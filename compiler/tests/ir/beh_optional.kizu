@@ -116,7 +116,7 @@ test "error union with optional success drives a fallible stream" {
 test "container lookups miss as null" {
     let allocator = mem::page_allocator();
     var values = array::new<i64>(allocator);
-    defer values.deinit();
+    defer values.deinit(allocator);
     try values.append(41);
     testing::expect_equal<i64>(41, values.get(0) orelse -1);
     testing::expect_equal<i64>(-1, values.get(9) orelse -1);
@@ -124,7 +124,7 @@ test "container lookups miss as null" {
     testing::expect_equal<i64>(-1, values.pop() orelse -1);
 
     var table = map::new<[]u8, i64>(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     try table.insert("hit", 7);
     testing::expect_equal<i64>(7, table.get("hit") orelse -1);
     testing::expect_equal<i64>(-1, table.get("miss") orelse -1);
@@ -136,7 +136,7 @@ test "container lookups miss as null" {
 test "map at_mut updates values in place" {
     let allocator = mem::page_allocator();
     var counts = map::new<[]u8, i64>(allocator);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     try counts.insert("kizu", 41);
 
     if counts.at_mut("kizu") |count| {
@@ -167,7 +167,7 @@ struct Visitor {
 test "arena at_mut updates elements in place" {
     let allocator = mem::page_allocator();
     var visitors = arena::new<Visitor>(allocator);
-    defer visitors.deinit();
+    defer visitors.deinit(allocator);
     let alice = visitors.add(Visitor { age: 30, visits: 0 });
 
     if visitors.at_mut(alice) |v| {
@@ -193,7 +193,7 @@ fn (self: &var Ledger) bump(index: i64) -> void {
 test "at_mut captures an owner's container field" {
     let allocator = mem::page_allocator();
     var ledger = Ledger { entries: array::new<i64>(allocator) };
-    defer ledger.deinit();
+    defer ledger.deinit(allocator);
     try ledger.entries.append(7);
     ledger.bump(0);
     if ledger.entries.at(0) |v| {
@@ -211,7 +211,7 @@ fn (self: &var Ledger) entry(index: i64) -> ?&var i64 {
 test "borrow optional returns flow to the caller's capture" {
     let allocator = mem::page_allocator();
     var ledger = Ledger { entries: array::new<i64>(allocator) };
-    defer ledger.deinit();
+    defer ledger.deinit(allocator);
     try ledger.entries.append(7);
     if ledger.entry(0) |v| {
         v.* = v.* + 1;
@@ -234,7 +234,7 @@ fn bump_first(items: &var array::Array<i64>) -> void {
 test "at_mut works through a &var parameter" {
     let allocator = mem::page_allocator();
     var items = array::new<i64>(allocator);
-    defer items.deinit();
+    defer items.deinit(allocator);
     try items.append(7);
     bump_first(items);
     testing::expect_equal<i64>(8, items.get_or_panic(0));
@@ -272,7 +272,7 @@ test "orelse guards exit on null" {
 
 fn make_name(allocator: Allocator, text: []u8) -> !string::String {
     var name = string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_bytes(text);
     return move name;
 }
@@ -281,17 +281,17 @@ fn make_name(allocator: Allocator, text: []u8) -> !string::String {
 test "owner payload pops through the capture" {
     let allocator = mem::page_allocator();
     var names = array::new<string::String>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
     try names.append(try make_name(allocator, "kizu"));
 
     var length = 0;
     if names.pop() |taken| {
         length = taken.len();
-        taken.deinit();
+        taken.deinit(allocator);
     }
     testing::expect_equal<i64>(4, length);
     if names.pop() |ghost| {
-        ghost.deinit();
+        ghost.deinit(allocator);
         testing::expect(false);
     }
 }
@@ -306,7 +306,6 @@ test "optional arguments accept null and values" {
     testing::expect_equal<i64>(1, or_one(null));
     testing::expect_equal<i64>(9, or_one(cast<u8>(9)));
 }
-
 
 // ir
 // lower:
@@ -499,7 +498,7 @@ test "optional arguments accept null and values" {
 //   %2: &var std::string::String = local.slot %1: std::string::String
 //   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %text: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
-//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
+//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
 //   %7: !std::string::String = error.ok %6: std::string::String
 //   return %7: !std::string::String
@@ -520,10 +519,10 @@ test "optional arguments accept null and values" {
 //   %6: i64 = cast %5: u8, i64
 //   return %6: i64
 // }
-// fn Ledger.deinit(%self: Ledger) -> void {
+// fn Ledger.deinit(%self: Ledger, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.entries %self: Ledger
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.orelse_takes_the_value_or_the_default() -> !void {
@@ -944,7 +943,7 @@ test "optional arguments accept null and values" {
 //   %6: i64 = const 7
 //   %7: std::mem::Error!void = call.std::array::Array.append.i64 %5: &var std::array::Array<i64>, %6: i64
 //   %8: Ledger = ref.load %4: &var Ledger
-//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger
+//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger, %1: Allocator
 //   %10: i64 = const 0
 //   call.Ledger.bump %4: &var Ledger, %10: i64
 //   %12: &var std::array::Array<i64> = field.addr.entries %4: &var Ledger
@@ -962,7 +961,7 @@ test "optional arguments accept null and values" {
 //   jump if.end.3
 // if.end.3:
 //   %20: Ledger = ref.load %4: &var Ledger
-//   call.Ledger.deinit %20: Ledger
+//   call.Ledger.deinit %20: Ledger, %1: Allocator
 //   %22: !void = error.ok
 //   return %22: !void
 // }
@@ -976,7 +975,7 @@ test "optional arguments accept null and values" {
 //   %6: i64 = const 7
 //   %7: std::mem::Error!void = call.std::array::Array.append.i64 %5: &var std::array::Array<i64>, %6: i64
 //   %8: Ledger = ref.load %4: &var Ledger
-//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger
+//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger, %1: Allocator
 //   %10: i64 = const 0
 //   %11: ?&var i64 = call.Ledger.entry %4: &var Ledger, %10: i64
 //   %12: &var i64 = opt.value %11: ?&var i64
@@ -1011,7 +1010,7 @@ test "optional arguments accept null and values" {
 //   jump if.end.6
 // if.end.6:
 //   %31: Ledger = ref.load %4: &var Ledger
-//   call.Ledger.deinit %31: Ledger
+//   call.Ledger.deinit %31: Ledger, %1: Allocator
 //   %33: !void = error.ok
 //   return %33: !void
 // }
@@ -1135,10 +1134,10 @@ test "optional arguments accept null and values" {
 //   %4: []u8 = const "kizu"
 //   %5: !std::string::String = call.make_name %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: i64 = const 0
 //   %12: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
 //   %13: std::string::String = opt.value %12: ?std::string::String
@@ -1146,7 +1145,7 @@ test "optional arguments accept null and values" {
 //   branch %14: bool, if.then.1, if.else.2
 // if.then.1:
 //   %15: i64 = call.std::string::String.len %13: std::string::String
-//   call.std::string::String.deinit %13: std::string::String
+//   call.std::string::String.deinit %13: std::string::String, %1: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
@@ -1159,7 +1158,7 @@ test "optional arguments accept null and values" {
 //   %22: bool = opt.has %20: ?std::string::String
 //   branch %22: bool, if.then.4, if.else.5
 // if.then.4:
-//   call.std::string::String.deinit %21: std::string::String
+//   call.std::string::String.deinit %21: std::string::String, %1: Allocator
 //   %24: bool = const false
 //   call.std::testing::expect %24: bool
 //   jump if.end.6
@@ -1167,7 +1166,7 @@ test "optional arguments accept null and values" {
 //   jump if.end.6
 // if.end.6:
 //   %26: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>, %1: Allocator
 //   %28: !void = error.ok
 //   return %28: !void
 // }
@@ -1376,7 +1375,7 @@ test "optional arguments accept null and values" {
 //   %2: &var std::string::String = local.slot %1: std::string::String
 //   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %text: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
-//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
+//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
 //   %7: !std::string::String = error.ok %6: std::string::String
 //   return %7: !std::string::String
@@ -1397,10 +1396,10 @@ test "optional arguments accept null and values" {
 //   %6: i64 = cast %5: u8, i64
 //   return %6: i64
 // }
-// fn Ledger.deinit(%self: Ledger) -> void {
+// fn Ledger.deinit(%self: Ledger, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.entries %self: Ledger
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.orelse_takes_the_value_or_the_default() -> !void {
@@ -1820,7 +1819,7 @@ test "optional arguments accept null and values" {
 //   %6: i64 = const 7
 //   %7: std::mem::Error!void = call.std::array::Array.append.i64 %5: &var std::array::Array<i64>, %6: i64
 //   %8: Ledger = ref.load %4: &var Ledger
-//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger
+//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger, %1: Allocator
 //   %10: i64 = const 0
 //   call.Ledger.bump %4: &var Ledger, %10: i64
 //   %12: &var std::array::Array<i64> = field.addr.entries %4: &var Ledger
@@ -1838,7 +1837,7 @@ test "optional arguments accept null and values" {
 //   jump if.end.3
 // if.end.3:
 //   %20: Ledger = ref.load %4: &var Ledger
-//   call.Ledger.deinit %20: Ledger
+//   call.Ledger.deinit %20: Ledger, %1: Allocator
 //   %22: !void = error.ok
 //   return %22: !void
 // }
@@ -1852,7 +1851,7 @@ test "optional arguments accept null and values" {
 //   %6: i64 = const 7
 //   %7: std::mem::Error!void = call.std::array::Array.append.i64 %5: &var std::array::Array<i64>, %6: i64
 //   %8: Ledger = ref.load %4: &var Ledger
-//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger
+//   error.try %7: std::mem::Error!void, cleanup call.Ledger.deinit %8: Ledger, %1: Allocator
 //   %10: i64 = const 0
 //   %11: ?&var i64 = call.Ledger.entry %4: &var Ledger, %10: i64
 //   %12: &var i64 = opt.value %11: ?&var i64
@@ -1887,7 +1886,7 @@ test "optional arguments accept null and values" {
 //   jump if.end.6
 // if.end.6:
 //   %31: Ledger = ref.load %4: &var Ledger
-//   call.Ledger.deinit %31: Ledger
+//   call.Ledger.deinit %31: Ledger, %1: Allocator
 //   %33: !void = error.ok
 //   return %33: !void
 // }
@@ -2011,10 +2010,10 @@ test "optional arguments accept null and values" {
 //   %4: []u8 = const "kizu"
 //   %5: !std::string::String = call.make_name %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: i64 = const 0
 //   %12: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
 //   %13: std::string::String = opt.value %12: ?std::string::String
@@ -2022,7 +2021,7 @@ test "optional arguments accept null and values" {
 //   branch %14: bool, if.then.1, if.else.2
 // if.then.1:
 //   %15: i64 = call.std::string::String.len %13: std::string::String
-//   call.std::string::String.deinit %13: std::string::String
+//   call.std::string::String.deinit %13: std::string::String, %1: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
@@ -2035,7 +2034,7 @@ test "optional arguments accept null and values" {
 //   %22: bool = opt.has %20: ?std::string::String
 //   branch %22: bool, if.then.4, if.else.5
 // if.then.4:
-//   call.std::string::String.deinit %21: std::string::String
+//   call.std::string::String.deinit %21: std::string::String, %1: Allocator
 //   %24: bool = const false
 //   call.std::testing::expect %24: bool
 //   jump if.end.6
@@ -2043,7 +2042,7 @@ test "optional arguments accept null and values" {
 //   jump if.end.6
 // if.end.6:
 //   %26: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>, %1: Allocator
 //   %28: !void = error.ok
 //   return %28: !void
 // }

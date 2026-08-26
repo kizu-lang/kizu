@@ -20,7 +20,7 @@ fn (self: &Loader) qualify_name(
 ) -> !string::String {
     let entry = self.groups.at(group);
     var out = string::new(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     if entry.path.len() > 0 {
         try out.append_string(&entry.path);
         try out.append_bytes("::");
@@ -71,7 +71,7 @@ fn (self: &var Loader) use_namespace(
 /// Returns every module group, by path, so that a walk is in a stable order.
 fn (self: &Loader) sorted_module_groups() -> !array::Array<arena::Handle<ModuleGroup>> {
     var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var index = 0;
     while self.std_order.at(index) |group| {
         try out.append(group.*);
@@ -106,7 +106,7 @@ fn (self: &Loader) sorted_module_groups() -> !array::Array<arena::Handle<ModuleG
 /// imports it, and inside each package a module after the ones it is built on.
 fn (self: &Loader) modules_in_load_order() -> !array::Array<arena::Handle<ModuleGroup>> {
     var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var index = 0;
     while self.std_order.at(index) |group| {
         try out.append(group.*);
@@ -125,7 +125,7 @@ fn (self: &Loader) files_of(
     groups: &array::Array<arena::Handle<ModuleGroup>>
 ) -> !array::Array<arena::Handle<ModuleFile>> {
     var out = array::new<arena::Handle<ModuleFile>>(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var group_index = 0;
     while groups.at(group_index) |group_handle| {
         group_index = group_index + 1;
@@ -170,15 +170,15 @@ fn declared_type(tree: &ast::Ast, declaration: ast::Declaration) -> ?DeclaredTyp
 /// Indexes user-declared module types before resolving references.
 fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
     let groups = try self.sorted_module_groups();
-    defer groups.deinit();
+    defer groups.deinit(self.allocator);
     let files = try self.files_of(&groups);
-    defer files.deinit();
+    defer files.deinit(self.allocator);
     var file_index = 0;
     while files.at(file_index) |file_handle| {
         file_index = file_index + 1;
         let file = file_handle.*;
         let declarations = try self.declarations_of(file);
-        defer declarations.deinit();
+        defer declarations.deinit(self.allocator);
         var index = 0;
         while declarations.at(index) |declaration_handle| {
             let declaration = declaration_handle.*;
@@ -188,11 +188,11 @@ fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnosti
                 let name_bytes = name.as_bytes();
                 let group = self.files.at(file).group;
                 let qualified = try self.qualify_name(group, name_bytes);
-                defer qualified.deinit();
+                defer qualified.deinit(self.allocator);
                 let qualified_bytes = qualified.as_bytes();
                 if self.types.contains(qualified_bytes) {
                     var text = try module_error_text(self.allocator);
-                    errdefer text.deinit();
+                    errdefer text.deinit(self.allocator);
                     try text.append_bytes("duplicate type `");
                     try text.append_string(&qualified);
                     try text.append_bytes("`");
@@ -213,15 +213,15 @@ fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnosti
 /// path can reach.
 fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
     let groups = try self.sorted_module_groups();
-    defer groups.deinit();
+    defer groups.deinit(self.allocator);
     let files = try self.files_of(&groups);
-    defer files.deinit();
+    defer files.deinit(self.allocator);
     var file_index = 0;
     while files.at(file_index) |file_handle| {
         file_index = file_index + 1;
         let file = file_handle.*;
         let declarations = try self.declarations_of(file);
-        defer declarations.deinit();
+        defer declarations.deinit(self.allocator);
         var index = 0;
         while declarations.at(index) |declaration_handle| {
             let declaration = declaration_handle.*;
@@ -235,11 +235,11 @@ fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagn
                     let name_bytes = name.as_bytes();
                     let group = self.files.at(file).group;
                     let qualified = try self.qualify_name(group, name_bytes);
-                    defer qualified.deinit();
+                    defer qualified.deinit(self.allocator);
                     let qualified_bytes = qualified.as_bytes();
                     if self.functions.contains(qualified_bytes) {
                         var text = try module_error_text(self.allocator);
-                        errdefer text.deinit();
+                        errdefer text.deinit(self.allocator);
                         try text.append_bytes("duplicate function `");
                         try text.append_string(&qualified);
                         try text.append_bytes("`");
@@ -262,9 +262,9 @@ fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagn
 /// modules are merged and before any phase reads the program.
 fn (self: &var Loader) program(tree: &var ast::Ast) -> !LoadResult {
     let groups = try self.sorted_module_groups();
-    defer groups.deinit();
+    defer groups.deinit(self.allocator);
     let files = try self.files_of(&groups);
-    defer files.deinit();
+    defer files.deinit(self.allocator);
     var file_index = 0;
     while files.at(file_index) |file_handle| {
         file_index = file_index + 1;
@@ -275,21 +275,21 @@ fn (self: &var Loader) program(tree: &var ast::Ast) -> !LoadResult {
     let outcome_1 = try self.ordered_modules();
     match outcome_1 {
         Ordered(ordered) => {
-            defer ordered.deinit();
+            defer ordered.deinit(self.allocator);
             var merged = ast::new_program(self.allocator);
-            errdefer merged.deinit();
+            errdefer merged.deinit(self.allocator);
             let ordered_files = try self.files_of(&ordered);
-            defer ordered_files.deinit();
+            defer ordered_files.deinit(self.allocator);
             var index = 0;
             while ordered_files.at(index) |file_handle| {
                 index = index + 1;
                 let file = file_handle.*;
                 if try self.qualify_module(tree, file, &var merged) |failed| {
-                    merged.deinit();
+                    merged.deinit(self.allocator);
                     return LoadResult::Error(move failed);
                 }
                 if try self.reject_unused_imports(file) |failed| {
-                    merged.deinit();
+                    merged.deinit(self.allocator);
                     return LoadResult::Error(move failed);
                 }
             }
@@ -309,18 +309,18 @@ union OrderResult {
 /// Returns dependency modules before modules that import them.
 fn (self: &Loader) ordered_modules() -> !OrderResult {
     var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var visiting = map::new<[]u8, bool>(self.allocator);
-    defer visiting.deinit();
+    defer visiting.deinit(self.allocator);
     var visited = map::new<[]u8, bool>(self.allocator);
-    defer visited.deinit();
+    defer visited.deinit(self.allocator);
     let loaded = try self.modules_in_load_order();
-    defer loaded.deinit();
+    defer loaded.deinit(self.allocator);
     var index = 0;
     while loaded.at(index) |group| {
         index = index + 1;
         if try self.visit_module(group.*, &var visiting, &var visited, &var out) |failed| {
-            out.deinit();
+            out.deinit(self.allocator);
             return OrderResult::Failed(move failed);
         }
     }
@@ -342,7 +342,7 @@ fn (self: &Loader) visit_module(
     if visiting.get(path) |active| {
         if active {
             var text = try module_error_text(self.allocator);
-            errdefer text.deinit();
+            errdefer text.deinit(self.allocator);
             try text.append_bytes("import cycle at `");
             try text.append_bytes(path);
             try text.append_bytes("`");
@@ -351,7 +351,7 @@ fn (self: &Loader) visit_module(
     }
     try visiting.insert(path, true);
     let imports = try sorted_import_paths(self.allocator, &entry.imports);
-    defer imports.deinit();
+    defer imports.deinit(self.allocator);
     var index = 0;
     while imports.at(index) |import_path| {
         index = index + 1;
@@ -376,7 +376,7 @@ fn sorted_import_paths(
     imports: &map::Map<[]u8, string::String>
 ) -> !array::Array<string::String> {
     var out = array::new<string::String>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while imports.key_at(index) |key| {
         index = index + 1;
@@ -395,7 +395,7 @@ fn sorted_aliases(
     imports: &map::Map<[]u8, string::String>
 ) -> !array::Array<string::String> {
     var out = array::new<string::String>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while imports.key_at(index) |key| {
         index = index + 1;
@@ -419,9 +419,9 @@ fn (self: &var Loader) resolve_imports(
 ) -> !?diagnostic::Diagnostic {
     let allocator = self.allocator;
     var bound = array::new<BoundImport>(allocator);
-    defer bound.deinit();
+    defer bound.deinit(self.allocator);
     let declarations = try self.declarations_of(file);
-    defer declarations.deinit();
+    defer declarations.deinit(self.allocator);
     var index = 0;
     while declarations.at(index) |declaration_handle| {
         let declaration = declaration_handle.*;
@@ -429,16 +429,16 @@ fn (self: &var Loader) resolve_imports(
         match tree.declarations.at(declaration.node) {
             Import(value) => {
                 let import_path = try join_import_path(allocator, tree, value);
-                errdefer import_path.deinit();
+                errdefer import_path.deinit(self.allocator);
                 let last = value.path.get_or_panic(value.path.len() - 1);
                 let alias = tree.texts.at(last.node);
                 let alias_bytes = alias.as_bytes();
                 if bound_alias_taken(&bound, alias_bytes) {
-                    import_path.deinit();
+                    import_path.deinit(self.allocator);
                     return try self.duplicate_import(alias_bytes, file);
                 }
                 if try self.bind_import(file, &import_path) |failed| {
-                    import_path.deinit();
+                    import_path.deinit(self.allocator);
                     return move failed;
                 }
                 try bound.append(BoundImport {
@@ -453,7 +453,7 @@ fn (self: &var Loader) resolve_imports(
         return move failed;
     }
     let pkg_text = try self.module_pkg_copy(file);
-    defer pkg_text.deinit();
+    defer pkg_text.deinit(self.allocator);
     let group = self.files.at(file).group;
     // The group's import union drives dependency ordering.
     if self.groups.at_mut(group) |entry| {
@@ -512,7 +512,7 @@ fn (self: &Loader) reject_import_shadowing(
     while group.files.at(file_index) |sibling| {
         file_index = file_index + 1;
         let declarations = try self.declarations_of(sibling.*);
-        defer declarations.deinit();
+        defer declarations.deinit(self.allocator);
         var index = 0;
         while declarations.at(index) |declaration| {
             index = index + 1;
@@ -521,12 +521,12 @@ fn (self: &Loader) reject_import_shadowing(
                 let name_bytes = text.as_bytes();
                 if bound_alias_taken(bound, name_bytes) {
                     var message = try module_error_text(self.allocator);
-                    errdefer message.deinit();
+                    errdefer message.deinit(self.allocator);
                     try message.append_bytes("declaration `");
                     try message.append_bytes(name_bytes);
                     try message.append_bytes("` shadows import in `");
                     let module_path = try self.module_path_copy(file);
-                    defer module_path.deinit();
+                    defer module_path.deinit(self.allocator);
                     try message.append_string(&module_path);
                     try message.append_bytes("`");
                     return try module_error(self.allocator, move message);
@@ -566,7 +566,7 @@ fn (self: &Loader) bind_import(
     let import_path = path.as_bytes();
     if !self.group_by_path.contains(import_path) and !self.packages.contains(import_path) {
         var text = try module_error_text(self.allocator);
-        errdefer text.deinit();
+        errdefer text.deinit(self.allocator);
         try text.append_bytes("missing import `");
         try text.append_bytes(import_path);
         try text.append_bytes("` in `");
@@ -575,7 +575,7 @@ fn (self: &Loader) bind_import(
         return try module_error(self.allocator, move text);
     }
     let module_path = try self.module_path_copy(file);
-    defer module_path.deinit();
+    defer module_path.deinit(self.allocator);
     let module_path_bytes = module_path.as_bytes();
     if !reachable_from(import_path, module_path_bytes) {
         return try self.internal_module_error(import_path, file);
@@ -592,7 +592,7 @@ fn (self: &Loader) internal_module_error(
 ) -> !diagnostic::Diagnostic {
     let found = internal_module(module_path);
     var text = try module_error_text(self.allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(self.allocator);
     try text.append_bytes("`");
     try text.append_bytes(module_path[0..found.module_end]);
     try text.append_bytes("` is internal to `");
@@ -609,12 +609,12 @@ fn (self: &Loader) duplicate_import(
     file: arena::Handle<ModuleFile>
 ) -> !diagnostic::Diagnostic {
     var text = try module_error_text(self.allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(self.allocator);
     try text.append_bytes("duplicate import alias `");
     try text.append_bytes(alias);
     try text.append_bytes("` in `");
     let module_path = try self.module_path_copy(file);
-    defer module_path.deinit();
+    defer module_path.deinit(self.allocator);
     try text.append_string(&module_path);
     try text.append_bytes("`");
     return module_error(self.allocator, move text);
@@ -628,7 +628,7 @@ fn (self: &Loader) reject_unused_imports(
 ) -> !?diagnostic::Diagnostic {
     let entry = self.files.at(file);
     let aliases = try sorted_aliases(self.allocator, &entry.imports);
-    defer aliases.deinit();
+    defer aliases.deinit(self.allocator);
     var index = 0;
     while aliases.at(index) |alias| {
         index = index + 1;
@@ -637,7 +637,7 @@ fn (self: &Loader) reject_unused_imports(
             continue;
         }
         var text = try module_error_text(self.allocator);
-        errdefer text.deinit();
+        errdefer text.deinit(self.allocator);
         try text.append_bytes("unused import `");
         if entry.namespaces.at(alias_bytes) |target| {
             try text.append_string(target);

@@ -6,7 +6,7 @@ import std::mem;
 import std::string;
 
 struct OwnerUnionCleanupProblem {
-    variant: ast::Text, binding: ast::Text
+    variant: ast::Text, binding: ast::Text, method: FunctionHandle
 }
 
 union OwnerUnionProblem {
@@ -63,7 +63,8 @@ fn (self: &Checker) validate_owner_union_cleanup(
                 if !self.types.is_text(function.return_type, "void") {
                     return OwnerUnionProblem::ReturnVoid;
                 }
-                if function.params.len() != 1 {
+                if function.params.len() != 2 or
+                    !self.types.is_text(function.params.get_or_panic(1), "Allocator") {
                     return OwnerUnionProblem::OnlySelf;
                 }
                 if function.borrow_params.get_or_panic(0) or
@@ -88,8 +89,8 @@ fn (self: &Checker) validate_owner_union_cleanup(
                                                 tree, matched.value, self_name
                                             ) {
                                                 return self.check_owner_union_arms(
-                                                    tree, declaration,
-                                                    union_type, matched);
+                                                    tree, declaration, union_type,
+                                                    matched, method);
                                             }
                                         },
                                         Expr(statement) => {
@@ -99,8 +100,8 @@ fn (self: &Checker) validate_owner_union_cleanup(
                                                         tree, matched.value, self_name
                                                     ) {
                                                         return self.check_owner_union_arms(
-                                                            tree, declaration,
-                                                            union_type, matched);
+                                                            tree, declaration, union_type,
+                                                            matched, method);
                                                     }
                                                 },
                                                 _ => {},
@@ -123,12 +124,12 @@ fn (self: &Checker) validate_owner_union_cleanup(
 
 fn (self: &Checker) check_owner_union_arms(
     tree: &ast::Ast, declaration: &ast::UnionDecl,
-    union_type: &UnionType, matched: &ast::MatchStmt
+    union_type: &UnionType, matched: &ast::MatchStmt, method: FunctionHandle
 ) -> !?OwnerUnionProblem {
     let owners_handle = self.deinit_owners orelse return null;
     let owners = self.deinit_owner_maps.at(owners_handle);
     var arms = map::new<[]u8, i64>(self.allocator);
-    defer arms.deinit();
+    defer arms.deinit(self.allocator);
     var index = 0;
     while matched.arms.at(index) |arm| {
         let retained = tree.texts.at(arm.tag.node);
@@ -157,7 +158,9 @@ fn (self: &Checker) check_owner_union_arms(
             }
             if !match_arm_cleans_payload(tree, arm.body, binding) {
                 return OwnerUnionProblem::Cleanup(OwnerUnionCleanupProblem {
-                    variant: variant.name, binding: arm.binding
+                    variant: variant.name,
+                    binding: arm.binding,
+                    method: method
                 });
             }
         } else {
@@ -225,7 +228,7 @@ fn (self: &Checker) owner_union_diagnostic(
     tree: &ast::Ast, owner: ast::Text, problem: OwnerUnionProblem
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     match problem {
         Generic => {
             try message.append_bytes("generic ");
@@ -246,9 +249,9 @@ fn (self: &Checker) owner_union_diagnostic(
             " is unsupported; use a concrete owner union with explicit `deinit`"),
         ReturnVoid => try message.append_bytes(" deinit must return void"),
         OnlySelf => {
-            try message.append_bytes(" deinit must take only `self: ");
+            try message.append_bytes(" deinit must take `self: ");
             try append_collection_text(&var message, tree, owner);
-            try message.append_byte(cast<u8>(96));
+            try message.append_bytes("` and `allocator: Allocator`");
         },
         ByValue => try message.append_bytes(" deinit must take `self` by value"),
         ReceiverType => {
@@ -274,7 +277,9 @@ fn (self: &Checker) owner_union_diagnostic(
         Cleanup(value) => {
             try message.append_bytes("` must clean its payload via `");
             try append_collection_text(&var message, tree, value.binding);
-            try message.append_bytes(".deinit()`");
+            try message.append_bytes(".deinit(");
+            try self.append_owner_union_allocator_name(&var message, value.method);
+            try message.append_bytes(")`");
         },
     }
     return new_checker_diagnostic(self.allocator, "type error", move message);
@@ -292,6 +297,21 @@ fn append_owner_union_variant(
     try out.append_bytes("owner-payload union variant `");
     return append_collection_member(out, tree,
         CollectionMemberIssue { owner: owner, member: variant }, "::");
+}
+
+/// Names the allocator this deinit was handed, so the release the diagnostic
+/// asks for is spelled the way the author would write it (ADR-0132).
+fn (self: &Checker) append_owner_union_allocator_name(
+    out: &var string::String, method: FunctionHandle
+) -> !void {
+    if self.metadata.functions.at(method.index) |function| {
+        if function.signature.params.at(1) |parameter| {
+            let name = parameter.name.as_bytes();
+            return out.append_bytes(name);
+        }
+        return;
+    }
+    return;
 }
 
 fn (self: &Checker) append_owner_union_self_name(

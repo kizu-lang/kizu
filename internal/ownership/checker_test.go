@@ -126,7 +126,7 @@ fn main() {
 func TestCheckAcceptsFixedBufferAllocator(t *testing.T) {
 	source := `fn fill(allocator: Allocator) -> !std::array::Array<i64> {
     var values = std::array::new<i64>(allocator);
-    errdefer values.deinit();
+    errdefer values.deinit(allocator);
     try values.append(7);
     return move values;
 }
@@ -135,7 +135,7 @@ fn main() -> !void {
     let scratch = buf.as_mut_bytes();
     let alloc = std::mem::fixed_buffer(scratch);
     var values = try fill(alloc);
-    defer values.deinit();
+    defer values.deinit(alloc);
     try values.append(1);
     return;
 }`
@@ -161,9 +161,9 @@ func TestCheckRejectsFixedBufferEscapes(t *testing.T) {
     let values = std::array::new<i64>(alloc);
     return values;
 }
-fn main() -> !void {
+fn main(allocator: Allocator) -> !void {
     var values = leak();
-    values.deinit();
+    values.deinit(allocator);
     return;
 }`,
 			want: "allocated from a tied allocator and cannot escape its frame",
@@ -175,10 +175,10 @@ fn main() -> !void {
     let scratch = buf.as_mut_bytes();
     return std::mem::fixed_buffer(scratch);
 }
-fn main() -> !void {
+fn main(allocator: Allocator) -> !void {
     let alloc = leak();
     var values = std::array::new<i64>(alloc);
-    defer values.deinit();
+    defer values.deinit(allocator);
     try values.append(1);
     return;
 }`,
@@ -191,7 +191,7 @@ fn main() -> !void {
     let scratch = buf.as_mut_bytes();
     let alloc = std::mem::fixed_buffer(scratch);
     var values = std::array::new<i64>(alloc);
-    defer values.deinit();
+    defer values.deinit(alloc);
     let sneak = buf.as_mut_bytes();
     sneak[0] = cast<u8>(1);
     try values.append(1);
@@ -256,7 +256,7 @@ fn main() -> !void {
     let view = buf.as_bytes();
     var value = reader(allocator, view);
     print(value.pending.len());
-    value.deinit();
+    value.deinit(allocator);
     let writable = buf.as_mut_bytes();
     writable[0] = cast<u8>(1);
     return;
@@ -307,7 +307,7 @@ fn main() -> !void {
     var buf = [16]u8{};
     let view = buf.as_bytes();
     let value = reader(allocator, view);
-    defer value.deinit();
+    defer value.deinit(allocator);
     let writable = buf.as_mut_bytes();
     writable[0] = cast<u8>(1);
     print(value.pending.len());
@@ -405,7 +405,7 @@ fn split(bytes: []u8) -> !?SplitView {
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var text = try std::string::from_bytes(allocator, "abc");
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     let suffix = tail(bytes);
     if try split(suffix) |parts| {
@@ -564,7 +564,7 @@ fn main() {
 		{
 			name: "moved base",
 			source: `struct Pair { left: i64, right: i64 }
-fn (self: Pair) deinit() -> void { }
+fn (self: Pair) deinit(allocator: Allocator) -> void { }
 fn touch(left: &var i64) { print(left); }
 fn main() {
     var pair = Pair { left: 1, right: 2 };
@@ -581,15 +581,15 @@ struct Registry { users: std::arena::Arena<User> }
 fn touch(users: &var std::arena::Arena<User>) {
     print(0);
 }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
     touch(&var self.users);
     return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
-    registry.deinit();
+    registry.deinit(allocator);
 }`,
 			want: "field `self.users` was deinitialized",
 		},
@@ -620,10 +620,10 @@ fn outer(user: &var User) {
 // follow a local borrowed view; the error value carries nothing from it.
 func TestCheckAcceptsErrorReturnAfterLocalView(t *testing.T) {
 	source := `error ViewError { Bad }
-fn fail(text: std::string::String) -> !void {
+fn fail(allocator: Allocator, text: std::string::String) -> !void {
     let bytes = text.as_bytes();
     print(bytes);
-    text.deinit();
+    text.deinit(allocator);
     return ViewError::Bad;
 }`
 	if err := checkSource(source); err != nil {
@@ -922,7 +922,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.at(alice).name);
-    users.deinit();
+    users.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -937,7 +937,7 @@ func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    defer users.deinit();
+    defer users.deinit(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.at(alice).name);
 }`
@@ -957,8 +957,8 @@ fn main() {
     let right = std::arena::new<User>(allocator);
     print(left);
     print(right);
-    left.deinit();
-    right.deinit();
+    left.deinit(allocator);
+    right.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1010,8 +1010,8 @@ fn make() -> std::arena::Handle<User> {
 			name: "returned handle from a local struct's field arena",
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
 }
 fn make() -> std::arena::Handle<User> {
     let allocator = std::mem::page_allocator();
@@ -1038,8 +1038,8 @@ fn (self: &var Registry) add_bound(name: []u8) -> std::arena::Handle<User> {
     let handle = self.users.add(User { name: name });
     return handle;
 }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
 }
 fn main() {
     let allocator = std::mem::page_allocator();
@@ -1048,7 +1048,7 @@ fn main() {
     let bob = registry.add_bound("bob");
     print(registry.users.at(alice).name);
     print(registry.users.at(bob).name);
-    registry.deinit();
+    registry.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1069,7 +1069,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     show(&users, alice);
-    users.deinit();
+    users.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1203,7 +1203,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     outer(&users, alice);
-    users.deinit();
+    users.deinit(allocator);
 }`,
 		},
 		{
@@ -1222,16 +1222,16 @@ fn main() {
     let right = std::arena::new<User>(allocator);
     let alice = left.add(User { name: "alice" });
     pick(&left, &right, alice);
-    left.deinit();
-    right.deinit();
+    left.deinit(allocator);
+    right.deinit(allocator);
 }`,
 		},
 		{
 			name: "matching field arena passes",
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
 }
 fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
     print(users.at(user).name);
@@ -1241,7 +1241,7 @@ fn main() {
     let registry = Registry { users: std::arena::new<User>(allocator) };
     let alice = registry.users.add(User { name: "alice" });
     show(&registry.users, alice);
-    registry.deinit();
+    registry.deinit(allocator);
 }`,
 		},
 	}
@@ -1259,8 +1259,8 @@ fn main() {
 func TestCheckRejectsArenaFieldParamHandleMismatch(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
 }
 fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
     print(users.at(user).name);
@@ -1331,8 +1331,8 @@ func TestCheckRejectsArenaUseAfterDeinit(t *testing.T) {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    users.deinit();
-    users.deinit();
+    users.deinit(allocator);
+    users.deinit(allocator);
 }`,
 			want: "arena `users` was deinitialized",
 		},
@@ -1342,7 +1342,7 @@ fn main() {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    users.deinit();
+    users.deinit(allocator);
     users.add(User { name: "alice" });
 }`,
 			want: "arena `users` was deinitialized",
@@ -1354,7 +1354,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
-    users.deinit();
+    users.deinit(allocator);
     print(users.at(alice).name);
 			}`,
 			want: "arena `users` was deinitialized",
@@ -1377,7 +1377,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let borrowed = &users;
-    users.deinit();
+    users.deinit(allocator);
     print(borrowed);
 }`,
 			want: "`Arena.deinit` cannot run while arena is borrowed",
@@ -1389,7 +1389,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
-    users.deinit();
+    users.deinit(allocator);
     print(alice);
 }`,
 			want: "handle `alice` cannot be used after arena `users` deinit",
@@ -1400,7 +1400,7 @@ fn main() {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    users.deinit();
+    users.deinit(allocator);
     let borrowed = &users;
     print(borrowed);
 }`,
@@ -1437,8 +1437,8 @@ func TestCheckRejectsDeferredCleanupExitErrors(t *testing.T) {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    users.deinit();
-    defer users.deinit();
+    users.deinit(allocator);
+    defer users.deinit(allocator);
 }`,
 			want: "arena `users` was deinitialized",
 		},
@@ -1448,7 +1448,7 @@ fn main() {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    defer users.deinit();
+    defer users.deinit(allocator);
     let moved = move users;
     print(moved);
 }`,
@@ -1461,7 +1461,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let borrowed = &users;
-    defer users.deinit();
+    defer users.deinit(allocator);
     while false { print(borrowed); }
 }`,
 			want: "`Arena.deinit` cannot run while arena is borrowed",
@@ -1478,7 +1478,7 @@ struct User { name: []u8 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
+    errdefer users.deinit(allocator);
     return move users;
 }`
 	if err := checkSource(source); err != nil {
@@ -1515,7 +1515,7 @@ fn step() -> !void { return; }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
+    errdefer users.deinit(allocator);
     let borrowed = &users;
     try step();
     print(borrowed);
@@ -1535,8 +1535,8 @@ struct User { name: []u8 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
-    users.deinit();
+    errdefer users.deinit(allocator);
+    users.deinit(allocator);
     return BuildError::Boom;
 }`
 	if err := checkSource(source); err != nil {
@@ -1550,9 +1550,9 @@ fn build() -> !std::arena::Arena<User> {
 func TestCheckErrDeferRetiresAtMove(t *testing.T) {
 	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit();
+    errdefer parent.deinit(allocator);
     let child = std::string::new(allocator);
-    errdefer child.deinit();
+    errdefer child.deinit(allocator);
     try child.append_byte(cast<u8>(97));
     try parent.append(move child);
     try parent.reserve(1);
@@ -1570,9 +1570,9 @@ func TestCheckErrDeferRetiresAtMove(t *testing.T) {
 func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
 	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit();
+    errdefer parent.deinit(allocator);
     let child = std::string::new(allocator);
-    errdefer child.deinit();
+    errdefer child.deinit(allocator);
     try child.append_byte(cast<u8>(97));
     try parent.append(move child);
     try parent.reserve(1);
@@ -1604,15 +1604,15 @@ func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
 // writable while an overlapping one does not.
 func TestCheckStringViewThroughFieldPath(t *testing.T) {
 	source := `struct Pair { pub left: std::string::String, pub right: std::string::String }
-fn (self: Pair) deinit() -> void {
-    self.left.deinit();
-    self.right.deinit();
+fn (self: Pair) deinit(allocator: Allocator) -> void {
+    self.left.deinit(allocator);
+    self.right.deinit(allocator);
     return;
 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var pair = Pair { left: std::string::new(allocator), right: std::string::new(allocator) };
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     let seen = pair.left.as_bytes();
     try pair.right.append_bytes("other");
     print(seen);
@@ -1628,14 +1628,14 @@ fn main() -> !void {
 // view pointing at the old one.
 func TestCheckRejectsStringViewFieldPathConflict(t *testing.T) {
 	source := `struct Holder { pub name: std::string::String }
-fn (self: Holder) deinit() -> void {
-    self.name.deinit();
+fn (self: Holder) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
     return;
 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var holder = Holder { name: std::string::new(allocator) };
-    defer holder.deinit();
+    defer holder.deinit(allocator);
     let seen = holder.name.as_bytes();
     try holder.name.append_bytes("grow");
     print(seen);
@@ -1665,9 +1665,9 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
 			name: "errdefer receiver after its value moved out",
 			source: `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     var parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit();
+    errdefer parent.deinit(allocator);
     var name = std::string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_byte(cast<u8>(97));
     try parent.append(move name);
     name = std::string::new(allocator);
@@ -1681,7 +1681,7 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
 			source: `fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var name = std::string::new(allocator);
-    defer name.deinit();
+    defer name.deinit(allocator);
     try name.append_byte(cast<u8>(97));
     name = std::string::new(allocator);
     print(name.len());
@@ -1698,13 +1698,13 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
 func TestCheckAllowsSecondOwnerUnderItsOwnName(t *testing.T) {
 	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     var parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit();
+    errdefer parent.deinit(allocator);
     var first = std::string::new(allocator);
-    errdefer first.deinit();
+    errdefer first.deinit(allocator);
     try first.append_byte(cast<u8>(97));
     try parent.append(move first);
     var second = std::string::new(allocator);
-    errdefer second.deinit();
+    errdefer second.deinit(allocator);
     try second.append_byte(cast<u8>(98));
     try parent.reserve(1);
     try parent.append(move second);
@@ -1890,10 +1890,10 @@ fn main() {
 // TestCheckArrayLenDoesNotMoveNonCopyArray keeps read-only Array methods non-consuming.
 func TestCheckArrayLenDoesNotMoveNonCopyArray(t *testing.T) {
 	source := `struct Name { value: []u8 }
-fn main(values: std::array::Array<Name>) {
+fn main(allocator: Allocator, values: std::array::Array<Name>) {
     let count = values.len();
     print(count);
-    values.deinit();
+    values.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1904,9 +1904,9 @@ fn main(values: std::array::Array<Name>) {
 // while tracking the returned Array as a separate owner.
 func TestCheckArrayCloneDoesNotMoveCopyArray(t *testing.T) {
 	source := `fn copy(values: std::array::Array<i64>, allocator: Allocator) -> !void {
-    defer values.deinit();
+    defer values.deinit(allocator);
     let copied = try values.clone(allocator);
-    defer copied.deinit();
+    defer copied.deinit(allocator);
     print(values.len());
     return;
 }
@@ -1923,9 +1923,9 @@ func TestCheckArrayCloneRejectsOwnerElements(t *testing.T) {
     values: std::array::Array<std::string::String>,
     allocator: Allocator,
 ) -> !void {
-    defer values.deinit();
+    defer values.deinit(allocator);
     let copied = try values.clone(allocator);
-    defer copied.deinit();
+    defer copied.deinit(allocator);
     return;
 }
 fn main() {}`
@@ -1941,8 +1941,8 @@ fn main() {}`
 // TestCheckArrayPopMovesNonCopyElement keeps resource arrays usable without copy reads.
 func TestCheckArrayPopMovesNonCopyElement(t *testing.T) {
 	source := `struct Name { value: []u8 }
-fn check(values: std::array::Array<Name>) -> !void {
-    defer values.deinit();
+fn check(allocator: Allocator, values: std::array::Array<Name>) -> !void {
+    defer values.deinit(allocator);
     if values.pop() |value| {
         print(value.value);
     }
@@ -1957,14 +1957,14 @@ fn main() {}`
 // TestCheckArrayPopOrPanicMovesNonCopyElement combines pop moves with explicit trapping.
 func TestCheckArrayPopOrPanicMovesNonCopyElement(t *testing.T) {
 	source := `struct Parsed { values: std::array::Array<i64> }
-fn (self: Parsed) deinit() -> void {
-    self.values.deinit();
+fn (self: Parsed) deinit(allocator: Allocator) -> void {
+    self.values.deinit(allocator);
 }
-fn check(values: std::array::Array<Parsed>) -> void {
+fn check(allocator: Allocator, values: std::array::Array<Parsed>) -> void {
     let value = values.pop_or_panic();
-    value.deinit();
+    value.deinit(allocator);
     print(values.len());
-    values.deinit();
+    values.deinit(allocator);
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
@@ -1975,17 +1975,17 @@ fn main() {}`
 // TestCheckArrayPopOrPanicRejectsActiveElementBorrow keeps mutation alias-safe.
 func TestCheckArrayPopOrPanicRejectsActiveElementBorrow(t *testing.T) {
 	source := `struct Parsed { values: std::array::Array<i64> }
-fn (self: Parsed) deinit() -> void {
-    self.values.deinit();
+fn (self: Parsed) deinit(allocator: Allocator) -> void {
+    self.values.deinit(allocator);
 }
 fn observe(value: &Parsed) -> void {}
-fn check(values: std::array::Array<Parsed>) -> !void {
+fn check(allocator: Allocator, values: std::array::Array<Parsed>) -> !void {
     if values.at(0) |first| {
         let value = values.pop_or_panic();
         observe(first);
-        value.deinit();
+        value.deinit(allocator);
     }
-    values.deinit();
+    values.deinit(allocator);
     return;
 }
 fn main() {}`
@@ -2005,14 +2005,14 @@ struct Parsed {
     users: std::arena::Arena<User>,
     ids: std::array::Array<i64>,
 }
-fn (self: Parsed) deinit() -> void {
-    self.users.deinit();
-    self.ids.deinit();
+fn (self: Parsed) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
+    self.ids.deinit(allocator);
 }
-fn check(values: std::array::Array<Parsed>) -> !void {
-    defer values.deinit();
+fn check(allocator: Allocator, values: std::array::Array<Parsed>) -> !void {
+    defer values.deinit(allocator);
     if values.pop() |item| {
-        item.deinit();
+        item.deinit(allocator);
     }
     return;
 }
@@ -2090,15 +2090,15 @@ fn (self: Registry) add(user: User) -> void {
     print(self.users.at(handle).name);
     return;
 }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
     return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
     registry.add(User { name: "alice" });
-    registry.deinit();
+    registry.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -2111,18 +2111,18 @@ func TestCheckAcceptsNestedFieldReceiverMethods(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 struct Wrapper { registry: Registry }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
 }
-fn (self: Wrapper) deinit() -> void {
-    self.registry.deinit();
+fn (self: Wrapper) deinit(allocator: Allocator) -> void {
+    self.registry.deinit(allocator);
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
     let wrapper = Wrapper { registry: move registry };
     wrapper.registry.users.add(User { name: "alice" });
-    wrapper.deinit();
+    wrapper.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -2140,13 +2140,13 @@ func TestCheckRejectsDirectFieldReceiverPolicy(t *testing.T) {
 			name: "field cleanup outside owner deinit",
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
-    registry.users.deinit();
+    registry.users.deinit(allocator);
 }`,
 			want: "field cleanup `registry.users.deinit` is only allowed inside owner deinit",
 		},
@@ -2154,15 +2154,15 @@ fn main() {
 			name: "use after field cleanup",
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
     self.users.add(User { name: "alice" });
     return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
-    registry.deinit();
+    registry.deinit(allocator);
 }`,
 			want: "field `self.users` was deinitialized",
 		},
@@ -2171,17 +2171,17 @@ fn main() {
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 struct Wrapper { registry: Registry }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
 }
-fn (self: Wrapper) deinit() -> void {
-    self.registry.users.deinit();
+fn (self: Wrapper) deinit(allocator: Allocator) -> void {
+    self.registry.users.deinit(allocator);
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
     let wrapper = Wrapper { registry: registry };
-    wrapper.deinit();
+    wrapper.deinit(allocator);
 }`,
 			want: "field cleanup `self.registry.users.deinit` is only allowed on one direct field",
 		},
@@ -2212,9 +2212,9 @@ func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
 			source: `fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let parent = std::array::new<std::string::String>(allocator);
-    defer parent.deinit();
+    defer parent.deinit(allocator);
     let name = std::string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_byte(cast<u8>(97));
     try parent.append(move name);
     parent.pop();
@@ -2226,7 +2226,7 @@ func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
 			name: "error union unwrapped by try",
 			source: `fn make(allocator: Allocator) -> !std::string::String {
     let name = std::string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_byte(cast<u8>(97));
     return move name;
 }
@@ -2278,7 +2278,7 @@ func TestCheckAllowsDiscardedNonOwnerExpression(t *testing.T) {
 	source := `fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let values = std::array::new<i64>(allocator);
-    defer values.deinit();
+    defer values.deinit(allocator);
     try values.append(1);
     values.pop();
     values.len();

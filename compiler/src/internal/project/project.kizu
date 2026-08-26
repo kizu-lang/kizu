@@ -55,7 +55,7 @@ pub union LoadResult {
 
 /// Builds a span-less `module error` diagnostic from already joined text.
 fn module_error(allocator: Allocator, text: string::String) -> !diagnostic::Diagnostic {
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     let built = try diagnostic::from_text(
         allocator,
@@ -70,7 +70,7 @@ fn module_error(allocator: Allocator, text: string::String) -> !diagnostic::Diag
 /// `module_error`.
 fn module_error_text(allocator: Allocator) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes("module error: ");
     return move out;
 }
@@ -112,7 +112,7 @@ fn (self: &Module) source_files(
     include_tests: bool
 ) -> !array::Array<string::String> {
     var files = array::new<string::String>(allocator);
-    errdefer files.deinit();
+    errdefer files.deinit(allocator);
     var index = 0;
     while self.files.at(index) |file| {
         try files.append(try copy_string(allocator, file));
@@ -151,19 +151,19 @@ pub fn resolve_modules(
     parsed: &manifest::Manifest
 ) -> !GraphResult {
     var modules = array::new<Module>(allocator);
-    errdefer modules.deinit();
+    errdefer modules.deinit(allocator);
     var seen_files = map::new<[]u8, string::String>(allocator);
-    defer seen_files.deinit();
+    defer seen_files.deinit(allocator);
     let package_name = parsed.package_name.as_bytes();
     var index = 0;
     while parsed.paths.at(index) |source_root| {
         index = index + 1;
         let source_root_bytes = source_root.as_bytes();
         let joined = try path::join(allocator, base_dir, source_root_bytes);
-        defer joined.deinit();
+        defer joined.deinit(allocator);
         let joined_bytes = joined.as_bytes();
         let root = try path::clean(allocator, joined_bytes);
-        defer root.deinit();
+        defer root.deinit(allocator);
         let root_bytes = root.as_bytes();
         if try collect_source_root(
             io,
@@ -174,7 +174,7 @@ pub fn resolve_modules(
             root_bytes,
             root_bytes
         ) |failed| {
-            modules.deinit();
+            modules.deinit(allocator);
             return GraphResult::Error(move failed);
         }
     }
@@ -196,7 +196,7 @@ fn collect_source_root(
     dir: []u8
 ) -> !?diagnostic::Diagnostic {
     var entries = try fs::read_dir(io, dir);
-    defer entries.deinit();
+    defer entries.deinit(allocator);
     var index = 0;
     while index < entries.len() {
         let entry = entries.get_or_panic(index);
@@ -242,16 +242,16 @@ fn record_source_file(
     file: []u8
 ) -> !?diagnostic::Diagnostic {
     let module_path = try source_module_path(allocator, package_name, source_root, file);
-    defer module_path.deinit();
+    defer module_path.deinit(allocator);
     let clean_path = try path::clean(allocator, file);
-    defer clean_path.deinit();
+    defer clean_path.deinit(allocator);
     let clean = clean_path.as_bytes();
     if seen_files.at(clean) |previous| {
         if same_text(previous, &module_path) {
             return null;
         }
         var text = try module_error_text(allocator);
-        errdefer text.deinit();
+        errdefer text.deinit(allocator);
         try text.append_bytes("source `");
         try text.append_bytes(clean);
         try text.append_bytes("` belongs to both `");
@@ -303,7 +303,7 @@ fn source_module_path(
 ) -> !string::String {
     let dir = path::dirname(file);
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes(package_name);
     let root_len = mem::len(source_root);
     if mem::len(dir) <= root_len {
@@ -552,10 +552,10 @@ pub fn (self: &var Loader) load_source(
     text: []u8
 ) -> !LoadResult {
     var files = array::new<string::String>(self.allocator);
-    errdefer files.deinit();
+    errdefer files.deinit(self.allocator);
     try files.append(try string::from_bytes(self.allocator, file));
     var modules = array::new<Module>(self.allocator);
-    errdefer modules.deinit();
+    errdefer modules.deinit(self.allocator);
     try modules.append(Module {
         path: string::new(self.allocator),
         files: move files,
@@ -565,9 +565,9 @@ pub fn (self: &var Loader) load_source(
         package_name: string::new(self.allocator),
         modules: move modules
     };
-    defer graph.deinit();
+    defer graph.deinit(self.allocator);
     let cleaned = try path::clean(self.allocator, file);
-    defer cleaned.deinit();
+    defer cleaned.deinit(self.allocator);
     let cleaned_bytes = cleaned.as_bytes();
     try self.source_overrides.insert(
         cleaned_bytes,
@@ -631,7 +631,7 @@ fn (self: &var Loader) load_package(
     while graph.modules.at(index) |module| {
         index = index + 1;
         let files = try module.source_files(self.allocator, include_tests);
-        defer files.deinit();
+        defer files.deinit(self.allocator);
         if files.len() == 0 {
             continue;
         }
@@ -648,7 +648,7 @@ fn (self: &var Loader) load_package(
             let outcome_1 = try self.parse_module_file(tree, file_bytes);
             match outcome_1 {
                 Program(program) => {
-                    errdefer program.deinit();
+                    errdefer program.deinit(self.allocator);
                     let file_copy = try copy_string(self.allocator, file);
                     let handle = self.files.add(ModuleFile {
                         group: group,
@@ -682,7 +682,7 @@ fn (self: &var Loader) parse_module_file(
     file: []u8
 ) -> !LoadResult {
     let cleaned = try path::clean(self.allocator, file);
-    defer cleaned.deinit();
+    defer cleaned.deinit(self.allocator);
     let cleaned_bytes = cleaned.as_bytes();
     if self.source_overrides.at(cleaned_bytes) |text| {
         let copied = try copy_string(self.allocator, text);
@@ -698,19 +698,19 @@ fn (self: &var Loader) parse_module_source(
     file: []u8,
     text: string::String
 ) -> !LoadResult {
-    errdefer text.deinit();
+    errdefer text.deinit(self.allocator);
     let path_copy = try string::from_bytes(self.allocator, file);
     let id = try self.sources.add(move path_copy, move text);
     if self.sources.at(id) |input| {
         let bytes = input.text.as_bytes();
         let scanner = lexer::new_source(self.allocator, id, bytes);
         var source_parser = try parser::new(self.allocator, move scanner);
-        defer source_parser.deinit();
+        defer source_parser.deinit(self.allocator);
         var program = try source_parser.parse_program(tree);
-        errdefer program.deinit();
+        errdefer program.deinit(self.allocator);
         if source_parser.diagnostic(0) |first| {
             let copied = try first.clone(self.allocator);
-            program.deinit();
+            program.deinit(self.allocator);
             return LoadResult::Error(move copied);
         }
         return LoadResult::Program(move program);

@@ -10,10 +10,10 @@ const ownerUnionPrelude = `union Node {
     Left(std::string::String),
     Right(std::array::Array<i64>),
 }
-fn (self: Node) deinit() -> void {
+fn (self: Node) deinit(allocator: Allocator) -> void {
     match self {
-        Left(s) => s.deinit(),
-        Right(a) => a.deinit(),
+        Left(s) => s.deinit(allocator),
+        Right(a) => a.deinit(allocator),
     }
 }
 `
@@ -29,9 +29,9 @@ func TestCheckAcceptsOwnerUnionActiveVariantCleanup(t *testing.T) {
 // TestCheckAcceptsOwnerUnionMoveAndDeinit moves a payload into a union value and
 // consumes it through the union deinit.
 func TestCheckAcceptsOwnerUnionMoveAndDeinit(t *testing.T) {
-	source := ownerUnionPrelude + `fn consume(s: std::string::String) -> void {
+	source := ownerUnionPrelude + `fn consume(allocator: Allocator, s: std::string::String) -> void {
     let n = Node::Left(move s);
-    n.deinit();
+    n.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("construct-and-deinit should check: %v", err)
@@ -53,10 +53,10 @@ fn consume(s: std::string::String) -> void {
 
 // TestCheckRejectsOwnerUnionDoubleCleanup rejects calling deinit twice.
 func TestCheckRejectsOwnerUnionDoubleCleanup(t *testing.T) {
-	source := ownerUnionPrelude + `fn consume(s: std::string::String) -> void {
+	source := ownerUnionPrelude + `fn consume(allocator: Allocator, s: std::string::String) -> void {
     let n = Node::Left(move s);
-    n.deinit();
-    n.deinit();
+    n.deinit(allocator);
+    n.deinit(allocator);
 }`
 	assertMoveError(t, source, "moved value `n` was used")
 }
@@ -64,9 +64,9 @@ func TestCheckRejectsOwnerUnionDoubleCleanup(t *testing.T) {
 // TestCheckRejectsOwnerUnionUseAfterDeinit rejects reading a deinitialized union.
 func TestCheckRejectsOwnerUnionUseAfterDeinit(t *testing.T) {
 	source := ownerUnionPrelude + `fn show(n: &Node) -> void { return; }
-fn consume(s: std::string::String) -> void {
+fn consume(allocator: Allocator, s: std::string::String) -> void {
     let n = Node::Left(move s);
-    n.deinit();
+    n.deinit(allocator);
     show(n);
 }`
 	assertMoveError(t, source, "moved value `n` was borrowed")
@@ -76,10 +76,10 @@ fn consume(s: std::string::String) -> void {
 // payload through an ordinary match on an owned union: the payload moves out and
 // carries its cleanup with it (ADR-0090).
 func TestCheckAcceptsActivePayloadCleanupOutsideDeinit(t *testing.T) {
-	source := ownerUnionPrelude + `fn drop_node(n: Node) -> void {
+	source := ownerUnionPrelude + `fn drop_node(allocator: Allocator, n: Node) -> void {
     match n {
-        Left(s) => s.deinit(),
-        Right(a) => a.deinit(),
+        Left(s) => s.deinit(allocator),
+        Right(a) => a.deinit(allocator),
     }
 }`
 	if err := checkSource(source); err != nil {
@@ -91,10 +91,10 @@ func TestCheckAcceptsActivePayloadCleanupOutsideDeinit(t *testing.T) {
 // payload out consumes the union, so touching it afterwards is use-after-move.
 func TestCheckRejectsUnionReuseAfterMovingMatch(t *testing.T) {
 	source := ownerUnionPrelude + `fn show(n: &Node) -> void { return; }
-fn drop_node(n: Node) -> void {
+fn drop_node(allocator: Allocator, n: Node) -> void {
     match n {
-        Left(s) => s.deinit(),
-        Right(a) => a.deinit(),
+        Left(s) => s.deinit(allocator),
+        Right(a) => a.deinit(allocator),
     }
     show(n);
 }`
@@ -109,10 +109,10 @@ func TestCheckRejectsOwnerUnionReuseAfterDeinitDispatch(t *testing.T) {
     Left(std::string::String),
     Right(std::array::Array<i64>),
 }
-fn (self: Node) deinit() -> void {
+fn (self: Node) deinit(allocator: Allocator) -> void {
     match self {
-        Left(s) => s.deinit(),
-        Right(a) => a.deinit(),
+        Left(s) => s.deinit(allocator),
+        Right(a) => a.deinit(allocator),
     }
     match self {
         Left(s) => print(0),

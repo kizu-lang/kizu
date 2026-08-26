@@ -8,12 +8,12 @@ import std::testing;
 // work without the two cleanups colliding (ADR-0114).
 fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
     var parent = array::new<string::String>(allocator);
-    errdefer parent.deinit();
+    errdefer parent.deinit(allocator);
 
     var i = 0;
     while i < count {
         var child = string::new(allocator);
-        errdefer child.deinit();
+        errdefer child.deinit(allocator);
         try child.append_byte(cast<u8>(97) + cast<u8>(i));
         try parent.append(move child);
         try parent.reserve(1);
@@ -27,18 +27,17 @@ fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
 test "errdefer retires at move" {
     let allocator = mem::page_allocator();
     let names = try build(allocator, 3);
-    defer names.deinit();
+    defer names.deinit(allocator);
 
     testing::expect_equal<i64>(3, names.len());
     var count = 0;
     while names.pop() |name| {
         testing::expect_equal<i64>(1, name.len());
-        name.deinit();
+        name.deinit(allocator);
         count = count + 1;
     }
     testing::expect_equal<i64>(3, count);
 }
-
 
 // ir
 // lower:
@@ -62,15 +61,15 @@ test "errdefer retires at move" {
 //   %12: std::mem::Error!void = call.std::string::String.append_byte %7: &var std::string::String, %11: u8
 //   %13: std::string::String = ref.load %7: &var std::string::String
 //   %14: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>
+//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String, %allocator: Allocator; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>, %allocator: Allocator
 //   %16: std::string::String = ref.load %7: &var std::string::String
 //   %17: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %16: std::string::String
 //   %18: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>
+//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>, %allocator: Allocator
 //   %20: i64 = const 1
 //   %21: std::mem::Error!void = call.std::array::Array.reserve.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %20: i64
 //   %22: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %21: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>
+//   error.try %21: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>, %allocator: Allocator
 //   %24: i64 = const 1
 //   %25: i64 = binary.+ %4: i64, %24: i64
 //   jump while.header.1
@@ -101,7 +100,7 @@ test "errdefer retires at move" {
 //   %14: i64 = const 1
 //   %15: i64 = call.std::string::String.len %12: std::string::String
 //   test.expect_equal %14: i64, %15: i64, i64
-//   call.std::string::String.deinit %12: std::string::String
+//   call.std::string::String.deinit %12: std::string::String, %1: Allocator
 //   %18: i64 = const 1
 //   %19: i64 = binary.+ %10: i64, %18: i64
 //   jump while.header.1
@@ -109,7 +108,7 @@ test "errdefer retires at move" {
 //   %20: i64 = const 3
 //   test.expect_equal %20: i64, %10: i64, i64
 //   %22: std::array::Array<std::string::String> = ref.load %5: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>, %1: Allocator
 //   %24: !void = error.ok
 //   return %24: !void
 // }
@@ -134,15 +133,15 @@ test "errdefer retires at move" {
 //   %12: std::mem::Error!void = call.std::string::String.append_byte %7: &var std::string::String, %11: u8
 //   %13: std::string::String = ref.load %7: &var std::string::String
 //   %14: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>
+//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String, %allocator: Allocator; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>, %allocator: Allocator
 //   %16: std::string::String = ref.load %7: &var std::string::String
 //   %17: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %16: std::string::String
 //   %18: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>
+//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>, %allocator: Allocator
 //   %20: i64 = const 1
 //   %21: std::mem::Error!void = call.std::array::Array.reserve.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %20: i64
 //   %22: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %21: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>
+//   error.try %21: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>, %allocator: Allocator
 //   %24: i64 = const 1
 //   %25: i64 = binary.+ %4: i64, %24: i64
 //   jump while.header.1
@@ -173,7 +172,7 @@ test "errdefer retires at move" {
 //   %14: i64 = const 1
 //   %15: i64 = call.std::string::String.len %12: std::string::String
 //   test.expect_equal %14: i64, %15: i64, i64
-//   call.std::string::String.deinit %12: std::string::String
+//   call.std::string::String.deinit %12: std::string::String, %1: Allocator
 //   %18: i64 = const 1
 //   %19: i64 = binary.+ %10: i64, %18: i64
 //   jump while.header.1
@@ -181,7 +180,7 @@ test "errdefer retires at move" {
 //   %20: i64 = const 3
 //   test.expect_equal %20: i64, %10: i64, i64
 //   %22: std::array::Array<std::string::String> = ref.load %5: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %22: std::array::Array<std::string::String>, %1: Allocator
 //   %24: !void = error.ok
 //   return %24: !void
 // }

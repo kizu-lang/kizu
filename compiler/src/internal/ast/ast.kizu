@@ -239,8 +239,12 @@ struct DerivedNames {
     receiver: Text,
     capture: Text,
     cleanup: Text,
+    allocator: Text,
     empty: Text,
-    empty_args: ExpressionList
+    empty_args: ExpressionList,
+    // The one argument every derived release carries: the allocator the body
+    // was handed, which is what made the fields it consumes (ADR-0132).
+    allocator_args: ExpressionList
 }
 
 enum DerivedMemberKind {
@@ -730,7 +734,7 @@ fn (self: &FunctionSignature) type_param_names(
     allocator: Allocator
 ) -> !array::Array<Text> {
     var names = array::new<Text>(allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(allocator);
     var index = 0;
     while self.static_params.at(index) |param| {
         if param.is_type() {
@@ -753,7 +757,7 @@ pub fn (self: &BufferLiteralExpr) type_text(
     allocator: Allocator
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try self.append_type_text(&var out);
     return move out;
 }
@@ -774,11 +778,11 @@ pub fn field_path_root(
     expression: Expression
 ) -> !?FieldPath {
     var path = string::new(allocator);
-    errdefer path.deinit();
+    errdefer path.deinit(allocator);
     if try append_field_path(ast, expression, &var path) |root| {
         return FieldPath { root: root, path: move path };
     }
-    path.deinit();
+    path.deinit(allocator);
     return null;
 }
 
@@ -829,7 +833,7 @@ pub fn render_expression(
     expression: Expression
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try append_expression(&var out, ast, expression);
     return move out;
 }
@@ -841,7 +845,7 @@ pub fn render_statement(
     statement: Statement
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try append_statement(&var out, ast, statement);
     return move out;
 }
@@ -853,7 +857,7 @@ pub fn render_block(
     block: Block
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try append_block(&var out, ast, block);
     return move out;
 }
@@ -1309,7 +1313,7 @@ pub fn render_program(
     program: &Program
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while program.declarations.at(index) |declaration| {
         if index > 0 {
@@ -1332,7 +1336,7 @@ pub fn render_declaration(
     declaration: Declaration
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try append_declaration(&var out, ast, declaration);
     return move out;
 }
@@ -1706,7 +1710,7 @@ pub fn comptime_match_expansion(
     variants: &array::Array<MetaVariant>
 ) -> !MatchStmt {
     var arms = array::new<MatchArm>(allocator);
-    errdefer arms.deinit();
+    errdefer arms.deinit(allocator);
     try arms.reserve(variants.len());
     let body = stmt.body.as_statement();
     var index = 0;
@@ -1786,7 +1790,7 @@ fn base_type_name(type_name: []u8) -> []u8 {
 
 fn new_owner_map(allocator: Allocator) -> !map::Map<[]u8, bool> {
     var owners = map::new<[]u8, bool>(allocator);
-    errdefer owners.deinit();
+    errdefer owners.deinit(allocator);
     try owners.insert("std::arena::Arena", true);
     return move owners;
 }
@@ -1842,7 +1846,7 @@ fn type_holds_owner(
         type_table,
         value
     );
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     let text = rendered.as_bytes();
     if typ::optional_elem(text) |elem| {
         return owner_type(owners, elem);
@@ -1912,7 +1916,7 @@ pub fn deinit_owners(
     program: &Program
 ) -> !map::Map<[]u8, bool> {
     var owners = try new_owner_map(allocator);
-    errdefer owners.deinit();
+    errdefer owners.deinit(allocator);
     try collect_declared_deinits(ast, program, &var owners, true);
     var grew = true;
     while grew {
@@ -1945,7 +1949,7 @@ pub fn declared_deinits(
     program: &Program
 ) -> !map::Map<[]u8, bool> {
     var declared = try new_owner_map(allocator);
-    errdefer declared.deinit();
+    errdefer declared.deinit(allocator);
     try collect_declared_deinits(ast, program, &var declared, false);
     return move declared;
 }
@@ -1956,7 +1960,7 @@ fn all_declared_deinits(
     program: &Program
 ) -> !map::Map<[]u8, bool> {
     var declared = map::new<[]u8, bool>(allocator);
-    errdefer declared.deinit();
+    errdefer declared.deinit(allocator);
     try collect_declared_deinits(ast, program, &var declared, true);
     return move declared;
 }
@@ -1968,11 +1972,11 @@ pub fn add_derived_deinits(
     program: &var Program
 ) -> !void {
     let owners = try deinit_owners(allocator, ast, program);
-    defer owners.deinit();
+    defer owners.deinit(allocator);
     let declared = try all_declared_deinits(allocator, ast, program);
-    defer declared.deinit();
+    defer declared.deinit(allocator);
     var derived = array::new<Declaration>(allocator);
-    defer derived.deinit();
+    defer derived.deinit(allocator);
     try derived.reserve(program.declarations.len());
     var index = 0;
     while program.declarations.get(index) |declaration| {
@@ -2054,16 +2058,24 @@ fn new_derived_names(
     let cleanup = try ast.add_text_from_bytes(
         typ::cleanup_method()
     );
+    let allocator_name = try ast.add_text_from_bytes("allocator");
     let empty = ast.add_empty_text();
     let empty_args = ast.add_expression_list(
         array::new<Expression>(allocator)
     );
+    let handed = add_derived_ident(ast, allocator_name);
+    var allocator_arg_values = array::new<Expression>(allocator);
+    errdefer allocator_arg_values.deinit(allocator);
+    try allocator_arg_values.append(handed);
+    let allocator_args = ast.add_expression_list(move allocator_arg_values);
     return DerivedNames {
         receiver: receiver,
         capture: capture,
         cleanup: cleanup,
+        allocator: allocator_name,
         empty: empty,
-        empty_args: empty_args
+        empty_args: empty_args,
+        allocator_args: allocator_args
     };
 }
 
@@ -2075,7 +2087,7 @@ fn derive_struct_deinit(
     names: &DerivedNames
 ) -> !?FunctionDecl {
     var statements = array::new<Statement>(allocator);
-    errdefer statements.deinit();
+    errdefer statements.deinit(allocator);
     try statements.reserve(declaration.fields.len());
     var index = 0;
     while declaration.fields.at(index) |field| {
@@ -2085,7 +2097,7 @@ fn derive_struct_deinit(
             field.type_name
         );
         let kind = derived_member_kind(owners, &rendered);
-        rendered.deinit();
+        rendered.deinit(allocator);
         match kind {
             OptionalOwner => {
                 // Only if may consume a field that while could read twice.
@@ -2128,7 +2140,7 @@ fn derive_struct_deinit(
         index = index + 1;
     }
     if statements.len() == 0 {
-        statements.deinit();
+        statements.deinit(allocator);
         return null;
     }
     return try derive_decl(
@@ -2174,7 +2186,7 @@ fn derive_union_deinit(
     names: &DerivedNames
 ) -> !?FunctionDecl {
     var arms = array::new<MatchArm>(allocator);
-    errdefer arms.deinit();
+    errdefer arms.deinit(allocator);
     try arms.reserve(declaration.variants.len());
     var owned = false;
     var index = 0;
@@ -2187,7 +2199,7 @@ fn derive_union_deinit(
                 payload
             );
             payload_owned = rendered_owner_type(owners, &rendered);
-            rendered.deinit();
+            rendered.deinit(allocator);
         }
         if payload_owned {
             owned = true;
@@ -2211,7 +2223,7 @@ fn derive_union_deinit(
         index = index + 1;
     }
     if !owned {
-        arms.deinit();
+        arms.deinit(allocator);
         return null;
     }
     let receiver = add_derived_ident(ast, names.receiver);
@@ -2222,7 +2234,7 @@ fn derive_union_deinit(
         meta_owner: names.empty
     }));
     var statements = array::new<Statement>(allocator);
-    errdefer statements.deinit();
+    errdefer statements.deinit(allocator);
     try statements.append(statement);
     return try derive_decl(
         allocator,
@@ -2243,13 +2255,13 @@ fn derive_decl(
     statements: array::Array<Statement>
 ) -> !FunctionDecl {
     var body = move statements;
-    errdefer body.deinit();
+    errdefer body.deinit(allocator);
     let returned = ast.add_statement(StatementNode::Return(ReturnStmt {
         value: null
     }));
     try body.append(returned);
     var static_params = array::new<StaticParam>(allocator);
-    errdefer static_params.deinit();
+    errdefer static_params.deinit(allocator);
     try static_params.reserve(type_params.len());
     var index = 0;
     while type_params.get(index) |name| {
@@ -2266,15 +2278,22 @@ fn derive_decl(
         type_params
     );
     var params = array::new<Param>(allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(allocator);
     try params.append(Param {
         name: names.receiver,
         type_name: receiver_type,
         borrow: false,
         mut_borrow: false
     });
+    let allocator_type = try ast.types.parse("Allocator");
+    try params.append(Param {
+        name: names.allocator,
+        type_name: allocator_type,
+        borrow: false,
+        mut_borrow: false
+    });
     let owner_copy = try copy_text(allocator, ast, owner);
-    defer owner_copy.deinit();
+    defer owner_copy.deinit(allocator);
     let owner_bytes = owner_copy.as_bytes();
     // A derived method keeps the module identity of its receiver type.
     let std_owner = mem::starts_with(owner_bytes, "std::");
@@ -2317,7 +2336,7 @@ fn derived_receiver_type(
         return ast.types.parse(bytes);
     }
     var text = string::new(allocator);
-    defer text.deinit();
+    defer text.deinit(allocator);
     try append_retained_text(&var text, ast.texts.at(owner.node));
     try text.append_byte(cast<u8>(60));
     var index = 0;
@@ -2392,7 +2411,7 @@ fn add_derived_cleanup(
     }));
     let call = ast.add_expression(ExpressionNode::Call(CallExpr {
         callee: method,
-        args: names.empty_args
+        args: names.allocator_args
     }));
     return ast.add_statement(StatementNode::Expr(ExprStmt {
         expr: call,
@@ -2406,7 +2425,7 @@ fn add_derived_block(
     statement: Statement
 ) -> !Block {
     var statements = array::new<Statement>(allocator);
-    errdefer statements.deinit();
+    errdefer statements.deinit(allocator);
     try statements.append(statement);
     return ast.add_block(BlockStmt { statements: move statements });
 }
@@ -2428,7 +2447,7 @@ fn joined_text(
     right: []u8
 ) -> !Text {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.reserve(mem::len(left) + mem::len(middle) + mem::len(right));
     try out.append_bytes(left);
     try out.append_bytes(middle);
@@ -2475,7 +2494,7 @@ fn add_construct_field(
     owner: []u8,
     worker_name: Text,
     cleanup_method: Text,
-    empty_args: ExpressionList,
+    release_args: ExpressionList,
     field: &ConstructField,
     args: ExpressionList,
     owners: &map::Map<[]u8, bool>
@@ -2512,7 +2531,7 @@ fn add_construct_field(
             ast,
             binding,
             cleanup_method,
-            empty_args
+            release_args
         );
         let moved = ast.add_expression(ExpressionNode::Move(MoveExpr {
             value: field_value,
@@ -2546,7 +2565,10 @@ struct ConstructBuilder {
     type_name: Text,
     worker_name: Text,
     cleanup_method: Text,
-    empty_args: ExpressionList
+    // The release an owner field's errdefer writes names the allocator the
+    // worker built it from, which is the construct's own first argument
+    // (ADR-0132).
+    release_args: ExpressionList
 }
 
 fn begin_construct(
@@ -2554,27 +2576,33 @@ fn begin_construct(
     ast: &var Ast,
     owner: []u8,
     worker: []u8,
-    field_count: i64
+    field_count: i64,
+    args: ExpressionList
 ) -> !ConstructBuilder {
     var statements = array::new<Statement>(allocator);
-    errdefer statements.deinit();
+    errdefer statements.deinit(allocator);
     try statements.reserve(field_count * 2);
     var values = array::new<FieldValue>(allocator);
-    errdefer values.deinit();
+    errdefer values.deinit(allocator);
     try values.reserve(field_count);
     let type_name = try ast.add_text_from_bytes(owner);
     let worker_name = try ast.add_text_from_bytes(worker);
     let cleanup_method = try ast.add_text_from_bytes(
         typ::cleanup_method()
     );
-    let empty_args = ast.add_expression_list(array::new<Expression>(allocator));
+    var release_values = array::new<Expression>(allocator);
+    errdefer release_values.deinit(allocator);
+    if args.len(ast) > 0 {
+        try release_values.append(args.get_or_panic(ast, 0));
+    }
+    let release_args = ast.add_expression_list(move release_values);
     return ConstructBuilder {
         statements: move statements,
         values: move values,
         type_name: type_name,
         worker_name: worker_name,
         cleanup_method: cleanup_method,
-        empty_args: empty_args
+        release_args: release_args
     };
 }
 
@@ -2592,7 +2620,7 @@ fn (self: &var ConstructBuilder) add_field(
         owner,
         self.worker_name,
         self.cleanup_method,
-        self.empty_args,
+        self.release_args,
         field,
         args,
         owners
@@ -2631,9 +2659,9 @@ pub fn construct_expansion(
     owners: &map::Map<[]u8, bool>
 ) -> !ConstructResult {
     var builder = try begin_construct(
-        allocator, ast, owner, worker, fields.len()
+        allocator, ast, owner, worker, fields.len(), args
     );
-    errdefer builder.deinit();
+    errdefer builder.deinit(allocator);
     var index = 0;
     while fields.at(index) |field| {
         try builder.add_field(allocator, ast, owner, field, args, owners);
@@ -2655,9 +2683,9 @@ pub fn construct_expansion_from_names(
     owners: &map::Map<[]u8, bool>
 ) -> !ConstructResult {
     var builder = try begin_construct(
-        allocator, ast, owner, worker, names.len()
+        allocator, ast, owner, worker, names.len(), args
     );
-    errdefer builder.deinit();
+    errdefer builder.deinit(allocator);
     var index = 0;
     while names.at(index) |retained_name| {
         let name = retained_name.as_bytes();

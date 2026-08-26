@@ -50,9 +50,9 @@ struct FieldCursor {
 /// declarations, the Go `Import`.
 pub fn import_header(allocator: Allocator, header: []u8) -> !ImportResult {
     var clean = try strip_comments(allocator, header);
-    defer clean.deinit();
+    defer clean.deinit(allocator);
     var decls = array::new<string::String>(allocator);
-    defer decls.deinit();
+    defer decls.deinit(allocator);
     let clean_bytes = clean.as_bytes();
     if try import_statements(allocator, clean_bytes, &var decls) |failure| {
         return ImportResult::Error(move failure);
@@ -90,7 +90,7 @@ fn join_lines(
     decls: &array::Array<string::String>
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while decls.at(index) |decl| {
         if index > 0 {
@@ -112,23 +112,23 @@ fn import_statement(
         return move failure;
     }
     var normalized = try normalize_spaces(allocator, stmt);
-    defer normalized.deinit();
+    defer normalized.deinit(allocator);
     let bytes = normalized.as_bytes();
     if match_function(bytes) |found| {
         var return_type = string::new(allocator);
-        defer return_type.deinit();
+        defer return_type.deinit(allocator);
         let return_bytes = bytes[0..found.return_end];
         if try c_type_to_kizu(allocator, return_bytes, &var return_type) |failure| {
             return move failure;
         }
         var params = string::new(allocator);
-        defer params.deinit();
+        defer params.deinit(allocator);
         let params_bytes = bytes[found.params_start..found.params_end];
         if try import_params(allocator, params_bytes, &var params) |failure| {
             return move failure;
         }
         var decl = string::new(allocator);
-        errdefer decl.deinit();
+        errdefer decl.deinit(allocator);
         try decl.append_bytes("extern ");
         try decl.append_byte(cast<u8>(34));
         try decl.append_bytes("c");
@@ -143,7 +143,7 @@ fn import_statement(
         return null;
     }
     var failure = try import_error(allocator, "unsupported declaration `");
-    errdefer failure.deinit();
+    errdefer failure.deinit(allocator);
     try failure.append_bytes(stmt);
     try failure.append_bytes("`");
     return move failure;
@@ -185,12 +185,12 @@ fn import_param(
     out: &var string::String
 ) -> !?string::String {
     var normalized = try normalize_pointer_stars(allocator, raw);
-    defer normalized.deinit();
+    defer normalized.deinit(allocator);
     let bytes = normalized.as_bytes();
     let length = mem::len(bytes);
     if contains(bytes, "[") or contains(bytes, "]") {
         var failure = try import_error(allocator, "arrays are unsupported in `");
-        errdefer failure.deinit();
+        errdefer failure.deinit(allocator);
         try failure.append_bytes(bytes);
         try failure.append_bytes("`");
         return move failure;
@@ -201,7 +201,7 @@ fn import_param(
     let last = last_field_start(bytes);
     let unnamed = contains(bytes[last..length], "*");
     var type_text = string::new(allocator);
-    defer type_text.deinit();
+    defer type_text.deinit(allocator);
     let type_end = if last > 0 { last - 1 } else { 0 };
     let type_bytes = if unnamed { bytes[0..length] } else { bytes[0..type_end] };
     if try c_type_to_kizu(allocator, type_bytes, &var type_text) |failure| {
@@ -226,20 +226,20 @@ fn c_type_to_kizu(
     out: &var string::String
 ) -> !?string::String {
     var starred = try normalize_pointer_stars(allocator, raw);
-    defer starred.deinit();
+    defer starred.deinit(allocator);
     let starred_bytes = starred.as_bytes();
     let depth = count_byte(starred_bytes, cast<u8>(42));
     var stripped = try without_byte(allocator, starred_bytes, cast<u8>(42));
-    defer stripped.deinit();
+    defer stripped.deinit(allocator);
     let stripped_bytes = stripped.as_bytes();
     var is_const = false;
     var element = try normalize_c_base(allocator, stripped_bytes, &var is_const);
-    defer element.deinit();
+    defer element.deinit(allocator);
     let element_bytes = element.as_bytes();
     let base = primitive_spelling(element_bytes);
     if mem::len(base) == 0 {
         var failure = try import_error(allocator, "unsupported C type `");
-        errdefer failure.deinit();
+        errdefer failure.deinit(allocator);
         try failure.append_bytes(stripped_bytes);
         try failure.append_bytes("`");
         return move failure;
@@ -269,7 +269,7 @@ fn normalize_c_base(
     is_const: &var bool
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var cursor = FieldCursor { start: 0, end: 0 };
     while cursor.next(raw) {
         let field = raw[cursor.start..cursor.end];
@@ -315,7 +315,7 @@ fn reject_unsupported(allocator: Allocator, stmt: []u8) -> !?string::String {
 // import_error starts one message with the prefix every Go import error has.
 fn import_error(allocator: Allocator, text: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "c import error: ");
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes(text);
     return move out;
 }
@@ -396,7 +396,7 @@ fn primitive_spelling(element: []u8) -> []u8 {
 // runs them in: a `/*` inside a line comment is still a block comment.
 fn strip_comments(allocator: Allocator, input: []u8) -> !string::String {
     var no_block = string::new(allocator);
-    defer no_block.deinit();
+    defer no_block.deinit(allocator);
     try strip_block_comments(input, &var no_block);
     let bytes = no_block.as_bytes();
     return strip_line_comments(allocator, bytes);
@@ -425,7 +425,7 @@ fn strip_block_comments(input: []u8, out: &var string::String) -> !void {
 // strip_line_comments returns input with every line cut at its first `//`.
 fn strip_line_comments(allocator: Allocator, input: []u8) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     let length = mem::len(input);
     var index = 0;
     while index < length {
@@ -445,7 +445,7 @@ fn strip_line_comments(allocator: Allocator, input: []u8) -> !string::String {
 // strings.Join(strings.Fields(input), " ").
 fn normalize_spaces(allocator: Allocator, input: []u8) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var cursor = FieldCursor { start: 0, end: 0 };
     while cursor.next(input) {
         if out.len() > 0 {
@@ -459,7 +459,7 @@ fn normalize_spaces(allocator: Allocator, input: []u8) -> !string::String {
 // normalize_pointer_stars makes C pointer stars easy to split.
 fn normalize_pointer_stars(allocator: Allocator, input: []u8) -> !string::String {
     var spaced = string::new(allocator);
-    defer spaced.deinit();
+    defer spaced.deinit(allocator);
     let length = mem::len(input);
     var index = 0;
     while index < length {
@@ -635,7 +635,7 @@ fn count_byte(bytes: []u8, byte: u8) -> i64 {
 // strings.ReplaceAll(input, "*", "").
 fn without_byte(allocator: Allocator, bytes: []u8, byte: u8) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     let length = mem::len(bytes);
     var index = 0;
     while index < length {

@@ -6,10 +6,10 @@ import std::testing;
 
 fn expect_round_trip(allocator: Allocator, text: []u8) -> !void {
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let parsed = try table.parse(text);
     let rendered = try render(allocator, &table, parsed);
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     let bytes = rendered.as_bytes();
     testing::expect(mem::equal_bytes(bytes, text));
     return;
@@ -31,7 +31,7 @@ fn expect_part(
 
 fn expect_invalid_split(allocator: Allocator, text: []u8) -> !void {
     if try split_args_optional(allocator, text) |parts| {
-        parts.deinit();
+        parts.deinit(allocator);
         testing::fail("malformed static arguments were accepted");
     }
     return;
@@ -86,10 +86,10 @@ test "type parse renders every compiler spelling back" {
 test "type rendering appends into caller-owned storage" {
     let allocator = mem::page_allocator();
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let parsed = try table.parse("std::map::Map<[]u8, [4]T>");
     var rendered = try string::from_bytes(allocator, "type=");
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     try append_render(&var rendered, &table, parsed);
     let bytes = rendered.as_bytes();
     testing::expect_equal<[]u8>(
@@ -101,9 +101,9 @@ test "type rendering appends into caller-owned storage" {
 test "type equality compares structure across independent arenas" {
     let allocator = mem::page_allocator();
     var left = new(allocator);
-    defer left.deinit();
+    defer left.deinit(allocator);
     var right = new(allocator);
-    defer right.deinit();
+    defer right.deinit(allocator);
     let first = try left.parse("Pair<[]u8, [4]T>");
     let same = try right.parse("Pair<[]u8, [4]T>");
     let other = try right.parse("Pair<[]u8, [8]T>");
@@ -114,13 +114,13 @@ test "type equality compares structure across independent arenas" {
 test "type table reuses roots and parses nested spellings independently" {
     let allocator = mem::page_allocator();
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let first = try table.parse("ParseError!Array<i64>");
     let second = try table.parse("ParseError!Array<i64>");
     testing::expect(equal(&table, first, &table, second));
     let nested = try table.parse("Array<i64>");
     let rendered = try render(allocator, &table, nested);
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     let bytes = rendered.as_bytes();
     testing::expect(mem::equal_bytes(bytes, "Array<i64>"));
 }
@@ -131,7 +131,7 @@ test "split args trims canonical space and keeps nested types whole" {
         allocator,
         " []u8, std::map::Map<[]u8, i64>,  bool "
     );
-    defer parts.deinit();
+    defer parts.deinit(allocator);
     testing::expect_equal<i64>(3, parts.len());
     expect_part(&parts, 0, "[]u8");
     expect_part(&parts, 1, "std::map::Map<[]u8, i64>");
@@ -141,7 +141,7 @@ test "split args trims canonical space and keeps nested types whole" {
 test "optional split keeps malformed text separate from allocation failure" {
     let allocator = mem::page_allocator();
     if try split_args_optional(allocator, "i64, Pair<bool, u8>") |parts| {
-        defer parts.deinit();
+        defer parts.deinit(allocator);
         testing::expect_equal<i64>(2, parts.len());
     } else {
         testing::fail("valid static arguments were rejected");
@@ -175,7 +175,7 @@ fn (self: &var Counter) visit(value: &Node) -> void {
 test "walk visits buffer elements outermost first" {
     let allocator = mem::page_allocator();
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let parsed = try table.parse("[4]Pair<T, bool>");
     var counter = Counter { total: 0, names: 0, buffers: 0 };
     walk<Counter>(&table, parsed, &var counter);
@@ -234,11 +234,11 @@ pub struct Qualifier {
     pub order: string::String
 }
 
-fn (self: Qualifier) deinit() -> void { self.order.deinit(); }
+fn (self: Qualifier) deinit(allocator: Allocator) -> void { self.order.deinit(allocator); }
 
 fn qualified_part(allocator: Allocator, bytes: []u8) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes(bytes);
     return move out;
 }
@@ -254,7 +254,7 @@ fn (self: &var Qualifier) rename_path(
     }
     self.calls = self.calls + 1;
     var out = array::new<string::String>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append(try qualified_part(allocator, "resolved"));
     var index = 0;
     while path.at(index) |part| {
@@ -268,17 +268,17 @@ fn (self: &var Qualifier) rename_path(
 test "map names rewrites every name and preserves surrounding structure" {
     let allocator = mem::page_allocator();
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let parsed = try table.parse("Error![4]Pair<T, bool>");
     var qualifier = Qualifier { calls: 0, order: string::new(allocator) };
-    defer qualifier.deinit();
+    defer qualifier.deinit(allocator);
     let mapped = try map_names<Qualifier>(
         &var table,
         parsed,
         &var qualifier
     );
     let rendered = try render(allocator, &table, mapped);
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     let bytes = rendered.as_bytes();
     testing::expect(mem::equal_bytes(
         bytes,
@@ -292,13 +292,13 @@ test "map names rewrites every name and preserves surrounding structure" {
 test "substitute text parses replacements once and renders canonically" {
     let allocator = mem::page_allocator();
     var empty = map::new<[]u8, []u8>(allocator);
-    defer empty.deinit();
+    defer empty.deinit(allocator);
     let unchanged = try substitute_text(allocator, "not a type", &empty);
-    defer unchanged.deinit();
+    defer unchanged.deinit(allocator);
     let unchanged_bytes = unchanged.as_bytes();
     testing::expect(mem::equal_bytes(unchanged_bytes, "not a type"));
     var substitutions = map::new<[]u8, []u8>(allocator);
-    defer substitutions.deinit();
+    defer substitutions.deinit(allocator);
     try substitutions.insert("T", "Pair<U,bool>");
     try substitutions.insert("U", "i64");
     let replaced = try substitute_text(
@@ -306,7 +306,7 @@ test "substitute text parses replacements once and renders canonically" {
         "Error!?&var Pair<T, ptr<const U>, []Timer, [4]U>",
         &substitutions
     );
-    defer replaced.deinit();
+    defer replaced.deinit(allocator);
     let bytes = replaced.as_bytes();
     testing::expect(mem::equal_bytes(
         bytes,
@@ -317,11 +317,11 @@ test "substitute text parses replacements once and renders canonically" {
 test "substitute owned text reads dynamic parallel arrays without retaining views" {
     let allocator = mem::page_allocator();
     var names = array::new<string::String>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
     try names.append(try string::from_bytes(allocator, "T"));
     try names.append(try string::from_bytes(allocator, "T"));
     var replacements = array::new<string::String>(allocator);
-    defer replacements.deinit();
+    defer replacements.deinit(allocator);
     try replacements.append(try string::from_bytes(allocator, "Pair<i64, bool>"));
     try replacements.append(try string::from_bytes(allocator, "u8"));
     let replaced = try substitute_owned_text(
@@ -330,7 +330,7 @@ test "substitute owned text reads dynamic parallel arrays without retaining view
         &names,
         &replacements
     );
-    defer replaced.deinit();
+    defer replaced.deinit(allocator);
     let bytes = replaced.as_bytes();
     testing::expect(mem::equal_bytes(bytes, "Error!?&u8"));
 }
@@ -338,11 +338,11 @@ test "substitute owned text reads dynamic parallel arrays without retaining view
 test "substitute retains a structural graph without rewriting replacements" {
     let allocator = mem::page_allocator();
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let declared = try table.parse("Error!?&var Pair<T, Timer, []T>");
     let replacement = try table.parse("Pair<U, bool>");
     var substitutions = map::new<[]u8, Type>(allocator);
-    defer substitutions.deinit();
+    defer substitutions.deinit(allocator);
     try substitutions.insert("T", replacement);
     try substitutions.insert("U", try table.parse("i64"));
     let replaced = try substitute(
@@ -351,7 +351,7 @@ test "substitute retains a structural graph without rewriting replacements" {
         &substitutions
     );
     let rendered = try render(allocator, &table, replaced);
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     let bytes = rendered.as_bytes();
     testing::expect_equal<[]u8>(
         "Error!?&var Pair<Pair<U, bool>, Timer, []Pair<U, bool>>",

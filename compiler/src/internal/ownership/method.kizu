@@ -69,7 +69,7 @@ fn (self: &var Checker) check_arena_at_receiver_method(
     let receiver = self.store.retain(move value);
     let method = try self.names.intern_text(tree, field.name);
     if try self.check_direct_field_receiver_by_type(tree, env, receiver, method, args, out) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(self.allocator);
         try self.release_temporary_borrow(borrow);
         return move failed;
     }
@@ -142,7 +142,7 @@ fn (self: &var Checker) check_local_arena_method(
         return self.check_arena_at_condition(tree, env, arena, args, out);
     }
     if self.names.is(method, "deinit") {
-        return self.check_owned_arena_deinit(tree, arena, args, out);
+        return self.check_owned_arena_deinit(tree, env, arena, args, out);
     }
     // Unreachable while this dispatch and the shared access table agree;
     // the table refusal above is the user-facing one.
@@ -208,7 +208,7 @@ fn (self: &var Checker) check_non_arena_method(
         return self.check_owned_string_method(tree, env, value, method, args, out);
     }
     if self.names.generic_base_is(type_name, "std::mem::Box") {
-        return self.check_box_method(tree, value, method, args, out);
+        return self.check_box_method(tree, env, value, method, args, out);
     }
     if try self.check_map_receiver_borrow(tree, value, method) |failed| {
         return move failed;
@@ -340,7 +340,7 @@ fn (self: &var Checker) direct_field_receiver(
 /// aliasing path count; borrows of disjoint sibling fields do not.
 fn (self: &var Checker) binding_for_direct_field_receiver(receiver: DirectFieldReceiver) -> !BindingHandle {
     var value = self.store.blank_binding(0, receiver.path, receiver.type_name);
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     // A field of a mutable place is itself a mutable place.
     value.mutable = self.mutable_place(receiver.owner);
     let owner = self.binding(receiver.owner);
@@ -380,7 +380,7 @@ fn (self: &var Checker) check_direct_field_receiver_by_type(
             return self.check_map_method(tree, env, value, parts.args, method, args, out);
         }
         if self.names.is(parts.base, "std::mem::Box") {
-            return self.check_box_method(tree, value, method, args, out);
+            return self.check_box_method(tree, env, value, method, args, out);
         }
         if self.names.is(parts.base, "std::arena::Arena") {
             return self.check_field_arena_method(tree, env, value, method, args, out);
@@ -415,7 +415,7 @@ fn (self: &var Checker) check_field_arena_method(
         return self.check_arena_at_condition(tree, env, arena, args, out);
     }
     if self.names.is(method, "deinit") {
-        return self.check_owned_arena_deinit(tree, arena, args, out);
+        return self.check_owned_arena_deinit(tree, env, arena, args, out);
     }
     // Unreachable while this dispatch and the shared access table agree;
     // the table refusal above is the user-facing one.
@@ -476,7 +476,7 @@ fn (self: &var Checker) check_box_receiver_expr(
     handled.* = false;
     var type_name = empty_name();
     if try self.read_expr(tree, env, field.receiver, &var type_name) |failed| {
-        failed.deinit();
+        failed.deinit(self.allocator);
         return null;
     }
     if !self.names.generic_base_is(type_name, "std::mem::Box") {
@@ -494,13 +494,14 @@ fn (self: &var Checker) check_box_receiver_expr(
             tree, ast::zero_span(), "box error: `Box.%s` requires local Box receiver", Arg::Str(method)
         );
     }
-    return self.check_box_method_for_target(tree, target.value, target.field, method, args, out);
+    return self.check_box_method_for_target(tree, env, target.value, target.field, method, args, out);
 }
 
 /// Validates Box methods with a tracked borrow root, the Go
 /// `checkBoxMethodForTarget`.
 fn (self: &var Checker) check_box_method_for_target(
-    tree: &ast::Ast,
+    tree: &var ast::Ast,
+    env: ScopeHandle,
     target: BindingHandle,
     field: Name,
     method: Name,
@@ -520,12 +521,9 @@ fn (self: &var Checker) check_box_method_for_target(
                 Arg::Str(method)
             );
         }
-        let count = arg_count(tree, args);
-        if count != 0 {
-            return try self.error2(
-                tree, ast::zero_span(), "box error: `Box.%s` expects 0 args, got %d",
-                Arg::Str(method), Arg::Int(count)
-            );
+        let label = try self.names.format("Box.%s", method, empty_name(), empty_name());
+        if try self.read_release_allocator(tree, env, label, target, args, 0) |failed| {
+            return move failed;
         }
         if is_empty(field) {
             try self.store.set_moved(target, true);
@@ -546,13 +544,14 @@ fn (self: &var Checker) check_box_method_for_target(
 
 /// Validates methods on a local Box binding, the Go `checkBoxMethod`.
 fn (self: &var Checker) check_box_method(
-    tree: &ast::Ast,
+    tree: &var ast::Ast,
+    env: ScopeHandle,
     box: BindingHandle,
     method: Name,
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    return self.check_box_method_for_target(tree, box, empty_name(), method, args, out);
+    return self.check_box_method_for_target(tree, env, box, empty_name(), method, args, out);
 }
 
 /// Classifies what one container method does to the storage a live borrow
@@ -829,13 +828,19 @@ fn (self: &var Checker) check_owned_string_method(
             Arg::Str(method), Arg::Str(method)
         );
     }
-    if self.names.is(method, "clear") or self.names.is(method, "deinit") {
+    if self.names.is(method, "clear") {
         if try self.check_string_no_args(tree, method, args) |failed| {
             return move failed;
         }
-        if self.names.is(method, "deinit") {
-            try self.store.set_moved(str_value, true);
+        out.* = self.common.void_name;
+        return null;
+    }
+    if self.names.is(method, "deinit") {
+        let release_label = try self.names.intern("String.deinit");
+        if try self.read_release_allocator(tree, env, release_label, str_value, args, 0) |failed| {
+            return move failed;
         }
+        try self.store.set_moved(str_value, true);
         out.* = self.common.void_name;
         return null;
     }

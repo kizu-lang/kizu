@@ -15,22 +15,22 @@ pub struct Bag {
     pub held: ?mem::Box<i64>,
 }
 
-fn (self: Bag) deinit() -> void {
+fn (self: Bag) deinit(allocator: Allocator) -> void {
     if self.items |items| {
-        items.deinit();
+        items.deinit(allocator);
     }
     if self.counts |counts| {
-        counts.deinit();
+        counts.deinit(allocator);
     }
     if self.held |held| {
-        held.deinit();
+        held.deinit(allocator);
     }
     return;
 }
 
 fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
     var text = string::new(allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(allocator);
     try text.append_bytes(bytes);
     return move text;
 }
@@ -54,11 +54,11 @@ test "optional owner field holds a string" {
         name: try owned(allocator, "alice"),
         nick: try owned(allocator, "al"),
     };
-    defer known.deinit();
+    defer known.deinit(allocator);
     expect_nick(&known, "al");
 
     var plain = Visitor { name: try owned(allocator, "bob"), nick: null };
-    defer plain.deinit();
+    defer plain.deinit(allocator);
     expect_nick(&plain, "none");
 }
 
@@ -68,12 +68,12 @@ test "optional owner field holds containers" {
     let allocator = mem::page_allocator();
 
     var items = array::new<i64>(allocator);
-    errdefer items.deinit();
+    errdefer items.deinit(allocator);
     try items.append(7);
     try items.append(9);
 
     var counts = map::new<[]u8, i64>(allocator);
-    errdefer counts.deinit();
+    errdefer counts.deinit(allocator);
     try counts.insert("hit", 3);
 
     var bag = Bag {
@@ -81,7 +81,7 @@ test "optional owner field holds containers" {
         counts: move counts,
         held: try mem::box<i64>(allocator, 5),
     };
-    defer bag.deinit();
+    defer bag.deinit(allocator);
 
     if bag.items |held| {
         testing::expect_equal<i64>(2, held.len());
@@ -102,8 +102,9 @@ test "optional owner field holds containers" {
 }
 
 test "optional owner field is null when empty" {
+    let allocator = mem::page_allocator();
     var bag = Bag { items: null, counts: null, held: null };
-    defer bag.deinit();
+    defer bag.deinit(allocator);
     if bag.items |_| {
         testing::fail("items should be null");
     }
@@ -124,25 +125,25 @@ test "optional owner produced by a call stays owned" {
     let allocator = mem::page_allocator();
 
     var items = array::new<string::String>(allocator);
-    errdefer items.deinit();
+    errdefer items.deinit(allocator);
     try items.append(try owned(allocator, "a"));
     try items.append(try owned(allocator, "b"));
 
     var drained = 0;
     while items.pop() |item| {
-        item.deinit();
+        item.deinit(allocator);
         drained = drained + 1;
     }
-    items.deinit();
+    items.deinit(allocator);
     testing::expect_equal<i64>(2, drained);
 
     if try maybe(allocator, true) |made| {
-        made.deinit();
+        made.deinit(allocator);
     } else {
         testing::fail("maybe should have made one");
     }
     if try maybe(allocator, false) |made| {
-        made.deinit();
+        made.deinit(allocator);
         testing::fail("maybe should have made nothing");
     }
 }
@@ -151,9 +152,9 @@ pub struct Held {
     pub nick: ?string::String,
 }
 
-fn (self: Held) deinit() -> void {
+fn (self: Held) deinit(allocator: Allocator) -> void {
     if self.nick |held| {
-        held.deinit();
+        held.deinit(allocator);
     }
     return;
 }
@@ -164,13 +165,13 @@ test "optional owner field inside containers" {
     let allocator = mem::page_allocator();
 
     var list = array::new<Held>(allocator);
-    defer list.deinit();
+    defer list.deinit(allocator);
     try list.append(Held { nick: try owned(allocator, "al") });
     try list.append(Held { nick: null });
     testing::expect_equal<i64>(2, list.len());
 
     var table = map::new<[]u8, Held>(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     try table.insert("alice", Held { nick: try owned(allocator, "al") });
     if table.at("alice") |entry| {
         if entry.nick |nick| {

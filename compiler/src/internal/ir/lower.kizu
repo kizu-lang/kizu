@@ -334,12 +334,12 @@ pub fn new_lowerer(
     checker: &ownership::Checker
 ) -> !Lowerer {
     var module = new_module(allocator);
-    errdefer module.deinit();
+    errdefer module.deinit(allocator);
     let common = try intern_common(&var module.names);
     let deinit_owners = try ast::deinit_owners(allocator, tree, program);
-    errdefer deinit_owners.deinit();
+    errdefer deinit_owners.deinit(allocator);
     var envs = new_env_store(allocator);
-    errdefer envs.deinit();
+    errdefer envs.deinit(allocator);
     let env = envs.new_env();
     // A function and a block that belong to no lowered function fill the
     // current slots until the first function opens, so the fields need no
@@ -354,7 +354,7 @@ pub fn new_lowerer(
     };
     let scratch_block = try module.add_block(scratch_function, empty_name());
     var decl_facts = arena::new<FunctionFacts>(allocator);
-    errdefer decl_facts.deinit();
+    errdefer decl_facts.deinit(allocator);
     let scratch_facts = FactsHandle {
         node: decl_facts.add(FunctionFacts {
             name: empty_name(),
@@ -367,10 +367,10 @@ pub fn new_lowerer(
         })
     };
     var generic_args = arena::new<GenericArgs>(allocator);
-    errdefer generic_args.deinit();
+    errdefer generic_args.deinit(allocator);
     let scratch_args = GenericArgsHandle { node: generic_args.add(blank_generic_args(allocator)) };
     var signature_nodes = arena::new<Signature>(allocator);
-    errdefer signature_nodes.deinit();
+    errdefer signature_nodes.deinit(allocator);
     let scratch_signature = SignatureHandle {
         node: signature_nodes.add(Signature {
             params: array::new<Param>(allocator),
@@ -379,7 +379,7 @@ pub fn new_lowerer(
         })
     };
     var storage_self_params = array::new<Param>(allocator);
-    errdefer storage_self_params.deinit();
+    errdefer storage_self_params.deinit(allocator);
     try storage_self_params.append(Param {
         name: empty_name(), type_name: empty_name(), passing: Passing::CallerStorage
     });
@@ -430,7 +430,7 @@ pub fn new_lowerer(
         deinit_owners: move deinit_owners,
         retired: array::new<RetiredReceiver>(allocator)
     };
-    errdefer lowerer.deinit();
+    errdefer lowerer.deinit(allocator);
     try lowerer.collect_facts(tree, program);
     try lowerer.copy_retired(checker);
     return move lowerer;
@@ -499,7 +499,7 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
 /// Copies one function declaration's facts.
 fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::FunctionDecl) -> !FactsHandle {
     var static_params = array::new<StaticParamFacts>(self.allocator);
-    errdefer static_params.deinit();
+    errdefer static_params.deinit(self.allocator);
     var index = 0;
     while function.signature.static_params.at(index) |param| {
         index = index + 1;
@@ -514,7 +514,7 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
         });
     }
     var params = array::new<ParamFacts>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     index = 0;
     while function.signature.params.at(index) |param| {
         index = index + 1;
@@ -676,7 +676,7 @@ fn (self: &var Lowerer) collect_decls(
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
     var combined = array::new<ast::Declaration>(self.allocator);
-    errdefer combined.deinit();
+    errdefer combined.deinit(self.allocator);
     while program.declarations.get(index) |declaration| {
         index = index + 1;
         match tree.declarations.at(declaration.node) {
@@ -718,7 +718,7 @@ fn (self: &var Lowerer) collect_decls(
 /// per call site.
 fn (self: &var Lowerer) index_method_signatures() -> !void {
     var method = string::new(self.allocator);
-    defer method.deinit();
+    defer method.deinit(self.allocator);
     let count = self.signatures.len();
     var position = 0;
     while position < count {
@@ -784,7 +784,7 @@ fn (self: &var Lowerer) add_method_signature(method: []u8, signature: SignatureH
         return list.append(signature);
     }
     var list = array::new<SignatureHandle>(self.allocator);
-    errdefer list.deinit();
+    errdefer list.deinit(self.allocator);
     try list.append(signature);
     return self.method_signatures.insert(method, move list);
 }
@@ -848,7 +848,7 @@ fn (self: &Lowerer) qualification_end(name: Name) -> i64 {
 /// Converts an AST union declaration to IR metadata, the Go `lowerUnion`.
 fn (self: &var Lowerer) lower_union(tree: &ast::Ast, declared: &ast::UnionDecl) -> !void {
     var variants = map::new<[]u8, UnionVariant>(self.allocator);
-    errdefer variants.deinit();
+    errdefer variants.deinit(self.allocator);
     var index = 0;
     while declared.variants.at(index) |variant| {
         var payload = empty_name();
@@ -872,7 +872,7 @@ fn (self: &var Lowerer) lower_union(tree: &ast::Ast, declared: &ast::UnionDecl) 
 /// Converts an AST enum declaration to IR metadata, the Go `lowerEnum`.
 fn (self: &var Lowerer) lower_enum(tree: &ast::Ast, declared: &ast::EnumDecl) -> !void {
     var tags = map::new<[]u8, i64>(self.allocator);
-    errdefer tags.deinit();
+    errdefer tags.deinit(self.allocator);
     var index = 0;
     while declared.tags.at(index) |tag| {
         let retained = tree.texts.at(tag.node);
@@ -901,7 +901,7 @@ fn (self: &var Lowerer) lower_error_set(
 ) -> !void {
     let name = try self.module.names.intern_text(tree, declared.name);
     var members = map::new<[]u8, i64>(self.allocator);
-    errdefer members.deinit();
+    errdefer members.deinit(self.allocator);
     let retained = name_text(&self.module.names, name);
     let name_bytes = retained.as_bytes();
     if std_errors.sets.at(name_bytes) |codes| {
@@ -946,9 +946,9 @@ fn (self: &var Lowerer) lower_combined_error_sets(
     pending: array::Array<ast::Declaration>
 ) -> !void {
     var work = move pending;
-    defer work.deinit();
+    defer work.deinit(self.allocator);
     var done = array::new<bool>(self.allocator);
-    defer done.deinit();
+    defer done.deinit(self.allocator);
     var index = 0;
     while index < work.len() {
         try done.append(false);
@@ -991,9 +991,9 @@ fn (self: &var Lowerer) lower_combined_error_set(
 ) -> !void {
     resolved.* = false;
     var origins = array::new<Name>(self.allocator);
-    errdefer origins.deinit();
+    errdefer origins.deinit(self.allocator);
     var seen = map::new<[]u8, bool>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     var name = empty_name();
     match tree.declarations.at(declaration.node) {
         ErrorSet(declared) => {
@@ -1004,7 +1004,7 @@ fn (self: &var Lowerer) lower_combined_error_set(
                 let reference_text = tree.texts.at(reference.node);
                 let reference_bytes = reference_text.as_bytes();
                 var contributed = array::new<Name>(self.allocator);
-                defer contributed.deinit();
+                defer contributed.deinit(self.allocator);
                 if self.module.error_sets.at(reference_bytes) |part| {
                     if part.origins.len() == 0 {
                         try contributed.append(try self.module.names.intern(reference_bytes));
@@ -1016,7 +1016,7 @@ fn (self: &var Lowerer) lower_combined_error_set(
                         }
                     }
                 } else {
-                    origins.deinit();
+                    origins.deinit(self.allocator);
                     return;
                 }
                 var position = 0;
@@ -1033,7 +1033,7 @@ fn (self: &var Lowerer) lower_combined_error_set(
             }
         },
         _ => {
-            origins.deinit();
+            origins.deinit(self.allocator);
             return;
         },
     }
@@ -1051,7 +1051,7 @@ fn (self: &var Lowerer) lower_combined_error_set(
 /// Converts an AST struct declaration to IR metadata, the Go `lowerStruct`.
 fn (self: &var Lowerer) lower_struct(tree: &ast::Ast, declared: &ast::StructDecl) -> !void {
     var fields = array::new<Field>(self.allocator);
-    errdefer fields.deinit();
+    errdefer fields.deinit(self.allocator);
     var index = 0;
     while declared.fields.at(index) |field| {
         index = index + 1;
@@ -1077,7 +1077,7 @@ fn (self: &var Lowerer) resolve_element_forms(tree: &ast::Ast, value: typ::Type)
 /// `lowerSignature`, against the type bindings in force.
 fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     var params = array::new<Param>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     let count = self.decl_param_count(decl);
     var index = 0;
     while index < count {
@@ -1186,7 +1186,7 @@ fn (self: &var Lowerer) function_by_value_name(name: Name) -> !?ResolvedFunction
         return ResolvedFunction { name: name, signature: signature };
     }
     var qualified = string::new(self.allocator);
-    defer qualified.deinit();
+    defer qualified.deinit(self.allocator);
     if try self.append_current_module_prefix(&var qualified) {
         let retained = name_text(&self.module.names, name);
         let bytes = retained.as_bytes();
@@ -1229,9 +1229,9 @@ fn last_namespace_end(bytes: []u8) -> i64 {
 /// Spells the function pointer type a signature's name has as a value.
 fn (self: &var Lowerer) function_pointer_type(signature: SignatureHandle) -> !Name {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     var params = array::new<Name>(self.allocator);
-    defer params.deinit();
+    defer params.deinit(self.allocator);
     let node = self.signature_nodes.at(signature.node);
     let unsafe_call = node.requires_unsafe;
     let result = node.return_type;
@@ -1296,7 +1296,7 @@ fn (self: &var Lowerer) lower_function_named(
 ) -> !?diagnostic::Diagnostic {
     let signature = try self.lower_signature(decl);
     var params = array::new<Param>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     let count = self.signature_param_count(signature);
     var index = 0;
     while index < count {
@@ -1321,13 +1321,13 @@ fn (self: &var Lowerer) lower_function_named(
     self.next_value = 0;
     self.next_block = 0;
     while self.loops.pop() |loop| {
-        loop.deinit();
+        loop.deinit(self.allocator);
     }
     while self.defer_frames.pop() |frame| {
-        frame.deinit();
+        frame.deinit(self.allocator);
     }
     var value_slots = array::new<Name>(self.allocator);
-    defer value_slots.deinit();
+    defer value_slots.deinit(self.allocator);
     index = 0;
     while index < count {
         let facts = self.decl_param(decl, index);
@@ -1516,12 +1516,12 @@ fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
 /// own.
 fn (self: &var Lowerer) resolve_type_args(list: Name) -> !Name {
     var args = try self.split_static_args(list);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() == 0 {
         return self.resolve_bound_type(list);
     }
     var out = string::new(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var index = 0;
     while args.get(index) |arg| {
         if index > 0 {

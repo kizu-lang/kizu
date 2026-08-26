@@ -40,7 +40,7 @@ test "json decode undoes string escapes" {
         \\{"name": "a\tbAé", "active": true}
     ;
     var profile = try json::decode<Profile>(allocator, document);
-    defer profile.deinit();
+    defer profile.deinit(allocator);
     testing::expect(profile.active);
     // a, TAB, b, A, and the two bytes é is in UTF-8.
     testing::expect_equal<i64>(6, profile.name.len());
@@ -54,7 +54,7 @@ test "json decode joins a surrogate pair" {
         \\{"name": "😀", "active": false}
     ;
     var profile = try json::decode<Profile>(allocator, document);
-    defer profile.deinit();
+    defer profile.deinit(allocator);
     testing::expect_equal<i64>(4, profile.name.len());
 }
 
@@ -64,7 +64,7 @@ test "json decode reads a nested struct" {
         \\{"count": 7, "head": {"active": true, "name": "abc"}}
     ;
     var wrapper = try json::decode<Wrapper>(allocator, document);
-    defer wrapper.deinit();
+    defer wrapper.deinit(allocator);
     testing::expect_equal<i64>(7, wrapper.count);
     testing::expect_equal<i64>(3, wrapper.head.name.len());
 }
@@ -77,9 +77,9 @@ test "json decode round trips through encode" {
         \\{"name":"alice","active":true}
     ;
     var profile = try json::decode<Profile>(allocator, document);
-    defer profile.deinit();
+    defer profile.deinit(allocator);
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<Profile>(allocator, profile, out);
     let bytes = out.as_bytes();
     testing::expect_equal<[]u8>(document, bytes);
@@ -154,7 +154,7 @@ test "json decode finds a Value object member by key" {
         \\{"user": "alice", "visits": [1, 2]}
     ;
     var value = try json::decode<json::Value>(allocator, document);
-    defer value.deinit();
+    defer value.deinit(allocator);
     testing::expect_equal<[]u8>("str", value_at_key(&value, "user"));
     testing::expect_equal<[]u8>("arr", value_at_key(&value, "visits"));
     testing::expect_equal<[]u8>("missing", value_at_key(&value, "absent"));
@@ -166,7 +166,7 @@ test "json decode reads a document as a Value" {
         \\{"n": 1, "arr": [1, "two"], "z": null}
     ;
     var value = try json::decode<json::Value>(allocator, document);
-    defer value.deinit();
+    defer value.deinit(allocator);
     testing::expect_equal<[]u8>("obj", value_kind(value));
     testing::expect_equal<i64>(3, value_size(value));
 }
@@ -177,7 +177,7 @@ test "json decode reads a scalar as a Value" {
         \\42
     ;
     var value = try json::decode<json::Value>(allocator, document);
-    defer value.deinit();
+    defer value.deinit(allocator);
     testing::expect_equal<[]u8>("i64", value_kind(value));
     testing::expect_equal<i64>(42, value_size(value));
 }
@@ -188,7 +188,7 @@ test "json decode reads an array of scalars" {
         \\[1, 2, 3]
     ;
     var numbers = try json::decode<array::Array<i64>>(allocator, document);
-    defer numbers.deinit();
+    defer numbers.deinit(allocator);
     testing::expect_equal<i64>(3, numbers.len());
     testing::expect_equal<i64>(3, numbers.get_or_panic(2));
 }
@@ -199,7 +199,7 @@ test "json decode reads an array of owners" {
         \\["ab", "cde"]
     ;
     var names = try json::decode<array::Array<string::String>>(allocator, document);
-    defer names.deinit();
+    defer names.deinit(allocator);
     testing::expect_equal<i64>(2, names.len());
 }
 
@@ -217,7 +217,7 @@ test "json decode reads arrays nested in structs" {
         \\{"rows": [{"cells": [1, 2]}, {"cells": [3]}]}
     ;
     var grid = try json::decode<Grid>(allocator, document);
-    defer grid.deinit();
+    defer grid.deinit(allocator);
     testing::expect_equal<i64>(2, grid.rows.len());
 }
 
@@ -232,11 +232,11 @@ pub union Cell {
     Name(string::String),
 }
 
-fn (self: Cell) deinit() -> void {
+fn (self: Cell) deinit(allocator: Allocator) -> void {
     match self {
         Missing => return,
         Number(_) => return,
-        Name(text) => text.deinit(),
+        Name(text) => text.deinit(allocator),
     }
     return;
 }
@@ -265,7 +265,7 @@ test "json decode reads a payload-free union variant from a string" {
         \\"Missing"
     ;
     var cell = try json::decode<Cell>(allocator, document);
-    defer cell.deinit();
+    defer cell.deinit(allocator);
     let read = match &cell {
         Missing => 0,
         Number(_) => 1,
@@ -280,7 +280,7 @@ test "json decode reads a union payload from the object naming it" {
         \\{"Name": "ab"}
     ;
     var cell = try json::decode<Cell>(allocator, document);
-    defer cell.deinit();
+    defer cell.deinit(allocator);
     let read = match &cell {
         Missing => 0,
         Number(_) => 0,
@@ -297,7 +297,7 @@ test "json decode reads sum cells of a struct" {
         \\{"level": "Low", "cell": {"Number": 5}}
     ;
     var record = try json::decode<Record>(allocator, document);
-    defer record.deinit();
+    defer record.deinit(allocator);
     let level = match record.level {
         Low => 0,
         High => 1,
@@ -318,7 +318,7 @@ fn key_order(
     counts: &map::Map<[]u8, i64>,
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while counts.key_at(index) |key| {
         try out.append_bytes(key);
@@ -336,13 +336,13 @@ test "json decode reads an object into a map" {
         \\{"alice": 2, "bob": 1}
     ;
     var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     testing::expect_equal<i64>(2, counts.len());
     testing::expect_equal<i64>(2, counts.get("alice") orelse 0);
     testing::expect_equal<i64>(1, counts.get("bob") orelse 0);
     // The map keeps the document's order, so the keys come back in it.
     var order = try key_order(allocator, &counts);
-    defer order.deinit();
+    defer order.deinit(allocator);
     let joined = order.as_bytes();
     testing::expect_equal<[]u8>("alice,bob,", joined);
 }
@@ -355,9 +355,9 @@ test "json decode undoes escapes in a map key" {
         \\{"c\u0061rol": 4}
     ;
     var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     var order = try key_order(allocator, &counts);
-    defer order.deinit();
+    defer order.deinit(allocator);
     let joined = order.as_bytes();
     testing::expect_equal<[]u8>("carol,", joined);
     testing::expect_equal<i64>(4, counts.get("carol") orelse 0);
@@ -372,7 +372,7 @@ test "json decode reads an object of strings into a map" {
         \\{"first": "alice", "last": "carol"}
     ;
     var names = try json::decode<map::Map<[]u8, string::String>>(allocator, document);
-    defer names.deinit();
+    defer names.deinit(allocator);
     testing::expect_equal<i64>(2, names.len());
     if names.at("first") |name| {
         let bytes = name.as_bytes();
@@ -387,7 +387,7 @@ test "json decode reads an object of strings into a map" {
         \\{"first":"alice","last":"carol"}
     ;
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<map::Map<[]u8, string::String>>(allocator, names, out);
     let text = out.as_bytes();
     testing::expect_equal<[]u8>(expected, text);
@@ -400,7 +400,7 @@ test "json decode reads an object of objects into a map" {
     ;
     var counts =
         try json::decode<map::Map<[]u8, map::Map<[]u8, i64>>>(allocator, document);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     testing::expect_equal<i64>(2, counts.len());
     if counts.at("bob") |held| {
         testing::expect_equal<i64>(2, held.len());
@@ -415,7 +415,7 @@ test "json decode reads an object of objects into a map" {
 test "json decode reads a box as the value it holds" {
     let allocator = mem::page_allocator();
     var total = try json::decode<mem::Box<i64>>(allocator, "7");
-    defer total.deinit();
+    defer total.deinit(allocator);
     let held = total.borrow();
     testing::expect_equal<i64>(7, held.*);
 }
@@ -433,9 +433,9 @@ test "json decode round trips a map and a box through encode" {
         \\{"counts": {"alice": 2, "bob": 1}, "total": 3}
     ;
     var report = try json::decode<Report>(allocator, document);
-    defer report.deinit();
+    defer report.deinit(allocator);
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<Report>(allocator, &report, &var out);
     let written = out.as_bytes();
     testing::expect_equal<[]u8>(
@@ -454,7 +454,7 @@ test "json decode reads an optional field that has a value" {
         \\{"name": "alice", "nick": 7}
     ;
     var visitor = try json::decode<Visitor>(allocator, document);
-    defer visitor.deinit();
+    defer visitor.deinit(allocator);
     testing::expect_equal<i64>(7, visitor.nick orelse 0);
 }
 
@@ -466,7 +466,7 @@ test "json decode reads a null optional field" {
         \\{"name": "alice", "nick": null}
     ;
     var visitor = try json::decode<Visitor>(allocator, document);
-    defer visitor.deinit();
+    defer visitor.deinit(allocator);
     testing::expect_equal<i64>(-1, visitor.nick orelse -1);
 }
 
@@ -476,7 +476,7 @@ test "json decode reads an omitted optional field as null" {
         \\{"name": "alice"}
     ;
     var visitor = try json::decode<Visitor>(allocator, document);
-    defer visitor.deinit();
+    defer visitor.deinit(allocator);
     testing::expect_equal<i64>(-1, visitor.nick orelse -1);
     testing::expect_equal<i64>(5, visitor.name.len());
 }
@@ -493,10 +493,10 @@ pub struct Named {
     pub nick: ?string::String,
 }
 
-fn (self: Named) deinit() -> void {
-    self.name.deinit();
+fn (self: Named) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
     if self.nick |held| {
-        held.deinit();
+        held.deinit(allocator);
     }
     return;
 }
@@ -518,24 +518,24 @@ test "json decode reads an optional string field" {
 
     var given = try json::decode<Named>(allocator, \\{"name": "alice", "nick": "al"}
     );
-    defer given.deinit();
+    defer given.deinit(allocator);
     expect_nick(&given, "al");
 
     var written = try json::decode<Named>(allocator, \\{"name": "alice", "nick": null}
     );
-    defer written.deinit();
+    defer written.deinit(allocator);
     expect_nick(&written, "none");
 
     var omitted = try json::decode<Named>(allocator, \\{"name": "alice"}
     );
-    defer omitted.deinit();
+    defer omitted.deinit(allocator);
     expect_nick(&omitted, "none");
 
     let expected =
         \\{"name":"alice","nick":"al"}
     ;
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<Named>(allocator, given, out);
     let text = out.as_bytes();
     testing::expect_equal<[]u8>(expected, text);
@@ -547,7 +547,7 @@ test "json decode reads an omitted optional field of a nested struct" {
         \\{"count": 2, "head": {"name": "alice"}}
     ;
     var page = try json::decode<Page>(allocator, document);
-    defer page.deinit();
+    defer page.deinit(allocator);
     testing::expect_equal<i64>(2, page.count);
     testing::expect_equal<i64>(-1, page.head.nick orelse -1);
 }

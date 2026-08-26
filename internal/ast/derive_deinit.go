@@ -39,9 +39,9 @@ func AddDerivedDeinits(program *Program) {
 // DeriveDeinit returns the `deinit` a type gets when it declares none: the body
 // that consumes each thing it holds, in declaration order.
 //
-//	fn (self: T) deinit() -> void {
-//	    self.f1.deinit();                          // owner field
-//	    if self.f2 |held| { held.deinit(); }       // ?Owner field
+//	fn (self: T) deinit(allocator: Allocator) -> void {
+//	    self.f1.deinit(allocator);                          // owner field
+//	    if self.f2 |held| { held.deinit(allocator); }       // ?Owner field
 //	    return;
 //	}
 //
@@ -146,8 +146,11 @@ func deriveDecl(owner string, typeParams []string, body []Statement) *FunctionDe
 			Receiver:     true,
 			Name:         owner + "." + typ.CleanupMethod,
 			StaticParams: params,
-			Params:       []Param{{Name: deriveReceiver, TypeName: receiver}},
-			ReturnType:   typeName("void"),
+			Params: []Param{
+				{Name: deriveReceiver, TypeName: receiver},
+				{Name: deriveAllocator, TypeName: typeName("Allocator")},
+			},
+			ReturnType: typeName("void"),
 			// The derived body is the type's own method and reads its own
 			// fields, so it carries the type's module identity: a user module
 			// is read from the method name, and std is read from the path.
@@ -162,10 +165,15 @@ func typeName(name string) *typ.Name {
 	return &typ.Name{Path: strings.Split(name, "::")}
 }
 
-// cleanupCall is `<value>.deinit();`.
+// cleanupCall is `<value>.deinit(allocator);`. The allocator the derived body
+// was handed is the one its fields were built from, so it is what releases
+// them: a value keeps no copy of the allocator that made it (ADR-0132).
 func cleanupCall(value Expression) Statement {
 	return &ExprStmt{
-		Expr:      &CallExpr{Callee: &FieldExpr{Receiver: value, Name: typ.CleanupMethod}},
+		Expr: &CallExpr{
+			Callee: &FieldExpr{Receiver: value, Name: typ.CleanupMethod},
+			Args:   []Expression{&IdentExpr{Name: deriveAllocator}},
+		},
 		Semicolon: true,
 	}
 }
@@ -181,4 +189,8 @@ const (
 	// body is closed, so nothing of the author's can collide with them.
 	deriveReceiver = "self"
 	deriveCapture  = "held"
+	// deriveAllocator names the allocator a release is handed. It is a
+	// parameter of every owner's deinit (ADR-0132), so the derived body has one
+	// to pass on without keeping a copy of it in the value.
+	deriveAllocator = "allocator"
 )

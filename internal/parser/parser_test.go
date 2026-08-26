@@ -212,8 +212,8 @@ fn (self: Parser) advance() -> void {
 
 // TestParseDeferCleanup checks block-exit cleanup statement parsing.
 func TestParseDeferCleanup(t *testing.T) {
-	input := `fn main() {
-    defer values.deinit();
+	input := `fn main(allocator: Allocator) {
+    defer values.deinit(allocator);
     return;
 }`
 	p := New(lexer.New(input))
@@ -221,7 +221,7 @@ func TestParseDeferCleanup(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() { defer values.deinit(); return; }`
+	want := `fn main(allocator: Allocator) { defer values.deinit(allocator); return; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -233,7 +233,7 @@ func TestParseRejectsDeferredStatements(t *testing.T) {
 		`fn main() { defer let value = 1; }`,
 		`fn main() { defer return; }`,
 		`fn main() { defer { print("cleanup"); } }`,
-		`fn main() { defer defer values.deinit(); }`,
+		`fn main(allocator: Allocator) { defer defer values.deinit(allocator); }`,
 	}
 	for _, input := range cases {
 		p := New(lexer.New(input))
@@ -249,8 +249,8 @@ func TestParseRejectsDeferredStatements(t *testing.T) {
 
 // TestParseErrDeferCleanup checks errdefer parses as a distinct statement.
 func TestParseErrDeferCleanup(t *testing.T) {
-	input := `fn main() -> !void {
-    errdefer values.deinit();
+	input := `fn main(allocator: Allocator) -> !void {
+    errdefer values.deinit(allocator);
     return;
 }`
 	p := New(lexer.New(input))
@@ -258,7 +258,7 @@ func TestParseErrDeferCleanup(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() -> !void { errdefer values.deinit(); return; }`
+	want := `fn main(allocator: Allocator) -> !void { errdefer values.deinit(allocator); return; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -270,7 +270,7 @@ func TestParseRejectsErrDeferredStatements(t *testing.T) {
 		`fn main() { errdefer let value = 1; }`,
 		`fn main() { errdefer return; }`,
 		`fn main() { errdefer { print("cleanup"); } }`,
-		`fn main() { errdefer errdefer values.deinit(); }`,
+		`fn main(allocator: Allocator) { errdefer errdefer values.deinit(allocator); }`,
 	}
 	for _, input := range cases {
 		p := New(lexer.New(input))

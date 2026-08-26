@@ -650,14 +650,17 @@ func (c *Checker) validateOwnerUnionCleanup(decl *ast.UnionDecl) error {
 	return c.checkOwnerUnionDeinitBody(decl, method)
 }
 
-// checkOwnerUnionDeinitSignature enforces the consuming `deinit(self: T) -> void`
-// receiver shape required for owner aggregates.
+// checkOwnerUnionDeinitSignature enforces the consuming
+// `deinit(self: T, allocator: Allocator) -> void` shape required for owner
+// aggregates. Every owner's release names the allocator it came from
+// (ADR-0132), so the payload's release has one to hand on.
 func (c *Checker) checkOwnerUnionDeinitSignature(decl *ast.UnionDecl, method *functionType) error {
 	if method.returnType != typeVoid {
 		return errorf("type error: owner-payload union `%s` deinit must return void", decl.Name)
 	}
-	if len(method.params) != 1 {
-		return errorf("type error: owner-payload union `%s` deinit must take only `self: %s`",
+	if len(method.params) != 2 || method.params[1] != Type("Allocator") {
+		return errorf(
+			"type error: owner-payload union `%s` deinit must take `self: %s` and `allocator: Allocator`",
 			decl.Name, decl.Name)
 	}
 	if method.borrowParams[0] || method.mutBorrowParams[0] {
@@ -679,6 +682,12 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 		return errorf("type error: owner-payload union `%s` deinit must take `self`", decl.Name)
 	}
 	selfName := fn.sig.Params[0].Name
+	// The release the arm has to write names the allocator this deinit was
+	// handed (ADR-0132), so the diagnostic spells it the way the author did.
+	allocatorName := "allocator"
+	if len(fn.sig.Params) > 1 {
+		allocatorName = fn.sig.Params[1].Name
+	}
 	match := ownerUnionSelfMatch(fn.body, selfName)
 	if match == nil {
 		return errorf(
@@ -713,8 +722,8 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 		if !matchArmCleansPayload(arm.Body, arm.Binding) {
 			return errorf(
 				"type error: owner-payload union variant `%s::%s` must clean its payload "+
-					"via `%s.deinit()`",
-				decl.Name, variant.Name, arm.Binding)
+					"via `%s.deinit(%s)`",
+				decl.Name, variant.Name, arm.Binding, allocatorName)
 		}
 	}
 	return nil
@@ -4460,6 +4469,28 @@ func (c *Checker) checkBoxConstructor(
 	return Type(fmt.Sprintf("std::mem::Error!std::mem::Box<%s>", elem)), true, nil
 }
 
+// checkReleaseAllocator validates the single Allocator a release names. A value
+// keeps no copy of the allocator that made it (ADR-0132), so the call spells
+// it, the same way the construction did.
+func (c *Checker) checkReleaseAllocator(
+	what string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	if len(args) != 1 {
+		return errorf("type error: `%s` expects 1 args, got %d", what, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != Type("Allocator") {
+		return errorf("type error: `%s` expects Allocator, got %s", what, got)
+	}
+	return nil
+}
+
 // checkBuiltinBoxMethod validates Box primitives that back source wrappers.
 func (c *Checker) checkBuiltinBoxMethod(
 	name string,
@@ -4471,7 +4502,14 @@ func (c *Checker) checkBuiltinBoxMethod(
 ) (Type, bool, error) {
 	receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
 	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (Type, error) {
-		if len(rest) != 0 {
+		// A release names the allocator the cell came from; a read of the
+		// payload needs nothing beyond the receiver.
+		if method == "deinit" || method == "take" {
+			if err := c.checkReleaseAllocator(
+				"Box."+method, rest, env, unsafe); err != nil {
+				return "", err
+			}
+		} else if len(rest) != 0 {
 			return "", errorf("type error: `Box.%s` expects 0 args, got %d",
 				method, len(rest))
 		}
@@ -5955,7 +5993,7 @@ func (c *Checker) checkArenaOrImplMethod(
 	case "at_mut":
 		return c.checkArenaAtMut(field, arg, args, env, unsafe)
 	case "deinit":
-		return c.checkArenaDeinit(field, args, env)
+		return c.checkArenaDeinit(field, args, env, unsafe)
 	default:
 		return "", errorf("type error: unknown arena method `%s`", field.Name)
 	}
@@ -6041,9 +6079,14 @@ func (c *Checker) checkStringMethod(
 	case "as_bytes", "as_mut_bytes":
 		return "", errorf(
 			"type error: `String.%s` must be bound with `let name = string.%s()`", name, name)
-	case "clear", "deinit":
+	case "clear":
 		if len(args) != 0 {
 			return "", errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
+		}
+		return typeVoid, nil
+	case "deinit":
+		if err := c.checkReleaseAllocator("String.deinit", args, env, unsafe); err != nil {
+			return "", err
 		}
 		return typeVoid, nil
 	default:
@@ -6530,8 +6573,8 @@ func (c *Checker) checkMapMethod(
 		}
 		return typeI64, nil
 	case "deinit":
-		if len(args) != 0 {
-			return "", errorf("type error: `Map.deinit` expects 0 args, got %d", len(args))
+		if err := c.checkReleaseAllocator("Map.deinit", args, env, unsafe); err != nil {
+			return "", err
 		}
 		return typeVoid, nil
 	default:
@@ -6892,6 +6935,7 @@ func (c *Checker) checkArenaDeinit(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
+	unsafe unsafeMark,
 ) (Type, error) {
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok && !c.directFieldCleanupReceiver(field.Receiver, env) {
@@ -6900,8 +6944,8 @@ func (c *Checker) checkArenaDeinit(
 	if ok && env.isBorrowed(ident.Name) {
 		return "", errorf("type error: `arena.deinit` requires owned arena receiver")
 	}
-	if len(args) != 0 {
-		return "", errorf("type error: `arena.deinit` expects 0 args, got %d", len(args))
+	if err := c.checkReleaseAllocator("arena.deinit", args, env, unsafe); err != nil {
+		return "", err
 	}
 	return typeVoid, nil
 }

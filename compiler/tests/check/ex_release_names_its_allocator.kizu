@@ -1,0 +1,61 @@
+// 解放は確保と同じ allocator を名指します。値は自分を作った allocator の複製を
+// 持たないので、`deinit` に必要なものは呼び出し側が綴ります(ADR-0132)。
+// おかげで `Box<T>` の cell は payload だけになり、pointer 2 本の節点が
+// malloc の 1 つ上の size class に押し上げられることがなくなります。
+
+import std::array;
+import std::mem;
+import std::string;
+
+struct Note {
+    title: string::String,
+    tags: array::Array<i64>,
+}
+
+// owner field を持つ型の deinit は導出されます。導出された body も allocator を
+// 受け取り、field へそのまま渡します —— 型ごとに引数が違わないので、
+// `defer x.deinit(allocator)` の書き方は型を見ずに決まります。
+fn note(allocator: Allocator, title: []u8) -> !Note {
+    var name = try string::from_bytes(allocator, title);
+    errdefer name.deinit(allocator);
+    let tags = array::new<i64>(allocator);
+    return Note {
+        title: move name,
+        tags: move tags
+    };
+}
+
+fn main() -> !void {
+    let heap = mem::page_allocator();
+    var scratch_bytes = [512]u8{};
+    let view = scratch_bytes.as_mut_bytes();
+    // 同じ frame に 2 つの allocator があります。値ごとに、それを作った方を
+    // 名指して解放します。
+    let scratch = mem::fixed_buffer(view);
+
+    var kept = try note(heap, "kept");
+    defer kept.deinit(heap);
+
+    var temporary = array::new<i64>(scratch);
+    defer temporary.deinit(scratch);
+
+    try temporary.append(7);
+    print(temporary.get(0) orelse -1);
+    print(kept.title.len());
+    return;
+}
+
+// run
+// features: allocator deinit derived-deinit fixed-buffer defer
+// output:
+// 7
+// 4
+
+// check
+// load:
+// struct Note { title: std::string::String, tags: std::array::Array<i64> }
+// fn note(allocator: Allocator, title: []u8) -> !Note { var name = try std::string::from_bytes(allocator, title); errdefer name.deinit(allocator); let tags = std::array::new<i64>(allocator); return Note { title: move name, tags: move tags }; }
+// fn main() -> !void { let heap = std::mem::page_allocator(); var scratch_bytes = [512]u8{}; let view = scratch_bytes.as_mut_bytes(); let scratch = std::mem::fixed_buffer(view); var kept = try note(heap, "kept"); defer kept.deinit(heap); var temporary = std::array::new<i64>(scratch); defer temporary.deinit(scratch); try temporary.append(7); print((temporary.get(0) orelse (-1))); print(kept.title.len()); return; }
+// fn (self: Note) Note.deinit(allocator: Allocator) -> void { self.title.deinit(allocator); self.tags.deinit(allocator); return; }
+// check:
+// ok

@@ -17,7 +17,7 @@ string.capacity() -> i64
 string.as_bytes() -> []u8
 string.as_mut_bytes() -> &var []u8
 string.clear() -> void
-string.deinit() -> void
+string.deinit(allocator: Allocator) -> void
 ```
 
 `string` primitive は追加しません。

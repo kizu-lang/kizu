@@ -28,9 +28,9 @@ fn (self: &var Checker) check_block_statements(
     block: ast::Block
 ) -> !?diagnostic::Diagnostic {
     var last_uses = try block_last_uses(self.allocator, tree, block);
-    defer last_uses.deinit();
+    defer last_uses.deinit(self.allocator);
     var defers = array::new<ast::Expression>(self.allocator);
-    defer defers.deinit();
+    defer defers.deinit(self.allocator);
     // Bindings declared inside this block carry ids above the watermark; the
     // fall-through leak check below is scoped to exactly those.
     let binding_mark = self.store.id_mark();
@@ -169,8 +169,13 @@ fn (self: &var Checker) check_defer_stmt(
             Arg::Str(self.common.deinit_name), Arg::Text(field.name)
         );
     }
-    var ignored = empty_name();
-    if try self.read_expr(tree, env, field.receiver, &var ignored) |failed| {
+    var receiver_type = empty_name();
+    if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
+        return move failed;
+    }
+    if try self.check_deferred_release_args(
+        tree, env, receiver_type, field, call.args
+    ) |failed| {
         return move failed;
     }
     // A registered defer runs on every later exit of this block, so from
@@ -181,6 +186,46 @@ fn (self: &var Checker) check_defer_stmt(
         }
     }
     return null;
+}
+
+/// Reads the arguments a registered cleanup carries, the Go
+/// `checkDeferredReleaseArgs`. They are read where the defer is written, not
+/// where it runs, so what runs at scope exit is settled at the point the
+/// source names (ADR-0132), and the tie between a value and the allocator
+/// that made it is checked here too.
+fn (self: &var Checker) check_deferred_release_args(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    receiver_type: Name,
+    field: &ast::FieldExpr,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while index < arg_count(tree, args) {
+        let argument = args.get_or_panic(tree, index);
+        index = index + 1;
+        var ignored = empty_name();
+        if try self.read_expr(tree, env, argument, &var ignored) |failed| {
+            return move failed;
+        }
+    }
+    if arg_count(tree, args) != 1 {
+        return null;
+    }
+    let receiver = self.lookup_ident(tree, env, field.receiver) orelse return null;
+    let label = try self.release_label(receiver_type);
+    let argument = args.get_or_panic(tree, 0);
+    return self.check_release_tie(tree, env, label, receiver, argument);
+}
+
+/// Names a release the way its diagnostics spell it, the Go `releaseLabel`:
+/// the receiver type's own name, without the module path or static arguments.
+fn (self: &var Checker) release_label(receiver_type: Name) -> !Name {
+    let borrowed = try self.names.trim_prefix(receiver_type, "&var ");
+    let owned = try self.names.trim_prefix(borrowed, "&");
+    let base = try self.names.generic_base_or_self(owned);
+    let tail = try self.names.after_last_path_separator(base);
+    return self.names.format("%s.deinit", tail, empty_name(), empty_name());
 }
 
 /// Validates an error-path cleanup registration, the Go `checkErrDeferStmt`.
@@ -203,8 +248,13 @@ fn (self: &var Checker) check_err_defer_stmt(
             Arg::Str(self.common.deinit_name), Arg::Text(field.name)
         );
     }
-    var ignored = empty_name();
-    if try self.read_expr(tree, env, field.receiver, &var ignored) |failed| {
+    var receiver_type = empty_name();
+    if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
+        return move failed;
+    }
+    if try self.check_deferred_release_args(
+        tree, env, receiver_type, field, call.args
+    ) |failed| {
         return move failed;
     }
     var name = empty_name();
@@ -569,9 +619,9 @@ fn (self: &var Checker) check_return_stmt(
     let error_path = try self.return_takes_error_path(tree, env, returned);
     if error_path {
         var retired = array::new<Name>(self.allocator);
-        errdefer retired.deinit();
+        errdefer retired.deinit(self.allocator);
         if try self.validate_err_defer_receivers(tree, env, &var retired) |failed| {
-            retired.deinit();
+            retired.deinit(self.allocator);
             return move failed;
         }
         try self.result.return_retired_err_defers.append(RetiredErrDefers {
@@ -637,7 +687,7 @@ fn (self: &var Checker) returned_type_name(
     }
     var out = empty_name();
     if try self.read_namespace_expr(tree, field, &var out) |failed| {
-        failed.deinit();
+        failed.deinit(self.allocator);
         return null;
     }
     return out;
@@ -773,7 +823,7 @@ fn (self: &var Checker) check_tied_allocator_return(
         return null;
     }
     var sources = array::new<BorrowSource>(self.allocator);
-    defer sources.deinit();
+    defer sources.deinit(self.allocator);
     handled.* = true;
     if try self.call_borrow_return_sources(
         tree, env, called.name, called.function, call, true, true, false, &var sources

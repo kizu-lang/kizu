@@ -13,7 +13,7 @@ test "box holds one owned value behind an allocator" {
     let boxed = try mem::box<Score>(allocator, Score { value: 41 });
     let seen = boxed.borrow();
     testing::expect_equal<i64>(41, seen.value);
-    boxed.deinit();
+    boxed.deinit(allocator);
 }
 
 // borrow_mut writes land in the cell: a later shared borrow observes them.
@@ -24,12 +24,12 @@ test "box borrow_mut writes through to the payload" {
     cell.value = cell.value + 41;
     let seen = boxed.borrow();
     testing::expect_equal<i64>(42, seen.value);
-    boxed.deinit();
+    boxed.deinit(allocator);
 }
 
 fn make_name(allocator: Allocator, text: []u8) -> !string::String {
     var name = string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_bytes(text);
     return move name;
 }
@@ -42,7 +42,7 @@ test "box deinit consumes an owner payload" {
     let boxed = try mem::box<string::String>(allocator, try make_name(allocator, "alice"));
     let held = boxed.borrow();
     testing::expect_equal<i64>(5, held.len());
-    boxed.deinit();
+    boxed.deinit(allocator);
 }
 
 // A fixed-buffer allocator serves Box like every other container, and the
@@ -52,11 +52,10 @@ test "fixed buffer allocator backs box" {
     let scratch = buf.as_mut_bytes();
     let alloc = mem::fixed_buffer(scratch);
     let boxed = try mem::box<Score>(alloc, Score { value: 7 });
-    defer boxed.deinit();
+    defer boxed.deinit(alloc);
     let seen = boxed.borrow();
     testing::expect_equal<i64>(7, seen.value);
 }
-
 
 // llvm
 // emit:
@@ -92,13 +91,13 @@ test "fixed buffer allocator backs box" {
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
 // declare ptr @kizu_box_new(ptr, i64, ptr)
-// declare void @kizu_box_deinit(ptr)
+// declare void @kizu_box_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.struct.Score @std__mem__Box_borrow_Score(ptr)
 // declare %kizu.struct.std__string__String @std__mem__Box_borrow_std_3a_3astring_3a_3aString(ptr)
 // declare ptr @std__mem__Box_borrow_mut_Score(ptr)
-// declare void @std__mem__Box_deinit_Score(ptr)
-// declare void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr)
+// declare void @std__mem__Box_deinit_Score(ptr, ptr)
+// declare void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr, ptr)
 // declare %kizu.error.std__mem__Error.std__mem__Box_Score_ @std__mem__box_Score(ptr, %kizu.struct.Score)
 // declare %kizu.error.std__mem__Error.std__mem__Box_std__string__String_ @std__mem__box_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
 // declare ptr @std__mem__fixed_buffer(%kizu.slice.u8)
@@ -120,7 +119,7 @@ test "fixed buffer allocator backs box" {
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -155,7 +154,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.8, i64 0, i64 0)
 //   unreachable
 // kizu.9.ok.ok:
-//   call void @std__mem__Box_deinit_Score(ptr %kizu.5)
+//   call void @std__mem__Box_deinit_Score(ptr %kizu.5, ptr %kizu.1)
 //   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.11
 // }
@@ -189,7 +188,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.13, i64 0, i64 0)
 //   unreachable
 // kizu.14.ok.ok:
-//   call void @std__mem__Box_deinit_Score(ptr %kizu.5)
+//   call void @std__mem__Box_deinit_Score(ptr %kizu.5, ptr %kizu.1)
 //   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.16
 // }
@@ -230,7 +229,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 5, i64 %kizu.9, i64 0, i64 0)
 //   unreachable
 // kizu.10.ok.ok:
-//   call void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr %kizu.6)
+//   call void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr %kizu.6, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -265,7 +264,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.12, i64 0, i64 0)
 //   unreachable
 // kizu.13.ok.ok:
-//   call void @kizu_box_deinit(ptr %kizu.9)
+//   call void @kizu_box_deinit(ptr %kizu.5, ptr %kizu.9, i64 ptrtoint (ptr getelementptr (%kizu.struct.Score, ptr null, i64 1) to i64))
 //   %kizu.15 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.15
 // }
@@ -302,13 +301,13 @@ test "fixed buffer allocator backs box" {
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
 // declare ptr @kizu_box_new(ptr, i64, ptr)
-// declare void @kizu_box_deinit(ptr)
+// declare void @kizu_box_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.struct.Score @std__mem__Box_borrow_Score(ptr)
 // declare %kizu.struct.std__string__String @std__mem__Box_borrow_std_3a_3astring_3a_3aString(ptr)
 // declare ptr @std__mem__Box_borrow_mut_Score(ptr)
-// declare void @std__mem__Box_deinit_Score(ptr)
-// declare void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr)
+// declare void @std__mem__Box_deinit_Score(ptr, ptr)
+// declare void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr, ptr)
 // declare %kizu.error.std__mem__Error.std__mem__Box_Score_ @std__mem__box_Score(ptr, %kizu.struct.Score)
 // declare %kizu.error.std__mem__Error.std__mem__Box_std__string__String_ @std__mem__box_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
 // declare ptr @std__mem__fixed_buffer(%kizu.slice.u8)
@@ -330,7 +329,7 @@ test "fixed buffer allocator backs box" {
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -365,7 +364,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.8, i64 0, i64 0)
 //   unreachable
 // kizu.9.ok.ok:
-//   call void @std__mem__Box_deinit_Score(ptr %kizu.5)
+//   call void @std__mem__Box_deinit_Score(ptr %kizu.5, ptr %kizu.1)
 //   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.11
 // }
@@ -399,7 +398,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.13, i64 0, i64 0)
 //   unreachable
 // kizu.14.ok.ok:
-//   call void @std__mem__Box_deinit_Score(ptr %kizu.5)
+//   call void @std__mem__Box_deinit_Score(ptr %kizu.5, ptr %kizu.1)
 //   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.16
 // }
@@ -440,7 +439,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 5, i64 %kizu.9, i64 0, i64 0)
 //   unreachable
 // kizu.10.ok.ok:
-//   call void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr %kizu.6)
+//   call void @std__mem__Box_deinit_std_3a_3astring_3a_3aString(ptr %kizu.6, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -475,7 +474,7 @@ test "fixed buffer allocator backs box" {
 //   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.12, i64 0, i64 0)
 //   unreachable
 // kizu.13.ok.ok:
-//   call void @kizu_box_deinit(ptr %kizu.9)
+//   call void @kizu_box_deinit(ptr %kizu.5, ptr %kizu.9, i64 ptrtoint (ptr getelementptr (%kizu.struct.Score, ptr null, i64 1) to i64))
 //   %kizu.15 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.15
 // }

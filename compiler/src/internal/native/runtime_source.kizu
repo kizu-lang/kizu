@@ -1387,38 +1387,32 @@ pub fn runtime_source() -> []u8 {
         \\    kizu_rt_free(arena->allocator, arena, (int64_t)sizeof(KizuArena));
         \\}
         \\
-        \\/* A Box cell is one max-aligned header holding the owning allocator, followed
-        \\ * by the payload. The handle Kizu code carries is the payload pointer, so
-        \\ * borrow is pointer identity and only new/deinit reach the runtime. */
-        \\#define KIZU_BOX_HEADER ((int64_t)16)
-        \\
+        \\/* A Box cell is the payload and nothing else. The handle Kizu code carries is
+        \\ * the payload pointer, so borrow is pointer identity and only new/deinit reach
+        \\ * the runtime.
+        \\ *
+        \\ * The cell stores neither its size nor its allocator. Both are known where the
+        \\ * release is written -- sizeof(T) at compile time, the allocator by the source
+        \\ * naming it -- and a cell that kept a copy would spend a word on each. A Box
+        \\ * around two pointers would then ask malloc for more than it holds and land in
+        \\ * the next size class, which is the whole allocation doubling. */
         \\void *kizu_box_new(void *allocator, int64_t size, const void *value) {
-        \\    if (size <= 0 || !value || size > INT64_MAX - KIZU_BOX_HEADER) {
+        \\    if (size <= 0 || !value) {
         \\        return NULL;
         \\    }
-        \\    unsigned char *cell =
-        \\        (unsigned char *)kizu_rt_alloc(allocator, KIZU_BOX_HEADER + size);
-        \\    if (!cell) {
+        \\    unsigned char *payload = (unsigned char *)kizu_rt_alloc(allocator, size);
+        \\    if (!payload) {
         \\        return NULL;
         \\    }
-        \\    memcpy(cell, &allocator, sizeof(allocator));
-        \\    int64_t cell_size = KIZU_BOX_HEADER + size;
-        \\    memcpy(cell + sizeof(allocator), &cell_size, sizeof(cell_size));
-        \\    unsigned char *payload = cell + KIZU_BOX_HEADER;
         \\    memcpy(payload, value, (size_t)size);
         \\    return payload;
         \\}
         \\
-        \\void kizu_box_deinit(void *payload) {
-        \\    if (!payload) {
+        \\void kizu_box_deinit(void *allocator, void *payload, int64_t size) {
+        \\    if (!payload || size <= 0) {
         \\        return;
         \\    }
-        \\    unsigned char *cell = (unsigned char *)payload - KIZU_BOX_HEADER;
-        \\    void *allocator;
-        \\    memcpy(&allocator, cell, sizeof(allocator));
-        \\    int64_t cell_size;
-        \\    memcpy(&cell_size, cell + sizeof(allocator), sizeof(cell_size));
-        \\    kizu_rt_free(allocator, cell, cell_size);
+        \\    kizu_rt_free(allocator, payload, size);
         \\}
         \\
         \\/* One cache line's worth of elements, so a small Array does not start with a

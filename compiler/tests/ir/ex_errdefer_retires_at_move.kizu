@@ -9,12 +9,12 @@ import std::string;
 // that owns it, and running both would free the same buffer twice (ADR-0114).
 fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
     var parent = array::new<string::String>(allocator);
-    errdefer parent.deinit();     // covers parent until this function returns it
+    errdefer parent.deinit(allocator);     // covers parent until this function returns it
 
     var i = 0;
     while i < count {
         var child = string::new(allocator);
-        errdefer child.deinit();      // covers this iteration's child
+        errdefer child.deinit(allocator);      // covers this iteration's child
         try child.append_byte(cast<u8>(97) + cast<u8>(i));
         try parent.append(move child);     // retires it: parent owns the child now
         i = i + 1;                    // the next iteration's try runs no child cleanup
@@ -25,10 +25,10 @@ fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
 fn main() -> !void {
     let allocator = mem::page_allocator();
     let names = try build(allocator, 3);
-    defer names.deinit();
+    defer names.deinit(allocator);
 
     var text = string::new(allocator);
-    defer text.deinit();
+    defer text.deinit(allocator);
     try fmt::append_i64(text, names.len());
     let bytes = text.as_bytes();
     print(bytes);
@@ -39,7 +39,6 @@ fn main() -> !void {
 // features: errdefer move deinit std-array std-string std-fmt allocator error-union try
 // output:
 // 3
-
 
 // ir
 // lower:
@@ -63,11 +62,11 @@ fn main() -> !void {
 //   %12: std::mem::Error!void = call.std::string::String.append_byte %7: &var std::string::String, %11: u8
 //   %13: std::string::String = ref.load %7: &var std::string::String
 //   %14: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>
+//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String, %allocator: Allocator; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>, %allocator: Allocator
 //   %16: std::string::String = ref.load %7: &var std::string::String
 //   %17: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %16: std::string::String
 //   %18: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>
+//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>, %allocator: Allocator
 //   %20: i64 = const 1
 //   %21: i64 = binary.+ %4: i64, %20: i64
 //   jump while.header.1
@@ -87,13 +86,13 @@ fn main() -> !void {
 //   %7: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
 //   %8: std::mem::Error!void = call.std::fmt::append_i64 %6: &var std::string::String, %7: i64
 //   %9: std::string::String = ref.load %6: &var std::string::String
-//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %1: Allocator; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>, %1: Allocator
 //   %11: std::string::String = ref.load %6: &var std::string::String
 //   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
 //   call.print %12: []u8
 //   %14: std::string::String = ref.load %6: &var std::string::String
-//   call.std::string::String.deinit %14: std::string::String
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   call.std::string::String.deinit %14: std::string::String, %1: Allocator
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>, %1: Allocator
 //   %17: !void = error.ok
 //   return %17: !void
 // }
@@ -118,11 +117,11 @@ fn main() -> !void {
 //   %12: std::mem::Error!void = call.std::string::String.append_byte %7: &var std::string::String, %11: u8
 //   %13: std::string::String = ref.load %7: &var std::string::String
 //   %14: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>
+//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String, %allocator: Allocator; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>, %allocator: Allocator
 //   %16: std::string::String = ref.load %7: &var std::string::String
 //   %17: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %16: std::string::String
 //   %18: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>
+//   error.try %17: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %18: std::array::Array<std::string::String>, %allocator: Allocator
 //   %20: i64 = const 1
 //   %21: i64 = binary.+ %4: i64, %20: i64
 //   jump while.header.1
@@ -142,13 +141,13 @@ fn main() -> !void {
 //   %7: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
 //   %8: std::mem::Error!void = call.std::fmt::append_i64 %6: &var std::string::String, %7: i64
 //   %9: std::string::String = ref.load %6: &var std::string::String
-//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %1: Allocator; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>, %1: Allocator
 //   %11: std::string::String = ref.load %6: &var std::string::String
 //   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
 //   call.print %12: []u8
 //   %14: std::string::String = ref.load %6: &var std::string::String
-//   call.std::string::String.deinit %14: std::string::String
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   call.std::string::String.deinit %14: std::string::String, %1: Allocator
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>, %1: Allocator
 //   %17: !void = error.ok
 //   return %17: !void
 // }

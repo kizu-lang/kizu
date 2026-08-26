@@ -11,7 +11,7 @@ import std::testing;
 /// hands back the module with the entry block left for the case to end.
 fn caller_module(allocator: Allocator, return_type: []u8) -> !Module {
     var module = new_module(allocator);
-    errdefer module.deinit();
+    errdefer module.deinit(allocator);
     let name = try module.names.intern("caller");
     let returned = try module.names.intern(return_type);
     let function = Function {
@@ -39,7 +39,7 @@ fn entry_block(module: &Module) -> Block {
 /// want.
 fn rejects_with(allocator: Allocator, module: &Module, want: []u8) -> !bool {
     if try verify(allocator, module) |failed| {
-        defer failed.deinit();
+        defer failed.deinit(allocator);
         let message = failed.message.as_bytes();
         return contains_bytes(message, want);
     }
@@ -62,14 +62,14 @@ fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
 test "verify rejects a block without a terminator" {
     let allocator = mem::page_allocator();
     var module = try caller_module(allocator, "void");
-    defer module.deinit();
+    defer module.deinit(allocator);
     testing::expect(try rejects_with(allocator, &module, "caller: block entry has no terminator"));
 }
 
 test "verify rejects a branch to a block that does not exist" {
     let allocator = mem::page_allocator();
     var module = try caller_module(allocator, "void");
-    defer module.deinit();
+    defer module.deinit(allocator);
     let cond = Value { name: try module.names.intern("%c"), type_name: try module.names.intern("bool") };
     let nowhere = try module.names.intern("nowhere");
     let exit = try module.names.intern("exit");
@@ -83,7 +83,7 @@ test "verify rejects a branch to a block that does not exist" {
 test "verify rejects a return of another type" {
     let allocator = mem::page_allocator();
     var module = try caller_module(allocator, "i64");
-    defer module.deinit();
+    defer module.deinit(allocator);
     let value = Value { name: try module.names.intern("%v"), type_name: try module.names.intern("i32") };
     let entry = entry_block(&module);
     module.set_terminator(entry, return_terminator(value));
@@ -95,7 +95,7 @@ test "verify rejects a return of another type" {
 test "verify rejects a read above its definition" {
     let allocator = mem::page_allocator();
     var module = try caller_module(allocator, "void");
-    defer module.deinit();
+    defer module.deinit(allocator);
     let i64_type = try module.names.intern("i64");
     let x = Value { name: try module.names.intern("%x"), type_name: i64_type };
     let y = Value { name: try module.names.intern("%y"), type_name: i64_type };
@@ -104,7 +104,7 @@ test "verify rejects a read above its definition" {
     // %y reads %x, which is only defined afterwards.
     let minus = try module.names.intern("-");
     var read = module.blank_instr(y, Op::Unary, minus, empty_name());
-    errdefer read.deinit();
+    errdefer read.deinit(allocator);
     try read.args.append(x);
     let _ = try module.add_instr(entry, move read);
     let define = module.blank_instr(x, Op::Const, empty_name(), one);

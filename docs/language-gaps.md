@@ -26,7 +26,7 @@ Kizu compiler を Kizu で書いたときに見つかった language / std の�
 | Array.at の結果は capture 限定で `orelse` も不可 | checker body port | `if arr.at(i) \|v\| {} else {}` |
 | `typ::map_names` の rename callback は error set しか返せず diagnostic を運べない | loader の resolve_type_node | mapper struct に失敗を記録して呼び出し後に読む |
 | view field を持つ struct(`ast::ConstructField { []u8, []u8 }`)を view binding から作れない | checker body の construct_expansion 呼び出し | builder(`begin_construct` / `add_field` / `finish_construct`)に変えた |
-| `while` 本体で作った view が同 block の `defer owner.deinit()` と衝突する | checker body | view を iteration ごとに bind し直す |
+| `while` 本体で作った view が同 block の `defer owner.deinit(allocator)` と衝突する | checker body | view を iteration ごとに bind し直す |
 | `mem::slice` を view に使えない / `?[]u8` を返す helper に view binding を渡せない | checker body | `x[a..b]` で切る / index を返す helper にする |
 | union payload に `?T` を置けない | loader の qualify(optional child を持つ結果) | optional 子は inline で分岐 |
 | `?Owner` を値で渡せず `&?T` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
@@ -48,11 +48,11 @@ Kizu compiler を Kizu で書いたときに見つかった language / std の�
 | `&var ?T` の parameter を書けず、後の file で宣言される型の `?T` field も置けない(struct の field 検査が file 順) | ir の control.kizu(`lower_loop_header` の index phi) | union `LoopTest { Plain(Value), Indexed(cond, phi) }` で header の結果を運ぶ |
 | `if`/`match` は statement と expression で別 node なので、値位置の `if`/`match` を statement として歩けない | ir の `statementValue` / `collectAssigned` / slot walk | `TrailingValue` union と、値位置専用の walk(`collect_assigned_if` / `collect_mut_borrows_value_stmt`) |
 | `Map` を空にできず(`clear` が無い)、owner field の差し替えもできないので、Go が関数ごとに作り直す `map[string]T` を写せない | llvm の `values` / `blockExitLabel`(`writeFunction` が `= map{}` で作り直す) | entry に関数の generation 番号を持たせ、違う generation の entry を無いものとして読む |
-| `Array.clear` / `truncate` は std 専用 method で user code から呼べない | llvm verify の `uses = nil`、corpus runner が std 関数を module から落とす処理 | `while values.pop() \|v\| { v.deinit(); }` で空にする。module の `functions` は全部 pop して user 関数だけ append し直す |
+| `Array.clear` / `truncate` は std 専用 method で user code から呼べない | llvm verify の `uses = nil`、corpus runner が std 関数を module から落とす処理 | `while values.pop() \|v\| { v.deinit(allocator); }` で空にする。module の `functions` は全部 pop して user 関数だけ append し直す |
 | 同じ式の中で `&var self.out` と `&self.names` を同時に渡せない(`self` 全体が借用済みになる)。逐次の文なら disjoint field の借用は通る | llvm の `line*`(`format_args(&var self.out, &self.names, ...)`) | `let names = &self.names;` に束縛してから `format_args(&var self.out, names, ...)` |
 | 引数式の中で `&var self` method を入れ子に呼べない(`self.line2(fmt, Arg::Str(try self.own(...)))` は receiver の借用と衝突) | llvm の全 writer | 引数を先に `let` に束縛する |
 | 関数が返した view(`deref_llvm_type(bytes)` の結果)をそのまま別の呼び出しの引数に置けない(escape 扱い)。`let x = f(view)` に束縛すれば通る。`let x = f(view) orelse ...` も escape 扱い | llvm の `takes_address_of` / `write_optional_types` | 束縛してから渡す。`orelse` の代わりに `if f(view) \|x\| {}` |
-| union は copy payload だけでも move-only で、`!` を返す関数に渡した union 引数は `errdefer arg.deinit()` を要求する | llvm の `Arg` union(`fmt.Fprintf` の引数) | formatter は引数を 1 つずつ `place_arg(... move arg)` に渡し、各 helper は `errdefer a.deinit();` を並べる |
+| union は copy payload だけでも move-only で、`!` を返す関数に渡した union 引数は `errdefer arg.deinit(allocator)` を要求する | llvm の `Arg` union(`fmt.Fprintf` の引数) | formatter は引数を 1 つずつ `place_arg(... move arg)` に渡し、各 helper は `errdefer a.deinit(allocator);` を並べる |
 | union payload / struct field に local binding 由来の `[]u8` view を置けない(literal と literal 由来の戻り値だけ) | llvm の `Arg::Lit`(Go の string 引数) | 生成 text は `Name` に intern(`Arg::Str`)か owned `String`(`Arg::Owned`)で渡し、`[]u8` を返す helper(`llvm_binary_op` など)は `&NameTable` + `Name` を受けて literal だけ返す |
 | closure / function value が無いので callback を取る Go 関数(`collectModuleTypeNames(collect func)`、`writeContainerNew(isResultType func)`)を写せない | llvm の header / container | 呼び分けを enum(`TypeCollector`、`ContainerKind`)で受け、中で match する |
 | `typ::walk` の visitor は `&Node` しか受けず、部分木を render する `Type` handle を持てない | llvm の `collectErrorUnionName`(`typ.Walk` で ErrorUnion node を `String()` する) | `root_node` / `child_type` で明示的に再帰する |

@@ -67,7 +67,7 @@ fn (self: &var Checker) check_map_constructor_allow_type_params(
 ) -> !?diagnostic::Diagnostic {
     let map_args = try self.names.split_generic_args(args_text) orelse
         return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
-    defer map_args.deinit();
+    defer map_args.deinit(self.allocator);
     if map_args.len() != 2 {
         return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
     }
@@ -94,7 +94,7 @@ fn (self: &var Checker) check_map_constructor_allow_type_params(
 /// `rejectArrayElementType`.
 fn (self: &var Checker) reject_array_element_type(tree: &ast::Ast, elem: Name) -> !?diagnostic::Diagnostic {
     var seen = map::new<[]u8, bool>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     if try self.reject_array_storage_type(tree, elem, &var seen) |failed| {
         return try self.wrap_error(
             tree, "array error: Array element is not safe: ", Arg::Int(0), Arg::Int(0), move failed
@@ -186,7 +186,7 @@ fn (self: &var Checker) type_apply_target(
     let raw = try self.names.intern_text(tree, apply.type_arg);
     if try self.qualified_name(tree, apply.callee) |name| {
         let owned = try self.names.copy(name);
-        defer owned.deinit();
+        defer owned.deinit(self.allocator);
         let bytes = owned.as_bytes();
         if try self.reject_unknown_builtin(tree, bytes) |failed| {
             return move failed;
@@ -288,7 +288,7 @@ fn (self: &var Checker) check_arena_type_apply(
 ) -> !?diagnostic::Diagnostic {
     let parts = try self.names.split_generic_args(type_arg) orelse
         return try self.error0(ast::zero_span(), "arena error: std::arena::new expects 1 type argument");
-    defer parts.deinit();
+    defer parts.deinit(self.allocator);
     if parts.len() != 1 {
         return try self.error0(ast::zero_span(), "arena error: std::arena::new expects 1 type argument");
     }
@@ -565,13 +565,23 @@ fn (self: &var Checker) check_builtin_box_method(
     if try self.check_builtin_receiver_method(tree, env, name, receiver, args) |failed| {
         return move failed;
     }
-    let rest = try self.rest_args(tree, args, 1);
-    let count = arg_count(tree, rest);
-    if count != 0 {
-        return try self.error2(
-            tree, ast::zero_span(), "box error: `Box.%s` expects 0 args, got %d",
-            Arg::Str(method), Arg::Int(count)
-        );
+    // A release names the allocator the cell came from; a read of the
+    // payload needs nothing beyond the receiver (ADR-0132).
+    if self.names.is(method, "deinit") or self.names.is(method, "take") {
+        let release_label = try self.names.format(
+            "Box.%s", method, empty_name(), empty_name());
+        if try self.read_release_allocator(tree, env, release_label, null, args, 1) |failed| {
+            return move failed;
+        }
+    } else {
+        let rest = try self.rest_args(tree, args, 1);
+        let count = arg_count(tree, rest);
+        if count != 0 {
+            return try self.error2(
+                tree, ast::zero_span(), "box error: `Box.%s` expects 0 args, got %d",
+                Arg::Str(method), Arg::Int(count)
+            );
+        }
     }
     if self.names.is(method, "borrow") {
         out.* = try self.names.prefixed("&", type_arg);
@@ -648,7 +658,7 @@ fn (self: &Checker) rest_args(
     from: i64
 ) -> !ast::ExpressionList {
     var values = array::new<ast::Expression>(self.allocator);
-    errdefer values.deinit();
+    errdefer values.deinit(self.allocator);
     var index = from;
     while arg_at(tree, args, index) |arg| {
         try values.append(arg);
@@ -713,6 +723,19 @@ fn (self: &var Checker) check_array_primitive_call(
         out.* = elem;
         return null;
     }
+    if self.names.is(method, "deinit") {
+        // The raw primitive frees only the buffer, whose allocator its header
+        // still holds; the wrapper above it is what names one.
+        let count = arg_count(tree, args);
+        if count != 0 {
+            return try self.error2(
+                tree, ast::zero_span(), "array error: `Array.%s` expects 0 args, got %d",
+                Arg::Str(method), Arg::Int(count)
+            );
+        }
+        out.* = self.common.void_name;
+        return null;
+    }
     let array_type = try self.names.format("std::array::Array<%s>", elem, empty_name(), empty_name());
     let blank = self.store.blank_binding(0, empty_name(), array_type);
     let array = self.store.retain(move blank);
@@ -753,7 +776,7 @@ fn (self: &var Checker) check_builtin_map_method(
 ) -> !?diagnostic::Diagnostic {
     handled.* = true;
     var map_args = array::new<Name>(self.allocator);
-    defer map_args.deinit();
+    defer map_args.deinit(self.allocator);
     if try self.checked_map_args_allow_type_params(tree, type_arg, &var map_args) |failed| {
         return move failed;
     }
@@ -925,7 +948,7 @@ fn (self: &var Checker) checked_map_args_allow_type_params(
 ) -> !?diagnostic::Diagnostic {
     let args = try self.names.split_generic_args(arg) orelse
         return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() != 2 {
         return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
     }
@@ -965,19 +988,19 @@ fn (self: &var Checker) check_generic_user_type_apply(
         );
     }
     var subst = self.empty_subst();
-    errdefer subst.deinit();
+    errdefer subst.deinit(self.allocator);
     if try self.generic_call_subst(tree, name, function, type_arg, &var subst) |failed| {
-        subst.deinit();
+        subst.deinit(self.allocator);
         return move failed;
     }
     if try self.check_call_handle_pairing(tree, env, function, 0, &subst, args) |failed| {
-        subst.deinit();
+        subst.deinit(self.allocator);
         return move failed;
     }
     var index = 0;
     while arg_at(tree, args, index) |arg| {
         if try self.check_generic_user_arg(tree, env, name, function, &subst, index, arg) |failed| {
-            subst.deinit();
+            subst.deinit(self.allocator);
             return move failed;
         }
         index = index + 1;
@@ -1022,14 +1045,14 @@ fn (self: &var Checker) generic_call_subst(
     let static_count = self.static_param_count(function);
     let static_args = try self.names.split_generic_args(type_arg) orelse
         return try self.static_args_count_error(tree, name, static_count);
-    defer static_args.deinit();
+    defer static_args.deinit(self.allocator);
     if static_args.len() != static_count {
         return try self.static_args_count_error(tree, name, static_count);
     }
     // Only the entries that declare types take part in substitution; a
     // compile-time value carries no ownership.
     var type_args = array::new<Name>(self.allocator);
-    defer type_args.deinit();
+    defer type_args.deinit(self.allocator);
     var index = 0;
     while self.static_param_at(function, index) |param| {
         if param.is_type {
@@ -1073,9 +1096,9 @@ fn (self: &Checker) bind_subst_param(out: &var Subst, param: Name, replacement: 
     let bytes = retained.as_bytes();
     try put_name(&var out.by_name, bytes, replacement);
     let key = try self.names.copy(param);
-    errdefer key.deinit();
+    errdefer key.deinit(self.allocator);
     let value = try self.names.copy(replacement);
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     try out.names.append(move key);
     try out.replacements.append(move value);
     return;
@@ -1095,16 +1118,16 @@ fn (self: &var Checker) bind_generic_call_fields(
     let previous = self.meta_fields.current;
     let static_count = self.static_param_count(function);
     let static_args = try self.names.split_generic_args(type_arg) orelse return previous;
-    defer static_args.deinit();
+    defer static_args.deinit(self.allocator);
     if static_args.len() != static_count {
         return previous;
     }
     // The fields are collected first and bound after, as the Go map is, so a
     // later argument's lookup does not see an earlier parameter's binding.
     var names = array::new<Name>(self.allocator);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var fields = array::new<MetaField>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     var owner = empty_name();
     var index = 0;
     while self.static_param_at(function, index) |param| {
@@ -1123,9 +1146,9 @@ fn (self: &var Checker) bind_generic_call_fields(
             continue;
         }
         var owned = array::new<MetaField>(self.allocator);
-        defer owned.deinit();
+        defer owned.deinit(self.allocator);
         if try self.public_fields(tree, owner, &var owned) |failed| {
-            failed.deinit();
+            failed.deinit(self.allocator);
             continue;
         }
         var field_index = 0;
@@ -1169,14 +1192,14 @@ fn (self: &var Checker) check_generic_instantiation(
     function: FunctionHandle,
     subst: Subst
 ) -> !?diagnostic::Diagnostic {
-    errdefer subst.deinit();
+    errdefer subst.deinit(self.allocator);
     var done = false;
     if try self.enter_instantiation(tree, function, &subst, &var done) |failed| {
-        subst.deinit();
+        subst.deinit(self.allocator);
         return move failed;
     }
     if done {
-        subst.deinit();
+        subst.deinit(self.allocator);
         return null;
     }
     let env = self.store.new_scope(null);
@@ -1218,7 +1241,7 @@ fn (self: &var Checker) enter_instantiation(
     done.* = false;
     let name = self.functions.at(function.index).name;
     var key = try self.names.copy(name);
-    defer key.deinit();
+    defer key.deinit(self.allocator);
     try key.append_bytes("<");
     var index = 0;
     var first = true;
@@ -1268,7 +1291,7 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
     if self.names.is(name, "std::map::Map") {
         let joined = try self.join_type_args(type_args);
         var ignored = array::new<Name>(self.allocator);
-        defer ignored.deinit();
+        defer ignored.deinit(self.allocator);
         if try self.checked_map_args(tree, joined, &var ignored) |failed| {
             return move failed;
         }
@@ -1280,7 +1303,7 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
 /// `strings.Join(typeArgs, ", ")`.
 fn (self: &var Checker) join_type_args(type_args: &array::Array<Name>) -> !Name {
     var out = string::new(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var index = 0;
     while type_args.get(index) |arg| {
         if index > 0 {

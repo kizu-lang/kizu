@@ -740,7 +740,7 @@ func (e *emitter) instrElementType(instr *ir.Instr) (string, error) {
 			instr.Op, instr.Result.Type)
 	}
 	if len(instr.Args) > 0 {
-		if elem, ok := arrayElementLLVMType(instr.Args[0].Type); ok {
+		if elem, ok := containerElementOf(withoutBorrow(instr.Args[0].Type)); ok {
 			return elem, nil
 		}
 	}
@@ -766,6 +766,18 @@ func (e *emitter) containerElementOfResult(typ string) (string, bool) {
 	if success, ok := e.errorUnionSuccessType(typ); ok {
 		typ = success
 	}
+	return containerElementOf(typ)
+}
+
+// withoutBorrow drops the borrow a spelling was reached through.
+func withoutBorrow(typ string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(typ, "&var "), "&")
+}
+
+// containerElementOf names the static argument a container spelling carries:
+// the element for an Array, Arena or Box, and the value for a Map, which is
+// what its storage is sized by.
+func containerElementOf(typ string) (string, bool) {
 	if elem, ok := arrayElementLLVMType(typ); ok {
 		return elem, true
 	}

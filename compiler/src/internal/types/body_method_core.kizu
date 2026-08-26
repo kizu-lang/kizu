@@ -20,7 +20,7 @@ fn (self: &var Checker) check_method_call_expr(
     let retained_name = tree.texts.at(field.name.node);
     let source_name = retained_name.as_bytes();
     let owned_name = try string::from_bytes(self.allocator, source_name);
-    defer owned_name.deinit();
+    defer owned_name.deinit(self.allocator);
     let name = owned_name.as_bytes();
     if try self.check_method_receiver_path(tree, field, name) |problem| {
         return move problem;
@@ -61,7 +61,7 @@ fn (self: &Checker) check_method_receiver_path(
                 return null;
             }
             if try ast::field_path_root(self.allocator, tree, field.receiver) |path| {
-                path.deinit();
+                path.deinit(self.allocator);
             } else {
                 return try self.checker_error_at(
                     "type error",
@@ -77,9 +77,9 @@ fn (self: &Checker) check_method_receiver_path(
                 _ => {},
             }
             let rendered = try ast::render_expression(self.allocator, tree, field.receiver);
-            defer rendered.deinit();
+            defer rendered.deinit(self.allocator);
             var message = string::new(self.allocator);
-            errdefer message.deinit();
+            errdefer message.deinit(self.allocator);
             try message.append_bytes("field cleanup `");
             let receiver_text = rendered.as_bytes();
             try message.append_bytes(receiver_text);
@@ -103,7 +103,7 @@ fn (self: &var Checker) check_known_receiver_method(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     let retained = try self.types.copy_text(self.allocator, receiver);
-    defer retained.deinit();
+    defer retained.deinit(self.allocator);
     let receiver_text = retained.as_bytes();
     if split_generic_type(receiver_text) |parts| {
         if mem::equal_bytes(parts.base, "std::array::Array") {
@@ -142,7 +142,7 @@ fn (self: &var Checker) check_arena_or_impl_method(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     let retained = try self.types.copy_text(self.allocator, receiver);
-    defer retained.deinit();
+    defer retained.deinit(self.allocator);
     let receiver_text = retained.as_bytes();
     if split_generic_type(receiver_text) |parts| {
         if mem::equal_bytes(parts.base, "std::arena::Arena") {
@@ -178,11 +178,11 @@ fn (self: &var Checker) check_method_args(
     let facts = self.callable_facts(method) orelse
         return try self.checker_error_at("type error", ast::zero_span(), "missing method metadata");
     let name = try self.copy_function_name(method);
-    defer name.deinit();
+    defer name.deinit(self.allocator);
     let name_bytes = name.as_bytes();
     if facts.parameter_count == 0 {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("method `");
         try message.append_bytes(name_bytes);
         try message.append_bytes("` must have self parameter");
@@ -206,7 +206,7 @@ fn (self: &var Checker) check_method_args(
         }
     }
     var substitutions = map::new<[]u8, Type>(self.allocator);
-    defer substitutions.deinit();
+    defer substitutions.deinit(self.allocator);
     return self.check_callable_args(tree, scope, method, 1, span, args, &substitutions, out);
 }
 
@@ -225,7 +225,7 @@ fn (self: &var Checker) check_callable_args(
         "type error", ast::zero_span(), "missing callable metadata"
     );
     let name = try self.copy_function_name(function);
-    defer name.deinit();
+    defer name.deinit(self.allocator);
     let name_bytes = name.as_bytes();
     let expected = facts.parameter_count - offset;
     if args.len(tree) != expected {
@@ -233,7 +233,7 @@ fn (self: &var Checker) check_callable_args(
     }
     if facts.requires_unsafe {
         let operation = try call_operation(self.allocator, name_bytes);
-        defer operation.deinit();
+        defer operation.deinit(self.allocator);
         let operation_bytes = operation.as_bytes();
         if try self.require_unsafe_capability_at(
             UnsafeCapability::UnsafeCall,
@@ -310,7 +310,7 @@ fn (self: &var Checker) check_callable_arg(
     }
     if !same_type(got, want) {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("arg ");
         try fmt::append_i64(&var message, index + 1);
         try message.append_bytes(" of `");
@@ -338,7 +338,7 @@ fn (self: &Checker) require_mutable_self_receiver(
             return null;
         }
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("method `");
         try message.append_bytes(method);
         try message.append_bytes("` takes `&var self`, receiver `");
@@ -347,7 +347,7 @@ fn (self: &Checker) require_mutable_self_receiver(
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("method `");
     try message.append_bytes(method);
     try message.append_bytes("` takes `&var self` and requires a local or direct field receiver");
@@ -378,7 +378,7 @@ fn capture_receiver_shape(
         _ => {},
     }
     if try ast::field_path_root(allocator, tree, receiver) |path| {
-        path.deinit();
+        path.deinit(allocator);
         return true;
     }
     return false;
@@ -419,7 +419,7 @@ fn (self: &Checker) method_self_type_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("method `");
     try message.append_bytes(name);
     try message.append_bytes("` self expects ");
@@ -431,7 +431,7 @@ fn (self: &Checker) method_self_type_error(
 
 fn (self: &Checker) missing_method_error(receiver: Type, name: []u8) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try self.append_checker_type(&var message, receiver);
     try message.append_bytes("` has no method `");
@@ -555,14 +555,16 @@ fn (self: &var Checker) check_map_method(
         return null;
     }
     if mem::equal_bytes(name, "deinit") {
-        if count != 0 {
-            return try self.receiver_arity_error("Map", name, 0, count);
+        if try self.check_release_allocator(
+            tree, scope, "Map", name, args, offset
+        ) |problem| {
+            return move problem;
         }
         out.* = try self.types.void_type();
         return null;
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("Map has no method `");
     try message.append_bytes(name);
     try message.append_byte(cast<u8>(96));
@@ -581,7 +583,7 @@ fn (self: &var Checker) check_map_at_condition(
 ) -> !?diagnostic::Diagnostic {
     if !self.capture_condition {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`Map.");
         try message.append_bytes(name);
         try message.append_bytes("` must be consumed by a capture (`if m.");
@@ -667,7 +669,7 @@ fn (self: &var Checker) check_map_key_arg(
 
 fn (self: &var Checker) is_copy_type(tree: &ast::Ast, value: Type) -> !bool {
     let retained = try self.types.copy_text(self.allocator, value);
-    defer retained.deinit();
+    defer retained.deinit(self.allocator);
     let text = retained.as_bytes();
     if is_builtin_copy_type(text) or
         self.metadata.enums_by_name.contains(text) or
@@ -675,7 +677,7 @@ fn (self: &var Checker) is_copy_type(tree: &ast::Ast, value: Type) -> !bool {
         return true;
     }
     var seen = array::new<Type>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     return self.is_plain_data_type(tree, value, &var seen);
 }
 
@@ -720,7 +722,7 @@ fn (self: &var Checker) check_array_primitive_method(
         if !self.type_is_generic_param(element) and
             !try self.is_copy_type(tree, element) {
             var message = string::new(self.allocator);
-            errdefer message.deinit();
+            errdefer message.deinit(self.allocator);
             try message.append_bytes("`Array.");
             try message.append_bytes(name);
             try message.append_bytes("` requires copy element");
@@ -807,7 +809,7 @@ fn (self: &var Checker) check_array_method(
         mem::equal_bytes(name, "at_mut") {
         if !self.capture_condition {
             var message = string::new(self.allocator);
-            errdefer message.deinit();
+            errdefer message.deinit(self.allocator);
             try message.append_bytes("`Array.");
             try message.append_bytes(name);
             try message.append_bytes("` must be consumed by a capture (`if array.");
@@ -838,7 +840,7 @@ fn (self: &var Checker) check_array_method(
         mem::equal_bytes(name, "get_or_panic") {
         if !try self.is_copy_type(tree, element) {
             var message = string::new(self.allocator);
-            errdefer message.deinit();
+            errdefer message.deinit(self.allocator);
             try message.append_bytes("`Array.");
             try message.append_bytes(name);
             try message.append_bytes("` requires copy element");
@@ -862,7 +864,7 @@ fn (self: &var Checker) check_array_method(
     }
     if mem::equal_bytes(name, "set") and self.owner_type(element) {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`Array.set` would leak the replaced `");
         try self.append_checker_type(&var message, element);
         try message.append_bytes("` element");
@@ -881,7 +883,7 @@ fn (self: &var Checker) check_array_std_method(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     var type_args = array::new<Type>(self.allocator);
-    defer type_args.deinit();
+    defer type_args.deinit(self.allocator);
     try type_args.append(element);
     return self.check_std_method(
         tree,
@@ -914,7 +916,7 @@ fn (self: &var Checker) check_array_index_arg(
     }
     if !self.types.is_text(got, "i64") {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`Array.");
         try message.append_bytes(name);
         try message.append_bytes("` expects i64 index, got ");
@@ -942,7 +944,7 @@ fn (self: &var Checker) check_std_array_storage_method(
 ) -> !?diagnostic::Diagnostic {
     if !self.checking_std_body() {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("Array has no method `");
         try message.append_bytes(name);
         try message.append_byte(cast<u8>(96));
@@ -966,7 +968,7 @@ fn (self: &var Checker) check_std_array_storage_method(
     }
     if !self.types.is_text(element, "u8") {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`Array.");
         try message.append_bytes(name);
         try message.append_bytes("` requires Array<u8>");
@@ -1021,7 +1023,7 @@ fn (self: &var Checker) check_std_method(
         return try self.receiver_arity_error(label, name, expected, count);
     }
     var substitutions = map::new<[]u8, Type>(self.allocator);
-    defer substitutions.deinit();
+    defer substitutions.deinit(self.allocator);
     if self.function_type_param_count(handle) == type_args.len() {
         try self.fill_method_substitutions(handle, type_args, &var substitutions);
     }
@@ -1071,10 +1073,10 @@ fn (self: &var Checker) check_std_method_body(
         return null;
     }
     var substitutions = map::new<[]u8, Type>(self.allocator);
-    defer substitutions.deinit();
+    defer substitutions.deinit(self.allocator);
     try self.fill_method_substitutions(method, type_args, &var substitutions);
     var fields = map::new<[]u8, MetaFieldHandle>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     return self.check_generic_instantiation(tree, method, &substitutions, &fields);
 }
 
@@ -1126,7 +1128,7 @@ fn (self: &Checker) fill_method_substitutions(
 
 fn (self: &Checker) std_missing_method_error(label: []u8, name: []u8) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes(label);
     try message.append_bytes(" has no method `");
     try message.append_bytes(name);
@@ -1142,7 +1144,7 @@ fn (self: &Checker) method_arity_error(
     got: i64
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(name);
     try message.append_bytes("` expects ");
@@ -1159,7 +1161,7 @@ fn (self: &Checker) std_method_arg_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(label);
     try message.append_byte(cast<u8>(46));

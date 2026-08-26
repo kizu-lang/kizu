@@ -81,13 +81,13 @@ union DeclaredFunctionResult {
 // source-order passes as the shipping Checker's collectTypesAndMethods.
 fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
     let owners = try ast::deinit_owners(self.allocator, tree, program);
-    errdefer owners.deinit();
+    errdefer owners.deinit(self.allocator);
     try self.predeclare_type_names(tree, program);
     var index = 0;
     while program.declarations.get(index) |declaration| {
         if try self.collect_type_decl(tree, declaration, &owners) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
-            owners.deinit();
+            owners.deinit(self.allocator);
             return move value;
         }
         index = index + 1;
@@ -95,14 +95,14 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
     // Combined error sets resolve after every set is collected, so the sets
     // they name may be declared later in the file.
     if try self.resolve_error_set_compositions(tree) |failed| {
-        owners.deinit();
+        owners.deinit(self.allocator);
         return move failed;
     }
     index = 0;
     while program.declarations.get(index) |declaration| {
         if try self.collect_method_decl(tree, declaration) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
-            owners.deinit();
+            owners.deinit(self.allocator);
             return move value;
         }
         index = index + 1;
@@ -113,7 +113,7 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
             Impl(value) => {
                 if try self.collect_impl(tree, value) |issue| {
                     let diagnostic = try self.type_collection_diagnostic(tree, issue);
-                    owners.deinit();
+                    owners.deinit(self.allocator);
                     return move diagnostic;
                 }
             },
@@ -209,12 +209,12 @@ fn (self: &var Checker) collect_struct_fields(
 
 fn (self: &var Checker) optional_field_element_allowed(tree: &ast::Ast, owners: &map::Map<[]u8, bool>, element: Type) -> !bool {
     var seen = array::new<Type>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     if try self.is_plain_data_type(tree, element, &var seen) {
         return true;
     }
     let text = try self.types.copy_text(self.allocator, element);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     let bytes = text.as_bytes();
     return ast::owner_type(owners, bytes);
 }
@@ -224,7 +224,7 @@ fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &
         return self.is_plain_data_type(tree, element, seen);
     }
     let text = try self.types.copy_text(self.allocator, value);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     let name = text.as_bytes();
     if self.types.is_text(value, "bool") or
         self.types.is_text(value, "void") or is_numeric_type(name) {
@@ -275,7 +275,7 @@ fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &
     } else {
         if union_handle |handle| {
             var payloads = array::new<Type>(self.allocator);
-            defer payloads.deinit();
+            defer payloads.deinit(self.allocator);
             if self.metadata.unions.at(handle.index) |union_type| {
                 var index = 0;
                 while union_type.variants.key_at(index) |variant| {
@@ -325,13 +325,13 @@ fn (self: &var Checker) collect_union_in_scope(tree: &ast::Ast, declaration: &as
         order: array::new<string::String>(self.allocator),
         public: declaration.public
     };
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     var index = 0;
     while declaration.type_params.at(index) |parameter| {
         let retained = tree.texts.at(parameter.node);
         let bytes = retained.as_bytes();
         let copied = try string::from_bytes(self.allocator, bytes);
-        errdefer copied.deinit();
+        errdefer copied.deinit(self.allocator);
         try value.type_params.append(move copied);
         index = index + 1;
     }
@@ -344,7 +344,7 @@ fn (self: &var Checker) collect_union_in_scope(tree: &ast::Ast, declaration: &as
         };
         if value.variants.contains(variant_name) {
             let issue = TypeCollectionIssue::DuplicateUnionVariant(member);
-            return discard_union(move value, issue);
+            return discard_union(self.allocator, move value, issue);
         }
         var payload_type = empty_type();
         if variant.payload |payload| {
@@ -352,12 +352,12 @@ fn (self: &var Checker) collect_union_in_scope(tree: &ast::Ast, declaration: &as
                 Value(value) => {
                     payload_type = value;
                 },
-                Issue(issue) => return discard_union(move value, TypeCollectionIssue::Resolution(issue)),
+                Issue(issue) => return discard_union(self.allocator, move value, TypeCollectionIssue::Resolution(issue)),
             }
             let normalized = try stdmeta::resolve_element_type_forms(self.allocator, &tree.types, payload);
-            defer normalized.deinit();
+            defer normalized.deinit(self.allocator);
             let written = try typ::render(self.allocator, &tree.types, payload);
-            defer written.deinit();
+            defer written.deinit(self.allocator);
             let normalized_bytes = normalized.as_bytes();
             let written_bytes = written.as_bytes();
             if !mem::equal_bytes(normalized_bytes, written_bytes) {
@@ -365,22 +365,22 @@ fn (self: &var Checker) collect_union_in_scope(tree: &ast::Ast, declaration: &as
                     Value(value) => {
                         payload_type = value;
                     },
-                    Issue(issue) => return discard_union(move value, TypeCollectionIssue::Resolution(issue)),
+                    Issue(issue) => return discard_union(self.allocator, move value, TypeCollectionIssue::Resolution(issue)),
                 }
             }
             if try self.types.optional_elem(payload_type) |_| {
-                return discard_union(move value, TypeCollectionIssue::UnionOptional(member));
+                return discard_union(self.allocator, move value, TypeCollectionIssue::UnionOptional(member));
             }
             if is_borrow_payload(&tree.types, payload) {
-                return discard_union(move value, TypeCollectionIssue::UnionBorrow(member));
+                return discard_union(self.allocator, move value, TypeCollectionIssue::UnionBorrow(member));
             }
             if self.types.contains_type_value(payload_type) {
-                return discard_union(move value, TypeCollectionIssue::UnionTypeValue(member));
+                return discard_union(self.allocator, move value, TypeCollectionIssue::UnionTypeValue(member));
             }
         }
         try value.variants.insert(variant_name, payload_type);
         let copied = try string::from_bytes(self.allocator, variant_name);
-        errdefer copied.deinit();
+        errdefer copied.deinit(self.allocator);
         try value.order.append(move copied);
         index = index + 1;
     }
@@ -390,13 +390,17 @@ fn (self: &var Checker) collect_union_in_scope(tree: &ast::Ast, declaration: &as
     return null;
 }
 
-fn discard_union(value: UnionType, issue: TypeCollectionIssue) -> ?TypeCollectionIssue {
-    value.deinit();
+fn discard_union(
+    allocator: Allocator,
+    value: UnionType,
+    issue: TypeCollectionIssue
+) -> ?TypeCollectionIssue {
+    value.deinit(allocator);
     return issue;
 }
 
 fn (self: &var Checker) intern_collection_text(text: string::String) -> !Type {
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     let bytes = text.as_bytes();
     return self.types.intern(bytes);
 }
@@ -412,13 +416,13 @@ fn (self: &var Checker) collect_contract(tree: &ast::Ast, declaration: &ast::Con
         methods: map::new<[]u8, FunctionHandle>(self.allocator),
         public: declaration.public
     };
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     var index = 0;
     while declaration.methods.at(index) |method| {
         let retained_method = tree.texts.at(method.signature.name.node);
         let method_name = retained_method.as_bytes();
         if value.methods.contains(method_name) {
-            value.deinit();
+            value.deinit(self.allocator);
             let issue = CollectionMemberIssue {
                 owner: declaration.name, member: method.signature.name
             };
@@ -429,7 +433,7 @@ fn (self: &var Checker) collect_contract(tree: &ast::Ast, declaration: &ast::Con
                 try value.methods.insert(method_name, handle);
             },
             Issue(issue) => {
-                value.deinit();
+                value.deinit(self.allocator);
                 return issue;
             },
         }
@@ -466,7 +470,7 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
         borrow_params: array::new<bool>(self.allocator),
         mut_borrow_params: array::new<bool>(self.allocator)
     };
-    errdefer storage.deinit();
+    errdefer storage.deinit(self.allocator);
     var index = 0;
     while signature.params.at(index) |parameter| {
         match try self.resolve_type_node(tree, parameter.type_name) {
@@ -474,12 +478,12 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
                 if try self.collect_function_parameter(
                     signature.std, parameter, parameter_type, &var storage
                 ) |issue| {
-                    return function_storage_issue(move storage, issue);
+                    return function_storage_issue(self.allocator, move storage, issue);
                 }
             },
             Issue(issue) => {
                 let resolution = TypeCollectionIssue::Resolution(issue);
-                return function_storage_issue(move storage, resolution);
+                return function_storage_issue(self.allocator, move storage, resolution);
             },
         }
         index = index + 1;
@@ -492,7 +496,7 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
             },
             Issue(issue) => {
                 let resolution = TypeCollectionIssue::Resolution(issue);
-                return function_storage_issue(move storage, resolution);
+                return function_storage_issue(self.allocator, move storage, resolution);
             },
         }
     }
@@ -501,15 +505,15 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
             name: signature.name, type_name: return_type
         };
         let issue = TypeCollectionIssue::FunctionReturnCompileTimeOnly(named);
-        return function_storage_issue(move storage, issue);
+        return function_storage_issue(self.allocator, move storage, issue);
     }
     if self.types.contains_buffer_type(return_type) {
         let issue = TypeCollectionIssue::FunctionReturnBuffer(signature.name);
-        return function_storage_issue(move storage, issue);
+        return function_storage_issue(self.allocator, move storage, issue);
     }
     if self.types.contains_type_value(return_type) {
         let issue = TypeCollectionIssue::FunctionReturnTypeValue(signature.name);
-        return function_storage_issue(move storage, issue);
+        return function_storage_issue(self.allocator, move storage, issue);
     }
     if !signature.std and self.types.contains_borrow_optional(return_type) {
         let text = try self.types.copy_text(self.allocator, return_type);
@@ -518,14 +522,14 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
         if typ::borrow_optional_elem(bytes) |_| {
             bare = true;
         }
-        text.deinit();
+        text.deinit(self.allocator);
         if !bare {
             let issue = TypeCollectionIssue::FunctionReturnNestedBorrowOptional(signature.name);
-            return function_storage_issue(move storage, issue);
+            return function_storage_issue(self.allocator, move storage, issue);
         }
     }
     let cached = try self.cache_function_signature(tree, signature);
-    errdefer cached.deinit();
+    errdefer cached.deinit(self.allocator);
     let retained_name = tree.texts.at(signature.name.node);
     let name = retained_name.as_bytes();
     let function_type = FunctionType {
@@ -543,8 +547,12 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
     return DeclaredFunctionResult::Value(handle);
 }
 
-fn function_storage_issue(storage: FunctionParamStorage, issue: TypeCollectionIssue) -> DeclaredFunctionResult {
-    storage.deinit();
+fn function_storage_issue(
+    allocator: Allocator,
+    storage: FunctionParamStorage,
+    issue: TypeCollectionIssue
+) -> DeclaredFunctionResult {
+    storage.deinit(allocator);
     return DeclaredFunctionResult::Issue(issue);
 }
 
@@ -609,7 +617,7 @@ fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::
         requires_unsafe: source.requires_unsafe,
         std: source.std
     };
-    errdefer signature.deinit();
+    errdefer signature.deinit(self.allocator);
     var index = 0;
     while source.static_params.at(index) |parameter| {
         let retained_name = tree.texts.at(parameter.name.node);
@@ -621,7 +629,7 @@ fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::
             is_type = false;
         }
         let copied = try string::from_bytes(self.allocator, name);
-        errdefer copied.deinit();
+        errdefer copied.deinit(self.allocator);
         try signature.static_params.append(StaticParamType {
             name: move copied, type_name: type_name, is_type: is_type
         });
@@ -632,7 +640,7 @@ fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::
         let retained_name = tree.texts.at(parameter.name.node);
         let name = retained_name.as_bytes();
         let copied = try string::from_bytes(self.allocator, name);
-        errdefer copied.deinit();
+        errdefer copied.deinit(self.allocator);
         try signature.params.append(SignatureParamType {
             name: move copied, borrow: parameter.borrow,
             mut_borrow: parameter.mut_borrow
@@ -651,7 +659,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
         _ => {},
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     var category = "type error";
     match issue {
         DuplicateType(name) => {
@@ -848,7 +856,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
         },
     }
     var value = try new_checker_diagnostic(self.allocator, category, move message);
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     match issue {
         StructObligationDoc(_) => try value.with_help(
             "write `/// <the invariant its fields carry>` above the declaration"
@@ -858,7 +866,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
         ),
         StructRawPointer(member) => {
             var help = string::new(self.allocator);
-            defer help.deinit();
+            defer help.deinit(self.allocator);
             try help.append_bytes("write `unsafe struct ");
             try append_collection_text(&var help, tree, member.owner);
             try help.append_bytes("` and document the invariant its fields carry");
@@ -871,7 +879,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
 }
 
 fn new_checker_diagnostic(allocator: Allocator, category: []u8, message: string::String) -> !diagnostic::Diagnostic {
-    defer message.deinit();
+    defer message.deinit(allocator);
     let message_text = message.as_bytes();
     return diagnostic::new(
         allocator, diagnostic::Severity::Error, category,
@@ -883,7 +891,7 @@ fn (self: &Checker) type_resolution_diagnostic(
     issue: TypeResolutionIssue
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     let category = try self.append_type_resolution_diagnostic(&var message, issue);
     return new_checker_diagnostic(self.allocator, category, move message);
 }
@@ -914,7 +922,7 @@ fn append_parameter_name(out: &var string::String, tree: &ast::Ast, name: ast::T
 
 fn (self: &Checker) append_checker_type(out: &var string::String, value: Type) -> !void {
     let text = try self.types.copy_text(self.allocator, value);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     let bytes = text.as_bytes();
     return out.append_bytes(bytes);
 }

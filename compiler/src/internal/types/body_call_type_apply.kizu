@@ -71,13 +71,13 @@ fn (self: &var Checker) check_type_apply_call_expr(
 ) -> !?diagnostic::Diagnostic {
     let name = try qualified_name(self.allocator, tree, expression.callee) orelse
         return try self.unsupported_type_application_error(tree, expression);
-    defer name.deinit();
+    defer name.deinit(self.allocator);
     let name_bytes = name.as_bytes();
     if try self.reject_unknown_builtin(name_bytes) |problem| {
         return move problem;
     }
     let instantiated = try self.instantiate_type_arg_text(tree, expression.type_arg);
-    defer instantiated.deinit();
+    defer instantiated.deinit(self.allocator);
     let type_arg = instantiated.as_bytes();
     if try self.reject_optional_static_args(type_arg) |problem| {
         return move problem;
@@ -148,7 +148,7 @@ fn (self: &var Checker) check_type_apply_call_expr(
         return null;
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(name_bytes);
     try message.append_bytes("` does not take static arguments");
@@ -160,9 +160,9 @@ fn (self: &Checker) unsupported_type_application_error(
     expression: &ast::TypeApplyExpr
 ) -> !diagnostic::Diagnostic {
     let rendered = try ast::render_expression(self.allocator, tree, expression.callee);
-    defer rendered.deinit();
+    defer rendered.deinit(self.allocator);
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("unsupported type application `");
     let callee = rendered.as_bytes();
     try message.append_bytes(callee);
@@ -176,7 +176,7 @@ fn (self: &Checker) unsupported_type_application_error(
 
 fn (self: &var Checker) reject_optional_static_args(text: []u8) -> !?diagnostic::Diagnostic {
     if try typ::split_args_optional(self.allocator, text) |arguments| {
-        defer arguments.deinit();
+        defer arguments.deinit(self.allocator);
         var index = 0;
         while arguments.at(index) |argument| {
             let bytes = argument.as_bytes();
@@ -285,7 +285,7 @@ fn (self: &Checker) pointer_cast_arg_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(name);
     try message.append_bytes("` expects ");
@@ -339,7 +339,7 @@ fn (self: &var Checker) check_generic_user_type_apply_function(
     handled.* = true;
     let static_args = try split_generic_args(self.allocator, type_arg) orelse
         return try self.static_arity_error(name, static_count);
-    defer static_args.deinit();
+    defer static_args.deinit(self.allocator);
     if static_args.len() != static_count {
         return try self.static_arity_error(name, static_count);
     }
@@ -367,7 +367,7 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     checked: CheckedStaticArgs,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    defer checked.deinit();
+    defer checked.deinit(self.allocator);
     if try self.check_generic_wrapper_type_args(tree, name, &checked.type_args) |problem| {
         return move problem;
     }
@@ -440,7 +440,7 @@ fn (self: &var Checker) check_static_args(
         substitutions: map::new<[]u8, Type>(self.allocator),
         field_args: map::new<[]u8, MetaFieldHandle>(self.allocator)
     };
-    errdefer checked.deinit();
+    errdefer checked.deinit(self.allocator);
     var index = 0;
     while index < arguments.len() {
         if try self.check_static_arg(
@@ -451,7 +451,7 @@ fn (self: &var Checker) check_static_args(
             index,
             &var checked
         ) |problem| {
-            checked.deinit();
+            checked.deinit(self.allocator);
             return CheckedStaticArgsResult::Problem(move problem);
         }
         index = index + 1;
@@ -479,7 +479,7 @@ fn (self: &var Checker) check_static_arg(
     let parameter_is_type = parameter.is_type;
     try checked.names.append(move parameter.name);
     var argument = string::new(self.allocator);
-    defer argument.deinit();
+    defer argument.deinit(self.allocator);
     if arguments.at(index) |retained_argument| {
         let source = retained_argument.as_bytes();
         try argument.append_bytes(source);
@@ -636,12 +636,12 @@ fn (self: &var Checker) field_static_arg(
         return CheckedFieldStaticArgResult::Problem(move problem);
     }
     var owner = string::new(self.allocator);
-    defer owner.deinit();
+    defer owner.deinit(self.allocator);
     var owner_present = false;
     try self.preceding_type_arg(function, index, arguments, &var owner, &var owner_present);
     if !owner_present {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_byte(cast<u8>(96));
         try message.append_bytes(function_name);
         try message.append_bytes("` static argument `");
@@ -665,7 +665,7 @@ fn (self: &var Checker) field_static_arg(
         },
     }
     var fields = array::new<MetaFieldHandle>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     if try self.public_meta_fields(tree, owner_type, &var fields) |problem| {
         return CheckedFieldStaticArgResult::Problem(move problem);
     }
@@ -679,7 +679,7 @@ fn (self: &var Checker) field_static_arg(
         field_index = field_index + 1;
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(owner_bytes);
     try message.append_bytes("` has no public field `");
@@ -748,7 +748,7 @@ fn (self: &Checker) check_static_value_arg(
         return null;
     }
     let expected = try self.types.copy_text(self.allocator, parameter_type);
-    defer expected.deinit();
+    defer expected.deinit(self.allocator);
     let expected_bytes = expected.as_bytes();
     return try self.static_value_kind_error(
         function_name, parameter_name, expected_bytes, argument
@@ -777,7 +777,7 @@ fn is_identifier_text(text: []u8) -> bool {
 
 fn (self: &Checker) static_arity_error(name: []u8, expected: i64) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(name);
     try message.append_bytes("` expects ");
@@ -793,7 +793,7 @@ fn (self: &Checker) static_value_kind_error(
     got: []u8
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(function_name);
     try message.append_bytes("` static argument `");
@@ -890,7 +890,7 @@ fn (self: &var Checker) checked_map_args(
         ast::zero_span(),
         "std::map::Map expects 2 static arguments"
     );
-    defer values.deinit();
+    defer values.deinit(self.allocator);
     if values.len() != 2 {
         return try self.checker_error_at(
             "type error",
@@ -928,7 +928,7 @@ fn (self: &var Checker) checked_map_args(
 
 fn (self: &Checker) map_key_type_error() -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("std::map::Map key type must be one of ");
     try message.append_bytes(typ::map_key_type_names());
     return self.checker_message_at("type error", ast::zero_span(), move message);
@@ -980,7 +980,7 @@ fn (self: &Checker) type_is_generic_param(value: Type) -> bool {
 
 fn (self: &var Checker) intern_map_type(key: Type, value: Type) -> !Type {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     try text.append_bytes("std::map::Map<");
     try self.append_checker_type(&var text, key);
     try text.append_bytes(", ");
@@ -1011,7 +1011,7 @@ fn (self: &var Checker) check_map_constructor_for_args(
     }
     if !self.types.is_text(got, "Allocator") {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`std::map::Map` expects Allocator, got ");
         try self.append_checker_type(&var message, got);
         return try self.checker_message_at("type error", ast::zero_span(), move message);
@@ -1179,7 +1179,7 @@ fn (self: &var Checker) check_map_index_arg(
 
 fn (self: &var Checker) intern_optional_type(value: Type) -> !Type {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     try text.append_byte(cast<u8>(63));
     try self.append_checker_type(&var text, value);
     let bytes = text.as_bytes();
@@ -1188,7 +1188,7 @@ fn (self: &var Checker) intern_optional_type(value: Type) -> !Type {
 
 fn (self: &var Checker) intern_optional_borrow_type(value: Type, mutable: bool) -> !Type {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     if mutable {
         try text.append_bytes("?&var ");
     } else {
@@ -1206,7 +1206,7 @@ fn (self: &Checker) map_expected_arg_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("`Map.");
     try message.append_bytes(name);
     try message.append_bytes("` expects ");
@@ -1296,7 +1296,7 @@ fn (self: &var Checker) check_allocator_from(
         return move problem;
     }
     var state_want = string::new(self.allocator);
-    defer state_want.deinit();
+    defer state_want.deinit(self.allocator);
     try state_want.append_bytes(type_arg);
     let state_bytes = state_want.as_bytes();
     let state_type = try self.types.intern(state_bytes);
@@ -1311,7 +1311,7 @@ fn (self: &var Checker) check_allocator_from(
     var index = 1;
     while index < 3 {
         var want_text = string::new(self.allocator);
-        defer want_text.deinit();
+        defer want_text.deinit(self.allocator);
         try want_text.append_bytes("unsafe fn(&var ");
         try want_text.append_bytes(type_arg);
         if index == 1 {
@@ -1350,7 +1350,7 @@ fn (self: &Checker) state_reserves_header(
     let declaration = self.metadata.structs.get(type_arg) orelse return false;
     let declared_type = first_field_type(tree, declaration) orelse return false;
     let rendered = try typ::render(self.allocator, &tree.types, declared_type);
-    defer rendered.deinit();
+    defer rendered.deinit(self.allocator);
     let bytes = rendered.as_bytes();
     return mem::equal_bytes(bytes, "std::mem::AllocatorHeader");
 }
@@ -1378,7 +1378,7 @@ fn (self: &var Checker) require_allocator_header_first(
         return null;
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(type_arg);
     try message.append_bytes(
@@ -1392,7 +1392,7 @@ fn (self: &var Checker) allocator_from_arg_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("`std::mem::allocator_from` ");
     try message.append_bytes(label);
     try message.append_bytes(" expects ");
@@ -1447,7 +1447,7 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
         return null;
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("Arena has no storage primitive `");
     try message.append_bytes(method);
     try message.append_byte(cast<u8>(96));
@@ -1466,7 +1466,7 @@ fn (self: &var Checker) check_arena_type_apply(
         "type error", ast::zero_span(),
         "std::arena::new expects 1 type argument"
     );
-    defer parts.deinit();
+    defer parts.deinit(self.allocator);
     if parts.len() != 1 {
         return try self.checker_error_at(
             "type error", ast::zero_span(),
@@ -1489,7 +1489,7 @@ fn (self: &var Checker) check_arena_type_apply(
     }
     if args.len(tree) != 1 {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`std::arena::new<");
         try self.append_checker_type(&var message, element);
         try message.append_bytes(">` expects exactly one allocator argument");
@@ -1530,7 +1530,7 @@ fn (self: &var Checker) check_builtin_testing_type_apply(
     }
     if args.len(tree) != 2 {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`std::testing::expect_equal<");
         try self.append_checker_type(&var message, expected);
         try message.append_bytes(">` expects 2 args");
@@ -1578,8 +1578,16 @@ fn (self: &var Checker) check_builtin_box_type_apply(
             return move problem;
         }
         let rest = args.len(tree) - 1;
-        if rest != 0 {
-            return try self.receiver_arity_error("Box", selected, 0, rest);
+        if mem::equal_bytes(selected, "deinit") or mem::equal_bytes(selected, "take") {
+            if try self.check_release_allocator(
+                tree, scope, "Box", selected, args, 1
+            ) |problem| {
+                return move problem;
+            }
+        } else {
+            if rest != 0 {
+                return try self.receiver_arity_error("Box", selected, 0, rest);
+            }
         }
         if mem::equal_bytes(selected, "borrow") {
             out.* = try self.types.borrow_wrapped_type(true, false, element);
@@ -1628,7 +1636,7 @@ fn (self: &var Checker) check_box_constructor(
 ) -> !?diagnostic::Diagnostic {
     if args.len(tree) != 2 {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`std::mem::Box<");
         try self.append_checker_type(&var message, element);
         try message.append_bytes(">` expects allocator and value");
@@ -1661,7 +1669,7 @@ fn (self: &var Checker) check_box_constructor(
     }
     if !same_type(coerced, element) {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`std::mem::Box<");
         try self.append_checker_type(&var message, element);
         try message.append_bytes(">` expects ");
@@ -1727,7 +1735,7 @@ fn (self: &var Checker) check_array_constructor(
     }
     if args.len(tree) != 1 {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`std::array::Array<");
         try self.append_checker_type(&var message, element);
         try message.append_bytes(">` expects allocator");
@@ -1754,7 +1762,7 @@ fn (self: &var Checker) check_builtin_receiver(
 ) -> !?diagnostic::Diagnostic {
     if args.len(tree) == 0 {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_byte(cast<u8>(96));
         try message.append_bytes(name);
         try message.append_bytes("` expects receiver");
@@ -1767,7 +1775,7 @@ fn (self: &var Checker) check_builtin_receiver(
     }
     if !same_type(got, receiver) {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_byte(cast<u8>(96));
         try message.append_bytes(name);
         try message.append_bytes("` expects ");
@@ -1793,7 +1801,7 @@ fn (self: &var Checker) intern_box_type(element: Type) -> !Type {
 
 fn (self: &var Checker) intern_single_argument_type(base: []u8, argument: Type) -> !Type {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     try text.append_bytes(base);
     try text.append_byte(cast<u8>(60));
     try self.append_checker_type(&var text, argument);
@@ -1804,7 +1812,7 @@ fn (self: &var Checker) intern_single_argument_type(base: []u8, argument: Type) 
 
 fn (self: &var Checker) intern_error_type(value: Type) -> !Type {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     try text.append_byte(cast<u8>(33));
     try self.append_checker_type(&var text, value);
     let bytes = text.as_bytes();
@@ -1814,12 +1822,46 @@ fn (self: &var Checker) intern_error_type(value: Type) -> !Type {
 // Interns `Set!T` for a declared error set spelled by the caller (ADR-0128).
 fn (self: &var Checker) intern_declared_error_type(set: []u8, value: Type) -> !Type {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     try text.append_bytes(set);
     try text.append_byte(cast<u8>(33));
     try self.append_checker_type(&var text, value);
     let bytes = text.as_bytes();
     return self.types.intern(bytes);
+}
+
+/// Validates the single Allocator a release names. A value keeps no copy of
+/// the allocator that made it (ADR-0132), so the call spells it, the same way
+/// the construction did. `offset` skips the receiver a primitive carries.
+fn (self: &var Checker) check_release_allocator(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    receiver: []u8,
+    method: []u8,
+    args: ast::ExpressionList,
+    offset: i64
+) -> !?diagnostic::Diagnostic {
+    let count = args.len(tree) - offset;
+    if count != 1 {
+        return try self.receiver_arity_error(receiver, method, 1, count);
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, offset);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "Allocator") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(receiver);
+        try message.append_byte(cast<u8>(46));
+        try message.append_bytes(method);
+        try message.append_bytes("` expects Allocator, got ");
+        try self.append_checker_type(&var message, got);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    return null;
 }
 
 fn (self: &Checker) receiver_arity_error(
@@ -1829,7 +1871,7 @@ fn (self: &Checker) receiver_arity_error(
     got: i64
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(receiver);
     try message.append_byte(cast<u8>(46));
@@ -1848,7 +1890,7 @@ fn (self: &Checker) typed_constructor_arg_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(name);
     try message.append_byte(cast<u8>(60));
@@ -1866,7 +1908,7 @@ fn (self: &Checker) testing_equal_arg_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("arg ");
     try fmt::append_i64(&var message, index + 1);
     try message.append_bytes(" of `std::testing::expect_equal<");
@@ -1913,10 +1955,10 @@ fn (self: &var Checker) check_generic_instantiation_bound(
         return try self.checker_error_at(
         "type error", ast::zero_span(), "missing generic function metadata"
     );
-    defer facts.deinit();
+    defer facts.deinit(self.allocator);
     let body = facts.body orelse return null;
     var static_params = array::new<StaticParamCheck>(self.allocator);
-    defer static_params.deinit();
+    defer static_params.deinit(self.allocator);
     let static_count = self.function_static_param_count(function);
     var index = 0;
     while index < static_count {
@@ -1932,7 +1974,7 @@ fn (self: &var Checker) check_generic_instantiation_bound(
         index = index + 1;
     }
     var runtime_params = array::new<InstanceParamCheck>(self.allocator);
-    defer runtime_params.deinit();
+    defer runtime_params.deinit(self.allocator);
     let runtime_count = self.function_runtime_param_count(function);
     index = 0;
     while index < runtime_count {
@@ -1949,9 +1991,9 @@ fn (self: &var Checker) check_generic_instantiation_bound(
     }
     let root = self.scopes.new_scope(null);
     var static_values = map::new<[]u8, Type>(self.allocator);
-    errdefer static_values.deinit();
+    errdefer static_values.deinit(self.allocator);
     var type_params = map::new<[]u8, bool>(self.allocator);
-    errdefer type_params.deinit();
+    errdefer type_params.deinit(self.allocator);
     index = 0;
     while static_params.at(index) |parameter| {
         let parameter_name = parameter.name.as_bytes();
@@ -1967,8 +2009,8 @@ fn (self: &var Checker) check_generic_instantiation_bound(
                 false
             );
             if try self.require_scope_definition(parameter_name, defined) |problem| {
-                type_params.deinit();
-                static_values.deinit();
+                type_params.deinit(self.allocator);
+                static_values.deinit(self.allocator);
                 return move problem;
             }
             try static_values.insert(parameter_name, parameter.type_name);
@@ -1981,8 +2023,8 @@ fn (self: &var Checker) check_generic_instantiation_bound(
             parameter.type_name, substitutions
         );
         if try self.revalidate_substituted(tree, parameter_type) |problem| {
-            type_params.deinit();
-            static_values.deinit();
+            type_params.deinit(self.allocator);
+            static_values.deinit(self.allocator);
             return move problem;
         }
         let parameter_name = parameter.name.as_bytes();
@@ -1995,8 +2037,8 @@ fn (self: &var Checker) check_generic_instantiation_bound(
             true
         );
         if try self.require_scope_definition(parameter_name, defined) |problem| {
-            type_params.deinit();
-            static_values.deinit();
+            type_params.deinit(self.allocator);
+            static_values.deinit(self.allocator);
             return move problem;
         }
         index = index + 1;
@@ -2005,13 +2047,13 @@ fn (self: &var Checker) check_generic_instantiation_bound(
     let substituted_return = try self.types.substitute_type_params(declared_return, substitutions);
     var return_type = empty_type();
     if try self.resolve_instance_type(tree, substituted_return, &var return_type) |problem| {
-        type_params.deinit();
-        static_values.deinit();
+        type_params.deinit(self.allocator);
+        static_values.deinit(self.allocator);
         return move problem;
     }
     if try self.revalidate_substituted(tree, return_type) |problem| {
-        type_params.deinit();
-        static_values.deinit();
+        type_params.deinit(self.allocator);
+        static_values.deinit(self.allocator);
         return move problem;
     }
     let type_args = try copy_type_value_map(self.allocator, substitutions);
@@ -2048,7 +2090,7 @@ fn (self: &var Checker) check_instantiated_body(
     self.mark = saved_mark;
     if !self.types.is_text(return_type, "void") and !returns {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("function `");
         try message.append_string(name);
         try message.append_bytes("` must return ");
@@ -2110,7 +2152,7 @@ fn (self: &var Checker) enter_instantiation(
     let key_bytes = key.as_bytes();
     let already_checked = self.checked_instances.contains(key_bytes);
     if already_checked {
-        key.deinit();
+        key.deinit(self.allocator);
         done.* = true;
         return null;
     }
@@ -2138,7 +2180,7 @@ fn (self: &Checker) instance_key(
     fields: &map::Map<[]u8, MetaFieldHandle>
 ) -> !?string::String {
     var key = string::new(self.allocator);
-    errdefer key.deinit();
+    errdefer key.deinit(self.allocator);
     if self.metadata.functions.at(function.index) |value| {
         try key.append_string(&value.name);
         try key.append_byte(cast<u8>(60));
@@ -2172,7 +2214,7 @@ fn (self: &Checker) instance_key(
         }
         return move key;
     }
-    key.deinit();
+    key.deinit(self.allocator);
     return null;
 }
 
@@ -2195,9 +2237,9 @@ fn depth_bound_text() -> []u8 {
 }
 
 fn (self: &Checker) instantiation_depth_error(key: string::String) -> !diagnostic::Diagnostic {
-    defer key.deinit();
+    defer key.deinit(self.allocator);
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("generic instantiation nested deeper than ");
     try message.append_bytes(depth_bound_text());
     try message.append_bytes(" at `");
@@ -2212,7 +2254,7 @@ fn (self: &Checker) instantiation_depth_error(key: string::String) -> !diagnosti
     }
     try message.append_byte(cast<u8>(96));
     var problem = try self.checker_message_at("type error", ast::zero_span(), move message);
-    errdefer problem.deinit();
+    errdefer problem.deinit(self.allocator);
     try problem.with_help("each call grew its static argument, so no instance repeats");
     return move problem;
 }
@@ -2264,7 +2306,7 @@ fn copy_type_value_map(
     source: &map::Map<[]u8, Type>
 ) -> !map::Map<[]u8, Type> {
     var copied = map::new<[]u8, Type>(allocator);
-    errdefer copied.deinit();
+    errdefer copied.deinit(allocator);
     var index = 0;
     while source.key_at(index) |name| {
         if source.get(name) |value| {
@@ -2281,15 +2323,15 @@ fn (self: &var Checker) reject_array_element_type(
     element: Type
 ) -> !?diagnostic::Diagnostic {
     var seen = array::new<Type>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     let result = try self.check_array_storage_type(tree, element, &var seen);
     match result {
         Safe => return null,
         Problem(problem) => return move problem,
         Unsafe(reason) => {
-            defer reason.deinit();
+            defer reason.deinit(self.allocator);
             var message = string::new(self.allocator);
-            errdefer message.deinit();
+            errdefer message.deinit(self.allocator);
             try message.append_bytes("Array element is not safe: ");
             try message.append_string(&reason);
             return try self.checker_message_at("type error", ast::zero_span(), move message);
@@ -2327,7 +2369,7 @@ fn (self: &var Checker) check_array_storage_type(
         );
     }
     let retained = try self.types.copy_text(self.allocator, value);
-    defer retained.deinit();
+    defer retained.deinit(self.allocator);
     let text = retained.as_bytes();
     if split_generic_type(text) |parts| {
         if mem::equal_bytes(parts.base, "option") {
@@ -2400,7 +2442,7 @@ fn (self: &var Checker) check_array_storage_union(
     seen: &var array::Array<Type>
 ) -> !ArrayStorageCheck {
     var variants = array::new<ArrayUnionStorageItem>(self.allocator);
-    defer variants.deinit();
+    defer variants.deinit(self.allocator);
     if self.metadata.unions.at(handle.index) |union_type| {
         var index = 0;
         while union_type.variants.key_at(index) |name| {
@@ -2439,9 +2481,9 @@ fn (self: &Checker) array_struct_storage_reason(
     field: []u8,
     reason: string::String
 ) -> !string::String {
-    defer reason.deinit();
+    defer reason.deinit(self.allocator);
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("type error: struct `");
     try self.append_checker_type(&var message, owner);
     try message.append_byte(cast<u8>(46));
@@ -2456,9 +2498,9 @@ fn (self: &Checker) array_union_storage_reason(
     variant: &string::String,
     reason: string::String
 ) -> !string::String {
-    defer reason.deinit();
+    defer reason.deinit(self.allocator);
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("type error: union `");
     try self.append_checker_type(&var message, owner);
     try message.append_bytes("::");

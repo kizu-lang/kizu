@@ -52,7 +52,7 @@ pub struct TempDirs {
 pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
     let dir = process::env("TMPDIR") orelse "/tmp";
     var base = try string::from_bytes(allocator, dir);
-    errdefer base.deinit();
+    errdefer base.deinit(allocator);
     if base.len() == 0 {
         try base.append_bytes("/tmp");
     }
@@ -62,7 +62,7 @@ pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
 /// Creates and returns the next temporary build directory.
 pub fn (self: &var TempDirs) claim_dir(io: Io, allocator: Allocator) -> !string::String {
     var dir = string::new(allocator);
-    defer dir.deinit();
+    defer dir.deinit(allocator);
     try dir.append_string(&self.base);
     try dir.append_bytes("/kizu-native-");
     try fmt::append_i64(&var dir, self.stamp);
@@ -72,7 +72,7 @@ pub fn (self: &var TempDirs) claim_dir(io: Io, allocator: Allocator) -> !string:
     let dir_bytes = dir.as_bytes();
     try fs::create_dir(io, dir_bytes);
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_string(&dir);
     return move out;
 }
@@ -96,14 +96,14 @@ pub fn build(
         return move failed;
     }
     var cache = try buildcache::new(io, allocator);
-    defer cache.deinit();
+    defer cache.deinit(allocator);
     var host = string::new(allocator);
-    defer host.deinit();
+    defer host.deinit(allocator);
     if try host_key(io, allocator, temps, &var host) |failed| {
         return move failed;
     }
     var runtime_path = string::new(allocator);
-    defer runtime_path.deinit();
+    defer runtime_path.deinit(allocator);
     if try runtime_object(io, allocator, temps, &var cache, options, &host, sets, &var runtime_path) |failed| {
         return move failed;
     }
@@ -111,13 +111,13 @@ pub fn build(
     let parent = path::dirname(output);
     try fsutil::create_dir_all(io, parent);
     let dir = try temps.claim_dir(io, allocator);
-    defer dir.deinit();
+    defer dir.deinit(allocator);
     let dir_bytes = dir.as_bytes();
     var command = array::new<string::String>(allocator);
-    defer command.deinit();
+    defer command.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
     if try link(io, allocator, dir_bytes, runtime_bytes, output, options, llvm_ir, &var command) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(allocator);
         try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
     }
@@ -143,19 +143,19 @@ pub fn executable(
         return move failed;
     }
     var cache = try buildcache::new(io, allocator);
-    defer cache.deinit();
+    defer cache.deinit(allocator);
     var host = string::new(allocator);
-    defer host.deinit();
+    defer host.deinit(allocator);
     if try host_key(io, allocator, temps, &var host) |failed| {
         return move failed;
     }
     var runtime_path = string::new(allocator);
-    defer runtime_path.deinit();
+    defer runtime_path.deinit(allocator);
     if try runtime_object(io, allocator, temps, &var cache, options, &host, sets, &var runtime_path) |failed| {
         return move failed;
     }
     var target_spelling = string::new(allocator);
-    defer target_spelling.deinit();
+    defer target_spelling.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
     try executable_cache_target(options, &host, runtime_bytes, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
@@ -173,19 +173,19 @@ pub fn executable(
             return null;
         },
         Miss(pending) => {
-            errdefer pending.deinit();
+            errdefer pending.deinit(allocator);
             var scratch_copy = string::new(allocator);
-            defer scratch_copy.deinit();
+            defer scratch_copy.deinit(allocator);
             try scratch_copy.append_string(&pending.scratch);
             let dir = try temps.claim_dir(io, allocator);
-            defer dir.deinit();
+            defer dir.deinit(allocator);
             let dir_bytes = dir.as_bytes();
             let scratch_bytes = scratch_copy.as_bytes();
             var command = array::new<string::String>(allocator);
-            defer command.deinit();
+            defer command.deinit(allocator);
             if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, llvm_ir, &var command) |failed| {
-                errdefer failed.deinit();
-                try cache.discard_artifact(io, move pending);
+                errdefer failed.deinit(allocator);
+                try cache.discard_artifact(io, allocator, move pending);
                 try clean_build_dir(io, allocator, dir_bytes);
                 return move failed;
             }
@@ -208,12 +208,12 @@ fn host_key(
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
     let dir = try temps.claim_dir(io, allocator);
-    defer dir.deinit();
+    defer dir.deinit(allocator);
     let dir_bytes = dir.as_bytes();
     let probe = try path::join(allocator, dir_bytes, "uname.txt");
-    defer probe.deinit();
+    defer probe.deinit(allocator);
     var script = string::new(allocator);
-    defer script.deinit();
+    defer script.deinit(allocator);
     try script.append_bytes("PATH=/usr/bin:/bin uname -sm > '");
     try script.append_string(&probe);
     try script.append_bytes("'");
@@ -225,7 +225,7 @@ fn host_key(
     }
     let probe_bytes = probe.as_bytes();
     let text = try fs::read_file(io, allocator, probe_bytes, mem::Limit::Unlimited);
-    defer text.deinit();
+    defer text.deinit(allocator);
     let answer = text.as_bytes();
     var end = mem::len(answer);
     while end > 0 and (answer[end - 1] == cast<u8>(10) or answer[end - 1] == cast<u8>(13)) {
@@ -327,7 +327,7 @@ pub fn clean_build_dir(io: Io, allocator: Allocator, dir: []u8) -> !void {
 /// Removes one build file when it is there.
 fn remove_temp_file(io: Io, allocator: Allocator, dir: []u8, name: []u8) -> !void {
     let target = try path::join(allocator, dir, name);
-    defer target.deinit();
+    defer target.deinit(allocator);
     let target_bytes = target.as_bytes();
     let found = try fs::exists(io, target_bytes);
     if found {
@@ -350,7 +350,7 @@ fn link(
     command: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
     let ir_path = try path::join(allocator, dir, "main.ll");
-    defer ir_path.deinit();
+    defer ir_path.deinit(allocator);
     let ir_bytes = ir_path.as_bytes();
     let text = llvm_ir.as_bytes();
     try fs::write_file(io, ir_bytes, text);
@@ -404,11 +404,11 @@ fn runtime_object(
         return move failed;
     }
     var source = string::new(allocator);
-    defer source.deinit();
+    defer source.deinit(allocator);
     try error_set_constants(allocator, sets, &var source);
     try source.append_bytes(runtime_source());
     var target_spelling = string::new(allocator);
-    defer target_spelling.deinit();
+    defer target_spelling.deinit(allocator);
     try runtime_cache_target(options, host, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
     let source_bytes = source.as_bytes();
@@ -425,17 +425,17 @@ fn runtime_object(
             return null;
         },
         Miss(pending) => {
-            errdefer pending.deinit();
+            errdefer pending.deinit(allocator);
             var scratch_copy = string::new(allocator);
-            defer scratch_copy.deinit();
+            defer scratch_copy.deinit(allocator);
             try scratch_copy.append_string(&pending.scratch);
             let dir = try temps.claim_dir(io, allocator);
-            defer dir.deinit();
+            defer dir.deinit(allocator);
             let dir_bytes = dir.as_bytes();
             let scratch_bytes = scratch_copy.as_bytes();
             if try compile_runtime(io, allocator, dir_bytes, &source, scratch_bytes, options) |failed| {
-                errdefer failed.deinit();
-                try cache.discard_artifact(io, move pending);
+                errdefer failed.deinit(allocator);
+                try cache.discard_artifact(io, allocator, move pending);
                 try clean_build_dir(io, allocator, dir_bytes);
                 return move failed;
             }
@@ -459,7 +459,7 @@ fn compile_runtime(
     options: &Options
 ) -> !?diagnostic::Diagnostic {
     let source_path = try path::join(allocator, dir, "runtime.c");
-    defer source_path.deinit();
+    defer source_path.deinit(allocator);
     let source_bytes = source_path.as_bytes();
     let text = source.as_bytes();
     try fs::write_file(io, source_bytes, text);
@@ -528,7 +528,7 @@ fn error_set_constants(
         return;
     }
     var names = array::new<string::String>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
     try sorted_keys<map::Map<[]u8, i64>>(allocator, sets, &var names);
     try out.append_bytes("/* Generated from the error set declarations. */");
     try out.append_byte(cast<u8>(10));
@@ -538,7 +538,7 @@ fn error_set_constants(
         let name_bytes = name.as_bytes();
         if sets.at(name_bytes) |members| {
             var spellings = array::new<string::String>(allocator);
-            defer spellings.deinit();
+            defer spellings.deinit(allocator);
             try sorted_keys<i64>(allocator, members, &var spellings);
             var spelling_index = 0;
             while spellings.at(spelling_index) |member| {
@@ -593,7 +593,7 @@ fn append_error_constant(allocator: Allocator, set: []u8, member: []u8, out: &va
     }
     try out.append_byte(cast<u8>(95));
     let snake = try camel_to_snake(allocator, member);
-    defer snake.deinit();
+    defer snake.deinit(allocator);
     let total = snake.len();
     index = 0;
     while index < total {
@@ -617,7 +617,7 @@ fn append_upper_byte(out: &var string::String, byte: u8) -> !void {
 /// `camelToSnake`.
 fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while index < mem::len(name) {
         let byte = name[index];
@@ -697,7 +697,7 @@ fn append_copy(
 /// stderr.
 fn fail_linker(allocator: Allocator, options: &Options, code: i64) -> !diagnostic::Diagnostic {
     var message = try string::from_bytes(allocator, "native error: ");
-    defer message.deinit();
+    defer message.deinit(allocator);
     try message.append_string(&options.linker);
     try message.append_bytes(" failed: exit status ");
     try fmt::append_i64(&var message, code);
@@ -709,7 +709,7 @@ fn fail_linker(allocator: Allocator, options: &Options, code: i64) -> !diagnosti
 /// `fmt.Errorf("native error: ...")`.
 fn fail_parts(allocator: Allocator, before: []u8, value: []u8, after: []u8) -> !diagnostic::Diagnostic {
     var message = try string::from_bytes(allocator, before);
-    defer message.deinit();
+    defer message.deinit(allocator);
     try message.append_bytes(value);
     try message.append_bytes(after);
     let text = message.as_bytes();
@@ -737,7 +737,7 @@ fn write_metadata(
     command: &array::Array<string::String>
 ) -> !void {
     var encoder = json::encoder_with_spaces(allocator, 2);
-    defer encoder.deinit();
+    defer encoder.deinit(allocator);
     try encoder.begin_object();
     try encoder.write_bytes_field("target", "native");
     try write_field(&var encoder, "triple", &options.triple);
@@ -760,11 +760,11 @@ fn write_metadata(
     try encoder.end_array();
     try encoder.end_object();
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try encoder.finish_into(&var out);
     try out.append_byte(cast<u8>(10));
     var target = string::new(allocator);
-    defer target.deinit();
+    defer target.deinit(allocator);
     try target.append_string(&options.output);
     try target.append_bytes(".kizu-build.json");
     let target_bytes = target.as_bytes();

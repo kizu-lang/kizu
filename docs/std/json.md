@@ -24,7 +24,7 @@ encoder.write_bool_field(name: []u8, value: bool) -> std::mem::Error!void
 encoder.write_null_field(name: []u8) -> std::mem::Error!void
 encoder.write_bytes_field(name: []u8, value: []u8) -> std::mem::Error!void
 encoder.finish_into(out: &var std::string::String) -> std::mem::Error!void
-encoder.deinit() -> void
+encoder.deinit(allocator: Allocator) -> void
 ```
 
 `Encoder` は出力 buffer を所有する owner です。`std::json` は error set を
@@ -254,7 +254,7 @@ pub union Value {
 
 ```kizu
 var value = try json::decode<json::Value>(allocator, document);
-defer value.deinit();
+defer value.deinit(allocator);
 ```
 
 `Obj` は key を document の順で保ちます(ADR-0088)。同じ key が 2 回現れたら
@@ -269,7 +269,7 @@ defer value.deinit();
 
 ```kizu
 var numbers = try json::decode<array::Array<i64>>(allocator, "[1, 2, 3]");
-defer numbers.deinit();
+defer numbers.deinit(allocator);
 ```
 
 ### map と box
@@ -293,7 +293,7 @@ let document =
     \\{"alice": 2, "bob": 1}
 ;
 var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
-defer counts.deinit();
+defer counts.deinit(allocator);
 ```
 
 設計の経緯は [ADR-0112](../adr/0112-json-encoder-owns-output-and-traps-misuse.md)

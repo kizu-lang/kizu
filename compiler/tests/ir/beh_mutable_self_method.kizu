@@ -152,7 +152,7 @@ fn (self: &var Recorder) note(value: i64) -> !void {
 test "a mutating method reaches a non-copy field" {
     let allocator = mem::page_allocator();
     var recorder = Recorder { journal: Journal { entries: array::new<i64>(allocator) } };
-    defer recorder.deinit();
+    defer recorder.deinit(allocator);
     try recorder.note(7);
     try recorder.note(9);
     testing::expect_equal<i64>(9, recorder.journal.last());
@@ -181,13 +181,12 @@ test "nested field paths reach methods and borrows" {
     var studio = Studio {
         recorder: Recorder { journal: Journal { entries: array::new<i64>(allocator) } },
     };
-    defer studio.deinit();
+    defer studio.deinit(allocator);
     try studio.recorder.journal.push(4);
     try studio.recorder.journal.entries.append(6);
     testing::expect_equal<i64>(6, studio.recorder.journal.last());
     testing::expect_equal<i64>(10, sum_entries(studio.recorder.journal.entries));
 }
-
 
 // ir
 // lower:
@@ -315,22 +314,22 @@ test "nested field paths reach methods and borrows" {
 // while.end.3:
 //   return %3: i64
 // }
-// fn Journal.deinit(%self: Journal) -> void {
+// fn Journal.deinit(%self: Journal, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.entries %self: Journal
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }
-// fn Recorder.deinit(%self: Recorder) -> void {
+// fn Recorder.deinit(%self: Recorder, %allocator: Allocator) -> void {
 // entry:
 //   %1: Journal = field.journal %self: Recorder
-//   call.Journal.deinit %1: Journal
+//   call.Journal.deinit %1: Journal, %allocator: Allocator
 //   return void: void
 // }
-// fn Studio.deinit(%self: Studio) -> void {
+// fn Studio.deinit(%self: Studio, %allocator: Allocator) -> void {
 // entry:
 //   %1: Recorder = field.recorder %self: Studio
-//   call.Recorder.deinit %1: Recorder
+//   call.Recorder.deinit %1: Recorder, %allocator: Allocator
 //   return void: void
 // }
 // fn test.mutable_self_method_writes_through_the_receiver() -> !void {
@@ -451,17 +450,17 @@ test "nested field paths reach methods and borrows" {
 //   %6: i64 = const 7
 //   %7: !void = call.Recorder.note %5: &var Recorder, %6: i64
 //   %8: Recorder = ref.load %5: &var Recorder
-//   error.try %7: !void, cleanup call.Recorder.deinit %8: Recorder
+//   error.try %7: !void, cleanup call.Recorder.deinit %8: Recorder, %1: Allocator
 //   %10: i64 = const 9
 //   %11: !void = call.Recorder.note %5: &var Recorder, %10: i64
 //   %12: Recorder = ref.load %5: &var Recorder
-//   error.try %11: !void, cleanup call.Recorder.deinit %12: Recorder
+//   error.try %11: !void, cleanup call.Recorder.deinit %12: Recorder, %1: Allocator
 //   %14: i64 = const 9
 //   %15: Journal = field.ref.journal %5: &var Recorder
 //   %16: i64 = call.Journal.last %15: Journal
 //   test.expect_equal %14: i64, %16: i64, i64
 //   %18: Recorder = ref.load %5: &var Recorder
-//   call.Recorder.deinit %18: Recorder
+//   call.Recorder.deinit %18: Recorder, %1: Allocator
 //   %20: !void = error.ok
 //   return %20: !void
 // }
@@ -478,14 +477,14 @@ test "nested field paths reach methods and borrows" {
 //   %9: i64 = const 4
 //   %10: !void = call.Journal.push %8: &var Journal, %9: i64
 //   %11: Studio = ref.load %6: &var Studio
-//   error.try %10: !void, cleanup call.Studio.deinit %11: Studio
+//   error.try %10: !void, cleanup call.Studio.deinit %11: Studio, %1: Allocator
 //   %13: &var Recorder = field.addr.recorder %6: &var Studio
 //   %14: &var Journal = field.addr.journal %13: &var Recorder
 //   %15: &var std::array::Array<i64> = field.addr.entries %14: &var Journal
 //   %16: i64 = const 6
 //   %17: std::mem::Error!void = call.std::array::Array.append.i64 %15: &var std::array::Array<i64>, %16: i64
 //   %18: Studio = ref.load %6: &var Studio
-//   error.try %17: std::mem::Error!void, cleanup call.Studio.deinit %18: Studio
+//   error.try %17: std::mem::Error!void, cleanup call.Studio.deinit %18: Studio, %1: Allocator
 //   %20: i64 = const 6
 //   %21: Recorder = field.ref.recorder %6: &var Studio
 //   %22: Journal = field.journal %21: Recorder
@@ -498,7 +497,7 @@ test "nested field paths reach methods and borrows" {
 //   %29: i64 = call.sum_entries %28: std::array::Array<i64>
 //   test.expect_equal %25: i64, %29: i64, i64
 //   %31: Studio = ref.load %6: &var Studio
-//   call.Studio.deinit %31: Studio
+//   call.Studio.deinit %31: Studio, %1: Allocator
 //   %33: !void = error.ok
 //   return %33: !void
 // }
@@ -627,22 +626,22 @@ test "nested field paths reach methods and borrows" {
 // while.end.3:
 //   return %3: i64
 // }
-// fn Journal.deinit(%self: Journal) -> void {
+// fn Journal.deinit(%self: Journal, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.entries %self: Journal
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }
-// fn Recorder.deinit(%self: Recorder) -> void {
+// fn Recorder.deinit(%self: Recorder, %allocator: Allocator) -> void {
 // entry:
 //   %1: Journal = field.journal %self: Recorder
-//   call.Journal.deinit %1: Journal
+//   call.Journal.deinit %1: Journal, %allocator: Allocator
 //   return void: void
 // }
-// fn Studio.deinit(%self: Studio) -> void {
+// fn Studio.deinit(%self: Studio, %allocator: Allocator) -> void {
 // entry:
 //   %1: Recorder = field.recorder %self: Studio
-//   call.Recorder.deinit %1: Recorder
+//   call.Recorder.deinit %1: Recorder, %allocator: Allocator
 //   return void: void
 // }
 // fn test.mutable_self_method_writes_through_the_receiver() -> !void {
@@ -763,17 +762,17 @@ test "nested field paths reach methods and borrows" {
 //   %6: i64 = const 7
 //   %7: !void = call.Recorder.note %5: &var Recorder, %6: i64
 //   %8: Recorder = ref.load %5: &var Recorder
-//   error.try %7: !void, cleanup call.Recorder.deinit %8: Recorder
+//   error.try %7: !void, cleanup call.Recorder.deinit %8: Recorder, %1: Allocator
 //   %10: i64 = const 9
 //   %11: !void = call.Recorder.note %5: &var Recorder, %10: i64
 //   %12: Recorder = ref.load %5: &var Recorder
-//   error.try %11: !void, cleanup call.Recorder.deinit %12: Recorder
+//   error.try %11: !void, cleanup call.Recorder.deinit %12: Recorder, %1: Allocator
 //   %14: i64 = const 9
 //   %15: Journal = field.ref.journal %5: &var Recorder
 //   %16: i64 = call.Journal.last %15: Journal
 //   test.expect_equal %14: i64, %16: i64, i64
 //   %18: Recorder = ref.load %5: &var Recorder
-//   call.Recorder.deinit %18: Recorder
+//   call.Recorder.deinit %18: Recorder, %1: Allocator
 //   %20: !void = error.ok
 //   return %20: !void
 // }
@@ -790,14 +789,14 @@ test "nested field paths reach methods and borrows" {
 //   %9: i64 = const 4
 //   %10: !void = call.Journal.push %8: &var Journal, %9: i64
 //   %11: Studio = ref.load %6: &var Studio
-//   error.try %10: !void, cleanup call.Studio.deinit %11: Studio
+//   error.try %10: !void, cleanup call.Studio.deinit %11: Studio, %1: Allocator
 //   %13: &var Recorder = field.addr.recorder %6: &var Studio
 //   %14: &var Journal = field.addr.journal %13: &var Recorder
 //   %15: &var std::array::Array<i64> = field.addr.entries %14: &var Journal
 //   %16: i64 = const 6
 //   %17: std::mem::Error!void = call.std::array::Array.append.i64 %15: &var std::array::Array<i64>, %16: i64
 //   %18: Studio = ref.load %6: &var Studio
-//   error.try %17: std::mem::Error!void, cleanup call.Studio.deinit %18: Studio
+//   error.try %17: std::mem::Error!void, cleanup call.Studio.deinit %18: Studio, %1: Allocator
 //   %20: i64 = const 6
 //   %21: Recorder = field.ref.recorder %6: &var Studio
 //   %22: Journal = field.journal %21: Recorder
@@ -810,7 +809,7 @@ test "nested field paths reach methods and borrows" {
 //   %29: i64 = call.sum_entries %28: std::array::Array<i64>
 //   test.expect_equal %25: i64, %29: i64, i64
 //   %31: Studio = ref.load %6: &var Studio
-//   call.Studio.deinit %31: Studio
+//   call.Studio.deinit %31: Studio, %1: Allocator
 //   %33: !void = error.ok
 //   return %33: !void
 // }

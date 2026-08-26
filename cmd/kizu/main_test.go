@@ -83,14 +83,14 @@ import std::string;
 
 fn build(allocator: Allocator) -> !string::String {
     var name = string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_byte(cast<u8>(97));
     return name;
 }
 
 fn keep(allocator: Allocator) -> !void {
     var held = try build(allocator);
-    defer held.deinit();
+    defer held.deinit(allocator);
     print(held.len());
     return;
 }
@@ -1461,13 +1461,13 @@ func TestBuildTargetNativeReturnedArrayFieldCommandSmoke(t *testing.T) {
 	code := []byte(`import std;
 
 struct Bag { values: std::array::Array<i64>, }
-fn (self: Bag) deinit() -> void {
-    self.values.deinit();
+fn (self: Bag) deinit(allocator: Allocator) -> void {
+    self.values.deinit(allocator);
     return;
 }
-fn make_bag() -> !Bag {
-    var values = std::array::new<i64>(std::mem::page_allocator());
-    errdefer values.deinit();
+fn make_bag(allocator: Allocator) -> !Bag {
+    var values = std::array::new<i64>(allocator);
+    errdefer values.deinit(allocator);
     try values.append(10);
     try values.append(20);
     return Bag { values: move values };
@@ -1477,10 +1477,11 @@ fn print_bag_len(bag: &Bag) -> void {
     return;
 }
 fn main() -> !void {
-    let bag = try make_bag();
+    let allocator = std::mem::page_allocator();
+    let bag = try make_bag(allocator);
     print(bag.values.len());
     print_bag_len(&bag);
-    bag.deinit();
+    bag.deinit(allocator);
     return;
 }`)
 	if err := os.WriteFile(source, code, 0o644); err != nil {
@@ -1517,13 +1518,13 @@ func TestBuildTargetNativeReturnedUnionArrayBorrowCommandSmoke(t *testing.T) {
 
 union Stmt { Add(i64), Done(i64), }
 struct Bag { stmts: std::array::Array<Stmt>, }
-fn (self: Bag) deinit() -> void {
-    self.stmts.deinit();
+fn (self: Bag) deinit(allocator: Allocator) -> void {
+    self.stmts.deinit(allocator);
     return;
 }
-fn make_bag() -> !Bag {
-    var stmts = std::array::new<Stmt>(std::mem::page_allocator());
-    errdefer stmts.deinit();
+fn make_bag(allocator: Allocator) -> !Bag {
+    var stmts = std::array::new<Stmt>(allocator);
+    errdefer stmts.deinit(allocator);
     try stmts.append(Stmt::Add(10));
     try stmts.append(Stmt::Done(20));
     return Bag { stmts: move stmts };
@@ -1545,8 +1546,9 @@ fn render_bag(bag: &Bag) -> !void {
     return;
 }
 fn main() -> !void {
-    let bag = try make_bag();
-    defer bag.deinit();
+    let allocator = std::mem::page_allocator();
+    let bag = try make_bag(allocator);
+    defer bag.deinit(allocator);
     try render_bag(&bag);
     return;
 }`)

@@ -8,7 +8,7 @@ import std::testing;
 
 fn build_greeting(allocator: Allocator) -> !string::String {
     var text = string::new(allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(allocator);
     try text.append_bytes("hello");
     return move text;
 }
@@ -16,7 +16,7 @@ fn build_greeting(allocator: Allocator) -> !string::String {
 test "errdefer builder returns the owner" {
     let allocator = mem::page_allocator();
     var text = try build_greeting(allocator);
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     testing::expect_equal<[]u8>("hello", bytes);
 }
@@ -24,7 +24,7 @@ test "errdefer builder returns the owner" {
 test "mem leak consumes an owner explicitly" {
     let allocator = mem::page_allocator();
     var text = string::new(allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(allocator);
     try text.append_bytes("kept alive");
     let bytes = text.as_bytes();
     testing::expect_equal<[]u8>("kept alive", bytes);
@@ -35,12 +35,11 @@ test "each branch consumes the owner its own way" {
     let allocator = mem::page_allocator();
     var text = string::new(allocator);
     if 1 < 2 {
-        text.deinit();
+        text.deinit(allocator);
     } else {
         mem::leak<string::String>(move text);
     }
 }
-
 
 // llvm
 // emit:
@@ -79,7 +78,7 @@ test "each branch consumes the owner its own way" {
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
 // declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
@@ -98,7 +97,7 @@ test "each branch consumes the owner its own way" {
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
 // kizu.6.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -138,7 +137,7 @@ test "each branch consumes the owner its own way" {
 //   call void @kizu_panic_expect_equal_bytes(ptr %kizu.6.left.ptr, i64 %kizu.6.left.len, ptr %kizu.6.right.ptr, i64 %kizu.6.right.len, i64 0, i64 0)
 //   unreachable
 // kizu.6.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.3)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.3, ptr %kizu.1)
 //   %kizu.8 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.8
 // }
@@ -158,7 +157,7 @@ test "each branch consumes the owner its own way" {
 //   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
 //   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
 // kizu.7.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.1)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
@@ -192,7 +191,7 @@ test "each branch consumes the owner its own way" {
 //   %kizu.5 = icmp slt i64 1, 2
 //   br i1 %kizu.5, label %if.then.1, label %if.else.2
 // if.then.1:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.2)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.2, ptr %kizu.1)
 //   br label %if.end.3
 // if.else.2:
 //   call void @std__mem__leak_std_3a_3astring_3a_3aString(%kizu.struct.std__string__String %kizu.2)
@@ -237,7 +236,7 @@ test "each branch consumes the owner its own way" {
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
 // declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
@@ -256,7 +255,7 @@ test "each branch consumes the owner its own way" {
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
 // kizu.6.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -296,7 +295,7 @@ test "each branch consumes the owner its own way" {
 //   call void @kizu_panic_expect_equal_bytes(ptr %kizu.6.left.ptr, i64 %kizu.6.left.len, ptr %kizu.6.right.ptr, i64 %kizu.6.right.len, i64 0, i64 0)
 //   unreachable
 // kizu.6.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.3)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.3, ptr %kizu.1)
 //   %kizu.8 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.8
 // }
@@ -316,7 +315,7 @@ test "each branch consumes the owner its own way" {
 //   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
 //   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
 // kizu.7.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.1)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
@@ -350,7 +349,7 @@ test "each branch consumes the owner its own way" {
 //   %kizu.5 = icmp slt i64 1, 2
 //   br i1 %kizu.5, label %if.then.1, label %if.else.2
 // if.then.1:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.2)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.2, ptr %kizu.1)
 //   br label %if.end.3
 // if.else.2:
 //   call void @std__mem__leak_std_3a_3astring_3a_3aString(%kizu.struct.std__string__String %kizu.2)

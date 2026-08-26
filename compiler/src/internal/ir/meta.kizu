@@ -17,7 +17,7 @@ import std::string;
 /// field order.
 fn (self: &var Lowerer) lower_comptime_for_stmt(tree: &var ast::Ast, statement: ast::ComptimeForStmt) -> !?diagnostic::Diagnostic {
     var fields = array::new<MetaField>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     if try self.comptime_for_fields(tree, statement.list, &var fields) |failed| {
         return move failed;
     }
@@ -178,7 +178,7 @@ fn (self: &Lowerer) meta_form(name: Name) -> ?stdmeta::Form {
 /// `metaCapture`.
 fn (self: &var Lowerer) meta_capture(tree: &var ast::Ast, form: stdmeta::Form, type_arg: Name, out: &var MetaField) -> !?diagnostic::Diagnostic {
     var args = try self.split_static_args(type_arg);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() != 2 {
         let form_name = try self.form_name(form);
         return try self.fail1(tree, "ir error: `%s` expects 2 static arguments", Arg::Str(form_name));
@@ -255,7 +255,7 @@ fn (self: &var Lowerer) lower_comptime_match_stmt(tree: &var ast::Ast, statement
         owner = subject.enum_name;
     }
     var variants = array::new<MetaField>(self.allocator);
-    defer variants.deinit();
+    defer variants.deinit(self.allocator);
     if try self.variants(tree, owner, &var variants) |failed| {
         return move failed;
     }
@@ -272,7 +272,7 @@ fn (self: &Lowerer) expand_comptime_match(
     variants: &array::Array<MetaField>
 ) -> !ast::Statement {
     var list = array::new<ast::MetaVariant>(self.allocator);
-    defer list.deinit();
+    defer list.deinit(self.allocator);
     var index = 0;
     while variants.get(index) |variant| {
         index = index + 1;
@@ -325,7 +325,7 @@ fn (self: &var Lowerer) lower_meta_capture_name(
         return move failed;
     }
     let name_copy = try self.module.names.copy(field.name);
-    defer name_copy.deinit();
+    defer name_copy.deinit(self.allocator);
     let bytes = name_copy.as_bytes();
     let immediate = try self.quoted_bytes(bytes);
     out.* = try self.emit_const(self.common.bytes_type, immediate);
@@ -417,19 +417,19 @@ fn (self: &var Lowerer) lower_meta_construct(
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
     var static_args = try self.split_static_args(type_arg);
-    defer static_args.deinit();
+    defer static_args.deinit(self.allocator);
     if static_args.len() != 2 {
         let form_name = try self.form_name(stdmeta::Form::Construct);
         return try self.fail1(tree, "ir error: `%s` expects 2 static arguments", Arg::Str(form_name));
     }
     let owner = try self.resolve_bound_type(static_args.get_or_panic(0));
     var fields = array::new<MetaField>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     if try self.public_fields(tree, owner, &var fields) |failed| {
         return move failed;
     }
     let expanded = try self.expand_meta_construct(tree, owner, static_args.get_or_panic(1), &fields, args);
-    defer expanded.deinit();
+    defer expanded.deinit(self.allocator);
     let _ = try self.push_defer_frame();
     if try self.lower_construct_statements(tree, &expanded.statements) |failed| {
         self.pop_defer_frame();
@@ -465,17 +465,17 @@ fn (self: &Lowerer) expand_meta_construct(
     args: ast::ExpressionList
 ) -> !ast::ConstructResult {
     var names = array::new<string::String>(self.allocator);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var type_names = array::new<string::String>(self.allocator);
-    defer type_names.deinit();
+    defer type_names.deinit(self.allocator);
     var index = 0;
     while fields.get(index) |field| {
         index = index + 1;
         let name = try self.module.names.copy(field.name);
-        errdefer name.deinit();
+        errdefer name.deinit(self.allocator);
         try names.append(move name);
         let type_name = try self.module.names.copy(field.typ);
-        errdefer type_name.deinit();
+        errdefer type_name.deinit(self.allocator);
         try type_names.append(move type_name);
     }
     let owner_text = name_text(&self.module.names, owner);
@@ -540,7 +540,7 @@ fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
     var inner = empty_name();
     var path = empty_name();
     var args = array::new<Name>(self.allocator);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     match typ::root_node(&self.types, parsed) {
         ErrorUnion(node) => {
             kind = WrapperKind::ErrorUnion;
@@ -565,7 +565,7 @@ fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
             if node.args.len() > 0 {
                 kind = WrapperKind::Applied;
                 var path_text = string::new(self.allocator);
-                errdefer path_text.deinit();
+                errdefer path_text.deinit(self.allocator);
                 var part_index = 0;
                 while node.path.at(part_index) |part| {
                     if part_index > 0 {
@@ -603,7 +603,7 @@ fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
         },
         Applied => {
             var out = string::new(self.allocator);
-            errdefer out.deinit();
+            errdefer out.deinit(self.allocator);
             try self.module.names.append_to(&var out, path);
             try out.append_byte(cast<u8>(60));
             var index = 0;
@@ -689,9 +689,9 @@ fn (self: &var Lowerer) meta_predicate(
         },
         HasPublicFields => {
             var fields = array::new<MetaField>(self.allocator);
-            defer fields.deinit();
+            defer fields.deinit(self.allocator);
             if try self.public_fields(tree, subject, &var fields) |failed| {
-                failed.deinit();
+                failed.deinit(self.allocator);
                 return null;
             }
             out.* = fields.len() > 0;
@@ -716,7 +716,7 @@ fn (self: &var Lowerer) meta_predicate_call(tree: &var ast::Ast, call: ast::Call
     let type_arg = try self.text_name(tree, apply.type_arg);
     var value = false;
     if try self.meta_predicate(tree, form, type_arg, &var value) |failed| {
-        failed.deinit();
+        failed.deinit(self.allocator);
         return false;
     }
     out.* = value;
@@ -738,12 +738,12 @@ fn (self: &Lowerer) predicate_form(name: Name) -> ?stdmeta::Form {
 /// `resolveMetaTypeText`. Text with no form in it comes back unchanged.
 fn (self: &var Lowerer) resolve_meta_type_text(text: Name) -> !Name {
     let copied = try self.module.names.copy(text);
-    defer copied.deinit();
+    defer copied.deinit(self.allocator);
     let bytes = copied.as_bytes();
     let parts = try stdmeta::split_apply(self.allocator, bytes) orelse return text;
-    defer parts.deinit();
+    defer parts.deinit(self.allocator);
     var args = array::new<Name>(self.allocator);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     var index = 0;
     while parts.args.at(index) |arg| {
         index = index + 1;

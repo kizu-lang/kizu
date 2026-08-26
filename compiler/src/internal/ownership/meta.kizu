@@ -27,14 +27,14 @@ fn (self: &var Checker) check_comptime_for_stmt(
     statement: ast::ComptimeForStmt
 ) -> !?diagnostic::Diagnostic {
     var fields = array::new<MetaField>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     if try self.comptime_for_fields(tree, statement.list, &var fields) |failed| {
         return move failed;
     }
     let retained = tree.texts.at(statement.name.node);
     let name_bytes = retained.as_bytes();
     let name = try string::from_bytes(self.allocator, name_bytes);
-    defer name.deinit();
+    defer name.deinit(self.allocator);
     let previous = self.meta_fields.current;
     var index = 0;
     while fields.get(index) |field| {
@@ -93,7 +93,7 @@ fn (self: &var Checker) variants(
 ) -> !?diagnostic::Diagnostic {
     let args = try self.names.split_generic_args(type_arg) orelse
         return try self.one_static_argument_error(tree, stdmeta::Form::Variants);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() != 1 {
         return try self.one_static_argument_error(tree, stdmeta::Form::Variants);
     }
@@ -130,7 +130,7 @@ fn (self: &var Checker) public_fields(
 ) -> !?diagnostic::Diagnostic {
     let args = try self.names.split_generic_args(type_arg) orelse
         return try self.one_static_argument_error(tree, stdmeta::Form::PublicFields);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() != 1 {
         return try self.one_static_argument_error(tree, stdmeta::Form::PublicFields);
     }
@@ -180,12 +180,12 @@ fn (self: &Checker) meta_field_named(name: Name) -> ?MetaField {
 /// Go `resolveMetaTypeText`. Text with no form in it comes back unchanged.
 fn (self: &var Checker) resolve_meta_type_text(text: Name) -> !Name {
     let copied = try self.names.copy(text);
-    defer copied.deinit();
+    defer copied.deinit(self.allocator);
     let bytes = copied.as_bytes();
     let parts = try stdmeta::split_apply(self.allocator, bytes) orelse return text;
-    defer parts.deinit();
+    defer parts.deinit(self.allocator);
     var args = array::new<Name>(self.allocator);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     var index = 0;
     while parts.args.at(index) |arg| {
         let arg_bytes = arg.as_bytes();
@@ -224,7 +224,7 @@ fn (self: &var Checker) element_type_text(text: Name, args: &array::Array<Name>)
         return text;
     }
     let copied = try self.names.copy(args.get_or_panic(0));
-    defer copied.deinit();
+    defer copied.deinit(self.allocator);
     let bytes = copied.as_bytes();
     let container = try self.names.parsed.parse(bytes);
     let element = stdmeta::element_type(&self.names.parsed, container) orelse return text;
@@ -294,7 +294,7 @@ fn (self: &var Checker) check_meta_apply(
     handled.* = true;
     let static_args = try self.names.split_generic_args(type_arg) orelse
         return try self.unreadable_static_arguments_error(tree, name);
-    defer static_args.deinit();
+    defer static_args.deinit(self.allocator);
     match form {
         FieldName => return self.check_meta_capture_name(tree, form, &static_args, out),
         VariantName => return self.check_meta_capture_name(tree, form, &static_args, out),
@@ -383,13 +383,13 @@ fn (self: &var Checker) check_meta_construct(
     }
     let owner = try self.resolve_meta_type_text(static_args.get_or_panic(0));
     var fields = array::new<MetaField>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     if try self.public_fields(tree, owner, &var fields) |failed| {
         return move failed;
     }
     let worker = static_args.get_or_panic(1);
     let expanded = try self.expand_meta_construct(tree, owner, worker, &fields, args);
-    defer expanded.deinit();
+    defer expanded.deinit(self.allocator);
     let scope = self.store.child(env);
     let mark = self.live_err_defers.len();
     if try self.check_construct_statements(tree, scope, &expanded.statements) |failed| {
@@ -420,23 +420,23 @@ fn (self: &Checker) expand_meta_construct(
     args: ast::ExpressionList
 ) -> !ast::ConstructResult {
     var names = array::new<string::String>(self.allocator);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var type_names = array::new<string::String>(self.allocator);
-    defer type_names.deinit();
+    defer type_names.deinit(self.allocator);
     var index = 0;
     while fields.get(index) |field| {
         let name = try self.names.copy(field.name);
-        errdefer name.deinit();
+        errdefer name.deinit(self.allocator);
         try names.append(move name);
         let type_name = try self.names.copy(field.typ);
-        errdefer type_name.deinit();
+        errdefer type_name.deinit(self.allocator);
         try type_names.append(move type_name);
         index = index + 1;
     }
     let owner_name = try self.names.copy(owner);
-    defer owner_name.deinit();
+    defer owner_name.deinit(self.allocator);
     let worker_name = try self.names.copy(worker);
-    defer worker_name.deinit();
+    defer worker_name.deinit(self.allocator);
     let owner_bytes = owner_name.as_bytes();
     let worker_bytes = worker_name.as_bytes();
     return ast::construct_expansion_from_names(
@@ -486,9 +486,9 @@ fn (self: &var Checker) check_meta_variant(
         return move failed;
     }
     let owner_name = try self.names.copy(variant.owner);
-    defer owner_name.deinit();
+    defer owner_name.deinit(self.allocator);
     let variant_name = try self.names.copy(variant.name);
-    defer variant_name.deinit();
+    defer variant_name.deinit(self.allocator);
     let owner_bytes = owner_name.as_bytes();
     let name_bytes = variant_name.as_bytes();
     let expanded = try ast::variant_expansion(tree, owner_bytes, name_bytes, args);
@@ -510,9 +510,9 @@ fn (self: &var Checker) check_comptime_match_stmt(
     let trimmed = try self.names.trim_prefix(value_type, "&var ");
     let owner = try self.names.trim_prefix(trimmed, "&");
     var variants = array::new<MetaField>(self.allocator);
-    defer variants.deinit();
+    defer variants.deinit(self.allocator);
     if try self.variants(tree, owner, &var variants) |failed| {
-        failed.deinit();
+        failed.deinit(self.allocator);
         return try self.error1(
             tree, ast::zero_span(), "move error: comptime match expects an enum or union, got %s",
             Arg::Str(value_type)
@@ -531,18 +531,18 @@ fn (self: &Checker) expand_comptime_match(
     variants: &array::Array<MetaField>
 ) -> !ast::Statement {
     var list = array::new<ast::MetaVariant>(self.allocator);
-    defer list.deinit();
+    defer list.deinit(self.allocator);
     var index = 0;
     while variants.get(index) |variant| {
         let name_copy = try self.names.copy(variant.name);
-        defer name_copy.deinit();
+        defer name_copy.deinit(self.allocator);
         let name_bytes = name_copy.as_bytes();
         let name = try tree.add_text_from_bytes(name_bytes);
         try list.append(ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
         index = index + 1;
     }
     let owner_copy = try self.names.copy(owner);
-    defer owner_copy.deinit();
+    defer owner_copy.deinit(self.allocator);
     let owner_bytes = owner_copy.as_bytes();
     let owner_text = try tree.add_text_from_bytes(owner_bytes);
     let empty = tree.add_empty_text();
@@ -613,7 +613,7 @@ fn (self: &var Checker) check_meta_field_borrow(
     }
     let receiver = args.get_or_panic(tree, 0);
     let name_copy = try self.names.copy(field.name);
-    defer name_copy.deinit();
+    defer name_copy.deinit(self.allocator);
     let name_bytes = name_copy.as_bytes();
     let name = try tree.add_text_from_bytes(name_bytes);
     let path = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {

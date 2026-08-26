@@ -33,11 +33,11 @@ struct NameList {
 /// Creates a parser and primes its current and lookahead tokens.
 pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
     var input = move scanner;
-    errdefer input.deinit();
+    errdefer input.deinit(allocator);
     var tokens = arena::new<token::Token>(allocator);
-    errdefer tokens.deinit();
+    errdefer tokens.deinit(allocator);
     var stream = array::new<arena::Handle<token::Token>>(allocator);
-    errdefer stream.deinit();
+    errdefer stream.deinit(allocator);
     try append_next_token(&var input, &var tokens, &var stream);
     try append_next_token(&var input, &var tokens, &var stream);
     return Parser {
@@ -57,11 +57,11 @@ fn (self: &Parser) errors(
     sources: &source::SourceMap
 ) -> !array::Array<string::String> {
     var out = array::new<string::String>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while self.diagnostics_store.at(index) |entry| {
         let rendered = try entry.error(allocator, sources);
-        errdefer rendered.deinit();
+        errdefer rendered.deinit(allocator);
         try out.append(move rendered);
         index = index + 1;
     }
@@ -125,7 +125,7 @@ fn (self: &Parser) starts_error_set_decl() -> bool {
 /// Parses one complete source file into caller-owned declaration storage.
 pub fn (self: &var Parser) parse_program(tree: &var ast::Ast) -> !ast::Program {
     var program = ast::new_program(self.allocator);
-    errdefer program.deinit();
+    errdefer program.deinit(self.allocator);
     while self.current_kind() != token::Kind::Eof {
         if try self.parse_top_level_declaration(tree) |declaration| {
             try program.add_declaration(declaration);
@@ -181,7 +181,7 @@ fn (self: &var Parser) parse_public_decl(
     tree: &var ast::Ast
 ) -> !ast::Declaration {
     let docs = try self.current_comment_text();
-    errdefer docs.deinit();
+    errdefer docs.deinit(self.allocator);
     try self.next_token();
     return self.parse_top_level_decl_with_doc(tree, move docs);
 }
@@ -190,7 +190,7 @@ fn (self: &var Parser) parse_top_level_decl_with_doc(
     tree: &var ast::Ast,
     docs: string::String
 ) -> !ast::Declaration {
-    errdefer docs.deinit();
+    errdefer docs.deinit(self.allocator);
     let kind = self.current_kind();
     if kind == token::Kind::Function {
         return self.parse_function_decl_with_doc(tree, move docs, true);
@@ -213,14 +213,14 @@ fn (self: &var Parser) parse_top_level_decl_with_doc(
         return self.parse_union_decl_with_doc(tree, move docs, true);
     }
     if kind == token::Kind::Contract {
-        docs.deinit();
+        docs.deinit(self.allocator);
         return self.parse_contract_decl(tree, true);
     }
     if kind == token::Kind::Ident and self.starts_error_set_decl() {
         return self.parse_error_set_decl_with_doc(tree, move docs, true);
     }
     try self.error_token("expected public declaration, got ", self.current_token());
-    docs.deinit();
+    docs.deinit(self.allocator);
     return tree.add_recovered_declaration(token_span_at(self));
 }
 
@@ -228,16 +228,16 @@ fn (self: &var Parser) parse_import_decl(
     tree: &var ast::Ast
 ) -> !ast::Declaration {
     var path = array::new<ast::Text>(self.allocator);
-    errdefer path.deinit();
+    errdefer path.deinit(self.allocator);
     if !try self.expect_peek(token::Kind::Ident) {
-        path.deinit();
+        path.deinit(self.allocator);
         return tree.add_recovered_declaration(token_span_at(self));
     }
     try path.append(try self.retain_current_literal(tree));
     while self.peek_kind() == token::Kind::DoubleColon {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
-            path.deinit();
+            path.deinit(self.allocator);
             return tree.add_recovered_declaration(token_span_at(self));
         }
         try path.append(try self.retain_current_literal(tree));
@@ -327,7 +327,7 @@ fn (self: &var Parser) parse_function_after_fn(
     function: ast::FunctionDecl
 ) -> !ast::Declaration {
     var value = move function;
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     if !try self.parse_function_signature_after_fn(tree, &var value.signature) {
         return add_function_decl(tree, move value);
     }
@@ -344,7 +344,7 @@ fn (self: &var Parser) parse_unsafe_decl(
     docs: string::String,
     public: bool
 ) -> !ast::Declaration {
-    errdefer docs.deinit();
+    errdefer docs.deinit(self.allocator);
     if self.peek_kind() == token::Kind::Struct {
         try self.next_token();
         var declaration = try self.parse_struct_decl_with_doc(tree, move docs, public) orelse
@@ -354,13 +354,13 @@ fn (self: &var Parser) parse_unsafe_decl(
     }
     if self.peek_kind() == token::Kind::Function {
         var function = self.function_stub(tree, public, move docs);
-        errdefer function.deinit();
+        errdefer function.deinit(self.allocator);
         function.signature.requires_unsafe = true;
         try self.next_token();
         return self.parse_function_after_fn(tree, move function);
     }
     try self.error_token("expected fn or struct after unsafe, got ", self.peek_token());
-    docs.deinit();
+    docs.deinit(self.allocator);
     return tree.add_recovered_declaration(token_span_at(self));
 }
 
@@ -377,14 +377,14 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     public: bool
 ) -> !ast::Declaration {
     var function = self.function_stub(tree, public, move docs);
-    errdefer function.deinit();
+    errdefer function.deinit(self.allocator);
     if !try self.expect_peek(token::Kind::String) {
-        function.deinit();
+        function.deinit(self.allocator);
         return tree.add_recovered_declaration(token_span_at(self));
     }
     function.signature.extern_abi = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::Function) {
-        function.deinit();
+        function.deinit(self.allocator);
         return tree.add_recovered_declaration(token_span_at(self));
     }
     let _ = try self.parse_function_signature_after_fn(tree, &var function.signature);
@@ -482,7 +482,7 @@ fn (self: &var Parser) parse_error_set_combines(
     tree: &var ast::Ast
 ) -> !array::Array<ast::Text> {
     var combines = array::new<ast::Text>(self.allocator);
-    errdefer combines.deinit();
+    errdefer combines.deinit(self.allocator);
     while true {
         if try self.parse_error_set_reference(tree) |reference| {
             try combines.append(reference);
@@ -507,12 +507,12 @@ fn (self: &var Parser) parse_error_set_reference(
         return null;
     }
     var name = string::new(self.allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(self.allocator);
     try append_token_literal(&var name, self.current_token());
     while self.peek_kind() == token::Kind::DoubleColon {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
-            name.deinit();
+            name.deinit(self.allocator);
             return null;
         }
         try name.append_bytes("::");
@@ -532,52 +532,54 @@ fn (self: &var Parser) parse_name_list(
     label: []u8
 ) -> !NameList {
     var names = array::new<ast::Text>(self.allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(self.allocator);
     var docs = map::new<[]u8, ast::Text>(self.allocator);
-    errdefer docs.deinit();
+    errdefer docs.deinit(self.allocator);
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
         let handle = self.stream.get_or_panic(self.position);
         if self.current_kind() != token::Kind::Ident {
             try self.error_expected(label, self.tokens.at(handle));
-            return finish_name_list(move names, move docs);
+            return finish_name_list(self.allocator, move names, move docs);
         }
         let current = self.tokens.at(handle);
         let name = try retain_literal(tree, current);
         try names.append(name);
         let text = try self.comment_text(&current.doc_comments);
         if text.len() == 0 {
-            text.deinit();
+            text.deinit(self.allocator);
         } else {
             let retained = tree.add_text(move text);
             let key = current.literal.as_bytes();
             try docs.insert(key, retained);
         }
         if !try self.consume_list_delimiter(label) {
-            return finish_name_list(move names, move docs);
+            return finish_name_list(self.allocator, move names, move docs);
         }
         try self.next_token();
     }
     try self.expect_list_close(label, " list");
-    return finish_name_list(move names, move docs);
+    return finish_name_list(self.allocator, move names, move docs);
 }
 
 fn finish_name_list(
+    allocator: Allocator,
     names: array::Array<ast::Text>,
     docs: map::Map<[]u8, ast::Text>
 ) -> NameList {
     return NameList {
         names: move names,
-        docs: tag_docs_or_null(move docs)
+        docs: tag_docs_or_null(allocator, move docs)
     };
 }
 
 fn tag_docs_or_null(
+    allocator: Allocator,
     docs: map::Map<[]u8, ast::Text>
 ) -> ?map::Map<[]u8, ast::Text> {
     if docs.len() == 0 {
-        docs.deinit();
+        docs.deinit(allocator);
         return null;
     }
     return move docs;
@@ -604,9 +606,9 @@ fn (self: &var Parser) parse_union_decl_with_doc(
         try self.next_token();
         let type_params = try self.parse_generic_param_list(tree) orelse
             return tree.add_recovered_declaration(token_span_at(self));
-        errdefer type_params.deinit();
+        errdefer type_params.deinit(self.allocator);
         if type_params.len() == 0 or !try self.expect_type_close() {
-            type_params.deinit();
+            type_params.deinit(self.allocator);
             return tree.add_recovered_declaration(token_span_at(self));
         }
         return self.finish_union_decl(tree, name, doc, move type_params, public);
@@ -622,9 +624,9 @@ fn (self: &var Parser) finish_union_decl(
     type_params: array::Array<ast::Text>,
     public: bool
 ) -> !ast::Declaration {
-    errdefer type_params.deinit();
+    errdefer type_params.deinit(self.allocator);
     if !try self.expect_peek(token::Kind::LBrace) {
-        type_params.deinit();
+        type_params.deinit(self.allocator);
         return tree.add_recovered_declaration(token_span_at(self));
     }
     let variants = try self.parse_union_variants(tree);
@@ -641,7 +643,7 @@ fn (self: &var Parser) parse_union_variants(
     tree: &var ast::Ast
 ) -> !array::Array<ast::UnionVariant> {
     var variants = array::new<ast::UnionVariant>(self.allocator);
-    errdefer variants.deinit();
+    errdefer variants.deinit(self.allocator);
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
@@ -716,9 +718,9 @@ fn (self: &var Parser) parse_struct_decl_with_doc(
         try self.next_token();
         let type_params = try self.parse_generic_param_list(tree) orelse
             return null;
-        errdefer type_params.deinit();
+        errdefer type_params.deinit(self.allocator);
         if type_params.len() == 0 or !try self.expect_type_close() {
-            type_params.deinit();
+            type_params.deinit(self.allocator);
             return null;
         }
         return self.finish_struct_decl(tree, name, doc, span, move type_params, public);
@@ -735,9 +737,9 @@ fn (self: &var Parser) finish_struct_decl(
     type_params: array::Array<ast::Text>,
     public: bool
 ) -> !?ast::StructDecl {
-    errdefer type_params.deinit();
+    errdefer type_params.deinit(self.allocator);
     if !try self.expect_peek(token::Kind::LBrace) {
-        type_params.deinit();
+        type_params.deinit(self.allocator);
         return null;
     }
     let fields = try self.parse_struct_fields(tree);
@@ -756,7 +758,7 @@ fn (self: &var Parser) parse_struct_fields(
     tree: &var ast::Ast
 ) -> !array::Array<ast::Field> {
     var fields = array::new<ast::Field>(self.allocator);
-    errdefer fields.deinit();
+    errdefer fields.deinit(self.allocator);
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
@@ -829,7 +831,7 @@ fn (self: &var Parser) parse_function_signature_after_fn(
 ) -> !bool {
     if self.peek_kind() == token::Kind::LParen {
         if try self.parse_receiver(tree) |receiver| {
-            defer receiver.deinit();
+            defer receiver.deinit(self.allocator);
             var receiver_index = 0;
             while receiver.get(receiver_index) |param| {
                 try signature.params.append(param);
@@ -848,7 +850,7 @@ fn (self: &var Parser) parse_function_signature_after_fn(
     if self.peek_kind() == token::Kind::Lt {
         try self.next_token();
         if try self.parse_static_param_list(tree) |static_params| {
-            defer static_params.deinit();
+            defer static_params.deinit(self.allocator);
             var static_index = 0;
             while static_params.get(static_index) |param| {
                 try signature.static_params.append(param);
@@ -866,7 +868,7 @@ fn (self: &var Parser) parse_function_signature_after_fn(
         return false;
     }
     let params = try self.parse_params(tree);
-    defer params.deinit();
+    defer params.deinit(self.allocator);
     var index = 0;
     while params.get(index) |param| {
         try signature.params.append(param);
@@ -903,7 +905,7 @@ fn (self: &var Parser) parse_contract_methods(
     tree: &var ast::Ast
 ) -> !array::Array<ast::FunctionDecl> {
     var methods = array::new<ast::FunctionDecl>(self.allocator);
-    errdefer methods.deinit();
+    errdefer methods.deinit(self.allocator);
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
@@ -912,7 +914,7 @@ fn (self: &var Parser) parse_contract_methods(
             return move methods;
         }
         if try self.parse_contract_method(tree) |method| {
-            errdefer method.deinit();
+            errdefer method.deinit(self.allocator);
             try methods.append(move method);
         } else {
             return move methods;
@@ -930,7 +932,7 @@ fn (self: &var Parser) parse_contract_method(
     tree: &var ast::Ast
 ) -> !?ast::FunctionDecl {
     var method = self.function_stub(tree, false, string::new(self.allocator));
-    errdefer method.deinit();
+    errdefer method.deinit(self.allocator);
     let _ = try self.parse_function_signature_after_fn(
         tree,
         &var method.signature
@@ -939,7 +941,7 @@ fn (self: &var Parser) parse_contract_method(
         try self.error_text(
             "a contract method takes no receiver; it says what a method looks like, not what it is on"
         );
-        method.deinit();
+        method.deinit(self.allocator);
         return null;
     }
     return move method;
@@ -966,7 +968,7 @@ fn (self: &var Parser) parse_params(
     tree: &var ast::Ast
 ) -> !array::Array<ast::Param> {
     var params = array::new<ast::Param>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     try self.next_token();
     if self.current_kind() == token::Kind::RParen {
         return move params;
@@ -1027,18 +1029,18 @@ fn (self: &var Parser) parse_receiver(
 ) -> !?array::Array<ast::Param> {
     try self.next_token();
     var params = try self.parse_params(tree);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     if !try self.expect_current(token::Kind::RParen) {
-        params.deinit();
+        params.deinit(self.allocator);
         return null;
     }
     if params.len() != 1 {
         var entry = try self.error_entry();
-        errdefer entry.deinit();
+        errdefer entry.deinit(self.allocator);
         try entry.message.append_bytes("expected one receiver in `fn (...)`, got ");
         try fmt::append_i64(&var entry.message, params.len());
         try self.record(move entry);
-        params.deinit();
+        params.deinit(self.allocator);
         return null;
     }
     return move params;
@@ -1138,7 +1140,7 @@ fn (self: &var Parser) expect_list_close(context: []u8, suffix: []u8) -> !void {
         return;
     }
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes("expected `}` to close ");
     try entry.message.append_bytes(context);
     try entry.message.append_bytes(suffix);
@@ -1170,7 +1172,7 @@ fn (self: &var Parser) finish_expr_stmt(
 
 fn (self: &var Parser) parse_block_stmt(tree: &var ast::Ast) -> !ast::Block {
     var statements = array::new<ast::Statement>(self.allocator);
-    errdefer statements.deinit();
+    errdefer statements.deinit(self.allocator);
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
@@ -1291,7 +1293,7 @@ fn (self: &var Parser) parse_labeled_stmt(
         For => try self.parse_for_stmt(tree, label),
         _ => {
             var entry = try self.error_entry();
-            errdefer entry.deinit();
+            errdefer entry.deinit(self.allocator);
             try entry.message.append_bytes("label `");
             try append_retained_text(&var entry.message, tree, label);
             try entry.message.append_bytes("` must be attached to while or for");
@@ -1565,7 +1567,7 @@ fn (self: &var Parser) parse_comptime_match_stmt(
     try self.next_token();
     let value = try self.parse_expression(tree, lowest_precedence());
     if try self.parse_variant_capture(tree) |retained_captures| {
-        defer retained_captures.deinit();
+        defer retained_captures.deinit(self.allocator);
         if retained_captures.len() == 0 {
             try self.error_text(
                 "comptime match requires a capture, as in `comptime match value |variant| { ... }`"
@@ -1615,7 +1617,7 @@ fn (self: &var Parser) parse_match_arms(
     tree: &var ast::Ast
 ) -> !array::Array<ast::MatchArm> {
     var arms = array::new<ast::MatchArm>(self.allocator);
-    errdefer arms.deinit();
+    errdefer arms.deinit(self.allocator);
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
@@ -1715,7 +1717,7 @@ fn joined_qualifier(
     segment: ast::Text
 ) -> !string::String {
     var joined = string::new(allocator);
-    errdefer joined.deinit();
+    errdefer joined.deinit(allocator);
     let head = tree.texts.at(qualifier.node);
     let head_bytes = head.as_bytes();
     if head.len() > 0 {
@@ -2215,7 +2217,7 @@ fn (self: &var Parser) parse_call_expr(
     callee: ast::Expression
 ) -> !ast::Expression {
     var args = array::new<ast::Expression>(self.allocator);
-    errdefer args.deinit();
+    errdefer args.deinit(self.allocator);
     if self.peek_kind() == token::Kind::RParen {
         try self.next_token();
     } else {
@@ -2245,7 +2247,7 @@ fn (self: &var Parser) parse_struct_literal_expr(
     let retained_type = tree.add_text(move type_name);
     let span = token_span_at(self);
     var fields = array::new<ast::FieldValue>(self.allocator);
-    errdefer fields.deinit();
+    errdefer fields.deinit(self.allocator);
     try self.next_token();
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
@@ -2253,11 +2255,11 @@ fn (self: &var Parser) parse_struct_literal_expr(
         if try self.parse_field_value(tree) |field| {
             try fields.append(field);
         } else {
-            fields.deinit();
+            fields.deinit(self.allocator);
             return tree.add_recovered_expression(span);
         }
         if !try self.consume_list_delimiter("struct literal field") {
-            fields.deinit();
+            fields.deinit(self.allocator);
             return tree.add_recovered_expression(span);
         }
         try self.next_token();
@@ -2353,7 +2355,7 @@ fn (self: &Parser) struct_literal_type_name(
     expression: ast::Expression
 ) -> !?string::String {
     var parts = array::new<ast::Text>(allocator);
-    defer parts.deinit();
+    defer parts.deinit(allocator);
     if !try namespace_expr_parts(tree, expression, &var parts) or
         parts.len() == 0 {
         return null;
@@ -2369,7 +2371,7 @@ fn (self: &Parser) struct_literal_type_name(
         }
     }
     var name = string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     var index = 0;
     while index < parts.len() {
         if index > 0 {
@@ -2421,7 +2423,7 @@ fn (self: &var Parser) parse_buffer_literal_expr(
         Buffer(buffer) => {
             let elem_type = typ::child_type(type_name, buffer.elem);
             let elem = try typ::render(self.allocator, &tree.types, elem_type);
-            defer elem.deinit();
+            defer elem.deinit(self.allocator);
             if !string_equals_bytes(&elem, "u8") {
                 try self.error_value("buffer element must be u8, got ", &elem, "");
                 return tree.add_recovered_expression(span);
@@ -2437,7 +2439,7 @@ fn (self: &var Parser) parse_buffer_literal_expr(
         _ => {},
     }
     let rendered = try typ::render(self.allocator, &tree.types, type_name);
-    defer rendered.deinit();
+    defer rendered.deinit(self.allocator);
     try self.error_value(
         "expected buffer literal `[N]u8{}`, got type `",
         &rendered,
@@ -2495,7 +2497,7 @@ fn (self: &var Parser) parse_variant_capture(
             return null;
         }
         var captures = array::new<ast::Text>(self.allocator);
-        errdefer captures.deinit();
+        errdefer captures.deinit(self.allocator);
         let first = try retain_literal(tree, self.tokens.at(first_handle));
         try captures.append(first);
         let second = try retain_literal(tree, self.tokens.at(second_handle));
@@ -2506,7 +2508,7 @@ fn (self: &var Parser) parse_variant_capture(
         return null;
     }
     var captures = array::new<ast::Text>(self.allocator);
-    errdefer captures.deinit();
+    errdefer captures.deinit(self.allocator);
     let first = try retain_literal(tree, self.tokens.at(first_handle));
     try captures.append(first);
     return move captures;
@@ -2514,12 +2516,12 @@ fn (self: &var Parser) parse_variant_capture(
 
 fn (self: &var Parser) parse_type_name(tree: &var ast::Ast) -> !?typ::Type {
     var builder = typ::new_builder(self.allocator);
-    errdefer builder.deinit();
+    errdefer builder.deinit(self.allocator);
     let parsed = try self.parse_type_node(&var builder);
     if parsed |root| {
         return typ::finish_builder(move builder, &var tree.types, root);
     }
-    builder.deinit();
+    builder.deinit(self.allocator);
     return null;
 }
 
@@ -2567,7 +2569,7 @@ fn (self: &var Parser) parse_func_type(
     }
     try self.next_token();
     var params = array::new<arena::Handle<typ::Node>>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     if self.peek_kind() != token::Kind::RParen {
         while true {
             try self.next_token();
@@ -2575,7 +2577,7 @@ fn (self: &var Parser) parse_func_type(
             if parsed |param| {
                 try params.append(param);
             } else {
-                params.deinit();
+                params.deinit(self.allocator);
                 return null;
             }
             if self.peek_kind() != token::Kind::Comma {
@@ -2586,13 +2588,13 @@ fn (self: &var Parser) parse_func_type(
     }
     if self.peek_kind() != token::Kind::RParen {
         try self.error_token("expected `)` in a function type, got ", self.peek_token());
-        params.deinit();
+        params.deinit(self.allocator);
         return null;
     }
     try self.next_token();
     if self.peek_kind() != token::Kind::Arrow {
         try self.error_token("expected `->` in a function type, got ", self.peek_token());
-        params.deinit();
+        params.deinit(self.allocator);
         return null;
     }
     try self.next_token();
@@ -2605,7 +2607,7 @@ fn (self: &var Parser) parse_func_type(
             unsafe_call: unsafe_call
         }));
     }
-    params.deinit();
+    params.deinit(self.allocator);
     return null;
 }
 
@@ -2658,7 +2660,7 @@ fn (self: &var Parser) parse_named_type(
     builder: &var typ::Builder
 ) -> !?arena::Handle<typ::Node> {
     var path = try self.parse_type_path();
-    errdefer path.deinit();
+    errdefer path.deinit(self.allocator);
     let allow_const = type_path_is_ptr(&path);
     if self.peek_kind() == token::Kind::Bang {
         let args = array::new<arena::Handle<typ::Node>>(self.allocator);
@@ -2685,13 +2687,13 @@ fn (self: &var Parser) parse_named_type(
         }));
     }
     var args = array::new<arena::Handle<typ::Node>>(self.allocator);
-    errdefer args.deinit();
+    errdefer args.deinit(self.allocator);
     try self.next_token();
     try self.next_token();
     if !try self.parse_type_arguments(builder, &var args, allow_const) or
         !try self.expect_type_close() {
-        args.deinit();
-        path.deinit();
+        args.deinit(self.allocator);
+        path.deinit(self.allocator);
         return null;
     }
     return builder.add(typ::Node::Name(typ::Name {
@@ -2702,7 +2704,7 @@ fn (self: &var Parser) parse_named_type(
 
 fn (self: &var Parser) parse_type_path() -> !array::Array<string::String> {
     var path = array::new<string::String>(self.allocator);
-    errdefer path.deinit();
+    errdefer path.deinit(self.allocator);
     try path.append(try owned_token_literal(
         self.allocator,
         self.current_token()
@@ -2749,11 +2751,11 @@ fn (self: &var Parser) parse_type_arg_list(
     allow_const: bool
 ) -> !?string::String {
     var out = string::new(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var first = true;
     while true {
         if try self.parse_static_type_arg(tree, allow_const) |arg| {
-            defer arg.deinit();
+            defer arg.deinit(self.allocator);
             if !first {
                 try out.append_bytes(", ");
             }
@@ -2761,7 +2763,7 @@ fn (self: &var Parser) parse_type_arg_list(
             try out.append_bytes(bytes);
             first = false;
         } else {
-            out.deinit();
+            out.deinit(self.allocator);
             return null;
         }
         if self.peek_kind() != token::Kind::Comma {
@@ -2780,14 +2782,14 @@ fn (self: &var Parser) parse_generic_param_list(
     tree: &var ast::Ast
 ) -> !?array::Array<ast::Text> {
     if try self.parse_static_param_list(tree) |params| {
-        defer params.deinit();
+        defer params.deinit(self.allocator);
         var names = array::new<ast::Text>(self.allocator);
-        errdefer names.deinit();
+        errdefer names.deinit(self.allocator);
         var index = 0;
         while params.at(index) |param| {
             if !param.is_type() {
                 try self.error_expected_type_param(tree, param);
-                names.deinit();
+                names.deinit(self.allocator);
                 return null;
             }
             try names.append(param.name);
@@ -2802,20 +2804,20 @@ fn (self: &var Parser) parse_static_param_list(
     tree: &var ast::Ast
 ) -> !?array::Array<ast::StaticParam> {
     var params = array::new<ast::StaticParam>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     var seen = map::new<[]u8, bool>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     try self.next_token();
     while true {
         let current = self.current_token();
         if current.kind != token::Kind::Ident {
             try self.error_token("expected static parameter, got ", current);
-            params.deinit();
+            params.deinit(self.allocator);
             return null;
         }
         if static_param_seen(&seen, current) {
             try self.error_literal("duplicate static parameter ", current);
-            params.deinit();
+            params.deinit(self.allocator);
             return null;
         }
         try retain_static_param_name(&var seen, current);
@@ -2889,7 +2891,7 @@ fn (self: &var Parser) parse_static_type_arg(
         kind == token::Kind::LBracket or
         kind == token::Kind::Question {
         var builder = typ::new_builder(self.allocator);
-        errdefer builder.deinit();
+        errdefer builder.deinit(self.allocator);
         let parsed = try self.parse_type_argument(&var builder, allow_const);
         if parsed |root| {
             let type_name = typ::finish_builder(
@@ -2899,7 +2901,7 @@ fn (self: &var Parser) parse_static_type_arg(
             );
             return try typ::render(self.allocator, &tree.types, type_name);
         }
-        builder.deinit();
+        builder.deinit(self.allocator);
         return null;
     }
     if kind == token::Kind::Int or
@@ -3035,7 +3037,7 @@ fn (self: &var Parser) record(entry: diagnostic::Diagnostic) -> !void {
 /// Records `text` as an error at the current token.
 fn (self: &var Parser) error_text(text: []u8) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(text);
     return self.record(move entry);
 }
@@ -3043,7 +3045,7 @@ fn (self: &var Parser) error_text(text: []u8) -> !void {
 /// Records `prefix` followed by `context` as an error at the current token.
 fn (self: &var Parser) error_context(prefix: []u8, context: []u8) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(prefix);
     try entry.message.append_bytes(context);
     return self.record(move entry);
@@ -3052,7 +3054,7 @@ fn (self: &var Parser) error_context(prefix: []u8, context: []u8) -> !void {
 /// Records `prefix` followed by the description of `actual`.
 fn (self: &var Parser) error_token(prefix: []u8, actual: &token::Token) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(prefix);
     try append_token_description(&var entry.message, actual);
     return self.record(move entry);
@@ -3061,7 +3063,7 @@ fn (self: &var Parser) error_token(prefix: []u8, actual: &token::Token) -> !void
 /// Records `expected <label>, got <actual>`.
 fn (self: &var Parser) error_expected(label: []u8, actual: &token::Token) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes("expected ");
     try entry.message.append_bytes(label);
     try entry.message.append_bytes(", got ");
@@ -3076,7 +3078,7 @@ fn (self: &var Parser) error_expected_kind(
     actual: &token::Token
 ) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(prefix);
     try append_token_type_description(&var entry.message, expected);
     try entry.message.append_bytes(", got ");
@@ -3087,7 +3089,7 @@ fn (self: &var Parser) error_expected_kind(
 /// Records `prefix` followed by the literal bytes of `actual`.
 fn (self: &var Parser) error_literal(prefix: []u8, actual: &token::Token) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(prefix);
     let bytes = actual.literal.as_bytes();
     try entry.message.append_bytes(bytes);
@@ -3101,7 +3103,7 @@ fn (self: &var Parser) error_value(
     suffix: []u8
 ) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(prefix);
     let bytes = value.as_bytes();
     try entry.message.append_bytes(bytes);
@@ -3112,7 +3114,7 @@ fn (self: &var Parser) error_value(
 /// Records the `impl <contract> for <type>;` hint for an impl without `for`.
 fn (self: &var Parser) error_impl_missing_for(contract_token: &token::Token) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes("expected `impl <contract> for ");
     let name = contract_token.literal.as_bytes();
     try entry.message.append_bytes(name);
@@ -3128,7 +3130,7 @@ fn (self: &var Parser) error_impl_body(
     type_token: &token::Token
 ) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     let contract_name = contract_token.literal.as_bytes();
     let type_name = type_token.literal.as_bytes();
     try entry.message.append_bytes("`impl ");
@@ -3147,7 +3149,7 @@ fn (self: &var Parser) error_expected_type_param(
     param: &ast::StaticParam
 ) -> !void {
     var entry = try self.error_entry();
-    errdefer entry.deinit();
+    errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes("expected type parameter, got ");
     try ast::append_static_param(&var entry.message, tree, param);
     return self.record(move entry);
@@ -3308,7 +3310,7 @@ fn (self: &var Parser) restore_lookahead(
     self.position = position;
     while self.diagnostics_store.len() > diagnostic_count {
         let abandoned = self.diagnostics_store.pop_or_panic();
-        abandoned.deinit();
+        abandoned.deinit(self.allocator);
     }
     return;
 }

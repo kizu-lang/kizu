@@ -355,6 +355,25 @@ func (c *Checker) checkMetaConstruct(
 	if err != nil {
 		return "", err
 	}
+	// A field the expansion must release was built by the worker from the
+	// allocator `construct` was handed, and the release names it (ADR-0132).
+	// The worker takes it first, the way every allocating function does, so
+	// the expansion reads it from the first argument.
+	if constructOwnsField(c.deinitOwners, fields) {
+		if len(args) == 0 {
+			return "", errorf("comptime error: `%s` over an owner field expects an allocator first",
+				stdmeta.Construct)
+		}
+		got, err := c.checkExpr(args[0], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != Type("Allocator") {
+			return "", errorf(
+				"comptime error: `%s` over an owner field expects Allocator first, got %s",
+				stdmeta.Construct, got)
+		}
+	}
 	statements, literal := ast.ConstructExpansion(
 		string(owner), staticArgs[1], fields, args, c.deinitOwners)
 	scope := env.child()
@@ -374,6 +393,17 @@ func (c *Checker) checkMetaConstruct(
 		return Type(string(errorPart) + "!" + string(built)), nil
 	}
 	return Type("!" + string(built)), nil
+}
+
+// constructOwnsField reports whether any field the expansion fills owns
+// something, so the expansion has a release to write.
+func constructOwnsField(owners map[string]bool, fields []ast.ConstructField) bool {
+	for _, field := range fields {
+		if ast.OwnerType(owners, field.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 // constructFields reads the public fields `construct` fills, and refuses a type

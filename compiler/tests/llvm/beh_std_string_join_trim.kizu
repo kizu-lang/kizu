@@ -9,7 +9,7 @@ fn append_part(
     bytes: []u8
 ) -> !void {
     let part = try string::from_bytes(allocator, bytes);
-    errdefer part.deinit();
+    errdefer part.deinit(allocator);
     try parts.append(move part);
     return;
 }
@@ -69,18 +69,18 @@ fn append_white_space_set(out: &var string::String) -> !void {
 test "string join preserves separators and returns an independent owner" {
     let allocator = mem::page_allocator();
     var parts = array::new<string::String>(allocator);
-    errdefer parts.deinit();
+    errdefer parts.deinit(allocator);
     try append_part(allocator, &var parts, "  first  ");
     try append_part(allocator, &var parts, "");
     try append_part(allocator, &var parts, " last  ");
     var joined = try string::join(allocator, &parts, "::");
-    defer joined.deinit();
+    defer joined.deinit(allocator);
     var expected = string::new(allocator);
-    defer expected.deinit();
+    defer expected.deinit(allocator);
     try expected.append_bytes("first  ");
     try expected.append_bytes("::::");
     try expected.append_bytes(" last");
-    parts.deinit();
+    parts.deinit(allocator);
     let before = joined.capacity();
     string::trim_space_in_place(&var joined);
     testing::expect_equal<i64>(before, joined.capacity());
@@ -92,27 +92,27 @@ test "string join preserves separators and returns an independent owner" {
 test "string join handles empty parts and an empty separator" {
     let allocator = mem::page_allocator();
     var empty = array::new<string::String>(allocator);
-    defer empty.deinit();
+    defer empty.deinit(allocator);
     let none = try string::join(allocator, &empty, ",");
-    defer none.deinit();
+    defer none.deinit(allocator);
     testing::expect_equal<i64>(0, none.len());
 
     var parts = array::new<string::String>(allocator);
-    defer parts.deinit();
+    defer parts.deinit(allocator);
     try append_part(allocator, &var parts, "a");
     try append_part(allocator, &var parts, "");
     try append_part(allocator, &var parts, "b");
     let joined = try string::join(allocator, &parts, "");
-    defer joined.deinit();
+    defer joined.deinit(allocator);
     let bytes = joined.as_bytes();
     testing::expect(mem::equal_bytes(bytes, "ab"));
 
     var single = array::new<string::String>(allocator);
-    errdefer single.deinit();
+    errdefer single.deinit(allocator);
     try append_part(allocator, &var single, "solo");
     let only = try string::join(allocator, &single, "ignored");
-    defer only.deinit();
-    single.deinit();
+    defer only.deinit(allocator);
+    single.deinit(allocator);
     let only_bytes = only.as_bytes();
     testing::expect(mem::equal_bytes(only_bytes, "solo"));
 }
@@ -120,7 +120,7 @@ test "string join handles empty parts and an empty separator" {
 test "string trim recognizes the fixed Unicode White Space set" {
     let allocator = mem::page_allocator();
     var text = string::new(allocator);
-    defer text.deinit();
+    defer text.deinit(allocator);
     try append_white_space_set(&var text);
     try text.append_bytes("middle");
     try append_white_space_set(&var text);
@@ -131,7 +131,7 @@ test "string trim recognizes the fixed Unicode White Space set" {
     testing::expect(mem::equal_bytes(bytes, "middle"));
 
     var only_space = string::new(allocator);
-    defer only_space.deinit();
+    defer only_space.deinit(allocator);
     try append_white_space_set(&var only_space);
     let only_capacity = only_space.capacity();
     string::trim_space_in_place(&var only_space);
@@ -139,7 +139,7 @@ test "string trim recognizes the fixed Unicode White Space set" {
     testing::expect_equal<i64>(only_capacity, only_space.capacity());
 
     var inner_space = string::new(allocator);
-    defer inner_space.deinit();
+    defer inner_space.deinit(allocator);
     try inner_space.append_bytes("left");
     try append_utf8(&var inner_space, 12288);
     try inner_space.append_bytes("right");
@@ -151,7 +151,7 @@ test "string trim recognizes the fixed Unicode White Space set" {
 test "string trim retains non-space Unicode and malformed UTF-8" {
     let allocator = mem::page_allocator();
     var non_space = string::new(allocator);
-    defer non_space.deinit();
+    defer non_space.deinit(allocator);
     try append_utf8(&var non_space, 6158);
     try append_utf8(&var non_space, 65279);
     try append_utf8(&var non_space, 65533);
@@ -166,14 +166,13 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
     writable[3] = cast<u8>(32);
     let input = raw.as_bytes();
     var malformed = try string::from_bytes(allocator, input);
-    defer malformed.deinit();
+    defer malformed.deinit(allocator);
     string::trim_space_in_place(&var malformed);
     testing::expect_equal<i64>(2, malformed.len());
     let bytes = malformed.as_bytes();
     testing::expect_equal<i64>(226, cast<i64>(bytes[0]));
     testing::expect_equal<i64>(128, cast<i64>(bytes[1]));
 }
-
 
 // llvm
 // emit:
@@ -235,14 +234,14 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
-// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i1 @std__mem__equal_bytes(%kizu.slice.u8, %kizu.slice.u8)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
 // declare i64 @std__string__String_capacity(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.error.std__mem__Error.std__string__String @std__string__from_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__string__GrowError.std__string__String @std__string__join(ptr, %kizu.array, %kizu.slice.u8)
@@ -639,7 +638,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
 //   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
 // kizu.7.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.6)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.6, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.5
 // kizu.7.try.ok:
 //   %kizu.8.ptr = getelementptr inbounds [1 x i8], ptr @.str.1, i64 0, i64 0
@@ -651,7 +650,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
 //   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
 // kizu.11.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.10)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.10, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.9
 // kizu.11.try.ok:
 //   %kizu.12.ptr = getelementptr inbounds [8 x i8], ptr @.str.2, i64 0, i64 0
@@ -663,7 +662,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.13
 // kizu.15.try.ok:
 //   %kizu.16 = load %kizu.array, ptr %kizu.3
@@ -676,7 +675,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.20.ok.bool = icmp ne i8 %kizu.20.ok, 0
 //   br i1 %kizu.20.ok.bool, label %kizu.20.try.ok, label %kizu.20.try.err
 // kizu.20.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.19)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.19, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.18, 2
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -697,9 +696,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.29.ok.bool = icmp ne i8 %kizu.29.ok, 0
 //   br i1 %kizu.29.ok.bool, label %kizu.29.try.ok, label %kizu.29.try.err
 // kizu.29.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.28)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.28, ptr %kizu.1)
 //   %kizu.try.err.9.code = extractvalue %kizu.error.std__mem__Error.void %kizu.25, 1
 //   %kizu.try.err.9.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.9 = insertvalue %kizu.error.void %kizu.try.err.9.base, i64 %kizu.try.err.9.code, 1
@@ -716,9 +715,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.35.ok.bool = icmp ne i8 %kizu.35.ok, 0
 //   br i1 %kizu.35.ok.bool, label %kizu.35.try.ok, label %kizu.35.try.err
 // kizu.35.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.32)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.33)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.34)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.32, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.33, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.34, ptr %kizu.1)
 //   %kizu.try.err.13.code = extractvalue %kizu.error.std__mem__Error.void %kizu.31, 1
 //   %kizu.try.err.13.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.13 = insertvalue %kizu.error.void %kizu.try.err.13.base, i64 %kizu.try.err.13.code, 1
@@ -735,16 +734,16 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.41.ok.bool = icmp ne i8 %kizu.41.ok, 0
 //   br i1 %kizu.41.ok.bool, label %kizu.41.try.ok, label %kizu.41.try.err
 // kizu.41.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.38)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.39)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.40)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.38, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.39, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.40, ptr %kizu.1)
 //   %kizu.try.err.17.code = extractvalue %kizu.error.std__mem__Error.void %kizu.37, 1
 //   %kizu.try.err.17.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.17 = insertvalue %kizu.error.void %kizu.try.err.17.base, i64 %kizu.try.err.17.code, 1
 //   ret %kizu.error.void %kizu.try.err.17
 // kizu.41.try.ok:
 //   %kizu.42 = load %kizu.array, ptr %kizu.3
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42, ptr %kizu.1)
 //   %kizu.44 = load %kizu.struct.std__string__String, ptr %kizu.21
 //   %kizu.45 = call i64 @std__string__String_capacity(%kizu.struct.std__string__String %kizu.44)
 //   call void @std__string__trim_space_in_place(ptr %kizu.21)
@@ -763,9 +762,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.54 = call i1 @std__mem__equal_bytes(%kizu.slice.u8 %kizu.51, %kizu.slice.u8 %kizu.53)
 //   call void @std__testing__expect(i1 %kizu.54)
 //   %kizu.56 = load %kizu.struct.std__string__String, ptr %kizu.23
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56, ptr %kizu.1)
 //   %kizu.58 = load %kizu.struct.std__string__String, ptr %kizu.21
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58, ptr %kizu.1)
 //   %kizu.60 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.60
 // }
@@ -784,7 +783,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.4, 2
 //   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
@@ -809,9 +808,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
 //   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
 // kizu.14.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.13)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.13, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.12
 // kizu.14.try.ok:
 //   %kizu.15.ptr = getelementptr inbounds [1 x i8], ptr @.str.1, i64 0, i64 0
@@ -823,9 +822,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
 //   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
 // kizu.18.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.17)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.17, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.16
 // kizu.18.try.ok:
 //   %kizu.19.ptr = getelementptr inbounds [2 x i8], ptr @.str.9, i64 0, i64 0
@@ -837,9 +836,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.22.ok.bool = icmp ne i8 %kizu.22.ok, 0
 //   br i1 %kizu.22.ok.bool, label %kizu.22.try.ok, label %kizu.22.try.err
 // kizu.22.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.21)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.21, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.20
 // kizu.22.try.ok:
 //   %kizu.23 = load %kizu.array, ptr %kizu.10
@@ -852,9 +851,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
 //   br i1 %kizu.27.ok.bool, label %kizu.27.try.ok, label %kizu.27.try.err
 // kizu.27.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.26)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.26, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.try.err.15.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.25, 2
 //   %kizu.try.err.15.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.15 = insertvalue %kizu.error.void %kizu.try.err.15.base, i64 %kizu.try.err.15.code, 1
@@ -879,11 +878,11 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.38.ok.bool = icmp ne i8 %kizu.38.ok, 0
 //   br i1 %kizu.38.ok.bool, label %kizu.38.try.ok, label %kizu.38.try.err
 // kizu.38.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.36)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.37)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.36, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.37, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.35
 // kizu.38.try.ok:
 //   %kizu.39 = load %kizu.array, ptr %kizu.33
@@ -897,11 +896,11 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.44.ok.bool = icmp ne i8 %kizu.44.ok, 0
 //   br i1 %kizu.44.ok.bool, label %kizu.44.try.ok, label %kizu.44.try.err
 // kizu.44.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.43)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.43, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.try.err.26.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.41, 2
 //   %kizu.try.err.26.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.26 = insertvalue %kizu.error.void %kizu.try.err.26.base, i64 %kizu.try.err.26.code, 1
@@ -909,19 +908,19 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 // kizu.44.try.ok:
 //   %kizu.44 = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.41, 1
 //   %kizu.45 = load %kizu.array, ptr %kizu.33
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.45)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.45, ptr %kizu.1)
 //   %kizu.47 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.44)
 //   %kizu.48.ptr = getelementptr inbounds [5 x i8], ptr @.str.11, i64 0, i64 0
 //   %kizu.48.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.48.ptr, 0
 //   %kizu.48 = insertvalue %kizu.slice.u8 %kizu.48.base, i64 4, 1
 //   %kizu.49 = call i1 @std__mem__equal_bytes(%kizu.slice.u8 %kizu.47, %kizu.slice.u8 %kizu.48)
 //   call void @std__testing__expect(i1 %kizu.49)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.44)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.44, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
 //   %kizu.53 = load %kizu.array, ptr %kizu.10
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.53)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.53, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.57 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.57
 // }
@@ -940,7 +939,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
 // kizu.6.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.4
 // kizu.6.try.ok:
 //   %kizu.7.ptr = getelementptr inbounds [7 x i8], ptr @.str.13, i64 0, i64 0
@@ -952,7 +951,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
 //   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
 // kizu.10.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9, ptr %kizu.1)
 //   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 1
 //   %kizu.try.err.3.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.3 = insertvalue %kizu.error.void %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 1
@@ -964,7 +963,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.13.ok.bool = icmp ne i8 %kizu.13.ok, 0
 //   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
 // kizu.13.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.11
 // kizu.13.try.ok:
 //   %kizu.14 = load %kizu.struct.std__string__String, ptr %kizu.3
@@ -994,8 +993,8 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
 //   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
 // kizu.30.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.28)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.29)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.28, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.29, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.27
 // kizu.30.try.ok:
 //   %kizu.31 = load %kizu.struct.std__string__String, ptr %kizu.26
@@ -1030,9 +1029,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.48.ok.bool = icmp ne i8 %kizu.48.ok, 0
 //   br i1 %kizu.48.ok.bool, label %kizu.48.try.ok, label %kizu.48.try.err
 // kizu.48.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.45)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.46)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.47)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.45, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.46, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.47, ptr %kizu.1)
 //   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.44, 1
 //   %kizu.try.err.10.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.10 = insertvalue %kizu.error.void %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 1
@@ -1046,9 +1045,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.54.ok.bool = icmp ne i8 %kizu.54.ok, 0
 //   br i1 %kizu.54.ok.bool, label %kizu.54.try.ok, label %kizu.54.try.err
 // kizu.54.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.51)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.52)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.53)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.51, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.52, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.53, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.50
 // kizu.54.try.ok:
 //   %kizu.55.ptr = getelementptr inbounds [6 x i8], ptr @.str.15, i64 0, i64 0
@@ -1062,9 +1061,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.60.ok.bool = icmp ne i8 %kizu.60.ok, 0
 //   br i1 %kizu.60.ok.bool, label %kizu.60.try.ok, label %kizu.60.try.err
 // kizu.60.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.57)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.59)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.57, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.59, ptr %kizu.1)
 //   %kizu.try.err.17.code = extractvalue %kizu.error.std__mem__Error.void %kizu.56, 1
 //   %kizu.try.err.17.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.17 = insertvalue %kizu.error.void %kizu.try.err.17.base, i64 %kizu.try.err.17.code, 1
@@ -1079,11 +1078,11 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.65 = call i1 @std__mem__equal_bytes(%kizu.slice.u8 %kizu.63, %kizu.slice.u8 %kizu.64)
 //   call void @std__testing__expect(i1 %kizu.65)
 //   %kizu.67 = load %kizu.struct.std__string__String, ptr %kizu.42
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.67)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.67, ptr %kizu.1)
 //   %kizu.69 = load %kizu.struct.std__string__String, ptr %kizu.26
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.69)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.69, ptr %kizu.1)
 //   %kizu.71 = load %kizu.struct.std__string__String, ptr %kizu.3
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.71)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.71, ptr %kizu.1)
 //   %kizu.73 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.73
 // }
@@ -1103,7 +1102,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
 //   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
 // kizu.7.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.5
 // kizu.7.try.ok:
 //   %kizu.9 = call %kizu.error.void @append_utf8(ptr %kizu.3, i64 65279)
@@ -1112,7 +1111,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
 //   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
 // kizu.11.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.10)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.10, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.9
 // kizu.11.try.ok:
 //   %kizu.13 = call %kizu.error.void @append_utf8(ptr %kizu.3, i64 65533)
@@ -1121,7 +1120,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.13
 // kizu.15.try.ok:
 //   call void @std__string__trim_space_in_place(ptr %kizu.3)
@@ -1215,7 +1214,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.57.ok.bool = icmp ne i8 %kizu.57.ok, 0
 //   br i1 %kizu.57.ok.bool, label %kizu.57.try.ok, label %kizu.57.try.err
 // kizu.57.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56, ptr %kizu.1)
 //   %kizu.try.err.9.code = extractvalue %kizu.error.std__mem__Error.std__string__String %kizu.55, 2
 //   %kizu.try.err.9.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.9 = insertvalue %kizu.error.void %kizu.try.err.9.base, i64 %kizu.try.err.9.code, 1
@@ -1281,9 +1280,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   unreachable
 // kizu.81.ok.ok:
 //   %kizu.82 = load %kizu.struct.std__string__String, ptr %kizu.58
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.82)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.82, ptr %kizu.1)
 //   %kizu.84 = load %kizu.struct.std__string__String, ptr %kizu.3
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.84)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.84, ptr %kizu.1)
 //   %kizu.86 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.86
 // }
@@ -1346,14 +1345,14 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
-// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i1 @std__mem__equal_bytes(%kizu.slice.u8, %kizu.slice.u8)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
 // declare i64 @std__string__String_capacity(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.error.std__mem__Error.std__string__String @std__string__from_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__string__GrowError.std__string__String @std__string__join(ptr, %kizu.array, %kizu.slice.u8)
@@ -1750,7 +1749,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
 //   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
 // kizu.7.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.6)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.6, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.5
 // kizu.7.try.ok:
 //   %kizu.8.ptr = getelementptr inbounds [1 x i8], ptr @.str.1, i64 0, i64 0
@@ -1762,7 +1761,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
 //   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
 // kizu.11.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.10)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.10, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.9
 // kizu.11.try.ok:
 //   %kizu.12.ptr = getelementptr inbounds [8 x i8], ptr @.str.2, i64 0, i64 0
@@ -1774,7 +1773,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.13
 // kizu.15.try.ok:
 //   %kizu.16 = load %kizu.array, ptr %kizu.3
@@ -1787,7 +1786,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.20.ok.bool = icmp ne i8 %kizu.20.ok, 0
 //   br i1 %kizu.20.ok.bool, label %kizu.20.try.ok, label %kizu.20.try.err
 // kizu.20.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.19)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.19, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.18, 2
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -1808,9 +1807,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.29.ok.bool = icmp ne i8 %kizu.29.ok, 0
 //   br i1 %kizu.29.ok.bool, label %kizu.29.try.ok, label %kizu.29.try.err
 // kizu.29.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.28)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.28, ptr %kizu.1)
 //   %kizu.try.err.9.code = extractvalue %kizu.error.std__mem__Error.void %kizu.25, 1
 //   %kizu.try.err.9.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.9 = insertvalue %kizu.error.void %kizu.try.err.9.base, i64 %kizu.try.err.9.code, 1
@@ -1827,9 +1826,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.35.ok.bool = icmp ne i8 %kizu.35.ok, 0
 //   br i1 %kizu.35.ok.bool, label %kizu.35.try.ok, label %kizu.35.try.err
 // kizu.35.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.32)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.33)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.34)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.32, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.33, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.34, ptr %kizu.1)
 //   %kizu.try.err.13.code = extractvalue %kizu.error.std__mem__Error.void %kizu.31, 1
 //   %kizu.try.err.13.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.13 = insertvalue %kizu.error.void %kizu.try.err.13.base, i64 %kizu.try.err.13.code, 1
@@ -1846,16 +1845,16 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.41.ok.bool = icmp ne i8 %kizu.41.ok, 0
 //   br i1 %kizu.41.ok.bool, label %kizu.41.try.ok, label %kizu.41.try.err
 // kizu.41.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.38)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.39)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.40)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.38, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.39, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.40, ptr %kizu.1)
 //   %kizu.try.err.17.code = extractvalue %kizu.error.std__mem__Error.void %kizu.37, 1
 //   %kizu.try.err.17.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.17 = insertvalue %kizu.error.void %kizu.try.err.17.base, i64 %kizu.try.err.17.code, 1
 //   ret %kizu.error.void %kizu.try.err.17
 // kizu.41.try.ok:
 //   %kizu.42 = load %kizu.array, ptr %kizu.3
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42, ptr %kizu.1)
 //   %kizu.44 = load %kizu.struct.std__string__String, ptr %kizu.21
 //   %kizu.45 = call i64 @std__string__String_capacity(%kizu.struct.std__string__String %kizu.44)
 //   call void @std__string__trim_space_in_place(ptr %kizu.21)
@@ -1874,9 +1873,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.54 = call i1 @std__mem__equal_bytes(%kizu.slice.u8 %kizu.51, %kizu.slice.u8 %kizu.53)
 //   call void @std__testing__expect(i1 %kizu.54)
 //   %kizu.56 = load %kizu.struct.std__string__String, ptr %kizu.23
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56, ptr %kizu.1)
 //   %kizu.58 = load %kizu.struct.std__string__String, ptr %kizu.21
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58, ptr %kizu.1)
 //   %kizu.60 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.60
 // }
@@ -1895,7 +1894,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.4, 2
 //   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
@@ -1920,9 +1919,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
 //   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
 // kizu.14.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.13)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.13, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.12
 // kizu.14.try.ok:
 //   %kizu.15.ptr = getelementptr inbounds [1 x i8], ptr @.str.1, i64 0, i64 0
@@ -1934,9 +1933,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
 //   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
 // kizu.18.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.17)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.17, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.16
 // kizu.18.try.ok:
 //   %kizu.19.ptr = getelementptr inbounds [2 x i8], ptr @.str.9, i64 0, i64 0
@@ -1948,9 +1947,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.22.ok.bool = icmp ne i8 %kizu.22.ok, 0
 //   br i1 %kizu.22.ok.bool, label %kizu.22.try.ok, label %kizu.22.try.err
 // kizu.22.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.21)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.21, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.20
 // kizu.22.try.ok:
 //   %kizu.23 = load %kizu.array, ptr %kizu.10
@@ -1963,9 +1962,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
 //   br i1 %kizu.27.ok.bool, label %kizu.27.try.ok, label %kizu.27.try.err
 // kizu.27.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.26)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.26, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.try.err.15.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.25, 2
 //   %kizu.try.err.15.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.15 = insertvalue %kizu.error.void %kizu.try.err.15.base, i64 %kizu.try.err.15.code, 1
@@ -1990,11 +1989,11 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.38.ok.bool = icmp ne i8 %kizu.38.ok, 0
 //   br i1 %kizu.38.ok.bool, label %kizu.38.try.ok, label %kizu.38.try.err
 // kizu.38.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.36)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.37)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.36, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.37, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.35
 // kizu.38.try.ok:
 //   %kizu.39 = load %kizu.array, ptr %kizu.33
@@ -2008,11 +2007,11 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.44.ok.bool = icmp ne i8 %kizu.44.ok, 0
 //   br i1 %kizu.44.ok.bool, label %kizu.44.try.ok, label %kizu.44.try.err
 // kizu.44.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.43)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.42, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.43, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.try.err.26.code = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.41, 2
 //   %kizu.try.err.26.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.26 = insertvalue %kizu.error.void %kizu.try.err.26.base, i64 %kizu.try.err.26.code, 1
@@ -2020,19 +2019,19 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 // kizu.44.try.ok:
 //   %kizu.44 = extractvalue %kizu.error.std__string__GrowError.std__string__String %kizu.41, 1
 //   %kizu.45 = load %kizu.array, ptr %kizu.33
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.45)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.45, ptr %kizu.1)
 //   %kizu.47 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.44)
 //   %kizu.48.ptr = getelementptr inbounds [5 x i8], ptr @.str.11, i64 0, i64 0
 //   %kizu.48.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.48.ptr, 0
 //   %kizu.48 = insertvalue %kizu.slice.u8 %kizu.48.base, i64 4, 1
 //   %kizu.49 = call i1 @std__mem__equal_bytes(%kizu.slice.u8 %kizu.47, %kizu.slice.u8 %kizu.48)
 //   call void @std__testing__expect(i1 %kizu.49)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.44)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.44, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
 //   %kizu.53 = load %kizu.array, ptr %kizu.10
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.53)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.53, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.2, ptr %kizu.1)
 //   %kizu.57 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.57
 // }
@@ -2051,7 +2050,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
 // kizu.6.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.5, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.4
 // kizu.6.try.ok:
 //   %kizu.7.ptr = getelementptr inbounds [7 x i8], ptr @.str.13, i64 0, i64 0
@@ -2063,7 +2062,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
 //   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
 // kizu.10.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9, ptr %kizu.1)
 //   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 1
 //   %kizu.try.err.3.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.3 = insertvalue %kizu.error.void %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 1
@@ -2075,7 +2074,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.13.ok.bool = icmp ne i8 %kizu.13.ok, 0
 //   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
 // kizu.13.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.11
 // kizu.13.try.ok:
 //   %kizu.14 = load %kizu.struct.std__string__String, ptr %kizu.3
@@ -2105,8 +2104,8 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
 //   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
 // kizu.30.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.28)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.29)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.28, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.29, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.27
 // kizu.30.try.ok:
 //   %kizu.31 = load %kizu.struct.std__string__String, ptr %kizu.26
@@ -2141,9 +2140,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.48.ok.bool = icmp ne i8 %kizu.48.ok, 0
 //   br i1 %kizu.48.ok.bool, label %kizu.48.try.ok, label %kizu.48.try.err
 // kizu.48.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.45)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.46)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.47)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.45, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.46, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.47, ptr %kizu.1)
 //   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.44, 1
 //   %kizu.try.err.10.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.10 = insertvalue %kizu.error.void %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 1
@@ -2157,9 +2156,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.54.ok.bool = icmp ne i8 %kizu.54.ok, 0
 //   br i1 %kizu.54.ok.bool, label %kizu.54.try.ok, label %kizu.54.try.err
 // kizu.54.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.51)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.52)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.53)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.51, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.52, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.53, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.50
 // kizu.54.try.ok:
 //   %kizu.55.ptr = getelementptr inbounds [6 x i8], ptr @.str.15, i64 0, i64 0
@@ -2173,9 +2172,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.60.ok.bool = icmp ne i8 %kizu.60.ok, 0
 //   br i1 %kizu.60.ok.bool, label %kizu.60.try.ok, label %kizu.60.try.err
 // kizu.60.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.57)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58)
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.59)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.57, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58, ptr %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.59, ptr %kizu.1)
 //   %kizu.try.err.17.code = extractvalue %kizu.error.std__mem__Error.void %kizu.56, 1
 //   %kizu.try.err.17.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.17 = insertvalue %kizu.error.void %kizu.try.err.17.base, i64 %kizu.try.err.17.code, 1
@@ -2190,11 +2189,11 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.65 = call i1 @std__mem__equal_bytes(%kizu.slice.u8 %kizu.63, %kizu.slice.u8 %kizu.64)
 //   call void @std__testing__expect(i1 %kizu.65)
 //   %kizu.67 = load %kizu.struct.std__string__String, ptr %kizu.42
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.67)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.67, ptr %kizu.1)
 //   %kizu.69 = load %kizu.struct.std__string__String, ptr %kizu.26
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.69)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.69, ptr %kizu.1)
 //   %kizu.71 = load %kizu.struct.std__string__String, ptr %kizu.3
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.71)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.71, ptr %kizu.1)
 //   %kizu.73 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.73
 // }
@@ -2214,7 +2213,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
 //   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
 // kizu.7.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.5
 // kizu.7.try.ok:
 //   %kizu.9 = call %kizu.error.void @append_utf8(ptr %kizu.3, i64 65279)
@@ -2223,7 +2222,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
 //   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
 // kizu.11.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.10)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.10, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.9
 // kizu.11.try.ok:
 //   %kizu.13 = call %kizu.error.void @append_utf8(ptr %kizu.3, i64 65533)
@@ -2232,7 +2231,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.13
 // kizu.15.try.ok:
 //   call void @std__string__trim_space_in_place(ptr %kizu.3)
@@ -2326,7 +2325,7 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   %kizu.57.ok.bool = icmp ne i8 %kizu.57.ok, 0
 //   br i1 %kizu.57.ok.bool, label %kizu.57.try.ok, label %kizu.57.try.err
 // kizu.57.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.56, ptr %kizu.1)
 //   %kizu.try.err.9.code = extractvalue %kizu.error.std__mem__Error.std__string__String %kizu.55, 2
 //   %kizu.try.err.9.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.9 = insertvalue %kizu.error.void %kizu.try.err.9.base, i64 %kizu.try.err.9.code, 1
@@ -2392,9 +2391,9 @@ test "string trim retains non-space Unicode and malformed UTF-8" {
 //   unreachable
 // kizu.81.ok.ok:
 //   %kizu.82 = load %kizu.struct.std__string__String, ptr %kizu.58
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.82)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.82, ptr %kizu.1)
 //   %kizu.84 = load %kizu.struct.std__string__String, ptr %kizu.3
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.84)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.84, ptr %kizu.1)
 //   %kizu.86 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.86
 // }

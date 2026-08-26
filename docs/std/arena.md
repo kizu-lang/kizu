@@ -7,7 +7,7 @@ std::arena::new<T>(allocator: Allocator) -> std::arena::Arena<T>
 arena.add(value: T) -> std::arena::Handle<T>
 arena.at(handle: std::arena::Handle<T>) -> &T
 arena.at_mut(handle: std::arena::Handle<T>) -> ?&var T
-arena.deinit() -> void
+arena.deinit(allocator: Allocator) -> void
 ```
 
 `new` は明示的な allocator capability を読み取り、`add` は value を arena へ

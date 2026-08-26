@@ -191,12 +191,12 @@ fn (self: &var Builder) add(node: Node) -> arena::Handle<Node> {
 
 fn copy_path(allocator: Allocator, source: &array::Array<string::String>) -> !array::Array<string::String> {
     var path = array::new<string::String>(allocator);
-    errdefer path.deinit();
+    errdefer path.deinit(allocator);
     var index = 0;
     while source.at(index) |part| {
         let bytes = part.as_bytes();
         let copied = try owned_text(allocator, bytes);
-        errdefer copied.deinit();
+        errdefer copied.deinit(allocator);
         try path.append(move copied);
         index = index + 1;
     }
@@ -238,7 +238,7 @@ fn parse_tree(allocator: Allocator, text: []u8) -> !TypeTree {
         position: 0,
         nodes: arena::new<Node>(allocator)
     };
-    errdefer parser.deinit();
+    errdefer parser.deinit(allocator);
     let root = try parser.parse_type();
     if parser.position != mem::len(text) {
         return Error::TrailingText;
@@ -310,7 +310,7 @@ fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
 // empty parameter list is the `fn() -> T` a nullary function points at.
 fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
     var params = array::new<arena::Handle<Node>>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     if !self.accept(")") {
         while true {
             try params.append(try self.parse_type());
@@ -369,7 +369,7 @@ fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
 // parse_name reads a `::` separated name and its static arguments.
 fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
     var path = array::new<string::String>(self.allocator);
-    errdefer path.deinit();
+    errdefer path.deinit(self.allocator);
     while true {
         let span = self.parse_ident();
         if span.start == span.end {
@@ -384,7 +384,7 @@ fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
         }
     }
     var args = array::new<arena::Handle<Node>>(self.allocator);
-    errdefer args.deinit();
+    errdefer args.deinit(self.allocator);
     if self.accept("<") {
         while true {
             try args.append(try self.parse_type());
@@ -452,7 +452,7 @@ fn is_digit(byte: u8) -> bool {
 
 fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes(bytes);
     return move out;
 }
@@ -463,7 +463,7 @@ pub fn split_args(
     text: []u8
 ) -> !array::Array<string::String> {
     var parts = array::new<string::String>(allocator);
-    errdefer parts.deinit();
+    errdefer parts.deinit(allocator);
     if try split_args_into(allocator, text, &var parts) |reason| {
         return reason;
     }
@@ -476,9 +476,9 @@ pub fn split_args_optional(
     text: []u8
 ) -> !?array::Array<string::String> {
     var parts = array::new<string::String>(allocator);
-    errdefer parts.deinit();
+    errdefer parts.deinit(allocator);
     if try split_args_into(allocator, text, &var parts) |_| {
-        parts.deinit();
+        parts.deinit(allocator);
         return null;
     }
     return move parts;
@@ -626,7 +626,7 @@ pub fn render(
     value: Type
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try append_render(&var out, table, value);
     return move out;
 }
@@ -955,7 +955,7 @@ fn (self: &var PlainNameTransform) fold_name(builder: &var Builder, path: array:
 
 fn transform_names<M, F>(source: &Table, value: Type, destination: &var Table, mapper: &var M, folder: &var F) -> !Type {
     var builder = new_builder(destination.allocator);
-    errdefer builder.deinit();
+    errdefer builder.deinit(destination.allocator);
     let root = try map_names_node<M, F>(&var builder, source.trees.at(value.tree), value.root, mapper, folder);
     return finish_builder(move builder, destination, root);
 }
@@ -994,7 +994,7 @@ fn map_names_node<M, F>(builder: &var Builder, value: &TypeTree, handle: arena::
 fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     let allocator = builder.allocator;
     var params = array::new<arena::Handle<Node>>(allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(builder.allocator);
     var index = 0;
     while node.params.get(index) |param| {
         try params.append(try map_names_node<M, F>(builder, value, param, mapper, folder));
@@ -1010,10 +1010,10 @@ fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, ma
 
 fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     var path = try mapper.rename_path(builder.allocator, &node.path);
-    errdefer path.deinit();
+    errdefer path.deinit(builder.allocator);
     let allocator = builder.allocator;
     var args = array::new<arena::Handle<Node>>(allocator);
-    errdefer args.deinit();
+    errdefer args.deinit(builder.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
         try args.append(try map_names_node<M, F>(builder, value, arg, mapper, folder));
@@ -1042,7 +1042,7 @@ pub fn substitute(
         return value;
     }
     var builder = new_builder(table.allocator);
-    errdefer builder.deinit();
+    errdefer builder.deinit(table.allocator);
     let root = try substitute_node(
         &var builder,
         table,
@@ -1061,9 +1061,9 @@ pub fn wrap_borrow(
     mutable: bool
 ) -> !Type {
     var substitutions = map::new<[]u8, Type>(table.allocator);
-    defer substitutions.deinit();
+    defer substitutions.deinit(table.allocator);
     var builder = new_builder(table.allocator);
-    errdefer builder.deinit();
+    errdefer builder.deinit(table.allocator);
     let elem = try substitute_node(
         &var builder,
         table,
@@ -1158,7 +1158,7 @@ fn substitute_func(
 ) -> !arena::Handle<Node> {
     let allocator = builder.allocator;
     var params = array::new<arena::Handle<Node>>(allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(builder.allocator);
     var index = 0;
     while node.params.get(index) |param| {
         try params.append(try substitute_node(
@@ -1200,7 +1200,7 @@ fn substitute_name(
         }
     }
     var args = array::new<arena::Handle<Node>>(builder.allocator);
-    errdefer args.deinit();
+    errdefer args.deinit(builder.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
         try args.append(try substitute_node(
@@ -1248,12 +1248,12 @@ pub fn substitute_text(
         return owned_text(allocator, text);
     }
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let parsed = try table.parse(text);
     var rendered_substitutions = RenderedSubstitutions {
         values: map::new<[]u8, string::String>(allocator)
     };
-    defer rendered_substitutions.deinit();
+    defer rendered_substitutions.deinit(allocator);
     var index = 0;
     while substitutions.key_at(index) |name| {
         if substitutions.get(name) |replacement| {
@@ -1280,12 +1280,12 @@ pub fn substitute_owned_text(
         return owned_text(allocator, text);
     }
     var table = new(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let parsed = try table.parse(text);
     var rendered_substitutions = RenderedSubstitutions {
         values: map::new<[]u8, string::String>(allocator)
     };
-    defer rendered_substitutions.deinit();
+    defer rendered_substitutions.deinit(allocator);
     var index = 0;
     while names.at(index) |name| {
         if replacements.at(index) |replacement| {
@@ -1320,7 +1320,7 @@ fn render_substituted(
     substitutions: &RenderedSubstitutions
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try append_tree_node_with<RenderedSubstitutions>(
         &var out,
         table.trees.at(parsed.tree),

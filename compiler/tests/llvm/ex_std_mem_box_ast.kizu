@@ -16,10 +16,10 @@ pub union Expr {
     Binary(BinaryExpr),
 }
 
-fn (self: Expr) deinit() -> void {
+fn (self: Expr) deinit(allocator: Allocator) -> void {
     match self {
         Ident(_) => return,
-        Binary(binary) => binary.deinit(),
+        Binary(binary) => binary.deinit(allocator),
     }
 }
 
@@ -31,8 +31,8 @@ fn expect_ident(expr: &Expr, expected: i64) -> !void {
     return;
 }
 
-fn expect_binary(binary: BinaryExpr) -> !void {
-    defer binary.deinit();
+fn expect_binary(allocator: Allocator, binary: BinaryExpr) -> !void {
+    defer binary.deinit(allocator);
     let borrowed = binary.left.borrow();
     try expect_ident(borrowed, 1);
     return;
@@ -50,7 +50,7 @@ fn make_binary(allocator: Allocator) -> !Expr {
         end: 8
     };
     let left = try mem::box<Expr>(allocator, Expr::Ident(left_span));
-    errdefer left.deinit();
+    errdefer left.deinit(allocator);
     let right = try mem::box<Expr>(allocator, Expr::Ident(right_span));
     return Expr::Binary(BinaryExpr {
         left: move left,
@@ -63,7 +63,7 @@ fn main() -> !void {
     let expr = try make_binary(allocator);
     match expr {
         Ident(span) => testing::expect_equal<i64>(0, span.start),
-        Binary(binary) => try expect_binary(move binary),
+        Binary(binary) => try expect_binary(allocator, move binary),
     }
     return;
 }
@@ -71,7 +71,6 @@ fn main() -> !void {
 // run
 // features: std-mem box recursive-ast
 // output:
-
 
 // llvm
 // emit:
@@ -102,7 +101,7 @@ fn main() -> !void {
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
 // declare ptr @std__mem__Box_borrow_Expr(ptr)
-// declare void @std__mem__Box_deinit_Expr(ptr)
+// declare void @std__mem__Box_deinit_Expr(ptr, ptr)
 // declare %kizu.error.std__mem__Error.std__mem__Box_Expr_ @std__mem__box_Expr(ptr, %kizu.union.Expr)
 // declare ptr @std__mem__page_allocator()
 // declare void @std__testing__expect(i1)
@@ -110,7 +109,7 @@ fn main() -> !void {
 // 
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define void @Expr_deinit(%kizu.union.Expr %kizu.self) {
+// define void @Expr_deinit(%kizu.union.Expr %kizu.self, ptr %kizu.allocator) {
 // entry:
 //   %kizu.3.slot = alloca %kizu.union.Expr, align 8
 //   %kizu.5.slot = alloca %kizu.union.Expr, align 8
@@ -135,7 +134,7 @@ fn main() -> !void {
 //   %kizu.5.payload.ptr = getelementptr %kizu.union.Expr, ptr %kizu.5.slot, i32 0, i32 1
 //   %kizu.5 = load %kizu.struct.BinaryExpr, ptr %kizu.5.payload.ptr, align 8
 //   store %kizu.struct.BinaryExpr %kizu.5, ptr %kizu.arg.0.1
-//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.1)
+//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.1, ptr %kizu.allocator)
 //   br label %match.end.1
 // match.unreachable.6:
 //   unreachable
@@ -178,7 +177,7 @@ fn main() -> !void {
 //   unreachable
 // }
 // 
-// define %kizu.error.void @expect_binary(ptr byval(%kizu.struct.BinaryExpr) %kizu.binary.addr) {
+// define %kizu.error.void @expect_binary(ptr %kizu.allocator, ptr byval(%kizu.struct.BinaryExpr) %kizu.binary.addr) {
 // entry:
 //   %kizu.arg.0.2 = alloca %kizu.struct.BinaryExpr
 //   %kizu.arg.0.3 = alloca %kizu.struct.BinaryExpr
@@ -191,11 +190,11 @@ fn main() -> !void {
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
 //   store %kizu.struct.BinaryExpr %kizu.binary, ptr %kizu.arg.0.2
-//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.2)
+//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.2, ptr %kizu.allocator)
 //   ret %kizu.error.void %kizu.4
 // kizu.5.try.ok:
 //   store %kizu.struct.BinaryExpr %kizu.binary, ptr %kizu.arg.0.3
-//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.3)
+//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.3, ptr %kizu.allocator)
 //   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.7
 // }
@@ -235,7 +234,7 @@ fn main() -> !void {
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
 // kizu.12.try.err:
-//   call void @std__mem__Box_deinit_Expr(ptr %kizu.9)
+//   call void @std__mem__Box_deinit_Expr(ptr %kizu.9, ptr %kizu.allocator)
 //   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.std__mem__Box_Expr_ %kizu.11, 2
 //   %kizu.try.err.3.base = insertvalue %kizu.error.Expr zeroinitializer, i8 0, 0
 //   %kizu.try.err.3 = insertvalue %kizu.error.Expr %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 2
@@ -258,7 +257,7 @@ fn main() -> !void {
 // entry:
 //   %kizu.6.slot = alloca %kizu.union.Expr, align 8
 //   %kizu.11.slot = alloca %kizu.union.Expr, align 8
-//   %kizu.arg.0.9 = alloca %kizu.struct.BinaryExpr
+//   %kizu.arg.1.9 = alloca %kizu.struct.BinaryExpr
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   %kizu.2 = call %kizu.error.Expr @make_binary(ptr %kizu.1)
@@ -314,8 +313,8 @@ fn main() -> !void {
 //   store %kizu.union.Expr %kizu.3, ptr %kizu.11.slot, align 8
 //   %kizu.11.payload.ptr = getelementptr %kizu.union.Expr, ptr %kizu.11.slot, i32 0, i32 1
 //   %kizu.11 = load %kizu.struct.BinaryExpr, ptr %kizu.11.payload.ptr, align 8
-//   store %kizu.struct.BinaryExpr %kizu.11, ptr %kizu.arg.0.9
-//   %kizu.12 = call %kizu.error.void @expect_binary(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.9)
+//   store %kizu.struct.BinaryExpr %kizu.11, ptr %kizu.arg.1.9
+//   %kizu.12 = call %kizu.error.void @expect_binary(ptr %kizu.1, ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.1.9)
 //   %kizu.13.ok = extractvalue %kizu.error.void %kizu.12, 0
 //   %kizu.13.ok.bool = icmp ne i8 %kizu.13.ok, 0
 //   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
@@ -333,13 +332,13 @@ fn main() -> !void {
 //   unreachable
 // }
 // 
-// define void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.self.addr) {
+// define void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.BinaryExpr, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.BinaryExpr %kizu.self, 0
-//   call void @std__mem__Box_deinit_Expr(ptr %kizu.1)
+//   call void @std__mem__Box_deinit_Expr(ptr %kizu.1, ptr %kizu.allocator)
 //   %kizu.3 = extractvalue %kizu.struct.BinaryExpr %kizu.self, 1
-//   call void @std__mem__Box_deinit_Expr(ptr %kizu.3)
+//   call void @std__mem__Box_deinit_Expr(ptr %kizu.3, ptr %kizu.allocator)
 //   ret void
 // }
 // opt:
@@ -370,7 +369,7 @@ fn main() -> !void {
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
 // declare ptr @std__mem__Box_borrow_Expr(ptr)
-// declare void @std__mem__Box_deinit_Expr(ptr)
+// declare void @std__mem__Box_deinit_Expr(ptr, ptr)
 // declare %kizu.error.std__mem__Error.std__mem__Box_Expr_ @std__mem__box_Expr(ptr, %kizu.union.Expr)
 // declare ptr @std__mem__page_allocator()
 // declare void @std__testing__expect(i1)
@@ -378,7 +377,7 @@ fn main() -> !void {
 // 
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define void @Expr_deinit(%kizu.union.Expr %kizu.self) {
+// define void @Expr_deinit(%kizu.union.Expr %kizu.self, ptr %kizu.allocator) {
 // entry:
 //   %kizu.5.slot = alloca %kizu.union.Expr, align 8
 //   %kizu.arg.0.1 = alloca %kizu.struct.BinaryExpr
@@ -399,7 +398,7 @@ fn main() -> !void {
 //   %kizu.5.payload.ptr = getelementptr %kizu.union.Expr, ptr %kizu.5.slot, i32 0, i32 1
 //   %kizu.5 = load %kizu.struct.BinaryExpr, ptr %kizu.5.payload.ptr, align 8
 //   store %kizu.struct.BinaryExpr %kizu.5, ptr %kizu.arg.0.1
-//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.1)
+//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.1, ptr %kizu.allocator)
 //   br label %match.end.1
 // match.unreachable.6:
 //   unreachable
@@ -438,7 +437,7 @@ fn main() -> !void {
 //   unreachable
 // }
 // 
-// define %kizu.error.void @expect_binary(ptr byval(%kizu.struct.BinaryExpr) %kizu.binary.addr) {
+// define %kizu.error.void @expect_binary(ptr %kizu.allocator, ptr byval(%kizu.struct.BinaryExpr) %kizu.binary.addr) {
 // entry:
 //   %kizu.arg.0.2 = alloca %kizu.struct.BinaryExpr
 //   %kizu.arg.0.3 = alloca %kizu.struct.BinaryExpr
@@ -451,11 +450,11 @@ fn main() -> !void {
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
 //   store %kizu.struct.BinaryExpr %kizu.binary, ptr %kizu.arg.0.2
-//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.2)
+//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.2, ptr %kizu.allocator)
 //   ret %kizu.error.void %kizu.4
 // kizu.5.try.ok:
 //   store %kizu.struct.BinaryExpr %kizu.binary, ptr %kizu.arg.0.3
-//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.3)
+//   call void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.3, ptr %kizu.allocator)
 //   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.7
 // }
@@ -495,7 +494,7 @@ fn main() -> !void {
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
 // kizu.12.try.err:
-//   call void @std__mem__Box_deinit_Expr(ptr %kizu.9)
+//   call void @std__mem__Box_deinit_Expr(ptr %kizu.9, ptr %kizu.allocator)
 //   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.std__mem__Box_Expr_ %kizu.11, 2
 //   %kizu.try.err.3.base = insertvalue %kizu.error.Expr zeroinitializer, i8 0, 0
 //   %kizu.try.err.3 = insertvalue %kizu.error.Expr %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 2
@@ -518,7 +517,7 @@ fn main() -> !void {
 // entry:
 //   %kizu.6.slot = alloca %kizu.union.Expr, align 8
 //   %kizu.11.slot = alloca %kizu.union.Expr, align 8
-//   %kizu.arg.0.9 = alloca %kizu.struct.BinaryExpr
+//   %kizu.arg.1.9 = alloca %kizu.struct.BinaryExpr
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   %kizu.2 = call %kizu.error.Expr @make_binary(ptr %kizu.1)
@@ -574,8 +573,8 @@ fn main() -> !void {
 //   store %kizu.union.Expr %kizu.3, ptr %kizu.11.slot, align 8
 //   %kizu.11.payload.ptr = getelementptr %kizu.union.Expr, ptr %kizu.11.slot, i32 0, i32 1
 //   %kizu.11 = load %kizu.struct.BinaryExpr, ptr %kizu.11.payload.ptr, align 8
-//   store %kizu.struct.BinaryExpr %kizu.11, ptr %kizu.arg.0.9
-//   %kizu.12 = call %kizu.error.void @expect_binary(ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.0.9)
+//   store %kizu.struct.BinaryExpr %kizu.11, ptr %kizu.arg.1.9
+//   %kizu.12 = call %kizu.error.void @expect_binary(ptr %kizu.1, ptr byval(%kizu.struct.BinaryExpr) %kizu.arg.1.9)
 //   %kizu.13.ok = extractvalue %kizu.error.void %kizu.12, 0
 //   %kizu.13.ok.bool = icmp ne i8 %kizu.13.ok, 0
 //   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
@@ -593,12 +592,12 @@ fn main() -> !void {
 //   unreachable
 // }
 // 
-// define void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.self.addr) {
+// define void @BinaryExpr_deinit(ptr byval(%kizu.struct.BinaryExpr) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.BinaryExpr, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.BinaryExpr %kizu.self, 0
-//   call void @std__mem__Box_deinit_Expr(ptr %kizu.1)
+//   call void @std__mem__Box_deinit_Expr(ptr %kizu.1, ptr %kizu.allocator)
 //   %kizu.3 = extractvalue %kizu.struct.BinaryExpr %kizu.self, 1
-//   call void @std__mem__Box_deinit_Expr(ptr %kizu.3)
+//   call void @std__mem__Box_deinit_Expr(ptr %kizu.3, ptr %kizu.allocator)
 //   ret void
 // }

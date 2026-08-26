@@ -20,7 +20,7 @@ fn (self: &var Lowerer) new_block(name: Name) -> !Block {
 fn (self: &var Lowerer) next_block_name(prefix: []u8) -> !Name {
     self.next_block = self.next_block + 1;
     var out = try string::from_bytes(self.allocator, prefix);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     try out.append_byte(cast<u8>(46));
     try fmt::append_i64(&var out, self.next_block);
     return self.module.names.intern_owned(move out);
@@ -30,7 +30,7 @@ fn (self: &var Lowerer) next_block_name(prefix: []u8) -> !Name {
 fn (self: &var Lowerer) next(type_name: Name) -> !Value {
     self.next_value = self.next_value + 1;
     var out = try string::from_bytes(self.allocator, "%");
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     try fmt::append_i64(&var out, self.next_value);
     let name = try self.module.names.intern_owned(move out);
     return Value { name: name, type_name: type_name };
@@ -76,7 +76,7 @@ fn (self: &var Lowerer) emit_with(
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
     var instr = self.module.blank_instr(result, op, operand, immediate);
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     var index = 0;
     while args.get(index) |arg| {
         index = index + 1;
@@ -106,7 +106,7 @@ fn (self: &var Lowerer) emit3(op: Op, type_name: Name, a: Value, b: Value, c: Va
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
     var instr = self.module.blank_instr(result, op, empty_name(), empty_name());
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     try instr.args.append(a);
     try instr.args.append(b);
     try instr.args.append(c);
@@ -128,7 +128,7 @@ fn (self: &var Lowerer) emit_imm1(op: Op, type_name: Name, immediate: Name, a: V
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
     var instr = self.module.blank_instr(result, op, empty_name(), immediate);
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     try instr.args.append(a);
     let _ = try self.module.add_instr(self.block, move instr);
     return result;
@@ -139,7 +139,7 @@ fn (self: &var Lowerer) emit_imm2(op: Op, type_name: Name, immediate: Name, a: V
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
     var instr = self.module.blank_instr(result, op, empty_name(), immediate);
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     try instr.args.append(a);
     try instr.args.append(b);
     let _ = try self.module.add_instr(self.block, move instr);
@@ -152,7 +152,7 @@ fn (self: &var Lowerer) emit_op1(op: Op, operand: Name, type_name: Name, a: Valu
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
     var instr = self.module.blank_instr(result, op, operand, empty_name());
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     try instr.args.append(a);
     let _ = try self.module.add_instr(self.block, move instr);
     return result;
@@ -164,7 +164,7 @@ fn (self: &var Lowerer) emit_op2(op: Op, operand: Name, type_name: Name, a: Valu
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
     var instr = self.module.blank_instr(result, op, operand, empty_name());
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     try instr.args.append(a);
     try instr.args.append(b);
     let _ = try self.module.add_instr(self.block, move instr);
@@ -225,7 +225,7 @@ fn (self: &var Lowerer) box_element_type(name: Name) -> !?Name {
 fn (self: &var Lowerer) map_key_value_type(name: Name, key_out: &var Name) -> !?Name {
     let args_text = try self.module.names.generic_arg_of(name, "std::map::Map") orelse return null;
     var args = try self.split_static_args(args_text);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() != 2 {
         return null;
     }
@@ -279,10 +279,10 @@ fn (self: &var Lowerer) handle_type(arena: Name) -> !Name {
 /// does.
 fn (self: &var Lowerer) split_static_args(args: Name) -> !array::Array<Name> {
     let args_copy = try self.module.names.copy(args);
-    defer args_copy.deinit();
+    defer args_copy.deinit(self.allocator);
     let bytes = args_copy.as_bytes();
     if try typ::split_args_optional(self.allocator, bytes) |found| {
-        defer found.deinit();
+        defer found.deinit(self.allocator);
         return self.module.names.intern_all(&found);
     }
     return array::new<Name>(self.allocator);
@@ -293,7 +293,7 @@ fn (self: &var Lowerer) split_static_args(args: Name) -> !array::Array<Name> {
 /// supported map shape.
 fn (self: &var Lowerer) map_instance_type(type_arg: Name, value_out: &var Name) -> !?Name {
     var args = try self.split_static_args(type_arg);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() != 2 {
         return null;
     }
@@ -356,9 +356,9 @@ fn error_union_parts_in(types: &var typ::Table, names: &var NameTable, result: N
     let parsed = try types.parse(bytes);
     var has_err = false;
     var err_text = string::new(names.allocator);
-    defer err_text.deinit();
+    defer err_text.deinit(names.allocator);
     var ok_text = string::new(names.allocator);
-    defer ok_text.deinit();
+    defer ok_text.deinit(names.allocator);
     match typ::root_node(types, parsed) {
         ErrorUnion(node) => {
             has_err = true;

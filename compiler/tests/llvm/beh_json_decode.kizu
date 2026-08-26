@@ -40,7 +40,7 @@ test "json decode undoes string escapes" {
         \\{"name": "a\tbAé", "active": true}
     ;
     var profile = try json::decode<Profile>(allocator, document);
-    defer profile.deinit();
+    defer profile.deinit(allocator);
     testing::expect(profile.active);
     // a, TAB, b, A, and the two bytes é is in UTF-8.
     testing::expect_equal<i64>(6, profile.name.len());
@@ -54,7 +54,7 @@ test "json decode joins a surrogate pair" {
         \\{"name": "😀", "active": false}
     ;
     var profile = try json::decode<Profile>(allocator, document);
-    defer profile.deinit();
+    defer profile.deinit(allocator);
     testing::expect_equal<i64>(4, profile.name.len());
 }
 
@@ -64,7 +64,7 @@ test "json decode reads a nested struct" {
         \\{"count": 7, "head": {"active": true, "name": "abc"}}
     ;
     var wrapper = try json::decode<Wrapper>(allocator, document);
-    defer wrapper.deinit();
+    defer wrapper.deinit(allocator);
     testing::expect_equal<i64>(7, wrapper.count);
     testing::expect_equal<i64>(3, wrapper.head.name.len());
 }
@@ -77,9 +77,9 @@ test "json decode round trips through encode" {
         \\{"name":"alice","active":true}
     ;
     var profile = try json::decode<Profile>(allocator, document);
-    defer profile.deinit();
+    defer profile.deinit(allocator);
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<Profile>(allocator, profile, out);
     let bytes = out.as_bytes();
     testing::expect_equal<[]u8>(document, bytes);
@@ -154,7 +154,7 @@ test "json decode finds a Value object member by key" {
         \\{"user": "alice", "visits": [1, 2]}
     ;
     var value = try json::decode<json::Value>(allocator, document);
-    defer value.deinit();
+    defer value.deinit(allocator);
     testing::expect_equal<[]u8>("str", value_at_key(&value, "user"));
     testing::expect_equal<[]u8>("arr", value_at_key(&value, "visits"));
     testing::expect_equal<[]u8>("missing", value_at_key(&value, "absent"));
@@ -166,7 +166,7 @@ test "json decode reads a document as a Value" {
         \\{"n": 1, "arr": [1, "two"], "z": null}
     ;
     var value = try json::decode<json::Value>(allocator, document);
-    defer value.deinit();
+    defer value.deinit(allocator);
     testing::expect_equal<[]u8>("obj", value_kind(value));
     testing::expect_equal<i64>(3, value_size(value));
 }
@@ -177,7 +177,7 @@ test "json decode reads a scalar as a Value" {
         \\42
     ;
     var value = try json::decode<json::Value>(allocator, document);
-    defer value.deinit();
+    defer value.deinit(allocator);
     testing::expect_equal<[]u8>("i64", value_kind(value));
     testing::expect_equal<i64>(42, value_size(value));
 }
@@ -188,7 +188,7 @@ test "json decode reads an array of scalars" {
         \\[1, 2, 3]
     ;
     var numbers = try json::decode<array::Array<i64>>(allocator, document);
-    defer numbers.deinit();
+    defer numbers.deinit(allocator);
     testing::expect_equal<i64>(3, numbers.len());
     testing::expect_equal<i64>(3, numbers.get_or_panic(2));
 }
@@ -199,7 +199,7 @@ test "json decode reads an array of owners" {
         \\["ab", "cde"]
     ;
     var names = try json::decode<array::Array<string::String>>(allocator, document);
-    defer names.deinit();
+    defer names.deinit(allocator);
     testing::expect_equal<i64>(2, names.len());
 }
 
@@ -217,7 +217,7 @@ test "json decode reads arrays nested in structs" {
         \\{"rows": [{"cells": [1, 2]}, {"cells": [3]}]}
     ;
     var grid = try json::decode<Grid>(allocator, document);
-    defer grid.deinit();
+    defer grid.deinit(allocator);
     testing::expect_equal<i64>(2, grid.rows.len());
 }
 
@@ -232,11 +232,11 @@ pub union Cell {
     Name(string::String),
 }
 
-fn (self: Cell) deinit() -> void {
+fn (self: Cell) deinit(allocator: Allocator) -> void {
     match self {
         Missing => return,
         Number(_) => return,
-        Name(text) => text.deinit(),
+        Name(text) => text.deinit(allocator),
     }
     return;
 }
@@ -265,7 +265,7 @@ test "json decode reads a payload-free union variant from a string" {
         \\"Missing"
     ;
     var cell = try json::decode<Cell>(allocator, document);
-    defer cell.deinit();
+    defer cell.deinit(allocator);
     let read = match &cell {
         Missing => 0,
         Number(_) => 1,
@@ -280,7 +280,7 @@ test "json decode reads a union payload from the object naming it" {
         \\{"Name": "ab"}
     ;
     var cell = try json::decode<Cell>(allocator, document);
-    defer cell.deinit();
+    defer cell.deinit(allocator);
     let read = match &cell {
         Missing => 0,
         Number(_) => 0,
@@ -297,7 +297,7 @@ test "json decode reads sum cells of a struct" {
         \\{"level": "Low", "cell": {"Number": 5}}
     ;
     var record = try json::decode<Record>(allocator, document);
-    defer record.deinit();
+    defer record.deinit(allocator);
     let level = match record.level {
         Low => 0,
         High => 1,
@@ -318,7 +318,7 @@ fn key_order(
     counts: &map::Map<[]u8, i64>,
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while counts.key_at(index) |key| {
         try out.append_bytes(key);
@@ -336,13 +336,13 @@ test "json decode reads an object into a map" {
         \\{"alice": 2, "bob": 1}
     ;
     var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     testing::expect_equal<i64>(2, counts.len());
     testing::expect_equal<i64>(2, counts.get("alice") orelse 0);
     testing::expect_equal<i64>(1, counts.get("bob") orelse 0);
     // The map keeps the document's order, so the keys come back in it.
     var order = try key_order(allocator, &counts);
-    defer order.deinit();
+    defer order.deinit(allocator);
     let joined = order.as_bytes();
     testing::expect_equal<[]u8>("alice,bob,", joined);
 }
@@ -355,9 +355,9 @@ test "json decode undoes escapes in a map key" {
         \\{"c\u0061rol": 4}
     ;
     var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     var order = try key_order(allocator, &counts);
-    defer order.deinit();
+    defer order.deinit(allocator);
     let joined = order.as_bytes();
     testing::expect_equal<[]u8>("carol,", joined);
     testing::expect_equal<i64>(4, counts.get("carol") orelse 0);
@@ -372,7 +372,7 @@ test "json decode reads an object of strings into a map" {
         \\{"first": "alice", "last": "carol"}
     ;
     var names = try json::decode<map::Map<[]u8, string::String>>(allocator, document);
-    defer names.deinit();
+    defer names.deinit(allocator);
     testing::expect_equal<i64>(2, names.len());
     if names.at("first") |name| {
         let bytes = name.as_bytes();
@@ -387,7 +387,7 @@ test "json decode reads an object of strings into a map" {
         \\{"first":"alice","last":"carol"}
     ;
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<map::Map<[]u8, string::String>>(allocator, names, out);
     let text = out.as_bytes();
     testing::expect_equal<[]u8>(expected, text);
@@ -400,7 +400,7 @@ test "json decode reads an object of objects into a map" {
     ;
     var counts =
         try json::decode<map::Map<[]u8, map::Map<[]u8, i64>>>(allocator, document);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     testing::expect_equal<i64>(2, counts.len());
     if counts.at("bob") |held| {
         testing::expect_equal<i64>(2, held.len());
@@ -415,7 +415,7 @@ test "json decode reads an object of objects into a map" {
 test "json decode reads a box as the value it holds" {
     let allocator = mem::page_allocator();
     var total = try json::decode<mem::Box<i64>>(allocator, "7");
-    defer total.deinit();
+    defer total.deinit(allocator);
     let held = total.borrow();
     testing::expect_equal<i64>(7, held.*);
 }
@@ -433,9 +433,9 @@ test "json decode round trips a map and a box through encode" {
         \\{"counts": {"alice": 2, "bob": 1}, "total": 3}
     ;
     var report = try json::decode<Report>(allocator, document);
-    defer report.deinit();
+    defer report.deinit(allocator);
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<Report>(allocator, &report, &var out);
     let written = out.as_bytes();
     testing::expect_equal<[]u8>(
@@ -454,7 +454,7 @@ test "json decode reads an optional field that has a value" {
         \\{"name": "alice", "nick": 7}
     ;
     var visitor = try json::decode<Visitor>(allocator, document);
-    defer visitor.deinit();
+    defer visitor.deinit(allocator);
     testing::expect_equal<i64>(7, visitor.nick orelse 0);
 }
 
@@ -466,7 +466,7 @@ test "json decode reads a null optional field" {
         \\{"name": "alice", "nick": null}
     ;
     var visitor = try json::decode<Visitor>(allocator, document);
-    defer visitor.deinit();
+    defer visitor.deinit(allocator);
     testing::expect_equal<i64>(-1, visitor.nick orelse -1);
 }
 
@@ -476,7 +476,7 @@ test "json decode reads an omitted optional field as null" {
         \\{"name": "alice"}
     ;
     var visitor = try json::decode<Visitor>(allocator, document);
-    defer visitor.deinit();
+    defer visitor.deinit(allocator);
     testing::expect_equal<i64>(-1, visitor.nick orelse -1);
     testing::expect_equal<i64>(5, visitor.name.len());
 }
@@ -493,10 +493,10 @@ pub struct Named {
     pub nick: ?string::String,
 }
 
-fn (self: Named) deinit() -> void {
-    self.name.deinit();
+fn (self: Named) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
     if self.nick |held| {
-        held.deinit();
+        held.deinit(allocator);
     }
     return;
 }
@@ -518,24 +518,24 @@ test "json decode reads an optional string field" {
 
     var given = try json::decode<Named>(allocator, \\{"name": "alice", "nick": "al"}
     );
-    defer given.deinit();
+    defer given.deinit(allocator);
     expect_nick(&given, "al");
 
     var written = try json::decode<Named>(allocator, \\{"name": "alice", "nick": null}
     );
-    defer written.deinit();
+    defer written.deinit(allocator);
     expect_nick(&written, "none");
 
     var omitted = try json::decode<Named>(allocator, \\{"name": "alice"}
     );
-    defer omitted.deinit();
+    defer omitted.deinit(allocator);
     expect_nick(&omitted, "none");
 
     let expected =
         \\{"name":"alice","nick":"al"}
     ;
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<Named>(allocator, given, out);
     let text = out.as_bytes();
     testing::expect_equal<[]u8>(expected, text);
@@ -547,11 +547,10 @@ test "json decode reads an omitted optional field of a nested struct" {
         \\{"count": 2, "head": {"name": "alice"}}
     ;
     var page = try json::decode<Page>(allocator, document);
-    defer page.deinit();
+    defer page.deinit(allocator);
     testing::expect_equal<i64>(2, page.count);
     testing::expect_equal<i64>(-1, page.head.nick orelse -1);
 }
-
 
 // llvm
 // emit:
@@ -703,19 +702,19 @@ test "json decode reads an omitted optional field of a nested struct" {
 // declare void @kizu_map_deinit(ptr)
 // 
 // declare ptr @kizu_box_new(ptr, i64, ptr)
-// declare void @kizu_box_deinit(ptr)
+// declare void @kizu_box_deinit(ptr, ptr, i64)
 // 
 // declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
 // 
-// declare void @std__array__Array_deinit_Row(%kizu.array)
-// declare void @std__array__Array_deinit_i64(%kizu.array)
-// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array)
+// declare void @std__array__Array_deinit_Row(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i64 @std__array__Array_get_or_panic_i64(%kizu.array, i64)
 // declare i64 @std__array__Array_len_Row(%kizu.array)
 // declare i64 @std__array__Array_len_i64(%kizu.array)
 // declare i64 @std__array__Array_len_std_3a_3ajson_3a_3aValue(%kizu.array)
 // declare i64 @std__array__Array_len_std_3a_3astring_3a_3aString(%kizu.array)
-// declare void @std__json__Value_deinit(%kizu.union.std__json__Value)
+// declare void @std__json__Value_deinit(%kizu.union.std__json__Value, ptr)
 // declare %kizu.error.std__json__DecodeError.Cell @std__json__decode_Cell(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__json__DecodeError.Counts @std__json__decode_Counts(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__json__DecodeError.Grid @std__json__decode_Grid(ptr, %kizu.slice.u8)
@@ -742,7 +741,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 // declare %kizu.opt._std__json__Value @std__map__Map_at__5b_5du8_std_3a_3ajson_3a_3aValue(ptr, %kizu.slice.u8)
 // declare %kizu.opt._std__map__Map___u8__i64_ @std__map__Map_at__5b_5du8_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, %kizu.slice.u8)
 // declare %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
-// declare void @std__map__Map_deinit__5b_5du8_i64(ptr)
+// declare void @std__map__Map_deinit__5b_5du8_i64(ptr, ptr)
 // declare %kizu.opt.i64 @std__map__Map_get__5b_5du8_i64(ptr, %kizu.slice.u8)
 // declare %kizu.opt.slice.u8 @std__map__Map_key_at__5b_5du8_i64(ptr, i64)
 // declare i64 @std__map__Map_len__5b_5du8_i64(ptr)
@@ -750,12 +749,12 @@ test "json decode reads an omitted optional field of a nested struct" {
 // declare i64 @std__map__Map_len__5b_5du8_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr)
 // declare i64 @std__map__Map_len__5b_5du8_std_3a_3astring_3a_3aString(ptr)
 // declare i64 @std__mem__Box_borrow_i64(ptr)
-// declare void @std__mem__Box_deinit_i64(ptr)
+// declare void @std__mem__Box_deinit_i64(ptr, ptr)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // declare void @std__testing__expect(i1)
@@ -999,7 +998,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // }
 // 
-// define void @Cell_deinit(%kizu.union.Cell %kizu.self) {
+// define void @Cell_deinit(%kizu.union.Cell %kizu.self, ptr %kizu.allocator) {
 // entry:
 //   %kizu.4.slot = alloca %kizu.union.Cell, align 8
 //   %kizu.6.slot = alloca %kizu.union.Cell, align 8
@@ -1027,7 +1026,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   store %kizu.union.Cell %kizu.self, ptr %kizu.6.slot, align 8
 //   %kizu.6.payload.ptr = getelementptr %kizu.union.Cell, ptr %kizu.6.slot, i32 0, i32 1
 //   %kizu.6 = load %kizu.struct.std__string__String, ptr %kizu.6.payload.ptr, align 8
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.allocator)
 //   br label %match.end.1
 // match.unreachable.8:
 //   unreachable
@@ -1053,7 +1052,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
 //   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
 // kizu.10.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -1066,7 +1065,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14, ptr %kizu.allocator)
 //   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
 //   %kizu.try.err.4.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.4 = insertvalue %kizu.error.std__string__String %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 2
@@ -1081,18 +1080,18 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   ret %kizu.error.std__string__String %kizu.19
 // }
 // 
-// define void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.self.addr) {
+// define void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Named, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Named %kizu.self, 0
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1, ptr %kizu.allocator)
 //   %kizu.3 = extractvalue %kizu.struct.Named %kizu.self, 1
 //   %kizu.4 = extractvalue %kizu.opt.std__string__String %kizu.3, 1
 //   %kizu.5.tag = extractvalue %kizu.opt.std__string__String %kizu.3, 0
 //   %kizu.5 = icmp ne i8 %kizu.5.tag, 0
 //   br i1 %kizu.5, label %if.then.1, label %if.else.2
 // if.then.1:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4, ptr %kizu.allocator)
 //   br label %if.end.3
 // if.else.2:
 //   br label %if.end.3
@@ -1140,73 +1139,73 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   ret void
 // }
 // 
-// define void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.self.addr) {
+// define void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Profile, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Profile %kizu.self, 0
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.self.addr) {
+// define void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Profile
 //   %kizu.self = load %kizu.struct.Wrapper, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Wrapper %kizu.self, 0
 //   store %kizu.struct.Profile %kizu.1, ptr %kizu.arg.0.1
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.1)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Row_deinit(ptr byval(%kizu.struct.Row) %kizu.self.addr) {
+// define void @Row_deinit(ptr byval(%kizu.struct.Row) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Row, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Row %kizu.self, 0
-//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.self.addr) {
+// define void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Grid, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Grid %kizu.self, 0
-//   call void @std__array__Array_deinit_Row(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_Row(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.self.addr) {
+// define void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Record, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Record %kizu.self, 1
-//   call void @Cell_deinit(%kizu.union.Cell %kizu.1)
+//   call void @Cell_deinit(%kizu.union.Cell %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.self.addr) {
+// define void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Report, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Report %kizu.self, 0
-//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.1)
+//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.1, ptr %kizu.allocator)
 //   %kizu.3 = extractvalue %kizu.struct.Report %kizu.self, 1
-//   call void @std__mem__Box_deinit_i64(ptr %kizu.3)
+//   call void @std__mem__Box_deinit_i64(ptr %kizu.3, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.self.addr) {
+// define void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Visitor, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Visitor %kizu.self, 0
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.self.addr) {
+// define void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Visitor
 //   %kizu.self = load %kizu.struct.Page, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Page %kizu.self, 0
 //   store %kizu.struct.Visitor %kizu.1, ptr %kizu.arg.0.1
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.1)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -1274,7 +1273,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.10.ok.ok:
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.2
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -1306,7 +1305,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.8.ok.ok:
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.2
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.10
 // }
@@ -1346,7 +1345,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.12.ok.ok:
 //   store %kizu.struct.Wrapper %kizu.4, ptr %kizu.arg.0.2
-//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.2)
+//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.14 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.14
 // }
@@ -1379,9 +1378,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8, ptr %kizu.1)
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.4
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.4)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.7, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -1400,9 +1399,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.12.ok.ok:
 //   %kizu.13 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13, ptr %kizu.1)
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.6
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.6)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.6, ptr %kizu.1)
 //   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.16
 // }
@@ -1545,7 +1544,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_bytes(ptr %kizu.16.left.ptr, i64 %kizu.16.left.len, ptr %kizu.16.right.ptr, i64 %kizu.16.right.len, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4)
+//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4, ptr %kizu.1)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // }
@@ -1592,7 +1591,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.9, i64 0, i64 0)
 //   unreachable
 // kizu.10.ok.ok:
-//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4)
+//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -1639,7 +1638,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.9, i64 0, i64 0)
 //   unreachable
 // kizu.10.ok.ok:
-//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4)
+//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -1708,7 +1707,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.6, i64 0, i64 0)
 //   unreachable
 // kizu.7.ok.ok:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.4)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.4, ptr %kizu.1)
 //   %kizu.9 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.9
 // }
@@ -1740,7 +1739,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.8.ok.ok:
 //   store %kizu.struct.Grid %kizu.4, ptr %kizu.arg.0.2
-//   call void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.arg.0.2)
+//   call void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.10
 // }
@@ -1816,7 +1815,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.14, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @Cell_deinit(%kizu.union.Cell %kizu.4)
+//   call void @Cell_deinit(%kizu.union.Cell %kizu.4, ptr %kizu.1)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // match.check.2:
@@ -1873,7 +1872,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.14, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @Cell_deinit(%kizu.union.Cell %kizu.4)
+//   call void @Cell_deinit(%kizu.union.Cell %kizu.4, ptr %kizu.1)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // match.check.2:
@@ -1956,7 +1955,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.24.ok.ok:
 //   store %kizu.struct.Record %kizu.4, ptr %kizu.arg.0.2
-//   call void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.arg.0.2)
+//   call void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.26 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.26
 // match.check.8:
@@ -2074,7 +2073,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_bytes(ptr %kizu.28.left.ptr, i64 %kizu.28.left.len, ptr %kizu.28.right.ptr, i64 %kizu.28.right.len, i64 0, i64 0)
 //   unreachable
 // kizu.28.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.25)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.25, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.31 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.31
@@ -2143,7 +2142,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 4, i64 %kizu.16, i64 0, i64 0)
 //   unreachable
 // kizu.17.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.20
@@ -2217,7 +2216,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
 //   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
 // kizu.23.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.22)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.22, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.21, 1
 //   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
@@ -2237,7 +2236,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.26.ok.ok:
 //   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.20
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.30 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.30
@@ -2342,7 +2341,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.5, i64 0, i64 0)
 //   unreachable
 // kizu.7.ok.ok:
-//   call void @kizu_box_deinit(ptr %kizu.4)
+//   call void @kizu_box_deinit(ptr %kizu.1, ptr %kizu.4, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
 //   %kizu.9 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.9
 // }
@@ -2375,9 +2374,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8, ptr %kizu.1)
 //   store %kizu.struct.Report %kizu.4, ptr %kizu.arg.0.4
-//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.4)
+//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.7, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -2399,9 +2398,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.13.ok.ok:
 //   %kizu.14 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14, ptr %kizu.1)
 //   store %kizu.struct.Report %kizu.4, ptr %kizu.arg.0.6
-//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.6)
+//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.6, ptr %kizu.1)
 //   %kizu.17 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.17
 // }
@@ -2442,7 +2441,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.11.ok.ok:
 //   store %kizu.struct.Visitor %kizu.4, ptr %kizu.arg.0.2
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.13
 // }
@@ -2485,7 +2484,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.13.ok.ok:
 //   store %kizu.struct.Visitor %kizu.4, ptr %kizu.arg.0.2
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.15 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.15
 // }
@@ -2536,7 +2535,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.17.ok.ok:
 //   store %kizu.struct.Visitor %kizu.4, ptr %kizu.arg.0.2
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.19
 // }
@@ -2585,7 +2584,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.4
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.4)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__json__DecodeError.Named %kizu.8, 2
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -2606,9 +2605,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
 // kizu.14.try.err:
 //   store %kizu.struct.Named %kizu.9, ptr %kizu.arg.0.8
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.8)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.8, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.10
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.10)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.10, ptr %kizu.1)
 //   %kizu.try.err.11.code = extractvalue %kizu.error.std__json__DecodeError.Named %kizu.13, 2
 //   %kizu.try.err.11.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.11 = insertvalue %kizu.error.void %kizu.try.err.11.base, i64 %kizu.try.err.11.code, 1
@@ -2631,13 +2630,13 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.22.ok.bool = icmp ne i8 %kizu.22.ok, 0
 //   br i1 %kizu.22.ok.bool, label %kizu.22.try.ok, label %kizu.22.try.err
 // kizu.22.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.21)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.21, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.14, ptr %kizu.arg.0.15
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.15)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.15, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.9, ptr %kizu.arg.0.17
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.17)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.17, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.19
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.19)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.19, ptr %kizu.1)
 //   %kizu.try.err.20.code = extractvalue %kizu.error.std__mem__Error.void %kizu.20, 1
 //   %kizu.try.err.20.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.20 = insertvalue %kizu.error.void %kizu.try.err.20.base, i64 %kizu.try.err.20.code, 1
@@ -2656,13 +2655,13 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.25.ok.ok:
 //   %kizu.26 = load %kizu.struct.std__string__String, ptr %kizu.19
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.14, ptr %kizu.arg.0.21
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.21)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.21, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.9, ptr %kizu.arg.0.22
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.22)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.22, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.23
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.23)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.23, ptr %kizu.1)
 //   %kizu.31 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.31
 // }
@@ -2713,7 +2712,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.17.ok.ok:
 //   store %kizu.struct.Page %kizu.4, ptr %kizu.arg.0.2
-//   call void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.arg.0.2)
+//   call void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.19
 // }
@@ -2866,19 +2865,19 @@ test "json decode reads an omitted optional field of a nested struct" {
 // declare void @kizu_map_deinit(ptr)
 // 
 // declare ptr @kizu_box_new(ptr, i64, ptr)
-// declare void @kizu_box_deinit(ptr)
+// declare void @kizu_box_deinit(ptr, ptr, i64)
 // 
 // declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
 // 
-// declare void @std__array__Array_deinit_Row(%kizu.array)
-// declare void @std__array__Array_deinit_i64(%kizu.array)
-// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array)
+// declare void @std__array__Array_deinit_Row(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i64 @std__array__Array_get_or_panic_i64(%kizu.array, i64)
 // declare i64 @std__array__Array_len_Row(%kizu.array)
 // declare i64 @std__array__Array_len_i64(%kizu.array)
 // declare i64 @std__array__Array_len_std_3a_3ajson_3a_3aValue(%kizu.array)
 // declare i64 @std__array__Array_len_std_3a_3astring_3a_3aString(%kizu.array)
-// declare void @std__json__Value_deinit(%kizu.union.std__json__Value)
+// declare void @std__json__Value_deinit(%kizu.union.std__json__Value, ptr)
 // declare %kizu.error.std__json__DecodeError.Cell @std__json__decode_Cell(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__json__DecodeError.Counts @std__json__decode_Counts(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__json__DecodeError.Grid @std__json__decode_Grid(ptr, %kizu.slice.u8)
@@ -2905,7 +2904,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 // declare %kizu.opt._std__json__Value @std__map__Map_at__5b_5du8_std_3a_3ajson_3a_3aValue(ptr, %kizu.slice.u8)
 // declare %kizu.opt._std__map__Map___u8__i64_ @std__map__Map_at__5b_5du8_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, %kizu.slice.u8)
 // declare %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
-// declare void @std__map__Map_deinit__5b_5du8_i64(ptr)
+// declare void @std__map__Map_deinit__5b_5du8_i64(ptr, ptr)
 // declare %kizu.opt.i64 @std__map__Map_get__5b_5du8_i64(ptr, %kizu.slice.u8)
 // declare %kizu.opt.slice.u8 @std__map__Map_key_at__5b_5du8_i64(ptr, i64)
 // declare i64 @std__map__Map_len__5b_5du8_i64(ptr)
@@ -2913,12 +2912,12 @@ test "json decode reads an omitted optional field of a nested struct" {
 // declare i64 @std__map__Map_len__5b_5du8_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr)
 // declare i64 @std__map__Map_len__5b_5du8_std_3a_3astring_3a_3aString(ptr)
 // declare i64 @std__mem__Box_borrow_i64(ptr)
-// declare void @std__mem__Box_deinit_i64(ptr)
+// declare void @std__mem__Box_deinit_i64(ptr, ptr)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // declare void @std__testing__expect(i1)
@@ -3122,7 +3121,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // }
 // 
-// define void @Cell_deinit(%kizu.union.Cell %kizu.self) {
+// define void @Cell_deinit(%kizu.union.Cell %kizu.self, ptr %kizu.allocator) {
 // entry:
 //   %kizu.6.slot = alloca %kizu.union.Cell, align 8
 //   %kizu.1 = extractvalue %kizu.union.Cell %kizu.self, 0
@@ -3146,7 +3145,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   store %kizu.union.Cell %kizu.self, ptr %kizu.6.slot, align 8
 //   %kizu.6.payload.ptr = getelementptr %kizu.union.Cell, ptr %kizu.6.slot, i32 0, i32 1
 //   %kizu.6 = load %kizu.struct.std__string__String, ptr %kizu.6.payload.ptr, align 8
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.allocator)
 //   br label %match.end.1
 // match.unreachable.8:
 //   unreachable
@@ -3172,7 +3171,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
 //   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
 // kizu.10.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.9, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -3185,7 +3184,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14, ptr %kizu.allocator)
 //   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
 //   %kizu.try.err.4.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.4 = insertvalue %kizu.error.std__string__String %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 2
@@ -3200,18 +3199,18 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   ret %kizu.error.std__string__String %kizu.19
 // }
 // 
-// define void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.self.addr) {
+// define void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Named, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Named %kizu.self, 0
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1, ptr %kizu.allocator)
 //   %kizu.3 = extractvalue %kizu.struct.Named %kizu.self, 1
 //   %kizu.4 = extractvalue %kizu.opt.std__string__String %kizu.3, 1
 //   %kizu.5.tag = extractvalue %kizu.opt.std__string__String %kizu.3, 0
 //   %kizu.5 = icmp ne i8 %kizu.5.tag, 0
 //   br i1 %kizu.5, label %if.then.1, label %if.else.2
 // if.then.1:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4, ptr %kizu.allocator)
 //   br label %if.end.3
 // if.else.2:
 //   br label %if.end.3
@@ -3259,73 +3258,73 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   ret void
 // }
 // 
-// define void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.self.addr) {
+// define void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Profile, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Profile %kizu.self, 0
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.self.addr) {
+// define void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Profile
 //   %kizu.self = load %kizu.struct.Wrapper, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Wrapper %kizu.self, 0
 //   store %kizu.struct.Profile %kizu.1, ptr %kizu.arg.0.1
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.1)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Row_deinit(ptr byval(%kizu.struct.Row) %kizu.self.addr) {
+// define void @Row_deinit(ptr byval(%kizu.struct.Row) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Row, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Row %kizu.self, 0
-//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.self.addr) {
+// define void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Grid, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Grid %kizu.self, 0
-//   call void @std__array__Array_deinit_Row(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_Row(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.self.addr) {
+// define void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Record, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Record %kizu.self, 1
-//   call void @Cell_deinit(%kizu.union.Cell %kizu.1)
+//   call void @Cell_deinit(%kizu.union.Cell %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.self.addr) {
+// define void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Report, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Report %kizu.self, 0
-//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.1)
+//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.1, ptr %kizu.allocator)
 //   %kizu.3 = extractvalue %kizu.struct.Report %kizu.self, 1
-//   call void @std__mem__Box_deinit_i64(ptr %kizu.3)
+//   call void @std__mem__Box_deinit_i64(ptr %kizu.3, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.self.addr) {
+// define void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Visitor, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Visitor %kizu.self, 0
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.self.addr) {
+// define void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Visitor
 //   %kizu.self = load %kizu.struct.Page, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Page %kizu.self, 0
 //   store %kizu.struct.Visitor %kizu.1, ptr %kizu.arg.0.1
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.1)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -3393,7 +3392,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.10.ok.ok:
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.2
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -3425,7 +3424,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.8.ok.ok:
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.2
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.10
 // }
@@ -3465,7 +3464,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.12.ok.ok:
 //   store %kizu.struct.Wrapper %kizu.4, ptr %kizu.arg.0.2
-//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.2)
+//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.14 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.14
 // }
@@ -3498,9 +3497,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8, ptr %kizu.1)
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.4
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.4)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.7, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -3519,9 +3518,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.12.ok.ok:
 //   %kizu.13 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13, ptr %kizu.1)
 //   store %kizu.struct.Profile %kizu.4, ptr %kizu.arg.0.6
-//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.6)
+//   call void @Profile_deinit(ptr byval(%kizu.struct.Profile) %kizu.arg.0.6, ptr %kizu.1)
 //   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.16
 // }
@@ -3664,7 +3663,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_bytes(ptr %kizu.16.left.ptr, i64 %kizu.16.left.len, ptr %kizu.16.right.ptr, i64 %kizu.16.right.len, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4)
+//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4, ptr %kizu.1)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // }
@@ -3711,7 +3710,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.9, i64 0, i64 0)
 //   unreachable
 // kizu.10.ok.ok:
-//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4)
+//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -3758,7 +3757,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.9, i64 0, i64 0)
 //   unreachable
 // kizu.10.ok.ok:
-//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4)
+//   call void @std__json__Value_deinit(%kizu.union.std__json__Value %kizu.4, ptr %kizu.1)
 //   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.12
 // }
@@ -3827,7 +3826,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.6, i64 0, i64 0)
 //   unreachable
 // kizu.7.ok.ok:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.4)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.4, ptr %kizu.1)
 //   %kizu.9 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.9
 // }
@@ -3859,7 +3858,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.8.ok.ok:
 //   store %kizu.struct.Grid %kizu.4, ptr %kizu.arg.0.2
-//   call void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.arg.0.2)
+//   call void @Grid_deinit(ptr byval(%kizu.struct.Grid) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.10
 // }
@@ -3933,7 +3932,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.14, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @Cell_deinit(%kizu.union.Cell %kizu.4)
+//   call void @Cell_deinit(%kizu.union.Cell %kizu.4, ptr %kizu.1)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // match.check.2:
@@ -3983,7 +3982,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.14, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @Cell_deinit(%kizu.union.Cell %kizu.4)
+//   call void @Cell_deinit(%kizu.union.Cell %kizu.4, ptr %kizu.1)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // match.check.2:
@@ -4062,7 +4061,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.24.ok.ok:
 //   store %kizu.struct.Record %kizu.4, ptr %kizu.arg.0.2
-//   call void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.arg.0.2)
+//   call void @Record_deinit(ptr byval(%kizu.struct.Record) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.26 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.26
 // match.check.8:
@@ -4177,7 +4176,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_bytes(ptr %kizu.28.left.ptr, i64 %kizu.28.left.len, ptr %kizu.28.right.ptr, i64 %kizu.28.right.len, i64 0, i64 0)
 //   unreachable
 // kizu.28.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.25)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.25, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.31 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.31
@@ -4246,7 +4245,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 4, i64 %kizu.16, i64 0, i64 0)
 //   unreachable
 // kizu.17.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.6, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.20
@@ -4320,7 +4319,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
 //   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
 // kizu.23.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.22)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.22, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.21, 1
 //   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
@@ -4340,7 +4339,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.26.ok.ok:
 //   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.20
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.4)
 //   %kizu.30 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.30
@@ -4445,7 +4444,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.5, i64 0, i64 0)
 //   unreachable
 // kizu.7.ok.ok:
-//   call void @kizu_box_deinit(ptr %kizu.4)
+//   call void @kizu_box_deinit(ptr %kizu.1, ptr %kizu.4, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
 //   %kizu.9 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.9
 // }
@@ -4478,9 +4477,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.8, ptr %kizu.1)
 //   store %kizu.struct.Report %kizu.4, ptr %kizu.arg.0.4
-//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.4)
+//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.7, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -4502,9 +4501,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.13.ok.ok:
 //   %kizu.14 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.14, ptr %kizu.1)
 //   store %kizu.struct.Report %kizu.4, ptr %kizu.arg.0.6
-//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.6)
+//   call void @Report_deinit(ptr byval(%kizu.struct.Report) %kizu.arg.0.6, ptr %kizu.1)
 //   %kizu.17 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.17
 // }
@@ -4545,7 +4544,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.11.ok.ok:
 //   store %kizu.struct.Visitor %kizu.4, ptr %kizu.arg.0.2
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.13
 // }
@@ -4588,7 +4587,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.13.ok.ok:
 //   store %kizu.struct.Visitor %kizu.4, ptr %kizu.arg.0.2
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.15 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.15
 // }
@@ -4639,7 +4638,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.17.ok.ok:
 //   store %kizu.struct.Visitor %kizu.4, ptr %kizu.arg.0.2
-//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2)
+//   call void @Visitor_deinit(ptr byval(%kizu.struct.Visitor) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.19
 // }
@@ -4688,7 +4687,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.4
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.4)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__json__DecodeError.Named %kizu.8, 2
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -4709,9 +4708,9 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
 // kizu.14.try.err:
 //   store %kizu.struct.Named %kizu.9, ptr %kizu.arg.0.8
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.8)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.8, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.10
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.10)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.10, ptr %kizu.1)
 //   %kizu.try.err.11.code = extractvalue %kizu.error.std__json__DecodeError.Named %kizu.13, 2
 //   %kizu.try.err.11.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.11 = insertvalue %kizu.error.void %kizu.try.err.11.base, i64 %kizu.try.err.11.code, 1
@@ -4734,13 +4733,13 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %kizu.22.ok.bool = icmp ne i8 %kizu.22.ok, 0
 //   br i1 %kizu.22.ok.bool, label %kizu.22.try.ok, label %kizu.22.try.err
 // kizu.22.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.21)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.21, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.14, ptr %kizu.arg.0.15
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.15)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.15, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.9, ptr %kizu.arg.0.17
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.17)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.17, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.19
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.19)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.19, ptr %kizu.1)
 //   %kizu.try.err.20.code = extractvalue %kizu.error.std__mem__Error.void %kizu.20, 1
 //   %kizu.try.err.20.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.20 = insertvalue %kizu.error.void %kizu.try.err.20.base, i64 %kizu.try.err.20.code, 1
@@ -4759,13 +4758,13 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.25.ok.ok:
 //   %kizu.26 = load %kizu.struct.std__string__String, ptr %kizu.19
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.26, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.14, ptr %kizu.arg.0.21
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.21)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.21, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.9, ptr %kizu.arg.0.22
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.22)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.22, ptr %kizu.1)
 //   store %kizu.struct.Named %kizu.4, ptr %kizu.arg.0.23
-//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.23)
+//   call void @Named_deinit(ptr byval(%kizu.struct.Named) %kizu.arg.0.23, ptr %kizu.1)
 //   %kizu.31 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.31
 // }
@@ -4816,7 +4815,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   unreachable
 // kizu.17.ok.ok:
 //   store %kizu.struct.Page %kizu.4, ptr %kizu.arg.0.2
-//   call void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.arg.0.2)
+//   call void @Page_deinit(ptr byval(%kizu.struct.Page) %kizu.arg.0.2, ptr %kizu.1)
 //   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.19
 // }

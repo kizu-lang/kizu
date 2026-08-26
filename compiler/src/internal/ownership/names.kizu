@@ -76,10 +76,10 @@ pub fn new_name_table(allocator: Allocator) -> NameTable {
     };
 }
 
-fn (self: NameTable) deinit() -> void {
-    self.texts.deinit();
-    self.by_text.deinit();
-    self.parsed.deinit();
+fn (self: NameTable) deinit(allocator: Allocator) -> void {
+    self.texts.deinit(allocator);
+    self.by_text.deinit(allocator);
+    self.parsed.deinit(allocator);
     return;
 }
 
@@ -120,11 +120,11 @@ fn (self: &var NameTable) intern_slice(name: Name, start: i64, end: i64) -> !Nam
 /// Returns the one name that spells an owned text, consuming the text.
 fn (self: &var NameTable) intern_owned(text: string::String) -> !Name {
     if text.len() == 0 {
-        text.deinit();
+        text.deinit(self.allocator);
         return empty_name();
     }
     if self.find_name(&text) |known| {
-        text.deinit();
+        text.deinit(self.allocator);
         return known;
     }
     let handle = self.texts.add(move text);
@@ -260,7 +260,7 @@ fn (self: &NameTable) append_to(out: &var string::String, name: Name) -> !void {
 /// Unused arguments are ignored, so one shape serves every arity up to three.
 fn (self: &var NameTable) format(format: []u8, a: Name, b: Name, c: Name) -> !Name {
     var out = string::new(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var used = 0;
     var index = 0;
     while index < mem::len(format) {
@@ -289,7 +289,7 @@ fn (self: &var NameTable) format(format: []u8, a: Name, b: Name, c: Name) -> !Na
 /// Names `prefix` + name.
 fn (self: &var NameTable) prefixed(prefix: []u8, name: Name) -> !Name {
     var out = try string::from_bytes(self.allocator, prefix);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     try self.append_to(&var out, name);
     return self.intern_owned(move out);
 }
@@ -300,6 +300,16 @@ fn (self: &var NameTable) trim_prefix(name: Name, prefix: []u8) -> !Name {
         return name;
     }
     return self.intern_slice(name, mem::len(prefix), self.len(name));
+}
+
+/// Names the last `::` separated segment of a name, or the name itself when
+/// it has no module path.
+fn (self: &var NameTable) after_last_path_separator(name: Name) -> !Name {
+    let index = self.last_index_of(name, cast<u8>(58));
+    if index < 0 {
+        return name;
+    }
+    return self.intern_slice(name, index + 1, self.len(name));
 }
 
 /// Names the text after the first `!`, or name itself without one: the
@@ -478,14 +488,14 @@ fn (self: &var NameTable) split_generic_args(args: Name) -> !?array::Array<Name>
     let retained = name_text(self, args);
     let bytes = retained.as_bytes();
     let parts = try typ::split_args_optional(self.allocator, bytes) orelse return null;
-    defer parts.deinit();
+    defer parts.deinit(self.allocator);
     return try self.intern_all(&parts);
 }
 
 /// Names every retained String of a list in order.
 fn (self: &var NameTable) intern_all(parts: &array::Array<string::String>) -> !array::Array<Name> {
     var out = array::new<Name>(self.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     var index = 0;
     while parts.at(index) |part| {
         let bytes = part.as_bytes();
@@ -620,7 +630,7 @@ fn (self: &NameTable) elided_copy(name: Name) -> !string::String {
     let bytes = retained.as_bytes();
     let length = mem::len(bytes);
     var out = try string::from_bytes(self.allocator, bytes[0..60]);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     try out.append_bytes(" ... ");
     try out.append_bytes(bytes[length - 60..length]);
     return move out;

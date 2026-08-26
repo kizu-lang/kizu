@@ -1553,7 +1553,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.at(alice).name);
-    users.deinit();
+    users.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1568,7 +1568,7 @@ func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    defer users.deinit();
+    defer users.deinit(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.at(alice).name);
 }`
@@ -1584,15 +1584,15 @@ struct Parsed {
     users: std::arena::Arena<User>,
     ids: std::array::Array<i64>,
 }
-fn (self: Parsed) deinit() -> void {
-    self.users.deinit();
-    self.ids.deinit();
+fn (self: Parsed) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
+    self.ids.deinit(allocator);
 }
-fn check(values: std::array::Array<Parsed>) -> !void {
+fn check(allocator: Allocator, values: std::array::Array<Parsed>) -> !void {
     if values.pop() |item| {
-        item.deinit();
+        item.deinit(allocator);
     }
-    values.deinit();
+    values.deinit(allocator);
     return;
 }
 fn main() {}`
@@ -1604,14 +1604,14 @@ fn main() {}`
 // TestCheckAcceptsArrayPopOrPanicResourceElements keeps the trap variant move-capable.
 func TestCheckAcceptsArrayPopOrPanicResourceElements(t *testing.T) {
 	source := `struct Parsed { values: std::array::Array<i64> }
-fn (self: Parsed) deinit() -> void {
-    self.values.deinit();
+fn (self: Parsed) deinit(allocator: Allocator) -> void {
+    self.values.deinit(allocator);
 }
-fn check(values: std::array::Array<Parsed>) -> void {
+fn check(allocator: Allocator, values: std::array::Array<Parsed>) -> void {
     let value = values.pop_or_panic();
-    value.deinit();
+    value.deinit(allocator);
     print(values.len());
-    values.deinit();
+    values.deinit(allocator);
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
@@ -1623,9 +1623,9 @@ fn main() {}`
 // the clone its own cleanup obligation.
 func TestCheckAcceptsArrayCloneForCopyElements(t *testing.T) {
 	source := `fn copy(values: std::array::Array<i64>, allocator: Allocator) -> !void {
-    defer values.deinit();
+    defer values.deinit(allocator);
     let copied = try values.clone(allocator);
-    defer copied.deinit();
+    defer copied.deinit(allocator);
     print(values.len());
     return;
 }
@@ -1641,9 +1641,9 @@ func TestCheckRejectsArrayCloneForOwnerElements(t *testing.T) {
     values: std::array::Array<std::string::String>,
     allocator: Allocator,
 ) -> !void {
-    defer values.deinit();
+    defer values.deinit(allocator);
     let copied = try values.clone(allocator);
-    defer copied.deinit();
+    defer copied.deinit(allocator);
     return;
 }
 fn main() {}`)
@@ -1677,7 +1677,7 @@ func TestCheckAcceptsErrDeferredCleanup(t *testing.T) {
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
+    errdefer users.deinit(allocator);
     return users;
 }
 fn main() {}`
@@ -1729,7 +1729,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     users.deinit(1);
 }`,
-			want: "`arena.deinit` expects 0 args",
+			want: "`arena.deinit` expects Allocator, got i64",
 		},
 	}
 	runErrorCases(t, cases)
@@ -1739,15 +1739,15 @@ fn main() {
 func TestCheckAcceptsOwnerFieldCleanup(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) deinit() -> void {
-    self.users.deinit();
+fn (self: Registry) deinit(allocator: Allocator) -> void {
+    self.users.deinit(allocator);
     return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let registry = Registry { users: users };
-    registry.deinit();
+    registry.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)

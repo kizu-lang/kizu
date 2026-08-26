@@ -73,7 +73,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.write_enum_name_tables(module);
     try self.write_error_name_table(module);
     var literals = try self.sorted_string_literals();
-    defer literals.deinit();
+    defer literals.deinit(self.allocator);
     var index = 0;
     while literals.at(index) |global| {
         index = index + 1;
@@ -83,7 +83,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         let literal_text = ir::name_text(&module.names, literal);
         let literal_bytes = literal_text.as_bytes();
         var unquoted = string::new(self.allocator);
-        defer unquoted.deinit();
+        defer unquoted.deinit(self.allocator);
         try append_unquoted(&var unquoted, literal_bytes);
         let unquoted_bytes = unquoted.as_bytes();
         try self.write_static_string_global(name, unquoted_bytes);
@@ -186,7 +186,7 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
         return;
     }
     var spellings = map::new<[]u8, ir::Name>(self.allocator);
-    defer spellings.deinit();
+    defer spellings.deinit(self.allocator);
     var set_index = 0;
     while module.error_sets.key_at(set_index) |set_name| {
         set_index = set_index + 1;
@@ -196,12 +196,12 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
                 tag_index = tag_index + 1;
                 let code = set.tags.get(member) orelse continue;
                 var spelling = try module.names.copy(set.name);
-                errdefer spelling.deinit();
+                errdefer spelling.deinit(self.allocator);
                 try spelling.append_bytes("::");
                 try spelling.append_bytes(member);
                 let spelling_name = try self.names.intern_owned(move spelling);
                 var key = string::new(self.allocator);
-                defer key.deinit();
+                defer key.deinit(self.allocator);
                 try fmt::append_i64(&var key, code);
                 let key_bytes = key.as_bytes();
                 try spellings.insert(key_bytes, spelling_name);
@@ -210,17 +210,17 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
     }
     let row_count = error_name_table_rows(module);
     var rows = array::new<string::String>(self.allocator);
-    defer rows.deinit();
+    defer rows.deinit(self.allocator);
     var code = 0;
     while code < row_count {
         var key = string::new(self.allocator);
-        defer key.deinit();
+        defer key.deinit(self.allocator);
         try fmt::append_i64(&var key, code);
         let key_bytes = key.as_bytes();
         if spellings.get(key_bytes) |spelling| {
             let global = try self.text1("@.kizu.error.name.%d", Arg::Int(code));
             var spelling_text = try self.names.copy(spelling);
-            defer spelling_text.deinit();
+            defer spelling_text.deinit(self.allocator);
             let spelling_bytes = spelling_text.as_bytes();
             try self.write_static_string_global(global, spelling_bytes);
             try rows.append(try self.sprint2(
@@ -243,14 +243,14 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
 /// `writePanicDecls`.
 fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
     var keys = try self.used_panic_entries(module);
-    defer keys.deinit();
+    defer keys.deinit(self.allocator);
     var index = 0;
     while keys.at(index) |spelling| {
         index = index + 1;
         let spelling_bytes = spelling.as_bytes();
         let key = parse_panic_key(spelling_bytes) orelse continue;
         var params = string::new(self.allocator);
-        errdefer params.deinit();
+        errdefer params.deinit(self.allocator);
         try append_panic_params(&var params, key);
         try self.line2("declare void @%s(%s)", Arg::Lit(panic_entry(key).entry), Arg::Owned(move params));
     }
@@ -264,7 +264,7 @@ fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
 /// `usedPanicEntries`.
 fn (self: &var Emitter) used_panic_entries(module: &ir::Module) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -330,13 +330,13 @@ fn expect_entry_key(module: &ir::Module, node: &ir::InstrNode) -> PanicKey {
 /// `writeErrorUnionTypes`.
 fn (self: &var Emitter) write_error_union_types(module: &ir::Module) -> !void {
     var names = try self.sorted_error_union_names(module);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
         let name_bytes = name.as_bytes();
         let parts = try self.error_union_parts(name_bytes) orelse continue;
-        defer parts.deinit();
+        defer parts.deinit(self.allocator);
         let union_name = try self.llvm_error_union_type_name(name_bytes);
         let success_bytes = parts.success.as_bytes();
         if mem::equal_bytes(success_bytes, "void") {
@@ -357,7 +357,7 @@ fn (self: &var Emitter) write_error_union_types(module: &ir::Module) -> !void {
 /// success already uses.
 fn (self: &var Emitter) write_optional_types(module: &ir::Module) -> !void {
     var names = try self.sorted_optional_names(module);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
@@ -416,7 +416,7 @@ fn (self: &var Emitter) collect_optional_name(seen: &var map::Map<[]u8, bool>, n
         return;
     }
     if try self.error_union_success_type(name) |success| {
-        defer success.deinit();
+        defer success.deinit(self.allocator);
         let success_bytes = success.as_bytes();
         return self.collect_optional_name(seen, success_bytes);
     }
@@ -446,7 +446,7 @@ fn collect_error_union_nodes(
     match typ::root_node(types, value) {
         ErrorUnion(node) => {
             var rendered = try typ::render(allocator, types, value);
-            defer rendered.deinit();
+            defer rendered.deinit(allocator);
             let rendered_bytes = rendered.as_bytes();
             try seen.insert(rendered_bytes, true);
             if node.err |err| {
@@ -485,7 +485,7 @@ fn collect_error_union_nodes(
 /// position the others scan.
 fn (self: &var Emitter) collect_module_type_names(module: &ir::Module, collector: TypeCollector) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     var struct_index = 0;
     while module.structs.key_at(struct_index) |struct_name| {
         struct_index = struct_index + 1;
@@ -555,12 +555,12 @@ fn (self: &var Emitter) collect_module_name(
 /// a map's keys.
 fn sorted_keys(allocator: Allocator, seen: &map::Map<[]u8, bool>) -> !array::Array<string::String> {
     var names = array::new<string::String>(allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(allocator);
     var index = 0;
     while seen.key_at(index) |name| {
         index = index + 1;
         let copied = try string::from_bytes(allocator, name);
-        errdefer copied.deinit();
+        errdefer copied.deinit(allocator);
         try names.append(move copied);
     }
     try sort::strings(&var names);
@@ -571,7 +571,7 @@ fn sorted_keys(allocator: Allocator, seen: &map::Map<[]u8, bool>) -> !array::Arr
 /// `validateModuleTypes`.
 fn (self: &var Emitter) validate_module_types(module: &ir::Module) -> !?diagnostic::Diagnostic {
     var names = try self.sorted_error_union_names(module);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
@@ -581,7 +581,7 @@ fn (self: &var Emitter) validate_module_types(module: &ir::Module) -> !?diagnost
         }
     }
     var unions = try sorted_union_names(self.allocator, module);
-    defer unions.deinit();
+    defer unions.deinit(self.allocator);
     index = 0;
     while unions.at(index) |name| {
         index = index + 1;
@@ -609,7 +609,7 @@ fn (self: &var Emitter) union_payload_capacity(module: &ir::Module, name: []u8) 
     let shown = try self.names.intern(name);
     if module.unions.at(name) |declared| {
         var seen = array::new<string::String>(self.allocator);
-        defer seen.deinit();
+        defer seen.deinit(self.allocator);
         if try self.union_payload_storage(module, name, declared, &var seen) |storage| {
             if storage.align > max_inline_payload_align() {
                 return CapacityResult::Error(try self.fail3(
@@ -631,7 +631,7 @@ fn (self: &var Emitter) union_payload_capacity(module: &ir::Module, name: []u8) 
 /// `writeExternalCallDecls`.
 fn (self: &var Emitter) write_external_call_decls(module: &ir::Module) -> !void {
     var decls = try self.external_call_decls(module);
-    defer decls.deinit();
+    defer decls.deinit(self.allocator);
     var index = 0;
     while decls.at(index) |decl| {
         index = index + 1;
@@ -650,7 +650,7 @@ fn (self: &var Emitter) write_external_call_decls(module: &ir::Module) -> !void 
 /// it overwrites; here the text is named so the map holds a copy handle.
 fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Array<string::String> {
     var seen = map::new<[]u8, ir::Name>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -681,17 +681,17 @@ fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Arra
         }
     }
     var names = array::new<string::String>(self.allocator);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var key_index = 0;
     while seen.key_at(key_index) |name| {
         key_index = key_index + 1;
         let copied = try string::from_bytes(self.allocator, name);
-        errdefer copied.deinit();
+        errdefer copied.deinit(self.allocator);
         try names.append(move copied);
     }
     try sort::strings(&var names);
     var decls = array::new<string::String>(self.allocator);
-    errdefer decls.deinit();
+    errdefer decls.deinit(self.allocator);
     var name_index = 0;
     while names.at(name_index) |name| {
         name_index = name_index + 1;
@@ -706,13 +706,13 @@ fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Arra
 /// `writeStructTypes`.
 fn (self: &var Emitter) write_struct_types(module: &ir::Module) -> !void {
     var names = try sorted_struct_names(self.allocator, module);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
         let name_bytes = name.as_bytes();
         var fields = array::new<string::String>(self.allocator);
-        defer fields.deinit();
+        defer fields.deinit(self.allocator);
         if module.structs.at(name_bytes) |declared| {
             var field_index = 0;
             while declared.fields.get(field_index) |field| {
@@ -737,7 +737,7 @@ fn (self: &var Emitter) write_struct_types(module: &ir::Module) -> !void {
 /// validated in validate_module_types, so the capacity is known here.
 fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
     var names = try sorted_union_names(self.allocator, module);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
@@ -748,7 +748,7 @@ fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
             Capacity(found) => {
                 capacity = found;
             },
-            Error(failed) => failed.deinit(),
+            Error(failed) => failed.deinit(self.allocator),
         }
         let union_name = try self.llvm_union_type_name(name_bytes);
         try self.line2("%s = type { i64, [%d x i8] }", Arg::Str(union_name), Arg::Int(capacity));
@@ -763,12 +763,12 @@ fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
 /// `sortedStringLiterals`: the globals sorted as text.
 fn (self: &Emitter) sorted_string_literals() -> !array::Array<string::String> {
     var globals = array::new<string::String>(self.allocator);
-    errdefer globals.deinit();
+    errdefer globals.deinit(self.allocator);
     var index = 0;
     while self.string_literals.key_at(index) |global| {
         index = index + 1;
         let copied = try string::from_bytes(self.allocator, global);
-        errdefer copied.deinit();
+        errdefer copied.deinit(self.allocator);
         try globals.append(move copied);
     }
     try sort::strings(&var globals);
@@ -778,12 +778,12 @@ fn (self: &Emitter) sorted_string_literals() -> !array::Array<string::String> {
 /// Returns declared structs in stable order, the Go `sortedStructNames`.
 fn sorted_struct_names(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
     var names = array::new<string::String>(allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(allocator);
     var index = 0;
     while module.structs.key_at(index) |name| {
         index = index + 1;
         let copied = try string::from_bytes(allocator, name);
-        errdefer copied.deinit();
+        errdefer copied.deinit(allocator);
         try names.append(move copied);
     }
     try sort::strings(&var names);
@@ -793,12 +793,12 @@ fn sorted_struct_names(allocator: Allocator, module: &ir::Module) -> !array::Arr
 /// Returns declared unions in stable order, the Go `sortedUnionNames`.
 fn sorted_union_names(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
     var names = array::new<string::String>(allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(allocator);
     var index = 0;
     while module.unions.key_at(index) |name| {
         index = index + 1;
         let copied = try string::from_bytes(allocator, name);
-        errdefer copied.deinit();
+        errdefer copied.deinit(allocator);
         try names.append(move copied);
     }
     try sort::strings(&var names);
@@ -934,7 +934,7 @@ fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
 /// name their value through a table of spellings, the Go `printsNamedTag`.
 fn (self: &var Emitter) prints_named_tag(module: &ir::Module) -> !bool {
     var enums = try printed_enums(self.allocator, module);
-    defer enums.deinit();
+    defer enums.deinit(self.allocator);
     if enums.len() > 0 {
         return true;
     }
@@ -972,7 +972,7 @@ fn is_print_call(module: &ir::Module, node: &ir::InstrNode) -> bool {
 /// `printedEnums`.
 fn printed_enums(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(allocator);
-    defer seen.deinit();
+    defer seen.deinit(allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -1004,7 +1004,7 @@ fn printed_enums(allocator: Allocator, module: &ir::Module) -> !array::Array<str
 /// `writeEnumNameTables`.
 fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
     var names = try printed_enums(self.allocator, module);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
@@ -1012,7 +1012,7 @@ fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
         let type_name = try self.names.intern(name_bytes);
         let table = try self.enum_table_name(name_bytes);
         var rows = array::new<string::String>(self.allocator);
-        defer rows.deinit();
+        defer rows.deinit(self.allocator);
         if module.enums.at(name_bytes) |declared| {
             let count = declared.tags.len();
             var row = 0;
@@ -1025,7 +1025,7 @@ fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
                         continue;
                     }
                     var spelling = try self.names.copy(type_name);
-                    defer spelling.deinit();
+                    defer spelling.deinit(self.allocator);
                     try spelling.append_bytes("::");
                     try spelling.append_bytes(tag);
                     let global = try self.text2("%s.%d", Arg::Str(table), Arg::Int(row));
@@ -1057,7 +1057,7 @@ fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
 /// the Go `enumNameTable` where the type arrives as text.
 fn (self: &var Emitter) enum_table_name(typ_name: []u8) -> !ir::Name {
     var out = try string::from_bytes(self.allocator, "@.kizu.enum.");
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     try append_mangled_global_name(&var out, typ_name);
     return self.names.intern_owned(move out);
 }

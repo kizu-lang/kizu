@@ -14,7 +14,7 @@ API 設計や仕様判断で迷ったら、まずここに照らします。
 
 ### 2. hidden control flow とは「呼び出しが source に見えないこと」
 
-`defer x.deinit()` は呼び出しが見えるので原理内。自動 Drop は見えないので違反。
+`defer x.deinit(allocator)` は呼び出しが見えるので原理内。自動 Drop は見えないので違反。
 生成された body でも、呼び出し自体が source にあれば隠れていない。
 
 ### 3. 危険な選択は禁止ではなく、grep できる明示語にする

@@ -27,27 +27,27 @@ fn expect_owner_union_diagnostic(
     method_owner: []u8, expected: []u8
 ) -> !void {
     var tree = ast::new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let scanner = lexer::new(allocator, input);
     var source_parser = try parser::new(allocator, move scanner);
-    defer source_parser.deinit();
+    defer source_parser.deinit(allocator);
     var program = try source_parser.parse_program(&var tree);
-    defer program.deinit();
+    defer program.deinit(allocator);
     var state = new_checker(allocator);
-    defer state.deinit();
+    defer state.deinit(allocator);
     if try state.collect_functions(&tree, &program) |value| {
-        defer value.deinit();
+        defer value.deinit(allocator);
         let message = value.message.as_bytes();
         testing::fail(message);
     }
     try prepare_owner_union_state(&var state, owner_name, method_owner);
     if try state.check_public_api(&tree, &program) |value| {
-        defer value.deinit();
+        defer value.deinit(allocator);
         let message = value.message.as_bytes();
         testing::fail(message);
     }
     if try state.check_owner_union_contracts(&tree, &program) |value| {
-        defer value.deinit();
+        defer value.deinit(allocator);
         let category = value.category.as_bytes();
         let message = value.message.as_bytes();
         let help = value.help.as_bytes();
@@ -64,27 +64,27 @@ fn expect_owner_union_success(
     allocator: Allocator, input: []u8, owner_name: []u8, method_owner: []u8
 ) -> !void {
     var tree = ast::new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let scanner = lexer::new(allocator, input);
     var source_parser = try parser::new(allocator, move scanner);
-    defer source_parser.deinit();
+    defer source_parser.deinit(allocator);
     var program = try source_parser.parse_program(&var tree);
-    defer program.deinit();
+    defer program.deinit(allocator);
     var state = new_checker(allocator);
-    defer state.deinit();
+    defer state.deinit(allocator);
     if try state.collect_functions(&tree, &program) |value| {
-        defer value.deinit();
+        defer value.deinit(allocator);
         let message = value.message.as_bytes();
         testing::fail(message);
     }
     try prepare_owner_union_state(&var state, owner_name, method_owner);
     if try state.check_public_api(&tree, &program) |value| {
-        defer value.deinit();
+        defer value.deinit(allocator);
         let message = value.message.as_bytes();
         testing::fail(message);
     }
     if try state.check_owner_union_contracts(&tree, &program) |value| {
-        defer value.deinit();
+        defer value.deinit(allocator);
         let message = value.message.as_bytes();
         testing::fail(message);
     }
@@ -96,33 +96,33 @@ test "owner union phase accepts copy and valid owner unions" {
     try expect_owner_union_success(allocator,
         "union Tag { A, Count(i64) }", "", "");
     try expect_owner_union_success(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Held(value) => value.deinit(), Empty => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held(value) => value.deinit(allocator), Empty => print(0), } }",
         "Resource", "Slot");
     try expect_owner_union_success(allocator,
-        "struct Resource {} union Slot { Count(i64), Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Count(value) => print(value), Held(value) => value.deinit(), Empty => print(0), } }",
+        "struct Resource {} union Slot { Count(i64), Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Count(value) => print(value), Held(value) => value.deinit(allocator), Empty => print(0), } }",
         "Resource", "Slot");
     try expect_owner_union_success(allocator,
         "struct Resource {} union Slot { Held(Resource), Empty }",
         "Resource", "");
     try expect_owner_union_success(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (item: Slot) deinit() -> void { (match item { Held(value) => value.deinit(), Empty => print(0), }); }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (item: Slot) deinit(allocator: Allocator) -> void { (match item { Held(value) => value.deinit(allocator), Empty => print(0), }); }",
         "Resource", "Slot");
 }
 
 test "owner union phase uses the retained DeinitOwners definition" {
     let allocator = mem::page_allocator();
     try expect_owner_union_diagnostic(allocator,
-        "union Slot { Held(std::arena::Arena<i64>), Empty } fn (self: Slot) deinit() -> void { match self { Held(arena) => print(0), Empty => print(0), } }",
+        "union Slot { Held(std::arena::Arena<i64>), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held(arena) => print(0), Empty => print(0), } }",
         "", "Slot",
-        "owner-payload union variant `Slot::Held` must clean its payload via `arena.deinit()`");
+        "owner-payload union variant `Slot::Held` must clean its payload via `arena.deinit(allocator)`");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Held(value) => print(0), Empty => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held(value) => print(0), Empty => print(0), } }",
         "Resource", "Slot",
-        "owner-payload union variant `Slot::Held` must clean its payload via `value.deinit()`");
+        "owner-payload union variant `Slot::Held` must clean its payload via `value.deinit(allocator)`");
     try expect_owner_union_diagnostic(allocator,
-        "union Slot { Held(std::mem::Box<i64>), Empty } fn (self: Slot) deinit() -> void { match self { Held(boxed) => print(0), Empty => print(0), } }",
+        "union Slot { Held(std::mem::Box<i64>), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held(boxed) => print(0), Empty => print(0), } }",
         "std::mem::Box", "Slot",
-        "owner-payload union variant `Slot::Held` must clean its payload via `boxed.deinit()`");
+        "owner-payload union variant `Slot::Held` must clean its payload via `boxed.deinit(allocator)`");
 }
 
 test "owner union signature diagnostics match the shipping checker" {
@@ -132,19 +132,19 @@ test "owner union signature diagnostics match the shipping checker" {
         "Resource", "",
         "generic owner-payload union `Slot` is unsupported; use a concrete owner union with explicit `deinit`");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource) } fn (self: Slot) deinit() -> i64 { return 0; }",
+        "struct Resource {} union Slot { Held(Resource) } fn (self: Slot) deinit(allocator: Allocator) -> i64 { return 0; }",
         "Resource", "Slot",
         "owner-payload union `Slot` deinit must return void");
     try expect_owner_union_diagnostic(allocator,
         "struct Resource {} union Slot { Held(Resource) } fn (self: Slot) deinit(extra: i64) -> void {}",
         "Resource", "Slot",
-        "owner-payload union `Slot` deinit must take only `self: Slot`");
+        "owner-payload union `Slot` deinit must take `self: Slot` and `allocator: Allocator`");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource) } fn (self: &Slot) deinit() -> void {}",
+        "struct Resource {} union Slot { Held(Resource) } fn (self: &Slot) deinit(allocator: Allocator) -> void {}",
         "Resource", "Slot",
         "owner-payload union `Slot` deinit must take `self` by value");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} struct Other {} union Slot { Held(Resource) } fn (self: Other) deinit() -> void {}",
+        "struct Resource {} struct Other {} union Slot { Held(Resource) } fn (self: Other) deinit(allocator: Allocator) -> void {}",
         "Resource", "Slot",
         "owner-payload union `Slot` deinit receiver must be `Slot`");
 }
@@ -152,39 +152,39 @@ test "owner union signature diagnostics match the shipping checker" {
 test "owner union body diagnostics match the shipping checker" {
     let allocator = mem::page_allocator();
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { return; }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { return; }",
         "Resource", "Slot",
         "owner-payload union `Slot` deinit must dispatch on `self` with an exhaustive `match`");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { print(0); match self { Held(value) => value.deinit(), Empty => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { print(0); match self { Held(value) => value.deinit(allocator), Empty => print(0), } }",
         "Resource", "Slot",
         "owner-payload union `Slot` deinit must dispatch on `self` with an exhaustive `match`");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Held(value) => print(0), _ => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held(value) => print(0), _ => print(0), } }",
         "Resource", "Slot",
         "owner-payload union `Slot` deinit `match` cannot use `_`; clean each variant explicitly");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Empty => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Empty => print(0), } }",
         "Resource", "Slot",
         "owner-payload union `Slot` deinit must handle variant `Held`");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Held => print(0), Empty => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held => print(0), Empty => print(0), } }",
         "Resource", "Slot",
         "owner-payload union variant `Slot::Held` must bind its payload to clean it in deinit");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Held(value) => value.clear(), Empty => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held(value) => value.clear(), Empty => print(0), } }",
         "Resource", "Slot",
-        "owner-payload union variant `Slot::Held` must clean its payload via `value.deinit()`");
+        "owner-payload union variant `Slot::Held` must clean its payload via `value.deinit(allocator)`");
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit() -> void { match self { Held(value) => { value.deinit(); }, Empty => print(0), } }",
+        "struct Resource {} union Slot { Held(Resource), Empty } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { Held(value) => { value.deinit(allocator); }, Empty => print(0), } }",
         "Resource", "Slot",
-        "owner-payload union variant `Slot::Held` must clean its payload via `value.deinit()`");
+        "owner-payload union variant `Slot::Held` must clean its payload via `value.deinit(allocator)`");
 }
 
 test "owner union reports the first owner variant in declaration order" {
     let allocator = mem::page_allocator();
     try expect_owner_union_diagnostic(allocator,
-        "struct Resource {} union Slot { First(Resource), Second(Resource) } fn (self: Slot) deinit() -> void { match self { First(first) => print(0), Second(second) => print(0), } }",
+        "struct Resource {} union Slot { First(Resource), Second(Resource) } fn (self: Slot) deinit(allocator: Allocator) -> void { match self { First(first) => print(0), Second(second) => print(0), } }",
         "Resource", "Slot",
-        "owner-payload union variant `Slot::First` must clean its payload via `first.deinit()`");
+        "owner-payload union variant `Slot::First` must clean its payload via `first.deinit(allocator)`");
 }

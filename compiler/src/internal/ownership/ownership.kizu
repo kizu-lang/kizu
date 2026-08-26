@@ -50,19 +50,19 @@ fn new_result(allocator: Allocator) -> Result {
     };
 }
 
-fn (self: Result) deinit() -> void {
-    self.return_retired_err_defers.deinit();
-    self.try_retired_err_defers.deinit();
+fn (self: Result) deinit(allocator: Allocator) -> void {
+    self.return_retired_err_defers.deinit(allocator);
+    self.try_retired_err_defers.deinit(allocator);
     return;
 }
 
-fn (self: RetiredErrDefers) deinit() -> void {
-    self.names.deinit();
+fn (self: RetiredErrDefers) deinit(allocator: Allocator) -> void {
+    self.names.deinit(allocator);
     return;
 }
 
-fn (self: RetiredTry) deinit() -> void {
-    self.names.deinit();
+fn (self: RetiredTry) deinit(allocator: Allocator) -> void {
+    self.names.deinit(allocator);
     return;
 }
 
@@ -102,9 +102,9 @@ pub struct FunctionInfo {
     pub body: ?ast::Block
 }
 
-fn (self: FunctionInfo) deinit() -> void {
-    self.static_params.deinit();
-    self.params.deinit();
+fn (self: FunctionInfo) deinit(allocator: Allocator) -> void {
+    self.static_params.deinit(allocator);
+    self.params.deinit(allocator);
     return;
 }
 
@@ -116,10 +116,10 @@ pub struct StructInfo {
     pub public_order: array::Array<Name>
 }
 
-fn (self: StructInfo) deinit() -> void {
-    self.fields.deinit();
-    self.order.deinit();
-    self.public_order.deinit();
+fn (self: StructInfo) deinit(allocator: Allocator) -> void {
+    self.fields.deinit(allocator);
+    self.order.deinit(allocator);
+    self.public_order.deinit(allocator);
     return;
 }
 
@@ -129,9 +129,9 @@ pub struct EnumInfo {
     pub order: array::Array<Name>
 }
 
-fn (self: EnumInfo) deinit() -> void {
-    self.tags.deinit();
-    self.order.deinit();
+fn (self: EnumInfo) deinit(allocator: Allocator) -> void {
+    self.tags.deinit(allocator);
+    self.order.deinit(allocator);
     return;
 }
 
@@ -142,9 +142,9 @@ pub struct UnionInfo {
     pub order: array::Array<Name>
 }
 
-fn (self: UnionInfo) deinit() -> void {
-    self.variants.deinit();
-    self.order.deinit();
+fn (self: UnionInfo) deinit(allocator: Allocator) -> void {
+    self.variants.deinit(allocator);
+    self.order.deinit(allocator);
     return;
 }
 
@@ -193,8 +193,8 @@ fn new_meta_binding_store(allocator: Allocator) -> MetaBindingStore {
     };
 }
 
-fn (self: MetaBindingStore) deinit() -> void {
-    self.bindings.deinit();
+fn (self: MetaBindingStore) deinit(allocator: Allocator) -> void {
+    self.bindings.deinit(allocator);
     return;
 }
 
@@ -236,10 +236,10 @@ pub struct Subst {
     replacements: array::Array<string::String>
 }
 
-fn (self: Subst) deinit() -> void {
-    self.by_name.deinit();
-    self.names.deinit();
-    self.replacements.deinit();
+fn (self: Subst) deinit(allocator: Allocator) -> void {
+    self.by_name.deinit(allocator);
+    self.names.deinit(allocator);
+    self.replacements.deinit(allocator);
     return;
 }
 
@@ -256,19 +256,21 @@ fn (self: &Checker) empty_subst() -> Subst {
 /// Checker selects one by copy handle so nested instantiations can restore
 /// the previous one without moving an owner field.
 struct SubstStore {
+    allocator: Allocator,
     frames: arena::Arena<Subst>,
     current: ?arena::Handle<Subst>
 }
 
 fn new_subst_store(allocator: Allocator) -> SubstStore {
     return SubstStore {
+        allocator: allocator,
         frames: arena::new<Subst>(allocator),
         current: null
     };
 }
 
-fn (self: SubstStore) deinit() -> void {
-    self.frames.deinit();
+fn (self: SubstStore) deinit(allocator: Allocator) -> void {
+    self.frames.deinit(allocator);
     return;
 }
 
@@ -278,7 +280,7 @@ fn (self: SubstStore) deinit() -> void {
 fn (self: &var SubstStore) enter(values: Subst) -> ?arena::Handle<Subst> {
     let previous = self.current;
     if values.by_name.len() == 0 {
-        values.deinit();
+        values.deinit(self.allocator);
         self.current = null;
         return previous;
     }
@@ -363,14 +365,14 @@ pub struct Checker {
 /// `Check` seeds per program (ast.DeinitOwners / DeclaredDeinits).
 pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program) -> !Checker {
     let deinit_owners = try ast::deinit_owners(allocator, tree, program);
-    errdefer deinit_owners.deinit();
+    errdefer deinit_owners.deinit(allocator);
     let declared_deinits = try ast::declared_deinits(allocator, tree, program);
-    errdefer declared_deinits.deinit();
+    errdefer declared_deinits.deinit(allocator);
     var names = new_name_table(allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(allocator);
     let common = try intern_common(&var names);
     var store = new_scope_store(allocator);
-    errdefer store.deinit();
+    errdefer store.deinit(allocator);
     let scratch = store.blank_binding(0, empty_name(), empty_name());
     let scratch_binding = store.retain(move scratch);
     return Checker {
@@ -407,26 +409,26 @@ pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program
     };
 }
 
-fn (self: Checker) deinit() -> void {
-    self.names.deinit();
-    self.store.deinit();
-    self.functions.deinit();
-    self.functions_by_name.deinit();
-    self.impls.deinit();
-    self.structs.deinit();
-    self.enums.deinit();
-    self.error_sets.deinit();
-    self.unions.deinit();
-    self.consume_needs.deinit();
-    self.deinit_owners.deinit();
-    self.declared_deinits.deinit();
-    self.checked_instances.deinit();
-    self.meta_fields.deinit();
-    self.missing_markers.deinit();
-    self.type_arg_values.deinit();
-    self.live_err_defers.deinit();
-    self.pending_alloc_taints.deinit();
-    self.result.deinit();
+fn (self: Checker) deinit(allocator: Allocator) -> void {
+    self.names.deinit(allocator);
+    self.store.deinit(allocator);
+    self.functions.deinit(allocator);
+    self.functions_by_name.deinit(allocator);
+    self.impls.deinit(allocator);
+    self.structs.deinit(allocator);
+    self.enums.deinit(allocator);
+    self.error_sets.deinit(allocator);
+    self.unions.deinit(allocator);
+    self.consume_needs.deinit(allocator);
+    self.deinit_owners.deinit(allocator);
+    self.declared_deinits.deinit(allocator);
+    self.checked_instances.deinit(allocator);
+    self.meta_fields.deinit(allocator);
+    self.missing_markers.deinit(allocator);
+    self.type_arg_values.deinit(allocator);
+    self.live_err_defers.deinit(allocator);
+    self.pending_alloc_taints.deinit(allocator);
+    self.result.deinit(allocator);
     return;
 }
 
@@ -439,9 +441,9 @@ pub fn check_all(
     program: &ast::Program
 ) -> !array::Array<diagnostic::Diagnostic> {
     var checker = try new_checker(allocator, tree, program);
-    defer checker.deinit();
+    defer checker.deinit(allocator);
     var out = array::new<diagnostic::Diagnostic>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     if try checker.check_setup(tree, program) |failed| {
         try out.append(move failed);
         return move out;
@@ -470,10 +472,10 @@ pub fn missing_move_markers(
     markers: &var array::Array<ast::Span>
 ) -> !?diagnostic::Diagnostic {
     var checker = try new_checker(allocator, tree, program);
-    defer checker.deinit();
+    defer checker.deinit(allocator);
     checker.collect_missing_markers = true;
     if try checker.check_program(tree, program) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(allocator);
         try append_missing_markers(&checker, markers);
         return move failed;
     }
@@ -629,7 +631,7 @@ fn (self: &var Checker) collect_enum(tree: &ast::Ast, declaration: &ast::EnumDec
         tags: map::new<[]u8, bool>(self.allocator),
         order: array::new<Name>(self.allocator)
     };
-    errdefer info.deinit();
+    errdefer info.deinit(self.allocator);
     var tag_index = 0;
     while declaration.tags.get(tag_index) |tag| {
         let retained = tree.texts.at(tag.node);
@@ -640,7 +642,8 @@ fn (self: &var Checker) collect_enum(tree: &ast::Ast, declaration: &ast::EnumDec
     }
     let name_text = tree.texts.at(declaration.name.node);
     let name_bytes = name_text.as_bytes();
-    return put_enum(&var self.enums, name_bytes, move info);
+    let allocator = self.allocator;
+    return put_enum(allocator, &var self.enums, name_bytes, move info);
 }
 
 fn put_flag(values: &var map::Map<[]u8, bool>, key: []u8, flag: bool) -> !void {
@@ -651,9 +654,14 @@ fn put_flag(values: &var map::Map<[]u8, bool>, key: []u8, flag: bool) -> !void {
     return values.insert(key, flag);
 }
 
-fn put_enum(values: &var map::Map<[]u8, EnumInfo>, key: []u8, info: EnumInfo) -> !void {
+fn put_enum(
+    allocator: Allocator,
+    values: &var map::Map<[]u8, EnumInfo>,
+    key: []u8,
+    info: EnumInfo
+) -> !void {
     if values.contains(key) {
-        info.deinit();
+        info.deinit(allocator);
         return;
     }
     return values.insert(key, move info);
@@ -663,7 +671,7 @@ fn put_enum(values: &var map::Map<[]u8, EnumInfo>, key: []u8, info: EnumInfo) ->
 /// `collectErrorSets`. An error carries nothing, so reading one moves nothing.
 fn (self: &var Checker) collect_error_sets(tree: &ast::Ast, program: &ast::Program) -> !void {
     var combined = array::new<ast::Declaration>(self.allocator);
-    defer combined.deinit();
+    defer combined.deinit(self.allocator);
     var index = 0;
     while program.declarations.get(index) |declaration| {
         index = index + 1;
@@ -683,7 +691,7 @@ fn (self: &var Checker) collect_error_sets(tree: &ast::Ast, program: &ast::Progr
     // so the loop settles; an unresolved reference is left for the checker
     // that names it.
     var done = array::new<bool>(self.allocator);
-    defer done.deinit();
+    defer done.deinit(self.allocator);
     index = 0;
     while index < combined.len() {
         try done.append(false);
@@ -724,7 +732,7 @@ fn (self: &var Checker) collect_combined_error_set(
 ) -> !void {
     resolved.* = false;
     var members = map::new<[]u8, bool>(self.allocator);
-    errdefer members.deinit();
+    errdefer members.deinit(self.allocator);
     match tree.declarations.at(declaration.node) {
         ErrorSet(value) => {
             var index = 0;
@@ -739,18 +747,19 @@ fn (self: &var Checker) collect_combined_error_set(
                         try put_flag(&var members, member, true);
                     }
                 } else {
-                    members.deinit();
+                    members.deinit(self.allocator);
                     return;
                 }
             }
             let name_text = tree.texts.at(value.name.node);
             let name_bytes = name_text.as_bytes();
-            try put_flags(&var self.error_sets, name_bytes, move members);
+            let allocator = self.allocator;
+            try put_flags(allocator, &var self.error_sets, name_bytes, move members);
             resolved.* = true;
             return;
         },
         _ => {
-            members.deinit();
+            members.deinit(self.allocator);
             return;
         },
     }
@@ -758,7 +767,7 @@ fn (self: &var Checker) collect_combined_error_set(
 
 fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::ErrorSetDecl) -> !void {
     var members = map::new<[]u8, bool>(self.allocator);
-    errdefer members.deinit();
+    errdefer members.deinit(self.allocator);
     var member_index = 0;
     while declaration.members.get(member_index) |member| {
         let retained = tree.texts.at(member.node);
@@ -768,12 +777,18 @@ fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::Er
     }
     let name_text = tree.texts.at(declaration.name.node);
     let name_bytes = name_text.as_bytes();
-    return put_flags(&var self.error_sets, name_bytes, move members);
+    let allocator = self.allocator;
+    return put_flags(allocator, &var self.error_sets, name_bytes, move members);
 }
 
-fn put_flags(values: &var map::Map<[]u8, map::Map<[]u8, bool>>, key: []u8, flags: map::Map<[]u8, bool>) -> !void {
+fn put_flags(
+    allocator: Allocator,
+    values: &var map::Map<[]u8, map::Map<[]u8, bool>>,
+    key: []u8,
+    flags: map::Map<[]u8, bool>
+) -> !void {
     if values.contains(key) {
-        flags.deinit();
+        flags.deinit(allocator);
         return;
     }
     return values.insert(key, move flags);
@@ -798,7 +813,7 @@ fn (self: &var Checker) collect_union(tree: &ast::Ast, declaration: &ast::UnionD
         variants: map::new<[]u8, Name>(self.allocator),
         order: array::new<Name>(self.allocator)
     };
-    errdefer info.deinit();
+    errdefer info.deinit(self.allocator);
     var variant_index = 0;
     while declaration.variants.at(variant_index) |variant| {
         let payload = try self.resolved_optional_type(tree, variant.payload);
@@ -810,7 +825,8 @@ fn (self: &var Checker) collect_union(tree: &ast::Ast, declaration: &ast::UnionD
     }
     let name_text = tree.texts.at(declaration.name.node);
     let name_bytes = name_text.as_bytes();
-    return put_union(&var self.unions, name_bytes, move info);
+    let allocator = self.allocator;
+    return put_union(allocator, &var self.unions, name_bytes, move info);
 }
 
 fn put_name(values: &var map::Map<[]u8, Name>, key: []u8, name: Name) -> !void {
@@ -821,9 +837,14 @@ fn put_name(values: &var map::Map<[]u8, Name>, key: []u8, name: Name) -> !void {
     return values.insert(key, name);
 }
 
-fn put_union(values: &var map::Map<[]u8, UnionInfo>, key: []u8, info: UnionInfo) -> !void {
+fn put_union(
+    allocator: Allocator,
+    values: &var map::Map<[]u8, UnionInfo>,
+    key: []u8,
+    info: UnionInfo
+) -> !void {
     if values.contains(key) {
-        info.deinit();
+        info.deinit(allocator);
         return;
     }
     return values.insert(key, move info);
@@ -861,11 +882,11 @@ fn (self: &var Checker) check_struct(tree: &ast::Ast, declaration: &ast::StructD
         order: array::new<Name>(self.allocator),
         public_order: array::new<Name>(self.allocator)
     };
-    errdefer info.deinit();
+    errdefer info.deinit(self.allocator);
     var field_index = 0;
     while declaration.fields.at(field_index) |field| {
         if field.borrow {
-            info.deinit();
+            info.deinit(self.allocator);
             return try self.error2(
                 tree, ast::zero_span(),
                 "borrow error: struct field `%s.%s` cannot store borrow",
@@ -885,13 +906,19 @@ fn (self: &var Checker) check_struct(tree: &ast::Ast, declaration: &ast::StructD
     }
     let name_text = tree.texts.at(declaration.name.node);
     let name_bytes = name_text.as_bytes();
-    try put_struct(&var self.structs, name_bytes, move info);
+    let allocator = self.allocator;
+    try put_struct(allocator, &var self.structs, name_bytes, move info);
     return null;
 }
 
-fn put_struct(values: &var map::Map<[]u8, StructInfo>, key: []u8, info: StructInfo) -> !void {
+fn put_struct(
+    allocator: Allocator,
+    values: &var map::Map<[]u8, StructInfo>,
+    key: []u8,
+    info: StructInfo
+) -> !void {
     if values.contains(key) {
-        info.deinit();
+        info.deinit(allocator);
         return;
     }
     return values.insert(key, move info);
@@ -909,14 +936,14 @@ fn (self: &var Checker) field_ownership_type(tree: &ast::Ast, field: &ast::Field
         }
     }
     var resolved = try stdmeta::resolve_element_type_forms(self.allocator, &tree.types, field.type_name);
-    errdefer resolved.deinit();
+    errdefer resolved.deinit(self.allocator);
     if mem::len(prefix) == 0 {
         return self.names.intern_owned(move resolved);
     }
     var out = try string::from_bytes(self.allocator, prefix);
-    errdefer out.deinit();
+    errdefer out.deinit(self.allocator);
     try out.append_string(&resolved);
-    resolved.deinit();
+    resolved.deinit(self.allocator);
     return self.names.intern_owned(move out);
 }
 
@@ -993,7 +1020,7 @@ fn (self: &var Checker) register_method(receiver: Name, method: Name, handle: Fu
         return methods.insert(method_bytes, handle);
     }
     var methods = map::new<[]u8, FunctionHandle>(self.allocator);
-    errdefer methods.deinit();
+    errdefer methods.deinit(self.allocator);
     try methods.insert(method_bytes, handle);
     return self.impls.insert(receiver_bytes, move methods);
 }
@@ -1006,7 +1033,7 @@ fn (self: &var Checker) function_info_from_decl(
     function: &ast::FunctionDecl
 ) -> !FunctionInfo {
     var static_params = array::new<StaticParamInfo>(self.allocator);
-    errdefer static_params.deinit();
+    errdefer static_params.deinit(self.allocator);
     var index = 0;
     while function.signature.static_params.at(index) |param| {
         try static_params.append(StaticParamInfo {
@@ -1017,7 +1044,7 @@ fn (self: &var Checker) function_info_from_decl(
         index = index + 1;
     }
     var params = array::new<ParamInfo>(self.allocator);
-    errdefer params.deinit();
+    errdefer params.deinit(self.allocator);
     index = 0;
     while function.signature.params.at(index) |param| {
         try params.append(ParamInfo {
@@ -1189,7 +1216,7 @@ fn (self: &var Checker) define_params(
             return move failed;
         }
         var value = self.store.new_binding(param.name, type_name);
-        errdefer value.deinit();
+        errdefer value.deinit(self.allocator);
         value.borrowed_param = param.borrow;
         value.mut_borrow = param.mut_borrow;
         // A method receiver is written as a by-value param but is not a
@@ -1219,7 +1246,7 @@ fn (self: &Checker) param_at(handle: FunctionHandle, index: i64) -> ?ParamInfo {
 /// `FunctionSignature.TypeParamNames`.
 fn (self: &Checker) type_param_names(handle: FunctionHandle) -> !array::Array<Name> {
     var names = array::new<Name>(self.allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(self.allocator);
     var index = 0;
     while self.static_param_at(handle, index) |param| {
         if param.is_type {
@@ -1247,7 +1274,7 @@ fn (self: &var Checker) check_test_decl(tree: &var ast::Ast, test: &ast::TestDec
     let retained_name = tree.texts.at(test.name.node);
     let source_name = retained_name.as_bytes();
     var name = try string::from_bytes(self.allocator, "test ");
-    errdefer name.deinit();
+    errdefer name.deinit(self.allocator);
     try fmt::append_bytes_literal(&var name, source_name);
     let info = FunctionInfo {
         name: try self.names.intern_owned(move name),
