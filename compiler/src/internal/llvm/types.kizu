@@ -302,9 +302,34 @@ fn (self: &var Emitter) llvm_union_type_name(name: []u8) -> !ir::Name {
     return self.names.intern_owned(move out);
 }
 
+/// Returns the element of an optional whose absence a value of the element
+/// type can already spell, and null when there is none, the Go
+/// `nicheOptionalElem`.
+///
+/// A Box handle is the address of its payload and a borrow is the address of
+/// what it borrows; neither can be null while it exists, so null is a spelling
+/// no live element uses and `?T` needs no tag beside the pointer to say which
+/// it is. That halves the recursive shape this exists for -- a node holding
+/// `?Box<Node>` twice is two words, not four -- and costs no branch: presence
+/// is the comparison the tag byte was computed from anyway.
+///
+/// A Map or an Arena handle is a pointer too, but its constructor hands back
+/// null when the allocation fails and the value carries that on, so null is a
+/// live value there and the niche is not free.
+pub fn niche_optional_elem(name: []u8) -> ?[]u8 {
+    let elem = typ::optional_elem(name) orelse return null;
+    if is_box_llvm_type(elem) or mem::starts_with(elem, "&") {
+        return elem;
+    }
+    return null;
+}
+
 /// Names the LLVM aggregate of one optional type, the Go
 /// `llvmOptionalTypeName`.
 fn (self: &var Emitter) llvm_optional_type_name(name: []u8) -> !ir::Name {
+    if niche_optional_elem(name) |_| {
+        return self.names.intern("ptr");
+    }
     var out = try string::from_bytes(self.allocator, "%kizu.opt.");
     errdefer out.deinit(self.allocator);
     if typ::optional_elem(name) |elem| {

@@ -34,8 +34,12 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 	if isArrayLLVMType(typ) {
 		return arrayHeaderSize, 8, true
 	}
-	// An optional is the two-field aggregate writeOptionalTypes declares:
-	// `{ i8, elem }`, laid out the C way like any struct.
+	// A niche optional is its element: the element spells absence itself.
+	if elem, ok := nicheOptionalElem(typ); ok {
+		return e.typeLayoutVisiting(elem, seen)
+	}
+	// Every other optional is the two-field aggregate writeOptionalTypes
+	// declares: `{ i8, elem }`, laid out the C way like any struct.
 	if elem, ok := optionalElemLLVM(typ); ok {
 		elemSize, elemAlign, ok := e.typeLayoutVisiting(elem, seen)
 		if !ok {

@@ -321,6 +321,12 @@ fn (self: &var Emitter) write_opt_some(module: &ir::Module, node: &ir::InstrNode
     let result_type = result_text.as_bytes();
     if typ::optional_elem(result_type) |elem| {
         if node.args.len() == 1 {
+            if niche_optional_elem(result_type) |_| {
+                // The payload is the whole value: a live element is never null.
+                let carried = try self.operand(module, node.args.get_or_panic(0));
+                try self.set_value(module, node.result, carried.operand);
+                return null;
+            }
             let result_name = try self.local_name(module, node.result.name);
             let opt_type = try self.llvm_type(module, result_type);
             let some_name = try self.suffixed(result_name, ".some");
@@ -345,6 +351,11 @@ fn (self: &var Emitter) write_opt_null(module: &ir::Module, node: &ir::InstrNode
     if !is_optional_type(result_type) or node.args.len() != 0 {
         return try self.fail0("llvm error: opt.null expects no args and a `?T` result");
     }
+    if niche_optional_elem(result_type) |_| {
+        let absent = try self.names.intern("null");
+        try self.set_value(module, node.result, absent);
+        return null;
+    }
     let result_name = try self.local_name(module, node.result.name);
     let opt_type = try self.llvm_type(module, result_type);
     try self.line2("  %s = insertvalue %s zeroinitializer, i8 0, 0", Arg::Str(result_name), Arg::Str(opt_type));
@@ -367,6 +378,12 @@ fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode)
         return try self.fail1("llvm error: opt.has expects `?T`, got %s", Arg::Str(shown));
     }
     let result_name = try self.local_name(module, node.result.name);
+    if niche_optional_elem(source_type) |_| {
+        let carried = try self.operand(module, source);
+        try self.line2("  %s = icmp ne ptr %s, null", Arg::Str(result_name), Arg::Str(carried.operand));
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
     let tag_name = try self.suffixed(result_name, ".tag");
     let opt_type = try self.llvm_type(module, source_type);
     let info = try self.operand(module, source);
@@ -391,6 +408,11 @@ fn (self: &var Emitter) write_opt_value(module: &ir::Module, node: &ir::InstrNod
             let elem_shown = try self.names.intern(elem);
             let result_shown = try self.own(module, node.result.type_name);
             return try self.fail2("llvm error: opt.value returns %s, got %s", Arg::Str(elem_shown), Arg::Str(result_shown));
+        }
+        if niche_optional_elem(source_type) |_| {
+            let carried = try self.operand(module, source);
+            try self.set_value(module, node.result, carried.operand);
+            return null;
         }
         let result_name = try self.local_name(module, node.result.name);
         let opt_type = try self.llvm_type(module, source_type);
