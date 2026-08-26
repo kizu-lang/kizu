@@ -6,12 +6,11 @@
 
 ## 1. 全体像: shipping 実装は 1 つ
 
-Kizu の shipping 実装は `internal/` + `cmd/kizu` の Go 実装だけです。
-`compiler/` では、その構造と挙動を保った Kizu への機械移植を進めますが、cutover
-までは CLI、fallback、user-facing command から呼びません。以前の selfhost は
-独立した第二実装として育ち、片方がもう片方を偽装して緑を保ったため削除しました。
-今回は `docs/selfhost-porting.md` と field ごとの ownership 判断を先に固定し、
-cutover と同時に Go compiler と移植専用の仕組みを削除します。
+利用者が受け取る binary は `compiler/` から build した Kizu compiler です。Go の
+`internal/` + `cmd/kizu` はそれを build する seed であり、両実装の出力を突き合わせる
+oracle でもあります。以前の selfhost は独立した第二実装として育ち、片方がもう片方を
+偽装して緑を保ったため削除しました。今回は Go の構造と挙動を保った機械移植にし、
+両者の差分を corpus で突き合わせています(ADR-0130)。
 
 規模感(2026-08 時点): Go 実装 約 42k 行 + テスト 約 18k 行、Kizu 製 std 約 10k 行、
 examples 約 5k 行。
@@ -127,5 +126,6 @@ CI は push/PR ごとに 1 job(`go test ./...` + gofmt)。定時実行は置き�
 | std の API リファレンス | docs/std/ |
 | stdlib の移行計画と builtin registry | docs/stdlib.md |
 | 性能作業の記録 | docs/perf.md |
-| self-host の移植規則 | docs/selfhost-porting.md |
+| self-host の移植を選んだ理由 | docs/adr/0130-selfhost-by-mechanical-porting.md |
+| 移植で見つかった言語 / std の gap | docs/language-gaps.md |
 | 主要な設計判断(IR/型/所有権/comptime …) | docs/adr/(特に 0006 comptime、0009 IR、0011 phase 順、0014 typed SSA、0049 モジュール解決)|
