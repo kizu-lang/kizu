@@ -1341,8 +1341,11 @@ fn (self: &var Lowerer) lower_function_named(
                 try self.slots.append(self.allocator, facts.name);
             } else {
                 // One that arrives as a value and is written through needs
-                // storage of its own, which is the copy it was handed.
-                if self.has_slot(facts.name) {
+                // storage of its own, which is the copy it was handed. One
+                // that arrives as an address already reaches storage, and it
+                // is the caller's: wrapping it again would hand the callee a
+                // borrow of a borrow.
+                if self.has_slot(facts.name) and !self.is_reference_type(param.type_name) {
                     try value_slots.append(self.allocator, facts.name);
                 }
             }
@@ -1422,10 +1425,14 @@ fn (self: &var Lowerer) borrow_ir_type(elem: Name, mutable: bool) -> !Name {
     if self.module.has_union(elem) {
         return self.module.names.prefixed("&", elem);
     }
-    // An array is its header, and the header is wider than a word. A shared
-    // borrow of one hands over the address of a copy rather than the copy
-    // itself, so a reader reaches the same fields a writer does.
-    if try self.array_element_type(elem) |_| {
+    // A borrow of an owner reaches the value the caller has, not a copy of
+    // it. An owner is where a container header lives, and the header is the
+    // storage it describes (ADR-0131): a copy of one stops seeing what the
+    // original goes on to own, so the two answer differently the moment
+    // anything writes through the original -- `b.show(b.put(v))` would show
+    // the value from before the put. Copy data has no such interior, so a
+    // borrow of it travels flat.
+    if self.is_owner_type(elem) {
         return self.module.names.prefixed("&", elem);
     }
     return elem;
@@ -1443,7 +1450,7 @@ fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
     if self.module.has_union(elem) {
         return Passing::CopyAddress;
     }
-    if self.module.names.has_generic_arg(elem, "std::array::Array") {
+    if self.is_owner_type(elem) {
         return Passing::CopyAddress;
     }
     return Passing::Value;

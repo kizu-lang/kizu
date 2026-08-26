@@ -773,8 +773,10 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 			continue
 		}
 		// One that arrives as a value and is written through needs storage of
-		// its own, which is the copy it was handed.
-		if l.slots[param.Name] {
+		// its own, which is the copy it was handed. One that arrives as an
+		// address already reaches storage, and it is the caller's: wrapping it
+		// again would hand the callee a borrow of a borrow.
+		if l.slots[param.Name] && !isReferenceType(signature.Params[index].Type) {
 			valueSlots = append(valueSlots, param.Name)
 		}
 	}
@@ -833,10 +835,14 @@ func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 	if _, ok := l.module.Unions[elem]; ok {
 		return "&" + elem, PassCopyAddress
 	}
-	// An array is its header, and the header is wider than a word. A shared
-	// borrow of one hands over the address of a copy rather than the copy
-	// itself, so a reader reaches the same fields a writer does.
-	if _, ok := arrayElementType(elem); ok {
+	// A borrow of an owner reaches the value the caller has, not a copy of
+	// it. An owner is where a container header lives, and the header is the
+	// storage it describes (ADR-0131): a copy of one stops seeing what the
+	// original goes on to own, so the two answer differently the moment
+	// anything writes through the original -- `b.show(b.put(v))` would show
+	// the value from before the put. Copy data has no such interior, so a
+	// borrow of it travels flat.
+	if ast.OwnerType(l.deinitOwners, elem) {
 		return "&" + elem, PassCopyAddress
 	}
 	return elem, PassValue
