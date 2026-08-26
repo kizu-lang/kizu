@@ -55,7 +55,7 @@ fn (self: &var Lowerer) add_slot(name: Name) -> !void {
     if self.has_slot(name) {
         return;
     }
-    return self.slots.append(name);
+    return self.slots.append(self.allocator, name);
 }
 
 /// Removes name from the slot set, the Go `delete(found, name)`.
@@ -80,7 +80,7 @@ fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement:
     defer exprs.deinit(self.allocator);
     var stmts = array::new<ast::Statement>(self.allocator);
     defer stmts.deinit(self.allocator);
-    let known = try statement_children(tree, statement, &var exprs, &var stmts);
+    let known = try statement_children(self.allocator, tree, statement, &var exprs, &var stmts);
     if !known {
         let kind = try self.name(statement_go_type(tree, statement));
         return try self.fail1(tree, "ir error: slot analysis does not know statement `%s`", Arg::Str(kind));
@@ -118,58 +118,58 @@ fn (self: &var Lowerer) collect_mut_borrows_children(
 /// one this walk knows. An unknown node is an error rather than an empty
 /// answer: a name missed here is a local that keeps its value while the
 /// callee writes into storage nobody reads.
-fn statement_children(
+fn statement_children(allocator: Allocator, 
     tree: &ast::Ast,
     statement: ast::Statement,
     exprs: &var array::Array<ast::Expression>,
     stmts: &var array::Array<ast::Statement>
 ) -> !bool {
     match tree.statements.at(statement.node) {
-        Let(s) => try exprs.append(s.value),
+        Let(s) => try exprs.append(allocator, s.value),
         Assign(s) => {
-            try exprs.append(s.target);
-            try exprs.append(s.value);
+            try exprs.append(allocator, s.target);
+            try exprs.append(allocator, s.value);
         },
         Return(s) => {
             if s.value |value| {
-                try exprs.append(value);
+                try exprs.append(allocator, value);
             }
         },
-        Defer(s) => try exprs.append(s.expr),
-        ErrDefer(s) => try exprs.append(s.expr),
-        Expr(s) => try exprs.append(s.expr),
+        Defer(s) => try exprs.append(allocator, s.expr),
+        ErrDefer(s) => try exprs.append(allocator, s.expr),
+        Expr(s) => try exprs.append(allocator, s.expr),
         Break(_) => {},
         Continue(_) => {},
         Block(s) => {
             var index = 0;
             while s.statements.get(index) |inner| {
                 index = index + 1;
-                try stmts.append(inner);
+                try stmts.append(allocator, inner);
             }
         },
-        If(s) => try if_children(s, exprs, stmts),
+        If(s) => try if_children(allocator, s, exprs, stmts),
         ComptimeIf(s) => {
-            try exprs.append(s.condition);
-            try stmts.append(s.consequence.as_statement());
+            try exprs.append(allocator, s.condition);
+            try stmts.append(allocator, s.consequence.as_statement());
             if s.alternative |alternative| {
-                try stmts.append(alternative.as_statement());
+                try stmts.append(allocator, alternative.as_statement());
             }
         },
-        ComptimeFor(s) => try stmts.append(s.body.as_statement()),
+        ComptimeFor(s) => try stmts.append(allocator, s.body.as_statement()),
         ComptimeMatch(s) => {
-            try exprs.append(s.value);
-            try stmts.append(s.body.as_statement());
+            try exprs.append(allocator, s.value);
+            try stmts.append(allocator, s.body.as_statement());
         },
         While(s) => {
-            try exprs.append(s.condition);
-            try stmts.append(s.body.as_statement());
+            try exprs.append(allocator, s.condition);
+            try stmts.append(allocator, s.body.as_statement());
         },
         For(s) => {
-            try exprs.append(s.start);
-            try exprs.append(s.end);
-            try stmts.append(s.body.as_statement());
+            try exprs.append(allocator, s.start);
+            try exprs.append(allocator, s.end);
+            try stmts.append(allocator, s.body.as_statement());
         },
-        Match(s) => try match_children(s, exprs, stmts),
+        Match(s) => try match_children(allocator, s, exprs, stmts),
         Recovered(_) => return false,
     }
     return true;
@@ -178,15 +178,15 @@ fn statement_children(
 /// Appends the children of an `if`, the `IfStmt` arm of the Go
 /// `nestingStatementChildren`: the condition, then the blocks that are
 /// present (the Go `blocks`).
-fn if_children(
+fn if_children(allocator: Allocator, 
     branch: ast::IfStmt,
     exprs: &var array::Array<ast::Expression>,
     stmts: &var array::Array<ast::Statement>
 ) -> !void {
-    try exprs.append(branch.condition);
-    try stmts.append(branch.consequence.as_statement());
+    try exprs.append(allocator, branch.condition);
+    try stmts.append(allocator, branch.consequence.as_statement());
     if branch.alternative |alternative| {
-        try stmts.append(alternative.as_statement());
+        try stmts.append(allocator, alternative.as_statement());
     }
     return;
 }
@@ -194,16 +194,16 @@ fn if_children(
 /// Appends the children of a `match`, the `MatchStmt` arm of the Go
 /// `nestingStatementChildren`: the value, then the statement each arm runs
 /// (the Go `matchArmBodies`).
-fn match_children(
+fn match_children(allocator: Allocator, 
     value: &ast::MatchStmt,
     exprs: &var array::Array<ast::Expression>,
     stmts: &var array::Array<ast::Statement>
 ) -> !void {
-    try exprs.append(value.value);
+    try exprs.append(allocator, value.value);
     var index = 0;
     while value.arms.get(index) |arm| {
         index = index + 1;
-        try stmts.append(arm.body);
+        try stmts.append(allocator, arm.body);
     }
     return;
 }
@@ -229,7 +229,7 @@ fn (self: &var Lowerer) collect_mut_borrows_expr(tree: &var ast::Ast, expression
     }
     var children = array::new<ast::Expression>(self.allocator);
     defer children.deinit(self.allocator);
-    let known = try expression_children(tree, expression, &var children);
+    let known = try expression_children(self.allocator, tree, expression, &var children);
     if !known {
         let kind = try self.name(expression_go_type(tree, expression));
         return try self.fail1(tree, "ir error: slot analysis does not know expression `%s`", Arg::Str(kind));
@@ -253,8 +253,8 @@ fn (self: &var Lowerer) collect_mut_borrows_value_stmt(tree: &var ast::Ast, expr
     var stmts = array::new<ast::Statement>(self.allocator);
     defer stmts.deinit(self.allocator);
     match tree.expressions.at(expression.node) {
-        If(branch) => try if_children(branch, &var exprs, &var stmts),
-        Match(value) => try match_children(value, &var exprs, &var stmts),
+        If(branch) => try if_children(self.allocator, branch, &var exprs, &var stmts),
+        Match(value) => try match_children(self.allocator, value, &var exprs, &var stmts),
         _ => {},
     }
     return self.collect_mut_borrows_children(tree, &exprs, &stmts);
@@ -263,7 +263,7 @@ fn (self: &var Lowerer) collect_mut_borrows_value_stmt(tree: &var ast::Ast, expr
 /// Appends the expressions written inside expr, the Go `expressionChildren`
 /// (with `structLiteralValues` and `guardExpressionChildren` folded in), and
 /// reports whether the node is one this walk knows.
-fn expression_children(
+fn expression_children(allocator: Allocator, 
     tree: &ast::Ast,
     expression: ast::Expression,
     children: &var array::Array<ast::Expression>
@@ -276,61 +276,61 @@ fn expression_children(
         Type(_) => {},
         BufferLiteral(_) => {},
         Null(_) => {},
-        Prefix(e) => try children.append(e.right),
+        Prefix(e) => try children.append(allocator, e.right),
         Binary(e) => {
-            try children.append(e.left);
-            try children.append(e.right);
+            try children.append(allocator, e.left);
+            try children.append(allocator, e.right);
         },
-        TypeApply(e) => try children.append(e.callee),
-        Cast(e) => try children.append(e.value),
-        Try(e) => try children.append(e.value),
-        Unsafe(e) => try children.append(e.value),
-        Move(e) => try children.append(e.value),
-        Comptime(e) => try children.append(e.expr),
-        Deref(e) => try children.append(e.receiver),
-        Field(e) => try children.append(e.receiver),
+        TypeApply(e) => try children.append(allocator, e.callee),
+        Cast(e) => try children.append(allocator, e.value),
+        Try(e) => try children.append(allocator, e.value),
+        Unsafe(e) => try children.append(allocator, e.value),
+        Move(e) => try children.append(allocator, e.value),
+        Comptime(e) => try children.append(allocator, e.expr),
+        Deref(e) => try children.append(allocator, e.receiver),
+        Field(e) => try children.append(allocator, e.receiver),
         Index(e) => {
-            try children.append(e.target);
+            try children.append(allocator, e.target);
             if e.index |index| {
-                try children.append(index);
+                try children.append(allocator, index);
             }
             if e.start |start| {
-                try children.append(start);
+                try children.append(allocator, start);
             }
             if e.end |end| {
-                try children.append(end);
+                try children.append(allocator, end);
             }
         },
         StructLiteral(e) => {
             var index = 0;
             while e.fields.get(index) |field| {
                 index = index + 1;
-                try children.append(field.value);
+                try children.append(allocator, field.value);
             }
         },
         Call(e) => {
-            try children.append(e.callee);
+            try children.append(allocator, e.callee);
             var index = 0;
             while ownership::arg_at(tree, e.args, index) |arg| {
                 index = index + 1;
-                try children.append(arg);
+                try children.append(allocator, arg);
             }
         },
         OrelseGuard(e) => {
             // The condition, and the value a return exit carries.
-            try children.append(e.condition);
+            try children.append(allocator, e.condition);
             if ownership::return_stmt(tree, e.exit) |returned| {
                 if returned.value |value| {
-                    try children.append(value);
+                    try children.append(allocator, value);
                 }
             }
         },
         CatchGuard(e) => {
             // The condition, and the value a return exit carries.
-            try children.append(e.condition);
+            try children.append(allocator, e.condition);
             if ownership::return_stmt(tree, e.exit) |returned| {
                 if returned.value |value| {
-                    try children.append(value);
+                    try children.append(allocator, value);
                 }
             }
         },
@@ -380,7 +380,7 @@ fn (self: &var Lowerer) mark_lent_method_args(
 ) -> !void {
     var method = string::new(self.allocator);
     defer method.deinit(self.allocator);
-    try append_text(tree, field.name, &var method);
+    try append_text(self.allocator, tree, field.name, &var method);
     let method_bytes = method.as_bytes();
     var position = 0;
     while self.method_signature_at(method_bytes, position) |signature| {
@@ -651,7 +651,7 @@ fn (self: &var Lowerer) lower_call_args_named(
         if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
             return move failed;
         }
-        try out.append(value);
+        try out.append(self.allocator, value);
     }
     return null;
 }
@@ -675,7 +675,7 @@ fn (self: &var Lowerer) lower_call_args_as(tree: &var ast::Ast, params: ParamsVi
         if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
             return move failed;
         }
-        try out.append(value);
+        try out.append(self.allocator, value);
     }
     return null;
 }

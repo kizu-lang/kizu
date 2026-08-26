@@ -51,8 +51,8 @@ pub fn new(
         help: string::new(allocator)
     };
     errdefer diagnostic.deinit(allocator);
-    try diagnostic.category.append_bytes(category);
-    try diagnostic.message.append_bytes(message);
+    try diagnostic.category.append_bytes(allocator, category);
+    try diagnostic.message.append_bytes(allocator, message);
     return move diagnostic;
 }
 
@@ -80,8 +80,7 @@ pub fn from_text(
     var start = first_end + 1;
     while start <= length {
         let end = line_end(text, start);
-        try add_text_line(
-            allocator,
+        try add_text_line(allocator,
             &var diagnostic,
             text[start..end]
         );
@@ -103,15 +102,15 @@ fn add_text_line(
     }
     if mem::starts_with(line, "help: ") {
         if diagnostic.help.len() > 0 {
-            try diagnostic.help.append_byte(cast<u8>(10));
+            try diagnostic.help.append_byte(allocator, cast<u8>(10));
         }
-        return diagnostic.help.append_bytes(line[6..mem::len(line)]);
+        return diagnostic.help.append_bytes(allocator, line[6..mem::len(line)]);
     }
     if mem::len(line) == 0 {
         return;
     }
     if diagnostic.message.len() == 0 {
-        return diagnostic.message.append_bytes(line);
+        return diagnostic.message.append_bytes(allocator, line);
     }
     return append_note(allocator, diagnostic, line);
 }
@@ -123,7 +122,7 @@ fn append_note(
 ) -> !void {
     let owned = try string::from_bytes(allocator, note);
     errdefer owned.deinit(allocator);
-    return diagnostic.notes.append(move owned);
+    return diagnostic.notes.append(allocator, move owned);
 }
 
 /// Renders the ADR-0072 message form without CLI severity wrapping.
@@ -134,55 +133,55 @@ fn (self: &Diagnostic) error(
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
     if self.category.len() > 0 {
-        try out.append_string(&self.category);
-        try out.append_bytes(": ");
+        try out.append_string(allocator, &self.category);
+        try out.append_bytes(allocator, ": ");
     } else {
         if self.severity == Severity::Warning {
-            try out.append_bytes("warning: ");
+            try out.append_bytes(allocator, "warning: ");
         }
     }
-    try out.append_string(&self.message);
+    try out.append_string(allocator, &self.message);
     if !self.span.is_zero() {
-        try out.append_bytes(" at ");
+        try out.append_bytes(allocator, " at ");
         var wrote_path = false;
         if self.span.source |id| {
-            wrote_path = try append_source_path(&var out, sources, id);
+            wrote_path = try append_source_path(allocator, &var out, sources, id);
         }
         if wrote_path {
-            try out.append_bytes(":");
+            try out.append_bytes(allocator, ":");
         }
-        try fmt::append_i64(&var out, self.span.start.line);
-        try out.append_bytes(":");
-        try fmt::append_i64(&var out, self.span.start.column);
+        try fmt::append_i64(allocator, &var out, self.span.start.line);
+        try out.append_bytes(allocator, ":");
+        try fmt::append_i64(allocator, &var out, self.span.start.column);
     }
     var index = 0;
     while self.notes.at(index) |note| {
-        try out.append_byte(cast<u8>(10));
-        try out.append_bytes("note: ");
-        try out.append_string(note);
+        try out.append_byte(allocator, cast<u8>(10));
+        try out.append_bytes(allocator, "note: ");
+        try out.append_string(allocator, note);
         index = index + 1;
     }
     if self.help.len() > 0 {
-        try append_help(&var out, &self.help);
+        try append_help(allocator, &var out, &self.help);
     }
     return move out;
 }
 
-fn append_source_path(
+fn append_source_path(allocator: Allocator, 
     out: &var string::String,
     sources: &source::SourceMap,
     id: source::SourceId
 ) -> !bool {
     if sources.at(id) |file| {
         if file.path.len() > 0 {
-            try out.append_string(&file.path);
+            try out.append_string(allocator, &file.path);
             return true;
         }
     }
     return false;
 }
 
-fn append_help(
+fn append_help(allocator: Allocator, 
     out: &var string::String,
     help: &string::String
 ) -> !void {
@@ -191,9 +190,9 @@ fn append_help(
     var start = 0;
     while start <= length {
         let end = line_end(bytes, start);
-        try out.append_byte(cast<u8>(10));
-        try out.append_bytes("help: ");
-        try out.append_bytes(bytes[start..end]);
+        try out.append_byte(allocator, cast<u8>(10));
+        try out.append_bytes(allocator, "help: ");
+        try out.append_bytes(allocator, bytes[start..end]);
         if end == length {
             break;
         }
@@ -214,8 +213,8 @@ fn (self: &Diagnostic) cli_error(
     defer rendered.deinit(allocator);
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes("error: ");
-    try out.append_string(&rendered);
+    try out.append_bytes(allocator, "error: ");
+    try out.append_string(allocator, &rendered);
     return move out;
 }
 
@@ -230,9 +229,9 @@ fn (self: &Diagnostic) severity_level() -> Severity {
 }
 
 /// Records one stable machine-readable diagnostic code.
-fn (self: &var Diagnostic) with_code(code: []u8) -> !void {
+fn (self: &var Diagnostic) with_code(allocator: Allocator, code: []u8) -> !void {
     self.code.clear();
-    return self.code.append_bytes(code);
+    return self.code.append_bytes(allocator, code);
 }
 
 /// Appends one structured note line.
@@ -244,9 +243,9 @@ fn (self: &var Diagnostic) with_note(
 }
 
 /// Records one help message.
-fn (self: &var Diagnostic) with_help(help: []u8) -> !void {
+fn (self: &var Diagnostic) with_help(allocator: Allocator, help: []u8) -> !void {
     self.help.clear();
-    return self.help.append_bytes(help);
+    return self.help.append_bytes(allocator, help);
 }
 
 /// Copies one diagnostic, including its notes, with allocator.
@@ -256,9 +255,9 @@ fn (self: &Diagnostic) clone(allocator: Allocator) -> !Diagnostic {
     var copied = try new(allocator, self.severity, category, self.span, message);
     errdefer copied.deinit(allocator);
     let code = self.code.as_bytes();
-    try copied.with_code(code);
+    try copied.with_code(allocator, code);
     let help = self.help.as_bytes();
-    try copied.with_help(help);
+    try copied.with_help(allocator, help);
     var index = 0;
     while self.notes.at(index) |note| {
         let note_bytes = note.as_bytes();

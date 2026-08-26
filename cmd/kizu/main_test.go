@@ -84,7 +84,7 @@ import std::string;
 fn build(allocator: Allocator) -> !string::String {
     var name = string::new(allocator);
     errdefer name.deinit(allocator);
-    try name.append_byte(cast<u8>(97));
+    try name.append_byte(allocator, cast<u8>(97));
     return name;
 }
 
@@ -1468,8 +1468,8 @@ fn (self: Bag) deinit(allocator: Allocator) -> void {
 fn make_bag(allocator: Allocator) -> !Bag {
     var values = std::array::new<i64>(allocator);
     errdefer values.deinit(allocator);
-    try values.append(10);
-    try values.append(20);
+    try values.append(allocator, 10);
+    try values.append(allocator, 20);
     return Bag { values: move values };
 }
 fn print_bag_len(bag: &Bag) -> void {
@@ -1525,8 +1525,8 @@ fn (self: Bag) deinit(allocator: Allocator) -> void {
 fn make_bag(allocator: Allocator) -> !Bag {
     var stmts = std::array::new<Stmt>(allocator);
     errdefer stmts.deinit(allocator);
-    try stmts.append(Stmt::Add(10));
-    try stmts.append(Stmt::Done(20));
+    try stmts.append(allocator, Stmt::Add(10));
+    try stmts.append(allocator, Stmt::Done(20));
     return Bag { stmts: move stmts };
 }
 fn print_stmt(stmt: &Stmt) -> void {

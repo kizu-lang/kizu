@@ -197,7 +197,7 @@ fn copy_path(allocator: Allocator, source: &array::Array<string::String>) -> !ar
         let bytes = part.as_bytes();
         let copied = try owned_text(allocator, bytes);
         errdefer copied.deinit(allocator);
-        try path.append(move copied);
+        try path.append(allocator, move copied);
         index = index + 1;
     }
     return move path;
@@ -209,7 +209,7 @@ fn (self: &Builder) at(handle: arena::Handle<Node>) -> &Node {
 }
 
 /// Transfers the completed graph into its phase table.
-pub fn finish_builder(builder: Builder, table: &var Table, root: arena::Handle<Node>) -> Type {
+pub fn finish_builder(allocator: Allocator, builder: Builder, table: &var Table, root: arena::Handle<Node>) -> Type {
     let tree = TypeTree { nodes: move builder.nodes, root: root };
     let tree_handle = table.trees.add(move tree);
     return Type { tree: tree_handle, root: root };
@@ -313,7 +313,7 @@ fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
     errdefer params.deinit(self.allocator);
     if !self.accept(")") {
         while true {
-            try params.append(try self.parse_type());
+            try params.append(self.allocator, try self.parse_type());
             if self.accept(",") {
                 let _ = self.accept(" ");
             } else {
@@ -375,8 +375,7 @@ fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
         if span.start == span.end {
             return Error::ExpectedName;
         }
-        try path.append(try owned_text(
-            self.allocator,
+        try path.append(self.allocator, try owned_text(self.allocator,
             self.input[span.start..span.end]
         ));
         if !self.accept("::") {
@@ -387,7 +386,7 @@ fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
     errdefer args.deinit(self.allocator);
     if self.accept("<") {
         while true {
-            try args.append(try self.parse_type());
+            try args.append(self.allocator, try self.parse_type());
             if self.accept(",") {
                 let _ = self.accept(" ");
             } else {
@@ -453,7 +452,7 @@ fn is_digit(byte: u8) -> bool {
 fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes(bytes);
+    try out.append_bytes(allocator, bytes);
     return move out;
 }
 
@@ -510,7 +509,7 @@ fn split_args_into(
                     if mem::len(part) == 0 {
                         has_empty = true;
                     }
-                    try parts.append(try owned_text(allocator, part));
+                    try parts.append(allocator, try owned_text(allocator, part));
                     start = index + 1;
                 }
             }
@@ -526,7 +525,7 @@ fn split_args_into(
     if mem::len(final_part) == 0 {
         has_empty = true;
     }
-    try parts.append(try owned_text(allocator, final_part));
+    try parts.append(allocator, try owned_text(allocator, final_part));
     if has_empty {
         return Error::EmptyStaticArgument;
     }
@@ -627,17 +626,17 @@ pub fn render(
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try append_render(&var out, table, value);
+    try append_render(allocator, &var out, table, value);
     return move out;
 }
 
 /// Appends one retained type's canonical spelling to caller-owned storage.
-pub fn append_render(
+pub fn append_render(allocator: Allocator, 
     out: &var string::String,
     table: &Table,
     value: Type
 ) -> !void {
-    return append_tree_node(
+    return append_tree_node(allocator, 
         out,
         table.trees.at(value.tree),
         value.root
@@ -658,87 +657,87 @@ pub fn child_type(
     return Type { tree: parent.tree, root: child };
 }
 
-fn append_tree_node(
+fn append_tree_node(allocator: Allocator, 
     out: &var string::String,
     tree: &TypeTree,
     root: arena::Handle<Node>
 ) -> !void {
     let lookup = NoReplacements {};
-    return append_tree_node_with<NoReplacements>(
+    return append_tree_node_with<NoReplacements>(allocator, 
         out, tree, root, &lookup
     );
 }
 
-fn append_tree_node_with<R>(
+fn append_tree_node_with<R>(allocator: Allocator, 
     out: &var string::String,
     tree: &TypeTree,
     root: arena::Handle<Node>,
     lookup: &R
 ) -> !void {
     match tree.nodes.at(root) {
-        Name(node) => try append_name_with<R>(out, tree, node, lookup),
+        Name(node) => try append_name_with<R>(allocator, out, tree, node, lookup),
         Slice(node) => {
-            try out.append_bytes("[]");
-            try append_tree_node_with<R>(out, tree, node.elem, lookup);
+            try out.append_bytes(allocator, "[]");
+            try append_tree_node_with<R>(allocator, out, tree, node.elem, lookup);
         },
         Buffer(node) => {
-            try out.append_byte(cast<u8>(91));
-            try fmt::append_i64(out, node.size);
-            try out.append_byte(cast<u8>(93));
-            try append_tree_node_with<R>(out, tree, node.elem, lookup);
+            try out.append_byte(allocator, cast<u8>(91));
+            try fmt::append_i64(allocator, out, node.size);
+            try out.append_byte(allocator, cast<u8>(93));
+            try append_tree_node_with<R>(allocator, out, tree, node.elem, lookup);
         },
         Borrow(node) => {
             if node.mutable {
-                try out.append_bytes("&var ");
+                try out.append_bytes(allocator, "&var ");
             } else {
-                try out.append_byte(cast<u8>(38));
+                try out.append_byte(allocator, cast<u8>(38));
             }
-            try append_tree_node_with<R>(out, tree, node.elem, lookup);
+            try append_tree_node_with<R>(allocator, out, tree, node.elem, lookup);
         },
         Optional(node) => {
-            try out.append_byte(cast<u8>(63));
-            try append_tree_node_with<R>(out, tree, node.elem, lookup);
+            try out.append_byte(allocator, cast<u8>(63));
+            try append_tree_node_with<R>(allocator, out, tree, node.elem, lookup);
         },
         Const(node) => {
-            try out.append_bytes("const ");
-            try append_tree_node_with<R>(out, tree, node.elem, lookup);
+            try out.append_bytes(allocator, "const ");
+            try append_tree_node_with<R>(allocator, out, tree, node.elem, lookup);
         },
         ErrorUnion(node) => {
             if node.err |err| {
-                try append_tree_node_with<R>(out, tree, err, lookup);
+                try append_tree_node_with<R>(allocator, out, tree, err, lookup);
             }
-            try out.append_byte(cast<u8>(33));
-            try append_tree_node_with<R>(out, tree, node.ok, lookup);
+            try out.append_byte(allocator, cast<u8>(33));
+            try append_tree_node_with<R>(allocator, out, tree, node.ok, lookup);
         },
-        Func(node) => try append_func_with<R>(out, tree, node, lookup),
+        Func(node) => try append_func_with<R>(allocator, out, tree, node, lookup),
     }
     return;
 }
 
-fn append_func_with<R>(
+fn append_func_with<R>(allocator: Allocator, 
     out: &var string::String,
     tree: &TypeTree,
     node: &Func,
     lookup: &R
 ) -> !void {
     if node.unsafe_call {
-        try out.append_bytes("unsafe fn(");
+        try out.append_bytes(allocator, "unsafe fn(");
     } else {
-        try out.append_bytes("fn(");
+        try out.append_bytes(allocator, "fn(");
     }
     var index = 0;
     while node.params.get(index) |param| {
         if index > 0 {
-            try out.append_bytes(", ");
+            try out.append_bytes(allocator, ", ");
         }
-        try append_tree_node_with<R>(out, tree, param, lookup);
+        try append_tree_node_with<R>(allocator, out, tree, param, lookup);
         index = index + 1;
     }
-    try out.append_bytes(") -> ");
-    return append_tree_node_with<R>(out, tree, node.result, lookup);
+    try out.append_bytes(allocator, ") -> ");
+    return append_tree_node_with<R>(allocator, out, tree, node.result, lookup);
 }
 
-fn append_name_with<R>(
+fn append_name_with<R>(allocator: Allocator, 
     out: &var string::String,
     tree: &TypeTree,
     node: &Name,
@@ -748,49 +747,49 @@ fn append_name_with<R>(
         if node.path.len() == 1 and node.args.len() == 0 {
             if node.path.at(0) |part| {
                 let bytes = part.as_bytes();
-                if try lookup.append_replacement(out, bytes) {
+                if try lookup.append_replacement(allocator, out, bytes) {
                     return;
                 }
             }
         }
     }
-    try append_name_path(out, node);
+    try append_name_path(allocator, out, node);
     if node.args.len() == 0 {
         return;
     }
-    try out.append_byte(cast<u8>(60));
+    try out.append_byte(allocator, cast<u8>(60));
     var index = 0;
     while node.args.get(index) |arg| {
         if index > 0 {
-            try out.append_bytes(", ");
+            try out.append_bytes(allocator, ", ");
         }
-        try append_tree_node_with<R>(out, tree, arg, lookup);
+        try append_tree_node_with<R>(allocator, out, tree, arg, lookup);
         index = index + 1;
     }
-    try out.append_byte(cast<u8>(62));
+    try out.append_byte(allocator, cast<u8>(62));
     return;
 }
 
-fn (self: &RenderedSubstitutions) append_replacement(
+fn (self: &RenderedSubstitutions) append_replacement(allocator: Allocator, 
     out: &var string::String,
     name: []u8
 ) -> !bool {
     if self.values.at(name) |replacement| {
         let bytes = replacement.as_bytes();
-        try out.append_bytes(bytes);
+        try out.append_bytes(allocator, bytes);
         return true;
     }
     return false;
 }
 
-fn append_name_path(out: &var string::String, node: &Name) -> !void {
+fn append_name_path(allocator: Allocator, out: &var string::String, node: &Name) -> !void {
     var index = 0;
     while node.path.at(index) |part| {
         if index > 0 {
-            try out.append_bytes("::");
+            try out.append_bytes(allocator, "::");
         }
         let bytes = part.as_bytes();
-        try out.append_bytes(bytes);
+        try out.append_bytes(allocator, bytes);
         index = index + 1;
     }
     return;
@@ -954,39 +953,40 @@ fn (self: &var PlainNameTransform) fold_name(builder: &var Builder, path: array:
 }
 
 fn transform_names<M, F>(source: &Table, value: Type, destination: &var Table, mapper: &var M, folder: &var F) -> !Type {
-    var builder = new_builder(destination.allocator);
-    errdefer builder.deinit(destination.allocator);
-    let root = try map_names_node<M, F>(&var builder, source.trees.at(value.tree), value.root, mapper, folder);
-    return finish_builder(move builder, destination, root);
+    let allocator = destination.allocator;
+    var builder = new_builder(allocator);
+    errdefer builder.deinit(allocator);
+    let root = try map_names_node<M, F>(allocator, &var builder, source.trees.at(value.tree), value.root, mapper, folder);
+    return finish_builder(allocator, move builder, destination, root);
 }
 
-fn map_names_node<M, F>(builder: &var Builder, value: &TypeTree, handle: arena::Handle<Node>, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
+fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, handle: arena::Handle<Node>, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     return match value.nodes.at(handle) {
         Name(node) => try map_name_node<M, F>(builder, value, node, mapper, folder),
         Slice(node) => {
-            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
+            let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Slice(Slice { elem: elem }))
         },
         Buffer(node) => {
-            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
+            let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Buffer(Buffer { size: node.size, elem: elem }))
         },
         Borrow(node) => {
-            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
+            let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Borrow(Borrow {
                 elem: elem,
                 mutable: node.mutable
             }))
         },
         Optional(node) => {
-            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
+            let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Optional(Optional { elem: elem }))
         },
         Const(node) => {
-            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
+            let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Const(Const { elem: elem }))
         },
-        ErrorUnion(node) => try map_error_union_names<M, F>(builder, value, node, mapper, folder),
+        ErrorUnion(node) => try map_error_union_names<M, F>(allocator, builder, value, node, mapper, folder),
         Func(node) => try map_func_names<M, F>(builder, value, node, mapper, folder),
     };
 }
@@ -997,10 +997,10 @@ fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, ma
     errdefer params.deinit(builder.allocator);
     var index = 0;
     while node.params.get(index) |param| {
-        try params.append(try map_names_node<M, F>(builder, value, param, mapper, folder));
+        try params.append(builder.allocator, try map_names_node<M, F>(builder.allocator, builder, value, param, mapper, folder));
         index = index + 1;
     }
-    let result = try map_names_node<M, F>(builder, value, node.result, mapper, folder);
+    let result = try map_names_node<M, F>(builder.allocator, builder, value, node.result, mapper, folder);
     return builder.nodes.add(Node::Func(Func {
         params: move params,
         result: result,
@@ -1016,17 +1016,17 @@ fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, map
     errdefer args.deinit(builder.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
-        try args.append(try map_names_node<M, F>(builder, value, arg, mapper, folder));
+        try args.append(builder.allocator, try map_names_node<M, F>(builder.allocator, builder, value, arg, mapper, folder));
         index = index + 1;
     }
     return folder.fold_name(builder, move path, move args);
 }
 
 // map_error_union_names keeps Go's callback order: success before error.
-fn map_error_union_names<M, F>(builder: &var Builder, value: &TypeTree, node: &ErrorUnion, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
-    let ok = try map_names_node<M, F>(builder, value, node.ok, mapper, folder);
+fn map_error_union_names<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, node: &ErrorUnion, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
+    let ok = try map_names_node<M, F>(allocator, builder, value, node.ok, mapper, folder);
     if node.err |source_err| {
-        let err = try map_names_node<M, F>(builder, value, source_err, mapper, folder);
+        let err = try map_names_node<M, F>(allocator, builder, value, source_err, mapper, folder);
         return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
     }
     return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
@@ -1038,12 +1038,13 @@ pub fn substitute(
     value: Type,
     substitutions: &map::Map<[]u8, Type>
 ) -> !Type {
+    let allocator = table.allocator;
     if substitutions.len() == 0 {
         return value;
     }
-    var builder = new_builder(table.allocator);
-    errdefer builder.deinit(table.allocator);
-    let root = try substitute_node(
+    var builder = new_builder(allocator);
+    errdefer builder.deinit(allocator);
+    let root = try substitute_node(allocator, 
         &var builder,
         table,
         table.trees.at(value.tree),
@@ -1051,7 +1052,7 @@ pub fn substitute(
         substitutions,
         true
     );
-    return finish_builder(move builder, table, root);
+    return finish_builder(allocator, move builder, table, root);
 }
 
 /// Retains one parsed type wrapped in an explicit borrow node.
@@ -1060,11 +1061,12 @@ pub fn wrap_borrow(
     value: Type,
     mutable: bool
 ) -> !Type {
-    var substitutions = map::new<[]u8, Type>(table.allocator);
-    defer substitutions.deinit(table.allocator);
-    var builder = new_builder(table.allocator);
-    errdefer builder.deinit(table.allocator);
-    let elem = try substitute_node(
+    let allocator = table.allocator;
+    var substitutions = map::new<[]u8, Type>(allocator);
+    defer substitutions.deinit(allocator);
+    var builder = new_builder(allocator);
+    errdefer builder.deinit(allocator);
+    let elem = try substitute_node(allocator, 
         &var builder,
         table,
         table.trees.at(value.tree),
@@ -1076,10 +1078,10 @@ pub fn wrap_borrow(
         elem: elem,
         mutable: mutable
     }));
-    return finish_builder(move builder, table, root);
+    return finish_builder(allocator, move builder, table, root);
 }
 
-fn substitute_node(
+fn substitute_node(allocator: Allocator, 
     builder: &var Builder,
     table: &Table,
     tree: &TypeTree,
@@ -1097,19 +1099,19 @@ fn substitute_node(
             replace_names
         ),
         Slice(node) => {
-            let elem = try substitute_node(
+            let elem = try substitute_node(allocator, 
                 builder, table, tree, node.elem, substitutions, replace_names
             );
             builder.nodes.add(Node::Slice(Slice { elem: elem }))
         },
         Buffer(node) => {
-            let elem = try substitute_node(
+            let elem = try substitute_node(allocator, 
                 builder, table, tree, node.elem, substitutions, replace_names
             );
             builder.nodes.add(Node::Buffer(Buffer { size: node.size, elem: elem }))
         },
         Borrow(node) => {
-            let elem = try substitute_node(
+            let elem = try substitute_node(allocator, 
                 builder, table, tree, node.elem, substitutions, replace_names
             );
             builder.nodes.add(Node::Borrow(Borrow {
@@ -1118,18 +1120,18 @@ fn substitute_node(
             }))
         },
         Optional(node) => {
-            let elem = try substitute_node(
+            let elem = try substitute_node(allocator, 
                 builder, table, tree, node.elem, substitutions, replace_names
             );
             builder.nodes.add(Node::Optional(Optional { elem: elem }))
         },
         Const(node) => {
-            let elem = try substitute_node(
+            let elem = try substitute_node(allocator, 
                 builder, table, tree, node.elem, substitutions, replace_names
             );
             builder.nodes.add(Node::Const(Const { elem: elem }))
         },
-        ErrorUnion(node) => try substitute_error_union(
+        ErrorUnion(node) => try substitute_error_union(allocator, 
             builder,
             table,
             tree,
@@ -1158,15 +1160,15 @@ fn substitute_func(
 ) -> !arena::Handle<Node> {
     let allocator = builder.allocator;
     var params = array::new<arena::Handle<Node>>(allocator);
-    errdefer params.deinit(builder.allocator);
+    errdefer params.deinit(allocator);
     var index = 0;
     while node.params.get(index) |param| {
-        try params.append(try substitute_node(
+        try params.append(allocator, try substitute_node(allocator, 
             builder, table, tree, param, substitutions, replace_names
         ));
         index = index + 1;
     }
-    let result = try substitute_node(
+    let result = try substitute_node(allocator, 
         builder, table, tree, node.result, substitutions, replace_names
     );
     return builder.nodes.add(Node::Func(Func {
@@ -1184,11 +1186,12 @@ fn substitute_name(
     substitutions: &map::Map<[]u8, Type>,
     replace_names: bool
 ) -> !arena::Handle<Node> {
+    let allocator = builder.allocator;
     if replace_names and node.path.len() == 1 and node.args.len() == 0 {
         if node.path.at(0) |part| {
             let name = part.as_bytes();
             if substitutions.get(name) |replacement| {
-                return substitute_node(
+                return substitute_node(allocator, 
                     builder,
                     table,
                     table.trees.at(replacement.tree),
@@ -1199,11 +1202,11 @@ fn substitute_name(
             }
         }
     }
-    var args = array::new<arena::Handle<Node>>(builder.allocator);
-    errdefer args.deinit(builder.allocator);
+    var args = array::new<arena::Handle<Node>>(allocator);
+    errdefer args.deinit(allocator);
     var index = 0;
     while node.args.get(index) |arg| {
-        try args.append(try substitute_node(
+        try args.append(allocator, try substitute_node(allocator, 
             builder,
             table,
             tree,
@@ -1213,12 +1216,12 @@ fn substitute_name(
         ));
         index = index + 1;
     }
-    let path = try copy_path(builder.allocator, &node.path);
+    let path = try copy_path(allocator, &node.path);
     return builder.add(Node::Name(Name { path: move path, args: move args }));
 }
 
 // substitute_error_union keeps Go's traversal order: success before error.
-fn substitute_error_union(
+fn substitute_error_union(allocator: Allocator, 
     builder: &var Builder,
     table: &Table,
     tree: &TypeTree,
@@ -1226,11 +1229,11 @@ fn substitute_error_union(
     substitutions: &map::Map<[]u8, Type>,
     replace_names: bool
 ) -> !arena::Handle<Node> {
-    let ok = try substitute_node(
+    let ok = try substitute_node(allocator, 
         builder, table, tree, node.ok, substitutions, replace_names
     );
     if node.err |source_err| {
-        let err = try substitute_node(
+        let err = try substitute_node(allocator, 
             builder, table, tree, source_err, substitutions, replace_names
         );
         return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
@@ -1261,8 +1264,7 @@ pub fn substitute_text(
         }
         index = index + 1;
     }
-    return render_substituted(
-        allocator,
+    return render_substituted(allocator,
         &table,
         parsed,
         &rendered_substitutions
@@ -1295,8 +1297,7 @@ pub fn substitute_owned_text(
         }
         index = index + 1;
     }
-    return render_substituted(
-        allocator,
+    return render_substituted(allocator,
         &table,
         parsed,
         &rendered_substitutions
@@ -1307,7 +1308,7 @@ fn put_rendered_substitution(allocator: Allocator, table: &var Table, values: &v
     let replacement_type = try table.parse(replacement);
     if values.at_mut(name) |existing| {
         existing.clear();
-        return append_render(existing, table, replacement_type);
+        return append_render(allocator, existing, table, replacement_type);
     }
     let replacement_text = try render(allocator, table, replacement_type);
     return values.insert(name, move replacement_text);
@@ -1321,7 +1322,7 @@ fn render_substituted(
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try append_tree_node_with<RenderedSubstitutions>(
+    try append_tree_node_with<RenderedSubstitutions>(allocator, 
         &var out,
         table.trees.at(parsed.tree),
         parsed.root,

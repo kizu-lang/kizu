@@ -13,7 +13,7 @@ pub fn read_file(
     path: &[]u8,
     limit: std::mem::Limit,
 ) -> std::fs::Error!std::string::String
-pub fn read_file_into(io: Io, path: &[]u8, out: &var std::string::String) -> std::fs::Error!void
+pub fn read_file_into(io: Io, allocator: Allocator, path: &[]u8, out: &var std::string::String) -> std::fs::Error!void
 pub fn write_file(io: Io, path: &[]u8, bytes: &[]u8) -> std::fs::Error!void
 pub fn exists(io: Io, path: &[]u8) -> std::fs::Error!bool
 pub fn metadata(io: Io, path: &[]u8) -> std::fs::Error!std::fs::Metadata

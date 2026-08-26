@@ -737,7 +737,7 @@ fn (self: &var Checker) tie_view_capture(
         try self.activate_borrow(source.target, source.field, false);
         capture.borrowed_param = true;
         capture.local_borrow = true;
-        try capture.borrow_targets.append(source);
+        try capture.borrow_targets.append(self.allocator, source);
         index = index + 1;
     }
     return null;
@@ -764,7 +764,7 @@ fn (self: &var Checker) cond_view_sources(
         }
         var index = 0;
         while derived.get(index) |source| {
-            try add_source(sources, source);
+            try add_source(self.allocator, sources, source);
             index = index + 1;
         }
     }
@@ -780,7 +780,7 @@ fn (self: &var Checker) cond_view_sources(
 }
 
 /// Adds one unseen source, the Go `addSource` closure of `condViewSources`.
-fn add_source(sources: &var array::Array<BorrowSource>, source: BorrowSource) -> !void {
+fn add_source(allocator: Allocator, sources: &var array::Array<BorrowSource>, source: BorrowSource) -> !void {
     var index = 0;
     while sources.get(index) |seen| {
         if seen.target.node == source.target.node and same_name(seen.field, source.field) {
@@ -788,7 +788,7 @@ fn add_source(sources: &var array::Array<BorrowSource>, source: BorrowSource) ->
         }
         index = index + 1;
     }
-    return sources.append(source);
+    return sources.append(allocator, source);
 }
 
 /// Adds the source one receiver or argument expression reads, the Go `add`
@@ -800,13 +800,13 @@ fn (self: &var Checker) add_cond_view_source(
     sources: &var array::Array<BorrowSource>
 ) -> !void {
     if try self.borrow_class_view_root(tree, env, expression) |view| {
-        return add_source(sources, BorrowSource { target: view, field: empty_name() });
+        return add_source(self.allocator, sources, BorrowSource { target: view, field: empty_name() });
     }
     let value = self.lookup_ident(tree, env, expression) orelse return;
     if self.binding(value).moved or !self.names.is_container_type(self.binding(value).type_name) {
         return;
     }
-    return add_source(sources, BorrowSource { target: value, field: empty_name() });
+    return add_source(self.allocator, sources, BorrowSource { target: value, field: empty_name() });
 }
 
 /// Rejects `orelse` over a view optional produced from an owned container,
@@ -989,7 +989,7 @@ fn (self: &var Checker) check_match_stmt_arms(
             return move failed;
         }
         if !self.stmt_terminates(tree, arm.body) {
-            try live.append(arm_env);
+            try live.append(self.allocator, arm_env);
         }
     }
     return null;

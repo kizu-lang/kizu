@@ -2609,18 +2609,29 @@ allocator binding は move されません。
 `Allocator` 値そのものに user-visible cleanup method はありません。
 allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
 
-**解放は allocator を名指します。** owner の `deinit` は receiver と
-`Allocator` の 2 つを取ります(§8、ADR-0132)。値は自分を作った allocator の
-複製を持たないので、解放に必要なものは呼び出し側が綴ります —— `sizeof(T)` を
-compile 時の値として渡すのと同じ扱いで、原理 4「hidden allocation を持たない」の
-裏側です。owner を持つすべての型がこの 1 つの形を取り、導出 `deinit` は
+**確保も解放も allocator を名指します。** owner の `deinit` は receiver と
+`Allocator` の 2 つを取り、storage を要求し得る method —— `Array.append` /
+`append_bytes` / `reserve`、`String.append_bytes` / `append_byte` /
+`append_string` / `reserve` —— も同じく allocator を receiver の次に取ります
+(§8、ADR-0132)。値は自分を作った allocator の複製を持たないので、確保にも
+解放にも必要なものは呼び出し側が綴ります —— `sizeof(T)` を compile 時の値として
+渡すのと同じ扱いで、原理 4「hidden allocation を持たない」の表と裏です。
+owner を持つすべての型が `deinit` のこの 1 つの形を取り、導出 `deinit` は
 受け取った allocator を field へそのまま渡します。
 
 ```kizu
 let allocator = mem::page_allocator();
 var values = array::new<i64>(allocator);
 defer values.deinit(allocator);
+try values.append(allocator, 7);
 ```
+
+`std::array::new<T>(allocator)` は何も確保しません。空の `Array<T>` は
+`{data, len, cap}` の 3 word で、allocator も element size も覚えないためです
+(Rust の `Vec` と同じ 3 word)。構築が受け取る `Allocator` は compile 時の
+provenance で、後続の確保・解放が同じものを名指すことを checker が要求します。
+`truncate` / `clear` / `pop` / `len` / `capacity` は確保も解放もしないので
+allocator を取りません。
 
 `defer` / `errdefer` の cleanup が運ぶ引数は、**`defer` が書かれた場所で読み**、
 block を出るときに走るのはその値です(§8)。

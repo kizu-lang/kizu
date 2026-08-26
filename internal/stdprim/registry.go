@@ -15,6 +15,10 @@ const (
 	// ArgStringOut is a &var std::string::String destination the callee
 	// appends into; the caller's buffer, mutated in place, never moved.
 	ArgStringOut ArgKind = "&var std::string::String"
+	// ArgAllocator is the allocator a primitive grows a destination buffer
+	// from. A String keeps no allocator of its own (ADR-0132), so a primitive
+	// that appends to one is handed the allocator the same way source is.
+	ArgAllocator ArgKind = "Allocator"
 )
 
 // CoreSignature describes simple std::internal::builtin calls with no ownership transfer.
@@ -37,19 +41,19 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::io::Error!void",
 	},
 	"std::internal::builtin::fs_read_file_into": {
-		Args:   []ArgKind{ArgIo, ArgBytes, ArgStringOut, ArgI64},
+		Args:   []ArgKind{ArgIo, ArgAllocator, ArgBytes, ArgStringOut, ArgI64},
 		Return: "std::fs::Error!void",
 	},
 	"std::internal::builtin::io_read_stdin_into": {
-		Args:   []ArgKind{ArgIo, ArgStringOut, ArgI64},
+		Args:   []ArgKind{ArgIo, ArgAllocator, ArgStringOut, ArgI64},
 		Return: "std::io::Error!void",
 	},
 	"std::internal::builtin::fs_real_path_into": {
-		Args:   []ArgKind{ArgIo, ArgBytes, ArgStringOut},
+		Args:   []ArgKind{ArgIo, ArgAllocator, ArgBytes, ArgStringOut},
 		Return: "std::fs::Error!void",
 	},
 	"std::internal::builtin::process_executable_path_into": {
-		Args:   []ArgKind{ArgStringOut},
+		Args:   []ArgKind{ArgAllocator, ArgStringOut},
 		Return: "std::process::Error!void",
 	},
 	"std::internal::builtin::process_arg_count": {Return: "i64"},

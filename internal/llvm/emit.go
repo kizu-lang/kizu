@@ -359,12 +359,17 @@ func (e *emitter) writeErrorUnionTypes() {
 // tag and the payload, the layout `!T` success already uses.
 func (e *emitter) writeOptionalTypes() {
 	names := e.sortedOptionalNames()
+	written := 0
 	for _, name := range names {
+		if _, ok := nicheOptionalElem(name); ok {
+			continue
+		}
 		elem, _ := optionalElemLLVM(name)
 		fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
 			llvmOptionalTypeName(name), e.llvmType(elem))
+		written++
 	}
-	if len(names) > 0 {
+	if written > 0 {
 		e.out.WriteByte('\n')
 	}
 }
@@ -397,15 +402,43 @@ func optionalElemLLVM(name string) (string, bool) {
 	return typ.OptionalElem(name)
 }
 
-// writeBorrowOptionalResult wraps a nullable runtime pointer into a borrow
-// optional `{i8, ptr}` result, branch-free: the pointer becomes the payload
-// and its non-nullness the presence tag. Array.at, Map.at, and Arena.at_mut
-// all end here.
+// nicheOptionalElem returns the element of an optional whose absence a value
+// of the element type can already spell, and true when there is one.
+//
+// A Box handle is the address of its payload and a borrow is the address of
+// what it borrows; neither can be null while it exists, so null is a spelling
+// no live element uses and `?T` needs no tag beside the pointer to say which
+// it is. That halves the recursive shape this exists for -- a node holding
+// `?Box<Node>` twice is two words, not four -- and costs no branch: presence
+// is the comparison the tag byte was computed from anyway.
+//
+// A Map or an Arena handle is a pointer too, but its constructor hands back
+// null when the allocation fails and the value carries that on, so null is a
+// live value there and the niche is not free.
+func nicheOptionalElem(name string) (string, bool) {
+	elem, ok := optionalElemLLVM(name)
+	if !ok {
+		return "", false
+	}
+	if isBoxLLVMType(elem) || strings.HasPrefix(elem, "&") {
+		return elem, true
+	}
+	return "", false
+}
+
+// writeBorrowOptionalResult hands a nullable runtime pointer back as a borrow
+// optional. A borrow is a niche optional, so the pointer is the whole value:
+// null is the absent one, which is what the runtime already returned. Array.at,
+// Map.at, and Arena.at_mut all end here.
 func (e *emitter) writeBorrowOptionalResult(instr *ir.Instr, ptrName string) error {
 	if _, ok := optionalElemLLVM(instr.Result.Type); !ok {
 		return fmt.Errorf(
 			"llvm error: %s expects a borrow optional result, got %s",
 			instr.Op, instr.Result.Type)
+	}
+	if _, ok := nicheOptionalElem(instr.Result.Type); ok {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: ptrName}
+		return nil
 	}
 	resultName := localName(instr.Result.Name)
 	optType := e.llvmType(instr.Result.Type)
@@ -424,6 +457,10 @@ func (e *emitter) writeBorrowOptionalResult(instr *ir.Instr, ptrName string) err
 
 // llvmOptionalTypeName names the LLVM aggregate of one optional type.
 func llvmOptionalTypeName(name string) string {
+	if elem, ok := nicheOptionalElem(name); ok {
+		_ = elem
+		return "ptr"
+	}
 	elem, _ := optionalElemLLVM(name)
 	return "%kizu.opt." + llvmNamePart(elem)
 }
@@ -1010,6 +1047,12 @@ func (e *emitter) writeOptSome(instr *ir.Instr) error {
 	if !ok || len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: opt.some expects one payload and a `?T` result")
 	}
+	if _, ok := nicheOptionalElem(instr.Result.Type); ok {
+		// The payload is the whole value: a live element is never null.
+		e.values[instr.Result.Name] = valueInfo{
+			typ: instr.Result.Type, operand: e.value(instr.Args[0]).operand}
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	optType := e.llvmType(instr.Result.Type)
 	someName := resultName + ".some"
@@ -1025,6 +1068,10 @@ func (e *emitter) writeOptSome(instr *ir.Instr) error {
 func (e *emitter) writeOptNull(instr *ir.Instr) error {
 	if _, ok := optionalElemLLVM(instr.Result.Type); !ok || len(instr.Args) != 0 {
 		return fmt.Errorf("llvm error: opt.null expects no args and a `?T` result")
+	}
+	if _, ok := nicheOptionalElem(instr.Result.Type); ok {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+		return nil
 	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
@@ -1043,6 +1090,12 @@ func (e *emitter) writeOptHas(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: opt.has expects `?T`, got %s", source.Type)
 	}
 	resultName := localName(instr.Result.Name)
+	if _, ok := nicheOptionalElem(source.Type); ok {
+		fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n",
+			resultName, e.value(source).operand)
+		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
+		return nil
+	}
 	tagName := resultName + ".tag"
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
 		tagName, e.llvmType(source.Type), e.value(source).operand)
@@ -1064,6 +1117,10 @@ func (e *emitter) writeOptValue(instr *ir.Instr) error {
 	}
 	if instr.Result.Type != elem {
 		return fmt.Errorf("llvm error: opt.value returns %s, got %s", elem, instr.Result.Type)
+	}
+	if _, ok := nicheOptionalElem(source.Type); ok {
+		e.values[instr.Result.Name] = valueInfo{typ: elem, operand: e.value(source).operand}
+		return nil
 	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n",

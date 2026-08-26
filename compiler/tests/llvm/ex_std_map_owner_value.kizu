@@ -5,7 +5,7 @@ import std::string;
 fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
     var text = string::new(allocator);
     errdefer text.deinit(allocator);
-    try text.append_bytes(bytes);
+    try text.append_bytes(allocator, bytes);
     return move text;
 }
 
@@ -29,7 +29,7 @@ fn main() -> !void {
     // at_mut borrows the value in place, which is how a stored owner grows
     // without leaving the map.
     if names.at_mut("last") |name| {
-        try name.append_bytes("son");
+        try name.append_bytes(allocator, "son");
     }
 
     var index = 0;
@@ -57,8 +57,6 @@ fn main() -> !void {
 // emit:
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
-// %kizu.opt._std__string__String = type { i8, ptr }
-// %kizu.opt._var_std__string__String = type { i8, ptr }
 // %kizu.opt.slice.u8 = type { i8, %kizu.slice.u8 }
 // 
 // %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
@@ -100,12 +98,12 @@ fn main() -> !void {
 // declare i64 @kizu_map_len(ptr)
 // declare void @kizu_map_deinit(ptr)
 // 
-// declare %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
-// declare %kizu.opt._var_std__string__String @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
+// declare ptr @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
+// declare ptr @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8, %kizu.struct.std__string__String)
 // declare %kizu.opt.slice.u8 @std__map__Map_key_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, i64)
 // declare ptr @std__mem__page_allocator()
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
@@ -114,7 +112,7 @@ fn main() -> !void {
 //   %kizu.2 = alloca %kizu.struct.std__string__String
 //   %kizu.1 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.allocator)
 //   store %kizu.struct.std__string__String %kizu.1, ptr %kizu.2
-//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.2, %kizu.slice.u8 %kizu.bytes)
+//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.2, ptr %kizu.allocator, %kizu.slice.u8 %kizu.bytes)
 //   %kizu.4 = load %kizu.struct.std__string__String, ptr %kizu.2
 //   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 0
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
@@ -219,13 +217,11 @@ fn main() -> !void {
 //   %kizu.23.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
 //   %kizu.23.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.23.ptr, 0
 //   %kizu.23 = insertvalue %kizu.slice.u8 %kizu.23.base, i64 5, 1
-//   %kizu.24 = call %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.22, %kizu.slice.u8 %kizu.23)
-//   %kizu.25 = extractvalue %kizu.opt._std__string__String %kizu.24, 1
-//   %kizu.26.tag = extractvalue %kizu.opt._std__string__String %kizu.24, 0
-//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   %kizu.24 = call ptr @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.22, %kizu.slice.u8 %kizu.23)
+//   %kizu.26 = icmp ne ptr %kizu.24, null
 //   br i1 %kizu.26, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.25
+//   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   %kizu.28 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.27)
 //   %kizu.print.slice.ptr.13 = extractvalue %kizu.slice.u8 %kizu.28, 0
 //   %kizu.print.slice.len.14 = extractvalue %kizu.slice.u8 %kizu.28, 1
@@ -238,16 +234,14 @@ fn main() -> !void {
 //   %kizu.31.ptr = getelementptr inbounds [5 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.31.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.31.ptr, 0
 //   %kizu.31 = insertvalue %kizu.slice.u8 %kizu.31.base, i64 4, 1
-//   %kizu.32 = call %kizu.opt._var_std__string__String @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.30, %kizu.slice.u8 %kizu.31)
-//   %kizu.33 = extractvalue %kizu.opt._var_std__string__String %kizu.32, 1
-//   %kizu.34.tag = extractvalue %kizu.opt._var_std__string__String %kizu.32, 0
-//   %kizu.34 = icmp ne i8 %kizu.34.tag, 0
+//   %kizu.32 = call ptr @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.30, %kizu.slice.u8 %kizu.31)
+//   %kizu.34 = icmp ne ptr %kizu.32, null
 //   br i1 %kizu.34, label %if.then.4, label %if.else.5
 // if.then.4:
 //   %kizu.35.ptr = getelementptr inbounds [4 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.35.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.35.ptr, 0
 //   %kizu.35 = insertvalue %kizu.slice.u8 %kizu.35.base, i64 3, 1
-//   %kizu.36 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.33, %kizu.slice.u8 %kizu.35)
+//   %kizu.36 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.32, ptr %kizu.1, %kizu.slice.u8 %kizu.35)
 //   %kizu.37 = load ptr, ptr %kizu.3
 //   %kizu.38.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.36, 0
 //   %kizu.38.ok.bool = icmp ne i8 %kizu.38.ok, 0
@@ -286,13 +280,11 @@ fn main() -> !void {
 //   %kizu.49.ptr = getelementptr inbounds [5 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
 //   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 4, 1
-//   %kizu.50 = call %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.48, %kizu.slice.u8 %kizu.49)
-//   %kizu.51 = extractvalue %kizu.opt._std__string__String %kizu.50, 1
-//   %kizu.52.tag = extractvalue %kizu.opt._std__string__String %kizu.50, 0
-//   %kizu.52 = icmp ne i8 %kizu.52.tag, 0
+//   %kizu.50 = call ptr @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.48, %kizu.slice.u8 %kizu.49)
+//   %kizu.52 = icmp ne ptr %kizu.50, null
 //   br i1 %kizu.52, label %if.then.10, label %if.else.11
 // if.then.10:
-//   %kizu.53 = load %kizu.struct.std__string__String, ptr %kizu.51
+//   %kizu.53 = load %kizu.struct.std__string__String, ptr %kizu.50
 //   %kizu.54 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.53)
 //   %kizu.print.slice.ptr.20 = extractvalue %kizu.slice.u8 %kizu.54, 0
 //   %kizu.print.slice.len.21 = extractvalue %kizu.slice.u8 %kizu.54, 1
@@ -321,8 +313,6 @@ fn main() -> !void {
 // opt:
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
-// %kizu.opt._std__string__String = type { i8, ptr }
-// %kizu.opt._var_std__string__String = type { i8, ptr }
 // %kizu.opt.slice.u8 = type { i8, %kizu.slice.u8 }
 // 
 // %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
@@ -364,12 +354,12 @@ fn main() -> !void {
 // declare i64 @kizu_map_len(ptr)
 // declare void @kizu_map_deinit(ptr)
 // 
-// declare %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
-// declare %kizu.opt._var_std__string__String @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
+// declare ptr @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
+// declare ptr @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8)
 // declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_std_3a_3astring_3a_3aString(ptr, %kizu.slice.u8, %kizu.struct.std__string__String)
 // declare %kizu.opt.slice.u8 @std__map__Map_key_at__5b_5du8_std_3a_3astring_3a_3aString(ptr, i64)
 // declare ptr @std__mem__page_allocator()
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
@@ -378,7 +368,7 @@ fn main() -> !void {
 //   %kizu.2 = alloca %kizu.struct.std__string__String
 //   %kizu.1 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.allocator)
 //   store %kizu.struct.std__string__String %kizu.1, ptr %kizu.2
-//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.2, %kizu.slice.u8 %kizu.bytes)
+//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.2, ptr %kizu.allocator, %kizu.slice.u8 %kizu.bytes)
 //   %kizu.4 = load %kizu.struct.std__string__String, ptr %kizu.2
 //   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 0
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
@@ -483,13 +473,11 @@ fn main() -> !void {
 //   %kizu.23.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
 //   %kizu.23.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.23.ptr, 0
 //   %kizu.23 = insertvalue %kizu.slice.u8 %kizu.23.base, i64 5, 1
-//   %kizu.24 = call %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.22, %kizu.slice.u8 %kizu.23)
-//   %kizu.25 = extractvalue %kizu.opt._std__string__String %kizu.24, 1
-//   %kizu.26.tag = extractvalue %kizu.opt._std__string__String %kizu.24, 0
-//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   %kizu.24 = call ptr @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.22, %kizu.slice.u8 %kizu.23)
+//   %kizu.26 = icmp ne ptr %kizu.24, null
 //   br i1 %kizu.26, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.25
+//   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   %kizu.28 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.27)
 //   %kizu.print.slice.ptr.13 = extractvalue %kizu.slice.u8 %kizu.28, 0
 //   %kizu.print.slice.len.14 = extractvalue %kizu.slice.u8 %kizu.28, 1
@@ -502,16 +490,14 @@ fn main() -> !void {
 //   %kizu.31.ptr = getelementptr inbounds [5 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.31.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.31.ptr, 0
 //   %kizu.31 = insertvalue %kizu.slice.u8 %kizu.31.base, i64 4, 1
-//   %kizu.32 = call %kizu.opt._var_std__string__String @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.30, %kizu.slice.u8 %kizu.31)
-//   %kizu.33 = extractvalue %kizu.opt._var_std__string__String %kizu.32, 1
-//   %kizu.34.tag = extractvalue %kizu.opt._var_std__string__String %kizu.32, 0
-//   %kizu.34 = icmp ne i8 %kizu.34.tag, 0
+//   %kizu.32 = call ptr @std__map__Map_at_mut__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.30, %kizu.slice.u8 %kizu.31)
+//   %kizu.34 = icmp ne ptr %kizu.32, null
 //   br i1 %kizu.34, label %if.then.4, label %if.else.5
 // if.then.4:
 //   %kizu.35.ptr = getelementptr inbounds [4 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.35.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.35.ptr, 0
 //   %kizu.35 = insertvalue %kizu.slice.u8 %kizu.35.base, i64 3, 1
-//   %kizu.36 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.33, %kizu.slice.u8 %kizu.35)
+//   %kizu.36 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.32, ptr %kizu.1, %kizu.slice.u8 %kizu.35)
 //   %kizu.37 = load ptr, ptr %kizu.3
 //   %kizu.38.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.36, 0
 //   %kizu.38.ok.bool = icmp ne i8 %kizu.38.ok, 0
@@ -550,13 +536,11 @@ fn main() -> !void {
 //   %kizu.49.ptr = getelementptr inbounds [5 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
 //   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 4, 1
-//   %kizu.50 = call %kizu.opt._std__string__String @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.48, %kizu.slice.u8 %kizu.49)
-//   %kizu.51 = extractvalue %kizu.opt._std__string__String %kizu.50, 1
-//   %kizu.52.tag = extractvalue %kizu.opt._std__string__String %kizu.50, 0
-//   %kizu.52 = icmp ne i8 %kizu.52.tag, 0
+//   %kizu.50 = call ptr @std__map__Map_at__5b_5du8_std_3a_3astring_3a_3aString(ptr %kizu.48, %kizu.slice.u8 %kizu.49)
+//   %kizu.52 = icmp ne ptr %kizu.50, null
 //   br i1 %kizu.52, label %if.then.10, label %if.else.11
 // if.then.10:
-//   %kizu.53 = load %kizu.struct.std__string__String, ptr %kizu.51
+//   %kizu.53 = load %kizu.struct.std__string__String, ptr %kizu.50
 //   %kizu.54 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.53)
 //   %kizu.print.slice.ptr.20 = extractvalue %kizu.slice.u8 %kizu.54, 0
 //   %kizu.print.slice.len.21 = extractvalue %kizu.slice.u8 %kizu.54, 1

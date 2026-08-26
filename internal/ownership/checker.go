@@ -131,11 +131,12 @@ type binding struct {
 }
 
 // allocTied reports an owner allocated from a frame-tied allocator: it keeps
-// its owner obligations (deinit) but cannot escape the frame. Owners are the
-// only non-borrow bindings that ever hold borrowTargets, so the combination
-// identifies them without a separate flag.
+// its owner obligations (deinit) but cannot escape the frame. A value can hold
+// borrow targets for another reason -- an aggregate that keeps a source view
+// holds one too -- and that one escapes under the view rules, not this one, so
+// the allocators are read out by type rather than taken to be every source.
 func (b *binding) allocTied() bool {
-	return !b.borrowedParam && len(b.borrowTargets) > 0
+	return !b.borrowedParam && len(b.tiedAllocatorSources()) > 0
 }
 
 // tiedAllocatorSources returns the tied allocators this value was built from.
@@ -5381,10 +5382,10 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		}
 		return elem, nil
 	case "deinit":
-		// The raw primitive frees only the buffer, whose allocator its header
-		// still holds; the wrapper above it is what names one.
-		if len(args) != 0 {
-			return "", errorf("array error: `Array.deinit` expects 0 args, got %d", len(args))
+		// The raw primitive frees the buffer through the allocator the release
+		// names: the header keeps none of its own (ADR-0132).
+		if err := c.readReleaseAllocator("Array.deinit", nil, args, env); err != nil {
+			return "", err
 		}
 		return "void", nil
 	default:
@@ -6813,7 +6814,10 @@ func (c *Checker) checkStringMethod(
 	case "append_bytes", "append_byte", "reserve", "truncate":
 		return c.checkStringAppendOrReserve(name, args, env)
 	case "append_string":
-		return c.checkStringSourceArg(name, args, env)
+		if err := c.readStringGrowAllocator(name, args, env); err != nil {
+			return "", err
+		}
+		return c.checkStringSourceArg(name, args[1:], env)
 	case "len", "capacity":
 		if err := checkStringNoArgs(name, args); err != nil {
 			return "", err
@@ -6840,20 +6844,58 @@ func (c *Checker) checkStringMethod(
 	}
 }
 
-// checkStringAppendOrReserve validates one-argument String mutators.
+// checkStringAppendOrReserve validates the String mutators that take a value.
+// A growth names the allocator its storage comes from first: a String keeps
+// none of its own (ADR-0132). `truncate` neither grows nor frees.
 func (c *Checker) checkStringAppendOrReserve(
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	rest := args
+	if stringGrowMethod(name) {
+		if err := c.readStringGrowAllocator(name, args, env); err != nil {
+			return "", err
+		}
+		rest = args[1:]
+	}
 	switch name {
 	case "append_bytes":
-		return c.checkStringBytesArg(name, args, env)
+		return c.checkStringBytesArg(name, rest, env)
 	case "append_byte":
-		return c.checkStringByteArg(name, args, env)
+		return c.checkStringByteArg(name, rest, env)
 	default:
-		return c.checkStringReserveArg(name, args, env)
+		return c.checkStringReserveArg(name, rest, env)
 	}
+}
+
+// stringGrowMethod reports the String methods that may ask for storage.
+func stringGrowMethod(name string) bool {
+	switch name {
+	case "append_bytes", "append_byte", "append_string", "reserve":
+		return true
+	default:
+		return false
+	}
+}
+
+// readStringGrowAllocator reads the leading Allocator a growth names.
+func (c *Checker) readStringGrowAllocator(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if len(args) != 2 {
+		return errorf("string error: `String.%s` expects 2 args, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return err
+	}
+	if got != "Allocator" {
+		return errorf("string error: `String.%s` expects Allocator, got %s", name, got)
+	}
+	return nil
 }
 
 // checkStringNoArgs validates no-argument String methods.
@@ -6974,13 +7016,10 @@ func (c *Checker) checkArrayMethod(
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args, env)
 	}
+	if arrayGrowMethod(name) {
+		return c.checkArrayGrowth(elem, name, args, env)
+	}
 	switch name {
-	case "append":
-		return c.checkArrayAppend(elem, args, env)
-	case "append_bytes":
-		return c.checkArrayAppendBytes(elem, args, env)
-	case "reserve":
-		return c.checkArrayCountMutation(name, args, env)
 	case "pop":
 		return c.checkArrayPop(elem, name, args, true)
 	case "pop_or_panic":
@@ -7160,6 +7199,57 @@ func (c *Checker) checkArrayCountMutation(
 		return "std::array::Error!void", nil
 	}
 	return "std::mem::Error!void", nil
+}
+
+// arrayGrowMethod reports the Array methods that may ask for storage.
+func arrayGrowMethod(name string) bool {
+	switch name {
+	case "append", "append_bytes", "reserve":
+		return true
+	default:
+		return false
+	}
+}
+
+// checkArrayGrowth validates one storage-asking Array method. A growth names
+// the allocator its storage comes from first: an Array header keeps none of
+// its own (ADR-0132).
+func (c *Checker) checkArrayGrowth(
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if err := c.readArrayGrowAllocator(name, args, env); err != nil {
+		return "", err
+	}
+	switch name {
+	case "append":
+		return c.checkArrayAppend(elem, args[1:], env)
+	case "append_bytes":
+		return c.checkArrayAppendBytes(elem, args[1:], env)
+	default:
+		return c.checkArrayCountMutation(name, args[1:], env)
+	}
+}
+
+// readArrayGrowAllocator reads the leading Allocator a growth names.
+func (c *Checker) readArrayGrowAllocator(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if len(args) != 2 {
+		return errorf("array error: `Array.%s` expects 2 args, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return err
+	}
+	if got != "Allocator" {
+		return errorf("array error: `Array.%s` expects Allocator, got %s", name, got)
+	}
+	return nil
 }
 
 // checkArrayAppend validates append mutation and element move.
@@ -8866,6 +8956,20 @@ func stmtIdentUses(stmt ast.Statement) []string {
 	}
 }
 
+// wrappedExprValue returns the operand of a one-operand expression wrapper.
+func wrappedExprValue(expr ast.Expression) ast.Expression {
+	switch e := expr.(type) {
+	case *ast.CastExpr:
+		return e.Value
+	case *ast.TryExpr:
+		return e.Value
+	case *ast.MoveExpr:
+		return e.Value
+	default:
+		return nil
+	}
+}
+
 // blockIdentUses collects identifier reads inside a nested block.
 func blockIdentUses(block *ast.BlockStmt) []string {
 	if block == nil {
@@ -8896,10 +9000,12 @@ func exprIdentUses(expr ast.Expression) []string {
 			uses = append(uses, exprIdentUses(arg)...)
 		}
 		return uses
-	case *ast.CastExpr:
-		return exprIdentUses(e.Value)
-	case *ast.TryExpr:
-		return exprIdentUses(e.Value)
+	case *ast.CastExpr, *ast.TryExpr, *ast.MoveExpr:
+		// One-operand wrappers read whatever they wrap. A `move` is among
+		// them: missing it would end the value's live range at its previous
+		// statement, and everything a last use releases -- the borrows it
+		// holds, the allocator it is tied to -- would go one statement early.
+		return exprIdentUses(wrappedExprValue(e))
 	case *ast.StructLiteralExpr:
 		uses := []string{}
 		for _, field := range e.Fields {

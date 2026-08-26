@@ -86,7 +86,26 @@ fn (self: &Checker) mutable_place(value: BindingHandle) -> bool {
 /// `binding.allocTied`: it keeps its owner obligations (deinit) but cannot
 /// escape the frame.
 fn (self: &Checker) alloc_tied(value: BindingHandle) -> bool {
-    return !self.binding(value).borrowed_param and self.has_borrow_targets(value);
+    if self.binding(value).borrowed_param {
+        return false;
+    }
+    return self.has_tied_allocator_source(value);
+}
+
+/// Reports whether this value was built from a tied allocator, the Go
+/// `binding.tiedAllocatorSources`. A value can hold borrow targets for another
+/// reason -- an aggregate that keeps a source view holds one too -- and that
+/// one escapes under the view rules, not this one, so the allocators are read
+/// out by type rather than taken to be every source.
+fn (self: &Checker) has_tied_allocator_source(value: BindingHandle) -> bool {
+    var index = 0;
+    while self.borrow_target_at(value, index) |source| {
+        index = index + 1;
+        if self.names.is(self.binding(source.target).type_name, "Allocator") {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Reports whether the binding is itself a `&var` parameter, the Go
@@ -374,7 +393,7 @@ fn (self: &var Checker) function_by_value_name(name: Name) -> !?FunctionHandle {
     if try self.append_current_module_prefix(&var qualified) {
         let retained = name_text(&self.names, name);
         let bytes = retained.as_bytes();
-        try qualified.append_bytes(bytes);
+        try qualified.append_bytes(self.allocator, bytes);
         let text = qualified.as_bytes();
         let candidate = try self.names.intern(text);
         return self.function_named(candidate);
@@ -393,7 +412,7 @@ fn (self: &var Checker) append_current_module_prefix(out: &var string::String) -
     if cut == 0 {
         return false;
     }
-    try out.append_bytes(bytes[0..cut]);
+    try out.append_bytes(self.allocator, bytes[0..cut]);
     return true;
 }
 
@@ -426,44 +445,44 @@ fn (self: &var Checker) function_pointer_name(name: Name) -> !?Name {
     result = info.return_type;
     var collected = 0;
     while info.params.get(collected) |param| {
-        try params.append(param.type_name);
+        try params.append(self.allocator, param.type_name);
         if param.mut_borrow {
-            try borrows.append(2);
+            try borrows.append(self.allocator, 2);
         } else {
             if param.borrow {
-                try borrows.append(1);
+                try borrows.append(self.allocator, 1);
             } else {
-                try borrows.append(0);
+                try borrows.append(self.allocator, 0);
             }
         }
         collected = collected + 1;
     }
     if unsafe_call {
-        try text.append_bytes("unsafe fn(");
+        try text.append_bytes(self.allocator, "unsafe fn(");
     } else {
-        try text.append_bytes("fn(");
+        try text.append_bytes(self.allocator, "fn(");
     }
     var index = 0;
     while params.get(index) |param| {
         if index > 0 {
-            try text.append_bytes(", ");
+            try text.append_bytes(self.allocator, ", ");
         }
         let marker = borrows.get_or_panic(index);
         if marker == 2 {
-            try text.append_bytes("&var ");
+            try text.append_bytes(self.allocator, "&var ");
         }
         if marker == 1 {
-            try text.append_byte(cast<u8>(38));
+            try text.append_byte(self.allocator, cast<u8>(38));
         }
         let retained = name_text(&self.names, param);
         let bytes = retained.as_bytes();
-        try text.append_bytes(bytes);
+        try text.append_bytes(self.allocator, bytes);
         index = index + 1;
     }
-    try text.append_bytes(") -> ");
+    try text.append_bytes(self.allocator, ") -> ");
     let retained_result = name_text(&self.names, result);
     let result_bytes = retained_result.as_bytes();
-    try text.append_bytes(result_bytes);
+    try text.append_bytes(self.allocator, result_bytes);
     let text_bytes = text.as_bytes();
     return try self.names.intern(text_bytes);
 }
@@ -699,8 +718,8 @@ fn (self: &Checker) name_is_map_key(value: Name) -> bool {
 fn (self: &Checker) map_key_type_error() -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("map error: std::map::Map key type must be one of ");
-    try message.append_bytes(typ::map_key_type_names());
+    try message.append_bytes(self.allocator, "map error: std::map::Map key type must be one of ");
+    try message.append_bytes(self.allocator, typ::map_key_type_names());
     return self.error_message(ast::zero_span(), move message);
 }
 
@@ -720,8 +739,8 @@ fn (self: &var Checker) checked_map_args(
     if !self.name_is_map_key(args.get_or_panic(0)) {
         return try self.map_key_type_error();
     }
-    try out.append(args.get_or_panic(0));
-    try out.append(args.get_or_panic(1));
+    try out.append(self.allocator, args.get_or_panic(0));
+    try out.append(self.allocator, args.get_or_panic(1));
     return null;
 }
 
@@ -768,7 +787,7 @@ fn (self: &var Checker) instantiate_type_arg_text(type_arg: Name) -> !Name {
     var index = 0;
     while args.get(index) |arg| {
         if index > 0 {
-            try out.append_bytes(", ");
+            try out.append_bytes(self.allocator, ", ");
         }
         let resolved = try self.instantiate_one_type_arg(arg);
         try self.names.append_to(&var out, resolved);

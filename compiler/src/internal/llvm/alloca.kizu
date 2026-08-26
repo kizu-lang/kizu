@@ -41,7 +41,7 @@ fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::St
     var start = 0;
     while start <= mem::len(body) {
         let end = line_end(body, start);
-        try lines.append(LineSpan { start: start, end: end });
+        try lines.append(allocator, LineSpan { start: start, end: end });
         start = end + 1;
     }
     var entry = -1;
@@ -54,7 +54,7 @@ fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::St
         index = index + 1;
     }
     if entry < 0 {
-        try out.append_bytes(body);
+        try out.append_bytes(allocator, body);
         return null;
     }
     var allocas = array::new<LineSpan>(allocator);
@@ -68,15 +68,15 @@ fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::St
             if try reject_counted_alloca(allocator, line) |failed| {
                 return move failed;
             }
-            try allocas.append(span);
+            try allocas.append(allocator, span);
             index = index + 1;
             continue;
         }
-        try kept.append(span);
+        try kept.append(allocator, span);
         index = index + 1;
     }
     if allocas.len() == 0 {
-        try out.append_bytes(body);
+        try out.append_bytes(allocator, body);
         return null;
     }
     var run = LineSpan { start: 0, end: 0 };
@@ -85,21 +85,21 @@ fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::St
     index = 0;
     while index <= entry {
         let span = kept.get_or_panic(index);
-        try extend_run(out, body, span, &var run, &var open, &var written);
+        try extend_run(allocator, out, body, span, &var run, &var open, &var written);
         index = index + 1;
     }
     index = 0;
     while allocas.get(index) |span| {
-        try extend_run(out, body, span, &var run, &var open, &var written);
+        try extend_run(allocator, out, body, span, &var run, &var open, &var written);
         index = index + 1;
     }
     index = entry + 1;
     while kept.get(index) |span| {
-        try extend_run(out, body, span, &var run, &var open, &var written);
+        try extend_run(allocator, out, body, span, &var run, &var open, &var written);
         index = index + 1;
     }
     if open {
-        try append_run(out, body, run, written);
+        try append_run(allocator, out, body, run, written);
     }
     return null;
 }
@@ -109,7 +109,7 @@ fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::St
 /// adjacent are copied once, with the newline the body already holds between
 /// them: only the hoisted allocas break a function into pieces, so most of it
 /// is two or three copies rather than one per line.
-fn extend_run(
+fn extend_run(allocator: Allocator, 
     out: &var string::String,
     body: []u8,
     span: LineSpan,
@@ -122,7 +122,7 @@ fn extend_run(
         return;
     }
     if open.* {
-        try append_run(out, body, run.*, written.*);
+        try append_run(allocator, out, body, run.*, written.*);
         written.* = written.* + 1;
     }
     run.* = span;
@@ -132,11 +132,11 @@ fn extend_run(
 
 /// Appends one run of the joined body, the Go `strings.Join(hoisted, "\n")`:
 /// a newline separates it from the run before.
-fn append_run(out: &var string::String, body: []u8, run: LineSpan, written: i64) -> !void {
+fn append_run(allocator: Allocator, out: &var string::String, body: []u8, run: LineSpan, written: i64) -> !void {
     if written > 0 {
-        try out.append_byte(cast<u8>(10));
+        try out.append_byte(allocator, cast<u8>(10));
     }
-    return out.append_bytes(body[run.start..run.end]);
+    return out.append_bytes(allocator, body[run.start..run.end]);
 }
 
 /// Refuses an alloca that takes an element count, the Go
@@ -165,8 +165,8 @@ fn reject_counted_alloca(allocator: Allocator, line: []u8) -> !?diagnostic::Diag
         }
         var message = try string::from_bytes(allocator, "llvm error: emitter bug: `");
         defer message.deinit(allocator);
-        try message.append_bytes(mem::trim_ascii(line));
-        try message.append_bytes("` allocates an element count, which the entry block cannot hold; a per-turn stack slot needs llvm.stacksave and llvm.stackrestore around the loop it sits in");
+        try message.append_bytes(allocator, mem::trim_ascii(line));
+        try message.append_bytes(allocator, "` allocates an element count, which the entry block cannot hold; a per-turn stack slot needs llvm.stacksave and llvm.stackrestore around the loop it sits in");
         let message_bytes = message.as_bytes();
         return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
     }

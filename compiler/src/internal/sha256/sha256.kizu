@@ -25,10 +25,10 @@ pub fn new(allocator: Allocator) -> !Hasher {
     errdefer and_table.deinit(allocator);
     var xor_table = array::new<i64>(allocator);
     errdefer xor_table.deinit(allocator);
-    try build_tables(&var and_table, &var xor_table);
+    try build_tables(allocator, &var and_table, &var xor_table);
     var k = array::new<i64>(allocator);
     errdefer k.deinit(allocator);
-    try append_round_constants(&var k);
+    try append_round_constants(allocator, &var k);
     return Hasher { and_table: move and_table, xor_table: move xor_table, k: move k };
 }
 
@@ -41,12 +41,12 @@ pub fn (self: &Hasher) append_hex_digest(
 ) -> !void {
     var state = array::new<i64>(allocator);
     defer state.deinit(allocator);
-    try append_initial_state(&var state);
+    try append_initial_state(allocator, &var state);
     var w = array::new<i64>(allocator);
     defer w.deinit(allocator);
     var slot = 0;
     while slot < 64 {
-        try w.append(0);
+        try w.append(allocator, 0);
         slot = slot + 1;
     }
     let and_table = &self.and_table;
@@ -61,20 +61,20 @@ pub fn (self: &Hasher) append_hex_digest(
     }
     var tail = string::new(allocator);
     defer tail.deinit(allocator);
-    try tail.append_bytes(bytes[offset..total]);
-    try tail.append_byte(cast<u8>(128));
+    try tail.append_bytes(allocator, bytes[offset..total]);
+    try tail.append_byte(allocator, cast<u8>(128));
     while tail.len() % 64 != 56 {
-        try tail.append_byte(cast<u8>(0));
+        try tail.append_byte(allocator, cast<u8>(0));
     }
     let bits = total * 8;
-    try tail.append_byte(cast<u8>((bits / 72057594037927936) % 256));
-    try tail.append_byte(cast<u8>((bits / 281474976710656) % 256));
-    try tail.append_byte(cast<u8>((bits / 1099511627776) % 256));
-    try tail.append_byte(cast<u8>((bits / 4294967296) % 256));
-    try tail.append_byte(cast<u8>((bits / 16777216) % 256));
-    try tail.append_byte(cast<u8>((bits / 65536) % 256));
-    try tail.append_byte(cast<u8>((bits / 256) % 256));
-    try tail.append_byte(cast<u8>(bits % 256));
+    try tail.append_byte(allocator, cast<u8>((bits / 72057594037927936) % 256));
+    try tail.append_byte(allocator, cast<u8>((bits / 281474976710656) % 256));
+    try tail.append_byte(allocator, cast<u8>((bits / 1099511627776) % 256));
+    try tail.append_byte(allocator, cast<u8>((bits / 4294967296) % 256));
+    try tail.append_byte(allocator, cast<u8>((bits / 16777216) % 256));
+    try tail.append_byte(allocator, cast<u8>((bits / 65536) % 256));
+    try tail.append_byte(allocator, cast<u8>((bits / 256) % 256));
+    try tail.append_byte(allocator, cast<u8>(bits % 256));
     let tail_len = tail.len();
     var tail_offset = 0;
     while tail_offset < tail_len {
@@ -86,7 +86,7 @@ pub fn (self: &Hasher) append_hex_digest(
     var index = 0;
     while index < 8 {
         let word = state.get_or_panic(index);
-        try append_hex_word(out, word);
+        try append_hex_word(allocator, out, word);
         index = index + 1;
     }
     return;
@@ -214,22 +214,22 @@ fn rotr(value: i64, down: i64, up: i64) -> i64 {
 /// Builds the byte-pair AND and XOR tables in one ascending walk: entry
 /// (a, b) reads entry (a/2, b/2), which the walk has always built already,
 /// and appends the low bits' contribution.
-fn build_tables(and_table: &var array::Array<i64>, xor_table: &var array::Array<i64>) -> !void {
+fn build_tables(allocator: Allocator, and_table: &var array::Array<i64>, xor_table: &var array::Array<i64>) -> !void {
     var a = 0;
     while a < 256 {
         var b = 0;
         while b < 256 {
             if a == 0 and b == 0 {
-                try and_table.append(0);
-                try xor_table.append(0);
+                try and_table.append(allocator, 0);
+                try xor_table.append(allocator, 0);
             } else {
                 let head = (a / 2) * 256 + b / 2;
                 let and_head = and_table.get_or_panic(head);
                 let xor_head = xor_table.get_or_panic(head);
                 let a_bit = a % 2;
                 let b_bit = b % 2;
-                try and_table.append(and_head * 2 + a_bit * b_bit);
-                try xor_table.append(xor_head * 2 + (a_bit + b_bit) % 2);
+                try and_table.append(allocator, and_head * 2 + a_bit * b_bit);
+                try xor_table.append(allocator, xor_head * 2 + (a_bit + b_bit) % 2);
             }
             b = b + 1;
         }
@@ -239,14 +239,14 @@ fn build_tables(and_table: &var array::Array<i64>, xor_table: &var array::Array<
 }
 
 /// Appends the eight hex digits of one 32-bit word, highest nibble first.
-fn append_hex_word(out: &var string::String, word: i64) -> !void {
+fn append_hex_word(allocator: Allocator, out: &var string::String, word: i64) -> !void {
     var divisor = 268435456;
     while divisor > 0 {
         let nibble = (word / divisor) % 16;
         if nibble < 10 {
-            try out.append_byte(cast<u8>(48 + nibble));
+            try out.append_byte(allocator, cast<u8>(48 + nibble));
         } else {
-            try out.append_byte(cast<u8>(87 + nibble));
+            try out.append_byte(allocator, cast<u8>(87 + nibble));
         }
         divisor = divisor / 16;
     }
@@ -254,83 +254,83 @@ fn append_hex_word(out: &var string::String, word: i64) -> !void {
 }
 
 /// Appends the FIPS 180-4 initial hash value H(0).
-fn append_initial_state(state: &var array::Array<i64>) -> !void {
-    try state.append(1779033703);
-    try state.append(3144134277);
-    try state.append(1013904242);
-    try state.append(2773480762);
-    try state.append(1359893119);
-    try state.append(2600822924);
-    try state.append(528734635);
-    try state.append(1541459225);
+fn append_initial_state(allocator: Allocator, state: &var array::Array<i64>) -> !void {
+    try state.append(allocator, 1779033703);
+    try state.append(allocator, 3144134277);
+    try state.append(allocator, 1013904242);
+    try state.append(allocator, 2773480762);
+    try state.append(allocator, 1359893119);
+    try state.append(allocator, 2600822924);
+    try state.append(allocator, 528734635);
+    try state.append(allocator, 1541459225);
     return;
 }
 
 /// Appends the FIPS 180-4 round constants K in order.
-fn append_round_constants(k: &var array::Array<i64>) -> !void {
-    try k.append(1116352408);
-    try k.append(1899447441);
-    try k.append(3049323471);
-    try k.append(3921009573);
-    try k.append(961987163);
-    try k.append(1508970993);
-    try k.append(2453635748);
-    try k.append(2870763221);
-    try k.append(3624381080);
-    try k.append(310598401);
-    try k.append(607225278);
-    try k.append(1426881987);
-    try k.append(1925078388);
-    try k.append(2162078206);
-    try k.append(2614888103);
-    try k.append(3248222580);
-    try k.append(3835390401);
-    try k.append(4022224774);
-    try k.append(264347078);
-    try k.append(604807628);
-    try k.append(770255983);
-    try k.append(1249150122);
-    try k.append(1555081692);
-    try k.append(1996064986);
-    try k.append(2554220882);
-    try k.append(2821834349);
-    try k.append(2952996808);
-    try k.append(3210313671);
-    try k.append(3336571891);
-    try k.append(3584528711);
-    try k.append(113926993);
-    try k.append(338241895);
-    try k.append(666307205);
-    try k.append(773529912);
-    try k.append(1294757372);
-    try k.append(1396182291);
-    try k.append(1695183700);
-    try k.append(1986661051);
-    try k.append(2177026350);
-    try k.append(2456956037);
-    try k.append(2730485921);
-    try k.append(2820302411);
-    try k.append(3259730800);
-    try k.append(3345764771);
-    try k.append(3516065817);
-    try k.append(3600352804);
-    try k.append(4094571909);
-    try k.append(275423344);
-    try k.append(430227734);
-    try k.append(506948616);
-    try k.append(659060556);
-    try k.append(883997877);
-    try k.append(958139571);
-    try k.append(1322822218);
-    try k.append(1537002063);
-    try k.append(1747873779);
-    try k.append(1955562222);
-    try k.append(2024104815);
-    try k.append(2227730452);
-    try k.append(2361852424);
-    try k.append(2428436474);
-    try k.append(2756734187);
-    try k.append(3204031479);
-    try k.append(3329325298);
+fn append_round_constants(allocator: Allocator, k: &var array::Array<i64>) -> !void {
+    try k.append(allocator, 1116352408);
+    try k.append(allocator, 1899447441);
+    try k.append(allocator, 3049323471);
+    try k.append(allocator, 3921009573);
+    try k.append(allocator, 961987163);
+    try k.append(allocator, 1508970993);
+    try k.append(allocator, 2453635748);
+    try k.append(allocator, 2870763221);
+    try k.append(allocator, 3624381080);
+    try k.append(allocator, 310598401);
+    try k.append(allocator, 607225278);
+    try k.append(allocator, 1426881987);
+    try k.append(allocator, 1925078388);
+    try k.append(allocator, 2162078206);
+    try k.append(allocator, 2614888103);
+    try k.append(allocator, 3248222580);
+    try k.append(allocator, 3835390401);
+    try k.append(allocator, 4022224774);
+    try k.append(allocator, 264347078);
+    try k.append(allocator, 604807628);
+    try k.append(allocator, 770255983);
+    try k.append(allocator, 1249150122);
+    try k.append(allocator, 1555081692);
+    try k.append(allocator, 1996064986);
+    try k.append(allocator, 2554220882);
+    try k.append(allocator, 2821834349);
+    try k.append(allocator, 2952996808);
+    try k.append(allocator, 3210313671);
+    try k.append(allocator, 3336571891);
+    try k.append(allocator, 3584528711);
+    try k.append(allocator, 113926993);
+    try k.append(allocator, 338241895);
+    try k.append(allocator, 666307205);
+    try k.append(allocator, 773529912);
+    try k.append(allocator, 1294757372);
+    try k.append(allocator, 1396182291);
+    try k.append(allocator, 1695183700);
+    try k.append(allocator, 1986661051);
+    try k.append(allocator, 2177026350);
+    try k.append(allocator, 2456956037);
+    try k.append(allocator, 2730485921);
+    try k.append(allocator, 2820302411);
+    try k.append(allocator, 3259730800);
+    try k.append(allocator, 3345764771);
+    try k.append(allocator, 3516065817);
+    try k.append(allocator, 3600352804);
+    try k.append(allocator, 4094571909);
+    try k.append(allocator, 275423344);
+    try k.append(allocator, 430227734);
+    try k.append(allocator, 506948616);
+    try k.append(allocator, 659060556);
+    try k.append(allocator, 883997877);
+    try k.append(allocator, 958139571);
+    try k.append(allocator, 1322822218);
+    try k.append(allocator, 1537002063);
+    try k.append(allocator, 1747873779);
+    try k.append(allocator, 1955562222);
+    try k.append(allocator, 2024104815);
+    try k.append(allocator, 2227730452);
+    try k.append(allocator, 2361852424);
+    try k.append(allocator, 2428436474);
+    try k.append(allocator, 2756734187);
+    try k.append(allocator, 3204031479);
+    try k.append(allocator, 3329325298);
     return;
 }

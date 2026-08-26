@@ -31,14 +31,21 @@ fn (self: &var Checker) check_array_method(
     if self.is_std_array_storage_method(method) {
         return self.check_array_storage_method(tree, env, elem, method, args, out);
     }
-    if self.names.is(method, "append") {
-        return self.check_array_append(tree, env, elem, args, out);
-    }
-    if self.names.is(method, "append_bytes") {
-        return self.check_array_append_bytes(tree, env, elem, args, out);
-    }
-    if self.names.is(method, "reserve") {
-        return self.check_array_count_mutation(tree, env, method, args, out);
+    // A growth names the allocator its storage comes from first: an Array
+    // header keeps none of its own (ADR-0132).
+    if self.names.is(method, "append") or self.names.is(method, "append_bytes") or
+        self.names.is(method, "reserve") {
+        if try self.read_array_grow_allocator(tree, env, method, args) |failed| {
+            return move failed;
+        }
+        let rest = try self.rest_args(tree, args, 1);
+        if self.names.is(method, "append") {
+            return self.check_array_append(tree, env, elem, rest, out);
+        }
+        if self.names.is(method, "append_bytes") {
+            return self.check_array_append_bytes(tree, env, elem, rest, out);
+        }
+        return self.check_array_count_mutation(tree, env, method, rest, out);
     }
     if self.names.is(method, "pop") {
         return self.check_array_pop(tree, elem, method, args, true, out);
@@ -764,6 +771,34 @@ fn (self: &var Checker) check_map_read_no_args(
 }
 
 /// Validates owned Map cleanup and marks it moved, the Go `checkMapDeinit`.
+/// Reads the leading Allocator an Array growth names.
+fn (self: &var Checker) read_array_grow_allocator(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 2 {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects 2 args, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects Allocator, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    return null;
+}
+
 /// Reads the single Allocator a release names. A value keeps no copy of the
 /// allocator that made it (ADR-0132), so the call spells it, the same way the
 /// construction did. `offset` skips the receiver a primitive carries.
@@ -1339,7 +1374,7 @@ fn (self: &var Checker) arena_handle_pairs(
         let position = index;
         index = index + 1;
         let type_name = try self.substitute_with(param.type_name, subst);
-        try resolved.append(type_name);
+        try resolved.append(self.allocator, type_name);
         let parts = try self.names.split_generic(type_name) orelse continue;
         if self.names.is(parts.base, "std::arena::Arena") {
             try self.note_pair_index(&var arenas, parts.args, position, param.borrow);
@@ -1361,7 +1396,7 @@ fn (self: &var Checker) arena_handle_pairs(
         if arena_index == ambiguous_pair_index() {
             continue;
         }
-        try pairs.append(ArenaHandlePair { arena: arena_index, handle: idx });
+        try pairs.append(self.allocator, ArenaHandlePair { arena: arena_index, handle: idx });
     }
     return;
 }

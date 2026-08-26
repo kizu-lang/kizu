@@ -283,7 +283,7 @@ fn (self: &var Lowerer) lower_allocator_from(
         if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
             return move failed;
         }
-        try values.append(value);
+        try values.append(self.allocator, value);
     }
     let allocator = try self.module.names.intern("Allocator");
     let symbol = try self.module.names.intern("std::internal::builtin::mem_allocator_from");
@@ -326,14 +326,14 @@ fn (self: &var Lowerer) lower_func_pointer_call(
     handled.* = true;
     var args = array::new<Value>(self.allocator);
     defer args.deinit(self.allocator);
-    try args.append(callee);
+    try args.append(self.allocator, callee);
     var index = 0;
     while ownership::arg_at(tree, call.args, index) |argument| {
         var lowered = self.common.void_value;
         if try self.lower_expr(tree, argument, &var lowered) |failed| {
             return move failed;
         }
-        try args.append(lowered);
+        try args.append(self.allocator, lowered);
         index = index + 1;
     }
     let result = try self.function_pointer_result_name(callee.type_name);
@@ -754,7 +754,7 @@ fn (self: &var Lowerer) lower_try_expr(
         index = 0;
         while cleanups.get(index) |cleanup| {
             index = index + 1;
-            try self.module.add_cleanup(instr, cleanup);
+            try self.module.add_cleanup(self.allocator, instr, cleanup);
         }
     }
     out.* = result;
@@ -831,11 +831,11 @@ fn (self: &var Lowerer) lower_method_call_expr(
     }
     var all_args = array::new<Value>(self.allocator);
     defer all_args.deinit(self.allocator);
-    try all_args.append(receiver);
+    try all_args.append(self.allocator, receiver);
     var index = 0;
     while lowered.get(index) |arg| {
         index = index + 1;
-        try all_args.append(arg);
+        try all_args.append(self.allocator, arg);
     }
     return self.lower_resolved_method(tree, receiver.type_name, method, &all_args, out);
 }
@@ -876,7 +876,7 @@ fn (self: &var Lowerer) lower_resolved_method(
         var receiver_only = array::new<Value>(self.allocator);
         defer receiver_only.deinit(self.allocator);
         if args.get(0) |receiver| {
-            try receiver_only.append(receiver);
+            try receiver_only.append(self.allocator, receiver);
         }
         return self.lower_arena_method(tree, method, receiver_type, &receiver_only, out);
     }
@@ -1321,8 +1321,11 @@ fn (self: &var Lowerer) lower_box_method(
             }
             let box_type = try self.module.names.wrapped("std::mem::Error!std::mem::Box<", elem, ">");
             let value = try self.emit_with(op, empty_name(), box_type, empty_name(), args);
+            // args are the allocator the cell comes from and the payload; a
+            // failed allocation releases the payload through that allocator.
             let owner = args.get_or_panic(1);
-            return self.release_owner_on_failure(tree, value, owner, out);
+            let allocator = args.get_or_panic(0);
+            return self.release_owner_on_failure(tree, value, owner, allocator, out);
         },
         BoxBorrow => {
             // A returned borrow travels under the same rule any borrow return
@@ -1436,8 +1439,12 @@ fn (self: &var Lowerer) lower_array_method(
         let result_type = try self.name(result);
         let value = try self.emit_with(op, empty_name(), result_type, empty_name(), args);
         if op == Op::ArrayAppend {
-            let owner = args.get_or_panic(1);
-            return self.release_owner_on_failure(tree, value, owner, out);
+            // args are the receiver, the allocator the growth names, and the
+            // element; a failed append releases the element through that same
+            // allocator, which is the one it was built from (ADR-0132).
+            let owner = args.get_or_panic(2);
+            let allocator = args.get_or_panic(1);
+            return self.release_owner_on_failure(tree, value, owner, allocator, out);
         }
         out.* = value;
         return null;
@@ -1511,6 +1518,7 @@ fn (self: &var Lowerer) release_owner_on_failure(
     tree: &var ast::Ast,
     result: Value,
     owner: Value,
+    allocator: Value,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
     if !self.is_owner_type(owner.type_name) {
@@ -1520,14 +1528,14 @@ fn (self: &var Lowerer) release_owner_on_failure(
     let cleanup_bytes = typ::cleanup_method();
     let method = try self.name(cleanup_bytes);
     var cleanup = empty_cleanup();
-    if try self.cleanup_from_method(tree, owner, method, empty_value(), &var cleanup) |failed| {
+    if try self.cleanup_from_method(tree, owner, method, allocator, &var cleanup) |failed| {
         return move failed;
     }
     cleanup.on_error = true;
     let success = try self.error_union_element_type(result.type_name);
     let value = try self.emit1(Op::ErrorTry, success, result);
     if self.last_instr() |instr| {
-        try self.module.add_cleanup(instr, cleanup);
+        try self.module.add_cleanup(self.allocator, instr, cleanup);
     }
     if self.name_is(success, "void") {
         out.* = try self.emit0(Op::ErrorOk, result.type_name);

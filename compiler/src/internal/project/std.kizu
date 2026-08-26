@@ -64,16 +64,15 @@ fn (self: &Loader) read_std_graph() -> !GraphResult {
 fn (self: &Loader) missing_lib_file(file: []u8) -> !diagnostic::Diagnostic {
     var text = string::new(self.allocator);
     defer text.deinit(self.allocator);
-    try text.append_bytes("open ");
-    try text.append_bytes(file);
-    try text.append_bytes(": no such file or directory");
-    try text.append_byte(cast<u8>(10));
-    try text.append_bytes("help: the library tree is `");
-    try text.append_string(&self.lib_dir);
-    try text.append_bytes("`; set KIZU_LIB_DIR or pass --lib-dir to point somewhere else");
+    try text.append_bytes(self.allocator, "open ");
+    try text.append_bytes(self.allocator, file);
+    try text.append_bytes(self.allocator, ": no such file or directory");
+    try text.append_byte(self.allocator, cast<u8>(10));
+    try text.append_bytes(self.allocator, "help: the library tree is `");
+    try text.append_string(self.allocator, &self.lib_dir);
+    try text.append_bytes(self.allocator, "`; set KIZU_LIB_DIR or pass --lib-dir to point somewhere else");
     let bytes = text.as_bytes();
-    let built = try diagnostic::from_text(
-        self.allocator,
+    let built = try diagnostic::from_text(self.allocator,
         diagnostic::Severity::Error,
         ast::zero_span(),
         bytes
@@ -131,7 +130,7 @@ fn (self: &Loader) std_modules_for(
         if module.files.len() == 0 {
             continue;
         }
-        try loader.paths.append(try copy_string(self.allocator, &module.path));
+        try loader.paths.append(self.allocator, try copy_string(self.allocator, &module.path));
     }
     try sort::strings(&var loader.paths);
     index = 0;
@@ -156,7 +155,7 @@ fn (self: &Loader) std_modules_for(
         while graph.modules.at(graph_index) |module| {
             graph_index = graph_index + 1;
             if same_text(&module.path, module_path) {
-                try modules.append(try clone_module(self.allocator, module));
+                try modules.append(self.allocator, try clone_module(self.allocator, module));
             }
         }
     }
@@ -172,14 +171,14 @@ fn clone_module(allocator: Allocator, module: &Module) -> !Module {
     errdefer files.deinit(allocator);
     var index = 0;
     while module.files.at(index) |file| {
-        try files.append(try copy_string(allocator, file));
+        try files.append(allocator, try copy_string(allocator, file));
         index = index + 1;
     }
     var test_files = array::new<string::String>(allocator);
     errdefer test_files.deinit(allocator);
     index = 0;
     while module.test_files.at(index) |file| {
-        try test_files.append(try copy_string(allocator, file));
+        try test_files.append(allocator, try copy_string(allocator, file));
         index = index + 1;
     }
     return Module {
@@ -201,7 +200,7 @@ fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> 
             index = index + 1;
             let bytes = module_path.as_bytes();
             if !internal_module(bytes).internal {
-                try wanted.append(try copy_string(self.allocator, module_path));
+                try wanted.append(self.allocator, try copy_string(self.allocator, module_path));
             }
         }
         return move wanted;
@@ -210,7 +209,7 @@ fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> 
     while self.paths.at(index) |module_path| {
         index = index + 1;
         if text_is(module_path, import_path) {
-            try wanted.append(try copy_string(self.allocator, module_path));
+            try wanted.append(self.allocator, try copy_string(self.allocator, module_path));
             return move wanted;
         }
     }
@@ -252,7 +251,7 @@ fn (self: &var StdLoader) visit(
             }
         }
     }
-    return self.out.append(try string::from_bytes(self.allocator, module_path));
+    return self.out.append(self.allocator, try string::from_bytes(self.allocator, module_path));
 }
 
 /// Returns the std modules a source names. std modules reach their siblings
@@ -269,7 +268,7 @@ fn (self: &StdLoader) references(text: &string::String) -> !array::Array<string:
         index = index + 1;
         let bytes = module_path.as_bytes();
         if seen.contains(bytes) {
-            try modules.append(try copy_string(self.allocator, module_path));
+            try modules.append(self.allocator, try copy_string(self.allocator, module_path));
         }
     }
     return move modules;
@@ -313,8 +312,8 @@ fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
                 let prefix_bytes = prefix.as_bytes();
                 try seen.insert(prefix_bytes, true);
             }
-            try prefix.append_bytes("::");
-            try prefix.append_string(&part.literal);
+            try prefix.append_bytes(allocator, "::");
+            try prefix.append_string(allocator, &part.literal);
         }
     }
     return move seen;
@@ -374,7 +373,7 @@ fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::St
                             joined.deinit(self.allocator);
                         } else {
                             try set_insert(&var seen, &joined);
-                            try paths.append(move joined);
+                            try paths.append(self.allocator, move joined);
                         }
                     },
                     _ => {},
@@ -405,10 +404,10 @@ pub fn join_import_path(
     var index = 0;
     while value.path.at(index) |segment| {
         if index > 0 {
-            try out.append_bytes("::");
+            try out.append_bytes(allocator, "::");
         }
         let text = tree.texts.at(segment.node);
-        try out.append_string(text);
+        try out.append_string(allocator, text);
         index = index + 1;
     }
     return move out;
@@ -523,9 +522,9 @@ fn (self: &Loader) collect_error_sets(
                 }
                 var qualified = try string::from_bytes(self.allocator, module_path);
                 defer qualified.deinit(self.allocator);
-                try qualified.append_bytes("::");
+                try qualified.append_bytes(self.allocator, "::");
                 let set_name = tree.texts.at(set.name.node);
-                try qualified.append_string(set_name);
+                try qualified.append_string(self.allocator, set_name);
                 let qualified_bytes = qualified.as_bytes();
                 try sets.insert(qualified_bytes, move members);
             },

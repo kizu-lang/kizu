@@ -57,8 +57,7 @@ pub union LoadResult {
 fn module_error(allocator: Allocator, text: string::String) -> !diagnostic::Diagnostic {
     defer text.deinit(allocator);
     let bytes = text.as_bytes();
-    let built = try diagnostic::from_text(
-        allocator,
+    let built = try diagnostic::from_text(allocator,
         diagnostic::Severity::Error,
         ast::zero_span(),
         bytes
@@ -71,7 +70,7 @@ fn module_error(allocator: Allocator, text: string::String) -> !diagnostic::Diag
 fn module_error_text(allocator: Allocator) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes("module error: ");
+    try out.append_bytes(allocator, "module error: ");
     return move out;
 }
 
@@ -115,13 +114,13 @@ fn (self: &Module) source_files(
     errdefer files.deinit(allocator);
     var index = 0;
     while self.files.at(index) |file| {
-        try files.append(try copy_string(allocator, file));
+        try files.append(allocator, try copy_string(allocator, file));
         index = index + 1;
     }
     if include_tests {
         index = 0;
         while self.test_files.at(index) |file| {
-            try files.append(try copy_string(allocator, file));
+            try files.append(allocator, try copy_string(allocator, file));
             index = index + 1;
         }
     }
@@ -215,8 +214,7 @@ fn collect_source_root(
             }
         } else {
             if mem::equal_bytes(path::extension(entry.path), ".kizu") {
-                if try record_source_file(
-                    allocator,
+                if try record_source_file(allocator,
                     modules,
                     seen_files,
                     package_name,
@@ -252,22 +250,22 @@ fn record_source_file(
         }
         var text = try module_error_text(allocator);
         errdefer text.deinit(allocator);
-        try text.append_bytes("source `");
-        try text.append_bytes(clean);
-        try text.append_bytes("` belongs to both `");
-        try text.append_string(previous);
-        try text.append_bytes("` and `");
-        try text.append_string(&module_path);
-        try text.append_bytes("`");
+        try text.append_bytes(allocator, "source `");
+        try text.append_bytes(allocator, clean);
+        try text.append_bytes(allocator, "` belongs to both `");
+        try text.append_string(allocator, previous);
+        try text.append_bytes(allocator, "` and `");
+        try text.append_string(allocator, &module_path);
+        try text.append_bytes(allocator, "`");
         return try module_error(allocator, move text);
     }
     try seen_files.insert(clean, try copy_string(allocator, &module_path));
     let slot = try module_slot(allocator, modules, &module_path);
     if modules.at_mut(slot) |module| {
         if is_test_file(clean) {
-            try module.test_files.append(try string::from_bytes(allocator, clean));
+            try module.test_files.append(allocator, try string::from_bytes(allocator, clean));
         } else {
-            try module.files.append(try string::from_bytes(allocator, clean));
+            try module.files.append(allocator, try string::from_bytes(allocator, clean));
         }
     }
     return null;
@@ -286,7 +284,7 @@ fn module_slot(
         }
         index = index + 1;
     }
-    try modules.append(Module {
+    try modules.append(allocator, Module {
         path: try copy_string(allocator, module_path),
         files: array::new<string::String>(allocator),
         test_files: array::new<string::String>(allocator)
@@ -304,7 +302,7 @@ fn source_module_path(
     let dir = path::dirname(file);
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes(package_name);
+    try out.append_bytes(allocator, package_name);
     let root_len = mem::len(source_root);
     if mem::len(dir) <= root_len {
         return move out;
@@ -314,13 +312,13 @@ fn source_module_path(
     if mem::len(rel) == 0 {
         return move out;
     }
-    try out.append_bytes("::");
+    try out.append_bytes(allocator, "::");
     var index = 0;
     while mem::byte_at(rel, index) |byte| {
         if byte == cast<u8>(47) {
-            try out.append_bytes("::");
+            try out.append_bytes(allocator, "::");
         } else {
-            try out.append_byte(byte);
+            try out.append_byte(allocator, byte);
         }
         index = index + 1;
     }
@@ -553,10 +551,10 @@ pub fn (self: &var Loader) load_source(
 ) -> !LoadResult {
     var files = array::new<string::String>(self.allocator);
     errdefer files.deinit(self.allocator);
-    try files.append(try string::from_bytes(self.allocator, file));
+    try files.append(self.allocator, try string::from_bytes(self.allocator, file));
     var modules = array::new<Module>(self.allocator);
     errdefer modules.deinit(self.allocator);
-    try modules.append(Module {
+    try modules.append(self.allocator, Module {
         path: string::new(self.allocator),
         files: move files,
         test_files: array::new<string::String>(self.allocator)
@@ -623,6 +621,7 @@ fn (self: &var Loader) load_package(
     include_tests: bool,
     std: bool
 ) -> !?diagnostic::Diagnostic {
+    let allocator = self.allocator;
     if graph.package_name.len() > 0 {
         let package_name = graph.package_name.as_bytes();
         try self.packages.insert(package_name, true);
@@ -630,16 +629,16 @@ fn (self: &var Loader) load_package(
     var index = 0;
     while graph.modules.at(index) |module| {
         index = index + 1;
-        let files = try module.source_files(self.allocator, include_tests);
-        defer files.deinit(self.allocator);
+        let files = try module.source_files(allocator, include_tests);
+        defer files.deinit(allocator);
         if files.len() == 0 {
             continue;
         }
         let group = self.groups.add(ModuleGroup {
-            path: try copy_string(self.allocator, &module.path),
-            pkg: try copy_string(self.allocator, &graph.package_name),
-            files: array::new<arena::Handle<ModuleFile>>(self.allocator),
-            imports: map::new<[]u8, string::String>(self.allocator)
+            path: try copy_string(allocator, &module.path),
+            pkg: try copy_string(allocator, &graph.package_name),
+            files: array::new<arena::Handle<ModuleFile>>(allocator),
+            imports: map::new<[]u8, string::String>(allocator)
         });
         var file_index = 0;
         while files.at(file_index) |file| {
@@ -648,18 +647,18 @@ fn (self: &var Loader) load_package(
             let outcome_1 = try self.parse_module_file(tree, file_bytes);
             match outcome_1 {
                 Program(program) => {
-                    errdefer program.deinit(self.allocator);
-                    let file_copy = try copy_string(self.allocator, file);
+                    errdefer program.deinit(allocator);
+                    let file_copy = try copy_string(allocator, file);
                     let handle = self.files.add(ModuleFile {
                         group: group,
                         file: move file_copy,
                         program: move program,
-                        imports: map::new<[]u8, string::String>(self.allocator),
-                        namespaces: map::new<[]u8, string::String>(self.allocator),
-                        used: map::new<[]u8, bool>(self.allocator)
+                        imports: map::new<[]u8, string::String>(allocator),
+                        namespaces: map::new<[]u8, string::String>(allocator),
+                        used: map::new<[]u8, bool>(allocator)
                     });
                     if self.groups.at_mut(group) |entry| {
-                        try entry.files.append(handle);
+                        try entry.files.append(allocator, handle);
                     }
                 },
                 Error(failed) => return move failed,
@@ -668,9 +667,9 @@ fn (self: &var Loader) load_package(
         let module_path = module.path.as_bytes();
         try self.group_by_path.insert(module_path, group);
         if std {
-            try self.std_order.append(group);
+            try self.std_order.append(allocator, group);
         } else {
-            try self.order.append(group);
+            try self.order.append(allocator, group);
         }
     }
     return null;

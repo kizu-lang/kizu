@@ -2414,8 +2414,11 @@ func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value,
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("ir error: box.new expects allocator and value")
 		}
+		// args are the allocator the cell comes from and the payload; a
+		// failed allocation releases the payload through that allocator.
 		return l.releaseOwnerOnFailure(
-			l.emit("box.new", "std::mem::Error!"+boxTypeName+"<"+elem+">", args, ""), args[1])
+			l.emit("box.new", "std::mem::Error!"+boxTypeName+"<"+elem+">", args, ""),
+			args[1], args[0])
 	case "borrow":
 		// A returned borrow travels under the same rule any borrow return
 		// does: unions stay behind a pointer, everything else as a copy.
@@ -2485,7 +2488,10 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 	if result, ok := arrayMethodResultType(name); ok {
 		value := l.emit("array."+name, result, args, "")
 		if name == "append" {
-			return l.releaseOwnerOnFailure(value, args[1])
+			// args are the receiver, the allocator the growth names, and the
+			// element; a failed append releases the element through that same
+			// allocator, which is the one it was built from (ADR-0132).
+			return l.releaseOwnerOnFailure(value, args[2], args[1])
 		}
 		return value, nil
 	}
@@ -2543,11 +2549,15 @@ func arrayMethodResultType(name string) (string, bool) {
 //
 // The wrap is `try` plus a re-wrap, so the primitive keeps the `!T` its wrapper
 // returns and the error still leaves the wrapper as an error.
-func (l *lowerer) releaseOwnerOnFailure(result Value, owner Value) (Value, error) {
+func (l *lowerer) releaseOwnerOnFailure(
+	result Value,
+	owner Value,
+	allocator Value,
+) (Value, error) {
 	if !ast.OwnerType(l.deinitOwners, owner.Type) {
 		return result, nil
 	}
-	cleanup, err := l.cleanupFromMethod(owner, typ.CleanupMethod, nil)
+	cleanup, err := l.cleanupFromMethod(owner, typ.CleanupMethod, []Value{allocator})
 	if err != nil {
 		return Value{}, err
 	}

@@ -6,15 +6,25 @@ pub fn new<T>(allocator: Allocator) -> std::array::Array<T> {
     return std::internal::builtin::array<T>(allocator);
 }
 
-fn (self: &var std::array::Array<T>) append<T>(value: T) -> std::mem::Error!void {
-    return std::internal::builtin::array_append<T>(self, value);
+// append names the allocator its storage grows from. An Array header is
+// `{data, len, cap}` and keeps no allocator, so what a growth needs is spelled
+// where the growth is asked for: allocation is an explicit allocator
+// (原理 4) and the header pays no word for it (ADR-0132).
+fn (self: &var std::array::Array<T>) append<T>(
+    allocator: Allocator,
+    value: T
+) -> std::mem::Error!void {
+    return std::internal::builtin::array_append<T>(self, allocator, value);
 }
 
 // append_bytes copies a whole run into a byte array in one call. Appending
 // byte by byte reaches the same place through one capacity check and one
 // store per byte, and text is built out of runs.
-fn (self: &var std::array::Array<T>) append_bytes<T>(bytes: []u8) -> std::mem::Error!void {
-    return std::internal::builtin::array_append_bytes<T>(self, bytes);
+fn (self: &var std::array::Array<T>) append_bytes<T>(
+    allocator: Allocator,
+    bytes: []u8
+) -> std::mem::Error!void {
+    return std::internal::builtin::array_append_bytes<T>(self, allocator, bytes);
 }
 
 fn (self: &std::array::Array<T>) len<T>() -> i64 {
@@ -25,17 +35,20 @@ fn (self: &std::array::Array<T>) capacity<T>() -> i64 {
     return std::internal::builtin::array_capacity<T>(self);
 }
 
-fn (self: &var std::array::Array<T>) reserve<T>(additional: i64) -> std::mem::Error!void {
-    return std::internal::builtin::array_reserve<T>(self, additional);
+fn (self: &var std::array::Array<T>) reserve<T>(
+    allocator: Allocator,
+    additional: i64
+) -> std::mem::Error!void {
+    return std::internal::builtin::array_reserve<T>(self, allocator, additional);
 }
 
 fn (self: &std::array::Array<T>) clone<T>(allocator: Allocator) -> std::mem::Error!std::array::Array<T> {
     var out = std::array::new<T>(allocator);
     errdefer out.deinit(allocator);
-    try out.reserve(self.len());
+    try out.reserve(allocator, self.len());
     var index = 0;
     while self.get(index) |item| {
-        try out.append(item);
+        try out.append(allocator, item);
         index = index + 1;
     }
     return out;
@@ -87,7 +100,7 @@ fn (self: std::array::Array<T>) deinit<T>(allocator: Allocator) -> void {
             item.deinit(allocator);
         }
     } else {}
-    std::internal::builtin::array_deinit<T>(self);
+    std::internal::builtin::array_deinit<T>(self, allocator);
 }
 
 fn (self: &var std::array::Array<T>) truncate<T>(length: i64) -> std::array::Error!void {

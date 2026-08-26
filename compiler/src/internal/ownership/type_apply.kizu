@@ -661,7 +661,7 @@ fn (self: &Checker) rest_args(
     errdefer values.deinit(self.allocator);
     var index = from;
     while arg_at(tree, args, index) |arg| {
-        try values.append(arg);
+        try values.append(self.allocator, arg);
         index = index + 1;
     }
     return tree.add_expression_list(move values);
@@ -724,14 +724,11 @@ fn (self: &var Checker) check_array_primitive_call(
         return null;
     }
     if self.names.is(method, "deinit") {
-        // The raw primitive frees only the buffer, whose allocator its header
-        // still holds; the wrapper above it is what names one.
-        let count = arg_count(tree, args);
-        if count != 0 {
-            return try self.error2(
-                tree, ast::zero_span(), "array error: `Array.%s` expects 0 args, got %d",
-                Arg::Str(method), Arg::Int(count)
-            );
+        // The raw primitive frees the buffer through the allocator the
+        // release names: the header keeps none of its own (ADR-0132).
+        let release_label = try self.names.intern("Array.deinit");
+        if try self.read_release_allocator(tree, env, release_label, null, args, 0) |failed| {
+            return move failed;
         }
         out.* = self.common.void_name;
         return null;
@@ -955,8 +952,8 @@ fn (self: &var Checker) checked_map_args_allow_type_params(
     let key_type = args.get_or_panic(0);
     let value_type = args.get_or_panic(1);
     if self.names.is_generic_param_name(key_type) or self.names.is_generic_param_name(value_type) {
-        try out.append(key_type);
-        try out.append(value_type);
+        try out.append(self.allocator, key_type);
+        try out.append(self.allocator, value_type);
         return null;
     }
     return self.checked_map_args(tree, arg, out);
@@ -1056,7 +1053,7 @@ fn (self: &var Checker) generic_call_subst(
     var index = 0;
     while self.static_param_at(function, index) |param| {
         if param.is_type {
-            try type_args.append(static_args.get_or_panic(index));
+            try type_args.append(self.allocator, static_args.get_or_panic(index));
         }
         index = index + 1;
     }
@@ -1099,8 +1096,8 @@ fn (self: &Checker) bind_subst_param(out: &var Subst, param: Name, replacement: 
     errdefer key.deinit(self.allocator);
     let value = try self.names.copy(replacement);
     errdefer value.deinit(self.allocator);
-    try out.names.append(move key);
-    try out.replacements.append(move value);
+    try out.names.append(self.allocator, move key);
+    try out.replacements.append(self.allocator, move value);
     return;
 }
 
@@ -1141,8 +1138,8 @@ fn (self: &var Checker) bind_generic_call_fields(
             continue;
         }
         if self.bound_meta_field(arg) |bound| {
-            try names.append(param.name);
-            try fields.append(bound);
+            try names.append(self.allocator, param.name);
+            try fields.append(self.allocator, bound);
             continue;
         }
         var owned = array::new<MetaField>(self.allocator);
@@ -1155,8 +1152,8 @@ fn (self: &var Checker) bind_generic_call_fields(
         while owned.get(field_index) |field| {
             field_index = field_index + 1;
             if same_name(field.name, arg) {
-                try names.append(param.name);
-                try fields.append(field);
+                try names.append(self.allocator, param.name);
+                try fields.append(self.allocator, field);
             }
         }
     }
@@ -1242,7 +1239,7 @@ fn (self: &var Checker) enter_instantiation(
     let name = self.functions.at(function.index).name;
     var key = try self.names.copy(name);
     defer key.deinit(self.allocator);
-    try key.append_bytes("<");
+    try key.append_bytes(self.allocator, "<");
     var index = 0;
     var first = true;
     while self.static_param_at(function, index) |param| {
@@ -1251,14 +1248,14 @@ fn (self: &var Checker) enter_instantiation(
             continue;
         }
         if !first {
-            try key.append_bytes(", ");
+            try key.append_bytes(self.allocator, ", ");
         }
         first = false;
         if self.subst_lookup(subst, param.name) |replacement| {
             try self.names.append_to(&var key, replacement);
         }
     }
-    try key.append_bytes(">");
+    try key.append_bytes(self.allocator, ">");
     let key_bytes = key.as_bytes();
     if self.checked_instances.get(key_bytes) orelse false {
         done.* = true;
@@ -1307,7 +1304,7 @@ fn (self: &var Checker) join_type_args(type_args: &array::Array<Name>) -> !Name 
     var index = 0;
     while type_args.get(index) |arg| {
         if index > 0 {
-            try out.append_bytes(", ");
+            try out.append_bytes(self.allocator, ", ");
         }
         try self.names.append_to(&var out, arg);
         index = index + 1;

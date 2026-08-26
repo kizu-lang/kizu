@@ -49,32 +49,32 @@ fn split_llvm_case(data: []u8) -> ?i64 {
 }
 
 /// Appends text as one expectation line: embedded newlines become `\n`.
-fn append_folded_llvm_line(out: &var string::String, text: []u8) -> !void {
+fn append_folded_llvm_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
     var index = 0;
     while mem::byte_at(text, index) |byte| {
         if byte == cast<u8>(10) {
-            try out.append_byte(cast<u8>(92));
-            try out.append_byte(cast<u8>(110));
+            try out.append_byte(allocator, cast<u8>(92));
+            try out.append_byte(allocator, cast<u8>(110));
         } else {
-            try out.append_byte(byte);
+            try out.append_byte(allocator, byte);
         }
         index = index + 1;
     }
-    return out.append_byte(cast<u8>(10));
+    return out.append_byte(allocator, cast<u8>(10));
 }
 
 /// Appends emitted text with every line prefixed by `// `.
-fn append_emitted(out: &var string::String, text: []u8) -> !void {
-    try out.append_bytes("// ");
+fn append_emitted(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    try out.append_bytes(allocator, "// ");
     var index = 0;
     while mem::byte_at(text, index) |byte| {
-        try out.append_byte(byte);
+        try out.append_byte(allocator, byte);
         if byte == cast<u8>(10) {
-            try out.append_bytes("// ");
+            try out.append_bytes(allocator, "// ");
         }
         index = index + 1;
     }
-    return out.append_byte(cast<u8>(10));
+    return out.append_byte(allocator, cast<u8>(10));
 }
 
 /// Drops the std functions of a module, the Go `userModule` of the corpus
@@ -85,7 +85,7 @@ fn keep_user_functions(allocator: Allocator, module: &var ir::Module) -> !array:
     var reversed = array::new<ir::Function>(allocator);
     errdefer reversed.deinit(allocator);
     while module.functions.pop() |function| {
-        try reversed.append(function);
+        try reversed.append(allocator, function);
     }
     var index = reversed.len();
     while index > 0 {
@@ -95,19 +95,19 @@ fn keep_user_functions(allocator: Allocator, module: &var ir::Module) -> !array:
         if module.names.starts_with(name, "std::") {
             continue;
         }
-        try module.functions.append(function);
+        try module.functions.append(allocator, function);
     }
     return move reversed;
 }
 
 /// Puts every function back in its original order after an emission that
 /// saw the user functions only.
-fn restore_functions(module: &var ir::Module, reversed: &array::Array<ir::Function>) -> !void {
+fn restore_functions(allocator: Allocator, module: &var ir::Module, reversed: &array::Array<ir::Function>) -> !void {
     while module.functions.pop() |_| {}
     var index = reversed.len();
     while index > 0 {
         index = index - 1;
-        try module.functions.append(reversed.get_or_panic(index));
+        try module.functions.append(allocator, reversed.get_or_panic(index));
     }
     return;
 }
@@ -120,11 +120,11 @@ fn append_llvm_failure(
     prefix: []u8,
     out: &var string::String
 ) -> !void {
-    try out.append_bytes(prefix);
+    try out.append_bytes(allocator, prefix);
     let text = try failed.error(allocator, sources);
     defer text.deinit(allocator);
     let bytes = text.as_bytes();
-    return append_folded_llvm_line(out, bytes);
+    return append_folded_llvm_line(allocator, out, bytes);
 }
 
 /// Appends one section: the LLVM IR emitted for the user functions of a
@@ -144,9 +144,9 @@ fn emit_llvm_section(
         try append_llvm_failure(allocator, sources, &failed, "// ", out);
     } else {
         let emitted_bytes = emitted.as_bytes();
-        try append_emitted(out, emitted_bytes);
+        try append_emitted(allocator, out, emitted_bytes);
     }
-    return restore_functions(module, &dropped);
+    return restore_functions(allocator, module, &dropped);
 }
 
 /// Appends the same `check failed:` line to both sections, the way the Go
@@ -157,11 +157,11 @@ fn append_check_failure(
     failed: &diagnostic::Diagnostic,
     out: &var string::String
 ) -> !void {
-    try out.append_bytes("// emit:");
-    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(allocator, "// emit:");
+    try out.append_byte(allocator, cast<u8>(10));
     try append_llvm_failure(allocator, sources, failed, "// check failed: ", out);
-    try out.append_bytes("// opt:");
-    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(allocator, "// opt:");
+    try out.append_byte(allocator, cast<u8>(10));
     return append_llvm_failure(allocator, sources, failed, "// check failed: ", out);
 }
 
@@ -206,19 +206,19 @@ fn render_llvm_case(
             }
             var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
             defer lowerer.deinit(allocator);
-            try out.append_bytes("// emit:");
-            try out.append_byte(cast<u8>(10));
+            try out.append_bytes(allocator, "// emit:");
+            try out.append_byte(allocator, cast<u8>(10));
             if try lowerer.lower(&var tree, &program, std_errors) |failed| {
                 defer failed.deinit(allocator);
                 try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
-                try out.append_bytes("// opt:");
-                try out.append_byte(cast<u8>(10));
+                try out.append_bytes(allocator, "// opt:");
+                try out.append_byte(allocator, cast<u8>(10));
                 try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
                 return move out;
             }
             try emit_llvm_section(allocator, &loader.sources, &var lowerer.module, &var out);
-            try out.append_bytes("// opt:");
-            try out.append_byte(cast<u8>(10));
+            try out.append_bytes(allocator, "// opt:");
+            try out.append_byte(allocator, cast<u8>(10));
             if try ir::optimize(allocator, &var lowerer.module) |failed| {
                 defer failed.deinit(allocator);
                 try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);

@@ -65,6 +65,7 @@ fn (self: &var Loader) qualify_module(
     file: arena::Handle<ModuleFile>,
     merged: &var ast::Program
 ) -> !?diagnostic::Diagnostic {
+    let allocator = self.allocator;
     let declarations = try self.declarations_of(file);
     defer declarations.deinit(self.allocator);
     var index = 0;
@@ -73,7 +74,7 @@ fn (self: &var Loader) qualify_module(
         index = index + 1;
         let outcome = try self.qualify_decl(tree, file, declaration);
         match outcome {
-            Declaration(qualified) => try merged.add_declaration(qualified),
+            Declaration(qualified) => try merged.add_declaration(allocator, qualified),
             Skipped => {},
             Failed(failed) => return move failed,
         }
@@ -188,11 +189,11 @@ fn (self: &var Loader) declared_function_name(
             }
             var text = try module_error_text(self.allocator);
             errdefer text.deinit(self.allocator);
-            try text.append_bytes("`");
-            try typ::append_render(&var text, &tree.types, receiver_type);
-            try text.append_bytes("` is not a type a method can be declared on in `");
+            try text.append_bytes(self.allocator, "`");
+            try typ::append_render(self.allocator, &var text, &tree.types, receiver_type);
+            try text.append_bytes(self.allocator, "` is not a type a method can be declared on in `");
             try self.append_module_name(&var text, file);
-            try text.append_bytes("`");
+            try text.append_bytes(self.allocator, "`");
             return NameResolution::Failed(try module_error(self.allocator, move text));
         },
         Failed(failed) => return NameResolution::Failed(move failed),
@@ -234,7 +235,7 @@ fn (self: &var Loader) qualify_struct(
         match outcome {
             Type(resolved) => {
                 copied.type_name = resolved;
-                try node.fields.append(copied);
+                try node.fields.append(self.allocator, copied);
             },
             Failed(failed) => {
                 node.deinit(self.allocator);
@@ -263,7 +264,7 @@ fn (self: &var Loader) qualify_error_set(
         let outcome = try self.resolve_text_base(tree, file, reference.*);
         match outcome {
             Name(resolved) => {
-                try combines.append(tree.add_text(move resolved));
+                try combines.append(self.allocator, tree.add_text(move resolved));
             },
             Failed(failed) => {
                 members.deinit(self.allocator);
@@ -328,7 +329,7 @@ fn (self: &var Loader) qualify_union(
                 },
             }
         }
-        try node.variants.append(copied);
+        try node.variants.append(self.allocator, copied);
     }
     return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Union(move node)));
 }
@@ -347,7 +348,7 @@ fn (self: &var Loader) qualify_contract(
         index = index + 1;
         let outcome = try self.qualify_function(tree, file, method, method.signature.name);
         match outcome {
-            Function(qualified) => try methods.append(move qualified),
+            Function(qualified) => try methods.append(self.allocator, move qualified),
             Failed(failed) => {
                 methods.deinit(self.allocator);
                 return DeclarationResult::Failed(move failed);
@@ -422,7 +423,7 @@ fn (self: &var Loader) qualify_function(
         match outcome {
             Type(resolved) => {
                 copied.type_name = resolved;
-                try signature.params.append(copied);
+                try signature.params.append(self.allocator, copied);
             },
             Failed(failed) => {
                 signature.deinit(self.allocator);
@@ -499,7 +500,7 @@ fn (self: &var Loader) qualify_block(
                 index = index + 1;
                 let outcome = try self.qualify_stmt(tree, file, statement.*);
                 match outcome {
-                    Statement(qualified) => try statements.append(qualified),
+                    Statement(qualified) => try statements.append(self.allocator, qualified),
                     Failed(failed) => {
                         statements.deinit(self.allocator);
                         return BlockResult::Failed(move failed);
@@ -859,7 +860,7 @@ fn (self: &var Loader) qualify_match_stmt(
                 match outcome {
                     Statement(body) => {
                         copied.body = body;
-                        try node.arms.append(copied);
+                        try node.arms.append(self.allocator, copied);
                     },
                     Failed(failed) => {
                         node.deinit(self.allocator);
@@ -1185,7 +1186,7 @@ fn (self: &var Loader) qualify_call_expr(
                 index = index + 1;
                 let outcome = try self.qualify_expr(tree, file, arg.*);
                 match outcome {
-                    Expression(qualified) => try args.append(qualified),
+                    Expression(qualified) => try args.append(self.allocator, qualified),
                     Failed(failed) => {
                         args.deinit(self.allocator);
                         return ExpressionResult::Failed(move failed);
@@ -1226,7 +1227,7 @@ fn (self: &var Loader) qualify_type_apply_expr(
                 var index = 0;
                 while args.at(index) |arg| {
                     if index > 0 {
-                        try out.append_bytes(", ");
+                        try out.append_bytes(self.allocator, ", ");
                     }
                     if index == worker {
                         // This argument names a function the form calls, not a
@@ -1235,14 +1236,14 @@ fn (self: &var Loader) qualify_type_apply_expr(
                         // call would find nothing.
                         let qualified = try self.qualify_function_name(file, arg);
                         defer qualified.deinit(self.allocator);
-                        try out.append_string(&qualified);
+                        try out.append_string(self.allocator, &qualified);
                     } else {
                         let arg_bytes = arg.as_bytes();
                         let outcome = try self.resolve_type(tree, file, arg_bytes);
                         match outcome {
                             Name(resolved) => {
                                 defer resolved.deinit(self.allocator);
-                                try out.append_string(&resolved);
+                                try out.append_string(self.allocator, &resolved);
                             },
                             Failed(failed) => {
                                 out.deinit(self.allocator);
@@ -1257,9 +1258,9 @@ fn (self: &var Loader) qualify_type_apply_expr(
             }
             var text = try module_error_text(self.allocator);
             errdefer text.deinit(self.allocator);
-            try text.append_bytes("invalid static arguments `");
-            try text.append_string(&type_arg);
-            try text.append_bytes("`");
+            try text.append_bytes(self.allocator, "invalid static arguments `");
+            try text.append_string(self.allocator, &type_arg);
+            try text.append_bytes(self.allocator, "`");
             return ExpressionResult::Failed(try module_error(self.allocator, move text));
         },
         Failed(failed) => return ExpressionResult::Failed(move failed),
@@ -1460,7 +1461,7 @@ fn (self: &var Loader) qualify_struct_literal(
                 match outcome {
                     Expression(value) => {
                         copied.value = value;
-                        try node.fields.append(copied);
+                        try node.fields.append(self.allocator, copied);
                     },
                     Failed(failed) => {
                         node.deinit(self.allocator);

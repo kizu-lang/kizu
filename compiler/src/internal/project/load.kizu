@@ -22,10 +22,10 @@ fn (self: &Loader) qualify_name(
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
     if entry.path.len() > 0 {
-        try out.append_string(&entry.path);
-        try out.append_bytes("::");
+        try out.append_string(self.allocator, &entry.path);
+        try out.append_bytes(self.allocator, "::");
     }
-    try out.append_bytes(name);
+    try out.append_bytes(self.allocator, name);
     return move out;
 }
 
@@ -38,9 +38,9 @@ fn (self: &Loader) append_module_name(
     let entry = self.files.at(file);
     let group = self.groups.at(entry.group);
     if group.path.len() > 0 {
-        return out.append_string(&group.path);
+        return out.append_string(self.allocator, &group.path);
     }
-    return out.append_string(&entry.file);
+    return out.append_string(self.allocator, &entry.file);
 }
 
 /// Copies the module path a file belongs to.
@@ -74,12 +74,12 @@ fn (self: &Loader) sorted_module_groups() -> !array::Array<arena::Handle<ModuleG
     errdefer out.deinit(self.allocator);
     var index = 0;
     while self.std_order.at(index) |group| {
-        try out.append(group.*);
+        try out.append(self.allocator, group.*);
         index = index + 1;
     }
     index = 0;
     while self.order.at(index) |group| {
-        try out.append(group.*);
+        try out.append(self.allocator, group.*);
         index = index + 1;
     }
     // Insertion sort by path; the group count is small.
@@ -109,12 +109,12 @@ fn (self: &Loader) modules_in_load_order() -> !array::Array<arena::Handle<Module
     errdefer out.deinit(self.allocator);
     var index = 0;
     while self.std_order.at(index) |group| {
-        try out.append(group.*);
+        try out.append(self.allocator, group.*);
         index = index + 1;
     }
     index = 0;
     while self.order.at(index) |group| {
-        try out.append(group.*);
+        try out.append(self.allocator, group.*);
         index = index + 1;
     }
     return move out;
@@ -132,7 +132,7 @@ fn (self: &Loader) files_of(
         let group = self.groups.at(group_handle.*);
         var file_index = 0;
         while group.files.at(file_index) |file| {
-            try out.append(file.*);
+            try out.append(self.allocator, file.*);
             file_index = file_index + 1;
         }
     }
@@ -193,9 +193,9 @@ fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnosti
                 if self.types.contains(qualified_bytes) {
                     var text = try module_error_text(self.allocator);
                     errdefer text.deinit(self.allocator);
-                    try text.append_bytes("duplicate type `");
-                    try text.append_string(&qualified);
-                    try text.append_bytes("`");
+                    try text.append_bytes(self.allocator, "duplicate type `");
+                    try text.append_string(self.allocator, &qualified);
+                    try text.append_bytes(self.allocator, "`");
                     return try module_error(self.allocator, move text);
                 }
                 try self.types.insert(
@@ -240,9 +240,9 @@ fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagn
                     if self.functions.contains(qualified_bytes) {
                         var text = try module_error_text(self.allocator);
                         errdefer text.deinit(self.allocator);
-                        try text.append_bytes("duplicate function `");
-                        try text.append_string(&qualified);
-                        try text.append_bytes("`");
+                        try text.append_bytes(self.allocator, "duplicate function `");
+                        try text.append_string(self.allocator, &qualified);
+                        try text.append_bytes(self.allocator, "`");
                         return try module_error(self.allocator, move text);
                     }
                     try self.functions.insert(
@@ -343,9 +343,9 @@ fn (self: &Loader) visit_module(
         if active {
             var text = try module_error_text(self.allocator);
             errdefer text.deinit(self.allocator);
-            try text.append_bytes("import cycle at `");
-            try text.append_bytes(path);
-            try text.append_bytes("`");
+            try text.append_bytes(self.allocator, "import cycle at `");
+            try text.append_bytes(self.allocator, path);
+            try text.append_bytes(self.allocator, "`");
             return try module_error(self.allocator, move text);
         }
     }
@@ -366,7 +366,7 @@ fn (self: &Loader) visit_module(
     }
     try visiting.insert(path, false);
     try visited.insert(path, true);
-    try out.append(group);
+    try out.append(self.allocator, group);
     return null;
 }
 
@@ -381,7 +381,7 @@ fn sorted_import_paths(
     while imports.key_at(index) |key| {
         index = index + 1;
         if imports.at(key) |value| {
-            try out.append(try copy_string(allocator, value));
+            try out.append(allocator, try copy_string(allocator, value));
         }
     }
     try sort::strings(&var out);
@@ -399,7 +399,7 @@ fn sorted_aliases(
     var index = 0;
     while imports.key_at(index) |key| {
         index = index + 1;
-        try out.append(try string::from_bytes(allocator, key));
+        try out.append(allocator, try string::from_bytes(allocator, key));
     }
     try sort::strings(&var out);
     return move out;
@@ -441,7 +441,7 @@ fn (self: &var Loader) resolve_imports(
                     import_path.deinit(self.allocator);
                     return move failed;
                 }
-                try bound.append(BoundImport {
+                try bound.append(self.allocator, BoundImport {
                     alias: try string::from_bytes(allocator, alias_bytes),
                     path: move import_path
                 });
@@ -522,13 +522,13 @@ fn (self: &Loader) reject_import_shadowing(
                 if bound_alias_taken(bound, name_bytes) {
                     var message = try module_error_text(self.allocator);
                     errdefer message.deinit(self.allocator);
-                    try message.append_bytes("declaration `");
-                    try message.append_bytes(name_bytes);
-                    try message.append_bytes("` shadows import in `");
+                    try message.append_bytes(self.allocator, "declaration `");
+                    try message.append_bytes(self.allocator, name_bytes);
+                    try message.append_bytes(self.allocator, "` shadows import in `");
                     let module_path = try self.module_path_copy(file);
                     defer module_path.deinit(self.allocator);
-                    try message.append_string(&module_path);
-                    try message.append_bytes("`");
+                    try message.append_string(self.allocator, &module_path);
+                    try message.append_bytes(self.allocator, "`");
                     return try module_error(self.allocator, move message);
                 }
             }
@@ -567,11 +567,11 @@ fn (self: &Loader) bind_import(
     if !self.group_by_path.contains(import_path) and !self.packages.contains(import_path) {
         var text = try module_error_text(self.allocator);
         errdefer text.deinit(self.allocator);
-        try text.append_bytes("missing import `");
-        try text.append_bytes(import_path);
-        try text.append_bytes("` in `");
+        try text.append_bytes(self.allocator, "missing import `");
+        try text.append_bytes(self.allocator, import_path);
+        try text.append_bytes(self.allocator, "` in `");
         try self.append_module_name(&var text, file);
-        try text.append_bytes("`");
+        try text.append_bytes(self.allocator, "`");
         return try module_error(self.allocator, move text);
     }
     let module_path = try self.module_path_copy(file);
@@ -593,13 +593,13 @@ fn (self: &Loader) internal_module_error(
     let found = internal_module(module_path);
     var text = try module_error_text(self.allocator);
     errdefer text.deinit(self.allocator);
-    try text.append_bytes("`");
-    try text.append_bytes(module_path[0..found.module_end]);
-    try text.append_bytes("` is internal to `");
-    try text.append_bytes(module_path[0..found.scope_end]);
-    try text.append_bytes("` and is not reachable from `");
+    try text.append_bytes(self.allocator, "`");
+    try text.append_bytes(self.allocator, module_path[0..found.module_end]);
+    try text.append_bytes(self.allocator, "` is internal to `");
+    try text.append_bytes(self.allocator, module_path[0..found.scope_end]);
+    try text.append_bytes(self.allocator, "` and is not reachable from `");
     try self.append_module_name(&var text, file);
-    try text.append_bytes("`");
+    try text.append_bytes(self.allocator, "`");
     return module_error(self.allocator, move text);
 }
 
@@ -610,13 +610,13 @@ fn (self: &Loader) duplicate_import(
 ) -> !diagnostic::Diagnostic {
     var text = try module_error_text(self.allocator);
     errdefer text.deinit(self.allocator);
-    try text.append_bytes("duplicate import alias `");
-    try text.append_bytes(alias);
-    try text.append_bytes("` in `");
+    try text.append_bytes(self.allocator, "duplicate import alias `");
+    try text.append_bytes(self.allocator, alias);
+    try text.append_bytes(self.allocator, "` in `");
     let module_path = try self.module_path_copy(file);
     defer module_path.deinit(self.allocator);
-    try text.append_string(&module_path);
-    try text.append_bytes("`");
+    try text.append_string(self.allocator, &module_path);
+    try text.append_bytes(self.allocator, "`");
     return module_error(self.allocator, move text);
 }
 
@@ -638,13 +638,13 @@ fn (self: &Loader) reject_unused_imports(
         }
         var text = try module_error_text(self.allocator);
         errdefer text.deinit(self.allocator);
-        try text.append_bytes("unused import `");
+        try text.append_bytes(self.allocator, "unused import `");
         if entry.namespaces.at(alias_bytes) |target| {
-            try text.append_string(target);
+            try text.append_string(self.allocator, target);
         }
-        try text.append_bytes("` in `");
+        try text.append_bytes(self.allocator, "` in `");
         try self.append_module_name(&var text, file);
-        try text.append_bytes("`");
+        try text.append_bytes(self.allocator, "`");
         return try module_error(self.allocator, move text);
     }
     return null;

@@ -108,11 +108,11 @@ pub fn new(io: Io, allocator: Allocator) -> !Cache {
 fn resolve_cache_dir(io: Io, allocator: Allocator, out: &var string::String) -> !void {
     if process::env("KIZU_CACHE_DIR") |given| {
         if mem::len(given) > 0 {
-            return out.append_bytes(given);
+            return out.append_bytes(allocator, given);
         }
     }
     try fsutil::append_user_cache_dir(io, allocator, out);
-    return out.append_bytes("/kizu");
+    return out.append_bytes(allocator, "/kizu");
 }
 
 /// Keys an artifact by everything it is made of, the Go `newInput`: the
@@ -129,13 +129,13 @@ pub fn (self: &Cache) new_input(
     try hasher.append_hex_digest(allocator, content, &var source_hash);
     var message = string::new(allocator);
     defer message.deinit(allocator);
-    try message.append_bytes(version());
-    try message.append_byte(cast<u8>(10));
-    try message.append_bytes(target);
-    try message.append_byte(cast<u8>(10));
-    try message.append_bytes(name);
-    try message.append_byte(cast<u8>(10));
-    try message.append_string(&source_hash);
+    try message.append_bytes(allocator, version());
+    try message.append_byte(allocator, cast<u8>(10));
+    try message.append_bytes(allocator, target);
+    try message.append_byte(allocator, cast<u8>(10));
+    try message.append_bytes(allocator, name);
+    try message.append_byte(allocator, cast<u8>(10));
+    try message.append_string(allocator, &source_hash);
     var key = string::new(allocator);
     errdefer key.deinit(allocator);
     let message_bytes = message.as_bytes();
@@ -168,7 +168,7 @@ pub fn (self: &var Cache) get_or_build_artifact(
     errdefer output.deinit(allocator);
     let hit = try self.artifact_hit(io, allocator, &input.key);
     if hit {
-        try out_path.append_string(&output);
+        try out_path.append_string(allocator, &output);
         input.deinit(allocator);
         stored.deinit(allocator);
         output.deinit(allocator);
@@ -178,11 +178,11 @@ pub fn (self: &var Cache) get_or_build_artifact(
     try fsutil::create_dir_all(io, dir_bytes);
     var scratch_name = string::new(allocator);
     defer scratch_name.deinit(allocator);
-    try fsutil::append_scratch_name(&input.key, self.scratch_sequence, &var scratch_name);
+    try fsutil::append_scratch_name(allocator, &input.key, self.scratch_sequence, &var scratch_name);
     self.scratch_sequence = self.scratch_sequence + 1;
     let scratch = try self.output_path_of(allocator, &scratch_name);
     errdefer scratch.deinit(allocator);
-    try out_path.append_string(&output);
+    try out_path.append_string(allocator, &output);
     return ArtifactPlan::Miss(PendingArtifact {
         input: move input,
         scratch: move scratch,
@@ -295,13 +295,13 @@ fn (self: &Cache) write_meta(
     try encoder.write_i64_field("size_bytes", size);
     var stamp = string::new(allocator);
     defer stamp.deinit(allocator);
-    try timestamp::append_rfc3339_utc(&var stamp, process::unix_millis());
+    try timestamp::append_rfc3339_utc(allocator, &var stamp, process::unix_millis());
     let stamp_bytes = stamp.as_bytes();
     try encoder.write_bytes_field("created_at", stamp_bytes);
     try encoder.end_object();
     var out = string::new(allocator);
     defer out.deinit(allocator);
-    try encoder.finish_into(&var out);
+    try encoder.finish_into(allocator, &var out);
     let key_bytes = input.key.as_bytes();
     let meta = try self.meta_path(allocator, key_bytes);
     defer meta.deinit(allocator);
@@ -378,7 +378,7 @@ fn append_entry_at(io: Io, allocator: Allocator, full: []u8, out: &var array::Ar
         defer text.deinit(allocator);
         let data = text.as_bytes();
         if json::decode_ignore_unknown<Entry>(allocator, data) |entry| {
-            try out.append(move entry);
+            try out.append(allocator, move entry);
         } else |err| {
             match err {
                 _ => return,
@@ -407,7 +407,7 @@ pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
     let count = all.len();
     var dir = string::new(allocator);
     errdefer dir.deinit(allocator);
-    try dir.append_string(&self.dir);
+    try dir.append_string(allocator, &self.dir);
     return Status {
         dir: move dir,
         max_bytes: self.max_bytes,
@@ -511,8 +511,8 @@ fn entry_before(all: &array::Array<Entry>, left: i64, right: i64) -> bool {
 pub fn (self: &Cache) meta_path(allocator: Allocator, key: []u8) -> !string::String {
     var name = string::new(allocator);
     defer name.deinit(allocator);
-    try name.append_bytes(key);
-    try name.append_bytes(".json");
+    try name.append_bytes(allocator, key);
+    try name.append_bytes(allocator, ".json");
     let dir_bytes = self.dir.as_bytes();
     let name_bytes = name.as_bytes();
     return path::join(allocator, dir_bytes, name_bytes);
@@ -523,8 +523,8 @@ pub fn (self: &Cache) meta_path(allocator: Allocator, key: []u8) -> !string::Str
 pub fn output_name(allocator: Allocator, key: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes(key);
-    try out.append_bytes(".out");
+    try out.append_bytes(allocator, key);
+    try out.append_bytes(allocator, ".out");
     return move out;
 }
 

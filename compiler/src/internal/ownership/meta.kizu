@@ -102,7 +102,7 @@ fn (self: &var Checker) variants(
         var index = 0;
         while self.enum_tag_at(owner, index) |tag| {
             index = index + 1;
-            try out.append(MetaField { owner: owner, name: tag, typ: empty_name(), variant: true });
+            try out.append(self.allocator, MetaField { owner: owner, name: tag, typ: empty_name(), variant: true });
         }
         return null;
     }
@@ -117,7 +117,7 @@ fn (self: &var Checker) variants(
     while self.union_variant_at(owner, index) |name| {
         index = index + 1;
         let payload = self.union_variant_payload_name(owner, name) orelse empty_name();
-        try out.append(MetaField { owner: owner, name: name, typ: payload, variant: true });
+        try out.append(self.allocator, MetaField { owner: owner, name: name, typ: payload, variant: true });
     }
     return null;
 }
@@ -146,7 +146,7 @@ fn (self: &var Checker) public_fields(
     while self.struct_public_field_at(owner, index) |name| {
         index = index + 1;
         let field_type = self.struct_field_type(owner, name) orelse empty_name();
-        try out.append(MetaField { owner: owner, name: name, typ: field_type, variant: false });
+        try out.append(self.allocator, MetaField { owner: owner, name: name, typ: field_type, variant: false });
     }
     return null;
 }
@@ -191,7 +191,7 @@ fn (self: &var Checker) resolve_meta_type_text(text: Name) -> !Name {
         let arg_bytes = arg.as_bytes();
         let arg_name = try self.names.intern(arg_bytes);
         let resolved = try self.resolve_meta_type_text(arg_name);
-        try args.append(resolved);
+        try args.append(self.allocator, resolved);
         index = index + 1;
     }
     match parts.form {
@@ -427,10 +427,10 @@ fn (self: &Checker) expand_meta_construct(
     while fields.get(index) |field| {
         let name = try self.names.copy(field.name);
         errdefer name.deinit(self.allocator);
-        try names.append(move name);
+        try names.append(self.allocator, move name);
         let type_name = try self.names.copy(field.typ);
         errdefer type_name.deinit(self.allocator);
-        try type_names.append(move type_name);
+        try type_names.append(self.allocator, move type_name);
         index = index + 1;
     }
     let owner_name = try self.names.copy(owner);
@@ -439,8 +439,7 @@ fn (self: &Checker) expand_meta_construct(
     defer worker_name.deinit(self.allocator);
     let owner_bytes = owner_name.as_bytes();
     let worker_bytes = worker_name.as_bytes();
-    return ast::construct_expansion_from_names(
-        self.allocator, tree, owner_bytes, worker_bytes, &names, &type_names, args,
+    return ast::construct_expansion_from_names(self.allocator, tree, owner_bytes, worker_bytes, &names, &type_names, args,
         &self.deinit_owners
     );
 }
@@ -538,7 +537,7 @@ fn (self: &Checker) expand_comptime_match(
         defer name_copy.deinit(self.allocator);
         let name_bytes = name_copy.as_bytes();
         let name = try tree.add_text_from_bytes(name_bytes);
-        try list.append(ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
+        try list.append(self.allocator, ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
         index = index + 1;
     }
     let owner_copy = try self.names.copy(owner);
@@ -546,8 +545,7 @@ fn (self: &Checker) expand_comptime_match(
     let owner_bytes = owner_copy.as_bytes();
     let owner_text = try tree.add_text_from_bytes(owner_bytes);
     let empty = tree.add_empty_text();
-    let expanded = try ast::comptime_match_expansion(
-        self.allocator, &statement, owner_text, empty, &list
+    let expanded = try ast::comptime_match_expansion(self.allocator, &statement, owner_text, empty, &list
     );
     return tree.add_statement(ast::StatementNode::Match(move expanded));
 }

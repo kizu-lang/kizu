@@ -12,12 +12,13 @@ import std::string;
 /// Turns Kizu SSA names into valid named LLVM local identifiers, the Go
 /// `localName`: `%x` becomes `%kizu.x`.
 fn (self: &var Emitter) local_name(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let allocator = self.allocator;
     let id = ir::name_id(name);
     if recalled_name(&self.local_names, id) |cached| {
         return cached;
     }
     let computed = try self.compute_local_name(module, name);
-    try remember_name(&var self.local_names, id, computed);
+    try remember_name(allocator, &var self.local_names, id, computed);
     return computed;
 }
 
@@ -28,7 +29,7 @@ fn (self: &var Emitter) compute_local_name(module: &ir::Module, name: ir::Name) 
     if mem::starts_with(bytes, "%") {
         var out = try string::from_bytes(self.allocator, "%kizu.");
         errdefer out.deinit(self.allocator);
-        try out.append_bytes(bytes[1..mem::len(bytes)]);
+        try out.append_bytes(self.allocator, bytes[1..mem::len(bytes)]);
         return self.names.intern_owned(move out);
     }
     return self.names.intern(bytes);
@@ -93,6 +94,7 @@ fn (self: &var Emitter) llvm_type(module: &ir::Module, typ_name: []u8) -> !ir::N
 
 /// Maps a type the module names to its LLVM type.
 fn (self: &var Emitter) llvm_type_of(module: &ir::Module, typ_name: ir::Name) -> !ir::Name {
+    let allocator = self.allocator;
     let id = ir::name_id(typ_name);
     if recalled_name(&self.llvm_types, id) |cached| {
         return cached;
@@ -100,7 +102,7 @@ fn (self: &var Emitter) llvm_type_of(module: &ir::Module, typ_name: ir::Name) ->
     let retained = ir::name_text(&module.names, typ_name);
     let bytes = retained.as_bytes();
     let computed = try self.llvm_type(module, bytes);
-    try remember_name(&var self.llvm_types, id, computed);
+    try remember_name(allocator, &var self.llvm_types, id, computed);
     return computed;
 }
 
@@ -270,7 +272,7 @@ fn llvm_bool(names: &ir::NameTable, value: ir::Name) -> []u8 {
 fn (self: &var Emitter) llvm_struct_type_name(name: []u8) -> !ir::Name {
     var out = try string::from_bytes(self.allocator, "%kizu.struct.");
     errdefer out.deinit(self.allocator);
-    try append_llvm_name_part(&var out, name);
+    try append_llvm_name_part(self.allocator, &var out, name);
     return self.names.intern_owned(move out);
 }
 
@@ -283,11 +285,11 @@ fn (self: &var Emitter) llvm_error_union_type_name(name: []u8) -> !ir::Name {
     errdefer out.deinit(self.allocator);
     if parts.err.len() > 0 {
         let err_bytes = parts.err.as_bytes();
-        try append_llvm_name_part(&var out, err_bytes);
-        try out.append_byte(cast<u8>(46));
+        try append_llvm_name_part(self.allocator, &var out, err_bytes);
+        try out.append_byte(self.allocator, cast<u8>(46));
     }
     let success_bytes = parts.success.as_bytes();
-    try append_llvm_name_part(&var out, success_bytes);
+    try append_llvm_name_part(self.allocator, &var out, success_bytes);
     return self.names.intern_owned(move out);
 }
 
@@ -296,17 +298,42 @@ fn (self: &var Emitter) llvm_error_union_type_name(name: []u8) -> !ir::Name {
 fn (self: &var Emitter) llvm_union_type_name(name: []u8) -> !ir::Name {
     var out = try string::from_bytes(self.allocator, "%kizu.union.");
     errdefer out.deinit(self.allocator);
-    try append_llvm_name_part(&var out, name);
+    try append_llvm_name_part(self.allocator, &var out, name);
     return self.names.intern_owned(move out);
+}
+
+/// Returns the element of an optional whose absence a value of the element
+/// type can already spell, and null when there is none, the Go
+/// `nicheOptionalElem`.
+///
+/// A Box handle is the address of its payload and a borrow is the address of
+/// what it borrows; neither can be null while it exists, so null is a spelling
+/// no live element uses and `?T` needs no tag beside the pointer to say which
+/// it is. That halves the recursive shape this exists for -- a node holding
+/// `?Box<Node>` twice is two words, not four -- and costs no branch: presence
+/// is the comparison the tag byte was computed from anyway.
+///
+/// A Map or an Arena handle is a pointer too, but its constructor hands back
+/// null when the allocation fails and the value carries that on, so null is a
+/// live value there and the niche is not free.
+pub fn niche_optional_elem(name: []u8) -> ?[]u8 {
+    let elem = typ::optional_elem(name) orelse return null;
+    if is_box_llvm_type(elem) or mem::starts_with(elem, "&") {
+        return elem;
+    }
+    return null;
 }
 
 /// Names the LLVM aggregate of one optional type, the Go
 /// `llvmOptionalTypeName`.
 fn (self: &var Emitter) llvm_optional_type_name(name: []u8) -> !ir::Name {
+    if niche_optional_elem(name) |_| {
+        return self.names.intern("ptr");
+    }
     var out = try string::from_bytes(self.allocator, "%kizu.opt.");
     errdefer out.deinit(self.allocator);
     if typ::optional_elem(name) |elem| {
-        try append_llvm_name_part(&var out, elem);
+        try append_llvm_name_part(self.allocator, &var out, elem);
     }
     return self.names.intern_owned(move out);
 }
@@ -318,7 +345,7 @@ fn (self: &var Emitter) llvm_optional_type_name(name: []u8) -> !ir::Name {
 fn (self: &var Emitter) llvm_function_name(name: []u8) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
-    try append_llvm_name_part(&var out, name);
+    try append_llvm_name_part(self.allocator, &var out, name);
     return self.names.intern_owned(move out);
 }
 
@@ -329,9 +356,9 @@ fn is_arena_handle_type(typ_name: []u8) -> bool {
 
 /// Keeps generated LLVM type names deterministic and readable, the Go
 /// `llvmNamePart`: every byte outside `_ a-z A-Z 0-9` becomes `_`.
-fn append_llvm_name_part(out: &var string::String, name: []u8) -> !void {
+fn append_llvm_name_part(allocator: Allocator, out: &var string::String, name: []u8) -> !void {
     if mem::equal_bytes(name, "[]u8") {
-        return out.append_bytes("slice.u8");
+        return out.append_bytes(allocator, "slice.u8");
     }
     var index = 0;
     while mem::byte_at(name, index) |ch| {
@@ -340,10 +367,10 @@ fn append_llvm_name_part(out: &var string::String, name: []u8) -> !void {
             (ch >= cast<u8>(97) and ch <= cast<u8>(122)) or
             (ch >= cast<u8>(65) and ch <= cast<u8>(90)) or
             (ch >= cast<u8>(48) and ch <= cast<u8>(57)) {
-            try out.append_byte(ch);
+            try out.append_byte(allocator, ch);
             continue;
         }
-        try out.append_byte(cast<u8>(95));
+        try out.append_byte(allocator, cast<u8>(95));
     }
     return;
 }
@@ -378,11 +405,11 @@ fn (self: &var Emitter) error_union_parts(name: []u8) -> !?ErrorUnionParts {
             var err = string::new(self.allocator);
             errdefer err.deinit(self.allocator);
             if node.err |err_node| {
-                try typ::append_render(&var err, &self.types, typ::child_type(parsed, err_node));
+                try typ::append_render(self.allocator, &var err, &self.types, typ::child_type(parsed, err_node));
             }
             var success = string::new(self.allocator);
             errdefer success.deinit(self.allocator);
-            try typ::append_render(&var success, &self.types, typ::child_type(parsed, node.ok));
+            try typ::append_render(self.allocator, &var success, &self.types, typ::child_type(parsed, node.ok));
             return ErrorUnionParts { err: move err, success: move success };
         },
         _ => return null,
@@ -406,23 +433,23 @@ fn is_lowerable_error_union_success(typ_name: []u8) -> bool {
 
 /// Appends a minimal LLVM string literal escape of value, the Go
 /// `escapeString`.
-fn append_escaped_string(out: &var string::String, value: []u8) -> !void {
+fn append_escaped_string(allocator: Allocator, out: &var string::String, value: []u8) -> !void {
     var index = 0;
     while mem::byte_at(value, index) |ch| {
         index = index + 1;
         if ch == cast<u8>(92) {
-            try out.append_bytes("\5C");
+            try out.append_bytes(allocator, "\5C");
             continue;
         }
         if ch == cast<u8>(34) {
-            try out.append_bytes("\22");
+            try out.append_bytes(allocator, "\22");
             continue;
         }
         if ch == cast<u8>(10) {
-            try out.append_bytes("\0A");
+            try out.append_bytes(allocator, "\0A");
             continue;
         }
-        try out.append_byte(ch);
+        try out.append_byte(allocator, ch);
     }
     return;
 }

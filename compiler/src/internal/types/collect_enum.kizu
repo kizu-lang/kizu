@@ -29,12 +29,12 @@ fn (self: &var Checker) collect_enum(tree: &ast::Ast, declaration: &ast::EnumDec
             };
             return TypeCollectionIssue::DuplicateEnumTag(issue);
         }
-        try value.order.append(ast::Text { node: tag.node });
+        try value.order.append(self.allocator, ast::Text { node: tag.node });
         try value.tags.insert(tag_name, true);
         index = index + 1;
     }
     let handle = EnumHandle { index: self.metadata.enums.len() };
-    try self.metadata.enums.append(move value);
+    try self.metadata.enums.append(self.allocator, move value);
     try self.metadata.enums_by_name.insert(name, handle);
     return null;
 }
@@ -70,7 +70,7 @@ fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::Er
         index = index + 1;
     }
     let tagged_handle = EnumHandle { index: self.metadata.enums.len() };
-    try self.metadata.enums.append(move tagged);
+    try self.metadata.enums.append(self.allocator, move tagged);
     var set = ErrorSetType {
         name: declaration.name,
         public: declaration.public,
@@ -88,7 +88,7 @@ fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::Er
         let reference_bytes = retained_reference.as_bytes();
         let copied = try string::from_bytes(self.allocator, reference_bytes);
         errdefer copied.deinit(self.allocator);
-        try set.combines.append(move copied);
+        try set.combines.append(self.allocator, move copied);
     }
     index = 0;
     while declaration.members.at(index) |member| {
@@ -97,10 +97,10 @@ fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::Er
         let member_name = retained_member.as_bytes();
         var key = string::new(self.allocator);
         errdefer key.deinit(self.allocator);
-        try key.append_bytes(name);
-        try key.append_bytes("::");
-        try key.append_bytes(member_name);
-        try set.value_order.append(move key);
+        try key.append_bytes(self.allocator, name);
+        try key.append_bytes(self.allocator, "::");
+        try key.append_bytes(self.allocator, member_name);
+        try set.value_order.append(self.allocator, move key);
     }
     index = 0;
     while set.value_order.at(index) |stored| {
@@ -109,7 +109,7 @@ fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::Er
         try set.values.insert(key_bytes, true);
     }
     let set_handle = ErrorSetHandle { index: self.metadata.error_sets.len() };
-    try self.metadata.error_sets.append(move set);
+    try self.metadata.error_sets.append(self.allocator, move set);
     try self.metadata.error_sets_by_name.insert(name, set_handle);
     return null;
 }
@@ -167,11 +167,11 @@ fn (self: &Checker) check_error_set_references(tree: &ast::Ast, position: i64) -
                 let name = retained_name.as_bytes();
                 var message = string::new(self.allocator);
                 errdefer message.deinit(self.allocator);
-                try message.append_bytes("`");
-                try message.append_bytes(name);
-                try message.append_bytes("` combines `");
-                try message.append_bytes(reference_bytes);
-                try message.append_bytes("`, which is not a declared error set");
+                try message.append_bytes(self.allocator, "`");
+                try message.append_bytes(self.allocator, name);
+                try message.append_bytes(self.allocator, "` combines `");
+                try message.append_bytes(self.allocator, reference_bytes);
+                try message.append_bytes(self.allocator, "`, which is not a declared error set");
                 return try self.checker_message_at("type error", ast::zero_span(), move message);
             }
         }
@@ -184,13 +184,13 @@ fn (self: &Checker) check_error_set_references(tree: &ast::Ast, position: i64) -
 fn (self: &Checker) combined_from_itself_error(tree: &ast::Ast, position: i64) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("error set `");
+    try message.append_bytes(self.allocator, "error set `");
     if self.metadata.error_sets.at(position) |set| {
         let retained_name = tree.texts.at(set.name.node);
         let name = retained_name.as_bytes();
-        try message.append_bytes(name);
+        try message.append_bytes(self.allocator, name);
     }
-    try message.append_bytes("` is combined from itself");
+    try message.append_bytes(self.allocator, "` is combined from itself");
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
@@ -229,7 +229,7 @@ fn (self: &var Checker) resolve_error_set_composition(position: i64, state: &var
                         try seen.insert(value_bytes, true);
                         let copied = try string::from_bytes(allocator, value_bytes);
                         errdefer copied.deinit(allocator);
-                        try merged.append(move copied);
+                        try merged.append(allocator, move copied);
                     }
                 }
             }
@@ -255,12 +255,12 @@ fn (self: &var Checker) resolve_error_set_composition(position: i64, state: &var
     errdefer reversed.deinit(allocator);
     while merged.pop() |value| {
         errdefer value.deinit(allocator);
-        try reversed.append(move value);
+        try reversed.append(allocator, move value);
     }
     if self.metadata.error_sets.at_mut(position) |slot| {
         while reversed.pop() |value| {
             errdefer value.deinit(allocator);
-            try slot.value_order.append(move value);
+            try slot.value_order.append(allocator, move value);
         }
         slot.resolved = true;
     }

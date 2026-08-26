@@ -468,8 +468,8 @@ fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStm
     var incoming = array::new<Incoming>(self.allocator);
     defer incoming.deinit(self.allocator);
     var result_type = empty_name();
-    try append_branch_incoming(then_result, &var incoming, &var result_type);
-    try append_branch_incoming(else_result, &var incoming, &var result_type);
+    try append_branch_incoming(self.allocator, then_result, &var incoming, &var result_type);
+    try append_branch_incoming(self.allocator, else_result, &var incoming, &var result_type);
     if incoming.len() == 0 {
         self.terminate(unreachable_terminator());
         return try self.fail0("ir error: an if used as a value has no branch that produces one");
@@ -481,7 +481,7 @@ fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStm
 /// Adds one reachable branch's value to the phi an if expression ends in,
 /// the body of the Go loop over `[]branchResult{thenResult, elseResult}`;
 /// the first reachable branch names the result type.
-fn append_branch_incoming(
+fn append_branch_incoming(allocator: Allocator, 
     result: BranchResult,
     incoming: &var array::Array<Incoming>,
     result_type: &var Name
@@ -492,7 +492,7 @@ fn append_branch_incoming(
     if is_empty(result_type.*) {
         result_type.* = result.value.type_name;
     }
-    return incoming.append(Incoming { block: result.end, value: result.value });
+    return incoming.append(allocator, Incoming { block: result.end, value: result.value });
 }
 
 /// Creates phi nodes for values that differ across branches, the Go
@@ -619,7 +619,7 @@ fn (self: &var Lowerer) new_block_named(prefix: []u8) -> !Block {
 fn (self: &var Lowerer) new_loop_block(form: LoopForm, suffix: []u8) -> !Block {
     var prefix = try string::from_bytes(self.allocator, loop_form_name(form));
     defer prefix.deinit(self.allocator);
-    try prefix.append_bytes(suffix);
+    try prefix.append_bytes(self.allocator, suffix);
     let bytes = prefix.as_bytes();
     return self.new_block_named(bytes);
 }
@@ -682,13 +682,13 @@ fn (self: &var Lowerer) lower_loop(tree: &var ast::Ast, shape: LoopShape) -> !?d
         // A copy, because closeLoopPhis rebinds the same names in self.env
         // while it reads what the body left them at.
         let fallthrough_env = try self.envs.clone_env(self.env);
-        try edges.append(LoopEdge { block: self.block_label(), env: fallthrough_env });
+        try edges.append(self.allocator, LoopEdge { block: self.block_label(), env: fallthrough_env });
         self.terminate(jump_terminator(back_name));
     }
     var index = 0;
     while loop.continue_edges.get(index) |edge| {
         index = index + 1;
-        try edges.append(edge);
+        try edges.append(self.allocator, edge);
     }
     if latch |latch_block| {
         self.block = latch_block;
@@ -762,7 +762,7 @@ fn (self: &var Lowerer) lower_loop_advance(latch: Block, test: LoopTest) -> !voi
             let index = self.module.instr_result(indexed.phi);
             let next = try self.emit_op2(Op::Binary, plus, self.common.i64_type, index, one);
             let latch_name = self.module.block_name(latch);
-            return self.module.add_incoming(indexed.phi, latch_name, next);
+            return self.module.add_incoming(self.allocator, indexed.phi, latch_name, next);
         },
     }
 }
@@ -828,6 +828,7 @@ fn (self: &var Lowerer) create_for_index_phi(block: Block, incoming: Name, start
 /// Lowers break and continue as jumps to loop blocks, the Go
 /// `lowerLoopBranch`.
 fn (self: &var Lowerer) lower_loop_branch(tree: &var ast::Ast, is_continue: bool, label: ast::Text) -> !?diagnostic::Diagnostic {
+    let allocator = self.allocator;
     let index = self.find_loop(tree, label) orelse return try self.fail1(
         tree, "ir error: unknown loop label `%s`", Arg::Text(label)
     );
@@ -837,15 +838,15 @@ fn (self: &var Lowerer) lower_loop_branch(tree: &var ast::Ast, is_continue: bool
     if self.loops.at_mut(index) |loop| {
         if is_continue {
             target = loop.continue_to;
-            try loop.continue_edges.append(edge);
+            try loop.continue_edges.append(allocator, edge);
         } else {
             target = loop.break_to;
-            try loop.break_edges.append(edge);
+            try loop.break_edges.append(allocator, edge);
         }
         defer_depth = loop.defer_depth;
     }
-    var cleanups = array::new<Cleanup>(self.allocator);
-    defer cleanups.deinit(self.allocator);
+    var cleanups = array::new<Cleanup>(allocator);
+    defer cleanups.deinit(allocator);
     try self.cleanups_from(defer_depth, false, &var cleanups);
     try self.emit_cleanups(&cleanups);
     self.terminate(jump_terminator(target));
@@ -855,7 +856,7 @@ fn (self: &var Lowerer) lower_loop_branch(tree: &var ast::Ast, is_continue: bool
 /// Records the current loop branch targets, the Go `pushLoop`. The record
 /// is read back by the `pop_or_panic` in `lower_loop`, the Go `popLoop`.
 fn (self: &var Lowerer) push_loop(label: Name, break_to: Name, continue_to: Name) -> !void {
-    return self.loops.append(LoopContext {
+    return self.loops.append(self.allocator, LoopContext {
         label: label,
         break_to: break_to,
         continue_to: continue_to,
@@ -895,7 +896,7 @@ fn (self: &var Lowerer) create_loop_phis(
         let phi = try self.add_open_phi(block, value.type_name, current, value);
         let result = self.module.instr_result(phi);
         try self.envs.bind(self.env, name, result);
-        try out.append(LoopPhi { name: name, phi: phi });
+        try out.append(self.allocator, LoopPhi { name: name, phi: phi });
     }
     return;
 }
@@ -918,12 +919,12 @@ fn (self: &var Lowerer) close_loop_phis(
         if latch |latch_block| {
             let value = try self.latch_value(latch_block, entry, &incoming);
             let latch_name = self.module.block_name(latch_block);
-            try self.module.add_incoming(entry.phi, latch_name, value);
+            try self.module.add_incoming(self.allocator, entry.phi, latch_name, value);
         } else {
             var position = 0;
             while incoming.get(position) |arriving| {
                 position = position + 1;
-                try self.module.add_incoming(entry.phi, arriving.block, arriving.value);
+                try self.module.add_incoming(self.allocator, entry.phi, arriving.block, arriving.value);
             }
         }
         let result = self.module.instr_result(entry.phi);
@@ -939,7 +940,7 @@ fn (self: &Lowerer) loop_incoming(name: Name, edges: &array::Array<LoopEdge>, ou
     while edges.get(index) |edge| {
         index = index + 1;
         if self.envs.get(edge.env, name) |value| {
-            try out.append(Incoming { block: edge.block, value: value });
+            try out.append(self.allocator, Incoming { block: edge.block, value: value });
         }
     }
     return;
@@ -979,7 +980,7 @@ fn (self: &var Lowerer) finish_loop_exit_phis(
         let result = self.module.instr_result(entry.phi);
         var incoming = array::new<Incoming>(self.allocator);
         defer incoming.deinit(self.allocator);
-        try incoming.append(Incoming { block: test, value: result });
+        try incoming.append(self.allocator, Incoming { block: test, value: result });
         try self.loop_incoming(entry.name, break_edges, &var incoming);
         if incoming.len() == 1 {
             continue;
@@ -998,9 +999,9 @@ fn (self: &var Lowerer) add_phi(block: Block, type_name: Name, incoming: &array:
     var index = 0;
     while incoming.get(index) |entry| {
         index = index + 1;
-        try instr.incoming.append(entry);
+        try instr.incoming.append(self.allocator, entry);
     }
-    let _ = try self.module.add_instr(block, move instr);
+    let _ = try self.module.add_instr(self.allocator, block, move instr);
     return result;
 }
 
@@ -1017,9 +1018,9 @@ fn (self: &var Lowerer) add_phi2(
     let result = try self.next(type_name);
     var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
     errdefer instr.deinit(self.allocator);
-    try instr.incoming.append(Incoming { block: left_block, value: left });
-    try instr.incoming.append(Incoming { block: right_block, value: right });
-    let _ = try self.module.add_instr(block, move instr);
+    try instr.incoming.append(self.allocator, Incoming { block: left_block, value: left });
+    try instr.incoming.append(self.allocator, Incoming { block: right_block, value: right });
+    let _ = try self.module.add_instr(self.allocator, block, move instr);
     return result;
 }
 
@@ -1031,8 +1032,8 @@ fn (self: &var Lowerer) add_open_phi(block: Block, type_name: Name, incoming_blo
     let result = try self.next(type_name);
     var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
     errdefer instr.deinit(self.allocator);
-    try instr.incoming.append(Incoming { block: incoming_block, value: value });
-    return self.module.add_instr(block, move instr);
+    try instr.incoming.append(self.allocator, Incoming { block: incoming_block, value: value });
+    return self.module.add_instr(self.allocator, block, move instr);
 }
 
 /// Appends the names assigned in a block, in the order they are first
@@ -1063,14 +1064,14 @@ fn (self: &var Lowerer) collect_assigned(
     if ownership::assign_stmt(tree, statement) |assign| {
         if assign_target_root(tree, assign.target) |root| {
             let name = try self.text_name(tree, root);
-            try add_assigned(names, name);
+            try add_assigned(self.allocator, names, name);
         }
     }
     var exprs = array::new<ast::Expression>(self.allocator);
     defer exprs.deinit(self.allocator);
     var stmts = array::new<ast::Statement>(self.allocator);
     defer stmts.deinit(self.allocator);
-    if !try statement_children(tree, statement, &var exprs, &var stmts) {
+    if !try statement_children(self.allocator, tree, statement, &var exprs, &var stmts) {
         let kind = try self.name(statement_go_type(tree, statement));
         return try self.fail1(tree, "ir error: loop analysis does not know statement `%s`", Arg::Str(kind));
     }
@@ -1107,7 +1108,7 @@ fn (self: &var Lowerer) collect_assigned_expr(
     }
     var children = array::new<ast::Expression>(self.allocator);
     defer children.deinit(self.allocator);
-    if !try expression_children(tree, expression, &var children) {
+    if !try expression_children(self.allocator, tree, expression, &var children) {
         let kind = try self.name(expression_go_type(tree, expression));
         return try self.fail1(tree, "ir error: loop analysis does not know expression `%s`", Arg::Str(kind));
     }
@@ -1188,7 +1189,7 @@ fn assign_target_root(tree: &ast::Ast, target: ast::Expression) -> ?ast::Text {
 
 /// Records name once, keeping the order names are first assigned in, the Go
 /// `addAssigned`.
-fn add_assigned(names: &var array::Array<Name>, name: Name) -> !void {
+fn add_assigned(allocator: Allocator, names: &var array::Array<Name>, name: Name) -> !void {
     var index = 0;
     while names.get(index) |existing| {
         index = index + 1;
@@ -1196,5 +1197,5 @@ fn add_assigned(names: &var array::Array<Name>, name: Name) -> !void {
             return;
         }
     }
-    return names.append(name);
+    return names.append(allocator, name);
 }

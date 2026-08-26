@@ -16,14 +16,14 @@ test "fixed buffer allocator backs containers" {
 
     var values = array::new<i64>(alloc);
     defer values.deinit(alloc);
-    try values.append(41);
-    try values.append(1);
+    try values.append(alloc, 41);
+    try values.append(alloc, 1);
     testing::expect_equal<i64>(2, values.len());
     testing::expect_equal<i64>(41, values.get_or_panic(0));
 
     var text = string::new(alloc);
     defer text.deinit(alloc);
-    try text.append_bytes("fixed");
+    try text.append_bytes(alloc, "fixed");
     testing::expect_equal<i64>(5, text.len());
 
     let visitors = arena::new<Visitor>(alloc);
@@ -35,7 +35,7 @@ test "fixed buffer allocator backs containers" {
 fn fill(allocator: Allocator, seed: i64) -> !array::Array<i64> {
     var values = array::new<i64>(allocator);
     errdefer values.deinit(allocator);
-    try values.append(seed);
+    try values.append(allocator, seed);
     return move values;
 }
 
@@ -62,7 +62,7 @@ test "fixed buffer factory wrapper returns through its parameter" {
     let alloc = scratch_alloc(scratch);
     var values = array::new<i64>(alloc);
     defer values.deinit(alloc);
-    try values.append(11);
+    try values.append(alloc, 11);
     testing::expect_equal<i64>(11, values.get_or_panic(0));
 }
 
@@ -70,8 +70,8 @@ fn sum_round(bytes: &var []u8, seed: i64) -> !i64 {
     let alloc = mem::fixed_buffer(bytes);
     var values = array::new<i64>(alloc);
     defer values.deinit(alloc);
-    try values.append(seed);
-    try values.append(seed + 1);
+    try values.append(alloc, seed);
+    try values.append(alloc, seed + 1);
     return values.get_or_panic(0) + values.get_or_panic(1);
 }
 
@@ -117,11 +117,11 @@ test "fixed buffer is reusable between rounds" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -139,11 +139,11 @@ test "fixed buffer is reusable between rounds" {
 // 
 // declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
 // declare i64 @std__array__Array_len_i64(ptr)
 // declare ptr @std__mem__fixed_buffer(%kizu.slice.u8)
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
@@ -156,9 +156,8 @@ test "fixed buffer is reusable between rounds" {
 // define %kizu.error.std__array__Array_i64_ @fill(ptr %kizu.allocator, i64 %kizu.seed) {
 // entry:
 //   %kizu.2 = alloca %kizu.array
-//   %kizu.1 = insertvalue %kizu.array zeroinitializer, ptr %kizu.allocator, 3
-//   store %kizu.array %kizu.1, ptr %kizu.2
-//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.2, i64 %kizu.seed)
+//   store %kizu.array zeroinitializer, ptr %kizu.2
+//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.2, ptr %kizu.allocator, i64 %kizu.seed)
 //   %kizu.4 = load %kizu.array, ptr %kizu.2
 //   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 0
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
@@ -166,13 +165,12 @@ test "fixed buffer is reusable between rounds" {
 // kizu.5.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.4, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.4, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.4, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.std__array__Array_i64_ zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.std__array__Array_i64_ %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 2
-//   ret %kizu.error.std__array__Array_i64_ %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.allocator, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.std__array__Array_i64_ zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.std__array__Array_i64_ %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 2
+//   ret %kizu.error.std__array__Array_i64_ %kizu.try.err.5
 // kizu.5.try.ok:
 //   %kizu.6 = load %kizu.array, ptr %kizu.2
 //   %kizu.7.ok = insertvalue %kizu.error.std__array__Array_i64_ zeroinitializer, i8 1, 0
@@ -190,9 +188,8 @@ test "fixed buffer is reusable between rounds" {
 // entry:
 //   %kizu.3 = alloca %kizu.array
 //   %kizu.1 = call ptr @std__mem__fixed_buffer(%kizu.slice.u8 %kizu.bytes)
-//   %kizu.2 = insertvalue %kizu.array zeroinitializer, ptr %kizu.1, 3
-//   store %kizu.array %kizu.2, ptr %kizu.3
-//   %kizu.4 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, i64 %kizu.seed)
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.4 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, ptr %kizu.1, i64 %kizu.seed)
 //   %kizu.5 = load %kizu.array, ptr %kizu.3
 //   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 0
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
@@ -200,30 +197,28 @@ test "fixed buffer is reusable between rounds" {
 // kizu.6.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.5, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.5, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.5, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.i64 %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 2
-//   ret %kizu.error.i64 %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.i64 %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 2
+//   ret %kizu.error.i64 %kizu.try.err.5
 // kizu.6.try.ok:
 //   %kizu.8 = add i64 %kizu.seed, 1
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, i64 %kizu.8)
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, ptr %kizu.1, i64 %kizu.8)
 //   %kizu.10 = load %kizu.array, ptr %kizu.3
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
 //   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
 // kizu.11.try.err:
-//   %kizu.array.deinit.data.8 = extractvalue %kizu.array %kizu.10, 0
-//   %kizu.array.deinit.cap.9 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.alloc.10 = extractvalue %kizu.array %kizu.10, 3
-//   %kizu.array.deinit.bytes.11 = mul i64 %kizu.array.deinit.cap.9, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.10, ptr %kizu.array.deinit.data.8, i64 %kizu.array.deinit.bytes.11)
-//   %kizu.try.err.12.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.12.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
-//   %kizu.try.err.12 = insertvalue %kizu.error.i64 %kizu.try.err.12.base, i64 %kizu.try.err.12.code, 2
-//   ret %kizu.error.i64 %kizu.try.err.12
+//   %kizu.array.deinit.data.7 = extractvalue %kizu.array %kizu.10, 0
+//   %kizu.array.deinit.cap.8 = extractvalue %kizu.array %kizu.10, 2
+//   %kizu.array.deinit.bytes.9 = mul i64 %kizu.array.deinit.cap.8, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.7, i64 %kizu.array.deinit.bytes.9)
+//   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.10.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
+//   %kizu.try.err.10 = insertvalue %kizu.error.i64 %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 2
+//   ret %kizu.error.i64 %kizu.try.err.10
 // kizu.11.try.ok:
 //   %kizu.13 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.3, i64 0)
 //   %kizu.15 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.3, i64 1)
@@ -231,11 +226,10 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.17.ok = insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0
 //   %kizu.17 = insertvalue %kizu.error.i64 %kizu.17.ok, i64 %kizu.16, 1
 //   %kizu.18 = load %kizu.array, ptr %kizu.3
-//   %kizu.array.deinit.data.13 = extractvalue %kizu.array %kizu.18, 0
-//   %kizu.array.deinit.cap.14 = extractvalue %kizu.array %kizu.18, 2
-//   %kizu.array.deinit.alloc.15 = extractvalue %kizu.array %kizu.18, 3
-//   %kizu.array.deinit.bytes.16 = mul i64 %kizu.array.deinit.cap.14, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.15, ptr %kizu.array.deinit.data.13, i64 %kizu.array.deinit.bytes.16)
+//   %kizu.array.deinit.data.11 = extractvalue %kizu.array %kizu.18, 0
+//   %kizu.array.deinit.cap.12 = extractvalue %kizu.array %kizu.18, 2
+//   %kizu.array.deinit.bytes.13 = mul i64 %kizu.array.deinit.cap.12, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.11, i64 %kizu.array.deinit.bytes.13)
 //   ret %kizu.error.i64 %kizu.17
 // }
 // 
@@ -252,9 +246,8 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 4096, 1
 //   %kizu.5 = call ptr @std__mem__fixed_buffer(%kizu.slice.u8 %kizu.4)
-//   %kizu.6 = insertvalue %kizu.array zeroinitializer, ptr %kizu.5, 3
-//   store %kizu.array %kizu.6, ptr %kizu.7
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, i64 41)
+//   store %kizu.array zeroinitializer, ptr %kizu.7
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, ptr %kizu.5, i64 41)
 //   %kizu.10 = load %kizu.array, ptr %kizu.7
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -262,29 +255,27 @@ test "fixed buffer is reusable between rounds" {
 // kizu.11.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.10, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.10, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
-//   ret %kizu.error.void %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
+//   ret %kizu.error.void %kizu.try.err.5
 // kizu.11.try.ok:
-//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, i64 1)
+//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, ptr %kizu.5, i64 1)
 //   %kizu.14 = load %kizu.array, ptr %kizu.7
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   %kizu.array.deinit.data.8 = extractvalue %kizu.array %kizu.14, 0
-//   %kizu.array.deinit.cap.9 = extractvalue %kizu.array %kizu.14, 2
-//   %kizu.array.deinit.alloc.10 = extractvalue %kizu.array %kizu.14, 3
-//   %kizu.array.deinit.bytes.11 = mul i64 %kizu.array.deinit.cap.9, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.10, ptr %kizu.array.deinit.data.8, i64 %kizu.array.deinit.bytes.11)
-//   %kizu.try.err.12.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
-//   %kizu.try.err.12.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.12 = insertvalue %kizu.error.void %kizu.try.err.12.base, i64 %kizu.try.err.12.code, 1
-//   ret %kizu.error.void %kizu.try.err.12
+//   %kizu.array.deinit.data.7 = extractvalue %kizu.array %kizu.14, 0
+//   %kizu.array.deinit.cap.8 = extractvalue %kizu.array %kizu.14, 2
+//   %kizu.array.deinit.bytes.9 = mul i64 %kizu.array.deinit.cap.8, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.7, i64 %kizu.array.deinit.bytes.9)
+//   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
+//   %kizu.try.err.10.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.10 = insertvalue %kizu.error.void %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 1
+//   ret %kizu.error.void %kizu.try.err.10
 // kizu.15.try.ok:
 //   %kizu.17 = call i64 @std__array__Array_len_i64(ptr %kizu.7)
 //   %kizu.18.ok = icmp eq i64 2, %kizu.17
@@ -305,7 +296,7 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.25.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
 //   %kizu.25.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.25.ptr, 0
 //   %kizu.25 = insertvalue %kizu.slice.u8 %kizu.25.base, i64 5, 1
-//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.24, %kizu.slice.u8 %kizu.25)
+//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.24, ptr %kizu.5, %kizu.slice.u8 %kizu.25)
 //   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   %kizu.28 = load %kizu.array, ptr %kizu.7
 //   %kizu.29.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 0
@@ -313,15 +304,14 @@ test "fixed buffer is reusable between rounds" {
 //   br i1 %kizu.29.ok.bool, label %kizu.29.try.ok, label %kizu.29.try.err
 // kizu.29.try.err:
 //   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.5)
-//   %kizu.array.deinit.data.15 = extractvalue %kizu.array %kizu.28, 0
-//   %kizu.array.deinit.cap.16 = extractvalue %kizu.array %kizu.28, 2
-//   %kizu.array.deinit.alloc.17 = extractvalue %kizu.array %kizu.28, 3
-//   %kizu.array.deinit.bytes.18 = mul i64 %kizu.array.deinit.cap.16, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.17, ptr %kizu.array.deinit.data.15, i64 %kizu.array.deinit.bytes.18)
-//   %kizu.try.err.19.code = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 1
-//   %kizu.try.err.19.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.19 = insertvalue %kizu.error.void %kizu.try.err.19.base, i64 %kizu.try.err.19.code, 1
-//   ret %kizu.error.void %kizu.try.err.19
+//   %kizu.array.deinit.data.13 = extractvalue %kizu.array %kizu.28, 0
+//   %kizu.array.deinit.cap.14 = extractvalue %kizu.array %kizu.28, 2
+//   %kizu.array.deinit.bytes.15 = mul i64 %kizu.array.deinit.cap.14, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.13, i64 %kizu.array.deinit.bytes.15)
+//   %kizu.try.err.16.code = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 1
+//   %kizu.try.err.16.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.16 = insertvalue %kizu.error.void %kizu.try.err.16.base, i64 %kizu.try.err.16.code, 1
+//   ret %kizu.error.void %kizu.try.err.16
 // kizu.29.try.ok:
 //   %kizu.31 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   %kizu.32 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.31)
@@ -347,20 +337,20 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.38.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.38.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.38.ptr, 0
 //   %kizu.38 = insertvalue %kizu.slice.u8 %kizu.38.base, i64 5, 1
-//   %kizu.arena.handle.null.20 = icmp eq ptr %kizu.34, null
-//   %kizu.arena.handle.21 = select i1 %kizu.arena.handle.null.20, ptr @kizu.arena.empty, ptr %kizu.34
-//   %kizu.arena.len.addr.22 = getelementptr %kizu.arena, ptr %kizu.arena.handle.21, i64 0, i32 1
-//   %kizu.arena.len.23 = load i64, ptr %kizu.arena.len.addr.22
-//   %kizu.arena.in_range.24 = icmp ult i64 %kizu.37, %kizu.arena.len.23
-//   %kizu.arena.elem_size.addr.25 = getelementptr %kizu.arena, ptr %kizu.arena.handle.21, i64 0, i32 3
-//   %kizu.arena.elem_size.26 = load i64, ptr %kizu.arena.elem_size.addr.25
-//   %kizu.arena.offset.27 = mul i64 %kizu.37, %kizu.arena.elem_size.26
-//   %kizu.arena.data.addr.28 = getelementptr %kizu.arena, ptr %kizu.arena.handle.21, i64 0, i32 0
-//   %kizu.arena.data.29 = load ptr, ptr %kizu.arena.data.addr.28
-//   %kizu.arena.elem.30 = getelementptr i8, ptr %kizu.arena.data.29, i64 %kizu.arena.offset.27
-//   %kizu.39.ptr = select i1 %kizu.arena.in_range.24, ptr %kizu.arena.elem.30, ptr null
-//   %kizu.arena.at.is_null.31 = icmp eq ptr %kizu.39.ptr, null
-//   br i1 %kizu.arena.at.is_null.31, label %kizu.39.ptr.arena.at.null, label %kizu.39.ptr.ok
+//   %kizu.arena.handle.null.17 = icmp eq ptr %kizu.34, null
+//   %kizu.arena.handle.18 = select i1 %kizu.arena.handle.null.17, ptr @kizu.arena.empty, ptr %kizu.34
+//   %kizu.arena.len.addr.19 = getelementptr %kizu.arena, ptr %kizu.arena.handle.18, i64 0, i32 1
+//   %kizu.arena.len.20 = load i64, ptr %kizu.arena.len.addr.19
+//   %kizu.arena.in_range.21 = icmp ult i64 %kizu.37, %kizu.arena.len.20
+//   %kizu.arena.elem_size.addr.22 = getelementptr %kizu.arena, ptr %kizu.arena.handle.18, i64 0, i32 3
+//   %kizu.arena.elem_size.23 = load i64, ptr %kizu.arena.elem_size.addr.22
+//   %kizu.arena.offset.24 = mul i64 %kizu.37, %kizu.arena.elem_size.23
+//   %kizu.arena.data.addr.25 = getelementptr %kizu.arena, ptr %kizu.arena.handle.18, i64 0, i32 0
+//   %kizu.arena.data.26 = load ptr, ptr %kizu.arena.data.addr.25
+//   %kizu.arena.elem.27 = getelementptr i8, ptr %kizu.arena.data.26, i64 %kizu.arena.offset.24
+//   %kizu.39.ptr = select i1 %kizu.arena.in_range.21, ptr %kizu.arena.elem.27, ptr null
+//   %kizu.arena.at.is_null.28 = icmp eq ptr %kizu.39.ptr, null
+//   br i1 %kizu.arena.at.is_null.28, label %kizu.39.ptr.arena.at.null, label %kizu.39.ptr.ok
 // kizu.39.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
@@ -381,11 +371,10 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.43 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.43, ptr %kizu.5)
 //   %kizu.45 = load %kizu.array, ptr %kizu.7
-//   %kizu.array.deinit.data.32 = extractvalue %kizu.array %kizu.45, 0
-//   %kizu.array.deinit.cap.33 = extractvalue %kizu.array %kizu.45, 2
-//   %kizu.array.deinit.alloc.34 = extractvalue %kizu.array %kizu.45, 3
-//   %kizu.array.deinit.bytes.35 = mul i64 %kizu.array.deinit.cap.33, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.34, ptr %kizu.array.deinit.data.32, i64 %kizu.array.deinit.bytes.35)
+//   %kizu.array.deinit.data.29 = extractvalue %kizu.array %kizu.45, 0
+//   %kizu.array.deinit.cap.30 = extractvalue %kizu.array %kizu.45, 2
+//   %kizu.array.deinit.bytes.31 = mul i64 %kizu.array.deinit.cap.30, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.29, i64 %kizu.array.deinit.bytes.31)
 //   %kizu.47 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.47
 // }
@@ -420,9 +409,8 @@ test "fixed buffer is reusable between rounds" {
 // kizu.12.ok.ok:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.8, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.8, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.8, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
 //   %kizu.14 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.14
 // }
@@ -438,9 +426,8 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 512, 1
 //   %kizu.5 = call ptr @scratch_alloc(%kizu.slice.u8 %kizu.4)
-//   %kizu.6 = insertvalue %kizu.array zeroinitializer, ptr %kizu.5, 3
-//   store %kizu.array %kizu.6, ptr %kizu.7
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, i64 11)
+//   store %kizu.array zeroinitializer, ptr %kizu.7
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, ptr %kizu.5, i64 11)
 //   %kizu.10 = load %kizu.array, ptr %kizu.7
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -448,13 +435,12 @@ test "fixed buffer is reusable between rounds" {
 // kizu.11.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.10, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.10, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
-//   ret %kizu.error.void %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
+//   ret %kizu.error.void %kizu.try.err.5
 // kizu.11.try.ok:
 //   %kizu.14 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.7, i64 0)
 //   %kizu.15.ok = icmp eq i64 11, %kizu.14
@@ -464,11 +450,10 @@ test "fixed buffer is reusable between rounds" {
 //   unreachable
 // kizu.15.ok.ok:
 //   %kizu.16 = load %kizu.array, ptr %kizu.7
-//   %kizu.array.deinit.data.7 = extractvalue %kizu.array %kizu.16, 0
-//   %kizu.array.deinit.cap.8 = extractvalue %kizu.array %kizu.16, 2
-//   %kizu.array.deinit.alloc.9 = extractvalue %kizu.array %kizu.16, 3
-//   %kizu.array.deinit.bytes.10 = mul i64 %kizu.array.deinit.cap.8, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.9, ptr %kizu.array.deinit.data.7, i64 %kizu.array.deinit.bytes.10)
+//   %kizu.array.deinit.data.6 = extractvalue %kizu.array %kizu.16, 0
+//   %kizu.array.deinit.cap.7 = extractvalue %kizu.array %kizu.16, 2
+//   %kizu.array.deinit.bytes.8 = mul i64 %kizu.array.deinit.cap.7, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.6, i64 %kizu.array.deinit.bytes.8)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // }
@@ -551,11 +536,11 @@ test "fixed buffer is reusable between rounds" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -573,11 +558,11 @@ test "fixed buffer is reusable between rounds" {
 // 
 // declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
 // declare i64 @std__array__Array_len_i64(ptr)
 // declare ptr @std__mem__fixed_buffer(%kizu.slice.u8)
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
@@ -590,9 +575,8 @@ test "fixed buffer is reusable between rounds" {
 // define %kizu.error.std__array__Array_i64_ @fill(ptr %kizu.allocator, i64 %kizu.seed) {
 // entry:
 //   %kizu.2 = alloca %kizu.array
-//   %kizu.1 = insertvalue %kizu.array zeroinitializer, ptr %kizu.allocator, 3
-//   store %kizu.array %kizu.1, ptr %kizu.2
-//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.2, i64 %kizu.seed)
+//   store %kizu.array zeroinitializer, ptr %kizu.2
+//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.2, ptr %kizu.allocator, i64 %kizu.seed)
 //   %kizu.4 = load %kizu.array, ptr %kizu.2
 //   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 0
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
@@ -600,13 +584,12 @@ test "fixed buffer is reusable between rounds" {
 // kizu.5.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.4, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.4, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.4, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.std__array__Array_i64_ zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.std__array__Array_i64_ %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 2
-//   ret %kizu.error.std__array__Array_i64_ %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.allocator, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.std__array__Array_i64_ zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.std__array__Array_i64_ %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 2
+//   ret %kizu.error.std__array__Array_i64_ %kizu.try.err.5
 // kizu.5.try.ok:
 //   %kizu.6 = load %kizu.array, ptr %kizu.2
 //   %kizu.7.ok = insertvalue %kizu.error.std__array__Array_i64_ zeroinitializer, i8 1, 0
@@ -624,9 +607,8 @@ test "fixed buffer is reusable between rounds" {
 // entry:
 //   %kizu.3 = alloca %kizu.array
 //   %kizu.1 = call ptr @std__mem__fixed_buffer(%kizu.slice.u8 %kizu.bytes)
-//   %kizu.2 = insertvalue %kizu.array zeroinitializer, ptr %kizu.1, 3
-//   store %kizu.array %kizu.2, ptr %kizu.3
-//   %kizu.4 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, i64 %kizu.seed)
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.4 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, ptr %kizu.1, i64 %kizu.seed)
 //   %kizu.5 = load %kizu.array, ptr %kizu.3
 //   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 0
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
@@ -634,30 +616,28 @@ test "fixed buffer is reusable between rounds" {
 // kizu.6.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.5, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.5, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.5, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.i64 %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 2
-//   ret %kizu.error.i64 %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.i64 %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 2
+//   ret %kizu.error.i64 %kizu.try.err.5
 // kizu.6.try.ok:
 //   %kizu.8 = add i64 %kizu.seed, 1
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, i64 %kizu.8)
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.3, ptr %kizu.1, i64 %kizu.8)
 //   %kizu.10 = load %kizu.array, ptr %kizu.3
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
 //   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
 // kizu.11.try.err:
-//   %kizu.array.deinit.data.8 = extractvalue %kizu.array %kizu.10, 0
-//   %kizu.array.deinit.cap.9 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.alloc.10 = extractvalue %kizu.array %kizu.10, 3
-//   %kizu.array.deinit.bytes.11 = mul i64 %kizu.array.deinit.cap.9, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.10, ptr %kizu.array.deinit.data.8, i64 %kizu.array.deinit.bytes.11)
-//   %kizu.try.err.12.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.12.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
-//   %kizu.try.err.12 = insertvalue %kizu.error.i64 %kizu.try.err.12.base, i64 %kizu.try.err.12.code, 2
-//   ret %kizu.error.i64 %kizu.try.err.12
+//   %kizu.array.deinit.data.7 = extractvalue %kizu.array %kizu.10, 0
+//   %kizu.array.deinit.cap.8 = extractvalue %kizu.array %kizu.10, 2
+//   %kizu.array.deinit.bytes.9 = mul i64 %kizu.array.deinit.cap.8, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.7, i64 %kizu.array.deinit.bytes.9)
+//   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.10.base = insertvalue %kizu.error.i64 zeroinitializer, i8 0, 0
+//   %kizu.try.err.10 = insertvalue %kizu.error.i64 %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 2
+//   ret %kizu.error.i64 %kizu.try.err.10
 // kizu.11.try.ok:
 //   %kizu.13 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.3, i64 0)
 //   %kizu.15 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.3, i64 1)
@@ -665,11 +645,10 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.17.ok = insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0
 //   %kizu.17 = insertvalue %kizu.error.i64 %kizu.17.ok, i64 %kizu.16, 1
 //   %kizu.18 = load %kizu.array, ptr %kizu.3
-//   %kizu.array.deinit.data.13 = extractvalue %kizu.array %kizu.18, 0
-//   %kizu.array.deinit.cap.14 = extractvalue %kizu.array %kizu.18, 2
-//   %kizu.array.deinit.alloc.15 = extractvalue %kizu.array %kizu.18, 3
-//   %kizu.array.deinit.bytes.16 = mul i64 %kizu.array.deinit.cap.14, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.15, ptr %kizu.array.deinit.data.13, i64 %kizu.array.deinit.bytes.16)
+//   %kizu.array.deinit.data.11 = extractvalue %kizu.array %kizu.18, 0
+//   %kizu.array.deinit.cap.12 = extractvalue %kizu.array %kizu.18, 2
+//   %kizu.array.deinit.bytes.13 = mul i64 %kizu.array.deinit.cap.12, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.11, i64 %kizu.array.deinit.bytes.13)
 //   ret %kizu.error.i64 %kizu.17
 // }
 // 
@@ -686,9 +665,8 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 4096, 1
 //   %kizu.5 = call ptr @std__mem__fixed_buffer(%kizu.slice.u8 %kizu.4)
-//   %kizu.6 = insertvalue %kizu.array zeroinitializer, ptr %kizu.5, 3
-//   store %kizu.array %kizu.6, ptr %kizu.7
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, i64 41)
+//   store %kizu.array zeroinitializer, ptr %kizu.7
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, ptr %kizu.5, i64 41)
 //   %kizu.10 = load %kizu.array, ptr %kizu.7
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -696,29 +674,27 @@ test "fixed buffer is reusable between rounds" {
 // kizu.11.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.10, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.10, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
-//   ret %kizu.error.void %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
+//   ret %kizu.error.void %kizu.try.err.5
 // kizu.11.try.ok:
-//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, i64 1)
+//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, ptr %kizu.5, i64 1)
 //   %kizu.14 = load %kizu.array, ptr %kizu.7
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   %kizu.array.deinit.data.8 = extractvalue %kizu.array %kizu.14, 0
-//   %kizu.array.deinit.cap.9 = extractvalue %kizu.array %kizu.14, 2
-//   %kizu.array.deinit.alloc.10 = extractvalue %kizu.array %kizu.14, 3
-//   %kizu.array.deinit.bytes.11 = mul i64 %kizu.array.deinit.cap.9, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.10, ptr %kizu.array.deinit.data.8, i64 %kizu.array.deinit.bytes.11)
-//   %kizu.try.err.12.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
-//   %kizu.try.err.12.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.12 = insertvalue %kizu.error.void %kizu.try.err.12.base, i64 %kizu.try.err.12.code, 1
-//   ret %kizu.error.void %kizu.try.err.12
+//   %kizu.array.deinit.data.7 = extractvalue %kizu.array %kizu.14, 0
+//   %kizu.array.deinit.cap.8 = extractvalue %kizu.array %kizu.14, 2
+//   %kizu.array.deinit.bytes.9 = mul i64 %kizu.array.deinit.cap.8, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.7, i64 %kizu.array.deinit.bytes.9)
+//   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
+//   %kizu.try.err.10.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.10 = insertvalue %kizu.error.void %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 1
+//   ret %kizu.error.void %kizu.try.err.10
 // kizu.15.try.ok:
 //   %kizu.17 = call i64 @std__array__Array_len_i64(ptr %kizu.7)
 //   %kizu.18.ok = icmp eq i64 2, %kizu.17
@@ -739,7 +715,7 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.25.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
 //   %kizu.25.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.25.ptr, 0
 //   %kizu.25 = insertvalue %kizu.slice.u8 %kizu.25.base, i64 5, 1
-//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.24, %kizu.slice.u8 %kizu.25)
+//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.24, ptr %kizu.5, %kizu.slice.u8 %kizu.25)
 //   %kizu.27 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   %kizu.28 = load %kizu.array, ptr %kizu.7
 //   %kizu.29.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 0
@@ -747,15 +723,14 @@ test "fixed buffer is reusable between rounds" {
 //   br i1 %kizu.29.ok.bool, label %kizu.29.try.ok, label %kizu.29.try.err
 // kizu.29.try.err:
 //   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.27, ptr %kizu.5)
-//   %kizu.array.deinit.data.15 = extractvalue %kizu.array %kizu.28, 0
-//   %kizu.array.deinit.cap.16 = extractvalue %kizu.array %kizu.28, 2
-//   %kizu.array.deinit.alloc.17 = extractvalue %kizu.array %kizu.28, 3
-//   %kizu.array.deinit.bytes.18 = mul i64 %kizu.array.deinit.cap.16, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.17, ptr %kizu.array.deinit.data.15, i64 %kizu.array.deinit.bytes.18)
-//   %kizu.try.err.19.code = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 1
-//   %kizu.try.err.19.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.19 = insertvalue %kizu.error.void %kizu.try.err.19.base, i64 %kizu.try.err.19.code, 1
-//   ret %kizu.error.void %kizu.try.err.19
+//   %kizu.array.deinit.data.13 = extractvalue %kizu.array %kizu.28, 0
+//   %kizu.array.deinit.cap.14 = extractvalue %kizu.array %kizu.28, 2
+//   %kizu.array.deinit.bytes.15 = mul i64 %kizu.array.deinit.cap.14, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.13, i64 %kizu.array.deinit.bytes.15)
+//   %kizu.try.err.16.code = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 1
+//   %kizu.try.err.16.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.16 = insertvalue %kizu.error.void %kizu.try.err.16.base, i64 %kizu.try.err.16.code, 1
+//   ret %kizu.error.void %kizu.try.err.16
 // kizu.29.try.ok:
 //   %kizu.31 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   %kizu.32 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.31)
@@ -781,20 +756,20 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.38.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.38.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.38.ptr, 0
 //   %kizu.38 = insertvalue %kizu.slice.u8 %kizu.38.base, i64 5, 1
-//   %kizu.arena.handle.null.20 = icmp eq ptr %kizu.34, null
-//   %kizu.arena.handle.21 = select i1 %kizu.arena.handle.null.20, ptr @kizu.arena.empty, ptr %kizu.34
-//   %kizu.arena.len.addr.22 = getelementptr %kizu.arena, ptr %kizu.arena.handle.21, i64 0, i32 1
-//   %kizu.arena.len.23 = load i64, ptr %kizu.arena.len.addr.22
-//   %kizu.arena.in_range.24 = icmp ult i64 %kizu.37, %kizu.arena.len.23
-//   %kizu.arena.elem_size.addr.25 = getelementptr %kizu.arena, ptr %kizu.arena.handle.21, i64 0, i32 3
-//   %kizu.arena.elem_size.26 = load i64, ptr %kizu.arena.elem_size.addr.25
-//   %kizu.arena.offset.27 = mul i64 %kizu.37, %kizu.arena.elem_size.26
-//   %kizu.arena.data.addr.28 = getelementptr %kizu.arena, ptr %kizu.arena.handle.21, i64 0, i32 0
-//   %kizu.arena.data.29 = load ptr, ptr %kizu.arena.data.addr.28
-//   %kizu.arena.elem.30 = getelementptr i8, ptr %kizu.arena.data.29, i64 %kizu.arena.offset.27
-//   %kizu.39.ptr = select i1 %kizu.arena.in_range.24, ptr %kizu.arena.elem.30, ptr null
-//   %kizu.arena.at.is_null.31 = icmp eq ptr %kizu.39.ptr, null
-//   br i1 %kizu.arena.at.is_null.31, label %kizu.39.ptr.arena.at.null, label %kizu.39.ptr.ok
+//   %kizu.arena.handle.null.17 = icmp eq ptr %kizu.34, null
+//   %kizu.arena.handle.18 = select i1 %kizu.arena.handle.null.17, ptr @kizu.arena.empty, ptr %kizu.34
+//   %kizu.arena.len.addr.19 = getelementptr %kizu.arena, ptr %kizu.arena.handle.18, i64 0, i32 1
+//   %kizu.arena.len.20 = load i64, ptr %kizu.arena.len.addr.19
+//   %kizu.arena.in_range.21 = icmp ult i64 %kizu.37, %kizu.arena.len.20
+//   %kizu.arena.elem_size.addr.22 = getelementptr %kizu.arena, ptr %kizu.arena.handle.18, i64 0, i32 3
+//   %kizu.arena.elem_size.23 = load i64, ptr %kizu.arena.elem_size.addr.22
+//   %kizu.arena.offset.24 = mul i64 %kizu.37, %kizu.arena.elem_size.23
+//   %kizu.arena.data.addr.25 = getelementptr %kizu.arena, ptr %kizu.arena.handle.18, i64 0, i32 0
+//   %kizu.arena.data.26 = load ptr, ptr %kizu.arena.data.addr.25
+//   %kizu.arena.elem.27 = getelementptr i8, ptr %kizu.arena.data.26, i64 %kizu.arena.offset.24
+//   %kizu.39.ptr = select i1 %kizu.arena.in_range.21, ptr %kizu.arena.elem.27, ptr null
+//   %kizu.arena.at.is_null.28 = icmp eq ptr %kizu.39.ptr, null
+//   br i1 %kizu.arena.at.is_null.28, label %kizu.39.ptr.arena.at.null, label %kizu.39.ptr.ok
 // kizu.39.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
@@ -815,11 +790,10 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.43 = load %kizu.struct.std__string__String, ptr %kizu.24
 //   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.43, ptr %kizu.5)
 //   %kizu.45 = load %kizu.array, ptr %kizu.7
-//   %kizu.array.deinit.data.32 = extractvalue %kizu.array %kizu.45, 0
-//   %kizu.array.deinit.cap.33 = extractvalue %kizu.array %kizu.45, 2
-//   %kizu.array.deinit.alloc.34 = extractvalue %kizu.array %kizu.45, 3
-//   %kizu.array.deinit.bytes.35 = mul i64 %kizu.array.deinit.cap.33, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.34, ptr %kizu.array.deinit.data.32, i64 %kizu.array.deinit.bytes.35)
+//   %kizu.array.deinit.data.29 = extractvalue %kizu.array %kizu.45, 0
+//   %kizu.array.deinit.cap.30 = extractvalue %kizu.array %kizu.45, 2
+//   %kizu.array.deinit.bytes.31 = mul i64 %kizu.array.deinit.cap.30, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.29, i64 %kizu.array.deinit.bytes.31)
 //   %kizu.47 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.47
 // }
@@ -854,9 +828,8 @@ test "fixed buffer is reusable between rounds" {
 // kizu.12.ok.ok:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.8, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.8, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.8, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
 //   %kizu.14 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.14
 // }
@@ -872,9 +845,8 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 512, 1
 //   %kizu.5 = call ptr @scratch_alloc(%kizu.slice.u8 %kizu.4)
-//   %kizu.6 = insertvalue %kizu.array zeroinitializer, ptr %kizu.5, 3
-//   store %kizu.array %kizu.6, ptr %kizu.7
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, i64 11)
+//   store %kizu.array zeroinitializer, ptr %kizu.7
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.7, ptr %kizu.5, i64 11)
 //   %kizu.10 = load %kizu.array, ptr %kizu.7
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -882,13 +854,12 @@ test "fixed buffer is reusable between rounds" {
 // kizu.11.try.err:
 //   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.10, 0
 //   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.10, 3
-//   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
-//   ret %kizu.error.void %kizu.try.err.6
+//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
+//   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
+//   ret %kizu.error.void %kizu.try.err.5
 // kizu.11.try.ok:
 //   %kizu.14 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.7, i64 0)
 //   %kizu.15.ok = icmp eq i64 11, %kizu.14
@@ -898,11 +869,10 @@ test "fixed buffer is reusable between rounds" {
 //   unreachable
 // kizu.15.ok.ok:
 //   %kizu.16 = load %kizu.array, ptr %kizu.7
-//   %kizu.array.deinit.data.7 = extractvalue %kizu.array %kizu.16, 0
-//   %kizu.array.deinit.cap.8 = extractvalue %kizu.array %kizu.16, 2
-//   %kizu.array.deinit.alloc.9 = extractvalue %kizu.array %kizu.16, 3
-//   %kizu.array.deinit.bytes.10 = mul i64 %kizu.array.deinit.cap.8, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.9, ptr %kizu.array.deinit.data.7, i64 %kizu.array.deinit.bytes.10)
+//   %kizu.array.deinit.data.6 = extractvalue %kizu.array %kizu.16, 0
+//   %kizu.array.deinit.cap.7 = extractvalue %kizu.array %kizu.16, 2
+//   %kizu.array.deinit.bytes.8 = mul i64 %kizu.array.deinit.cap.7, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.6, i64 %kizu.array.deinit.bytes.8)
 //   %kizu.18 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.18
 // }

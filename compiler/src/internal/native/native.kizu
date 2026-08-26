@@ -54,7 +54,7 @@ pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
     var base = try string::from_bytes(allocator, dir);
     errdefer base.deinit(allocator);
     if base.len() == 0 {
-        try base.append_bytes("/tmp");
+        try base.append_bytes(allocator, "/tmp");
     }
     return TempDirs { base: move base, stamp: process::monotonic_millis(), next: 0 };
 }
@@ -63,17 +63,17 @@ pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
 pub fn (self: &var TempDirs) claim_dir(io: Io, allocator: Allocator) -> !string::String {
     var dir = string::new(allocator);
     defer dir.deinit(allocator);
-    try dir.append_string(&self.base);
-    try dir.append_bytes("/kizu-native-");
-    try fmt::append_i64(&var dir, self.stamp);
-    try dir.append_bytes("-");
-    try fmt::append_i64(&var dir, self.next);
+    try dir.append_string(allocator, &self.base);
+    try dir.append_bytes(allocator, "/kizu-native-");
+    try fmt::append_i64(allocator, &var dir, self.stamp);
+    try dir.append_bytes(allocator, "-");
+    try fmt::append_i64(allocator, &var dir, self.next);
     self.next = self.next + 1;
     let dir_bytes = dir.as_bytes();
     try fs::create_dir(io, dir_bytes);
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_string(&dir);
+    try out.append_string(allocator, &dir);
     return move out;
 }
 
@@ -157,7 +157,7 @@ pub fn executable(
     var target_spelling = string::new(allocator);
     defer target_spelling.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
-    try executable_cache_target(options, &host, runtime_bytes, &var target_spelling);
+    try executable_cache_target(allocator, options, &host, runtime_bytes, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
     let ir_bytes = llvm_ir.as_bytes();
     let plan = try cache.get_or_build_artifact(
@@ -176,7 +176,7 @@ pub fn executable(
             errdefer pending.deinit(allocator);
             var scratch_copy = string::new(allocator);
             defer scratch_copy.deinit(allocator);
-            try scratch_copy.append_string(&pending.scratch);
+            try scratch_copy.append_string(allocator, &pending.scratch);
             let dir = try temps.claim_dir(io, allocator);
             defer dir.deinit(allocator);
             let dir_bytes = dir.as_bytes();
@@ -214,9 +214,9 @@ fn host_key(
     defer probe.deinit(allocator);
     var script = string::new(allocator);
     defer script.deinit(allocator);
-    try script.append_bytes("PATH=/usr/bin:/bin uname -sm > '");
-    try script.append_string(&probe);
-    try script.append_bytes("'");
+    try script.append_bytes(allocator, "PATH=/usr/bin:/bin uname -sm > '");
+    try script.append_string(allocator, &probe);
+    try script.append_bytes(allocator, "'");
     let script_bytes = script.as_bytes();
     let code = try process::spawn_wait8(3, "/bin/sh", "-c", script_bytes, "", "", "", "", "");
     if code != 0 {
@@ -232,7 +232,7 @@ fn host_key(
         end = end - 1;
     }
     let trimmed = answer[0..end];
-    let mapped = try append_host_of(trimmed, out);
+    let mapped = try append_host_of(allocator, trimmed, out);
     try clean_build_dir(io, allocator, dir_bytes);
     if !mapped {
         return try fail_parts(allocator, "native error: unsupported host `", trimmed, "`");
@@ -241,21 +241,21 @@ fn host_key(
 }
 
 /// Maps one `uname -sm` answer to the Go `GOOS-GOARCH` spelling.
-fn append_host_of(answer: []u8, out: &var string::String) -> !bool {
+fn append_host_of(allocator: Allocator, answer: []u8, out: &var string::String) -> !bool {
     if mem::equal_bytes(answer, "Darwin arm64") {
-        try out.append_bytes("darwin-arm64");
+        try out.append_bytes(allocator, "darwin-arm64");
         return true;
     }
     if mem::equal_bytes(answer, "Darwin x86_64") {
-        try out.append_bytes("darwin-amd64");
+        try out.append_bytes(allocator, "darwin-amd64");
         return true;
     }
     if mem::equal_bytes(answer, "Linux x86_64") {
-        try out.append_bytes("linux-amd64");
+        try out.append_bytes(allocator, "linux-amd64");
         return true;
     }
     if mem::equal_bytes(answer, "Linux aarch64") {
-        try out.append_bytes("linux-arm64");
+        try out.append_bytes(allocator, "linux-arm64");
         return true;
     }
     return false;
@@ -263,50 +263,50 @@ fn append_host_of(answer: []u8, out: &var string::String) -> !bool {
 
 /// Spells what changes the runtime object but is not in its source, the Go
 /// `runtimeCacheTarget` over `toolchainKey`, `/`-joined in the same order.
-fn runtime_cache_target(
+fn runtime_cache_target(allocator: Allocator, 
     options: &Options,
     host: &string::String,
     out: &var string::String
 ) -> !void {
-    try out.append_bytes("native-runtime");
-    return append_toolchain_key(options, host, out);
+    try out.append_bytes(allocator, "native-runtime");
+    return append_toolchain_key(allocator, options, host, out);
 }
 
 /// Spells what the executable is made of besides the IR, the Go
 /// `executableCacheTarget`: the toolchain key and the runtime object's own
 /// stored name, so a program built against an older runtime is a different
 /// artifact rather than the same one.
-fn executable_cache_target(
+fn executable_cache_target(allocator: Allocator, 
     options: &Options,
     host: &string::String,
     runtime_path: []u8,
     out: &var string::String
 ) -> !void {
-    try out.append_bytes("native-exe");
-    try append_toolchain_key(options, host, out);
-    try out.append_byte(cast<u8>(47));
+    try out.append_bytes(allocator, "native-exe");
+    try append_toolchain_key(allocator, options, host, out);
+    try out.append_byte(allocator, cast<u8>(47));
     let base = path::basename(runtime_path);
-    return out.append_bytes(base);
+    return out.append_bytes(allocator, base);
 }
 
 /// Appends the Go `toolchainKey` parts, `/`-joined: the driver, the host
 /// it builds on, and the flags it is asked to honour.
-fn append_toolchain_key(
+fn append_toolchain_key(allocator: Allocator, 
     options: &Options,
     host: &string::String,
     out: &var string::String
 ) -> !void {
-    try out.append_byte(cast<u8>(47));
-    try out.append_string(&options.linker);
-    try out.append_byte(cast<u8>(47));
-    try out.append_string(host);
+    try out.append_byte(allocator, cast<u8>(47));
+    try out.append_string(allocator, &options.linker);
+    try out.append_byte(allocator, cast<u8>(47));
+    try out.append_string(allocator, host);
     if options.triple.len() > 0 {
-        try out.append_bytes("/-target/");
-        try out.append_string(&options.triple);
+        try out.append_bytes(allocator, "/-target/");
+        try out.append_string(allocator, &options.triple);
     }
-    try out.append_byte(cast<u8>(47));
+    try out.append_byte(allocator, cast<u8>(47));
     let level = clang_optimization_flag(options.opt);
-    return out.append_bytes(level);
+    return out.append_bytes(allocator, level);
 }
 
 /// Removes the transient inputs a build wrote into one claimed temporary
@@ -406,10 +406,10 @@ fn runtime_object(
     var source = string::new(allocator);
     defer source.deinit(allocator);
     try error_set_constants(allocator, sets, &var source);
-    try source.append_bytes(runtime_source());
+    try source.append_bytes(allocator, runtime_source());
     var target_spelling = string::new(allocator);
     defer target_spelling.deinit(allocator);
-    try runtime_cache_target(options, host, &var target_spelling);
+    try runtime_cache_target(allocator, options, host, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
     let source_bytes = source.as_bytes();
     let plan = try cache.get_or_build_artifact(
@@ -428,7 +428,7 @@ fn runtime_object(
             errdefer pending.deinit(allocator);
             var scratch_copy = string::new(allocator);
             defer scratch_copy.deinit(allocator);
-            try scratch_copy.append_string(&pending.scratch);
+            try scratch_copy.append_string(allocator, &pending.scratch);
             let dir = try temps.claim_dir(io, allocator);
             defer dir.deinit(allocator);
             let dir_bytes = dir.as_bytes();
@@ -530,8 +530,8 @@ fn error_set_constants(
     var names = array::new<string::String>(allocator);
     defer names.deinit(allocator);
     try sorted_keys<map::Map<[]u8, i64>>(allocator, sets, &var names);
-    try out.append_bytes("/* Generated from the error set declarations. */");
-    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(allocator, "/* Generated from the error set declarations. */");
+    try out.append_byte(allocator, cast<u8>(10));
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
@@ -545,15 +545,15 @@ fn error_set_constants(
                 spelling_index = spelling_index + 1;
                 let member_bytes = member.as_bytes();
                 let code = members.get(member_bytes) orelse 0;
-                try out.append_bytes("#define ");
+                try out.append_bytes(allocator, "#define ");
                 try append_error_constant(allocator, name_bytes, member_bytes, out);
-                try out.append_bytes(" ");
-                try fmt::append_i64(out, code);
-                try out.append_byte(cast<u8>(10));
+                try out.append_bytes(allocator, " ");
+                try fmt::append_i64(allocator, out, code);
+                try out.append_byte(allocator, cast<u8>(10));
             }
         }
     }
-    try out.append_byte(cast<u8>(10));
+    try out.append_byte(allocator, cast<u8>(10));
     return;
 }
 
@@ -568,7 +568,7 @@ fn sorted_keys<V>(
     while source.key_at(index) |key| {
         index = index + 1;
         let name = try string::from_bytes(allocator, key);
-        try out.append(move name);
+        try out.append(allocator, move name);
     }
     return sort::strings(out);
 }
@@ -577,7 +577,7 @@ fn sorted_keys<V>(
 /// `::` and `.` in the set name become `_`, and everything is uppercased,
 /// written straight into the constants text.
 fn append_error_constant(allocator: Allocator, set: []u8, member: []u8, out: &var string::String) -> !void {
-    try out.append_bytes("KIZU_ERR_");
+    try out.append_bytes(allocator, "KIZU_ERR_");
     var index = 0;
     while index < mem::len(set) {
         let byte = set[index];
@@ -586,12 +586,12 @@ fn append_error_constant(allocator: Allocator, set: []u8, member: []u8, out: &va
             if byte == cast<u8>(58) {
                 index = index + 1;
             }
-            try out.append_byte(cast<u8>(95));
+            try out.append_byte(allocator, cast<u8>(95));
             continue;
         }
-        try append_upper_byte(out, byte);
+        try append_upper_byte(allocator, out, byte);
     }
-    try out.append_byte(cast<u8>(95));
+    try out.append_byte(allocator, cast<u8>(95));
     let snake = try camel_to_snake(allocator, member);
     defer snake.deinit(allocator);
     let total = snake.len();
@@ -600,17 +600,17 @@ fn append_error_constant(allocator: Allocator, set: []u8, member: []u8, out: &va
         let snake_bytes = snake.as_bytes();
         let byte = snake_bytes[index];
         index = index + 1;
-        try append_upper_byte(out, byte);
+        try append_upper_byte(allocator, out, byte);
     }
     return;
 }
 
 /// Appends one byte with a lowercase letter raised to uppercase.
-fn append_upper_byte(out: &var string::String, byte: u8) -> !void {
+fn append_upper_byte(allocator: Allocator, out: &var string::String, byte: u8) -> !void {
     if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
-        return out.append_byte(byte - cast<u8>(32));
+        return out.append_byte(allocator, byte - cast<u8>(32));
     }
-    return out.append_byte(byte);
+    return out.append_byte(allocator, byte);
 }
 
 /// Separates the words in a member name for the C spelling, the Go
@@ -622,9 +622,9 @@ fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
     while index < mem::len(name) {
         let byte = name[index];
         if index > 0 and byte >= cast<u8>(65) and byte <= cast<u8>(90) {
-            try out.append_byte(cast<u8>(95));
+            try out.append_byte(allocator, cast<u8>(95));
         }
-        try out.append_byte(byte);
+        try out.append_byte(allocator, byte);
         index = index + 1;
     }
     return move out;
@@ -685,7 +685,7 @@ fn append_copy(
     bytes: []u8
 ) -> !void {
     let value = try string::from_bytes(allocator, bytes);
-    try command.append(move value);
+    try command.append(allocator, move value);
     return;
 }
 
@@ -698,9 +698,9 @@ fn append_copy(
 fn fail_linker(allocator: Allocator, options: &Options, code: i64) -> !diagnostic::Diagnostic {
     var message = try string::from_bytes(allocator, "native error: ");
     defer message.deinit(allocator);
-    try message.append_string(&options.linker);
-    try message.append_bytes(" failed: exit status ");
-    try fmt::append_i64(&var message, code);
+    try message.append_string(allocator, &options.linker);
+    try message.append_bytes(allocator, " failed: exit status ");
+    try fmt::append_i64(allocator, &var message, code);
     let text = message.as_bytes();
     return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
@@ -710,8 +710,8 @@ fn fail_linker(allocator: Allocator, options: &Options, code: i64) -> !diagnosti
 fn fail_parts(allocator: Allocator, before: []u8, value: []u8, after: []u8) -> !diagnostic::Diagnostic {
     var message = try string::from_bytes(allocator, before);
     defer message.deinit(allocator);
-    try message.append_bytes(value);
-    try message.append_bytes(after);
+    try message.append_bytes(allocator, value);
+    try message.append_bytes(allocator, after);
     let text = message.as_bytes();
     return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
@@ -761,12 +761,12 @@ fn write_metadata(
     try encoder.end_object();
     var out = string::new(allocator);
     defer out.deinit(allocator);
-    try encoder.finish_into(&var out);
-    try out.append_byte(cast<u8>(10));
+    try encoder.finish_into(allocator, &var out);
+    try out.append_byte(allocator, cast<u8>(10));
     var target = string::new(allocator);
     defer target.deinit(allocator);
-    try target.append_string(&options.output);
-    try target.append_bytes(".kizu-build.json");
+    try target.append_string(allocator, &options.output);
+    try target.append_bytes(allocator, ".kizu-build.json");
     let target_bytes = target.as_bytes();
     let text = out.as_bytes();
     try fs::write_file(io, target_bytes, text);

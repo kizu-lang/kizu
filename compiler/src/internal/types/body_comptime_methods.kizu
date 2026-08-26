@@ -42,7 +42,7 @@ fn (self: &var Checker) check_comptime_if_stmt(
             let got = try self.comptime_value_type(condition);
             var message = string::new(self.allocator);
             errdefer message.deinit(self.allocator);
-            try message.append_bytes("if condition must be bool, got ");
+            try message.append_bytes(self.allocator, "if condition must be bool, got ");
             try self.append_checker_type(&var message, got);
             return try self.comptime_message(move message);
         },
@@ -236,7 +236,7 @@ fn (self: &var Checker) variant_meta_fields(
             let retained_tag = tree.texts.at(tag.node);
             let tag_name = retained_tag.as_bytes();
             let handle = try self.retain_meta_field(owner, tag_name, empty_type(), true);
-            try out.append(handle);
+            try out.append(self.allocator, handle);
             index = index + 1;
         }
         return null;
@@ -250,7 +250,7 @@ fn (self: &var Checker) variant_meta_fields(
             defer variant.deinit(self.allocator);
             let variant_name = variant.name.as_bytes();
             let handle = try self.retain_meta_field(owner, variant_name, variant.payload, true);
-            try out.append(handle);
+            try out.append(self.allocator, handle);
         }
         index = index + 1;
     }
@@ -288,7 +288,7 @@ fn (self: &Checker) copy_union_variant(handle: UnionHandle, index: i64) -> !?Uni
 fn (self: &Checker) meta_variants_type_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("`std::meta::variants` expects an enum or union, got ");
+    try message.append_bytes(self.allocator, "`std::meta::variants` expects an enum or union, got ");
     try self.append_checker_type(&var message, owner);
     return self.comptime_message(move message);
 }
@@ -351,7 +351,7 @@ fn (self: &Checker) expand_comptime_match(
         let field = self.meta_field_entries.at(handle.node);
         let field_name = field.name.as_bytes();
         let name = try tree.add_text_from_bytes(field_name);
-        try meta_variants.append(ast::MetaVariant {
+        try meta_variants.append(self.allocator, ast::MetaVariant {
             name: name,
             has_payload: !same_type(field.type_name, empty_type())
         });
@@ -362,8 +362,7 @@ fn (self: &Checker) expand_comptime_match(
     let owner_bytes = owner_name.as_bytes();
     let owner_text = try tree.add_text_from_bytes(owner_bytes);
     let empty = tree.add_empty_text();
-    let expanded = try ast::comptime_match_expansion(
-        self.allocator, statement, owner_text, empty, &meta_variants
+    let expanded = try ast::comptime_match_expansion(self.allocator, statement, owner_text, empty, &meta_variants
     );
     return tree.add_statement(ast::StatementNode::Match(move expanded));
 }
@@ -371,7 +370,7 @@ fn (self: &Checker) expand_comptime_match(
 fn (self: &Checker) comptime_match_subject_error(value_type: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("comptime match expects an enum or union, got ");
+    try message.append_bytes(self.allocator, "comptime match expects an enum or union, got ");
     try self.append_checker_type(&var message, value_type);
     return self.comptime_message(move message);
 }
@@ -379,9 +378,9 @@ fn (self: &Checker) comptime_match_subject_error(value_type: Type) -> !diagnosti
 fn (self: &Checker) comptime_match_capture_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("comptime match on `");
+    try message.append_bytes(self.allocator, "comptime match on `");
     try self.append_checker_type(&var message, owner);
-    try message.append_bytes(
+    try message.append_bytes(self.allocator, 
         "` needs a payload capture, as in `comptime match value |variant, payload| { ... }`"
     );
     return self.comptime_message(move message);
@@ -452,7 +451,7 @@ fn (self: &var Checker) check_box_std_method(
 ) -> !?diagnostic::Diagnostic {
     var type_args = array::new<Type>(self.allocator);
     defer type_args.deinit(self.allocator);
-    try type_args.append(elem);
+    try type_args.append(self.allocator, elem);
     return self.check_std_method(
         tree,
         scope,
@@ -469,9 +468,9 @@ fn (self: &var Checker) check_box_std_method(
 fn (self: &Checker) box_local_receiver_error(name: []u8) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("`Box.");
-    try message.append_bytes(name);
-    try message.append_bytes("` requires local Box receiver");
+    try message.append_bytes(self.allocator, "`Box.");
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` requires local Box receiver");
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
@@ -511,9 +510,9 @@ fn (self: &var Checker) check_string_receiver_method(
             !self.scopes.is_mut_borrowed(scope, binding) {
             var message = string::new(self.allocator);
             errdefer message.deinit(self.allocator);
-            try message.append_bytes("`String.");
-            try message.append_bytes(name);
-            try message.append_bytes("` requires mutable String receiver");
+            try message.append_bytes(self.allocator, "`String.");
+            try message.append_bytes(self.allocator, name);
+            try message.append_bytes(self.allocator, "` requires mutable String receiver");
             return try self.checker_message_at("type error", ast::zero_span(), move message);
         }
     }
@@ -559,11 +558,11 @@ fn (self: &var Checker) check_string_method(
         mem::equal_bytes(name, "as_mut_bytes") {
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
-        try message.append_bytes("`String.");
-        try message.append_bytes(name);
-        try message.append_bytes("` must be bound with `let name = string.");
-        try message.append_bytes(name);
-        try message.append_bytes("()`");
+        try message.append_bytes(self.allocator, "`String.");
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "` must be bound with `let name = string.");
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "()`");
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     if mem::equal_bytes(name, "clear") {
@@ -592,10 +591,19 @@ fn (self: &var Checker) check_string_mutator_arg(
     name: []u8,
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
-    if args.len(tree) != 1 {
-        return try self.string_method_arg_count_error(name, args.len(tree));
+    // A growth names the allocator its storage comes from first: a String
+    // keeps none of its own (ADR-0132). `truncate` neither grows nor frees.
+    var offset = 0;
+    if is_string_grow_method(name) {
+        offset = 1;
+        if try self.check_string_grow_allocator(tree, scope, name, args) |problem| {
+            return move problem;
+        }
     }
-    let argument = args.get_or_panic(tree, 0);
+    if args.len(tree) != offset + 1 {
+        return try self.string_method_arg_count_error(name, offset + 1, args.len(tree));
+    }
+    let argument = args.get_or_panic(tree, offset);
     var got = empty_type();
     if mem::equal_bytes(name, "append_byte") {
         let want = try self.types.u8_type();
@@ -630,13 +638,47 @@ fn (self: &var Checker) check_string_mutator_arg(
     return null;
 }
 
-fn (self: &Checker) string_method_arg_count_error(name: []u8, got: i64) -> !diagnostic::Diagnostic {
+fn (self: &Checker) string_method_arg_count_error(
+    name: []u8,
+    expected: i64,
+    got: i64
+) -> !diagnostic::Diagnostic {
     var label = string::new(self.allocator);
     defer label.deinit(self.allocator);
-    try label.append_bytes("String.");
-    try label.append_bytes(name);
+    try label.append_bytes(self.allocator, "String.");
+    try label.append_bytes(self.allocator, name);
     let label_bytes = label.as_bytes();
-    return self.named_arity_error(label_bytes, 1, got);
+    return self.named_arity_error(label_bytes, expected, got);
+}
+
+/// Reports the String methods that may ask for storage.
+fn is_string_grow_method(name: []u8) -> bool {
+    return mem::equal_bytes(name, "append_bytes") or
+        mem::equal_bytes(name, "append_byte") or
+        mem::equal_bytes(name, "append_string") or
+        mem::equal_bytes(name, "reserve");
+}
+
+/// Validates the leading Allocator a String growth names.
+fn (self: &var Checker) check_string_grow_allocator(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 2 {
+        return try self.string_method_arg_count_error(name, 2, args.len(tree));
+    }
+    let argument = args.get_or_panic(tree, 0);
+    var got = empty_type();
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "Allocator") {
+        let allocator_type = try self.types.intern("Allocator");
+        return try self.std_method_arg_error("String", name, allocator_type, got);
+    }
+    return null;
 }
 
 fn (self: &Checker) string_method_string_arg_error(
@@ -645,9 +687,9 @@ fn (self: &Checker) string_method_string_arg_error(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("`String.");
-    try message.append_bytes(name);
-    try message.append_bytes("` expects String, got ");
+    try message.append_bytes(self.allocator, "`String.");
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` expects String, got ");
     try self.append_checker_type(&var message, got);
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
@@ -692,9 +734,9 @@ fn (self: &var Checker) check_arena_method(
     }
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("unknown arena method `");
-    try message.append_bytes(name);
-    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(self.allocator, "unknown arena method `");
+    try message.append_bytes(self.allocator, name);
+    try message.append_byte(self.allocator, cast<u8>(96));
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
@@ -839,11 +881,11 @@ fn (self: &Checker) labeled_arg_type_error(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(label);
-    try message.append_bytes("` expects ");
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, label);
+    try message.append_bytes(self.allocator, "` expects ");
     try self.append_checker_type(&var message, want);
-    try message.append_bytes(", got ");
+    try message.append_bytes(self.allocator, ", got ");
     try self.append_checker_type(&var message, got);
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
@@ -863,8 +905,8 @@ fn (self: &Checker) check_under_mark(
             "`unsafe` covers no operation that needs it"
         );
         errdefer failure.deinit(self.allocator);
-        try failure.with_code("unsafe.unused_marker");
-        try failure.with_help("remove `unsafe`");
+        try failure.with_code(self.allocator, "unsafe.unused_marker");
+        try failure.with_help(self.allocator, "remove `unsafe`");
         return move failure;
     }
     let safety = tree.texts.at(expression.safety.node);
@@ -875,8 +917,8 @@ fn (self: &Checker) check_under_mark(
             "`unsafe` needs a `// SAFETY:` comment on its statement"
         );
         errdefer failure.deinit(self.allocator);
-        try failure.with_code("unsafe.missing_safety_comment");
-        try failure.with_help("write `// SAFETY: <why this holds>` on the line above");
+        try failure.with_code(self.allocator, "unsafe.missing_safety_comment");
+        try failure.with_help(self.allocator, "write `// SAFETY: <why this holds>` on the line above");
         return move failure;
     }
     return null;
@@ -959,9 +1001,9 @@ fn (self: &var Checker) check_function(
         !self.function_implicit_return(function) and !returns {
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
-        try message.append_bytes("function `");
-        try message.append_bytes(name);
-        try message.append_bytes("` must return ");
+        try message.append_bytes(self.allocator, "function `");
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "` must return ");
         try self.append_checker_type(&var message, facts.return_type);
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
@@ -1010,7 +1052,7 @@ fn (self: &var Checker) check_test_decl(
     let source_name = retained_name.as_bytes();
     var name = try string::from_bytes(self.allocator, "test ");
     errdefer name.deinit(self.allocator);
-    try fmt::append_bytes_literal(&var name, source_name);
+    try fmt::append_bytes_literal(self.allocator, &var name, source_name);
     let return_type = try self.types.intern("!void");
     let signature = FunctionSignatureType {
         extern_abi: string::new(self.allocator),
@@ -1031,7 +1073,7 @@ fn (self: &var Checker) check_test_decl(
         implicit_return: true
     };
     let handle = FunctionHandle { index: self.metadata.functions.len() };
-    try self.metadata.functions.append(move function);
+    try self.metadata.functions.append(self.allocator, move function);
     if try self.check_function(tree, handle) |problem| {
         self.discard_test_function();
         return move problem;

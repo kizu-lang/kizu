@@ -166,6 +166,11 @@ fn expr_ident_uses(
         },
         Cast(value) => return expr_ident_uses(tree, value.value, at, out, force, count),
         Try(value) => return expr_ident_uses(tree, value.value, at, out, force, count),
+        // A hand-off reads the place it hands off. Missing it here would end
+        // the value's live range at its previous statement, and everything a
+        // last use releases -- the borrows it holds, the allocator it is tied
+        // to -- would be released one statement early.
+        Move(value) => return expr_ident_uses(tree, value.value, at, out, force, count),
         StructLiteral(value) => {
             var index = 0;
             while value.fields.get(index) |field| {
@@ -257,9 +262,10 @@ fn (self: &Checker) last_use_of(value: BindingHandle, last_uses: &map::Map<[]u8,
 /// Moves a binding's borrow targets out, leaving it with none, the Go
 /// `targets := value.borrowTargets; value.borrowTargets = nil`.
 fn (self: &var Checker) take_borrow_targets(value: BindingHandle, out: &var array::Array<BorrowSource>) -> !void {
+    let allocator = self.allocator;
     if self.store.binding_mut(value) |record| {
         while record.borrow_targets.pop() |source| {
-            try out.append(source);
+            try out.append(allocator, source);
         }
     }
     return;

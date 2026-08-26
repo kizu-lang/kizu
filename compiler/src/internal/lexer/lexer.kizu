@@ -199,7 +199,7 @@ fn (self: &var Lexer) attach_comments(out: &var token::Token) -> !void {
         let span = self.pending_doc.get_or_panic(index);
         var text = try owned_text(self.allocator, self.input[span.start..span.end]);
         errdefer text.deinit(self.allocator);
-        try out.doc_comments.append(move text);
+        try out.doc_comments.append(self.allocator, move text);
         index = index + 1;
     }
     index = 0;
@@ -207,7 +207,7 @@ fn (self: &var Lexer) attach_comments(out: &var token::Token) -> !void {
         let span = self.pending_safety.get_or_panic(index);
         var text = try owned_text(self.allocator, self.input[span.start..span.end]);
         errdefer text.deinit(self.allocator);
-        try out.safety.append(move text);
+        try out.safety.append(self.allocator, move text);
         index = index + 1;
     }
     return;
@@ -258,11 +258,11 @@ fn (self: &var Lexer) skip_ignored() -> !void {
             return;
         }
         if self.is_doc_comment_start() {
-            try self.pending_doc.append(self.read_doc_comment());
+            try self.pending_doc.append(self.allocator, self.read_doc_comment());
             continue;
         }
         if self.read_safety_comment() |span| {
-            try self.pending_safety.append(span);
+            try self.pending_safety.append(self.allocator, span);
             continue;
         }
         clear_spans(&var self.pending_doc);
@@ -365,10 +365,10 @@ fn (self: &var Lexer) read_multiline_string() -> !string::String {
             self.read_char();
         }
         if !first {
-            try out.append_byte(cast<u8>(10));
+            try out.append_byte(self.allocator, cast<u8>(10));
         }
         first = false;
-        try append_normalized_utf8(&var out, self.input[start..self.position]);
+        try append_normalized_utf8(self.allocator, &var out, self.input[start..self.position]);
         if !self.peek_multiline_continuation() {
             break;
         }
@@ -523,21 +523,21 @@ fn clear_spans(spans: &var array::Array<Span>) -> void {
 fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try append_normalized_utf8(&var out, bytes);
+    try append_normalized_utf8(allocator, &var out, bytes);
     return move out;
 }
 
-fn append_normalized_utf8(out: &var string::String, bytes: []u8) -> !void {
+fn append_normalized_utf8(allocator: Allocator, out: &var string::String, bytes: []u8) -> !void {
     var position = 0;
     let length = mem::len(bytes);
     while position < length {
         let scalar = decode_scalar(bytes, position);
         if scalar.valid {
-            try out.append_bytes(bytes[position..position + scalar.width]);
+            try out.append_bytes(allocator, bytes[position..position + scalar.width]);
         } else {
-            try out.append_byte(cast<u8>(239));
-            try out.append_byte(cast<u8>(191));
-            try out.append_byte(cast<u8>(189));
+            try out.append_byte(allocator, cast<u8>(239));
+            try out.append_byte(allocator, cast<u8>(191));
+            try out.append_byte(allocator, cast<u8>(189));
         }
         position = position + scalar.width;
     }

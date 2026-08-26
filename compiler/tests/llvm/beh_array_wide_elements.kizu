@@ -11,7 +11,7 @@ pub struct Wide {
 fn one(allocator: Allocator, byte: u8) -> !string::String {
     var text = string::new(allocator);
     errdefer text.deinit(allocator);
-    try text.append_byte(byte);
+    try text.append_byte(allocator, byte);
     return move text;
 }
 
@@ -30,9 +30,9 @@ test "array holds elements wider than a pointer" {
     let allocator = mem::page_allocator();
     var items = array::new<Wide>(allocator);
     defer items.deinit(allocator);
-    try items.append(try wide(allocator, cast<u8>(97)));
-    try items.append(try wide(allocator, cast<u8>(98)));
-    try items.append(try wide(allocator, cast<u8>(99)));
+    try items.append(allocator, try wide(allocator, cast<u8>(97)));
+    try items.append(allocator, try wide(allocator, cast<u8>(98)));
+    try items.append(allocator, try wide(allocator, cast<u8>(99)));
     testing::expect_equal<i64>(3, items.len());
     if items.at(2) |third| {
         testing::expect_equal<i64>(1, third.left.len());
@@ -50,8 +50,8 @@ test "generic array constructor measures its element" {
     let allocator = mem::page_allocator();
     var items = collect<Wide>(allocator);
     defer items.deinit(allocator);
-    try items.append(try wide(allocator, cast<u8>(120)));
-    try items.append(try wide(allocator, cast<u8>(121)));
+    try items.append(allocator, try wide(allocator, cast<u8>(120)));
+    try items.append(allocator, try wide(allocator, cast<u8>(121)));
     testing::expect_equal<i64>(2, items.len());
     if items.at(1) |second| {
         testing::expect_equal<i64>(1, second.right.len());
@@ -62,8 +62,6 @@ test "generic array constructor measures its element" {
 // emit:
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
-// %kizu.opt._Wide = type { i8, ptr }
-// 
 // %kizu.error.Wide = type { i8, %kizu.struct.Wide, i64 }
 // %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
 // %kizu.error.void = type { i8, i64 }
@@ -90,11 +88,11 @@ test "generic array constructor measures its element" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -102,12 +100,12 @@ test "generic array constructor measures its element" {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr, %kizu.struct.Wide)
-// declare %kizu.opt._Wide @std__array__Array_at_Wide(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr, ptr, %kizu.struct.Wide)
+// declare ptr @std__array__Array_at_Wide(ptr, i64)
 // declare void @std__array__Array_deinit_Wide(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_Wide(ptr)
 // declare ptr @std__mem__page_allocator()
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, ptr, i8)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
@@ -119,7 +117,7 @@ test "generic array constructor measures its element" {
 //   %kizu.2 = alloca %kizu.struct.std__string__String
 //   %kizu.1 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.allocator)
 //   store %kizu.struct.std__string__String %kizu.1, ptr %kizu.2
-//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr %kizu.2, i8 %kizu.byte)
+//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr %kizu.2, ptr %kizu.allocator, i8 %kizu.byte)
 //   %kizu.4 = load %kizu.struct.std__string__String, ptr %kizu.2
 //   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 0
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
@@ -183,8 +181,7 @@ test "generic array constructor measures its element" {
 // entry:
 //   %kizu.3 = alloca %kizu.array
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = insertvalue %kizu.array zeroinitializer, ptr %kizu.1, 3
-//   store %kizu.array %kizu.2, ptr %kizu.3
+//   store %kizu.array zeroinitializer, ptr %kizu.3
 //   %kizu.5 = trunc i64 97 to i8
 //   %kizu.6 = call %kizu.error.Wide @wide(ptr %kizu.1, i8 %kizu.5)
 //   %kizu.7 = load %kizu.array, ptr %kizu.3
@@ -199,7 +196,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.2
 // kizu.8.try.ok:
 //   %kizu.8 = extractvalue %kizu.error.Wide %kizu.6, 1
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.8)
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.8)
 //   %kizu.10 = load %kizu.array, ptr %kizu.3
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -225,7 +222,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.16.try.ok:
 //   %kizu.16 = extractvalue %kizu.error.Wide %kizu.14, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.16)
 //   %kizu.18 = load %kizu.array, ptr %kizu.3
 //   %kizu.19.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.19.ok.bool = icmp ne i8 %kizu.19.ok, 0
@@ -251,7 +248,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.10
 // kizu.24.try.ok:
 //   %kizu.24 = extractvalue %kizu.error.Wide %kizu.22, 1
-//   %kizu.25 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.24)
+//   %kizu.25 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.24)
 //   %kizu.26 = load %kizu.array, ptr %kizu.3
 //   %kizu.27.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.25, 0
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
@@ -270,13 +267,11 @@ test "generic array constructor measures its element" {
 //   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.29, i64 0, i64 0)
 //   unreachable
 // kizu.30.ok.ok:
-//   %kizu.32 = call %kizu.opt._Wide @std__array__Array_at_Wide(ptr %kizu.3, i64 2)
-//   %kizu.33 = extractvalue %kizu.opt._Wide %kizu.32, 1
-//   %kizu.34.tag = extractvalue %kizu.opt._Wide %kizu.32, 0
-//   %kizu.34 = icmp ne i8 %kizu.34.tag, 0
+//   %kizu.32 = call ptr @std__array__Array_at_Wide(ptr %kizu.3, i64 2)
+//   %kizu.34 = icmp ne ptr %kizu.32, null
 //   br i1 %kizu.34, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.36.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.33, i32 0, i32 0
+//   %kizu.36.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.32, i32 0, i32 0
 //   %kizu.36 = load %kizu.struct.std__string__String, ptr %kizu.36.ptr
 //   %kizu.37 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.36)
 //   %kizu.38.ok = icmp eq i64 1, %kizu.37
@@ -285,7 +280,7 @@ test "generic array constructor measures its element" {
 //   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.37, i64 0, i64 0)
 //   unreachable
 // kizu.38.ok.ok:
-//   %kizu.40.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.33, i32 0, i32 1
+//   %kizu.40.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.32, i32 0, i32 1
 //   %kizu.40 = load %kizu.struct.std__string__String, ptr %kizu.40.ptr
 //   %kizu.41 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.40)
 //   %kizu.42.ok = icmp eq i64 1, %kizu.41
@@ -324,7 +319,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.2
 // kizu.8.try.ok:
 //   %kizu.8 = extractvalue %kizu.error.Wide %kizu.6, 1
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.8)
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.8)
 //   %kizu.10 = load %kizu.array, ptr %kizu.3
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -350,7 +345,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.16.try.ok:
 //   %kizu.16 = extractvalue %kizu.error.Wide %kizu.14, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.16)
 //   %kizu.18 = load %kizu.array, ptr %kizu.3
 //   %kizu.19.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.19.ok.bool = icmp ne i8 %kizu.19.ok, 0
@@ -369,13 +364,11 @@ test "generic array constructor measures its element" {
 //   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.21, i64 0, i64 0)
 //   unreachable
 // kizu.22.ok.ok:
-//   %kizu.24 = call %kizu.opt._Wide @std__array__Array_at_Wide(ptr %kizu.3, i64 1)
-//   %kizu.25 = extractvalue %kizu.opt._Wide %kizu.24, 1
-//   %kizu.26.tag = extractvalue %kizu.opt._Wide %kizu.24, 0
-//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   %kizu.24 = call ptr @std__array__Array_at_Wide(ptr %kizu.3, i64 1)
+//   %kizu.26 = icmp ne ptr %kizu.24, null
 //   br i1 %kizu.26, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.28.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.25, i32 0, i32 1
+//   %kizu.28.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.24, i32 0, i32 1
 //   %kizu.28 = load %kizu.struct.std__string__String, ptr %kizu.28.ptr
 //   %kizu.29 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.28)
 //   %kizu.30.ok = icmp eq i64 1, %kizu.29
@@ -396,14 +389,11 @@ test "generic array constructor measures its element" {
 // 
 // define %kizu.array @collect_Wide(ptr %kizu.allocator) {
 // entry:
-//   %kizu.1 = insertvalue %kizu.array zeroinitializer, ptr %kizu.allocator, 3
-//   ret %kizu.array %kizu.1
+//   ret %kizu.array zeroinitializer
 // }
 // opt:
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
-// %kizu.opt._Wide = type { i8, ptr }
-// 
 // %kizu.error.Wide = type { i8, %kizu.struct.Wide, i64 }
 // %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
 // %kizu.error.void = type { i8, i64 }
@@ -430,11 +420,11 @@ test "generic array constructor measures its element" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -442,12 +432,12 @@ test "generic array constructor measures its element" {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr, %kizu.struct.Wide)
-// declare %kizu.opt._Wide @std__array__Array_at_Wide(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr, ptr, %kizu.struct.Wide)
+// declare ptr @std__array__Array_at_Wide(ptr, i64)
 // declare void @std__array__Array_deinit_Wide(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_Wide(ptr)
 // declare ptr @std__mem__page_allocator()
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, ptr, i8)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
@@ -459,7 +449,7 @@ test "generic array constructor measures its element" {
 //   %kizu.2 = alloca %kizu.struct.std__string__String
 //   %kizu.1 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.allocator)
 //   store %kizu.struct.std__string__String %kizu.1, ptr %kizu.2
-//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr %kizu.2, i8 %kizu.byte)
+//   %kizu.3 = call %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr %kizu.2, ptr %kizu.allocator, i8 %kizu.byte)
 //   %kizu.4 = load %kizu.struct.std__string__String, ptr %kizu.2
 //   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 0
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
@@ -523,8 +513,7 @@ test "generic array constructor measures its element" {
 // entry:
 //   %kizu.3 = alloca %kizu.array
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = insertvalue %kizu.array zeroinitializer, ptr %kizu.1, 3
-//   store %kizu.array %kizu.2, ptr %kizu.3
+//   store %kizu.array zeroinitializer, ptr %kizu.3
 //   %kizu.5 = trunc i64 97 to i8
 //   %kizu.6 = call %kizu.error.Wide @wide(ptr %kizu.1, i8 %kizu.5)
 //   %kizu.7 = load %kizu.array, ptr %kizu.3
@@ -539,7 +528,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.2
 // kizu.8.try.ok:
 //   %kizu.8 = extractvalue %kizu.error.Wide %kizu.6, 1
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.8)
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.8)
 //   %kizu.10 = load %kizu.array, ptr %kizu.3
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -565,7 +554,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.16.try.ok:
 //   %kizu.16 = extractvalue %kizu.error.Wide %kizu.14, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.16)
 //   %kizu.18 = load %kizu.array, ptr %kizu.3
 //   %kizu.19.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.19.ok.bool = icmp ne i8 %kizu.19.ok, 0
@@ -591,7 +580,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.10
 // kizu.24.try.ok:
 //   %kizu.24 = extractvalue %kizu.error.Wide %kizu.22, 1
-//   %kizu.25 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.24)
+//   %kizu.25 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.24)
 //   %kizu.26 = load %kizu.array, ptr %kizu.3
 //   %kizu.27.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.25, 0
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
@@ -610,13 +599,11 @@ test "generic array constructor measures its element" {
 //   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.29, i64 0, i64 0)
 //   unreachable
 // kizu.30.ok.ok:
-//   %kizu.32 = call %kizu.opt._Wide @std__array__Array_at_Wide(ptr %kizu.3, i64 2)
-//   %kizu.33 = extractvalue %kizu.opt._Wide %kizu.32, 1
-//   %kizu.34.tag = extractvalue %kizu.opt._Wide %kizu.32, 0
-//   %kizu.34 = icmp ne i8 %kizu.34.tag, 0
+//   %kizu.32 = call ptr @std__array__Array_at_Wide(ptr %kizu.3, i64 2)
+//   %kizu.34 = icmp ne ptr %kizu.32, null
 //   br i1 %kizu.34, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.36.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.33, i32 0, i32 0
+//   %kizu.36.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.32, i32 0, i32 0
 //   %kizu.36 = load %kizu.struct.std__string__String, ptr %kizu.36.ptr
 //   %kizu.37 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.36)
 //   %kizu.38.ok = icmp eq i64 1, %kizu.37
@@ -625,7 +612,7 @@ test "generic array constructor measures its element" {
 //   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.37, i64 0, i64 0)
 //   unreachable
 // kizu.38.ok.ok:
-//   %kizu.40.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.33, i32 0, i32 1
+//   %kizu.40.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.32, i32 0, i32 1
 //   %kizu.40 = load %kizu.struct.std__string__String, ptr %kizu.40.ptr
 //   %kizu.41 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.40)
 //   %kizu.42.ok = icmp eq i64 1, %kizu.41
@@ -664,7 +651,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.2
 // kizu.8.try.ok:
 //   %kizu.8 = extractvalue %kizu.error.Wide %kizu.6, 1
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.8)
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.8)
 //   %kizu.10 = load %kizu.array, ptr %kizu.3
 //   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
 //   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
@@ -690,7 +677,7 @@ test "generic array constructor measures its element" {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.16.try.ok:
 //   %kizu.16 = extractvalue %kizu.error.Wide %kizu.14, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, %kizu.struct.Wide %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__array__Array_append_Wide(ptr %kizu.3, ptr %kizu.1, %kizu.struct.Wide %kizu.16)
 //   %kizu.18 = load %kizu.array, ptr %kizu.3
 //   %kizu.19.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.19.ok.bool = icmp ne i8 %kizu.19.ok, 0
@@ -709,13 +696,11 @@ test "generic array constructor measures its element" {
 //   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.21, i64 0, i64 0)
 //   unreachable
 // kizu.22.ok.ok:
-//   %kizu.24 = call %kizu.opt._Wide @std__array__Array_at_Wide(ptr %kizu.3, i64 1)
-//   %kizu.25 = extractvalue %kizu.opt._Wide %kizu.24, 1
-//   %kizu.26.tag = extractvalue %kizu.opt._Wide %kizu.24, 0
-//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   %kizu.24 = call ptr @std__array__Array_at_Wide(ptr %kizu.3, i64 1)
+//   %kizu.26 = icmp ne ptr %kizu.24, null
 //   br i1 %kizu.26, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.28.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.25, i32 0, i32 1
+//   %kizu.28.ptr = getelementptr %kizu.struct.Wide, ptr %kizu.24, i32 0, i32 1
 //   %kizu.28 = load %kizu.struct.std__string__String, ptr %kizu.28.ptr
 //   %kizu.29 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.28)
 //   %kizu.30.ok = icmp eq i64 1, %kizu.29
@@ -736,6 +721,5 @@ test "generic array constructor measures its element" {
 // 
 // define %kizu.array @collect_Wide(ptr %kizu.allocator) {
 // entry:
-//   %kizu.1 = insertvalue %kizu.array zeroinitializer, ptr %kizu.allocator, 3
-//   ret %kizu.array %kizu.1
+//   ret %kizu.array zeroinitializer
 // }

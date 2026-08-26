@@ -45,18 +45,18 @@ fn split_check_case(data: []u8) -> ?i64 {
 }
 
 /// Appends text as one expectation line: embedded newlines become `\n`.
-fn append_folded_line(out: &var string::String, text: []u8) -> !void {
+fn append_folded_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
     var index = 0;
     while mem::byte_at(text, index) |byte| {
         if byte == cast<u8>(10) {
-            try out.append_byte(cast<u8>(92));
-            try out.append_byte(cast<u8>(110));
+            try out.append_byte(allocator, cast<u8>(92));
+            try out.append_byte(allocator, cast<u8>(110));
         } else {
-            try out.append_byte(byte);
+            try out.append_byte(allocator, byte);
         }
         index = index + 1;
     }
-    return out.append_byte(cast<u8>(10));
+    return out.append_byte(allocator, cast<u8>(10));
 }
 
 /// Reports whether a merged declaration came from the standard library.
@@ -95,8 +95,8 @@ fn render_load_section(
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes("// load:");
-    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(allocator, "// load:");
+    try out.append_byte(allocator, cast<u8>(10));
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
@@ -107,9 +107,9 @@ fn render_load_section(
             defer failed.deinit(allocator);
             let text = try failed.error(allocator, &loader.sources);
             defer text.deinit(allocator);
-            try out.append_bytes("// ");
+            try out.append_bytes(allocator, "// ");
             let bytes = text.as_bytes();
-            try append_folded_line(&var out, bytes);
+            try append_folded_line(allocator, &var out, bytes);
             return move out;
         },
         Program(program) => {
@@ -123,16 +123,16 @@ fn render_load_section(
                 let rendered = try ast::render_declaration(allocator, &tree, declaration.*);
                 defer rendered.deinit(allocator);
                 let bytes = rendered.as_bytes();
-                try out.append_bytes("// ");
+                try out.append_bytes(allocator, "// ");
                 var byte_index = 0;
                 while mem::byte_at(bytes, byte_index) |byte| {
-                    try out.append_byte(byte);
+                    try out.append_byte(allocator, byte);
                     if byte == cast<u8>(10) {
-                        try out.append_bytes("// ");
+                        try out.append_bytes(allocator, "// ");
                     }
                     byte_index = byte_index + 1;
                 }
-                try out.append_byte(cast<u8>(10));
+                try out.append_byte(allocator, cast<u8>(10));
             }
             try append_check_section(&var out, allocator, &var tree, &program);
             return move out;
@@ -150,75 +150,75 @@ fn append_check_section(
     tree: &var ast::Ast,
     program: &ast::Program
 ) -> !void {
-    try out.append_bytes("// check:");
-    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(allocator, "// check:");
+    try out.append_byte(allocator, cast<u8>(10));
     var diagnostics = try types::check_all(allocator, tree, program);
     defer diagnostics.deinit(allocator);
     if diagnostics.len() == 0 {
         var moves = try ownership::check_all(allocator, tree, program);
         defer moves.deinit(allocator);
-        return append_diagnostic_lines(out, &moves);
+        return append_diagnostic_lines(allocator, out, &moves);
     }
-    return append_diagnostic_lines(out, &diagnostics);
+    return append_diagnostic_lines(allocator, out, &diagnostics);
 }
 
 /// Appends `ok` for no diagnostics, or one line per diagnostic.
-fn append_diagnostic_lines(
+fn append_diagnostic_lines(allocator: Allocator, 
     out: &var string::String,
     diagnostics: &array::Array<diagnostic::Diagnostic>
 ) -> !void {
     if diagnostics.len() == 0 {
-        try out.append_bytes("// ok");
-        return out.append_byte(cast<u8>(10));
+        try out.append_bytes(allocator, "// ok");
+        return out.append_byte(allocator, cast<u8>(10));
     }
     var index = 0;
     while diagnostics.at(index) |entry| {
         index = index + 1;
-        try append_diagnostic_line(out, entry);
+        try append_diagnostic_line(allocator, out, entry);
     }
     return;
 }
 
 /// Renders one structured diagnostic the way the Go corpus test does.
-fn append_diagnostic_line(
+fn append_diagnostic_line(allocator: Allocator, 
     out: &var string::String,
     entry: &diagnostic::Diagnostic
 ) -> !void {
-    try out.append_bytes("// ");
+    try out.append_bytes(allocator, "// ");
     if entry.span.is_zero() {
-        try out.append_bytes("-");
+        try out.append_bytes(allocator, "-");
     } else {
-        try fmt::append_i64(out, entry.span.start.line);
-        try out.append_byte(cast<u8>(58));
-        try fmt::append_i64(out, entry.span.start.column);
-        try out.append_byte(cast<u8>(45));
-        try fmt::append_i64(out, entry.span.end.line);
-        try out.append_byte(cast<u8>(58));
-        try fmt::append_i64(out, entry.span.end.column);
+        try fmt::append_i64(allocator, out, entry.span.start.line);
+        try out.append_byte(allocator, cast<u8>(58));
+        try fmt::append_i64(allocator, out, entry.span.start.column);
+        try out.append_byte(allocator, cast<u8>(45));
+        try fmt::append_i64(allocator, out, entry.span.end.line);
+        try out.append_byte(allocator, cast<u8>(58));
+        try fmt::append_i64(allocator, out, entry.span.end.column);
     }
     if entry.code.len() > 0 {
-        try out.append_bytes(" [");
-        try out.append_string(&entry.code);
-        try out.append_bytes("]");
+        try out.append_bytes(allocator, " [");
+        try out.append_string(allocator, &entry.code);
+        try out.append_bytes(allocator, "]");
     }
-    try out.append_byte(cast<u8>(32));
+    try out.append_byte(allocator, cast<u8>(32));
     if entry.category.len() > 0 {
-        try out.append_string(&entry.category);
-        try out.append_bytes(": ");
+        try out.append_string(allocator, &entry.category);
+        try out.append_bytes(allocator, ": ");
     }
     let message = entry.message.as_bytes();
-    try append_folded_line(out, message);
+    try append_folded_line(allocator, out, message);
     var index = 0;
     while entry.notes.at(index) |note| {
         index = index + 1;
-        try out.append_bytes("//   note: ");
+        try out.append_bytes(allocator, "//   note: ");
         let note_bytes = note.as_bytes();
-        try append_folded_line(out, note_bytes);
+        try append_folded_line(allocator, out, note_bytes);
     }
     if entry.help.len() > 0 {
-        try out.append_bytes("//   help: ");
+        try out.append_bytes(allocator, "//   help: ");
         let help = entry.help.as_bytes();
-        try append_folded_line(out, help);
+        try append_folded_line(allocator, out, help);
     }
     return;
 }

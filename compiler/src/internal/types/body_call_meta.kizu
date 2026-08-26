@@ -120,7 +120,7 @@ fn (self: &var Checker) resolve_meta_call_capture(
     while arguments.at(index) |argument| {
         let bytes = argument.as_bytes();
         let retained = try self.types.intern(bytes);
-        try resolved.append(retained);
+        try resolved.append(self.allocator, retained);
         index = index + 1;
     }
     return self.resolve_meta_capture(tree, form, &resolved);
@@ -190,7 +190,7 @@ fn (self: &var Checker) check_meta_variant(
             owner = field.owner;
             payload = field.type_name;
             let source_name = field.name.as_bytes();
-            try name.append_bytes(source_name);
+            try name.append_bytes(self.allocator, source_name);
         },
     }
     let expected = if same_type(payload, empty_type()) {
@@ -220,7 +220,7 @@ fn (self: &var Checker) check_meta_construct(
     defer owner_argument.deinit(self.allocator);
     if static_args.at(0) |value| {
         let bytes = value.as_bytes();
-        try owner_argument.append_bytes(bytes);
+        try owner_argument.append_bytes(self.allocator, bytes);
     } else {
         return try self.comptime_form_list_error(stdmeta::Form::Construct);
     }
@@ -228,7 +228,7 @@ fn (self: &var Checker) check_meta_construct(
     defer worker_argument.deinit(self.allocator);
     if static_args.at(1) |value| {
         let bytes = value.as_bytes();
-        try worker_argument.append_bytes(bytes);
+        try worker_argument.append_bytes(self.allocator, bytes);
     } else {
         return try self.comptime_form_list_error(stdmeta::Form::Construct);
     }
@@ -280,7 +280,7 @@ fn (self: &var Checker) check_meta_construct(
             try self.append_checker_type(&var error_union, parts.err);
         }
     }
-    try error_union.append_byte(cast<u8>(33));
+    try error_union.append_byte(self.allocator, cast<u8>(33));
     try self.append_checker_type(&var error_union, built);
     let result_bytes = error_union.as_bytes();
     out.* = try self.types.intern(result_bytes);
@@ -306,7 +306,7 @@ fn (self: &var Checker) public_meta_fields(
                     let name = retained_name.as_bytes();
                     let field_type = try self.types.remember(&tree.types, field.type_name);
                     let handle = try self.retain_meta_field(owner, name, field_type, false);
-                    try out.append(handle);
+                    try out.append(self.allocator, handle);
                 }
                 index = index + 1;
             }
@@ -333,10 +333,10 @@ fn (self: &Checker) expand_meta_construct(
         let field_name = field.name.as_bytes();
         let name = try string::from_bytes(self.allocator, field_name);
         errdefer name.deinit(self.allocator);
-        try names.append(move name);
+        try names.append(self.allocator, move name);
         let type_name = try self.types.copy_text(self.allocator, field.type_name);
         errdefer type_name.deinit(self.allocator);
-        try type_names.append(move type_name);
+        try type_names.append(self.allocator, move type_name);
         index = index + 1;
     }
     let owner_name = try self.types.copy_text(self.allocator, owner);
@@ -344,8 +344,7 @@ fn (self: &Checker) expand_meta_construct(
     let owner_bytes = owner_name.as_bytes();
     if self.deinit_owners |owners_handle| {
         let owners = self.deinit_owner_maps.at(owners_handle);
-        return ast::construct_expansion_from_names(
-            self.allocator,
+        return ast::construct_expansion_from_names(self.allocator,
             tree,
             owner_bytes,
             worker,
@@ -357,8 +356,7 @@ fn (self: &Checker) expand_meta_construct(
     }
     var empty_owners = map::new<[]u8, bool>(self.allocator);
     defer empty_owners.deinit(self.allocator);
-    return ast::construct_expansion_from_names(
-        self.allocator,
+    return ast::construct_expansion_from_names(self.allocator,
         tree,
         owner_bytes,
         worker,
@@ -383,7 +381,7 @@ fn (self: &var Checker) check_meta_unsupported(
     defer argument.deinit(self.allocator);
     if arguments.at(0) |retained| {
         let source = retained.as_bytes();
-        try argument.append_bytes(source);
+        try argument.append_bytes(self.allocator, source);
     } else {
         return try self.comptime_arity_error(
             stdmeta::spelling(stdmeta::Form::Unsupported),
@@ -410,10 +408,10 @@ fn (self: &var Checker) check_meta_unsupported(
 fn (self: &Checker) comptime_named_error(name: []u8, suffix: []u8) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(name);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(suffix);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, suffix);
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
 
@@ -425,35 +423,35 @@ fn (self: &Checker) comptime_arity_error(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(name);
-    try message.append_bytes("` expects ");
-    try fmt::append_i64(&var message, expected);
-    try message.append_byte(cast<u8>(32));
-    try message.append_bytes(kind);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` expects ");
+    try fmt::append_i64(self.allocator, &var message, expected);
+    try message.append_byte(self.allocator, cast<u8>(32));
+    try message.append_bytes(self.allocator, kind);
     if expected != 1 {
-        try message.append_byte(cast<u8>(115));
+        try message.append_byte(self.allocator, cast<u8>(115));
     }
-    try message.append_bytes(", got ");
-    try fmt::append_i64(&var message, got);
+    try message.append_bytes(self.allocator, ", got ");
+    try fmt::append_i64(self.allocator, &var message, got);
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
 
 fn (self: &Checker) comptime_form_list_error(form: stdmeta::Form) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(stdmeta::spelling(form));
-    try message.append_bytes("` is only written as a comptime for list");
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, stdmeta::spelling(form));
+    try message.append_bytes(self.allocator, "` is only written as a comptime for list");
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
 
 fn (self: &Checker) comptime_type_form_value_error(form: stdmeta::Form) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(stdmeta::spelling(form));
-    try message.append_bytes("` names a type, not a value");
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, stdmeta::spelling(form));
+    try message.append_bytes(self.allocator, "` names a type, not a value");
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
 
@@ -464,11 +462,11 @@ fn (self: &Checker) meta_field_borrow_error(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(stdmeta::spelling(form));
-    try message.append_bytes("` expects &");
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, stdmeta::spelling(form));
+    try message.append_bytes(self.allocator, "` expects &");
     try self.append_checker_type(&var message, owner);
-    try message.append_bytes(", got ");
+    try message.append_bytes(self.allocator, ", got ");
     try self.append_checker_type(&var message, got);
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
@@ -482,24 +480,24 @@ fn (self: &Checker) meta_variant_arity_error(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(stdmeta::spelling(form));
-    try message.append_bytes("` builds `");
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, stdmeta::spelling(form));
+    try message.append_bytes(self.allocator, "` builds `");
     try self.append_checker_type(&var message, owner);
-    try message.append_bytes("::");
+    try message.append_bytes(self.allocator, "::");
     let name_bytes = name.as_bytes();
-    try message.append_bytes(name_bytes);
-    try message.append_bytes("` from ");
-    try fmt::append_i64(&var message, expected);
-    try message.append_bytes(" arguments, got ");
-    try fmt::append_i64(&var message, got);
+    try message.append_bytes(self.allocator, name_bytes);
+    try message.append_bytes(self.allocator, "` from ");
+    try fmt::append_i64(self.allocator, &var message, expected);
+    try message.append_bytes(self.allocator, " arguments, got ");
+    try fmt::append_i64(self.allocator, &var message, got);
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
 
 fn (self: &Checker) meta_public_fields_type_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("`std::meta::public_fields` expects a struct, got ");
+    try message.append_bytes(self.allocator, "`std::meta::public_fields` expects a struct, got ");
     try self.append_checker_type(&var message, owner);
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
@@ -507,9 +505,9 @@ fn (self: &Checker) meta_public_fields_type_error(owner: Type) -> !diagnostic::D
 fn (self: &Checker) meta_construct_empty_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("`std::meta::construct` has no public field to construct `");
+    try message.append_bytes(self.allocator, "`std::meta::construct` has no public field to construct `");
     try self.append_checker_type(&var message, owner);
-    try message.append_bytes("` from");
+    try message.append_bytes(self.allocator, "` from");
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
 
@@ -519,19 +517,19 @@ fn (self: &Checker) meta_unsupported_function_error(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_byte(cast<u8>(96));
-    try message.append_bytes(function);
-    try message.append_bytes("` does not support type `");
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, function);
+    try message.append_bytes(self.allocator, "` does not support type `");
     try self.append_checker_type(&var message, subject);
-    try message.append_byte(cast<u8>(96));
+    try message.append_byte(self.allocator, cast<u8>(96));
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }
 
 fn (self: &Checker) meta_unsupported_here_error(subject: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("type `");
+    try message.append_bytes(self.allocator, "type `");
     try self.append_checker_type(&var message, subject);
-    try message.append_bytes("` is not supported here");
+    try message.append_bytes(self.allocator, "` is not supported here");
     return self.checker_message_at("comptime error", ast::zero_span(), move message);
 }

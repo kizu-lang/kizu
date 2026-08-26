@@ -55,7 +55,7 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
             blocks = 0;
             drain(&var uses);
             drain(&var tokens);
-            try append_percent_tokens(line_start, line, &var tokens);
+            try append_percent_tokens(allocator, line_start, line, &var tokens);
             var index = 0;
             while index + 1 < tokens.len() {
                 let name_start = tokens.get(index) orelse break;
@@ -81,10 +81,10 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
                 if !defined_in(&defs, name_bytes, ordinal) and !types.contains(name_bytes) {
                     var message = try string::from_bytes(allocator, "llvm error: emitter bug: function `");
                     defer message.deinit(allocator);
-                    try message.append_bytes(function);
-                    try message.append_bytes("` reads `%");
-                    try message.append_bytes(name_bytes);
-                    try message.append_bytes("` but nothing defines it");
+                    try message.append_bytes(allocator, function);
+                    try message.append_bytes(allocator, "` reads `%");
+                    try message.append_bytes(allocator, name_bytes);
+                    try message.append_bytes(allocator, "` but nothing defines it");
                     let message_bytes = message.as_bytes();
                     return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
                 }
@@ -100,14 +100,14 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
         if blocks > 1 and is_alloca_line(line) {
             var message = try string::from_bytes(allocator, "llvm error: emitter bug: function `");
             defer message.deinit(allocator);
-            try message.append_bytes(function);
-            try message.append_bytes("` allocates outside its entry block, which grows the stack on every execution: ");
-            try message.append_bytes(mem::trim_ascii(line));
+            try message.append_bytes(allocator, function);
+            try message.append_bytes(allocator, "` allocates outside its entry block, which grows the stack on every execution: ");
+            try message.append_bytes(allocator, mem::trim_ascii(line));
             let message_bytes = message.as_bytes();
             return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
         }
         drain(&var tokens);
-        try append_percent_tokens(line_start, line, &var tokens);
+        try append_percent_tokens(allocator, line_start, line, &var tokens);
         var first = 0;
         if instruction_def(line) |def| {
             try defs.insert(def, ordinal);
@@ -118,8 +118,8 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
             let name_start = tokens.get(index) orelse break;
             let name_end = tokens.get(index + 1) orelse break;
             index = index + 2;
-            try uses.append(name_start);
-            try uses.append(name_end);
+            try uses.append(allocator, name_start);
+            try uses.append(allocator, name_end);
         }
     }
     return null;
@@ -246,7 +246,7 @@ fn trim_left_spaces(line: []u8) -> []u8 {
 /// the Go `percentTokens`. Go slices the line and pays nothing per token;
 /// here each token is the pair of offsets it occupies in the enclosing text,
 /// so the scan reads the same bytes back without retaining any.
-fn append_percent_tokens(base: i64, line: []u8, out: &var array::Array<i64>) -> !void {
+fn append_percent_tokens(allocator: Allocator, base: i64, line: []u8, out: &var array::Array<i64>) -> !void {
     var in_quote = false;
     var index = 0;
     while index < mem::len(line) {
@@ -268,8 +268,8 @@ fn append_percent_tokens(base: i64, line: []u8, out: &var array::Array<i64>) -> 
             end = end + 1;
         }
         if end > index + 1 {
-            try out.append(base + index + 1);
-            try out.append(base + end);
+            try out.append(allocator, base + index + 1);
+            try out.append(allocator, base + end);
         }
         index = end;
     }
