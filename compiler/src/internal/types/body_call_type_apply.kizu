@@ -2114,7 +2114,7 @@ fn (self: &var Checker) enter_instantiation(
         done.* = true;
         return null;
     }
-    if self.instantiation_depth >= 64 {
+    if self.instantiation_depth >= max_instantiation_depth() {
         done.* = true;
         return try self.instantiation_depth_error(move key);
     }
@@ -2176,11 +2176,31 @@ fn (self: &Checker) instance_key(
     return null;
 }
 
+/// Bounds how deep generic instantiation may nest, the Go
+/// `maxInstantiationDepth`. A body whose own calls grow their type argument
+/// never repeats an instance, so no memo stops it and the checker would run
+/// forever; a bound turns that into a diagnostic. Reflection walks nest by
+/// struct depth, so real programs stay far below this.
+///
+/// The bound is what says the compiler stops before its stack does, so it is
+/// set where the shorter of the two stacks holds: an unoptimized build of
+/// this compiler spends about 150KB per level, which leaves it no room at 64.
+fn max_instantiation_depth() -> i64 {
+    return 32;
+}
+
+/// The bound as the diagnostic spells it.
+fn depth_bound_text() -> []u8 {
+    return "32";
+}
+
 fn (self: &Checker) instantiation_depth_error(key: string::String) -> !diagnostic::Diagnostic {
     defer key.deinit();
     var message = string::new(self.allocator);
     errdefer message.deinit();
-    try message.append_bytes("generic instantiation nested deeper than 64 at `");
+    try message.append_bytes("generic instantiation nested deeper than ");
+    try message.append_bytes(depth_bound_text());
+    try message.append_bytes(" at `");
     let text = key.as_bytes();
     let length = mem::len(text);
     if length <= 120 {

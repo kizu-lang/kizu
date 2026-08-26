@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::stdprim;
 import std::array;
 import std::mem;
 import std::string;
@@ -23,23 +24,16 @@ import std::string;
 // a set: membership is a scan, and a name is added only when absent.
 
 /// Collects into `self.slots` the local names the function passes to a
-/// `&var` parameter, the Go `mutablyBorrowedLocals`.
+/// `&var` parameter, the Go `mutablyBorrowedLocals`. Parameters are left in
+/// the set: one that arrives as caller storage already has storage, which
+/// lower_function_named hands it, and one that arrives as a value is the
+/// callee's own copy, which can live in a slot like any local.
 fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: FactsHandle) -> !?diagnostic::Diagnostic {
     while self.slots.pop() |_| {}
     if self.decl_body(decl) |body| {
         if try self.collect_mut_borrows_stmt(tree, body.as_statement()) |failed| {
             return move failed;
         }
-    }
-    // A parameter never allocates a slot: one that arrives as caller storage
-    // is added to the set by lower_function_named with the storage it came
-    // with, and any other parameter has no storage to lend.
-    let count = self.decl_param_count(decl);
-    var index = 0;
-    while index < count {
-        let param = self.decl_param(decl, index);
-        index = index + 1;
-        try self.remove_slot(param.name);
     }
     return null;
 }
@@ -467,6 +461,20 @@ fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
     return self.envs.bind(self.env, name, slot);
 }
 
+/// Binds a capture the same way bind_local binds a declaration, the Go
+/// `bindCapture`. A name the function mutably borrows needs storage of its
+/// own, and a capture is a local like any other -- `if build() |parts|` then
+/// `parts.append(..)` writes through the header it was handed. A capture that
+/// already binds a borrow is an address, and one address is all it needs.
+fn (self: &var Lowerer) bind_capture(name: Name, value: Value) -> !void {
+    if !self.has_slot(name) or self.is_reference_type(value.type_name) {
+        return self.envs.bind(self.env, name, value);
+    }
+    let slot_type = try self.module.names.prefixed("&var ", value.type_name);
+    let slot = try self.emit1(Op::LocalSlot, slot_type, value);
+    return self.envs.bind(self.env, name, slot);
+}
+
 /// Unwraps explicit `&var x` call-site syntax to the name whose storage the
 /// callee is lent, the Go `borrowTargetExpr`. Caller storage only ever comes
 /// from a `&var` parameter, so `&` needs no arm here.
@@ -560,7 +568,92 @@ fn (self: &var Lowerer) lower_field_storage(tree: &var ast::Ast, expression: ast
 
 /// Lowers the arguments of a call to name, the Go `lowerCallArgs`.
 fn (self: &var Lowerer) lower_call_args(tree: &var ast::Ast, name: Name, args: ast::ExpressionList, out: &var array::Array<Value>) -> !?diagnostic::Diagnostic {
-    return self.lower_call_args_as(tree, self.callee_params(name), args, out);
+    if self.signature_named(name) |signature| {
+        return self.lower_call_args_as(tree, params_of(signature), args, out);
+    }
+    let named = try self.core_primitive_param_types(name);
+    return self.lower_call_args_named(tree, named, args, out);
+}
+
+/// Names the arguments of a std::internal::builtin the lowerer has no
+/// declared signature for, the Go `corePrimitiveParams`. Only the
+/// destinations matter: a primitive that appends into the caller's String
+/// receives that String's storage, so the growth the runtime does is visible
+/// to the caller. The other argument kinds carry their own types to the call
+/// already.
+fn (self: &var Lowerer) core_primitive_param_types(name: Name) -> !NamedTypes {
+    let position = self.string_out_position(name);
+    if position < 0 {
+        return no_named_types();
+    }
+    let spelled = try self.module.names.intern(stdprim::arg_kind_spelling(stdprim::ArgKind::StringOut));
+    return with_named_type(no_named_types(), position, spelled);
+}
+
+/// Returns the argument position a std::internal::builtin appends into, or
+/// -1 when it has none. Reading the registry borrows the name table, so the
+/// interning the caller does happens after the borrow is over.
+fn (self: &Lowerer) string_out_position(name: Name) -> i64 {
+    let retained = name_text(&self.module.names, name);
+    let spelling = retained.as_bytes();
+    var position = -1;
+    if stdprim::simple_core_signature(spelling) |signature| {
+        var index = 0;
+        while index < signature.args_len() {
+            let kind = signature.arg_at(index) orelse break;
+            if is_string_out(kind) {
+                position = index;
+            }
+            index = index + 1;
+        }
+    }
+    return position;
+}
+
+/// Reports whether a primitive argument is a String the callee appends into.
+fn is_string_out(kind: stdprim::ArgKind) -> bool {
+    return match kind {
+        StringOut => true,
+        _ => false,
+    };
+}
+
+/// Returns the record with one argument position named.
+fn with_named_type(types: NamedTypes, index: i64, spelled: Name) -> NamedTypes {
+    if index == 0 {
+        return NamedTypes { first: spelled, second: types.second, third: types.third, fourth: types.fourth };
+    }
+    if index == 1 {
+        return NamedTypes { first: types.first, second: spelled, third: types.third, fourth: types.fourth };
+    }
+    if index == 2 {
+        return NamedTypes { first: types.first, second: types.second, third: spelled, fourth: types.fourth };
+    }
+    if index == 3 {
+        return NamedTypes { first: types.first, second: types.second, third: types.third, fourth: spelled };
+    }
+    return types;
+}
+
+/// Lowers call arguments at the types the call names for them, for callees
+/// with no signature to read: the NamedTypes half of lower_call_args_as.
+fn (self: &var Lowerer) lower_call_args_named(
+    tree: &var ast::Ast,
+    types: NamedTypes,
+    args: ast::ExpressionList,
+    out: &var array::Array<Value>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        let want = named_type_at(types, index);
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try out.append(value);
+    }
+    return null;
 }
 
 /// Lowers call arguments at the types the callee declares for them, the Go

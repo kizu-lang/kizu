@@ -755,6 +755,7 @@ fn (self: &var Emitter) panic_position(span: ast::Span) -> !ir::Name {
 /// the keys of the Go `failureErrors` map.
 enum FailureKey {
     ArrayAppend,
+    ArrayAppendBytes,
     ArrayBounds,
     ArrayReserve,
     ArraySwap,
@@ -774,6 +775,7 @@ struct FailureError {
 fn failure_error(key: FailureKey) -> FailureError {
     return match key {
         ArrayAppend => FailureError { set: "std::mem::Error", member: "OutOfMemory" },
+        ArrayAppendBytes => FailureError { set: "std::mem::Error", member: "OutOfMemory" },
         ArrayBounds => FailureError { set: "std::array::Error", member: "OutOfBounds" },
         ArrayReserve => FailureError { set: "std::mem::Error", member: "OutOfMemory" },
         ArraySwap => FailureError { set: "std::array::Error", member: "OutOfBounds" },
@@ -787,6 +789,7 @@ fn failure_error(key: FailureKey) -> FailureError {
 fn failure_key_spelling(key: FailureKey) -> []u8 {
     return match key {
         ArrayAppend => "array_append",
+        ArrayAppendBytes => "array_append_bytes",
         ArrayBounds => "array_bounds",
         ArrayReserve => "array_reserve",
         ArraySwap => "array_swap",
@@ -1212,6 +1215,7 @@ fn (self: &var Emitter) write_runtime_instr(module: &ir::Module, node: &ir::Inst
     match node.op {
         ArrayNew => return self.write_array_instr(module, node),
         ArrayAppend => return self.write_array_instr(module, node),
+        ArrayAppendBytes => return self.write_array_instr(module, node),
         ArrayAsBytes => return self.write_array_instr(module, node),
         ArrayAt => return self.write_array_instr(module, node),
         ArrayAtMut => return self.write_array_instr(module, node),
@@ -1651,6 +1655,18 @@ fn (self: &var Emitter) write_static_string_global(name: ir::Name, value: []u8) 
 /// `elementSizeOperand`.
 fn (self: &var Emitter) element_size_operand(module: &ir::Module, typ_name: ir::Name) -> !ir::Name {
     let llvm_type = try self.llvm_type_of(module, typ_name);
+    return self.size_of_llvm_type(llvm_type);
+}
+
+/// The same for a type spelled out rather than named by the module, for the
+/// releases that read their element from the array they were handed.
+fn (self: &var Emitter) element_size_operand_bytes(module: &ir::Module, typ_name: []u8) -> !ir::Name {
+    let llvm_type = try self.llvm_type(module, typ_name);
+    return self.size_of_llvm_type(llvm_type);
+}
+
+/// Returns a LLVM constant expression for the size of a lowered type.
+fn (self: &var Emitter) size_of_llvm_type(llvm_type: ir::Name) -> !ir::Name {
     if self.names.is(llvm_type, "ptr") {
         return self.names.intern("8");
     }
@@ -1689,9 +1705,15 @@ fn (self: &var Emitter) write_container_new(
     if node.args.len() != 1 or !is_container_type(kind, result_type) {
         return try self.fail1("llvm error: %s", Arg::Lit(shape));
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail1("llvm error: %s", Arg::Lit(shape));
+    }
+    let elem_bytes = elem.as_bytes();
     let result_name = try self.local_name(module, node.result.name);
     let allocator = try self.operand(module, node.args.get_or_panic(0));
-    let size = try self.element_size_operand(module, node.immediate);
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     try self.line4(
         "  %s = call ptr @%s(ptr %s, i64 %s)",
         Arg::Str(result_name), Arg::Lit(runtime), Arg::Str(allocator.operand), Arg::Str(size)

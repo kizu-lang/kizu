@@ -6,6 +6,7 @@
 std::mem::page_allocator() -> Allocator
 std::array::new<T>(allocator: Allocator) -> std::array::Array<T>
 array.append(value: T) -> std::mem::Error!void
+array.append_bytes(bytes: []u8) -> std::mem::Error!void   // Array<u8> のみ
 array.len() -> i64
 array.capacity() -> i64
 array.reserve(additional: i64) -> std::mem::Error!void

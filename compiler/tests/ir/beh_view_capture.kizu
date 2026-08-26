@@ -292,7 +292,7 @@ test "try preserves transitive view capture provenance" {
 // fn buffered_iter(%allocator: Allocator, %bytes: []u8) -> BufferedIter {
 // entry:
 //   %1: i64 = const 0
-//   %2: std::array::Array<i64> = array.new %allocator: Allocator, i64
+//   %2: std::array::Array<i64> = array.new %allocator: Allocator
 //   %3: BufferedIter = struct.new {bytes: %bytes: []u8, index: %1: i64, seen: %2: std::array::Array<i64>}
 //   return %3: BufferedIter
 // }
@@ -361,50 +361,56 @@ test "try preserves transitive view capture provenance" {
 // fn test.struct_literal_captures_a_runtime_view() -> !void {
 // entry:
 //   %1: [2]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [2]u8
-//   %3: u8 = const 10
-//   call.fill %2: []u8, %3: u8
-//   %5: []u8 = buffer.as_bytes %1: [2]u8
-//   %6: i64 = const 0
-//   %7: BytesIter = struct.new {bytes: %5: []u8, index: %6: i64}
-//   %8: &var BytesIter = local.slot %7: BytesIter
+//   %2: &var [2]u8 = local.slot %1: [2]u8
+//   %3: [2]u8 = ref.load %2: &var [2]u8
+//   %4: []u8 = buffer.as_bytes %3: [2]u8
+//   %5: u8 = const 10
+//   call.fill %4: []u8, %5: u8
+//   %7: [2]u8 = ref.load %2: &var [2]u8
+//   %8: []u8 = buffer.as_bytes %7: [2]u8
 //   %9: i64 = const 0
+//   %10: BytesIter = struct.new {bytes: %8: []u8, index: %9: i64}
+//   %11: &var BytesIter = local.slot %10: BytesIter
+//   %12: i64 = const 0
 //   jump while.header.1
 // while.header.1:
-//   %10: i64 = phi [entry, %9: i64], [while.body.2, %15: i64]
-//   %11: BytesIter = ref.load %8: &var BytesIter
-//   %12: bool = call.BytesIter.has_next %11: BytesIter
-//   branch %12: bool, while.body.2, while.end.3
+//   %13: i64 = phi [entry, %12: i64], [while.body.2, %18: i64]
+//   %14: BytesIter = ref.load %11: &var BytesIter
+//   %15: bool = call.BytesIter.has_next %14: BytesIter
+//   branch %15: bool, while.body.2, while.end.3
 // while.body.2:
-//   %13: u8 = call.BytesIter.next %8: &var BytesIter
-//   %14: i64 = cast %13: u8, i64
-//   %15: i64 = binary.+ %10: i64, %14: i64
+//   %16: u8 = call.BytesIter.next %11: &var BytesIter
+//   %17: i64 = cast %16: u8, i64
+//   %18: i64 = binary.+ %13: i64, %17: i64
 //   jump while.header.1
 // while.end.3:
-//   %16: i64 = const 21
-//   test.expect_equal %16: i64, %10: i64, i64
-//   %18: !void = error.ok
-//   return %18: !void
+//   %19: i64 = const 21
+//   test.expect_equal %19: i64, %13: i64, i64
+//   %21: !void = error.ok
+//   return %21: !void
 // }
 // fn test.factory_call_ties_its_result_to_the_view_argument() -> !void {
 // entry:
 //   %1: [2]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [2]u8
-//   %3: u8 = const 30
-//   call.fill %2: []u8, %3: u8
-//   %5: []u8 = buffer.as_bytes %1: [2]u8
-//   %6: BytesIter = call.iter %5: []u8
-//   %7: &var BytesIter = local.slot %6: BytesIter
-//   %8: i64 = const 30
-//   %9: u8 = call.BytesIter.next %7: &var BytesIter
-//   %10: i64 = cast %9: u8, i64
-//   test.expect_equal %8: i64, %10: i64, i64
-//   %12: i64 = const 31
-//   %13: u8 = call.BytesIter.next %7: &var BytesIter
-//   %14: i64 = cast %13: u8, i64
-//   test.expect_equal %12: i64, %14: i64, i64
-//   %16: !void = error.ok
-//   return %16: !void
+//   %2: &var [2]u8 = local.slot %1: [2]u8
+//   %3: [2]u8 = ref.load %2: &var [2]u8
+//   %4: []u8 = buffer.as_bytes %3: [2]u8
+//   %5: u8 = const 30
+//   call.fill %4: []u8, %5: u8
+//   %7: [2]u8 = ref.load %2: &var [2]u8
+//   %8: []u8 = buffer.as_bytes %7: [2]u8
+//   %9: BytesIter = call.iter %8: []u8
+//   %10: &var BytesIter = local.slot %9: BytesIter
+//   %11: i64 = const 30
+//   %12: u8 = call.BytesIter.next %10: &var BytesIter
+//   %13: i64 = cast %12: u8, i64
+//   test.expect_equal %11: i64, %13: i64, i64
+//   %15: i64 = const 31
+//   %16: u8 = call.BytesIter.next %10: &var BytesIter
+//   %17: i64 = cast %16: u8, i64
+//   test.expect_equal %15: i64, %17: i64, i64
+//   %19: !void = error.ok
+//   return %19: !void
 // }
 // fn test.view_free_struct_returns_take_view_arguments_freely() -> !void {
 // entry:
@@ -433,178 +439,73 @@ test "try preserves transitive view capture provenance" {
 // fn test.capture_releases_at_last_use() -> !void {
 // entry:
 //   %1: [2]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [2]u8
-//   %3: i64 = const 0
-//   %4: BytesIter = struct.new {bytes: %2: []u8, index: %3: i64}
+//   %2: &var [2]u8 = local.slot %1: [2]u8
+//   %3: [2]u8 = ref.load %2: &var [2]u8
+//   %4: []u8 = buffer.as_bytes %3: [2]u8
 //   %5: i64 = const 0
-//   %6: i64 = field.index %4: BytesIter
-//   test.expect_equal %5: i64, %6: i64, i64
-//   %8: []u8 = buffer.as_bytes %1: [2]u8
-//   %9: u8 = const 50
-//   call.fill %8: []u8, %9: u8
-//   %11: []u8 = buffer.as_bytes %1: [2]u8
-//   %12: i64 = const 50
-//   %13: i64 = const 0
-//   %14: i64 = slice.len %11: []u8
-//   %15: bool = binary.< %13: i64, 0: i64
-//   cond_fail %15: bool, bounds(%13: i64, %14: i64)
-//   %16: bool = binary.>= %13: i64, %14: i64
-//   cond_fail %16: bool, bounds(%13: i64, %14: i64)
-//   %17: u8 = slice.index %11: []u8, %13: i64
-//   %18: i64 = cast %17: u8, i64
-//   test.expect_equal %12: i64, %18: i64, i64
-//   %20: !void = error.ok
-//   return %20: !void
+//   %6: BytesIter = struct.new {bytes: %4: []u8, index: %5: i64}
+//   %7: i64 = const 0
+//   %8: i64 = field.index %6: BytesIter
+//   test.expect_equal %7: i64, %8: i64, i64
+//   %10: [2]u8 = ref.load %2: &var [2]u8
+//   %11: []u8 = buffer.as_bytes %10: [2]u8
+//   %12: u8 = const 50
+//   call.fill %11: []u8, %12: u8
+//   %14: [2]u8 = ref.load %2: &var [2]u8
+//   %15: []u8 = buffer.as_bytes %14: [2]u8
+//   %16: i64 = const 50
+//   %17: i64 = const 0
+//   %18: i64 = slice.len %15: []u8
+//   %19: bool = binary.< %17: i64, 0: i64
+//   cond_fail %19: bool, bounds(%17: i64, %18: i64)
+//   %20: bool = binary.>= %17: i64, %18: i64
+//   cond_fail %20: bool, bounds(%17: i64, %18: i64)
+//   %21: u8 = slice.index %15: []u8, %17: i64
+//   %22: i64 = cast %21: u8, i64
+//   test.expect_equal %16: i64, %22: i64, i64
+//   %24: !void = error.ok
+//   return %24: !void
 // }
 // fn test.a_view_lends_to_a_method_whose_receiver_cannot_keep_it() -> !void {
 // entry:
 //   %1: [3]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [3]u8
-//   %3: u8 = const 4
-//   call.fill %2: []u8, %3: u8
-//   %5: []u8 = buffer.as_bytes %1: [3]u8
-//   %6: i64 = const 0
-//   %7: Sink = struct.new {total: %6: i64}
-//   %8: &var Sink = local.slot %7: Sink
-//   call.Sink.take %8: &var Sink, %5: []u8
-//   call.Sink.take %8: &var Sink, %5: []u8
-//   %11: i64 = const 6
-//   %12: i64 = field.ref.total %8: &var Sink
-//   test.expect_equal %11: i64, %12: i64, i64
-//   %14: i64 = const 9
-//   %15: Sink = ref.load %8: &var Sink
-//   %16: i64 = call.Sink.weigh %15: Sink, %5: []u8
-//   test.expect_equal %14: i64, %16: i64, i64
-//   %18: !void = error.ok
-//   return %18: !void
+//   %2: &var [3]u8 = local.slot %1: [3]u8
+//   %3: [3]u8 = ref.load %2: &var [3]u8
+//   %4: []u8 = buffer.as_bytes %3: [3]u8
+//   %5: u8 = const 4
+//   call.fill %4: []u8, %5: u8
+//   %7: [3]u8 = ref.load %2: &var [3]u8
+//   %8: []u8 = buffer.as_bytes %7: [3]u8
+//   %9: i64 = const 0
+//   %10: Sink = struct.new {total: %9: i64}
+//   %11: &var Sink = local.slot %10: Sink
+//   call.Sink.take %11: &var Sink, %8: []u8
+//   call.Sink.take %11: &var Sink, %8: []u8
+//   %14: i64 = const 6
+//   %15: i64 = field.ref.total %11: &var Sink
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 9
+//   %18: Sink = ref.load %11: &var Sink
+//   %19: i64 = call.Sink.weigh %18: Sink, %8: []u8
+//   test.expect_equal %17: i64, %19: i64, i64
+//   %21: !void = error.ok
+//   return %21: !void
 // }
 // fn test.owner_aggregate_captures_a_runtime_view() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: [3]u8 = buffer.new
-//   %3: []u8 = buffer.as_bytes %2: [3]u8
-//   %4: u8 = const 60
-//   call.fill %3: []u8, %4: u8
-//   %6: []u8 = buffer.as_bytes %2: [3]u8
-//   %7: BufferedIter = call.buffered_iter %1: Allocator, %6: []u8
-//   %8: std::array::Array<i64> = field.seen %7: BufferedIter
-//   %9: []u8 = field.bytes %7: BufferedIter
-//   %10: i64 = const 0
-//   %11: i64 = slice.len %9: []u8
-//   %12: bool = binary.< %10: i64, 0: i64
-//   cond_fail %12: bool, bounds(%10: i64, %11: i64)
-//   %13: bool = binary.>= %10: i64, %11: i64
-//   cond_fail %13: bool, bounds(%10: i64, %11: i64)
-//   %14: u8 = slice.index %9: []u8, %10: i64
-//   %15: i64 = cast %14: u8, i64
-//   %16: std::mem::Error!void = call.std::array::Array.append.i64 %8: std::array::Array<i64>, %15: i64
-//   error.try %16: std::mem::Error!void, cleanup call.BufferedIter.deinit %7: BufferedIter
-//   %18: i64 = const 60
-//   %19: std::array::Array<i64> = field.seen %7: BufferedIter
-//   %20: i64 = const 0
-//   %21: i64 = call.std::array::Array.get_or_panic.i64 %19: std::array::Array<i64>, %20: i64
-//   test.expect_equal %18: i64, %21: i64, i64
-//   call.BufferedIter.deinit %7: BufferedIter
-//   %24: []u8 = buffer.as_bytes %2: [3]u8
-//   %25: i64 = const 90
-//   %26: u8 = cast %25: i64, u8
-//   %27: i64 = const 0
-//   %28: i64 = slice.len %24: []u8
-//   %29: bool = binary.< %27: i64, 0: i64
-//   cond_fail %29: bool, bounds(%27: i64, %28: i64)
-//   %30: bool = binary.>= %27: i64, %28: i64
-//   cond_fail %30: bool, bounds(%27: i64, %28: i64)
-//   slice.store %24: []u8, %27: i64, %26: u8
-//   %32: []u8 = buffer.as_bytes %2: [3]u8
-//   %33: i64 = const 90
-//   %34: i64 = const 0
-//   %35: i64 = slice.len %32: []u8
-//   %36: bool = binary.< %34: i64, 0: i64
-//   cond_fail %36: bool, bounds(%34: i64, %35: i64)
-//   %37: bool = binary.>= %34: i64, %35: i64
-//   cond_fail %37: bool, bounds(%34: i64, %35: i64)
-//   %38: u8 = slice.index %32: []u8, %34: i64
-//   %39: i64 = cast %38: u8, i64
-//   test.expect_equal %33: i64, %39: i64, i64
-//   %41: !void = error.ok
-//   return %41: !void
-// }
-// fn test.capture_propagates_a_borrowed_view_through_a_helper_return() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: []u8 = const "abc"
-//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
-//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
-//   %5: []u8 = call.std::string::String.as_bytes %4: std::string::String
-//   %6: []u8 = call.view_tail %5: []u8
-//   %7: i64 = const 98
-//   %8: u8 = cast %7: i64, u8
-//   %9: i64 = const 0
-//   %10: i64 = slice.len %6: []u8
-//   %11: bool = binary.< %9: i64, 0: i64
-//   cond_fail %11: bool, bounds(%9: i64, %10: i64)
-//   %12: bool = binary.>= %9: i64, %10: i64
-//   cond_fail %12: bool, bounds(%9: i64, %10: i64)
-//   %13: u8 = slice.index %6: []u8, %9: i64
-//   test.expect_equal %8: u8, %13: u8, u8
-//   %15: ?SplitView = call.split_view %6: []u8
-//   %16: SplitView = opt.value %15: ?SplitView
-//   %17: bool = opt.has %15: ?SplitView
-//   branch %17: bool, if.then.1, if.else.2
-// if.then.1:
-//   %18: i64 = const 98
-//   %19: u8 = cast %18: i64, u8
-//   %20: []u8 = field.left %16: SplitView
-//   %21: i64 = const 0
-//   %22: i64 = slice.len %20: []u8
-//   %23: bool = binary.< %21: i64, 0: i64
-//   cond_fail %23: bool, bounds(%21: i64, %22: i64)
-//   %24: bool = binary.>= %21: i64, %22: i64
-//   cond_fail %24: bool, bounds(%21: i64, %22: i64)
-//   %25: u8 = slice.index %20: []u8, %21: i64
-//   test.expect_equal %19: u8, %25: u8, u8
-//   %27: i64 = const 99
-//   %28: u8 = cast %27: i64, u8
-//   %29: []u8 = field.right %16: SplitView
-//   %30: i64 = const 0
-//   %31: i64 = slice.len %29: []u8
-//   %32: bool = binary.< %30: i64, 0: i64
-//   cond_fail %32: bool, bounds(%30: i64, %31: i64)
-//   %33: bool = binary.>= %30: i64, %31: i64
-//   cond_fail %33: bool, bounds(%30: i64, %31: i64)
-//   %34: u8 = slice.index %29: []u8, %30: i64
-//   test.expect_equal %28: u8, %34: u8, u8
-//   jump if.end.3
-// if.else.2:
-//   jump if.end.3
-// if.end.3:
-//   %36: []u8 = const "d"
-//   %37: std::mem::Error!void = call.std::string::String.append_bytes %4: std::string::String, %36: []u8
-//   error.try %37: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
-//   %39: i64 = const 4
-//   %40: i64 = call.std::string::String.len %4: std::string::String
-//   test.expect_equal %39: i64, %40: i64, i64
-//   call.std::string::String.deinit %4: std::string::String
-//   %43: !void = error.ok
-//   return %43: !void
-// }
-// fn test.try_preserves_transitive_view_capture_provenance() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: []u8 = const "abc"
-//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
-//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
-//   %5: []u8 = call.std::string::String.as_bytes %4: std::string::String
-//   %6: []u8 = call.view_tail %5: []u8
-//   %7: !?SplitView = call.fallible_split_view %6: []u8
-//   %8: ?SplitView = error.try %7: !?SplitView, cleanup call.std::string::String.deinit %4: std::string::String
-//   %9: SplitView = opt.value %8: ?SplitView
-//   %10: bool = opt.has %8: ?SplitView
-//   branch %10: bool, if.then.1, if.else.2
-// if.then.1:
-//   %11: i64 = const 98
-//   %12: u8 = cast %11: i64, u8
-//   %13: []u8 = field.left %9: SplitView
+//   %3: &var [3]u8 = local.slot %2: [3]u8
+//   %4: [3]u8 = ref.load %3: &var [3]u8
+//   %5: []u8 = buffer.as_bytes %4: [3]u8
+//   %6: u8 = const 60
+//   call.fill %5: []u8, %6: u8
+//   %8: [3]u8 = ref.load %3: &var [3]u8
+//   %9: []u8 = buffer.as_bytes %8: [3]u8
+//   %10: BufferedIter = call.buffered_iter %1: Allocator, %9: []u8
+//   %11: &var BufferedIter = local.slot %10: BufferedIter
+//   %12: &var std::array::Array<i64> = field.addr.seen %11: &var BufferedIter
+//   %13: []u8 = field.ref.bytes %11: &var BufferedIter
 //   %14: i64 = const 0
 //   %15: i64 = slice.len %13: []u8
 //   %16: bool = binary.< %14: i64, 0: i64
@@ -612,10 +513,71 @@ test "try preserves transitive view capture provenance" {
 //   %17: bool = binary.>= %14: i64, %15: i64
 //   cond_fail %17: bool, bounds(%14: i64, %15: i64)
 //   %18: u8 = slice.index %13: []u8, %14: i64
-//   test.expect_equal %12: u8, %18: u8, u8
-//   %20: i64 = const 99
+//   %19: i64 = cast %18: u8, i64
+//   %20: std::mem::Error!void = call.std::array::Array.append.i64 %12: &var std::array::Array<i64>, %19: i64
+//   %21: BufferedIter = ref.load %11: &var BufferedIter
+//   error.try %20: std::mem::Error!void, cleanup call.BufferedIter.deinit %21: BufferedIter
+//   %23: i64 = const 60
+//   %24: &var std::array::Array<i64> = field.addr.seen %11: &var BufferedIter
+//   %25: i64 = const 0
+//   %26: i64 = call.std::array::Array.get_or_panic.i64 %24: &var std::array::Array<i64>, %25: i64
+//   test.expect_equal %23: i64, %26: i64, i64
+//   %28: BufferedIter = ref.load %11: &var BufferedIter
+//   call.BufferedIter.deinit %28: BufferedIter
+//   %30: [3]u8 = ref.load %3: &var [3]u8
+//   %31: []u8 = buffer.as_bytes %30: [3]u8
+//   %32: i64 = const 90
+//   %33: u8 = cast %32: i64, u8
+//   %34: i64 = const 0
+//   %35: i64 = slice.len %31: []u8
+//   %36: bool = binary.< %34: i64, 0: i64
+//   cond_fail %36: bool, bounds(%34: i64, %35: i64)
+//   %37: bool = binary.>= %34: i64, %35: i64
+//   cond_fail %37: bool, bounds(%34: i64, %35: i64)
+//   slice.store %31: []u8, %34: i64, %33: u8
+//   %39: [3]u8 = ref.load %3: &var [3]u8
+//   %40: []u8 = buffer.as_bytes %39: [3]u8
+//   %41: i64 = const 90
+//   %42: i64 = const 0
+//   %43: i64 = slice.len %40: []u8
+//   %44: bool = binary.< %42: i64, 0: i64
+//   cond_fail %44: bool, bounds(%42: i64, %43: i64)
+//   %45: bool = binary.>= %42: i64, %43: i64
+//   cond_fail %45: bool, bounds(%42: i64, %43: i64)
+//   %46: u8 = slice.index %40: []u8, %42: i64
+//   %47: i64 = cast %46: u8, i64
+//   test.expect_equal %41: i64, %47: i64, i64
+//   %49: !void = error.ok
+//   return %49: !void
+// }
+// fn test.capture_propagates_a_borrowed_view_through_a_helper_return() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "abc"
+//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
+//   %5: &var std::string::String = local.slot %4: std::string::String
+//   %6: std::string::String = ref.load %5: &var std::string::String
+//   %7: []u8 = call.std::string::String.as_bytes %6: std::string::String
+//   %8: []u8 = call.view_tail %7: []u8
+//   %9: i64 = const 98
+//   %10: u8 = cast %9: i64, u8
+//   %11: i64 = const 0
+//   %12: i64 = slice.len %8: []u8
+//   %13: bool = binary.< %11: i64, 0: i64
+//   cond_fail %13: bool, bounds(%11: i64, %12: i64)
+//   %14: bool = binary.>= %11: i64, %12: i64
+//   cond_fail %14: bool, bounds(%11: i64, %12: i64)
+//   %15: u8 = slice.index %8: []u8, %11: i64
+//   test.expect_equal %10: u8, %15: u8, u8
+//   %17: ?SplitView = call.split_view %8: []u8
+//   %18: SplitView = opt.value %17: ?SplitView
+//   %19: bool = opt.has %17: ?SplitView
+//   branch %19: bool, if.then.1, if.else.2
+// if.then.1:
+//   %20: i64 = const 98
 //   %21: u8 = cast %20: i64, u8
-//   %22: []u8 = field.right %9: SplitView
+//   %22: []u8 = field.left %18: SplitView
 //   %23: i64 = const 0
 //   %24: i64 = slice.len %22: []u8
 //   %25: bool = binary.< %23: i64, 0: i64
@@ -624,19 +586,89 @@ test "try preserves transitive view capture provenance" {
 //   cond_fail %26: bool, bounds(%23: i64, %24: i64)
 //   %27: u8 = slice.index %22: []u8, %23: i64
 //   test.expect_equal %21: u8, %27: u8, u8
+//   %29: i64 = const 99
+//   %30: u8 = cast %29: i64, u8
+//   %31: []u8 = field.right %18: SplitView
+//   %32: i64 = const 0
+//   %33: i64 = slice.len %31: []u8
+//   %34: bool = binary.< %32: i64, 0: i64
+//   cond_fail %34: bool, bounds(%32: i64, %33: i64)
+//   %35: bool = binary.>= %32: i64, %33: i64
+//   cond_fail %35: bool, bounds(%32: i64, %33: i64)
+//   %36: u8 = slice.index %31: []u8, %32: i64
+//   test.expect_equal %30: u8, %36: u8, u8
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   %29: []u8 = const "d"
-//   %30: std::mem::Error!void = call.std::string::String.append_bytes %4: std::string::String, %29: []u8
-//   error.try %30: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
-//   %32: i64 = const 4
-//   %33: i64 = call.std::string::String.len %4: std::string::String
-//   test.expect_equal %32: i64, %33: i64, i64
-//   call.std::string::String.deinit %4: std::string::String
-//   %36: !void = error.ok
-//   return %36: !void
+//   %38: []u8 = const "d"
+//   %39: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %38: []u8
+//   %40: std::string::String = ref.load %5: &var std::string::String
+//   error.try %39: std::mem::Error!void, cleanup call.std::string::String.deinit %40: std::string::String
+//   %42: i64 = const 4
+//   %43: std::string::String = ref.load %5: &var std::string::String
+//   %44: i64 = call.std::string::String.len %43: std::string::String
+//   test.expect_equal %42: i64, %44: i64, i64
+//   %46: std::string::String = ref.load %5: &var std::string::String
+//   call.std::string::String.deinit %46: std::string::String
+//   %48: !void = error.ok
+//   return %48: !void
+// }
+// fn test.try_preserves_transitive_view_capture_provenance() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "abc"
+//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
+//   %5: &var std::string::String = local.slot %4: std::string::String
+//   %6: std::string::String = ref.load %5: &var std::string::String
+//   %7: []u8 = call.std::string::String.as_bytes %6: std::string::String
+//   %8: []u8 = call.view_tail %7: []u8
+//   %9: !?SplitView = call.fallible_split_view %8: []u8
+//   %10: std::string::String = ref.load %5: &var std::string::String
+//   %11: ?SplitView = error.try %9: !?SplitView, cleanup call.std::string::String.deinit %10: std::string::String
+//   %12: SplitView = opt.value %11: ?SplitView
+//   %13: bool = opt.has %11: ?SplitView
+//   branch %13: bool, if.then.1, if.else.2
+// if.then.1:
+//   %14: i64 = const 98
+//   %15: u8 = cast %14: i64, u8
+//   %16: []u8 = field.left %12: SplitView
+//   %17: i64 = const 0
+//   %18: i64 = slice.len %16: []u8
+//   %19: bool = binary.< %17: i64, 0: i64
+//   cond_fail %19: bool, bounds(%17: i64, %18: i64)
+//   %20: bool = binary.>= %17: i64, %18: i64
+//   cond_fail %20: bool, bounds(%17: i64, %18: i64)
+//   %21: u8 = slice.index %16: []u8, %17: i64
+//   test.expect_equal %15: u8, %21: u8, u8
+//   %23: i64 = const 99
+//   %24: u8 = cast %23: i64, u8
+//   %25: []u8 = field.right %12: SplitView
+//   %26: i64 = const 0
+//   %27: i64 = slice.len %25: []u8
+//   %28: bool = binary.< %26: i64, 0: i64
+//   cond_fail %28: bool, bounds(%26: i64, %27: i64)
+//   %29: bool = binary.>= %26: i64, %27: i64
+//   cond_fail %29: bool, bounds(%26: i64, %27: i64)
+//   %30: u8 = slice.index %25: []u8, %26: i64
+//   test.expect_equal %24: u8, %30: u8, u8
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %32: []u8 = const "d"
+//   %33: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %32: []u8
+//   %34: std::string::String = ref.load %5: &var std::string::String
+//   error.try %33: std::mem::Error!void, cleanup call.std::string::String.deinit %34: std::string::String
+//   %36: i64 = const 4
+//   %37: std::string::String = ref.load %5: &var std::string::String
+//   %38: i64 = call.std::string::String.len %37: std::string::String
+//   test.expect_equal %36: i64, %38: i64, i64
+//   %40: std::string::String = ref.load %5: &var std::string::String
+//   call.std::string::String.deinit %40: std::string::String
+//   %42: !void = error.ok
+//   return %42: !void
 // }
 // opt:
 // fn iter(%bytes: []u8) -> BytesIter {
@@ -714,7 +746,7 @@ test "try preserves transitive view capture provenance" {
 // fn buffered_iter(%allocator: Allocator, %bytes: []u8) -> BufferedIter {
 // entry:
 //   %1: i64 = const 0
-//   %2: std::array::Array<i64> = array.new %allocator: Allocator, i64
+//   %2: std::array::Array<i64> = array.new %allocator: Allocator
 //   %3: BufferedIter = struct.new {bytes: %bytes: []u8, index: %1: i64, seen: %2: std::array::Array<i64>}
 //   return %3: BufferedIter
 // }
@@ -783,50 +815,56 @@ test "try preserves transitive view capture provenance" {
 // fn test.struct_literal_captures_a_runtime_view() -> !void {
 // entry:
 //   %1: [2]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [2]u8
-//   %3: u8 = const 10
-//   call.fill %2: []u8, %3: u8
-//   %5: []u8 = buffer.as_bytes %1: [2]u8
-//   %6: i64 = const 0
-//   %7: BytesIter = struct.new {bytes: %5: []u8, index: %6: i64}
-//   %8: &var BytesIter = local.slot %7: BytesIter
+//   %2: &var [2]u8 = local.slot %1: [2]u8
+//   %3: [2]u8 = ref.load %2: &var [2]u8
+//   %4: []u8 = buffer.as_bytes %3: [2]u8
+//   %5: u8 = const 10
+//   call.fill %4: []u8, %5: u8
+//   %7: [2]u8 = ref.load %2: &var [2]u8
+//   %8: []u8 = buffer.as_bytes %7: [2]u8
 //   %9: i64 = const 0
+//   %10: BytesIter = struct.new {bytes: %8: []u8, index: %9: i64}
+//   %11: &var BytesIter = local.slot %10: BytesIter
+//   %12: i64 = const 0
 //   jump while.header.1
 // while.header.1:
-//   %10: i64 = phi [entry, %9: i64], [while.body.2, %15: i64]
-//   %11: BytesIter = ref.load %8: &var BytesIter
-//   %12: bool = call.BytesIter.has_next %11: BytesIter
-//   branch %12: bool, while.body.2, while.end.3
+//   %13: i64 = phi [entry, %12: i64], [while.body.2, %18: i64]
+//   %14: BytesIter = ref.load %11: &var BytesIter
+//   %15: bool = call.BytesIter.has_next %14: BytesIter
+//   branch %15: bool, while.body.2, while.end.3
 // while.body.2:
-//   %13: u8 = call.BytesIter.next %8: &var BytesIter
-//   %14: i64 = cast %13: u8, i64
-//   %15: i64 = binary.+ %10: i64, %14: i64
+//   %16: u8 = call.BytesIter.next %11: &var BytesIter
+//   %17: i64 = cast %16: u8, i64
+//   %18: i64 = binary.+ %13: i64, %17: i64
 //   jump while.header.1
 // while.end.3:
-//   %16: i64 = const 21
-//   test.expect_equal %16: i64, %10: i64, i64
-//   %18: !void = error.ok
-//   return %18: !void
+//   %19: i64 = const 21
+//   test.expect_equal %19: i64, %13: i64, i64
+//   %21: !void = error.ok
+//   return %21: !void
 // }
 // fn test.factory_call_ties_its_result_to_the_view_argument() -> !void {
 // entry:
 //   %1: [2]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [2]u8
-//   %3: u8 = const 30
-//   call.fill %2: []u8, %3: u8
-//   %5: []u8 = buffer.as_bytes %1: [2]u8
-//   %6: BytesIter = call.iter %5: []u8
-//   %7: &var BytesIter = local.slot %6: BytesIter
-//   %8: i64 = const 30
-//   %9: u8 = call.BytesIter.next %7: &var BytesIter
-//   %10: i64 = cast %9: u8, i64
-//   test.expect_equal %8: i64, %10: i64, i64
-//   %12: i64 = const 31
-//   %13: u8 = call.BytesIter.next %7: &var BytesIter
-//   %14: i64 = cast %13: u8, i64
-//   test.expect_equal %12: i64, %14: i64, i64
-//   %16: !void = error.ok
-//   return %16: !void
+//   %2: &var [2]u8 = local.slot %1: [2]u8
+//   %3: [2]u8 = ref.load %2: &var [2]u8
+//   %4: []u8 = buffer.as_bytes %3: [2]u8
+//   %5: u8 = const 30
+//   call.fill %4: []u8, %5: u8
+//   %7: [2]u8 = ref.load %2: &var [2]u8
+//   %8: []u8 = buffer.as_bytes %7: [2]u8
+//   %9: BytesIter = call.iter %8: []u8
+//   %10: &var BytesIter = local.slot %9: BytesIter
+//   %11: i64 = const 30
+//   %12: u8 = call.BytesIter.next %10: &var BytesIter
+//   %13: i64 = cast %12: u8, i64
+//   test.expect_equal %11: i64, %13: i64, i64
+//   %15: i64 = const 31
+//   %16: u8 = call.BytesIter.next %10: &var BytesIter
+//   %17: i64 = cast %16: u8, i64
+//   test.expect_equal %15: i64, %17: i64, i64
+//   %19: !void = error.ok
+//   return %19: !void
 // }
 // fn test.view_free_struct_returns_take_view_arguments_freely() -> !void {
 // entry:
@@ -855,178 +893,73 @@ test "try preserves transitive view capture provenance" {
 // fn test.capture_releases_at_last_use() -> !void {
 // entry:
 //   %1: [2]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [2]u8
-//   %3: i64 = const 0
-//   %4: BytesIter = struct.new {bytes: %2: []u8, index: %3: i64}
+//   %2: &var [2]u8 = local.slot %1: [2]u8
+//   %3: [2]u8 = ref.load %2: &var [2]u8
+//   %4: []u8 = buffer.as_bytes %3: [2]u8
 //   %5: i64 = const 0
-//   %6: i64 = field.index %4: BytesIter
-//   test.expect_equal %5: i64, %6: i64, i64
-//   %8: []u8 = buffer.as_bytes %1: [2]u8
-//   %9: u8 = const 50
-//   call.fill %8: []u8, %9: u8
-//   %11: []u8 = buffer.as_bytes %1: [2]u8
-//   %12: i64 = const 50
-//   %13: i64 = const 0
-//   %14: i64 = slice.len %11: []u8
-//   %15: bool = binary.< %13: i64, 0: i64
-//   cond_fail %15: bool, bounds(%13: i64, %14: i64)
-//   %16: bool = binary.>= %13: i64, %14: i64
-//   cond_fail %16: bool, bounds(%13: i64, %14: i64)
-//   %17: u8 = slice.index %11: []u8, %13: i64
-//   %18: i64 = cast %17: u8, i64
-//   test.expect_equal %12: i64, %18: i64, i64
-//   %20: !void = error.ok
-//   return %20: !void
+//   %6: BytesIter = struct.new {bytes: %4: []u8, index: %5: i64}
+//   %7: i64 = const 0
+//   %8: i64 = field.index %6: BytesIter
+//   test.expect_equal %7: i64, %8: i64, i64
+//   %10: [2]u8 = ref.load %2: &var [2]u8
+//   %11: []u8 = buffer.as_bytes %10: [2]u8
+//   %12: u8 = const 50
+//   call.fill %11: []u8, %12: u8
+//   %14: [2]u8 = ref.load %2: &var [2]u8
+//   %15: []u8 = buffer.as_bytes %14: [2]u8
+//   %16: i64 = const 50
+//   %17: i64 = const 0
+//   %18: i64 = slice.len %15: []u8
+//   %19: bool = binary.< %17: i64, 0: i64
+//   cond_fail %19: bool, bounds(%17: i64, %18: i64)
+//   %20: bool = binary.>= %17: i64, %18: i64
+//   cond_fail %20: bool, bounds(%17: i64, %18: i64)
+//   %21: u8 = slice.index %15: []u8, %17: i64
+//   %22: i64 = cast %21: u8, i64
+//   test.expect_equal %16: i64, %22: i64, i64
+//   %24: !void = error.ok
+//   return %24: !void
 // }
 // fn test.a_view_lends_to_a_method_whose_receiver_cannot_keep_it() -> !void {
 // entry:
 //   %1: [3]u8 = buffer.new
-//   %2: []u8 = buffer.as_bytes %1: [3]u8
-//   %3: u8 = const 4
-//   call.fill %2: []u8, %3: u8
-//   %5: []u8 = buffer.as_bytes %1: [3]u8
-//   %6: i64 = const 0
-//   %7: Sink = struct.new {total: %6: i64}
-//   %8: &var Sink = local.slot %7: Sink
-//   call.Sink.take %8: &var Sink, %5: []u8
-//   call.Sink.take %8: &var Sink, %5: []u8
-//   %11: i64 = const 6
-//   %12: i64 = field.ref.total %8: &var Sink
-//   test.expect_equal %11: i64, %12: i64, i64
-//   %14: i64 = const 9
-//   %15: Sink = ref.load %8: &var Sink
-//   %16: i64 = call.Sink.weigh %15: Sink, %5: []u8
-//   test.expect_equal %14: i64, %16: i64, i64
-//   %18: !void = error.ok
-//   return %18: !void
+//   %2: &var [3]u8 = local.slot %1: [3]u8
+//   %3: [3]u8 = ref.load %2: &var [3]u8
+//   %4: []u8 = buffer.as_bytes %3: [3]u8
+//   %5: u8 = const 4
+//   call.fill %4: []u8, %5: u8
+//   %7: [3]u8 = ref.load %2: &var [3]u8
+//   %8: []u8 = buffer.as_bytes %7: [3]u8
+//   %9: i64 = const 0
+//   %10: Sink = struct.new {total: %9: i64}
+//   %11: &var Sink = local.slot %10: Sink
+//   call.Sink.take %11: &var Sink, %8: []u8
+//   call.Sink.take %11: &var Sink, %8: []u8
+//   %14: i64 = const 6
+//   %15: i64 = field.ref.total %11: &var Sink
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 9
+//   %18: Sink = ref.load %11: &var Sink
+//   %19: i64 = call.Sink.weigh %18: Sink, %8: []u8
+//   test.expect_equal %17: i64, %19: i64, i64
+//   %21: !void = error.ok
+//   return %21: !void
 // }
 // fn test.owner_aggregate_captures_a_runtime_view() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: [3]u8 = buffer.new
-//   %3: []u8 = buffer.as_bytes %2: [3]u8
-//   %4: u8 = const 60
-//   call.fill %3: []u8, %4: u8
-//   %6: []u8 = buffer.as_bytes %2: [3]u8
-//   %7: BufferedIter = call.buffered_iter %1: Allocator, %6: []u8
-//   %8: std::array::Array<i64> = field.seen %7: BufferedIter
-//   %9: []u8 = field.bytes %7: BufferedIter
-//   %10: i64 = const 0
-//   %11: i64 = slice.len %9: []u8
-//   %12: bool = binary.< %10: i64, 0: i64
-//   cond_fail %12: bool, bounds(%10: i64, %11: i64)
-//   %13: bool = binary.>= %10: i64, %11: i64
-//   cond_fail %13: bool, bounds(%10: i64, %11: i64)
-//   %14: u8 = slice.index %9: []u8, %10: i64
-//   %15: i64 = cast %14: u8, i64
-//   %16: std::mem::Error!void = call.std::array::Array.append.i64 %8: std::array::Array<i64>, %15: i64
-//   error.try %16: std::mem::Error!void, cleanup call.BufferedIter.deinit %7: BufferedIter
-//   %18: i64 = const 60
-//   %19: std::array::Array<i64> = field.seen %7: BufferedIter
-//   %20: i64 = const 0
-//   %21: i64 = call.std::array::Array.get_or_panic.i64 %19: std::array::Array<i64>, %20: i64
-//   test.expect_equal %18: i64, %21: i64, i64
-//   call.BufferedIter.deinit %7: BufferedIter
-//   %24: []u8 = buffer.as_bytes %2: [3]u8
-//   %25: i64 = const 90
-//   %26: u8 = cast %25: i64, u8
-//   %27: i64 = const 0
-//   %28: i64 = slice.len %24: []u8
-//   %29: bool = binary.< %27: i64, 0: i64
-//   cond_fail %29: bool, bounds(%27: i64, %28: i64)
-//   %30: bool = binary.>= %27: i64, %28: i64
-//   cond_fail %30: bool, bounds(%27: i64, %28: i64)
-//   slice.store %24: []u8, %27: i64, %26: u8
-//   %32: []u8 = buffer.as_bytes %2: [3]u8
-//   %33: i64 = const 90
-//   %34: i64 = const 0
-//   %35: i64 = slice.len %32: []u8
-//   %36: bool = binary.< %34: i64, 0: i64
-//   cond_fail %36: bool, bounds(%34: i64, %35: i64)
-//   %37: bool = binary.>= %34: i64, %35: i64
-//   cond_fail %37: bool, bounds(%34: i64, %35: i64)
-//   %38: u8 = slice.index %32: []u8, %34: i64
-//   %39: i64 = cast %38: u8, i64
-//   test.expect_equal %33: i64, %39: i64, i64
-//   %41: !void = error.ok
-//   return %41: !void
-// }
-// fn test.capture_propagates_a_borrowed_view_through_a_helper_return() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: []u8 = const "abc"
-//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
-//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
-//   %5: []u8 = call.std::string::String.as_bytes %4: std::string::String
-//   %6: []u8 = call.view_tail %5: []u8
-//   %7: i64 = const 98
-//   %8: u8 = cast %7: i64, u8
-//   %9: i64 = const 0
-//   %10: i64 = slice.len %6: []u8
-//   %11: bool = binary.< %9: i64, 0: i64
-//   cond_fail %11: bool, bounds(%9: i64, %10: i64)
-//   %12: bool = binary.>= %9: i64, %10: i64
-//   cond_fail %12: bool, bounds(%9: i64, %10: i64)
-//   %13: u8 = slice.index %6: []u8, %9: i64
-//   test.expect_equal %8: u8, %13: u8, u8
-//   %15: ?SplitView = call.split_view %6: []u8
-//   %16: SplitView = opt.value %15: ?SplitView
-//   %17: bool = opt.has %15: ?SplitView
-//   branch %17: bool, if.then.1, if.else.2
-// if.then.1:
-//   %18: i64 = const 98
-//   %19: u8 = cast %18: i64, u8
-//   %20: []u8 = field.left %16: SplitView
-//   %21: i64 = const 0
-//   %22: i64 = slice.len %20: []u8
-//   %23: bool = binary.< %21: i64, 0: i64
-//   cond_fail %23: bool, bounds(%21: i64, %22: i64)
-//   %24: bool = binary.>= %21: i64, %22: i64
-//   cond_fail %24: bool, bounds(%21: i64, %22: i64)
-//   %25: u8 = slice.index %20: []u8, %21: i64
-//   test.expect_equal %19: u8, %25: u8, u8
-//   %27: i64 = const 99
-//   %28: u8 = cast %27: i64, u8
-//   %29: []u8 = field.right %16: SplitView
-//   %30: i64 = const 0
-//   %31: i64 = slice.len %29: []u8
-//   %32: bool = binary.< %30: i64, 0: i64
-//   cond_fail %32: bool, bounds(%30: i64, %31: i64)
-//   %33: bool = binary.>= %30: i64, %31: i64
-//   cond_fail %33: bool, bounds(%30: i64, %31: i64)
-//   %34: u8 = slice.index %29: []u8, %30: i64
-//   test.expect_equal %28: u8, %34: u8, u8
-//   jump if.end.3
-// if.else.2:
-//   jump if.end.3
-// if.end.3:
-//   %36: []u8 = const "d"
-//   %37: std::mem::Error!void = call.std::string::String.append_bytes %4: std::string::String, %36: []u8
-//   error.try %37: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
-//   %39: i64 = const 4
-//   %40: i64 = call.std::string::String.len %4: std::string::String
-//   test.expect_equal %39: i64, %40: i64, i64
-//   call.std::string::String.deinit %4: std::string::String
-//   %43: !void = error.ok
-//   return %43: !void
-// }
-// fn test.try_preserves_transitive_view_capture_provenance() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: []u8 = const "abc"
-//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
-//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
-//   %5: []u8 = call.std::string::String.as_bytes %4: std::string::String
-//   %6: []u8 = call.view_tail %5: []u8
-//   %7: !?SplitView = call.fallible_split_view %6: []u8
-//   %8: ?SplitView = error.try %7: !?SplitView, cleanup call.std::string::String.deinit %4: std::string::String
-//   %9: SplitView = opt.value %8: ?SplitView
-//   %10: bool = opt.has %8: ?SplitView
-//   branch %10: bool, if.then.1, if.else.2
-// if.then.1:
-//   %11: i64 = const 98
-//   %12: u8 = cast %11: i64, u8
-//   %13: []u8 = field.left %9: SplitView
+//   %3: &var [3]u8 = local.slot %2: [3]u8
+//   %4: [3]u8 = ref.load %3: &var [3]u8
+//   %5: []u8 = buffer.as_bytes %4: [3]u8
+//   %6: u8 = const 60
+//   call.fill %5: []u8, %6: u8
+//   %8: [3]u8 = ref.load %3: &var [3]u8
+//   %9: []u8 = buffer.as_bytes %8: [3]u8
+//   %10: BufferedIter = call.buffered_iter %1: Allocator, %9: []u8
+//   %11: &var BufferedIter = local.slot %10: BufferedIter
+//   %12: &var std::array::Array<i64> = field.addr.seen %11: &var BufferedIter
+//   %13: []u8 = field.ref.bytes %11: &var BufferedIter
 //   %14: i64 = const 0
 //   %15: i64 = slice.len %13: []u8
 //   %16: bool = binary.< %14: i64, 0: i64
@@ -1034,10 +967,71 @@ test "try preserves transitive view capture provenance" {
 //   %17: bool = binary.>= %14: i64, %15: i64
 //   cond_fail %17: bool, bounds(%14: i64, %15: i64)
 //   %18: u8 = slice.index %13: []u8, %14: i64
-//   test.expect_equal %12: u8, %18: u8, u8
-//   %20: i64 = const 99
+//   %19: i64 = cast %18: u8, i64
+//   %20: std::mem::Error!void = call.std::array::Array.append.i64 %12: &var std::array::Array<i64>, %19: i64
+//   %21: BufferedIter = ref.load %11: &var BufferedIter
+//   error.try %20: std::mem::Error!void, cleanup call.BufferedIter.deinit %21: BufferedIter
+//   %23: i64 = const 60
+//   %24: &var std::array::Array<i64> = field.addr.seen %11: &var BufferedIter
+//   %25: i64 = const 0
+//   %26: i64 = call.std::array::Array.get_or_panic.i64 %24: &var std::array::Array<i64>, %25: i64
+//   test.expect_equal %23: i64, %26: i64, i64
+//   %28: BufferedIter = ref.load %11: &var BufferedIter
+//   call.BufferedIter.deinit %28: BufferedIter
+//   %30: [3]u8 = ref.load %3: &var [3]u8
+//   %31: []u8 = buffer.as_bytes %30: [3]u8
+//   %32: i64 = const 90
+//   %33: u8 = cast %32: i64, u8
+//   %34: i64 = const 0
+//   %35: i64 = slice.len %31: []u8
+//   %36: bool = binary.< %34: i64, 0: i64
+//   cond_fail %36: bool, bounds(%34: i64, %35: i64)
+//   %37: bool = binary.>= %34: i64, %35: i64
+//   cond_fail %37: bool, bounds(%34: i64, %35: i64)
+//   slice.store %31: []u8, %34: i64, %33: u8
+//   %39: [3]u8 = ref.load %3: &var [3]u8
+//   %40: []u8 = buffer.as_bytes %39: [3]u8
+//   %41: i64 = const 90
+//   %42: i64 = const 0
+//   %43: i64 = slice.len %40: []u8
+//   %44: bool = binary.< %42: i64, 0: i64
+//   cond_fail %44: bool, bounds(%42: i64, %43: i64)
+//   %45: bool = binary.>= %42: i64, %43: i64
+//   cond_fail %45: bool, bounds(%42: i64, %43: i64)
+//   %46: u8 = slice.index %40: []u8, %42: i64
+//   %47: i64 = cast %46: u8, i64
+//   test.expect_equal %41: i64, %47: i64, i64
+//   %49: !void = error.ok
+//   return %49: !void
+// }
+// fn test.capture_propagates_a_borrowed_view_through_a_helper_return() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "abc"
+//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
+//   %5: &var std::string::String = local.slot %4: std::string::String
+//   %6: std::string::String = ref.load %5: &var std::string::String
+//   %7: []u8 = call.std::string::String.as_bytes %6: std::string::String
+//   %8: []u8 = call.view_tail %7: []u8
+//   %9: i64 = const 98
+//   %10: u8 = cast %9: i64, u8
+//   %11: i64 = const 0
+//   %12: i64 = slice.len %8: []u8
+//   %13: bool = binary.< %11: i64, 0: i64
+//   cond_fail %13: bool, bounds(%11: i64, %12: i64)
+//   %14: bool = binary.>= %11: i64, %12: i64
+//   cond_fail %14: bool, bounds(%11: i64, %12: i64)
+//   %15: u8 = slice.index %8: []u8, %11: i64
+//   test.expect_equal %10: u8, %15: u8, u8
+//   %17: ?SplitView = call.split_view %8: []u8
+//   %18: SplitView = opt.value %17: ?SplitView
+//   %19: bool = opt.has %17: ?SplitView
+//   branch %19: bool, if.then.1, if.else.2
+// if.then.1:
+//   %20: i64 = const 98
 //   %21: u8 = cast %20: i64, u8
-//   %22: []u8 = field.right %9: SplitView
+//   %22: []u8 = field.left %18: SplitView
 //   %23: i64 = const 0
 //   %24: i64 = slice.len %22: []u8
 //   %25: bool = binary.< %23: i64, 0: i64
@@ -1046,17 +1040,87 @@ test "try preserves transitive view capture provenance" {
 //   cond_fail %26: bool, bounds(%23: i64, %24: i64)
 //   %27: u8 = slice.index %22: []u8, %23: i64
 //   test.expect_equal %21: u8, %27: u8, u8
+//   %29: i64 = const 99
+//   %30: u8 = cast %29: i64, u8
+//   %31: []u8 = field.right %18: SplitView
+//   %32: i64 = const 0
+//   %33: i64 = slice.len %31: []u8
+//   %34: bool = binary.< %32: i64, 0: i64
+//   cond_fail %34: bool, bounds(%32: i64, %33: i64)
+//   %35: bool = binary.>= %32: i64, %33: i64
+//   cond_fail %35: bool, bounds(%32: i64, %33: i64)
+//   %36: u8 = slice.index %31: []u8, %32: i64
+//   test.expect_equal %30: u8, %36: u8, u8
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   %29: []u8 = const "d"
-//   %30: std::mem::Error!void = call.std::string::String.append_bytes %4: std::string::String, %29: []u8
-//   error.try %30: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
-//   %32: i64 = const 4
-//   %33: i64 = call.std::string::String.len %4: std::string::String
-//   test.expect_equal %32: i64, %33: i64, i64
-//   call.std::string::String.deinit %4: std::string::String
-//   %36: !void = error.ok
-//   return %36: !void
+//   %38: []u8 = const "d"
+//   %39: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %38: []u8
+//   %40: std::string::String = ref.load %5: &var std::string::String
+//   error.try %39: std::mem::Error!void, cleanup call.std::string::String.deinit %40: std::string::String
+//   %42: i64 = const 4
+//   %43: std::string::String = ref.load %5: &var std::string::String
+//   %44: i64 = call.std::string::String.len %43: std::string::String
+//   test.expect_equal %42: i64, %44: i64, i64
+//   %46: std::string::String = ref.load %5: &var std::string::String
+//   call.std::string::String.deinit %46: std::string::String
+//   %48: !void = error.ok
+//   return %48: !void
+// }
+// fn test.try_preserves_transitive_view_capture_provenance() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "abc"
+//   %3: std::mem::Error!std::string::String = call.std::string::from_bytes %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: std::mem::Error!std::string::String
+//   %5: &var std::string::String = local.slot %4: std::string::String
+//   %6: std::string::String = ref.load %5: &var std::string::String
+//   %7: []u8 = call.std::string::String.as_bytes %6: std::string::String
+//   %8: []u8 = call.view_tail %7: []u8
+//   %9: !?SplitView = call.fallible_split_view %8: []u8
+//   %10: std::string::String = ref.load %5: &var std::string::String
+//   %11: ?SplitView = error.try %9: !?SplitView, cleanup call.std::string::String.deinit %10: std::string::String
+//   %12: SplitView = opt.value %11: ?SplitView
+//   %13: bool = opt.has %11: ?SplitView
+//   branch %13: bool, if.then.1, if.else.2
+// if.then.1:
+//   %14: i64 = const 98
+//   %15: u8 = cast %14: i64, u8
+//   %16: []u8 = field.left %12: SplitView
+//   %17: i64 = const 0
+//   %18: i64 = slice.len %16: []u8
+//   %19: bool = binary.< %17: i64, 0: i64
+//   cond_fail %19: bool, bounds(%17: i64, %18: i64)
+//   %20: bool = binary.>= %17: i64, %18: i64
+//   cond_fail %20: bool, bounds(%17: i64, %18: i64)
+//   %21: u8 = slice.index %16: []u8, %17: i64
+//   test.expect_equal %15: u8, %21: u8, u8
+//   %23: i64 = const 99
+//   %24: u8 = cast %23: i64, u8
+//   %25: []u8 = field.right %12: SplitView
+//   %26: i64 = const 0
+//   %27: i64 = slice.len %25: []u8
+//   %28: bool = binary.< %26: i64, 0: i64
+//   cond_fail %28: bool, bounds(%26: i64, %27: i64)
+//   %29: bool = binary.>= %26: i64, %27: i64
+//   cond_fail %29: bool, bounds(%26: i64, %27: i64)
+//   %30: u8 = slice.index %25: []u8, %26: i64
+//   test.expect_equal %24: u8, %30: u8, u8
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %32: []u8 = const "d"
+//   %33: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %32: []u8
+//   %34: std::string::String = ref.load %5: &var std::string::String
+//   error.try %33: std::mem::Error!void, cleanup call.std::string::String.deinit %34: std::string::String
+//   %36: i64 = const 4
+//   %37: std::string::String = ref.load %5: &var std::string::String
+//   %38: i64 = call.std::string::String.len %37: std::string::String
+//   test.expect_equal %36: i64, %38: i64, i64
+//   %40: std::string::String = ref.load %5: &var std::string::String
+//   call.std::string::String.deinit %40: std::string::String
+//   %42: !void = error.ok
+//   return %42: !void
 // }

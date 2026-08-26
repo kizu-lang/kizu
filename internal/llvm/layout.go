@@ -29,6 +29,11 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 	if e.lowersToWord(typ) {
 		return 8, 8, true
 	}
+	// An array is its header: four words describing storage the array owns
+	// elsewhere. The header is what a field or a union payload holds.
+	if isArrayLLVMType(typ) {
+		return arrayHeaderSize, 8, true
+	}
 	// An optional is the two-field aggregate writeOptionalTypes declares:
 	// `{ i8, elem }`, laid out the C way like any struct.
 	if elem, ok := optionalElemLLVM(typ); ok {
@@ -71,11 +76,10 @@ func primitiveLayout(typ string) (int, int, bool) {
 // owned container or arena handle lowering to a pointer, or a tag lowering to
 // an i64. An enum tag and an error code are the same shape here.
 func (e *emitter) lowersToWord(typ string) bool {
-	if typ == "std::string::String" || isArenaHandleType(typ) {
+	if isArenaHandleType(typ) {
 		return true
 	}
-	if isArrayLLVMType(typ) || isMapLLVMType(typ) || isArenaLLVMType(typ) ||
-		isBoxLLVMType(typ) {
+	if isMapLLVMType(typ) || isArenaLLVMType(typ) || isBoxLLVMType(typ) {
 		return true
 	}
 	if _, ok := e.module.Enums[typ]; ok {

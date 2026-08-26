@@ -101,6 +101,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::arena_pop_or_panic":           true,
 	"std::internal::builtin::array":                        true,
 	"std::internal::builtin::array_append":                 true,
+	"std::internal::builtin::array_append_bytes":           true,
 	"std::internal::builtin::array_at":                     true,
 	"std::internal::builtin::array_as_bytes":               true,
 	"std::internal::builtin::array_as_mut_bytes":           true,

@@ -90,9 +90,15 @@ func (v Value) String() string {
 
 // Instr is one SSA instruction.
 type Instr struct {
-	Result    Value
-	Op        string
-	Args      []Value
+	Result Value
+	Op     string
+	Args   []Value
+	// Immediate is what the instruction carries that no value of its own
+	// spells: the text of a literal, the variant a union instruction selects,
+	// and the kind a cond_fail reports. A type argument is not among them --
+	// a container spells its element in its own type, and a second copy here
+	// could be missing (a Cleanup carries none) or disagree, either of which
+	// measures a release against the wrong size.
 	Immediate string
 	Fields    []FieldArg
 	Incoming  []Incoming

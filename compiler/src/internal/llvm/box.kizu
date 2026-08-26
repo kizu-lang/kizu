@@ -1,6 +1,7 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::mem;
+import std::string;
 
 // Mechanical port of internal/llvm/box.go: the hosted Box runtime
 // declarations and the `box.*` instructions.
@@ -86,7 +87,13 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
             let value_base = try self.suffixed(result_name, ".value");
             let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(1));
             let raw_name = try self.suffixed(result_name, ".raw");
-            let size = try self.element_size_operand(module, node.immediate);
+            var elem = string::new(self.allocator);
+            defer elem.deinit();
+            if !try self.instr_element_type(module, node, &var elem) {
+                return try self.fail0("llvm error: box.new expects allocator, T -> !Box<T>");
+            }
+            let elem_bytes = elem.as_bytes();
+            let size = try self.element_size_operand_bytes(module, elem_bytes);
             try self.line4(
                 "  %s = call ptr @kizu_box_new(ptr %s, i64 %s, ptr %s)",
                 Arg::Str(raw_name), Arg::Str(allocator.operand), Arg::Str(size), Arg::Str(value_slot)

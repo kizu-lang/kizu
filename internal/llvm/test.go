@@ -20,7 +20,8 @@ func (e *emitter) usesByteEqualityRuntime() bool {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if instr.Op == "test.expect_equal" && instr.Immediate == "[]u8" {
+				if instr.Op == "test.expect_equal" && len(instr.Args) > 0 &&
+					instr.Args[0].Type == "[]u8" {
 					return true
 				}
 				if strings.HasPrefix(instr.Op, "binary.") &&

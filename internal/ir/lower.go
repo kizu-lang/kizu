@@ -567,6 +567,24 @@ func (l *lowerer) indexMethodSignatures() {
 			l.methodSigs[method] = append(l.methodSigs[method], sig)
 		}
 	}
+	// A generic method has no lowered signature until its instance is
+	// requested, which happens at the call the slot analysis runs before. Its
+	// declaration already says whether the receiver arrives as the binding's
+	// storage, so the analysis reads that rather than instantiating to ask.
+	for name, decl := range l.genericDecls {
+		method, ok := genericMethodName(name)
+		if !ok || len(decl.Params) == 0 || !decl.Params[0].MutBorrow {
+			continue
+		}
+		l.methodSigs[method] = append(l.methodSigs[method],
+			Signature{Params: []Param{{Passing: PassCallerStorage}}})
+	}
+}
+
+// genericMethodName returns the method a generic declaration name ends with.
+func genericMethodName(name string) (string, bool) {
+	_, method, ok := stdmethod.SplitMethodName(name)
+	return method, ok
 }
 
 // externCSymbol strips the module qualification a resolver added to an extern
@@ -744,6 +762,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.nextBlock = 0
 	l.loops = nil
 	l.deferFrames = nil
+	valueSlots := make([]string, 0, len(fn.Params))
 	for index, param := range fn.Params {
 		l.env.set(param.Name, signature.Params[index].Value())
 		// A parameter that arrives as the caller's storage is a storage name
@@ -751,9 +770,22 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		// consumers take the pointer itself.
 		if signature.Params[index].Passing == PassCallerStorage {
 			l.slots[param.Name] = true
+			continue
+		}
+		// One that arrives as a value and is written through needs storage of
+		// its own, which is the copy it was handed.
+		if l.slots[param.Name] {
+			valueSlots = append(valueSlots, param.Name)
 		}
 	}
 	l.block = l.newBlock("entry")
+	for _, name := range valueSlots {
+		value, ok := l.env.get(name)
+		if !ok {
+			continue
+		}
+		l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
+	}
 	if err := l.lowerBlock(fn.Body); err != nil {
 		return nil, err
 	}
@@ -799,6 +831,12 @@ func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 		return "&var " + elem, PassCallerStorage
 	}
 	if _, ok := l.module.Unions[elem]; ok {
+		return "&" + elem, PassCopyAddress
+	}
+	// An array is its header, and the header is wider than a word. A shared
+	// borrow of one hands over the address of a copy rather than the copy
+	// itself, so a reader reaches the same fields a writer does.
+	if _, ok := arrayElementType(elem); ok {
 		return "&" + elem, PassCopyAddress
 	}
 	return elem, PassValue
@@ -1851,11 +1889,12 @@ func (l *lowerer) lowerTypedContainerPrimitive(
 	// A container primitive carries its element type as an immediate the backend
 	// reads, so the call itself declares no parameter types to hand over.
 	if method, ok := arrayPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		elem := l.resolveType(typeArg)
+		args, err := l.lowerCallArgsAs(arrayPrimitiveParams(method, elem), rawArgs)
 		if err != nil {
 			return Value{}, true, err
 		}
-		value, err := l.lowerArrayMethod(method, l.resolveType(typeArg), args)
+		value, err := l.lowerArrayMethod(method, elem, args)
 		return value, true, err
 	}
 	if method, ok := mapPrimitives[name]; ok {
@@ -1901,7 +1940,7 @@ func (l *lowerer) lowerArenaConstructor(typeArg string, args []ast.Expression) (
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("arena.new", "std::arena::Arena<"+typeArg+">", []Value{allocator}, typeArg), nil
+	return l.emit("arena.new", "std::arena::Arena<"+typeArg+">", []Value{allocator}, ""), nil
 }
 
 // lowerArrayConstructor lowers std::array::new<T>(allocator).
@@ -1916,12 +1955,12 @@ func (l *lowerer) lowerArrayConstructor(typeArg string, args []ast.Expression) (
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, typeArg), nil
+	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, ""), nil
 }
 
 // lowerMapConstructor lowers std::map::new<K, V>(allocator).
 func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Value, error) {
-	mapType, valueType, ok := mapInstanceType(typeArg)
+	mapType, _, ok := mapInstanceType(typeArg)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: std::map::Map key type must be one of %s",
 			typ.MapKeyTypeNames())
@@ -1933,7 +1972,7 @@ func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Va
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("map.new", mapType, []Value{allocator}, valueType), nil
+	return l.emit("map.new", mapType, []Value{allocator}, ""), nil
 }
 
 // lowerTryExpr lowers error-union propagation as an explicit IR instruction.
@@ -1965,7 +2004,7 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 // leaves a dead read behind.
 func (l *lowerer) lowerMethodReceiver(field *ast.FieldExpr) (Value, error) {
 	if receiverType := l.assignTargetType(field.Receiver); receiverType != "" &&
-		l.methodTakesSelfStorage(receiverType, field.Name) {
+		l.methodReceivesAddress(receiverType, field.Name) {
 		if storage, ok := l.lowerFieldStorage(field.Receiver); ok {
 			return storage, nil
 		}
@@ -1988,7 +2027,7 @@ func (l *lowerer) lowerMethodCallExpr(
 	// (`array.at(i) |elem|`), which holds a real address; a `&T` parameter is
 	// already erased to its value by the time it is a receiver.
 	wantsStorage := l.methodTakesSelfStorage(receiver.Type, field.Name)
-	if isReferenceType(receiver.Type) && !wantsStorage {
+	if isReferenceType(receiver.Type) && !l.methodReceivesAddress(receiver.Type, field.Name) {
 		receiver = l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, "")
 	}
 	if wantsStorage && !isMutableReferenceType(receiver.Type) {
@@ -2018,6 +2057,10 @@ func (l *lowerer) lowerResolvedMethod(
 	method string,
 	allArgs []Value,
 ) (Value, error) {
+	// A container method that mutates receives the binding's storage, so the
+	// receiver arrives spelled as the borrow. The container it names is the
+	// same one either way.
+	receiverType = derefType(receiverType)
 	if elem, ok := arrayElementType(receiverType); ok {
 		return l.lowerStdContainerMethod(arrayTypeName, method, elem, allArgs)
 	}
@@ -2092,6 +2135,7 @@ func (l *lowerer) lowerBufferMethod(
 // as. nil means the lowerer cannot name them from the receiver alone, and those
 // arguments keep the types they carry themselves.
 func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, error) {
+	receiver = derefType(receiver)
 	if elem, ok := arrayElementType(receiver); ok {
 		return l.stdContainerParams(arrayTypeName, method, elem)
 	}
@@ -2165,12 +2209,29 @@ func (l *lowerer) stdContainerCallOp(
 // methodTakesSelfStorage reports whether the method this receiver resolves
 // declares `&var self`, so the call passes storage instead of a loaded value.
 func (l *lowerer) methodTakesSelfStorage(receiverType string, method string) bool {
-	name, ok := l.implMethodCalleeName(receiverType, method)
-	if !ok {
-		return false
+	return l.methodSelfPassing(receiverType, method) == PassCallerStorage
+}
+
+// methodReceivesAddress reports whether a method reads its receiver through an
+// address rather than a copy of it. A receiver that already has storage is then
+// handed that storage: reading an array costs no copy of the header it reads,
+// which for a container wider than a word is the difference between a pointer
+// and a memcpy at every call.
+func (l *lowerer) methodReceivesAddress(receiverType string, method string) bool {
+	passing := l.methodSelfPassing(receiverType, method)
+	return passing == PassCallerStorage || passing == PassCopyAddress
+}
+
+// methodSelfPassing says how a method receives its receiver.
+func (l *lowerer) methodSelfPassing(receiverType string, method string) Passing {
+	if name, ok := l.implMethodCalleeName(receiverType, method); ok {
+		params := l.signatures[name].Params
+		if len(params) == 0 {
+			return PassValue
+		}
+		return params[0].Passing
 	}
-	params := l.signatures[name].Params
-	return len(params) > 0 && params[0].Passing == PassCallerStorage
+	return l.genericMethodSelfPassing(receiverType, method)
 }
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.
@@ -2178,6 +2239,49 @@ func (l *lowerer) implMethodCalleeName(receiver string, method string) (string, 
 	name := stdmethod.MethodName(derefType(receiver), method)
 	if _, ok := l.signatures[name]; ok {
 		return name, true
+	}
+	return "", false
+}
+
+// genericMethodSelfPassing answers the same question for a method that is only
+// known as a generic declaration. A std container method is one: its instance
+// is requested at the call, so there is no lowered signature to read before the
+// receiver is lowered, and the declaration is what says how the receiver
+// arrives.
+func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) Passing {
+	container := derefType(receiverType)
+	base, ok := stdContainerTypeName(container)
+	if !ok {
+		return PassValue
+	}
+	decl := l.genericDecl(stdmethod.MethodName(base, method))
+	if decl == nil || len(decl.Params) == 0 {
+		return PassValue
+	}
+	if decl.Params[0].MutBorrow {
+		return PassCallerStorage
+	}
+	if decl.Params[0].Borrow {
+		_, passing := l.borrowIRType(container, false)
+		return passing
+	}
+	return PassValue
+}
+
+// stdContainerTypeName names the generic declaration a container instance was
+// applied from, the name lowerResolvedMethod dispatches on.
+func stdContainerTypeName(typ string) (string, bool) {
+	if _, ok := arrayElementType(typ); ok {
+		return arrayTypeName, true
+	}
+	if _, ok := mapStaticArgs(typ); ok {
+		return mapTypeName, true
+	}
+	if _, ok := boxElementType(typ); ok {
+		return boxTypeName, true
+	}
+	if strings.HasPrefix(typ, arenaTypeName+"<") && strings.HasSuffix(typ, ">") {
+		return arenaTypeName, true
 	}
 	return "", false
 }
@@ -2195,8 +2299,44 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 // as. std/src/array/array.kizu forwards each method to one of these, and lowering the
 // forward is what makes that line the implementation rather than a description
 // of one.
+// arrayMutatingPrimitives names the array primitives that write through the
+// header. They receive the binding's storage; the rest receive the address of
+// a copy, and `deinit` receives the header itself because releasing it is the
+// last thing done with it.
+var arrayMutatingPrimitives = map[string]bool{
+	"append": true, "append_bytes": true, "reserve": true, "pop": true, "pop_or_panic": true,
+	"set": true, "swap": true, "at_mut": true, "clear": true,
+	"truncate": true, "as_mut_bytes": true,
+}
+
+// arrayPrimitiveParams says how one array primitive receives its array. The
+// primitives declare no signature of their own, so this is where the call
+// learns whether to hand over storage, an address, or the value.
+func arrayPrimitiveParams(method string, elem string) []Param {
+	if method == typ.CleanupMethod {
+		return nil
+	}
+	array := arrayTypeName + "<" + elem + ">"
+	self := Param{Type: "&" + array, Passing: PassCopyAddress}
+	if arrayMutatingPrimitives[method] {
+		self = Param{Type: "&var " + array, Passing: PassCallerStorage}
+	}
+	// The element positions are named too, so an integer literal written at a
+	// call narrows to the element type rather than staying i64.
+	switch method {
+	case "append":
+		return []Param{self, {Type: elem}}
+	case "append_bytes":
+		return []Param{self, {Type: "[]u8"}}
+	case "set":
+		return []Param{self, {Type: "i64"}, {Type: elem}}
+	}
+	return []Param{self}
+}
+
 var arrayPrimitives = map[string]string{
 	"std::internal::builtin::array_append":       "append",
+	"std::internal::builtin::array_append_bytes": "append_bytes",
 	"std::internal::builtin::array_as_bytes":     "as_bytes",
 	"std::internal::builtin::array_as_mut_bytes": "as_mut_bytes",
 	"std::internal::builtin::array_at":           "at",
@@ -2253,11 +2393,11 @@ var arenaPrimitives = map[string]string{
 func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (Value, error) {
 	switch name {
 	case "len":
-		return l.emit("arena.len", "i64", args, elem), nil
+		return l.emit("arena.len", "i64", args, ""), nil
 	case "pop_or_panic":
-		return l.emit("arena.pop_or_panic", elem, args, elem), nil
+		return l.emit("arena.pop_or_panic", elem, args, ""), nil
 	case "deinit":
-		return l.emit("arena.deinit", "void", args, elem), nil
+		return l.emit("arena.deinit", "void", args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown arena primitive `%s`", name)
 	}
@@ -2272,19 +2412,19 @@ func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value,
 			return Value{}, fmt.Errorf("ir error: box.new expects allocator and value")
 		}
 		return l.releaseOwnerOnFailure(
-			l.emit("box.new", "std::mem::Error!"+boxTypeName+"<"+elem+">", args, elem), args[1])
+			l.emit("box.new", "std::mem::Error!"+boxTypeName+"<"+elem+">", args, ""), args[1])
 	case "borrow":
 		// A returned borrow travels under the same rule any borrow return
 		// does: unions stay behind a pointer, everything else as a copy.
 		spelling, _ := l.borrowIRType(elem, false)
-		return l.emit("box.borrow", spelling, args, elem), nil
+		return l.emit("box.borrow", spelling, args, ""), nil
 	case "borrow_mut":
 		spelling, _ := l.borrowIRType(elem, true)
-		return l.emit("box.borrow_mut", spelling, args, elem), nil
+		return l.emit("box.borrow_mut", spelling, args, ""), nil
 	case "deinit":
-		return l.emit("box.deinit", "void", args, elem), nil
+		return l.emit("box.deinit", "void", args, ""), nil
 	case "take":
-		return l.emit("box.take", elem, args, elem), nil
+		return l.emit("box.take", elem, args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown box method `%s`", name)
 	}
@@ -2312,23 +2452,23 @@ func (l *lowerer) lowerMapMethod(
 ) (Value, error) {
 	switch name {
 	case "insert":
-		return l.emit("map.insert", "std::mem::Error!void", args, valueType), nil
+		return l.emit("map.insert", "std::mem::Error!void", args, ""), nil
 	case "get":
-		return l.emit("map.get", "?"+valueType, args, valueType), nil
+		return l.emit("map.get", "?"+valueType, args, ""), nil
 	case "at":
-		return l.emit("map.at", "?&"+valueType, args, valueType), nil
+		return l.emit("map.at", "?&"+valueType, args, ""), nil
 	case "at_mut":
-		return l.emit("map.at_mut", "?&var "+valueType, args, valueType), nil
+		return l.emit("map.at_mut", "?&var "+valueType, args, ""), nil
 	case "take_value_at":
-		return l.emit("map.take_value_at", valueType, args, valueType), nil
+		return l.emit("map.take_value_at", valueType, args, ""), nil
 	case "key_at":
-		return l.emit("map.key_at", "?"+keyType, args, valueType), nil
+		return l.emit("map.key_at", "?"+keyType, args, ""), nil
 	case "contains":
-		return l.emit("map.contains", "bool", args, valueType), nil
+		return l.emit("map.contains", "bool", args, ""), nil
 	case "len":
-		return l.emit("map.len", "i64", args, valueType), nil
+		return l.emit("map.len", "i64", args, ""), nil
 	case "deinit":
-		return l.emit("map.deinit", "void", args, valueType), nil
+		return l.emit("map.deinit", "void", args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown map method `%s`", name)
 	}
@@ -2340,7 +2480,7 @@ func (l *lowerer) lowerMapMethod(
 // fixed result type and go through arrayMethodResultType.
 func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Value, error) {
 	if result, ok := arrayMethodResultType(name); ok {
-		value := l.emit("array."+name, result, args, elem)
+		value := l.emit("array."+name, result, args, "")
 		if name == "append" {
 			return l.releaseOwnerOnFailure(value, args[1])
 		}
@@ -2348,21 +2488,21 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 	}
 	switch name {
 	case "pop":
-		return l.emit("array.pop", "?"+elem, args, elem), nil
+		return l.emit("array.pop", "?"+elem, args, ""), nil
 	case "pop_or_panic":
-		return l.emit("array.pop_or_panic", elem, args, elem), nil
+		return l.emit("array.pop_or_panic", elem, args, ""), nil
 	case "get":
-		return l.emit("array.get", "?"+elem, args, elem), nil
+		return l.emit("array.get", "?"+elem, args, ""), nil
 	case "get_or_panic":
-		return l.emit("array.get_or_panic", elem, args, elem), nil
+		return l.emit("array.get_or_panic", elem, args, ""), nil
 	case "at":
-		return l.emit("array.at", "?&"+elem, args, elem), nil
+		return l.emit("array.at", "?&"+elem, args, ""), nil
 	case "at_mut":
-		return l.emit("array.at_mut", "?&var "+elem, args, elem), nil
+		return l.emit("array.at_mut", "?&var "+elem, args, ""), nil
 	case "as_mut_bytes":
 		// The same view value as as_bytes: mutability is a checker-level
 		// permission, not a different runtime representation (ADR-0096).
-		return l.emit("array.as_bytes", "[]u8", args, elem), nil
+		return l.emit("array.as_bytes", "[]u8", args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown array method `%s`", name)
 	}
@@ -2374,7 +2514,7 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 // path rather than lowering them to an instruction.
 func arrayMethodResultType(name string) (string, bool) {
 	switch name {
-	case "append", "reserve":
+	case "append", "append_bytes", "reserve":
 		// Growing needs memory and nothing else (ADR-0128).
 		return "std::mem::Error!void", true
 	case "set", "swap", "truncate":

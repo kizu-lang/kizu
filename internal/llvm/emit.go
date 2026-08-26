@@ -182,13 +182,14 @@ func panicPosition(span ast.Span) []string {
 // *value* (a recoverable !T), as opposed to panicEntries, which abort. The
 // member is named here; its number comes from the set declaration in std.
 var failureErrors = map[string]struct{ set, member string }{
-	"array_append":   {"std::mem::Error", "OutOfMemory"},
-	"array_bounds":   {"std::array::Error", "OutOfBounds"},
-	"array_reserve":  {"std::mem::Error", "OutOfMemory"},
-	"array_swap":     {"std::array::Error", "OutOfBounds"},
-	"array_truncate": {"std::array::Error", "OutOfBounds"},
-	"map_insert":     {"std::mem::Error", "OutOfMemory"},
-	"box_new":        {"std::mem::Error", "OutOfMemory"},
+	"array_append":       {"std::mem::Error", "OutOfMemory"},
+	"array_append_bytes": {"std::mem::Error", "OutOfMemory"},
+	"array_bounds":       {"std::array::Error", "OutOfBounds"},
+	"array_reserve":      {"std::mem::Error", "OutOfMemory"},
+	"array_swap":         {"std::array::Error", "OutOfBounds"},
+	"array_truncate":     {"std::array::Error", "OutOfBounds"},
+	"map_insert":         {"std::mem::Error", "OutOfMemory"},
+	"box_new":            {"std::mem::Error", "OutOfMemory"},
 }
 
 // failureErrorCode returns the global code one container failure lowers to.

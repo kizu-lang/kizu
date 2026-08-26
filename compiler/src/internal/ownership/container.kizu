@@ -34,6 +34,9 @@ fn (self: &var Checker) check_array_method(
     if self.names.is(method, "append") {
         return self.check_array_append(tree, env, elem, args, out);
     }
+    if self.names.is(method, "append_bytes") {
+        return self.check_array_append_bytes(tree, env, elem, args, out);
+    }
     if self.names.is(method, "reserve") {
         return self.check_array_count_mutation(tree, env, method, args, out);
     }
@@ -217,6 +220,42 @@ fn (self: &var Checker) check_array_storage_method(
         );
     }
     return self.check_array_read_no_args(tree, method, args, out);
+}
+
+/// Validates the run Array.append_bytes copies, the Go
+/// `checkArrayAppendBytesArg`. The source is read, not moved: it is a view.
+fn (self: &var Checker) check_array_append_bytes(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if !self.names.is(elem, "u8") {
+        return try self.error0(
+            ast::zero_span(), "array error: `Array.append_bytes` requires Array<u8>"
+        );
+    }
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.append_bytes` expects 1 arg, got %d",
+            Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "[]u8") {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.append_bytes` expects []u8, got %s",
+            Arg::Str(got)
+        );
+    }
+    out.* = self.common.mem_error_void_name;
+    return null;
 }
 
 /// Reports methods reserved for std-owned storage wrappers, the Go

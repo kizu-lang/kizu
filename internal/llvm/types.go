@@ -50,6 +50,9 @@ func (e *emitter) llvmType(typ string) string {
 	if isBoxLLVMType(typ) {
 		return "ptr"
 	}
+	if isArrayLLVMType(typ) {
+		return arrayHeaderType
+	}
 	if _, ok := e.module.Structs[typ]; ok {
 		return llvmStructTypeName(typ)
 	}

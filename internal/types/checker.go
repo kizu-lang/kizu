@@ -4505,6 +4505,7 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 		typ, _, err := c.checkArrayConstructor(arg, args, env, unsafe)
 		return typ, true, err
 	case "std::internal::builtin::array_append",
+		"std::internal::builtin::array_append_bytes",
 		"std::internal::builtin::array_len",
 		"std::internal::builtin::array_capacity",
 		"std::internal::builtin::array_pop", "std::internal::builtin::array_pop_or_panic",
@@ -5118,7 +5119,11 @@ func (c *Checker) enterInstanceContext(
 // memo stops it and the checker would run forever; a bound turns that into a
 // diagnostic (#1627). Reflection walks nest by struct depth, so real programs
 // stay far below this.
-const maxInstantiationDepth = 64
+//
+// The bound is what says the compiler stops before its stack does, so it is
+// set where the shorter of the two stacks holds: an unoptimized build of the
+// Kizu compiler spends about 150KB per level, which leaves it no room at 64.
+const maxInstantiationDepth = 32
 
 // enterInstantiation records one instantiation and reports whether it has
 // already been checked. An instance is one body with one set of static
@@ -6279,6 +6284,12 @@ func (c *Checker) checkArrayMethod(
 	case "clone":
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.clone` requires copy element")
+		}
+	case "append_bytes":
+		// The declaration is generic; only a u8 array has elements a byte run
+		// can be spelled as.
+		if elem != typeU8 {
+			return "", errorf("type error: `Array.append_bytes` requires Array<u8>")
 		}
 	case "set":
 		if c.ownerType(elem) {
