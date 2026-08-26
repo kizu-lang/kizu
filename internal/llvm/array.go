@@ -14,11 +14,16 @@ import (
 // asserts the same offsets, so the two spellings cannot drift apart.
 const arrayHeaderType = "%kizu.array"
 
+// arrayHeaderSize is what arrayHeaderType occupies: five words.
+const arrayHeaderSize = 40
+
 // The field indices of arrayHeaderType.
 const (
-	arrayFieldData     = 0
-	arrayFieldLen      = 1
-	arrayFieldCapacity = 2
+	arrayFieldData      = 0
+	arrayFieldLen       = 1
+	arrayFieldCapacity  = 2
+	arrayFieldElemSize  = 3
+	arrayFieldAllocator = 4
 )
 
 // arrayEmptyGlobal is the header read in place of a null handle. The runtime
@@ -36,7 +41,6 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, i64, ptr }\n", arrayHeaderType)
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
 		arrayEmptyGlobal, arrayHeaderType)
-	e.out.WriteString("declare ptr @kizu_array_new(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr)\n")
 	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_pop(ptr)\n")
@@ -44,7 +48,7 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	e.out.WriteString("declare i1 @kizu_array_truncate(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_array_clear(ptr)\n")
 	e.out.WriteString("declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)\n")
-	e.out.WriteString("declare void @kizu_array_deinit(ptr)\n\n")
+	e.out.WriteString("declare void @kizu_array_deinit(ptr, ptr, i64)\n\n")
 }
 
 // arrayHandle returns an operand that always points at a readable header.
@@ -183,10 +187,23 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	return e.writeArrayBoolResult(instr.Result, okName, "array_swap")
 }
 
-// writeArrayNew lowers std::array::new<T>(allocator) to an opaque runtime handle.
+// writeArrayNew lowers std::array::new<T>(allocator) to the header value an
+// empty array is. An empty array owns no storage, so it needs none: the three
+// fields that describe the elements are zero and the two that describe how to
+// grow are the element size and the allocator the call names.
 func (e *emitter) writeArrayNew(instr *ir.Instr) error {
-	return e.writeContainerNew(instr, "kizu_array_new",
-		isArrayLLVMType, "array.new expects allocator -> Array<T>")
+	if len(instr.Args) != 1 || !isArrayLLVMType(instr.Result.Type) {
+		return fmt.Errorf("llvm error: array.new expects allocator -> Array<T>")
+	}
+	allocator := e.value(instr.Args[0])
+	sized := "%" + e.nextSyntheticValue("array.new.sized")
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i64 %s, %d\n",
+		sized, arrayHeaderType, e.elementSizeOperand(instr.Immediate), arrayFieldElemSize)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, %d\n",
+		resultName, arrayHeaderType, sized, allocator.operand, arrayFieldAllocator)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeContainerNew lowers one container constructor to its runtime call:
@@ -469,9 +486,23 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: array.deinit expects Array<T> -> void")
 	}
 	array := e.value(instr.Args[0])
-	fmt.Fprintf(&e.out, "  call void @kizu_array_deinit(ptr %s)\n", array.operand)
+	data := e.arrayFieldOf(array.operand, arrayFieldData, "array.deinit.data")
+	capacity := e.arrayFieldOf(array.operand, arrayFieldCapacity, "array.deinit.cap")
+	elemSize := e.arrayFieldOf(array.operand, arrayFieldElemSize, "array.deinit.elem")
+	allocator := e.arrayFieldOf(array.operand, arrayFieldAllocator, "array.deinit.alloc")
+	bytes := "%" + e.nextSyntheticValue("array.deinit.bytes")
+	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n", bytes, capacity, elemSize)
+	fmt.Fprintf(&e.out, "  call void @kizu_array_deinit(ptr %s, ptr %s, i64 %s)\n",
+		allocator, data, bytes)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
+}
+
+// arrayFieldOf reads one field out of an array header value.
+func (e *emitter) arrayFieldOf(value string, field int, name string) string {
+	out := "%" + e.nextSyntheticValue(name)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n", out, arrayHeaderType, value, field)
+	return out
 }
 
 // writeArrayOptionalLoadResult converts a nullable element pointer to ?T:

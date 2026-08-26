@@ -354,9 +354,9 @@ fn main() -> !void {
 }`)
 	got := Dump(module)
 	for _, want := range []string{
-		"  %9: &Point = opt.value %8: ?&Point\n",
-		"  %11: Point = ref.load %9: &Point\n",
-		"  %12: i64 = call.Point.sum %11: Point\n",
+		"  %12: &Point = opt.value %11: ?&Point\n",
+		"  %14: Point = ref.load %12: &Point\n",
+		"  %15: i64 = call.Point.sum %14: Point\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
@@ -895,7 +895,7 @@ fn main() -> !void {
 }`)
 	got := Dump(module)
 	want := "  %1: std::mem::Error!void = array.append" +
-		" %self: std::array::Array<i64>, %value: i64, i64\n" +
+		" %self: &var std::array::Array<i64>, %value: i64, i64\n" +
 		"  return %1: std::mem::Error!void\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)

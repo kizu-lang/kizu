@@ -258,7 +258,7 @@ func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) func(
 		return func() {}
 	}
 	previous, bound := l.env.get(arm.Binding)
-	l.env.set(arm.Binding, l.emit(
+	l.bindCapture(arm.Binding, l.emit(
 		"union.payload",
 		variant.Payload,
 		[]Value{subject.unionValue},

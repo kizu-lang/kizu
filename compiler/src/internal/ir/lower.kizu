@@ -81,6 +81,45 @@ pub struct ParamsView {
     pub offset: i64
 }
 
+/// The types a call hands its first arguments over at when the callee has no
+/// signature the lowerer can read them from. A container primitive and a
+/// std::internal::builtin both declare none of their own, so the call site
+/// spells the ones that matter in place; `empty_name` leaves an argument
+/// with the type it carries itself, the Go zero `Param`.
+pub struct NamedTypes {
+    pub first: Name,
+    pub second: Name,
+    pub third: Name,
+    pub fourth: Name
+}
+
+/// Returns the record that names nothing.
+pub fn no_named_types() -> NamedTypes {
+    return NamedTypes {
+        first: empty_name(),
+        second: empty_name(),
+        third: empty_name(),
+        fourth: empty_name()
+    };
+}
+
+/// Returns the type named for one argument position, or the empty name.
+pub fn named_type_at(types: NamedTypes, index: i64) -> Name {
+    if index == 0 {
+        return types.first;
+    }
+    if index == 1 {
+        return types.second;
+    }
+    if index == 2 {
+        return types.third;
+    }
+    if index == 3 {
+        return types.fourth;
+    }
+    return empty_name();
+}
+
 /// Returns the parameter list a callee the lowerer has no signature for
 /// gets: every argument keeps the type it carries itself.
 pub fn no_params() -> ParamsView {
@@ -217,6 +256,10 @@ pub struct Lowerer {
     scratch_facts: FactsHandle,
     scratch_args: GenericArgsHandle,
     scratch_signature: SignatureHandle,
+    // The signature the slot analysis reads for a generic method whose
+    // receiver arrives as the binding's storage: one param, handed over that
+    // way, which is all markLentMethodArgs looks at.
+    storage_self_signature: SignatureHandle,
     tests: array::Array<TestFacts>,
     signature_nodes: arena::Arena<Signature>,
     signatures: map::Map<[]u8, SignatureHandle>,
@@ -335,6 +378,18 @@ pub fn new_lowerer(
             requires_unsafe: false
         })
     };
+    var storage_self_params = array::new<Param>(allocator);
+    errdefer storage_self_params.deinit();
+    try storage_self_params.append(Param {
+        name: empty_name(), type_name: empty_name(), passing: Passing::CallerStorage
+    });
+    let storage_self_signature = SignatureHandle {
+        node: signature_nodes.add(Signature {
+            params: move storage_self_params,
+            return_type: empty_name(),
+            requires_unsafe: false
+        })
+    };
     var lowerer = Lowerer {
         allocator: allocator,
         module: move module,
@@ -345,6 +400,7 @@ pub fn new_lowerer(
         scratch_facts: scratch_facts,
         scratch_args: scratch_args,
         scratch_signature: scratch_signature,
+        storage_self_signature: storage_self_signature,
         tests: array::new<TestFacts>(allocator),
         signature_nodes: move signature_nodes,
         signatures: map::new<[]u8, SignatureHandle>(allocator),
@@ -684,7 +740,41 @@ fn (self: &var Lowerer) index_method_signatures() -> !void {
         }
         position = position + 1;
     }
+    // A generic method has no lowered signature until its instance is
+    // requested, which happens at the call the slot analysis runs before. Its
+    // declaration already says whether the receiver arrives as the binding's
+    // storage, so the analysis reads that rather than instantiating to ask.
+    var generic_index = 0;
+    while self.generic_decls.key_at(generic_index) |key| {
+        generic_index = generic_index + 1;
+        let decl = self.generic_decls.get(key) orelse continue;
+        if self.decl_param_count(decl) == 0 {
+            continue;
+        }
+        let receiver = self.decl_param(decl, 0);
+        if !receiver.mut_borrow {
+            continue;
+        }
+        method.clear();
+        if try self.generic_method_name(decl, &var method) {
+            let method_bytes = method.as_bytes();
+            try self.add_method_signature(method_bytes, self.storage_self_signature);
+        }
+    }
     return;
+}
+
+/// Appends the method name a generic declaration ends with, and reports
+/// whether it has one, the Go `genericMethodName`.
+fn (self: &Lowerer) generic_method_name(decl: FactsHandle, out: &var string::String) -> !bool {
+    let facts = self.decl_facts.at(decl.node);
+    let retained = name_text(&self.module.names, facts.name);
+    let spelling = retained.as_bytes();
+    if stdmethod::split_method_name(spelling) |parts| {
+        try out.append_bytes(parts.method);
+        return true;
+    }
+    return false;
 }
 
 /// Records one method under its name, the Go
@@ -1236,6 +1326,8 @@ fn (self: &var Lowerer) lower_function_named(
     while self.defer_frames.pop() |frame| {
         frame.deinit();
     }
+    var value_slots = array::new<Name>(self.allocator);
+    defer value_slots.deinit();
     index = 0;
     while index < count {
         let facts = self.decl_param(decl, index);
@@ -1246,12 +1338,27 @@ fn (self: &var Lowerer) lower_function_named(
             // address consumers take the pointer itself.
             if param.passing == Passing::CallerStorage {
                 try self.slots.append(facts.name);
+            } else {
+                // One that arrives as a value and is written through needs
+                // storage of its own, which is the copy it was handed.
+                if self.has_slot(facts.name) {
+                    try value_slots.append(facts.name);
+                }
             }
         }
         index = index + 1;
     }
     let entry = try self.module.names.intern("entry");
     self.block = try self.new_block(entry);
+    var slot_index = 0;
+    while value_slots.get(slot_index) |slot_name| {
+        slot_index = slot_index + 1;
+        if self.envs.get(self.env, slot_name) |value| {
+            let slot_type = try self.module.names.prefixed("&var ", value.type_name);
+            let slot = try self.emit1(Op::LocalSlot, slot_type, value);
+            try self.envs.bind(self.env, slot_name, slot);
+        }
+    }
     if self.decl_body(decl) |body| {
         if try self.lower_block(tree, body) |failed| {
             return move failed;
@@ -1314,6 +1421,12 @@ fn (self: &var Lowerer) borrow_ir_type(elem: Name, mutable: bool) -> !Name {
     if self.module.has_union(elem) {
         return self.module.names.prefixed("&", elem);
     }
+    // An array is its header, and the header is wider than a word. A shared
+    // borrow of one hands over the address of a copy rather than the copy
+    // itself, so a reader reaches the same fields a writer does.
+    if try self.array_element_type(elem) |_| {
+        return self.module.names.prefixed("&", elem);
+    }
     return elem;
 }
 
@@ -1327,6 +1440,9 @@ fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
         return Passing::CallerStorage;
     }
     if self.module.has_union(elem) {
+        return Passing::CopyAddress;
+    }
+    if self.module.names.has_generic_arg(elem, "std::array::Array") {
         return Passing::CopyAddress;
     }
     return Passing::Value;

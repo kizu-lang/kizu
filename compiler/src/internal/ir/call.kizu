@@ -520,6 +520,7 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
     let array_op = array_primitive(bytes);
+    let array_shape = array_primitive_shape(bytes);
     let map_op = map_primitive(bytes);
     let box_op = box_primitive(bytes);
     let arena_op = arena_primitive(bytes);
@@ -528,12 +529,13 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     // over.
     if array_op |op| {
         handled.* = true;
+        let elem = try self.resolve_bound_type(type_arg);
+        let named = try self.array_primitive_param_types(array_shape, elem);
         var args = array::new<Value>(self.allocator);
         defer args.deinit();
-        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
+        if try self.lower_call_args_named(tree, named, raw_args, &var args) |failed| {
             return move failed;
         }
-        let elem = try self.resolve_bound_type(type_arg);
         return self.lower_array_method(tree, op, elem, &args, out);
     }
     if map_op |op| {
@@ -575,6 +577,73 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
         return self.lower_arena_primitive(tree, op, elem, &args, out);
     }
     return null;
+}
+
+/// Says how one array primitive receives its array, the Go
+/// `arrayPrimitiveParams`. The primitives declare no signature of their own,
+/// so this is where the call learns whether to hand over storage, an
+/// address, or the value.
+fn (self: &var Lowerer) array_primitive_param_types(shape: ArrayPrimitiveShape, elem: Name) -> !NamedTypes {
+    if shape.releases {
+        return no_named_types();
+    }
+    let array_type = try self.module.names.wrapped("std::array::Array<", elem, ">");
+    var self_type = try self.module.names.prefixed("&", array_type);
+    if shape.mutates {
+        self_type = try self.module.names.prefixed("&var ", array_type);
+    }
+    // The element positions are named too, so an integer literal written at a
+    // call narrows to the element type rather than staying i64.
+    if shape.takes_element {
+        return NamedTypes {
+            first: self_type, second: elem, third: empty_name(), fourth: empty_name()
+        };
+    }
+    if shape.takes_index_and_element {
+        let index_type = try self.module.names.intern("i64");
+        return NamedTypes {
+            first: self_type, second: index_type, third: elem, fourth: empty_name()
+        };
+    }
+    return NamedTypes {
+        first: self_type, second: empty_name(), third: empty_name(), fourth: empty_name()
+    };
+}
+
+/// What one array primitive does with the array it is handed, read from its
+/// name while the name table is still borrowed for it.
+struct ArrayPrimitiveShape {
+    releases: bool,
+    mutates: bool,
+    takes_element: bool,
+    takes_index_and_element: bool
+}
+
+/// Reads the shape of one array primitive from its name.
+fn array_primitive_shape(name: []u8) -> ArrayPrimitiveShape {
+    return ArrayPrimitiveShape {
+        releases: mem::equal_bytes(name, "std::internal::builtin::array_deinit"),
+        mutates: array_mutating_primitive(name),
+        takes_element: mem::equal_bytes(name, "std::internal::builtin::array_append"),
+        takes_index_and_element: mem::equal_bytes(name, "std::internal::builtin::array_set")
+    };
+}
+
+/// Names the array primitives that write through the header, the Go
+/// `arrayMutatingPrimitives`. They receive the binding's storage; the rest
+/// receive the address of a copy, and `deinit` receives the header itself
+/// because releasing it is the last thing done with it.
+fn array_mutating_primitive(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std::internal::builtin::array_append") or
+        mem::equal_bytes(name, "std::internal::builtin::array_reserve") or
+        mem::equal_bytes(name, "std::internal::builtin::array_pop") or
+        mem::equal_bytes(name, "std::internal::builtin::array_pop_or_panic") or
+        mem::equal_bytes(name, "std::internal::builtin::array_set") or
+        mem::equal_bytes(name, "std::internal::builtin::array_swap") or
+        mem::equal_bytes(name, "std::internal::builtin::array_at_mut") or
+        mem::equal_bytes(name, "std::internal::builtin::array_clear") or
+        mem::equal_bytes(name, "std::internal::builtin::array_truncate") or
+        mem::equal_bytes(name, "std::internal::builtin::array_as_mut_bytes");
 }
 
 /// Lowers std::arena::new<T>(allocator), the Go `lowerArenaConstructor`.
@@ -771,13 +840,17 @@ fn (self: &var Lowerer) lower_resolved_method(
     args: &array::Array<Value>,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
-    if try self.array_element_type(receiver_type) |elem| {
+    // A container method that mutates receives the binding's storage, so the
+    // receiver arrives spelled as the borrow. The container it names is the
+    // same one either way.
+    let container = try self.deref_type(receiver_type);
+    if try self.array_element_type(container) |elem| {
         return self.lower_std_container_method(tree, "std::array::Array", method, elem, args, out);
     }
-    if try self.map_static_args(receiver_type) |map_args| {
+    if try self.map_static_args(container) |map_args| {
         return self.lower_std_container_method(tree, "std::map::Map", method, map_args, args, out);
     }
-    if try self.box_element_type(receiver_type) |elem| {
+    if try self.box_element_type(container) |elem| {
         return self.lower_std_container_method(tree, "std::mem::Box", method, elem, args, out);
     }
     let elem = try self.arena_element_type(receiver_type);
@@ -857,13 +930,14 @@ fn (self: &var Lowerer) method_callee_params(
     method: Name,
     out: &var ParamsView
 ) -> !?diagnostic::Diagnostic {
-    if try self.array_element_type(receiver) |elem| {
+    let container = try self.deref_type(receiver);
+    if try self.array_element_type(container) |elem| {
         return self.std_container_params(tree, "std::array::Array", method, elem, out);
     }
-    if try self.map_static_args(receiver) |map_args| {
+    if try self.map_static_args(container) |map_args| {
         return self.std_container_params(tree, "std::map::Map", method, map_args, out);
     }
-    if try self.box_element_type(receiver) |elem| {
+    if try self.box_element_type(container) |elem| {
         return self.std_container_params(tree, "std::mem::Box", method, elem, out);
     }
     if try self.impl_method_callee_name(receiver, method) |name| {
@@ -953,10 +1027,47 @@ fn (self: &var Lowerer) std_container_call_op(
 /// the Go `methodTakesSelfStorage`, so the call passes storage instead of a
 /// loaded value.
 fn (self: &var Lowerer) method_takes_self_storage(receiver_type: Name, method: Name) -> !bool {
-    let name = try self.impl_method_callee_name(receiver_type, method) orelse return false;
-    let signature = self.signature_named(name) orelse return false;
+    let resolved = try self.impl_method_callee_name(receiver_type, method) orelse
+        return self.generic_method_takes_self_storage(receiver_type, method);
+    let signature = self.signature_named(resolved) orelse return false;
     let first = self.signature_param(signature, 0) orelse return false;
     return first.passing == Passing::CallerStorage;
+}
+
+/// Answers the same question for a method only known as a generic
+/// declaration, the Go `genericMethodTakesSelfStorage`. A std container
+/// method is one: its instance is requested at the call, so there is no
+/// lowered signature to read before the receiver is lowered, and the
+/// declaration is what says whether the receiver arrives as the binding's
+/// storage.
+fn (self: &var Lowerer) generic_method_takes_self_storage(receiver_type: Name, method: Name) -> !bool {
+    let base = try self.std_container_type_name(receiver_type) orelse return false;
+    let name = try self.module.names.joined(base, ".", method);
+    let decl = self.generic_decl(name) orelse return false;
+    if self.decl_param_count(decl) == 0 {
+        return false;
+    }
+    let param = self.decl_param(decl, 0);
+    return param.mut_borrow;
+}
+
+/// Names the generic declaration a container instance was applied from, the
+/// name lower_resolved_method dispatches on, the Go `stdContainerTypeName`.
+fn (self: &var Lowerer) std_container_type_name(typ: Name) -> !?Name {
+    let base = try self.deref_type(typ);
+    if try self.array_element_type(base) |_| {
+        return try self.module.names.intern("std::array::Array");
+    }
+    if try self.map_static_args(base) |_| {
+        return try self.module.names.intern("std::map::Map");
+    }
+    if try self.box_element_type(base) |_| {
+        return try self.module.names.intern("std::mem::Box");
+    }
+    if self.module.names.has_generic_arg(base, "std::arena::Arena") {
+        return try self.module.names.intern("std::arena::Arena");
+    }
+    return null;
 }
 
 /// Resolves a checked receiver method to its lowered symbol, the Go

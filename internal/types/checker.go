@@ -5118,7 +5118,11 @@ func (c *Checker) enterInstanceContext(
 // memo stops it and the checker would run forever; a bound turns that into a
 // diagnostic (#1627). Reflection walks nest by struct depth, so real programs
 // stay far below this.
-const maxInstantiationDepth = 64
+//
+// The bound is what says the compiler stops before its stack does, so it is
+// set where the shorter of the two stacks holds: an unoptimized build of the
+// Kizu compiler spends about 150KB per level, which leaves it no room at 64.
+const maxInstantiationDepth = 32
 
 // enterInstantiation records one instantiation and reports whether it has
 // already been checked. An instance is one body with one set of static

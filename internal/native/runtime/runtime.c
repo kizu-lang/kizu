@@ -38,11 +38,11 @@ typedef struct {
     int64_t len;
 } KizuSliceU8;
 
-/* A Kizu std::string::String is one field: the Array<u8> handle its bytes
- * live in. A &var String argument arrives as a pointer to that struct. */
-typedef struct {
-    void *bytes;
-} KizuString;
+/* A Kizu std::string::String is one field: the Array<u8> its bytes live in,
+ * and an Array is its header, not a pointer to one. So a &var String argument
+ * arrives as a pointer to that header, and the two names are the same struct.
+ * The alias is what keeps the signatures below reading as strings. */
+typedef KizuArray KizuString;
 
 typedef struct {
     int64_t size;
@@ -91,9 +91,9 @@ typedef struct {
 
 typedef struct {
     _Bool ok;
-    void *value;
+    KizuArray value;
     int64_t error;
-} KizuErrorPtr;
+} KizuErrorArray;
 
 /* A map is an array of entries in the order they were first inserted, plus an
    open-addressed table of indices into it. The entries array is what iteration
@@ -284,7 +284,7 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
     return out;
 }
 
-void *kizu_array_new(void *allocator, int64_t elem_size);
+static KizuArray kizu_array_empty(int64_t elem_size);
 _Bool kizu_array_append(void *handle, const void *elem);
 _Bool kizu_array_swap(void *handle, int64_t left, int64_t right);
 _Bool kizu_array_truncate(void *handle, int64_t len);
@@ -428,18 +428,18 @@ static KizuErrorFsMetadata kizu_err_metadata(int64_t failure) {
     return out;
 }
 
-static KizuErrorPtr kizu_ok_ptr(void *value) {
-    KizuErrorPtr out;
+static KizuErrorArray kizu_ok_array(KizuArray value) {
+    KizuErrorArray out;
     out.ok = 1;
     out.value = value;
     out.error = 0;
     return out;
 }
 
-static KizuErrorPtr kizu_err_ptr(int64_t failure) {
-    KizuErrorPtr out;
+static KizuErrorArray kizu_err_array(int64_t failure) {
+    KizuErrorArray out;
     out.ok = 0;
-    out.value = NULL;
+    out.value = kizu_array_empty((int64_t)sizeof(KizuFsDirEntry));
     out.error = failure;
     return out;
 }
@@ -714,7 +714,7 @@ static int64_t kizu_read_stream_into(
     int64_t oom_failure,
     int64_t read_failure
 ) {
-    KizuArray *array = dst ? (KizuArray *)dst->bytes : NULL;
+    KizuArray *array = dst;
     if (!array || array->elem_size != 1) {
         return read_failure;
     }
@@ -817,7 +817,7 @@ void std__internal__builtin__process_env(KizuOptSliceU8 *out, const KizuSliceU8 
 /* kizu_string_append_bytes appends raw bytes to a String buffer, leaving the
  * buffer as it was when the reservation fails. */
 static int kizu_string_append_bytes(KizuString *dst, const char *text, int64_t length) {
-    KizuArray *array = dst ? (KizuArray *)dst->bytes : NULL;
+    KizuArray *array = dst;
     if (!array || array->elem_size != 1 || (length > 0 && !text)) {
         return 0;
     }
@@ -1169,26 +1169,21 @@ static void kizu_sort_dir_entries(KizuArray *array) {
     }
 }
 
-static KizuErrorPtr kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 path) {
+static KizuErrorArray kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 path) {
     if (kizu_io_is_failing(io)) {
-        return kizu_err_ptr(KIZU_ERR_STD_FS_ERROR_IO_FAILING);
+        return kizu_err_array(KIZU_ERR_STD_FS_ERROR_IO_FAILING);
     }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
-        return kizu_err_ptr(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
+        return kizu_err_array(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
     DIR *dir = opendir(cpath);
     if (!dir) {
         int code = errno;
         free(cpath);
-        return kizu_err_ptr(kizu_errno_failure(code));
+        return kizu_err_array(kizu_errno_failure(code));
     }
-    void *array = kizu_array_new(NULL, (int64_t)sizeof(KizuFsDirEntry));
-    if (!array) {
-        closedir(dir);
-        free(cpath);
-        return kizu_err_ptr(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
-    }
+    KizuArray array = kizu_array_empty((int64_t)sizeof(KizuFsDirEntry));
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
@@ -1204,19 +1199,19 @@ static KizuErrorPtr kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 pa
             item.is_dir = stat(entry_path, &st) == 0 && S_ISDIR(st.st_mode);
             free(entry_path);
         }
-        if (!kizu_array_append(array, &item)) {
+        if (!kizu_array_append(&array, &item)) {
             closedir(dir);
             free(cpath);
-            return kizu_err_ptr(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
+            return kizu_err_array(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
         }
     }
     closedir(dir);
     free(cpath);
-    kizu_sort_dir_entries((KizuArray *)array);
-    return kizu_ok_ptr(array);
+    kizu_sort_dir_entries(&array);
+    return kizu_ok_array(array);
 }
 
-void std__internal__builtin__fs_read_dir(KizuErrorPtr *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_read_dir(KizuErrorArray *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_read_dir_result(io, *path);
 }
 
@@ -1301,16 +1296,16 @@ _Bool kizu_bytes_equal(
     return memcmp(left, right, (size_t)left_len) == 0;
 }
 
-void *kizu_array_new(void *allocator, int64_t elem_size) {
-    if (elem_size <= 0) {
-        return NULL;
-    }
-    KizuArray *array = (KizuArray *)kizu_rt_zalloc(allocator, sizeof(KizuArray));
-    if (!array) {
-        return NULL;
-    }
-    array->elem_size = elem_size;
-    array->allocator = allocator;
+/* An Array with nothing in it. The header is the value, so an empty array
+ * owns no allocation and costs nothing to make; the first append is what
+ * asks the allocator for storage. */
+static KizuArray kizu_array_empty(int64_t elem_size) {
+    KizuArray array;
+    array.data = NULL;
+    array.len = 0;
+    array.cap = 0;
+    array.elem_size = elem_size;
+    array.allocator = NULL;
     return array;
 }
 
@@ -1782,11 +1777,10 @@ void kizu_map_deinit(void *handle) {
     kizu_rt_free(map->allocator, map, (int64_t)sizeof(KizuMap));
 }
 
-void kizu_array_deinit(void *handle) {
-    KizuArray *array = (KizuArray *)handle;
-    if (!array) {
-        return;
-    }
-    kizu_rt_free(array->allocator, array->data, array->cap * array->elem_size);
-    kizu_rt_free(array->allocator, array, (int64_t)sizeof(KizuArray));
+/* An array header is the binding, so releasing one is releasing the element
+   storage it points at. The caller passes the three fields that describe that
+   storage rather than a pointer to the header, which no longer has an address
+   of its own. */
+void kizu_array_deinit(void *allocator, void *data, int64_t bytes) {
+    kizu_rt_free(allocator, data, bytes);
 }

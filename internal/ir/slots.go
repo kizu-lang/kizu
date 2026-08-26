@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
 // A local is an SSA value, which is enough until something writes through a
@@ -20,16 +21,13 @@ import (
 // would mean a value on one path and storage on another.
 
 // mutablyBorrowedLocals returns the local names fn passes to a `&var` parameter.
+// Parameters are left in the set: one that arrives as caller storage already
+// has storage, which lowerFunctionNamed hands it, and one that arrives as a
+// value is the callee's own copy, which can live in a slot like any local.
 func (l *lowerer) mutablyBorrowedLocals(fn *ast.FunctionDecl) (map[string]bool, error) {
 	found := map[string]bool{}
 	if err := l.collectMutBorrowsStmt(fn.Body, found); err != nil {
 		return nil, err
-	}
-	// A parameter never allocates a slot: one that arrives as caller storage
-	// is added to the set by lowerFunctionNamed with the storage it came with,
-	// and any other parameter has no storage to lend.
-	for _, param := range fn.Params {
-		delete(found, param.Name)
 	}
 	return found, nil
 }
@@ -339,6 +337,19 @@ func (l *lowerer) bindLocal(name string, value Value) {
 	l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
 }
 
+// bindCapture binds a capture the same way bindLocal binds a declaration: a
+// name the function mutably borrows needs storage of its own, and a capture is
+// a local like any other -- `if build() |parts|` then `parts.append(..)` writes
+// through the header it was handed. A capture that already binds a borrow is
+// an address, and one address is all it needs.
+func (l *lowerer) bindCapture(name string, value Value) {
+	if !l.slots[name] || isReferenceType(value.Type) {
+		l.env.set(name, value)
+		return
+	}
+	l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
+}
+
 // borrowTargetExpr unwraps explicit `&var x` call-site syntax to the name
 // whose storage the callee is lent. Caller storage only ever comes from a
 // `&var` parameter, so `&` needs no arm here.
@@ -409,7 +420,29 @@ func (l *lowerer) lowerFieldStorage(expr ast.Expression) (Value, bool) {
 
 // lowerCallArgs lowers the arguments of a call to name.
 func (l *lowerer) lowerCallArgs(name string, args []ast.Expression) ([]Value, error) {
-	return l.lowerCallArgsAs(l.signatures[name].Params, args)
+	if sig, ok := l.signatures[name]; ok {
+		return l.lowerCallArgsAs(sig.Params, args)
+	}
+	return l.lowerCallArgsAs(corePrimitiveParams(name), args)
+}
+
+// corePrimitiveParams names the arguments of a std::internal::builtin the
+// lowerer has no declared signature for. Only the destinations matter: a
+// primitive that appends into the caller's String receives that String's
+// storage, so the growth the runtime does is visible to the caller. The other
+// argument kinds carry their own types to the call already.
+func corePrimitiveParams(name string) []Param {
+	sig, ok := stdprim.SimpleCoreSignatures[name]
+	if !ok {
+		return nil
+	}
+	params := make([]Param, len(sig.Args))
+	for index, arg := range sig.Args {
+		if arg == stdprim.ArgStringOut {
+			params[index] = Param{Type: string(arg), Passing: PassCallerStorage}
+		}
+	}
+	return params
 }
 
 // lowerCallArgsAs lowers call arguments at the types the callee declares for

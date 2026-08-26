@@ -107,7 +107,7 @@ func (l *lowerer) lowerCaptureBranch(
 	var hadPrevious bool
 	if capture != "" {
 		previous, hadPrevious = l.env.get(capture)
-		l.env.set(capture, payload)
+		l.bindCapture(capture, payload)
 	}
 	result, err := l.lowerBranchBlock(block, body, target, false)
 	if capture != "" {
@@ -551,7 +551,7 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 				return Value{}, fmt.Errorf(
 					"ir error: while capture needs a `?T` condition, got %s", cond.Type)
 			}
-			l.env.set(stmt.Capture, l.emit("opt.value", elem, []Value{cond}, ""))
+			l.bindCapture(stmt.Capture, l.emit("opt.value", elem, []Value{cond}, ""))
 			return l.emit("opt.has", "bool", []Value{cond}, ""), nil
 		},
 	})
