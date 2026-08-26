@@ -29,7 +29,7 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 	if e.lowersToWord(typ) {
 		return 8, 8, true
 	}
-	// An array is its header: five words describing storage the array owns
+	// An array is its header: four words describing storage the array owns
 	// elsewhere. The header is what a field or a union payload holds.
 	if isArrayLLVMType(typ) {
 		return arrayHeaderSize, 8, true

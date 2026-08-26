@@ -26,7 +26,6 @@ pub fn runtime_source() -> []u8 {
         \\    unsigned char *data;
         \\    int64_t len;
         \\    int64_t cap;
-        \\    int64_t elem_size;
         \\    void *allocator;
         \\} KizuArray;
         \\
@@ -37,8 +36,8 @@ pub fn runtime_source() -> []u8 {
         \\_Static_assert(offsetof(KizuArray, data) == 0, "KizuArray.data leads the header");
         \\_Static_assert(offsetof(KizuArray, len) == 8, "KizuArray.len follows data");
         \\_Static_assert(offsetof(KizuArray, cap) == 16, "KizuArray.cap follows len");
-        \\_Static_assert(offsetof(KizuArray, elem_size) == 24, "KizuArray.elem_size follows cap");
-        \\_Static_assert(sizeof(KizuArray) == 40, "KizuArray is five words");
+        \\_Static_assert(offsetof(KizuArray, allocator) == 24, "KizuArray.allocator follows cap");
+        \\_Static_assert(sizeof(KizuArray) == 32, "KizuArray is four words");
         \\
         \\typedef struct {
         \\    unsigned char *ptr;
@@ -291,11 +290,11 @@ pub fn runtime_source() -> []u8 {
         \\    return out;
         \\}
         \\
-        \\static KizuArray kizu_array_empty(int64_t elem_size);
-        \\_Bool kizu_array_append(void *handle, const void *elem);
-        \\_Bool kizu_array_swap(void *handle, int64_t left, int64_t right);
+        \\static KizuArray kizu_array_empty(void *allocator);
+        \\_Bool kizu_array_append(void *handle, const void *elem, int64_t elem_size);
+        \\_Bool kizu_array_swap(void *handle, int64_t left, int64_t right, int64_t elem_size);
         \\_Bool kizu_array_truncate(void *handle, int64_t len);
-        \\static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed);
+        \\static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed, int64_t elem_size);
         \\static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size);
         \\
         \\static int kizu_runtime_argc = 0;
@@ -446,7 +445,7 @@ pub fn runtime_source() -> []u8 {
         \\static KizuErrorArray kizu_err_array(int64_t failure) {
         \\    KizuErrorArray out;
         \\    out.ok = 0;
-        \\    out.value = kizu_array_empty((int64_t)sizeof(KizuFsDirEntry));
+        \\    out.value = kizu_array_empty(NULL);
         \\    out.error = failure;
         \\    return out;
         \\}
@@ -722,7 +721,7 @@ pub fn runtime_source() -> []u8 {
         \\    int64_t read_failure
         \\) {
         \\    KizuArray *array = dst;
-        \\    if (!array || array->elem_size != 1) {
+        \\    if (!array) {
         \\        return read_failure;
         \\    }
         \\    int64_t start_len = array->len;
@@ -731,7 +730,7 @@ pub fn runtime_source() -> []u8 {
         \\        if (max >= 0 && max + 1 < reserve) {
         \\            reserve = max + 1;
         \\        }
-        \\        if (!kizu_array_reserve_storage(array, start_len + reserve)) {
+        \\        if (!kizu_array_reserve_storage(array, start_len + reserve, 1)) {
         \\            return oom_failure;
         \\        }
         \\    }
@@ -741,7 +740,7 @@ pub fn runtime_source() -> []u8 {
         \\        if (max >= 0 && max + 1 - total < want) {
         \\            want = max + 1 - total;
         \\        }
-        \\        if (!kizu_array_reserve_storage(array, array->len + want)) {
+        \\        if (!kizu_array_reserve_storage(array, array->len + want, 1)) {
         \\            kizu_array_truncate(array, start_len);
         \\            return oom_failure;
         \\        }
@@ -825,10 +824,10 @@ pub fn runtime_source() -> []u8 {
         \\ * buffer as it was when the reservation fails. */
         \\static int kizu_string_append_bytes(KizuString *dst, const char *text, int64_t length) {
         \\    KizuArray *array = dst;
-        \\    if (!array || array->elem_size != 1 || (length > 0 && !text)) {
+        \\    if (!array || (length > 0 && !text)) {
         \\        return 0;
         \\    }
-        \\    if (!kizu_array_reserve_storage(array, array->len + length)) {
+        \\    if (!kizu_array_reserve_storage(array, array->len + length, 1)) {
         \\        return 0;
         \\    }
         \\    memcpy(array->data + array->len, text, (size_t)length);
@@ -1161,7 +1160,7 @@ pub fn runtime_source() -> []u8 {
         \\ * sees the same listing. Directories are small enough that an insertion sort
         \\ * over the collected entries costs nothing worth a larger sort. */
         \\static void kizu_sort_dir_entries(KizuArray *array) {
-        \\    if (!array || array->elem_size != (int64_t)sizeof(KizuFsDirEntry)) {
+        \\    if (!array) {
         \\        return;
         \\    }
         \\    KizuFsDirEntry *items = (KizuFsDirEntry *)array->data;
@@ -1190,7 +1189,7 @@ pub fn runtime_source() -> []u8 {
         \\        free(cpath);
         \\        return kizu_err_array(kizu_errno_failure(code));
         \\    }
-        \\    KizuArray array = kizu_array_empty((int64_t)sizeof(KizuFsDirEntry));
+        \\    KizuArray array = kizu_array_empty(NULL);
         \\    struct dirent *entry;
         \\    while ((entry = readdir(dir)) != NULL) {
         \\        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
@@ -1206,7 +1205,7 @@ pub fn runtime_source() -> []u8 {
         \\            item.is_dir = stat(entry_path, &st) == 0 && S_ISDIR(st.st_mode);
         \\            free(entry_path);
         \\        }
-        \\        if (!kizu_array_append(&array, &item)) {
+        \\        if (!kizu_array_append(&array, &item, (int64_t)sizeof(KizuFsDirEntry))) {
         \\            closedir(dir);
         \\            free(cpath);
         \\            return kizu_err_array(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
@@ -1305,14 +1304,14 @@ pub fn runtime_source() -> []u8 {
         \\
         \\/* An Array with nothing in it. The header is the value, so an empty array
         \\ * owns no allocation and costs nothing to make; the first append is what
-        \\ * asks the allocator for storage. */
-        \\static KizuArray kizu_array_empty(int64_t elem_size) {
+        \\ * asks the allocator for storage. The element size is not in the header: the
+        \\ * compiler knows T at every call and passes it in. */
+        \\static KizuArray kizu_array_empty(void *allocator) {
         \\    KizuArray array;
         \\    array.data = NULL;
         \\    array.len = 0;
         \\    array.cap = 0;
-        \\    array.elem_size = elem_size;
-        \\    array.allocator = NULL;
+        \\    array.allocator = allocator;
         \\    return array;
         \\}
         \\
@@ -1430,14 +1429,19 @@ pub fn runtime_source() -> []u8 {
         \\    kizu_rt_free(allocator, cell, cell_size);
         \\}
         \\
-        \\/* One cache line's worth of elements, at least one, so a small Array does not
-        \\ * start with a sub-cache-line allocation. */
+        \\/* One cache line's worth of elements, so a small Array does not start with a
+        \\ * sub-cache-line allocation, but never fewer than a few: an element wide
+        \\ * enough to fill a cache line on its own would otherwise start at one and
+        \\ * reallocate on the second append, and the wider the element the more each of
+        \\ * those reallocations moves. */
         \\static int64_t kizu_array_init_capacity(int64_t elem_size) {
         \\    const int64_t cache_line = 64;
-        \\    if (elem_size <= 0 || elem_size >= cache_line) {
-        \\        return 1;
+        \\    const int64_t least = 4;
+        \\    if (elem_size <= 0) {
+        \\        return least;
         \\    }
-        \\    return cache_line / elem_size;
+        \\    int64_t fits = cache_line / elem_size;
+        \\    return fits > least ? fits : least;
         \\}
         \\
         \\/* Grow by half again plus the initial capacity, following Zig's
@@ -1458,19 +1462,19 @@ pub fn runtime_source() -> []u8 {
         \\    return minimum + half + init;
         \\}
         \\
-        \\static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed) {
+        \\static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed, int64_t elem_size) {
         \\    if (!array || needed < 0) {
         \\        return 0;
         \\    }
         \\    if (needed <= array->cap) {
         \\        return 1;
         \\    }
-        \\    int64_t next = kizu_array_grow_capacity(needed, array->elem_size);
-        \\    if (array->elem_size > 0 && next > INT64_MAX / array->elem_size) {
+        \\    int64_t next = kizu_array_grow_capacity(needed, elem_size);
+        \\    if (elem_size > 0 && next > INT64_MAX / elem_size) {
         \\        return 0;
         \\    }
         \\    unsigned char *data = (unsigned char *)kizu_rt_realloc(
-        \\        array->allocator, array->data, array->cap * array->elem_size, next * array->elem_size);
+        \\        array->allocator, array->data, array->cap * elem_size, next * elem_size);
         \\    if (!data) {
         \\        return 0;
         \\    }
@@ -1479,34 +1483,34 @@ pub fn runtime_source() -> []u8 {
         \\    return 1;
         \\}
         \\
-        \\_Bool kizu_array_append(void *handle, const void *elem) {
+        \\_Bool kizu_array_append(void *handle, const void *elem, int64_t elem_size) {
         \\    KizuArray *array = (KizuArray *)handle;
-        \\    if (!array || !elem || !kizu_array_reserve_storage(array, array->len + 1)) {
+        \\    if (!array || !elem || !kizu_array_reserve_storage(array, array->len + 1, elem_size)) {
         \\        return 0;
         \\    }
-        \\    memcpy(array->data + array->len * array->elem_size, elem, (size_t)array->elem_size);
+        \\    memcpy(array->data + array->len * elem_size, elem, (size_t)elem_size);
         \\    array->len += 1;
         \\    return 1;
         \\}
         \\
-        \\_Bool kizu_array_reserve(void *handle, int64_t additional) {
+        \\_Bool kizu_array_reserve(void *handle, int64_t additional, int64_t elem_size) {
         \\    KizuArray *array = (KizuArray *)handle;
         \\    if (!array || additional < 0 || additional > INT64_MAX - array->len) {
         \\        return 0;
         \\    }
-        \\    return kizu_array_reserve_storage(array, array->len + additional);
+        \\    return kizu_array_reserve_storage(array, array->len + additional, elem_size);
         \\}
         \\
-        \\void *kizu_array_pop(void *handle) {
+        \\void *kizu_array_pop(void *handle, int64_t elem_size) {
         \\    KizuArray *array = (KizuArray *)handle;
         \\    if (!array || array->len <= 0) {
         \\        return NULL;
         \\    }
         \\    array->len -= 1;
-        \\    return array->data + array->len * array->elem_size;
+        \\    return array->data + array->len * elem_size;
         \\}
         \\
-        \\_Bool kizu_array_swap(void *handle, int64_t left, int64_t right) {
+        \\_Bool kizu_array_swap(void *handle, int64_t left, int64_t right, int64_t elem_size) {
         \\    KizuArray *array = (KizuArray *)handle;
         \\    if (!array || left < 0 || right < 0 || left >= array->len || right >= array->len) {
         \\        return 0;
@@ -1514,9 +1518,9 @@ pub fn runtime_source() -> []u8 {
         \\    if (left == right) {
         \\        return 1;
         \\    }
-        \\    unsigned char *left_elem = array->data + left * array->elem_size;
-        \\    unsigned char *right_elem = array->data + right * array->elem_size;
-        \\    for (int64_t index = 0; index < array->elem_size; index++) {
+        \\    unsigned char *left_elem = array->data + left * elem_size;
+        \\    unsigned char *right_elem = array->data + right * elem_size;
+        \\    for (int64_t index = 0; index < elem_size; index++) {
         \\        unsigned char byte = left_elem[index];
         \\        left_elem[index] = right_elem[index];
         \\        right_elem[index] = byte;

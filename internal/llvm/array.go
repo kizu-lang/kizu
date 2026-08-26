@@ -14,16 +14,18 @@ import (
 // asserts the same offsets, so the two spellings cannot drift apart.
 const arrayHeaderType = "%kizu.array"
 
-// arrayHeaderSize is what arrayHeaderType occupies: five words.
-const arrayHeaderSize = 40
+// arrayHeaderSize is what arrayHeaderType occupies: four words. The element
+// size is not among them -- the compiler knows T at every call that needs it,
+// so a header carrying sizeof(T) would carry what the caller already has, in
+// every array and in every element of an array of arrays.
+const arrayHeaderSize = 32
 
 // The field indices of arrayHeaderType.
 const (
 	arrayFieldData      = 0
 	arrayFieldLen       = 1
 	arrayFieldCapacity  = 2
-	arrayFieldElemSize  = 3
-	arrayFieldAllocator = 4
+	arrayFieldAllocator = 3
 )
 
 // arrayEmptyGlobal is the header read in place of a null handle. The runtime
@@ -38,13 +40,13 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	if !e.usesArrayRuntime() {
 		return
 	}
-	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, i64, ptr }\n", arrayHeaderType)
+	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, ptr }\n", arrayHeaderType)
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
 		arrayEmptyGlobal, arrayHeaderType)
-	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr)\n")
-	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, i64)\n")
-	e.out.WriteString("declare ptr @kizu_array_pop(ptr)\n")
-	e.out.WriteString("declare i1 @kizu_array_swap(ptr, i64, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, i64, i64)\n")
+	e.out.WriteString("declare ptr @kizu_array_pop(ptr, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_swap(ptr, i64, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_truncate(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_array_clear(ptr)\n")
 	e.out.WriteString("declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)\n")
@@ -182,8 +184,9 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	left := e.value(instr.Args[1])
 	right := e.value(instr.Args[2])
 	okName := localName(instr.Result.Name) + ".ok"
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_swap(ptr %s, i64 %s, i64 %s)\n",
-		okName, array.operand, left.operand, right.operand)
+	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_swap(ptr %s, i64 %s, i64 %s, i64 %s)\n",
+		okName, array.operand, left.operand, right.operand,
+		e.elementSizeOperand(instr.Immediate))
 	return e.writeArrayBoolResult(instr.Result, okName, "array_swap")
 }
 
@@ -196,12 +199,9 @@ func (e *emitter) writeArrayNew(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: array.new expects allocator -> Array<T>")
 	}
 	allocator := e.value(instr.Args[0])
-	sized := "%" + e.nextSyntheticValue("array.new.sized")
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i64 %s, %d\n",
-		sized, arrayHeaderType, e.elementSizeOperand(instr.Immediate), arrayFieldElemSize)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, %d\n",
-		resultName, arrayHeaderType, sized, allocator.operand, arrayFieldAllocator)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, ptr %s, %d\n",
+		resultName, arrayHeaderType, allocator.operand, arrayFieldAllocator)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -270,8 +270,8 @@ func (e *emitter) writeArrayAppendPaths(
 	fmt.Fprintf(&e.out, "%s:\n", slowLabel)
 	elemSlot := e.writeStackValue(localName(instr.Result.Name)+".elem", instr.Args[1])
 	slowOk := "%" + e.nextSyntheticValue("array.append.slow.ok")
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append(ptr %s, ptr %s)\n",
-		slowOk, handleOperand, elemSlot)
+	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append(ptr %s, ptr %s, i64 %s)\n",
+		slowOk, handleOperand, elemSlot, e.elementSizeOperand(instr.Immediate))
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
 	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ %s, %%%s ]\n",
@@ -325,8 +325,8 @@ func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
 	array := e.value(instr.Args[0])
 	additional := e.value(instr.Args[1])
 	okName := localName(instr.Result.Name) + ".ok"
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_reserve(ptr %s, i64 %s)\n",
-		okName, array.operand, additional.operand)
+	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_reserve(ptr %s, i64 %s, i64 %s)\n",
+		okName, array.operand, additional.operand, e.elementSizeOperand(instr.Immediate))
 	return e.writeArrayBoolResult(instr.Result, okName, "array_reserve")
 }
 
@@ -337,7 +337,8 @@ func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	}
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
+		ptrName, array.operand, e.elementSizeOperand(instr.Immediate))
 	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
 }
 
@@ -348,7 +349,8 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 	}
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
+		ptrName, array.operand, e.elementSizeOperand(instr.Immediate))
 	e.writeNullFailure(instr, ptrName, "array.pop.panic", "array_empty")
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
@@ -486,12 +488,19 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: array.deinit expects Array<T> -> void")
 	}
 	array := e.value(instr.Args[0])
+	// A cleanup carries no immediate, so the element the release measures is
+	// read from the array it was handed: the one place the type is written
+	// down either way.
+	elem, ok := arrayElementLLVMType(instr.Args[0].Type)
+	if !ok {
+		return fmt.Errorf("llvm error: array.deinit expects Array<T> -> void")
+	}
 	data := e.arrayFieldOf(array.operand, arrayFieldData, "array.deinit.data")
 	capacity := e.arrayFieldOf(array.operand, arrayFieldCapacity, "array.deinit.cap")
-	elemSize := e.arrayFieldOf(array.operand, arrayFieldElemSize, "array.deinit.elem")
 	allocator := e.arrayFieldOf(array.operand, arrayFieldAllocator, "array.deinit.alloc")
 	bytes := "%" + e.nextSyntheticValue("array.deinit.bytes")
-	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n", bytes, capacity, elemSize)
+	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n",
+		bytes, capacity, e.elementSizeOperand(elem))
 	fmt.Fprintf(&e.out, "  call void @kizu_array_deinit(ptr %s, ptr %s, i64 %s)\n",
 		allocator, data, bytes)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
@@ -638,6 +647,16 @@ func (e *emitter) elementSizeOperand(typ string) string {
 // isArrayLLVMType reports whether a lowered IR type is a std::array::Array<T>.
 func isArrayLLVMType(typ string) bool {
 	return strings.HasPrefix(typ, "std::array::Array<") && strings.HasSuffix(typ, ">")
+}
+
+// arrayElementLLVMType names T for a `std::array::Array<T>` spelling, through a
+// borrow of one.
+func arrayElementLLVMType(typ string) (string, bool) {
+	typ = strings.TrimPrefix(strings.TrimPrefix(typ, "&var "), "&")
+	if !isArrayLLVMType(typ) {
+		return "", false
+	}
+	return typ[len("std::array::Array<") : len(typ)-1], true
 }
 
 // alignSuffix renders the `, align N` an LLVM load carries when the pointer is
