@@ -131,11 +131,12 @@ type binding struct {
 }
 
 // allocTied reports an owner allocated from a frame-tied allocator: it keeps
-// its owner obligations (deinit) but cannot escape the frame. Owners are the
-// only non-borrow bindings that ever hold borrowTargets, so the combination
-// identifies them without a separate flag.
+// its owner obligations (deinit) but cannot escape the frame. A value can hold
+// borrow targets for another reason -- an aggregate that keeps a source view
+// holds one too -- and that one escapes under the view rules, not this one, so
+// the allocators are read out by type rather than taken to be every source.
 func (b *binding) allocTied() bool {
-	return !b.borrowedParam && len(b.borrowTargets) > 0
+	return !b.borrowedParam && len(b.tiedAllocatorSources()) > 0
 }
 
 // tiedAllocatorSources returns the tied allocators this value was built from.
@@ -8955,6 +8956,20 @@ func stmtIdentUses(stmt ast.Statement) []string {
 	}
 }
 
+// wrappedExprValue returns the operand of a one-operand expression wrapper.
+func wrappedExprValue(expr ast.Expression) ast.Expression {
+	switch e := expr.(type) {
+	case *ast.CastExpr:
+		return e.Value
+	case *ast.TryExpr:
+		return e.Value
+	case *ast.MoveExpr:
+		return e.Value
+	default:
+		return nil
+	}
+}
+
 // blockIdentUses collects identifier reads inside a nested block.
 func blockIdentUses(block *ast.BlockStmt) []string {
 	if block == nil {
@@ -8985,10 +9000,12 @@ func exprIdentUses(expr ast.Expression) []string {
 			uses = append(uses, exprIdentUses(arg)...)
 		}
 		return uses
-	case *ast.CastExpr:
-		return exprIdentUses(e.Value)
-	case *ast.TryExpr:
-		return exprIdentUses(e.Value)
+	case *ast.CastExpr, *ast.TryExpr, *ast.MoveExpr:
+		// One-operand wrappers read whatever they wrap. A `move` is among
+		// them: missing it would end the value's live range at its previous
+		// statement, and everything a last use releases -- the borrows it
+		// holds, the allocator it is tied to -- would go one statement early.
+		return exprIdentUses(wrappedExprValue(e))
 	case *ast.StructLiteralExpr:
 		uses := []string{}
 		for _, field := range e.Fields {

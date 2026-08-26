@@ -86,7 +86,26 @@ fn (self: &Checker) mutable_place(value: BindingHandle) -> bool {
 /// `binding.allocTied`: it keeps its owner obligations (deinit) but cannot
 /// escape the frame.
 fn (self: &Checker) alloc_tied(value: BindingHandle) -> bool {
-    return !self.binding(value).borrowed_param and self.has_borrow_targets(value);
+    if self.binding(value).borrowed_param {
+        return false;
+    }
+    return self.has_tied_allocator_source(value);
+}
+
+/// Reports whether this value was built from a tied allocator, the Go
+/// `binding.tiedAllocatorSources`. A value can hold borrow targets for another
+/// reason -- an aggregate that keeps a source view holds one too -- and that
+/// one escapes under the view rules, not this one, so the allocators are read
+/// out by type rather than taken to be every source.
+fn (self: &Checker) has_tied_allocator_source(value: BindingHandle) -> bool {
+    var index = 0;
+    while self.borrow_target_at(value, index) |source| {
+        index = index + 1;
+        if self.names.is(self.binding(source.target).type_name, "Allocator") {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Reports whether the binding is itself a `&var` parameter, the Go

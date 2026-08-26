@@ -80,9 +80,11 @@ fn (self: Node) deinit(allocator: Allocator) -> void {
 allocator は tied なので、取り違えは compile error です。tie を持たない
 `page_allocator()` 同士は同じ allocator なので検査は要りません。
 
-owner を container の要素にするとき、要素の tie は container の tie と一致して
-いなければなりません。container の解放は要素の解放に自分の allocator を渡す
-ためです。
+container の解放は要素の解放に自分の allocator を渡すので、要素と container が
+違う allocator から来ていると取り違えになります。これに別の検査は要りません ——
+tied allocator から作った owner は `move` できず(SPEC §14.3)、要素になれない
+ためです。tie を持たない `page_allocator()` 同士は区別が付かないので、残るのは
+検査できないし検査する必要もない場合だけです。
 
 ## 却下
 
