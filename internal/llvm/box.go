@@ -58,12 +58,16 @@ func (e *emitter) writeBoxNew(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	allocator := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
 	valueSlot := e.writeStackValue(resultName+".value", instr.Args[1])
 	rawName := resultName + ".raw"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_box_new(ptr %s, i64 %s, ptr %s)\n",
-		rawName, allocator.operand, e.elementSizeOperand(instr.Immediate), valueSlot)
+		rawName, allocator.operand, e.elementSizeOperand(elem), valueSlot)
 	okName := resultName + ".is_ok"
 	okByteName := resultName + ".ok.byte"
 	codeName := resultName + ".code"

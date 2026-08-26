@@ -1940,7 +1940,7 @@ func (l *lowerer) lowerArenaConstructor(typeArg string, args []ast.Expression) (
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("arena.new", "std::arena::Arena<"+typeArg+">", []Value{allocator}, typeArg), nil
+	return l.emit("arena.new", "std::arena::Arena<"+typeArg+">", []Value{allocator}, ""), nil
 }
 
 // lowerArrayConstructor lowers std::array::new<T>(allocator).
@@ -1955,12 +1955,12 @@ func (l *lowerer) lowerArrayConstructor(typeArg string, args []ast.Expression) (
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, typeArg), nil
+	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, ""), nil
 }
 
 // lowerMapConstructor lowers std::map::new<K, V>(allocator).
 func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Value, error) {
-	mapType, valueType, ok := mapInstanceType(typeArg)
+	mapType, _, ok := mapInstanceType(typeArg)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: std::map::Map key type must be one of %s",
 			typ.MapKeyTypeNames())
@@ -1972,7 +1972,7 @@ func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Va
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("map.new", mapType, []Value{allocator}, valueType), nil
+	return l.emit("map.new", mapType, []Value{allocator}, ""), nil
 }
 
 // lowerTryExpr lowers error-union propagation as an explicit IR instruction.
@@ -2393,11 +2393,11 @@ var arenaPrimitives = map[string]string{
 func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (Value, error) {
 	switch name {
 	case "len":
-		return l.emit("arena.len", "i64", args, elem), nil
+		return l.emit("arena.len", "i64", args, ""), nil
 	case "pop_or_panic":
-		return l.emit("arena.pop_or_panic", elem, args, elem), nil
+		return l.emit("arena.pop_or_panic", elem, args, ""), nil
 	case "deinit":
-		return l.emit("arena.deinit", "void", args, elem), nil
+		return l.emit("arena.deinit", "void", args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown arena primitive `%s`", name)
 	}
@@ -2412,19 +2412,19 @@ func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value,
 			return Value{}, fmt.Errorf("ir error: box.new expects allocator and value")
 		}
 		return l.releaseOwnerOnFailure(
-			l.emit("box.new", "std::mem::Error!"+boxTypeName+"<"+elem+">", args, elem), args[1])
+			l.emit("box.new", "std::mem::Error!"+boxTypeName+"<"+elem+">", args, ""), args[1])
 	case "borrow":
 		// A returned borrow travels under the same rule any borrow return
 		// does: unions stay behind a pointer, everything else as a copy.
 		spelling, _ := l.borrowIRType(elem, false)
-		return l.emit("box.borrow", spelling, args, elem), nil
+		return l.emit("box.borrow", spelling, args, ""), nil
 	case "borrow_mut":
 		spelling, _ := l.borrowIRType(elem, true)
-		return l.emit("box.borrow_mut", spelling, args, elem), nil
+		return l.emit("box.borrow_mut", spelling, args, ""), nil
 	case "deinit":
-		return l.emit("box.deinit", "void", args, elem), nil
+		return l.emit("box.deinit", "void", args, ""), nil
 	case "take":
-		return l.emit("box.take", elem, args, elem), nil
+		return l.emit("box.take", elem, args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown box method `%s`", name)
 	}
@@ -2452,23 +2452,23 @@ func (l *lowerer) lowerMapMethod(
 ) (Value, error) {
 	switch name {
 	case "insert":
-		return l.emit("map.insert", "std::mem::Error!void", args, valueType), nil
+		return l.emit("map.insert", "std::mem::Error!void", args, ""), nil
 	case "get":
-		return l.emit("map.get", "?"+valueType, args, valueType), nil
+		return l.emit("map.get", "?"+valueType, args, ""), nil
 	case "at":
-		return l.emit("map.at", "?&"+valueType, args, valueType), nil
+		return l.emit("map.at", "?&"+valueType, args, ""), nil
 	case "at_mut":
-		return l.emit("map.at_mut", "?&var "+valueType, args, valueType), nil
+		return l.emit("map.at_mut", "?&var "+valueType, args, ""), nil
 	case "take_value_at":
-		return l.emit("map.take_value_at", valueType, args, valueType), nil
+		return l.emit("map.take_value_at", valueType, args, ""), nil
 	case "key_at":
-		return l.emit("map.key_at", "?"+keyType, args, valueType), nil
+		return l.emit("map.key_at", "?"+keyType, args, ""), nil
 	case "contains":
-		return l.emit("map.contains", "bool", args, valueType), nil
+		return l.emit("map.contains", "bool", args, ""), nil
 	case "len":
-		return l.emit("map.len", "i64", args, valueType), nil
+		return l.emit("map.len", "i64", args, ""), nil
 	case "deinit":
-		return l.emit("map.deinit", "void", args, valueType), nil
+		return l.emit("map.deinit", "void", args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown map method `%s`", name)
 	}
@@ -2480,7 +2480,7 @@ func (l *lowerer) lowerMapMethod(
 // fixed result type and go through arrayMethodResultType.
 func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Value, error) {
 	if result, ok := arrayMethodResultType(name); ok {
-		value := l.emit("array."+name, result, args, elem)
+		value := l.emit("array."+name, result, args, "")
 		if name == "append" {
 			return l.releaseOwnerOnFailure(value, args[1])
 		}
@@ -2488,21 +2488,21 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 	}
 	switch name {
 	case "pop":
-		return l.emit("array.pop", "?"+elem, args, elem), nil
+		return l.emit("array.pop", "?"+elem, args, ""), nil
 	case "pop_or_panic":
-		return l.emit("array.pop_or_panic", elem, args, elem), nil
+		return l.emit("array.pop_or_panic", elem, args, ""), nil
 	case "get":
-		return l.emit("array.get", "?"+elem, args, elem), nil
+		return l.emit("array.get", "?"+elem, args, ""), nil
 	case "get_or_panic":
-		return l.emit("array.get_or_panic", elem, args, elem), nil
+		return l.emit("array.get_or_panic", elem, args, ""), nil
 	case "at":
-		return l.emit("array.at", "?&"+elem, args, elem), nil
+		return l.emit("array.at", "?&"+elem, args, ""), nil
 	case "at_mut":
-		return l.emit("array.at_mut", "?&var "+elem, args, elem), nil
+		return l.emit("array.at_mut", "?&var "+elem, args, ""), nil
 	case "as_mut_bytes":
 		// The same view value as as_bytes: mutability is a checker-level
 		// permission, not a different runtime representation (ADR-0096).
-		return l.emit("array.as_bytes", "[]u8", args, elem), nil
+		return l.emit("array.as_bytes", "[]u8", args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown array method `%s`", name)
 	}

@@ -770,7 +770,7 @@ while.end.3:
 
 const arenaSnapshot = `fn main(%allocator: Allocator) -> void {
 entry:
-  %1: std::arena::Arena<User> = arena.new %allocator: Allocator, User
+  %1: std::arena::Arena<User> = arena.new %allocator: Allocator
   %2: []u8 = const "alice"
   %3: User = struct.new {name: %2: []u8}
   %4: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %3: User
@@ -895,7 +895,7 @@ fn main() -> !void {
 }`)
 	got := Dump(module)
 	want := "  %1: std::mem::Error!void = array.append" +
-		" %self: &var std::array::Array<i64>, %value: i64, i64\n" +
+		" %self: &var std::array::Array<i64>, %value: i64\n" +
 		"  return %1: std::mem::Error!void\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
@@ -992,15 +992,16 @@ fn main() -> !void {
     return;
 }`)
 	got := Dump(module)
+	// The element is spelled once, in the type of the array the call returns.
 	for _, want := range []string{
-		"array.new %allocator: Allocator, Wide\n",
-		"array.new %allocator: Allocator, i64\n",
+		": std::array::Array<Wide> = array.new %allocator: Allocator\n",
+		": std::array::Array<i64> = array.new %allocator: Allocator\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
 		}
 	}
-	if strings.Contains(got, "array.new %allocator: Allocator, E\n") {
+	if strings.Contains(got, ": std::array::Array<E> = array.new") {
 		t.Fatalf("element type reached the backend unresolved:\n%s", got)
 	}
 }

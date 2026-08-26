@@ -37,6 +37,85 @@ fn copy_array_element(names: &ir::NameTable, type_name: ir::Name, out: &var stri
     return true;
 }
 
+/// Copies the type an instruction measures into out, the Go
+/// `instrElementType`. A container spells its element in its own type, so the
+/// two can never disagree and no instruction can arrive without one -- a
+/// cleanup carries no immediate, and a release measured against a missing type
+/// would free the wrong number of bytes.
+///
+/// Which value carries it depends on the instruction: a constructor names the
+/// container it returns, and everything else was handed the container it works
+/// on. Reading whichever happens to match would take the wrong answer for an
+/// element that is itself a container, where the result of a `pop` is an Array
+/// whose own element is not what the outer storage is sized by.
+fn (self: &var Emitter) instr_element_type(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    out: &var string::String
+) -> !bool {
+    if container_constructor(node.op) {
+        return self.container_element_of_result(module, node.result.type_name, out);
+    }
+    if node.args.len() == 0 {
+        return false;
+    }
+    let first = node.args.get_or_panic(0);
+    return copy_array_element(&module.names, first.type_name, out);
+}
+
+/// Reports the instructions whose container is the value they return rather
+/// than the one they were handed.
+fn container_constructor(op: ir::Op) -> bool {
+    return match op {
+        ArrayNew => true,
+        MapNew => true,
+        ArenaNew => true,
+        BoxNew => true,
+        _ => false,
+    };
+}
+
+/// Copies what a constructor's result holds: the element for an Array, Arena
+/// or Box, and the value for a Map, which is what its storage is sized by.
+fn (self: &var Emitter) container_element_of_result(
+    module: &ir::Module,
+    type_name: ir::Name,
+    out: &var string::String
+) -> !bool {
+    let retained = ir::name_text(&module.names, type_name);
+    var spelling = retained.as_bytes();
+    if try self.error_union_success_type(spelling) |success| {
+        defer success.deinit();
+        let bytes = success.as_bytes();
+        return try self.copy_container_arg(bytes, out);
+    }
+    return self.copy_container_arg(spelling, out);
+}
+
+/// Copies the static argument a container spelling carries, taking a Map's
+/// value rather than its key.
+fn (self: &var Emitter) copy_container_arg(spelling: []u8, out: &var string::String) -> !bool {
+    if is_array_llvm_type(spelling) {
+        try out.append_bytes(spelling[18..mem::len(spelling) - 1]);
+        return true;
+    }
+    if mem::starts_with(spelling, "std::arena::Arena<") and ir::ends_with_bytes(spelling, ">") {
+        try out.append_bytes(spelling[18..mem::len(spelling) - 1]);
+        return true;
+    }
+    if mem::starts_with(spelling, "std::mem::Box<") and ir::ends_with_bytes(spelling, ">") {
+        try out.append_bytes(spelling[14..mem::len(spelling) - 1]);
+        return true;
+    }
+    if mem::starts_with(spelling, "std::map::Map<") and ir::ends_with_bytes(spelling, ">") {
+        let args = spelling[14..mem::len(spelling) - 1];
+        let comma = top_level_comma(args, 0) orelse return false;
+        try out.append_bytes(mem::trim_ascii(args[comma + 1..mem::len(args)]));
+        return true;
+    }
+    return false;
+}
+
 /// Names the runtime's KizuArray header in emitted modules, the Go
 /// `arrayHeaderType`. Element access reads these fields rather than calling the
 /// runtime for each one: `kizu ir compiler` reaches an element 264 million
@@ -147,10 +226,32 @@ fn (self: &var Emitter) array_load_field(handle: ir::Name, field: i64, name: []u
 /// Returns the address of the element at index, the Go `arrayElementAddr`. The
 /// stride is the element type, which is what array.new sized the elements by,
 /// and the index is not checked here.
+/// The same for an element spelled out rather than named by the module, for
+/// the instructions that read their element from the value they were handed.
+fn (self: &var Emitter) array_element_addr_bytes(
+    module: &ir::Module,
+    handle: ir::Name,
+    elem: []u8,
+    index: ir::Name
+) -> !ir::Name {
+    let elem_type = try self.llvm_type(module, elem);
+    return self.array_element_addr_of(handle, elem_type, index);
+}
+
 fn (self: &var Emitter) array_element_addr(
     module: &ir::Module,
     handle: ir::Name,
     elem: ir::Name,
+    index: ir::Name
+) -> !ir::Name {
+    let elem_type = try self.llvm_type_of(module, elem);
+    return self.array_element_addr_of(handle, elem_type, index);
+}
+
+/// Writes the address of one element slot, given the lowered element type.
+fn (self: &var Emitter) array_element_addr_of(
+    handle: ir::Name,
+    elem_type: ir::Name,
     index: ir::Name
 ) -> !ir::Name {
     let data_addr = try self.array_field_addr(handle, array_field_data(), "array.data.addr");
@@ -158,7 +259,6 @@ fn (self: &var Emitter) array_element_addr(
     let data = try self.percent(data_synthetic);
     let elem_synthetic = try self.next_synthetic_value("array.elem");
     let elem_addr = try self.percent(elem_synthetic);
-    let elem_type = try self.llvm_type_of(module, elem);
     try self.line2("  %s = load ptr, ptr %s", Arg::Str(data), Arg::Str(data_addr));
     try self.line4(
         "  %s = getelementptr %s, ptr %s, i64 %s",
@@ -175,7 +275,8 @@ fn (self: &var Emitter) array_checked_element(
     module: &ir::Module,
     node: &ir::InstrNode,
     handle: ir::Name,
-    index: ir::Name
+    index: ir::Name,
+    elem_bytes: []u8
 ) -> !ir::Name {
     let len_synthetic = try self.next_synthetic_value("array.len");
     let length = try self.percent(len_synthetic);
@@ -183,7 +284,7 @@ fn (self: &var Emitter) array_checked_element(
     let range_synthetic = try self.next_synthetic_value("array.in_range");
     let in_range = try self.percent(range_synthetic);
     try self.line3("  %s = icmp ult i64 %s, %s", Arg::Str(in_range), Arg::Str(index), Arg::Str(length));
-    let elem_addr = try self.array_element_addr(module, handle, node.immediate, index);
+    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, index);
     let checked_synthetic = try self.next_synthetic_value("array.checked");
     let checked = try self.percent(checked_synthetic);
     try self.line3(
@@ -291,12 +392,19 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
         !module.names.is(node.args.get_or_panic(2).type_name, "i64") or !module.names.is(node.result.type_name, "std::array::Error!void") {
         return try self.fail0("llvm error: array.swap expects Array<T>, i64, i64 -> std::array::Error!void");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let left = try self.operand(module, node.args.get_or_panic(1));
     let right = try self.operand(module, node.args.get_or_panic(2));
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    let size = try self.element_size_operand(module, node.immediate);
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     try self.line5(
         "  %s = call i1 @kizu_array_swap(ptr %s, i64 %s, i64 %s, i64 %s)",
         Arg::Str(ok_name), Arg::Str(array.operand), Arg::Str(left.operand),
@@ -333,11 +441,18 @@ fn (self: &var Emitter) write_array_append(module: &ir::Module, node: &ir::Instr
     if node.args.len() != 2 or !module.names.is(node.result.type_name, "std::mem::Error!void") {
         return try self.fail0("llvm error: array.append expects Array<T>, T -> std::mem::Error!void");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let handle = try self.array_handle(array.operand);
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    try self.write_array_append_paths(module, node, array.operand, handle, ok_name);
+    try self.write_array_append_paths(module, node, array.operand, handle, ok_name, elem_bytes);
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayAppend);
 }
 
@@ -351,7 +466,8 @@ fn (self: &var Emitter) write_array_append_paths(
     node: &ir::InstrNode,
     handle_operand: ir::Name,
     handle: ir::Name,
-    ok_name: ir::Name
+    ok_name: ir::Name,
+    elem_bytes: []u8
 ) -> !void {
     let len_synthetic = try self.next_synthetic_value("array.append.len");
     let length = try self.percent(len_synthetic);
@@ -369,10 +485,10 @@ fn (self: &var Emitter) write_array_append_paths(
     try self.mark_current_block_exit(module, join_label);
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(fits), Arg::Str(fast_label), Arg::Str(slow_label));
     try self.line1("%s:", Arg::Str(fast_label));
-    try self.write_array_append_fast(module, node, handle, length, length_addr);
+    try self.write_array_append_fast(module, node, handle, length, length_addr, elem_bytes);
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(slow_label));
-    let slow_ok = try self.write_array_append_slow(module, node, handle_operand);
+    let slow_ok = try self.write_array_append_slow(module, node, handle_operand, elem_bytes);
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(join_label));
     return self.line4(
@@ -388,10 +504,11 @@ fn (self: &var Emitter) write_array_append_fast(
     node: &ir::InstrNode,
     handle: ir::Name,
     length: ir::Name,
-    length_addr: ir::Name
+    length_addr: ir::Name,
+    elem_bytes: []u8
 ) -> !void {
     let value = node.args.get_or_panic(1);
-    let elem_addr = try self.array_element_addr(module, handle, node.immediate, length);
+    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, length);
     let value_type = try self.llvm_type_of(module, value.type_name);
     let value_operand = try self.operand(module, value);
     try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr));
@@ -406,14 +523,15 @@ fn (self: &var Emitter) write_array_append_fast(
 fn (self: &var Emitter) write_array_append_slow(
     module: &ir::Module,
     node: &ir::InstrNode,
-    handle_operand: ir::Name
+    handle_operand: ir::Name,
+    elem_bytes: []u8
 ) -> !ir::Name {
     let result_name = try self.local_name(module, node.result.name);
     let elem_base = try self.suffixed(result_name, ".elem");
     let elem_slot = try self.write_stack_value(module, elem_base, node.args.get_or_panic(1));
     let slow_synthetic = try self.next_synthetic_value("array.append.slow.ok");
     let slow_ok = try self.percent(slow_synthetic);
-    let size = try self.element_size_operand(module, node.immediate);
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     try self.line4(
         "  %s = call i1 @kizu_array_append(ptr %s, ptr %s, i64 %s)",
         Arg::Str(slow_ok), Arg::Str(handle_operand), Arg::Str(elem_slot), Arg::Str(size)
@@ -453,11 +571,18 @@ fn (self: &var Emitter) write_array_reserve(module: &ir::Module, node: &ir::Inst
         !module.names.is(node.result.type_name, "std::mem::Error!void") {
         return try self.fail0("llvm error: array.reserve expects Array<T>, i64 -> std::mem::Error!void");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let additional = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    let size = try self.element_size_operand(module, node.immediate);
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     try self.line4(
         "  %s = call i1 @kizu_array_reserve(ptr %s, i64 %s, i64 %s)",
         Arg::Str(ok_name), Arg::Str(array.operand), Arg::Str(additional.operand), Arg::Str(size)
@@ -495,10 +620,17 @@ fn (self: &var Emitter) write_array_pop(module: &ir::Module, node: &ir::InstrNod
     if node.args.len() != 1 {
         return try self.fail0("llvm error: array.pop expects Array<T> -> ?T");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    let size = try self.element_size_operand(module, node.immediate);
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     try self.line3(
         "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)",
         Arg::Str(ptr_name), Arg::Str(array.operand), Arg::Str(size)
@@ -512,10 +644,17 @@ fn (self: &var Emitter) write_array_pop_or_panic(module: &ir::Module, node: &ir:
     if node.args.len() != 1 {
         return try self.fail0("llvm error: array.pop_or_panic expects Array<T> -> T");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    let size = try self.element_size_operand(module, node.immediate);
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     try self.line3(
         "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)",
         Arg::Str(ptr_name), Arg::Str(array.operand), Arg::Str(size)
@@ -534,10 +673,17 @@ fn (self: &var Emitter) write_array_get(module: &ir::Module, node: &ir::InstrNod
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
         return try self.fail0("llvm error: array.get expects Array<T>, i64 -> ?T");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let handle = try self.array_handle(array.operand);
-    let checked = try self.array_checked_element(module, node, handle, index.operand);
+    let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes);
     return self.write_array_optional_load_result(module, node, checked);
 }
 
@@ -546,6 +692,13 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
         return try self.fail0("llvm error: array.get_or_panic expects Array<T>, i64 -> T");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let handle = try self.array_handle(array.operand);
@@ -553,7 +706,7 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     let len_name = try self.percent(len_synthetic);
     try self.array_load_field(handle, array_field_len(), "array.get.panic.len", len_name);
     try self.write_bounds_failure(module, node, index.operand, len_name);
-    let elem_addr = try self.array_element_addr(module, handle, node.immediate, index.operand);
+    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, index.operand);
     let result_name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(elem_addr));
@@ -568,10 +721,17 @@ fn (self: &var Emitter) write_array_at(module: &ir::Module, node: &ir::InstrNode
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
         return try self.fail0("llvm error: array.at expects Array<T>, i64 -> ?&T");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let handle = try self.array_handle(array.operand);
-    let checked = try self.array_checked_element(module, node, handle, index.operand);
+    let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes);
     return self.write_borrow_optional_result(module, node, checked);
 }
 
@@ -582,12 +742,19 @@ fn (self: &var Emitter) write_array_set(module: &ir::Module, node: &ir::InstrNod
         !module.names.is(node.result.type_name, "std::array::Error!void") {
         return try self.fail0("llvm error: array.set expects Array<T>, i64, T -> std::array::Error!void");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit();
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let handle = try self.array_handle(array.operand);
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    try self.write_array_checked_store(module, node, handle, index.operand, ok_name);
+    try self.write_array_checked_store(module, node, handle, index.operand, ok_name, elem_bytes);
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayBounds);
 }
 
@@ -598,7 +765,8 @@ fn (self: &var Emitter) write_array_checked_store(
     node: &ir::InstrNode,
     handle: ir::Name,
     index: ir::Name,
-    ok_name: ir::Name
+    ok_name: ir::Name,
+    elem_bytes: []u8
 ) -> !void {
     let len_synthetic = try self.next_synthetic_value("array.set.len");
     let length = try self.percent(len_synthetic);
@@ -613,7 +781,7 @@ fn (self: &var Emitter) write_array_checked_store(
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(in_range), Arg::Str(store_label), Arg::Str(skip_label));
     try self.line1("%s:", Arg::Str(store_label));
     let value = node.args.get_or_panic(2);
-    let elem_addr = try self.array_element_addr(module, handle, node.immediate, index);
+    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, index);
     let value_type = try self.llvm_type_of(module, value.type_name);
     let value_operand = try self.operand(module, value);
     try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr));

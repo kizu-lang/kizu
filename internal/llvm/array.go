@@ -95,15 +95,23 @@ func (e *emitter) arrayElementAddr(handle string, elem string, index string) str
 // index is outside the array. The comparison is unsigned, so a negative index
 // is out of range without a second test -- the same answer the runtime gave by
 // returning a null element pointer.
-func (e *emitter) arrayCheckedElement(instr *ir.Instr, handle string, index string) string {
+func (e *emitter) arrayCheckedElement(
+	instr *ir.Instr,
+	handle string,
+	index string,
+) (string, error) {
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return "", err
+	}
 	length := "%" + e.nextSyntheticValue("array.len")
 	e.arrayLoadField(handle, arrayFieldLen, "array.len", length)
 	inRange := "%" + e.nextSyntheticValue("array.in_range")
 	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
-	elemAddr := e.arrayElementAddr(handle, instr.Immediate, index)
+	elemAddr := e.arrayElementAddr(handle, elem, index)
 	checked := "%" + e.nextSyntheticValue("array.checked")
 	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", checked, inRange, elemAddr)
-	return checked
+	return checked, nil
 }
 
 // usesArrayRuntime reports whether this module uses std::array::Array lowering.
@@ -186,10 +194,14 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	array := e.value(instr.Args[0])
 	left := e.value(instr.Args[1])
 	right := e.value(instr.Args[2])
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_swap(ptr %s, i64 %s, i64 %s, i64 %s)\n",
 		okName, array.operand, left.operand, right.operand,
-		e.elementSizeOperand(instr.Immediate))
+		e.elementSizeOperand(elem))
 	return e.writeArrayBoolResult(instr.Result, okName, "array_swap")
 }
 
@@ -220,10 +232,14 @@ func (e *emitter) writeContainerNew(
 	if len(instr.Args) != 1 || !isResultType(instr.Result.Type) {
 		return fmt.Errorf("llvm error: %s", shape)
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	resultName := localName(instr.Result.Name)
 	allocator := e.value(instr.Args[0])
 	fmt.Fprintf(&e.out, "  %s = call ptr @%s(ptr %s, i64 %s)\n",
-		resultName, runtime, allocator.operand, e.elementSizeOperand(instr.Immediate))
+		resultName, runtime, allocator.operand, e.elementSizeOperand(elem))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -233,10 +249,14 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Result.Type != "std::mem::Error!void" {
 		return fmt.Errorf("llvm error: array.append expects Array<T>, T -> std::mem::Error!void")
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	array := e.value(instr.Args[0])
 	handle := e.arrayHandle(array.operand)
 	okName := localName(instr.Result.Name) + ".ok"
-	e.writeArrayAppendPaths(instr, array.operand, handle, okName)
+	e.writeArrayAppendPaths(instr, elem, array.operand, handle, okName)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_append")
 }
 
@@ -246,6 +266,7 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 // stand-in, so a null handle still comes back as the failure it is.
 func (e *emitter) writeArrayAppendPaths(
 	instr *ir.Instr,
+	elem string,
 	handleOperand string,
 	handle string,
 	okName string,
@@ -263,7 +284,7 @@ func (e *emitter) writeArrayAppendPaths(
 	e.markCurrentBlockExit(joinLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", fits, fastLabel, slowLabel)
 	fmt.Fprintf(&e.out, "%s:\n", fastLabel)
-	elemAddr := e.arrayElementAddr(handle, instr.Immediate, length)
+	elemAddr := e.arrayElementAddr(handle, elem, length)
 	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
 		e.llvmType(instr.Args[1].Type), e.value(instr.Args[1]).operand, elemAddr)
 	grown := "%" + e.nextSyntheticValue("array.append.grown")
@@ -274,7 +295,7 @@ func (e *emitter) writeArrayAppendPaths(
 	elemSlot := e.writeStackValue(localName(instr.Result.Name)+".elem", instr.Args[1])
 	slowOk := "%" + e.nextSyntheticValue("array.append.slow.ok")
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append(ptr %s, ptr %s, i64 %s)\n",
-		slowOk, handleOperand, elemSlot, e.elementSizeOperand(instr.Immediate))
+		slowOk, handleOperand, elemSlot, e.elementSizeOperand(elem))
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
 	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ %s, %%%s ]\n",
@@ -345,11 +366,15 @@ func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
 		instr.Result.Type != "std::mem::Error!void" {
 		return fmt.Errorf("llvm error: array.reserve expects Array<T>, i64 -> std::mem::Error!void")
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	array := e.value(instr.Args[0])
 	additional := e.value(instr.Args[1])
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_reserve(ptr %s, i64 %s, i64 %s)\n",
-		okName, array.operand, additional.operand, e.elementSizeOperand(instr.Immediate))
+		okName, array.operand, additional.operand, e.elementSizeOperand(elem))
 	return e.writeArrayBoolResult(instr.Result, okName, "array_reserve")
 }
 
@@ -358,10 +383,14 @@ func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: array.pop expects Array<T> -> ?T")
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
-		ptrName, array.operand, e.elementSizeOperand(instr.Immediate))
+		ptrName, array.operand, e.elementSizeOperand(elem))
 	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
 }
 
@@ -370,10 +399,14 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: array.pop_or_panic expects Array<T> -> T")
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
-		ptrName, array.operand, e.elementSizeOperand(instr.Immediate))
+		ptrName, array.operand, e.elementSizeOperand(elem))
 	e.writeNullFailure(instr, ptrName, "array.pop.panic", "array_empty")
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
@@ -389,8 +422,11 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	}
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	return e.writeArrayOptionalLoadResult(
-		instr, e.arrayCheckedElement(instr, handle, index.operand), 0)
+	checked, err := e.arrayCheckedElement(instr, handle, index.operand)
+	if err != nil {
+		return err
+	}
+	return e.writeArrayOptionalLoadResult(instr, checked, 0)
 }
 
 // writeArrayGetOrPanic lowers Array.get_or_panic(index).
@@ -398,12 +434,16 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
 		return fmt.Errorf("llvm error: array.get_or_panic expects Array<T>, i64 -> T")
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
 	lenName := "%" + e.nextSyntheticValue("array.get.panic.len")
 	e.arrayLoadField(handle, arrayFieldLen, "array.get.panic.len", lenName)
 	e.writeBoundsFailure(instr, index.operand, lenName)
-	elemAddr := e.arrayElementAddr(handle, instr.Immediate, index.operand)
+	elemAddr := e.arrayElementAddr(handle, elem, index.operand)
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), elemAddr)
@@ -420,8 +460,11 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	}
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	return e.writeBorrowOptionalResult(
-		instr, e.arrayCheckedElement(instr, handle, index.operand))
+	checked, err := e.arrayCheckedElement(instr, handle, index.operand)
+	if err != nil {
+		return err
+	}
+	return e.writeBorrowOptionalResult(instr, checked)
 }
 
 // writeArraySet lowers Array.set(index, value) and preserves !void failure flow.
@@ -430,10 +473,14 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 		instr.Result.Type != "std::array::Error!void" {
 		return fmt.Errorf("llvm error: array.set expects Array<T>, i64, T -> std::array::Error!void")
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
 	okName := localName(instr.Result.Name) + ".ok"
-	e.writeArrayCheckedStore(handle, instr.Immediate, index.operand, instr.Args[2], okName)
+	e.writeArrayCheckedStore(handle, elem, index.operand, instr.Args[2], okName)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_bounds")
 }
 
@@ -670,6 +717,78 @@ func (e *emitter) elementSizeOperand(typ string) string {
 // isArrayLLVMType reports whether a lowered IR type is a std::array::Array<T>.
 func isArrayLLVMType(typ string) bool {
 	return strings.HasPrefix(typ, "std::array::Array<") && strings.HasSuffix(typ, ">")
+}
+
+// instrElementType names the type an instruction measures, read from the value
+// it was handed rather than from a separate field. A container spells its
+// element in its own type, so the two can never disagree and no instruction can
+// arrive without one -- a cleanup carries no immediate, and a release measured
+// against a missing type would free the wrong number of bytes.
+//
+// Which value carries it depends on the instruction: a constructor names the
+// container it returns, and everything else was handed the container it works
+// on. Reading whichever happens to match would take the wrong answer for an
+// element that is itself a container, where the result of a `pop` is an Array
+// whose own element is not what the outer storage is sized by.
+func (e *emitter) instrElementType(instr *ir.Instr) (string, error) {
+	if isContainerConstructor(instr.Op) {
+		if elem, ok := e.containerElementOfResult(instr.Result.Type); ok {
+			return elem, nil
+		}
+		return "", fmt.Errorf(
+			"llvm error: emitter bug: `%s` returns `%s`, which names no container",
+			instr.Op, instr.Result.Type)
+	}
+	if len(instr.Args) > 0 {
+		if elem, ok := arrayElementLLVMType(instr.Args[0].Type); ok {
+			return elem, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"llvm error: emitter bug: `%s` measures an element but was handed no container",
+		instr.Op)
+}
+
+// isContainerConstructor reports the instructions whose container is the value
+// they return rather than the one they were handed.
+func isContainerConstructor(op string) bool {
+	switch op {
+	case "array.new", "map.new", "arena.new", "box.new":
+		return true
+	}
+	return false
+}
+
+// containerElementOfResult names what a constructor's result holds: the element
+// for an Array, Arena or Box, and the value for a Map, which is what its
+// storage is sized by.
+func (e *emitter) containerElementOfResult(typ string) (string, bool) {
+	if success, ok := e.errorUnionSuccessType(typ); ok {
+		typ = success
+	}
+	if elem, ok := arrayElementLLVMType(typ); ok {
+		return elem, true
+	}
+	if elem, ok := genericArgOf(typ, "std::arena::Arena<"); ok {
+		return elem, true
+	}
+	if elem, ok := genericArgOf(typ, "std::mem::Box<"); ok {
+		return elem, true
+	}
+	if args, ok := genericArgOf(typ, "std::map::Map<"); ok {
+		if parts := splitTopLevelCommas(args); len(parts) == 2 {
+			return strings.TrimSpace(parts[1]), true
+		}
+	}
+	return "", false
+}
+
+// genericArgOf returns the static arguments a spelling carries under prefix.
+func genericArgOf(typ string, prefix string) (string, bool) {
+	if !strings.HasPrefix(typ, prefix) || !strings.HasSuffix(typ, ">") {
+		return "", false
+	}
+	return typ[len(prefix) : len(typ)-1], true
 }
 
 // arrayElementLLVMType names T for a `std::array::Array<T>` spelling, through a
