@@ -138,6 +138,20 @@ func (b *binding) allocTied() bool {
 	return !b.borrowedParam && len(b.borrowTargets) > 0
 }
 
+// tiedAllocatorSources returns the tied allocators this value was built from.
+// A value can hold borrow targets for other reasons -- an aggregate that keeps
+// a source view holds one too -- so the allocators are read out by type rather
+// than taken to be every source.
+func (b *binding) tiedAllocatorSources() []*binding {
+	sources := make([]*binding, 0, len(b.borrowTargets))
+	for _, source := range b.borrowTargets {
+		if source.target != nil && source.target.typeName == "Allocator" {
+			sources = append(sources, source.target)
+		}
+	}
+	return sources
+}
+
 // isMutBorrowParam reports whether the binding is itself a `&var` parameter:
 // the caller's storage, which assigning the binding stores into.
 func (b *binding) isMutBorrowParam() bool {
@@ -688,7 +702,11 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 		return errorf("move error: defer cleanup must be `%s`, got `%s`",
 			typ.CleanupMethod, field.Name)
 	}
-	if _, err := c.readExpr(field.Receiver, env); err != nil {
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return err
+	}
+	if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
 		return err
 	}
 	// A registered defer runs on every later exit of this block, so from here
@@ -718,7 +736,11 @@ func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
 		return errorf("move error: errdefer cleanup must be `%s`, got `%s`",
 			typ.CleanupMethod, field.Name)
 	}
-	if _, err := c.readExpr(field.Receiver, env); err != nil {
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return err
+	}
+	if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
 		return err
 	}
 	name := ""
@@ -727,6 +749,48 @@ func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
 	}
 	c.liveErrDefers = append(c.liveErrDefers, errDeferEntry{receiver: field.Receiver, name: name})
 	return nil
+}
+
+// checkDeferredReleaseArgs reads the arguments a registered cleanup carries.
+// They are read where the defer is written, not where it runs, so what runs at
+// scope exit is settled at the point the source names (ADR-0132), and the tie
+// between a value and the allocator that made it is checked here too.
+func (c *Checker) checkDeferredReleaseArgs(
+	receiverType string,
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) error {
+	for _, arg := range args {
+		if _, err := c.readExpr(arg, env); err != nil {
+			return err
+		}
+	}
+	if len(args) != 1 {
+		return nil
+	}
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	receiver, exists := env.lookup(ident.Name)
+	if !exists {
+		return nil
+	}
+	return c.checkReleaseTie(releaseLabel(receiverType), receiver, args[0], env)
+}
+
+// releaseLabel names a release the way its diagnostics spell it: the receiver
+// type's own name, without the module path or static arguments.
+func releaseLabel(receiverType string) string {
+	name := strings.TrimPrefix(strings.TrimPrefix(receiverType, "&var "), "&")
+	if base, _, ok := splitGenericType(name); ok {
+		name = base
+	}
+	if idx := strings.LastIndex(name, "::"); idx >= 0 {
+		name = name[idx+2:]
+	}
+	return name + "." + typ.CleanupMethod
 }
 
 // restoreErrDefers drops errdefer entries registered inside an exited block.
@@ -5155,8 +5219,15 @@ func (c *Checker) checkBuiltinBoxMethod(
 	}
 	receiver := fmt.Sprintf("std::mem::Box<%s>", typeArg)
 	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (string, error) {
-		if len(rest) != 0 {
-			return "", errorf("box error: `Box.%s` expects 0 args, got %d", method, len(rest))
+		// A release names the allocator the cell came from; a read of the
+		// payload needs nothing beyond the receiver.
+		if method == "deinit" || method == "take" {
+			if err := c.readReleaseAllocator("Box."+method, nil, rest, env); err != nil {
+				return "", err
+			}
+		} else if len(rest) != 0 {
+			return "", errorf("box error: `Box.%s` expects 0 args, got %d",
+				method, len(rest))
 		}
 		switch method {
 		case "borrow":
@@ -5171,6 +5242,68 @@ func (c *Checker) checkBuiltinBoxMethod(
 			return "", errorf("box error: Box has no method `%s`", method)
 		}
 	}, args, env)
+}
+
+// readReleaseAllocator reads the single Allocator a release names. A value
+// keeps no copy of the allocator that made it (ADR-0132), so the call spells
+// it, the same way the construction did.
+func (c *Checker) readReleaseAllocator(
+	what string,
+	receiver *binding,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if len(args) != 1 {
+		return errorf("move error: `%s` expects 1 args, got %d", what, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return err
+	}
+	if got != "Allocator" {
+		return errorf("move error: `%s` expects Allocator, got %s", what, got)
+	}
+	return c.checkReleaseTie(what, receiver, args[0], env)
+}
+
+// checkReleaseTie requires the allocator a release names to be the one the
+// value was made from (ADR-0132). Only a tied allocator has an identity to
+// compare: `page_allocator()` values are indistinguishable, so nothing there
+// is checkable and nothing needs to be. An owner built from a tied allocator
+// carries that allocator among its borrow targets, which is what says which
+// one it is.
+func (c *Checker) checkReleaseTie(
+	what string,
+	receiver *binding,
+	arg ast.Expression,
+	env *scope,
+) error {
+	if receiver == nil {
+		return nil
+	}
+	tied := c.tiedAllocatorArg(arg, env)
+	sources := receiver.tiedAllocatorSources()
+	if len(sources) == 0 {
+		if tied != nil {
+			return errorf(
+				"move error: `%s` names allocator `%s`, which is tied to state `%s` was not built from",
+				what, tied.name, receiver.name)
+		}
+		return nil
+	}
+	if tied == nil {
+		return errorf(
+			"move error: `%s` must name the tied allocator `%s` was built from",
+			what, receiver.name)
+	}
+	for _, source := range sources {
+		if source == tied {
+			return nil
+		}
+	}
+	return errorf(
+		"move error: `%s` names allocator `%s`, but `%s` was built from another",
+		what, tied.name, receiver.name)
 }
 
 // checkBuiltinArrayMethod validates std-only Array method primitives.
@@ -5247,6 +5380,13 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "?" + elem, nil
 		}
 		return elem, nil
+	case "deinit":
+		// The raw primitive frees only the buffer, whose allocator its header
+		// still holds; the wrapper above it is what names one.
+		if len(args) != 0 {
+			return "", errorf("array error: `Array.deinit` expects 0 args, got %d", len(args))
+		}
+		return "void", nil
 	default:
 		array := &binding{typeName: fmt.Sprintf("std::array::Array<%s>", elem)}
 		return c.checkArrayMethod(array, elem, name, args, env)
@@ -6232,7 +6372,7 @@ func (c *Checker) checkArenaMethod(
 	case "at_mut":
 		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
-		return c.checkArenaDeinit(arena, args)
+		return c.checkArenaDeinit(arena, args, env)
 	default:
 		// Unreachable while this switch and the shared access table agree;
 		// the table refusal above is the user-facing one.
@@ -6284,7 +6424,7 @@ func (c *Checker) checkNonArenaMethod(
 		return c.checkStringMethod(value, name, args, env)
 	}
 	if base, _, ok := splitGenericType(value.typeName); ok && base == "std::mem::Box" {
-		return c.checkBoxMethod(value, name, args)
+		return c.checkBoxMethod(value, name, args, env)
 	}
 	if err := checkMapReceiverBorrow(value, name); err != nil {
 		return "", err
@@ -6415,7 +6555,7 @@ func (c *Checker) checkDirectFieldReceiverByType(
 		return c.checkMapMethod(value, elem, name, args, env)
 	}
 	if ok && base == "std::mem::Box" {
-		return c.checkBoxMethod(value, name, args)
+		return c.checkBoxMethod(value, name, args, env)
 	}
 	if ok && base == "std::arena::Arena" {
 		return c.checkFieldArenaMethod(value, name, args, env)
@@ -6443,7 +6583,7 @@ func (c *Checker) checkFieldArenaMethod(
 		// does; handle provenance stays strict.
 		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
-		return c.checkArenaDeinit(arena, args)
+		return c.checkArenaDeinit(arena, args, env)
 	default:
 		// Unreachable while this switch and the shared access table agree;
 		// the table refusal above is the user-facing one.
@@ -6494,7 +6634,7 @@ func (c *Checker) checkBoxReceiverExpr(
 	if (field.Name == "take" || field.Name == typ.CleanupMethod) && borrowedField != "" {
 		return "", true, errorf("box error: `Box.%s` requires local Box receiver", field.Name)
 	}
-	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args)
+	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args, env)
 	return typ, true, err
 }
 
@@ -6504,6 +6644,7 @@ func (c *Checker) checkBoxMethodForTarget(
 	field string,
 	name string,
 	args []ast.Expression,
+	env *scope,
 ) (string, error) {
 	switch name {
 	case "borrow", "borrow_mut":
@@ -6513,8 +6654,8 @@ func (c *Checker) checkBoxMethodForTarget(
 		if target.hasAnyBorrow() {
 			return "", errorf("box error: `Box.%s` cannot run while box is borrowed", name)
 		}
-		if len(args) != 0 {
-			return "", errorf("box error: `Box.%s` expects 0 args, got %d", name, len(args))
+		if err := c.readReleaseAllocator("Box."+name, target, args, env); err != nil {
+			return "", err
 		}
 		if field == "" {
 			target.moved = true
@@ -6534,8 +6675,9 @@ func (c *Checker) checkBoxMethod(
 	box *binding,
 	name string,
 	args []ast.Expression,
+	env *scope,
 ) (string, error) {
-	return c.checkBoxMethodForTarget(box, "", name, args)
+	return c.checkBoxMethodForTarget(box, "", name, args, env)
 }
 
 // containerAccess classifies what one container method does to the storage a
@@ -6680,13 +6822,16 @@ func (c *Checker) checkStringMethod(
 	case "as_bytes", "as_mut_bytes":
 		return "", errorf(
 			"string error: `String.%s` must be bound with `let name = string.%s()`", name, name)
-	case "clear", "deinit":
+	case "clear":
 		if err := checkStringNoArgs(name, args); err != nil {
 			return "", err
 		}
-		if name == "deinit" {
-			str.moved = true
+		return "void", nil
+	case "deinit":
+		if err := c.readReleaseAllocator("String.deinit", str, args, env); err != nil {
+			return "", err
 		}
+		str.moved = true
 		return "void", nil
 	default:
 		// Unreachable while this switch and the shared access table agree;
@@ -6849,7 +6994,7 @@ func (c *Checker) checkArrayMethod(
 	case "set", "swap":
 		return c.checkArrayIndexedMutation(array, elem, name, args, env)
 	case "deinit":
-		return c.checkArrayDeinit(array, name, args)
+		return c.checkArrayDeinit(array, name, args, env)
 	default:
 		// Unreachable while this switch and the shared access table agree;
 		// the table refusal above is the user-facing one.
@@ -6863,9 +7008,10 @@ func (c *Checker) checkArrayDeinit(
 	array *binding,
 	name string,
 	args []ast.Expression,
+	env *scope,
 ) (string, error) {
-	if len(args) != 0 {
-		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
+	if err := c.readReleaseAllocator("Array."+name, array, args, env); err != nil {
+		return "", err
 	}
 	array.moved = true
 	return "void", nil
@@ -7207,7 +7353,7 @@ func (c *Checker) checkMapMethod(
 	case "len":
 		return c.checkMapReadNoArgs(name, args)
 	case "deinit":
-		return c.checkMapDeinit(mapValue, args)
+		return c.checkMapDeinit(mapValue, args, env)
 	default:
 		// Unreachable while this switch and the shared access table agree;
 		// the table refusal above is the user-facing one.
@@ -7323,9 +7469,13 @@ func (c *Checker) checkMapReadNoArgs(name string, args []ast.Expression) (string
 }
 
 // checkMapDeinit validates owned Map cleanup and marks it moved.
-func (c *Checker) checkMapDeinit(mapValue *binding, args []ast.Expression) (string, error) {
-	if len(args) != 0 {
-		return "", errorf("map error: `Map.deinit` expects 0 args, got %d", len(args))
+func (c *Checker) checkMapDeinit(
+	mapValue *binding,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if err := c.readReleaseAllocator("Map.deinit", mapValue, args, env); err != nil {
+		return "", err
 	}
 	mapValue.moved = true
 	return "void", nil
@@ -7535,9 +7685,13 @@ func (c *Checker) checkArenaHandleArg(
 }
 
 // checkArenaDeinit validates explicit arena cleanup and invalidates the binding.
-func (c *Checker) checkArenaDeinit(arena *binding, args []ast.Expression) (string, error) {
-	if len(args) != 0 {
-		return "", errorf("arena error: `arena.deinit` expects 0 args, got %d", len(args))
+func (c *Checker) checkArenaDeinit(
+	arena *binding,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if err := c.readReleaseAllocator("arena.deinit", arena, args, env); err != nil {
+		return "", err
 	}
 	arena.deinitialized = true
 	arena.moved = true

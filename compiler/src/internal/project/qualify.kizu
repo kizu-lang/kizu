@@ -66,7 +66,7 @@ fn (self: &var Loader) qualify_module(
     merged: &var ast::Program
 ) -> !?diagnostic::Diagnostic {
     let declarations = try self.declarations_of(file);
-    defer declarations.deinit();
+    defer declarations.deinit(self.allocator);
     var index = 0;
     while declarations.at(index) |declaration_handle| {
         let declaration = declaration_handle.*;
@@ -93,10 +93,10 @@ fn (self: &var Loader) qualify_decl(
         Enum(value) => {
             let name = try self.qualify_text(tree, file, value.name);
             let tags = try value.tags.clone(self.allocator);
-            errdefer tags.deinit();
+            errdefer tags.deinit(self.allocator);
             if value.tag_docs |docs| {
                 let tag_docs = try copy_docs(self.allocator, docs);
-                errdefer tag_docs.deinit();
+                errdefer tag_docs.deinit(self.allocator);
                 return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Enum(
                     ast::EnumDecl { name: name, doc: value.doc, tags: move tags, tag_docs: move tag_docs, public: value.public }
                 )));
@@ -133,7 +133,7 @@ fn (self: &var Loader) qualify_decl(
 /// Copies the documentation a declaration keeps per tag or member.
 fn copy_docs(allocator: Allocator, docs: &map::Map<[]u8, ast::Text>) -> !map::Map<[]u8, ast::Text> {
     var out = map::new<[]u8, ast::Text>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while docs.key_at(index) |key| {
         index = index + 1;
@@ -147,7 +147,7 @@ fn copy_docs(allocator: Allocator, docs: &map::Map<[]u8, ast::Text>) -> !map::Ma
 /// Retains what a name declared in file's module is filed under.
 fn (self: &Loader) qualify_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: ast::Text) -> !ast::Text {
     let source = try text_copy(self.allocator, tree, name);
-    defer source.deinit();
+    defer source.deinit(self.allocator);
     let bytes = source.as_bytes();
     let qualified = try self.qualify_in(file, bytes);
     return tree.add_text(move qualified);
@@ -170,7 +170,7 @@ fn (self: &var Loader) declared_function_name(
 ) -> !NameResolution {
     if !decl.signature.receiver or decl.signature.params.len() == 0 {
         let name = try text_copy(self.allocator, tree, decl.signature.name);
-        defer name.deinit();
+        defer name.deinit(self.allocator);
         let name_bytes = name.as_bytes();
         return NameResolution::Name(try self.qualify_in(file, name_bytes));
     }
@@ -179,15 +179,15 @@ fn (self: &var Loader) declared_function_name(
     match outcome {
         Type(resolved) => {
             if try receiver_base(self.allocator, &tree.types, resolved) |base| {
-                defer base.deinit();
+                defer base.deinit(self.allocator);
                 let base_bytes = base.as_bytes();
                 let name = try text_copy(self.allocator, tree, decl.signature.name);
-                defer name.deinit();
+                defer name.deinit(self.allocator);
                 let name_bytes = name.as_bytes();
                 return NameResolution::Name(try stdmethod::method_name(self.allocator, base_bytes, name_bytes));
             }
             var text = try module_error_text(self.allocator);
-            errdefer text.deinit();
+            errdefer text.deinit(self.allocator);
             try text.append_bytes("`");
             try typ::append_render(&var text, &tree.types, receiver_type);
             try text.append_bytes("` is not a type a method can be declared on in `");
@@ -225,7 +225,7 @@ fn (self: &var Loader) qualify_struct(
         span: decl.span,
         requires_unsafe: decl.requires_unsafe
     };
-    errdefer node.deinit();
+    errdefer node.deinit(self.allocator);
     var index = 0;
     while decl.fields.at(index) |field| {
         index = index + 1;
@@ -237,7 +237,7 @@ fn (self: &var Loader) qualify_struct(
                 try node.fields.append(copied);
             },
             Failed(failed) => {
-                node.deinit();
+                node.deinit(self.allocator);
                 return DeclarationResult::Failed(move failed);
             },
         }
@@ -254,9 +254,9 @@ fn (self: &var Loader) qualify_error_set(
 ) -> !DeclarationResult {
     let name = try self.qualify_text(tree, file, decl.name);
     var members = try decl.members.clone(self.allocator);
-    errdefer members.deinit();
+    errdefer members.deinit(self.allocator);
     var combines = array::new<ast::Text>(self.allocator);
-    errdefer combines.deinit();
+    errdefer combines.deinit(self.allocator);
     var index = 0;
     while decl.combines.at(index) |reference| {
         index = index + 1;
@@ -266,15 +266,15 @@ fn (self: &var Loader) qualify_error_set(
                 try combines.append(tree.add_text(move resolved));
             },
             Failed(failed) => {
-                members.deinit();
-                combines.deinit();
+                members.deinit(self.allocator);
+                combines.deinit(self.allocator);
                 return DeclarationResult::Failed(move failed);
             },
         }
     }
     if decl.member_docs |docs| {
         let member_docs = try copy_docs(self.allocator, docs);
-        errdefer member_docs.deinit();
+        errdefer member_docs.deinit(self.allocator);
         return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::ErrorSet(
             ast::ErrorSetDecl {
                 name: name,
@@ -311,7 +311,7 @@ fn (self: &var Loader) qualify_union(
         variants: array::new<ast::UnionVariant>(self.allocator),
         public: decl.public
     };
-    errdefer node.deinit();
+    errdefer node.deinit(self.allocator);
     var index = 0;
     while decl.variants.at(index) |variant| {
         index = index + 1;
@@ -323,7 +323,7 @@ fn (self: &var Loader) qualify_union(
                     copied.payload = resolved;
                 },
                 Failed(failed) => {
-                    node.deinit();
+                    node.deinit(self.allocator);
                     return DeclarationResult::Failed(move failed);
                 },
             }
@@ -341,7 +341,7 @@ fn (self: &var Loader) qualify_contract(
 ) -> !DeclarationResult {
     let name = try self.qualify_text(tree, file, decl.name);
     var methods = array::new<ast::FunctionDecl>(self.allocator);
-    errdefer methods.deinit();
+    errdefer methods.deinit(self.allocator);
     var index = 0;
     while decl.methods.at(index) |method| {
         index = index + 1;
@@ -349,7 +349,7 @@ fn (self: &var Loader) qualify_contract(
         match outcome {
             Function(qualified) => try methods.append(move qualified),
             Failed(failed) => {
-                methods.deinit();
+                methods.deinit(self.allocator);
                 return DeclarationResult::Failed(move failed);
             },
         }
@@ -386,7 +386,7 @@ fn (self: &var Loader) qualify_impl(
 /// Rewrites one retained type spelling into its package-qualified form.
 fn (self: &var Loader) resolve_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: ast::Text) -> !NameResolution {
     let source = try text_copy(self.allocator, tree, name);
-    defer source.deinit();
+    defer source.deinit(self.allocator);
     let bytes = source.as_bytes();
     return self.resolve_type(tree, file, bytes);
 }
@@ -413,7 +413,7 @@ fn (self: &var Loader) qualify_function(
         public: decl.signature.public,
         std: self.module_is_std(file)
     };
-    errdefer signature.deinit();
+    errdefer signature.deinit(self.allocator);
     var index = 0;
     while decl.signature.params.at(index) |param| {
         index = index + 1;
@@ -425,7 +425,7 @@ fn (self: &var Loader) qualify_function(
                 try signature.params.append(copied);
             },
             Failed(failed) => {
-                signature.deinit();
+                signature.deinit(self.allocator);
                 return FunctionResult::Failed(move failed);
             },
         }
@@ -437,7 +437,7 @@ fn (self: &var Loader) qualify_function(
                 signature.return_type = resolved;
             },
             Failed(failed) => {
-                signature.deinit();
+                signature.deinit(self.allocator);
                 return FunctionResult::Failed(move failed);
             },
         }
@@ -450,7 +450,7 @@ fn (self: &var Loader) qualify_function(
                 body = qualified;
             },
             Failed(failed) => {
-                signature.deinit();
+                signature.deinit(self.allocator);
                 return FunctionResult::Failed(move failed);
             },
         }
@@ -491,9 +491,9 @@ fn (self: &var Loader) qualify_block(
     match tree.statements.at(block.node) {
         Block(value) => {
             let source = try value.statements.clone(self.allocator);
-            defer source.deinit();
+            defer source.deinit(self.allocator);
             var statements = array::new<ast::Statement>(self.allocator);
-            errdefer statements.deinit();
+            errdefer statements.deinit(self.allocator);
             var index = 0;
             while source.at(index) |statement| {
                 index = index + 1;
@@ -501,7 +501,7 @@ fn (self: &var Loader) qualify_block(
                 match outcome {
                     Statement(qualified) => try statements.append(qualified),
                     Failed(failed) => {
-                        statements.deinit();
+                        statements.deinit(self.allocator);
                         return BlockResult::Failed(move failed);
                     },
                 }
@@ -831,9 +831,9 @@ fn (self: &var Loader) qualify_match_stmt(
         meta_capture: stmt.meta_capture,
         meta_owner: stmt.meta_owner
     };
-    errdefer node.deinit();
+    errdefer node.deinit(self.allocator);
     let source = try stmt.arms.clone(self.allocator);
-    defer source.deinit();
+    defer source.deinit(self.allocator);
     let value_outcome = try self.qualify_expr(tree, file, stmt.value);
     match value_outcome {
         Expression(value) => {
@@ -850,7 +850,7 @@ fn (self: &var Loader) qualify_match_stmt(
                             copied.tag_set = tree.add_text(move resolved);
                         },
                         Failed(failed) => {
-                            node.deinit();
+                            node.deinit(self.allocator);
                             return MatchResult::Failed(move failed);
                         },
                     }
@@ -862,7 +862,7 @@ fn (self: &var Loader) qualify_match_stmt(
                         try node.arms.append(copied);
                     },
                     Failed(failed) => {
-                        node.deinit();
+                        node.deinit(self.allocator);
                         return MatchResult::Failed(move failed);
                     },
                 }
@@ -870,7 +870,7 @@ fn (self: &var Loader) qualify_match_stmt(
             return MatchResult::Match(move node);
         },
         Failed(failed) => {
-            node.deinit();
+            node.deinit(self.allocator);
             return MatchResult::Failed(move failed);
         },
     }
@@ -1177,9 +1177,9 @@ fn (self: &var Loader) qualify_call_expr(
             node.callee = callee;
             let list = tree.expression_lists.at(expr.args.node);
             let source = try list.clone(self.allocator);
-            defer source.deinit();
+            defer source.deinit(self.allocator);
             var args = array::new<ast::Expression>(self.allocator);
-            errdefer args.deinit();
+            errdefer args.deinit(self.allocator);
             var index = 0;
             while source.at(index) |arg| {
                 index = index + 1;
@@ -1187,7 +1187,7 @@ fn (self: &var Loader) qualify_call_expr(
                 match outcome {
                     Expression(qualified) => try args.append(qualified),
                     Failed(failed) => {
-                        args.deinit();
+                        args.deinit(self.allocator);
                         return ExpressionResult::Failed(move failed);
                     },
                 }
@@ -1216,13 +1216,13 @@ fn (self: &var Loader) qualify_type_apply_expr(
         Expression(callee) => {
             node.callee = callee;
             let type_arg = try text_copy(self.allocator, tree, expr.type_arg);
-            defer type_arg.deinit();
+            defer type_arg.deinit(self.allocator);
             let type_arg_bytes = type_arg.as_bytes();
             if try typ::split_args_optional(self.allocator, type_arg_bytes) |args| {
-                defer args.deinit();
+                defer args.deinit(self.allocator);
                 let worker = try worker_arg_index(self.allocator, tree, expr.callee);
                 var out = string::new(self.allocator);
-                errdefer out.deinit();
+                errdefer out.deinit(self.allocator);
                 var index = 0;
                 while args.at(index) |arg| {
                     if index > 0 {
@@ -1234,18 +1234,18 @@ fn (self: &var Loader) qualify_type_apply_expr(
                         // it as a type would leave the name unqualified and the
                         // call would find nothing.
                         let qualified = try self.qualify_function_name(file, arg);
-                        defer qualified.deinit();
+                        defer qualified.deinit(self.allocator);
                         try out.append_string(&qualified);
                     } else {
                         let arg_bytes = arg.as_bytes();
                         let outcome = try self.resolve_type(tree, file, arg_bytes);
                         match outcome {
                             Name(resolved) => {
-                                defer resolved.deinit();
+                                defer resolved.deinit(self.allocator);
                                 try out.append_string(&resolved);
                             },
                             Failed(failed) => {
-                                out.deinit();
+                                out.deinit(self.allocator);
                                 return ExpressionResult::Failed(move failed);
                             },
                         }
@@ -1256,7 +1256,7 @@ fn (self: &var Loader) qualify_type_apply_expr(
                 return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::TypeApply(node)));
             }
             var text = try module_error_text(self.allocator);
-            errdefer text.deinit();
+            errdefer text.deinit(self.allocator);
             try text.append_bytes("invalid static arguments `");
             try text.append_string(&type_arg);
             try text.append_bytes("`");
@@ -1270,7 +1270,7 @@ fn (self: &var Loader) qualify_type_apply_expr(
 /// will call, or -1 when the callee calls none.
 fn worker_arg_index(allocator: Allocator, tree: &ast::Ast, callee: ast::Expression) -> !i64 {
     let rendered = try ast::render_expression(allocator, tree, callee);
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     let bytes = rendered.as_bytes();
     if stdmeta::lookup(bytes) |shape| {
         if shape.worker == 0 {
@@ -1305,7 +1305,7 @@ fn (self: &var Loader) qualify_callee(
         Ident(value) => {
             var node = value;
             let name = try text_copy(self.allocator, tree, value.name);
-            defer name.deinit();
+            defer name.deinit(self.allocator);
             let name_bytes = name.as_bytes();
             if try self.declares_function(file, name_bytes) {
                 node.name = try self.qualify_text(tree, file, value.name);
@@ -1316,7 +1316,7 @@ fn (self: &var Loader) qualify_callee(
             let node = value;
             if node.namespace {
                 if try self.resolve_type_namespace_receiver(tree, file, node.receiver) |receiver| {
-                    receiver.deinit();
+                    receiver.deinit(self.allocator);
                     return self.qualify_field_expr(tree, file, node);
                 }
                 let outcome = try self.resolve_namespace_path(tree, file, expr);
@@ -1342,7 +1342,7 @@ fn (self: &var Loader) qualify_callee(
 /// names -- methods are filed under their receiver and are not among them.
 fn (self: &Loader) declares_function(file: arena::Handle<ModuleFile>, name: []u8) -> !bool {
     let qualified = try self.qualify_in(file, name);
-    defer qualified.deinit();
+    defer qualified.deinit(self.allocator);
     return index_holds(&self.functions, &qualified);
 }
 
@@ -1445,9 +1445,9 @@ fn (self: &var Loader) qualify_struct_literal(
         fields: array::new<ast::FieldValue>(self.allocator),
         span: expr.span
     };
-    errdefer node.deinit();
+    errdefer node.deinit(self.allocator);
     let source = try expr.fields.clone(self.allocator);
-    defer source.deinit();
+    defer source.deinit(self.allocator);
     let type_outcome = try self.resolve_text(tree, file, expr.type_name);
     match type_outcome {
         Name(resolved) => {
@@ -1463,7 +1463,7 @@ fn (self: &var Loader) qualify_struct_literal(
                         try node.fields.append(copied);
                     },
                     Failed(failed) => {
-                        node.deinit();
+                        node.deinit(self.allocator);
                         return ExpressionResult::Failed(move failed);
                     },
                 }
@@ -1471,7 +1471,7 @@ fn (self: &var Loader) qualify_struct_literal(
             return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::StructLiteral(move node)));
         },
         Failed(failed) => {
-            node.deinit();
+            node.deinit(self.allocator);
             return ExpressionResult::Failed(move failed);
         },
     }

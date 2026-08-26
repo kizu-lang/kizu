@@ -92,7 +92,7 @@ pub union ArtifactPlan {
 /// Returns the default local cache, the Go `New`.
 pub fn new(io: Io, allocator: Allocator) -> !Cache {
     var dir = string::new(allocator);
-    errdefer dir.deinit();
+    errdefer dir.deinit(allocator);
     try resolve_cache_dir(io, allocator, &var dir);
     let hasher = try sha256::new(allocator);
     return Cache {
@@ -125,10 +125,10 @@ pub fn (self: &Cache) new_input(
 ) -> !CacheInput {
     let hasher = &self.hasher;
     var source_hash = string::new(allocator);
-    errdefer source_hash.deinit();
+    errdefer source_hash.deinit(allocator);
     try hasher.append_hex_digest(allocator, content, &var source_hash);
     var message = string::new(allocator);
-    defer message.deinit();
+    defer message.deinit(allocator);
     try message.append_bytes(version());
     try message.append_byte(cast<u8>(10));
     try message.append_bytes(target);
@@ -137,7 +137,7 @@ pub fn (self: &Cache) new_input(
     try message.append_byte(cast<u8>(10));
     try message.append_string(&source_hash);
     var key = string::new(allocator);
-    errdefer key.deinit();
+    errdefer key.deinit(allocator);
     let message_bytes = message.as_bytes();
     try hasher.append_hex_digest(allocator, message_bytes, &var key);
     let target_copy = try string::from_bytes(allocator, target);
@@ -161,27 +161,27 @@ pub fn (self: &var Cache) get_or_build_artifact(
     out_path: &var string::String
 ) -> !ArtifactPlan {
     let input = try self.new_input(allocator, name, target, content);
-    errdefer input.deinit();
+    errdefer input.deinit(allocator);
     let stored = try output_name_of(allocator, &input.key);
-    errdefer stored.deinit();
+    errdefer stored.deinit(allocator);
     let output = try self.output_path_of(allocator, &stored);
-    errdefer output.deinit();
+    errdefer output.deinit(allocator);
     let hit = try self.artifact_hit(io, allocator, &input.key);
     if hit {
         try out_path.append_string(&output);
-        input.deinit();
-        stored.deinit();
-        output.deinit();
+        input.deinit(allocator);
+        stored.deinit(allocator);
+        output.deinit(allocator);
         return ArtifactPlan::Hit;
     }
     let dir_bytes = self.dir.as_bytes();
     try fsutil::create_dir_all(io, dir_bytes);
     var scratch_name = string::new(allocator);
-    defer scratch_name.deinit();
+    defer scratch_name.deinit(allocator);
     try fsutil::append_scratch_name(&input.key, self.scratch_sequence, &var scratch_name);
     self.scratch_sequence = self.scratch_sequence + 1;
     let scratch = try self.output_path_of(allocator, &scratch_name);
-    errdefer scratch.deinit();
+    errdefer scratch.deinit(allocator);
     try out_path.append_string(&output);
     return ArtifactPlan::Miss(PendingArtifact {
         input: move input,
@@ -200,9 +200,9 @@ pub fn (self: &Cache) finish_artifact(
     allocator: Allocator,
     pending: PendingArtifact
 ) -> !void {
-    errdefer pending.deinit();
+    errdefer pending.deinit(allocator);
     try self.install_artifact(io, allocator, &pending);
-    pending.deinit();
+    pending.deinit(allocator);
     return self.enforce_limit(io, allocator);
 }
 
@@ -222,10 +222,14 @@ fn (self: &Cache) install_artifact(
 
 /// Abandons a miss whose builder failed, the Go `defer os.Remove` of the
 /// scratch file: what was half-built is removed, and nothing is recorded.
-pub fn (self: &Cache) discard_artifact(io: Io, pending: PendingArtifact) -> !void {
-    errdefer pending.deinit();
+pub fn (self: &Cache) discard_artifact(
+    io: Io,
+    allocator: Allocator,
+    pending: PendingArtifact
+) -> !void {
+    errdefer pending.deinit(allocator);
     try remove_scratch(io, &pending);
-    pending.deinit();
+    pending.deinit(allocator);
     return;
 }
 
@@ -244,14 +248,14 @@ fn remove_scratch(io: Io, pending: &PendingArtifact) -> !void {
 /// gone is a miss.
 pub fn (self: &Cache) has_artifact(io: Io, allocator: Allocator, key: []u8) -> !?Entry {
     if try self.read_entry(io, allocator, key) |entry| {
-        errdefer entry.deinit();
+        errdefer entry.deinit(allocator);
         let name_bytes = entry.output.as_bytes();
         let stored = try self.output_path(allocator, name_bytes);
-        defer stored.deinit();
+        defer stored.deinit(allocator);
         let stored_bytes = stored.as_bytes();
         let found = try fs::exists(io, stored_bytes);
         if !found {
-            entry.deinit();
+            entry.deinit(allocator);
             return null;
         }
         return move entry;
@@ -264,7 +268,7 @@ pub fn (self: &Cache) has_artifact(io: Io, allocator: Allocator, key: []u8) -> !
 fn (self: &Cache) artifact_hit(io: Io, allocator: Allocator, key: &string::String) -> !bool {
     let key_bytes = key.as_bytes();
     if try self.has_artifact(io, allocator, key_bytes) |entry| {
-        entry.deinit();
+        entry.deinit(allocator);
         return true;
     }
     return false;
@@ -281,7 +285,7 @@ fn (self: &Cache) write_meta(
     size: i64
 ) -> !void {
     var encoder = json::encoder_with_spaces(allocator, 2);
-    defer encoder.deinit();
+    defer encoder.deinit(allocator);
     try encoder.begin_object();
     try write_field(&var encoder, "key", &input.key);
     try write_field(&var encoder, "target", &input.target);
@@ -290,17 +294,17 @@ fn (self: &Cache) write_meta(
     try encoder.write_bytes_field("output", stored);
     try encoder.write_i64_field("size_bytes", size);
     var stamp = string::new(allocator);
-    defer stamp.deinit();
+    defer stamp.deinit(allocator);
     try timestamp::append_rfc3339_utc(&var stamp, process::unix_millis());
     let stamp_bytes = stamp.as_bytes();
     try encoder.write_bytes_field("created_at", stamp_bytes);
     try encoder.end_object();
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try encoder.finish_into(&var out);
     let key_bytes = input.key.as_bytes();
     let meta = try self.meta_path(allocator, key_bytes);
-    defer meta.deinit();
+    defer meta.deinit(allocator);
     let meta_bytes = meta.as_bytes();
     let text = out.as_bytes();
     try fs::write_file(io, meta_bytes, text);
@@ -319,10 +323,10 @@ fn write_field(encoder: &var json::Encoder, name: []u8, value: &string::String) 
 /// error: a stale or corrupt entry never becomes a failure of the caller.
 pub fn (self: &Cache) read_entry(io: Io, allocator: Allocator, key: []u8) -> !?Entry {
     let meta = try self.meta_path(allocator, key);
-    defer meta.deinit();
+    defer meta.deinit(allocator);
     let meta_bytes = meta.as_bytes();
     if fs::read_file(io, allocator, meta_bytes, mem::Limit::Unlimited) |text| {
-        defer text.deinit();
+        defer text.deinit(allocator);
         let data = text.as_bytes();
         if json::decode_ignore_unknown<Entry>(allocator, data) |entry| {
             return move entry;
@@ -348,7 +352,7 @@ pub fn (self: &Cache) entries(io: Io, allocator: Allocator, out: &var array::Arr
         return;
     }
     var listed = try fs::read_dir(io, dir_bytes);
-    defer listed.deinit();
+    defer listed.deinit(allocator);
     var index = 0;
     while index < listed.len() {
         let item = listed.get_or_panic(index);
@@ -371,7 +375,7 @@ fn append_entry_at(io: Io, allocator: Allocator, full: []u8, out: &var array::Ar
     // std::json cannot decode is skipped, the Go continue on a
     // `json.Unmarshal` error.
     if fs::read_file(io, allocator, full, mem::Limit::Unlimited) |text| {
-        defer text.deinit();
+        defer text.deinit(allocator);
         let data = text.as_bytes();
         if json::decode_ignore_unknown<Entry>(allocator, data) |entry| {
             try out.append(move entry);
@@ -392,7 +396,7 @@ fn append_entry_at(io: Io, allocator: Allocator, full: []u8, out: &var array::Ar
 /// Returns current cache size and entry count, the Go `Status`.
 pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
     var all = array::new<Entry>(allocator);
-    defer all.deinit();
+    defer all.deinit(allocator);
     try self.entries(io, allocator, &var all);
     var size = 0;
     var index = 0;
@@ -402,7 +406,7 @@ pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
     }
     let count = all.len();
     var dir = string::new(allocator);
-    errdefer dir.deinit();
+    errdefer dir.deinit(allocator);
     try dir.append_string(&self.dir);
     return Status {
         dir: move dir,
@@ -415,7 +419,7 @@ pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
 /// Removes every cache entry, the Go `Prune`.
 pub fn (self: &Cache) prune(io: Io, allocator: Allocator) -> !PruneResult {
     var all = array::new<Entry>(allocator);
-    defer all.deinit();
+    defer all.deinit(allocator);
     try self.entries(io, allocator, &var all);
     var bytes = 0;
     var index = 0;
@@ -432,7 +436,7 @@ pub fn (self: &Cache) prune(io: Io, allocator: Allocator) -> !PruneResult {
 /// `enforceLimit`.
 pub fn (self: &Cache) enforce_limit(io: Io, allocator: Allocator) -> !void {
     var all = array::new<Entry>(allocator);
-    defer all.deinit();
+    defer all.deinit(allocator);
     try self.entries(io, allocator, &var all);
     let count = all.len();
     var a = 0;
@@ -473,7 +477,7 @@ pub fn (self: &Cache) enforce_limit(io: Io, allocator: Allocator) -> !void {
 fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry) -> !void {
     let key_bytes = entry.key.as_bytes();
     let meta = try self.meta_path(allocator, key_bytes);
-    defer meta.deinit();
+    defer meta.deinit(allocator);
     let meta_bytes = meta.as_bytes();
     let meta_found = try fs::exists(io, meta_bytes);
     if meta_found {
@@ -481,7 +485,7 @@ fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry
     }
     let output_bytes = entry.output.as_bytes();
     let stored = try self.output_path(allocator, output_bytes);
-    defer stored.deinit();
+    defer stored.deinit(allocator);
     let stored_bytes = stored.as_bytes();
     let stored_found = try fs::exists(io, stored_bytes);
     if stored_found {
@@ -506,7 +510,7 @@ fn entry_before(all: &array::Array<Entry>, left: i64, right: i64) -> bool {
 /// Returns the metadata path for key, the Go `metaPath`.
 pub fn (self: &Cache) meta_path(allocator: Allocator, key: []u8) -> !string::String {
     var name = string::new(allocator);
-    defer name.deinit();
+    defer name.deinit(allocator);
     try name.append_bytes(key);
     try name.append_bytes(".json");
     let dir_bytes = self.dir.as_bytes();
@@ -518,7 +522,7 @@ pub fn (self: &Cache) meta_path(allocator: Allocator, key: []u8) -> !string::Str
 /// `outputName`.
 pub fn output_name(allocator: Allocator, key: []u8) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes(key);
     try out.append_bytes(".out");
     return move out;

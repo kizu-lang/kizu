@@ -166,7 +166,7 @@ func TestCompleteReturnsStructFieldsAndImplMethods(t *testing.T) {
     count: i64,
 }
 
-fn (self: Trace) deinit() -> void {
+fn (self: Trace) deinit(allocator: Allocator) -> void {
     return;
 }
 /// Renames the trace.
@@ -189,10 +189,10 @@ fn main() {
 	}
 	deinit := requireCompletion(t, items, "deinit")
 	if deinit.Kind != completionItemKindMethod || deinit.TextEdit == nil ||
-		deinit.TextEdit.NewText != "deinit()" {
+		deinit.TextEdit.NewText != "deinit(${1:allocator})" {
 		t.Fatalf("deinit item = %#v, want method call snippet", deinit)
 	}
-	if deinit.Detail != "fn deinit(self: Trace) -> void" {
+	if deinit.Detail != "fn deinit(self: Trace, allocator: Allocator) -> void" {
 		t.Fatalf("deinit detail = %q, want method signature", deinit.Detail)
 	}
 	rename := requireCompletion(t, items, "rename")

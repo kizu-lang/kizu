@@ -6,7 +6,7 @@ import std::testing;
 
 fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
     var text = string::new(allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(allocator);
     try text.append_bytes(bytes);
     return move text;
 }
@@ -14,7 +14,7 @@ fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
 test "std map owner value borrow and grow" {
     let allocator = mem::page_allocator();
     var names = map::new<[]u8, string::String>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
 
     try names.insert("first", try owned(allocator, "alice"));
     try names.insert("last", try owned(allocator, "smith"));
@@ -45,13 +45,13 @@ test "std map owner value borrow and grow" {
 test "std map owner value keeps insertion order" {
     let allocator = mem::page_allocator();
     var names = map::new<[]u8, string::String>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
 
     try names.insert("b", try owned(allocator, "one"));
     try names.insert("a", try owned(allocator, "two"));
 
     var joined = string::new(allocator);
-    defer joined.deinit();
+    defer joined.deinit(allocator);
     var index = 0;
     while names.key_at(index) |key| {
         try joined.append_bytes(key);
@@ -67,9 +67,9 @@ test "std map holds containers as values" {
     // A map value that is itself a container was refused only because the
     // copy constraint masked it; nothing about nesting needed its own rule.
     var counts = map::new<[]u8, map::Map<[]u8, i64>>(allocator);
-    defer counts.deinit();
+    defer counts.deinit(allocator);
     var inner = map::new<[]u8, i64>(allocator);
-    errdefer inner.deinit();
+    errdefer inner.deinit(allocator);
     try inner.insert("hit", 2);
     try counts.insert("alice", move inner);
     if counts.at("alice") |held| {
@@ -79,9 +79,9 @@ test "std map holds containers as values" {
     }
 
     var lists = map::new<[]u8, array::Array<i64>>(allocator);
-    defer lists.deinit();
+    defer lists.deinit(allocator);
     var items = array::new<i64>(allocator);
-    errdefer items.deinit();
+    errdefer items.deinit(allocator);
     try items.append(7);
     try lists.insert("alice", move items);
     if lists.at("alice") |held| {
@@ -90,7 +90,6 @@ test "std map holds containers as values" {
         testing::fail("alice is missing");
     }
 }
-
 
 // llvm
 // emit:
@@ -181,7 +180,7 @@ test "std map holds containers as values" {
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // declare void @std__testing__fail(%kizu.slice.u8)
 // 
@@ -199,7 +198,7 @@ test "std map holds containers as values" {
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -474,7 +473,7 @@ test "std map holds containers as values" {
 //   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
 //   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
 // kizu.24.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.23)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.23, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.2)
 //   %kizu.try.err.11.code = extractvalue %kizu.error.std__mem__Error.void %kizu.22, 1
 //   %kizu.try.err.11.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
@@ -500,7 +499,7 @@ test "std map holds containers as values" {
 //   unreachable
 // kizu.30.ok.ok:
 //   %kizu.31 = load %kizu.struct.std__string__String, ptr %kizu.16
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.31)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.31, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.2)
 //   %kizu.34 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.34
@@ -720,7 +719,7 @@ test "std map holds containers as values" {
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // declare void @std__testing__fail(%kizu.slice.u8)
 // 
@@ -738,7 +737,7 @@ test "std map holds containers as values" {
 //   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
 //   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
 // kizu.5.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.4, ptr %kizu.allocator)
 //   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.3, 1
 //   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
 //   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
@@ -1013,7 +1012,7 @@ test "std map holds containers as values" {
 //   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
 //   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
 // kizu.24.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.23)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.23, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.2)
 //   %kizu.try.err.11.code = extractvalue %kizu.error.std__mem__Error.void %kizu.22, 1
 //   %kizu.try.err.11.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
@@ -1039,7 +1038,7 @@ test "std map holds containers as values" {
 //   unreachable
 // kizu.30.ok.ok:
 //   %kizu.31 = load %kizu.struct.std__string__String, ptr %kizu.16
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.31)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.31, ptr %kizu.1)
 //   call void @kizu_map_deinit(ptr %kizu.2)
 //   %kizu.34 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.34

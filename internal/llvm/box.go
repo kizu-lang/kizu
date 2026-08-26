@@ -13,7 +13,7 @@ func (e *emitter) writeBoxRuntimeDecls() {
 		return
 	}
 	e.out.WriteString("declare ptr @kizu_box_new(ptr, i64, ptr)\n")
-	e.out.WriteString("declare void @kizu_box_deinit(ptr)\n\n")
+	e.out.WriteString("declare void @kizu_box_deinit(ptr, ptr, i64)\n\n")
 }
 
 // usesBoxRuntime reports whether this module uses std::mem::Box lowering.
@@ -109,11 +109,17 @@ func (e *emitter) writeBoxBorrow(instr *ir.Instr) error {
 
 // writeBoxDeinit lowers Box.deinit(): the runtime releases the cell.
 func (e *emitter) writeBoxDeinit(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Result.Type != "void" {
-		return fmt.Errorf("llvm error: box.deinit expects Box<T> -> void")
+	if len(instr.Args) != 2 || instr.Result.Type != "void" {
+		return fmt.Errorf("llvm error: box.deinit expects Box<T>, Allocator -> void")
+	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
 	}
 	box := e.value(instr.Args[0])
-	fmt.Fprintf(&e.out, "  call void @kizu_box_deinit(ptr %s)\n", box.operand)
+	allocator := e.value(instr.Args[1])
+	fmt.Fprintf(&e.out, "  call void @kizu_box_deinit(ptr %s, ptr %s, i64 %s)\n",
+		allocator.operand, box.operand, e.elementSizeOperand(elem))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }
@@ -121,14 +127,20 @@ func (e *emitter) writeBoxDeinit(instr *ir.Instr) error {
 // writeBoxTake lowers the box_take primitive `Box.deinit` forwards to when the
 // payload owns something: it moves out before the runtime releases the cell.
 func (e *emitter) writeBoxTake(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || !isBoxLLVMType(instr.Args[0].Type) {
-		return fmt.Errorf("llvm error: box.take expects Box<T> -> T")
+	if len(instr.Args) != 2 || !isBoxLLVMType(instr.Args[0].Type) {
+		return fmt.Errorf("llvm error: box.take expects Box<T>, Allocator -> T")
+	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
 	}
 	box := e.value(instr.Args[0])
+	allocator := e.value(instr.Args[1])
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), box.operand)
-	fmt.Fprintf(&e.out, "  call void @kizu_box_deinit(ptr %s)\n", box.operand)
+	fmt.Fprintf(&e.out, "  call void @kizu_box_deinit(ptr %s, ptr %s, i64 %s)\n",
+		allocator.operand, box.operand, e.elementSizeOperand(elem))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

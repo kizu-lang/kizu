@@ -86,61 +86,61 @@ fn render_section(
     out: &var string::String
 ) -> !void {
     var tree = ast::new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
-    defer loader.deinit();
+    defer loader.deinit(allocator);
     let loaded = try loader.load_source(&var tree, "", input);
     match loaded {
         Error(failed) => {
-            defer failed.deinit();
+            defer failed.deinit(allocator);
             try out.append_bytes("// check failed: ");
             let text = try failed.error(allocator, &loader.sources);
-            defer text.deinit();
+            defer text.deinit(allocator);
             let bytes = text.as_bytes();
             return append_folded(out, bytes);
         },
         Program(program) => {
-            defer program.deinit();
+            defer program.deinit(allocator);
             if try types::check(allocator, &var tree, &program) |failed| {
-                defer failed.deinit();
+                defer failed.deinit(allocator);
                 try out.append_bytes("// check failed: ");
                 let text = try failed.error(allocator, &loader.sources);
-                defer text.deinit();
+                defer text.deinit(allocator);
                 let bytes = text.as_bytes();
                 return append_folded(out, bytes);
             }
             var checker = try ownership::new_checker(allocator, &tree, &program);
-            defer checker.deinit();
+            defer checker.deinit(allocator);
             if try checker.check_program(&var tree, &program) |failed| {
-                defer failed.deinit();
+                defer failed.deinit(allocator);
                 try out.append_bytes("// check failed: ");
                 let text = try failed.error(allocator, &loader.sources);
-                defer text.deinit();
+                defer text.deinit(allocator);
                 let bytes = text.as_bytes();
                 return append_folded(out, bytes);
             }
             var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
-            defer lowerer.deinit();
+            defer lowerer.deinit(allocator);
             if try lowerer.lower(&var tree, &program, std_errors) |failed| {
-                defer failed.deinit();
+                defer failed.deinit(allocator);
                 try out.append_bytes("// ");
                 let text = try failed.error(allocator, &loader.sources);
-                defer text.deinit();
+                defer text.deinit(allocator);
                 let bytes = text.as_bytes();
                 return append_folded(out, bytes);
             }
             if opt {
                 if try ir::optimize(allocator, &var lowerer.module) |failed| {
-                    defer failed.deinit();
+                    defer failed.deinit(allocator);
                     try out.append_bytes("// ");
                     let text = try failed.error(allocator, &loader.sources);
-                    defer text.deinit();
+                    defer text.deinit(allocator);
                     let bytes = text.as_bytes();
                     return append_folded(out, bytes);
                 }
             }
             let rendered = try render_user_functions(allocator, &lowerer.module);
-            defer rendered.deinit();
+            defer rendered.deinit(allocator);
             let bytes = rendered.as_bytes();
             return append_rendered(out, bytes);
         },
@@ -151,7 +151,7 @@ fn render_section(
 /// module's functions whose symbol is not under `std::`.
 fn render_user_functions(allocator: Allocator, module: &ir::Module) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -180,7 +180,7 @@ fn render_ir_case(
     input: []u8
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes("// lower:");
     try out.append_byte(cast<u8>(10));
     try render_section(io, allocator, std_errors, input, false, &var out);
@@ -194,18 +194,18 @@ test "ir corpus lowers like the shipping compiler" {
     let allocator = mem::page_allocator();
     let io = io::blocking();
     var std_loader = try project::new_loader(io, allocator, "lib/kizu");
-    defer std_loader.deinit();
+    defer std_loader.deinit(allocator);
     let codes = try std_loader.std_error_codes();
     match codes {
         Error(failed) => {
-            defer failed.deinit();
+            defer failed.deinit(allocator);
             try io::write_stderr_line(io, "std error codes could not be read");
             testing::expect(false);
         },
         Codes(std_errors) => {
-            defer std_errors.deinit();
+            defer std_errors.deinit(allocator);
             var entries = try fs::read_dir(io, "compiler/tests/ir");
-            defer entries.deinit();
+            defer entries.deinit(allocator);
             var cases = 0;
             var failures = 0;
             var index = 0;
@@ -217,13 +217,13 @@ test "ir corpus lowers like the shipping compiler" {
                 }
                 cases = cases + 1;
                 let data = try fs::read_file(io, allocator, entry.path, mem::Limit::Unlimited);
-                defer data.deinit();
+                defer data.deinit(allocator);
                 let bytes = data.as_bytes();
                 if split_ir_case(bytes) |cut| {
                     let input = bytes[0..cut];
                     let want = bytes[cut + mem::len(ir_marker())..mem::len(bytes)];
                     let got = try render_ir_case(io, allocator, &std_errors, input);
-                    defer got.deinit();
+                    defer got.deinit(allocator);
                     let got_bytes = got.as_bytes();
                     if !mem::equal_bytes(want, got_bytes) {
                         failures = failures + 1;

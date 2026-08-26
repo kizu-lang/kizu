@@ -8,7 +8,7 @@ import std::testing;
 
 fn build_greeting(allocator: Allocator) -> !string::String {
     var text = string::new(allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(allocator);
     try text.append_bytes("hello");
     return move text;
 }
@@ -16,7 +16,7 @@ fn build_greeting(allocator: Allocator) -> !string::String {
 test "errdefer builder returns the owner" {
     let allocator = mem::page_allocator();
     var text = try build_greeting(allocator);
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     testing::expect_equal<[]u8>("hello", bytes);
 }
@@ -24,7 +24,7 @@ test "errdefer builder returns the owner" {
 test "mem leak consumes an owner explicitly" {
     let allocator = mem::page_allocator();
     var text = string::new(allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(allocator);
     try text.append_bytes("kept alive");
     let bytes = text.as_bytes();
     testing::expect_equal<[]u8>("kept alive", bytes);
@@ -35,12 +35,11 @@ test "each branch consumes the owner its own way" {
     let allocator = mem::page_allocator();
     var text = string::new(allocator);
     if 1 < 2 {
-        text.deinit();
+        text.deinit(allocator);
     } else {
         mem::leak<string::String>(move text);
     }
 }
-
 
 // ir
 // lower:
@@ -51,7 +50,7 @@ test "each branch consumes the owner its own way" {
 //   %3: []u8 = const "hello"
 //   %4: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %3: []u8
 //   %5: std::string::String = ref.load %2: &var std::string::String
-//   error.try %4: std::mem::Error!void, cleanup call.std::string::String.deinit %5: std::string::String
+//   error.try %4: std::mem::Error!void, cleanup call.std::string::String.deinit %5: std::string::String, %allocator: Allocator
 //   %7: std::string::String = ref.load %2: &var std::string::String
 //   %8: !std::string::String = error.ok %7: std::string::String
 //   return %8: !std::string::String
@@ -64,7 +63,7 @@ test "each branch consumes the owner its own way" {
 //   %4: []u8 = call.std::string::String.as_bytes %3: std::string::String
 //   %5: []u8 = const "hello"
 //   test.expect_equal %5: []u8, %4: []u8, []u8
-//   call.std::string::String.deinit %3: std::string::String
+//   call.std::string::String.deinit %3: std::string::String, %1: Allocator
 //   %8: !void = error.ok
 //   return %8: !void
 // }
@@ -76,7 +75,7 @@ test "each branch consumes the owner its own way" {
 //   %4: []u8 = const "kept alive"
 //   %5: std::mem::Error!void = call.std::string::String.append_bytes %3: &var std::string::String, %4: []u8
 //   %6: std::string::String = ref.load %3: &var std::string::String
-//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String
+//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String, %1: Allocator
 //   %8: std::string::String = ref.load %3: &var std::string::String
 //   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
 //   %10: []u8 = const "kept alive"
@@ -95,7 +94,7 @@ test "each branch consumes the owner its own way" {
 //   %5: bool = binary.< %3: i64, %4: i64
 //   branch %5: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::string::String.deinit %2: std::string::String
+//   call.std::string::String.deinit %2: std::string::String, %1: Allocator
 //   jump if.end.3
 // if.else.2:
 //   call.std::mem::leak.std_3a_3astring_3a_3aString %2: std::string::String
@@ -112,7 +111,7 @@ test "each branch consumes the owner its own way" {
 //   %3: []u8 = const "hello"
 //   %4: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %3: []u8
 //   %5: std::string::String = ref.load %2: &var std::string::String
-//   error.try %4: std::mem::Error!void, cleanup call.std::string::String.deinit %5: std::string::String
+//   error.try %4: std::mem::Error!void, cleanup call.std::string::String.deinit %5: std::string::String, %allocator: Allocator
 //   %7: std::string::String = ref.load %2: &var std::string::String
 //   %8: !std::string::String = error.ok %7: std::string::String
 //   return %8: !std::string::String
@@ -125,7 +124,7 @@ test "each branch consumes the owner its own way" {
 //   %4: []u8 = call.std::string::String.as_bytes %3: std::string::String
 //   %5: []u8 = const "hello"
 //   test.expect_equal %5: []u8, %4: []u8, []u8
-//   call.std::string::String.deinit %3: std::string::String
+//   call.std::string::String.deinit %3: std::string::String, %1: Allocator
 //   %8: !void = error.ok
 //   return %8: !void
 // }
@@ -137,7 +136,7 @@ test "each branch consumes the owner its own way" {
 //   %4: []u8 = const "kept alive"
 //   %5: std::mem::Error!void = call.std::string::String.append_bytes %3: &var std::string::String, %4: []u8
 //   %6: std::string::String = ref.load %3: &var std::string::String
-//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String
+//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String, %1: Allocator
 //   %8: std::string::String = ref.load %3: &var std::string::String
 //   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
 //   %10: []u8 = const "kept alive"
@@ -156,7 +155,7 @@ test "each branch consumes the owner its own way" {
 //   %5: bool = binary.< %3: i64, %4: i64
 //   branch %5: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::string::String.deinit %2: std::string::String
+//   call.std::string::String.deinit %2: std::string::String, %1: Allocator
 //   jump if.end.3
 // if.else.2:
 //   call.std::mem::leak.std_3a_3astring_3a_3aString %2: std::string::String

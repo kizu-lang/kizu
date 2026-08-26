@@ -136,8 +136,8 @@ struct CaptureCondition {
     cond_type: Name
 }
 
-fn (self: CaptureCondition) deinit() -> void {
-    self.borrow_cond.deinit();
+fn (self: CaptureCondition) deinit(allocator: Allocator) -> void {
+    self.borrow_cond.deinit(allocator);
     return;
 }
 
@@ -170,7 +170,7 @@ fn (self: &var Checker) check_if_stmt(
     statement: ast::IfStmt
 ) -> !?diagnostic::Diagnostic {
     var head = try self.new_capture_condition();
-    defer head.deinit();
+    defer head.deinit(self.allocator);
     if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
         return move failed;
     }
@@ -209,7 +209,7 @@ fn (self: &var Checker) check_if_stmt(
             }
             let err_name = try self.names.intern_text(tree, statement.err_capture);
             var err_binding = self.store.new_binding(err_name, err_type);
-            errdefer err_binding.deinit();
+            errdefer err_binding.deinit(self.allocator);
             err_binding.decl_span = expression_span(tree, statement.condition);
             let _ = try self.define(right_scope, move err_binding);
         }
@@ -386,7 +386,7 @@ fn (self: &var Checker) check_while_stmt(
     statement: ast::WhileStmt
 ) -> !?diagnostic::Diagnostic {
     var head = try self.new_capture_condition();
-    defer head.deinit();
+    defer head.deinit(self.allocator);
     if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
         return move failed;
     }
@@ -514,7 +514,7 @@ fn (self: &var Checker) new_capture_binding(
     let capture_name = try self.names.intern_text(tree, name);
     let payload = try self.names.optional_payload_name(cond_type);
     var value = self.store.new_binding(capture_name, payload);
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     value.decl_span = expression_span(tree, condition);
     return move value;
 }
@@ -576,7 +576,7 @@ fn (self: &var Checker) hands_over_optional_payload(tree: &ast::Ast, condition: 
     let apply = type_apply_expr(tree, call.callee) orelse return true;
     var target = empty_type_apply_target();
     if try self.type_apply_target(tree, apply, &var target) |failed| {
-        failed.deinit();
+        failed.deinit(self.allocator);
         return true;
     }
     if self.meta_form(target.name) |form| {
@@ -662,26 +662,26 @@ fn (self: &var Checker) define_capture(
     }
     if head.is_borrow_cond {
         var capture = try self.new_capture_binding(tree, name, head.borrow_cond.elem, condition);
-        errdefer capture.deinit();
+        errdefer capture.deinit(self.allocator);
         if try self.tie_container_borrow_capture(tree, &var capture, &head.borrow_cond, body) |failed| {
-            capture.deinit();
+            capture.deinit(self.allocator);
             return move failed;
         }
         let _ = try self.define(body, move capture);
         return null;
     }
     var capture = try self.new_capture_binding(tree, name, head.cond_type, condition);
-    errdefer capture.deinit();
+    errdefer capture.deinit(self.allocator);
     var is_field_capture = false;
     if try self.tie_optional_owner_field_capture(
         tree, env, &var capture, condition, head.cond_type, in_loop, &var is_field_capture, consumes
     ) |failed| {
-        capture.deinit();
+        capture.deinit(self.allocator);
         return move failed;
     }
     if !is_field_capture {
         if try self.tie_view_capture(tree, body, &var capture, head.cond_type, condition) |failed| {
-            capture.deinit();
+            capture.deinit(self.allocator);
             return move failed;
         }
     }
@@ -725,7 +725,7 @@ fn (self: &var Checker) tie_view_capture(
         return null;
     }
     var sources = array::new<BorrowSource>(self.allocator);
-    defer sources.deinit();
+    defer sources.deinit(self.allocator);
     if try self.cond_view_sources(tree, env, condition, &var sources) |failed| {
         return move failed;
     }
@@ -756,7 +756,7 @@ fn (self: &var Checker) cond_view_sources(
     let call = call_expr(tree, unwrapped) orelse return null;
     if try self.called_user_function(tree, call.callee) |called| {
         var derived = array::new<BorrowSource>(self.allocator);
-        defer derived.deinit();
+        defer derived.deinit(self.allocator);
         if try self.call_borrow_return_sources(
             tree, env, called.name, called.function, call, false, false, true, &var derived
         ) |failed| {
@@ -824,7 +824,7 @@ fn (self: &var Checker) refuse_container_view_orelse(
         return null;
     }
     var sources = array::new<BorrowSource>(self.allocator);
-    defer sources.deinit();
+    defer sources.deinit(self.allocator);
     if try self.cond_view_sources(tree, env, condition, &var sources) |failed| {
         return move failed;
     }
@@ -891,7 +891,7 @@ fn (self: &var Checker) check_match_stmt(
     let tags = try self.match_tags(value_type) orelse
         return try self.error1(tree, ast::zero_span(), "move error: match expects enum or union, got %s", Arg::Str(value_type));
     var arm_variants = array::new<MetaField>(self.allocator);
-    defer arm_variants.deinit();
+    defer arm_variants.deinit(self.allocator);
     var has_arm_variants = false;
     if try self.comptime_arm_variants(tree, head, &var arm_variants, &var has_arm_variants) |failed| {
         return move failed;
@@ -902,7 +902,7 @@ fn (self: &var Checker) check_match_stmt(
     }
     let owned_match = try self.match_scrutinee_owned(tree, env, head.value);
     let arms = try match_stmt_arms(self.allocator, tree, statement);
-    defer arms.deinit();
+    defer arms.deinit(self.allocator);
     if !owner_deinit_dispatch {
         if try self.consume_moved_from_scrutinee(tree, env, head.value, &arms, tags) |failed| {
             return move failed;
@@ -912,7 +912,7 @@ fn (self: &var Checker) check_match_stmt(
     // inside the loop would start each arm from what the arms before it
     // merged back, so an arm would inherit a cleanup only one other arm ran.
     var live = array::new<ScopeHandle>(self.allocator);
-    defer live.deinit();
+    defer live.deinit(self.allocator);
     let context = MatchArmContext {
         value_type: value_type,
         tags: tags,
@@ -1226,7 +1226,7 @@ fn (self: &var Checker) define_match_arm_payload(
     }
     let name = try self.names.intern_text(tree, arm.binding);
     var value = self.store.new_binding(name, payload);
-    errdefer value.deinit();
+    errdefer value.deinit(self.allocator);
     value.decl_span = span;
     let class = try self.classify_match_payload(payload);
     let owned = class == MatchPayloadClass::Copies or

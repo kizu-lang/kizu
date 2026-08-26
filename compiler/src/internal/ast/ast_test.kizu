@@ -67,7 +67,7 @@ fn expect_expression_render(
         tree,
         expression
     );
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     expect_retained_text(&rendered, expected);
     return;
 }
@@ -83,7 +83,7 @@ fn expect_statement_render(
         tree,
         statement
     );
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     expect_retained_text(&rendered, expected);
     return;
 }
@@ -95,7 +95,7 @@ fn expect_block_render(
     expected: []u8
 ) -> !void {
     let rendered = try render_block(allocator, tree, block);
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     expect_retained_text(&rendered, expected);
     return;
 }
@@ -111,7 +111,7 @@ fn expect_declaration_render(
         tree,
         declaration
     );
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     expect_retained_text(&rendered, expected);
     return;
 }
@@ -127,7 +127,7 @@ fn expect_program_render(
         tree,
         program
     );
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     expect_retained_text(&rendered, expected);
     return;
 }
@@ -258,12 +258,17 @@ fn expect_construct_worker(
 fn expect_construct_cleanup(
     tree: &Ast,
     statement: Statement,
-    expected_binding: []u8
+    expected_binding: []u8,
+    expected_allocator: Expression
 ) -> void {
     match tree.statements.at(statement.node) {
         ErrDefer(cleanup) => match tree.expressions.at(cleanup.expr.node) {
             Call(call) => {
-                testing::expect_equal<i64>(0, call.args.len(tree));
+                // The release names the construct's own first argument.
+                testing::expect_equal<i64>(1, call.args.len(tree));
+                testing::expect(
+                    call.args.get_or_panic(tree, 0).node == expected_allocator.node
+                );
                 match tree.expressions.at(call.callee.node) {
                     Field(method) => {
                         testing::expect(!method.namespace);
@@ -312,7 +317,7 @@ fn add_struct_with_field(
     field_type: typ::Type
 ) -> !void {
     var fields = array::new<Field>(allocator);
-    errdefer fields.deinit();
+    errdefer fields.deinit(allocator);
     try fields.append(Field {
         name: try retained_text(tree, field_name),
         doc: try retained_text(tree, ""),
@@ -346,7 +351,7 @@ fn add_union_with_payload(
     payload: typ::Type
 ) -> !void {
     var variants = array::new<UnionVariant>(allocator);
-    errdefer variants.deinit();
+    errdefer variants.deinit(allocator);
     try variants.append(UnionVariant {
         name: try retained_text(tree, variant_name),
         doc: try retained_text(tree, ""),
@@ -374,7 +379,7 @@ fn add_cleanup_function(
     derived: bool
 ) -> !void {
     var signature = try empty_signature(allocator, tree, name);
-    errdefer signature.deinit();
+    errdefer signature.deinit(allocator);
     signature.receiver = true;
     let doc = try retained_text(tree, "");
     let declaration = tree.add_declaration(DeclarationNode::Function(
@@ -405,7 +410,7 @@ fn expect_type_name(
     expected: []u8
 ) -> !void {
     let rendered = try typ::render(allocator, types, value);
-    defer rendered.deinit();
+    defer rendered.deinit(allocator);
     expect_retained_text(&rendered, expected);
     return;
 }
@@ -420,7 +425,9 @@ fn expect_cleanup_field(
             testing::expect(value.semicolon);
             match tree.expressions.at(value.expr.node) {
                 Call(call) => {
-                    testing::expect_equal<i64>(0, call.args.len(tree));
+                    // A derived body hands on the allocator it was given.
+                    testing::expect_equal<i64>(1, call.args.len(tree));
+                    expect_ident_name(tree, call.args.get_or_panic(tree, 0), "allocator");
                     match tree.expressions.at(call.callee.node) {
                         Field(method) => {
                             expect_text(tree, method.name, "deinit");
@@ -478,10 +485,10 @@ test "span zero state follows its source position" {
 test "function signatures return only type parameter names" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let integer = try tree.types.parse("i64");
     var signature = try empty_signature(allocator, &var tree, "visit");
-    defer signature.deinit();
+    defer signature.deinit(allocator);
     try signature.static_params.append(StaticParam {
         name: try retained_text(&var tree, "T"),
         type_name: null
@@ -495,7 +502,7 @@ test "function signatures return only type parameter names" {
         type_name: null
     });
     let names = try signature.type_param_names(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
     testing::expect_equal<i64>(2, names.len());
     if names.get(0) |name| {
         expect_text(&tree, name, "T");
@@ -509,16 +516,16 @@ test "function signatures return only type parameter names" {
     }
     testing::expect_equal<i64>(3, signature.static_params.len());
     var empty = try empty_signature(allocator, &var tree, "plain");
-    defer empty.deinit();
+    defer empty.deinit(allocator);
     let empty_names = try empty.type_param_names(allocator);
-    defer empty_names.deinit();
+    defer empty_names.deinit(allocator);
     testing::expect_equal<i64>(0, empty_names.len());
 }
 
 test "match arms recognize only the wildcard tag" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let retained_body = tree.add_block(BlockStmt {
         statements: array::new<Statement>(allocator)
     });
@@ -547,21 +554,21 @@ test "buffer literal type text preserves its stored size" {
         span: zero_span()
     };
     let positive_text = try positive.type_text(allocator);
-    defer positive_text.deinit();
+    defer positive_text.deinit(allocator);
     expect_retained_text(&positive_text, "[12]u8");
     let negative = BufferLiteralExpr {
         size: -2,
         span: zero_span()
     };
     let negative_text = try negative.type_text(allocator);
-    defer negative_text.deinit();
+    defer negative_text.deinit(allocator);
     expect_retained_text(&negative_text, "[-2]u8");
 }
 
 test "field paths retain their root and dotted suffix" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let root_span = Span {
         source: null,
         start: Position { line: 3, column: 4 },
@@ -587,7 +594,7 @@ test "field paths retain their root and dotted suffix" {
         span: zero_span()
     }));
     if try field_path_root(allocator, &tree, first) |resolved| {
-        defer resolved.deinit();
+        defer resolved.deinit(allocator);
         expect_text(&tree, resolved.root.name, "owner");
         testing::expect_equal<i64>(3, resolved.root.span.start.line);
         testing::expect_equal<i64>(4, resolved.root.span.start.column);
@@ -598,14 +605,14 @@ test "field paths retain their root and dotted suffix" {
         testing::fail("direct field path was not recognized");
     }
     if try field_path_root(allocator, &tree, second) |resolved| {
-        defer resolved.deinit();
+        defer resolved.deinit(allocator);
         expect_text(&tree, resolved.root.name, "owner");
         expect_retained_text(&resolved.path, "a.b");
     } else {
         testing::fail("nested field path was not recognized");
     }
     if try field_path_root(allocator, &tree, root) |resolved| {
-        resolved.deinit();
+        resolved.deinit(allocator);
         testing::fail("identifier was accepted as a field path");
     }
     let namespace_name = try retained_text(&var tree, "Item");
@@ -616,7 +623,7 @@ test "field paths retain their root and dotted suffix" {
         span: zero_span()
     }));
     if try field_path_root(allocator, &tree, namespaced) |resolved| {
-        resolved.deinit();
+        resolved.deinit(allocator);
         testing::fail("namespace field was accepted as a runtime path");
     }
     let nested_name = try retained_text(&var tree, "value");
@@ -629,7 +636,7 @@ test "field paths retain their root and dotted suffix" {
     }
     ));
     if try field_path_root(allocator, &tree, nested_namespace) |resolved| {
-        resolved.deinit();
+        resolved.deinit(allocator);
         testing::fail("runtime field above a namespace field was accepted");
     }
     let integer_text = try retained_text(&var tree, "1");
@@ -646,7 +653,7 @@ test "field paths retain their root and dotted suffix" {
     }
     ));
     if try field_path_root(allocator, &tree, invalid_root) |resolved| {
-        resolved.deinit();
+        resolved.deinit(allocator);
         testing::fail("non-identifier field root was accepted");
     }
 }
@@ -654,7 +661,7 @@ test "field paths retain their root and dotted suffix" {
 test "expression rendering covers values operators calls and access" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let integer_type = try tree.types.parse("i64");
     let x = try add_ident_expression(&var tree, "x");
     let foo = try add_ident_expression(&var tree, "foo");
@@ -724,7 +731,7 @@ test "expression rendering covers values operators calls and access" {
         "(41 + 1)"
     );
     var args = array::new<Expression>(allocator);
-    errdefer args.deinit();
+    errdefer args.deinit(allocator);
     try args.append(x);
     try args.append(forty_one);
     let retained_args = tree.add_expression_list(move args);
@@ -874,7 +881,7 @@ test "expression rendering covers values operators calls and access" {
 test "expression rendering covers composite and control forms" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let empty = try retained_text(&var tree, "");
     let value = try add_ident_expression(&var tree, "value");
     let payload = try add_ident_expression(&var tree, "payload");
@@ -885,7 +892,7 @@ test "expression rendering covers composite and control forms" {
         BoolExpr { value: true }
     ));
     var fields = array::new<FieldValue>(allocator);
-    errdefer fields.deinit();
+    errdefer fields.deinit(allocator);
     try fields.append(FieldValue {
         name: try retained_text(&var tree, "x"),
         value: one
@@ -940,7 +947,7 @@ test "expression rendering covers composite and control forms" {
         ReturnStmt { value: null }
     ));
     var arms = array::new<MatchArm>(allocator);
-    errdefer arms.deinit();
+    errdefer arms.deinit(allocator);
     try arms.append(MatchArm {
         tag: try retained_text(&var tree, "Some"),
         binding: try retained_text(&var tree, "item"),
@@ -970,7 +977,7 @@ test "expression rendering covers composite and control forms" {
 test "statement rendering covers control and compile-time forms" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let empty = try retained_text(&var tree, "");
     let x_name = try retained_text(&var tree, "x");
     let outer = try retained_text(&var tree, "outer");
@@ -1111,7 +1118,7 @@ test "statement rendering covers control and compile-time forms" {
         allocator, &tree, named_continue, "continue :outer;"
     );
     var arms = array::new<MatchArm>(allocator);
-    errdefer arms.deinit();
+    errdefer arms.deinit(allocator);
     let terminated_body = tree.add_statement(StatementNode::Expr(
         ExprStmt { expr: x, semicolon: true }
     ));
@@ -1178,7 +1185,7 @@ test "statement rendering covers control and compile-time forms" {
     let empty_block = add_empty_block(allocator, &var tree);
     try expect_block_render(allocator, &tree, empty_block, "{  }");
     var statements = array::new<Statement>(allocator);
-    errdefer statements.deinit();
+    errdefer statements.deinit(allocator);
     try statements.append(let_statement);
     try statements.append(value_return);
     let populated_block = tree.add_block(BlockStmt {
@@ -1201,18 +1208,18 @@ test "statement rendering covers control and compile-time forms" {
 test "declaration and program rendering cover every top level form" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let integer = try tree.types.parse("i64");
     let boolean = try tree.types.parse("bool");
     var program = new_program(allocator);
-    defer program.deinit();
+    defer program.deinit(allocator);
     try expect_program_render(allocator, &tree, &program, "");
     let ignored_doc = try retained_text(
         &var tree,
         "ignored documentation"
     );
     var import_path = array::new<Text>(allocator);
-    errdefer import_path.deinit();
+    errdefer import_path.deinit(allocator);
     try import_path.append(try retained_text(&var tree, "std"));
     try import_path.append(try retained_text(&var tree, "mem"));
     let import_decl = tree.add_declaration(DeclarationNode::Import(
@@ -1230,7 +1237,7 @@ test "declaration and program rendering cover every top level form" {
         &var tree,
         "visit"
     );
-    errdefer function_signature.deinit();
+    errdefer function_signature.deinit(allocator);
     function_signature.receiver = true;
     function_signature.return_type = boolean;
     function_signature.requires_unsafe = true;
@@ -1289,7 +1296,7 @@ test "declaration and program rendering cover every top level form" {
         &var tree,
         "write"
     );
-    errdefer extern_signature.deinit();
+    errdefer extern_signature.deinit(allocator);
     extern_signature.public = true;
     extern_signature.requires_unsafe = true;
     extern_signature.extern_abi = try retained_text(
@@ -1342,7 +1349,7 @@ test "declaration and program rendering cover every top level form" {
         \\test "\xE6\xA4\x9C\xE6\x9F\xBB" <missing>
     );
     var struct_type_params = array::new<Text>(allocator);
-    errdefer struct_type_params.deinit();
+    errdefer struct_type_params.deinit(allocator);
     try struct_type_params.append(try retained_text(
         &var tree,
         "T"
@@ -1352,7 +1359,7 @@ test "declaration and program rendering cover every top level form" {
         "U"
     ));
     var fields = array::new<Field>(allocator);
-    errdefer fields.deinit();
+    errdefer fields.deinit(allocator);
     try fields.append(Field {
         name: try retained_text(&var tree, "value"),
         doc: ignored_doc,
@@ -1397,11 +1404,11 @@ test "declaration and program rendering cover every top level form" {
         "pub unsafe struct Pair<T, U> { pub value: &i64, slot: &var bool, plain: i64 }"
     );
     var tags = array::new<Text>(allocator);
-    errdefer tags.deinit();
+    errdefer tags.deinit(allocator);
     try tags.append(try retained_text(&var tree, "Ready"));
     try tags.append(try retained_text(&var tree, "Done"));
     var tag_docs = map::new<[]u8, Text>(allocator);
-    errdefer tag_docs.deinit();
+    errdefer tag_docs.deinit(allocator);
     try tag_docs.insert("Ready", ignored_doc);
     let enum_name = try retained_text(&var tree, "State");
     let enum_decl = tree.add_declaration(DeclarationNode::Enum(
@@ -1421,11 +1428,11 @@ test "declaration and program rendering cover every top level form" {
         "pub enum State { Ready, Done }"
     );
     var members = array::new<Text>(allocator);
-    errdefer members.deinit();
+    errdefer members.deinit(allocator);
     try members.append(try retained_text(&var tree, "Missing"));
     try members.append(try retained_text(&var tree, "Invalid"));
     var member_docs = map::new<[]u8, Text>(allocator);
-    errdefer member_docs.deinit();
+    errdefer member_docs.deinit(allocator);
     try member_docs.insert("Missing", ignored_doc);
     let error_name = try retained_text(&var tree, "Failure");
     let error_decl = tree.add_declaration(DeclarationNode::ErrorSet(
@@ -1446,13 +1453,13 @@ test "declaration and program rendering cover every top level form" {
         "pub error Failure { Missing, Invalid }"
     );
     var union_type_params = array::new<Text>(allocator);
-    errdefer union_type_params.deinit();
+    errdefer union_type_params.deinit(allocator);
     try union_type_params.append(try retained_text(
         &var tree,
         "T"
     ));
     var variants = array::new<UnionVariant>(allocator);
-    errdefer variants.deinit();
+    errdefer variants.deinit(allocator);
     try variants.append(UnionVariant {
         name: try retained_text(&var tree, "Ok"),
         doc: ignored_doc,
@@ -1481,13 +1488,13 @@ test "declaration and program rendering cover every top level form" {
         "pub union Result<T> { Ok(i64), Empty }"
     );
     var methods = array::new<FunctionDecl>(allocator);
-    errdefer methods.deinit();
+    errdefer methods.deinit(allocator);
     var first_signature = try empty_signature(
         allocator,
         &var tree,
         "first"
     );
-    errdefer first_signature.deinit();
+    errdefer first_signature.deinit(allocator);
     first_signature.receiver = true;
     try methods.append(FunctionDecl {
         signature: move first_signature,
@@ -1500,7 +1507,7 @@ test "declaration and program rendering cover every top level form" {
         &var tree,
         "second"
     );
-    errdefer second_signature.deinit();
+    errdefer second_signature.deinit(allocator);
     try methods.append(FunctionDecl {
         signature: move second_signature,
         doc: ignored_doc,
@@ -1564,17 +1571,17 @@ test "declaration and program rendering cover every top level form" {
 test "program retains declaration handles and nested contract methods" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let integer = try tree.types.parse("i64");
     var program = new_program(allocator);
-    defer program.deinit();
+    defer program.deinit(allocator);
     var body_statements = array::new<Statement>(allocator);
-    errdefer body_statements.deinit();
+    errdefer body_statements.deinit(allocator);
     let body = tree.add_block(BlockStmt {
         statements: move body_statements
     });
     var signature = try empty_signature(allocator, &var tree, "visit");
-    errdefer signature.deinit();
+    errdefer signature.deinit(allocator);
     try signature.static_params.append(StaticParam {
         name: try retained_text(&var tree, "T"),
         type_name: null
@@ -1598,9 +1605,9 @@ test "program retains declaration handles and nested contract methods" {
     ));
     try program.add_declaration(function);
     var methods = array::new<FunctionDecl>(allocator);
-    errdefer methods.deinit();
+    errdefer methods.deinit(allocator);
     let method_signature = try empty_signature(allocator, &var tree, "visit");
-    errdefer method_signature.deinit();
+    errdefer method_signature.deinit(allocator);
     let method_doc = try retained_text(&var tree, "");
     try methods.append(FunctionDecl {
         signature: move method_signature,
@@ -1618,10 +1625,10 @@ test "program retains declaration handles and nested contract methods" {
     ));
     try program.add_declaration(contract_decl);
     var tags = array::new<Text>(allocator);
-    errdefer tags.deinit();
+    errdefer tags.deinit(allocator);
     try tags.append(try retained_text(&var tree, "Ready"));
     var tag_docs = map::new<[]u8, Text>(allocator);
-    errdefer tag_docs.deinit();
+    errdefer tag_docs.deinit(allocator);
     try tag_docs.insert(
         "Ready",
         try retained_text(&var tree, "The visitor may run.")
@@ -1703,7 +1710,7 @@ test "program retains declaration handles and nested contract methods" {
 test "deinit owner discovery includes declared and transitive holders" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let outer_type = try tree.types.parse("Outer");
     let middle_type = try tree.types.parse("Middle");
     let optional_inner_type = try tree.types.parse("?Inner");
@@ -1714,7 +1721,7 @@ test "deinit owner discovery includes declared and transitive holders" {
     );
     let integer_type = try tree.types.parse("i64");
     var program = new_program(allocator);
-    defer program.deinit();
+    defer program.deinit(allocator);
     try add_union_with_payload(
         allocator,
         &var tree,
@@ -1800,7 +1807,7 @@ test "deinit owner discovery includes declared and transitive holders" {
         false
     );
     let owners = try deinit_owners(allocator, &tree, &program);
-    defer owners.deinit();
+    defer owners.deinit(allocator);
     expect_owner(&owners, "std::arena::Arena", true);
     expect_owner(&owners, "std::array::Array", true);
     expect_owner(&owners, "std::mem::Box", true);
@@ -1814,7 +1821,7 @@ test "deinit owner discovery includes declared and transitive holders" {
     expect_owner(&owners, "Boxed", true);
     expect_owner(&owners, "Point", false);
     let declared = try declared_deinits(allocator, &tree, &program);
-    defer declared.deinit();
+    defer declared.deinit(allocator);
     expect_owner(&declared, "std::arena::Arena", true);
     expect_owner(&declared, "std::array::Array", true);
     expect_owner(&declared, "std::mem::Box", true);
@@ -1826,12 +1833,12 @@ test "deinit owner discovery includes declared and transitive holders" {
 test "derived struct deinit consumes plain and optional owner fields" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let string_type = try tree.types.parse("std::string::String");
     let optional_string = try tree.types.parse("?std::string::String");
     let integer = try tree.types.parse("i64");
     var fields = array::new<Field>(allocator);
-    errdefer fields.deinit();
+    errdefer fields.deinit(allocator);
     let empty = try retained_text(&var tree, "");
     try fields.append(Field {
         name: try retained_text(&var tree, "name"),
@@ -1858,7 +1865,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
         public: false
     });
     var type_params = array::new<Text>(allocator);
-    errdefer type_params.deinit();
+    errdefer type_params.deinit(allocator);
     try type_params.append(try retained_text(&var tree, "T"));
     let visitor_name = try retained_text(&var tree, "Visitor");
     let declaration = tree.add_declaration(DeclarationNode::Struct(
@@ -1873,7 +1880,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
     }
     ));
     var owners = map::new<[]u8, bool>(allocator);
-    defer owners.deinit();
+    defer owners.deinit(allocator);
     try owners.insert("std::string::String", true);
     if try derive_deinit(
         allocator,
@@ -1897,7 +1904,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
                 } else {
                     testing::fail("derived deinit lost its type parameter");
                 }
-                testing::expect_equal<i64>(1, value.signature.params.len());
+                testing::expect_equal<i64>(2, value.signature.params.len());
                 if value.signature.params.at(0) |receiver| {
                     expect_text(&tree, receiver.name, "self");
                     try expect_type_name(
@@ -1908,6 +1915,19 @@ test "derived struct deinit consumes plain and optional owner fields" {
                     );
                 } else {
                     testing::fail("derived deinit had no receiver");
+                }
+                // Every owner's release names the allocator it came from,
+                // and a derived body hands its own on (ADR-0132).
+                if value.signature.params.at(1) |handed| {
+                    expect_text(&tree, handed.name, "allocator");
+                    try expect_type_name(
+                        allocator,
+                        &tree.types,
+                        handed.type_name,
+                        "Allocator"
+                    );
+                } else {
+                    testing::fail("derived deinit had no allocator");
                 }
                 if value.body |body| {
                     match tree.statements.at(body.node) {
@@ -1979,12 +1999,12 @@ test "derived struct deinit consumes plain and optional owner fields" {
 test "derived union deinit matches every variant and consumes owner payload" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let string_type = try tree.types.parse("std::string::String");
     let integer = try tree.types.parse("i64");
     let empty = try retained_text(&var tree, "");
     var variants = array::new<UnionVariant>(allocator);
-    errdefer variants.deinit();
+    errdefer variants.deinit(allocator);
     try variants.append(UnionVariant {
         name: try retained_text(&var tree, "Kept"),
         doc: empty,
@@ -2011,7 +2031,7 @@ test "derived union deinit matches every variant and consumes owner payload" {
     }
     ));
     var owners = map::new<[]u8, bool>(allocator);
-    defer owners.deinit();
+    defer owners.deinit(allocator);
     try owners.insert("std::string::String", true);
     if try derive_deinit(
         allocator,
@@ -2078,11 +2098,11 @@ test "derived union deinit matches every variant and consumes owner payload" {
 test "adding derived deinits skips copy and manually cleaned types" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let resource = try tree.types.parse("Resource");
     let integer = try tree.types.parse("i64");
     var program = new_program(allocator);
-    defer program.deinit();
+    defer program.deinit(allocator);
     try add_cleanup_function(
         allocator,
         &var tree,
@@ -2146,14 +2166,14 @@ test "adding derived deinits skips copy and manually cleaned types" {
 test "variant helpers preserve shared bodies and ordinary expression shape" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let subject_name = try retained_text(&var tree, "slot");
     let subject = tree.add_expression(ExpressionNode::Ident(IdentExpr {
         name: subject_name,
         span: zero_span()
     }));
     var body_statements = array::new<Statement>(allocator);
-    errdefer body_statements.deinit();
+    errdefer body_statements.deinit(allocator);
     let body = tree.add_block(BlockStmt {
         statements: move body_statements
     });
@@ -2173,7 +2193,7 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
         comptime_node
     ));
     var variants = array::new<MetaVariant>(allocator);
-    defer variants.deinit();
+    defer variants.deinit(allocator);
     try variants.append(MetaVariant {
         name: vacant_name,
         has_payload: false
@@ -2191,7 +2211,7 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
                 empty_name,
                 &variants
             );
-            defer expanded.deinit();
+            defer expanded.deinit(allocator);
             testing::expect_equal<i64>(2, expanded.arms.len());
             expect_text(&tree, expanded.meta_capture, "variant");
             expect_text(&tree, expanded.meta_owner, "Slot");
@@ -2222,7 +2242,7 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     );
     expect_variant_path(&tree, tag, "Slot", "Vacant");
     var source_args = array::new<Expression>(allocator);
-    errdefer source_args.deinit();
+    errdefer source_args.deinit(allocator);
     try source_args.append(subject);
     let source_args_list = tree.add_expression_list(move source_args);
     let source_call = tree.add_expression(ExpressionNode::Call(CallExpr {
@@ -2260,14 +2280,14 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
 test "construct expansion builds fields in order and marks owner handoff" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let subject_name = try retained_text(&var tree, "input");
     let subject = tree.add_expression(ExpressionNode::Ident(IdentExpr {
         name: subject_name,
         span: zero_span()
     }));
     var source_args = array::new<Expression>(allocator);
-    errdefer source_args.deinit();
+    errdefer source_args.deinit(allocator);
     try source_args.append(subject);
     let source_args_list = tree.add_expression_list(move source_args);
     let source_call = tree.add_expression(ExpressionNode::Call(CallExpr {
@@ -2275,7 +2295,7 @@ test "construct expansion builds fields in order and marks owner handoff" {
         args: source_args_list
     }));
     var fields = array::new<ConstructField>(allocator);
-    defer fields.deinit();
+    defer fields.deinit(allocator);
     try fields.append(ConstructField {
         name: "name",
         type_name: "std::string::String"
@@ -2285,7 +2305,7 @@ test "construct expansion builds fields in order and marks owner handoff" {
         type_name: "i64"
     });
     var owners = map::new<[]u8, bool>(allocator);
-    defer owners.deinit();
+    defer owners.deinit(allocator);
     try owners.insert("std::string::String", true);
     try owners.insert("std::array::Array", true);
     testing::expect(owner_type(
@@ -2305,7 +2325,7 @@ test "construct expansion builds fields in order and marks owner handoff" {
                 shared_args,
                 &owners
             );
-            defer expanded.deinit();
+            defer expanded.deinit(allocator);
             testing::expect_equal<i64>(3, expanded.statements.len());
             expect_construct_worker(
                 &tree,
@@ -2318,7 +2338,8 @@ test "construct expansion builds fields in order and marks owner handoff" {
             expect_construct_cleanup(
                 &tree,
                 expanded.statements.get_or_panic(1),
-                "construct$name"
+                "construct$name",
+                subject
             );
             expect_construct_worker(
                 &tree,
@@ -2373,7 +2394,7 @@ test "construct expansion builds fields in order and marks owner handoff" {
 test "typed handles retain a shared expression graph" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     let literal_text = try retained_text(&var tree, "41");
     let literal = tree.add_expression(ExpressionNode::Int(IntExpr {
         value: literal_text
@@ -2399,7 +2420,7 @@ test "typed handles retain a shared expression graph" {
         semicolon: true
     }));
     var statements = array::new<Statement>(allocator);
-    errdefer statements.deinit();
+    errdefer statements.deinit(allocator);
     try statements.append(statement);
     let block = tree.add_block(BlockStmt {
         statements: move statements

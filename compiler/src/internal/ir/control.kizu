@@ -79,7 +79,7 @@ fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStm
     }
     var then_result = self.blank_branch();
     if try self.lower_branch_block(tree, then_block, statement.consequence, merge_name, false, &var then_result) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(self.allocator);
         if has_capture {
             try self.restore_loop_var(saved);
         }
@@ -103,7 +103,7 @@ fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStm
     }
     var else_result = self.blank_branch();
     if try self.lower_branch_block(tree, else_block, else_body, merge_name, false, &var else_result) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(self.allocator);
         if has_err_capture {
             try self.restore_loop_var(saved_err);
         }
@@ -466,7 +466,7 @@ fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStm
     self.block = merge_block;
     try self.merge_branch_envs(merge_block, then_result, else_result);
     var incoming = array::new<Incoming>(self.allocator);
-    defer incoming.deinit();
+    defer incoming.deinit(self.allocator);
     var result_type = empty_name();
     try append_branch_incoming(then_result, &var incoming, &var result_type);
     try append_branch_incoming(else_result, &var incoming, &var result_type);
@@ -618,7 +618,7 @@ fn (self: &var Lowerer) new_block_named(prefix: []u8) -> !Block {
 /// `l.newBlock(l.nextBlockName(shape.name + ".header"))` and its siblings.
 fn (self: &var Lowerer) new_loop_block(form: LoopForm, suffix: []u8) -> !Block {
     var prefix = try string::from_bytes(self.allocator, loop_form_name(form));
-    defer prefix.deinit();
+    defer prefix.deinit(self.allocator);
     try prefix.append_bytes(suffix);
     let bytes = prefix.as_bytes();
     return self.new_block_named(bytes);
@@ -629,7 +629,7 @@ fn (self: &var Lowerer) new_loop_block(form: LoopForm, suffix: []u8) -> !Block {
 /// once for every loop form rather than once per form.
 fn (self: &var Lowerer) lower_loop(tree: &var ast::Ast, shape: LoopShape) -> !?diagnostic::Diagnostic {
     var assigned = array::new<Name>(self.allocator);
-    defer assigned.deinit();
+    defer assigned.deinit(self.allocator);
     if try self.assigned_names(tree, shape.body, &var assigned) |failed| {
         return move failed;
     }
@@ -644,7 +644,7 @@ fn (self: &var Lowerer) lower_loop(tree: &var ast::Ast, shape: LoopShape) -> !?d
     let header_name = self.module.block_name(header);
     self.module.set_terminator(preheader, jump_terminator(header_name));
     var phis = array::new<LoopPhi>(self.allocator);
-    defer phis.deinit();
+    defer phis.deinit(self.allocator);
     try self.create_loop_phis(header, &assigned, &var phis);
     self.block = header;
     let preheader_name = self.module.block_name(preheader);
@@ -673,9 +673,9 @@ fn (self: &var Lowerer) lower_loop(tree: &var ast::Ast, shape: LoopShape) -> !?d
     // The Go `popLoop`: the loop leaves the stack, and its edges are read
     // from the record it was.
     let loop = self.loops.pop_or_panic();
-    defer loop.deinit();
+    defer loop.deinit(self.allocator);
     var edges = array::new<LoopEdge>(self.allocator);
-    defer edges.deinit();
+    defer edges.deinit(self.allocator);
     if !self.terminated() {
         // The body falling through is one more edge back into the loop, and
         // it comes first because it is the one the source reads as the loop.
@@ -782,7 +782,7 @@ fn (self: &var Lowerer) lower_while_stmt(tree: &var ast::Ast, statement: ast::Wh
     let capture = try self.text_name(tree, statement.capture);
     let saved = self.saved_binding(capture);
     if try self.lower_loop(tree, shape) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(self.allocator);
         try self.restore_loop_var(saved);
         return move failed;
     }
@@ -811,7 +811,7 @@ fn (self: &var Lowerer) lower_for_stmt(tree: &var ast::Ast, statement: ast::ForS
         body: statement.body
     };
     if try self.lower_loop(tree, shape) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(self.allocator);
         try self.restore_loop_var(saved);
         return move failed;
     }
@@ -845,7 +845,7 @@ fn (self: &var Lowerer) lower_loop_branch(tree: &var ast::Ast, is_continue: bool
         defer_depth = loop.defer_depth;
     }
     var cleanups = array::new<Cleanup>(self.allocator);
-    defer cleanups.deinit();
+    defer cleanups.deinit(self.allocator);
     try self.cleanups_from(defer_depth, false, &var cleanups);
     try self.emit_cleanups(&cleanups);
     self.terminate(jump_terminator(target));
@@ -913,7 +913,7 @@ fn (self: &var Lowerer) close_loop_phis(
     while phis.get(index) |entry| {
         index = index + 1;
         var incoming = array::new<Incoming>(self.allocator);
-        defer incoming.deinit();
+        defer incoming.deinit(self.allocator);
         try self.loop_incoming(entry.name, edges, &var incoming);
         if latch |latch_block| {
             let value = try self.latch_value(latch_block, entry, &incoming);
@@ -978,7 +978,7 @@ fn (self: &var Lowerer) finish_loop_exit_phis(
         index = index + 1;
         let result = self.module.instr_result(entry.phi);
         var incoming = array::new<Incoming>(self.allocator);
-        defer incoming.deinit();
+        defer incoming.deinit(self.allocator);
         try incoming.append(Incoming { block: test, value: result });
         try self.loop_incoming(entry.name, break_edges, &var incoming);
         if incoming.len() == 1 {
@@ -994,7 +994,7 @@ fn (self: &var Lowerer) finish_loop_exit_phis(
 fn (self: &var Lowerer) add_phi(block: Block, type_name: Name, incoming: &array::Array<Incoming>) -> !Value {
     let result = try self.next(type_name);
     var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     var index = 0;
     while incoming.get(index) |entry| {
         index = index + 1;
@@ -1016,7 +1016,7 @@ fn (self: &var Lowerer) add_phi2(
 ) -> !Value {
     let result = try self.next(type_name);
     var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     try instr.incoming.append(Incoming { block: left_block, value: left });
     try instr.incoming.append(Incoming { block: right_block, value: right });
     let _ = try self.module.add_instr(block, move instr);
@@ -1030,7 +1030,7 @@ fn (self: &var Lowerer) add_phi2(
 fn (self: &var Lowerer) add_open_phi(block: Block, type_name: Name, incoming_block: Name, value: Value) -> !Instr {
     let result = try self.next(type_name);
     var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
-    errdefer instr.deinit();
+    errdefer instr.deinit(self.allocator);
     try instr.incoming.append(Incoming { block: incoming_block, value: value });
     return self.module.add_instr(block, move instr);
 }
@@ -1067,9 +1067,9 @@ fn (self: &var Lowerer) collect_assigned(
         }
     }
     var exprs = array::new<ast::Expression>(self.allocator);
-    defer exprs.deinit();
+    defer exprs.deinit(self.allocator);
     var stmts = array::new<ast::Statement>(self.allocator);
-    defer stmts.deinit();
+    defer stmts.deinit(self.allocator);
     if !try statement_children(tree, statement, &var exprs, &var stmts) {
         let kind = try self.name(statement_go_type(tree, statement));
         return try self.fail1(tree, "ir error: loop analysis does not know statement `%s`", Arg::Str(kind));
@@ -1106,7 +1106,7 @@ fn (self: &var Lowerer) collect_assigned_expr(
         return self.collect_assigned_match(tree, expression, names);
     }
     var children = array::new<ast::Expression>(self.allocator);
-    defer children.deinit();
+    defer children.deinit(self.allocator);
     if !try expression_children(tree, expression, &var children) {
         let kind = try self.name(expression_go_type(tree, expression));
         return try self.fail1(tree, "ir error: loop analysis does not know expression `%s`", Arg::Str(kind));
@@ -1153,7 +1153,7 @@ fn (self: &var Lowerer) collect_assigned_match(
         return move failed;
     }
     let arms = try ownership::match_expr_arms(self.allocator, tree, expression);
-    defer arms.deinit();
+    defer arms.deinit(self.allocator);
     var index = 0;
     while arms.get(index) |arm| {
         index = index + 1;

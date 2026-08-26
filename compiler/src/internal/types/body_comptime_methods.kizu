@@ -41,7 +41,7 @@ fn (self: &var Checker) check_comptime_if_stmt(
         _ => {
             let got = try self.comptime_value_type(condition);
             var message = string::new(self.allocator);
-            errdefer message.deinit();
+            errdefer message.deinit(self.allocator);
             try message.append_bytes("if condition must be bool, got ");
             try self.append_checker_type(&var message, got);
             return try self.comptime_message(move message);
@@ -69,14 +69,14 @@ fn (self: &var Checker) check_comptime_for_stmt(
     out: &var bool
 ) -> !?diagnostic::Diagnostic {
     var fields = array::new<MetaFieldHandle>(self.allocator);
-    defer fields.deinit();
+    defer fields.deinit(self.allocator);
     if try self.comptime_for_fields(tree, statement.list, &var fields) |problem| {
         return move problem;
     }
     let retained_name = tree.texts.at(statement.name.node);
     let source_name = retained_name.as_bytes();
     let owned_name = try string::from_bytes(self.allocator, source_name);
-    defer owned_name.deinit();
+    defer owned_name.deinit(self.allocator);
     let previous_meta = self.meta_bindings.current;
     var returns = true;
     var index = 0;
@@ -115,7 +115,7 @@ fn (self: &var Checker) comptime_for_fields(
         Call(call) => match tree.expressions.at(call.callee.node) {
             TypeApply(applied) => {
                 if try qualified_name(self.allocator, tree, applied.callee) |name| {
-                    defer name.deinit();
+                    defer name.deinit(self.allocator);
                     return self.comptime_for_named_fields(
                         tree, call.args, applied.type_arg, &name, out
                     );
@@ -144,13 +144,13 @@ fn (self: &var Checker) comptime_for_named_fields(
     match identified.form {
         PublicFields => {
             let instantiated = try self.instantiate_type_arg_text(tree, type_arg);
-            defer instantiated.deinit();
+            defer instantiated.deinit(self.allocator);
             let argument_text = instantiated.as_bytes();
             return self.comptime_public_fields(tree, argument_text, out);
         },
         Variants => {
             let instantiated = try self.instantiate_type_arg_text(tree, type_arg);
-            defer instantiated.deinit();
+            defer instantiated.deinit(self.allocator);
             let argument_text = instantiated.as_bytes();
             return self.comptime_variants(tree, argument_text, out);
         },
@@ -201,7 +201,7 @@ fn (self: &var Checker) comptime_list_owner(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if try typ::split_args_optional(self.allocator, type_arg) |arguments| {
-        defer arguments.deinit();
+        defer arguments.deinit(self.allocator);
         if arguments.len() != 1 {
             return try self.comptime_form_error(form, "` expects 1 static argument");
         }
@@ -228,7 +228,7 @@ fn (self: &var Checker) variant_meta_fields(
     out: &var array::Array<MetaFieldHandle>
 ) -> !?diagnostic::Diagnostic {
     let owner_name = try self.types.copy_text(self.allocator, owner);
-    defer owner_name.deinit();
+    defer owner_name.deinit(self.allocator);
     let owner_bytes = owner_name.as_bytes();
     if self.metadata.enums_by_name.get(owner_bytes) |enum_handle| {
         var index = 0;
@@ -247,7 +247,7 @@ fn (self: &var Checker) variant_meta_fields(
     var index = 0;
     while index < count {
         if try self.copy_union_variant(union_handle, index) |variant| {
-            defer variant.deinit();
+            defer variant.deinit(self.allocator);
             let variant_name = variant.name.as_bytes();
             let handle = try self.retain_meta_field(owner, variant_name, variant.payload, true);
             try out.append(handle);
@@ -287,7 +287,7 @@ fn (self: &Checker) copy_union_variant(handle: UnionHandle, index: i64) -> !?Uni
 
 fn (self: &Checker) meta_variants_type_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("`std::meta::variants` expects an enum or union, got ");
     try self.append_checker_type(&var message, owner);
     return self.comptime_message(move message);
@@ -310,9 +310,9 @@ fn (self: &var Checker) check_comptime_match_stmt(
     }
     let owner = try self.types.borrowed_value_type(value_type);
     var variants = array::new<MetaFieldHandle>(self.allocator);
-    defer variants.deinit();
+    defer variants.deinit(self.allocator);
     if try self.variant_meta_fields(tree, owner, &var variants) |problem| {
-        problem.deinit();
+        problem.deinit(self.allocator);
         return try self.comptime_match_subject_error(value_type);
     }
     let binding_len = tree.texts.at(statement.binding.node).len();
@@ -345,7 +345,7 @@ fn (self: &Checker) expand_comptime_match(
     variants: &array::Array<MetaFieldHandle>
 ) -> !ast::Statement {
     var meta_variants = array::new<ast::MetaVariant>(self.allocator);
-    defer meta_variants.deinit();
+    defer meta_variants.deinit(self.allocator);
     var index = 0;
     while variants.get(index) |handle| {
         let field = self.meta_field_entries.at(handle.node);
@@ -358,7 +358,7 @@ fn (self: &Checker) expand_comptime_match(
         index = index + 1;
     }
     let owner_name = try self.types.copy_text(self.allocator, owner);
-    defer owner_name.deinit();
+    defer owner_name.deinit(self.allocator);
     let owner_bytes = owner_name.as_bytes();
     let owner_text = try tree.add_text_from_bytes(owner_bytes);
     let empty = tree.add_empty_text();
@@ -370,7 +370,7 @@ fn (self: &Checker) expand_comptime_match(
 
 fn (self: &Checker) comptime_match_subject_error(value_type: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("comptime match expects an enum or union, got ");
     try self.append_checker_type(&var message, value_type);
     return self.comptime_message(move message);
@@ -378,7 +378,7 @@ fn (self: &Checker) comptime_match_subject_error(value_type: Type) -> !diagnosti
 
 fn (self: &Checker) comptime_match_capture_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("comptime match on `");
     try self.append_checker_type(&var message, owner);
     try message.append_bytes(
@@ -425,7 +425,7 @@ fn (self: &var Checker) check_box_receiver_method(
         return self.check_box_std_method(tree, scope, elem, name, args, out);
     }
     let receiver_name = try self.types.copy_text(self.allocator, receiver);
-    defer receiver_name.deinit();
+    defer receiver_name.deinit(self.allocator);
     let receiver_text = receiver_name.as_bytes();
     if self.impl_method(receiver_text, name) |method| {
         return self.check_method_args(
@@ -451,7 +451,7 @@ fn (self: &var Checker) check_box_std_method(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     var type_args = array::new<Type>(self.allocator);
-    defer type_args.deinit();
+    defer type_args.deinit(self.allocator);
     try type_args.append(elem);
     return self.check_std_method(
         tree,
@@ -468,7 +468,7 @@ fn (self: &var Checker) check_box_std_method(
 
 fn (self: &Checker) box_local_receiver_error(name: []u8) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("`Box.");
     try message.append_bytes(name);
     try message.append_bytes("` requires local Box receiver");
@@ -510,7 +510,7 @@ fn (self: &var Checker) check_string_receiver_method(
             self.scopes.is_borrowed(scope, binding) and
             !self.scopes.is_mut_borrowed(scope, binding) {
             var message = string::new(self.allocator);
-            errdefer message.deinit();
+            errdefer message.deinit(self.allocator);
             try message.append_bytes("`String.");
             try message.append_bytes(name);
             try message.append_bytes("` requires mutable String receiver");
@@ -558,7 +558,7 @@ fn (self: &var Checker) check_string_method(
     if mem::equal_bytes(name, "as_bytes") or
         mem::equal_bytes(name, "as_mut_bytes") {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("`String.");
         try message.append_bytes(name);
         try message.append_bytes("` must be bound with `let name = string.");
@@ -566,10 +566,18 @@ fn (self: &var Checker) check_string_method(
         try message.append_bytes("()`");
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
-    if mem::equal_bytes(name, "clear") or
-        mem::equal_bytes(name, "deinit") {
+    if mem::equal_bytes(name, "clear") {
         if args.len(tree) != 0 {
             return try self.receiver_arity_error("String", name, 0, args.len(tree));
+        }
+        out.* = try self.types.void_type();
+        return null;
+    }
+    if mem::equal_bytes(name, "deinit") {
+        if try self.check_release_allocator(
+            tree, scope, "String", name, args, 0
+        ) |problem| {
+            return move problem;
         }
         out.* = try self.types.void_type();
         return null;
@@ -624,7 +632,7 @@ fn (self: &var Checker) check_string_mutator_arg(
 
 fn (self: &Checker) string_method_arg_count_error(name: []u8, got: i64) -> !diagnostic::Diagnostic {
     var label = string::new(self.allocator);
-    defer label.deinit();
+    defer label.deinit(self.allocator);
     try label.append_bytes("String.");
     try label.append_bytes(name);
     let label_bytes = label.as_bytes();
@@ -636,7 +644,7 @@ fn (self: &Checker) string_method_string_arg_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("`String.");
     try message.append_bytes(name);
     try message.append_bytes("` expects String, got ");
@@ -683,7 +691,7 @@ fn (self: &var Checker) check_arena_method(
         return self.check_arena_deinit(tree, scope, field, args, out);
     }
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_bytes("unknown arena method `");
     try message.append_bytes(name);
     try message.append_byte(cast<u8>(96));
@@ -811,8 +819,10 @@ fn (self: &var Checker) check_arena_deinit(
             );
         }
     }
-    if args.len(tree) != 0 {
-        return try self.named_arity_error("arena.deinit", 0, args.len(tree));
+    if try self.check_release_allocator(
+        tree, scope, "arena", "deinit", args, 0
+    ) |problem| {
+        return move problem;
     }
     out.* = try self.types.void_type();
     return null;
@@ -828,7 +838,7 @@ fn (self: &Checker) labeled_arg_type_error(
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
-    errdefer message.deinit();
+    errdefer message.deinit(self.allocator);
     try message.append_byte(cast<u8>(96));
     try message.append_bytes(label);
     try message.append_bytes("` expects ");
@@ -852,7 +862,7 @@ fn (self: &Checker) check_under_mark(
             "unsafe error", expression.span,
             "`unsafe` covers no operation that needs it"
         );
-        errdefer failure.deinit();
+        errdefer failure.deinit(self.allocator);
         try failure.with_code("unsafe.unused_marker");
         try failure.with_help("remove `unsafe`");
         return move failure;
@@ -864,7 +874,7 @@ fn (self: &Checker) check_under_mark(
             "unsafe error", expression.span,
             "`unsafe` needs a `// SAFETY:` comment on its statement"
         );
-        errdefer failure.deinit();
+        errdefer failure.deinit(self.allocator);
         try failure.with_code("unsafe.missing_safety_comment");
         try failure.with_help("write `// SAFETY: <why this holds>` on the line above");
         return move failure;
@@ -884,7 +894,7 @@ fn (self: &var Checker) check_function(
         return try self.checker_error_at(
         "type error", ast::zero_span(), "missing function metadata"
     );
-    defer facts.deinit();
+    defer facts.deinit(self.allocator);
     let body = facts.body orelse return null;
     let name = facts.name.as_bytes();
     if try self.check_main_return_type(name, facts.return_type) |problem| {
@@ -892,16 +902,16 @@ fn (self: &var Checker) check_function(
     }
     let root = self.scopes.new_scope(null);
     var static_values = map::new<[]u8, Type>(self.allocator);
-    errdefer static_values.deinit();
+    errdefer static_values.deinit(self.allocator);
     if try self.define_static_value_params(root, function, &var static_values) |problem| {
-        static_values.deinit();
+        static_values.deinit(self.allocator);
         return move problem;
     }
     let runtime_count = self.function_runtime_param_count(function);
     var index = 0;
     while index < runtime_count {
         if try self.copy_instance_param(function, index) |parameter| {
-            defer parameter.deinit();
+            defer parameter.deinit(self.allocator);
             let parameter_name = parameter.name.as_bytes();
             let defined = try self.define_scope_param(
                 root,
@@ -912,11 +922,11 @@ fn (self: &var Checker) check_function(
                 true
             );
             if try self.require_scope_definition(parameter_name, defined) |problem| {
-                static_values.deinit();
+                static_values.deinit(self.allocator);
                 return move problem;
             }
         } else {
-            static_values.deinit();
+            static_values.deinit(self.allocator);
             return try self.checker_error_at(
                 "type error",
                 ast::zero_span(),
@@ -948,7 +958,7 @@ fn (self: &var Checker) check_function(
     if !self.types.is_text(facts.return_type, "void") and
         !self.function_implicit_return(function) and !returns {
         var message = string::new(self.allocator);
-        errdefer message.deinit();
+        errdefer message.deinit(self.allocator);
         try message.append_bytes("function `");
         try message.append_bytes(name);
         try message.append_bytes("` must return ");
@@ -975,7 +985,7 @@ fn (self: &Checker) function_implicit_return(function: FunctionHandle) -> bool {
 // Collects the type-valued static parameter names of one cached signature.
 fn (self: &Checker) signature_type_params(function: FunctionHandle) -> !map::Map<[]u8, bool> {
     var names = map::new<[]u8, bool>(self.allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(self.allocator);
     if self.metadata.functions.at(function.index) |value| {
         var index = 0;
         while value.signature.static_params.at(index) |parameter| {
@@ -999,7 +1009,7 @@ fn (self: &var Checker) check_test_decl(
     let retained_name = tree.texts.at(test.name.node);
     let source_name = retained_name.as_bytes();
     var name = try string::from_bytes(self.allocator, "test ");
-    errdefer name.deinit();
+    errdefer name.deinit(self.allocator);
     try fmt::append_bytes_literal(&var name, source_name);
     let return_type = try self.types.intern("!void");
     let signature = FunctionSignatureType {
@@ -1032,6 +1042,6 @@ fn (self: &var Checker) check_test_decl(
 
 fn (self: &var Checker) discard_test_function() -> void {
     let removed = self.metadata.functions.pop_or_panic();
-    removed.deinit();
+    removed.deinit(self.allocator);
     return;
 }

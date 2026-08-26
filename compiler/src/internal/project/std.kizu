@@ -30,10 +30,10 @@ fn std_dir_name() -> []u8 {
 fn (self: &Loader) read_std_graph() -> !GraphResult {
     let lib_dir = self.lib_dir.as_bytes();
     let dir = try path::join(self.allocator, lib_dir, std_dir_name());
-    defer dir.deinit();
+    defer dir.deinit(self.allocator);
     let dir_bytes = dir.as_bytes();
     let manifest_path = try path::join(self.allocator, dir_bytes, manifest_file_name());
-    defer manifest_path.deinit();
+    defer manifest_path.deinit(self.allocator);
     let manifest_path_bytes = manifest_path.as_bytes();
     let exists = try fs::exists(self.io, manifest_path_bytes);
     if !exists {
@@ -45,12 +45,12 @@ fn (self: &Loader) read_std_graph() -> !GraphResult {
         manifest_path_bytes,
         mem::Limit::Unlimited
     );
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     let text_bytes = text.as_bytes();
     let outcome_1 = try manifest::parse_std_manifest(self.allocator, text_bytes);
     match outcome_1 {
         Manifest(parsed) => {
-            defer parsed.deinit();
+            defer parsed.deinit(self.allocator);
             return resolve_modules(self.io, self.allocator, dir_bytes, &parsed);
         },
         Error(message) => {
@@ -63,7 +63,7 @@ fn (self: &Loader) read_std_graph() -> !GraphResult {
 /// reader can point the compiler somewhere else.
 fn (self: &Loader) missing_lib_file(file: []u8) -> !diagnostic::Diagnostic {
     var text = string::new(self.allocator);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     try text.append_bytes("open ");
     try text.append_bytes(file);
     try text.append_bytes(": no such file or directory");
@@ -124,7 +124,7 @@ fn (self: &Loader) std_modules_for(
         visited: map::new<[]u8, bool>(self.allocator),
         out: array::new<string::String>(self.allocator)
     };
-    defer loader.deinit();
+    defer loader.deinit(self.allocator);
     var index = 0;
     while graph.modules.at(index) |module| {
         index = index + 1;
@@ -139,7 +139,7 @@ fn (self: &Loader) std_modules_for(
         index = index + 1;
         let import_bytes = import_path.as_bytes();
         let wanted = try loader.named(import_bytes);
-        defer wanted.deinit();
+        defer wanted.deinit(self.allocator);
         var wanted_index = 0;
         while wanted.at(wanted_index) |module_path| {
             wanted_index = wanted_index + 1;
@@ -148,7 +148,7 @@ fn (self: &Loader) std_modules_for(
         }
     }
     var modules = array::new<Module>(self.allocator);
-    errdefer modules.deinit();
+    errdefer modules.deinit(self.allocator);
     index = 0;
     while loader.out.at(index) |module_path| {
         index = index + 1;
@@ -169,14 +169,14 @@ fn (self: &Loader) std_modules_for(
 /// Copies one module record with allocator.
 fn clone_module(allocator: Allocator, module: &Module) -> !Module {
     var files = array::new<string::String>(allocator);
-    errdefer files.deinit();
+    errdefer files.deinit(allocator);
     var index = 0;
     while module.files.at(index) |file| {
         try files.append(try copy_string(allocator, file));
         index = index + 1;
     }
     var test_files = array::new<string::String>(allocator);
-    errdefer test_files.deinit();
+    errdefer test_files.deinit(allocator);
     index = 0;
     while module.test_files.at(index) |file| {
         try test_files.append(try copy_string(allocator, file));
@@ -194,7 +194,7 @@ fn clone_module(allocator: Allocator, module: &Module) -> !Module {
 /// path through the root can spell.
 fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> {
     var wanted = array::new<string::String>(self.allocator);
-    errdefer wanted.deinit();
+    errdefer wanted.deinit(self.allocator);
     if mem::equal_bytes(import_path, std_root()) {
         var index = 0;
         while self.paths.at(index) |module_path| {
@@ -240,9 +240,9 @@ fn (self: &var StdLoader) visit(
             file_index = file_index + 1;
             let file_bytes = file.as_bytes();
             let text = try fs::read_file(self.io, self.allocator, file_bytes, mem::Limit::Unlimited);
-            errdefer text.deinit();
+            errdefer text.deinit(self.allocator);
             let dependencies = try self.references(&text);
-            defer dependencies.deinit();
+            defer dependencies.deinit(self.allocator);
             try sources.insert(file_bytes, move text);
             var dependency_index = 0;
             while dependencies.at(dependency_index) |dependency| {
@@ -261,9 +261,9 @@ fn (self: &var StdLoader) visit(
 fn (self: &StdLoader) references(text: &string::String) -> !array::Array<string::String> {
     let text_bytes = text.as_bytes();
     var seen = try scan_std_paths(self.allocator, text_bytes);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     var modules = array::new<string::String>(self.allocator);
-    errdefer modules.deinit();
+    errdefer modules.deinit(self.allocator);
     var index = 0;
     while self.paths.at(index) |module_path| {
         index = index + 1;
@@ -279,12 +279,12 @@ fn (self: &StdLoader) references(text: &string::String) -> !array::Array<string:
 /// literals and comments by reading tokens rather than text.
 fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
     var seen = map::new<[]u8, bool>(allocator);
-    errdefer seen.deinit();
+    errdefer seen.deinit(allocator);
     var scanner = lexer::new(allocator, text);
-    defer scanner.deinit();
+    defer scanner.deinit(allocator);
     while true {
         let current = try scanner.next_token();
-        defer current.deinit();
+        defer current.deinit(allocator);
         if current.kind == token::Kind::Eof {
             return move seen;
         }
@@ -295,16 +295,16 @@ fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
         // is a module this source could be built on, and the last segment names
         // an item.
         var prefix = try string::from_bytes(allocator, std_root());
-        defer prefix.deinit();
+        defer prefix.deinit(allocator);
         var segments = 1;
         while true {
             let separator = try scanner.next_token();
-            defer separator.deinit();
+            defer separator.deinit(allocator);
             if separator.kind != token::Kind::DoubleColon {
                 break;
             }
             let part = try scanner.next_token();
-            defer part.deinit();
+            defer part.deinit(allocator);
             if part.kind != token::Kind::Ident {
                 break;
             }
@@ -325,14 +325,14 @@ fn (self: &var Loader) load_std(tree: &var ast::Ast) -> !?diagnostic::Diagnostic
     let outcome_2 = try self.read_std_graph();
     match outcome_2 {
         Graph(graph) => {
-            defer graph.deinit();
+            defer graph.deinit(self.allocator);
             try self.remember_std_modules(&graph);
             let imports = try self.std_import_paths(tree);
-            defer imports.deinit();
+            defer imports.deinit(self.allocator);
             var std_sources = map::new<[]u8, string::String>(self.allocator);
-            defer std_sources.deinit();
+            defer std_sources.deinit(self.allocator);
             let std_graph = try self.std_modules_for(&graph, &imports, &var std_sources);
-            defer std_graph.deinit();
+            defer std_graph.deinit(self.allocator);
             // The walk that decided which modules to load already read them,
             // so the parse takes that text rather than opening the same files
             // again.
@@ -347,11 +347,11 @@ fn (self: &var Loader) load_std(tree: &var ast::Ast) -> !?diagnostic::Diagnostic
 /// stable order.
 fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
-    defer seen.deinit();
+    defer seen.deinit(self.allocator);
     var paths = array::new<string::String>(self.allocator);
-    errdefer paths.deinit();
+    errdefer paths.deinit(self.allocator);
     let groups = try self.sorted_module_groups();
-    defer groups.deinit();
+    defer groups.deinit(self.allocator);
     var group_index = 0;
     while groups.at(group_index) |group_handle| {
         group_index = group_index + 1;
@@ -369,9 +369,9 @@ fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::St
                             continue;
                         }
                         let joined = try join_import_path(self.allocator, tree, value);
-                        errdefer joined.deinit();
+                        errdefer joined.deinit(self.allocator);
                         if set_contains(&seen, &joined) {
-                            joined.deinit();
+                            joined.deinit(self.allocator);
                         } else {
                             try set_insert(&var seen, &joined);
                             try paths.append(move joined);
@@ -401,7 +401,7 @@ pub fn join_import_path(
     value: &ast::ImportDecl
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while value.path.at(index) |segment| {
         if index > 0 {
@@ -423,7 +423,7 @@ fn (self: &var Loader) add_source_overrides(
     while sources.key_at(index) |key| {
         index = index + 1;
         let cleaned = try path::clean(self.allocator, key);
-        defer cleaned.deinit();
+        defer cleaned.deinit(self.allocator);
         let cleaned_bytes = cleaned.as_bytes();
         if sources.at(key) |text| {
             try self.source_overrides.insert(cleaned_bytes, try copy_string(self.allocator, text));
@@ -460,22 +460,22 @@ pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
     match outcome {
         Error(failed) => return StdErrorCodesResult::Error(move failed),
         Graph(graph) => {
-            defer graph.deinit();
+            defer graph.deinit(self.allocator);
             var sets = map::new<[]u8, map::Map<[]u8, i64>>(self.allocator);
-            errdefer sets.deinit();
+            errdefer sets.deinit(self.allocator);
             var code = 1;
             var index = 0;
             while graph.modules.at(index) |module| {
                 index = index + 1;
                 let files = try module.source_files(self.allocator, false);
-                defer files.deinit();
+                defer files.deinit(self.allocator);
                 var file_index = 0;
                 while files.at(file_index) |file| {
                     file_index = file_index + 1;
                     let file_bytes = file.as_bytes();
                     let module_path = module.path.as_bytes();
                     if try self.collect_error_sets(file_bytes, module_path, &var sets, &var code) |failed| {
-                        sets.deinit();
+                        sets.deinit(self.allocator);
                         return StdErrorCodesResult::Error(move failed);
                     }
                 }
@@ -494,15 +494,15 @@ fn (self: &Loader) collect_error_sets(
     code: &var i64
 ) -> !?diagnostic::Diagnostic {
     let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
-    defer text.deinit();
+    defer text.deinit(self.allocator);
     var tree = ast::new(self.allocator);
-    defer tree.deinit();
+    defer tree.deinit(self.allocator);
     let bytes = text.as_bytes();
     let scanner = lexer::new(self.allocator, bytes);
     var source_parser = try parser::new(self.allocator, move scanner);
-    defer source_parser.deinit();
+    defer source_parser.deinit(self.allocator);
     let program = try source_parser.parse_program(&var tree);
-    defer program.deinit();
+    defer program.deinit(self.allocator);
     if source_parser.diagnostic(0) |first| {
         return try first.clone(self.allocator);
     }
@@ -512,7 +512,7 @@ fn (self: &Loader) collect_error_sets(
         match tree.declarations.at(declaration.node) {
             ErrorSet(set) => {
                 var members = map::new<[]u8, i64>(self.allocator);
-                errdefer members.deinit();
+                errdefer members.deinit(self.allocator);
                 var member_index = 0;
                 while set.members.at(member_index) |member| {
                     member_index = member_index + 1;
@@ -522,7 +522,7 @@ fn (self: &Loader) collect_error_sets(
                     code.* = code.* + 1;
                 }
                 var qualified = try string::from_bytes(self.allocator, module_path);
-                defer qualified.deinit();
+                defer qualified.deinit(self.allocator);
                 try qualified.append_bytes("::");
                 let set_name = tree.texts.at(set.name.node);
                 try qualified.append_string(set_name);

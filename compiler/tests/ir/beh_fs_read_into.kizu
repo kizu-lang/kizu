@@ -12,7 +12,7 @@ test "read_file returns the file as an owned String" {
     let allocator = mem::page_allocator();
     let text = try fs::read_file(
         stdio, allocator, "examples/fixtures/config.txt", mem::Limit::Unlimited);
-    defer text.deinit();
+    defer text.deinit(allocator);
     testing::expect_equal<i64>(16, text.len());
     try text.truncate(15);
     let view = text.as_bytes();
@@ -24,7 +24,7 @@ test "read_file under an explicit byte ceiling succeeds" {
     let allocator = mem::page_allocator();
     let text = try fs::read_file(
         stdio, allocator, "examples/fixtures/config.txt", mem::Limit::Bytes(1024));
-    defer text.deinit();
+    defer text.deinit(allocator);
     testing::expect_equal<i64>(16, text.len());
 }
 
@@ -32,7 +32,7 @@ test "read_file_into appends to the caller buffer without fs allocation" {
     let stdio = io::blocking();
     let allocator = mem::page_allocator();
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try out.append_bytes("head:");
     try fs::read_file_into(stdio, "examples/fixtures/config.txt", &var out);
     testing::expect_equal<i64>(21, out.len());
@@ -40,7 +40,6 @@ test "read_file_into appends to the caller buffer without fs allocation" {
     let view = out.as_bytes();
     testing::expect_equal<[]u8>("head:kizu fs fixture", view);
 }
-
 
 // ir
 // lower:
@@ -60,13 +59,13 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %12: i64 = const 15
 //   %13: std::string::Error!void = call.std::string::String.truncate %7: &var std::string::String, %12: i64
 //   %14: std::string::String = ref.load %7: &var std::string::String
-//   error.try %13: std::string::Error!void, cleanup call.std::string::String.deinit %14: std::string::String
+//   error.try %13: std::string::Error!void, cleanup call.std::string::String.deinit %14: std::string::String, %2: Allocator
 //   %16: std::string::String = ref.load %7: &var std::string::String
 //   %17: []u8 = call.std::string::String.as_bytes %16: std::string::String
 //   %18: []u8 = const "kizu fs fixture"
 //   test.expect_equal %18: []u8, %17: []u8, []u8
 //   %20: std::string::String = ref.load %7: &var std::string::String
-//   call.std::string::String.deinit %20: std::string::String
+//   call.std::string::String.deinit %20: std::string::String, %2: Allocator
 //   %22: !void = error.ok
 //   return %22: !void
 // }
@@ -82,7 +81,7 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %8: i64 = const 16
 //   %9: i64 = call.std::string::String.len %7: std::string::String
 //   test.expect_equal %8: i64, %9: i64, i64
-//   call.std::string::String.deinit %7: std::string::String
+//   call.std::string::String.deinit %7: std::string::String, %2: Allocator
 //   %12: !void = error.ok
 //   return %12: !void
 // }
@@ -95,11 +94,11 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %5: []u8 = const "head:"
 //   %6: std::mem::Error!void = call.std::string::String.append_bytes %4: &var std::string::String, %5: []u8
 //   %7: std::string::String = ref.load %4: &var std::string::String
-//   error.try %6: std::mem::Error!void, cleanup call.std::string::String.deinit %7: std::string::String
+//   error.try %6: std::mem::Error!void, cleanup call.std::string::String.deinit %7: std::string::String, %2: Allocator
 //   %9: []u8 = const "examples/fixtures/config.txt"
 //   %10: std::fs::Error!void = call.std::fs::read_file_into %1: Io, %9: []u8, %4: &var std::string::String
 //   %11: std::string::String = ref.load %4: &var std::string::String
-//   error.try %10: std::fs::Error!void, cleanup call.std::string::String.deinit %11: std::string::String
+//   error.try %10: std::fs::Error!void, cleanup call.std::string::String.deinit %11: std::string::String, %2: Allocator
 //   %13: i64 = const 21
 //   %14: std::string::String = ref.load %4: &var std::string::String
 //   %15: i64 = call.std::string::String.len %14: std::string::String
@@ -107,13 +106,13 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %17: i64 = const 20
 //   %18: std::string::Error!void = call.std::string::String.truncate %4: &var std::string::String, %17: i64
 //   %19: std::string::String = ref.load %4: &var std::string::String
-//   error.try %18: std::string::Error!void, cleanup call.std::string::String.deinit %19: std::string::String
+//   error.try %18: std::string::Error!void, cleanup call.std::string::String.deinit %19: std::string::String, %2: Allocator
 //   %21: std::string::String = ref.load %4: &var std::string::String
 //   %22: []u8 = call.std::string::String.as_bytes %21: std::string::String
 //   %23: []u8 = const "head:kizu fs fixture"
 //   test.expect_equal %23: []u8, %22: []u8, []u8
 //   %25: std::string::String = ref.load %4: &var std::string::String
-//   call.std::string::String.deinit %25: std::string::String
+//   call.std::string::String.deinit %25: std::string::String, %2: Allocator
 //   %27: !void = error.ok
 //   return %27: !void
 // }
@@ -134,13 +133,13 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %12: i64 = const 15
 //   %13: std::string::Error!void = call.std::string::String.truncate %7: &var std::string::String, %12: i64
 //   %14: std::string::String = ref.load %7: &var std::string::String
-//   error.try %13: std::string::Error!void, cleanup call.std::string::String.deinit %14: std::string::String
+//   error.try %13: std::string::Error!void, cleanup call.std::string::String.deinit %14: std::string::String, %2: Allocator
 //   %16: std::string::String = ref.load %7: &var std::string::String
 //   %17: []u8 = call.std::string::String.as_bytes %16: std::string::String
 //   %18: []u8 = const "kizu fs fixture"
 //   test.expect_equal %18: []u8, %17: []u8, []u8
 //   %20: std::string::String = ref.load %7: &var std::string::String
-//   call.std::string::String.deinit %20: std::string::String
+//   call.std::string::String.deinit %20: std::string::String, %2: Allocator
 //   %22: !void = error.ok
 //   return %22: !void
 // }
@@ -156,7 +155,7 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %8: i64 = const 16
 //   %9: i64 = call.std::string::String.len %7: std::string::String
 //   test.expect_equal %8: i64, %9: i64, i64
-//   call.std::string::String.deinit %7: std::string::String
+//   call.std::string::String.deinit %7: std::string::String, %2: Allocator
 //   %12: !void = error.ok
 //   return %12: !void
 // }
@@ -169,11 +168,11 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %5: []u8 = const "head:"
 //   %6: std::mem::Error!void = call.std::string::String.append_bytes %4: &var std::string::String, %5: []u8
 //   %7: std::string::String = ref.load %4: &var std::string::String
-//   error.try %6: std::mem::Error!void, cleanup call.std::string::String.deinit %7: std::string::String
+//   error.try %6: std::mem::Error!void, cleanup call.std::string::String.deinit %7: std::string::String, %2: Allocator
 //   %9: []u8 = const "examples/fixtures/config.txt"
 //   %10: std::fs::Error!void = call.std::fs::read_file_into %1: Io, %9: []u8, %4: &var std::string::String
 //   %11: std::string::String = ref.load %4: &var std::string::String
-//   error.try %10: std::fs::Error!void, cleanup call.std::string::String.deinit %11: std::string::String
+//   error.try %10: std::fs::Error!void, cleanup call.std::string::String.deinit %11: std::string::String, %2: Allocator
 //   %13: i64 = const 21
 //   %14: std::string::String = ref.load %4: &var std::string::String
 //   %15: i64 = call.std::string::String.len %14: std::string::String
@@ -181,13 +180,13 @@ test "read_file_into appends to the caller buffer without fs allocation" {
 //   %17: i64 = const 20
 //   %18: std::string::Error!void = call.std::string::String.truncate %4: &var std::string::String, %17: i64
 //   %19: std::string::String = ref.load %4: &var std::string::String
-//   error.try %18: std::string::Error!void, cleanup call.std::string::String.deinit %19: std::string::String
+//   error.try %18: std::string::Error!void, cleanup call.std::string::String.deinit %19: std::string::String, %2: Allocator
 //   %21: std::string::String = ref.load %4: &var std::string::String
 //   %22: []u8 = call.std::string::String.as_bytes %21: std::string::String
 //   %23: []u8 = const "head:kizu fs fixture"
 //   test.expect_equal %23: []u8, %22: []u8, []u8
 //   %25: std::string::String = ref.load %4: &var std::string::String
-//   call.std::string::String.deinit %25: std::string::String
+//   call.std::string::String.deinit %25: std::string::String, %2: Allocator
 //   %27: !void = error.ok
 //   return %27: !void
 // }

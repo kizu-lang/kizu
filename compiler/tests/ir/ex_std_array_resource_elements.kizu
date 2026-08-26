@@ -20,7 +20,7 @@ union Slot {
 // release the partial array, the success return moves it out.
 fn make_holder(allocator: Allocator) -> !Holder {
     let inner = array::new<i64>(allocator);
-    errdefer inner.deinit();
+    errdefer inner.deinit(allocator);
     try inner.append(7);
     return Holder { values: move inner };
 }
@@ -28,15 +28,15 @@ fn make_holder(allocator: Allocator) -> !Holder {
 fn main() -> !void {
     let allocator = mem::page_allocator();
     let users = arena::new<User>(allocator);
-    defer users.deinit();
+    defer users.deinit(allocator);
     let handles = array::new<arena::Handle<User>>(allocator);
-    defer handles.deinit();
+    defer handles.deinit(allocator);
     let maps = array::new<map::Map<[]u8, i64>>(allocator);
-    defer maps.deinit();
+    defer maps.deinit(allocator);
     let holders = array::new<Holder>(allocator);
-    defer holders.deinit();
+    defer holders.deinit(allocator);
     let slots = array::new<Slot>(allocator);
-    defer slots.deinit();
+    defer slots.deinit(allocator);
 
     let alice = users.add(User { name: "alice" });
     try handles.append(alice);
@@ -45,12 +45,12 @@ fn main() -> !void {
     let table = map::new<[]u8, i64>(allocator);
     try maps.append(move table);
     let moved_table = maps.pop_or_panic();
-    moved_table.deinit();
+    moved_table.deinit(allocator);
 
     try holders.append(try make_holder(allocator));
     let holder = holders.pop_or_panic();
     print(holder.values.get_or_panic(0));
-    holder.deinit();
+    holder.deinit(allocator);
 
     let bob = users.add(User { name: "bob" });
     try slots.append(Slot::UserHandle(bob));
@@ -64,7 +64,6 @@ fn main() -> !void {
 // 1
 // 7
 // 1
-
 
 // ir
 // lower:
@@ -101,7 +100,7 @@ fn main() -> !void {
 //   %16: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %17: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %18: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %14: std::mem::Error!void, cleanup array.deinit %15: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %16: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %17: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %18: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %14: std::mem::Error!void, cleanup array.deinit %15: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %16: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %17: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %18: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %20: i64 = call.std::array::Array.len.std_3a_3aarena_3a_3aHandle_3cUser_3e %4: &var std::array::Array<std::arena::Handle<User>>
 //   call.print %20: i64
 //   %22: std::map::Map<[]u8, i64> = map.new %1: Allocator
@@ -110,27 +109,27 @@ fn main() -> !void {
 //   %25: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %26: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %27: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %23: std::mem::Error!void, cleanup array.deinit %24: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %25: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %26: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %27: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %23: std::mem::Error!void, cleanup array.deinit %24: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %25: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %26: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %27: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %29: std::map::Map<[]u8, i64> = call.std::array::Array.pop_or_panic.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %6: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   call.std::map::Map.deinit._5b_5du8.i64 %29: std::map::Map<[]u8, i64>
+//   call.std::map::Map.deinit._5b_5du8.i64 %29: std::map::Map<[]u8, i64>, %1: Allocator
 //   %31: !Holder = call.make_holder %1: Allocator
 //   %32: std::array::Array<Slot> = ref.load %10: &var std::array::Array<Slot>
 //   %33: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %34: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %35: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   %36: Holder = error.try %31: !Holder, cleanup array.deinit %32: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %33: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %34: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %35: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   %36: Holder = error.try %31: !Holder, cleanup array.deinit %32: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %33: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %34: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %35: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %37: std::mem::Error!void = call.std::array::Array.append.Holder %8: &var std::array::Array<Holder>, %36: Holder
 //   %38: std::array::Array<Slot> = ref.load %10: &var std::array::Array<Slot>
 //   %39: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %40: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %41: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %37: std::mem::Error!void, cleanup array.deinit %38: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %39: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %40: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %41: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %37: std::mem::Error!void, cleanup array.deinit %38: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %39: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %40: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %41: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %43: Holder = call.std::array::Array.pop_or_panic.Holder %8: &var std::array::Array<Holder>
 //   %44: std::array::Array<i64> = field.values %43: Holder
 //   %45: i64 = const 0
 //   %46: i64 = call.std::array::Array.get_or_panic.i64 %44: std::array::Array<i64>, %45: i64
 //   call.print %46: i64
-//   call.Holder.deinit %43: Holder
+//   call.Holder.deinit %43: Holder, %1: Allocator
 //   %49: []u8 = const "bob"
 //   %50: User = struct.new {name: %49: []u8}
 //   %51: std::arena::Handle<User> = arena.add %2: std::arena::Arena<User>, %50: User
@@ -140,25 +139,25 @@ fn main() -> !void {
 //   %55: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %56: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %57: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %53: std::mem::Error!void, cleanup array.deinit %54: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %55: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %56: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %57: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %53: std::mem::Error!void, cleanup array.deinit %54: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %55: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %56: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %57: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %59: i64 = call.std::array::Array.len.Slot %10: &var std::array::Array<Slot>
 //   call.print %59: i64
 //   %61: std::array::Array<Slot> = ref.load %10: &var std::array::Array<Slot>
 //   array.deinit %61: std::array::Array<Slot>
 //   %63: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
-//   call.std::array::Array.deinit.Holder %63: std::array::Array<Holder>
+//   call.std::array::Array.deinit.Holder %63: std::array::Array<Holder>, %1: Allocator
 //   %65: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %65: std::array::Array<std::map::Map<[]u8, i64>>
+//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %65: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %67: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
 //   array.deinit %67: std::array::Array<std::arena::Handle<User>>
 //   arena.deinit %2: std::arena::Arena<User>
 //   %70: !void = error.ok
 //   return %70: !void
 // }
-// fn Holder.deinit(%self: Holder) -> void {
+// fn Holder.deinit(%self: Holder, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.values %self: Holder
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }
 // opt:
@@ -195,7 +194,7 @@ fn main() -> !void {
 //   %16: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %17: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %18: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %14: std::mem::Error!void, cleanup array.deinit %15: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %16: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %17: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %18: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %14: std::mem::Error!void, cleanup array.deinit %15: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %16: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %17: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %18: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %20: i64 = call.std::array::Array.len.std_3a_3aarena_3a_3aHandle_3cUser_3e %4: &var std::array::Array<std::arena::Handle<User>>
 //   call.print %20: i64
 //   %22: std::map::Map<[]u8, i64> = map.new %1: Allocator
@@ -204,27 +203,27 @@ fn main() -> !void {
 //   %25: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %26: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %27: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %23: std::mem::Error!void, cleanup array.deinit %24: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %25: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %26: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %27: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %23: std::mem::Error!void, cleanup array.deinit %24: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %25: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %26: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %27: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %29: std::map::Map<[]u8, i64> = call.std::array::Array.pop_or_panic.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %6: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   call.std::map::Map.deinit._5b_5du8.i64 %29: std::map::Map<[]u8, i64>
+//   call.std::map::Map.deinit._5b_5du8.i64 %29: std::map::Map<[]u8, i64>, %1: Allocator
 //   %31: !Holder = call.make_holder %1: Allocator
 //   %32: std::array::Array<Slot> = ref.load %10: &var std::array::Array<Slot>
 //   %33: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %34: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %35: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   %36: Holder = error.try %31: !Holder, cleanup array.deinit %32: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %33: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %34: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %35: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   %36: Holder = error.try %31: !Holder, cleanup array.deinit %32: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %33: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %34: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %35: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %37: std::mem::Error!void = call.std::array::Array.append.Holder %8: &var std::array::Array<Holder>, %36: Holder
 //   %38: std::array::Array<Slot> = ref.load %10: &var std::array::Array<Slot>
 //   %39: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %40: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %41: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %37: std::mem::Error!void, cleanup array.deinit %38: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %39: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %40: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %41: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %37: std::mem::Error!void, cleanup array.deinit %38: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %39: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %40: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %41: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %43: Holder = call.std::array::Array.pop_or_panic.Holder %8: &var std::array::Array<Holder>
 //   %44: std::array::Array<i64> = field.values %43: Holder
 //   %45: i64 = const 0
 //   %46: i64 = call.std::array::Array.get_or_panic.i64 %44: std::array::Array<i64>, %45: i64
 //   call.print %46: i64
-//   call.Holder.deinit %43: Holder
+//   call.Holder.deinit %43: Holder, %1: Allocator
 //   %49: []u8 = const "bob"
 //   %50: User = struct.new {name: %49: []u8}
 //   %51: std::arena::Handle<User> = arena.add %2: std::arena::Arena<User>, %50: User
@@ -234,24 +233,24 @@ fn main() -> !void {
 //   %55: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
 //   %56: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   %57: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
-//   error.try %53: std::mem::Error!void, cleanup array.deinit %54: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %55: std::array::Array<Holder>; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %56: std::array::Array<std::map::Map<[]u8, i64>>; array.deinit %57: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
+//   error.try %53: std::mem::Error!void, cleanup array.deinit %54: std::array::Array<Slot>; call.std::array::Array.deinit.Holder %55: std::array::Array<Holder>, %1: Allocator; call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %56: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator; array.deinit %57: std::array::Array<std::arena::Handle<User>>; arena.deinit %2: std::arena::Arena<User>
 //   %59: i64 = call.std::array::Array.len.Slot %10: &var std::array::Array<Slot>
 //   call.print %59: i64
 //   %61: std::array::Array<Slot> = ref.load %10: &var std::array::Array<Slot>
 //   array.deinit %61: std::array::Array<Slot>
 //   %63: std::array::Array<Holder> = ref.load %8: &var std::array::Array<Holder>
-//   call.std::array::Array.deinit.Holder %63: std::array::Array<Holder>
+//   call.std::array::Array.deinit.Holder %63: std::array::Array<Holder>, %1: Allocator
 //   %65: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %6: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %65: std::array::Array<std::map::Map<[]u8, i64>>
+//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %65: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %67: std::array::Array<std::arena::Handle<User>> = ref.load %4: &var std::array::Array<std::arena::Handle<User>>
 //   array.deinit %67: std::array::Array<std::arena::Handle<User>>
 //   arena.deinit %2: std::arena::Arena<User>
 //   %70: !void = error.ok
 //   return %70: !void
 // }
-// fn Holder.deinit(%self: Holder) -> void {
+// fn Holder.deinit(%self: Holder, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.values %self: Holder
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }

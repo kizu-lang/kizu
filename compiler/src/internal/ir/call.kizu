@@ -271,7 +271,7 @@ fn (self: &var Lowerer) lower_allocator_from(
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
     var values = array::new<Value>(self.allocator);
-    defer values.deinit();
+    defer values.deinit(self.allocator);
     var index = 0;
     while ownership::arg_at(tree, args, index) |arg| {
         var want = empty_name();
@@ -294,7 +294,7 @@ fn (self: &var Lowerer) lower_allocator_from(
 /// Spells `&var T` for the state an allocator is built from.
 fn (self: &var Lowerer) borrowed_state_name(state: Name) -> !Name {
     var text = try string::from_bytes(self.allocator, "&var ");
-    errdefer text.deinit();
+    errdefer text.deinit(self.allocator);
     try self.module.names.append_to(&var text, state);
     return self.module.names.intern_owned(move text);
 }
@@ -325,7 +325,7 @@ fn (self: &var Lowerer) lower_func_pointer_call(
     }
     handled.* = true;
     var args = array::new<Value>(self.allocator);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     try args.append(callee);
     var index = 0;
     while ownership::arg_at(tree, call.args, index) |argument| {
@@ -386,7 +386,7 @@ fn (self: &var Lowerer) lower_named_call_expr(
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
     var args = array::new<Value>(self.allocator);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if try self.lower_call_args(tree, name, raw_args, &var args) |failed| {
         return move failed;
     }
@@ -410,7 +410,7 @@ fn (self: &var Lowerer) lower_named_call_expr(
         ret = self.signature_return(signature);
     } else {
         let name_copy = try self.module.names.copy(name);
-        defer name_copy.deinit();
+        defer name_copy.deinit(self.allocator);
         let bytes = name_copy.as_bytes();
         if stdprim::simple_core_signature(bytes) |core| {
             ret = try self.name(core.return_type);
@@ -465,7 +465,7 @@ fn (self: &var Lowerer) lower_typed_named_call_expr(
             return move failed;
         }
         var args = array::new<Value>(self.allocator);
-        defer args.deinit();
+        defer args.deinit(self.allocator);
         if try self.lower_call_args_as(tree, params, raw_args, &var args) |failed| {
             return move failed;
         }
@@ -490,7 +490,7 @@ fn (self: &var Lowerer) lower_typed_named_call_expr(
         return move failed;
     }
     var args = array::new<Value>(self.allocator);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if try self.lower_call_args_as(tree, params_of(instance.signature), raw_args, &var args) |failed| {
         return move failed;
     }
@@ -532,7 +532,7 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
         let elem = try self.resolve_bound_type(type_arg);
         let named = try self.array_primitive_param_types(array_shape, elem);
         var args = array::new<Value>(self.allocator);
-        defer args.deinit();
+        defer args.deinit(self.allocator);
         if try self.lower_call_args_named(tree, named, raw_args, &var args) |failed| {
             return move failed;
         }
@@ -541,7 +541,7 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     if map_op |op| {
         handled.* = true;
         var args = array::new<Value>(self.allocator);
-        defer args.deinit();
+        defer args.deinit(self.allocator);
         if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
             return move failed;
         }
@@ -559,7 +559,7 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     if box_op |op| {
         handled.* = true;
         var args = array::new<Value>(self.allocator);
-        defer args.deinit();
+        defer args.deinit(self.allocator);
         if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
             return move failed;
         }
@@ -569,7 +569,7 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     if arena_op |op| {
         handled.* = true;
         var args = array::new<Value>(self.allocator);
-        defer args.deinit();
+        defer args.deinit(self.allocator);
         if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
             return move failed;
         }
@@ -738,7 +738,7 @@ fn (self: &var Lowerer) lower_try_expr(
     // receiver is loaded here: Cleanup args are always values, never `&var`
     // slots, and no backend has to re-derive that rule.
     var cleanups = array::new<Cleanup>(self.allocator);
-    defer cleanups.deinit();
+    defer cleanups.deinit(self.allocator);
     try self.error_cleanups(&var cleanups);
     try self.retire_cleanups_for_try(expression, &var cleanups);
     var index = 0;
@@ -825,12 +825,12 @@ fn (self: &var Lowerer) lower_method_call_expr(
         return move failed;
     }
     var lowered = array::new<Value>(self.allocator);
-    defer lowered.deinit();
+    defer lowered.deinit(self.allocator);
     if try self.lower_call_args_as(tree, params, args, &var lowered) |failed| {
         return move failed;
     }
     var all_args = array::new<Value>(self.allocator);
-    defer all_args.deinit();
+    defer all_args.deinit(self.allocator);
     try all_args.append(receiver);
     var index = 0;
     while lowered.get(index) |arg| {
@@ -869,7 +869,16 @@ fn (self: &var Lowerer) lower_resolved_method(
         if self.is_owner_type(elem) {
             return self.lower_std_container_method(tree, "std::arena::Arena", method, elem, args, out);
         }
-        return self.lower_arena_method(tree, method, receiver_type, args, out);
+        // Plain elements have no cleanup loop, so the release is the runtime
+        // op. The arena header still keeps the allocator the op frees
+        // through, so the one the call names goes no further than the check
+        // of it (ADR-0132).
+        var receiver_only = array::new<Value>(self.allocator);
+        defer receiver_only.deinit(self.allocator);
+        if args.get(0) |receiver| {
+            try receiver_only.append(receiver);
+        }
+        return self.lower_arena_method(tree, method, receiver_type, &receiver_only, out);
     }
     if try self.impl_method_callee_name(receiver_type, method) |method_name| {
         return self.lower_impl_method_call(tree, method_name, args, out);
@@ -1352,7 +1361,7 @@ fn (self: &var Lowerer) map_primitive_type_args(
     key_out: &var Name
 ) -> !Name {
     var args = try self.split_static_args(type_arg);
-    defer args.deinit();
+    defer args.deinit(self.allocator);
     if args.len() != 2 {
         return empty_name();
     }
@@ -1511,7 +1520,7 @@ fn (self: &var Lowerer) release_owner_on_failure(
     let cleanup_bytes = typ::cleanup_method();
     let method = try self.name(cleanup_bytes);
     var cleanup = empty_cleanup();
-    if try self.cleanup_from_method(tree, owner, method, &var cleanup) |failed| {
+    if try self.cleanup_from_method(tree, owner, method, empty_value(), &var cleanup) |failed| {
         return move failed;
     }
     cleanup.on_error = true;

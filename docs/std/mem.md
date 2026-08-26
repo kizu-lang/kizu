@@ -20,8 +20,8 @@ std::mem::box<T>(allocator: Allocator, value: T) -> std::mem::Error!std::mem::Bo
 std::mem::leak<T>(value: T) -> void
 box.borrow() -> &T
 box.borrow_mut() -> &var T
-box.take() -> T
-box.deinit() -> void
+box.take(allocator: Allocator) -> T
+box.deinit(allocator: Allocator) -> void
 std::mem::len(bytes: []u8) -> i64
 std::mem::byte_at(bytes: []u8, index: i64) -> ?u8
 std::mem::equal_bytes(left: []u8, right: []u8) -> bool

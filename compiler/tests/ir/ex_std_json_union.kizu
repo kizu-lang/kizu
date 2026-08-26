@@ -13,11 +13,11 @@ pub union Note {
     Text(string::String),
 }
 
-fn (self: Note) deinit() -> void {
+fn (self: Note) deinit(allocator: Allocator) -> void {
     match self {
         Empty => return,
         Count(_) => return,
-        Text(text) => text.deinit(),
+        Text(text) => text.deinit(allocator),
     }
     return;
 }
@@ -45,23 +45,23 @@ fn describe(note: &Note) -> []u8 {
 fn main() -> !void {
     let allocator = mem::page_allocator();
     var name = string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_bytes("alice");
     var account = Account {
         name: move name,
         role: Role::Guest,
         note: Note::Count(3),
     };
-    defer account.deinit();
+    defer account.deinit(allocator);
 
     var out = string::new(allocator);
-    defer out.deinit();
+    defer out.deinit(allocator);
     try json::encode<Account>(allocator, account, out);
     let written = out.as_bytes();
     print(written);
 
     var read = try json::decode<Account>(allocator, written);
-    defer read.deinit();
+    defer read.deinit(allocator);
     let read_name = read.name.as_bytes();
     print(read_name);
     print(describe(&read.note));
@@ -75,10 +75,9 @@ fn main() -> !void {
 // alice
 // count
 
-
 // ir
 // lower:
-// fn Note.deinit(%self: Note) -> void {
+// fn Note.deinit(%self: Note, %allocator: Allocator) -> void {
 // entry:
 //   %1: i64 = union.tag %self: Note
 //   jump match.check.2
@@ -100,7 +99,7 @@ fn main() -> !void {
 //   branch %5: bool, match.arm.7, match.unreachable.8
 // match.arm.7:
 //   %6: std::string::String = union.payload %self: Note, Text
-//   call.std::string::String.deinit %6: std::string::String
+//   call.std::string::String.deinit %6: std::string::String, %allocator: Allocator
 //   jump match.end.1
 // match.unreachable.8:
 //   unreachable
@@ -144,7 +143,7 @@ fn main() -> !void {
 //   %4: []u8 = const "alice"
 //   %5: std::mem::Error!void = call.std::string::String.append_bytes %3: &var std::string::String, %4: []u8
 //   %6: std::string::String = ref.load %3: &var std::string::String
-//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String
+//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String, %1: Allocator
 //   %8: std::string::String = ref.load %3: &var std::string::String
 //   %9: Role = const 1
 //   %10: i64 = const 3
@@ -154,36 +153,36 @@ fn main() -> !void {
 //   %14: &var std::string::String = local.slot %13: std::string::String
 //   %15: std::mem::Error!void = call.std::json::encode.Account %1: Allocator, %12: Account, %14: &var std::string::String
 //   %16: std::string::String = ref.load %14: &var std::string::String
-//   error.try %15: std::mem::Error!void, cleanup call.std::string::String.deinit %16: std::string::String; call.Account.deinit %12: Account
+//   error.try %15: std::mem::Error!void, cleanup call.std::string::String.deinit %16: std::string::String, %1: Allocator; call.Account.deinit %12: Account, %1: Allocator
 //   %18: std::string::String = ref.load %14: &var std::string::String
 //   %19: []u8 = call.std::string::String.as_bytes %18: std::string::String
 //   call.print %19: []u8
 //   %21: std::json::DecodeError!Account = call.std::json::decode.Account %1: Allocator, %19: []u8
 //   %22: std::string::String = ref.load %14: &var std::string::String
-//   %23: Account = error.try %21: std::json::DecodeError!Account, cleanup call.std::string::String.deinit %22: std::string::String; call.Account.deinit %12: Account
+//   %23: Account = error.try %21: std::json::DecodeError!Account, cleanup call.std::string::String.deinit %22: std::string::String, %1: Allocator; call.Account.deinit %12: Account, %1: Allocator
 //   %24: std::string::String = field.name %23: Account
 //   %25: []u8 = call.std::string::String.as_bytes %24: std::string::String
 //   call.print %25: []u8
 //   %27: Note = field.note %23: Account
 //   %28: []u8 = call.describe %27: Note
 //   call.print %28: []u8
-//   call.Account.deinit %23: Account
+//   call.Account.deinit %23: Account, %1: Allocator
 //   %31: std::string::String = ref.load %14: &var std::string::String
-//   call.std::string::String.deinit %31: std::string::String
-//   call.Account.deinit %12: Account
+//   call.std::string::String.deinit %31: std::string::String, %1: Allocator
+//   call.Account.deinit %12: Account, %1: Allocator
 //   %34: !void = error.ok
 //   return %34: !void
 // }
-// fn Account.deinit(%self: Account) -> void {
+// fn Account.deinit(%self: Account, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::string::String = field.name %self: Account
-//   call.std::string::String.deinit %1: std::string::String
+//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
 //   %3: Note = field.note %self: Account
-//   call.Note.deinit %3: Note
+//   call.Note.deinit %3: Note, %allocator: Allocator
 //   return void: void
 // }
 // opt:
-// fn Note.deinit(%self: Note) -> void {
+// fn Note.deinit(%self: Note, %allocator: Allocator) -> void {
 // entry:
 //   %1: i64 = union.tag %self: Note
 //   jump match.check.2
@@ -204,7 +203,7 @@ fn main() -> !void {
 //   branch %5: bool, match.arm.7, match.unreachable.8
 // match.arm.7:
 //   %6: std::string::String = union.payload %self: Note, Text
-//   call.std::string::String.deinit %6: std::string::String
+//   call.std::string::String.deinit %6: std::string::String, %allocator: Allocator
 //   jump match.end.1
 // match.unreachable.8:
 //   unreachable
@@ -246,7 +245,7 @@ fn main() -> !void {
 //   %4: []u8 = const "alice"
 //   %5: std::mem::Error!void = call.std::string::String.append_bytes %3: &var std::string::String, %4: []u8
 //   %6: std::string::String = ref.load %3: &var std::string::String
-//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String
+//   error.try %5: std::mem::Error!void, cleanup call.std::string::String.deinit %6: std::string::String, %1: Allocator
 //   %8: std::string::String = ref.load %3: &var std::string::String
 //   %9: Role = const 1
 //   %10: i64 = const 3
@@ -256,31 +255,31 @@ fn main() -> !void {
 //   %14: &var std::string::String = local.slot %13: std::string::String
 //   %15: std::mem::Error!void = call.std::json::encode.Account %1: Allocator, %12: Account, %14: &var std::string::String
 //   %16: std::string::String = ref.load %14: &var std::string::String
-//   error.try %15: std::mem::Error!void, cleanup call.std::string::String.deinit %16: std::string::String; call.Account.deinit %12: Account
+//   error.try %15: std::mem::Error!void, cleanup call.std::string::String.deinit %16: std::string::String, %1: Allocator; call.Account.deinit %12: Account, %1: Allocator
 //   %18: std::string::String = ref.load %14: &var std::string::String
 //   %19: []u8 = call.std::string::String.as_bytes %18: std::string::String
 //   call.print %19: []u8
 //   %21: std::json::DecodeError!Account = call.std::json::decode.Account %1: Allocator, %19: []u8
 //   %22: std::string::String = ref.load %14: &var std::string::String
-//   %23: Account = error.try %21: std::json::DecodeError!Account, cleanup call.std::string::String.deinit %22: std::string::String; call.Account.deinit %12: Account
+//   %23: Account = error.try %21: std::json::DecodeError!Account, cleanup call.std::string::String.deinit %22: std::string::String, %1: Allocator; call.Account.deinit %12: Account, %1: Allocator
 //   %24: std::string::String = field.name %23: Account
 //   %25: []u8 = call.std::string::String.as_bytes %24: std::string::String
 //   call.print %25: []u8
 //   %27: Note = field.note %23: Account
 //   %28: []u8 = call.describe %27: Note
 //   call.print %28: []u8
-//   call.Account.deinit %23: Account
+//   call.Account.deinit %23: Account, %1: Allocator
 //   %31: std::string::String = ref.load %14: &var std::string::String
-//   call.std::string::String.deinit %31: std::string::String
-//   call.Account.deinit %12: Account
+//   call.std::string::String.deinit %31: std::string::String, %1: Allocator
+//   call.Account.deinit %12: Account, %1: Allocator
 //   %34: !void = error.ok
 //   return %34: !void
 // }
-// fn Account.deinit(%self: Account) -> void {
+// fn Account.deinit(%self: Account, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::string::String = field.name %self: Account
-//   call.std::string::String.deinit %1: std::string::String
+//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
 //   %3: Note = field.note %self: Account
-//   call.Note.deinit %3: Note
+//   call.Note.deinit %3: Note, %allocator: Allocator
 //   return void: void
 // }

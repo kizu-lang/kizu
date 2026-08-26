@@ -111,9 +111,9 @@ fn main() { let _ = to_u(Kind::X, 3); }`,
 
 // TestEmitArrayPopOrPanicReportsBeforeMoving fixes the native lowering sequence.
 func TestEmitArrayPopOrPanicReportsBeforeMoving(t *testing.T) {
-	module := lowerSource(t, `fn take(values: std::array::Array<i64>) -> i64 {
+	module := lowerSource(t, `fn take(allocator: Allocator, values: std::array::Array<i64>) -> i64 {
     let value = values.pop_or_panic();
-    values.deinit();
+    values.deinit(allocator);
     return value;
 }
 fn main() {}`)

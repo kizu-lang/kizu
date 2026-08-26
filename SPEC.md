@@ -417,7 +417,7 @@ import std::array;
 fn main() -> !void {
     let allocator = mem::page_allocator();
     let values = array::new<i64>(allocator);
-    defer values.deinit();
+    defer values.deinit(allocator);
 
     try values.append(1);
     return;
@@ -435,7 +435,7 @@ cleanup 呼び出しを実行します。通常の block exit や正常な `retu
 ```kizu
 fn make_values(allocator: mem::Allocator) -> !array::Array<i64> {
     let values = array::new<i64>(allocator);
-    errdefer values.deinit();
+    errdefer values.deinit(allocator);
 
     try values.append(1);
     return move values;
@@ -445,15 +445,17 @@ fn make_values(allocator: mem::Allocator) -> !array::Array<i64> {
 で許可する形は cleanup method call の expression statement だけです。
 
 ```kizu
-defer values.deinit();
-defer text.deinit();
-defer users.deinit();
+defer values.deinit(allocator);
+defer text.deinit(allocator);
+defer users.deinit(allocator);
 ```
 
 `defer let ...;`、`defer return ...;`、`defer { ... }`、
 `defer defer ...;` は構文として扱いません。
-deferred expression は `.deinit()` のような `void` cleanup call でなければなりません。
-cleanup 対象は自動探索しません。Drop / RAII / implicit destructor はありません。
+deferred expression は `.deinit(allocator)` のような `void` cleanup call でなければ
+なりません。receiver 以外の引数は **`defer` が書かれた場所で読み**、block を出るときに
+走るのはその値です。cleanup 対象は自動探索しません。Drop / RAII / implicit destructor
+はありません。
 
 deferred cleanup は明示 cleanup call と同じ ownership rule で検査します。
 登録時点で receiver を参照できる必要があり、block exit で実行する時点でも
@@ -468,7 +470,7 @@ cleanup は名前が意味しなくなった値を持つことになります。
 
 ```kizu
 var child = string::new(allocator);
-errdefer child.deinit();
+errdefer child.deinit(allocator);
 try child.append_byte(cast<u8>(97));  // 失敗したら child を解放する
 try parent.append(move child);        // ここから先は parent が child を持つ
 try parent.reserve(1);                // 失敗しても child は解放しない
@@ -479,19 +481,19 @@ try parent.reserve(1);                // 失敗しても child は解放しな�
 
 ```kizu
 var first = string::new(allocator);
-errdefer first.deinit();              // first だけを覆う
+errdefer first.deinit(allocator);     // first だけを覆う
 try parent.append(move first);        // 退役
 
 var second = string::new(allocator);  // 新しい owner は新しい名前へ
-errdefer second.deinit();             // second だけを覆う
+errdefer second.deinit(allocator);    // second だけを覆う
 try parent.reserve(1);                // 失敗したら second を解放する
 ```
 
 ```kizu
 var name = string::new(allocator);
-errdefer name.deinit();
+errdefer name.deinit(allocator);
 if !ok {
-    name.deinit();                    // 先に手放してから
+    name.deinit(allocator);           // 先に手放してから
     return PlaceError::Rejected;      // error を返す。errdefer は走らない
 }
 ```
@@ -560,9 +562,9 @@ self.a.b.len();        // ok: nested field receiver
 
 field receiver は root owner の ownership state に従います。read-only method は
 owner / path が読めるときだけ、mutating method は owner と重なる path が borrow 中で
-ないときだけ呼べます。`field.deinit()` のような destructive cleanup は、値を保持して
+ないときだけ呼べます。`field.deinit(allocator)` のような destructive cleanup は、値を保持して
 いる場所の direct field 1 段だけ許可します(§8)。borrow の field は拒否します。
-`self.a.b.deinit()` のような nested cleanup は、中間型 `a` 自身の deinit を迂回する
+`self.a.b.deinit(allocator)` のような nested cleanup は、中間型 `a` 自身の deinit を迂回する
 ため拒否します。
 
 ### 6.6 import と visibility
@@ -961,13 +963,13 @@ let label = match color {
 `match` の arm に `return` は書けません。
 
 owner-payload union の deinit 契約(§8)が受理する cleanup arm は
-`Kept(payload) => payload.deinit(),` の直接形のままです。block に包んだ
+`Kept(payload) => payload.deinit(allocator),` の直接形のままです。block に包んだ
 cleanup は契約 error になります。
 
 ```kizu
-fn (self: Slot) deinit() -> void {
+fn (self: Slot) deinit(allocator: Allocator) -> void {
     match self {
-        Kept(payload) => payload.deinit(),
+        Kept(payload) => payload.deinit(allocator),
         Vacant => {},
     }
     return;
@@ -1332,7 +1334,7 @@ owner aggregate は copy できず、値渡しや代入では move されます�
 block を出る時点で、owner 値は次のいずれかで consume 済みでなければ
 compile error です(ADR-0091)。
 
-* `value.deinit()` または `defer value.deinit();` による明示 cleanup
+* `value.deinit(allocator)` または `defer value.deinit(allocator);` による明示 cleanup
 * 別の owner aggregate / container への move
 * owned return value として caller への move
 * `std::mem::leak(value)` による明示 leak
@@ -1394,8 +1396,8 @@ consume しなければなりません。呼び出し側は move 済みで、そ
 mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
 
 owner field または owner payload を含む型は、それを持つことによって owner です。
-`deinit(self: T) -> void` を宣言しなければ、保持しているものを宣言順に consume する
-body が導出されます。
+`deinit(self: T, allocator: Allocator) -> void` を宣言しなければ、保持しているものを
+宣言順に consume する body が導出されます。
 
 ```kizu
 struct Visitor {
@@ -1403,15 +1405,15 @@ struct Visitor {
     nick: ?string::String,
 }
 // 導出される body:
-//   self.name.deinit();
-//   if self.nick |held| { held.deinit(); }
+//   self.name.deinit(allocator);
+//   if self.nick |held| { held.deinit(allocator); }
 ```
 
 義務が field の義務だけである型に、書ける body は 1 つしかありません。「`deinit` は
 receiver の owner field をすべての path で consume する」がそれを固定しており、
 field は互いに alias しないので順序も効きません。手で書いても書けるのは導出結果
 だけで、それは原理 10 が畳めと言う定型です。cleanup contract は field の型に既に
-見えており、呼び出し `value.deinit()` は source に残るので、原理 2 の hidden control
+見えており、呼び出し `value.deinit(allocator)` は source に残るので、原理 2 の hidden control
 flow にも当たりません。
 
 自分で確保したものを解放する型 —— allocator から取ったメモリ、descriptor ——
@@ -1434,14 +1436,14 @@ fn finish(partial: Partial) -> Full {
 例外はその型自身の `deinit` body で、そこは宣言義務を果たしている最中です。
 
 field を 1 つ取り出した値は、もう自分の型と一致しません。丸ごと move すること、
-borrow すること、`deinit()` を呼ぶことは compile error です。いずれも既に無い
+borrow すること、`deinit(allocator)` を呼ぶことは compile error です。いずれも既に無い
 field に手を伸ばします。残りも取り出すか、1 つも取り出さないかです。
 
 borrow から field を取り出すことはできません。貸し手がまだ持っているものを
 解放することになります。
 
 cleanup の名前は `deinit` 1 つです。`deinit` は値と、値が保持しているものを
-解放します。container なら要素を要素自身の `deinit()` で consume してから buffer を
+解放します。container なら要素を要素自身の `deinit(allocator)` で consume してから buffer を
 解放し、何も保持しない要素ではその consume が空になるだけです。要素型が決まって
 いない generic code も同じ 1 つを書きます。名前が 1 つなので任意の深さに合成でき、
 owner 要素の container を要素にする入れ子も書けます。owner 要素の `set` は、置き換え
@@ -1461,11 +1463,11 @@ union MirStmt {
     If(MirIf),
 }
 
-fn (self: MirStmt) deinit() -> void {
+fn (self: MirStmt) deinit(allocator: Allocator) -> void {
     match self {
-        LetCall(stmt) => stmt.deinit(),
-        ReturnExpr(stmt) => stmt.deinit(),
-        If(stmt) => stmt.deinit(),
+        LetCall(stmt) => stmt.deinit(allocator),
+        ReturnExpr(stmt) => stmt.deinit(allocator),
+        If(stmt) => stmt.deinit(allocator),
     }
 }
 ```
@@ -1692,10 +1694,10 @@ core arena の構築は明示 allocator capability を要求し、
   できない。borrow parameter を根に持つ arena からは返せるが、local arena 由来の
   borrow は function から escape できない
 * `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
-* `std::arena::Arena<T>.deinit()` は initialized element を各要素の `deinit()` で
-  consume してから arena storage を解放し、binding を無効化する
-* `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
-* `owner.field.deinit()` は値を保持している場所の direct field だけ許可する(§8)
+* `std::arena::Arena<T>.deinit(allocator)` は initialized element を各要素の
+  `deinit(allocator)` で consume してから arena storage を解放し、binding を無効化する
+* `std::arena::Arena<T>.deinit(allocator)` は owned local receiver の呼び出しだけを許可する
+* `owner.field.deinit(allocator)` は値を保持している場所の direct field だけ許可する(§8)
 * handle は copy 型で、代入・値渡し・格納しても元の binding は使い続けられる。
   複製は元と同じ arena 由来を引き継ぎ、以下の規則は複製にも適用される
 * handle は borrow より長生きしてよい
@@ -2412,13 +2414,15 @@ std::meta::unsupported<T>()                   compile error にする
 ```kizu
 // construct<Names, make_field>(allocator) が表すコード
 let first = try make_field<Names, first>(allocator);
-errdefer first.deinit();
+errdefer first.deinit(allocator);
 let second = try make_field<Names, second>(allocator);
 Names { first: move first, second: move second }
 ```
 
 `errdefer` は owner field にだけ並びます。値は struct literal が一度に取るまで
-別々の binding なので、半端に組んだ `T` が置かれる場所はありません。worker の
+別々の binding なので、半端に組んだ `T` が置かれる場所はありません。owner field を
+持つ `T` では第 1 引数が `Allocator` でなければなりません —— worker はそこから
+field を作り、`errdefer` はその同じ allocator を名指して解放します(§15.3)。worker の
 戻り値型はその field の型でなければならず、public field を 1 つも持たない型は
 compile error です(値の行き先が無いため)。
 
@@ -2602,9 +2606,31 @@ size を受け取ります。2 関数は `unsafe fn` で、契約 —— 返し�
 tie のない `Allocator`(`page_allocator()`)は copy 型です。`Array<T>`、
 `String`、`Map<K, V>`、`Box<T>`、`std::arena::Arena<T>` の構築に渡しても
 allocator binding は move されません。
-作られた owner は自身の allocation と `deinit` に必要なものを内部で保持し、
 `Allocator` 値そのものに user-visible cleanup method はありません。
 allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
+
+**解放は allocator を名指します。** owner の `deinit` は receiver と
+`Allocator` の 2 つを取ります(§8、ADR-0132)。値は自分を作った allocator の
+複製を持たないので、解放に必要なものは呼び出し側が綴ります —— `sizeof(T)` を
+compile 時の値として渡すのと同じ扱いで、原理 4「hidden allocation を持たない」の
+裏側です。owner を持つすべての型がこの 1 つの形を取り、導出 `deinit` は
+受け取った allocator を field へそのまま渡します。
+
+```kizu
+let allocator = mem::page_allocator();
+var values = array::new<i64>(allocator);
+defer values.deinit(allocator);
+```
+
+`defer` / `errdefer` の cleanup が運ぶ引数は、**`defer` が書かれた場所で読み**、
+block を出るときに走るのはその値です(§8)。
+
+解放に渡す `Allocator` は、その owner を作ったものと同じでなければなりません。
+検査できるのは tied allocator だけです —— tie を持たない `page_allocator()`
+同士は区別が付かず、区別する必要もないためです。tied allocator から作った
+owner を別の tied allocator で、あるいは tie の無い allocator で解放するのは
+compile error です。逆に、tied allocator から作っていない owner に tied
+allocator を渡すのも error です。
 
 `fixed_buffer` は stack buffer(§7.1)の writable view から allocator を
 作ります。返る `Allocator` は **tied** で、borrow と同じ扱いです:
@@ -2699,7 +2725,7 @@ receiver は owned local または `&var Array<T>` に限り、shared borrow 越
 
 `String.deinit` / `Box.deinit` / `Map.deinit` / `Arena.deinit` は caller 側の binding を
 無効化する必要があるため、owned local receiver 限定です。値を保持している
-場所では `owner.field.deinit()` の direct field cleanup も同じで、その field は
+場所では `owner.field.deinit(allocator)` の direct field cleanup も同じで、その field は
 以後使用できません(§8)。`deinit` 後の container 使用は safe Kizu では
 禁止します。
 
@@ -2707,16 +2733,16 @@ receiver は owned local または `&var Array<T>` に限り、shared borrow 越
 開くのは capture です。
 
 ```kizu
-fn (self: Visitor) deinit() -> void {
+fn (self: Visitor) deinit(allocator: Allocator) -> void {
     if self.nick |held| {
-        held.deinit();
+        held.deinit(allocator);
     }
     return;
 }
 ```
 
 capture が束縛する payload は、値を保持している場所でだけ owner です。
-そこは `self.field.deinit()` に与えているのと同じ判定で、分解できる場所と
+そこは `self.field.deinit(allocator)` に与えているのと同じ判定で、分解できる場所と
 同じです(§8)。借用越しの読みでは payload は borrow で、consume は拒否します。
 payload は field storage の中にあり、借りた値では開いても渡されないためで、
 `match` が owner union payload に対して持つ分け方と同じです。

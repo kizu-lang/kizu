@@ -56,7 +56,7 @@ fn append_path(out: &var string::String, parts: &array::Array<string::String>, s
 /// Joins parts[start..end] with `::`.
 fn join_path(allocator: Allocator, parts: &array::Array<string::String>, start: i64, end: i64) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try append_path(&var out, parts, start, end);
     return move out;
 }
@@ -65,7 +65,7 @@ fn join_path(allocator: Allocator, parts: &array::Array<string::String>, start: 
 /// name a chain through an import spells.
 fn join_under(allocator: Allocator, target: &string::String, parts: &array::Array<string::String>) -> !string::String {
     var out = try copy_string(allocator, target);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes("::");
     try append_path(&var out, parts, 1, parts.len());
     return move out;
@@ -74,7 +74,7 @@ fn join_under(allocator: Allocator, target: &string::String, parts: &array::Arra
 /// Splits a `::` separated name into its segments.
 fn split_path(allocator: Allocator, name: []u8) -> !array::Array<string::String> {
     var parts = array::new<string::String>(allocator);
-    errdefer parts.deinit();
+    errdefer parts.deinit(allocator);
     var start = 0;
     var index = 0;
     let length = mem::len(name);
@@ -172,7 +172,7 @@ fn (self: &Loader) index_hides(
 /// Reports whether a module at file may name module_path.
 fn (self: &Loader) reachable(file: arena::Handle<ModuleFile>, module_path: []u8) -> !bool {
     let from = try self.module_path_copy(file);
-    defer from.deinit();
+    defer from.deinit(self.allocator);
     let from_bytes = from.as_bytes();
     return reachable_from(module_path, from_bytes);
 }
@@ -185,7 +185,7 @@ fn (self: &Loader) name_error(
     after: []u8
 ) -> !diagnostic::Diagnostic {
     var text = try module_error_text(self.allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(self.allocator);
     try text.append_bytes(before);
     try text.append_bytes("`");
     try append_path(&var text, parts, 0, parts.len());
@@ -201,7 +201,7 @@ fn (self: &var Loader) resolve_type_namespace_receiver(
     receiver: ast::Expression
 ) -> !?string::String {
     if try namespace_parts(self.allocator, tree, receiver) |parts| {
-        defer parts.deinit();
+        defer parts.deinit(self.allocator);
         return self.resolve_type_namespace_parts(file, &parts);
     }
     return null;
@@ -214,7 +214,7 @@ fn (self: &var Loader) resolve_namespace_path(
     expr: ast::Expression
 ) -> !NamespaceResolution {
     if try namespace_parts(self.allocator, tree, expr) |parts| {
-        defer parts.deinit();
+        defer parts.deinit(self.allocator);
         return self.resolve_namespace_parts(file, &parts);
     }
     return NamespaceResolution::Missing;
@@ -229,13 +229,13 @@ fn (self: &var Loader) resolve_namespace_parts(
         return NamespaceResolution::Missing;
     }
     if try self.namespace_target(file, parts) |target| {
-        defer target.deinit();
+        defer target.deinit(self.allocator);
         if parts.len() == 1 {
             return NamespaceResolution::Missing;
         }
         try self.use_first(file, parts);
         let name = try join_under(self.allocator, &target, parts);
-        defer name.deinit();
+        defer name.deinit(self.allocator);
         let name_bytes = name.as_bytes();
         let reachable = try self.reachable(file, name_bytes);
         if !reachable {
@@ -251,14 +251,14 @@ fn (self: &var Loader) resolve_namespace_parts(
         return NamespaceResolution::Failed(move failed);
     }
     let joined = try join_path(self.allocator, parts, 0, parts.len());
-    defer joined.deinit();
+    defer joined.deinit(self.allocator);
     let joined_bytes = joined.as_bytes();
     let name = try self.qualify_in(file, joined_bytes);
-    errdefer name.deinit();
+    errdefer name.deinit(self.allocator);
     if index_holds(&self.functions, &name) {
         return NamespaceResolution::Name(move name);
     }
-    name.deinit();
+    name.deinit(self.allocator);
     return NamespaceResolution::Missing;
 }
 
@@ -273,7 +273,7 @@ fn (self: &Loader) reject_unbound_std(
         return null;
     }
     if try self.namespace_target(file, parts) |bound| {
-        bound.deinit();
+        bound.deinit(self.allocator);
         return null;
     }
     let size = try self.std_module_prefix(parts);
@@ -281,14 +281,14 @@ fn (self: &Loader) reject_unbound_std(
         return null;
     }
     let path = try join_path(self.allocator, parts, 0, size);
-    defer path.deinit();
+    defer path.deinit(self.allocator);
     let path_bytes = path.as_bytes();
     let reachable = try self.reachable(file, path_bytes);
     if !reachable {
         return try self.internal_module_error(path_bytes, file);
     }
     var text = try module_error_text(self.allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(self.allocator);
     try text.append_bytes("`");
     try append_path(&var text, parts, 0, parts.len());
     try text.append_bytes("` is used without an import in `");
@@ -313,7 +313,7 @@ fn (self: &Loader) std_module_prefix(parts: &array::Array<string::String>) -> !i
     var size = parts.len();
     while size >= 2 {
         let path = try join_path(self.allocator, parts, 0, size);
-        defer path.deinit();
+        defer path.deinit(self.allocator);
         let path_bytes = path.as_bytes();
         if self.std_module(path_bytes) {
             return size;
@@ -344,7 +344,7 @@ fn (self: &Loader) resolve_imported_function(
     parts: &array::Array<string::String>
 ) -> !NamespaceResolution {
     let name = try join_under(self.allocator, target, parts);
-    defer name.deinit();
+    defer name.deinit(self.allocator);
     if !index_holds(&self.functions, &name) {
         return NamespaceResolution::Failed(try self.name_error("unknown function ", parts, ""));
     }
@@ -363,11 +363,11 @@ fn (self: &var Loader) resolve_type_namespace_parts(
         return null;
     }
     if try self.namespace_target(file, parts) |target| {
-        defer target.deinit();
+        defer target.deinit(self.allocator);
         if parts.len() > 1 {
             try self.use_first(file, parts);
             let name = try join_under(self.allocator, &target, parts);
-            defer name.deinit();
+            defer name.deinit(self.allocator);
             let name_bytes = name.as_bytes();
             let reachable = try self.reachable(file, name_bytes);
             if !reachable {
@@ -382,14 +382,14 @@ fn (self: &var Loader) resolve_type_namespace_parts(
         }
     }
     let joined = try join_path(self.allocator, parts, 0, parts.len());
-    defer joined.deinit();
+    defer joined.deinit(self.allocator);
     let joined_bytes = joined.as_bytes();
     let name = try self.qualify_in(file, joined_bytes);
-    errdefer name.deinit();
+    errdefer name.deinit(self.allocator);
     if index_holds(&self.types, &name) {
         return move name;
     }
-    name.deinit();
+    name.deinit(self.allocator);
     return null;
 }
 
@@ -398,7 +398,7 @@ fn namespace_parts(allocator: Allocator, tree: &ast::Ast, expr: ast::Expression)
     match tree.expressions.at(expr.node) {
         Ident(value) => {
             var parts = array::new<string::String>(allocator);
-            errdefer parts.deinit();
+            errdefer parts.deinit(allocator);
             try parts.append(try text_copy(allocator, tree, value.name));
             return move parts;
         },
@@ -407,7 +407,7 @@ fn namespace_parts(allocator: Allocator, tree: &ast::Ast, expr: ast::Expression)
                 return null;
             }
             if try namespace_parts(allocator, tree, value.receiver) |parts| {
-                errdefer parts.deinit();
+                errdefer parts.deinit(allocator);
                 try parts.append(try text_copy(allocator, tree, value.name));
                 return move parts;
             }
@@ -438,10 +438,10 @@ fn (self: &var Loader) resolve_type_node(
     value: typ::Type
 ) -> !TypeNodeResolution {
     var names = array::new<string::String>(self.allocator);
-    defer names.deinit();
+    defer names.deinit(self.allocator);
     try collect_type_names(self.allocator, &tree.types, value, &var names);
     var renames = NameRenames { resolved: map::new<[]u8, string::String>(self.allocator) };
-    defer renames.deinit();
+    defer renames.deinit(self.allocator);
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
@@ -505,7 +505,7 @@ fn (self: &var NameRenames) rename_path(
     path: &array::Array<string::String>
 ) -> !array::Array<string::String> {
     let joined = try join_path(allocator, path, 0, path.len());
-    defer joined.deinit();
+    defer joined.deinit(allocator);
     let joined_bytes = joined.as_bytes();
     if self.resolved.at(joined_bytes) |resolved| {
         let resolved_bytes = resolved.as_bytes();
@@ -523,7 +523,7 @@ fn (self: &var Loader) resolve_base(file: arena::Handle<ModuleFile>, name: []u8)
             return NameResolution::Failed(try self.internal_module_error(name, file));
         }
         let parts = try split_path(self.allocator, name);
-        defer parts.deinit();
+        defer parts.deinit(self.allocator);
         if try self.reject_unbound_std(file, &parts) |failed| {
             return NameResolution::Failed(move failed);
         }
@@ -533,11 +533,11 @@ fn (self: &var Loader) resolve_base(file: arena::Handle<ModuleFile>, name: []u8)
         return self.resolve_qualified_base(file, name);
     }
     let local = try self.qualify_in(file, name);
-    errdefer local.deinit();
+    errdefer local.deinit(self.allocator);
     if index_holds(&self.types, &local) {
         return NameResolution::Name(move local);
     }
-    local.deinit();
+    local.deinit(self.allocator);
     if is_primitive_type(name) {
         return NameResolution::Name(try string::from_bytes(self.allocator, name));
     }
@@ -547,12 +547,12 @@ fn (self: &var Loader) resolve_base(file: arena::Handle<ModuleFile>, name: []u8)
 /// Resolves an imported module type by last-segment alias.
 fn (self: &var Loader) resolve_qualified_base(file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
     let parts = try split_path(self.allocator, name);
-    defer parts.deinit();
+    defer parts.deinit(self.allocator);
     if try self.namespace_target(file, &parts) |target| {
-        defer target.deinit();
+        defer target.deinit(self.allocator);
         try self.use_first(file, &parts);
         let qualified = try join_under(self.allocator, &target, &parts);
-        defer qualified.deinit();
+        defer qualified.deinit(self.allocator);
         let qualified_bytes = qualified.as_bytes();
         let reachable = try self.reachable(file, qualified_bytes);
         if !reachable {
@@ -571,12 +571,12 @@ fn (self: &var Loader) resolve_qualified_base(file: arena::Handle<ModuleFile>, n
         return NameResolution::Name(try copy_string(self.allocator, &qualified));
     }
     var text = try module_error_text(self.allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(self.allocator);
     try text.append_bytes("`");
     try append_path(&var text, &parts, 0, 1);
     try text.append_bytes("` is not imported in `");
     let module_path = try self.module_path_copy(file);
-    defer module_path.deinit();
+    defer module_path.deinit(self.allocator);
     try text.append_string(&module_path);
     try text.append_bytes("`");
     return NameResolution::Failed(try module_error(self.allocator, move text));

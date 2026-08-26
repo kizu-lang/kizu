@@ -2074,7 +2074,10 @@ func (l *lowerer) lowerResolvedMethod(
 		if ast.OwnerType(l.deinitOwners, elem) {
 			return l.lowerStdContainerMethod(arenaTypeName, method, elem, allArgs)
 		}
-		return l.lowerArenaMethod(method, receiverType, allArgs)
+		// Plain elements have no cleanup loop, so the release is the runtime
+		// op. The arena header still keeps the allocator the op frees through,
+		// so the one the call names goes no further than the check of it.
+		return l.lowerArenaMethod(method, receiverType, allArgs[:1])
 	}
 	if methodName, ok := l.implMethodCalleeName(receiverType, method); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -2544,7 +2547,7 @@ func (l *lowerer) releaseOwnerOnFailure(result Value, owner Value) (Value, error
 	if !ast.OwnerType(l.deinitOwners, owner.Type) {
 		return result, nil
 	}
-	cleanup, err := l.cleanupFromMethod(owner, typ.CleanupMethod)
+	cleanup, err := l.cleanupFromMethod(owner, typ.CleanupMethod, nil)
 	if err != nil {
 		return Value{}, err
 	}

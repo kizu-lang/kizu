@@ -50,11 +50,23 @@ check_function_comments() {
 
 # .claude holds agent worktree checkouts -- copies of this repository that git does not
 # track here and that are checked by their own working tree, not by this one.
-files="$(find . \
+found="$(find . \
   -path './.direnv' -prune -o \
   -path './.git' -prune -o \
   -path './.claude' -prune -o \
   -name '*.go' -print)"
+
+# What git ignores is not this repository's source: a local scratch tree that
+# happens to hold Go files is checked by whoever put it there, if at all. The
+# question is asked of git rather than answered by a list here, so a new one
+# does not have to be added to that list to stop failing this hook.
+files=""
+for file in $found; do
+  if git check-ignore -q "$file" 2>/dev/null; then
+    continue
+  fi
+  files="$files $file"
+done
 
 for file in $files; do
   check_function_comments "$file"

@@ -148,10 +148,10 @@ test "owner aggregate captures a runtime view" {
     fill(scratch, 60);
     let view = buf.as_bytes();
     var it = buffered_iter(allocator, view);
-    errdefer it.deinit();
+    errdefer it.deinit(allocator);
     try it.seen.append(cast<i64>(it.bytes[0]));
     testing::expect_equal<i64>(60, it.seen.get_or_panic(0));
-    it.deinit();
+    it.deinit(allocator);
     let writable = buf.as_mut_bytes();
     writable[0] = cast<u8>(90);
     let check = buf.as_bytes();
@@ -186,7 +186,7 @@ fn fallible_split_view(bytes: []u8) -> !?SplitView {
 test "capture propagates a borrowed view through a helper return" {
     let allocator = mem::page_allocator();
     var text = try string::from_bytes(allocator, "abc");
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     let tail = view_tail(bytes);
     testing::expect_equal<u8>(cast<u8>(98), tail[0]);
@@ -203,7 +203,7 @@ test "capture propagates a borrowed view through a helper return" {
 test "try preserves transitive view capture provenance" {
     let allocator = mem::page_allocator();
     var text = try string::from_bytes(allocator, "abc");
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     let tail = view_tail(bytes);
     if try fallible_split_view(tail) |parts| {
@@ -213,7 +213,6 @@ test "try preserves transitive view capture provenance" {
     try text.append_bytes("d");
     testing::expect_equal<i64>(4, text.len());
 }
-
 
 // ir
 // lower:
@@ -352,10 +351,10 @@ test "try preserves transitive view capture provenance" {
 //   %2: !?SplitView = error.ok %1: ?SplitView
 //   return %2: !?SplitView
 // }
-// fn BufferedIter.deinit(%self: BufferedIter) -> void {
+// fn BufferedIter.deinit(%self: BufferedIter, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.seen %self: BufferedIter
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.struct_literal_captures_a_runtime_view() -> !void {
@@ -516,14 +515,14 @@ test "try preserves transitive view capture provenance" {
 //   %19: i64 = cast %18: u8, i64
 //   %20: std::mem::Error!void = call.std::array::Array.append.i64 %12: &var std::array::Array<i64>, %19: i64
 //   %21: BufferedIter = ref.load %11: &var BufferedIter
-//   error.try %20: std::mem::Error!void, cleanup call.BufferedIter.deinit %21: BufferedIter
+//   error.try %20: std::mem::Error!void, cleanup call.BufferedIter.deinit %21: BufferedIter, %1: Allocator
 //   %23: i64 = const 60
 //   %24: &var std::array::Array<i64> = field.addr.seen %11: &var BufferedIter
 //   %25: i64 = const 0
 //   %26: i64 = call.std::array::Array.get_or_panic.i64 %24: &var std::array::Array<i64>, %25: i64
 //   test.expect_equal %23: i64, %26: i64, i64
 //   %28: BufferedIter = ref.load %11: &var BufferedIter
-//   call.BufferedIter.deinit %28: BufferedIter
+//   call.BufferedIter.deinit %28: BufferedIter, %1: Allocator
 //   %30: [3]u8 = ref.load %3: &var [3]u8
 //   %31: []u8 = buffer.as_bytes %30: [3]u8
 //   %32: i64 = const 90
@@ -604,13 +603,13 @@ test "try preserves transitive view capture provenance" {
 //   %38: []u8 = const "d"
 //   %39: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %38: []u8
 //   %40: std::string::String = ref.load %5: &var std::string::String
-//   error.try %39: std::mem::Error!void, cleanup call.std::string::String.deinit %40: std::string::String
+//   error.try %39: std::mem::Error!void, cleanup call.std::string::String.deinit %40: std::string::String, %1: Allocator
 //   %42: i64 = const 4
 //   %43: std::string::String = ref.load %5: &var std::string::String
 //   %44: i64 = call.std::string::String.len %43: std::string::String
 //   test.expect_equal %42: i64, %44: i64, i64
 //   %46: std::string::String = ref.load %5: &var std::string::String
-//   call.std::string::String.deinit %46: std::string::String
+//   call.std::string::String.deinit %46: std::string::String, %1: Allocator
 //   %48: !void = error.ok
 //   return %48: !void
 // }
@@ -626,7 +625,7 @@ test "try preserves transitive view capture provenance" {
 //   %8: []u8 = call.view_tail %7: []u8
 //   %9: !?SplitView = call.fallible_split_view %8: []u8
 //   %10: std::string::String = ref.load %5: &var std::string::String
-//   %11: ?SplitView = error.try %9: !?SplitView, cleanup call.std::string::String.deinit %10: std::string::String
+//   %11: ?SplitView = error.try %9: !?SplitView, cleanup call.std::string::String.deinit %10: std::string::String, %1: Allocator
 //   %12: SplitView = opt.value %11: ?SplitView
 //   %13: bool = opt.has %11: ?SplitView
 //   branch %13: bool, if.then.1, if.else.2
@@ -660,13 +659,13 @@ test "try preserves transitive view capture provenance" {
 //   %32: []u8 = const "d"
 //   %33: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %32: []u8
 //   %34: std::string::String = ref.load %5: &var std::string::String
-//   error.try %33: std::mem::Error!void, cleanup call.std::string::String.deinit %34: std::string::String
+//   error.try %33: std::mem::Error!void, cleanup call.std::string::String.deinit %34: std::string::String, %1: Allocator
 //   %36: i64 = const 4
 //   %37: std::string::String = ref.load %5: &var std::string::String
 //   %38: i64 = call.std::string::String.len %37: std::string::String
 //   test.expect_equal %36: i64, %38: i64, i64
 //   %40: std::string::String = ref.load %5: &var std::string::String
-//   call.std::string::String.deinit %40: std::string::String
+//   call.std::string::String.deinit %40: std::string::String, %1: Allocator
 //   %42: !void = error.ok
 //   return %42: !void
 // }
@@ -806,10 +805,10 @@ test "try preserves transitive view capture provenance" {
 //   %2: !?SplitView = error.ok %1: ?SplitView
 //   return %2: !?SplitView
 // }
-// fn BufferedIter.deinit(%self: BufferedIter) -> void {
+// fn BufferedIter.deinit(%self: BufferedIter, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<i64> = field.seen %self: BufferedIter
-//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.struct_literal_captures_a_runtime_view() -> !void {
@@ -970,14 +969,14 @@ test "try preserves transitive view capture provenance" {
 //   %19: i64 = cast %18: u8, i64
 //   %20: std::mem::Error!void = call.std::array::Array.append.i64 %12: &var std::array::Array<i64>, %19: i64
 //   %21: BufferedIter = ref.load %11: &var BufferedIter
-//   error.try %20: std::mem::Error!void, cleanup call.BufferedIter.deinit %21: BufferedIter
+//   error.try %20: std::mem::Error!void, cleanup call.BufferedIter.deinit %21: BufferedIter, %1: Allocator
 //   %23: i64 = const 60
 //   %24: &var std::array::Array<i64> = field.addr.seen %11: &var BufferedIter
 //   %25: i64 = const 0
 //   %26: i64 = call.std::array::Array.get_or_panic.i64 %24: &var std::array::Array<i64>, %25: i64
 //   test.expect_equal %23: i64, %26: i64, i64
 //   %28: BufferedIter = ref.load %11: &var BufferedIter
-//   call.BufferedIter.deinit %28: BufferedIter
+//   call.BufferedIter.deinit %28: BufferedIter, %1: Allocator
 //   %30: [3]u8 = ref.load %3: &var [3]u8
 //   %31: []u8 = buffer.as_bytes %30: [3]u8
 //   %32: i64 = const 90
@@ -1058,13 +1057,13 @@ test "try preserves transitive view capture provenance" {
 //   %38: []u8 = const "d"
 //   %39: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %38: []u8
 //   %40: std::string::String = ref.load %5: &var std::string::String
-//   error.try %39: std::mem::Error!void, cleanup call.std::string::String.deinit %40: std::string::String
+//   error.try %39: std::mem::Error!void, cleanup call.std::string::String.deinit %40: std::string::String, %1: Allocator
 //   %42: i64 = const 4
 //   %43: std::string::String = ref.load %5: &var std::string::String
 //   %44: i64 = call.std::string::String.len %43: std::string::String
 //   test.expect_equal %42: i64, %44: i64, i64
 //   %46: std::string::String = ref.load %5: &var std::string::String
-//   call.std::string::String.deinit %46: std::string::String
+//   call.std::string::String.deinit %46: std::string::String, %1: Allocator
 //   %48: !void = error.ok
 //   return %48: !void
 // }
@@ -1080,7 +1079,7 @@ test "try preserves transitive view capture provenance" {
 //   %8: []u8 = call.view_tail %7: []u8
 //   %9: !?SplitView = call.fallible_split_view %8: []u8
 //   %10: std::string::String = ref.load %5: &var std::string::String
-//   %11: ?SplitView = error.try %9: !?SplitView, cleanup call.std::string::String.deinit %10: std::string::String
+//   %11: ?SplitView = error.try %9: !?SplitView, cleanup call.std::string::String.deinit %10: std::string::String, %1: Allocator
 //   %12: SplitView = opt.value %11: ?SplitView
 //   %13: bool = opt.has %11: ?SplitView
 //   branch %13: bool, if.then.1, if.else.2
@@ -1114,13 +1113,13 @@ test "try preserves transitive view capture provenance" {
 //   %32: []u8 = const "d"
 //   %33: std::mem::Error!void = call.std::string::String.append_bytes %5: &var std::string::String, %32: []u8
 //   %34: std::string::String = ref.load %5: &var std::string::String
-//   error.try %33: std::mem::Error!void, cleanup call.std::string::String.deinit %34: std::string::String
+//   error.try %33: std::mem::Error!void, cleanup call.std::string::String.deinit %34: std::string::String, %1: Allocator
 //   %36: i64 = const 4
 //   %37: std::string::String = ref.load %5: &var std::string::String
 //   %38: i64 = call.std::string::String.len %37: std::string::String
 //   test.expect_equal %36: i64, %38: i64, i64
 //   %40: std::string::String = ref.load %5: &var std::string::String
-//   call.std::string::String.deinit %40: std::string::String
+//   call.std::string::String.deinit %40: std::string::String, %1: Allocator
 //   %42: !void = error.ok
 //   return %42: !void
 // }

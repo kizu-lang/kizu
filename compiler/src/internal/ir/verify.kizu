@@ -17,7 +17,7 @@ import std::string;
 /// Reports the first way a module is not well formed, the Go `Verify`.
 pub fn verify(allocator: Allocator, module: &Module) -> !?diagnostic::Diagnostic {
     var types = typ::new(allocator);
-    defer types.deinit();
+    defer types.deinit(allocator);
     return verify_with_types(allocator, module, &var types);
 }
 
@@ -31,7 +31,7 @@ fn verify_with_types(allocator: Allocator, module: &Module, types: &var typ::Tab
         fn_return: empty_name(),
         block_name: empty_name()
     };
-    defer verifier.deinit();
+    defer verifier.deinit(allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -78,7 +78,7 @@ fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table
     self.fn_name = node.name;
     self.fn_return = node.return_type;
     var blocks = try block_index(self.allocator, module, function);
-    defer blocks.deinit();
+    defer blocks.deinit(self.allocator);
     var index = 0;
     while node.blocks.get(index) |block| {
         index = index + 1;
@@ -96,7 +96,7 @@ fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table
         }
     }
     var preds = try block_predecessors(self.allocator, module, function, &blocks);
-    defer preds.deinit();
+    defer preds.deinit(self.allocator);
     if try self.phi_incoming_matches_predecessors(module, function, &blocks, &preds) |failed| {
         return move failed;
     }
@@ -122,7 +122,7 @@ fn block_index(allocator: Allocator, module: &Module, function: Function) -> !Bl
         names: array::new<Name>(allocator),
         handles: array::new<Block>(allocator)
     };
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     let node = module.function_nodes.at(function.node);
     var index = 0;
     while node.blocks.get(index) |block| {
@@ -193,7 +193,7 @@ fn (self: &Verifier) verify_call(module: &Module, node: &InstrNode, callee: Name
         let got = node.args.get_or_panic(index);
         if !argument_fits(module, param, got.type_name) {
             var position = try string::from_bytes(self.allocator, "call ");
-            errdefer position.deinit();
+            errdefer position.deinit(self.allocator);
             try module.names.append_to(&var position, callee);
             try position.append_bytes(" argument ");
             try fmt::append_i64(&var position, index);
@@ -272,7 +272,7 @@ fn (self: &Verifier) struct_literal(module: &Module, node: &InstrNode) -> !?diag
                 }
                 if !same_name(declared.type_name, field.value.type_name) {
                     var position = string::new(self.allocator);
-                    errdefer position.deinit();
+                    errdefer position.deinit(self.allocator);
                     try module.names.append_to(&var position, node.result.type_name);
                     try position.append_bytes(".");
                     try module.names.append_to(&var position, field.name);
@@ -294,7 +294,7 @@ fn (self: &Verifier) union_payload(module: &Module, node: &InstrNode) -> !?diagn
     let arg = node.args.get_or_panic(0);
     if !same_name(variant.payload, arg.type_name) {
         var position = string::new(self.allocator);
-        errdefer position.deinit();
+        errdefer position.deinit(self.allocator);
         try module.names.append_to(&var position, node.result.type_name);
         try position.append_bytes("::");
         try module.names.append_to(&var position, variant.name);
@@ -319,14 +319,14 @@ fn (self: &Verifier) success_wrap(module: &Module, types: &var typ::Table, node:
         return null;
     }
     var success = try typ::render(self.allocator, types, parts.ok);
-    defer success.deinit();
+    defer success.deinit(self.allocator);
     let arg = node.args.get_or_panic(0);
     let arg_text = name_text(&module.names, arg.type_name);
     let success_bytes = success.as_bytes();
     let arg_bytes = arg_text.as_bytes();
     if !mem::equal_bytes(success_bytes, arg_bytes) {
         var position = try string::from_bytes(self.allocator, "success wrapped as ");
-        errdefer position.deinit();
+        errdefer position.deinit(self.allocator);
         try module.names.append_to(&var position, node.result.type_name);
         return try self.fail_text(module, move position, &success, arg_text);
     }
@@ -455,9 +455,9 @@ fn (self: &Verifier) fail_text(
     want: &string::String,
     got: &string::String
 ) -> !diagnostic::Diagnostic {
-    defer position.deinit();
+    defer position.deinit(self.allocator);
     var out = try string::from_bytes(self.allocator, "ir verify error: ");
-    defer out.deinit();
+    defer out.deinit(self.allocator);
     try module.names.append_to(&var out, self.fn_name);
     try out.append_bytes(": ");
     try out.append_string(&position);
@@ -488,7 +488,7 @@ fn (self: &Verifier) failure(
     g: VerifyArg
 ) -> !diagnostic::Diagnostic {
     var out = try string::from_bytes(self.allocator, "ir verify error: ");
-    defer out.deinit();
+    defer out.deinit(self.allocator);
     try module.names.append_to(&var out, self.fn_name);
     try out.append_bytes(": ");
     var used = 0;
@@ -558,9 +558,9 @@ fn (self: &Verifier) phi_incoming_matches_predecessors(
     // Two block-wide flag sets, reused: a rule that fails ends the whole
     // verification, so only the path that continues has to clear them.
     var arrives = try flags(self.allocator, blocks.len());
-    defer arrives.deinit();
+    defer arrives.deinit(self.allocator);
     var named = try flags(self.allocator, blocks.len());
-    defer named.deinit();
+    defer named.deinit(self.allocator);
     var index = 0;
     while node.blocks.get(index) |block| {
         if preds.at(index) |into| {
@@ -587,7 +587,7 @@ fn (self: &Verifier) phi_incoming_matches_predecessors(
 /// Returns count flags, all clear.
 fn flags(allocator: Allocator, count: i64) -> !array::Array<bool> {
     var out = array::new<bool>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while index < count {
         try out.append(false);
@@ -696,9 +696,9 @@ fn (self: &Verifier) phi_incoming_dominates(
         return null;
     }
     var defined_in = try value_defining_blocks(self.allocator, module, function);
-    defer defined_in.deinit();
+    defer defined_in.deinit(self.allocator);
     var tree = try build_dominator_tree(self.allocator, module, function, blocks, preds);
-    defer tree.deinit();
+    defer tree.deinit(self.allocator);
     var index = 0;
     while node.blocks.get(index) |block| {
         index = index + 1;
@@ -751,9 +751,9 @@ fn (self: &Verifier) values_dominate_uses(
         return null;
     }
     var defined_in = try value_defining_blocks(self.allocator, module, function);
-    defer defined_in.deinit();
+    defer defined_in.deinit(self.allocator);
     var tree = try build_dominator_tree(self.allocator, module, function, blocks, preds);
-    defer tree.deinit();
+    defer tree.deinit(self.allocator);
     var index = 0;
     while node.blocks.get(index) |block| {
         let block_node = module.blocks.at(block.node);
@@ -813,6 +813,14 @@ fn (self: &Verifier) check_operands(
         if try self.dominates_use(module, tree, defined_in, blocks, position, step, cleanup.arg) |failed| {
             return move failed;
         }
+        if is_empty(cleanup.allocator.name) {
+            continue;
+        }
+        if try self.dominates_use(
+            module, tree, defined_in, blocks, position, step, cleanup.allocator
+        ) |failed| {
+            return move failed;
+        }
     }
     return null;
 }
@@ -869,7 +877,7 @@ struct Definition {
 /// available everywhere.
 fn value_defining_blocks(allocator: Allocator, module: &Module, function: Function) -> !map::Map<[]u8, Definition> {
     var defined = map::new<[]u8, Definition>(allocator);
-    errdefer defined.deinit();
+    errdefer defined.deinit(allocator);
     let node = module.function_nodes.at(function.node);
     var index = 0;
     while node.blocks.get(index) |block| {
@@ -916,12 +924,12 @@ fn build_dominator_tree(
     preds: &array::Array<array::Array<i64>>
 ) -> !DominatorTree {
     var order = try reverse_postorder(allocator, module, function, blocks);
-    defer order.deinit();
+    defer order.deinit(allocator);
     var tree = DominatorTree {
         place: array::new<i64>(allocator),
         idom: array::new<i64>(allocator)
     };
-    errdefer tree.deinit();
+    errdefer tree.deinit(allocator);
     var position = 0;
     while position < blocks.len() {
         try tree.place.append(-1);
@@ -1020,9 +1028,9 @@ fn reverse_postorder(
 ) -> !array::Array<i64> {
     let node = module.function_nodes.at(function.node);
     var visited = try flags(allocator, blocks.len());
-    defer visited.deinit();
+    defer visited.deinit(allocator);
     var order = array::new<i64>(allocator);
-    errdefer order.deinit();
+    errdefer order.deinit(allocator);
     if node.blocks.len() == 0 {
         return move order;
     }
@@ -1071,7 +1079,7 @@ fn block_predecessors(
     blocks: &BlockIndex
 ) -> !array::Array<array::Array<i64>> {
     var preds = array::new<array::Array<i64>>(allocator);
-    errdefer preds.deinit();
+    errdefer preds.deinit(allocator);
     var index = 0;
     while index < blocks.len() {
         try preds.append(array::new<i64>(allocator));

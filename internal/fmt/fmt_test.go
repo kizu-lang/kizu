@@ -25,9 +25,9 @@ func TestFormatPreservesAlreadyFormatted(t *testing.T) {
 
 // TestFormatErrDeferCleanup checks errdefer lays out like a statement keyword.
 func TestFormatErrDeferCleanup(t *testing.T) {
-	src := `fn build() -> !void {errdefer values.deinit();return;}`
-	want := "fn build() -> !void {\n" +
-		"    errdefer values.deinit();\n" +
+	src := `fn build(allocator: Allocator) -> !void {errdefer values.deinit(allocator);return;}`
+	want := "fn build(allocator: Allocator) -> !void {\n" +
+		"    errdefer values.deinit(allocator);\n" +
 		"    return;\n" +
 		"}\n"
 	if got := Format(src); got != want {

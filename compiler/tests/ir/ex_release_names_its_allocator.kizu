@@ -1,0 +1,170 @@
+// 解放は確保と同じ allocator を名指します。値は自分を作った allocator の複製を
+// 持たないので、`deinit` に必要なものは呼び出し側が綴ります(ADR-0132)。
+// おかげで `Box<T>` の cell は payload だけになり、pointer 2 本の節点が
+// malloc の 1 つ上の size class に押し上げられることがなくなります。
+
+import std::array;
+import std::mem;
+import std::string;
+
+struct Note {
+    title: string::String,
+    tags: array::Array<i64>,
+}
+
+// owner field を持つ型の deinit は導出されます。導出された body も allocator を
+// 受け取り、field へそのまま渡します —— 型ごとに引数が違わないので、
+// `defer x.deinit(allocator)` の書き方は型を見ずに決まります。
+fn note(allocator: Allocator, title: []u8) -> !Note {
+    var name = try string::from_bytes(allocator, title);
+    errdefer name.deinit(allocator);
+    let tags = array::new<i64>(allocator);
+    return Note {
+        title: move name,
+        tags: move tags
+    };
+}
+
+fn main() -> !void {
+    let heap = mem::page_allocator();
+    var scratch_bytes = [512]u8{};
+    let view = scratch_bytes.as_mut_bytes();
+    // 同じ frame に 2 つの allocator があります。値ごとに、それを作った方を
+    // 名指して解放します。
+    let scratch = mem::fixed_buffer(view);
+
+    var kept = try note(heap, "kept");
+    defer kept.deinit(heap);
+
+    var temporary = array::new<i64>(scratch);
+    defer temporary.deinit(scratch);
+
+    try temporary.append(7);
+    print(temporary.get(0) orelse -1);
+    print(kept.title.len());
+    return;
+}
+
+// run
+// features: allocator deinit derived-deinit fixed-buffer defer
+// output:
+// 7
+// 4
+
+// ir
+// lower:
+// fn note(%allocator: Allocator, %title: []u8) -> !Note {
+// entry:
+//   %1: std::mem::Error!std::string::String = call.std::string::from_bytes %allocator: Allocator, %title: []u8
+//   %2: std::string::String = error.try %1: std::mem::Error!std::string::String
+//   %3: std::array::Array<i64> = array.new %allocator: Allocator
+//   %4: Note = struct.new {title: %2: std::string::String, tags: %3: std::array::Array<i64>}
+//   %5: !Note = error.ok %4: Note
+//   return %5: !Note
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: [512]u8 = buffer.new
+//   %3: &var [512]u8 = local.slot %2: [512]u8
+//   %4: [512]u8 = ref.load %3: &var [512]u8
+//   %5: []u8 = buffer.as_bytes %4: [512]u8
+//   %6: Allocator = call.std::mem::fixed_buffer %5: []u8
+//   %7: []u8 = const "kept"
+//   %8: !Note = call.note %1: Allocator, %7: []u8
+//   %9: Note = error.try %8: !Note
+//   %10: std::array::Array<i64> = array.new %6: Allocator
+//   %11: &var std::array::Array<i64> = local.slot %10: std::array::Array<i64>
+//   %12: i64 = const 7
+//   %13: std::mem::Error!void = call.std::array::Array.append.i64 %11: &var std::array::Array<i64>, %12: i64
+//   %14: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
+//   error.try %13: std::mem::Error!void, cleanup array.deinit %14: std::array::Array<i64>; call.Note.deinit %9: Note, %1: Allocator
+//   %16: i64 = const 0
+//   %17: ?i64 = call.std::array::Array.get.i64 %11: &var std::array::Array<i64>, %16: i64
+//   %18: bool = opt.has %17: ?i64
+//   branch %18: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %19: i64 = opt.value %17: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %20: i64 = const 1
+//   %21: i64 = unary.- %20: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %22: i64 = phi [orelse.some.1, %19: i64], [orelse.else.2, %21: i64]
+//   call.print %22: i64
+//   %24: std::string::String = field.title %9: Note
+//   %25: i64 = call.std::string::String.len %24: std::string::String
+//   call.print %25: i64
+//   %27: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
+//   array.deinit %27: std::array::Array<i64>
+//   call.Note.deinit %9: Note, %1: Allocator
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn Note.deinit(%self: Note, %allocator: Allocator) -> void {
+// entry:
+//   %1: std::string::String = field.title %self: Note
+//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
+//   %3: std::array::Array<i64> = field.tags %self: Note
+//   call.std::array::Array.deinit.i64 %3: std::array::Array<i64>, %allocator: Allocator
+//   return void: void
+// }
+// opt:
+// fn note(%allocator: Allocator, %title: []u8) -> !Note {
+// entry:
+//   %1: std::mem::Error!std::string::String = call.std::string::from_bytes %allocator: Allocator, %title: []u8
+//   %2: std::string::String = error.try %1: std::mem::Error!std::string::String
+//   %3: std::array::Array<i64> = array.new %allocator: Allocator
+//   %4: Note = struct.new {title: %2: std::string::String, tags: %3: std::array::Array<i64>}
+//   %5: !Note = error.ok %4: Note
+//   return %5: !Note
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: [512]u8 = buffer.new
+//   %3: &var [512]u8 = local.slot %2: [512]u8
+//   %4: [512]u8 = ref.load %3: &var [512]u8
+//   %5: []u8 = buffer.as_bytes %4: [512]u8
+//   %6: Allocator = call.std::mem::fixed_buffer %5: []u8
+//   %7: []u8 = const "kept"
+//   %8: !Note = call.note %1: Allocator, %7: []u8
+//   %9: Note = error.try %8: !Note
+//   %10: std::array::Array<i64> = array.new %6: Allocator
+//   %11: &var std::array::Array<i64> = local.slot %10: std::array::Array<i64>
+//   %12: i64 = const 7
+//   %13: std::mem::Error!void = call.std::array::Array.append.i64 %11: &var std::array::Array<i64>, %12: i64
+//   %14: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
+//   error.try %13: std::mem::Error!void, cleanup array.deinit %14: std::array::Array<i64>; call.Note.deinit %9: Note, %1: Allocator
+//   %16: i64 = const 0
+//   %17: ?i64 = call.std::array::Array.get.i64 %11: &var std::array::Array<i64>, %16: i64
+//   %18: bool = opt.has %17: ?i64
+//   branch %18: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %19: i64 = opt.value %17: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %20: i64 = const 1
+//   %21: i64 = unary.- %20: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %22: i64 = phi [orelse.some.1, %19: i64], [orelse.else.2, %21: i64]
+//   call.print %22: i64
+//   %24: std::string::String = field.title %9: Note
+//   %25: i64 = call.std::string::String.len %24: std::string::String
+//   call.print %25: i64
+//   %27: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
+//   array.deinit %27: std::array::Array<i64>
+//   call.Note.deinit %9: Note, %1: Allocator
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn Note.deinit(%self: Note, %allocator: Allocator) -> void {
+// entry:
+//   %1: std::string::String = field.title %self: Note
+//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
+//   %3: std::array::Array<i64> = field.tags %self: Note
+//   call.std::array::Array.deinit.i64 %3: std::array::Array<i64>, %allocator: Allocator
+//   return void: void
+// }

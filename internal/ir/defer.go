@@ -60,10 +60,17 @@ func cleanupReceiverName(expr ast.Expression) string {
 	return ident.Name
 }
 
-// cleanupFromExpr converts the narrow v0 defer expression into a void cleanup.
+// cleanupFromExpr converts a defer expression into a void cleanup.
+//
+// A cleanup may carry arguments beyond its receiver. `Box.deinit` takes the
+// allocator that handed out the cell, because the cell does not store one:
+// what a release needs and what the value spells are separate questions, and
+// keeping a copy of the answer in every cell is what a `deinit(allocator)`
+// avoids. The arguments are read where the defer is written, not where it
+// runs, so what runs at scope exit is settled at the point the source names.
 func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 	call, ok := expr.(*ast.CallExpr)
-	if !ok || len(call.Args) != 0 {
+	if !ok {
 		return Cleanup{}, fmt.Errorf("ir error: defer expects cleanup method call")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
@@ -78,7 +85,15 @@ func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 	if !ok {
 		return Cleanup{}, fmt.Errorf("ir error: undefined defer receiver `%s`", ident.Name)
 	}
-	return l.cleanupFromMethod(receiver, field.Name)
+	rest := make([]Value, 0, len(call.Args))
+	for _, arg := range call.Args {
+		value, err := l.lowerExpr(arg)
+		if err != nil {
+			return Cleanup{}, err
+		}
+		rest = append(rest, value)
+	}
+	return l.cleanupFromMethod(receiver, field.Name, rest)
 }
 
 // containerCleanup names what one std container's cleanup needs: the std type
@@ -88,28 +103,33 @@ type containerCleanup struct {
 	name      string
 	shallowOp string
 	typeArg   string
+	// shallowNamesAllocator is whether the runtime op takes the allocator the
+	// release names. A Box cell stores nothing but its payload, so the op is
+	// handed one; the other containers still keep an allocator in the header
+	// their op reads.
+	shallowNamesAllocator bool
 }
 
 // stdContainerCleanup reports the cleanup shape of a std container type, and
 // false for anything else.
 func stdContainerCleanup(receiverType string) (containerCleanup, bool) {
 	if elem, ok := arrayElementType(receiverType); ok {
-		return containerCleanup{arrayTypeName, "array.deinit", elem}, true
+		return containerCleanup{arrayTypeName, "array.deinit", elem, false}, true
 	}
 	if args, ok := mapStaticArgs(receiverType); ok {
-		return containerCleanup{mapTypeName, "map.deinit", args}, true
+		return containerCleanup{mapTypeName, "map.deinit", args, false}, true
 	}
 	if elem, ok := boxElementType(receiverType); ok {
-		return containerCleanup{boxTypeName, "box.deinit", elem}, true
+		return containerCleanup{boxTypeName, "box.deinit", elem, true}, true
 	}
 	if elem := arenaElementType(receiverType); elem != "unknown" {
-		return containerCleanup{arenaTypeName, "arena.deinit", elem}, true
+		return containerCleanup{arenaTypeName, "arena.deinit", elem, false}, true
 	}
 	return containerCleanup{}, false
 }
 
 // cleanupFromMethod resolves one receiver.method() cleanup into an IR instruction.
-func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, error) {
+func (l *lowerer) cleanupFromMethod(receiver Value, method string, rest []Value) (Cleanup, error) {
 	receiverType := derefType(receiver.Type)
 	if container, ok := stdContainerCleanup(receiverType); ok && method == typ.CleanupMethod {
 		// A container whose contents own something releases them first, and
@@ -117,13 +137,17 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, err
 		// cleanup calls its instance exactly like a direct call would. Plain
 		// contents have no loop to run, so they keep the runtime op.
 		if !ast.OwnerType(l.deinitOwners, container.typeArg) {
-			return Cleanup{Op: container.shallowOp, Args: []Value{receiver}}, nil
+			args := []Value{receiver}
+			if container.shallowNamesAllocator {
+				args = append(args, rest...)
+			}
+			return Cleanup{Op: container.shallowOp, Args: args}, nil
 		}
 		op, _, err := l.stdContainerCallOp(container.name, method, container.typeArg)
 		if err != nil {
 			return Cleanup{}, err
 		}
-		return Cleanup{Op: op, Args: []Value{receiver}}, nil
+		return Cleanup{Op: op, Args: append([]Value{receiver}, rest...)}, nil
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, method); ok {
 		sig := l.signatures[methodName]
@@ -133,7 +157,7 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, err
 				sig.Return,
 			)
 		}
-		return Cleanup{Op: "call." + methodName, Args: []Value{receiver}}, nil
+		return Cleanup{Op: "call." + methodName, Args: append([]Value{receiver}, rest...)}, nil
 	}
 	return Cleanup{}, fmt.Errorf("ir error: unknown cleanup method `%s`", method)
 }

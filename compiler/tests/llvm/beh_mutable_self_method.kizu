@@ -152,7 +152,7 @@ fn (self: &var Recorder) note(value: i64) -> !void {
 test "a mutating method reaches a non-copy field" {
     let allocator = mem::page_allocator();
     var recorder = Recorder { journal: Journal { entries: array::new<i64>(allocator) } };
-    defer recorder.deinit();
+    defer recorder.deinit(allocator);
     try recorder.note(7);
     try recorder.note(9);
     testing::expect_equal<i64>(9, recorder.journal.last());
@@ -181,13 +181,12 @@ test "nested field paths reach methods and borrows" {
     var studio = Studio {
         recorder: Recorder { journal: Journal { entries: array::new<i64>(allocator) } },
     };
-    defer studio.deinit();
+    defer studio.deinit(allocator);
     try studio.recorder.journal.push(4);
     try studio.recorder.journal.entries.append(6);
     testing::expect_equal<i64>(6, studio.recorder.journal.last());
     testing::expect_equal<i64>(10, sum_entries(studio.recorder.journal.entries));
 }
-
 
 // llvm
 // emit:
@@ -234,7 +233,7 @@ test "nested field paths reach methods and borrows" {
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
-// declare void @std__array__Array_deinit_i64(%kizu.array)
+// declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
 // declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
 // declare i64 @std__array__Array_len_i64(ptr)
 // declare i64 @std__mem__len(%kizu.slice.u8)
@@ -409,31 +408,31 @@ test "nested field paths reach methods and borrows" {
 //   ret i64 %kizu.3
 // }
 // 
-// define void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.self.addr) {
+// define void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Journal, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Journal %kizu.self, 0
-//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.self.addr) {
+// define void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Journal
 //   %kizu.self = load %kizu.struct.Recorder, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Recorder %kizu.self, 0
 //   store %kizu.struct.Journal %kizu.1, ptr %kizu.arg.0.1
-//   call void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.arg.0.1)
+//   call void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.self.addr) {
+// define void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Recorder
 //   %kizu.self = load %kizu.struct.Studio, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Studio %kizu.self, 0
 //   store %kizu.struct.Recorder %kizu.1, ptr %kizu.arg.0.1
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.1)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -624,7 +623,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
 //   store %kizu.struct.Recorder %kizu.8, ptr %kizu.arg.0.2
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.2)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.7
 // kizu.9.try.ok:
 //   %kizu.11 = call %kizu.error.void @Recorder_note(ptr %kizu.5, i64 9)
@@ -634,7 +633,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
 // kizu.13.try.err:
 //   store %kizu.struct.Recorder %kizu.12, ptr %kizu.arg.0.4
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.4)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.4, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.11
 // kizu.13.try.ok:
 //   %kizu.15.ptr = getelementptr %kizu.struct.Recorder, ptr %kizu.5, i32 0, i32 0
@@ -649,7 +648,7 @@ test "nested field paths reach methods and borrows" {
 // kizu.17.ok.ok:
 //   %kizu.18 = load %kizu.struct.Recorder, ptr %kizu.5
 //   store %kizu.struct.Recorder %kizu.18, ptr %kizu.arg.0.6
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.6)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.6, ptr %kizu.1)
 //   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.20
 // }
@@ -677,7 +676,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
 // kizu.12.try.err:
 //   store %kizu.struct.Studio %kizu.11, ptr %kizu.arg.0.2
-//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.2)
+//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.10
 // kizu.12.try.ok:
 //   %kizu.13 = getelementptr %kizu.struct.Studio, ptr %kizu.6, i32 0, i32 0
@@ -690,7 +689,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.19.ok.bool, label %kizu.19.try.ok, label %kizu.19.try.err
 // kizu.19.try.err:
 //   store %kizu.struct.Studio %kizu.18, ptr %kizu.arg.0.4
-//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.4)
+//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -721,7 +720,7 @@ test "nested field paths reach methods and borrows" {
 // kizu.30.ok.ok:
 //   %kizu.31 = load %kizu.struct.Studio, ptr %kizu.6
 //   store %kizu.struct.Studio %kizu.31, ptr %kizu.arg.0.8
-//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.8)
+//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.8, ptr %kizu.1)
 //   %kizu.33 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.33
 // }
@@ -769,7 +768,7 @@ test "nested field paths reach methods and borrows" {
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
-// declare void @std__array__Array_deinit_i64(%kizu.array)
+// declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
 // declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
 // declare i64 @std__array__Array_len_i64(ptr)
 // declare i64 @std__mem__len(%kizu.slice.u8)
@@ -944,31 +943,31 @@ test "nested field paths reach methods and borrows" {
 //   ret i64 %kizu.3
 // }
 // 
-// define void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.self.addr) {
+// define void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Journal, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Journal %kizu.self, 0
-//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.self.addr) {
+// define void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Journal
 //   %kizu.self = load %kizu.struct.Recorder, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Recorder %kizu.self, 0
 //   store %kizu.struct.Journal %kizu.1, ptr %kizu.arg.0.1
-//   call void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.arg.0.1)
+//   call void @Journal_deinit(ptr byval(%kizu.struct.Journal) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
-// define void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.self.addr) {
+// define void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.arg.0.1 = alloca %kizu.struct.Recorder
 //   %kizu.self = load %kizu.struct.Studio, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Studio %kizu.self, 0
 //   store %kizu.struct.Recorder %kizu.1, ptr %kizu.arg.0.1
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.1)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -1159,7 +1158,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
 // kizu.9.try.err:
 //   store %kizu.struct.Recorder %kizu.8, ptr %kizu.arg.0.2
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.2)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.7
 // kizu.9.try.ok:
 //   %kizu.11 = call %kizu.error.void @Recorder_note(ptr %kizu.5, i64 9)
@@ -1169,7 +1168,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
 // kizu.13.try.err:
 //   store %kizu.struct.Recorder %kizu.12, ptr %kizu.arg.0.4
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.4)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.4, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.11
 // kizu.13.try.ok:
 //   %kizu.15.ptr = getelementptr %kizu.struct.Recorder, ptr %kizu.5, i32 0, i32 0
@@ -1184,7 +1183,7 @@ test "nested field paths reach methods and borrows" {
 // kizu.17.ok.ok:
 //   %kizu.18 = load %kizu.struct.Recorder, ptr %kizu.5
 //   store %kizu.struct.Recorder %kizu.18, ptr %kizu.arg.0.6
-//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.6)
+//   call void @Recorder_deinit(ptr byval(%kizu.struct.Recorder) %kizu.arg.0.6, ptr %kizu.1)
 //   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.20
 // }
@@ -1212,7 +1211,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
 // kizu.12.try.err:
 //   store %kizu.struct.Studio %kizu.11, ptr %kizu.arg.0.2
-//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.2)
+//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.2, ptr %kizu.1)
 //   ret %kizu.error.void %kizu.10
 // kizu.12.try.ok:
 //   %kizu.13 = getelementptr %kizu.struct.Studio, ptr %kizu.6, i32 0, i32 0
@@ -1225,7 +1224,7 @@ test "nested field paths reach methods and borrows" {
 //   br i1 %kizu.19.ok.bool, label %kizu.19.try.ok, label %kizu.19.try.err
 // kizu.19.try.err:
 //   store %kizu.struct.Studio %kizu.18, ptr %kizu.arg.0.4
-//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.4)
+//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.4, ptr %kizu.1)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.void %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 1
@@ -1256,7 +1255,7 @@ test "nested field paths reach methods and borrows" {
 // kizu.30.ok.ok:
 //   %kizu.31 = load %kizu.struct.Studio, ptr %kizu.6
 //   store %kizu.struct.Studio %kizu.31, ptr %kizu.arg.0.8
-//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.8)
+//   call void @Studio_deinit(ptr byval(%kizu.struct.Studio) %kizu.arg.0.8, ptr %kizu.1)
 //   %kizu.33 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.33
 // }

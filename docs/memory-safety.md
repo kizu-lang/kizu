@@ -103,7 +103,7 @@ policy.
 - An `Arena.at` borrow can return through a parameter-rooted arena, but cannot
   escape a local arena.
 - `std::arena::Arena<T>` may own elements that themselves own resources.
-- `std::arena::Arena<T>.deinit()` consumes every initialized owner element before
+- `std::arena::Arena<T>.deinit(allocator)` consumes every initialized owner element before
   releasing arena storage and invalidating the binding.
 - Values read through `arena.at` cannot be moved out.
 - A handle can only be used with the arena that produced it.
@@ -120,12 +120,12 @@ policy.
   lexical block; function bodies are blocks.
 - Deferred cleanup runs in reverse registration order when the block exits,
   including explicit return and error-return paths.
-- The first supported form is a cleanup method call such as `defer x.deinit();`.
+- The first supported form is a cleanup method call such as `defer x.deinit(allocator);`.
 - Deferred cleanup does not discover resources automatically and does not add
   Drop / RAII semantics.
 - The cleanup receiver must satisfy the same ownership and borrow rules as an
   explicit cleanup call when the block exits.
-- Owned containers should register `defer x.deinit();` in the same
+- Owned containers should register `defer x.deinit(allocator);` in the same
   lexical block once the owner is established, unless the owner is returned or a
   narrower compiler subset does not yet support `defer` for that path.
 

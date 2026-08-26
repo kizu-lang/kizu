@@ -184,7 +184,7 @@ pub fn encode<T>(
     out: &var std::string::String,
 ) -> std::mem::Error!void {
     var encoder = std::json::encoder(allocator);
-    defer encoder.deinit();
+    defer encoder.deinit(allocator);
     try encode_value<T>(encoder, value);
     try encoder.finish_into(out);
     return;
@@ -200,7 +200,7 @@ pub fn encode_with_spaces<T>(
     out: &var std::string::String,
 ) -> std::mem::Error!void {
     var encoder = std::json::encoder_with_spaces(allocator, width);
-    defer encoder.deinit();
+    defer encoder.deinit(allocator);
     try encode_value<T>(encoder, value);
     try encoder.finish_into(out);
     return;
@@ -214,7 +214,7 @@ pub fn encode_with_tabs<T>(
     out: &var std::string::String,
 ) -> std::mem::Error!void {
     var encoder = std::json::encoder_with_tabs(allocator, width);
-    defer encoder.deinit();
+    defer encoder.deinit(allocator);
     try encode_value<T>(encoder, value);
     try encoder.finish_into(out);
     return;
@@ -966,7 +966,7 @@ fn decode_string(
 ) -> std::json::DecodeError!std::string::String {
     try expect_byte(bytes, index, cast<u8>(34));
     var out = std::string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     while std::mem::byte_at(bytes, index.*) |byte| {
         index.* = index.* + 1;
         if byte == cast<u8>(34) {
@@ -1107,7 +1107,7 @@ fn scan_object(
     }
     try expect_byte(bytes, index, cast<u8>(123));
     var members = std::array::new<Member>(allocator);
-    errdefer members.deinit();
+    errdefer members.deinit(allocator);
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(125) {
             index.* = index.* + 1;
@@ -1295,14 +1295,14 @@ pub union Value {
     Obj(std::map::Map<[]u8, std::json::Value>),
 }
 
-fn (self: Value) deinit() -> void {
+fn (self: Value) deinit(allocator: Allocator) -> void {
     match self {
         Null => return,
         Bool(_) => return,
         I64(_) => return,
-        Str(text) => text.deinit(),
-        Arr(items) => items.deinit(),
-        Obj(entries) => entries.deinit(),
+        Str(text) => text.deinit(allocator),
+        Arr(items) => items.deinit(allocator),
+        Obj(entries) => entries.deinit(allocator),
     }
     return;
 }
@@ -1444,7 +1444,7 @@ fn decode_any_array(
 ) -> std::json::DecodeError!std::json::Value {
     try expect_byte(bytes, index, cast<u8>(91));
     var items = std::array::new<std::json::Value>(allocator);
-    errdefer items.deinit();
+    errdefer items.deinit(allocator);
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(93) {
             index.* = index.* + 1;
@@ -1470,7 +1470,7 @@ fn decode_any_object(
 ) -> std::json::DecodeError!std::json::Value {
     try expect_byte(bytes, index, cast<u8>(123));
     var entries = std::map::new<[]u8, std::json::Value>(allocator);
-    errdefer entries.deinit();
+    errdefer entries.deinit(allocator);
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(125) {
             index.* = index.* + 1;
@@ -1481,7 +1481,7 @@ fn decode_any_object(
     while more {
         skip_space(bytes, index);
         var key = try decode_string(allocator, bytes, index);
-        defer key.deinit();
+        defer key.deinit(allocator);
         let name = key.as_bytes();
         // Refused before the value is built, the way `scan_object` refuses one:
         // keeping either of the two would silently drop what the other carried.
@@ -1529,7 +1529,7 @@ fn decode_array<T>(
 ) -> std::json::DecodeError!T {
     try expect_byte(bytes, index, cast<u8>(91));
     var items = std::array::new<std::meta::element<T>>(allocator);
-    errdefer items.deinit();
+    errdefer items.deinit(allocator);
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(93) {
             index.* = index.* + 1;
@@ -1559,7 +1559,7 @@ fn decode_map<T>(
 ) -> std::json::DecodeError!T {
     try expect_byte(bytes, index, cast<u8>(123));
     var entries = std::map::new<[]u8, std::meta::element<T>>(allocator);
-    errdefer entries.deinit();
+    errdefer entries.deinit(allocator);
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(125) {
             index.* = index.* + 1;
@@ -1570,7 +1570,7 @@ fn decode_map<T>(
     while more {
         skip_space(bytes, index);
         var key = try decode_string(allocator, bytes, index);
-        defer key.deinit();
+        defer key.deinit(allocator);
         let name = key.as_bytes();
         // Refused before the value is built, the way `scan_object` refuses one:
         // keeping either of the two would silently drop what the other carried.
@@ -1634,7 +1634,7 @@ fn decode_variant_payload<T>(
     ignore_unknown: bool,
 ) -> std::json::DecodeError!T {
     var scan = try scan_object(allocator, bytes, index, 0);
-    defer scan.deinit();
+    defer scan.deinit(allocator);
     if scan.members.len() != 1 {
         return Error::UnexpectedToken;
     }
@@ -1660,12 +1660,12 @@ fn decode_variant_payload<T>(
 // so the choice is made where the element type is bound to a name.
 fn deinit_elements<E>(items: std::array::Array<E>) -> void {
     comptime if E == type<std::string::String> or E == type<std::json::Value> {
-        items.deinit();
+        items.deinit(allocator);
     } else {
         comptime if std::meta::is_struct<E>() {
-            items.deinit();
+            items.deinit(allocator);
         } else {
-            items.deinit();
+            items.deinit(allocator);
         }
     }
     return;
@@ -1682,7 +1682,7 @@ fn decode_struct<T>(
     ignore_unknown: bool,
 ) -> std::json::DecodeError!T {
     var scan = try scan_object(allocator, bytes, index, 0);
-    defer scan.deinit();
+    defer scan.deinit(allocator);
     if !ignore_unknown {
         // Checked before anything is built: a document `T` cannot hold is
         // refused while there is still nothing to release.

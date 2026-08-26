@@ -60,12 +60,9 @@ fn (self: &var Checker) check_array_method(
         return self.check_array_indexed_mutation(tree, env, array, elem, method, args, out);
     }
     if self.names.is(method, "deinit") {
-        let count = arg_count(tree, args);
-        if count != 0 {
-            return try self.error2(
-                tree, ast::zero_span(), "array error: `Array.%s` expects 0 args, got %d",
-                Arg::Str(method), Arg::Int(count)
-            );
+        let release_label = try self.names.intern("Array.deinit");
+        if try self.read_release_allocator(tree, env, release_label, array, args, 0) |failed| {
+            return move failed;
         }
         try self.store.set_moved(array, true);
         out.* = self.common.void_name;
@@ -544,7 +541,7 @@ fn (self: &var Checker) check_map_method(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     var map_args = array::new<Name>(self.allocator);
-    defer map_args.deinit();
+    defer map_args.deinit(self.allocator);
     if try self.checked_map_args(tree, args_text, &var map_args) |failed| {
         return move failed;
     }
@@ -590,7 +587,7 @@ fn (self: &var Checker) check_map_method(
         return self.check_map_read_no_args(tree, method, args, out);
     }
     if self.names.is(method, "deinit") {
-        return self.check_map_deinit(tree, map_value, args, out);
+        return self.check_map_deinit(tree, env, map_value, args, out);
     }
     // Unreachable while this chain and the shared access table agree; the
     // table refusal above is the user-facing one.
@@ -767,18 +764,100 @@ fn (self: &var Checker) check_map_read_no_args(
 }
 
 /// Validates owned Map cleanup and marks it moved, the Go `checkMapDeinit`.
+/// Reads the single Allocator a release names. A value keeps no copy of the
+/// allocator that made it (ADR-0132), so the call spells it, the same way the
+/// construction did. `offset` skips the receiver a primitive carries.
+fn (self: &var Checker) read_release_allocator(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    label: Name,
+    receiver: ?BindingHandle,
+    args: ast::ExpressionList,
+    offset: i64
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args) - offset;
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects 1 args, got %d",
+            Arg::Str(label), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, offset);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects Allocator, got %s",
+            Arg::Str(label), Arg::Str(got)
+        );
+    }
+    return self.check_release_tie(tree, env, label, receiver, first);
+}
+
+/// Requires the allocator a release names to be the one the value was made
+/// from, the Go `checkReleaseTie` (ADR-0132). Only a tied allocator has an
+/// identity to compare: `page_allocator()` values are indistinguishable, so
+/// nothing there is checkable and nothing needs to be.
+fn (self: &var Checker) check_release_tie(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    label: Name,
+    receiver: ?BindingHandle,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let value = receiver orelse return null;
+    let tied = self.tied_allocator_arg(tree, env, arg);
+    var sources = 0;
+    var index = 0;
+    while self.borrow_target_at(value, index) |source| {
+        index = index + 1;
+        if !self.names.is(self.binding(source.target).type_name, "Allocator") {
+            continue;
+        }
+        sources = sources + 1;
+        if tied |named| {
+            if named.node == source.target.node {
+                return null;
+            }
+        }
+    }
+    let owner_name = self.binding(value).name;
+    if sources == 0 {
+        if tied |named| {
+            return try self.error3(
+                tree, ast::zero_span(),
+                "move error: `%s` names allocator `%s`, which is tied to state `%s` was not built from",
+                Arg::Str(label), Arg::Str(self.binding(named).name), Arg::Str(owner_name)
+            );
+        }
+        return null;
+    }
+    if tied |named| {
+        return try self.error3(
+            tree, ast::zero_span(),
+            "move error: `%s` names allocator `%s`, but `%s` was built from another",
+            Arg::Str(label), Arg::Str(self.binding(named).name), Arg::Str(owner_name)
+        );
+    }
+    return try self.error2(
+        tree, ast::zero_span(),
+        "move error: `%s` must name the tied allocator `%s` was built from",
+        Arg::Str(label), Arg::Str(owner_name)
+    );
+}
+
 fn (self: &var Checker) check_map_deinit(
-    tree: &ast::Ast,
+    tree: &var ast::Ast,
+    env: ScopeHandle,
     map_value: BindingHandle,
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 0 {
-        return try self.error1(
-            tree, ast::zero_span(), "map error: `Map.deinit` expects 0 args, got %d",
-            Arg::Int(count)
-        );
+    let release_label = try self.names.intern("Map.deinit");
+    if try self.read_release_allocator(tree, env, release_label, map_value, args, 0) |failed| {
+        return move failed;
     }
     try self.store.set_moved(map_value, true);
     out.* = self.common.void_name;
@@ -899,7 +978,7 @@ fn (self: &var Checker) check_impl_method_call(
                 let name = self.binding(value).name;
                 return try self.error3(
                     tree, ast::zero_span(),
-                    "move error: field `%s.%s` is already consumed, so `%s.deinit()` would release it twice",
+                    "move error: field `%s.%s` is already consumed, so `%s.deinit(self.allocator)` would release it twice",
                     Arg::Str(name), Arg::Str(field), Arg::Str(name)
                 );
             }
@@ -957,7 +1036,7 @@ fn (self: &var Checker) check_impl_method_args(
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
     let none = self.empty_subst();
-    defer none.deinit();
+    defer none.deinit(self.allocator);
     if try self.check_call_handle_pairing(tree, env, method, 1, &none, args) |failed| {
         return move failed;
     }
@@ -969,9 +1048,9 @@ fn (self: &var Checker) check_impl_method_args(
         try self.activate_borrow(place.target, place.field, false);
     }
     var borrowed = array::new<TemporaryBorrow>(self.allocator);
-    defer borrowed.deinit();
+    defer borrowed.deinit(self.allocator);
     if try self.activate_borrow_args(tree, env, method, 1, args, &var borrowed) |failed| {
-        errdefer failed.deinit();
+        errdefer failed.deinit(self.allocator);
         if receiver_mut {
             try self.release_temporary_borrow(
                 TemporaryBorrow { value: place.target, field: place.field, mutable: false }
@@ -984,7 +1063,7 @@ fn (self: &var Checker) check_impl_method_args(
         let position = index;
         index = index + 1;
         if try self.check_impl_method_arg(tree, env, method, position + 1, arg) |failed| {
-            errdefer failed.deinit();
+            errdefer failed.deinit(self.allocator);
             if receiver_mut {
                 try self.release_temporary_borrow(
                     TemporaryBorrow { value: place.target, field: place.field, mutable: false }
@@ -1003,7 +1082,7 @@ fn (self: &var Checker) check_impl_method_args(
         if try self.check_borrow_conflict_for_field(
             tree, place.target, place.field, true
         ) |failed| {
-            errdefer failed.deinit();
+            errdefer failed.deinit(self.allocator);
             try self.release_temporary_borrows(&borrowed);
             return move failed;
         }
@@ -1151,17 +1230,15 @@ fn (self: &var Checker) check_arena_handle_arg(
 /// Validates explicit arena cleanup and invalidates the binding, the Go
 /// `checkArenaDeinit`.
 fn (self: &var Checker) check_owned_arena_deinit(
-    tree: &ast::Ast,
+    tree: &var ast::Ast,
+    env: ScopeHandle,
     arena: BindingHandle,
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 0 {
-        return try self.error1(
-            tree, ast::zero_span(), "arena error: `arena.deinit` expects 0 args, got %d",
-            Arg::Int(count)
-        );
+    let release_label = try self.names.intern("arena.deinit");
+    if try self.read_release_allocator(tree, env, release_label, arena, args, 0) |failed| {
+        return move failed;
     }
     try self.store.set_deinitialized(arena, true);
     try self.store.set_moved(arena, true);
@@ -1252,11 +1329,11 @@ fn (self: &var Checker) arena_handle_pairs(
     pairs: &var array::Array<ArenaHandlePair>
 ) -> !void {
     var resolved = array::new<Name>(self.allocator);
-    defer resolved.deinit();
+    defer resolved.deinit(self.allocator);
     var arenas = map::new<[]u8, i64>(self.allocator);
-    defer arenas.deinit();
+    defer arenas.deinit(self.allocator);
     var handles = map::new<[]u8, i64>(self.allocator);
-    defer handles.deinit();
+    defer handles.deinit(self.allocator);
     var index = 0;
     while self.param_at(function, first_param + index) |param| {
         let position = index;
@@ -1337,7 +1414,7 @@ fn (self: &var Checker) check_call_handle_pairing(
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
     var pairs = array::new<ArenaHandlePair>(self.allocator);
-    defer pairs.deinit();
+    defer pairs.deinit(self.allocator);
     try self.arena_handle_pairs(function, first_param, subst, &var pairs);
     var index = 0;
     while pairs.get(index) |pair| {
@@ -1376,7 +1453,7 @@ fn (self: &var Checker) arena_arg_binding(
     }
     var direct = self.empty_direct_field_receiver();
     if try self.direct_field_receiver(tree, env, field, &var direct) |failed| {
-        failed.deinit();
+        failed.deinit(self.allocator);
         return null;
     }
     if !self.names.generic_base_is(direct.type_name, "std::arena::Arena") {

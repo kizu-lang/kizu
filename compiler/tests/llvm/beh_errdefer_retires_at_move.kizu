@@ -8,12 +8,12 @@ import std::testing;
 // work without the two cleanups colliding (ADR-0114).
 fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
     var parent = array::new<string::String>(allocator);
-    errdefer parent.deinit();
+    errdefer parent.deinit(allocator);
 
     var i = 0;
     while i < count {
         var child = string::new(allocator);
-        errdefer child.deinit();
+        errdefer child.deinit(allocator);
         try child.append_byte(cast<u8>(97) + cast<u8>(i));
         try parent.append(move child);
         try parent.reserve(1);
@@ -27,18 +27,17 @@ fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
 test "errdefer retires at move" {
     let allocator = mem::page_allocator();
     let names = try build(allocator, 3);
-    defer names.deinit();
+    defer names.deinit(allocator);
 
     testing::expect_equal<i64>(3, names.len());
     var count = 0;
     while names.pop() |name| {
         testing::expect_equal<i64>(1, name.len());
-        name.deinit();
+        name.deinit(allocator);
         count = count + 1;
     }
     testing::expect_equal<i64>(3, count);
 }
-
 
 // llvm
 // emit:
@@ -83,13 +82,13 @@ test "errdefer retires at move" {
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
-// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_std_3a_3astring_3a_3aString(ptr)
 // declare %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_reserve_std_3a_3astring_3a_3aString(ptr, i64)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
@@ -119,8 +118,8 @@ test "errdefer retires at move" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13, ptr %kizu.allocator)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14, ptr %kizu.allocator)
 //   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.void %kizu.12, 1
 //   %kizu.try.err.3.base = insertvalue %kizu.error.std__array__Array_std__string__String_ zeroinitializer, i8 0, 0
 //   %kizu.try.err.3 = insertvalue %kizu.error.std__array__Array_std__string__String_ %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 2
@@ -133,7 +132,7 @@ test "errdefer retires at move" {
 //   %kizu.19.ok.bool = icmp ne i8 %kizu.19.ok, 0
 //   br i1 %kizu.19.ok.bool, label %kizu.19.try.ok, label %kizu.19.try.err
 // kizu.19.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.18)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.18, ptr %kizu.allocator)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.std__array__Array_std__string__String_ zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.std__array__Array_std__string__String_ %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 2
@@ -145,7 +144,7 @@ test "errdefer retires at move" {
 //   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
 //   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
 // kizu.23.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22, ptr %kizu.allocator)
 //   %kizu.try.err.7.code = extractvalue %kizu.error.std__mem__Error.void %kizu.21, 1
 //   %kizu.try.err.7.base = insertvalue %kizu.error.std__array__Array_std__string__String_ zeroinitializer, i8 0, 0
 //   %kizu.try.err.7 = insertvalue %kizu.error.std__array__Array_std__string__String_ %kizu.try.err.7.base, i64 %kizu.try.err.7.code, 2
@@ -199,7 +198,7 @@ test "errdefer retires at move" {
 //   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.15, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12, ptr %kizu.1)
 //   %kizu.19 = add i64 %kizu.10, 1
 //   br label %while.header.1
 // while.end.3:
@@ -210,7 +209,7 @@ test "errdefer retires at move" {
 //   unreachable
 // kizu.21.ok.ok:
 //   %kizu.22 = load %kizu.array, ptr %kizu.5
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22, ptr %kizu.1)
 //   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.24
 // }
@@ -256,13 +255,13 @@ test "errdefer retires at move" {
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
-// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_std_3a_3astring_3a_3aString(ptr)
 // declare %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_reserve_std_3a_3astring_3a_3aString(ptr, i64)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_byte(ptr, i8)
-// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare i64 @std__string__String_len(%kizu.struct.std__string__String)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
@@ -292,8 +291,8 @@ test "errdefer retires at move" {
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
 // kizu.15.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13)
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.13, ptr %kizu.allocator)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.14, ptr %kizu.allocator)
 //   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.void %kizu.12, 1
 //   %kizu.try.err.3.base = insertvalue %kizu.error.std__array__Array_std__string__String_ zeroinitializer, i8 0, 0
 //   %kizu.try.err.3 = insertvalue %kizu.error.std__array__Array_std__string__String_ %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 2
@@ -306,7 +305,7 @@ test "errdefer retires at move" {
 //   %kizu.19.ok.bool = icmp ne i8 %kizu.19.ok, 0
 //   br i1 %kizu.19.ok.bool, label %kizu.19.try.ok, label %kizu.19.try.err
 // kizu.19.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.18)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.18, ptr %kizu.allocator)
 //   %kizu.try.err.5.code = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 1
 //   %kizu.try.err.5.base = insertvalue %kizu.error.std__array__Array_std__string__String_ zeroinitializer, i8 0, 0
 //   %kizu.try.err.5 = insertvalue %kizu.error.std__array__Array_std__string__String_ %kizu.try.err.5.base, i64 %kizu.try.err.5.code, 2
@@ -318,7 +317,7 @@ test "errdefer retires at move" {
 //   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
 //   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
 // kizu.23.try.err:
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22, ptr %kizu.allocator)
 //   %kizu.try.err.7.code = extractvalue %kizu.error.std__mem__Error.void %kizu.21, 1
 //   %kizu.try.err.7.base = insertvalue %kizu.error.std__array__Array_std__string__String_ zeroinitializer, i8 0, 0
 //   %kizu.try.err.7 = insertvalue %kizu.error.std__array__Array_std__string__String_ %kizu.try.err.7.base, i64 %kizu.try.err.7.code, 2
@@ -372,7 +371,7 @@ test "errdefer retires at move" {
 //   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.15, i64 0, i64 0)
 //   unreachable
 // kizu.16.ok.ok:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.12, ptr %kizu.1)
 //   %kizu.19 = add i64 %kizu.10, 1
 //   br label %while.header.1
 // while.end.3:
@@ -383,7 +382,7 @@ test "errdefer retires at move" {
 //   unreachable
 // kizu.21.ok.ok:
 //   %kizu.22 = load %kizu.array, ptr %kizu.5
-//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22)
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array %kizu.22, ptr %kizu.1)
 //   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
 //   ret %kizu.error.void %kizu.24
 // }

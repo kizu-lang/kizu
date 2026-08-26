@@ -162,20 +162,22 @@ pub fn element_type(
 /// the checker that owns their context can reject or instantiate them later.
 pub fn resolve_element_type_forms(allocator: Allocator, table: &typ::Table, value: typ::Type) -> !string::String {
     var resolved = typ::new(allocator);
-    defer resolved.deinit();
-    var mapper = ElementTypeMapper {};
+    defer resolved.deinit(allocator);
+    var mapper = ElementTypeMapper { allocator: allocator };
     let transformed = try typ::fold_names_into<ElementTypeMapper>(table, value, &var resolved, &var mapper);
     return typ::render(allocator, &resolved, transformed);
 }
 
-struct ElementTypeMapper {}
+struct ElementTypeMapper {
+    allocator: Allocator,
+}
 
 fn (self: &var ElementTypeMapper) fold_name(builder: &var typ::Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<typ::Node>>) -> !arena::Handle<typ::Node> {
     if path_is(&path, "meta", "element") and args.len() == 1 {
         let container = args.get_or_panic(0);
         if projected_element_handle(builder, container) |element| {
-            path.deinit();
-            args.deinit();
+            path.deinit(self.allocator);
+            args.deinit(self.allocator);
             return element;
         }
     }
@@ -248,7 +250,7 @@ fn path_part_is(path: &array::Array<string::String>, index: i64, expected: []u8)
 /// Returns every form.
 pub fn names(allocator: Allocator) -> !array::Array<Form> {
     var out = array::new<Form>(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = 0;
     while entry(index) |value| {
         try out.append(value.form);
@@ -269,7 +271,7 @@ pub fn split_apply(
     text: []u8
 ) -> !?ApplyParts {
     var normalized = try string::from_bytes(allocator, text);
-    defer normalized.deinit();
+    defer normalized.deinit(allocator);
     string::trim_space_in_place(&var normalized);
     let spelling_bytes = normalized.as_bytes();
     let length = mem::len(spelling_bytes);
@@ -282,7 +284,7 @@ pub fn split_apply(
         return null;
     }
     var name = try string::from_bytes(allocator, spelling_bytes[0..open]);
-    defer name.deinit();
+    defer name.deinit(allocator);
     string::trim_space_in_place(&var name);
     let name_bytes = name.as_bytes();
     if lookup_entry(name_bytes) |known| {
@@ -302,7 +304,7 @@ fn split_args(
     text: []u8
 ) -> !?array::Array<string::String> {
     var parts = array::new<string::String>(allocator);
-    errdefer parts.deinit();
+    errdefer parts.deinit(allocator);
     var depth = 0;
     var start = 0;
     var index = 0;
@@ -314,7 +316,7 @@ fn split_args(
             if byte == cast<u8>(62) {
                 depth = depth - 1;
                 if depth < 0 {
-                    parts.deinit();
+                    parts.deinit(allocator);
                     return null;
                 }
             } else {
@@ -324,7 +326,7 @@ fn split_args(
                         &var parts,
                         text[start..index]
                     ) {
-                        parts.deinit();
+                        parts.deinit(allocator);
                         return null;
                     }
                     start = index + 1;
@@ -338,7 +340,7 @@ fn split_args(
         &var parts,
         text[start..mem::len(text)]
     ) {
-        parts.deinit();
+        parts.deinit(allocator);
         return null;
     }
     return move parts;
@@ -350,10 +352,10 @@ fn append_trimmed_part(
     text: []u8
 ) -> !bool {
     var part = try string::from_bytes(allocator, text);
-    errdefer part.deinit();
+    errdefer part.deinit(allocator);
     string::trim_space_in_place(&var part);
     if part.len() == 0 {
-        part.deinit();
+        part.deinit(allocator);
         return false;
     }
     try parts.append(move part);

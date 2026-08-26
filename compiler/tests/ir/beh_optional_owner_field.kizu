@@ -15,22 +15,22 @@ pub struct Bag {
     pub held: ?mem::Box<i64>,
 }
 
-fn (self: Bag) deinit() -> void {
+fn (self: Bag) deinit(allocator: Allocator) -> void {
     if self.items |items| {
-        items.deinit();
+        items.deinit(allocator);
     }
     if self.counts |counts| {
-        counts.deinit();
+        counts.deinit(allocator);
     }
     if self.held |held| {
-        held.deinit();
+        held.deinit(allocator);
     }
     return;
 }
 
 fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
     var text = string::new(allocator);
-    errdefer text.deinit();
+    errdefer text.deinit(allocator);
     try text.append_bytes(bytes);
     return move text;
 }
@@ -54,11 +54,11 @@ test "optional owner field holds a string" {
         name: try owned(allocator, "alice"),
         nick: try owned(allocator, "al"),
     };
-    defer known.deinit();
+    defer known.deinit(allocator);
     expect_nick(&known, "al");
 
     var plain = Visitor { name: try owned(allocator, "bob"), nick: null };
-    defer plain.deinit();
+    defer plain.deinit(allocator);
     expect_nick(&plain, "none");
 }
 
@@ -68,12 +68,12 @@ test "optional owner field holds containers" {
     let allocator = mem::page_allocator();
 
     var items = array::new<i64>(allocator);
-    errdefer items.deinit();
+    errdefer items.deinit(allocator);
     try items.append(7);
     try items.append(9);
 
     var counts = map::new<[]u8, i64>(allocator);
-    errdefer counts.deinit();
+    errdefer counts.deinit(allocator);
     try counts.insert("hit", 3);
 
     var bag = Bag {
@@ -81,7 +81,7 @@ test "optional owner field holds containers" {
         counts: move counts,
         held: try mem::box<i64>(allocator, 5),
     };
-    defer bag.deinit();
+    defer bag.deinit(allocator);
 
     if bag.items |held| {
         testing::expect_equal<i64>(2, held.len());
@@ -102,8 +102,9 @@ test "optional owner field holds containers" {
 }
 
 test "optional owner field is null when empty" {
+    let allocator = mem::page_allocator();
     var bag = Bag { items: null, counts: null, held: null };
-    defer bag.deinit();
+    defer bag.deinit(allocator);
     if bag.items |_| {
         testing::fail("items should be null");
     }
@@ -124,25 +125,25 @@ test "optional owner produced by a call stays owned" {
     let allocator = mem::page_allocator();
 
     var items = array::new<string::String>(allocator);
-    errdefer items.deinit();
+    errdefer items.deinit(allocator);
     try items.append(try owned(allocator, "a"));
     try items.append(try owned(allocator, "b"));
 
     var drained = 0;
     while items.pop() |item| {
-        item.deinit();
+        item.deinit(allocator);
         drained = drained + 1;
     }
-    items.deinit();
+    items.deinit(allocator);
     testing::expect_equal<i64>(2, drained);
 
     if try maybe(allocator, true) |made| {
-        made.deinit();
+        made.deinit(allocator);
     } else {
         testing::fail("maybe should have made one");
     }
     if try maybe(allocator, false) |made| {
-        made.deinit();
+        made.deinit(allocator);
         testing::fail("maybe should have made nothing");
     }
 }
@@ -151,9 +152,9 @@ pub struct Held {
     pub nick: ?string::String,
 }
 
-fn (self: Held) deinit() -> void {
+fn (self: Held) deinit(allocator: Allocator) -> void {
     if self.nick |held| {
-        held.deinit();
+        held.deinit(allocator);
     }
     return;
 }
@@ -164,13 +165,13 @@ test "optional owner field inside containers" {
     let allocator = mem::page_allocator();
 
     var list = array::new<Held>(allocator);
-    defer list.deinit();
+    defer list.deinit(allocator);
     try list.append(Held { nick: try owned(allocator, "al") });
     try list.append(Held { nick: null });
     testing::expect_equal<i64>(2, list.len());
 
     var table = map::new<[]u8, Held>(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     try table.insert("alice", Held { nick: try owned(allocator, "al") });
     if table.at("alice") |entry| {
         if entry.nick |nick| {
@@ -184,17 +185,16 @@ test "optional owner field inside containers" {
     }
 }
 
-
 // ir
 // lower:
-// fn Bag.deinit(%self: Bag) -> void {
+// fn Bag.deinit(%self: Bag, %allocator: Allocator) -> void {
 // entry:
 //   %1: ?std::array::Array<i64> = field.items %self: Bag
 //   %2: std::array::Array<i64> = opt.value %1: ?std::array::Array<i64>
 //   %3: bool = opt.has %1: ?std::array::Array<i64>
 //   branch %3: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::array::Array.deinit.i64 %2: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %2: std::array::Array<i64>, %allocator: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
@@ -204,7 +204,7 @@ test "optional owner field inside containers" {
 //   %7: bool = opt.has %5: ?std::map::Map<[]u8, i64>
 //   branch %7: bool, if.then.4, if.else.5
 // if.then.4:
-//   call.std::map::Map.deinit._5b_5du8.i64 %6: std::map::Map<[]u8, i64>
+//   call.std::map::Map.deinit._5b_5du8.i64 %6: std::map::Map<[]u8, i64>, %allocator: Allocator
 //   jump if.end.6
 // if.else.5:
 //   jump if.end.6
@@ -214,7 +214,7 @@ test "optional owner field inside containers" {
 //   %11: bool = opt.has %9: ?std::mem::Box<i64>
 //   branch %11: bool, if.then.7, if.else.8
 // if.then.7:
-//   call.std::mem::Box.deinit.i64 %10: std::mem::Box<i64>
+//   call.std::mem::Box.deinit.i64 %10: std::mem::Box<i64>, %allocator: Allocator
 //   jump if.end.9
 // if.else.8:
 //   jump if.end.9
@@ -227,7 +227,7 @@ test "optional owner field inside containers" {
 //   %2: &var std::string::String = local.slot %1: std::string::String
 //   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %bytes: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
-//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
+//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
 //   %7: !std::string::String = error.ok %6: std::string::String
 //   return %7: !std::string::String
@@ -266,30 +266,30 @@ test "optional owner field inside containers" {
 //   %7: !?std::string::String = error.ok %6: ?std::string::String
 //   return %7: !?std::string::String
 // }
-// fn Held.deinit(%self: Held) -> void {
+// fn Held.deinit(%self: Held, %allocator: Allocator) -> void {
 // entry:
 //   %1: ?std::string::String = field.nick %self: Held
 //   %2: std::string::String = opt.value %1: ?std::string::String
 //   %3: bool = opt.has %1: ?std::string::String
 //   branch %3: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::string::String.deinit %2: std::string::String
+//   call.std::string::String.deinit %2: std::string::String, %allocator: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
 //   return void: void
 // }
-// fn Visitor.deinit(%self: Visitor) -> void {
+// fn Visitor.deinit(%self: Visitor, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::string::String = field.name %self: Visitor
-//   call.std::string::String.deinit %1: std::string::String
+//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
 //   %3: ?std::string::String = field.nick %self: Visitor
 //   %4: std::string::String = opt.value %3: ?std::string::String
 //   %5: bool = opt.has %3: ?std::string::String
 //   branch %5: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::string::String.deinit %4: std::string::String
+//   call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
@@ -311,13 +311,13 @@ test "optional owner field inside containers" {
 //   call.expect_nick %9: Visitor, %10: []u8
 //   %12: []u8 = const "bob"
 //   %13: !std::string::String = call.owned %1: Allocator, %12: []u8
-//   %14: std::string::String = error.try %13: !std::string::String, cleanup call.Visitor.deinit %9: Visitor
+//   %14: std::string::String = error.try %13: !std::string::String, cleanup call.Visitor.deinit %9: Visitor, %1: Allocator
 //   %15: ?std::string::String = opt.null
 //   %16: Visitor = struct.new {name: %14: std::string::String, nick: %15: ?std::string::String}
 //   %17: []u8 = const "none"
 //   call.expect_nick %16: Visitor, %17: []u8
-//   call.Visitor.deinit %16: Visitor
-//   call.Visitor.deinit %9: Visitor
+//   call.Visitor.deinit %16: Visitor, %1: Allocator
+//   call.Visitor.deinit %9: Visitor, %1: Allocator
 //   %21: !void = error.ok
 //   return %21: !void
 // }
@@ -401,30 +401,31 @@ test "optional owner field inside containers" {
 //   call.std::testing::fail %53: []u8
 //   jump if.end.12
 // if.end.12:
-//   call.Bag.deinit %25: Bag
+//   call.Bag.deinit %25: Bag, %1: Allocator
 //   %56: !void = error.ok
 //   return %56: !void
 // }
 // fn test.optional_owner_field_is_null_when_empty() -> !void {
 // entry:
-//   %1: ?std::array::Array<i64> = opt.null
-//   %2: ?std::map::Map<[]u8, i64> = opt.null
-//   %3: ?std::mem::Box<i64> = opt.null
-//   %4: Bag = struct.new {items: %1: ?std::array::Array<i64>, counts: %2: ?std::map::Map<[]u8, i64>, held: %3: ?std::mem::Box<i64>}
-//   %5: ?std::array::Array<i64> = field.items %4: Bag
-//   %6: std::array::Array<i64> = opt.value %5: ?std::array::Array<i64>
-//   %7: bool = opt.has %5: ?std::array::Array<i64>
-//   branch %7: bool, if.then.1, if.else.2
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: ?std::array::Array<i64> = opt.null
+//   %3: ?std::map::Map<[]u8, i64> = opt.null
+//   %4: ?std::mem::Box<i64> = opt.null
+//   %5: Bag = struct.new {items: %2: ?std::array::Array<i64>, counts: %3: ?std::map::Map<[]u8, i64>, held: %4: ?std::mem::Box<i64>}
+//   %6: ?std::array::Array<i64> = field.items %5: Bag
+//   %7: std::array::Array<i64> = opt.value %6: ?std::array::Array<i64>
+//   %8: bool = opt.has %6: ?std::array::Array<i64>
+//   branch %8: bool, if.then.1, if.else.2
 // if.then.1:
-//   %8: []u8 = const "items should be null"
-//   call.std::testing::fail %8: []u8
+//   %9: []u8 = const "items should be null"
+//   call.std::testing::fail %9: []u8
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   call.Bag.deinit %4: Bag
-//   %11: !void = error.ok
-//   return %11: !void
+//   call.Bag.deinit %5: Bag, %1: Allocator
+//   %12: !void = error.ok
+//   return %12: !void
 // }
 // fn test.optional_owner_produced_by_a_call_stays_owned() -> !void {
 // entry:
@@ -434,17 +435,17 @@ test "optional owner field inside containers" {
 //   %4: []u8 = const "a"
 //   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: []u8 = const "b"
 //   %12: !std::string::String = call.owned %1: Allocator, %11: []u8
 //   %13: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>
+//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>, %1: Allocator
 //   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %14: std::string::String
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>
+//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: i64 = const 0
 //   jump while.header.1
 // while.header.1:
@@ -454,13 +455,13 @@ test "optional owner field inside containers" {
 //   %22: bool = opt.has %20: ?std::string::String
 //   branch %22: bool, while.body.2, while.end.3
 // while.body.2:
-//   call.std::string::String.deinit %21: std::string::String
+//   call.std::string::String.deinit %21: std::string::String, %1: Allocator
 //   %24: i64 = const 1
 //   %25: i64 = binary.+ %19: i64, %24: i64
 //   jump while.header.1
 // while.end.3:
 //   %26: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>, %1: Allocator
 //   %28: i64 = const 2
 //   test.expect_equal %28: i64, %19: i64, i64
 //   %30: bool = const true
@@ -470,7 +471,7 @@ test "optional owner field inside containers" {
 //   %34: bool = opt.has %32: ?std::string::String
 //   branch %34: bool, if.then.4, if.else.5
 // if.then.4:
-//   call.std::string::String.deinit %33: std::string::String
+//   call.std::string::String.deinit %33: std::string::String, %1: Allocator
 //   jump if.end.6
 // if.else.5:
 //   %36: []u8 = const "maybe should have made one"
@@ -484,7 +485,7 @@ test "optional owner field inside containers" {
 //   %42: bool = opt.has %40: ?std::string::String
 //   branch %42: bool, if.then.7, if.else.8
 // if.then.7:
-//   call.std::string::String.deinit %41: std::string::String
+//   call.std::string::String.deinit %41: std::string::String, %1: Allocator
 //   %44: []u8 = const "maybe should have made nothing"
 //   call.std::testing::fail %44: []u8
 //   jump if.end.9
@@ -502,17 +503,17 @@ test "optional owner field inside containers" {
 //   %4: []u8 = const "al"
 //   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
 //   %6: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.Held %6: std::array::Array<Held>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.Held %6: std::array::Array<Held>, %1: Allocator
 //   %8: ?std::string::String = opt.some %7: std::string::String
 //   %9: Held = struct.new {nick: %8: ?std::string::String}
 //   %10: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %9: Held
 //   %11: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   error.try %10: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %11: std::array::Array<Held>
+//   error.try %10: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %11: std::array::Array<Held>, %1: Allocator
 //   %13: ?std::string::String = opt.null
 //   %14: Held = struct.new {nick: %13: ?std::string::String}
 //   %15: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %14: Held
 //   %16: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %16: std::array::Array<Held>
+//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %16: std::array::Array<Held>, %1: Allocator
 //   %18: i64 = const 2
 //   %19: i64 = call.std::array::Array.len.Held %3: &var std::array::Array<Held>
 //   test.expect_equal %18: i64, %19: i64, i64
@@ -521,12 +522,12 @@ test "optional owner field inside containers" {
 //   %23: []u8 = const "al"
 //   %24: !std::string::String = call.owned %1: Allocator, %23: []u8
 //   %25: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   %26: std::string::String = error.try %24: !std::string::String, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %25: std::array::Array<Held>
+//   %26: std::string::String = error.try %24: !std::string::String, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %25: std::array::Array<Held>, %1: Allocator
 //   %27: ?std::string::String = opt.some %26: std::string::String
 //   %28: Held = struct.new {nick: %27: ?std::string::String}
 //   %29: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.Held %21: std::map::Map<[]u8, Held>, %22: []u8, %28: Held
 //   %30: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   error.try %29: std::mem::Error!void, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %30: std::array::Array<Held>
+//   error.try %29: std::mem::Error!void, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %30: std::array::Array<Held>, %1: Allocator
 //   %32: []u8 = const "alice"
 //   %33: ?&Held = call.std::map::Map.at._5b_5du8.Held %21: std::map::Map<[]u8, Held>, %32: []u8
 //   %34: &Held = opt.value %33: ?&Held
@@ -544,7 +545,7 @@ test "optional owner field inside containers" {
 // if.end.3:
 //   map.deinit %21: std::map::Map<[]u8, Held>
 //   %47: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   call.std::array::Array.deinit.Held %47: std::array::Array<Held>
+//   call.std::array::Array.deinit.Held %47: std::array::Array<Held>, %1: Allocator
 //   %49: !void = error.ok
 //   return %49: !void
 // if.then.4:
@@ -560,14 +561,14 @@ test "optional owner field inside containers" {
 //   jump if.end.3
 // }
 // opt:
-// fn Bag.deinit(%self: Bag) -> void {
+// fn Bag.deinit(%self: Bag, %allocator: Allocator) -> void {
 // entry:
 //   %1: ?std::array::Array<i64> = field.items %self: Bag
 //   %2: std::array::Array<i64> = opt.value %1: ?std::array::Array<i64>
 //   %3: bool = opt.has %1: ?std::array::Array<i64>
 //   branch %3: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::array::Array.deinit.i64 %2: std::array::Array<i64>
+//   call.std::array::Array.deinit.i64 %2: std::array::Array<i64>, %allocator: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
@@ -577,7 +578,7 @@ test "optional owner field inside containers" {
 //   %7: bool = opt.has %5: ?std::map::Map<[]u8, i64>
 //   branch %7: bool, if.then.4, if.else.5
 // if.then.4:
-//   call.std::map::Map.deinit._5b_5du8.i64 %6: std::map::Map<[]u8, i64>
+//   call.std::map::Map.deinit._5b_5du8.i64 %6: std::map::Map<[]u8, i64>, %allocator: Allocator
 //   jump if.end.6
 // if.else.5:
 //   jump if.end.6
@@ -587,7 +588,7 @@ test "optional owner field inside containers" {
 //   %11: bool = opt.has %9: ?std::mem::Box<i64>
 //   branch %11: bool, if.then.7, if.else.8
 // if.then.7:
-//   call.std::mem::Box.deinit.i64 %10: std::mem::Box<i64>
+//   call.std::mem::Box.deinit.i64 %10: std::mem::Box<i64>, %allocator: Allocator
 //   jump if.end.9
 // if.else.8:
 //   jump if.end.9
@@ -600,7 +601,7 @@ test "optional owner field inside containers" {
 //   %2: &var std::string::String = local.slot %1: std::string::String
 //   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %bytes: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
-//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
+//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
 //   %7: !std::string::String = error.ok %6: std::string::String
 //   return %7: !std::string::String
@@ -639,30 +640,30 @@ test "optional owner field inside containers" {
 //   %7: !?std::string::String = error.ok %6: ?std::string::String
 //   return %7: !?std::string::String
 // }
-// fn Held.deinit(%self: Held) -> void {
+// fn Held.deinit(%self: Held, %allocator: Allocator) -> void {
 // entry:
 //   %1: ?std::string::String = field.nick %self: Held
 //   %2: std::string::String = opt.value %1: ?std::string::String
 //   %3: bool = opt.has %1: ?std::string::String
 //   branch %3: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::string::String.deinit %2: std::string::String
+//   call.std::string::String.deinit %2: std::string::String, %allocator: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
 //   return void: void
 // }
-// fn Visitor.deinit(%self: Visitor) -> void {
+// fn Visitor.deinit(%self: Visitor, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::string::String = field.name %self: Visitor
-//   call.std::string::String.deinit %1: std::string::String
+//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
 //   %3: ?std::string::String = field.nick %self: Visitor
 //   %4: std::string::String = opt.value %3: ?std::string::String
 //   %5: bool = opt.has %3: ?std::string::String
 //   branch %5: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::string::String.deinit %4: std::string::String
+//   call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
@@ -684,13 +685,13 @@ test "optional owner field inside containers" {
 //   call.expect_nick %9: Visitor, %10: []u8
 //   %12: []u8 = const "bob"
 //   %13: !std::string::String = call.owned %1: Allocator, %12: []u8
-//   %14: std::string::String = error.try %13: !std::string::String, cleanup call.Visitor.deinit %9: Visitor
+//   %14: std::string::String = error.try %13: !std::string::String, cleanup call.Visitor.deinit %9: Visitor, %1: Allocator
 //   %15: ?std::string::String = opt.null
 //   %16: Visitor = struct.new {name: %14: std::string::String, nick: %15: ?std::string::String}
 //   %17: []u8 = const "none"
 //   call.expect_nick %16: Visitor, %17: []u8
-//   call.Visitor.deinit %16: Visitor
-//   call.Visitor.deinit %9: Visitor
+//   call.Visitor.deinit %16: Visitor, %1: Allocator
+//   call.Visitor.deinit %9: Visitor, %1: Allocator
 //   %21: !void = error.ok
 //   return %21: !void
 // }
@@ -774,29 +775,30 @@ test "optional owner field inside containers" {
 //   call.std::testing::fail %53: []u8
 //   jump if.end.12
 // if.end.12:
-//   call.Bag.deinit %25: Bag
+//   call.Bag.deinit %25: Bag, %1: Allocator
 //   %56: !void = error.ok
 //   return %56: !void
 // }
 // fn test.optional_owner_field_is_null_when_empty() -> !void {
 // entry:
-//   %1: ?std::array::Array<i64> = opt.null
-//   %2: ?std::map::Map<[]u8, i64> = opt.null
-//   %3: ?std::mem::Box<i64> = opt.null
-//   %4: Bag = struct.new {items: %1: ?std::array::Array<i64>, counts: %2: ?std::map::Map<[]u8, i64>, held: %3: ?std::mem::Box<i64>}
-//   %5: ?std::array::Array<i64> = field.items %4: Bag
-//   %7: bool = opt.has %5: ?std::array::Array<i64>
-//   branch %7: bool, if.then.1, if.else.2
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: ?std::array::Array<i64> = opt.null
+//   %3: ?std::map::Map<[]u8, i64> = opt.null
+//   %4: ?std::mem::Box<i64> = opt.null
+//   %5: Bag = struct.new {items: %2: ?std::array::Array<i64>, counts: %3: ?std::map::Map<[]u8, i64>, held: %4: ?std::mem::Box<i64>}
+//   %6: ?std::array::Array<i64> = field.items %5: Bag
+//   %8: bool = opt.has %6: ?std::array::Array<i64>
+//   branch %8: bool, if.then.1, if.else.2
 // if.then.1:
-//   %8: []u8 = const "items should be null"
-//   call.std::testing::fail %8: []u8
+//   %9: []u8 = const "items should be null"
+//   call.std::testing::fail %9: []u8
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   call.Bag.deinit %4: Bag
-//   %11: !void = error.ok
-//   return %11: !void
+//   call.Bag.deinit %5: Bag, %1: Allocator
+//   %12: !void = error.ok
+//   return %12: !void
 // }
 // fn test.optional_owner_produced_by_a_call_stays_owned() -> !void {
 // entry:
@@ -806,17 +808,17 @@ test "optional owner field inside containers" {
 //   %4: []u8 = const "a"
 //   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: []u8 = const "b"
 //   %12: !std::string::String = call.owned %1: Allocator, %11: []u8
 //   %13: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>
+//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>, %1: Allocator
 //   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %14: std::string::String
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>
+//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: i64 = const 0
 //   jump while.header.1
 // while.header.1:
@@ -826,13 +828,13 @@ test "optional owner field inside containers" {
 //   %22: bool = opt.has %20: ?std::string::String
 //   branch %22: bool, while.body.2, while.end.3
 // while.body.2:
-//   call.std::string::String.deinit %21: std::string::String
+//   call.std::string::String.deinit %21: std::string::String, %1: Allocator
 //   %24: i64 = const 1
 //   %25: i64 = binary.+ %19: i64, %24: i64
 //   jump while.header.1
 // while.end.3:
 //   %26: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>, %1: Allocator
 //   %28: i64 = const 2
 //   test.expect_equal %28: i64, %19: i64, i64
 //   %30: bool = const true
@@ -842,7 +844,7 @@ test "optional owner field inside containers" {
 //   %34: bool = opt.has %32: ?std::string::String
 //   branch %34: bool, if.then.4, if.else.5
 // if.then.4:
-//   call.std::string::String.deinit %33: std::string::String
+//   call.std::string::String.deinit %33: std::string::String, %1: Allocator
 //   jump if.end.6
 // if.else.5:
 //   %36: []u8 = const "maybe should have made one"
@@ -856,7 +858,7 @@ test "optional owner field inside containers" {
 //   %42: bool = opt.has %40: ?std::string::String
 //   branch %42: bool, if.then.7, if.else.8
 // if.then.7:
-//   call.std::string::String.deinit %41: std::string::String
+//   call.std::string::String.deinit %41: std::string::String, %1: Allocator
 //   %44: []u8 = const "maybe should have made nothing"
 //   call.std::testing::fail %44: []u8
 //   jump if.end.9
@@ -874,17 +876,17 @@ test "optional owner field inside containers" {
 //   %4: []u8 = const "al"
 //   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
 //   %6: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.Held %6: std::array::Array<Held>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.Held %6: std::array::Array<Held>, %1: Allocator
 //   %8: ?std::string::String = opt.some %7: std::string::String
 //   %9: Held = struct.new {nick: %8: ?std::string::String}
 //   %10: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %9: Held
 //   %11: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   error.try %10: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %11: std::array::Array<Held>
+//   error.try %10: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %11: std::array::Array<Held>, %1: Allocator
 //   %13: ?std::string::String = opt.null
 //   %14: Held = struct.new {nick: %13: ?std::string::String}
 //   %15: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %14: Held
 //   %16: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %16: std::array::Array<Held>
+//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %16: std::array::Array<Held>, %1: Allocator
 //   %18: i64 = const 2
 //   %19: i64 = call.std::array::Array.len.Held %3: &var std::array::Array<Held>
 //   test.expect_equal %18: i64, %19: i64, i64
@@ -893,12 +895,12 @@ test "optional owner field inside containers" {
 //   %23: []u8 = const "al"
 //   %24: !std::string::String = call.owned %1: Allocator, %23: []u8
 //   %25: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   %26: std::string::String = error.try %24: !std::string::String, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %25: std::array::Array<Held>
+//   %26: std::string::String = error.try %24: !std::string::String, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %25: std::array::Array<Held>, %1: Allocator
 //   %27: ?std::string::String = opt.some %26: std::string::String
 //   %28: Held = struct.new {nick: %27: ?std::string::String}
 //   %29: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.Held %21: std::map::Map<[]u8, Held>, %22: []u8, %28: Held
 //   %30: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   error.try %29: std::mem::Error!void, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %30: std::array::Array<Held>
+//   error.try %29: std::mem::Error!void, cleanup map.deinit %21: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %30: std::array::Array<Held>, %1: Allocator
 //   %32: []u8 = const "alice"
 //   %33: ?&Held = call.std::map::Map.at._5b_5du8.Held %21: std::map::Map<[]u8, Held>, %32: []u8
 //   %34: &Held = opt.value %33: ?&Held
@@ -916,7 +918,7 @@ test "optional owner field inside containers" {
 // if.end.3:
 //   map.deinit %21: std::map::Map<[]u8, Held>
 //   %47: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
-//   call.std::array::Array.deinit.Held %47: std::array::Array<Held>
+//   call.std::array::Array.deinit.Held %47: std::array::Array<Held>, %1: Allocator
 //   %49: !void = error.ok
 //   return %49: !void
 // if.then.4:

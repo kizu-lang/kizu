@@ -149,9 +149,9 @@ func TestOptimizeKeepsStructFieldAndCleanupOperandsLive(t *testing.T) {
 
 // TestLowerArrayPopOrPanicPreservesMoveAndTrapOperation fixes the IR boundary.
 func TestLowerArrayPopOrPanicPreservesMoveAndTrapOperation(t *testing.T) {
-	module := lowerSource(t, `fn take(values: std::array::Array<i64>) -> i64 {
+	module := lowerSource(t, `fn take(allocator: Allocator, values: std::array::Array<i64>) -> i64 {
     let value = values.pop_or_panic();
-    values.deinit();
+    values.deinit(allocator);
     return value;
 }
 fn main() {}`)
@@ -182,7 +182,7 @@ fn main() {
     if xs.at_mut(0) |m| {
         print(read_it(m));
     }
-    xs.deinit();
+    xs.deinit(allocator);
 }`)
 	lowerSource(t, `union Shape { Dot, Bar(i64) }
 fn read_shape(s: &Shape) -> i64 {
@@ -197,7 +197,7 @@ fn main() {
     if xs.at_mut(0) |m| {
         print(read_shape(m));
     }
-    xs.deinit();
+    xs.deinit(allocator);
 }`)
 }
 
@@ -257,7 +257,7 @@ struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
+    errdefer users.deinit(allocator);
     return BuildError::Boom;
 }
 fn main() {}`)
@@ -271,7 +271,7 @@ struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
+    errdefer users.deinit(allocator);
     return move users;
 }
 fn main() {}`)
@@ -288,9 +288,9 @@ func TestLowerErrDeferRetiresAtMove(t *testing.T) {
 	module := lowerSource(t, `
 fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit();
+    errdefer parent.deinit(allocator);
     let child = std::string::new(allocator);
-    errdefer child.deinit();
+    errdefer child.deinit(allocator);
     try child.append_byte(cast<u8>(97));
     try parent.append(move child);
     try parent.reserve(1);
@@ -345,7 +345,7 @@ fn (self: Point) sum() -> i64 { return self.x; }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var points = std::array::new<Point>(allocator);
-    defer points.deinit();
+    defer points.deinit(allocator);
     try points.append(Point { x: 7 });
     if points.at(0) |p| {
         print(p.sum());
@@ -674,7 +674,7 @@ fn main(allocator: Allocator) {
     let users = arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.at(alice).name);
-    users.deinit();
+    users.deinit(allocator);
 }`
 
 const comptimeSource = `fn main() {
@@ -859,13 +859,13 @@ func TestLowerFalliblePrimitiveReleasesOwnerArgument(t *testing.T) {
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var parent = std::array::new<std::string::String>(allocator);
-    defer parent.deinit();
+    defer parent.deinit(allocator);
     var name = std::string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_byte(cast<u8>(97));
     try parent.append(move name);
     let boxed = try std::mem::box<std::string::String>(allocator, std::string::new(allocator));
-    defer boxed.deinit();
+    defer boxed.deinit(allocator);
     return;
 }`)
 	got := Dump(module)
@@ -889,7 +889,7 @@ func TestLowerFalliblePrimitiveLeavesCopyArgumentAlone(t *testing.T) {
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var values = std::array::new<i64>(allocator);
-    defer values.deinit();
+    defer values.deinit(allocator);
     try values.append(1);
     return;
 }`)
@@ -935,21 +935,21 @@ fn main() -> void {
 func TestLowerMetaConstructBuildsInOneLiteral(t *testing.T) {
 	module := lowerSource(t, `
 struct Names { pub first: std::string::String, pub second: std::string::String }
-fn (self: Names) deinit() -> void {
-    self.first.deinit();
-    self.second.deinit();
+fn (self: Names) deinit(allocator: Allocator) -> void {
+    self.first.deinit(allocator);
+    self.second.deinit(allocator);
     return;
 }
 fn field_from_name<T, f: Field>(allocator: Allocator) -> !std::meta::field_type<T, f> {
     var out = std::string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes(std::meta::field_name<T, f>());
     return move out;
 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var names = try std::meta::construct<Names, field_from_name>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
     return;
 }`)
 	got := Dump(module)
@@ -957,7 +957,8 @@ fn main() -> !void {
 		"  %2: !std::string::String = call.field_from_name.Names.first %1: Allocator\n",
 		"  %4: !std::string::String = call.field_from_name.Names.second %1: Allocator\n",
 		"  %5: std::string::String = error.try %4: !std::string::String," +
-			" cleanup call.std::string::String.deinit %3: std::string::String\n",
+			" cleanup call.std::string::String.deinit %3: std::string::String," +
+			" %1: Allocator\n",
 		"  %6: Names = struct.new {first: %3: std::string::String," +
 			" second: %5: std::string::String}\n",
 	} {
@@ -975,9 +976,9 @@ fn main() -> !void {
 func TestLowerContainerConstructorResolvesElementType(t *testing.T) {
 	module := lowerSource(t, `
 struct Wide { pub left: std::string::String, pub right: std::string::String }
-fn (self: Wide) deinit() -> void {
-    self.left.deinit();
-    self.right.deinit();
+fn (self: Wide) deinit(allocator: Allocator) -> void {
+    self.left.deinit(allocator);
+    self.right.deinit(allocator);
     return;
 }
 fn collect<E>(allocator: Allocator) -> std::array::Array<E> {
@@ -986,9 +987,9 @@ fn collect<E>(allocator: Allocator) -> std::array::Array<E> {
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var wide = collect<Wide>(allocator);
-    defer wide.deinit();
+    defer wide.deinit(allocator);
     var numbers = collect<i64>(allocator);
-    defer numbers.deinit();
+    defer numbers.deinit(allocator);
     return;
 }`)
 	got := Dump(module)

@@ -58,12 +58,12 @@ struct Builder {
 /// Returns the canonical formatting of source, the Go `Format`.
 pub fn format(allocator: Allocator, source: []u8) -> !string::String {
     var tokens = try tokenize(allocator, source);
-    defer tokens.deinit();
+    defer tokens.deinit(allocator);
     try normalize_leading_imports(allocator, &var tokens);
     let generic = try detect_generic_brackets(allocator, &tokens);
-    defer generic.deinit();
+    defer generic.deinit(allocator);
     let comments = try line_comments(allocator, source);
-    defer comments.deinit();
+    defer comments.deinit(allocator);
     var builder = Builder {
         out: string::new(allocator),
         depth: 0,
@@ -82,7 +82,7 @@ pub fn format(allocator: Allocator, source: []u8) -> !string::String {
         after_comment: false,
         in_capture: false
     };
-    defer builder.deinit();
+    defer builder.deinit(allocator);
     var index = 0;
     while tokens.at(index) |current| {
         if current.kind == token::Kind::RBrace {
@@ -110,10 +110,10 @@ pub fn format(allocator: Allocator, source: []u8) -> !string::String {
     return string::from_bytes(allocator, formatted);
 }
 
-fn (self: Builder) deinit() -> void {
-    self.out.deinit();
-    self.delimiter_lines.deinit();
-    self.block_stack.deinit();
+fn (self: Builder) deinit(allocator: Allocator) -> void {
+    self.out.deinit(allocator);
+    self.delimiter_lines.deinit(allocator);
+    self.block_stack.deinit(allocator);
 }
 
 /// Marks generic `<` and `>` tokens, the Go `detectGenericBrackets`.
@@ -122,7 +122,7 @@ fn detect_generic_brackets(
     tokens: &array::Array<token::Token>
 ) -> !array::Array<bool> {
     var flags = array::new<bool>(allocator);
-    errdefer flags.deinit();
+    errdefer flags.deinit(allocator);
     var fill = 0;
     while fill < tokens.len() {
         try flags.append(false);
@@ -197,9 +197,9 @@ fn generic_scan_terminator(kind: token::Kind) -> bool {
 /// Collects every lexer token including EOF, the Go `tokenize`.
 fn tokenize(allocator: Allocator, source: []u8) -> !array::Array<token::Token> {
     var scanner = lexer::new(allocator, source);
-    defer scanner.deinit();
+    defer scanner.deinit(allocator);
     var tokens = array::new<token::Token>(allocator);
-    errdefer tokens.deinit();
+    errdefer tokens.deinit(allocator);
     while true {
         let next = try scanner.next_token();
         let done = next.kind == token::Kind::Eof;
@@ -214,9 +214,9 @@ fn tokenize(allocator: Allocator, source: []u8) -> !array::Array<token::Token> {
 /// Records every source line comment, the Go `lineComments`.
 fn line_comments(allocator: Allocator, source: []u8) -> !array::Array<LineComment> {
     let lines = try source_lines(allocator, source);
-    defer lines.deinit();
+    defer lines.deinit(allocator);
     var comments = array::new<LineComment>(allocator);
-    errdefer comments.deinit();
+    errdefer comments.deinit(allocator);
     var index = 0;
     while lines.get(index) |line_range| {
         let line = source[line_range.start..line_range.end];
@@ -227,7 +227,7 @@ fn line_comments(allocator: Allocator, source: []u8) -> !array::Array<LineCommen
         }
         let standalone = try trim_space_empty(allocator, line[0..start]);
         var text = try string::from_bytes(allocator, line[start..mem::len(line)]);
-        errdefer text.deinit();
+        errdefer text.deinit(allocator);
         string::trim_space_in_place(&var text);
         let blank_before = standalone and
             try has_blank_line_before(allocator, source, &lines, index);
@@ -246,7 +246,7 @@ fn line_comments(allocator: Allocator, source: []u8) -> !array::Array<LineCommen
 
 fn source_lines(allocator: Allocator, source: []u8) -> !array::Array<LineRange> {
     var lines = array::new<LineRange>(allocator);
-    errdefer lines.deinit();
+    errdefer lines.deinit(allocator);
     var start = 0;
     var index = 0;
     let length = mem::len(source);
@@ -290,7 +290,7 @@ fn comment_start(line: []u8) -> i64 {
 
 fn trim_space_empty(allocator: Allocator, bytes: []u8) -> !bool {
     var text = try string::from_bytes(allocator, bytes);
-    defer text.deinit();
+    defer text.deinit(allocator);
     string::trim_space_in_place(&var text);
     return text.len() == 0;
 }
@@ -334,7 +334,7 @@ fn normalize_leading_imports(
     tokens: &var array::Array<token::Token>
 ) -> !void {
     var ranges = try leading_import_ranges(allocator, tokens);
-    defer ranges.deinit();
+    defer ranges.deinit(allocator);
     if ranges.len() < 2 {
         return;
     }
@@ -373,7 +373,7 @@ fn leading_import_ranges(
     tokens: &array::Array<token::Token>
 ) -> !array::Array<ImportRange> {
     var ranges = array::new<ImportRange>(allocator);
-    errdefer ranges.deinit();
+    errdefer ranges.deinit(allocator);
     var index = 0;
     while tokens.at(index) |current| {
         if current.kind != token::Kind::Import {
@@ -409,7 +409,7 @@ fn import_path_key(
     range: ImportRange
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var index = range.start + 1;
     while index < range.end {
         if tokens.at(index) |current| {
@@ -434,9 +434,9 @@ fn import_range_less(
     right: ImportRange
 ) -> !bool {
     let left_key = try import_path_key(allocator, tokens, left);
-    defer left_key.deinit();
+    defer left_key.deinit(allocator);
     let right_key = try import_path_key(allocator, tokens, right);
-    defer right_key.deinit();
+    defer right_key.deinit(allocator);
     let left_bytes = left_key.as_bytes();
     let right_bytes = right_key.as_bytes();
     return bytes_less(left_bytes, right_bytes);

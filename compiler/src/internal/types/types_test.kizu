@@ -12,7 +12,7 @@ fn expect_type_text(
     expected: []u8
 ) -> !void {
     let text = try table.copy_text(allocator, value);
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     testing::expect_equal<[]u8>(expected, bytes);
     return;
@@ -47,7 +47,7 @@ fn expect_invalid_generic_args(
     text: []u8
 ) -> !void {
     if try split_generic_args(allocator, text) |parts| {
-        parts.deinit();
+        parts.deinit(allocator);
         testing::fail("malformed generic arguments were accepted");
     }
     return;
@@ -93,16 +93,16 @@ fn append_function_param(
 test "type table interns canonical identities and owns source copies" {
     let allocator = mem::page_allocator();
     var source = typ::new(allocator);
-    errdefer source.deinit();
+    errdefer source.deinit(allocator);
     let parsed = try source.parse("ParseError!Array<i64>");
     var table = new_type_table(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let first = try table.remember(&source, parsed);
-    source.deinit();
+    source.deinit(allocator);
     let second = try table.intern("ParseError!Array<i64>");
     testing::expect(same_type(first, second));
     let first_text = try table.copy_text(allocator, first);
-    defer first_text.deinit();
+    defer first_text.deinit(allocator);
     let first_bytes = first_text.as_bytes();
     testing::expect_equal<[]u8>("ParseError!Array<i64>", first_bytes);
     if table.lookup(first) |_| {} else {
@@ -110,7 +110,7 @@ test "type table interns canonical identities and owns source copies" {
     }
     let empty = empty_type();
     let empty_text = try table.copy_text(allocator, empty);
-    defer empty_text.deinit();
+    defer empty_text.deinit(allocator);
     let empty_bytes = empty_text.as_bytes();
     testing::expect_equal<[]u8>("", empty_bytes);
     if table.lookup(empty) |_| {
@@ -171,7 +171,7 @@ test "type registries retain the exact closed Go vocabularies" {
 test "type table preserves structural queries and substitutions" {
     let allocator = mem::page_allocator();
     var table = new_type_table(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let buffer = try table.intern("Pair<?T, [4]u8>");
     testing::expect(!table.is_buffer_type(buffer));
     testing::expect(table.contains_buffer_type(buffer));
@@ -188,7 +188,7 @@ test "type table preserves structural queries and substitutions" {
     let replacement = try table.intern("Pair<U, bool>");
     let concrete_u = try table.intern("i64");
     var substitutions = map::new<[]u8, Type>(allocator);
-    defer substitutions.deinit();
+    defer substitutions.deinit(allocator);
     try substitutions.insert("T", replacement);
     try substitutions.insert("U", concrete_u);
     let replaced = try table.substitute_type_params(
@@ -205,13 +205,13 @@ test "type table preserves structural queries and substitutions" {
     let direct = try table.substitute_type_params(parameter, &substitutions);
     testing::expect(same_type(direct, replacement));
     var parsed_args = array::new<typ::Type>(allocator);
-    defer parsed_args.deinit();
+    defer parsed_args.deinit(allocator);
     var source = typ::new(allocator);
-    defer source.deinit();
+    defer source.deinit(allocator);
     try parsed_args.append(try source.parse("[]u8"));
     try parsed_args.append(try source.parse("Pair<i64, bool>"));
     let texts = try arg_texts(allocator, &source, &parsed_args);
-    defer texts.deinit();
+    defer texts.deinit(allocator);
     testing::expect_equal<i64>(2, texts.len());
     if texts.at(1) |text| {
         let bytes = text.as_bytes();
@@ -224,7 +224,7 @@ test "type table preserves structural queries and substitutions" {
 test "borrow and error-union helpers retain copy Type identities" {
     let allocator = mem::page_allocator();
     var table = new_type_table(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let value = try table.intern("[]u8");
     let mutable = try table.borrow_wrapped_type(true, true, value);
     try expect_type_text(allocator, &table, mutable, "&var []u8");
@@ -270,7 +270,7 @@ test "borrow and error-union helpers retain copy Type identities" {
 test "borrow coercion and raw pointer classifications keep failure reasons" {
     let allocator = mem::page_allocator();
     var table = new_type_table(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let value = try table.intern("i64");
     let shared = try table.intern("&i64");
     let mutable = try table.intern("&var i64");
@@ -328,7 +328,7 @@ test "borrow coercion and raw pointer classifications keep failure reasons" {
 test "wrapped predicates and generic text helpers preserve Go seams" {
     let allocator = mem::page_allocator();
     var table = new_type_table(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let nested_pointer = try table.intern("Pair<?[]ptr<i64>, bool>");
     testing::expect(table.contains_raw_pointer(nested_pointer));
     let nested_type = try table.intern("std::array::Array<const type>");
@@ -338,19 +338,19 @@ test "wrapped predicates and generic text helpers preserve Go seams" {
     let runtime_only = try table.intern("Pair<i64, bool>");
     testing::expect(!table.contains_compile_time_only(runtime_only));
     var joined_values = array::new<Type>(allocator);
-    defer joined_values.deinit();
+    defer joined_values.deinit(allocator);
     let joined_i64 = try table.intern("i64");
     try joined_values.append(joined_i64);
     let joined_bytes_type = try table.intern("[]u8");
     try joined_values.append(joined_bytes_type);
     let joined = try table.join_types(allocator, &joined_values);
-    defer joined.deinit();
+    defer joined.deinit(allocator);
     let joined_bytes = joined.as_bytes();
     testing::expect_equal<[]u8>("i64, []u8", joined_bytes);
     if split_generic_type("Pair<i64, []u8>") |parts| {
         testing::expect_equal<[]u8>("Pair", parts.base);
         if try split_generic_args(allocator, parts.args) |args| {
-            defer args.deinit();
+            defer args.deinit(allocator);
             testing::expect_equal<i64>(2, args.len());
             if single_generic_arg(&args) |_| {
                 testing::fail("two generic arguments were accepted as one");
@@ -366,7 +366,7 @@ test "wrapped predicates and generic text helpers preserve Go seams" {
     try expect_invalid_generic_args(allocator, "i64, , bool");
     try expect_invalid_generic_args(allocator, "");
     var one = array::new<string::String>(allocator);
-    defer one.deinit();
+    defer one.deinit(allocator);
     try one.append(try string::from_bytes(allocator, "i64"));
     if single_generic_arg(&one) |argument| {
         let bytes = argument.as_bytes();
@@ -379,12 +379,12 @@ test "wrapped predicates and generic text helpers preserve Go seams" {
 test "checker metadata sorts methods and compares receiver-less contracts" {
     let allocator = mem::page_allocator();
     var methods = map::new<[]u8, FunctionHandle>(allocator);
-    defer methods.deinit();
+    defer methods.deinit(allocator);
     try methods.insert("zeta", FunctionHandle { index: 0 });
     try methods.insert("alpha", FunctionHandle { index: 1 });
     try methods.insert("middle", FunctionHandle { index: 2 });
     let names = try sorted_method_names(allocator, &methods);
-    defer names.deinit();
+    defer names.deinit(allocator);
     testing::expect_equal<i64>(3, names.len());
     if names.at(0) |first| {
         let bytes = first.as_bytes();
@@ -399,15 +399,15 @@ test "checker metadata sorts methods and compares receiver-less contracts" {
         testing::fail("sorted method list lost its last entry");
     }
     var table = new_type_table(allocator);
-    defer table.deinit();
+    defer table.deinit(allocator);
     let void_type = try table.intern("void");
     let receiver_type = try table.intern("Widget");
     let value_type = try table.intern("i64");
     var want = try empty_function_type(allocator, "write", void_type);
-    defer want.deinit();
+    defer want.deinit(allocator);
     try append_function_param(&var want, value_type, true, false);
     var got = try empty_function_type(allocator, "Widget.write", void_type);
-    defer got.deinit();
+    defer got.deinit(allocator);
     try append_function_param(&var got, receiver_type, false, false);
     try append_function_param(&var got, value_type, true, false);
     testing::expect(method_matches(&want, &got));

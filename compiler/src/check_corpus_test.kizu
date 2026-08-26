@@ -94,26 +94,26 @@ fn render_load_section(
     input: []u8
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     try out.append_bytes("// load:");
     try out.append_byte(cast<u8>(10));
     var tree = ast::new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
-    defer loader.deinit();
+    defer loader.deinit(allocator);
     let loaded = try loader.load_source(&var tree, "", input);
     match loaded {
         Error(failed) => {
-            defer failed.deinit();
+            defer failed.deinit(allocator);
             let text = try failed.error(allocator, &loader.sources);
-            defer text.deinit();
+            defer text.deinit(allocator);
             try out.append_bytes("// ");
             let bytes = text.as_bytes();
             try append_folded_line(&var out, bytes);
             return move out;
         },
         Program(program) => {
-            defer program.deinit();
+            defer program.deinit(allocator);
             var index = 0;
             while program.declarations.at(index) |declaration| {
                 index = index + 1;
@@ -121,7 +121,7 @@ fn render_load_section(
                     continue;
                 }
                 let rendered = try ast::render_declaration(allocator, &tree, declaration.*);
-                defer rendered.deinit();
+                defer rendered.deinit(allocator);
                 let bytes = rendered.as_bytes();
                 try out.append_bytes("// ");
                 var byte_index = 0;
@@ -153,10 +153,10 @@ fn append_check_section(
     try out.append_bytes("// check:");
     try out.append_byte(cast<u8>(10));
     var diagnostics = try types::check_all(allocator, tree, program);
-    defer diagnostics.deinit();
+    defer diagnostics.deinit(allocator);
     if diagnostics.len() == 0 {
         var moves = try ownership::check_all(allocator, tree, program);
-        defer moves.deinit();
+        defer moves.deinit(allocator);
         return append_diagnostic_lines(out, &moves);
     }
     return append_diagnostic_lines(out, &diagnostics);
@@ -227,7 +227,7 @@ test "check corpus loads and checks like the shipping compiler" {
     let allocator = mem::page_allocator();
     let io = io::blocking();
     var entries = try fs::read_dir(io, "compiler/tests/check");
-    defer entries.deinit();
+    defer entries.deinit(allocator);
     var cases = 0;
     var failures = 0;
     var index = 0;
@@ -239,13 +239,13 @@ test "check corpus loads and checks like the shipping compiler" {
         }
         cases = cases + 1;
         let data = try fs::read_file(io, allocator, entry.path, mem::Limit::Unlimited);
-        defer data.deinit();
+        defer data.deinit(allocator);
         let bytes = data.as_bytes();
         if split_check_case(bytes) |cut| {
             let input = bytes[0..cut];
             let want = bytes[cut + mem::len(check_marker())..mem::len(bytes)];
             let got = try render_load_section(io, allocator, input);
-            defer got.deinit();
+            defer got.deinit(allocator);
             let got_bytes = got.as_bytes();
             if !mem::equal_bytes(want, got_bytes) {
                 failures = failures + 1;

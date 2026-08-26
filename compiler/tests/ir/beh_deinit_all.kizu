@@ -15,14 +15,14 @@ struct Bag {
 
 fn make_name(allocator: Allocator, text: []u8) -> !string::String {
     var name = string::new(allocator);
-    errdefer name.deinit();
+    errdefer name.deinit(allocator);
     try name.append_bytes(text);
     return move name;
 }
 
 fn make_bag(allocator: Allocator) -> !Bag {
     let names = array::new<string::String>(allocator);
-    errdefer names.deinit();
+    errdefer names.deinit(allocator);
     try names.append(try make_name(allocator, "alice"));
     return Bag { names: move names, count: 1 };
 }
@@ -30,7 +30,7 @@ fn make_bag(allocator: Allocator) -> !Bag {
 test "deinit consumes remaining owner elements" {
     let allocator = mem::page_allocator();
     let names = array::new<string::String>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
     try names.append(try make_name(allocator, "alice"));
     try names.append(try make_name(allocator, "bob"));
     testing::expect_equal<i64>(2, names.len());
@@ -39,16 +39,16 @@ test "deinit consumes remaining owner elements" {
 test "pop before deinit consumes elements one by one" {
     let allocator = mem::page_allocator();
     let names = array::new<string::String>(allocator);
-    defer names.deinit();
+    defer names.deinit(allocator);
     try names.append(try make_name(allocator, "carol"));
     let taken = names.pop_or_panic();
-    taken.deinit();
+    taken.deinit(allocator);
     testing::expect_equal<i64>(0, names.len());
 }
 
 fn make_table(allocator: Allocator) -> !map::Map<[]u8, i64> {
     let table = map::new<[]u8, i64>(allocator);
-    errdefer table.deinit();
+    errdefer table.deinit(allocator);
     try table.insert("seen", 1);
     return move table;
 }
@@ -56,7 +56,7 @@ fn make_table(allocator: Allocator) -> !map::Map<[]u8, i64> {
 test "deinit cleans owner containers as elements" {
     let allocator = mem::page_allocator();
     let maps = array::new<map::Map<[]u8, i64>>(allocator);
-    defer maps.deinit();
+    defer maps.deinit(allocator);
     try maps.append(try make_table(allocator));
     testing::expect_equal<i64>(1, maps.len());
 }
@@ -64,10 +64,9 @@ test "deinit cleans owner containers as elements" {
 test "struct deinit forwards owner-element arrays to deinit" {
     let allocator = mem::page_allocator();
     let bag = try make_bag(allocator);
-    defer bag.deinit();
+    defer bag.deinit(allocator);
     testing::expect_equal<i64>(1, bag.count);
 }
-
 
 // ir
 // lower:
@@ -77,7 +76,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %2: &var std::string::String = local.slot %1: std::string::String
 //   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %text: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
-//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
+//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
 //   %7: !std::string::String = error.ok %6: std::string::String
 //   return %7: !std::string::String
@@ -89,10 +88,10 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %3: []u8 = const "alice"
 //   %4: !std::string::String = call.make_name %allocator: Allocator, %3: []u8
 //   %5: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   %6: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %5: std::array::Array<std::string::String>
+//   %6: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %5: std::array::Array<std::string::String>, %allocator: Allocator
 //   %7: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %6: std::string::String
 //   %8: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %8: std::array::Array<std::string::String>
+//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %8: std::array::Array<std::string::String>, %allocator: Allocator
 //   %10: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
 //   %11: i64 = const 1
 //   %12: Bag = struct.new {names: %10: std::array::Array<std::string::String>, count: %11: i64}
@@ -109,10 +108,10 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %6: !std::map::Map<[]u8, i64> = error.ok %1: std::map::Map<[]u8, i64>
 //   return %6: !std::map::Map<[]u8, i64>
 // }
-// fn Bag.deinit(%self: Bag) -> void {
+// fn Bag.deinit(%self: Bag, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<std::string::String> = field.names %self: Bag
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.deinit_consumes_remaining_owner_elements() -> !void {
@@ -123,22 +122,22 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %4: []u8 = const "alice"
 //   %5: !std::string::String = call.make_name %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: []u8 = const "bob"
 //   %12: !std::string::String = call.make_name %1: Allocator, %11: []u8
 //   %13: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>
+//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>, %1: Allocator
 //   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %14: std::string::String
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>
+//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: i64 = const 2
 //   %19: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
 //   test.expect_equal %18: i64, %19: i64, i64
 //   %21: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %21: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %21: std::array::Array<std::string::String>, %1: Allocator
 //   %23: !void = error.ok
 //   return %23: !void
 // }
@@ -150,17 +149,17 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %4: []u8 = const "carol"
 //   %5: !std::string::String = call.make_name %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: std::string::String = call.std::array::Array.pop_or_panic.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
-//   call.std::string::String.deinit %11: std::string::String
+//   call.std::string::String.deinit %11: std::string::String, %1: Allocator
 //   %13: i64 = const 0
 //   %14: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
 //   test.expect_equal %13: i64, %14: i64, i64
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: !void = error.ok
 //   return %18: !void
 // }
@@ -171,15 +170,15 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %3: &var std::array::Array<std::map::Map<[]u8, i64>> = local.slot %2: std::array::Array<std::map::Map<[]u8, i64>>
 //   %4: !std::map::Map<[]u8, i64> = call.make_table %1: Allocator
 //   %5: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %3: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   %6: std::map::Map<[]u8, i64> = error.try %4: !std::map::Map<[]u8, i64>, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %5: std::array::Array<std::map::Map<[]u8, i64>>
+//   %6: std::map::Map<[]u8, i64> = error.try %4: !std::map::Map<[]u8, i64>, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %5: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %7: std::mem::Error!void = call.std::array::Array.append.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %3: &var std::array::Array<std::map::Map<[]u8, i64>>, %6: std::map::Map<[]u8, i64>
 //   %8: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %3: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %8: std::array::Array<std::map::Map<[]u8, i64>>
+//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %8: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %10: i64 = const 1
 //   %11: i64 = call.std::array::Array.len.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %3: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   test.expect_equal %10: i64, %11: i64, i64
 //   %13: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %3: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %13: std::array::Array<std::map::Map<[]u8, i64>>
+//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %13: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %15: !void = error.ok
 //   return %15: !void
 // }
@@ -191,7 +190,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %4: i64 = const 1
 //   %5: i64 = field.count %3: Bag
 //   test.expect_equal %4: i64, %5: i64, i64
-//   call.Bag.deinit %3: Bag
+//   call.Bag.deinit %3: Bag, %1: Allocator
 //   %8: !void = error.ok
 //   return %8: !void
 // }
@@ -202,7 +201,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %2: &var std::string::String = local.slot %1: std::string::String
 //   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %text: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
-//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String
+//   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
 //   %7: !std::string::String = error.ok %6: std::string::String
 //   return %7: !std::string::String
@@ -214,10 +213,10 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %3: []u8 = const "alice"
 //   %4: !std::string::String = call.make_name %allocator: Allocator, %3: []u8
 //   %5: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   %6: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %5: std::array::Array<std::string::String>
+//   %6: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %5: std::array::Array<std::string::String>, %allocator: Allocator
 //   %7: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: &var std::array::Array<std::string::String>, %6: std::string::String
 //   %8: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
-//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %8: std::array::Array<std::string::String>
+//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %8: std::array::Array<std::string::String>, %allocator: Allocator
 //   %10: std::array::Array<std::string::String> = ref.load %2: &var std::array::Array<std::string::String>
 //   %11: i64 = const 1
 //   %12: Bag = struct.new {names: %10: std::array::Array<std::string::String>, count: %11: i64}
@@ -234,10 +233,10 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %6: !std::map::Map<[]u8, i64> = error.ok %1: std::map::Map<[]u8, i64>
 //   return %6: !std::map::Map<[]u8, i64>
 // }
-// fn Bag.deinit(%self: Bag) -> void {
+// fn Bag.deinit(%self: Bag, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::array::Array<std::string::String> = field.names %self: Bag
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.deinit_consumes_remaining_owner_elements() -> !void {
@@ -248,22 +247,22 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %4: []u8 = const "alice"
 //   %5: !std::string::String = call.make_name %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: []u8 = const "bob"
 //   %12: !std::string::String = call.make_name %1: Allocator, %11: []u8
 //   %13: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>
+//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>, %1: Allocator
 //   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %14: std::string::String
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>
+//   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: i64 = const 2
 //   %19: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
 //   test.expect_equal %18: i64, %19: i64, i64
 //   %21: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %21: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %21: std::array::Array<std::string::String>, %1: Allocator
 //   %23: !void = error.ok
 //   return %23: !void
 // }
@@ -275,17 +274,17 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %4: []u8 = const "carol"
 //   %5: !std::string::String = call.make_name %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
 //   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>
+//   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: std::string::String = call.std::array::Array.pop_or_panic.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
-//   call.std::string::String.deinit %11: std::string::String
+//   call.std::string::String.deinit %11: std::string::String, %1: Allocator
 //   %13: i64 = const 0
 //   %14: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>
 //   test.expect_equal %13: i64, %14: i64, i64
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
-//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: !void = error.ok
 //   return %18: !void
 // }
@@ -296,15 +295,15 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %3: &var std::array::Array<std::map::Map<[]u8, i64>> = local.slot %2: std::array::Array<std::map::Map<[]u8, i64>>
 //   %4: !std::map::Map<[]u8, i64> = call.make_table %1: Allocator
 //   %5: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %3: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   %6: std::map::Map<[]u8, i64> = error.try %4: !std::map::Map<[]u8, i64>, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %5: std::array::Array<std::map::Map<[]u8, i64>>
+//   %6: std::map::Map<[]u8, i64> = error.try %4: !std::map::Map<[]u8, i64>, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %5: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %7: std::mem::Error!void = call.std::array::Array.append.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %3: &var std::array::Array<std::map::Map<[]u8, i64>>, %6: std::map::Map<[]u8, i64>
 //   %8: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %3: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %8: std::array::Array<std::map::Map<[]u8, i64>>
+//   error.try %7: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %8: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %10: i64 = const 1
 //   %11: i64 = call.std::array::Array.len.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %3: &var std::array::Array<std::map::Map<[]u8, i64>>
 //   test.expect_equal %10: i64, %11: i64, i64
 //   %13: std::array::Array<std::map::Map<[]u8, i64>> = ref.load %3: &var std::array::Array<std::map::Map<[]u8, i64>>
-//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %13: std::array::Array<std::map::Map<[]u8, i64>>
+//   call.std::array::Array.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %13: std::array::Array<std::map::Map<[]u8, i64>>, %1: Allocator
 //   %15: !void = error.ok
 //   return %15: !void
 // }
@@ -316,7 +315,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   %4: i64 = const 1
 //   %5: i64 = field.count %3: Bag
 //   test.expect_equal %4: i64, %5: i64, i64
-//   call.Bag.deinit %3: Bag
+//   call.Bag.deinit %3: Bag, %1: Allocator
 //   %8: !void = error.ok
 //   return %8: !void
 // }

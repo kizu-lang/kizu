@@ -83,7 +83,7 @@ fn append_emitted(out: &var string::String, text: []u8) -> !void {
 /// caller can restore the module with `restore_functions`.
 fn keep_user_functions(allocator: Allocator, module: &var ir::Module) -> !array::Array<ir::Function> {
     var reversed = array::new<ir::Function>(allocator);
-    errdefer reversed.deinit();
+    errdefer reversed.deinit(allocator);
     while module.functions.pop() |function| {
         try reversed.append(function);
     }
@@ -122,7 +122,7 @@ fn append_llvm_failure(
 ) -> !void {
     try out.append_bytes(prefix);
     let text = try failed.error(allocator, sources);
-    defer text.deinit();
+    defer text.deinit(allocator);
     let bytes = text.as_bytes();
     return append_folded_llvm_line(out, bytes);
 }
@@ -136,11 +136,11 @@ fn emit_llvm_section(
     out: &var string::String
 ) -> !void {
     let dropped = try keep_user_functions(allocator, module);
-    defer dropped.deinit();
+    defer dropped.deinit(allocator);
     var emitted = string::new(allocator);
-    defer emitted.deinit();
+    defer emitted.deinit(allocator);
     if try llvm::emit(allocator, module, &var emitted) |failed| {
-        defer failed.deinit();
+        defer failed.deinit(allocator);
         try append_llvm_failure(allocator, sources, &failed, "// ", out);
     } else {
         let emitted_bytes = emitted.as_bytes();
@@ -178,38 +178,38 @@ fn render_llvm_case(
     input: []u8
 ) -> !string::String {
     var out = string::new(allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(allocator);
     var tree = ast::new(allocator);
-    defer tree.deinit();
+    defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
-    defer loader.deinit();
+    defer loader.deinit(allocator);
     let loaded = try loader.load_source(&var tree, "", input);
     match loaded {
         Error(failed) => {
-            defer failed.deinit();
+            defer failed.deinit(allocator);
             try append_check_failure(allocator, &loader.sources, &failed, &var out);
             return move out;
         },
         Program(program) => {
-            defer program.deinit();
+            defer program.deinit(allocator);
             if try types::check(allocator, &var tree, &program) |failed| {
-                defer failed.deinit();
+                defer failed.deinit(allocator);
                 try append_check_failure(allocator, &loader.sources, &failed, &var out);
                 return move out;
             }
             var checker = try ownership::new_checker(allocator, &tree, &program);
-            defer checker.deinit();
+            defer checker.deinit(allocator);
             if try checker.check_program(&var tree, &program) |failed| {
-                defer failed.deinit();
+                defer failed.deinit(allocator);
                 try append_check_failure(allocator, &loader.sources, &failed, &var out);
                 return move out;
             }
             var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
-            defer lowerer.deinit();
+            defer lowerer.deinit(allocator);
             try out.append_bytes("// emit:");
             try out.append_byte(cast<u8>(10));
             if try lowerer.lower(&var tree, &program, std_errors) |failed| {
-                defer failed.deinit();
+                defer failed.deinit(allocator);
                 try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
                 try out.append_bytes("// opt:");
                 try out.append_byte(cast<u8>(10));
@@ -220,7 +220,7 @@ fn render_llvm_case(
             try out.append_bytes("// opt:");
             try out.append_byte(cast<u8>(10));
             if try ir::optimize(allocator, &var lowerer.module) |failed| {
-                defer failed.deinit();
+                defer failed.deinit(allocator);
                 try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
                 return move out;
             }
@@ -234,18 +234,18 @@ test "llvm corpus emits like the shipping compiler" {
     let allocator = mem::page_allocator();
     let io = io::blocking();
     var std_loader = try project::new_loader(io, allocator, "lib/kizu");
-    defer std_loader.deinit();
+    defer std_loader.deinit(allocator);
     let codes = try std_loader.std_error_codes();
     match codes {
         Error(failed) => {
-            defer failed.deinit();
+            defer failed.deinit(allocator);
             try io::write_stderr_line(io, "std error codes could not be read");
             testing::expect(false);
         },
         Codes(std_errors) => {
-            defer std_errors.deinit();
+            defer std_errors.deinit(allocator);
             var entries = try fs::read_dir(io, "compiler/tests/llvm");
-            defer entries.deinit();
+            defer entries.deinit(allocator);
             var cases = 0;
             var failures = 0;
             var index = 0;
@@ -257,13 +257,13 @@ test "llvm corpus emits like the shipping compiler" {
                 }
                 cases = cases + 1;
                 let data = try fs::read_file(io, allocator, entry.path, mem::Limit::Unlimited);
-                defer data.deinit();
+                defer data.deinit(allocator);
                 let bytes = data.as_bytes();
                 if split_llvm_case(bytes) |cut| {
                     let input = bytes[0..cut];
                     let want = bytes[cut + mem::len(llvm_marker())..mem::len(bytes)];
                     let got = try render_llvm_case(io, allocator, &std_errors, input);
-                    defer got.deinit();
+                    defer got.deinit(allocator);
                     let got_bytes = got.as_bytes();
                     if !mem::equal_bytes(want, got_bytes) {
                         failures = failures + 1;

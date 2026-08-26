@@ -19,7 +19,7 @@ array.at(index: i64) -> ?&T
 array.at_mut(index: i64) -> ?&var T
 array.set(index: i64, value: T) -> std::array::Error!void
 array.swap(left: i64, right: i64) -> std::array::Error!void
-array.deinit() -> void
+array.deinit(allocator: Allocator) -> void
 ```
 
 `std::array::new<T>()` のような hidden default allocator は使いません。
@@ -44,8 +44,10 @@ recoverable な empty case を扱う場合は `pop` を使います。
 `String` のような owner element にも使えます。receiver は owned local または
 `&var Array<T>` でなければならず、shared borrow 越しの呼び出しは拒否されます。
 
-`deinit` は全要素を consume してから buffer を解放します。要素が何も持たない
-場合は consume が空になるだけで、生成されるのは buffer の解放 1 命令です。
+`deinit` は確保に使った allocator を名指します —— 値は自分を作った allocator の
+複製を持たないので、解放に必要なものは呼び出し側が綴ります(SPEC §14.3)。
+全要素を consume してから buffer を解放し、要素が何も持たない場合は consume が
+空になるだけで、生成されるのは buffer の解放 1 命令です。
 cleanup の名前はこれ 1 つなので、要素型が決まっていない generic code も同じ
 ものを書け、`Array<Array<String>>` のような入れ子もそのまま解放できます。
 

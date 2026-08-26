@@ -11,7 +11,7 @@ map.at_mut(key: K) -> ?&var V
 map.key_at(index: i64) -> ?K
 map.contains(key: K) -> bool
 map.len() -> i64
-map.deinit() -> void
+map.deinit(allocator: Allocator) -> void
 ```
 
 key type `K` に書けるのは `[]u8` と整数型

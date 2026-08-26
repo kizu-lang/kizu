@@ -19,7 +19,7 @@ fn (self: &var Emitter) write_box_runtime_decls(module: &ir::Module) -> !void {
         return;
     }
     try self.line("declare ptr @kizu_box_new(ptr, i64, ptr)");
-    try self.line("declare void @kizu_box_deinit(ptr)");
+    try self.line("declare void @kizu_box_deinit(ptr, ptr, i64)");
     return self.line("");
 }
 
@@ -71,7 +71,7 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
     let result_type = result_text.as_bytes();
     var success_is_box = false;
     if try self.error_union_success_type(result_type) |success| {
-        defer success.deinit();
+        defer success.deinit(self.allocator);
         let success_bytes = success.as_bytes();
         success_is_box = is_box_llvm_type(success_bytes);
     }
@@ -88,7 +88,7 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
             let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(1));
             let raw_name = try self.suffixed(result_name, ".raw");
             var elem = string::new(self.allocator);
-            defer elem.deinit();
+            defer elem.deinit(self.allocator);
             if !try self.instr_element_type(module, node, &var elem) {
                 return try self.fail0("llvm error: box.new expects allocator, T -> !Box<T>");
             }
@@ -158,11 +158,22 @@ fn (self: &var Emitter) write_box_borrow(module: &ir::Module, node: &ir::InstrNo
 /// Lowers Box.deinit(), the Go `writeBoxDeinit`: the runtime releases the
 /// cell.
 fn (self: &var Emitter) write_box_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
-        return try self.fail0("llvm error: box.deinit expects Box<T> -> void");
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: box.deinit expects Box<T>, Allocator -> void");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0("llvm error: emitter bug: box release names no payload type");
+    }
+    let elem_bytes = elem.as_bytes();
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     let box = try self.operand(module, node.args.get_or_panic(0));
-    try self.line1("  call void @kizu_box_deinit(ptr %s)", Arg::Str(box.operand));
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
+    try self.line3(
+        "  call void @kizu_box_deinit(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(allocator.operand), Arg::Str(box.operand), Arg::Str(size)
+    );
     try self.set_void_value(module, node.result);
     return null;
 }
@@ -171,14 +182,25 @@ fn (self: &var Emitter) write_box_deinit(module: &ir::Module, node: &ir::InstrNo
 /// owns something, the Go `writeBoxTake`: it moves out before the runtime
 /// releases the cell.
 fn (self: &var Emitter) write_box_take(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !is_box_name(&module.names, node.args.get_or_panic(0).type_name) {
-        return try self.fail0("llvm error: box.take expects Box<T> -> T");
+    if node.args.len() != 2 or !is_box_name(&module.names, node.args.get_or_panic(0).type_name) {
+        return try self.fail0("llvm error: box.take expects Box<T>, Allocator -> T");
     }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0("llvm error: emitter bug: box release names no payload type");
+    }
+    let elem_bytes = elem.as_bytes();
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     let box = try self.operand(module, node.args.get_or_panic(0));
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(box.operand));
-    try self.line1("  call void @kizu_box_deinit(ptr %s)", Arg::Str(box.operand));
+    try self.line3(
+        "  call void @kizu_box_deinit(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(allocator.operand), Arg::Str(box.operand), Arg::Str(size)
+    );
     try self.set_value(module, node.result, result_name);
     return null;
 }

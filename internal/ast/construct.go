@@ -17,7 +17,7 @@ type ConstructField struct {
 // (ADR-0115).
 //
 //	let f1 = try worker<T, f1>(args...);
-//	errdefer f1.deinit();
+//	errdefer f1.deinit(args[0]);
 //	let f2 = try worker<T, f2>(args...);
 //	T { f1: move f1, f2: f2 }
 //
@@ -38,6 +38,14 @@ func ConstructExpansion(
 ) ([]Statement, Expression) {
 	statements := make([]Statement, 0, len(fields)*2)
 	values := make([]FieldValue, 0, len(fields))
+	// The release an owner field's errdefer writes names the allocator the
+	// worker built it from, which is the construct's own first argument
+	// (ADR-0132). The checker requires one there before an owner field can
+	// reach here.
+	release := []Expression{}
+	if len(args) > 0 {
+		release = []Expression{args[0]}
+	}
 	for _, field := range fields {
 		binding := constructBinding(field.Name)
 		statements = append(statements, &LetStmt{
@@ -52,7 +60,10 @@ func ConstructExpansion(
 		})
 		// A value with no cleanup contract has nothing to release, and the
 		// fields already built are what an `errdefer` protects: a later worker
-		// that fails leaves them owned by nobody else.
+		// that fails leaves them owned by nobody else. The release names the
+		// allocator the worker built the field from, which is the construct's
+		// own first argument (ADR-0132); the checker requires one there as
+		// soon as any field owns something.
 		value := Expression(&IdentExpr{Name: binding})
 		if OwnerType(owners, field.Type) {
 			statements = append(statements, &ErrDeferStmt{Expr: &CallExpr{
@@ -60,6 +71,7 @@ func ConstructExpansion(
 					Receiver: &IdentExpr{Name: binding},
 					Name:     typ.CleanupMethod,
 				},
+				Args: release,
 			}})
 			// The literal takes the value out of its binding, which is the
 			// same hand-off a program spells `move`. Writing the marker here

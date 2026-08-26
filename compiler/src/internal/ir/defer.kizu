@@ -21,7 +21,7 @@ fn (self: &var Lowerer) push_defer_frame() -> !i64 {
 /// Closes the innermost lexical cleanup frame, the Go `popDeferFrame`.
 fn (self: &var Lowerer) pop_defer_frame() -> void {
     if self.defer_frames.pop() |frame| {
-        frame.deinit();
+        frame.deinit(self.allocator);
     }
     return;
 }
@@ -74,9 +74,6 @@ fn (self: &var Lowerer) cleanup_from_expr(
 ) -> !?diagnostic::Diagnostic {
     let call = ownership::call_expr(tree, expression) orelse
         return try self.fail0("ir error: defer expects cleanup method call");
-    if ownership::arg_count(tree, call.args) != 0 {
-        return try self.fail0("ir error: defer expects cleanup method call");
-    }
     let field = ownership::field_expr(tree, call.callee) orelse
         return try self.fail0("ir error: defer expects cleanup method call");
     if field.namespace {
@@ -88,7 +85,16 @@ fn (self: &var Lowerer) cleanup_from_expr(
     let receiver = self.envs.get(self.env, name) orelse
         return try self.fail1(tree, "ir error: undefined defer receiver `%s`", Arg::Str(name));
     let method = try self.text_name(tree, field.name);
-    return self.cleanup_from_method(tree, receiver, method, out);
+    // The arguments are read where the defer is written, not where it runs,
+    // so what runs at scope exit is settled at the point the source names.
+    var allocator = empty_value();
+    if ownership::arg_count(tree, call.args) > 0 {
+        let argument = call.args.get_or_panic(tree, 0);
+        if try self.lower_expr(tree, argument, &var allocator) |failed| {
+            return move failed;
+        }
+    }
+    return self.cleanup_from_method(tree, receiver, method, allocator, out);
 }
 
 /// Names what one std container's cleanup needs, the Go `containerCleanup`:
@@ -97,32 +103,63 @@ fn (self: &var Lowerer) cleanup_from_expr(
 struct ContainerCleanup {
     name: []u8,
     shallow_op: Op,
-    type_arg: Name
+    type_arg: Name,
+    // Whether the runtime op takes the allocator the release names. A Box
+    // cell stores nothing but its payload, so the op is handed one; the other
+    // containers still keep an allocator in the header their op reads.
+    shallow_names_allocator: bool
 }
 
 /// Reports the cleanup shape of a std container type, the Go
 /// `stdContainerCleanup`, and null for anything else.
 fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?ContainerCleanup {
     if try self.array_element_type(receiver_type) |elem| {
-        return ContainerCleanup { name: "std::array::Array", shallow_op: Op::ArrayDeinit, type_arg: elem };
+        return ContainerCleanup {
+            name: "std::array::Array",
+            shallow_op: Op::ArrayDeinit,
+            type_arg: elem,
+            shallow_names_allocator: false
+        };
     }
     if try self.map_static_args(receiver_type) |map_args| {
-        return ContainerCleanup { name: "std::map::Map", shallow_op: Op::MapDeinit, type_arg: map_args };
+        return ContainerCleanup {
+            name: "std::map::Map",
+            shallow_op: Op::MapDeinit,
+            type_arg: map_args,
+            shallow_names_allocator: false
+        };
     }
     if try self.box_element_type(receiver_type) |elem| {
-        return ContainerCleanup { name: "std::mem::Box", shallow_op: Op::BoxDeinit, type_arg: elem };
+        return ContainerCleanup {
+            name: "std::mem::Box",
+            shallow_op: Op::BoxDeinit,
+            type_arg: elem,
+            shallow_names_allocator: true
+        };
     }
     let elem = try self.arena_element_type(receiver_type);
     if !self.name_is(elem, "unknown") {
-        return ContainerCleanup { name: "std::arena::Arena", shallow_op: Op::ArenaDeinit, type_arg: elem };
+        return ContainerCleanup {
+            name: "std::arena::Arena",
+            shallow_op: Op::ArenaDeinit,
+            type_arg: elem,
+            shallow_names_allocator: false
+        };
     }
     return null;
 }
 
 /// Returns a cleanup that runs op over the one receiver it consumes, the Go
 /// `Cleanup{Op: op, Args: []Value{receiver}}`.
-fn cleanup_of(op: Op, operand: Name, receiver: Value) -> Cleanup {
-    return Cleanup { op: op, operand: operand, arg: receiver, on_error: false, receiver: empty_name() };
+fn cleanup_of(op: Op, operand: Name, receiver: Value, allocator: Value) -> Cleanup {
+    return Cleanup {
+        op: op,
+        operand: operand,
+        arg: receiver,
+        allocator: allocator,
+        on_error: false,
+        receiver: empty_name()
+    };
 }
 
 /// Returns the record `std_container_call_op` fills, pointing at the
@@ -137,6 +174,7 @@ fn (self: &var Lowerer) cleanup_from_method(
     tree: &var ast::Ast,
     receiver: Value,
     method: Name,
+    allocator: Value,
     out: &var Cleanup
 ) -> !?diagnostic::Diagnostic {
     let receiver_type = try self.deref_type(receiver.type_name);
@@ -148,7 +186,11 @@ fn (self: &var Lowerer) cleanup_from_method(
             // would. Plain contents have no loop to run, so they keep the
             // runtime op.
             if !self.is_owner_type(container.type_arg) {
-                out.* = cleanup_of(container.shallow_op, empty_name(), receiver);
+                var carried = empty_value();
+                if container.shallow_names_allocator {
+                    carried = allocator;
+                }
+                out.* = cleanup_of(container.shallow_op, empty_name(), receiver, carried);
                 return null;
             }
             let container_name = container.name;
@@ -156,7 +198,7 @@ fn (self: &var Lowerer) cleanup_from_method(
             if try self.std_container_call_op(tree, container_name, method, container.type_arg, &var resolved) |failed| {
                 return move failed;
             }
-            out.* = cleanup_of(Op::Call, resolved.symbol, receiver);
+            out.* = cleanup_of(Op::Call, resolved.symbol, receiver, allocator);
             return null;
         }
     }
@@ -168,7 +210,7 @@ fn (self: &var Lowerer) cleanup_from_method(
         if !self.name_is(returned, "void") {
             return try self.fail1(tree, "ir error: defer cleanup must return void, got %s", Arg::Str(returned));
         }
-        out.* = cleanup_of(Op::Call, method_name, receiver);
+        out.* = cleanup_of(Op::Call, method_name, receiver, allocator);
         return null;
     }
     return try self.fail1(tree, "ir error: unknown cleanup method `%s`", Arg::Str(method));
@@ -215,7 +257,7 @@ fn (self: &var Lowerer) cleanups_from(depth: i64, include_error: bool, out: &var
 /// `emitNormalCleanups`.
 fn (self: &var Lowerer) emit_normal_cleanups() -> !void {
     var cleanups = array::new<Cleanup>(self.allocator);
-    defer cleanups.deinit();
+    defer cleanups.deinit(self.allocator);
     try self.normal_cleanups(&var cleanups);
     return self.emit_cleanups(&cleanups);
 }
@@ -225,7 +267,7 @@ fn (self: &var Lowerer) emit_normal_cleanups() -> !void {
 /// ones a move retired before it.
 fn (self: &var Lowerer) emit_error_cleanups_for_return(statement: ast::Statement) -> !void {
     var cleanups = array::new<Cleanup>(self.allocator);
-    defer cleanups.deinit();
+    defer cleanups.deinit(self.allocator);
     try self.error_cleanups(&var cleanups);
     try self.retire_cleanups(CleanupExit::Return(statement), &var cleanups);
     return self.emit_cleanups(&cleanups);
@@ -280,7 +322,7 @@ fn (self: &Lowerer) retire_cleanups(exit: CleanupExit, cleanups: &var array::Arr
 /// without an error.
 fn (self: &var Lowerer) emit_cleanup_frame(frame: i64) -> !void {
     var cleanups = array::new<Cleanup>(self.allocator);
-    defer cleanups.deinit();
+    defer cleanups.deinit(self.allocator);
     if self.defer_frames.at(frame) |entries| {
         var index = entries.len();
         while index > 0 {
@@ -305,7 +347,12 @@ fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void
     while cleanups.get(index) |cleanup| {
         index = index + 1;
         let arg = try self.load_cleanup_arg(cleanup.arg);
-        let _ = try self.emit_op1(cleanup.op, cleanup.operand, self.common.void_type, arg);
+        if is_empty(cleanup.allocator.name) {
+            let _ = try self.emit_op1(cleanup.op, cleanup.operand, self.common.void_type, arg);
+        } else {
+            let _ = try self.emit_op2(
+                cleanup.op, cleanup.operand, self.common.void_type, arg, cleanup.allocator);
+        }
     }
     return;
 }
@@ -323,5 +370,12 @@ fn (self: &var Lowerer) load_cleanup_arg(arg: Value) -> !Value {
 
 /// Returns an empty cleanup record, the slot a resolver fills.
 fn empty_cleanup() -> Cleanup {
-    return Cleanup { op: Op::Id, operand: empty_name(), arg: empty_value(), on_error: false, receiver: empty_name() };
+    return Cleanup {
+        op: Op::Id,
+        operand: empty_name(),
+        arg: empty_value(),
+        allocator: empty_value(),
+        on_error: false,
+        receiver: empty_name()
+    };
 }

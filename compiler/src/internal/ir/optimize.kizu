@@ -28,7 +28,7 @@ fn constant_fold(allocator: Allocator, module: &var Module) -> !void {
         while function_block_at(module, function, block_index) |block| {
             block_index = block_index + 1;
             var consts = try constants_in(allocator, module, block);
-            defer consts.deinit();
+            defer consts.deinit(allocator);
             var instr_index = 0;
             while block_instr_at(module, block, instr_index) |instr| {
                 instr_index = instr_index + 1;
@@ -46,7 +46,7 @@ fn copy_propagate(allocator: Allocator, module: &var Module) -> !void {
     while module.functions.get(index) |function| {
         index = index + 1;
         var copies = map::new<[]u8, Value>(allocator);
-        defer copies.deinit();
+        defer copies.deinit(allocator);
         var block_index = 0;
         while function_block_at(module, function, block_index) |block| {
             block_index = block_index + 1;
@@ -81,7 +81,7 @@ fn dead_code_eliminate(allocator: Allocator, module: &var Module) -> !void {
     while module.functions.get(index) |function| {
         index = index + 1;
         var used = try used_values(allocator, module, function);
-        defer used.deinit();
+        defer used.deinit(allocator);
         var block_index = 0;
         while function_block_at(module, function, block_index) |block| {
             block_index = block_index + 1;
@@ -109,7 +109,7 @@ fn block_instr_at(module: &Module, block: Block, index: i64) -> ?Instr {
 /// `constantsIn`.
 fn constants_in(allocator: Allocator, module: &Module, block: Block) -> !map::Map<[]u8, i64> {
     var consts = map::new<[]u8, i64>(allocator);
-    errdefer consts.deinit();
+    errdefer consts.deinit(allocator);
     let block_node = module.blocks.at(block.node);
     var index = 0;
     while block_node.instrs.get(index) |instr| {
@@ -254,6 +254,11 @@ fn replace_args(module: &var Module, instr: Instr, copies: &map::Map<[]u8, Value
                     slot.arg = replacement;
                 }
             }
+            if copy_of(names, copies, cleanup.allocator.name) |replacement| {
+                if node.cleanups.at_mut(index) |slot| {
+                    slot.allocator = replacement;
+                }
+            }
             index = index + 1;
         }
     }
@@ -284,7 +289,7 @@ fn replace_terminator_args(module: &var Module, block: Block, copies: &map::Map<
 /// Returns the set of SSA names read by a function, the Go `usedValues`.
 fn used_values(allocator: Allocator, module: &Module, function: Function) -> !map::Map<[]u8, bool> {
     var used = map::new<[]u8, bool>(allocator);
-    errdefer used.deinit();
+    errdefer used.deinit(allocator);
     let node = module.function_nodes.at(function.node);
     var index = 0;
     while node.blocks.get(index) |block| {
@@ -313,6 +318,7 @@ fn used_values(allocator: Allocator, module: &Module, function: Function) -> !ma
             while instr_node.cleanups.get(arg_index) |cleanup| {
                 arg_index = arg_index + 1;
                 try mark_used(module, &var used, cleanup.arg.name);
+                try mark_used(module, &var used, cleanup.allocator.name);
             }
         }
         try mark_used(module, &var used, block_node.terminator.value.name);
@@ -332,7 +338,7 @@ fn mark_used(module: &Module, used: &var map::Map<[]u8, bool>, name: Name) -> !v
 /// `keepLiveInstrs`, written back over the block's list.
 fn keep_live_instrs(allocator: Allocator, module: &var Module, block: Block, used: &map::Map<[]u8, bool>) -> !void {
     var kept = array::new<Instr>(allocator);
-    defer kept.deinit();
+    defer kept.deinit(allocator);
     var index = 0;
     while block_instr_at(module, block, index) |instr| {
         index = index + 1;

@@ -20,7 +20,7 @@ union Slot {
 // release the partial array, the success return moves it out.
 fn make_holder(allocator: Allocator) -> !Holder {
     let inner = array::new<i64>(allocator);
-    errdefer inner.deinit();
+    errdefer inner.deinit(allocator);
     try inner.append(7);
     return Holder { values: move inner };
 }
@@ -28,15 +28,15 @@ fn make_holder(allocator: Allocator) -> !Holder {
 fn main() -> !void {
     let allocator = mem::page_allocator();
     let users = arena::new<User>(allocator);
-    defer users.deinit();
+    defer users.deinit(allocator);
     let handles = array::new<arena::Handle<User>>(allocator);
-    defer handles.deinit();
+    defer handles.deinit(allocator);
     let maps = array::new<map::Map<[]u8, i64>>(allocator);
-    defer maps.deinit();
+    defer maps.deinit(allocator);
     let holders = array::new<Holder>(allocator);
-    defer holders.deinit();
+    defer holders.deinit(allocator);
     let slots = array::new<Slot>(allocator);
-    defer slots.deinit();
+    defer slots.deinit(allocator);
 
     let alice = users.add(User { name: "alice" });
     try handles.append(alice);
@@ -45,12 +45,12 @@ fn main() -> !void {
     let table = map::new<[]u8, i64>(allocator);
     try maps.append(move table);
     let moved_table = maps.pop_or_panic();
-    moved_table.deinit();
+    moved_table.deinit(allocator);
 
     try holders.append(try make_holder(allocator));
     let holder = holders.pop_or_panic();
     print(holder.values.get_or_panic(0));
-    holder.deinit();
+    holder.deinit(allocator);
 
     let bob = users.add(User { name: "bob" });
     try slots.append(Slot::UserHandle(bob));
@@ -64,7 +64,6 @@ fn main() -> !void {
 // 1
 // 7
 // 1
-
 
 // llvm
 // emit:
@@ -130,15 +129,15 @@ fn main() -> !void {
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cUser_3e(ptr, i64)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, ptr)
-// declare void @std__array__Array_deinit_Holder(%kizu.array)
-// declare void @std__array__Array_deinit_i64(%kizu.array)
-// declare void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array)
+// declare void @std__array__Array_deinit_Holder(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array, ptr)
 // declare i64 @std__array__Array_get_or_panic_i64(%kizu.array, i64)
 // declare i64 @std__array__Array_len_Slot(ptr)
 // declare i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cUser_3e(ptr)
 // declare %kizu.struct.Holder @std__array__Array_pop_or_panic_Holder(ptr)
 // declare ptr @std__array__Array_pop_or_panic_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr)
-// declare void @std__map__Map_deinit__5b_5du8_i64(ptr)
+// declare void @std__map__Map_deinit__5b_5du8_i64(ptr, ptr)
 // declare ptr @std__mem__page_allocator()
 // 
 // declare void @kizu_panic_arena_add(i64, i64)
@@ -218,8 +217,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.15, 3
 //   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.16)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.17)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.16, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.17, ptr %kizu.1)
 //   %kizu.array.deinit.data.9 = extractvalue %kizu.array %kizu.18, 0
 //   %kizu.array.deinit.cap.10 = extractvalue %kizu.array %kizu.18, 2
 //   %kizu.array.deinit.alloc.11 = extractvalue %kizu.array %kizu.18, 3
@@ -251,8 +250,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.19 = extractvalue %kizu.array %kizu.24, 3
 //   %kizu.array.deinit.bytes.20 = mul i64 %kizu.array.deinit.cap.18, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.19, ptr %kizu.array.deinit.data.17, i64 %kizu.array.deinit.bytes.20)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.25)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.26)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.25, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.26, ptr %kizu.1)
 //   %kizu.array.deinit.data.24 = extractvalue %kizu.array %kizu.27, 0
 //   %kizu.array.deinit.cap.25 = extractvalue %kizu.array %kizu.27, 2
 //   %kizu.array.deinit.alloc.26 = extractvalue %kizu.array %kizu.27, 3
@@ -268,7 +267,7 @@ fn main() -> !void {
 //   ret i32 1
 // kizu.28.try.ok:
 //   %kizu.29 = call ptr @std__array__Array_pop_or_panic_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr %kizu.6)
-//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.29)
+//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.29, ptr %kizu.1)
 //   %kizu.31 = call %kizu.error.Holder @make_holder(ptr %kizu.1)
 //   %kizu.32 = load %kizu.array, ptr %kizu.10
 //   %kizu.33 = load %kizu.array, ptr %kizu.8
@@ -283,8 +282,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.34 = extractvalue %kizu.array %kizu.32, 3
 //   %kizu.array.deinit.bytes.35 = mul i64 %kizu.array.deinit.cap.33, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.34, ptr %kizu.array.deinit.data.32, i64 %kizu.array.deinit.bytes.35)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.33)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.34)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.33, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.34, ptr %kizu.1)
 //   %kizu.array.deinit.data.39 = extractvalue %kizu.array %kizu.35, 0
 //   %kizu.array.deinit.cap.40 = extractvalue %kizu.array %kizu.35, 2
 //   %kizu.array.deinit.alloc.41 = extractvalue %kizu.array %kizu.35, 3
@@ -314,8 +313,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.49 = extractvalue %kizu.array %kizu.38, 3
 //   %kizu.array.deinit.bytes.50 = mul i64 %kizu.array.deinit.cap.48, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.49, ptr %kizu.array.deinit.data.47, i64 %kizu.array.deinit.bytes.50)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.39)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.40)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.39, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.40, ptr %kizu.1)
 //   %kizu.array.deinit.data.54 = extractvalue %kizu.array %kizu.41, 0
 //   %kizu.array.deinit.cap.55 = extractvalue %kizu.array %kizu.41, 2
 //   %kizu.array.deinit.alloc.56 = extractvalue %kizu.array %kizu.41, 3
@@ -335,7 +334,7 @@ fn main() -> !void {
 //   %kizu.46 = call i64 @std__array__Array_get_or_panic_i64(%kizu.array %kizu.44, i64 0)
 //   call void @kizu_print_int(i64 %kizu.46)
 //   store %kizu.struct.Holder %kizu.43, ptr %kizu.arg.0.61
-//   call void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.arg.0.61)
+//   call void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.arg.0.61, ptr %kizu.1)
 //   %kizu.49.ptr = getelementptr inbounds [4 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
 //   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 3, 1
@@ -367,8 +366,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.65 = extractvalue %kizu.array %kizu.54, 3
 //   %kizu.array.deinit.bytes.66 = mul i64 %kizu.array.deinit.cap.64, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.65, ptr %kizu.array.deinit.data.63, i64 %kizu.array.deinit.bytes.66)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.55)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.56)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.55, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.56, ptr %kizu.1)
 //   %kizu.array.deinit.data.70 = extractvalue %kizu.array %kizu.57, 0
 //   %kizu.array.deinit.cap.71 = extractvalue %kizu.array %kizu.57, 2
 //   %kizu.array.deinit.alloc.72 = extractvalue %kizu.array %kizu.57, 3
@@ -392,9 +391,9 @@ fn main() -> !void {
 //   %kizu.array.deinit.bytes.80 = mul i64 %kizu.array.deinit.cap.78, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.79, ptr %kizu.array.deinit.data.77, i64 %kizu.array.deinit.bytes.80)
 //   %kizu.63 = load %kizu.array, ptr %kizu.8
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.63)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.63, ptr %kizu.1)
 //   %kizu.65 = load %kizu.array, ptr %kizu.6
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.65)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.65, ptr %kizu.1)
 //   %kizu.67 = load %kizu.array, ptr %kizu.4
 //   %kizu.array.deinit.data.81 = extractvalue %kizu.array %kizu.67, 0
 //   %kizu.array.deinit.cap.82 = extractvalue %kizu.array %kizu.67, 2
@@ -418,11 +417,11 @@ fn main() -> !void {
 //   ret i32 0
 // }
 // 
-// define void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.self.addr) {
+// define void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Holder, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Holder %kizu.self, 0
-//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // opt:
@@ -488,15 +487,15 @@ fn main() -> !void {
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cUser_3e(ptr, i64)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, ptr)
-// declare void @std__array__Array_deinit_Holder(%kizu.array)
-// declare void @std__array__Array_deinit_i64(%kizu.array)
-// declare void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array)
+// declare void @std__array__Array_deinit_Holder(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
+// declare void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array, ptr)
 // declare i64 @std__array__Array_get_or_panic_i64(%kizu.array, i64)
 // declare i64 @std__array__Array_len_Slot(ptr)
 // declare i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cUser_3e(ptr)
 // declare %kizu.struct.Holder @std__array__Array_pop_or_panic_Holder(ptr)
 // declare ptr @std__array__Array_pop_or_panic_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr)
-// declare void @std__map__Map_deinit__5b_5du8_i64(ptr)
+// declare void @std__map__Map_deinit__5b_5du8_i64(ptr, ptr)
 // declare ptr @std__mem__page_allocator()
 // 
 // declare void @kizu_panic_arena_add(i64, i64)
@@ -576,8 +575,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.4 = extractvalue %kizu.array %kizu.15, 3
 //   %kizu.array.deinit.bytes.5 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.4, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.5)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.16)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.17)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.16, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.17, ptr %kizu.1)
 //   %kizu.array.deinit.data.9 = extractvalue %kizu.array %kizu.18, 0
 //   %kizu.array.deinit.cap.10 = extractvalue %kizu.array %kizu.18, 2
 //   %kizu.array.deinit.alloc.11 = extractvalue %kizu.array %kizu.18, 3
@@ -609,8 +608,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.19 = extractvalue %kizu.array %kizu.24, 3
 //   %kizu.array.deinit.bytes.20 = mul i64 %kizu.array.deinit.cap.18, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.19, ptr %kizu.array.deinit.data.17, i64 %kizu.array.deinit.bytes.20)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.25)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.26)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.25, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.26, ptr %kizu.1)
 //   %kizu.array.deinit.data.24 = extractvalue %kizu.array %kizu.27, 0
 //   %kizu.array.deinit.cap.25 = extractvalue %kizu.array %kizu.27, 2
 //   %kizu.array.deinit.alloc.26 = extractvalue %kizu.array %kizu.27, 3
@@ -626,7 +625,7 @@ fn main() -> !void {
 //   ret i32 1
 // kizu.28.try.ok:
 //   %kizu.29 = call ptr @std__array__Array_pop_or_panic_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr %kizu.6)
-//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.29)
+//   call void @std__map__Map_deinit__5b_5du8_i64(ptr %kizu.29, ptr %kizu.1)
 //   %kizu.31 = call %kizu.error.Holder @make_holder(ptr %kizu.1)
 //   %kizu.32 = load %kizu.array, ptr %kizu.10
 //   %kizu.33 = load %kizu.array, ptr %kizu.8
@@ -641,8 +640,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.34 = extractvalue %kizu.array %kizu.32, 3
 //   %kizu.array.deinit.bytes.35 = mul i64 %kizu.array.deinit.cap.33, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.34, ptr %kizu.array.deinit.data.32, i64 %kizu.array.deinit.bytes.35)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.33)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.34)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.33, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.34, ptr %kizu.1)
 //   %kizu.array.deinit.data.39 = extractvalue %kizu.array %kizu.35, 0
 //   %kizu.array.deinit.cap.40 = extractvalue %kizu.array %kizu.35, 2
 //   %kizu.array.deinit.alloc.41 = extractvalue %kizu.array %kizu.35, 3
@@ -672,8 +671,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.49 = extractvalue %kizu.array %kizu.38, 3
 //   %kizu.array.deinit.bytes.50 = mul i64 %kizu.array.deinit.cap.48, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.49, ptr %kizu.array.deinit.data.47, i64 %kizu.array.deinit.bytes.50)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.39)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.40)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.39, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.40, ptr %kizu.1)
 //   %kizu.array.deinit.data.54 = extractvalue %kizu.array %kizu.41, 0
 //   %kizu.array.deinit.cap.55 = extractvalue %kizu.array %kizu.41, 2
 //   %kizu.array.deinit.alloc.56 = extractvalue %kizu.array %kizu.41, 3
@@ -693,7 +692,7 @@ fn main() -> !void {
 //   %kizu.46 = call i64 @std__array__Array_get_or_panic_i64(%kizu.array %kizu.44, i64 0)
 //   call void @kizu_print_int(i64 %kizu.46)
 //   store %kizu.struct.Holder %kizu.43, ptr %kizu.arg.0.61
-//   call void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.arg.0.61)
+//   call void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.arg.0.61, ptr %kizu.1)
 //   %kizu.49.ptr = getelementptr inbounds [4 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
 //   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 3, 1
@@ -725,8 +724,8 @@ fn main() -> !void {
 //   %kizu.array.deinit.alloc.65 = extractvalue %kizu.array %kizu.54, 3
 //   %kizu.array.deinit.bytes.66 = mul i64 %kizu.array.deinit.cap.64, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.65, ptr %kizu.array.deinit.data.63, i64 %kizu.array.deinit.bytes.66)
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.55)
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.56)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.55, ptr %kizu.1)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.56, ptr %kizu.1)
 //   %kizu.array.deinit.data.70 = extractvalue %kizu.array %kizu.57, 0
 //   %kizu.array.deinit.cap.71 = extractvalue %kizu.array %kizu.57, 2
 //   %kizu.array.deinit.alloc.72 = extractvalue %kizu.array %kizu.57, 3
@@ -750,9 +749,9 @@ fn main() -> !void {
 //   %kizu.array.deinit.bytes.80 = mul i64 %kizu.array.deinit.cap.78, ptrtoint (ptr getelementptr (%kizu.union.Slot, ptr null, i64 1) to i64)
 //   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.79, ptr %kizu.array.deinit.data.77, i64 %kizu.array.deinit.bytes.80)
 //   %kizu.63 = load %kizu.array, ptr %kizu.8
-//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.63)
+//   call void @std__array__Array_deinit_Holder(%kizu.array %kizu.63, ptr %kizu.1)
 //   %kizu.65 = load %kizu.array, ptr %kizu.6
-//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.65)
+//   call void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array %kizu.65, ptr %kizu.1)
 //   %kizu.67 = load %kizu.array, ptr %kizu.4
 //   %kizu.array.deinit.data.81 = extractvalue %kizu.array %kizu.67, 0
 //   %kizu.array.deinit.cap.82 = extractvalue %kizu.array %kizu.67, 2
@@ -776,10 +775,10 @@ fn main() -> !void {
 //   ret i32 0
 // }
 // 
-// define void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.self.addr) {
+// define void @Holder_deinit(ptr byval(%kizu.struct.Holder) %kizu.self.addr, ptr %kizu.allocator) {
 // entry:
 //   %kizu.self = load %kizu.struct.Holder, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Holder %kizu.self, 0
-//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1)
+//   call void @std__array__Array_deinit_i64(%kizu.array %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }

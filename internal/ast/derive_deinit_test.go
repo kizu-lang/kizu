@@ -30,7 +30,7 @@ func TestDeriveDeinitConsumesWhatTheTypeHolds(t *testing.T) {
 		t.Fatalf("got %d statements, want the two owner fields and a return",
 			len(fn.Body.Statements))
 	}
-	if got := fn.Body.Statements[0].String(); got != "self.name.deinit();" {
+	if got := fn.Body.Statements[0].String(); got != "self.name.deinit(allocator);" {
 		t.Fatalf("owner field: got %q", got)
 	}
 	if _, ok := fn.Body.Statements[1].(*IfStmt); !ok {
