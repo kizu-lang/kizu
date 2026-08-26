@@ -38,10 +38,10 @@ fn (self: &var Lowerer) request_generic_instance(
     let seen = self.instantiated.get(id) orelse false;
     if !seen {
         while self.instantiated.len() <= id {
-            try self.instantiated.append(false);
+            try self.instantiated.append(self.allocator, false);
         }
         try self.instantiated.set(id, true);
-        try self.pending.append(GenericInstance { decl: decl, args: args, symbol: symbol });
+        try self.pending.append(self.allocator, GenericInstance { decl: decl, args: args, symbol: symbol });
     }
     // The signature the caller sees resolves the forms the declaration
     // wrote, so a `-> std::meta::field_type<T, f>` result arrives as the
@@ -117,6 +117,7 @@ fn (self: &var Lowerer) bind_generic_args(
     parts: &array::Array<string::String>,
     out: &var GenericBinding
 ) -> !?diagnostic::Diagnostic {
+    let allocator = self.allocator;
     let count = self.decl_static_param_count(decl);
     if parts.len() != count {
         return try self.fail3(
@@ -125,8 +126,8 @@ fn (self: &var Lowerer) bind_generic_args(
         );
     }
     let arg_names = try self.module.names.intern_all(parts);
-    defer arg_names.deinit(self.allocator);
-    let args = GenericArgsHandle { node: self.generic_args.add(blank_generic_args(self.allocator)) };
+    defer arg_names.deinit(allocator);
+    let args = GenericArgsHandle { node: self.generic_args.add(blank_generic_args(allocator)) };
     out.* = GenericBinding { decl: decl, args: args };
     var index = 0;
     while index < count {
@@ -134,7 +135,7 @@ fn (self: &var Lowerer) bind_generic_args(
         let arg = arg_names.get(index) orelse empty_name();
         index = index + 1;
         if self.generic_args.at_mut(args.node) |node| {
-            try node.order.append(param.name);
+            try node.order.append(allocator, param.name);
         }
         if param.is_type {
             // Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs
@@ -147,7 +148,7 @@ fn (self: &var Lowerer) bind_generic_args(
         // `Function` parameter -- as the name of the function to forward to.
         let text = self.resolve_static_value(arg);
         if self.generic_args.at_mut(args.node) |node| {
-            try node.values.append(StaticValue { name: param.name, typ: param.type_name, text: text });
+            try node.values.append(allocator, StaticValue { name: param.name, typ: param.type_name, text: text });
         }
     }
     return null;
@@ -155,18 +156,19 @@ fn (self: &var Lowerer) bind_generic_args(
 
 /// Records one type parameter binding in both forms the lowerer reads.
 fn (self: &var Lowerer) add_type_binding(args: GenericArgsHandle, name: Name, bound: Name) -> !void {
+    let allocator = self.allocator;
     let name_copy = try self.module.names.copy(name);
-    errdefer name_copy.deinit(self.allocator);
+    errdefer name_copy.deinit(allocator);
     let bound_copy = try self.module.names.copy(bound);
-    errdefer bound_copy.deinit(self.allocator);
+    errdefer bound_copy.deinit(allocator);
     if self.generic_args.at_mut(args.node) |node| {
-        try node.bindings.append(TypeBinding { name: name, bound: bound });
-        try node.binding_names.append(move name_copy);
-        try node.binding_types.append(move bound_copy);
+        try node.bindings.append(allocator, TypeBinding { name: name, bound: bound });
+        try node.binding_names.append(allocator, move name_copy);
+        try node.binding_types.append(allocator, move bound_copy);
         return;
     }
-    name_copy.deinit(self.allocator);
-    bound_copy.deinit(self.allocator);
+    name_copy.deinit(allocator);
+    bound_copy.deinit(allocator);
     return;
 }
 
@@ -196,9 +198,9 @@ fn (self: &Lowerer) split_args_reason(text: []u8) -> !string::String {
     if !decided and depth != 0 {
         reason = "type error: unbalanced `<` in `";
     }
-    try out.append_bytes(reason);
-    try out.append_bytes(text);
-    try out.append_bytes("`");
+    try out.append_bytes(self.allocator, reason);
+    try out.append_bytes(self.allocator, text);
+    try out.append_bytes(self.allocator, "`");
     return move out;
 }
 
@@ -339,7 +341,7 @@ fn (self: &var Lowerer) generic_instance_name(name: Name, args: GenericArgsHandl
     while index < count {
         let param = self.order_at(args, index);
         index = index + 1;
-        try out.append_byte(cast<u8>(46));
+        try out.append_byte(self.allocator, cast<u8>(46));
         if self.bound_type(args, param) |bound| {
             try self.append_encoded_static_arg(&var out, bound);
             continue;
@@ -375,26 +377,26 @@ fn (self: &Lowerer) append_encoded_static_arg(out: &var string::String, arg: Nam
         let byte = bytes[index];
         index = index + 1;
         if byte == cast<u8>(95) {
-            try out.append_bytes("__");
+            try out.append_bytes(self.allocator, "__");
             continue;
         }
         if (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
             (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
             (byte >= cast<u8>(48) and byte <= cast<u8>(57)) {
-            try out.append_byte(byte);
+            try out.append_byte(self.allocator, byte);
             continue;
         }
-        try out.append_byte(cast<u8>(95));
-        try append_hex_byte(out, byte);
+        try out.append_byte(self.allocator, cast<u8>(95));
+        try append_hex_byte(self.allocator, out, byte);
     }
     return;
 }
 
 /// Appends one byte as two lowercase hex digits, the Go `%02x`.
-fn append_hex_byte(out: &var string::String, byte: u8) -> !void {
+fn append_hex_byte(allocator: Allocator, out: &var string::String, byte: u8) -> !void {
     let value = cast<i64>(byte);
-    try out.append_byte(hex_digit(value / 16));
-    return out.append_byte(hex_digit(value % 16));
+    try out.append_byte(allocator, hex_digit(value / 16));
+    return out.append_byte(allocator, hex_digit(value % 16));
 }
 
 /// Returns the lowercase hex digit for a value below 16.

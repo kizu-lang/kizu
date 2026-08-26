@@ -77,7 +77,7 @@ fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var 
                 var index = 0;
                 while declared.tags.get(index) |tag| {
                     index = index + 1;
-                    try out.append(MetaField {
+                    try out.append(self.allocator, MetaField {
                         owner: type_arg,
                         name: try self.text_name(tree, tag),
                         typ: empty_name(),
@@ -99,7 +99,7 @@ fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var 
                     if variant.payload |declared_payload| {
                         payload = try self.resolve_element_forms(tree, declared_payload);
                     }
-                    try out.append(MetaField {
+                    try out.append(self.allocator, MetaField {
                         owner: type_arg,
                         name: try self.text_name(tree, variant.name),
                         typ: payload,
@@ -129,7 +129,7 @@ fn (self: &var Lowerer) public_fields(tree: &var ast::Ast, type_arg: Name, out: 
                 if !field.public {
                     continue;
                 }
-                try out.append(MetaField {
+                try out.append(self.allocator, MetaField {
                     owner: type_arg,
                     name: try self.text_name(tree, field.name),
                     typ: try self.resolve_element_forms(tree, field.type_name),
@@ -279,7 +279,7 @@ fn (self: &Lowerer) expand_comptime_match(
         let retained = name_text(&self.module.names, variant.name);
         let name_bytes = retained.as_bytes();
         let name = try tree.add_text_from_bytes(name_bytes);
-        try list.append(ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
+        try list.append(self.allocator, ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
     }
     let retained = name_text(&self.module.names, owner);
     let owner_bytes = retained.as_bytes();
@@ -473,17 +473,16 @@ fn (self: &Lowerer) expand_meta_construct(
         index = index + 1;
         let name = try self.module.names.copy(field.name);
         errdefer name.deinit(self.allocator);
-        try names.append(move name);
+        try names.append(self.allocator, move name);
         let type_name = try self.module.names.copy(field.typ);
         errdefer type_name.deinit(self.allocator);
-        try type_names.append(move type_name);
+        try type_names.append(self.allocator, move type_name);
     }
     let owner_text = name_text(&self.module.names, owner);
     let owner_bytes = owner_text.as_bytes();
     let worker_text = name_text(&self.module.names, worker);
     let worker_bytes = worker_text.as_bytes();
-    return ast::construct_expansion_from_names(
-        self.allocator, tree, owner_bytes, worker_bytes, &names, &type_names, args, &self.deinit_owners
+    return ast::construct_expansion_from_names(self.allocator, tree, owner_bytes, worker_bytes, &names, &type_names, args, &self.deinit_owners
     );
 }
 
@@ -569,17 +568,17 @@ fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
                 var part_index = 0;
                 while node.path.at(part_index) |part| {
                     if part_index > 0 {
-                        try path_text.append_bytes("::");
+                        try path_text.append_bytes(self.allocator, "::");
                     }
                     part_index = part_index + 1;
-                    try path_text.append_string(part);
+                    try path_text.append_string(self.allocator, part);
                 }
                 path = try self.module.names.intern_owned(move path_text);
                 var index = 0;
                 while node.args.get(index) |arg| {
                     index = index + 1;
                     let rendered = try typ::render(self.allocator, &self.types, typ::child_type(parsed, arg));
-                    try args.append(try self.module.names.intern_owned(move rendered));
+                    try args.append(self.allocator, try self.module.names.intern_owned(move rendered));
                 }
             }
         },
@@ -605,17 +604,17 @@ fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
             var out = string::new(self.allocator);
             errdefer out.deinit(self.allocator);
             try self.module.names.append_to(&var out, path);
-            try out.append_byte(cast<u8>(60));
+            try out.append_byte(self.allocator, cast<u8>(60));
             var index = 0;
             while args.get(index) |arg| {
                 if index > 0 {
-                    try out.append_bytes(", ");
+                    try out.append_bytes(self.allocator, ", ");
                 }
                 index = index + 1;
                 let resolved_arg = try self.resolve_meta_type_deep(arg);
                 try self.module.names.append_to(&var out, resolved_arg);
             }
-            try out.append_byte(cast<u8>(62));
+            try out.append_byte(self.allocator, cast<u8>(62));
             return self.module.names.intern_owned(move out);
         },
         Other => return text,
@@ -749,7 +748,7 @@ fn (self: &var Lowerer) resolve_meta_type_text(text: Name) -> !Name {
         index = index + 1;
         let arg_bytes = arg.as_bytes();
         let arg_name = try self.module.names.intern(arg_bytes);
-        try args.append(try self.resolve_meta_type_text(arg_name));
+        try args.append(self.allocator, try self.resolve_meta_type_text(arg_name));
     }
     match parts.form {
         FieldType => return self.capture_type_text(text, &args),

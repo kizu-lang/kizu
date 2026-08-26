@@ -5,11 +5,11 @@
 ```text
 std::mem::page_allocator() -> Allocator
 std::array::new<T>(allocator: Allocator) -> std::array::Array<T>
-array.append(value: T) -> std::mem::Error!void
-array.append_bytes(bytes: []u8) -> std::mem::Error!void   // Array<u8> のみ
+array.append(allocator: Allocator, value: T) -> std::mem::Error!void
+array.append_bytes(allocator: Allocator, bytes: []u8) -> std::mem::Error!void   // Array<u8> のみ
 array.len() -> i64
 array.capacity() -> i64
-array.reserve(additional: i64) -> std::mem::Error!void
+array.reserve(allocator: Allocator, additional: i64) -> std::mem::Error!void
 array.clone(allocator: Allocator) -> !Array<T>
 array.pop() -> ?T
 array.pop_or_panic() -> T
@@ -44,8 +44,11 @@ recoverable な empty case を扱う場合は `pop` を使います。
 `String` のような owner element にも使えます。receiver は owned local または
 `&var Array<T>` でなければならず、shared borrow 越しの呼び出しは拒否されます。
 
-`deinit` は確保に使った allocator を名指します —— 値は自分を作った allocator の
-複製を持たないので、解放に必要なものは呼び出し側が綴ります(SPEC §14.3)。
+確保も解放も allocator を名指します。`Array<T>` の header は `{data, len, cap}`
+の 3 word で、allocator を覚えません —— 確保に必要なものも解放に必要なものも
+呼び出し側が既に持っており、値がその複製を運ぶ必要はないからです(SPEC §14.3)。
+`new` が受け取る allocator は compile 時の provenance で、`append` / `reserve` /
+`deinit` が同じものを名指すことを checker が要求します。
 全要素を consume してから buffer を解放し、要素が何も持たない場合は consume が
 空になるだけで、生成されるのは buffer の解放 1 命令です。
 cleanup の名前はこれ 1 つなので、要素型が決まっていない generic code も同じ

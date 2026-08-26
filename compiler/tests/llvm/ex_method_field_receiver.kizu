@@ -24,8 +24,8 @@ struct Tracker {
 // exclusive borrow derives from the owner's storage, the same derivation a
 // `&var` argument uses. A type split into small fields keeps each field's
 // methods callable through the owner.
-fn (self: &var Tracker) record(id: i64) -> !void {
-    try self.log.append(id);
+fn (self: &var Tracker) record(allocator: Allocator, id: i64) -> !void {
+    try self.log.append(allocator, id);
     self.visits.bump();
     return;
 }
@@ -34,8 +34,8 @@ fn main() -> !void {
     let allocator = mem::page_allocator();
     var tracker = Tracker { visits: Counter { count: 0 }, log: array::new<i64>(allocator) };
     defer tracker.deinit(allocator);
-    try tracker.record(7);
-    try tracker.record(9);
+    try tracker.record(allocator, 7);
+    try tracker.record(allocator, 9);
     tracker.visits.bump();
     print(tracker.visits.count);
     reset(tracker.visits);
@@ -76,11 +76,11 @@ fn main() -> !void {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -88,7 +88,7 @@ fn main() -> !void {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_i64(ptr)
 // declare ptr @std__mem__page_allocator()
@@ -110,10 +110,10 @@ fn main() -> !void {
 //   ret void
 // }
 // 
-// define %kizu.error.void @Tracker_record(ptr %kizu.self, i64 %kizu.id) {
+// define %kizu.error.void @Tracker_record(ptr %kizu.self, ptr %kizu.allocator, i64 %kizu.id) {
 // entry:
 //   %kizu.1 = getelementptr %kizu.struct.Tracker, ptr %kizu.self, i32 0, i32 1
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.1, i64 %kizu.id)
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.1, ptr %kizu.allocator, i64 %kizu.id)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -138,11 +138,10 @@ fn main() -> !void {
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   %kizu.3 = insertvalue %kizu.struct.Counter zeroinitializer, i64 0, 0
-//   %kizu.4 = insertvalue %kizu.array zeroinitializer, ptr %kizu.1, 3
 //   %kizu.5.field0 = insertvalue %kizu.struct.Tracker zeroinitializer, %kizu.struct.Counter %kizu.3, 0
-//   %kizu.5 = insertvalue %kizu.struct.Tracker %kizu.5.field0, %kizu.array %kizu.4, 1
+//   %kizu.5 = insertvalue %kizu.struct.Tracker %kizu.5.field0, %kizu.array zeroinitializer, 1
 //   store %kizu.struct.Tracker %kizu.5, ptr %kizu.6
-//   %kizu.8 = call %kizu.error.void @Tracker_record(ptr %kizu.6, i64 7)
+//   %kizu.8 = call %kizu.error.void @Tracker_record(ptr %kizu.6, ptr %kizu.1, i64 7)
 //   %kizu.9 = load %kizu.struct.Tracker, ptr %kizu.6
 //   %kizu.10.ok = extractvalue %kizu.error.void %kizu.8, 0
 //   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
@@ -158,7 +157,7 @@ fn main() -> !void {
 //   call void @kizu_main_error_message(ptr %kizu.main.err.name.4.ptr, i64 %kizu.main.err.name.4.len)
 //   ret i32 1
 // kizu.10.try.ok:
-//   %kizu.12 = call %kizu.error.void @Tracker_record(ptr %kizu.6, i64 9)
+//   %kizu.12 = call %kizu.error.void @Tracker_record(ptr %kizu.6, ptr %kizu.1, i64 9)
 //   %kizu.13 = load %kizu.struct.Tracker, ptr %kizu.6
 //   %kizu.14.ok = extractvalue %kizu.error.void %kizu.12, 0
 //   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
@@ -239,11 +238,11 @@ fn main() -> !void {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -251,7 +250,7 @@ fn main() -> !void {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_i64(ptr)
 // declare ptr @std__mem__page_allocator()
@@ -273,10 +272,10 @@ fn main() -> !void {
 //   ret void
 // }
 // 
-// define %kizu.error.void @Tracker_record(ptr %kizu.self, i64 %kizu.id) {
+// define %kizu.error.void @Tracker_record(ptr %kizu.self, ptr %kizu.allocator, i64 %kizu.id) {
 // entry:
 //   %kizu.1 = getelementptr %kizu.struct.Tracker, ptr %kizu.self, i32 0, i32 1
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.1, i64 %kizu.id)
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.1, ptr %kizu.allocator, i64 %kizu.id)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -301,11 +300,10 @@ fn main() -> !void {
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   %kizu.3 = insertvalue %kizu.struct.Counter zeroinitializer, i64 0, 0
-//   %kizu.4 = insertvalue %kizu.array zeroinitializer, ptr %kizu.1, 3
 //   %kizu.5.field0 = insertvalue %kizu.struct.Tracker zeroinitializer, %kizu.struct.Counter %kizu.3, 0
-//   %kizu.5 = insertvalue %kizu.struct.Tracker %kizu.5.field0, %kizu.array %kizu.4, 1
+//   %kizu.5 = insertvalue %kizu.struct.Tracker %kizu.5.field0, %kizu.array zeroinitializer, 1
 //   store %kizu.struct.Tracker %kizu.5, ptr %kizu.6
-//   %kizu.8 = call %kizu.error.void @Tracker_record(ptr %kizu.6, i64 7)
+//   %kizu.8 = call %kizu.error.void @Tracker_record(ptr %kizu.6, ptr %kizu.1, i64 7)
 //   %kizu.9 = load %kizu.struct.Tracker, ptr %kizu.6
 //   %kizu.10.ok = extractvalue %kizu.error.void %kizu.8, 0
 //   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
@@ -321,7 +319,7 @@ fn main() -> !void {
 //   call void @kizu_main_error_message(ptr %kizu.main.err.name.4.ptr, i64 %kizu.main.err.name.4.len)
 //   ret i32 1
 // kizu.10.try.ok:
-//   %kizu.12 = call %kizu.error.void @Tracker_record(ptr %kizu.6, i64 9)
+//   %kizu.12 = call %kizu.error.void @Tracker_record(ptr %kizu.6, ptr %kizu.1, i64 9)
 //   %kizu.13 = load %kizu.struct.Tracker, ptr %kizu.6
 //   %kizu.14.ok = extractvalue %kizu.error.void %kizu.12, 0
 //   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0

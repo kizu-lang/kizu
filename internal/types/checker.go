@@ -4641,8 +4641,8 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		// The raw primitive frees only the buffer, with no owner-element rule:
 		// it is the one escape `Array.deinit` uses after consuming the
 		// elements, and only std source can name it.
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.deinit` expects 0 args, got %d", len(args))
+		if err := c.checkReleaseAllocator("Array.deinit", args, env, unsafe); err != nil {
+			return "", err
 		}
 		return typeVoid, nil
 	default:
@@ -6101,16 +6101,56 @@ func (c *Checker) checkStringMutatorArg(
 	env *scope,
 	unsafe unsafeMark,
 ) error {
+	// A growth names the allocator its storage comes from: a String keeps
+	// none of its own (ADR-0132). `truncate` neither grows nor frees, so it
+	// names nothing.
+	rest := args
+	if stringGrowMethod(name) {
+		if err := c.checkStringGrowAllocator(name, args, env, unsafe); err != nil {
+			return err
+		}
+		rest = args[1:]
+	}
 	switch name {
 	case "append_bytes":
-		return c.checkStringBytesArg(name, args, env, unsafe)
+		return c.checkStringBytesArg(name, rest, len(args), env, unsafe)
 	case "append_byte":
-		return c.checkStringByteArg(name, args, env, unsafe)
+		return c.checkStringByteArg(name, rest, len(args), env, unsafe)
 	case "append_string":
-		return c.checkStringStringArg(name, args, env, unsafe)
+		return c.checkStringStringArg(name, rest, len(args), env, unsafe)
 	default:
-		return c.checkStringReserveArg(name, args, env, unsafe)
+		return c.checkStringReserveArg(name, rest, len(args), env, unsafe)
 	}
+}
+
+// stringGrowMethod reports the String methods that may ask for storage.
+func stringGrowMethod(name string) bool {
+	switch name {
+	case "append_bytes", "append_byte", "append_string", "reserve":
+		return true
+	default:
+		return false
+	}
+}
+
+// checkStringGrowAllocator validates the leading Allocator a growth names.
+func (c *Checker) checkStringGrowAllocator(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	if len(args) != 2 {
+		return errorf("type error: `String.%s` expects 2 args, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != Type("Allocator") {
+		return errorf("type error: `String.%s` expects Allocator, got %s", name, got)
+	}
+	return nil
 }
 
 // isStringMutatingMethod reports whether a String method can change owned storage.
@@ -6128,11 +6168,13 @@ func isStringMutatingMethod(name string) bool {
 func (c *Checker) checkStringBytesArg(
 	name string,
 	args []ast.Expression,
+	arity int,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
-		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `String.%s` expects %d args, got %d",
+			name, arity-len(args)+1, arity)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -6148,11 +6190,13 @@ func (c *Checker) checkStringBytesArg(
 func (c *Checker) checkStringStringArg(
 	name string,
 	args []ast.Expression,
+	arity int,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
-		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `String.%s` expects %d args, got %d",
+			name, arity-len(args)+1, arity)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -6168,11 +6212,13 @@ func (c *Checker) checkStringStringArg(
 func (c *Checker) checkStringReserveArg(
 	name string,
 	args []ast.Expression,
+	arity int,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
-		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `String.%s` expects %d args, got %d",
+			name, arity-len(args)+1, arity)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -6188,11 +6234,13 @@ func (c *Checker) checkStringReserveArg(
 func (c *Checker) checkStringByteArg(
 	name string,
 	args []ast.Expression,
+	arity int,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
-		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `String.%s` expects %d args, got %d",
+			name, arity-len(args)+1, arity)
 	}
 	got, err := c.checkContextualExpr(args[0], typeU8, env, unsafe)
 	if err != nil {

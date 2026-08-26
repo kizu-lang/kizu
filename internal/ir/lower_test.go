@@ -291,9 +291,9 @@ fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     errdefer parent.deinit(allocator);
     let child = std::string::new(allocator);
     errdefer child.deinit(allocator);
-    try child.append_byte(cast<u8>(97));
-    try parent.append(move child);
-    try parent.reserve(1);
+    try child.append_byte(allocator, cast<u8>(97));
+    try parent.append(allocator, move child);
+    try parent.reserve(allocator, 1);
     return move parent;
 }
 fn main() {}`)
@@ -346,7 +346,7 @@ fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var points = std::array::new<Point>(allocator);
     defer points.deinit(allocator);
-    try points.append(Point { x: 7 });
+    try points.append(allocator, Point { x: 7 });
     if points.at(0) |p| {
         print(p.sum());
     }
@@ -862,8 +862,8 @@ fn main() -> !void {
     defer parent.deinit(allocator);
     var name = std::string::new(allocator);
     errdefer name.deinit(allocator);
-    try name.append_byte(cast<u8>(97));
-    try parent.append(move name);
+    try name.append_byte(allocator, cast<u8>(97));
+    try parent.append(allocator, move name);
     let boxed = try std::mem::box<std::string::String>(allocator, std::string::new(allocator));
     defer boxed.deinit(allocator);
     return;
@@ -871,10 +871,11 @@ fn main() -> !void {
 	got := Dump(module)
 	for _, want := range []string{
 		"  error.try %1: std::mem::Error!void, cleanup call.std::string::String.deinit" +
-			" %value: std::string::String\n",
+			" %value: std::string::String, %allocator: Allocator\n",
 		"  %2: std::mem::Box<std::string::String> = error.try" +
 			" %1: std::mem::Error!std::mem::Box<std::string::String>," +
-			" cleanup call.std::string::String.deinit %value: std::string::String\n",
+			" cleanup call.std::string::String.deinit %value: std::string::String," +
+			" %allocator: Allocator\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
@@ -890,12 +891,12 @@ fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var values = std::array::new<i64>(allocator);
     defer values.deinit(allocator);
-    try values.append(1);
+    try values.append(allocator, 1);
     return;
 }`)
 	got := Dump(module)
 	want := "  %1: std::mem::Error!void = array.append" +
-		" %self: &var std::array::Array<i64>, %value: i64\n" +
+		" %self: &var std::array::Array<i64>, %allocator: Allocator, %value: i64\n" +
 		"  return %1: std::mem::Error!void\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
@@ -943,7 +944,7 @@ fn (self: Names) deinit(allocator: Allocator) -> void {
 fn field_from_name<T, f: Field>(allocator: Allocator) -> !std::meta::field_type<T, f> {
     var out = std::string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes(std::meta::field_name<T, f>());
+    try out.append_bytes(allocator, std::meta::field_name<T, f>());
     return move out;
 }
 fn main() -> !void {

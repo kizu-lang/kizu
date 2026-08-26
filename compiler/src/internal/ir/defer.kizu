@@ -14,7 +14,7 @@ import std::array;
 /// Opens a lexical cleanup frame for one block, the Go `pushDeferFrame`, and
 /// returns its index.
 fn (self: &var Lowerer) push_defer_frame() -> !i64 {
-    try self.defer_frames.append(array::new<Cleanup>(self.allocator));
+    try self.defer_frames.append(self.allocator, array::new<Cleanup>(self.allocator));
     return self.defer_frames.len() - 1;
 }
 
@@ -42,6 +42,7 @@ fn (self: &var Lowerer) lower_err_defer_stmt(tree: &var ast::Ast, statement: ast
 /// Go `recordCleanup`. on_error marks errdefer entries that run only on
 /// error-return paths.
 fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Expression, on_error: bool) -> !?diagnostic::Diagnostic {
+    let allocator = self.allocator;
     var cleanup = empty_cleanup();
     if try self.cleanup_from_expr(tree, expression, &var cleanup) |failed| {
         return move failed;
@@ -50,7 +51,7 @@ fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Exp
     cleanup.receiver = try self.cleanup_receiver_name(tree, expression);
     let frame = self.defer_frames.len() - 1;
     if self.defer_frames.at_mut(frame) |entries| {
-        try entries.append(cleanup);
+        try entries.append(allocator, cleanup);
     }
     return null;
 }
@@ -118,7 +119,7 @@ fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?Containe
             name: "std::array::Array",
             shallow_op: Op::ArrayDeinit,
             type_arg: elem,
-            shallow_names_allocator: false
+            shallow_names_allocator: true
         };
     }
     if try self.map_static_args(receiver_type) |map_args| {
@@ -245,7 +246,7 @@ fn (self: &var Lowerer) cleanups_from(depth: i64, include_error: bool, out: &var
                     if cleanup.on_error and !include_error {
                         continue;
                     }
-                    try out.append(cleanup);
+                    try out.append(self.allocator, cleanup);
                 }
             }
         }
@@ -331,7 +332,7 @@ fn (self: &var Lowerer) emit_cleanup_frame(frame: i64) -> !void {
                 if cleanup.on_error {
                     continue;
                 }
-                try cleanups.append(cleanup);
+                try cleanups.append(self.allocator, cleanup);
             }
         }
     }

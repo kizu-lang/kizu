@@ -39,14 +39,14 @@ struct NameRenames {
 }
 
 /// Appends parts[start..end] joined by `::`.
-fn append_path(out: &var string::String, parts: &array::Array<string::String>, start: i64, end: i64) -> !void {
+fn append_path(allocator: Allocator, out: &var string::String, parts: &array::Array<string::String>, start: i64, end: i64) -> !void {
     var index = start;
     while index < end {
         if parts.at(index) |part| {
             if index > start {
-                try out.append_bytes("::");
+                try out.append_bytes(allocator, "::");
             }
-            try out.append_string(part);
+            try out.append_string(allocator, part);
         }
         index = index + 1;
     }
@@ -57,7 +57,7 @@ fn append_path(out: &var string::String, parts: &array::Array<string::String>, s
 fn join_path(allocator: Allocator, parts: &array::Array<string::String>, start: i64, end: i64) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try append_path(&var out, parts, start, end);
+    try append_path(allocator, &var out, parts, start, end);
     return move out;
 }
 
@@ -66,8 +66,8 @@ fn join_path(allocator: Allocator, parts: &array::Array<string::String>, start: 
 fn join_under(allocator: Allocator, target: &string::String, parts: &array::Array<string::String>) -> !string::String {
     var out = try copy_string(allocator, target);
     errdefer out.deinit(allocator);
-    try out.append_bytes("::");
-    try append_path(&var out, parts, 1, parts.len());
+    try out.append_bytes(allocator, "::");
+    try append_path(allocator, &var out, parts, 1, parts.len());
     return move out;
 }
 
@@ -81,7 +81,7 @@ fn split_path(allocator: Allocator, name: []u8) -> !array::Array<string::String>
     while index <= length {
         if index == length or (index + 1 < length and
             name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58)) {
-            try parts.append(try string::from_bytes(allocator, name[start..index]));
+            try parts.append(allocator, try string::from_bytes(allocator, name[start..index]));
             index = index + 2;
             start = index;
             continue;
@@ -186,11 +186,11 @@ fn (self: &Loader) name_error(
 ) -> !diagnostic::Diagnostic {
     var text = try module_error_text(self.allocator);
     errdefer text.deinit(self.allocator);
-    try text.append_bytes(before);
-    try text.append_bytes("`");
-    try append_path(&var text, parts, 0, parts.len());
-    try text.append_bytes("`");
-    try text.append_bytes(after);
+    try text.append_bytes(self.allocator, before);
+    try text.append_bytes(self.allocator, "`");
+    try append_path(self.allocator, &var text, parts, 0, parts.len());
+    try text.append_bytes(self.allocator, "`");
+    try text.append_bytes(self.allocator, after);
     return module_error(self.allocator, move text);
 }
 
@@ -289,19 +289,19 @@ fn (self: &Loader) reject_unbound_std(
     }
     var text = try module_error_text(self.allocator);
     errdefer text.deinit(self.allocator);
-    try text.append_bytes("`");
-    try append_path(&var text, parts, 0, parts.len());
-    try text.append_bytes("` is used without an import in `");
+    try text.append_bytes(self.allocator, "`");
+    try append_path(self.allocator, &var text, parts, 0, parts.len());
+    try text.append_bytes(self.allocator, "` is used without an import in `");
     try self.append_module_name(&var text, file);
-    try text.append_bytes("`");
-    try text.append_byte(cast<u8>(10));
-    try text.append_bytes("help: `import ");
-    try text.append_bytes(std_root());
-    try text.append_bytes(";` reaches it by this path, or `import ");
-    try text.append_string(&path);
-    try text.append_bytes(";` and write `");
-    try append_path(&var text, parts, size - 1, parts.len());
-    try text.append_bytes("`");
+    try text.append_bytes(self.allocator, "`");
+    try text.append_byte(self.allocator, cast<u8>(10));
+    try text.append_bytes(self.allocator, "help: `import ");
+    try text.append_bytes(self.allocator, std_root());
+    try text.append_bytes(self.allocator, ";` reaches it by this path, or `import ");
+    try text.append_string(self.allocator, &path);
+    try text.append_bytes(self.allocator, ";` and write `");
+    try append_path(self.allocator, &var text, parts, size - 1, parts.len());
+    try text.append_bytes(self.allocator, "`");
     return try module_error(self.allocator, move text);
 }
 
@@ -399,7 +399,7 @@ fn namespace_parts(allocator: Allocator, tree: &ast::Ast, expr: ast::Expression)
         Ident(value) => {
             var parts = array::new<string::String>(allocator);
             errdefer parts.deinit(allocator);
-            try parts.append(try text_copy(allocator, tree, value.name));
+            try parts.append(allocator, try text_copy(allocator, tree, value.name));
             return move parts;
         },
         Field(value) => {
@@ -408,7 +408,7 @@ fn namespace_parts(allocator: Allocator, tree: &ast::Ast, expr: ast::Expression)
             }
             if try namespace_parts(allocator, tree, value.receiver) |parts| {
                 errdefer parts.deinit(allocator);
-                try parts.append(try text_copy(allocator, tree, value.name));
+                try parts.append(allocator, try text_copy(allocator, tree, value.name));
                 return move parts;
             }
             return null;
@@ -467,7 +467,7 @@ fn collect_type_names(
 ) -> !void {
     match typ::root_node(table, value) {
         Name(node) => {
-            try out.append(try join_path(allocator, &node.path, 0, node.path.len()));
+            try out.append(allocator, try join_path(allocator, &node.path, 0, node.path.len()));
             var index = 0;
             while node.args.get(index) |arg| {
                 try collect_type_names(allocator, table, typ::child_type(value, arg), out);
@@ -572,13 +572,13 @@ fn (self: &var Loader) resolve_qualified_base(file: arena::Handle<ModuleFile>, n
     }
     var text = try module_error_text(self.allocator);
     errdefer text.deinit(self.allocator);
-    try text.append_bytes("`");
-    try append_path(&var text, &parts, 0, 1);
-    try text.append_bytes("` is not imported in `");
+    try text.append_bytes(self.allocator, "`");
+    try append_path(self.allocator, &var text, &parts, 0, 1);
+    try text.append_bytes(self.allocator, "` is not imported in `");
     let module_path = try self.module_path_copy(file);
     defer module_path.deinit(self.allocator);
-    try text.append_string(&module_path);
-    try text.append_bytes("`");
+    try text.append_string(self.allocator, &module_path);
+    try text.append_bytes(self.allocator, "`");
     return NameResolution::Failed(try module_error(self.allocator, move text));
 }
 

@@ -24,18 +24,18 @@ fn (self: &var Emitter) enum_name_table(module: &ir::Module, typ_name: ir::Name)
 
 /// Appends a type name made usable inside an LLVM global identifier, the Go
 /// `mangleGlobalName`: `:`, `<`, `>` and `,` become `_`, and spaces drop.
-fn append_mangled_global_name(out: &var string::String, typ_name: []u8) -> !void {
+fn append_mangled_global_name(allocator: Allocator, out: &var string::String, typ_name: []u8) -> !void {
     var index = 0;
     while mem::byte_at(typ_name, index) |ch| {
         index = index + 1;
         if ch == cast<u8>(58) or ch == cast<u8>(60) or ch == cast<u8>(62) or ch == cast<u8>(44) {
-            try out.append_byte(cast<u8>(95));
+            try out.append_byte(allocator, cast<u8>(95));
             continue;
         }
         if ch == cast<u8>(32) {
             continue;
         }
-        try out.append_byte(ch);
+        try out.append_byte(allocator, ch);
     }
     return;
 }
@@ -84,7 +84,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         let literal_bytes = literal_text.as_bytes();
         var unquoted = string::new(self.allocator);
         defer unquoted.deinit(self.allocator);
-        try append_unquoted(&var unquoted, literal_bytes);
+        try append_unquoted(self.allocator, &var unquoted, literal_bytes);
         let unquoted_bytes = unquoted.as_bytes();
         try self.write_static_string_global(name, unquoted_bytes);
     }
@@ -114,7 +114,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
 /// `strconv.Unquote` over the form `internal/quote.Bytes` writes: `"` ... `"`
 /// with `\\`, `\"`, `\n`, `\r`, `\t` and `\xNN`. Go drops the result of a
 /// malformed literal; here the output stays empty for one.
-fn append_unquoted(out: &var string::String, literal: []u8) -> !void {
+fn append_unquoted(allocator: Allocator, out: &var string::String, literal: []u8) -> !void {
     let length = mem::len(literal);
     if length < 2 or literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
         return;
@@ -124,7 +124,7 @@ fn append_unquoted(out: &var string::String, literal: []u8) -> !void {
     while index < length - 1 {
         let ch = literal[index];
         if ch != cast<u8>(92) {
-            try out.append_byte(ch);
+            try out.append_byte(allocator, ch);
             index = index + 1;
             continue;
         }
@@ -134,25 +134,25 @@ fn append_unquoted(out: &var string::String, literal: []u8) -> !void {
         let escape = literal[index + 1];
         index = index + 2;
         if escape == cast<u8>(92) or escape == cast<u8>(34) {
-            try out.append_byte(escape);
+            try out.append_byte(allocator, escape);
             continue;
         }
         if escape == cast<u8>(110) {
-            try out.append_byte(cast<u8>(10));
+            try out.append_byte(allocator, cast<u8>(10));
             continue;
         }
         if escape == cast<u8>(114) {
-            try out.append_byte(cast<u8>(13));
+            try out.append_byte(allocator, cast<u8>(13));
             continue;
         }
         if escape == cast<u8>(116) {
-            try out.append_byte(cast<u8>(9));
+            try out.append_byte(allocator, cast<u8>(9));
             continue;
         }
         if escape == cast<u8>(120) and index + 1 < length - 1 + 1 and index + 2 <= length - 1 {
             if hex_value(literal[index]) |high| {
                 if hex_value(literal[index + 1]) |low| {
-                    try out.append_byte(cast<u8>(high * 16 + low));
+                    try out.append_byte(allocator, cast<u8>(high * 16 + low));
                     index = index + 2;
                     continue;
                 }
@@ -197,12 +197,12 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
                 let code = set.tags.get(member) orelse continue;
                 var spelling = try module.names.copy(set.name);
                 errdefer spelling.deinit(self.allocator);
-                try spelling.append_bytes("::");
-                try spelling.append_bytes(member);
+                try spelling.append_bytes(self.allocator, "::");
+                try spelling.append_bytes(self.allocator, member);
                 let spelling_name = try self.names.intern_owned(move spelling);
                 var key = string::new(self.allocator);
                 defer key.deinit(self.allocator);
-                try fmt::append_i64(&var key, code);
+                try fmt::append_i64(self.allocator, &var key, code);
                 let key_bytes = key.as_bytes();
                 try spellings.insert(key_bytes, spelling_name);
             }
@@ -215,7 +215,7 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
     while code < row_count {
         var key = string::new(self.allocator);
         defer key.deinit(self.allocator);
-        try fmt::append_i64(&var key, code);
+        try fmt::append_i64(self.allocator, &var key, code);
         let key_bytes = key.as_bytes();
         if spellings.get(key_bytes) |spelling| {
             let global = try self.text1("@.kizu.error.name.%d", Arg::Int(code));
@@ -223,11 +223,11 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
             defer spelling_text.deinit(self.allocator);
             let spelling_bytes = spelling_text.as_bytes();
             try self.write_static_string_global(global, spelling_bytes);
-            try rows.append(try self.sprint2(
+            try rows.append(self.allocator, try self.sprint2(
                 "{ ptr, i64 } { ptr %s, i64 %d }", Arg::Str(global), Arg::Int(mem::len(spelling_bytes))
             ));
         } else {
-            try rows.append(try string::from_bytes(self.allocator, "{ ptr, i64 } { ptr null, i64 0 }"));
+            try rows.append(self.allocator, try string::from_bytes(self.allocator, "{ ptr, i64 } { ptr null, i64 0 }"));
         }
         code = code + 1;
     }
@@ -251,7 +251,7 @@ fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
         let key = parse_panic_key(spelling_bytes) orelse continue;
         var params = string::new(self.allocator);
         errdefer params.deinit(self.allocator);
-        try append_panic_params(&var params, key);
+        try append_panic_params(self.allocator, &var params, key);
         try self.line2("declare void @%s(%s)", Arg::Lit(panic_entry(key).entry), Arg::Owned(move params));
     }
     if keys.len() > 0 {
@@ -473,8 +473,7 @@ fn collect_error_union_nodes(
                 index = index + 1;
                 try collect_error_union_nodes(allocator, types, typ::child_type(value, param), seen);
             }
-            return collect_error_union_nodes(
-                allocator, types, typ::child_type(value, node.result), seen);
+            return collect_error_union_nodes(allocator, types, typ::child_type(value, node.result), seen);
         },
     }
 }
@@ -561,7 +560,7 @@ fn sorted_keys(allocator: Allocator, seen: &map::Map<[]u8, bool>) -> !array::Arr
         index = index + 1;
         let copied = try string::from_bytes(allocator, name);
         errdefer copied.deinit(allocator);
-        try names.append(move copied);
+        try names.append(allocator, move copied);
     }
     try sort::strings(&var names);
     return move names;
@@ -687,7 +686,7 @@ fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Arra
         key_index = key_index + 1;
         let copied = try string::from_bytes(self.allocator, name);
         errdefer copied.deinit(self.allocator);
-        try names.append(move copied);
+        try names.append(self.allocator, move copied);
     }
     try sort::strings(&var names);
     var decls = array::new<string::String>(self.allocator);
@@ -697,7 +696,7 @@ fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Arra
         name_index = name_index + 1;
         let name_bytes = name.as_bytes();
         let decl = seen.get(name_bytes) orelse continue;
-        try decls.append(try self.names.copy(decl));
+        try decls.append(self.allocator, try self.names.copy(decl));
     }
     return move decls;
 }
@@ -718,7 +717,7 @@ fn (self: &var Emitter) write_struct_types(module: &ir::Module) -> !void {
             while declared.fields.get(field_index) |field| {
                 field_index = field_index + 1;
                 let field_type = try self.llvm_type_of(module, field.type_name);
-                try fields.append(try self.names.copy(field_type));
+                try fields.append(self.allocator, try self.names.copy(field_type));
             }
         }
         let struct_name = try self.llvm_struct_type_name(name_bytes);
@@ -769,7 +768,7 @@ fn (self: &Emitter) sorted_string_literals() -> !array::Array<string::String> {
         index = index + 1;
         let copied = try string::from_bytes(self.allocator, global);
         errdefer copied.deinit(self.allocator);
-        try globals.append(move copied);
+        try globals.append(self.allocator, move copied);
     }
     try sort::strings(&var globals);
     return move globals;
@@ -784,7 +783,7 @@ fn sorted_struct_names(allocator: Allocator, module: &ir::Module) -> !array::Arr
         index = index + 1;
         let copied = try string::from_bytes(allocator, name);
         errdefer copied.deinit(allocator);
-        try names.append(move copied);
+        try names.append(allocator, move copied);
     }
     try sort::strings(&var names);
     return move names;
@@ -799,7 +798,7 @@ fn sorted_union_names(allocator: Allocator, module: &ir::Module) -> !array::Arra
         index = index + 1;
         let copied = try string::from_bytes(allocator, name);
         errdefer copied.deinit(allocator);
-        try names.append(move copied);
+        try names.append(allocator, move copied);
     }
     try sort::strings(&var names);
     return move names;
@@ -1026,12 +1025,12 @@ fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
                     }
                     var spelling = try self.names.copy(type_name);
                     defer spelling.deinit(self.allocator);
-                    try spelling.append_bytes("::");
-                    try spelling.append_bytes(tag);
+                    try spelling.append_bytes(self.allocator, "::");
+                    try spelling.append_bytes(self.allocator, tag);
                     let global = try self.text2("%s.%d", Arg::Str(table), Arg::Int(row));
                     let spelling_bytes = spelling.as_bytes();
                     try self.write_static_string_global(global, spelling_bytes);
-                    try rows.append(try self.sprint2(
+                    try rows.append(self.allocator, try self.sprint2(
                         "{ ptr, i64 } { ptr %s, i64 %d }", Arg::Str(global), Arg::Int(spelling.len())
                     ));
                 }
@@ -1058,6 +1057,6 @@ fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
 fn (self: &var Emitter) enum_table_name(typ_name: []u8) -> !ir::Name {
     var out = try string::from_bytes(self.allocator, "@.kizu.enum.");
     errdefer out.deinit(self.allocator);
-    try append_mangled_global_name(&var out, typ_name);
+    try append_mangled_global_name(self.allocator, &var out, typ_name);
     return self.names.intern_owned(move out);
 }

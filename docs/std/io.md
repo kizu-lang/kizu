@@ -19,6 +19,7 @@ pub fn read_stdin(
 
 pub fn read_stdin_into(
     io: Io,
+    allocator: Allocator,
     out: &var std::string::String,
 ) -> std::io::Error!void
 ```

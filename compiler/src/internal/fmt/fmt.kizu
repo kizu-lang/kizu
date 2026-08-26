@@ -37,6 +37,9 @@ struct BlockState {
 }
 
 struct Builder {
+    // The allocator its output grows from. A String keeps none of its own
+    // (ADR-0132), and the builder is handed one when format starts.
+    allocator: Allocator,
     out: string::String,
     depth: i64,
     delimiter_lines: array::Array<i64>,
@@ -65,6 +68,7 @@ pub fn format(allocator: Allocator, source: []u8) -> !string::String {
     let comments = try line_comments(allocator, source);
     defer comments.deinit(allocator);
     var builder = Builder {
+        allocator: allocator,
         out: string::new(allocator),
         depth: 0,
         delimiter_lines: array::new<i64>(allocator),
@@ -125,7 +129,7 @@ fn detect_generic_brackets(
     errdefer flags.deinit(allocator);
     var fill = 0;
     while fill < tokens.len() {
-        try flags.append(false);
+        try flags.append(allocator, false);
         fill = fill + 1;
     }
     var index = 0;
@@ -203,7 +207,7 @@ fn tokenize(allocator: Allocator, source: []u8) -> !array::Array<token::Token> {
     while true {
         let next = try scanner.next_token();
         let done = next.kind == token::Kind::Eof;
-        try tokens.append(move next);
+        try tokens.append(allocator, move next);
         if done {
             return move tokens;
         }
@@ -233,7 +237,7 @@ fn line_comments(allocator: Allocator, source: []u8) -> !array::Array<LineCommen
             try has_blank_line_before(allocator, source, &lines, index);
         let blank_after = standalone and
             try has_blank_line_after(allocator, source, &lines, index);
-        try comments.append(LineComment {
+        try comments.append(allocator, LineComment {
             line: index + 1,
             text: move text,
             blank_before: blank_before,
@@ -252,12 +256,12 @@ fn source_lines(allocator: Allocator, source: []u8) -> !array::Array<LineRange> 
     let length = mem::len(source);
     while index < length {
         if source[index] == cast<u8>(10) {
-            try lines.append(LineRange { start: start, end: index });
+            try lines.append(allocator, LineRange { start: start, end: index });
             start = index + 1;
         }
         index = index + 1;
     }
-    try lines.append(LineRange { start: start, end: length });
+    try lines.append(allocator, LineRange { start: start, end: length });
     return move lines;
 }
 
@@ -397,7 +401,7 @@ fn leading_import_ranges(
                 index = index + 1;
             }
         }
-        try ranges.append(ImportRange { start: start, end: index });
+        try ranges.append(allocator, ImportRange { start: start, end: index });
     }
     return move ranges;
 }
@@ -415,10 +419,10 @@ fn import_path_key(
         if tokens.at(index) |current| {
             if current.kind == token::Kind::Ident {
                 let literal = current.literal.as_bytes();
-                try out.append_bytes(literal);
+                try out.append_bytes(allocator, literal);
             } else {
                 if current.kind == token::Kind::DoubleColon {
-                    try out.append_bytes("::");
+                    try out.append_bytes(allocator, "::");
                 }
             }
         }
@@ -567,13 +571,13 @@ fn (self: &var Builder) write_comment_line(
 ) -> !void {
     if comment.blank_before and self.out.len() > 0 and !self.ends_with_blank_line() {
         if !self.at_line_start {
-            try self.out.append_byte(cast<u8>(10));
+            try self.out.append_byte(self.allocator, cast<u8>(10));
             self.at_line_start = true;
         }
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
     }
     if !self.at_line_start {
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
         self.at_line_start = true;
     }
     if self.has_prev {
@@ -584,12 +588,12 @@ fn (self: &var Builder) write_comment_line(
     }
     try self.write_indent();
     let text = comment.text.as_bytes();
-    try self.out.append_bytes(text);
-    try self.out.append_byte(cast<u8>(10));
+    try self.out.append_bytes(self.allocator, text);
+    try self.out.append_byte(self.allocator, cast<u8>(10));
     self.at_line_start = true;
     self.after_comment = true;
     if comment.blank_after and !self.ends_with_blank_line() {
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
     }
     self.source_line = comment.line;
     return;
@@ -607,7 +611,7 @@ fn (self: &var Builder) maybe_blank_line_for_top_level(current: &token::Token) -
         return;
     }
     if !self.is_consecutive_import(current.kind) and !self.ends_with_blank_line() {
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
     }
     self.last_top_decl = current.kind;
     self.has_last_top_decl = true;
@@ -642,7 +646,7 @@ fn (self: &var Builder) maybe_preserve_source_line_break(
         }
         return;
     }
-    try self.out.append_byte(cast<u8>(10));
+    try self.out.append_byte(self.allocator, cast<u8>(10));
     self.at_line_start = true;
     self.continuation = self.continuation_indent(current.kind, generic);
     return;
@@ -710,7 +714,7 @@ fn (self: &var Builder) write_separator(
         return self.write_indent();
     }
     if self.has_prev and self.should_insert_space(current, tokens, generic) {
-        return self.out.append_byte(cast<u8>(32));
+        return self.out.append_byte(self.allocator, cast<u8>(32));
     }
     return;
 }
@@ -732,7 +736,7 @@ fn (self: &var Builder) record_emitted(
         self.in_capture = !self.in_capture;
     }
     if self.opens_continuation_group(current.kind, generic) {
-        try self.delimiter_lines.append(current.line);
+        try self.delimiter_lines.append(self.allocator, current.line);
     } else {
         if self.closes_continuation_group(current.kind, generic) and
             self.delimiter_lines.len() > 0 {
@@ -780,7 +784,7 @@ fn (self: &var Builder) maybe_trailing_newline(
 ) -> !void {
     if kind == token::Kind::LBrace {
         let block_kind = current_open_block_kind(tokens, self.index);
-        try self.block_stack.append(BlockState {
+        try self.block_stack.append(self.allocator, BlockState {
             kind: block_kind,
             delimiter_base: self.delimiter_lines.len()
         });
@@ -791,12 +795,12 @@ fn (self: &var Builder) maybe_trailing_newline(
         if next_kind == token::Kind::RBrace {
             return;
         }
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
         self.at_line_start = true;
         return;
     }
     if kind == token::Kind::Semicolon {
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
         self.at_line_start = true;
         self.continuation = 0;
     }
@@ -816,13 +820,13 @@ fn (self: &var Builder) emit_rbrace(
         self.depth = self.depth - 1;
     }
     if self.has_prev and self.prev_kind == token::Kind::LBrace {
-        try self.out.append_byte(cast<u8>(125));
+        try self.out.append_byte(self.allocator, cast<u8>(125));
     } else {
         if !self.at_line_start {
-            try self.out.append_byte(cast<u8>(10));
+            try self.out.append_byte(self.allocator, cast<u8>(10));
         }
         try self.write_indent();
-        try self.out.append_byte(cast<u8>(125));
+        try self.out.append_byte(self.allocator, cast<u8>(125));
     }
     self.prev_kind = token::Kind::RBrace;
     self.prev_index = self.index;
@@ -833,7 +837,7 @@ fn (self: &var Builder) emit_rbrace(
     }
     self.after_comment = false;
     if rbrace_wants_newline(next_kind) {
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
         self.at_line_start = true;
     }
     return;
@@ -845,7 +849,7 @@ fn (self: &var Builder) emit_inline_rbrace(
     next_kind: token::Kind
 ) -> !void {
     if self.has_prev and self.prev_kind != token::Kind::LBrace {
-        try self.out.append_byte(cast<u8>(32));
+        try self.out.append_byte(self.allocator, cast<u8>(32));
     }
     try self.write_token(current);
     self.prev_kind = current.kind;
@@ -857,7 +861,7 @@ fn (self: &var Builder) emit_inline_rbrace(
     }
     self.after_comment = false;
     if rbrace_wants_newline(next_kind) {
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
         self.at_line_start = true;
         self.continuation = 0;
     }
@@ -872,7 +876,7 @@ fn (self: &var Builder) emit_trailing_comma_before_close() -> !void {
         self.prev_kind == token::Kind::LBrace {
         return;
     }
-    try self.out.append_byte(cast<u8>(44));
+    try self.out.append_byte(self.allocator, cast<u8>(44));
     self.prev_kind = token::Kind::Comma;
     self.has_prev = true;
     self.at_line_start = false;
@@ -1118,7 +1122,7 @@ fn (self: &var Builder) finish() -> !void {
             trimming = false;
         }
     }
-    return self.out.append_byte(cast<u8>(10));
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 fn ends_with_newline(value: &string::String) -> bool {
@@ -1133,7 +1137,7 @@ fn ends_with_newline(value: &string::String) -> bool {
 fn (self: &var Builder) write_indent() -> !void {
     var index = 0;
     while index < self.depth + self.continuation {
-        try self.out.append_bytes("    ");
+        try self.out.append_bytes(self.allocator, "    ");
         index = index + 1;
     }
     self.continuation = 0;
@@ -1142,35 +1146,36 @@ fn (self: &var Builder) write_indent() -> !void {
 
 /// Writes one canonical token, the Go `writeToken`.
 fn (self: &var Builder) write_token(current: &token::Token) -> !void {
+    let allocator = self.allocator;
     if current.kind == token::Kind::String {
         let literal = current.literal.as_bytes();
         return self.write_string_literal(literal);
     }
-    return append_token_spelling(&var self.out, current);
+    return append_token_spelling(allocator, &var self.out, current);
 }
 
 /// Appends the canonical printable form of current, the Go `tokenSpelling`.
 /// Returning the token-owned literal as a view is not expressible, so the
 /// spelling is appended into caller-owned storage instead.
-fn append_token_spelling(out: &var string::String, current: &token::Token) -> !void {
+fn append_token_spelling(allocator: Allocator, out: &var string::String, current: &token::Token) -> !void {
     let literal = current.literal.as_bytes();
     if mem::len(literal) > 0 {
-        return out.append_bytes(literal);
+        return out.append_bytes(allocator, literal);
     }
-    return out.append_bytes(token::spelling(current.kind));
+    return out.append_bytes(allocator, token::spelling(current.kind));
 }
 
 /// Writes one single-line string literal, the Go `writeStringLiteral`.
 fn (self: &var Builder) write_string_literal(value: []u8) -> !void {
-    try self.out.append_byte(cast<u8>(34));
-    try self.out.append_bytes(value);
-    return self.out.append_byte(cast<u8>(34));
+    try self.out.append_byte(self.allocator, cast<u8>(34));
+    try self.out.append_bytes(self.allocator, value);
+    return self.out.append_byte(self.allocator, cast<u8>(34));
 }
 
 /// Writes a multiline literal, the Go `emitMultilineString`.
 fn (self: &var Builder) emit_multiline_string(current: &token::Token) -> !void {
     if !self.at_line_start {
-        try self.out.append_byte(cast<u8>(10));
+        try self.out.append_byte(self.allocator, cast<u8>(10));
     }
     let literal = current.literal.as_bytes();
     var start = 0;
@@ -1183,20 +1188,20 @@ fn (self: &var Builder) emit_multiline_string(current: &token::Token) -> !void {
         }
         var indent = 0;
         while indent < self.depth + 1 {
-            try self.out.append_bytes("    ");
+            try self.out.append_bytes(self.allocator, "    ");
             indent = indent + 1;
         }
-        try self.out.append_bytes("\\");
-        try self.out.append_bytes(literal[start..end]);
+        try self.out.append_bytes(self.allocator, "\\");
+        try self.out.append_bytes(self.allocator, literal[start..end]);
         line_count = line_count + 1;
         if end < mem::len(literal) {
-            try self.out.append_byte(cast<u8>(10));
+            try self.out.append_byte(self.allocator, cast<u8>(10));
             start = end + 1;
         } else {
             done = true;
         }
     }
-    try self.out.append_byte(cast<u8>(10));
+    try self.out.append_byte(self.allocator, cast<u8>(10));
     self.at_line_start = true;
     self.prev_kind = current.kind;
     self.prev_index = self.index;

@@ -17,30 +17,30 @@ pub struct User {
 // whose type is itself a struct takes the same branch, so the recursion is the
 // program's, not a special case in the compiler. Each instantiation is checked
 // with its own field types.
-fn render<T>(out: &var string::String, value: &T) -> !void {
+fn render<T>(allocator: Allocator, out: &var string::String, value: &T) -> !void {
     comptime if std::meta::is_struct<T>() {
-        try out.append_bytes("{");
+        try out.append_bytes(allocator, "{");
         comptime for std::meta::public_fields<T>() |f| {
-            try out.append_bytes(std::meta::field_name<T, f>());
-            try out.append_bytes(":");
-            try render<std::meta::field_type<T, f>>(out, std::meta::field<T, f>(value));
-            try out.append_bytes(" ");
+            try out.append_bytes(allocator, std::meta::field_name<T, f>());
+            try out.append_bytes(allocator, ":");
+            try render<std::meta::field_type<T, f>>(allocator, out, std::meta::field<T, f>(value));
+            try out.append_bytes(allocator, " ");
         }
-        try out.append_bytes("}");
+        try out.append_bytes(allocator, "}");
     } else {
-        try render_scalar<T>(out, value);
+        try render_scalar<T>(allocator, out, value);
     }
     return;
 }
 
-fn render_scalar<T>(out: &var string::String, value: &T) -> !void {
+fn render_scalar<T>(allocator: Allocator, out: &var string::String, value: &T) -> !void {
     comptime if T == type<i64> {
-        try fmt::append_i64(out, value.*);
+        try fmt::append_i64(allocator, out, value.*);
     } else {
         comptime if T == type<bool> {
-            try fmt::append_bool(out, value.*);
+            try fmt::append_bool(allocator, out, value.*);
         } else {
-            try out.append_bytes(value.*);
+            try out.append_bytes(allocator, value.*);
         }
     }
     return;
@@ -56,7 +56,7 @@ fn main() -> !void {
         profile: Profile { city: "kyoto", age: 30 },
         active: true,
     };
-    try render<User>(text, user);
+    try render<User>(allocator, text, user);
 
     let bytes = text.as_bytes();
     print(bytes);
@@ -108,10 +108,10 @@ fn main() -> !void {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// declare %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr, i1)
-// declare %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr, ptr, i1)
+// declare %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr, ptr, i64)
 // declare ptr @std__mem__page_allocator()
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
@@ -119,7 +119,7 @@ fn main() -> !void {
 // define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 // entry:
 //   %kizu.3 = alloca %kizu.struct.std__string__String
-//   %kizu.arg.1.1 = alloca %kizu.struct.User
+//   %kizu.arg.2.1 = alloca %kizu.struct.User
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   %kizu.2 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.1)
@@ -132,8 +132,8 @@ fn main() -> !void {
 //   %kizu.9.field0 = insertvalue %kizu.struct.User zeroinitializer, i64 7, 0
 //   %kizu.9.field1 = insertvalue %kizu.struct.User %kizu.9.field0, %kizu.struct.Profile %kizu.7, 1
 //   %kizu.9 = insertvalue %kizu.struct.User %kizu.9.field1, i1 true, 2
-//   store %kizu.struct.User %kizu.9, ptr %kizu.arg.1.1
-//   %kizu.10 = call %kizu.error.void @render_User(ptr %kizu.3, ptr byval(%kizu.struct.User) %kizu.arg.1.1)
+//   store %kizu.struct.User %kizu.9, ptr %kizu.arg.2.1
+//   %kizu.10 = call %kizu.error.void @render_User(ptr %kizu.1, ptr %kizu.3, ptr byval(%kizu.struct.User) %kizu.arg.2.1)
 //   %kizu.11 = load %kizu.struct.std__string__String, ptr %kizu.3
 //   %kizu.12.ok = extractvalue %kizu.error.void %kizu.10, 0
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
@@ -171,14 +171,14 @@ fn main() -> !void {
 //   ret i32 0
 // }
 // 
-// define %kizu.error.void @render_User(ptr %kizu.out, ptr byval(%kizu.struct.User) %kizu.value.addr) {
+// define %kizu.error.void @render_User(ptr %kizu.allocator, ptr %kizu.out, ptr byval(%kizu.struct.User) %kizu.value.addr) {
 // entry:
-//   %kizu.arg.1.7 = alloca %kizu.struct.Profile
+//   %kizu.arg.2.7 = alloca %kizu.struct.Profile
 //   %kizu.value = load %kizu.struct.User, ptr %kizu.value.addr
 //   %kizu.1.ptr = getelementptr inbounds [2 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
 //   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 1, 1
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.1)
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.1)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -191,7 +191,7 @@ fn main() -> !void {
 //   %kizu.4.ptr = getelementptr inbounds [3 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 2, 1
-//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.4)
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.4)
 //   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
@@ -204,7 +204,7 @@ fn main() -> !void {
 //   %kizu.7.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
 //   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 1, 1
-//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.7)
+//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.7)
 //   %kizu.9.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 0
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
@@ -215,7 +215,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.3
 // kizu.9.try.ok:
 //   %kizu.10 = extractvalue %kizu.struct.User %kizu.value, 0
-//   %kizu.11 = call %kizu.error.void @render_i64(ptr %kizu.out, i64 %kizu.10)
+//   %kizu.11 = call %kizu.error.void @render_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.10)
 //   %kizu.12.ok = extractvalue %kizu.error.void %kizu.11, 0
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
@@ -225,7 +225,7 @@ fn main() -> !void {
 //   %kizu.13.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.13.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.13.ptr, 0
 //   %kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 1, 1
-//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.13)
+//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.13)
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
@@ -238,7 +238,7 @@ fn main() -> !void {
 //   %kizu.16.ptr = getelementptr inbounds [8 x i8], ptr @.str.5, i64 0, i64 0
 //   %kizu.16.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.16.ptr, 0
 //   %kizu.16 = insertvalue %kizu.slice.u8 %kizu.16.base, i64 7, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.16)
 //   %kizu.18.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
 //   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
@@ -251,7 +251,7 @@ fn main() -> !void {
 //   %kizu.19.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
 //   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 1, 1
-//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.19)
+//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.19)
 //   %kizu.21.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.20, 0
 //   %kizu.21.ok.bool = icmp ne i8 %kizu.21.ok, 0
 //   br i1 %kizu.21.ok.bool, label %kizu.21.try.ok, label %kizu.21.try.err
@@ -262,8 +262,8 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.21.try.ok:
 //   %kizu.22 = extractvalue %kizu.struct.User %kizu.value, 1
-//   store %kizu.struct.Profile %kizu.22, ptr %kizu.arg.1.7
-//   %kizu.23 = call %kizu.error.void @render_Profile(ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.arg.1.7)
+//   store %kizu.struct.Profile %kizu.22, ptr %kizu.arg.2.7
+//   %kizu.23 = call %kizu.error.void @render_Profile(ptr %kizu.allocator, ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.arg.2.7)
 //   %kizu.24.ok = extractvalue %kizu.error.void %kizu.23, 0
 //   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
 //   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
@@ -273,7 +273,7 @@ fn main() -> !void {
 //   %kizu.25.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.25.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.25.ptr, 0
 //   %kizu.25 = insertvalue %kizu.slice.u8 %kizu.25.base, i64 1, 1
-//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.25)
+//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.25)
 //   %kizu.27.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 0
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
 //   br i1 %kizu.27.ok.bool, label %kizu.27.try.ok, label %kizu.27.try.err
@@ -286,7 +286,7 @@ fn main() -> !void {
 //   %kizu.28.ptr = getelementptr inbounds [7 x i8], ptr @.str.6, i64 0, i64 0
 //   %kizu.28.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.28.ptr, 0
 //   %kizu.28 = insertvalue %kizu.slice.u8 %kizu.28.base, i64 6, 1
-//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.28)
+//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.28)
 //   %kizu.30.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.29, 0
 //   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
 //   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
@@ -299,7 +299,7 @@ fn main() -> !void {
 //   %kizu.31.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.31.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.31.ptr, 0
 //   %kizu.31 = insertvalue %kizu.slice.u8 %kizu.31.base, i64 1, 1
-//   %kizu.32 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.31)
+//   %kizu.32 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.31)
 //   %kizu.33.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.32, 0
 //   %kizu.33.ok.bool = icmp ne i8 %kizu.33.ok, 0
 //   br i1 %kizu.33.ok.bool, label %kizu.33.try.ok, label %kizu.33.try.err
@@ -310,7 +310,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.10
 // kizu.33.try.ok:
 //   %kizu.34 = extractvalue %kizu.struct.User %kizu.value, 2
-//   %kizu.35 = call %kizu.error.void @render_bool(ptr %kizu.out, i1 %kizu.34)
+//   %kizu.35 = call %kizu.error.void @render_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.34)
 //   %kizu.36.ok = extractvalue %kizu.error.void %kizu.35, 0
 //   %kizu.36.ok.bool = icmp ne i8 %kizu.36.ok, 0
 //   br i1 %kizu.36.ok.bool, label %kizu.36.try.ok, label %kizu.36.try.err
@@ -320,7 +320,7 @@ fn main() -> !void {
 //   %kizu.37.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.37.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.37.ptr, 0
 //   %kizu.37 = insertvalue %kizu.slice.u8 %kizu.37.base, i64 1, 1
-//   %kizu.38 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.37)
+//   %kizu.38 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.37)
 //   %kizu.39.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.38, 0
 //   %kizu.39.ok.bool = icmp ne i8 %kizu.39.ok, 0
 //   br i1 %kizu.39.ok.bool, label %kizu.39.try.ok, label %kizu.39.try.err
@@ -333,7 +333,7 @@ fn main() -> !void {
 //   %kizu.40.ptr = getelementptr inbounds [2 x i8], ptr @.str.7, i64 0, i64 0
 //   %kizu.40.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.40.ptr, 0
 //   %kizu.40 = insertvalue %kizu.slice.u8 %kizu.40.base, i64 1, 1
-//   %kizu.41 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.40)
+//   %kizu.41 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.40)
 //   %kizu.42.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.41, 0
 //   %kizu.42.ok.bool = icmp ne i8 %kizu.42.ok, 0
 //   br i1 %kizu.42.ok.bool, label %kizu.42.try.ok, label %kizu.42.try.err
@@ -347,9 +347,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.43
 // }
 // 
-// define %kizu.error.void @render_i64(ptr %kizu.out, i64 %kizu.value) {
+// define %kizu.error.void @render_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.void @render_scalar_i64(ptr %kizu.out, i64 %kizu.value)
+//   %kizu.1 = call %kizu.error.void @render_scalar_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -360,13 +360,13 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_Profile(ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.value.addr) {
+// define %kizu.error.void @render_Profile(ptr %kizu.allocator, ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.value.addr) {
 // entry:
 //   %kizu.value = load %kizu.struct.Profile, ptr %kizu.value.addr
 //   %kizu.1.ptr = getelementptr inbounds [2 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
 //   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 1, 1
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.1)
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.1)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -379,7 +379,7 @@ fn main() -> !void {
 //   %kizu.4.ptr = getelementptr inbounds [5 x i8], ptr @.str.8, i64 0, i64 0
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 4, 1
-//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.4)
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.4)
 //   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
@@ -392,7 +392,7 @@ fn main() -> !void {
 //   %kizu.7.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
 //   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 1, 1
-//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.7)
+//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.7)
 //   %kizu.9.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 0
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
@@ -403,7 +403,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.3
 // kizu.9.try.ok:
 //   %kizu.10 = extractvalue %kizu.struct.Profile %kizu.value, 0
-//   %kizu.11 = call %kizu.error.void @render__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.10)
+//   %kizu.11 = call %kizu.error.void @render__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.10)
 //   %kizu.12.ok = extractvalue %kizu.error.void %kizu.11, 0
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
@@ -413,7 +413,7 @@ fn main() -> !void {
 //   %kizu.13.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.13.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.13.ptr, 0
 //   %kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 1, 1
-//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.13)
+//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.13)
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
@@ -426,7 +426,7 @@ fn main() -> !void {
 //   %kizu.16.ptr = getelementptr inbounds [4 x i8], ptr @.str.9, i64 0, i64 0
 //   %kizu.16.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.16.ptr, 0
 //   %kizu.16 = insertvalue %kizu.slice.u8 %kizu.16.base, i64 3, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.16)
 //   %kizu.18.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
 //   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
@@ -439,7 +439,7 @@ fn main() -> !void {
 //   %kizu.19.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
 //   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 1, 1
-//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.19)
+//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.19)
 //   %kizu.21.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.20, 0
 //   %kizu.21.ok.bool = icmp ne i8 %kizu.21.ok, 0
 //   br i1 %kizu.21.ok.bool, label %kizu.21.try.ok, label %kizu.21.try.err
@@ -450,7 +450,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.21.try.ok:
 //   %kizu.22 = extractvalue %kizu.struct.Profile %kizu.value, 1
-//   %kizu.23 = call %kizu.error.void @render_i64(ptr %kizu.out, i64 %kizu.22)
+//   %kizu.23 = call %kizu.error.void @render_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.22)
 //   %kizu.24.ok = extractvalue %kizu.error.void %kizu.23, 0
 //   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
 //   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
@@ -460,7 +460,7 @@ fn main() -> !void {
 //   %kizu.25.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.25.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.25.ptr, 0
 //   %kizu.25 = insertvalue %kizu.slice.u8 %kizu.25.base, i64 1, 1
-//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.25)
+//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.25)
 //   %kizu.27.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 0
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
 //   br i1 %kizu.27.ok.bool, label %kizu.27.try.ok, label %kizu.27.try.err
@@ -473,7 +473,7 @@ fn main() -> !void {
 //   %kizu.28.ptr = getelementptr inbounds [2 x i8], ptr @.str.7, i64 0, i64 0
 //   %kizu.28.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.28.ptr, 0
 //   %kizu.28 = insertvalue %kizu.slice.u8 %kizu.28.base, i64 1, 1
-//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.28)
+//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.28)
 //   %kizu.30.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.29, 0
 //   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
 //   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
@@ -487,9 +487,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.31
 // }
 // 
-// define %kizu.error.void @render_bool(ptr %kizu.out, i1 %kizu.value) {
+// define %kizu.error.void @render_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.void @render_scalar_bool(ptr %kizu.out, i1 %kizu.value)
+//   %kizu.1 = call %kizu.error.void @render_scalar_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -500,9 +500,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_scalar_i64(ptr %kizu.out, i64 %kizu.value) {
+// define %kizu.error.void @render_scalar_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr %kizu.out, i64 %kizu.value)
+//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -516,9 +516,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
+// define %kizu.error.void @render__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.value)
+//   %kizu.1 = call %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -529,9 +529,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_scalar_bool(ptr %kizu.out, i1 %kizu.value) {
+// define %kizu.error.void @render_scalar_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr %kizu.out, i1 %kizu.value)
+//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -545,9 +545,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
+// define %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.value)
+//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -599,10 +599,10 @@ fn main() -> !void {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// declare %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr, i1)
-// declare %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr, ptr, i1)
+// declare %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr, ptr, i64)
 // declare ptr @std__mem__page_allocator()
-// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
@@ -610,7 +610,7 @@ fn main() -> !void {
 // define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 // entry:
 //   %kizu.3 = alloca %kizu.struct.std__string__String
-//   %kizu.arg.1.1 = alloca %kizu.struct.User
+//   %kizu.arg.2.1 = alloca %kizu.struct.User
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   %kizu.2 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.1)
@@ -623,8 +623,8 @@ fn main() -> !void {
 //   %kizu.9.field0 = insertvalue %kizu.struct.User zeroinitializer, i64 7, 0
 //   %kizu.9.field1 = insertvalue %kizu.struct.User %kizu.9.field0, %kizu.struct.Profile %kizu.7, 1
 //   %kizu.9 = insertvalue %kizu.struct.User %kizu.9.field1, i1 true, 2
-//   store %kizu.struct.User %kizu.9, ptr %kizu.arg.1.1
-//   %kizu.10 = call %kizu.error.void @render_User(ptr %kizu.3, ptr byval(%kizu.struct.User) %kizu.arg.1.1)
+//   store %kizu.struct.User %kizu.9, ptr %kizu.arg.2.1
+//   %kizu.10 = call %kizu.error.void @render_User(ptr %kizu.1, ptr %kizu.3, ptr byval(%kizu.struct.User) %kizu.arg.2.1)
 //   %kizu.11 = load %kizu.struct.std__string__String, ptr %kizu.3
 //   %kizu.12.ok = extractvalue %kizu.error.void %kizu.10, 0
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
@@ -662,14 +662,14 @@ fn main() -> !void {
 //   ret i32 0
 // }
 // 
-// define %kizu.error.void @render_User(ptr %kizu.out, ptr byval(%kizu.struct.User) %kizu.value.addr) {
+// define %kizu.error.void @render_User(ptr %kizu.allocator, ptr %kizu.out, ptr byval(%kizu.struct.User) %kizu.value.addr) {
 // entry:
-//   %kizu.arg.1.7 = alloca %kizu.struct.Profile
+//   %kizu.arg.2.7 = alloca %kizu.struct.Profile
 //   %kizu.value = load %kizu.struct.User, ptr %kizu.value.addr
 //   %kizu.1.ptr = getelementptr inbounds [2 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
 //   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 1, 1
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.1)
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.1)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -682,7 +682,7 @@ fn main() -> !void {
 //   %kizu.4.ptr = getelementptr inbounds [3 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 2, 1
-//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.4)
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.4)
 //   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
@@ -695,7 +695,7 @@ fn main() -> !void {
 //   %kizu.7.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
 //   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 1, 1
-//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.7)
+//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.7)
 //   %kizu.9.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 0
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
@@ -706,7 +706,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.3
 // kizu.9.try.ok:
 //   %kizu.10 = extractvalue %kizu.struct.User %kizu.value, 0
-//   %kizu.11 = call %kizu.error.void @render_i64(ptr %kizu.out, i64 %kizu.10)
+//   %kizu.11 = call %kizu.error.void @render_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.10)
 //   %kizu.12.ok = extractvalue %kizu.error.void %kizu.11, 0
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
@@ -716,7 +716,7 @@ fn main() -> !void {
 //   %kizu.13.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.13.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.13.ptr, 0
 //   %kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 1, 1
-//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.13)
+//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.13)
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
@@ -729,7 +729,7 @@ fn main() -> !void {
 //   %kizu.16.ptr = getelementptr inbounds [8 x i8], ptr @.str.5, i64 0, i64 0
 //   %kizu.16.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.16.ptr, 0
 //   %kizu.16 = insertvalue %kizu.slice.u8 %kizu.16.base, i64 7, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.16)
 //   %kizu.18.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
 //   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
@@ -742,7 +742,7 @@ fn main() -> !void {
 //   %kizu.19.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
 //   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 1, 1
-//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.19)
+//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.19)
 //   %kizu.21.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.20, 0
 //   %kizu.21.ok.bool = icmp ne i8 %kizu.21.ok, 0
 //   br i1 %kizu.21.ok.bool, label %kizu.21.try.ok, label %kizu.21.try.err
@@ -753,8 +753,8 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.21.try.ok:
 //   %kizu.22 = extractvalue %kizu.struct.User %kizu.value, 1
-//   store %kizu.struct.Profile %kizu.22, ptr %kizu.arg.1.7
-//   %kizu.23 = call %kizu.error.void @render_Profile(ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.arg.1.7)
+//   store %kizu.struct.Profile %kizu.22, ptr %kizu.arg.2.7
+//   %kizu.23 = call %kizu.error.void @render_Profile(ptr %kizu.allocator, ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.arg.2.7)
 //   %kizu.24.ok = extractvalue %kizu.error.void %kizu.23, 0
 //   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
 //   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
@@ -764,7 +764,7 @@ fn main() -> !void {
 //   %kizu.25.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.25.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.25.ptr, 0
 //   %kizu.25 = insertvalue %kizu.slice.u8 %kizu.25.base, i64 1, 1
-//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.25)
+//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.25)
 //   %kizu.27.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 0
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
 //   br i1 %kizu.27.ok.bool, label %kizu.27.try.ok, label %kizu.27.try.err
@@ -777,7 +777,7 @@ fn main() -> !void {
 //   %kizu.28.ptr = getelementptr inbounds [7 x i8], ptr @.str.6, i64 0, i64 0
 //   %kizu.28.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.28.ptr, 0
 //   %kizu.28 = insertvalue %kizu.slice.u8 %kizu.28.base, i64 6, 1
-//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.28)
+//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.28)
 //   %kizu.30.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.29, 0
 //   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
 //   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
@@ -790,7 +790,7 @@ fn main() -> !void {
 //   %kizu.31.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.31.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.31.ptr, 0
 //   %kizu.31 = insertvalue %kizu.slice.u8 %kizu.31.base, i64 1, 1
-//   %kizu.32 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.31)
+//   %kizu.32 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.31)
 //   %kizu.33.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.32, 0
 //   %kizu.33.ok.bool = icmp ne i8 %kizu.33.ok, 0
 //   br i1 %kizu.33.ok.bool, label %kizu.33.try.ok, label %kizu.33.try.err
@@ -801,7 +801,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.10
 // kizu.33.try.ok:
 //   %kizu.34 = extractvalue %kizu.struct.User %kizu.value, 2
-//   %kizu.35 = call %kizu.error.void @render_bool(ptr %kizu.out, i1 %kizu.34)
+//   %kizu.35 = call %kizu.error.void @render_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.34)
 //   %kizu.36.ok = extractvalue %kizu.error.void %kizu.35, 0
 //   %kizu.36.ok.bool = icmp ne i8 %kizu.36.ok, 0
 //   br i1 %kizu.36.ok.bool, label %kizu.36.try.ok, label %kizu.36.try.err
@@ -811,7 +811,7 @@ fn main() -> !void {
 //   %kizu.37.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.37.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.37.ptr, 0
 //   %kizu.37 = insertvalue %kizu.slice.u8 %kizu.37.base, i64 1, 1
-//   %kizu.38 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.37)
+//   %kizu.38 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.37)
 //   %kizu.39.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.38, 0
 //   %kizu.39.ok.bool = icmp ne i8 %kizu.39.ok, 0
 //   br i1 %kizu.39.ok.bool, label %kizu.39.try.ok, label %kizu.39.try.err
@@ -824,7 +824,7 @@ fn main() -> !void {
 //   %kizu.40.ptr = getelementptr inbounds [2 x i8], ptr @.str.7, i64 0, i64 0
 //   %kizu.40.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.40.ptr, 0
 //   %kizu.40 = insertvalue %kizu.slice.u8 %kizu.40.base, i64 1, 1
-//   %kizu.41 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.40)
+//   %kizu.41 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.40)
 //   %kizu.42.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.41, 0
 //   %kizu.42.ok.bool = icmp ne i8 %kizu.42.ok, 0
 //   br i1 %kizu.42.ok.bool, label %kizu.42.try.ok, label %kizu.42.try.err
@@ -838,9 +838,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.43
 // }
 // 
-// define %kizu.error.void @render_i64(ptr %kizu.out, i64 %kizu.value) {
+// define %kizu.error.void @render_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.void @render_scalar_i64(ptr %kizu.out, i64 %kizu.value)
+//   %kizu.1 = call %kizu.error.void @render_scalar_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -851,13 +851,13 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_Profile(ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.value.addr) {
+// define %kizu.error.void @render_Profile(ptr %kizu.allocator, ptr %kizu.out, ptr byval(%kizu.struct.Profile) %kizu.value.addr) {
 // entry:
 //   %kizu.value = load %kizu.struct.Profile, ptr %kizu.value.addr
 //   %kizu.1.ptr = getelementptr inbounds [2 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
 //   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 1, 1
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.1)
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.1)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -870,7 +870,7 @@ fn main() -> !void {
 //   %kizu.4.ptr = getelementptr inbounds [5 x i8], ptr @.str.8, i64 0, i64 0
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 4, 1
-//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.4)
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.4)
 //   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
 //   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
 //   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
@@ -883,7 +883,7 @@ fn main() -> !void {
 //   %kizu.7.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
 //   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 1, 1
-//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.7)
+//   %kizu.8 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.7)
 //   %kizu.9.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.8, 0
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
 //   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
@@ -894,7 +894,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.3
 // kizu.9.try.ok:
 //   %kizu.10 = extractvalue %kizu.struct.Profile %kizu.value, 0
-//   %kizu.11 = call %kizu.error.void @render__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.10)
+//   %kizu.11 = call %kizu.error.void @render__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.10)
 //   %kizu.12.ok = extractvalue %kizu.error.void %kizu.11, 0
 //   %kizu.12.ok.bool = icmp ne i8 %kizu.12.ok, 0
 //   br i1 %kizu.12.ok.bool, label %kizu.12.try.ok, label %kizu.12.try.err
@@ -904,7 +904,7 @@ fn main() -> !void {
 //   %kizu.13.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.13.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.13.ptr, 0
 //   %kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 1, 1
-//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.13)
+//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.13)
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
 //   br i1 %kizu.15.ok.bool, label %kizu.15.try.ok, label %kizu.15.try.err
@@ -917,7 +917,7 @@ fn main() -> !void {
 //   %kizu.16.ptr = getelementptr inbounds [4 x i8], ptr @.str.9, i64 0, i64 0
 //   %kizu.16.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.16.ptr, 0
 //   %kizu.16 = insertvalue %kizu.slice.u8 %kizu.16.base, i64 3, 1
-//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.16)
+//   %kizu.17 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.16)
 //   %kizu.18.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.17, 0
 //   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
 //   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
@@ -930,7 +930,7 @@ fn main() -> !void {
 //   %kizu.19.ptr = getelementptr inbounds [2 x i8], ptr @.str.3, i64 0, i64 0
 //   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
 //   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 1, 1
-//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.19)
+//   %kizu.20 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.19)
 //   %kizu.21.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.20, 0
 //   %kizu.21.ok.bool = icmp ne i8 %kizu.21.ok, 0
 //   br i1 %kizu.21.ok.bool, label %kizu.21.try.ok, label %kizu.21.try.err
@@ -941,7 +941,7 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.try.err.6
 // kizu.21.try.ok:
 //   %kizu.22 = extractvalue %kizu.struct.Profile %kizu.value, 1
-//   %kizu.23 = call %kizu.error.void @render_i64(ptr %kizu.out, i64 %kizu.22)
+//   %kizu.23 = call %kizu.error.void @render_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.22)
 //   %kizu.24.ok = extractvalue %kizu.error.void %kizu.23, 0
 //   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
 //   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
@@ -951,7 +951,7 @@ fn main() -> !void {
 //   %kizu.25.ptr = getelementptr inbounds [2 x i8], ptr @.str.4, i64 0, i64 0
 //   %kizu.25.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.25.ptr, 0
 //   %kizu.25 = insertvalue %kizu.slice.u8 %kizu.25.base, i64 1, 1
-//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.25)
+//   %kizu.26 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.25)
 //   %kizu.27.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.26, 0
 //   %kizu.27.ok.bool = icmp ne i8 %kizu.27.ok, 0
 //   br i1 %kizu.27.ok.bool, label %kizu.27.try.ok, label %kizu.27.try.err
@@ -964,7 +964,7 @@ fn main() -> !void {
 //   %kizu.28.ptr = getelementptr inbounds [2 x i8], ptr @.str.7, i64 0, i64 0
 //   %kizu.28.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.28.ptr, 0
 //   %kizu.28 = insertvalue %kizu.slice.u8 %kizu.28.base, i64 1, 1
-//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.28)
+//   %kizu.29 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.28)
 //   %kizu.30.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.29, 0
 //   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
 //   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
@@ -978,9 +978,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.31
 // }
 // 
-// define %kizu.error.void @render_bool(ptr %kizu.out, i1 %kizu.value) {
+// define %kizu.error.void @render_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.void @render_scalar_bool(ptr %kizu.out, i1 %kizu.value)
+//   %kizu.1 = call %kizu.error.void @render_scalar_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -991,9 +991,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_scalar_i64(ptr %kizu.out, i64 %kizu.value) {
+// define %kizu.error.void @render_scalar_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr %kizu.out, i64 %kizu.value)
+//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_i64(ptr %kizu.allocator, ptr %kizu.out, i64 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -1007,9 +1007,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
+// define %kizu.error.void @render__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.value)
+//   %kizu.1 = call %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -1020,9 +1020,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_scalar_bool(ptr %kizu.out, i1 %kizu.value) {
+// define %kizu.error.void @render_scalar_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr %kizu.out, i1 %kizu.value)
+//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__fmt__append_bool(ptr %kizu.allocator, ptr %kizu.out, i1 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
@@ -1036,9 +1036,9 @@ fn main() -> !void {
 //   ret %kizu.error.void %kizu.3
 // }
 // 
-// define %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
+// define %kizu.error.void @render_scalar__5b_5du8(ptr %kizu.allocator, ptr %kizu.out, %kizu.slice.u8 %kizu.value) {
 // entry:
-//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, %kizu.slice.u8 %kizu.value)
+//   %kizu.1 = call %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr %kizu.out, ptr %kizu.allocator, %kizu.slice.u8 %kizu.value)
 //   %kizu.2.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.1, 0
 //   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
 //   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err

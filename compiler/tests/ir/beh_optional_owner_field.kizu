@@ -31,7 +31,7 @@ fn (self: Bag) deinit(allocator: Allocator) -> void {
 fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
     var text = string::new(allocator);
     errdefer text.deinit(allocator);
-    try text.append_bytes(bytes);
+    try text.append_bytes(allocator, bytes);
     return move text;
 }
 
@@ -69,8 +69,8 @@ test "optional owner field holds containers" {
 
     var items = array::new<i64>(allocator);
     errdefer items.deinit(allocator);
-    try items.append(7);
-    try items.append(9);
+    try items.append(allocator, 7);
+    try items.append(allocator, 9);
 
     var counts = map::new<[]u8, i64>(allocator);
     errdefer counts.deinit(allocator);
@@ -126,8 +126,8 @@ test "optional owner produced by a call stays owned" {
 
     var items = array::new<string::String>(allocator);
     errdefer items.deinit(allocator);
-    try items.append(try owned(allocator, "a"));
-    try items.append(try owned(allocator, "b"));
+    try items.append(allocator, try owned(allocator, "a"));
+    try items.append(allocator, try owned(allocator, "b"));
 
     var drained = 0;
     while items.pop() |item| {
@@ -166,8 +166,8 @@ test "optional owner field inside containers" {
 
     var list = array::new<Held>(allocator);
     defer list.deinit(allocator);
-    try list.append(Held { nick: try owned(allocator, "al") });
-    try list.append(Held { nick: null });
+    try list.append(allocator, Held { nick: try owned(allocator, "al") });
+    try list.append(allocator, Held { nick: null });
     testing::expect_equal<i64>(2, list.len());
 
     var table = map::new<[]u8, Held>(allocator);
@@ -225,7 +225,7 @@ test "optional owner field inside containers" {
 // entry:
 //   %1: std::string::String = call.std::string::new %allocator: Allocator
 //   %2: &var std::string::String = local.slot %1: std::string::String
-//   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %bytes: []u8
+//   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %allocator: Allocator, %bytes: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
 //   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
@@ -327,19 +327,19 @@ test "optional owner field inside containers" {
 //   %2: std::array::Array<i64> = array.new %1: Allocator
 //   %3: &var std::array::Array<i64> = local.slot %2: std::array::Array<i64>
 //   %4: i64 = const 7
-//   %5: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %4: i64
+//   %5: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %1: Allocator, %4: i64
 //   %6: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
-//   error.try %5: std::mem::Error!void, cleanup array.deinit %6: std::array::Array<i64>
+//   error.try %5: std::mem::Error!void, cleanup array.deinit %6: std::array::Array<i64>, %1: Allocator
 //   %8: i64 = const 9
-//   %9: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %8: i64
+//   %9: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %1: Allocator, %8: i64
 //   %10: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
-//   error.try %9: std::mem::Error!void, cleanup array.deinit %10: std::array::Array<i64>
+//   error.try %9: std::mem::Error!void, cleanup array.deinit %10: std::array::Array<i64>, %1: Allocator
 //   %12: std::map::Map<[]u8, i64> = map.new %1: Allocator
 //   %13: []u8 = const "hit"
 //   %14: i64 = const 3
 //   %15: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.i64 %12: std::map::Map<[]u8, i64>, %13: []u8, %14: i64
 //   %16: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
-//   error.try %15: std::mem::Error!void, cleanup map.deinit %12: std::map::Map<[]u8, i64>; array.deinit %16: std::array::Array<i64>
+//   error.try %15: std::mem::Error!void, cleanup map.deinit %12: std::map::Map<[]u8, i64>; array.deinit %16: std::array::Array<i64>, %1: Allocator
 //   %18: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
 //   %19: ?std::array::Array<i64> = opt.some %18: std::array::Array<i64>
 //   %20: ?std::map::Map<[]u8, i64> = opt.some %12: std::map::Map<[]u8, i64>
@@ -436,14 +436,14 @@ test "optional owner field inside containers" {
 //   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
-//   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
+//   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %1: Allocator, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: []u8 = const "b"
 //   %12: !std::string::String = call.owned %1: Allocator, %11: []u8
 //   %13: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>, %1: Allocator
-//   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %14: std::string::String
+//   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %1: Allocator, %14: std::string::String
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: i64 = const 0
@@ -506,12 +506,12 @@ test "optional owner field inside containers" {
 //   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.Held %6: std::array::Array<Held>, %1: Allocator
 //   %8: ?std::string::String = opt.some %7: std::string::String
 //   %9: Held = struct.new {nick: %8: ?std::string::String}
-//   %10: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %9: Held
+//   %10: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %1: Allocator, %9: Held
 //   %11: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
 //   error.try %10: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %11: std::array::Array<Held>, %1: Allocator
 //   %13: ?std::string::String = opt.null
 //   %14: Held = struct.new {nick: %13: ?std::string::String}
-//   %15: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %14: Held
+//   %15: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %1: Allocator, %14: Held
 //   %16: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
 //   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %16: std::array::Array<Held>, %1: Allocator
 //   %18: i64 = const 2
@@ -599,7 +599,7 @@ test "optional owner field inside containers" {
 // entry:
 //   %1: std::string::String = call.std::string::new %allocator: Allocator
 //   %2: &var std::string::String = local.slot %1: std::string::String
-//   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %bytes: []u8
+//   %3: std::mem::Error!void = call.std::string::String.append_bytes %2: &var std::string::String, %allocator: Allocator, %bytes: []u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
 //   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
 //   %6: std::string::String = ref.load %2: &var std::string::String
@@ -701,19 +701,19 @@ test "optional owner field inside containers" {
 //   %2: std::array::Array<i64> = array.new %1: Allocator
 //   %3: &var std::array::Array<i64> = local.slot %2: std::array::Array<i64>
 //   %4: i64 = const 7
-//   %5: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %4: i64
+//   %5: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %1: Allocator, %4: i64
 //   %6: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
-//   error.try %5: std::mem::Error!void, cleanup array.deinit %6: std::array::Array<i64>
+//   error.try %5: std::mem::Error!void, cleanup array.deinit %6: std::array::Array<i64>, %1: Allocator
 //   %8: i64 = const 9
-//   %9: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %8: i64
+//   %9: std::mem::Error!void = call.std::array::Array.append.i64 %3: &var std::array::Array<i64>, %1: Allocator, %8: i64
 //   %10: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
-//   error.try %9: std::mem::Error!void, cleanup array.deinit %10: std::array::Array<i64>
+//   error.try %9: std::mem::Error!void, cleanup array.deinit %10: std::array::Array<i64>, %1: Allocator
 //   %12: std::map::Map<[]u8, i64> = map.new %1: Allocator
 //   %13: []u8 = const "hit"
 //   %14: i64 = const 3
 //   %15: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.i64 %12: std::map::Map<[]u8, i64>, %13: []u8, %14: i64
 //   %16: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
-//   error.try %15: std::mem::Error!void, cleanup map.deinit %12: std::map::Map<[]u8, i64>; array.deinit %16: std::array::Array<i64>
+//   error.try %15: std::mem::Error!void, cleanup map.deinit %12: std::map::Map<[]u8, i64>; array.deinit %16: std::array::Array<i64>, %1: Allocator
 //   %18: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
 //   %19: ?std::array::Array<i64> = opt.some %18: std::array::Array<i64>
 //   %20: ?std::map::Map<[]u8, i64> = opt.some %12: std::map::Map<[]u8, i64>
@@ -809,14 +809,14 @@ test "optional owner field inside containers" {
 //   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
 //   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>, %1: Allocator
-//   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %7: std::string::String
+//   %8: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %1: Allocator, %7: std::string::String
 //   %9: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   error.try %8: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %9: std::array::Array<std::string::String>, %1: Allocator
 //   %11: []u8 = const "b"
 //   %12: !std::string::String = call.owned %1: Allocator, %11: []u8
 //   %13: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   %14: std::string::String = error.try %12: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>, %1: Allocator
-//   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %14: std::string::String
+//   %15: std::mem::Error!void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: &var std::array::Array<std::string::String>, %1: Allocator, %14: std::string::String
 //   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
 //   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %16: std::array::Array<std::string::String>, %1: Allocator
 //   %18: i64 = const 0
@@ -879,12 +879,12 @@ test "optional owner field inside containers" {
 //   %7: std::string::String = error.try %5: !std::string::String, cleanup call.std::array::Array.deinit.Held %6: std::array::Array<Held>, %1: Allocator
 //   %8: ?std::string::String = opt.some %7: std::string::String
 //   %9: Held = struct.new {nick: %8: ?std::string::String}
-//   %10: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %9: Held
+//   %10: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %1: Allocator, %9: Held
 //   %11: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
 //   error.try %10: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %11: std::array::Array<Held>, %1: Allocator
 //   %13: ?std::string::String = opt.null
 //   %14: Held = struct.new {nick: %13: ?std::string::String}
-//   %15: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %14: Held
+//   %15: std::mem::Error!void = call.std::array::Array.append.Held %3: &var std::array::Array<Held>, %1: Allocator, %14: Held
 //   %16: std::array::Array<Held> = ref.load %3: &var std::array::Array<Held>
 //   error.try %15: std::mem::Error!void, cleanup call.std::array::Array.deinit.Held %16: std::array::Array<Held>, %1: Allocator
 //   %18: i64 = const 2

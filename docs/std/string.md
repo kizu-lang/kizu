@@ -7,10 +7,10 @@ std::string::new(allocator: Allocator) -> std::string::String
 std::string::from_bytes(allocator: Allocator, bytes: []u8) -> std::mem::Error!std::string::String
 std::string::join(allocator: Allocator, parts: &std::array::Array<std::string::String>, separator: []u8) -> std::string::GrowError!std::string::String
 std::string::trim_space_in_place(value: &var std::string::String) -> void
-string.append_bytes(bytes: []u8) -> std::mem::Error!void
-string.append_byte(byte: u8) -> std::mem::Error!void
-string.append_string(other: &std::string::String) -> std::mem::Error!void
-string.reserve(additional: i64) -> std::string::GrowError!void
+string.append_bytes(allocator: Allocator, bytes: []u8) -> std::mem::Error!void
+string.append_byte(allocator: Allocator, byte: u8) -> std::mem::Error!void
+string.append_string(allocator: Allocator, other: &std::string::String) -> std::mem::Error!void
+string.reserve(allocator: Allocator, additional: i64) -> std::string::GrowError!void
 string.truncate(length: i64) -> std::string::Error!void
 string.len() -> i64
 string.capacity() -> i64

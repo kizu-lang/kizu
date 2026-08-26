@@ -61,7 +61,7 @@ fn main() -> !process::ExitStatus {
         let first = try process::arg(0);
         if mem::equal_bytes(first, "--lib-dir") {
             let given = try process::arg(1);
-            try lib_dir.append_bytes(given);
+            try lib_dir.append_bytes(allocator, given);
             next = 2;
         }
     }
@@ -149,8 +149,8 @@ fn main() -> !process::ExitStatus {
 fn report_unknown_command(io: Io, allocator: Allocator, command: []u8) -> !void {
     var message = try string::from_bytes(allocator, "error: unknown command `");
     defer message.deinit(allocator);
-    try message.append_bytes(command);
-    try message.append_bytes("`");
+    try message.append_bytes(allocator, command);
+    try message.append_bytes(allocator, "`");
     let message_bytes = message.as_bytes();
     return io::write_stderr_line(io, message_bytes);
 }
@@ -170,7 +170,7 @@ fn read_source_file(io: Io, allocator: Allocator, path: []u8) -> !SourceRead {
     } else |failed| {
         var message = string::new(allocator);
         errdefer message.deinit(allocator);
-        try append_read_failure(io, &var message, path, failed);
+        try append_read_failure(allocator, io, &var message, path, failed);
         return SourceRead::Failed(move message);
     }
 }
@@ -180,25 +180,25 @@ fn read_source_file(io: Io, allocator: Allocator, path: []u8) -> !SourceRead {
 /// names a failure to open and `read` one to read. The runtime folds every
 /// read-stage errno into ReadFailed, so a directory is recognized by asking
 /// the file system rather than by the error alone.
-fn append_read_failure(
+fn append_read_failure(allocator: Allocator, 
     io: Io,
     out: &var string::String,
     path: []u8,
     failed: fs::Error
 ) -> !void {
     if read_stage_failure(failed) {
-        try out.append_bytes("read ");
-        try out.append_bytes(path);
+        try out.append_bytes(allocator, "read ");
+        try out.append_bytes(allocator, path);
         if is_directory(io, path) {
-            return out.append_bytes(": is a directory");
+            return out.append_bytes(allocator, ": is a directory");
         }
-        return out.append_bytes(": input/output error");
+        return out.append_bytes(allocator, ": input/output error");
     }
-    try out.append_bytes("open ");
-    try out.append_bytes(path);
-    try out.append_bytes(": ");
+    try out.append_bytes(allocator, "open ");
+    try out.append_bytes(allocator, path);
+    try out.append_bytes(allocator, ": ");
     let reason = open_failure_reason(failed);
-    return out.append_bytes(reason);
+    return out.append_bytes(allocator, reason);
 }
 
 /// Reports the failure the runtime raises once the file is already open.
@@ -243,7 +243,7 @@ fn is_directory(io: Io, path: []u8) -> bool {
 fn write_error_line(io: Io, allocator: Allocator, message: []u8) -> !void {
     var line = try string::from_bytes(allocator, "error: ");
     defer line.deinit(allocator);
-    try line.append_bytes(message);
+    try line.append_bytes(allocator, message);
     let bytes = line.as_bytes();
     return io::write_stderr_line(io, bytes);
 }
@@ -251,8 +251,7 @@ fn write_error_line(io: Io, allocator: Allocator, message: []u8) -> !void {
 /// Turns one read failure message into the diagnostic a load reports.
 fn load_read_failure(allocator: Allocator, message: &string::String) -> !project::LoadResult {
     let bytes = message.as_bytes();
-    let failed = try diagnostic::from_text(
-        allocator,
+    let failed = try diagnostic::from_text(allocator,
         diagnostic::Severity::Error,
         ast::zero_span(),
         bytes
@@ -334,8 +333,8 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     try usage(io);
     var message = try string::from_bytes(allocator, "error: invalid build target `");
     defer message.deinit(allocator);
-    try message.append_bytes(target_kind);
-    try message.append_bytes("`");
+    try message.append_bytes(allocator, target_kind);
+    try message.append_bytes(allocator, "`");
     let message_bytes = message.as_bytes();
     try io::write_stderr_line(io, message_bytes);
     return 1;
@@ -383,8 +382,8 @@ fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i
         defer current.deinit(allocator);
         var dir_line = string::new(allocator);
         defer dir_line.deinit(allocator);
-        try dir_line.append_bytes("cache dir: ");
-        try dir_line.append_string(&current.dir);
+        try dir_line.append_bytes(allocator, "cache dir: ");
+        try dir_line.append_string(allocator, &current.dir);
         let dir_line_bytes = dir_line.as_bytes();
         try io::write_stdout_line(io, dir_line_bytes);
         try write_count_line(io, allocator, "entries: ", current.entries);
@@ -398,11 +397,11 @@ fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i
         let removed = try cache.prune(io, allocator);
         var line = string::new(allocator);
         defer line.deinit(allocator);
-        try line.append_bytes("cache pruned: removed ");
-        try stdfmt::append_i64(&var line, removed.entries);
-        try line.append_bytes(" entries, freed ");
-        try stdfmt::append_i64(&var line, removed.bytes);
-        try line.append_bytes(" bytes");
+        try line.append_bytes(allocator, "cache pruned: removed ");
+        try stdfmt::append_i64(allocator, &var line, removed.entries);
+        try line.append_bytes(allocator, " entries, freed ");
+        try stdfmt::append_i64(allocator, &var line, removed.bytes);
+        try line.append_bytes(allocator, " bytes");
         let line_bytes = line.as_bytes();
         try io::write_stdout_line(io, line_bytes);
         return 0;
@@ -416,8 +415,8 @@ fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i
 fn write_count_line(io: Io, allocator: Allocator, label: []u8, value: i64) -> !void {
     var line = string::new(allocator);
     defer line.deinit(allocator);
-    try line.append_bytes(label);
-    try stdfmt::append_i64(&var line, value);
+    try line.append_bytes(allocator, label);
+    try stdfmt::append_i64(allocator, &var line, value);
     let line_bytes = line.as_bytes();
     return io::write_stdout_line(io, line_bytes);
 }
@@ -454,7 +453,7 @@ fn import_c_header_source(io: Io, allocator: Allocator, source_text: string::Str
             defer message.deinit(allocator);
             var line = try string::from_bytes(allocator, "error: ");
             defer line.deinit(allocator);
-            try line.append_string(&message);
+            try line.append_string(allocator, &message);
             let line_bytes = line.as_bytes();
             try io::write_stderr_line(io, line_bytes);
             return 1;
@@ -471,7 +470,7 @@ fn resolve_lib_dir(io: Io, allocator: Allocator, out: &var string::String) -> !v
     // from an unset one, so an empty one names no tree here either.
     if process::env("KIZU_LIB_DIR") |from_env| {
         if mem::len(from_env) > 0 {
-            return out.append_bytes(from_env);
+            return out.append_bytes(allocator, from_env);
         }
     }
     let executable = try process::executable_path(allocator);
@@ -496,7 +495,7 @@ fn append_lib_dir_beside(
     let lib = try path::join(allocator, prefix, "lib/kizu");
     defer lib.deinit(allocator);
     let lib_bytes = lib.as_bytes();
-    return out.append_bytes(lib_bytes);
+    return out.append_bytes(allocator, lib_bytes);
 }
 
 union MarkerInsertResult {
@@ -698,8 +697,7 @@ fn insert_move_markers(
             }
             var markers = array::new<ast::Span>(allocator);
             defer markers.deinit(allocator);
-            if try ownership::missing_move_markers(
-                allocator,
+            if try ownership::missing_move_markers(allocator,
                 &var tree,
                 &program,
                 &var markers
@@ -727,12 +725,12 @@ fn insert_move_markers(
                     marker.start.line,
                     marker.start.column
                 ) orelse return MarkerInsertResult::Outside(marker.start);
-                try offsets.append(offset);
+                try offsets.append(allocator, offset);
             }
             try sort_offsets_descending(&var offsets);
             var offset_index = 0;
             while offsets.get(offset_index) |offset| {
-                try insert_move_at(source_text, offset);
+                try insert_move_at(allocator, source_text, offset);
                 offset_index = offset_index + 1;
             }
             return MarkerInsertResult::Ok;
@@ -785,9 +783,9 @@ fn sort_offsets_descending(offsets: &var array::Array<i64>) -> !void {
     return;
 }
 
-fn insert_move_at(source_text: &var string::String, offset: i64) -> !void {
+fn insert_move_at(allocator: Allocator, source_text: &var string::String, offset: i64) -> !void {
     let old_length = source_text.len();
-    try source_text.append_bytes("move ");
+    try source_text.append_bytes(allocator, "move ");
     let bytes = source_text.as_mut_bytes();
     var cursor = old_length;
     while cursor > offset {
@@ -810,12 +808,12 @@ fn write_fmt_outside_error(
 ) -> !void {
     var message = try string::from_bytes(allocator, "error: fmt: ");
     defer message.deinit(allocator);
-    try message.append_bytes(file);
-    try message.append_byte(cast<u8>(58));
-    try stdfmt::append_i64(&var message, position.line);
-    try message.append_byte(cast<u8>(58));
-    try stdfmt::append_i64(&var message, position.column);
-    try message.append_bytes(" is outside the file");
+    try message.append_bytes(allocator, file);
+    try message.append_byte(allocator, cast<u8>(58));
+    try stdfmt::append_i64(allocator, &var message, position.line);
+    try message.append_byte(allocator, cast<u8>(58));
+    try stdfmt::append_i64(allocator, &var message, position.column);
+    try message.append_bytes(allocator, " is outside the file");
     let bytes = message.as_bytes();
     return io::write_stderr_line(io, bytes);
 }
@@ -904,9 +902,9 @@ fn init_command(
     );
     var line = try string::from_bytes(allocator, "initialized Kizu package `");
     defer line.deinit(allocator);
-    try line.append_bytes(package_bytes);
-    try line.append_bytes("` in ");
-    try line.append_bytes(absolute_bytes);
+    try line.append_bytes(allocator, package_bytes);
+    try line.append_bytes(allocator, "` in ");
+    try line.append_bytes(allocator, absolute_bytes);
     let line_bytes = line.as_bytes();
     try io::write_stdout_line(io, line_bytes);
     return 0;
@@ -948,17 +946,17 @@ fn normalize_init_package_name(
     while index < mem::len(name) {
         let current = name[index];
         if current >= cast<u8>(65) and current <= cast<u8>(90) {
-            try out.append_byte(current + cast<u8>(32));
+            try out.append_byte(allocator, current + cast<u8>(32));
             last_underscore = false;
         } else {
             if (current >= cast<u8>(97) and current <= cast<u8>(122)) or
                 (current >= cast<u8>(48) and current <= cast<u8>(57)) {
-                try out.append_byte(current);
+                try out.append_byte(allocator, current);
                 last_underscore = false;
             } else {
                 if current == cast<u8>(95) or current == cast<u8>(45) {
                     if out.len() > 0 and !last_underscore {
-                        try out.append_byte(cast<u8>(95));
+                        try out.append_byte(allocator, cast<u8>(95));
                         last_underscore = true;
                     }
                 } else {
@@ -1049,26 +1047,26 @@ fn retained_path_exists(io: Io, retained: &string::String) -> !bool {
 fn init_manifest(allocator: Allocator, package_name: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "[package]");
     errdefer out.deinit(allocator);
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("name = ");
-    try out.append_byte(cast<u8>(34));
-    try out.append_bytes(package_name);
-    try out.append_byte(cast<u8>(34));
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("version = ");
-    try out.append_byte(cast<u8>(34));
-    try out.append_bytes("0.1.0");
-    try out.append_byte(cast<u8>(34));
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("[modules]");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("paths = [");
-    try out.append_byte(cast<u8>(34));
-    try out.append_bytes("src");
-    try out.append_byte(cast<u8>(34));
-    try out.append_byte(cast<u8>(93));
-    try out.append_byte(cast<u8>(10));
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, "name = ");
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, package_name);
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, "version = ");
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, "0.1.0");
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, "[modules]");
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, "paths = [");
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, "src");
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_byte(allocator, cast<u8>(93));
+    try out.append_byte(allocator, cast<u8>(10));
     return move out;
 }
 
@@ -1098,8 +1096,8 @@ fn write_init_path_error(
 ) -> !void {
     var message = try string::from_bytes(allocator, prefix);
     defer message.deinit(allocator);
-    try message.append_bytes(value);
-    try message.append_bytes(suffix);
+    try message.append_bytes(allocator, value);
+    try message.append_bytes(allocator, suffix);
     let bytes = message.as_bytes();
     return io::write_stderr_line(io, bytes);
 }
@@ -1238,8 +1236,8 @@ fn lower_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: 
                     if package_name.len() > 0 {
                         var entry = string::new(allocator);
                         defer entry.deinit(allocator);
-                        try entry.append_string(&package_name);
-                        try entry.append_bytes("::main");
+                        try entry.append_string(allocator, &package_name);
+                        try entry.append_bytes(allocator, "::main");
                         let entry_bytes = entry.as_bytes();
                         if try add_package_main(allocator, &var lowerer.module, entry_bytes) |failed| {
                             defer failed.deinit(allocator);
@@ -1311,10 +1309,10 @@ fn add_package_main(allocator: Allocator, module: &var ir::Module, entry: []u8) 
             blocks: array::new<ir::Block>(allocator)
         })
     };
-    try module.functions.append(main_function);
+    try module.functions.append(allocator, main_function);
     let block = try module.add_block(main_function, entry_name);
     let call = module.blank_instr(result, ir::Op::Call, callee, ir::empty_name());
-    let _ = try module.add_instr(block, move call);
+    let _ = try module.add_instr(allocator, block, move call);
     module.set_terminator(block, ir::return_terminator(result));
     return ir::verify(allocator, module);
 }
@@ -1394,9 +1392,9 @@ fn load_target(
     defer manifest_path.deinit(allocator);
     if mem::equal_bytes(path::basename(target), "kizu.toml") {
         root.clear();
-        try root.append_bytes(path::dirname(target));
+        try root.append_bytes(allocator, path::dirname(target));
         manifest_path.clear();
-        try manifest_path.append_bytes(target);
+        try manifest_path.append_bytes(allocator, target);
     }
     let manifest_bytes = manifest_path.as_bytes();
     let manifest_read = try read_source_file(io, allocator, manifest_bytes);
@@ -1438,7 +1436,7 @@ fn load_manifest_package(
     match parsed {
         Manifest(found) => {
             defer found.deinit(allocator);
-            try package_name.append_string(&found.package_name);
+            try package_name.append_string(allocator, &found.package_name);
             let root_bytes = root.as_bytes();
             let resolved = try project::resolve_modules(io, allocator, root_bytes, &found);
             match resolved {
@@ -1455,8 +1453,7 @@ fn load_manifest_package(
         Error(message) => {
             defer message.deinit(allocator);
             let message_bytes = message.as_bytes();
-            let failed = try diagnostic::from_text(
-                allocator,
+            let failed = try diagnostic::from_text(allocator,
                 diagnostic::Severity::Error,
                 ast::zero_span(),
                 message_bytes
@@ -1622,7 +1619,7 @@ fn parse_native_build_args(
             try io::write_stderr_line(io, "error: invalid command arguments");
             return 1;
         }
-        try path.append_bytes(arg);
+        try path.append_bytes(allocator, arg);
     }
     if path.len() == 0 {
         try usage(io);
@@ -1632,7 +1629,7 @@ fn parse_native_build_args(
     if options.output.len() == 0 {
         let path_bytes = path.as_bytes();
         let emit_bytes = options.emit.as_bytes();
-        try default_native_output(path_bytes, emit_bytes, &var options.output);
+        try default_native_output(allocator, path_bytes, emit_bytes, &var options.output);
     }
     return 0;
 }
@@ -1652,31 +1649,31 @@ fn take_flag_value(
         try usage(io);
         var message = try string::from_bytes(allocator, "error: missing value after ");
         defer message.deinit(allocator);
-        try message.append_bytes(flag);
+        try message.append_bytes(allocator, flag);
         let message_bytes = message.as_bytes();
         try io::write_stderr_line(io, message_bytes);
         return 0 - 1;
     }
     let value = try process::arg(index);
     into.clear();
-    try into.append_bytes(value);
+    try into.append_bytes(allocator, value);
     return index + 1;
 }
 
 /// Maps a source path to the default target/native artifact, the Go
 /// `defaultNativeOutput`.
-fn default_native_output(path: []u8, emit: []u8, out: &var string::String) -> !void {
+fn default_native_output(allocator: Allocator, path: []u8, emit: []u8, out: &var string::String) -> !void {
     let base = path::basename(path);
     let ext = path::extension(base);
     let stem_end = mem::len(base) - mem::len(ext);
     let name = base[0..stem_end];
-    try out.append_bytes("target/native/");
-    try out.append_bytes(name);
+    try out.append_bytes(allocator, "target/native/");
+    try out.append_bytes(allocator, name);
     if mem::equal_bytes(emit, "obj") {
-        try out.append_bytes(".o");
+        try out.append_bytes(allocator, ".o");
     }
     if mem::equal_bytes(emit, "llvm") {
-        try out.append_bytes(".ll");
+        try out.append_bytes(allocator, ".ll");
     }
     return;
 }
@@ -1745,8 +1742,8 @@ fn native_target(
                     if command != NativeCommand::Test and package_name.len() > 0 {
                         var entry = string::new(allocator);
                         defer entry.deinit(allocator);
-                        try entry.append_string(&package_name);
-                        try entry.append_bytes("::main");
+                        try entry.append_string(allocator, &package_name);
+                        try entry.append_bytes(allocator, "::main");
                         let entry_bytes = entry.as_bytes();
                         if try add_package_main(allocator, &var lowerer.module, entry_bytes) |failed| {
                             defer failed.deinit(allocator);
@@ -1765,7 +1762,7 @@ fn native_target(
                         var roots = array::new<string::String>(allocator);
                         defer roots.deinit(allocator);
                         let main_root = try string::from_bytes(allocator, "main");
-                        try roots.append(move main_root);
+                        try roots.append(allocator, move main_root);
                         try ir::keep_reachable_functions(allocator, &var lowerer.module, &roots);
                     }
                     var text = string::new(allocator);
@@ -1815,10 +1812,9 @@ fn native_target(
 fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic::Diagnostic {
     var test_names = array::new<ir::Name>(allocator);
     defer test_names.deinit(allocator);
-    try ir::test_function_names(module, &var test_names);
+    try ir::test_function_names(allocator, module, &var test_names);
     if test_names.len() == 0 {
-        let failed = try diagnostic::from_text(
-            allocator,
+        let failed = try diagnostic::from_text(allocator,
             diagnostic::Severity::Error,
             ast::zero_span(),
             "test error: no tests found"
@@ -1829,7 +1825,7 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic:
     var reversed = array::new<ir::Function>(allocator);
     defer reversed.deinit(allocator);
     while module.functions.pop() |function| {
-        try reversed.append(function);
+        try reversed.append(allocator, function);
     }
     var position = reversed.len();
     while position > 0 {
@@ -1839,7 +1835,7 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic:
         if module.names.is(name, "main") {
             continue;
         }
-        try module.functions.append(function);
+        try module.functions.append(allocator, function);
     }
     // A test body returns `!void`, so the entry tries each result: the first
     // failing test returns its message instead of letting the run report ok.
@@ -1855,32 +1851,32 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic:
             blocks: array::new<ir::Block>(allocator)
         })
     };
-    try module.functions.append(main_function);
+    try module.functions.append(allocator, main_function);
     let block = try module.add_block(main_function, entry_name);
     var index = 0;
     while test_names.get(index) |test_name| {
         var called_spelling = try string::from_bytes(allocator, "%test.");
         errdefer called_spelling.deinit(allocator);
-        try stdfmt::append_i64(&var called_spelling, index);
+        try stdfmt::append_i64(allocator, &var called_spelling, index);
         let called_name = try module.names.intern_owned(move called_spelling);
         let called = ir::Value { name: called_name, type_name: bang_void };
         let call = module.blank_instr(called, ir::Op::Call, test_name, ir::empty_name());
-        let _ = try module.add_instr(block, move call);
+        let _ = try module.add_instr(allocator, block, move call);
         var tried_spelling = try string::from_bytes(allocator, "%try.");
         errdefer tried_spelling.deinit(allocator);
-        try stdfmt::append_i64(&var tried_spelling, index);
+        try stdfmt::append_i64(allocator, &var tried_spelling, index);
         let tried_name = try module.names.intern_owned(move tried_spelling);
         let tried = ir::Value { name: tried_name, type_name: void_name };
         var tried_instr = module.blank_instr(tried, ir::Op::ErrorTry, ir::empty_name(), ir::empty_name());
         errdefer tried_instr.deinit(allocator);
-        try tried_instr.args.append(called);
-        let _ = try module.add_instr(block, move tried_instr);
+        try tried_instr.args.append(allocator, called);
+        let _ = try module.add_instr(allocator, block, move tried_instr);
         index = index + 1;
     }
     let ok_name = try module.names.intern("%test.ok");
     let ok = ir::Value { name: ok_name, type_name: bang_void };
     let ok_instr = module.blank_instr(ok, ir::Op::ErrorOk, ir::empty_name(), ir::empty_name());
-    let _ = try module.add_instr(block, move ok_instr);
+    let _ = try module.add_instr(allocator, block, move ok_instr);
     module.set_terminator(block, ir::return_terminator(ok));
     return ir::verify(allocator, module);
 }
@@ -1907,31 +1903,31 @@ fn execute_built(allocator: Allocator, exe: []u8, arg_start: i64, arg_count: i64
     defer a7.deinit(allocator);
     if arg_count >= 1 {
         let value = try process::arg(arg_start);
-        try a1.append_bytes(value);
+        try a1.append_bytes(allocator, value);
     }
     if arg_count >= 2 {
         let value = try process::arg(arg_start + 1);
-        try a2.append_bytes(value);
+        try a2.append_bytes(allocator, value);
     }
     if arg_count >= 3 {
         let value = try process::arg(arg_start + 2);
-        try a3.append_bytes(value);
+        try a3.append_bytes(allocator, value);
     }
     if arg_count >= 4 {
         let value = try process::arg(arg_start + 3);
-        try a4.append_bytes(value);
+        try a4.append_bytes(allocator, value);
     }
     if arg_count >= 5 {
         let value = try process::arg(arg_start + 4);
-        try a5.append_bytes(value);
+        try a5.append_bytes(allocator, value);
     }
     if arg_count >= 6 {
         let value = try process::arg(arg_start + 5);
-        try a6.append_bytes(value);
+        try a6.append_bytes(allocator, value);
     }
     if arg_count >= 7 {
         let value = try process::arg(arg_start + 6);
-        try a7.append_bytes(value);
+        try a7.append_bytes(allocator, value);
     }
     let b0 = a0.as_bytes();
     let b1 = a1.as_bytes();

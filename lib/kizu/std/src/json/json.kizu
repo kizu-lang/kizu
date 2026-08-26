@@ -6,6 +6,10 @@
 // owned output. `write_*_field` pairs the key and the value in one call, so
 // a key can never be left without a value.
 pub struct Encoder {
+    // The allocator its buffer grows from. A String keeps none of its own
+    // (ADR-0132), and an encoder is handed one at construction, so it holds
+    // that one rather than asking for it again at every write.
+    allocator: Allocator,
     out: std::string::String,
     // The nesting state exists to detect misuse, not to drive output. Each
     // open container holds one bit in two i64 stacks: `kinds` records object
@@ -32,6 +36,7 @@ pub struct Encoder {
 
 pub fn encoder(allocator: Allocator) -> Encoder {
     return Encoder {
+        allocator: allocator,
         out: std::string::new(allocator),
         depth: 0,
         kinds: 0,
@@ -59,6 +64,7 @@ fn indented_encoder(allocator: Allocator, byte: u8, width: i64) -> Encoder {
         std::internal::builtin::panic("json encoder: indent width cannot be negative");
     }
     return Encoder {
+        allocator: allocator,
         out: std::string::new(allocator),
         depth: 0,
         kinds: 0,
@@ -110,50 +116,54 @@ fn (self: &var Encoder) begin_array_field(name: []u8) -> std::mem::Error!void {
 }
 
 fn (self: &var Encoder) write_i64(value: i64) -> std::mem::Error!void {
+    let allocator = self.allocator;
     try self.begin_value();
-    try std::fmt::append_i64(self.out, value);
+    try std::fmt::append_i64(allocator, self.out, value);
     return;
 }
 
 fn (self: &var Encoder) write_bool(value: bool) -> std::mem::Error!void {
+    let allocator = self.allocator;
     try self.begin_value();
-    try std::fmt::append_bool(self.out, value);
+    try std::fmt::append_bool(allocator, self.out, value);
     return;
 }
 
 fn (self: &var Encoder) write_null() -> std::mem::Error!void {
     try self.begin_value();
-    try self.out.append_bytes("null");
+    try self.out.append_bytes(self.allocator, "null");
     return;
 }
 
 fn (self: &var Encoder) write_bytes(value: []u8) -> std::mem::Error!void {
     try self.begin_value();
-    try self.append_string(value);
+    try self.write_quoted(value);
     return;
 }
 
 fn (self: &var Encoder) write_i64_field(name: []u8, value: i64) -> std::mem::Error!void {
+    let allocator = self.allocator;
     try self.begin_field(name);
-    try std::fmt::append_i64(self.out, value);
+    try std::fmt::append_i64(allocator, self.out, value);
     return;
 }
 
 fn (self: &var Encoder) write_bool_field(name: []u8, value: bool) -> std::mem::Error!void {
+    let allocator = self.allocator;
     try self.begin_field(name);
-    try std::fmt::append_bool(self.out, value);
+    try std::fmt::append_bool(allocator, self.out, value);
     return;
 }
 
 fn (self: &var Encoder) write_null_field(name: []u8) -> std::mem::Error!void {
     try self.begin_field(name);
-    try self.out.append_bytes("null");
+    try self.out.append_bytes(self.allocator, "null");
     return;
 }
 
 fn (self: &var Encoder) write_bytes_field(name: []u8, value: []u8) -> std::mem::Error!void {
     try self.begin_field(name);
-    try self.append_string(value);
+    try self.write_quoted(value);
     return;
 }
 
@@ -161,14 +171,17 @@ fn (self: &var Encoder) write_bytes_field(name: []u8, value: []u8) -> std::mem::
 // into `out`. The encoder keeps its own buffer; `deinit` releases it. The
 // checker cannot yet lend a field's bytes out of a method, so v1 copies into
 // a caller buffer instead of returning a view.
-fn (self: Encoder) finish_into(out: &var std::string::String) -> std::mem::Error!void {
+fn (self: Encoder) finish_into(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::mem::Error!void {
     if self.depth != 0 {
         std::internal::builtin::panic("json encoder: finish with an open container");
     }
     if !self.top_written {
         std::internal::builtin::panic("json encoder: finish before any value");
     }
-    try out.append_string(self.out);
+    try out.append_string(allocator, self.out);
     return;
 }
 
@@ -186,7 +199,7 @@ pub fn encode<T>(
     var encoder = std::json::encoder(allocator);
     defer encoder.deinit(allocator);
     try encode_value<T>(encoder, value);
-    try encoder.finish_into(out);
+    try encoder.finish_into(allocator, out);
     return;
 }
 
@@ -202,7 +215,7 @@ pub fn encode_with_spaces<T>(
     var encoder = std::json::encoder_with_spaces(allocator, width);
     defer encoder.deinit(allocator);
     try encode_value<T>(encoder, value);
-    try encoder.finish_into(out);
+    try encoder.finish_into(allocator, out);
     return;
 }
 
@@ -216,7 +229,7 @@ pub fn encode_with_tabs<T>(
     var encoder = std::json::encoder_with_tabs(allocator, width);
     defer encoder.deinit(allocator);
     try encode_value<T>(encoder, value);
-    try encoder.finish_into(out);
+    try encoder.finish_into(allocator, out);
     return;
 }
 
@@ -578,17 +591,17 @@ fn (self: &var Encoder) begin_field(name: []u8) -> std::mem::Error!void {
         std::internal::builtin::panic("json encoder: field outside an object");
     }
     try self.mark_element();
-    try self.append_string(name);
-    try self.out.append_byte(cast<u8>(58));
+    try self.write_quoted(name);
+    try self.out.append_byte(self.allocator, cast<u8>(58));
     if self.indent_width > 0 {
-        try self.out.append_byte(cast<u8>(32));
+        try self.out.append_byte(self.allocator, cast<u8>(32));
     }
     return;
 }
 
 fn (self: &var Encoder) mark_element() -> std::mem::Error!void {
     if self.nonempty % 2 == 1 {
-        try self.out.append_byte(cast<u8>(44));
+        try self.out.append_byte(self.allocator, cast<u8>(44));
     } else {
         self.nonempty = self.nonempty + 1;
     }
@@ -603,10 +616,10 @@ fn (self: &var Encoder) break_line(level: i64) -> std::mem::Error!void {
     if self.indent_width == 0 {
         return;
     }
-    try self.out.append_byte(cast<u8>(10));
+    try self.out.append_byte(self.allocator, cast<u8>(10));
     var remaining = level * self.indent_width;
     while remaining > 0 {
-        try self.out.append_byte(self.indent_byte);
+        try self.out.append_byte(self.allocator, self.indent_byte);
         remaining = remaining - 1;
     }
     return;
@@ -619,7 +632,7 @@ fn (self: &var Encoder) push(kind: i64, open: u8) -> std::mem::Error!void {
     self.depth = self.depth + 1;
     self.kinds = self.kinds * 2 + kind;
     self.nonempty = self.nonempty * 2;
-    try self.out.append_byte(open);
+    try self.out.append_byte(self.allocator, open);
     return;
 }
 
@@ -633,39 +646,39 @@ fn (self: &var Encoder) pop(close: u8) -> std::mem::Error!void {
     if had_element {
         try self.break_line(self.depth);
     }
-    try self.out.append_byte(close);
+    try self.out.append_byte(self.allocator, close);
     return;
 }
 
-// append_string writes one JSON string: quoted, with the two-character JSON
+// write_quoted writes one JSON string: quoted, with the two-character JSON
 // escapes for quote, backslash, newline, carriage return, and tab, and
 // \u00XX for the remaining control bytes. Bytes are escaped
 // deterministically; encode v1 does not validate UTF-8.
-fn (self: &var Encoder) append_string(bytes: []u8) -> std::mem::Error!void {
-    try self.out.append_byte(cast<u8>(34));
+fn (self: &var Encoder) write_quoted(bytes: []u8) -> std::mem::Error!void {
+    try self.out.append_byte(self.allocator, cast<u8>(34));
     var index = 0;
     let length = std::mem::len(bytes);
     while index < length {
         let byte = bytes[index];
         if byte == cast<u8>(34) or byte == cast<u8>(92) {
-            try self.out.append_byte(cast<u8>(92));
-            try self.out.append_byte(byte);
+            try self.out.append_byte(self.allocator, cast<u8>(92));
+            try self.out.append_byte(self.allocator, byte);
         } else {
             if byte == cast<u8>(10) {
-                try self.out.append_bytes("\n");
+                try self.out.append_bytes(self.allocator, "\n");
             } else {
                 if byte == cast<u8>(13) {
-                    try self.out.append_bytes("\r");
+                    try self.out.append_bytes(self.allocator, "\r");
                 } else {
                     if byte == cast<u8>(9) {
-                        try self.out.append_bytes("\t");
+                        try self.out.append_bytes(self.allocator, "\t");
                     } else {
                         if byte < cast<u8>(32) {
-                            try self.out.append_bytes("\u00");
-                            try self.out.append_byte(hex_digit(byte / cast<u8>(16)));
-                            try self.out.append_byte(hex_digit(byte % cast<u8>(16)));
+                            try self.out.append_bytes(self.allocator, "\u00");
+                            try self.out.append_byte(self.allocator, hex_digit(byte / cast<u8>(16)));
+                            try self.out.append_byte(self.allocator, hex_digit(byte % cast<u8>(16)));
                         } else {
-                            try self.out.append_byte(byte);
+                            try self.out.append_byte(self.allocator, byte);
                         }
                     }
                 }
@@ -673,7 +686,7 @@ fn (self: &var Encoder) append_string(bytes: []u8) -> std::mem::Error!void {
         }
         index = index + 1;
     }
-    try self.out.append_byte(cast<u8>(34));
+    try self.out.append_byte(self.allocator, cast<u8>(34));
     return;
 }
 
@@ -878,62 +891,62 @@ fn read_hex4(bytes: []u8, index: &var i64) -> Error!i64 {
 }
 
 // append_utf8 writes one code point as UTF-8.
-fn append_utf8(out: &var std::string::String, code: i64) -> std::json::DecodeError!void {
+fn append_utf8(allocator: Allocator, out: &var std::string::String, code: i64) -> std::json::DecodeError!void {
     if code < 128 {
-        try out.append_byte(cast<u8>(code));
+        try out.append_byte(allocator, cast<u8>(code));
         return;
     }
     if code < 2048 {
-        try out.append_byte(cast<u8>(192 + code / 64));
-        try out.append_byte(cast<u8>(128 + code % 64));
+        try out.append_byte(allocator, cast<u8>(192 + code / 64));
+        try out.append_byte(allocator, cast<u8>(128 + code % 64));
         return;
     }
     if code < 65536 {
-        try out.append_byte(cast<u8>(224 + code / 4096));
-        try out.append_byte(cast<u8>(128 + code / 64 % 64));
-        try out.append_byte(cast<u8>(128 + code % 64));
+        try out.append_byte(allocator, cast<u8>(224 + code / 4096));
+        try out.append_byte(allocator, cast<u8>(128 + code / 64 % 64));
+        try out.append_byte(allocator, cast<u8>(128 + code % 64));
         return;
     }
-    try out.append_byte(cast<u8>(240 + code / 262144));
-    try out.append_byte(cast<u8>(128 + code / 4096 % 64));
-    try out.append_byte(cast<u8>(128 + code / 64 % 64));
-    try out.append_byte(cast<u8>(128 + code % 64));
+    try out.append_byte(allocator, cast<u8>(240 + code / 262144));
+    try out.append_byte(allocator, cast<u8>(128 + code / 4096 % 64));
+    try out.append_byte(allocator, cast<u8>(128 + code / 64 % 64));
+    try out.append_byte(allocator, cast<u8>(128 + code % 64));
     return;
 }
 
 // decode_escape reads what follows a `\` and appends the character it names.
 // A `\uXXXX` above the basic plane arrives as a surrogate pair, so the high
 // half consumes its low half here; a half on its own names no character.
-fn decode_escape(bytes: []u8, index: &var i64, out: &var std::string::String) -> std::json::DecodeError!void {
+fn decode_escape(allocator: Allocator, bytes: []u8, index: &var i64, out: &var std::string::String) -> std::json::DecodeError!void {
     if std::mem::byte_at(bytes, index.*) |byte| {
         index.* = index.* + 1;
         if byte == cast<u8>(34) or byte == cast<u8>(92) or byte == cast<u8>(47) {
-            try out.append_byte(byte);
+            try out.append_byte(allocator, byte);
             return;
         }
         if byte == cast<u8>(110) {
-            try out.append_byte(cast<u8>(10));
+            try out.append_byte(allocator, cast<u8>(10));
             return;
         }
         if byte == cast<u8>(114) {
-            try out.append_byte(cast<u8>(13));
+            try out.append_byte(allocator, cast<u8>(13));
             return;
         }
         if byte == cast<u8>(116) {
-            try out.append_byte(cast<u8>(9));
+            try out.append_byte(allocator, cast<u8>(9));
             return;
         }
         if byte == cast<u8>(98) {
-            try out.append_byte(cast<u8>(8));
+            try out.append_byte(allocator, cast<u8>(8));
             return;
         }
         if byte == cast<u8>(102) {
-            try out.append_byte(cast<u8>(12));
+            try out.append_byte(allocator, cast<u8>(12));
             return;
         }
         if byte == cast<u8>(117) {
             let code = try read_hex4(bytes, index);
-            try append_utf8(out, try pair_surrogate(bytes, index, code));
+            try append_utf8(allocator, out, try pair_surrogate(bytes, index, code));
             return;
         }
     }
@@ -973,9 +986,9 @@ fn decode_string(
             return move out;
         }
         if byte == cast<u8>(92) {
-            try decode_escape(bytes, index, &var out);
+            try decode_escape(allocator, bytes, index, &var out);
         } else {
-            try out.append_byte(byte);
+            try out.append_byte(allocator, byte);
         }
     }
     return Error::UnexpectedToken;
@@ -1125,7 +1138,7 @@ fn scan_object(
         if member_at(&members, bytes, key_at) |_| {
             return Error::DuplicateField;
         }
-        try members.append(member);
+        try members.append(allocator, member);
         try skip_value(bytes, index, depth + 1);
         more = try comma_or_close(bytes, index, cast<u8>(125));
     }
@@ -1380,16 +1393,14 @@ fn decode_value<T>(
                     comptime if std::meta::is_array<T>()
                         or std::meta::is_map<T>()
                         or std::meta::is_box<T>() {
-                        return decode_container_value<T>(
-                            allocator, bytes, index, ignore_unknown);
+                        return decode_container_value<T>(allocator, bytes, index, ignore_unknown);
                     } else {
                         comptime if std::meta::has_public_fields<T>() {
                             return decode_struct<T>(allocator, bytes, index, ignore_unknown);
                         } else {
                             comptime if std::meta::is_enum<T>()
                                 or std::meta::is_union<T>() {
-                                return decode_variant<T>(
-                                    allocator, bytes, index, ignore_unknown);
+                                return decode_variant<T>(allocator, bytes, index, ignore_unknown);
                             } else {
                                 return std::meta::unsupported<T>();
                             }
@@ -1454,7 +1465,7 @@ fn decode_any_array(
     var more = true;
     while more {
         let item = try decode_any(allocator, bytes, index, depth + 1);
-        try items.append(move item);
+        try items.append(allocator, move item);
         more = try comma_or_close(bytes, index, cast<u8>(93));
     }
     return std::json::Value::Arr(move items);
@@ -1511,8 +1522,7 @@ fn decode_container_value<T>(
         comptime if std::meta::is_map<T>() {
             return decode_map<T>(allocator, bytes, index, ignore_unknown);
         } else {
-            let held = try decode_value<std::meta::element<T>>(
-                allocator, bytes, index, ignore_unknown);
+            let held = try decode_value<std::meta::element<T>>(allocator, bytes, index, ignore_unknown);
             return try std::mem::box<std::meta::element<T>>(allocator, held);
         }
     }
@@ -1538,9 +1548,8 @@ fn decode_array<T>(
     }
     var more = true;
     while more {
-        let item = try decode_value<std::meta::element<T>>(
-            allocator, bytes, index, ignore_unknown);
-        try items.append(move item);
+        let item = try decode_value<std::meta::element<T>>(allocator, bytes, index, ignore_unknown);
+        try items.append(allocator, move item);
         more = try comma_or_close(bytes, index, cast<u8>(93));
     }
     return move items;
@@ -1578,8 +1587,7 @@ fn decode_map<T>(
             return Error::DuplicateField;
         }
         try expect_byte(bytes, index, cast<u8>(58));
-        let value = try decode_value<std::meta::element<T>>(
-            allocator, bytes, index, ignore_unknown);
+        let value = try decode_value<std::meta::element<T>>(allocator, bytes, index, ignore_unknown);
         try entries.insert(name, move value);
         more = try comma_or_close(bytes, index, cast<u8>(125));
     }
@@ -1643,8 +1651,7 @@ fn decode_variant_payload<T>(
             comptime if std::meta::has_payload<T, v>() {
                 if key_equals(bytes, member.key_at, std::meta::variant_name<T, v>()) {
                     var at = member.value_at;
-                    let payload = try decode_value<std::meta::variant_type<T, v>>(
-                        allocator, bytes, &var at, ignore_unknown);
+                    let payload = try decode_value<std::meta::variant_type<T, v>>(allocator, bytes, &var at, ignore_unknown);
                     return std::meta::variant<T, v>(move payload);
                 }
             } else {
@@ -1732,15 +1739,13 @@ fn decode_field<T, f: Field>(
     comptime if std::meta::is_optional<std::meta::field_type<T, f>>() {
         if member_named(&scan.members, bytes, name) |value_at| {
             var index = value_at;
-            return decode_optional<std::meta::field_type<T, f>>(
-                allocator, bytes, &var index, ignore_unknown);
+            return decode_optional<std::meta::field_type<T, f>>(allocator, bytes, &var index, ignore_unknown);
         }
         return null;
     } else {
         if member_named(&scan.members, bytes, name) |value_at| {
             var index = value_at;
-            return decode_value<std::meta::field_type<T, f>>(
-                allocator, bytes, &var index, ignore_unknown);
+            return decode_value<std::meta::field_type<T, f>>(allocator, bytes, &var index, ignore_unknown);
         }
         return Error::MissingField;
     }
@@ -1764,7 +1769,6 @@ fn decode_optional<T>(
     }
     // Bound, not returned directly: the implicit wrap into `?E` reaches a value
     // of type `E`, not the `!E` a call to a fallible function is.
-    let held = try decode_value<std::meta::element<T>>(
-        allocator, bytes, index, ignore_unknown);
+    let held = try decode_value<std::meta::element<T>>(allocator, bytes, index, ignore_unknown);
     return held;
 }

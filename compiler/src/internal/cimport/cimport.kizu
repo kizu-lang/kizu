@@ -94,9 +94,9 @@ fn join_lines(
     var index = 0;
     while decls.at(index) |decl| {
         if index > 0 {
-            try out.append_byte(cast<u8>(10));
+            try out.append_byte(allocator, cast<u8>(10));
         }
-        try out.append_string(decl);
+        try out.append_string(allocator, decl);
         index = index + 1;
     }
     return move out;
@@ -129,23 +129,23 @@ fn import_statement(
         }
         var decl = string::new(allocator);
         errdefer decl.deinit(allocator);
-        try decl.append_bytes("extern ");
-        try decl.append_byte(cast<u8>(34));
-        try decl.append_bytes("c");
-        try decl.append_byte(cast<u8>(34));
-        try decl.append_bytes(" fn ");
-        try decl.append_bytes(bytes[found.name_start..found.name_end]);
-        try decl.append_bytes("(");
-        try decl.append_string(&params);
-        try decl.append_bytes(") -> ");
-        try decl.append_string(&return_type);
-        try decls.append(move decl);
+        try decl.append_bytes(allocator, "extern ");
+        try decl.append_byte(allocator, cast<u8>(34));
+        try decl.append_bytes(allocator, "c");
+        try decl.append_byte(allocator, cast<u8>(34));
+        try decl.append_bytes(allocator, " fn ");
+        try decl.append_bytes(allocator, bytes[found.name_start..found.name_end]);
+        try decl.append_bytes(allocator, "(");
+        try decl.append_string(allocator, &params);
+        try decl.append_bytes(allocator, ") -> ");
+        try decl.append_string(allocator, &return_type);
+        try decls.append(allocator, move decl);
         return null;
     }
     var failure = try import_error(allocator, "unsupported declaration `");
     errdefer failure.deinit(allocator);
-    try failure.append_bytes(stmt);
-    try failure.append_bytes("`");
+    try failure.append_bytes(allocator, stmt);
+    try failure.append_bytes(allocator, "`");
     return move failure;
 }
 
@@ -165,7 +165,7 @@ fn import_params(
     while start <= length {
         let end = find_byte(trimmed, start, cast<u8>(44));
         if number > 1 {
-            try out.append_bytes(", ");
+            try out.append_bytes(allocator, ", ");
         }
         if try import_param(allocator, trimmed[start..end], number, out) |failure| {
             return move failure;
@@ -191,8 +191,8 @@ fn import_param(
     if contains(bytes, "[") or contains(bytes, "]") {
         var failure = try import_error(allocator, "arrays are unsupported in `");
         errdefer failure.deinit(allocator);
-        try failure.append_bytes(bytes);
-        try failure.append_bytes("`");
+        try failure.append_bytes(allocator, bytes);
+        try failure.append_bytes(allocator, "`");
         return move failure;
     }
     if length == 0 {
@@ -208,13 +208,13 @@ fn import_param(
         return move failure;
     }
     if unnamed {
-        try out.append_bytes("p");
-        try fmt::append_i64(out, number);
+        try out.append_bytes(allocator, "p");
+        try fmt::append_i64(allocator, out, number);
     } else {
-        try out.append_bytes(bytes[last..length]);
+        try out.append_bytes(allocator, bytes[last..length]);
     }
-    try out.append_bytes(": ");
-    try out.append_string(&type_text);
+    try out.append_bytes(allocator, ": ");
+    try out.append_string(allocator, &type_text);
     return null;
 }
 
@@ -240,22 +240,22 @@ fn c_type_to_kizu(
     if mem::len(base) == 0 {
         var failure = try import_error(allocator, "unsupported C type `");
         errdefer failure.deinit(allocator);
-        try failure.append_bytes(stripped_bytes);
-        try failure.append_bytes("`");
+        try failure.append_bytes(allocator, stripped_bytes);
+        try failure.append_bytes(allocator, "`");
         return move failure;
     }
     var level = 0;
     while level < depth {
-        try out.append_bytes("ptr<");
+        try out.append_bytes(allocator, "ptr<");
         level = level + 1;
     }
     if depth > 0 and is_const {
-        try out.append_bytes("const ");
+        try out.append_bytes(allocator, "const ");
     }
-    try out.append_bytes(base);
+    try out.append_bytes(allocator, base);
     level = 0;
     while level < depth {
-        try out.append_bytes(">");
+        try out.append_bytes(allocator, ">");
         level = level + 1;
     }
     return null;
@@ -281,9 +281,9 @@ fn normalize_c_base(
             continue;
         }
         if out.len() > 0 {
-            try out.append_bytes(" ");
+            try out.append_bytes(allocator, " ");
         }
-        try out.append_bytes(field);
+        try out.append_bytes(allocator, field);
     }
     return move out;
 }
@@ -316,7 +316,7 @@ fn reject_unsupported(allocator: Allocator, stmt: []u8) -> !?string::String {
 fn import_error(allocator: Allocator, text: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "c import error: ");
     errdefer out.deinit(allocator);
-    try out.append_bytes(text);
+    try out.append_bytes(allocator, text);
     return move out;
 }
 
@@ -397,7 +397,7 @@ fn primitive_spelling(element: []u8) -> []u8 {
 fn strip_comments(allocator: Allocator, input: []u8) -> !string::String {
     var no_block = string::new(allocator);
     defer no_block.deinit(allocator);
-    try strip_block_comments(input, &var no_block);
+    try strip_block_comments(allocator, input, &var no_block);
     let bytes = no_block.as_bytes();
     return strip_line_comments(allocator, bytes);
 }
@@ -405,18 +405,18 @@ fn strip_comments(allocator: Allocator, input: []u8) -> !string::String {
 // strip_block_comments writes input into out with each `/* ... */` replaced by
 // one space. A `/*` that nothing closes is not a comment, the same way the Go
 // pattern finds no match to replace.
-fn strip_block_comments(input: []u8, out: &var string::String) -> !void {
+fn strip_block_comments(allocator: Allocator, input: []u8, out: &var string::String) -> !void {
     let length = mem::len(input);
     var index = 0;
     while index < length {
         if starts_at(input, index, "/*") {
             if block_comment_end(input, index + 2) |end| {
-                try out.append_byte(cast<u8>(32));
+                try out.append_byte(allocator, cast<u8>(32));
                 index = end + 2;
                 continue;
             }
         }
-        try out.append_byte(input[index]);
+        try out.append_byte(allocator, input[index]);
         index = index + 1;
     }
     return;
@@ -435,7 +435,7 @@ fn strip_line_comments(allocator: Allocator, input: []u8) -> !string::String {
             }
             continue;
         }
-        try out.append_byte(input[index]);
+        try out.append_byte(allocator, input[index]);
         index = index + 1;
     }
     return move out;
@@ -449,9 +449,9 @@ fn normalize_spaces(allocator: Allocator, input: []u8) -> !string::String {
     var cursor = FieldCursor { start: 0, end: 0 };
     while cursor.next(input) {
         if out.len() > 0 {
-            try out.append_bytes(" ");
+            try out.append_bytes(allocator, " ");
         }
-        try out.append_bytes(input[cursor.start..cursor.end]);
+        try out.append_bytes(allocator, input[cursor.start..cursor.end]);
     }
     return move out;
 }
@@ -464,9 +464,9 @@ fn normalize_pointer_stars(allocator: Allocator, input: []u8) -> !string::String
     var index = 0;
     while index < length {
         if input[index] == cast<u8>(42) {
-            try spaced.append_bytes(" * ");
+            try spaced.append_bytes(allocator, " * ");
         } else {
-            try spaced.append_byte(input[index]);
+            try spaced.append_byte(allocator, input[index]);
         }
         index = index + 1;
     }
@@ -640,7 +640,7 @@ fn without_byte(allocator: Allocator, bytes: []u8, byte: u8) -> !string::String 
     var index = 0;
     while index < length {
         if bytes[index] != byte {
-            try out.append_byte(bytes[index]);
+            try out.append_byte(allocator, bytes[index]);
         }
         index = index + 1;
     }

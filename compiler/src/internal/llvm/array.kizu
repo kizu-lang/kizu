@@ -17,7 +17,7 @@ fn is_array_llvm_type(typ_name: []u8) -> bool {
 
 /// Copies T out of a `std::array::Array<T>` spelling, through a borrow of one,
 /// and reports whether the spelling was one.
-fn copy_array_element(names: &ir::NameTable, type_name: ir::Name, out: &var string::String) -> !bool {
+fn copy_array_element(allocator: Allocator, names: &ir::NameTable, type_name: ir::Name, out: &var string::String) -> !bool {
     let retained = ir::name_text(names, type_name);
     let spelling = retained.as_bytes();
     var start = 0;
@@ -33,7 +33,7 @@ fn copy_array_element(names: &ir::NameTable, type_name: ir::Name, out: &var stri
         return false;
     }
     let elem = spelling[start + 18..mem::len(spelling) - 1];
-    try out.append_bytes(elem);
+    try out.append_bytes(allocator, elem);
     return true;
 }
 
@@ -106,21 +106,21 @@ fn (self: &var Emitter) container_element_of_result(
 /// value rather than its key.
 fn (self: &var Emitter) copy_container_arg(spelling: []u8, out: &var string::String) -> !bool {
     if is_array_llvm_type(spelling) {
-        try out.append_bytes(spelling[18..mem::len(spelling) - 1]);
+        try out.append_bytes(self.allocator, spelling[18..mem::len(spelling) - 1]);
         return true;
     }
     if mem::starts_with(spelling, "std::arena::Arena<") and ir::ends_with_bytes(spelling, ">") {
-        try out.append_bytes(spelling[18..mem::len(spelling) - 1]);
+        try out.append_bytes(self.allocator, spelling[18..mem::len(spelling) - 1]);
         return true;
     }
     if mem::starts_with(spelling, "std::mem::Box<") and ir::ends_with_bytes(spelling, ">") {
-        try out.append_bytes(spelling[14..mem::len(spelling) - 1]);
+        try out.append_bytes(self.allocator, spelling[14..mem::len(spelling) - 1]);
         return true;
     }
     if mem::starts_with(spelling, "std::map::Map<") and ir::ends_with_bytes(spelling, ">") {
         let args = spelling[14..mem::len(spelling) - 1];
         let comma = top_level_comma(args, 0) orelse return false;
-        try out.append_bytes(mem::trim_ascii(args[comma + 1..mem::len(args)]));
+        try out.append_bytes(self.allocator, mem::trim_ascii(args[comma + 1..mem::len(args)]));
         return true;
     }
     return false;
@@ -160,17 +160,14 @@ fn array_field_capacity() -> i64 {
     return 2;
 }
 
-/// The field index of the allocator the array grows with.
-fn array_field_allocator() -> i64 {
-    return 3;
-}
-
-/// What array_header_type occupies: four words, the Go `arrayHeaderSize`.
-/// The element size is not among them -- the compiler knows T at every call
-/// that needs it, so a header carrying sizeof(T) would carry what the caller
+/// What array_header_type occupies: three words, the same three a Rust `Vec`
+/// carries, the Go `arrayHeaderSize`. Neither the element size nor the
+/// allocator is among them -- the compiler knows T at every call that needs it
+/// and the source names the allocator at every call that needs one
+/// (ADR-0132) -- so a header carrying either would carry what the caller
 /// already has, in every array and in every element of an array of arrays.
 pub fn array_header_size() -> i64 {
-    return 32;
+    return 24;
 }
 
 /// Writes declarations for the hosted Array runtime, the Go
@@ -179,14 +176,14 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
     if !self.uses_array_runtime(module) {
         return;
     }
-    try self.line1("%s = type { ptr, i64, i64, ptr }", Arg::Lit(array_header_type()));
+    try self.line1("%s = type { ptr, i64, i64 }", Arg::Lit(array_header_type()));
     try self.line2(
         "%s = private unnamed_addr global %s zeroinitializer",
         Arg::Lit(array_empty_global()), Arg::Lit(array_header_type())
     );
-    try self.line("declare i1 @kizu_array_append(ptr, ptr, i64)");
-    try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr, i64)");
-    try self.line("declare i1 @kizu_array_reserve(ptr, i64, i64)");
+    try self.line("declare i1 @kizu_array_append(ptr, ptr, ptr, i64)");
+    try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)");
+    try self.line("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)");
     try self.line("declare ptr @kizu_array_pop(ptr, i64)");
     try self.line("declare i1 @kizu_array_swap(ptr, i64, i64, i64)");
     try self.line("declare i1 @kizu_array_truncate(ptr, i64)");
@@ -227,7 +224,7 @@ fn (self: &var Emitter) array_field_addr(handle: ir::Name, field: i64, name: []u
 fn (self: &var Emitter) array_load_field(handle: ir::Name, field: i64, name: []u8, into: ir::Name) -> !void {
     var addr_name = try string::from_bytes(self.allocator, name);
     defer addr_name.deinit(self.allocator);
-    try addr_name.append_bytes(".addr");
+    try addr_name.append_bytes(self.allocator, ".addr");
     let addr_bytes = addr_name.as_bytes();
     let addr = try self.array_field_addr(handle, field, addr_bytes);
     return self.line2("  %s = load i64, ptr %s", Arg::Str(into), Arg::Str(addr));
@@ -323,8 +320,8 @@ fn (self: &var Emitter) write_bounds_failure(
     try self.line1("%s:", Arg::Str(fail_label));
     var args = self.no_names();
     defer args.deinit(self.allocator);
-    try args.append(index);
-    try args.append(length);
+    try args.append(self.allocator, index);
+    try args.append(self.allocator, length);
     try self.write_panic_call(node, PanicKey::Bounds, &args);
     return self.line1("%s:", Arg::Str(ok_label));
 }
@@ -424,32 +421,28 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
 }
 
 /// Lowers std::array::new<T>(allocator) to the header value an empty array
-/// is, the Go `writeArrayNew`. An empty array owns no storage, so it needs
-/// none: the three fields that describe the elements are zero and the two
-/// that describe how to grow are the element size and the allocator the call
-/// names.
+/// is, the Go `writeArrayNew`: three zero words. An empty array owns no
+/// storage, so it needs none, and it keeps nothing about how to grow either --
+/// the allocator the constructor names is read by the checker, which requires
+/// every later call that allocates or releases to name the same one
+/// (ADR-0132). So the construction costs no instruction at all.
 fn (self: &var Emitter) write_array_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
     if node.args.len() != 1 or !is_array_llvm_type(result_type) {
         return try self.fail0("llvm error: array.new expects allocator -> Array<T>");
     }
-    let allocator = try self.operand(module, node.args.get_or_panic(0));
-    let result_name = try self.local_name(module, node.result.name);
-    try self.line4(
-        "  %s = insertvalue %s zeroinitializer, ptr %s, %s",
-        Arg::Str(result_name), Arg::Lit(array_header_type()),
-        Arg::Str(allocator.operand), Arg::Int(array_field_allocator())
-    );
-    try self.set_value(module, node.result, result_name);
+    let zero = try self.names.intern("zeroinitializer");
+    try self.set_value(module, node.result, zero);
     return null;
 }
 
 /// Lowers Array.append(value) and preserves !void failure flow, the Go
 /// `writeArrayAppend`.
 fn (self: &var Emitter) write_array_append(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or !module.names.is(node.result.type_name, "std::mem::Error!void") {
-        return try self.fail0("llvm error: array.append expects Array<T>, T -> std::mem::Error!void");
+    if node.args.len() != 3 or !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0(
+            "llvm error: array.append expects Array<T>, Allocator, T -> std::mem::Error!void");
     }
     var elem = string::new(self.allocator);
     defer elem.deinit(self.allocator);
@@ -517,7 +510,7 @@ fn (self: &var Emitter) write_array_append_fast(
     length_addr: ir::Name,
     elem_bytes: []u8
 ) -> !void {
-    let value = node.args.get_or_panic(1);
+    let value = node.args.get_or_panic(2);
     let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, length);
     let value_type = try self.llvm_type_of(module, value.type_name);
     let value_operand = try self.operand(module, value);
@@ -538,13 +531,15 @@ fn (self: &var Emitter) write_array_append_slow(
 ) -> !ir::Name {
     let result_name = try self.local_name(module, node.result.name);
     let elem_base = try self.suffixed(result_name, ".elem");
-    let elem_slot = try self.write_stack_value(module, elem_base, node.args.get_or_panic(1));
+    let elem_slot = try self.write_stack_value(module, elem_base, node.args.get_or_panic(2));
     let slow_synthetic = try self.next_synthetic_value("array.append.slow.ok");
     let slow_ok = try self.percent(slow_synthetic);
     let size = try self.element_size_operand_bytes(module, elem_bytes);
-    try self.line4(
-        "  %s = call i1 @kizu_array_append(ptr %s, ptr %s, i64 %s)",
-        Arg::Str(slow_ok), Arg::Str(handle_operand), Arg::Str(elem_slot), Arg::Str(size)
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
+    try self.line5(
+        "  %s = call i1 @kizu_array_append(ptr %s, ptr %s, ptr %s, i64 %s)",
+        Arg::Str(slow_ok), Arg::Str(allocator.operand), Arg::Str(handle_operand),
+        Arg::Str(elem_slot), Arg::Str(size)
     );
     return slow_ok;
 }
@@ -577,9 +572,10 @@ fn (self: &var Emitter) write_array_capacity(module: &ir::Module, node: &ir::Ins
 
 /// Lowers Array.reserve(additional), the Go `writeArrayReserve`.
 fn (self: &var Emitter) write_array_reserve(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+    if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(2).type_name, "i64") or
         !module.names.is(node.result.type_name, "std::mem::Error!void") {
-        return try self.fail0("llvm error: array.reserve expects Array<T>, i64 -> std::mem::Error!void");
+        return try self.fail0(
+            "llvm error: array.reserve expects Array<T>, Allocator, i64 -> std::mem::Error!void");
     }
     var elem = string::new(self.allocator);
     defer elem.deinit(self.allocator);
@@ -589,13 +585,15 @@ fn (self: &var Emitter) write_array_reserve(module: &ir::Module, node: &ir::Inst
     }
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
-    let additional = try self.operand(module, node.args.get_or_panic(1));
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
+    let additional = try self.operand(module, node.args.get_or_panic(2));
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
     let size = try self.element_size_operand_bytes(module, elem_bytes);
-    try self.line4(
-        "  %s = call i1 @kizu_array_reserve(ptr %s, i64 %s, i64 %s)",
-        Arg::Str(ok_name), Arg::Str(array.operand), Arg::Str(additional.operand), Arg::Str(size)
+    try self.line5(
+        "  %s = call i1 @kizu_array_reserve(ptr %s, ptr %s, i64 %s, i64 %s)",
+        Arg::Str(ok_name), Arg::Str(allocator.operand), Arg::Str(array.operand),
+        Arg::Str(additional.operand), Arg::Str(size)
     );
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayReserve);
 }
@@ -604,12 +602,14 @@ fn (self: &var Emitter) write_array_reserve(module: &ir::Module, node: &ir::Inst
 /// `writeArrayAppendBytes`: the run is copied in one runtime call rather than
 /// one element at a time.
 fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") or
+    if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(2).type_name, "[]u8") or
         !module.names.is(node.result.type_name, "std::mem::Error!void") {
-        return try self.fail0("llvm error: array.append_bytes expects Array<u8>, []u8 -> std::mem::Error!void");
+        return try self.fail0(
+            "llvm error: array.append_bytes expects Array<u8>, Allocator, []u8 -> std::mem::Error!void");
     }
     let array = try self.operand(module, node.args.get_or_panic(0));
-    let slice = try self.operand(module, node.args.get_or_panic(1));
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
+    let slice = try self.operand(module, node.args.get_or_panic(2));
     let synthetic = try self.next_synthetic_value("array.append_bytes");
     let base = try self.percent(synthetic);
     let ptr_name = try self.suffixed(base, ".ptr");
@@ -618,9 +618,10 @@ fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir:
     try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(len_name), Arg::Str(slice.operand));
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    try self.line4(
-        "  %s = call i1 @kizu_array_append_bytes(ptr %s, ptr %s, i64 %s)",
-        Arg::Str(ok_name), Arg::Str(array.operand), Arg::Str(ptr_name), Arg::Str(len_name)
+    try self.line5(
+        "  %s = call i1 @kizu_array_append_bytes(ptr %s, ptr %s, ptr %s, i64 %s)",
+        Arg::Str(ok_name), Arg::Str(allocator.operand), Arg::Str(array.operand),
+        Arg::Str(ptr_name), Arg::Str(len_name)
     );
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayAppendBytes);
 }
@@ -847,8 +848,8 @@ fn (self: &var Emitter) write_array_as_bytes(module: &ir::Module, node: &ir::Ins
 
 /// Lowers Array.deinit(), the Go `writeArrayDeinit`.
 fn (self: &var Emitter) write_array_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
-        return try self.fail0("llvm error: array.deinit expects Array<T> -> void");
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: array.deinit expects Array<T>, Allocator -> void");
     }
     let array = try self.operand(module, node.args.get_or_panic(0));
     // A cleanup carries no immediate, so the element the release measures is
@@ -856,13 +857,13 @@ fn (self: &var Emitter) write_array_deinit(module: &ir::Module, node: &ir::Instr
     // down either way.
     var elem = string::new(self.allocator);
     defer elem.deinit(self.allocator);
-    if !try copy_array_element(&module.names, node.args.get_or_panic(0).type_name, &var elem) {
+    if !try copy_array_element(self.allocator, &module.names, node.args.get_or_panic(0).type_name, &var elem) {
         return try self.fail0("llvm error: array.deinit expects Array<T> -> void");
     }
     let elem_bytes = elem.as_bytes();
     let data = try self.array_field_of(array.operand, array_field_data(), "array.deinit.data");
     let capacity = try self.array_field_of(array.operand, array_field_capacity(), "array.deinit.cap");
-    let allocator = try self.array_field_of(array.operand, array_field_allocator(), "array.deinit.alloc");
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
     let elem_size = try self.element_size_operand_bytes(module, elem_bytes);
     let bytes_synthetic = try self.next_synthetic_value("array.deinit.bytes");
     let bytes = try self.percent(bytes_synthetic);
@@ -872,7 +873,7 @@ fn (self: &var Emitter) write_array_deinit(module: &ir::Module, node: &ir::Instr
     );
     try self.line3(
         "  call void @kizu_array_deinit(ptr %s, ptr %s, i64 %s)",
-        Arg::Str(allocator), Arg::Str(data), Arg::Str(bytes)
+        Arg::Str(allocator.operand), Arg::Str(data), Arg::Str(bytes)
     );
     try self.set_void_value(module, node.result);
     return null;

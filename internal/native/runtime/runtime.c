@@ -19,7 +19,6 @@ typedef struct {
     unsigned char *data;
     int64_t len;
     int64_t cap;
-    void *allocator;
 } KizuArray;
 
 /* The native backend reads these fields itself rather than calling in for every
@@ -29,8 +28,7 @@ typedef struct {
 _Static_assert(offsetof(KizuArray, data) == 0, "KizuArray.data leads the header");
 _Static_assert(offsetof(KizuArray, len) == 8, "KizuArray.len follows data");
 _Static_assert(offsetof(KizuArray, cap) == 16, "KizuArray.cap follows len");
-_Static_assert(offsetof(KizuArray, allocator) == 24, "KizuArray.allocator follows cap");
-_Static_assert(sizeof(KizuArray) == 32, "KizuArray is four words");
+_Static_assert(sizeof(KizuArray) == 24, "KizuArray is three words");
 
 typedef struct {
     unsigned char *ptr;
@@ -283,12 +281,13 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
     return out;
 }
 
-static KizuArray kizu_array_empty(void *allocator);
-_Bool kizu_array_append(void *handle, const void *elem, int64_t elem_size);
-_Bool kizu_array_append_bytes(void *handle, const void *bytes, int64_t length);
+static KizuArray kizu_array_empty(void);
+_Bool kizu_array_append(void *allocator, void *handle, const void *elem, int64_t elem_size);
+_Bool kizu_array_append_bytes(void *allocator, void *handle, const void *bytes, int64_t length);
 _Bool kizu_array_swap(void *handle, int64_t left, int64_t right, int64_t elem_size);
 _Bool kizu_array_truncate(void *handle, int64_t len);
-static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed, int64_t elem_size);
+static _Bool kizu_array_reserve_storage(
+    void *allocator, KizuArray *array, int64_t needed, int64_t elem_size);
 static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size);
 
 static int kizu_runtime_argc = 0;
@@ -439,7 +438,7 @@ static KizuErrorArray kizu_ok_array(KizuArray value) {
 static KizuErrorArray kizu_err_array(int64_t failure) {
     KizuErrorArray out;
     out.ok = 0;
-    out.value = kizu_array_empty(NULL);
+    out.value = kizu_array_empty();
     out.error = failure;
     return out;
 }
@@ -707,6 +706,7 @@ void std__internal__builtin__io_write_stderr(
  * the buffer is truncated back to where it started. */
 static int64_t kizu_read_stream_into(
     FILE *stream,
+    void *allocator,
     KizuString *dst,
     int64_t max,
     int64_t size_hint,
@@ -724,7 +724,7 @@ static int64_t kizu_read_stream_into(
         if (max >= 0 && max + 1 < reserve) {
             reserve = max + 1;
         }
-        if (!kizu_array_reserve_storage(array, start_len + reserve, 1)) {
+        if (!kizu_array_reserve_storage(allocator, array, start_len + reserve, 1)) {
             return oom_failure;
         }
     }
@@ -734,7 +734,7 @@ static int64_t kizu_read_stream_into(
         if (max >= 0 && max + 1 - total < want) {
             want = max + 1 - total;
         }
-        if (!kizu_array_reserve_storage(array, array->len + want, 1)) {
+        if (!kizu_array_reserve_storage(allocator, array, array->len + want, 1)) {
             kizu_array_truncate(array, start_len);
             return oom_failure;
         }
@@ -756,12 +756,13 @@ static int64_t kizu_read_stream_into(
 }
 
 static KizuErrorVoid kizu_std_builtin_io_read_stdin_into_result(
-    void *io, KizuString *dst, int64_t max) {
+    void *io, void *allocator, KizuString *dst, int64_t max) {
     if (kizu_io_is_failing(io)) {
         return kizu_err_void(KIZU_ERR_STD_IO_ERROR_IO_FAILING);
     }
     int64_t failure = kizu_read_stream_into(
         stdin,
+        allocator,
         dst,
         max,
         0,
@@ -775,8 +776,8 @@ static KizuErrorVoid kizu_std_builtin_io_read_stdin_into_result(
 }
 
 void std__internal__builtin__io_read_stdin_into(
-    KizuErrorVoid *out, void *io, KizuString *dst, int64_t max) {
-    *out = kizu_std_builtin_io_read_stdin_into_result(io, dst, max);
+    KizuErrorVoid *out, void *io, void *allocator, KizuString *dst, int64_t max) {
+    *out = kizu_std_builtin_io_read_stdin_into_result(io, allocator, dst, max);
 }
 
 int64_t std__internal__builtin__process_arg_count(void) {
@@ -815,16 +816,19 @@ void std__internal__builtin__process_env(KizuOptSliceU8 *out, const KizuSliceU8 
 }
 
 /* kizu_string_append_bytes appends raw bytes to a String buffer, leaving the
- * buffer as it was when the reservation fails. */
-static int kizu_string_append_bytes(KizuString *dst, const char *text, int64_t length) {
-    return kizu_array_append_bytes(dst, text, length) ? 1 : 0;
+ * buffer as it was when the reservation fails. The buffer is the caller's, so
+ * the allocator that grows it is the caller's too (ADR-0132). */
+static int kizu_string_append_bytes(
+    void *allocator, KizuString *dst, const char *text, int64_t length) {
+    return kizu_array_append_bytes(allocator, dst, text, length) ? 1 : 0;
 }
 
 /* The path of the running executable as the kernel reports it: Linux keeps it
  * in /proc/self/exe and macOS answers _NSGetExecutablePath. Neither reads a
  * file the program named, so this is process identity like argv, not I/O. A
  * path that does not fit is reported rather than truncated. */
-static KizuErrorVoid kizu_std_builtin_process_executable_path_into_result(KizuString *dst) {
+static KizuErrorVoid kizu_std_builtin_process_executable_path_into_result(
+    void *allocator, KizuString *dst) {
     char buffer[4096];
     int64_t length = 0;
 #if defined(__APPLE__)
@@ -840,14 +844,15 @@ static KizuErrorVoid kizu_std_builtin_process_executable_path_into_result(KizuSt
     }
     length = (int64_t)written;
 #endif
-    if (!kizu_string_append_bytes(dst, buffer, length)) {
+    if (!kizu_string_append_bytes(allocator, dst, buffer, length)) {
         return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_OUT_OF_MEMORY);
     }
     return kizu_ok_void();
 }
 
-void std__internal__builtin__process_executable_path_into(KizuErrorVoid *out, KizuString *dst) {
-    *out = kizu_std_builtin_process_executable_path_into_result(dst);
+void std__internal__builtin__process_executable_path_into(
+    KizuErrorVoid *out, void *allocator, KizuString *dst) {
+    *out = kizu_std_builtin_process_executable_path_into_result(allocator, dst);
 }
 
 int64_t std__internal__builtin__process_monotonic_millis(void) {
@@ -933,7 +938,7 @@ void std__internal__builtin__process_spawn_wait8(
 }
 
 static KizuErrorVoid kizu_std_builtin_fs_read_file_into_result(
-    void *io, KizuSliceU8 path, KizuString *dst, int64_t max) {
+    void *io, void *allocator, KizuSliceU8 path, KizuString *dst, int64_t max) {
     if (kizu_io_is_failing(io)) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_IO_FAILING);
     }
@@ -954,6 +959,7 @@ static KizuErrorVoid kizu_std_builtin_fs_read_file_into_result(
     }
     int64_t failure = kizu_read_stream_into(
         file,
+        allocator,
         dst,
         max,
         size_hint,
@@ -968,8 +974,13 @@ static KizuErrorVoid kizu_std_builtin_fs_read_file_into_result(
 }
 
 void std__internal__builtin__fs_read_file_into(
-    KizuErrorVoid *out, void *io, const KizuSliceU8 *path, KizuString *dst, int64_t max) {
-    *out = kizu_std_builtin_fs_read_file_into_result(io, *path, dst, max);
+    KizuErrorVoid *out,
+    void *io,
+    void *allocator,
+    const KizuSliceU8 *path,
+    KizuString *dst,
+    int64_t max) {
+    *out = kizu_std_builtin_fs_read_file_into_result(io, allocator, *path, dst, max);
 }
 
 /* realpath resolves symlinks and `.` / `..` against the real file system, so
@@ -977,6 +988,7 @@ void std__internal__builtin__fs_read_file_into(
  * allocate the answer, which keeps PATH_MAX out of this. */
 static KizuErrorVoid kizu_std_builtin_fs_real_path_into_result(
     void *io,
+    void *allocator,
     KizuSliceU8 path,
     KizuString *dst
 ) {
@@ -993,7 +1005,7 @@ static KizuErrorVoid kizu_std_builtin_fs_real_path_into_result(
     if (!resolved) {
         return kizu_err_void(kizu_errno_failure(code));
     }
-    int appended = kizu_string_append_bytes(dst, resolved, (int64_t)strlen(resolved));
+    int appended = kizu_string_append_bytes(allocator, dst, resolved, (int64_t)strlen(resolved));
     free(resolved);
     if (!appended) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
@@ -1004,10 +1016,11 @@ static KizuErrorVoid kizu_std_builtin_fs_real_path_into_result(
 void std__internal__builtin__fs_real_path_into(
     KizuErrorVoid *out,
     void *io,
+    void *allocator,
     const KizuSliceU8 *path,
     KizuString *dst
 ) {
-    *out = kizu_std_builtin_fs_real_path_into_result(io, *path, dst);
+    *out = kizu_std_builtin_fs_real_path_into_result(io, allocator, *path, dst);
 }
 
 static KizuErrorVoid kizu_std_builtin_fs_write_file_result(
@@ -1174,7 +1187,7 @@ static KizuErrorArray kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 
         free(cpath);
         return kizu_err_array(kizu_errno_failure(code));
     }
-    KizuArray array = kizu_array_empty(NULL);
+    KizuArray array = kizu_array_empty();
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
@@ -1190,7 +1203,7 @@ static KizuErrorArray kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 
             item.is_dir = stat(entry_path, &st) == 0 && S_ISDIR(st.st_mode);
             free(entry_path);
         }
-        if (!kizu_array_append(&array, &item, (int64_t)sizeof(KizuFsDirEntry))) {
+        if (!kizu_array_append(NULL, &array, &item, (int64_t)sizeof(KizuFsDirEntry))) {
             closedir(dir);
             free(cpath);
             return kizu_err_array(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
@@ -1289,14 +1302,14 @@ _Bool kizu_bytes_equal(
 
 /* An Array with nothing in it. The header is the value, so an empty array
  * owns no allocation and costs nothing to make; the first append is what
- * asks the allocator for storage. The element size is not in the header: the
- * compiler knows T at every call and passes it in. */
-static KizuArray kizu_array_empty(void *allocator) {
+ * asks the allocator for storage. Neither the element size nor the allocator
+ * is in the header: the compiler knows T at every call and the source names
+ * the allocator at every call that needs one, so both are passed in. */
+static KizuArray kizu_array_empty(void) {
     KizuArray array;
     array.data = NULL;
     array.len = 0;
     array.cap = 0;
-    array.allocator = allocator;
     return array;
 }
 
@@ -1441,7 +1454,8 @@ static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size) {
     return minimum + half + init;
 }
 
-static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed, int64_t elem_size) {
+static _Bool kizu_array_reserve_storage(
+    void *allocator, KizuArray *array, int64_t needed, int64_t elem_size) {
     if (!array || needed < 0) {
         return 0;
     }
@@ -1453,7 +1467,7 @@ static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed, int64_
         return 0;
     }
     unsigned char *data = (unsigned char *)kizu_rt_realloc(
-        array->allocator, array->data, array->cap * elem_size, next * elem_size);
+        allocator, array->data, array->cap * elem_size, next * elem_size);
     if (!data) {
         return 0;
     }
@@ -1462,9 +1476,10 @@ static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed, int64_
     return 1;
 }
 
-_Bool kizu_array_append(void *handle, const void *elem, int64_t elem_size) {
+_Bool kizu_array_append(void *allocator, void *handle, const void *elem, int64_t elem_size) {
     KizuArray *array = (KizuArray *)handle;
-    if (!array || !elem || !kizu_array_reserve_storage(array, array->len + 1, elem_size)) {
+    if (!array || !elem ||
+        !kizu_array_reserve_storage(allocator, array, array->len + 1, elem_size)) {
         return 0;
     }
     memcpy(array->data + array->len * elem_size, elem, (size_t)elem_size);
@@ -1476,7 +1491,8 @@ _Bool kizu_array_append(void *handle, const void *elem, int64_t elem_size) {
  * capacity check and one copy. Reaching the same place one byte at a time pays
  * a check, a store and a length update per byte, and the text a compiler emits
  * is built out of runs, not bytes. */
-_Bool kizu_array_append_bytes(void *handle, const void *bytes, int64_t length) {
+_Bool kizu_array_append_bytes(
+    void *allocator, void *handle, const void *bytes, int64_t length) {
     KizuArray *array = (KizuArray *)handle;
     if (!array || length < 0 || (length > 0 && !bytes)) {
         return 0;
@@ -1484,7 +1500,7 @@ _Bool kizu_array_append_bytes(void *handle, const void *bytes, int64_t length) {
     if (length > INT64_MAX - array->len) {
         return 0;
     }
-    if (!kizu_array_reserve_storage(array, array->len + length, 1)) {
+    if (!kizu_array_reserve_storage(allocator, array, array->len + length, 1)) {
         return 0;
     }
     memcpy(array->data + array->len, bytes, (size_t)length);
@@ -1492,12 +1508,13 @@ _Bool kizu_array_append_bytes(void *handle, const void *bytes, int64_t length) {
     return 1;
 }
 
-_Bool kizu_array_reserve(void *handle, int64_t additional, int64_t elem_size) {
+_Bool kizu_array_reserve(
+    void *allocator, void *handle, int64_t additional, int64_t elem_size) {
     KizuArray *array = (KizuArray *)handle;
     if (!array || additional < 0 || additional > INT64_MAX - array->len) {
         return 0;
     }
-    return kizu_array_reserve_storage(array, array->len + additional, elem_size);
+    return kizu_array_reserve_storage(allocator, array, array->len + additional, elem_size);
 }
 
 void *kizu_array_pop(void *handle, int64_t elem_size) {

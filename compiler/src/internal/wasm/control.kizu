@@ -124,7 +124,7 @@ fn (self: &Emitter) fail_op(
 ) -> !diagnostic::Diagnostic {
     var text = string::new(self.allocator);
     errdefer text.deinit(self.allocator);
-    try ir::append_op(&var text, &module.names, node.op, node.operand);
+    try ir::append_op(self.allocator, &var text, &module.names, node.op, node.operand);
     return self.fail(format, Arg::Owned(move text));
 }
 
@@ -180,7 +180,7 @@ fn (self: &var Emitter) constant_expr(
     var out = try string::from_bytes(self.allocator, prefix);
     errdefer out.deinit(self.allocator);
     try module.names.append_to(&var out, node.immediate);
-    try out.append_bytes(")");
+    try out.append_bytes(self.allocator, ")");
     return self.names.intern_owned(move out);
 }
 
@@ -188,8 +188,8 @@ fn (self: &var Emitter) constant_expr(
 fn (self: &var Emitter) offset_expr(offset: i64) -> !ir::Name {
     var out = try string::from_bytes(self.allocator, "(i32.const ");
     errdefer out.deinit(self.allocator);
-    try fmt::append_i64(&var out, offset);
-    try out.append_bytes(")");
+    try fmt::append_i64(self.allocator, &var out, offset);
+    try out.append_bytes(self.allocator, ")");
     return self.names.intern_owned(move out);
 }
 
@@ -234,8 +234,8 @@ fn (self: &var Emitter) write_func_addr(
         return try self.fail("wasm error: `%s` has no table entry", Arg::Str(node.operand));
     var text = try string::from_bytes(self.allocator, "(i32.const ");
     errdefer text.deinit(self.allocator);
-    try fmt::append_i64(&var text, position);
-    try text.append_byte(cast<u8>(41));
+    try fmt::append_i64(self.allocator, &var text, position);
+    try text.append_byte(self.allocator, cast<u8>(41));
     let expr = try self.names.intern_owned(move text);
     try self.set_value(module, node.result, expr, 0);
     return null;
@@ -253,19 +253,19 @@ fn (self: &var Emitter) write_indirect_call(
     let signature = try self.intern_signature(module, node);
     var call = try string::from_bytes(self.allocator, "(call_indirect (type $sig");
     errdefer call.deinit(self.allocator);
-    try fmt::append_i64(&var call, signature);
-    try call.append_bytes(")");
+    try fmt::append_i64(self.allocator, &var call, signature);
+    try call.append_bytes(self.allocator, ")");
     var index = 1;
     while node.args.get(index) |arg| {
         index = index + 1;
-        try call.append_bytes(" ");
+        try call.append_bytes(self.allocator, " ");
         let info = try self.value_of(module, arg);
         try self.names.append_to(&var call, info.expr);
     }
-    try call.append_bytes(" ");
+    try call.append_bytes(self.allocator, " ");
     let callee = try self.value_of(module, callee_value);
     try self.names.append_to(&var call, callee.expr);
-    try call.append_byte(cast<u8>(41));
+    try call.append_byte(self.allocator, cast<u8>(41));
     if module.names.is(node.result.type_name, "void") {
         try self.line1("            %s", Arg::Owned(move call));
         return null;
@@ -290,17 +290,17 @@ fn (self: &var Emitter) write_call(
     var call = try string::from_bytes(self.allocator, "(call $");
     errdefer call.deinit(self.allocator);
     try module.names.append_to(&var call, node.operand);
-    try call.append_bytes(" ");
+    try call.append_bytes(self.allocator, " ");
     var index = 0;
     while node.args.get(index) |arg| {
         if index > 0 {
-            try call.append_bytes(" ");
+            try call.append_bytes(self.allocator, " ");
         }
         index = index + 1;
         let info = try self.value_of(module, arg);
         try self.names.append_to(&var call, info.expr);
     }
-    try call.append_bytes(")");
+    try call.append_bytes(self.allocator, ")");
     if module.names.is(node.result.type_name, "void") {
         try self.line1("            %s", Arg::Owned(move call));
         return null;

@@ -11,6 +11,9 @@ pub enum ArgKind {
     I64,
     Io,
     StringOut,
+    // The allocator a primitive grows a destination buffer from. A String
+    // keeps none of its own (ADR-0132).
+    Allocator,
 }
 
 /// Returns the type spelling represented by kind.
@@ -20,6 +23,7 @@ pub fn arg_kind_spelling(kind: ArgKind) -> []u8 {
         I64 => "i64",
         Io => "Io",
         StringOut => "&var std::string::String",
+        Allocator => "Allocator",
     };
 }
 
@@ -28,11 +32,11 @@ enum CoreArgs {
     Bytes,
     I64,
     IoBytes,
-    IoBytesStringOut,
-    IoBytesStringOutI64,
-    IoStringOutI64,
+    IoAllocBytesStringOut,
+    IoAllocBytesStringOutI64,
+    IoAllocStringOutI64,
     SpawnWait8,
-    StringOut,
+    AllocStringOut,
 }
 
 /// Describes one simple std::internal::builtin call.
@@ -48,11 +52,11 @@ pub fn (self: &CoreSignature) args_len() -> i64 {
         Bytes => 1,
         I64 => 1,
         IoBytes => 2,
-        IoBytesStringOut => 3,
-        IoBytesStringOutI64 => 4,
-        IoStringOutI64 => 3,
+        IoAllocBytesStringOut => 4,
+        IoAllocBytesStringOutI64 => 5,
+        IoAllocStringOutI64 => 4,
         SpawnWait8 => 9,
-        StringOut => 1,
+        AllocStringOut => 2,
     };
 }
 
@@ -82,47 +86,59 @@ pub fn (self: &CoreSignature) arg_at(index: i64) -> ?ArgKind {
         }
         return null;
     }
-    if self.args == CoreArgs::IoBytesStringOut {
+    if self.args == CoreArgs::IoAllocBytesStringOut {
         if index == 0 {
             return ArgKind::Io;
         }
         if index == 1 {
-            return ArgKind::Bytes;
+            return ArgKind::Allocator;
         }
         if index == 2 {
+            return ArgKind::Bytes;
+        }
+        if index == 3 {
             return ArgKind::StringOut;
         }
         return null;
     }
-    if self.args == CoreArgs::StringOut {
+    if self.args == CoreArgs::AllocStringOut {
         if index == 0 {
+            return ArgKind::Allocator;
+        }
+        if index == 1 {
             return ArgKind::StringOut;
         }
         return null;
     }
-    if self.args == CoreArgs::IoBytesStringOutI64 {
+    if self.args == CoreArgs::IoAllocBytesStringOutI64 {
         if index == 0 {
             return ArgKind::Io;
         }
         if index == 1 {
+            return ArgKind::Allocator;
+        }
+        if index == 2 {
             return ArgKind::Bytes;
+        }
+        if index == 3 {
+            return ArgKind::StringOut;
+        }
+        if index == 4 {
+            return ArgKind::I64;
+        }
+        return null;
+    }
+    if self.args == CoreArgs::IoAllocStringOutI64 {
+        if index == 0 {
+            return ArgKind::Io;
+        }
+        if index == 1 {
+            return ArgKind::Allocator;
         }
         if index == 2 {
             return ArgKind::StringOut;
         }
         if index == 3 {
-            return ArgKind::I64;
-        }
-        return null;
-    }
-    if self.args == CoreArgs::IoStringOutI64 {
-        if index == 0 {
-            return ArgKind::Io;
-        }
-        if index == 1 {
-            return ArgKind::StringOut;
-        }
-        if index == 2 {
             return ArgKind::I64;
         }
         return null;
@@ -160,19 +176,19 @@ pub fn simple_core_signature(name: []u8) -> ?CoreSignature {
     }
     if mem::equal_bytes(name, "std::internal::builtin::fs_read_file_into") {
         return signature(
-            CoreArgs::IoBytesStringOutI64,
+            CoreArgs::IoAllocBytesStringOutI64,
             "std::fs::Error!void"
         );
     }
     if mem::equal_bytes(name, "std::internal::builtin::fs_real_path_into") {
-        return signature(CoreArgs::IoBytesStringOut, "std::fs::Error!void");
+        return signature(CoreArgs::IoAllocBytesStringOut, "std::fs::Error!void");
     }
     if mem::equal_bytes(name, "std::internal::builtin::process_executable_path_into") {
-        return signature(CoreArgs::StringOut, "std::process::Error!void");
+        return signature(CoreArgs::AllocStringOut, "std::process::Error!void");
     }
     if mem::equal_bytes(name, "std::internal::builtin::io_read_stdin_into") {
         return signature(
-            CoreArgs::IoStringOutI64,
+            CoreArgs::IoAllocStringOutI64,
             "std::io::Error!void"
         );
     }
@@ -239,7 +255,7 @@ pub fn builtin_names(
     while builtin_name(index) |name| {
         let owned = try string::from_bytes(allocator, name);
         errdefer owned.deinit(allocator);
-        try names.append(move owned);
+        try names.append(allocator, move owned);
         index = index + 1;
     }
     return move names;

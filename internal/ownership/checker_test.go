@@ -127,7 +127,7 @@ func TestCheckAcceptsFixedBufferAllocator(t *testing.T) {
 	source := `fn fill(allocator: Allocator) -> !std::array::Array<i64> {
     var values = std::array::new<i64>(allocator);
     errdefer values.deinit(allocator);
-    try values.append(7);
+    try values.append(allocator, 7);
     return move values;
 }
 fn main() -> !void {
@@ -136,7 +136,7 @@ fn main() -> !void {
     let alloc = std::mem::fixed_buffer(scratch);
     var values = try fill(alloc);
     defer values.deinit(alloc);
-    try values.append(1);
+    try values.append(alloc, 1);
     return;
 }`
 	if err := checkSource(source); err != nil {
@@ -179,7 +179,7 @@ fn main(allocator: Allocator) -> !void {
     let alloc = leak();
     var values = std::array::new<i64>(alloc);
     defer values.deinit(allocator);
-    try values.append(1);
+    try values.append(allocator, 1);
     return;
 }`,
 			want: "returns an allocator tied to local state and cannot escape",
@@ -194,7 +194,7 @@ fn main(allocator: Allocator) -> !void {
     defer values.deinit(alloc);
     let sneak = buf.as_mut_bytes();
     sneak[0] = cast<u8>(1);
-    try values.append(1);
+    try values.append(alloc, 1);
     return;
 }`,
 			want: "value `buf` cannot be borrowed while mutably borrowed",
@@ -409,7 +409,7 @@ fn main() -> !void {
     let bytes = text.as_bytes();
     let suffix = tail(bytes);
     if try split(suffix) |parts| {
-        try text.append_bytes("d");
+        try text.append_bytes(allocator, "d");
         print(parts.left);
     }
     return;
@@ -1553,9 +1553,9 @@ func TestCheckErrDeferRetiresAtMove(t *testing.T) {
     errdefer parent.deinit(allocator);
     let child = std::string::new(allocator);
     errdefer child.deinit(allocator);
-    try child.append_byte(cast<u8>(97));
-    try parent.append(move child);
-    try parent.reserve(1);
+    try child.append_byte(allocator, cast<u8>(97));
+    try parent.append(allocator, move child);
+    try parent.reserve(allocator, 1);
     return move parent;
 }`
 	if err := checkSource(source); err != nil {
@@ -1573,9 +1573,9 @@ func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
     errdefer parent.deinit(allocator);
     let child = std::string::new(allocator);
     errdefer child.deinit(allocator);
-    try child.append_byte(cast<u8>(97));
-    try parent.append(move child);
-    try parent.reserve(1);
+    try child.append_byte(allocator, cast<u8>(97));
+    try parent.append(allocator, move child);
+    try parent.reserve(allocator, 1);
     return move parent;
 }`
 	program, err := project.LoadSource("", withStdImport(source))
@@ -1614,7 +1614,7 @@ fn main() -> !void {
     var pair = Pair { left: std::string::new(allocator), right: std::string::new(allocator) };
     defer pair.deinit(allocator);
     let seen = pair.left.as_bytes();
-    try pair.right.append_bytes("other");
+    try pair.right.append_bytes(allocator, "other");
     print(seen);
     return;
 }`
@@ -1637,7 +1637,7 @@ fn main() -> !void {
     var holder = Holder { name: std::string::new(allocator) };
     defer holder.deinit(allocator);
     let seen = holder.name.as_bytes();
-    try holder.name.append_bytes("grow");
+    try holder.name.append_bytes(allocator, "grow");
     print(seen);
     return;
 }`
@@ -1668,10 +1668,10 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
     errdefer parent.deinit(allocator);
     var name = std::string::new(allocator);
     errdefer name.deinit(allocator);
-    try name.append_byte(cast<u8>(97));
-    try parent.append(move name);
+    try name.append_byte(allocator, cast<u8>(97));
+    try parent.append(allocator, move name);
     name = std::string::new(allocator);
-    try parent.append(name);
+    try parent.append(allocator, name);
     return parent;
 }`,
 			want: "`errdefer` cleanup receiver `name` cannot be assigned over",
@@ -1682,7 +1682,7 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
     let allocator = std::mem::page_allocator();
     var name = std::string::new(allocator);
     defer name.deinit(allocator);
-    try name.append_byte(cast<u8>(97));
+    try name.append_byte(allocator, cast<u8>(97));
     name = std::string::new(allocator);
     print(name.len());
     return;
@@ -1701,13 +1701,13 @@ func TestCheckAllowsSecondOwnerUnderItsOwnName(t *testing.T) {
     errdefer parent.deinit(allocator);
     var first = std::string::new(allocator);
     errdefer first.deinit(allocator);
-    try first.append_byte(cast<u8>(97));
-    try parent.append(move first);
+    try first.append_byte(allocator, cast<u8>(97));
+    try parent.append(allocator, move first);
     var second = std::string::new(allocator);
     errdefer second.deinit(allocator);
-    try second.append_byte(cast<u8>(98));
-    try parent.reserve(1);
-    try parent.append(move second);
+    try second.append_byte(allocator, cast<u8>(98));
+    try parent.reserve(allocator, 1);
+    try parent.append(allocator, move second);
     return move parent;
 }`
 	if err := checkSource(source); err != nil {
@@ -2215,8 +2215,8 @@ func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
     defer parent.deinit(allocator);
     let name = std::string::new(allocator);
     errdefer name.deinit(allocator);
-    try name.append_byte(cast<u8>(97));
-    try parent.append(move name);
+    try name.append_byte(allocator, cast<u8>(97));
+    try parent.append(allocator, move name);
     parent.pop();
     return;
 }`,
@@ -2227,7 +2227,7 @@ func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
 			source: `fn make(allocator: Allocator) -> !std::string::String {
     let name = std::string::new(allocator);
     errdefer name.deinit(allocator);
-    try name.append_byte(cast<u8>(97));
+    try name.append_byte(allocator, cast<u8>(97));
     return move name;
 }
 fn main() -> !void {
@@ -2279,7 +2279,7 @@ func TestCheckAllowsDiscardedNonOwnerExpression(t *testing.T) {
     let allocator = std::mem::page_allocator();
     let values = std::array::new<i64>(allocator);
     defer values.deinit(allocator);
-    try values.append(1);
+    try values.append(allocator, 1);
     values.pop();
     values.len();
     return;

@@ -59,7 +59,7 @@ pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::Str
     if try verify_emitted_text(allocator, text) |failed| {
         return move failed;
     }
-    try out.append_bytes(text);
+    try out.append_bytes(allocator, text);
     return null;
 }
 
@@ -146,12 +146,12 @@ fn append_arg(
 ) -> !void {
     match arg {
         Str(name) => return names.append_to(out, name),
-        Lit(text) => return out.append_bytes(text),
+        Lit(text) => return out.append_bytes(allocator, text),
         Owned(text) => {
             defer text.deinit(allocator);
-            return out.append_string(&text);
+            return out.append_string(allocator, &text);
         },
-        Int(value) => return fmt::append_i64(out, value),
+        Int(value) => return fmt::append_i64(allocator, out, value),
         None => return,
     }
 }
@@ -176,39 +176,39 @@ fn place_arg(
         let byte = format[index];
         if byte == cast<u8>(37) and index + 1 < mem::len(format) {
             if format[index + 1] == cast<u8>(37) {
-                try out.append_bytes(format[run..index + 1]);
+                try out.append_bytes(allocator, format[run..index + 1]);
                 index = index + 2;
                 run = index;
                 continue;
             }
-            try out.append_bytes(format[run..index]);
+            try out.append_bytes(allocator, format[run..index]);
             try append_arg(allocator, out, names, move arg);
             position.* = index + 2;
             return;
         }
         index = index + 1;
     }
-    try out.append_bytes(format[run..index]);
+    try out.append_bytes(allocator, format[run..index]);
     arg.deinit(allocator);
     position.* = index;
     return;
 }
 
 /// Appends the text of format after its last placeholder.
-fn append_format_rest(out: &var string::String, format: []u8, position: i64) -> !void {
+fn append_format_rest(allocator: Allocator, out: &var string::String, format: []u8, position: i64) -> !void {
     var index = position;
     var run = index;
     while index < mem::len(format) {
         let byte = format[index];
         if byte == cast<u8>(37) and index + 1 < mem::len(format) and format[index + 1] == cast<u8>(37) {
-            try out.append_bytes(format[run..index + 1]);
+            try out.append_bytes(allocator, format[run..index + 1]);
             index = index + 2;
             run = index;
             continue;
         }
         index = index + 1;
     }
-    return out.append_bytes(format[run..index]);
+    return out.append_bytes(allocator, format[run..index]);
 }
 
 /// Appends format with its 1 argument placed in order. Each arity has its
@@ -224,7 +224,7 @@ fn format_args1(
     errdefer a.deinit(allocator);
     var position = 0;
     try place_arg(allocator, out, names, format, &var position, move a);
-    return append_format_rest(out, format, position);
+    return append_format_rest(allocator, out, format, position);
 }
 
 /// Appends format with its 2 arguments placed in order. Each arity has its
@@ -243,7 +243,7 @@ fn format_args2(
     var position = 0;
     try place_arg(allocator, out, names, format, &var position, move a);
     try place_arg(allocator, out, names, format, &var position, move b);
-    return append_format_rest(out, format, position);
+    return append_format_rest(allocator, out, format, position);
 }
 
 /// Appends format with its 3 arguments placed in order. Each arity has its
@@ -265,7 +265,7 @@ fn format_args3(
     try place_arg(allocator, out, names, format, &var position, move a);
     try place_arg(allocator, out, names, format, &var position, move b);
     try place_arg(allocator, out, names, format, &var position, move c);
-    return append_format_rest(out, format, position);
+    return append_format_rest(allocator, out, format, position);
 }
 
 /// Appends format with its 4 arguments placed in order. Each arity has its
@@ -290,7 +290,7 @@ fn format_args4(
     try place_arg(allocator, out, names, format, &var position, move b);
     try place_arg(allocator, out, names, format, &var position, move c);
     try place_arg(allocator, out, names, format, &var position, move d);
-    return append_format_rest(out, format, position);
+    return append_format_rest(allocator, out, format, position);
 }
 
 /// Appends format with its 5 arguments placed in order. Each arity has its
@@ -318,7 +318,7 @@ fn format_args5(
     try place_arg(allocator, out, names, format, &var position, move c);
     try place_arg(allocator, out, names, format, &var position, move d);
     try place_arg(allocator, out, names, format, &var position, move e);
-    return append_format_rest(out, format, position);
+    return append_format_rest(allocator, out, format, position);
 }
 
 /// Appends format with its 6 arguments placed in order. Each arity has its
@@ -349,14 +349,14 @@ fn format_args6(
     try place_arg(allocator, out, names, format, &var position, move d);
     try place_arg(allocator, out, names, format, &var position, move e);
     try place_arg(allocator, out, names, format, &var position, move f);
-    return append_format_rest(out, format, position);
+    return append_format_rest(allocator, out, format, position);
 }
 
 /// Writes one line of LLVM text with no interpolation, the Go
 /// `e.out.WriteString("...\n")`.
 fn (self: &var Emitter) line(text: []u8) -> !void {
-    try self.out.append_bytes(text);
-    return self.out.append_byte(cast<u8>(10));
+    try self.out.append_bytes(self.allocator, text);
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes one formatted line, the Go `fmt.Fprintf(&e.out, "...\n", a)`.
@@ -364,7 +364,7 @@ fn (self: &var Emitter) line1(format: []u8, a: Arg) -> !void {
     let allocator = self.allocator;
     let names = &self.names;
     try format_args1(allocator, &var self.out, names, format, move a);
-    return self.out.append_byte(cast<u8>(10));
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes one formatted line with two arguments.
@@ -372,7 +372,7 @@ fn (self: &var Emitter) line2(format: []u8, a: Arg, b: Arg) -> !void {
     let allocator = self.allocator;
     let names = &self.names;
     try format_args2(allocator, &var self.out, names, format, move a, move b);
-    return self.out.append_byte(cast<u8>(10));
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes one formatted line with three arguments.
@@ -380,7 +380,7 @@ fn (self: &var Emitter) line3(format: []u8, a: Arg, b: Arg, c: Arg) -> !void {
     let allocator = self.allocator;
     let names = &self.names;
     try format_args3(allocator, &var self.out, names, format, move a, move b, move c);
-    return self.out.append_byte(cast<u8>(10));
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes one formatted line with four arguments.
@@ -388,7 +388,7 @@ fn (self: &var Emitter) line4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !
     let allocator = self.allocator;
     let names = &self.names;
     try format_args4(allocator, &var self.out, names, format, move a, move b, move c, move d);
-    return self.out.append_byte(cast<u8>(10));
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes one formatted line with five arguments.
@@ -396,7 +396,7 @@ fn (self: &var Emitter) line5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: A
     let allocator = self.allocator;
     let names = &self.names;
     try format_args5(allocator, &var self.out, names, format, move a, move b, move c, move d, move e);
-    return self.out.append_byte(cast<u8>(10));
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes one formatted line with six arguments.
@@ -404,7 +404,7 @@ fn (self: &var Emitter) line6(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: A
     let allocator = self.allocator;
     let names = &self.names;
     try format_args6(allocator, &var self.out, names, format, move a, move b, move c, move d, move e, move f);
-    return self.out.append_byte(cast<u8>(10));
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Builds one text the Go `fmt.Sprintf` way and names it, for a line part
@@ -491,12 +491,12 @@ fn (self: &Emitter) wrap(format: []u8, a: Arg, b: Arg, inner: diagnostic::Diagno
     var out = string::new(self.allocator);
     defer out.deinit(self.allocator);
     try format_args2(self.allocator, &var out, &self.names, format, move a, move b);
-    try out.append_bytes(": ");
+    try out.append_bytes(self.allocator, ": ");
     if inner.category.len() > 0 {
-        try out.append_string(&inner.category);
-        try out.append_bytes(": ");
+        try out.append_string(self.allocator, &inner.category);
+        try out.append_bytes(self.allocator, ": ");
     }
-    try out.append_string(&inner.message);
+    try out.append_string(self.allocator, &inner.message);
     let text = out.as_bytes();
     return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
@@ -504,6 +504,7 @@ fn (self: &Emitter) wrap(format: []u8, a: Arg, b: Arg, inner: diagnostic::Diagno
 /// Names the text of a module name in the emitter's table, so it can be
 /// interpolated and compared with the names the emitter spells.
 fn (self: &var Emitter) own(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let allocator = self.allocator;
     let id = ir::name_id(name);
     if recalled_name(&self.owned_names, id) |cached| {
         return cached;
@@ -511,7 +512,7 @@ fn (self: &var Emitter) own(module: &ir::Module, name: ir::Name) -> !ir::Name {
     let retained = ir::name_text(&module.names, name);
     let bytes = retained.as_bytes();
     let computed = try self.names.intern(bytes);
-    try remember_name(&var self.owned_names, id, computed);
+    try remember_name(allocator, &var self.owned_names, id, computed);
     return computed;
 }
 
@@ -526,9 +527,9 @@ fn recalled_name(table: &array::Array<ir::Name>, id: i64) -> ?ir::Name {
 }
 
 /// Stores one answer at its id, growing the table to reach it.
-fn remember_name(table: &var array::Array<ir::Name>, id: i64, value: ir::Name) -> !void {
+fn remember_name(allocator: Allocator, table: &var array::Array<ir::Name>, id: i64, value: ir::Name) -> !void {
     while table.len() <= id {
-        try table.append(ir::empty_name());
+        try table.append(allocator, ir::empty_name());
     }
     return table.set(id, value);
 }
@@ -753,13 +754,13 @@ fn panic_param_at(params: []u8, position: i64) -> []u8 {
 /// `, `: every entry takes the source line and column last, so any failure
 /// can say where it happened; the runtime omits the position when the line
 /// is zero.
-fn append_panic_params(out: &var string::String, key: PanicKey) -> !void {
+fn append_panic_params(allocator: Allocator, out: &var string::String, key: PanicKey) -> !void {
     let spec = panic_entry(key);
     if mem::len(spec.params) > 0 {
-        try out.append_bytes(spec.params);
-        try out.append_bytes(", ");
+        try out.append_bytes(allocator, spec.params);
+        try out.append_bytes(allocator, ", ");
     }
-    return out.append_bytes("i64, i64");
+    return out.append_bytes(allocator, "i64, i64");
 }
 
 /// Names the source position arguments for a failure call, the Go
@@ -911,13 +912,13 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     defer params.deinit(self.allocator);
     if self.main_returns_int {
         return_type = try self.names.intern("i32");
-        try params.append(try string::from_bytes(self.allocator, "i32 %kizu.argc"));
-        try params.append(try string::from_bytes(self.allocator, "ptr %kizu.argv"));
+        try params.append(self.allocator, try string::from_bytes(self.allocator, "i32 %kizu.argc"));
+        try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr %kizu.argv"));
     } else {
         var index = 0;
         while node.params.get(index) |param| {
             index = index + 1;
-            try params.append(try self.function_param_abi(module, param));
+            try params.append(self.allocator, try self.function_param_abi(module, param));
             let operand = try self.local_name(module, param.name);
             try self.set_value(module, param.value(), operand);
         }
@@ -947,9 +948,9 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
         return try self.wrap("llvm error: function `%s`", Arg::Str(fn_name), Arg::None, move failed);
     }
     try self.out.truncate(body_start);
-    try self.out.append_string(&hoisted);
+    try self.out.append_string(self.allocator, &hoisted);
     try self.line("}");
-    try self.out.append_byte(cast<u8>(10));
+    try self.out.append_byte(self.allocator, cast<u8>(10));
     self.main_returns_int = false;
     self.current_return = ir::empty_name();
     self.current_block = ir::empty_name();
@@ -982,7 +983,7 @@ fn (self: &var Emitter) function_param_abi(module: &ir::Module, param: ir::Param
         allocator, &var self.entry_param_loads, names, "  %s = load %s, ptr %s",
         Arg::Str(param_name), Arg::Str(param_type), Arg::Str(addr_name)
     );
-    try self.entry_param_loads.append_byte(cast<u8>(10));
+    try self.entry_param_loads.append_byte(self.allocator, cast<u8>(10));
     return self.sprint2("ptr byval(%s) %s", Arg::Str(param_type), Arg::Str(addr_name));
 }
 
@@ -1179,7 +1180,7 @@ fn (self: &var Emitter) write_block(module: &ir::Module, block: ir::Block) -> !?
     try self.line1("%s:", Arg::Str(label));
     self.current_block = node.name;
     if !self.wrote_param_loads {
-        try self.out.append_string(&self.entry_param_loads);
+        try self.out.append_string(self.allocator, &self.entry_param_loads);
         self.wrote_param_loads = true;
     }
     if self.main_returns_int and module.names.is(node.name, "entry") {
@@ -1305,7 +1306,7 @@ fn (self: &var Emitter) write_runtime_instr(module: &ir::Module, node: &ir::Inst
 fn (self: &var Emitter) op_name(module: &ir::Module, node: &ir::InstrNode) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
-    try ir::append_op(&var out, &module.names, node.op, node.operand);
+    try ir::append_op(self.allocator, &var out, &module.names, node.op, node.operand);
     return self.names.intern_owned(move out);
 }
 
@@ -1322,9 +1323,9 @@ fn (self: &var Emitter) write_cleanup(module: &ir::Module, cleanup: ir::Cleanup)
         cleanup.op, cleanup.operand, ir::empty_name()
     );
     defer instr.deinit(self.allocator);
-    try instr.args.append(cleanup.arg);
+    try instr.args.append(self.allocator, cleanup.arg);
     if !ir::is_empty(cleanup.allocator.name) {
-        try instr.args.append(cleanup.allocator);
+        try instr.args.append(self.allocator, cleanup.allocator);
     }
     return self.write_instr(module, &instr);
 }
@@ -1420,7 +1421,7 @@ fn (self: &var Emitter) set_block_exit_label(block: ir::Name, label: ir::Name) -
     let id = ir::name_id(block);
     let stale = ExitLabel { label: ir::empty_name(), generation: -1 };
     while self.block_exit_label.len() <= id {
-        try self.block_exit_label.append(stale);
+        try self.block_exit_label.append(self.allocator, stale);
     }
     return self.block_exit_label.set(id, ExitLabel { label: label, generation: self.generation });
 }
@@ -1449,17 +1450,17 @@ fn (self: &var Emitter) helper_label_bytes(base: []u8, suffix: []u8) -> !ir::Nam
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
     if mem::starts_with(base, "%kizu.") {
-        try out.append_bytes(base[1..mem::len(base)]);
+        try out.append_bytes(self.allocator, base[1..mem::len(base)]);
     } else {
         if mem::starts_with(base, "%") {
-            try out.append_bytes("kizu.");
-            try out.append_bytes(base[1..mem::len(base)]);
+            try out.append_bytes(self.allocator, "kizu.");
+            try out.append_bytes(self.allocator, base[1..mem::len(base)]);
         } else {
-            try out.append_bytes(base);
+            try out.append_bytes(self.allocator, base);
         }
     }
-    try out.append_byte(cast<u8>(46));
-    try out.append_bytes(suffix);
+    try out.append_byte(self.allocator, cast<u8>(46));
+    try out.append_bytes(self.allocator, suffix);
     return self.names.intern_owned(move out);
 }
 
@@ -1589,7 +1590,7 @@ fn (self: &var Emitter) set_value(module: &ir::Module, result: ir::Value, operan
         typ: ir::empty_name(), operand: ir::empty_name(), generation: -1
     };
     while self.values.len() <= id {
-        try self.values.append(stale);
+        try self.values.append(self.allocator, stale);
     }
     return self.values.set(id, ValueInfo { typ: typ_name, operand: operand, generation: self.generation });
 }
@@ -1666,7 +1667,7 @@ fn (self: &var Emitter) write_slice_parts(prefix: ir::Name, slice_operand: ir::N
 fn (self: &var Emitter) write_static_string_global(name: ir::Name, value: []u8) -> !void {
     var escaped = string::new(self.allocator);
     errdefer escaped.deinit(self.allocator);
-    try append_escaped_string(&var escaped, value);
+    try append_escaped_string(self.allocator, &var escaped, value);
     let format =
         \\%s = private unnamed_addr constant [%d x i8] c"%s\00"
     ;
@@ -1763,7 +1764,7 @@ fn (self: &var Emitter) write_null_failure(
     let null_name = try self.percent(synthetic);
     var fail_suffix = try string::from_bytes(self.allocator, prefix);
     defer fail_suffix.deinit(self.allocator);
-    try fail_suffix.append_bytes(".null");
+    try fail_suffix.append_bytes(self.allocator, ".null");
     let fail_suffix_bytes = fail_suffix.as_bytes();
     let fail_label = try self.helper_label_local(ptr_name, fail_suffix_bytes);
     let ok_label = try self.helper_label_local(ptr_name, "ok");
@@ -1784,13 +1785,13 @@ fn (self: &var Emitter) write_panic_call(node: &ir::InstrNode, key: PanicKey, ar
     while args.get(index) |arg| {
         var part = try string::from_bytes(self.allocator, panic_param_at(spec.params, index));
         errdefer part.deinit(self.allocator);
-        try part.append_bytes(" ");
+        try part.append_bytes(self.allocator, " ");
         try self.names.append_to(&var part, arg);
-        try typed.append(move part);
+        try typed.append(self.allocator, move part);
         index = index + 1;
     }
     let position = try self.panic_position(node.span);
-    try typed.append(try self.names.copy(position));
+    try typed.append(self.allocator, try self.names.copy(position));
     let joined = try string::join(self.allocator, &typed, ", ");
     try self.line2("  call void @%s(%s)", Arg::Lit(spec.entry), Arg::Owned(move joined));
     return self.line("  unreachable");
@@ -1839,15 +1840,15 @@ struct ResultLabels {
 fn (self: &var Emitter) array_result_labels(module: &ir::Module, result: ir::Name, prefix: []u8) -> !ResultLabels {
     var fail_suffix = try string::from_bytes(self.allocator, prefix);
     defer fail_suffix.deinit(self.allocator);
-    try fail_suffix.append_bytes(".fail");
+    try fail_suffix.append_bytes(self.allocator, ".fail");
     let fail_bytes = fail_suffix.as_bytes();
     var ok_suffix = try string::from_bytes(self.allocator, prefix);
     defer ok_suffix.deinit(self.allocator);
-    try ok_suffix.append_bytes(".ok");
+    try ok_suffix.append_bytes(self.allocator, ".ok");
     let ok_bytes = ok_suffix.as_bytes();
     var join_suffix = try string::from_bytes(self.allocator, prefix);
     defer join_suffix.deinit(self.allocator);
-    try join_suffix.append_bytes(".join");
+    try join_suffix.append_bytes(self.allocator, ".join");
     let join_bytes = join_suffix.as_bytes();
     return ResultLabels {
         fail: try self.helper_label(module, result, fail_bytes),

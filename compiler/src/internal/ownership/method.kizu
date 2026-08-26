@@ -807,12 +807,22 @@ fn (self: &var Checker) check_owned_string_method(
     if try self.check_container_method_access(tree, self.common.string_name, str_value, method) |failed| {
         return move failed;
     }
+    // A growth names the allocator its storage comes from first: a String
+    // keeps none of its own (ADR-0132). `truncate` neither grows nor frees.
     if self.names.is(method, "append_bytes") or self.names.is(method, "append_byte") or
-        self.names.is(method, "reserve") or self.names.is(method, "truncate") {
-        return self.check_string_append_or_reserve(tree, env, method, args, out);
-    }
-    if self.names.is(method, "append_string") {
-        return self.check_string_source_arg(tree, env, method, args, out);
+        self.names.is(method, "reserve") or self.names.is(method, "truncate") or
+        self.names.is(method, "append_string") {
+        var rest = args;
+        if !self.names.is(method, "truncate") {
+            if try self.read_string_grow_allocator(tree, env, method, args) |failed| {
+                return move failed;
+            }
+            rest = try self.rest_args(tree, args, 1);
+        }
+        if self.names.is(method, "append_string") {
+            return self.check_string_source_arg(tree, env, method, rest, out);
+        }
+        return self.check_string_append_or_reserve(tree, env, method, rest, out);
     }
     if self.names.is(method, "len") or self.names.is(method, "capacity") {
         if try self.check_string_no_args(tree, method, args) |failed| {
@@ -867,6 +877,34 @@ fn (self: &var Checker) check_string_append_or_reserve(
         return self.check_string_byte_arg(tree, env, method, args, out);
     }
     return self.check_string_reserve_arg(tree, env, method, args, out);
+}
+
+/// Reads the leading Allocator a String growth names.
+fn (self: &var Checker) read_string_grow_allocator(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 2 {
+        return try self.error2(
+            tree, ast::zero_span(), "string error: `String.%s` expects 2 args, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error2(
+            tree, ast::zero_span(), "string error: `String.%s` expects Allocator, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    return null;
 }
 
 /// Validates no-argument String methods, the Go `checkStringNoArgs`.

@@ -130,8 +130,8 @@ fn block_index(allocator: Allocator, module: &Module, function: Function) -> !Bl
         let retained = name_text(&module.names, name);
         let bytes = retained.as_bytes();
         try out.at.insert(bytes, index);
-        try out.names.append(name);
-        try out.handles.append(block);
+        try out.names.append(allocator, name);
+        try out.handles.append(allocator, block);
         index = index + 1;
     }
     return move out;
@@ -195,8 +195,8 @@ fn (self: &Verifier) verify_call(module: &Module, node: &InstrNode, callee: Name
             var position = try string::from_bytes(self.allocator, "call ");
             errdefer position.deinit(self.allocator);
             try module.names.append_to(&var position, callee);
-            try position.append_bytes(" argument ");
-            try fmt::append_i64(&var position, index);
+            try position.append_bytes(self.allocator, " argument ");
+            try fmt::append_i64(self.allocator, &var position, index);
             return try self.fail(module, move position, param.type_name, got.type_name);
         }
         index = index + 1;
@@ -274,7 +274,7 @@ fn (self: &Verifier) struct_literal(module: &Module, node: &InstrNode) -> !?diag
                     var position = string::new(self.allocator);
                     errdefer position.deinit(self.allocator);
                     try module.names.append_to(&var position, node.result.type_name);
-                    try position.append_bytes(".");
+                    try position.append_bytes(self.allocator, ".");
                     try module.names.append_to(&var position, field.name);
                     return try self.fail(module, move position, declared.type_name, field.value.type_name);
                 }
@@ -296,9 +296,9 @@ fn (self: &Verifier) union_payload(module: &Module, node: &InstrNode) -> !?diagn
         var position = string::new(self.allocator);
         errdefer position.deinit(self.allocator);
         try module.names.append_to(&var position, node.result.type_name);
-        try position.append_bytes("::");
+        try position.append_bytes(self.allocator, "::");
         try module.names.append_to(&var position, variant.name);
-        try position.append_bytes(" payload");
+        try position.append_bytes(self.allocator, " payload");
         return try self.fail(module, move position, variant.payload, arg.type_name);
     }
     return null;
@@ -459,14 +459,14 @@ fn (self: &Verifier) fail_text(
     var out = try string::from_bytes(self.allocator, "ir verify error: ");
     defer out.deinit(self.allocator);
     try module.names.append_to(&var out, self.fn_name);
-    try out.append_bytes(": ");
-    try out.append_string(&position);
-    try out.append_bytes(" in block ");
+    try out.append_bytes(self.allocator, ": ");
+    try out.append_string(self.allocator, &position);
+    try out.append_bytes(self.allocator, " in block ");
     try module.names.append_to(&var out, self.block_name);
-    try out.append_bytes(" is ");
-    try out.append_string(got);
-    try out.append_bytes(", declared ");
-    try out.append_string(want);
+    try out.append_bytes(self.allocator, " is ");
+    try out.append_string(self.allocator, got);
+    try out.append_bytes(self.allocator, ", declared ");
+    try out.append_string(self.allocator, want);
     let text = out.as_bytes();
     return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
@@ -490,37 +490,37 @@ fn (self: &Verifier) failure(
     var out = try string::from_bytes(self.allocator, "ir verify error: ");
     defer out.deinit(self.allocator);
     try module.names.append_to(&var out, self.fn_name);
-    try out.append_bytes(": ");
+    try out.append_bytes(self.allocator, ": ");
     var used = 0;
     var index = 0;
     while index < mem::len(format) {
         let byte = format[index];
         if byte == cast<u8>(37) and index + 1 < mem::len(format) {
             if used == 0 {
-                try append_verify_arg(&var out, module, a);
+                try append_verify_arg(self.allocator, &var out, module, a);
             }
             if used == 1 {
-                try append_verify_arg(&var out, module, b);
+                try append_verify_arg(self.allocator, &var out, module, b);
             }
             if used == 2 {
-                try append_verify_arg(&var out, module, c);
+                try append_verify_arg(self.allocator, &var out, module, c);
             }
             if used == 3 {
-                try append_verify_arg(&var out, module, d);
+                try append_verify_arg(self.allocator, &var out, module, d);
             }
             if used == 4 {
-                try append_verify_arg(&var out, module, e);
+                try append_verify_arg(self.allocator, &var out, module, e);
             }
             if used == 5 {
-                try append_verify_arg(&var out, module, f);
+                try append_verify_arg(self.allocator, &var out, module, f);
             }
             if used == 6 {
-                try append_verify_arg(&var out, module, g);
+                try append_verify_arg(self.allocator, &var out, module, g);
             }
             used = used + 1;
             index = index + 2;
         } else {
-            try out.append_byte(byte);
+            try out.append_byte(self.allocator, byte);
             index = index + 1;
         }
     }
@@ -528,10 +528,10 @@ fn (self: &Verifier) failure(
     return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
 
-fn append_verify_arg(out: &var string::String, module: &Module, arg: VerifyArg) -> !void {
+fn append_verify_arg(allocator: Allocator, out: &var string::String, module: &Module, arg: VerifyArg) -> !void {
     match arg {
         Str(name) => return module.names.append_to(out, name),
-        Int(value) => return fmt::append_i64(out, value),
+        Int(value) => return fmt::append_i64(allocator, out, value),
         None => return,
     }
 }
@@ -590,7 +590,7 @@ fn flags(allocator: Allocator, count: i64) -> !array::Array<bool> {
     errdefer out.deinit(allocator);
     var index = 0;
     while index < count {
-        try out.append(false);
+        try out.append(allocator, false);
         index = index + 1;
     }
     return move out;
@@ -932,13 +932,13 @@ fn build_dominator_tree(
     errdefer tree.deinit(allocator);
     var position = 0;
     while position < blocks.len() {
-        try tree.place.append(-1);
+        try tree.place.append(allocator, -1);
         position = position + 1;
     }
     position = 0;
     while order.get(position) |block| {
         try tree.place.set(block, position);
-        try tree.idom.append(-1);
+        try tree.idom.append(allocator, -1);
         position = position + 1;
     }
     if order.len() == 0 {
@@ -1034,7 +1034,7 @@ fn reverse_postorder(
     if node.blocks.len() == 0 {
         return move order;
     }
-    try visit_postorder(module, blocks, &var visited, &var order, 0);
+    try visit_postorder(allocator, module, blocks, &var visited, &var order, 0);
     var head = 0;
     var tail = order.len() - 1;
     while head < tail {
@@ -1047,7 +1047,7 @@ fn reverse_postorder(
 
 /// Appends the block at position after every block it can reach, the Go
 /// `visit` closure of `reversePostorder`.
-fn visit_postorder(
+fn visit_postorder(allocator: Allocator, 
     module: &Module,
     blocks: &BlockIndex,
     visited: &var array::Array<bool>,
@@ -1063,10 +1063,10 @@ fn visit_postorder(
     while term.successor(index) |target| {
         index = index + 1;
         if blocks.position_of(module, target) |to| {
-            try visit_postorder(module, blocks, visited, order, to);
+            try visit_postorder(allocator, module, blocks, visited, order, to);
         }
     }
-    return order.append(position);
+    return order.append(allocator, position);
 }
 
 /// Derives the CFG edges from each block's terminator, the Go
@@ -1082,7 +1082,7 @@ fn block_predecessors(
     errdefer preds.deinit(allocator);
     var index = 0;
     while index < blocks.len() {
-        try preds.append(array::new<i64>(allocator));
+        try preds.append(allocator, array::new<i64>(allocator));
         index = index + 1;
     }
     let node = module.function_nodes.at(function.node);
@@ -1093,7 +1093,7 @@ fn block_predecessors(
         while block_node.terminator.successor(position) |target| {
             position = position + 1;
             if blocks.position_of(module, target) |to| {
-                try add_predecessor(&var preds, to, index);
+                try add_predecessor(allocator, &var preds, to, index);
             }
         }
         index = index + 1;
@@ -1102,9 +1102,9 @@ fn block_predecessors(
 }
 
 /// Records one edge, the Go `preds[target] = append(preds[target], name)`.
-fn add_predecessor(preds: &var array::Array<array::Array<i64>>, to: i64, from: i64) -> !void {
+fn add_predecessor(allocator: Allocator, preds: &var array::Array<array::Array<i64>>, to: i64, from: i64) -> !void {
     if preds.at_mut(to) |list| {
-        return list.append(from);
+        return list.append(allocator, from);
     }
     return;
 }

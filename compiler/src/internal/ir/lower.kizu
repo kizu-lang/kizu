@@ -380,7 +380,7 @@ pub fn new_lowerer(
     };
     var storage_self_params = array::new<Param>(allocator);
     errdefer storage_self_params.deinit(allocator);
-    try storage_self_params.append(Param {
+    try storage_self_params.append(allocator, Param {
         name: empty_name(), type_name: empty_name(), passing: Passing::CallerStorage
     });
     let storage_self_signature = SignatureHandle {
@@ -462,7 +462,7 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
         match tree.declarations.at(declaration.node) {
             Function(function) => {
                 let handle = try self.function_facts(tree, function);
-                try self.decls.append(handle);
+                try self.decls.append(self.allocator, handle);
                 let facts = self.decl_facts.at(handle.node);
                 if facts.static_params.len() > 0 {
                     try self.generic_decls.insert(name_id(facts.name), handle);
@@ -473,7 +473,7 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
                 let name_bytes = retained.as_bytes();
                 let symbol = try test_function_name(self.allocator, name_bytes);
                 let symbol_name = try self.module.names.intern_owned(move symbol);
-                try self.tests.append(TestFacts { symbol: symbol_name, body: test.body });
+                try self.tests.append(self.allocator, TestFacts { symbol: symbol_name, body: test.body });
             },
             Struct(declared) => {
                 let retained = tree.texts.at(declared.name.node);
@@ -507,7 +507,7 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
         if param.type_name |declared| {
             type_name = try self.intern_type(tree, declared);
         }
-        try static_params.append(StaticParamFacts {
+        try static_params.append(self.allocator, StaticParamFacts {
             name: try self.module.names.intern_text(tree, param.name),
             is_type: param.is_type(),
             type_name: type_name
@@ -518,7 +518,7 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
     index = 0;
     while function.signature.params.at(index) |param| {
         index = index + 1;
-        try params.append(ParamFacts {
+        try params.append(self.allocator, ParamFacts {
             name: try self.module.names.intern_text(tree, param.name),
             type_name: try self.intern_type(tree, param.type_name),
             borrow: param.borrow,
@@ -556,7 +556,7 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
         while checker.retired_return_name_at(index, position) |name| {
             position = position + 1;
             let copied = try self.copy_retired_name(checker, name);
-            try self.retired.append(RetiredReceiver {
+            try self.retired.append(self.allocator, RetiredReceiver {
                 statement: statement.node, expression: null, name: copied
             });
         }
@@ -568,7 +568,7 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
         while checker.retired_try_name_at(index, position) |name| {
             position = position + 1;
             let copied = try self.copy_retired_name(checker, name);
-            try self.retired.append(RetiredReceiver {
+            try self.retired.append(self.allocator, RetiredReceiver {
                 statement: null, expression: expression.node, name: copied
             });
         }
@@ -684,7 +684,7 @@ fn (self: &var Lowerer) collect_decls(
             Enum(declared) => try self.lower_enum(tree, declared),
             ErrorSet(declared) => {
                 if declared.combines.len() > 0 {
-                    try combined.append(declaration);
+                    try combined.append(self.allocator, declaration);
                 } else {
                     try self.lower_error_set(tree, declared, std_errors);
                 }
@@ -727,7 +727,7 @@ fn (self: &var Lowerer) index_method_signatures() -> !void {
         var found = false;
         if self.signatures.key_at(position) |key| {
             if stdmethod::split_method_name(key) |parts| {
-                try method.append_bytes(parts.method);
+                try method.append_bytes(self.allocator, parts.method);
                 if self.signatures.get(key) |handle| {
                     signature = handle;
                     found = true;
@@ -771,7 +771,7 @@ fn (self: &Lowerer) generic_method_name(decl: FactsHandle, out: &var string::Str
     let retained = name_text(&self.module.names, facts.name);
     let spelling = retained.as_bytes();
     if stdmethod::split_method_name(spelling) |parts| {
-        try out.append_bytes(parts.method);
+        try out.append_bytes(self.allocator, parts.method);
         return true;
     }
     return false;
@@ -780,12 +780,13 @@ fn (self: &Lowerer) generic_method_name(decl: FactsHandle, out: &var string::Str
 /// Records one method under its name, the Go
 /// `l.methodSigs[method] = append(l.methodSigs[method], sig)`.
 fn (self: &var Lowerer) add_method_signature(method: []u8, signature: SignatureHandle) -> !void {
+    let allocator = self.allocator;
     if self.method_signatures.at_mut(method) |list| {
-        return list.append(signature);
+        return list.append(allocator, signature);
     }
-    var list = array::new<SignatureHandle>(self.allocator);
-    errdefer list.deinit(self.allocator);
-    try list.append(signature);
+    var list = array::new<SignatureHandle>(allocator);
+    errdefer list.deinit(allocator);
+    try list.append(allocator, signature);
     return self.method_signatures.insert(method, move list);
 }
 
@@ -814,7 +815,7 @@ fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle)
 fn (self: &var Lowerer) record_extern_symbol(name: Name, symbol: Name) -> !void {
     let id = name_id(name);
     while self.extern_symbols.len() <= id {
-        try self.extern_symbols.append(empty_name());
+        try self.extern_symbols.append(self.allocator, empty_name());
     }
     return self.extern_symbols.set(id, symbol);
 }
@@ -951,7 +952,7 @@ fn (self: &var Lowerer) lower_combined_error_sets(
     defer done.deinit(self.allocator);
     var index = 0;
     while index < work.len() {
-        try done.append(false);
+        try done.append(self.allocator, false);
         index = index + 1;
     }
     var remaining = work.len();
@@ -1007,12 +1008,12 @@ fn (self: &var Lowerer) lower_combined_error_set(
                 defer contributed.deinit(self.allocator);
                 if self.module.error_sets.at(reference_bytes) |part| {
                     if part.origins.len() == 0 {
-                        try contributed.append(try self.module.names.intern(reference_bytes));
+                        try contributed.append(self.allocator, try self.module.names.intern(reference_bytes));
                     } else {
                         var position = 0;
                         while part.origins.at(position) |origin| {
                             position = position + 1;
-                            try contributed.append(origin.*);
+                            try contributed.append(self.allocator, origin.*);
                         }
                     }
                 } else {
@@ -1028,7 +1029,7 @@ fn (self: &var Lowerer) lower_combined_error_set(
                         continue;
                     }
                     try seen.insert(origin_bytes, true);
-                    try origins.append(origin.*);
+                    try origins.append(self.allocator, origin.*);
                 }
             }
         },
@@ -1055,7 +1056,7 @@ fn (self: &var Lowerer) lower_struct(tree: &ast::Ast, declared: &ast::StructDecl
     var index = 0;
     while declared.fields.at(index) |field| {
         index = index + 1;
-        try fields.append(Field {
+        try fields.append(self.allocator, Field {
             name: try self.module.names.intern_text(tree, field.name),
             type_name: try self.resolve_element_forms(tree, field.type_name)
         });
@@ -1083,7 +1084,7 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     while index < count {
         let facts = self.decl_param(decl, index);
         index = index + 1;
-        try params.append(try self.lower_param(facts));
+        try params.append(self.allocator, try self.lower_param(facts));
     }
     let declared_return = self.decl_facts.at(decl.node).return_type;
     let resolved = try self.resolve_bound_type(declared_return);
@@ -1190,7 +1191,7 @@ fn (self: &var Lowerer) function_by_value_name(name: Name) -> !?ResolvedFunction
     if try self.append_current_module_prefix(&var qualified) {
         let retained = name_text(&self.module.names, name);
         let bytes = retained.as_bytes();
-        try qualified.append_bytes(bytes);
+        try qualified.append_bytes(self.allocator, bytes);
         let text = qualified.as_bytes();
         let candidate = try self.module.names.intern(text);
         if self.signature_named(candidate) |signature| {
@@ -1210,7 +1211,7 @@ fn (self: &var Lowerer) append_current_module_prefix(out: &var string::String) -
     if cut == 0 {
         return false;
     }
-    try out.append_bytes(bytes[0..cut]);
+    try out.append_bytes(self.allocator, bytes[0..cut]);
     return true;
 }
 
@@ -1237,28 +1238,28 @@ fn (self: &var Lowerer) function_pointer_type(signature: SignatureHandle) -> !Na
     let result = node.return_type;
     var index = 0;
     while node.params.get(index) |param| {
-        try params.append(param.type_name);
+        try params.append(self.allocator, param.type_name);
         index = index + 1;
     }
     if unsafe_call {
-        try text.append_bytes("unsafe fn(");
+        try text.append_bytes(self.allocator, "unsafe fn(");
     } else {
-        try text.append_bytes("fn(");
+        try text.append_bytes(self.allocator, "fn(");
     }
     index = 0;
     while params.get(index) |param| {
         if index > 0 {
-            try text.append_bytes(", ");
+            try text.append_bytes(self.allocator, ", ");
         }
         let retained = name_text(&self.module.names, param);
         let bytes = retained.as_bytes();
-        try text.append_bytes(bytes);
+        try text.append_bytes(self.allocator, bytes);
         index = index + 1;
     }
-    try text.append_bytes(") -> ");
+    try text.append_bytes(self.allocator, ") -> ");
     let retained_result = name_text(&self.module.names, result);
     let result_bytes = retained_result.as_bytes();
-    try text.append_bytes(result_bytes);
+    try text.append_bytes(self.allocator, result_bytes);
     let text_bytes = text.as_bytes();
     return self.module.names.intern(text_bytes);
 }
@@ -1301,7 +1302,7 @@ fn (self: &var Lowerer) lower_function_named(
     var index = 0;
     while index < count {
         if self.signature_param(signature, index) |param| {
-            try params.append(param);
+            try params.append(self.allocator, param);
         }
         index = index + 1;
     }
@@ -1313,7 +1314,7 @@ fn (self: &var Lowerer) lower_function_named(
             blocks: array::new<Block>(self.allocator)
         })
     };
-    try self.module.functions.append(self.current);
+    try self.module.functions.append(self.allocator, self.current);
     self.env = self.envs.new_env();
     if try self.mutably_borrowed_locals(tree, decl) |failed| {
         return move failed;
@@ -1337,12 +1338,12 @@ fn (self: &var Lowerer) lower_function_named(
             // name like a lent local: reads load, assignments store, and
             // address consumers take the pointer itself.
             if param.passing == Passing::CallerStorage {
-                try self.slots.append(facts.name);
+                try self.slots.append(self.allocator, facts.name);
             } else {
                 // One that arrives as a value and is written through needs
                 // storage of its own, which is the copy it was handed.
                 if self.has_slot(facts.name) {
-                    try value_slots.append(facts.name);
+                    try value_slots.append(self.allocator, facts.name);
                 }
             }
         }
@@ -1505,8 +1506,7 @@ fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
     let node = self.generic_args.at(args.node);
     let retained = name_text(&self.module.names, resolved);
     let bytes = retained.as_bytes();
-    let substituted = try typ::substitute_owned_text(
-        self.allocator, bytes, &node.binding_names, &node.binding_types
+    let substituted = try typ::substitute_owned_text(self.allocator, bytes, &node.binding_names, &node.binding_types
     );
     return self.module.names.intern_owned(move substituted);
 }
@@ -1525,7 +1525,7 @@ fn (self: &var Lowerer) resolve_type_args(list: Name) -> !Name {
     var index = 0;
     while args.get(index) |arg| {
         if index > 0 {
-            try out.append_bytes(", ");
+            try out.append_bytes(self.allocator, ", ");
         }
         index = index + 1;
         let resolved = try self.resolve_bound_type(arg);

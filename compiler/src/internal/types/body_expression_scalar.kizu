@@ -82,9 +82,9 @@ fn (self: &var Checker) check_ident_expr(
     }
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("undefined variable `");
-    try message.append_bytes(name);
-    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(self.allocator, "undefined variable `");
+    try message.append_bytes(self.allocator, name);
+    try message.append_byte(self.allocator, cast<u8>(96));
     return try self.checker_message_at("type error", expression.span, move message);
 }
 
@@ -99,7 +99,7 @@ fn (self: &var Checker) function_by_value_name(name: []u8) -> !?FunctionHandle {
     var qualified = string::new(self.allocator);
     defer qualified.deinit(self.allocator);
     if try self.append_current_module_prefix(&var qualified) {
-        try qualified.append_bytes(name);
+        try qualified.append_bytes(self.allocator, name);
         let bytes = qualified.as_bytes();
         return self.metadata.functions_by_name.get(bytes);
     }
@@ -115,7 +115,7 @@ fn (self: &var Checker) append_current_module_prefix(out: &var string::String) -
         let bytes = function.name.as_bytes();
         let cut = last_namespace_end(bytes);
         if cut > 0 {
-            try out.append_bytes(bytes[0..cut]);
+            try out.append_bytes(self.allocator, bytes[0..cut]);
             appended = true;
         }
     }
@@ -169,42 +169,42 @@ fn (self: &var Checker) append_function_pointer_text(
         unsafe_call = function.signature.requires_unsafe;
         var copied = try self.types.copy_text(self.allocator, function.return_type);
         errdefer copied.deinit(self.allocator);
-        try result.append_string(&copied);
+        try result.append_string(self.allocator, &copied);
         copied.deinit(self.allocator);
         var index = 0;
         while function.params.get(index) |param| {
             var spelled = string::new(self.allocator);
             errdefer spelled.deinit(self.allocator);
             if function.mut_borrow_params.get_or_panic(index) {
-                try spelled.append_bytes("&var ");
+                try spelled.append_bytes(self.allocator, "&var ");
             } else {
                 if function.borrow_params.get_or_panic(index) {
-                    try spelled.append_byte(cast<u8>(38));
+                    try spelled.append_byte(self.allocator, cast<u8>(38));
                 }
             }
             var param_text = try self.types.copy_text(self.allocator, param);
             errdefer param_text.deinit(self.allocator);
-            try spelled.append_string(&param_text);
+            try spelled.append_string(self.allocator, &param_text);
             param_text.deinit(self.allocator);
-            try params.append(move spelled);
+            try params.append(self.allocator, move spelled);
             index = index + 1;
         }
     }
     if unsafe_call {
-        try out.append_bytes("unsafe fn(");
+        try out.append_bytes(self.allocator, "unsafe fn(");
     } else {
-        try out.append_bytes("fn(");
+        try out.append_bytes(self.allocator, "fn(");
     }
     var index = 0;
     while params.at(index) |param| {
         if index > 0 {
-            try out.append_bytes(", ");
+            try out.append_bytes(self.allocator, ", ");
         }
-        try out.append_string(param);
+        try out.append_string(self.allocator, param);
         index = index + 1;
     }
-    try out.append_bytes(") -> ");
-    return out.append_string(&result);
+    try out.append_bytes(self.allocator, ") -> ");
+    return out.append_string(self.allocator, &result);
 }
 
 // Treats a fit-checked integer literal as the expected integer type.
@@ -236,9 +236,9 @@ fn (self: &Checker) coerce_contextual_integer_literal(
     defer rendered.deinit(self.allocator);
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("integer literal `");
-    try message.append_string(&rendered);
-    try message.append_bytes("` does not fit ");
+    try message.append_bytes(self.allocator, "integer literal `");
+    try message.append_string(self.allocator, &rendered);
+    try message.append_bytes(self.allocator, "` does not fit ");
     try self.append_checker_type(&var message, want);
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
@@ -321,9 +321,9 @@ fn (self: &var Checker) check_logical(
     }
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("type error: operator `");
-    try message.append_bytes(operator);
-    try message.append_bytes("` expects bool operands");
+    try message.append_bytes(self.allocator, "type error: operator `");
+    try message.append_bytes(self.allocator, operator);
+    try message.append_bytes(self.allocator, "` expects bool operands");
     try self.append_operand_text(&var message, left, right);
     return try self.checker_text_diagnostic_at(span, move message);
 }
@@ -352,13 +352,13 @@ fn (self: &Checker) operator_type_mismatch(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("type error: operator `");
-    try message.append_bytes(operator);
-    try message.append_bytes("` operands must have same type");
+    try message.append_bytes(self.allocator, "type error: operator `");
+    try message.append_bytes(self.allocator, operator);
+    try message.append_bytes(self.allocator, "` operands must have same type");
     try self.append_operand_text(&var message, left, right);
     var problem = try self.checker_text_diagnostic_at(span, move message);
     errdefer problem.deinit(self.allocator);
-    try problem.with_code("type.operator_type_mismatch");
+    try problem.with_code(self.allocator, "type.operator_type_mismatch");
     return move problem;
 }
 
@@ -372,11 +372,11 @@ fn (self: &Checker) operator_operand_kind_error(
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes("type error: operator `");
-    try message.append_bytes(operator);
-    try message.append_bytes("` expects ");
-    try message.append_bytes(want);
-    try message.append_bytes(" operands");
+    try message.append_bytes(self.allocator, "type error: operator `");
+    try message.append_bytes(self.allocator, operator);
+    try message.append_bytes(self.allocator, "` expects ");
+    try message.append_bytes(self.allocator, want);
+    try message.append_bytes(self.allocator, " operands");
     try self.append_operand_text(&var message, left, right);
     return self.checker_text_diagnostic_at(span, move message);
 }
@@ -386,11 +386,11 @@ fn (self: &Checker) append_operand_text(
     left: Type,
     right: Type
 ) -> !void {
-    try message.append_byte(cast<u8>(10));
-    try message.append_bytes("note: left operand has type ");
+    try message.append_byte(self.allocator, cast<u8>(10));
+    try message.append_bytes(self.allocator, "note: left operand has type ");
     try self.append_checker_type(message, left);
-    try message.append_byte(cast<u8>(10));
-    try message.append_bytes("note: right operand has type ");
+    try message.append_byte(self.allocator, cast<u8>(10));
+    try message.append_bytes(self.allocator, "note: right operand has type ");
     return self.append_checker_type(message, right);
 }
 

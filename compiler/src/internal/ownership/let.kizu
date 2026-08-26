@@ -101,7 +101,7 @@ fn (self: &var Checker) check_explicit_borrow_result_let_stmt(
     if source.target |target| {
         var sources = array::new<BorrowSource>(self.allocator);
         defer sources.deinit(self.allocator);
-        try sources.append(BorrowSource { target: target, field: source.field });
+        try sources.append(self.allocator, BorrowSource { target: target, field: source.field });
         return self.check_explicit_returned_borrow_let_stmt(tree, env, statement, &sources, source.elem, false);
     }
     var sources = array::new<BorrowSource>(self.allocator);
@@ -234,7 +234,7 @@ fn (self: &var Checker) check_capture_let_stmt(
         return move failed;
     }
     if found {
-        try sources.append(BorrowSource { target: view_source, field: empty_name() });
+        try sources.append(self.allocator, BorrowSource { target: view_source, field: empty_name() });
         return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, self.common.bytes_name, false);
     }
     handled.* = false;
@@ -279,7 +279,7 @@ fn (self: &var Checker) struct_capture_initializer(
             if try self.read_expr(tree, env, field.value, &var ignored) |failed| {
                 return move failed;
             }
-            try sources.append(BorrowSource { target: view, field: empty_name() });
+            try sources.append(self.allocator, BorrowSource { target: view, field: empty_name() });
             continue;
         }
         if try self.move_expr(tree, env, field.value, &var ignored) |failed| {
@@ -326,7 +326,7 @@ fn (self: &var Checker) attach_alloc_provenance(tree: &ast::Ast, value: BindingH
     var sources = array::new<BorrowSource>(self.allocator);
     defer sources.deinit(self.allocator);
     while self.pending_alloc_taints.pop() |taint| {
-        try sources.append(BorrowSource { target: taint.alloc, field: empty_name() });
+        try sources.append(self.allocator, BorrowSource { target: taint.alloc, field: empty_name() });
     }
     // Popping reversed the taints; restore the order they were recorded in.
     var index = 0;
@@ -363,8 +363,9 @@ fn (self: &var Checker) bind_borrow_sources(
 
 /// Records one more borrow source on a binding.
 fn (self: &var Checker) append_borrow_target(value: BindingHandle, source: BorrowSource) -> !void {
+    let allocator = self.allocator;
     if self.store.binding_mut(value) |record| {
-        return record.borrow_targets.append(source);
+        return record.borrow_targets.append(allocator, source);
     }
     return;
 }
@@ -552,12 +553,12 @@ fn (self: &var Checker) call_borrow_return_sources(
         if !param.borrow or (mutable and !param.mut_borrow) {
             if allocator_return {
                 if self.tied_allocator_arg(tree, env, arg) |alloc| {
-                    try sources.append(BorrowSource { target: alloc, field: empty_name() });
+                    try sources.append(self.allocator, BorrowSource { target: alloc, field: empty_name() });
                 }
             }
             if view_return and self.names.is(param.type_name, "[]u8") {
                 if try self.borrow_class_view_root(tree, env, arg) |view| {
-                    try sources.append(BorrowSource { target: view, field: empty_name() });
+                    try sources.append(self.allocator, BorrowSource { target: view, field: empty_name() });
                 }
             }
             continue;
@@ -568,7 +569,7 @@ fn (self: &var Checker) call_borrow_return_sources(
             return move failed;
         }
         if found {
-            try sources.append(BorrowSource { target: target.value, field: target.field });
+            try sources.append(self.allocator, BorrowSource { target: target.value, field: target.field });
             continue;
         }
         // call_borrow_target tolerates non-place args for temporary call
@@ -693,7 +694,7 @@ fn (self: &var Checker) check_string_view_let_stmt(
     errdefer value.deinit(self.allocator);
     value.borrowed_param = true;
     value.local_borrow = true;
-    try value.borrow_targets.append(BorrowSource { target: view.target, field: view.path });
+    try value.borrow_targets.append(self.allocator, BorrowSource { target: view.target, field: view.path });
     value.mut_borrow = view.mutable;
     let _ = try self.define(env, move value);
     return null;
@@ -804,7 +805,7 @@ fn (self: &var Checker) check_box_borrow_let_stmt(
     errdefer value.deinit(self.allocator);
     value.borrowed_param = true;
     value.local_borrow = true;
-    try value.borrow_targets.append(BorrowSource { target: box.target, field: box.field });
+    try value.borrow_targets.append(self.allocator, BorrowSource { target: box.target, field: box.field });
     value.mut_borrow = box.mutable;
     let _ = try self.define(env, move value);
     return null;
@@ -909,7 +910,7 @@ fn (self: &var Checker) check_borrow_let_stmt(
     errdefer value.deinit(self.allocator);
     value.borrowed_param = true;
     value.local_borrow = true;
-    try value.borrow_targets.append(BorrowSource { target: target.value, field: target.field });
+    try value.borrow_targets.append(self.allocator, BorrowSource { target: target.value, field: target.field });
     value.mut_borrow = mutable;
     let _ = try self.define(env, move value);
     return null;

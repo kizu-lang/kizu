@@ -1,7 +1,9 @@
-// 解放は確保と同じ allocator を名指します。値は自分を作った allocator の複製を
-// 持たないので、`deinit` に必要なものは呼び出し側が綴ります(ADR-0132)。
-// おかげで `Box<T>` の cell は payload だけになり、pointer 2 本の節点が
-// malloc の 1 つ上の size class に押し上げられることがなくなります。
+// 確保も解放も allocator を名指します。値は自分を作った allocator の複製を
+// 持たないので、`append` にも `deinit` にも必要なものは呼び出し側が綴ります
+// (ADR-0132)。おかげで `Box<T>` の cell は payload だけ、`Array<T>` の header
+// は `{data, len, cap}` の 3 word になり、pointer 2 本の節点が malloc の 1 つ上の
+// size class に押し上げられることも、Array を持つ struct が 1 word 余分に払う
+// こともなくなります。
 
 import std::array;
 import std::mem;
@@ -30,7 +32,7 @@ fn main() -> !void {
     var scratch_bytes = [512]u8{};
     let view = scratch_bytes.as_mut_bytes();
     // 同じ frame に 2 つの allocator があります。値ごとに、それを作った方を
-    // 名指して解放します。
+    // 名指して伸ばし、名指して解放します。
     let scratch = mem::fixed_buffer(view);
 
     var kept = try note(heap, "kept");
@@ -39,7 +41,7 @@ fn main() -> !void {
     var temporary = array::new<i64>(scratch);
     defer temporary.deinit(scratch);
 
-    try temporary.append(7);
+    try temporary.append(scratch, 7);
     print(temporary.get(0) orelse -1);
     print(kept.title.len());
     return;
@@ -85,11 +87,11 @@ fn main() -> !void {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -97,7 +99,7 @@ fn main() -> !void {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
 // declare %kizu.opt.i64 @std__array__Array_get_i64(ptr, i64)
 // declare ptr @std__mem__fixed_buffer(%kizu.slice.u8)
@@ -119,9 +121,8 @@ fn main() -> !void {
 //   ret %kizu.error.Note %kizu.try.err.1
 // kizu.2.try.ok:
 //   %kizu.2 = extractvalue %kizu.error.std__mem__Error.std__string__String %kizu.1, 1
-//   %kizu.3 = insertvalue %kizu.array zeroinitializer, ptr %kizu.allocator, 3
 //   %kizu.4.field0 = insertvalue %kizu.struct.Note zeroinitializer, %kizu.struct.std__string__String %kizu.2, 0
-//   %kizu.4 = insertvalue %kizu.struct.Note %kizu.4.field0, %kizu.array %kizu.3, 1
+//   %kizu.4 = insertvalue %kizu.struct.Note %kizu.4.field0, %kizu.array zeroinitializer, 1
 //   %kizu.5.ok = insertvalue %kizu.error.Note zeroinitializer, i8 1, 0
 //   %kizu.5 = insertvalue %kizu.error.Note %kizu.5.ok, %kizu.struct.Note %kizu.4, 1
 //   ret %kizu.error.Note %kizu.5
@@ -132,8 +133,8 @@ fn main() -> !void {
 //   %kizu.2 = alloca [512 x i8]
 //   %kizu.3 = alloca ptr
 //   %kizu.11 = alloca %kizu.array
-//   %kizu.arg.0.9 = alloca %kizu.struct.Note
-//   %kizu.arg.0.16 = alloca %kizu.struct.Note
+//   %kizu.arg.0.8 = alloca %kizu.struct.Note
+//   %kizu.arg.0.14 = alloca %kizu.struct.Note
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   store [512 x i8] zeroinitializer, ptr %kizu.2
@@ -159,9 +160,8 @@ fn main() -> !void {
 //   ret i32 1
 // kizu.9.try.ok:
 //   %kizu.9 = extractvalue %kizu.error.Note %kizu.8, 1
-//   %kizu.10 = insertvalue %kizu.array zeroinitializer, ptr %kizu.6, 3
-//   store %kizu.array %kizu.10, ptr %kizu.11
-//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.11, i64 7)
+//   store %kizu.array zeroinitializer, ptr %kizu.11
+//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.11, ptr %kizu.6, i64 7)
 //   %kizu.14 = load %kizu.array, ptr %kizu.11
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
@@ -169,17 +169,16 @@ fn main() -> !void {
 // kizu.15.try.err:
 //   %kizu.array.deinit.data.4 = extractvalue %kizu.array %kizu.14, 0
 //   %kizu.array.deinit.cap.5 = extractvalue %kizu.array %kizu.14, 2
-//   %kizu.array.deinit.alloc.6 = extractvalue %kizu.array %kizu.14, 3
-//   %kizu.array.deinit.bytes.7 = mul i64 %kizu.array.deinit.cap.5, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.6, ptr %kizu.array.deinit.data.4, i64 %kizu.array.deinit.bytes.7)
-//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.9
-//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.9, ptr %kizu.1)
-//   %kizu.main.err.code.10 = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
-//   %kizu.main.err.name.11.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.10
-//   %kizu.main.err.name.11.ptr = load ptr, ptr %kizu.main.err.name.11.row
-//   %kizu.main.err.name.11.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.11.row, i64 0, i32 1
-//   %kizu.main.err.name.11.len = load i64, ptr %kizu.main.err.name.11.len.addr
-//   call void @kizu_main_error_message(ptr %kizu.main.err.name.11.ptr, i64 %kizu.main.err.name.11.len)
+//   %kizu.array.deinit.bytes.6 = mul i64 %kizu.array.deinit.cap.5, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.6, ptr %kizu.array.deinit.data.4, i64 %kizu.array.deinit.bytes.6)
+//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.8
+//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.8, ptr %kizu.1)
+//   %kizu.main.err.code.9 = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
+//   %kizu.main.err.name.10.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.9
+//   %kizu.main.err.name.10.ptr = load ptr, ptr %kizu.main.err.name.10.row
+//   %kizu.main.err.name.10.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.10.row, i64 0, i32 1
+//   %kizu.main.err.name.10.len = load i64, ptr %kizu.main.err.name.10.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.10.ptr, i64 %kizu.main.err.name.10.len)
 //   ret i32 1
 // kizu.15.try.ok:
 //   %kizu.17 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.11, i64 0)
@@ -199,26 +198,25 @@ fn main() -> !void {
 //   %kizu.25 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.24)
 //   call void @kizu_print_int(i64 %kizu.25)
 //   %kizu.27 = load %kizu.array, ptr %kizu.11
-//   %kizu.array.deinit.data.12 = extractvalue %kizu.array %kizu.27, 0
-//   %kizu.array.deinit.cap.13 = extractvalue %kizu.array %kizu.27, 2
-//   %kizu.array.deinit.alloc.14 = extractvalue %kizu.array %kizu.27, 3
-//   %kizu.array.deinit.bytes.15 = mul i64 %kizu.array.deinit.cap.13, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.14, ptr %kizu.array.deinit.data.12, i64 %kizu.array.deinit.bytes.15)
-//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.16
-//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.16, ptr %kizu.1)
+//   %kizu.array.deinit.data.11 = extractvalue %kizu.array %kizu.27, 0
+//   %kizu.array.deinit.cap.12 = extractvalue %kizu.array %kizu.27, 2
+//   %kizu.array.deinit.bytes.13 = mul i64 %kizu.array.deinit.cap.12, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.6, ptr %kizu.array.deinit.data.11, i64 %kizu.array.deinit.bytes.13)
+//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.14
+//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.14, ptr %kizu.1)
 //   %kizu.30 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   %kizu.main.ok.17 = extractvalue %kizu.error.void %kizu.30, 0
-//   %kizu.main.ok.17.bool = icmp ne i8 %kizu.main.ok.17, 0
-//   br i1 %kizu.main.ok.17.bool, label %kizu.main.exit.ok.19, label %kizu.main.exit.fail.20
-// kizu.main.exit.fail.20:
-//   %kizu.main.err.code.21 = extractvalue %kizu.error.void %kizu.30, 1
-//   %kizu.main.err.name.22.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.21
-//   %kizu.main.err.name.22.ptr = load ptr, ptr %kizu.main.err.name.22.row
-//   %kizu.main.err.name.22.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.22.row, i64 0, i32 1
-//   %kizu.main.err.name.22.len = load i64, ptr %kizu.main.err.name.22.len.addr
-//   call void @kizu_main_error_message(ptr %kizu.main.err.name.22.ptr, i64 %kizu.main.err.name.22.len)
+//   %kizu.main.ok.15 = extractvalue %kizu.error.void %kizu.30, 0
+//   %kizu.main.ok.15.bool = icmp ne i8 %kizu.main.ok.15, 0
+//   br i1 %kizu.main.ok.15.bool, label %kizu.main.exit.ok.17, label %kizu.main.exit.fail.18
+// kizu.main.exit.fail.18:
+//   %kizu.main.err.code.19 = extractvalue %kizu.error.void %kizu.30, 1
+//   %kizu.main.err.name.20.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.19
+//   %kizu.main.err.name.20.ptr = load ptr, ptr %kizu.main.err.name.20.row
+//   %kizu.main.err.name.20.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.20.row, i64 0, i32 1
+//   %kizu.main.err.name.20.len = load i64, ptr %kizu.main.err.name.20.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.20.ptr, i64 %kizu.main.err.name.20.len)
 //   ret i32 1
-// kizu.main.exit.ok.19:
+// kizu.main.exit.ok.17:
 //   ret i32 0
 // }
 // 
@@ -264,11 +262,11 @@ fn main() -> !void {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.array = type { ptr, i64, i64, ptr }
+// %kizu.array = type { ptr, i64, i64 }
 // @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
-// declare i1 @kizu_array_append(ptr, ptr, i64)
-// declare i1 @kizu_array_append_bytes(ptr, ptr, i64)
-// declare i1 @kizu_array_reserve(ptr, i64, i64)
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
 // declare ptr @kizu_array_pop(ptr, i64)
 // declare i1 @kizu_array_swap(ptr, i64, i64, i64)
 // declare i1 @kizu_array_truncate(ptr, i64)
@@ -276,7 +274,7 @@ fn main() -> !void {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare void @std__array__Array_deinit_i64(%kizu.array, ptr)
 // declare %kizu.opt.i64 @std__array__Array_get_i64(ptr, i64)
 // declare ptr @std__mem__fixed_buffer(%kizu.slice.u8)
@@ -298,9 +296,8 @@ fn main() -> !void {
 //   ret %kizu.error.Note %kizu.try.err.1
 // kizu.2.try.ok:
 //   %kizu.2 = extractvalue %kizu.error.std__mem__Error.std__string__String %kizu.1, 1
-//   %kizu.3 = insertvalue %kizu.array zeroinitializer, ptr %kizu.allocator, 3
 //   %kizu.4.field0 = insertvalue %kizu.struct.Note zeroinitializer, %kizu.struct.std__string__String %kizu.2, 0
-//   %kizu.4 = insertvalue %kizu.struct.Note %kizu.4.field0, %kizu.array %kizu.3, 1
+//   %kizu.4 = insertvalue %kizu.struct.Note %kizu.4.field0, %kizu.array zeroinitializer, 1
 //   %kizu.5.ok = insertvalue %kizu.error.Note zeroinitializer, i8 1, 0
 //   %kizu.5 = insertvalue %kizu.error.Note %kizu.5.ok, %kizu.struct.Note %kizu.4, 1
 //   ret %kizu.error.Note %kizu.5
@@ -311,8 +308,8 @@ fn main() -> !void {
 //   %kizu.2 = alloca [512 x i8]
 //   %kizu.3 = alloca ptr
 //   %kizu.11 = alloca %kizu.array
-//   %kizu.arg.0.9 = alloca %kizu.struct.Note
-//   %kizu.arg.0.16 = alloca %kizu.struct.Note
+//   %kizu.arg.0.8 = alloca %kizu.struct.Note
+//   %kizu.arg.0.14 = alloca %kizu.struct.Note
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   store [512 x i8] zeroinitializer, ptr %kizu.2
@@ -338,9 +335,8 @@ fn main() -> !void {
 //   ret i32 1
 // kizu.9.try.ok:
 //   %kizu.9 = extractvalue %kizu.error.Note %kizu.8, 1
-//   %kizu.10 = insertvalue %kizu.array zeroinitializer, ptr %kizu.6, 3
-//   store %kizu.array %kizu.10, ptr %kizu.11
-//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.11, i64 7)
+//   store %kizu.array zeroinitializer, ptr %kizu.11
+//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr %kizu.11, ptr %kizu.6, i64 7)
 //   %kizu.14 = load %kizu.array, ptr %kizu.11
 //   %kizu.15.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 0
 //   %kizu.15.ok.bool = icmp ne i8 %kizu.15.ok, 0
@@ -348,17 +344,16 @@ fn main() -> !void {
 // kizu.15.try.err:
 //   %kizu.array.deinit.data.4 = extractvalue %kizu.array %kizu.14, 0
 //   %kizu.array.deinit.cap.5 = extractvalue %kizu.array %kizu.14, 2
-//   %kizu.array.deinit.alloc.6 = extractvalue %kizu.array %kizu.14, 3
-//   %kizu.array.deinit.bytes.7 = mul i64 %kizu.array.deinit.cap.5, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.6, ptr %kizu.array.deinit.data.4, i64 %kizu.array.deinit.bytes.7)
-//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.9
-//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.9, ptr %kizu.1)
-//   %kizu.main.err.code.10 = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
-//   %kizu.main.err.name.11.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.10
-//   %kizu.main.err.name.11.ptr = load ptr, ptr %kizu.main.err.name.11.row
-//   %kizu.main.err.name.11.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.11.row, i64 0, i32 1
-//   %kizu.main.err.name.11.len = load i64, ptr %kizu.main.err.name.11.len.addr
-//   call void @kizu_main_error_message(ptr %kizu.main.err.name.11.ptr, i64 %kizu.main.err.name.11.len)
+//   %kizu.array.deinit.bytes.6 = mul i64 %kizu.array.deinit.cap.5, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.6, ptr %kizu.array.deinit.data.4, i64 %kizu.array.deinit.bytes.6)
+//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.8
+//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.8, ptr %kizu.1)
+//   %kizu.main.err.code.9 = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
+//   %kizu.main.err.name.10.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.9
+//   %kizu.main.err.name.10.ptr = load ptr, ptr %kizu.main.err.name.10.row
+//   %kizu.main.err.name.10.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.10.row, i64 0, i32 1
+//   %kizu.main.err.name.10.len = load i64, ptr %kizu.main.err.name.10.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.10.ptr, i64 %kizu.main.err.name.10.len)
 //   ret i32 1
 // kizu.15.try.ok:
 //   %kizu.17 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.11, i64 0)
@@ -378,26 +373,25 @@ fn main() -> !void {
 //   %kizu.25 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.24)
 //   call void @kizu_print_int(i64 %kizu.25)
 //   %kizu.27 = load %kizu.array, ptr %kizu.11
-//   %kizu.array.deinit.data.12 = extractvalue %kizu.array %kizu.27, 0
-//   %kizu.array.deinit.cap.13 = extractvalue %kizu.array %kizu.27, 2
-//   %kizu.array.deinit.alloc.14 = extractvalue %kizu.array %kizu.27, 3
-//   %kizu.array.deinit.bytes.15 = mul i64 %kizu.array.deinit.cap.13, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.array.deinit.alloc.14, ptr %kizu.array.deinit.data.12, i64 %kizu.array.deinit.bytes.15)
-//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.16
-//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.16, ptr %kizu.1)
+//   %kizu.array.deinit.data.11 = extractvalue %kizu.array %kizu.27, 0
+//   %kizu.array.deinit.cap.12 = extractvalue %kizu.array %kizu.27, 2
+//   %kizu.array.deinit.bytes.13 = mul i64 %kizu.array.deinit.cap.12, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.6, ptr %kizu.array.deinit.data.11, i64 %kizu.array.deinit.bytes.13)
+//   store %kizu.struct.Note %kizu.9, ptr %kizu.arg.0.14
+//   call void @Note_deinit(ptr byval(%kizu.struct.Note) %kizu.arg.0.14, ptr %kizu.1)
 //   %kizu.30 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   %kizu.main.ok.17 = extractvalue %kizu.error.void %kizu.30, 0
-//   %kizu.main.ok.17.bool = icmp ne i8 %kizu.main.ok.17, 0
-//   br i1 %kizu.main.ok.17.bool, label %kizu.main.exit.ok.19, label %kizu.main.exit.fail.20
-// kizu.main.exit.fail.20:
-//   %kizu.main.err.code.21 = extractvalue %kizu.error.void %kizu.30, 1
-//   %kizu.main.err.name.22.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.21
-//   %kizu.main.err.name.22.ptr = load ptr, ptr %kizu.main.err.name.22.row
-//   %kizu.main.err.name.22.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.22.row, i64 0, i32 1
-//   %kizu.main.err.name.22.len = load i64, ptr %kizu.main.err.name.22.len.addr
-//   call void @kizu_main_error_message(ptr %kizu.main.err.name.22.ptr, i64 %kizu.main.err.name.22.len)
+//   %kizu.main.ok.15 = extractvalue %kizu.error.void %kizu.30, 0
+//   %kizu.main.ok.15.bool = icmp ne i8 %kizu.main.ok.15, 0
+//   br i1 %kizu.main.ok.15.bool, label %kizu.main.exit.ok.17, label %kizu.main.exit.fail.18
+// kizu.main.exit.fail.18:
+//   %kizu.main.err.code.19 = extractvalue %kizu.error.void %kizu.30, 1
+//   %kizu.main.err.name.20.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.19
+//   %kizu.main.err.name.20.ptr = load ptr, ptr %kizu.main.err.name.20.row
+//   %kizu.main.err.name.20.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.20.row, i64 0, i32 1
+//   %kizu.main.err.name.20.len = load i64, ptr %kizu.main.err.name.20.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.20.ptr, i64 %kizu.main.err.name.20.len)
 //   ret i32 1
-// kizu.main.exit.ok.19:
+// kizu.main.exit.ok.17:
 //   ret i32 0
 // }
 // 

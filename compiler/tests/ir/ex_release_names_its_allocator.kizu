@@ -1,7 +1,9 @@
-// 解放は確保と同じ allocator を名指します。値は自分を作った allocator の複製を
-// 持たないので、`deinit` に必要なものは呼び出し側が綴ります(ADR-0132)。
-// おかげで `Box<T>` の cell は payload だけになり、pointer 2 本の節点が
-// malloc の 1 つ上の size class に押し上げられることがなくなります。
+// 確保も解放も allocator を名指します。値は自分を作った allocator の複製を
+// 持たないので、`append` にも `deinit` にも必要なものは呼び出し側が綴ります
+// (ADR-0132)。おかげで `Box<T>` の cell は payload だけ、`Array<T>` の header
+// は `{data, len, cap}` の 3 word になり、pointer 2 本の節点が malloc の 1 つ上の
+// size class に押し上げられることも、Array を持つ struct が 1 word 余分に払う
+// こともなくなります。
 
 import std::array;
 import std::mem;
@@ -30,7 +32,7 @@ fn main() -> !void {
     var scratch_bytes = [512]u8{};
     let view = scratch_bytes.as_mut_bytes();
     // 同じ frame に 2 つの allocator があります。値ごとに、それを作った方を
-    // 名指して解放します。
+    // 名指して伸ばし、名指して解放します。
     let scratch = mem::fixed_buffer(view);
 
     var kept = try note(heap, "kept");
@@ -39,7 +41,7 @@ fn main() -> !void {
     var temporary = array::new<i64>(scratch);
     defer temporary.deinit(scratch);
 
-    try temporary.append(7);
+    try temporary.append(scratch, 7);
     print(temporary.get(0) orelse -1);
     print(kept.title.len());
     return;
@@ -76,9 +78,9 @@ fn main() -> !void {
 //   %10: std::array::Array<i64> = array.new %6: Allocator
 //   %11: &var std::array::Array<i64> = local.slot %10: std::array::Array<i64>
 //   %12: i64 = const 7
-//   %13: std::mem::Error!void = call.std::array::Array.append.i64 %11: &var std::array::Array<i64>, %12: i64
+//   %13: std::mem::Error!void = call.std::array::Array.append.i64 %11: &var std::array::Array<i64>, %6: Allocator, %12: i64
 //   %14: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
-//   error.try %13: std::mem::Error!void, cleanup array.deinit %14: std::array::Array<i64>; call.Note.deinit %9: Note, %1: Allocator
+//   error.try %13: std::mem::Error!void, cleanup array.deinit %14: std::array::Array<i64>, %6: Allocator; call.Note.deinit %9: Note, %1: Allocator
 //   %16: i64 = const 0
 //   %17: ?i64 = call.std::array::Array.get.i64 %11: &var std::array::Array<i64>, %16: i64
 //   %18: bool = opt.has %17: ?i64
@@ -97,7 +99,7 @@ fn main() -> !void {
 //   %25: i64 = call.std::string::String.len %24: std::string::String
 //   call.print %25: i64
 //   %27: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
-//   array.deinit %27: std::array::Array<i64>
+//   array.deinit %27: std::array::Array<i64>, %6: Allocator
 //   call.Note.deinit %9: Note, %1: Allocator
 //   %30: !void = error.ok
 //   return %30: !void
@@ -134,9 +136,9 @@ fn main() -> !void {
 //   %10: std::array::Array<i64> = array.new %6: Allocator
 //   %11: &var std::array::Array<i64> = local.slot %10: std::array::Array<i64>
 //   %12: i64 = const 7
-//   %13: std::mem::Error!void = call.std::array::Array.append.i64 %11: &var std::array::Array<i64>, %12: i64
+//   %13: std::mem::Error!void = call.std::array::Array.append.i64 %11: &var std::array::Array<i64>, %6: Allocator, %12: i64
 //   %14: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
-//   error.try %13: std::mem::Error!void, cleanup array.deinit %14: std::array::Array<i64>; call.Note.deinit %9: Note, %1: Allocator
+//   error.try %13: std::mem::Error!void, cleanup array.deinit %14: std::array::Array<i64>, %6: Allocator; call.Note.deinit %9: Note, %1: Allocator
 //   %16: i64 = const 0
 //   %17: ?i64 = call.std::array::Array.get.i64 %11: &var std::array::Array<i64>, %16: i64
 //   %18: bool = opt.has %17: ?i64
@@ -155,7 +157,7 @@ fn main() -> !void {
 //   %25: i64 = call.std::string::String.len %24: std::string::String
 //   call.print %25: i64
 //   %27: std::array::Array<i64> = ref.load %11: &var std::array::Array<i64>
-//   array.deinit %27: std::array::Array<i64>
+//   array.deinit %27: std::array::Array<i64>, %6: Allocator
 //   call.Note.deinit %9: Note, %1: Allocator
 //   %30: !void = error.ok
 //   return %30: !void

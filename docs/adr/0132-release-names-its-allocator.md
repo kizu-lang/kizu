@@ -31,17 +31,24 @@ allocator が分からないから**。
 
 ## Decision
 
-**owner の解放は allocator を名指す。**
+**owner の確保と解放は allocator を名指す。**
 
 ```kizu
 fn (self: std::mem::Box<T>) deinit<T>(allocator: Allocator) -> void
 fn (self: std::array::Array<T>) deinit<T>(allocator: Allocator) -> void
+fn (self: &var std::array::Array<T>) append<T>(allocator: Allocator, value: T) -> !void
+fn (self: &var std::array::Array<T>) reserve<T>(allocator: Allocator, n: i64) -> !void
 ```
 
-`sizeof(T)` を compile 時の値として渡すのと同じ扱いです。解放に必要なものは
-呼び出し側が既に持っており、値がその複製を運ぶ必要はありません。これは
-原理 #4「確保は明示 allocator。hidden allocation を持たない」の裏側で、
-**hidden deallocation も持たない**ということです。
+`sizeof(T)` を compile 時の値として渡すのと同じ扱いです。確保にも解放にも必要な
+ものは呼び出し側が既に持っており、値がその複製を運ぶ必要はありません。解放側は
+原理 #4「確保は明示 allocator。hidden allocation を持たない」の裏側で
+**hidden deallocation も持たない**ということ、確保側は原理 #4 そのものです ——
+`values.append(x)` は allocator を受け取らずに確保していました。
+
+`std::array::new<T>(allocator)` は引数を保ちますが、何も確保しないので runtime
+には届きません。compile 時の provenance として残り、後続の確保・解放が同じ
+allocator を名指すことを checker が要求します(原理 #5)。
 
 ### 導出 deinit も allocator を取る
 
@@ -81,6 +88,7 @@ owner を container の要素にするとき、要素の tie は container の t
 
 | 案 | 却下理由 |
 | --- | --- |
+| `array::new<T>()` から allocator も落とす(Zig の `ArrayListUnmanaged`) | 値が持つ情報は減らないのに、その container がどの allocator のものかを compile 時に照合する足場が消える。tie 検査が Array に効かなくなり、原理 #5 に反する |
 | header に allocator を残す | 解放のたびに読める代わりに、確保のたびに 1 word 払う。Box では size class 1 つ分、つまり allocation の倍化になる |
 | 暗黙の global allocator を持ち、`deinit()` は引数なしのまま(Rust の `Box`) | 原理 #4 が禁じている。どこから確保したかが source に出なくなる |
 | `Box` だけ allocator を取り、`Array` は header に残す | 解放の綴りが型ごとに変わる。owner field を持つ型の導出 deinit がどちらの形にもなり得て、`defer` の書き方が型を見ないと決まらない |
@@ -94,8 +102,10 @@ owner を container の要素にするとき、要素の tie は container の t
   61MB から 46MB になった。残る差は `?Box<T>` が tag と pointer を別に持つこと
   で、それは別の判断
 - `Array<T>` の header は `{data, len, cap}` の 3 word(24 byte)で、Rust の
-  `Vec` と同じ。`allocator` word を落とすには `append` / `reserve` も allocator
-  を取る必要があり、そこはこの決定の続きとして別に行う
+  `Vec` と同じ。Array を持つ struct はすべて 1 word 縮み、compiler が自分自身を
+  check する peak RSS は 564MB から 497MB になった
+- 空の `Array<T>` の構築は命令 0 個になった。3 word の zero 値がそれ自体で
+  答えなので、`insertvalue` すら要らない
 - **owner を持つすべての型の `deinit` が allocator を取る。** 呼び出し側は
   `defer x.deinit(allocator)` と書く
 - allocator binding は、それが作った owner より長生きしなければならない。
