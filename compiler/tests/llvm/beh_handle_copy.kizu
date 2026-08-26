@@ -30,7 +30,7 @@ fn read_value(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
 test "handle assignment leaves the source usable" {
     let allocator = mem::page_allocator();
     let items = arena::new<Item>(allocator);
-    let h = items.add(Item { value: 7 });
+    let h = items.add(allocator, Item { value: 7 });
     let h2 = h;
     testing::expect_equal<i64>(14, items.at(h).value + items.at(h2).value);
     items.deinit(allocator);
@@ -39,7 +39,7 @@ test "handle assignment leaves the source usable" {
 test "a helper takes the same handle twice" {
     let allocator = mem::page_allocator();
     let items = arena::new<Item>(allocator);
-    let h = items.add(Item { value: 21 });
+    let h = items.add(allocator, Item { value: 21 });
     testing::expect_equal<i64>(42, read_value(&items, h) + read_value(&items, h));
     items.deinit(allocator);
 }
@@ -47,9 +47,9 @@ test "a helper takes the same handle twice" {
 test "two parents share one child" {
     let allocator = mem::page_allocator();
     let nodes = arena::new<Node>(allocator);
-    let leaf = nodes.add(Node { value: 5, child: null });
-    let a = nodes.add(Node { value: 10, child: leaf });
-    let b = nodes.add(Node { value: 20, child: leaf });
+    let leaf = nodes.add(allocator, Node { value: 5, child: null });
+    let a = nodes.add(allocator, Node { value: 10, child: leaf });
+    let b = nodes.add(allocator, Node { value: 20, child: leaf });
     var total = nodes.at(leaf).value;
     if nodes.at(a).child |c| {
         total = total + nodes.at(c).value;
@@ -65,7 +65,7 @@ test "an array holds handles as a worklist" {
     let allocator = mem::page_allocator();
     let nodes = arena::new<Node>(allocator);
     defer nodes.deinit(allocator);
-    let leaf = nodes.add(Node { value: 1, child: null });
+    let leaf = nodes.add(allocator, Node { value: 1, child: null });
     var work = array::new<arena::Handle<Node>>(allocator);
     defer work.deinit(allocator);
     try work.append(allocator, leaf);
@@ -82,7 +82,7 @@ test "an array holds handles as a worklist" {
 test "a struct holding a handle is copy" {
     let allocator = mem::page_allocator();
     let items = arena::new<Item>(allocator);
-    let h = items.add(Item { value: 7 });
+    let h = items.add(allocator, Item { value: 7 });
     let r = Ref { h: h, weight: 3 };
     let r2 = r;
     testing::expect_equal<i64>(17, items.at(r.h).value + items.at(r2.h).value + r.weight);
@@ -129,14 +129,6 @@ test "a struct holding a handle is copy" {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// %kizu.arena = type { ptr, i64, i64, i64, ptr }
-// @kizu.arena.empty = private unnamed_addr global %kizu.arena zeroinitializer
-// declare ptr @kizu_arena_new(ptr, i64)
-// declare i64 @kizu_arena_add(ptr, ptr)
-// declare i64 @kizu_arena_len(ptr)
-// declare ptr @kizu_arena_pop(ptr)
-// declare void @kizu_arena_deinit(ptr)
-// 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr, ptr, i64)
 // declare i64 @std__array__Array_get_or_panic_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr, i64)
 // declare i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr)
@@ -146,373 +138,323 @@ test "a struct holding a handle is copy" {
 // declare void @kizu_panic_arena_handle(i64, i64)
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define i64 @read_value(ptr %kizu.items, i64 %kizu.h) {
+// define i64 @read_value(%kizu.array %kizu.items, i64 %kizu.h) {
 // entry:
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.items, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.items
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.h, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.h, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.1.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.1.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.1.ptr.arena.at.null, label %kizu.1.ptr.ok
-// kizu.1.ptr.arena.at.null:
+//   %kizu.1 = alloca %kizu.array
+//   store %kizu.array %kizu.items, ptr %kizu.1
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.1, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.1
+//   %kizu.array.len.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.array.len.3 = load i64, ptr %kizu.array.len.4
+//   %kizu.array.in_range.5 = icmp ult i64 %kizu.h, %kizu.array.len.3
+//   %kizu.array.data.addr.6 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.7 = load ptr, ptr %kizu.array.data.addr.6
+//   %kizu.array.elem.8 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.7, i64 %kizu.h
+//   %kizu.2.ptr = select i1 %kizu.array.in_range.5, ptr %kizu.array.elem.8, ptr null
+//   %kizu.arena.at.is_null.9 = icmp eq ptr %kizu.2.ptr, null
+//   br i1 %kizu.arena.at.is_null.9, label %kizu.2.ptr.arena.at.null, label %kizu.2.ptr.ok
+// kizu.2.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.1.ptr.ok:
-//   %kizu.1 = load %kizu.struct.Item, ptr %kizu.1.ptr
-//   %kizu.2 = extractvalue %kizu.struct.Item %kizu.1, 0
-//   ret i64 %kizu.2
+// kizu.2.ptr.ok:
+//   %kizu.2 = load %kizu.struct.Item, ptr %kizu.2.ptr
+//   %kizu.3 = extractvalue %kizu.struct.Item %kizu.2, 0
+//   ret i64 %kizu.3
 // }
 // 
 // define %kizu.error.void @test_handle_assignment_leaves_the_source_usable() {
 // entry:
-//   %kizu.5.value.slot = alloca %kizu.struct.Item
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.6.elem.slot = alloca %kizu.struct.Item
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
-//   store %kizu.struct.Item %kizu.4, ptr %kizu.5.value.slot
-//   %kizu.5 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.5.value.slot)
-//   %kizu.5.bad = icmp slt i64 %kizu.5, 0
-//   br i1 %kizu.5.bad, label %kizu.5.bad.arena.add.fail, label %kizu.5.bad.ok
-// kizu.5.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.6, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.6.ok.array.append.fast, label %kizu.6.ok.array.append.slow
+// kizu.6.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.8, i64 %kizu.6
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.6, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.slow:
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.6.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.6.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.join:
+//   %kizu.6.ok = phi i1 [ true, %kizu.6.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.6.ok.array.append.slow ]
+//   %kizu.6.bad = xor i1 %kizu.6.ok, true
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.5.bad.ok:
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.5, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.5, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.7.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.7.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.7.ptr.arena.at.null, label %kizu.7.ptr.ok
-// kizu.7.ptr.arena.at.null:
+// kizu.6.bad.ok:
+//   %kizu.array.handle.null.12 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.13 = select i1 %kizu.array.handle.null.12, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.15 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 1
+//   %kizu.array.len.14 = load i64, ptr %kizu.array.len.15
+//   %kizu.array.in_range.16 = icmp ult i64 %kizu.6, %kizu.array.len.14
+//   %kizu.array.data.addr.17 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 0
+//   %kizu.array.data.18 = load ptr, ptr %kizu.array.data.addr.17
+//   %kizu.array.elem.19 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.18, i64 %kizu.6
+//   %kizu.8.ptr = select i1 %kizu.array.in_range.16, ptr %kizu.array.elem.19, ptr null
+//   %kizu.arena.at.is_null.20 = icmp eq ptr %kizu.8.ptr, null
+//   br i1 %kizu.arena.at.is_null.20, label %kizu.8.ptr.arena.at.null, label %kizu.8.ptr.ok
+// kizu.8.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.7.ptr.ok:
-//   %kizu.7 = load %kizu.struct.Item, ptr %kizu.7.ptr
-//   %kizu.8 = extractvalue %kizu.struct.Item %kizu.7, 0
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.5, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.5, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.9.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.9.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.9.ptr.arena.at.null, label %kizu.9.ptr.ok
-// kizu.9.ptr.arena.at.null:
+// kizu.8.ptr.ok:
+//   %kizu.8 = load %kizu.struct.Item, ptr %kizu.8.ptr
+//   %kizu.9 = extractvalue %kizu.struct.Item %kizu.8, 0
+//   %kizu.array.handle.null.21 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.22 = select i1 %kizu.array.handle.null.21, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.24 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 1
+//   %kizu.array.len.23 = load i64, ptr %kizu.array.len.24
+//   %kizu.array.in_range.25 = icmp ult i64 %kizu.6, %kizu.array.len.23
+//   %kizu.array.data.addr.26 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 0
+//   %kizu.array.data.27 = load ptr, ptr %kizu.array.data.addr.26
+//   %kizu.array.elem.28 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.27, i64 %kizu.6
+//   %kizu.10.ptr = select i1 %kizu.array.in_range.25, ptr %kizu.array.elem.28, ptr null
+//   %kizu.arena.at.is_null.29 = icmp eq ptr %kizu.10.ptr, null
+//   br i1 %kizu.arena.at.is_null.29, label %kizu.10.ptr.arena.at.null, label %kizu.10.ptr.ok
+// kizu.10.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.9.ptr.ok:
-//   %kizu.9 = load %kizu.struct.Item, ptr %kizu.9.ptr
-//   %kizu.10 = extractvalue %kizu.struct.Item %kizu.9, 0
-//   %kizu.11 = add i64 %kizu.8, %kizu.10
-//   %kizu.12.ok = icmp eq i64 14, %kizu.11
-//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
-// kizu.12.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 14, i64 %kizu.11, i64 0, i64 0)
+// kizu.10.ptr.ok:
+//   %kizu.10 = load %kizu.struct.Item, ptr %kizu.10.ptr
+//   %kizu.11 = extractvalue %kizu.struct.Item %kizu.10, 0
+//   %kizu.12 = add i64 %kizu.9, %kizu.11
+//   %kizu.13.ok = icmp eq i64 14, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 14, i64 %kizu.12, i64 0, i64 0)
 //   unreachable
-// kizu.12.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.14 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.14
+// kizu.13.ok.ok:
+//   %kizu.14 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.30 = extractvalue %kizu.array %kizu.14, 0
+//   %kizu.arena.deinit.cap.31 = extractvalue %kizu.array %kizu.14, 2
+//   %kizu.arena.deinit.bytes.32 = mul i64 %kizu.arena.deinit.cap.31, ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.30, i64 %kizu.arena.deinit.bytes.32)
+//   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.16
 // }
 // 
 // define %kizu.error.void @test_a_helper_takes_the_same_handle_twice() {
 // entry:
-//   %kizu.5.value.slot = alloca %kizu.struct.Item
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.6.elem.slot = alloca %kizu.struct.Item
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 21, 0
-//   store %kizu.struct.Item %kizu.4, ptr %kizu.5.value.slot
-//   %kizu.5 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.5.value.slot)
-//   %kizu.5.bad = icmp slt i64 %kizu.5, 0
-//   br i1 %kizu.5.bad, label %kizu.5.bad.arena.add.fail, label %kizu.5.bad.ok
-// kizu.5.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.struct.Item zeroinitializer, i64 21, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.6, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.6.ok.array.append.fast, label %kizu.6.ok.array.append.slow
+// kizu.6.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.8, i64 %kizu.6
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.6, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.slow:
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.6.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.6.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.join:
+//   %kizu.6.ok = phi i1 [ true, %kizu.6.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.6.ok.array.append.slow ]
+//   %kizu.6.bad = xor i1 %kizu.6.ok, true
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.5.bad.ok:
-//   %kizu.7 = call i64 @read_value(ptr %kizu.2, i64 %kizu.5)
-//   %kizu.8 = call i64 @read_value(ptr %kizu.2, i64 %kizu.5)
-//   %kizu.9 = add i64 %kizu.7, %kizu.8
-//   %kizu.10.ok = icmp eq i64 42, %kizu.9
-//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
-// kizu.10.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.9, i64 0, i64 0)
+// kizu.6.bad.ok:
+//   %kizu.8 = load %kizu.array, ptr %kizu.3
+//   %kizu.9 = call i64 @read_value(%kizu.array %kizu.8, i64 %kizu.6)
+//   %kizu.10 = load %kizu.array, ptr %kizu.3
+//   %kizu.11 = call i64 @read_value(%kizu.array %kizu.10, i64 %kizu.6)
+//   %kizu.12 = add i64 %kizu.9, %kizu.11
+//   %kizu.13.ok = icmp eq i64 42, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.12, i64 0, i64 0)
 //   unreachable
-// kizu.10.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.12
+// kizu.13.ok.ok:
+//   %kizu.14 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.12 = extractvalue %kizu.array %kizu.14, 0
+//   %kizu.arena.deinit.cap.13 = extractvalue %kizu.array %kizu.14, 2
+//   %kizu.arena.deinit.bytes.14 = mul i64 %kizu.arena.deinit.cap.13, ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.12, i64 %kizu.arena.deinit.bytes.14)
+//   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.16
 // }
 // 
 // define %kizu.error.void @test_two_parents_share_one_child() {
 // entry:
-//   %kizu.6.value.slot = alloca %kizu.struct.Node
-//   %kizu.10.value.slot = alloca %kizu.struct.Node
-//   %kizu.14.value.slot = alloca %kizu.struct.Node
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.7.elem.slot = alloca %kizu.struct.Node
+//   %kizu.11.elem.slot = alloca %kizu.struct.Node
+//   %kizu.15.elem.slot = alloca %kizu.struct.Node
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
-//   %kizu.5.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 5, 0
-//   %kizu.5 = insertvalue %kizu.struct.Node %kizu.5.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.4, 1
-//   store %kizu.struct.Node %kizu.5, ptr %kizu.6.value.slot
-//   %kizu.6 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.6.value.slot)
-//   %kizu.6.bad = icmp slt i64 %kizu.6, 0
-//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
-// kizu.6.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
+//   %kizu.6.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 5, 0
+//   %kizu.6 = insertvalue %kizu.struct.Node %kizu.6.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.5, 1
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.7, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.7.ok.array.append.fast, label %kizu.7.ok.array.append.slow
+// kizu.7.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.8, i64 %kizu.7
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.7, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.7.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.7.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.join:
+//   %kizu.7.ok = phi i1 [ true, %kizu.7.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.7.ok.array.append.slow ]
+//   %kizu.7.bad = xor i1 %kizu.7.ok, true
+//   br i1 %kizu.7.bad, label %kizu.7.bad.arena.add.fail, label %kizu.7.bad.ok
+// kizu.7.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.6.bad.ok:
-//   %kizu.8.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
-//   %kizu.8 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.8.some, i64 %kizu.6, 1
-//   %kizu.9.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 10, 0
-//   %kizu.9 = insertvalue %kizu.struct.Node %kizu.9.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.8, 1
-//   store %kizu.struct.Node %kizu.9, ptr %kizu.10.value.slot
-//   %kizu.10 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.10.value.slot)
-//   %kizu.10.bad = icmp slt i64 %kizu.10, 0
-//   br i1 %kizu.10.bad, label %kizu.10.bad.arena.add.fail, label %kizu.10.bad.ok
-// kizu.10.bad.arena.add.fail:
+// kizu.7.bad.ok:
+//   %kizu.9.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
+//   %kizu.9 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.9.some, i64 %kizu.7, 1
+//   %kizu.10.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 10, 0
+//   %kizu.10 = insertvalue %kizu.struct.Node %kizu.10.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.9, 1
+//   %kizu.array.handle.null.12 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.13 = select i1 %kizu.array.handle.null.12, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.15 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 1
+//   %kizu.11 = load i64, ptr %kizu.array.append.len.addr.15
+//   %kizu.array.append.cap.16 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 2
+//   %kizu.array.append.cap.14 = load i64, ptr %kizu.array.append.cap.16
+//   %kizu.array.append.fits.17 = icmp slt i64 %kizu.11, %kizu.array.append.cap.14
+//   br i1 %kizu.array.append.fits.17, label %kizu.11.ok.array.append.fast, label %kizu.11.ok.array.append.slow
+// kizu.11.ok.array.append.fast:
+//   %kizu.array.data.addr.18 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 0
+//   %kizu.array.data.19 = load ptr, ptr %kizu.array.data.addr.18
+//   %kizu.array.elem.20 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.19, i64 %kizu.11
+//   store %kizu.struct.Node %kizu.10, ptr %kizu.array.elem.20
+//   %kizu.array.append.grown.21 = add i64 %kizu.11, 1
+//   store i64 %kizu.array.append.grown.21, ptr %kizu.array.append.len.addr.15
+//   br label %kizu.11.ok.array.append.join
+// kizu.11.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.10, ptr %kizu.11.elem.slot
+//   %kizu.array.append.slow.ok.22 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.11.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.11.ok.array.append.join
+// kizu.11.ok.array.append.join:
+//   %kizu.11.ok = phi i1 [ true, %kizu.11.ok.array.append.fast ], [ %kizu.array.append.slow.ok.22, %kizu.11.ok.array.append.slow ]
+//   %kizu.11.bad = xor i1 %kizu.11.ok, true
+//   br i1 %kizu.11.bad, label %kizu.11.bad.arena.add.fail, label %kizu.11.bad.ok
+// kizu.11.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.10.bad.ok:
-//   %kizu.12.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
-//   %kizu.12 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.12.some, i64 %kizu.6, 1
-//   %kizu.13.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 20, 0
-//   %kizu.13 = insertvalue %kizu.struct.Node %kizu.13.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.12, 1
-//   store %kizu.struct.Node %kizu.13, ptr %kizu.14.value.slot
-//   %kizu.14 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.14.value.slot)
-//   %kizu.14.bad = icmp slt i64 %kizu.14, 0
-//   br i1 %kizu.14.bad, label %kizu.14.bad.arena.add.fail, label %kizu.14.bad.ok
-// kizu.14.bad.arena.add.fail:
+// kizu.11.bad.ok:
+//   %kizu.13.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
+//   %kizu.13 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.13.some, i64 %kizu.7, 1
+//   %kizu.14.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 20, 0
+//   %kizu.14 = insertvalue %kizu.struct.Node %kizu.14.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.13, 1
+//   %kizu.array.handle.null.23 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.24 = select i1 %kizu.array.handle.null.23, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.26 = getelementptr %kizu.array, ptr %kizu.array.handle.24, i64 0, i32 1
+//   %kizu.15 = load i64, ptr %kizu.array.append.len.addr.26
+//   %kizu.array.append.cap.27 = getelementptr %kizu.array, ptr %kizu.array.handle.24, i64 0, i32 2
+//   %kizu.array.append.cap.25 = load i64, ptr %kizu.array.append.cap.27
+//   %kizu.array.append.fits.28 = icmp slt i64 %kizu.15, %kizu.array.append.cap.25
+//   br i1 %kizu.array.append.fits.28, label %kizu.15.ok.array.append.fast, label %kizu.15.ok.array.append.slow
+// kizu.15.ok.array.append.fast:
+//   %kizu.array.data.addr.29 = getelementptr %kizu.array, ptr %kizu.array.handle.24, i64 0, i32 0
+//   %kizu.array.data.30 = load ptr, ptr %kizu.array.data.addr.29
+//   %kizu.array.elem.31 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.30, i64 %kizu.15
+//   store %kizu.struct.Node %kizu.14, ptr %kizu.array.elem.31
+//   %kizu.array.append.grown.32 = add i64 %kizu.15, 1
+//   store i64 %kizu.array.append.grown.32, ptr %kizu.array.append.len.addr.26
+//   br label %kizu.15.ok.array.append.join
+// kizu.15.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.14, ptr %kizu.15.elem.slot
+//   %kizu.array.append.slow.ok.33 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.15.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.15.ok.array.append.join
+// kizu.15.ok.array.append.join:
+//   %kizu.15.ok = phi i1 [ true, %kizu.15.ok.array.append.fast ], [ %kizu.array.append.slow.ok.33, %kizu.15.ok.array.append.slow ]
+//   %kizu.15.bad = xor i1 %kizu.15.ok, true
+//   br i1 %kizu.15.bad, label %kizu.15.bad.arena.add.fail, label %kizu.15.bad.ok
+// kizu.15.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.14.bad.ok:
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.6, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.6, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.15.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.15.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.15.ptr.arena.at.null, label %kizu.15.ptr.ok
-// kizu.15.ptr.arena.at.null:
+// kizu.15.bad.ok:
+//   %kizu.array.handle.null.34 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.35 = select i1 %kizu.array.handle.null.34, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.37 = getelementptr %kizu.array, ptr %kizu.array.handle.35, i64 0, i32 1
+//   %kizu.array.len.36 = load i64, ptr %kizu.array.len.37
+//   %kizu.array.in_range.38 = icmp ult i64 %kizu.7, %kizu.array.len.36
+//   %kizu.array.data.addr.39 = getelementptr %kizu.array, ptr %kizu.array.handle.35, i64 0, i32 0
+//   %kizu.array.data.40 = load ptr, ptr %kizu.array.data.addr.39
+//   %kizu.array.elem.41 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.40, i64 %kizu.7
+//   %kizu.16.ptr = select i1 %kizu.array.in_range.38, ptr %kizu.array.elem.41, ptr null
+//   %kizu.arena.at.is_null.42 = icmp eq ptr %kizu.16.ptr, null
+//   br i1 %kizu.arena.at.is_null.42, label %kizu.16.ptr.arena.at.null, label %kizu.16.ptr.ok
+// kizu.16.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.15.ptr.ok:
-//   %kizu.15 = load %kizu.struct.Node, ptr %kizu.15.ptr
-//   %kizu.16 = extractvalue %kizu.struct.Node %kizu.15, 0
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.10, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.10, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.17.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.17.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.17.ptr.arena.at.null, label %kizu.17.ptr.ok
-// kizu.17.ptr.arena.at.null:
+// kizu.16.ptr.ok:
+//   %kizu.16 = load %kizu.struct.Node, ptr %kizu.16.ptr
+//   %kizu.17 = extractvalue %kizu.struct.Node %kizu.16, 0
+//   %kizu.array.handle.null.43 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.44 = select i1 %kizu.array.handle.null.43, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.46 = getelementptr %kizu.array, ptr %kizu.array.handle.44, i64 0, i32 1
+//   %kizu.array.len.45 = load i64, ptr %kizu.array.len.46
+//   %kizu.array.in_range.47 = icmp ult i64 %kizu.11, %kizu.array.len.45
+//   %kizu.array.data.addr.48 = getelementptr %kizu.array, ptr %kizu.array.handle.44, i64 0, i32 0
+//   %kizu.array.data.49 = load ptr, ptr %kizu.array.data.addr.48
+//   %kizu.array.elem.50 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.49, i64 %kizu.11
+//   %kizu.18.ptr = select i1 %kizu.array.in_range.47, ptr %kizu.array.elem.50, ptr null
+//   %kizu.arena.at.is_null.51 = icmp eq ptr %kizu.18.ptr, null
+//   br i1 %kizu.arena.at.is_null.51, label %kizu.18.ptr.arena.at.null, label %kizu.18.ptr.ok
+// kizu.18.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.17.ptr.ok:
-//   %kizu.17 = load %kizu.struct.Node, ptr %kizu.17.ptr
-//   %kizu.18 = extractvalue %kizu.struct.Node %kizu.17, 1
-//   %kizu.19 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.18, 1
-//   %kizu.20.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.18, 0
-//   %kizu.20 = icmp ne i8 %kizu.20.tag, 0
-//   br i1 %kizu.20, label %if.then.1, label %if.else.2
+// kizu.18.ptr.ok:
+//   %kizu.18 = load %kizu.struct.Node, ptr %kizu.18.ptr
+//   %kizu.19 = extractvalue %kizu.struct.Node %kizu.18, 1
+//   %kizu.20 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.19, 1
+//   %kizu.21.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.19, 0
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.arena.handle.null.25 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.26 = select i1 %kizu.arena.handle.null.25, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.27 = getelementptr %kizu.arena, ptr %kizu.arena.handle.26, i64 0, i32 1
-//   %kizu.arena.len.28 = load i64, ptr %kizu.arena.len.addr.27
-//   %kizu.arena.in_range.29 = icmp ult i64 %kizu.19, %kizu.arena.len.28
-//   %kizu.arena.elem_size.addr.30 = getelementptr %kizu.arena, ptr %kizu.arena.handle.26, i64 0, i32 3
-//   %kizu.arena.elem_size.31 = load i64, ptr %kizu.arena.elem_size.addr.30
-//   %kizu.arena.offset.32 = mul i64 %kizu.19, %kizu.arena.elem_size.31
-//   %kizu.arena.data.addr.33 = getelementptr %kizu.arena, ptr %kizu.arena.handle.26, i64 0, i32 0
-//   %kizu.arena.data.34 = load ptr, ptr %kizu.arena.data.addr.33
-//   %kizu.arena.elem.35 = getelementptr i8, ptr %kizu.arena.data.34, i64 %kizu.arena.offset.32
-//   %kizu.21.ptr = select i1 %kizu.arena.in_range.29, ptr %kizu.arena.elem.35, ptr null
-//   %kizu.arena.at.is_null.36 = icmp eq ptr %kizu.21.ptr, null
-//   br i1 %kizu.arena.at.is_null.36, label %kizu.21.ptr.arena.at.null, label %kizu.21.ptr.ok
-// kizu.21.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.21.ptr.ok:
-//   %kizu.21 = load %kizu.struct.Node, ptr %kizu.21.ptr
-//   %kizu.22 = extractvalue %kizu.struct.Node %kizu.21, 0
-//   %kizu.23 = add i64 %kizu.16, %kizu.22
-//   br label %if.end.3
-// if.else.2:
-//   br label %if.end.3
-// if.end.3:
-//   %kizu.24 = phi i64 [ %kizu.23, %kizu.21.ptr.ok ], [ %kizu.16, %if.else.2 ]
-//   %kizu.arena.handle.null.37 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.38 = select i1 %kizu.arena.handle.null.37, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.39 = getelementptr %kizu.arena, ptr %kizu.arena.handle.38, i64 0, i32 1
-//   %kizu.arena.len.40 = load i64, ptr %kizu.arena.len.addr.39
-//   %kizu.arena.in_range.41 = icmp ult i64 %kizu.14, %kizu.arena.len.40
-//   %kizu.arena.elem_size.addr.42 = getelementptr %kizu.arena, ptr %kizu.arena.handle.38, i64 0, i32 3
-//   %kizu.arena.elem_size.43 = load i64, ptr %kizu.arena.elem_size.addr.42
-//   %kizu.arena.offset.44 = mul i64 %kizu.14, %kizu.arena.elem_size.43
-//   %kizu.arena.data.addr.45 = getelementptr %kizu.arena, ptr %kizu.arena.handle.38, i64 0, i32 0
-//   %kizu.arena.data.46 = load ptr, ptr %kizu.arena.data.addr.45
-//   %kizu.arena.elem.47 = getelementptr i8, ptr %kizu.arena.data.46, i64 %kizu.arena.offset.44
-//   %kizu.25.ptr = select i1 %kizu.arena.in_range.41, ptr %kizu.arena.elem.47, ptr null
-//   %kizu.arena.at.is_null.48 = icmp eq ptr %kizu.25.ptr, null
-//   br i1 %kizu.arena.at.is_null.48, label %kizu.25.ptr.arena.at.null, label %kizu.25.ptr.ok
-// kizu.25.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.25.ptr.ok:
-//   %kizu.25 = load %kizu.struct.Node, ptr %kizu.25.ptr
-//   %kizu.26 = extractvalue %kizu.struct.Node %kizu.25, 1
-//   %kizu.27 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.26, 1
-//   %kizu.28.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.26, 0
-//   %kizu.28 = icmp ne i8 %kizu.28.tag, 0
-//   br i1 %kizu.28, label %if.then.4, label %if.else.5
-// if.then.4:
-//   %kizu.arena.handle.null.49 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.50 = select i1 %kizu.arena.handle.null.49, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.51 = getelementptr %kizu.arena, ptr %kizu.arena.handle.50, i64 0, i32 1
-//   %kizu.arena.len.52 = load i64, ptr %kizu.arena.len.addr.51
-//   %kizu.arena.in_range.53 = icmp ult i64 %kizu.27, %kizu.arena.len.52
-//   %kizu.arena.elem_size.addr.54 = getelementptr %kizu.arena, ptr %kizu.arena.handle.50, i64 0, i32 3
-//   %kizu.arena.elem_size.55 = load i64, ptr %kizu.arena.elem_size.addr.54
-//   %kizu.arena.offset.56 = mul i64 %kizu.27, %kizu.arena.elem_size.55
-//   %kizu.arena.data.addr.57 = getelementptr %kizu.arena, ptr %kizu.arena.handle.50, i64 0, i32 0
-//   %kizu.arena.data.58 = load ptr, ptr %kizu.arena.data.addr.57
-//   %kizu.arena.elem.59 = getelementptr i8, ptr %kizu.arena.data.58, i64 %kizu.arena.offset.56
-//   %kizu.29.ptr = select i1 %kizu.arena.in_range.53, ptr %kizu.arena.elem.59, ptr null
-//   %kizu.arena.at.is_null.60 = icmp eq ptr %kizu.29.ptr, null
-//   br i1 %kizu.arena.at.is_null.60, label %kizu.29.ptr.arena.at.null, label %kizu.29.ptr.ok
-// kizu.29.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.29.ptr.ok:
-//   %kizu.29 = load %kizu.struct.Node, ptr %kizu.29.ptr
-//   %kizu.30 = extractvalue %kizu.struct.Node %kizu.29, 0
-//   %kizu.31 = add i64 %kizu.24, %kizu.30
-//   br label %if.end.6
-// if.else.5:
-//   br label %if.end.6
-// if.end.6:
-//   %kizu.32 = phi i64 [ %kizu.31, %kizu.29.ptr.ok ], [ %kizu.24, %if.else.5 ]
-//   %kizu.34.ok = icmp eq i64 15, %kizu.32
-//   br i1 %kizu.34.ok, label %kizu.34.ok.ok, label %kizu.34.ok.fail
-// kizu.34.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 15, i64 %kizu.32, i64 0, i64 0)
-//   unreachable
-// kizu.34.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.36 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.36
-// }
-// 
-// define %kizu.error.void @test_an_array_holds_handles_as_a_worklist() {
-// entry:
-//   %kizu.6.value.slot = alloca %kizu.struct.Node
-//   %kizu.8 = alloca %kizu.array
-//   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
-//   %kizu.5.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 1, 0
-//   %kizu.5 = insertvalue %kizu.struct.Node %kizu.5.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.4, 1
-//   store %kizu.struct.Node %kizu.5, ptr %kizu.6.value.slot
-//   %kizu.6 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.6.value.slot)
-//   %kizu.6.bad = icmp slt i64 %kizu.6, 0
-//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
-// kizu.6.bad.arena.add.fail:
-//   call void @kizu_panic_arena_add(i64 0, i64 0)
-//   unreachable
-// kizu.6.bad.ok:
-//   store %kizu.array zeroinitializer, ptr %kizu.8
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8, ptr %kizu.1, i64 %kizu.6)
-//   %kizu.10 = load %kizu.array, ptr %kizu.8
-//   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
-//   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
-//   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
-// kizu.11.try.err:
-//   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.10, 0
-//   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
-//   ret %kizu.error.void %kizu.try.err.6
-// kizu.11.try.ok:
-//   %kizu.12 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8, ptr %kizu.1, i64 %kizu.6)
-//   %kizu.13 = load %kizu.array, ptr %kizu.8
-//   %kizu.14.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.12, 0
-//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
-//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
-// kizu.14.try.err:
-//   %kizu.array.deinit.data.8 = extractvalue %kizu.array %kizu.13, 0
-//   %kizu.array.deinit.cap.9 = extractvalue %kizu.array %kizu.13, 2
-//   %kizu.array.deinit.bytes.10 = mul i64 %kizu.array.deinit.cap.9, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.8, i64 %kizu.array.deinit.bytes.10)
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.try.err.12.code = extractvalue %kizu.error.std__mem__Error.void %kizu.12, 1
-//   %kizu.try.err.12.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.12 = insertvalue %kizu.error.void %kizu.try.err.12.base, i64 %kizu.try.err.12.code, 1
-//   ret %kizu.error.void %kizu.try.err.12
-// kizu.14.try.ok:
-//   br label %while.header.1
-// while.header.1:
-//   %kizu.17 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.24, %kizu.22.ptr.ok ]
-//   %kizu.18 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.26, %kizu.22.ptr.ok ]
-//   %kizu.19 = call i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8)
-//   %kizu.20 = icmp slt i64 %kizu.18, %kizu.19
-//   br i1 %kizu.20, label %while.body.2, label %while.end.3
-// while.body.2:
-//   %kizu.21 = call i64 @std__array__Array_get_or_panic_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8, i64 %kizu.18)
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.21, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.21, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.22.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.22.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.22.ptr.arena.at.null, label %kizu.22.ptr.ok
+//   %kizu.array.handle.null.52 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.53 = select i1 %kizu.array.handle.null.52, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.55 = getelementptr %kizu.array, ptr %kizu.array.handle.53, i64 0, i32 1
+//   %kizu.array.len.54 = load i64, ptr %kizu.array.len.55
+//   %kizu.array.in_range.56 = icmp ult i64 %kizu.20, %kizu.array.len.54
+//   %kizu.array.data.addr.57 = getelementptr %kizu.array, ptr %kizu.array.handle.53, i64 0, i32 0
+//   %kizu.array.data.58 = load ptr, ptr %kizu.array.data.addr.57
+//   %kizu.array.elem.59 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.58, i64 %kizu.20
+//   %kizu.22.ptr = select i1 %kizu.array.in_range.56, ptr %kizu.array.elem.59, ptr null
+//   %kizu.arena.at.is_null.60 = icmp eq ptr %kizu.22.ptr, null
+//   br i1 %kizu.arena.at.is_null.60, label %kizu.22.ptr.arena.at.null, label %kizu.22.ptr.ok
 // kizu.22.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
@@ -520,95 +462,289 @@ test "a struct holding a handle is copy" {
 //   %kizu.22 = load %kizu.struct.Node, ptr %kizu.22.ptr
 //   %kizu.23 = extractvalue %kizu.struct.Node %kizu.22, 0
 //   %kizu.24 = add i64 %kizu.17, %kizu.23
-//   %kizu.26 = add i64 %kizu.18, 1
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.25 = phi i64 [ %kizu.24, %kizu.22.ptr.ok ], [ %kizu.17, %if.else.2 ]
+//   %kizu.array.handle.null.61 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.62 = select i1 %kizu.array.handle.null.61, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.64 = getelementptr %kizu.array, ptr %kizu.array.handle.62, i64 0, i32 1
+//   %kizu.array.len.63 = load i64, ptr %kizu.array.len.64
+//   %kizu.array.in_range.65 = icmp ult i64 %kizu.15, %kizu.array.len.63
+//   %kizu.array.data.addr.66 = getelementptr %kizu.array, ptr %kizu.array.handle.62, i64 0, i32 0
+//   %kizu.array.data.67 = load ptr, ptr %kizu.array.data.addr.66
+//   %kizu.array.elem.68 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.67, i64 %kizu.15
+//   %kizu.26.ptr = select i1 %kizu.array.in_range.65, ptr %kizu.array.elem.68, ptr null
+//   %kizu.arena.at.is_null.69 = icmp eq ptr %kizu.26.ptr, null
+//   br i1 %kizu.arena.at.is_null.69, label %kizu.26.ptr.arena.at.null, label %kizu.26.ptr.ok
+// kizu.26.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.26.ptr.ok:
+//   %kizu.26 = load %kizu.struct.Node, ptr %kizu.26.ptr
+//   %kizu.27 = extractvalue %kizu.struct.Node %kizu.26, 1
+//   %kizu.28 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.27, 1
+//   %kizu.29.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.27, 0
+//   %kizu.29 = icmp ne i8 %kizu.29.tag, 0
+//   br i1 %kizu.29, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.array.handle.null.70 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.71 = select i1 %kizu.array.handle.null.70, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.73 = getelementptr %kizu.array, ptr %kizu.array.handle.71, i64 0, i32 1
+//   %kizu.array.len.72 = load i64, ptr %kizu.array.len.73
+//   %kizu.array.in_range.74 = icmp ult i64 %kizu.28, %kizu.array.len.72
+//   %kizu.array.data.addr.75 = getelementptr %kizu.array, ptr %kizu.array.handle.71, i64 0, i32 0
+//   %kizu.array.data.76 = load ptr, ptr %kizu.array.data.addr.75
+//   %kizu.array.elem.77 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.76, i64 %kizu.28
+//   %kizu.30.ptr = select i1 %kizu.array.in_range.74, ptr %kizu.array.elem.77, ptr null
+//   %kizu.arena.at.is_null.78 = icmp eq ptr %kizu.30.ptr, null
+//   br i1 %kizu.arena.at.is_null.78, label %kizu.30.ptr.arena.at.null, label %kizu.30.ptr.ok
+// kizu.30.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.30.ptr.ok:
+//   %kizu.30 = load %kizu.struct.Node, ptr %kizu.30.ptr
+//   %kizu.31 = extractvalue %kizu.struct.Node %kizu.30, 0
+//   %kizu.32 = add i64 %kizu.25, %kizu.31
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.33 = phi i64 [ %kizu.32, %kizu.30.ptr.ok ], [ %kizu.25, %if.else.5 ]
+//   %kizu.35.ok = icmp eq i64 15, %kizu.33
+//   br i1 %kizu.35.ok, label %kizu.35.ok.ok, label %kizu.35.ok.fail
+// kizu.35.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 15, i64 %kizu.33, i64 0, i64 0)
+//   unreachable
+// kizu.35.ok.ok:
+//   %kizu.36 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.79 = extractvalue %kizu.array %kizu.36, 0
+//   %kizu.arena.deinit.cap.80 = extractvalue %kizu.array %kizu.36, 2
+//   %kizu.arena.deinit.bytes.81 = mul i64 %kizu.arena.deinit.cap.80, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.79, i64 %kizu.arena.deinit.bytes.81)
+//   %kizu.38 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.38
+// }
+// 
+// define %kizu.error.void @test_an_array_holds_handles_as_a_worklist() {
+// entry:
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.7.elem.slot = alloca %kizu.struct.Node
+//   %kizu.9 = alloca %kizu.array
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
+//   %kizu.6.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 1, 0
+//   %kizu.6 = insertvalue %kizu.struct.Node %kizu.6.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.5, 1
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.7, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.7.ok.array.append.fast, label %kizu.7.ok.array.append.slow
+// kizu.7.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.8, i64 %kizu.7
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.7, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.7.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.7.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.join:
+//   %kizu.7.ok = phi i1 [ true, %kizu.7.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.7.ok.array.append.slow ]
+//   %kizu.7.bad = xor i1 %kizu.7.ok, true
+//   br i1 %kizu.7.bad, label %kizu.7.bad.arena.add.fail, label %kizu.7.bad.ok
+// kizu.7.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.7.bad.ok:
+//   store %kizu.array zeroinitializer, ptr %kizu.9
+//   %kizu.10 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9, ptr %kizu.1, i64 %kizu.7)
+//   %kizu.11 = load %kizu.array, ptr %kizu.9
+//   %kizu.12 = load %kizu.array, ptr %kizu.3
+//   %kizu.13.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.10, 0
+//   %kizu.13.ok.bool = icmp ne i8 %kizu.13.ok, 0
+//   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
+// kizu.13.try.err:
+//   %kizu.array.deinit.data.13 = extractvalue %kizu.array %kizu.11, 0
+//   %kizu.array.deinit.cap.14 = extractvalue %kizu.array %kizu.11, 2
+//   %kizu.array.deinit.bytes.15 = mul i64 %kizu.array.deinit.cap.14, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.13, i64 %kizu.array.deinit.bytes.15)
+//   %kizu.arena.deinit.data.17 = extractvalue %kizu.array %kizu.12, 0
+//   %kizu.arena.deinit.cap.18 = extractvalue %kizu.array %kizu.12, 2
+//   %kizu.arena.deinit.bytes.19 = mul i64 %kizu.arena.deinit.cap.18, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.17, i64 %kizu.arena.deinit.bytes.19)
+//   %kizu.try.err.20.code = extractvalue %kizu.error.std__mem__Error.void %kizu.10, 1
+//   %kizu.try.err.20.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.20 = insertvalue %kizu.error.void %kizu.try.err.20.base, i64 %kizu.try.err.20.code, 1
+//   ret %kizu.error.void %kizu.try.err.20
+// kizu.13.try.ok:
+//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9, ptr %kizu.1, i64 %kizu.7)
+//   %kizu.15 = load %kizu.array, ptr %kizu.9
+//   %kizu.16 = load %kizu.array, ptr %kizu.3
+//   %kizu.17.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 0
+//   %kizu.17.ok.bool = icmp ne i8 %kizu.17.ok, 0
+//   br i1 %kizu.17.ok.bool, label %kizu.17.try.ok, label %kizu.17.try.err
+// kizu.17.try.err:
+//   %kizu.array.deinit.data.22 = extractvalue %kizu.array %kizu.15, 0
+//   %kizu.array.deinit.cap.23 = extractvalue %kizu.array %kizu.15, 2
+//   %kizu.array.deinit.bytes.24 = mul i64 %kizu.array.deinit.cap.23, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.22, i64 %kizu.array.deinit.bytes.24)
+//   %kizu.arena.deinit.data.26 = extractvalue %kizu.array %kizu.16, 0
+//   %kizu.arena.deinit.cap.27 = extractvalue %kizu.array %kizu.16, 2
+//   %kizu.arena.deinit.bytes.28 = mul i64 %kizu.arena.deinit.cap.27, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.26, i64 %kizu.arena.deinit.bytes.28)
+//   %kizu.try.err.29.code = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 1
+//   %kizu.try.err.29.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.29 = insertvalue %kizu.error.void %kizu.try.err.29.base, i64 %kizu.try.err.29.code, 1
+//   ret %kizu.error.void %kizu.try.err.29
+// kizu.17.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.20 = phi i64 [ 0, %kizu.17.try.ok ], [ %kizu.27, %kizu.25.ptr.ok ]
+//   %kizu.21 = phi i64 [ 0, %kizu.17.try.ok ], [ %kizu.29, %kizu.25.ptr.ok ]
+//   %kizu.22 = call i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9)
+//   %kizu.23 = icmp slt i64 %kizu.21, %kizu.22
+//   br i1 %kizu.23, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.24 = call i64 @std__array__Array_get_or_panic_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9, i64 %kizu.21)
+//   %kizu.array.handle.null.30 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.31 = select i1 %kizu.array.handle.null.30, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.33 = getelementptr %kizu.array, ptr %kizu.array.handle.31, i64 0, i32 1
+//   %kizu.array.len.32 = load i64, ptr %kizu.array.len.33
+//   %kizu.array.in_range.34 = icmp ult i64 %kizu.24, %kizu.array.len.32
+//   %kizu.array.data.addr.35 = getelementptr %kizu.array, ptr %kizu.array.handle.31, i64 0, i32 0
+//   %kizu.array.data.36 = load ptr, ptr %kizu.array.data.addr.35
+//   %kizu.array.elem.37 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.36, i64 %kizu.24
+//   %kizu.25.ptr = select i1 %kizu.array.in_range.34, ptr %kizu.array.elem.37, ptr null
+//   %kizu.arena.at.is_null.38 = icmp eq ptr %kizu.25.ptr, null
+//   br i1 %kizu.arena.at.is_null.38, label %kizu.25.ptr.arena.at.null, label %kizu.25.ptr.ok
+// kizu.25.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.25.ptr.ok:
+//   %kizu.25 = load %kizu.struct.Node, ptr %kizu.25.ptr
+//   %kizu.26 = extractvalue %kizu.struct.Node %kizu.25, 0
+//   %kizu.27 = add i64 %kizu.20, %kizu.26
+//   %kizu.29 = add i64 %kizu.21, 1
 //   br label %while.header.1
 // while.end.3:
-//   %kizu.28.ok = icmp eq i64 2, %kizu.17
-//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
-// kizu.28.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.17, i64 0, i64 0)
+//   %kizu.31.ok = icmp eq i64 2, %kizu.20
+//   br i1 %kizu.31.ok, label %kizu.31.ok.ok, label %kizu.31.ok.fail
+// kizu.31.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.20, i64 0, i64 0)
 //   unreachable
-// kizu.28.ok.ok:
-//   %kizu.29 = load %kizu.array, ptr %kizu.8
-//   %kizu.array.deinit.data.25 = extractvalue %kizu.array %kizu.29, 0
-//   %kizu.array.deinit.cap.26 = extractvalue %kizu.array %kizu.29, 2
-//   %kizu.array.deinit.bytes.27 = mul i64 %kizu.array.deinit.cap.26, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.25, i64 %kizu.array.deinit.bytes.27)
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.32 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.32
+// kizu.31.ok.ok:
+//   %kizu.32 = load %kizu.array, ptr %kizu.9
+//   %kizu.array.deinit.data.39 = extractvalue %kizu.array %kizu.32, 0
+//   %kizu.array.deinit.cap.40 = extractvalue %kizu.array %kizu.32, 2
+//   %kizu.array.deinit.bytes.41 = mul i64 %kizu.array.deinit.cap.40, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.39, i64 %kizu.array.deinit.bytes.41)
+//   %kizu.34 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.42 = extractvalue %kizu.array %kizu.34, 0
+//   %kizu.arena.deinit.cap.43 = extractvalue %kizu.array %kizu.34, 2
+//   %kizu.arena.deinit.bytes.44 = mul i64 %kizu.arena.deinit.cap.43, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.42, i64 %kizu.arena.deinit.bytes.44)
+//   %kizu.36 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.36
 // }
 // 
 // define %kizu.error.void @test_a_struct_holding_a_handle_is_copy() {
 // entry:
-//   %kizu.5.value.slot = alloca %kizu.struct.Item
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.6.elem.slot = alloca %kizu.struct.Item
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
-//   store %kizu.struct.Item %kizu.4, ptr %kizu.5.value.slot
-//   %kizu.5 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.5.value.slot)
-//   %kizu.5.bad = icmp slt i64 %kizu.5, 0
-//   br i1 %kizu.5.bad, label %kizu.5.bad.arena.add.fail, label %kizu.5.bad.ok
-// kizu.5.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.6, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.6.ok.array.append.fast, label %kizu.6.ok.array.append.slow
+// kizu.6.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.8, i64 %kizu.6
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.6, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.slow:
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.6.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.6.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.join:
+//   %kizu.6.ok = phi i1 [ true, %kizu.6.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.6.ok.array.append.slow ]
+//   %kizu.6.bad = xor i1 %kizu.6.ok, true
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.5.bad.ok:
-//   %kizu.7.field0 = insertvalue %kizu.struct.Ref zeroinitializer, i64 %kizu.5, 0
-//   %kizu.7 = insertvalue %kizu.struct.Ref %kizu.7.field0, i64 3, 1
-//   %kizu.9 = extractvalue %kizu.struct.Ref %kizu.7, 0
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.9, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.9, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.10.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.10.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.10.ptr.arena.at.null, label %kizu.10.ptr.ok
-// kizu.10.ptr.arena.at.null:
+// kizu.6.bad.ok:
+//   %kizu.8.field0 = insertvalue %kizu.struct.Ref zeroinitializer, i64 %kizu.6, 0
+//   %kizu.8 = insertvalue %kizu.struct.Ref %kizu.8.field0, i64 3, 1
+//   %kizu.10 = extractvalue %kizu.struct.Ref %kizu.8, 0
+//   %kizu.array.handle.null.12 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.13 = select i1 %kizu.array.handle.null.12, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.15 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 1
+//   %kizu.array.len.14 = load i64, ptr %kizu.array.len.15
+//   %kizu.array.in_range.16 = icmp ult i64 %kizu.10, %kizu.array.len.14
+//   %kizu.array.data.addr.17 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 0
+//   %kizu.array.data.18 = load ptr, ptr %kizu.array.data.addr.17
+//   %kizu.array.elem.19 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.18, i64 %kizu.10
+//   %kizu.11.ptr = select i1 %kizu.array.in_range.16, ptr %kizu.array.elem.19, ptr null
+//   %kizu.arena.at.is_null.20 = icmp eq ptr %kizu.11.ptr, null
+//   br i1 %kizu.arena.at.is_null.20, label %kizu.11.ptr.arena.at.null, label %kizu.11.ptr.ok
+// kizu.11.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.10.ptr.ok:
-//   %kizu.10 = load %kizu.struct.Item, ptr %kizu.10.ptr
-//   %kizu.11 = extractvalue %kizu.struct.Item %kizu.10, 0
-//   %kizu.12 = extractvalue %kizu.struct.Ref %kizu.7, 0
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.12, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.12, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.13.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.13.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.13.ptr.arena.at.null, label %kizu.13.ptr.ok
-// kizu.13.ptr.arena.at.null:
+// kizu.11.ptr.ok:
+//   %kizu.11 = load %kizu.struct.Item, ptr %kizu.11.ptr
+//   %kizu.12 = extractvalue %kizu.struct.Item %kizu.11, 0
+//   %kizu.13 = extractvalue %kizu.struct.Ref %kizu.8, 0
+//   %kizu.array.handle.null.21 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.22 = select i1 %kizu.array.handle.null.21, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.24 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 1
+//   %kizu.array.len.23 = load i64, ptr %kizu.array.len.24
+//   %kizu.array.in_range.25 = icmp ult i64 %kizu.13, %kizu.array.len.23
+//   %kizu.array.data.addr.26 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 0
+//   %kizu.array.data.27 = load ptr, ptr %kizu.array.data.addr.26
+//   %kizu.array.elem.28 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.27, i64 %kizu.13
+//   %kizu.14.ptr = select i1 %kizu.array.in_range.25, ptr %kizu.array.elem.28, ptr null
+//   %kizu.arena.at.is_null.29 = icmp eq ptr %kizu.14.ptr, null
+//   br i1 %kizu.arena.at.is_null.29, label %kizu.14.ptr.arena.at.null, label %kizu.14.ptr.ok
+// kizu.14.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.13.ptr.ok:
-//   %kizu.13 = load %kizu.struct.Item, ptr %kizu.13.ptr
-//   %kizu.14 = extractvalue %kizu.struct.Item %kizu.13, 0
-//   %kizu.15 = add i64 %kizu.11, %kizu.14
-//   %kizu.16 = extractvalue %kizu.struct.Ref %kizu.7, 1
-//   %kizu.17 = add i64 %kizu.15, %kizu.16
-//   %kizu.18.ok = icmp eq i64 17, %kizu.17
-//   br i1 %kizu.18.ok, label %kizu.18.ok.ok, label %kizu.18.ok.fail
-// kizu.18.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 17, i64 %kizu.17, i64 0, i64 0)
+// kizu.14.ptr.ok:
+//   %kizu.14 = load %kizu.struct.Item, ptr %kizu.14.ptr
+//   %kizu.15 = extractvalue %kizu.struct.Item %kizu.14, 0
+//   %kizu.16 = add i64 %kizu.12, %kizu.15
+//   %kizu.17 = extractvalue %kizu.struct.Ref %kizu.8, 1
+//   %kizu.18 = add i64 %kizu.16, %kizu.17
+//   %kizu.19.ok = icmp eq i64 17, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 17, i64 %kizu.18, i64 0, i64 0)
 //   unreachable
-// kizu.18.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.20
+// kizu.19.ok.ok:
+//   %kizu.20 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.30 = extractvalue %kizu.array %kizu.20, 0
+//   %kizu.arena.deinit.cap.31 = extractvalue %kizu.array %kizu.20, 2
+//   %kizu.arena.deinit.bytes.32 = mul i64 %kizu.arena.deinit.cap.31, ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.30, i64 %kizu.arena.deinit.bytes.32)
+//   %kizu.22 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.22
 // }
 // opt:
 // ; Kizu LLVM IR
@@ -649,14 +785,6 @@ test "a struct holding a handle is copy" {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// %kizu.arena = type { ptr, i64, i64, i64, ptr }
-// @kizu.arena.empty = private unnamed_addr global %kizu.arena zeroinitializer
-// declare ptr @kizu_arena_new(ptr, i64)
-// declare i64 @kizu_arena_add(ptr, ptr)
-// declare i64 @kizu_arena_len(ptr)
-// declare ptr @kizu_arena_pop(ptr)
-// declare void @kizu_arena_deinit(ptr)
-// 
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr, ptr, i64)
 // declare i64 @std__array__Array_get_or_panic_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr, i64)
 // declare i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr)
@@ -666,373 +794,323 @@ test "a struct holding a handle is copy" {
 // declare void @kizu_panic_arena_handle(i64, i64)
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define i64 @read_value(ptr %kizu.items, i64 %kizu.h) {
+// define i64 @read_value(%kizu.array %kizu.items, i64 %kizu.h) {
 // entry:
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.items, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.items
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.h, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.h, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.1.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.1.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.1.ptr.arena.at.null, label %kizu.1.ptr.ok
-// kizu.1.ptr.arena.at.null:
+//   %kizu.1 = alloca %kizu.array
+//   store %kizu.array %kizu.items, ptr %kizu.1
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.1, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.1
+//   %kizu.array.len.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.array.len.3 = load i64, ptr %kizu.array.len.4
+//   %kizu.array.in_range.5 = icmp ult i64 %kizu.h, %kizu.array.len.3
+//   %kizu.array.data.addr.6 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.7 = load ptr, ptr %kizu.array.data.addr.6
+//   %kizu.array.elem.8 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.7, i64 %kizu.h
+//   %kizu.2.ptr = select i1 %kizu.array.in_range.5, ptr %kizu.array.elem.8, ptr null
+//   %kizu.arena.at.is_null.9 = icmp eq ptr %kizu.2.ptr, null
+//   br i1 %kizu.arena.at.is_null.9, label %kizu.2.ptr.arena.at.null, label %kizu.2.ptr.ok
+// kizu.2.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.1.ptr.ok:
-//   %kizu.1 = load %kizu.struct.Item, ptr %kizu.1.ptr
-//   %kizu.2 = extractvalue %kizu.struct.Item %kizu.1, 0
-//   ret i64 %kizu.2
+// kizu.2.ptr.ok:
+//   %kizu.2 = load %kizu.struct.Item, ptr %kizu.2.ptr
+//   %kizu.3 = extractvalue %kizu.struct.Item %kizu.2, 0
+//   ret i64 %kizu.3
 // }
 // 
 // define %kizu.error.void @test_handle_assignment_leaves_the_source_usable() {
 // entry:
-//   %kizu.5.value.slot = alloca %kizu.struct.Item
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.6.elem.slot = alloca %kizu.struct.Item
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
-//   store %kizu.struct.Item %kizu.4, ptr %kizu.5.value.slot
-//   %kizu.5 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.5.value.slot)
-//   %kizu.5.bad = icmp slt i64 %kizu.5, 0
-//   br i1 %kizu.5.bad, label %kizu.5.bad.arena.add.fail, label %kizu.5.bad.ok
-// kizu.5.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.6, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.6.ok.array.append.fast, label %kizu.6.ok.array.append.slow
+// kizu.6.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.8, i64 %kizu.6
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.6, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.slow:
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.6.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.6.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.join:
+//   %kizu.6.ok = phi i1 [ true, %kizu.6.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.6.ok.array.append.slow ]
+//   %kizu.6.bad = xor i1 %kizu.6.ok, true
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.5.bad.ok:
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.5, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.5, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.7.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.7.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.7.ptr.arena.at.null, label %kizu.7.ptr.ok
-// kizu.7.ptr.arena.at.null:
+// kizu.6.bad.ok:
+//   %kizu.array.handle.null.12 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.13 = select i1 %kizu.array.handle.null.12, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.15 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 1
+//   %kizu.array.len.14 = load i64, ptr %kizu.array.len.15
+//   %kizu.array.in_range.16 = icmp ult i64 %kizu.6, %kizu.array.len.14
+//   %kizu.array.data.addr.17 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 0
+//   %kizu.array.data.18 = load ptr, ptr %kizu.array.data.addr.17
+//   %kizu.array.elem.19 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.18, i64 %kizu.6
+//   %kizu.8.ptr = select i1 %kizu.array.in_range.16, ptr %kizu.array.elem.19, ptr null
+//   %kizu.arena.at.is_null.20 = icmp eq ptr %kizu.8.ptr, null
+//   br i1 %kizu.arena.at.is_null.20, label %kizu.8.ptr.arena.at.null, label %kizu.8.ptr.ok
+// kizu.8.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.7.ptr.ok:
-//   %kizu.7 = load %kizu.struct.Item, ptr %kizu.7.ptr
-//   %kizu.8 = extractvalue %kizu.struct.Item %kizu.7, 0
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.5, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.5, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.9.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.9.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.9.ptr.arena.at.null, label %kizu.9.ptr.ok
-// kizu.9.ptr.arena.at.null:
+// kizu.8.ptr.ok:
+//   %kizu.8 = load %kizu.struct.Item, ptr %kizu.8.ptr
+//   %kizu.9 = extractvalue %kizu.struct.Item %kizu.8, 0
+//   %kizu.array.handle.null.21 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.22 = select i1 %kizu.array.handle.null.21, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.24 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 1
+//   %kizu.array.len.23 = load i64, ptr %kizu.array.len.24
+//   %kizu.array.in_range.25 = icmp ult i64 %kizu.6, %kizu.array.len.23
+//   %kizu.array.data.addr.26 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 0
+//   %kizu.array.data.27 = load ptr, ptr %kizu.array.data.addr.26
+//   %kizu.array.elem.28 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.27, i64 %kizu.6
+//   %kizu.10.ptr = select i1 %kizu.array.in_range.25, ptr %kizu.array.elem.28, ptr null
+//   %kizu.arena.at.is_null.29 = icmp eq ptr %kizu.10.ptr, null
+//   br i1 %kizu.arena.at.is_null.29, label %kizu.10.ptr.arena.at.null, label %kizu.10.ptr.ok
+// kizu.10.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.9.ptr.ok:
-//   %kizu.9 = load %kizu.struct.Item, ptr %kizu.9.ptr
-//   %kizu.10 = extractvalue %kizu.struct.Item %kizu.9, 0
-//   %kizu.11 = add i64 %kizu.8, %kizu.10
-//   %kizu.12.ok = icmp eq i64 14, %kizu.11
-//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
-// kizu.12.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 14, i64 %kizu.11, i64 0, i64 0)
+// kizu.10.ptr.ok:
+//   %kizu.10 = load %kizu.struct.Item, ptr %kizu.10.ptr
+//   %kizu.11 = extractvalue %kizu.struct.Item %kizu.10, 0
+//   %kizu.12 = add i64 %kizu.9, %kizu.11
+//   %kizu.13.ok = icmp eq i64 14, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 14, i64 %kizu.12, i64 0, i64 0)
 //   unreachable
-// kizu.12.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.14 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.14
+// kizu.13.ok.ok:
+//   %kizu.14 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.30 = extractvalue %kizu.array %kizu.14, 0
+//   %kizu.arena.deinit.cap.31 = extractvalue %kizu.array %kizu.14, 2
+//   %kizu.arena.deinit.bytes.32 = mul i64 %kizu.arena.deinit.cap.31, ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.30, i64 %kizu.arena.deinit.bytes.32)
+//   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.16
 // }
 // 
 // define %kizu.error.void @test_a_helper_takes_the_same_handle_twice() {
 // entry:
-//   %kizu.5.value.slot = alloca %kizu.struct.Item
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.6.elem.slot = alloca %kizu.struct.Item
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 21, 0
-//   store %kizu.struct.Item %kizu.4, ptr %kizu.5.value.slot
-//   %kizu.5 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.5.value.slot)
-//   %kizu.5.bad = icmp slt i64 %kizu.5, 0
-//   br i1 %kizu.5.bad, label %kizu.5.bad.arena.add.fail, label %kizu.5.bad.ok
-// kizu.5.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.struct.Item zeroinitializer, i64 21, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.6, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.6.ok.array.append.fast, label %kizu.6.ok.array.append.slow
+// kizu.6.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.8, i64 %kizu.6
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.6, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.slow:
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.6.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.6.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.join:
+//   %kizu.6.ok = phi i1 [ true, %kizu.6.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.6.ok.array.append.slow ]
+//   %kizu.6.bad = xor i1 %kizu.6.ok, true
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.5.bad.ok:
-//   %kizu.7 = call i64 @read_value(ptr %kizu.2, i64 %kizu.5)
-//   %kizu.8 = call i64 @read_value(ptr %kizu.2, i64 %kizu.5)
-//   %kizu.9 = add i64 %kizu.7, %kizu.8
-//   %kizu.10.ok = icmp eq i64 42, %kizu.9
-//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
-// kizu.10.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.9, i64 0, i64 0)
+// kizu.6.bad.ok:
+//   %kizu.8 = load %kizu.array, ptr %kizu.3
+//   %kizu.9 = call i64 @read_value(%kizu.array %kizu.8, i64 %kizu.6)
+//   %kizu.10 = load %kizu.array, ptr %kizu.3
+//   %kizu.11 = call i64 @read_value(%kizu.array %kizu.10, i64 %kizu.6)
+//   %kizu.12 = add i64 %kizu.9, %kizu.11
+//   %kizu.13.ok = icmp eq i64 42, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.12, i64 0, i64 0)
 //   unreachable
-// kizu.10.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.12
+// kizu.13.ok.ok:
+//   %kizu.14 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.12 = extractvalue %kizu.array %kizu.14, 0
+//   %kizu.arena.deinit.cap.13 = extractvalue %kizu.array %kizu.14, 2
+//   %kizu.arena.deinit.bytes.14 = mul i64 %kizu.arena.deinit.cap.13, ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.12, i64 %kizu.arena.deinit.bytes.14)
+//   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.16
 // }
 // 
 // define %kizu.error.void @test_two_parents_share_one_child() {
 // entry:
-//   %kizu.6.value.slot = alloca %kizu.struct.Node
-//   %kizu.10.value.slot = alloca %kizu.struct.Node
-//   %kizu.14.value.slot = alloca %kizu.struct.Node
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.7.elem.slot = alloca %kizu.struct.Node
+//   %kizu.11.elem.slot = alloca %kizu.struct.Node
+//   %kizu.15.elem.slot = alloca %kizu.struct.Node
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
-//   %kizu.5.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 5, 0
-//   %kizu.5 = insertvalue %kizu.struct.Node %kizu.5.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.4, 1
-//   store %kizu.struct.Node %kizu.5, ptr %kizu.6.value.slot
-//   %kizu.6 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.6.value.slot)
-//   %kizu.6.bad = icmp slt i64 %kizu.6, 0
-//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
-// kizu.6.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
+//   %kizu.6.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 5, 0
+//   %kizu.6 = insertvalue %kizu.struct.Node %kizu.6.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.5, 1
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.7, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.7.ok.array.append.fast, label %kizu.7.ok.array.append.slow
+// kizu.7.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.8, i64 %kizu.7
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.7, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.7.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.7.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.join:
+//   %kizu.7.ok = phi i1 [ true, %kizu.7.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.7.ok.array.append.slow ]
+//   %kizu.7.bad = xor i1 %kizu.7.ok, true
+//   br i1 %kizu.7.bad, label %kizu.7.bad.arena.add.fail, label %kizu.7.bad.ok
+// kizu.7.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.6.bad.ok:
-//   %kizu.8.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
-//   %kizu.8 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.8.some, i64 %kizu.6, 1
-//   %kizu.9.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 10, 0
-//   %kizu.9 = insertvalue %kizu.struct.Node %kizu.9.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.8, 1
-//   store %kizu.struct.Node %kizu.9, ptr %kizu.10.value.slot
-//   %kizu.10 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.10.value.slot)
-//   %kizu.10.bad = icmp slt i64 %kizu.10, 0
-//   br i1 %kizu.10.bad, label %kizu.10.bad.arena.add.fail, label %kizu.10.bad.ok
-// kizu.10.bad.arena.add.fail:
+// kizu.7.bad.ok:
+//   %kizu.9.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
+//   %kizu.9 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.9.some, i64 %kizu.7, 1
+//   %kizu.10.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 10, 0
+//   %kizu.10 = insertvalue %kizu.struct.Node %kizu.10.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.9, 1
+//   %kizu.array.handle.null.12 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.13 = select i1 %kizu.array.handle.null.12, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.15 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 1
+//   %kizu.11 = load i64, ptr %kizu.array.append.len.addr.15
+//   %kizu.array.append.cap.16 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 2
+//   %kizu.array.append.cap.14 = load i64, ptr %kizu.array.append.cap.16
+//   %kizu.array.append.fits.17 = icmp slt i64 %kizu.11, %kizu.array.append.cap.14
+//   br i1 %kizu.array.append.fits.17, label %kizu.11.ok.array.append.fast, label %kizu.11.ok.array.append.slow
+// kizu.11.ok.array.append.fast:
+//   %kizu.array.data.addr.18 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 0
+//   %kizu.array.data.19 = load ptr, ptr %kizu.array.data.addr.18
+//   %kizu.array.elem.20 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.19, i64 %kizu.11
+//   store %kizu.struct.Node %kizu.10, ptr %kizu.array.elem.20
+//   %kizu.array.append.grown.21 = add i64 %kizu.11, 1
+//   store i64 %kizu.array.append.grown.21, ptr %kizu.array.append.len.addr.15
+//   br label %kizu.11.ok.array.append.join
+// kizu.11.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.10, ptr %kizu.11.elem.slot
+//   %kizu.array.append.slow.ok.22 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.11.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.11.ok.array.append.join
+// kizu.11.ok.array.append.join:
+//   %kizu.11.ok = phi i1 [ true, %kizu.11.ok.array.append.fast ], [ %kizu.array.append.slow.ok.22, %kizu.11.ok.array.append.slow ]
+//   %kizu.11.bad = xor i1 %kizu.11.ok, true
+//   br i1 %kizu.11.bad, label %kizu.11.bad.arena.add.fail, label %kizu.11.bad.ok
+// kizu.11.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.10.bad.ok:
-//   %kizu.12.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
-//   %kizu.12 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.12.some, i64 %kizu.6, 1
-//   %kizu.13.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 20, 0
-//   %kizu.13 = insertvalue %kizu.struct.Node %kizu.13.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.12, 1
-//   store %kizu.struct.Node %kizu.13, ptr %kizu.14.value.slot
-//   %kizu.14 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.14.value.slot)
-//   %kizu.14.bad = icmp slt i64 %kizu.14, 0
-//   br i1 %kizu.14.bad, label %kizu.14.bad.arena.add.fail, label %kizu.14.bad.ok
-// kizu.14.bad.arena.add.fail:
+// kizu.11.bad.ok:
+//   %kizu.13.some = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 1, 0
+//   %kizu.13 = insertvalue %kizu.opt.std__arena__Handle_Node_ %kizu.13.some, i64 %kizu.7, 1
+//   %kizu.14.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 20, 0
+//   %kizu.14 = insertvalue %kizu.struct.Node %kizu.14.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.13, 1
+//   %kizu.array.handle.null.23 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.24 = select i1 %kizu.array.handle.null.23, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.26 = getelementptr %kizu.array, ptr %kizu.array.handle.24, i64 0, i32 1
+//   %kizu.15 = load i64, ptr %kizu.array.append.len.addr.26
+//   %kizu.array.append.cap.27 = getelementptr %kizu.array, ptr %kizu.array.handle.24, i64 0, i32 2
+//   %kizu.array.append.cap.25 = load i64, ptr %kizu.array.append.cap.27
+//   %kizu.array.append.fits.28 = icmp slt i64 %kizu.15, %kizu.array.append.cap.25
+//   br i1 %kizu.array.append.fits.28, label %kizu.15.ok.array.append.fast, label %kizu.15.ok.array.append.slow
+// kizu.15.ok.array.append.fast:
+//   %kizu.array.data.addr.29 = getelementptr %kizu.array, ptr %kizu.array.handle.24, i64 0, i32 0
+//   %kizu.array.data.30 = load ptr, ptr %kizu.array.data.addr.29
+//   %kizu.array.elem.31 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.30, i64 %kizu.15
+//   store %kizu.struct.Node %kizu.14, ptr %kizu.array.elem.31
+//   %kizu.array.append.grown.32 = add i64 %kizu.15, 1
+//   store i64 %kizu.array.append.grown.32, ptr %kizu.array.append.len.addr.26
+//   br label %kizu.15.ok.array.append.join
+// kizu.15.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.14, ptr %kizu.15.elem.slot
+//   %kizu.array.append.slow.ok.33 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.15.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.15.ok.array.append.join
+// kizu.15.ok.array.append.join:
+//   %kizu.15.ok = phi i1 [ true, %kizu.15.ok.array.append.fast ], [ %kizu.array.append.slow.ok.33, %kizu.15.ok.array.append.slow ]
+//   %kizu.15.bad = xor i1 %kizu.15.ok, true
+//   br i1 %kizu.15.bad, label %kizu.15.bad.arena.add.fail, label %kizu.15.bad.ok
+// kizu.15.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.14.bad.ok:
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.6, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.6, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.15.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.15.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.15.ptr.arena.at.null, label %kizu.15.ptr.ok
-// kizu.15.ptr.arena.at.null:
+// kizu.15.bad.ok:
+//   %kizu.array.handle.null.34 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.35 = select i1 %kizu.array.handle.null.34, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.37 = getelementptr %kizu.array, ptr %kizu.array.handle.35, i64 0, i32 1
+//   %kizu.array.len.36 = load i64, ptr %kizu.array.len.37
+//   %kizu.array.in_range.38 = icmp ult i64 %kizu.7, %kizu.array.len.36
+//   %kizu.array.data.addr.39 = getelementptr %kizu.array, ptr %kizu.array.handle.35, i64 0, i32 0
+//   %kizu.array.data.40 = load ptr, ptr %kizu.array.data.addr.39
+//   %kizu.array.elem.41 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.40, i64 %kizu.7
+//   %kizu.16.ptr = select i1 %kizu.array.in_range.38, ptr %kizu.array.elem.41, ptr null
+//   %kizu.arena.at.is_null.42 = icmp eq ptr %kizu.16.ptr, null
+//   br i1 %kizu.arena.at.is_null.42, label %kizu.16.ptr.arena.at.null, label %kizu.16.ptr.ok
+// kizu.16.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.15.ptr.ok:
-//   %kizu.15 = load %kizu.struct.Node, ptr %kizu.15.ptr
-//   %kizu.16 = extractvalue %kizu.struct.Node %kizu.15, 0
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.10, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.10, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.17.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.17.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.17.ptr.arena.at.null, label %kizu.17.ptr.ok
-// kizu.17.ptr.arena.at.null:
+// kizu.16.ptr.ok:
+//   %kizu.16 = load %kizu.struct.Node, ptr %kizu.16.ptr
+//   %kizu.17 = extractvalue %kizu.struct.Node %kizu.16, 0
+//   %kizu.array.handle.null.43 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.44 = select i1 %kizu.array.handle.null.43, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.46 = getelementptr %kizu.array, ptr %kizu.array.handle.44, i64 0, i32 1
+//   %kizu.array.len.45 = load i64, ptr %kizu.array.len.46
+//   %kizu.array.in_range.47 = icmp ult i64 %kizu.11, %kizu.array.len.45
+//   %kizu.array.data.addr.48 = getelementptr %kizu.array, ptr %kizu.array.handle.44, i64 0, i32 0
+//   %kizu.array.data.49 = load ptr, ptr %kizu.array.data.addr.48
+//   %kizu.array.elem.50 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.49, i64 %kizu.11
+//   %kizu.18.ptr = select i1 %kizu.array.in_range.47, ptr %kizu.array.elem.50, ptr null
+//   %kizu.arena.at.is_null.51 = icmp eq ptr %kizu.18.ptr, null
+//   br i1 %kizu.arena.at.is_null.51, label %kizu.18.ptr.arena.at.null, label %kizu.18.ptr.ok
+// kizu.18.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.17.ptr.ok:
-//   %kizu.17 = load %kizu.struct.Node, ptr %kizu.17.ptr
-//   %kizu.18 = extractvalue %kizu.struct.Node %kizu.17, 1
-//   %kizu.19 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.18, 1
-//   %kizu.20.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.18, 0
-//   %kizu.20 = icmp ne i8 %kizu.20.tag, 0
-//   br i1 %kizu.20, label %if.then.1, label %if.else.2
+// kizu.18.ptr.ok:
+//   %kizu.18 = load %kizu.struct.Node, ptr %kizu.18.ptr
+//   %kizu.19 = extractvalue %kizu.struct.Node %kizu.18, 1
+//   %kizu.20 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.19, 1
+//   %kizu.21.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.19, 0
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %if.then.1, label %if.else.2
 // if.then.1:
-//   %kizu.arena.handle.null.25 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.26 = select i1 %kizu.arena.handle.null.25, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.27 = getelementptr %kizu.arena, ptr %kizu.arena.handle.26, i64 0, i32 1
-//   %kizu.arena.len.28 = load i64, ptr %kizu.arena.len.addr.27
-//   %kizu.arena.in_range.29 = icmp ult i64 %kizu.19, %kizu.arena.len.28
-//   %kizu.arena.elem_size.addr.30 = getelementptr %kizu.arena, ptr %kizu.arena.handle.26, i64 0, i32 3
-//   %kizu.arena.elem_size.31 = load i64, ptr %kizu.arena.elem_size.addr.30
-//   %kizu.arena.offset.32 = mul i64 %kizu.19, %kizu.arena.elem_size.31
-//   %kizu.arena.data.addr.33 = getelementptr %kizu.arena, ptr %kizu.arena.handle.26, i64 0, i32 0
-//   %kizu.arena.data.34 = load ptr, ptr %kizu.arena.data.addr.33
-//   %kizu.arena.elem.35 = getelementptr i8, ptr %kizu.arena.data.34, i64 %kizu.arena.offset.32
-//   %kizu.21.ptr = select i1 %kizu.arena.in_range.29, ptr %kizu.arena.elem.35, ptr null
-//   %kizu.arena.at.is_null.36 = icmp eq ptr %kizu.21.ptr, null
-//   br i1 %kizu.arena.at.is_null.36, label %kizu.21.ptr.arena.at.null, label %kizu.21.ptr.ok
-// kizu.21.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.21.ptr.ok:
-//   %kizu.21 = load %kizu.struct.Node, ptr %kizu.21.ptr
-//   %kizu.22 = extractvalue %kizu.struct.Node %kizu.21, 0
-//   %kizu.23 = add i64 %kizu.16, %kizu.22
-//   br label %if.end.3
-// if.else.2:
-//   br label %if.end.3
-// if.end.3:
-//   %kizu.24 = phi i64 [ %kizu.23, %kizu.21.ptr.ok ], [ %kizu.16, %if.else.2 ]
-//   %kizu.arena.handle.null.37 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.38 = select i1 %kizu.arena.handle.null.37, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.39 = getelementptr %kizu.arena, ptr %kizu.arena.handle.38, i64 0, i32 1
-//   %kizu.arena.len.40 = load i64, ptr %kizu.arena.len.addr.39
-//   %kizu.arena.in_range.41 = icmp ult i64 %kizu.14, %kizu.arena.len.40
-//   %kizu.arena.elem_size.addr.42 = getelementptr %kizu.arena, ptr %kizu.arena.handle.38, i64 0, i32 3
-//   %kizu.arena.elem_size.43 = load i64, ptr %kizu.arena.elem_size.addr.42
-//   %kizu.arena.offset.44 = mul i64 %kizu.14, %kizu.arena.elem_size.43
-//   %kizu.arena.data.addr.45 = getelementptr %kizu.arena, ptr %kizu.arena.handle.38, i64 0, i32 0
-//   %kizu.arena.data.46 = load ptr, ptr %kizu.arena.data.addr.45
-//   %kizu.arena.elem.47 = getelementptr i8, ptr %kizu.arena.data.46, i64 %kizu.arena.offset.44
-//   %kizu.25.ptr = select i1 %kizu.arena.in_range.41, ptr %kizu.arena.elem.47, ptr null
-//   %kizu.arena.at.is_null.48 = icmp eq ptr %kizu.25.ptr, null
-//   br i1 %kizu.arena.at.is_null.48, label %kizu.25.ptr.arena.at.null, label %kizu.25.ptr.ok
-// kizu.25.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.25.ptr.ok:
-//   %kizu.25 = load %kizu.struct.Node, ptr %kizu.25.ptr
-//   %kizu.26 = extractvalue %kizu.struct.Node %kizu.25, 1
-//   %kizu.27 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.26, 1
-//   %kizu.28.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.26, 0
-//   %kizu.28 = icmp ne i8 %kizu.28.tag, 0
-//   br i1 %kizu.28, label %if.then.4, label %if.else.5
-// if.then.4:
-//   %kizu.arena.handle.null.49 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.50 = select i1 %kizu.arena.handle.null.49, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.51 = getelementptr %kizu.arena, ptr %kizu.arena.handle.50, i64 0, i32 1
-//   %kizu.arena.len.52 = load i64, ptr %kizu.arena.len.addr.51
-//   %kizu.arena.in_range.53 = icmp ult i64 %kizu.27, %kizu.arena.len.52
-//   %kizu.arena.elem_size.addr.54 = getelementptr %kizu.arena, ptr %kizu.arena.handle.50, i64 0, i32 3
-//   %kizu.arena.elem_size.55 = load i64, ptr %kizu.arena.elem_size.addr.54
-//   %kizu.arena.offset.56 = mul i64 %kizu.27, %kizu.arena.elem_size.55
-//   %kizu.arena.data.addr.57 = getelementptr %kizu.arena, ptr %kizu.arena.handle.50, i64 0, i32 0
-//   %kizu.arena.data.58 = load ptr, ptr %kizu.arena.data.addr.57
-//   %kizu.arena.elem.59 = getelementptr i8, ptr %kizu.arena.data.58, i64 %kizu.arena.offset.56
-//   %kizu.29.ptr = select i1 %kizu.arena.in_range.53, ptr %kizu.arena.elem.59, ptr null
-//   %kizu.arena.at.is_null.60 = icmp eq ptr %kizu.29.ptr, null
-//   br i1 %kizu.arena.at.is_null.60, label %kizu.29.ptr.arena.at.null, label %kizu.29.ptr.ok
-// kizu.29.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.29.ptr.ok:
-//   %kizu.29 = load %kizu.struct.Node, ptr %kizu.29.ptr
-//   %kizu.30 = extractvalue %kizu.struct.Node %kizu.29, 0
-//   %kizu.31 = add i64 %kizu.24, %kizu.30
-//   br label %if.end.6
-// if.else.5:
-//   br label %if.end.6
-// if.end.6:
-//   %kizu.32 = phi i64 [ %kizu.31, %kizu.29.ptr.ok ], [ %kizu.24, %if.else.5 ]
-//   %kizu.34.ok = icmp eq i64 15, %kizu.32
-//   br i1 %kizu.34.ok, label %kizu.34.ok.ok, label %kizu.34.ok.fail
-// kizu.34.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 15, i64 %kizu.32, i64 0, i64 0)
-//   unreachable
-// kizu.34.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.36 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.36
-// }
-// 
-// define %kizu.error.void @test_an_array_holds_handles_as_a_worklist() {
-// entry:
-//   %kizu.6.value.slot = alloca %kizu.struct.Node
-//   %kizu.8 = alloca %kizu.array
-//   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
-//   %kizu.5.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 1, 0
-//   %kizu.5 = insertvalue %kizu.struct.Node %kizu.5.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.4, 1
-//   store %kizu.struct.Node %kizu.5, ptr %kizu.6.value.slot
-//   %kizu.6 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.6.value.slot)
-//   %kizu.6.bad = icmp slt i64 %kizu.6, 0
-//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
-// kizu.6.bad.arena.add.fail:
-//   call void @kizu_panic_arena_add(i64 0, i64 0)
-//   unreachable
-// kizu.6.bad.ok:
-//   store %kizu.array zeroinitializer, ptr %kizu.8
-//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8, ptr %kizu.1, i64 %kizu.6)
-//   %kizu.10 = load %kizu.array, ptr %kizu.8
-//   %kizu.11.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
-//   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
-//   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
-// kizu.11.try.err:
-//   %kizu.array.deinit.data.2 = extractvalue %kizu.array %kizu.10, 0
-//   %kizu.array.deinit.cap.3 = extractvalue %kizu.array %kizu.10, 2
-//   %kizu.array.deinit.bytes.4 = mul i64 %kizu.array.deinit.cap.3, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.2, i64 %kizu.array.deinit.bytes.4)
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
-//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
-//   ret %kizu.error.void %kizu.try.err.6
-// kizu.11.try.ok:
-//   %kizu.12 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8, ptr %kizu.1, i64 %kizu.6)
-//   %kizu.13 = load %kizu.array, ptr %kizu.8
-//   %kizu.14.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.12, 0
-//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
-//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
-// kizu.14.try.err:
-//   %kizu.array.deinit.data.8 = extractvalue %kizu.array %kizu.13, 0
-//   %kizu.array.deinit.cap.9 = extractvalue %kizu.array %kizu.13, 2
-//   %kizu.array.deinit.bytes.10 = mul i64 %kizu.array.deinit.cap.9, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.8, i64 %kizu.array.deinit.bytes.10)
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.try.err.12.code = extractvalue %kizu.error.std__mem__Error.void %kizu.12, 1
-//   %kizu.try.err.12.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
-//   %kizu.try.err.12 = insertvalue %kizu.error.void %kizu.try.err.12.base, i64 %kizu.try.err.12.code, 1
-//   ret %kizu.error.void %kizu.try.err.12
-// kizu.14.try.ok:
-//   br label %while.header.1
-// while.header.1:
-//   %kizu.17 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.24, %kizu.22.ptr.ok ]
-//   %kizu.18 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.26, %kizu.22.ptr.ok ]
-//   %kizu.19 = call i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8)
-//   %kizu.20 = icmp slt i64 %kizu.18, %kizu.19
-//   br i1 %kizu.20, label %while.body.2, label %while.end.3
-// while.body.2:
-//   %kizu.21 = call i64 @std__array__Array_get_or_panic_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.8, i64 %kizu.18)
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.21, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.21, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.22.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.22.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.22.ptr.arena.at.null, label %kizu.22.ptr.ok
+//   %kizu.array.handle.null.52 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.53 = select i1 %kizu.array.handle.null.52, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.55 = getelementptr %kizu.array, ptr %kizu.array.handle.53, i64 0, i32 1
+//   %kizu.array.len.54 = load i64, ptr %kizu.array.len.55
+//   %kizu.array.in_range.56 = icmp ult i64 %kizu.20, %kizu.array.len.54
+//   %kizu.array.data.addr.57 = getelementptr %kizu.array, ptr %kizu.array.handle.53, i64 0, i32 0
+//   %kizu.array.data.58 = load ptr, ptr %kizu.array.data.addr.57
+//   %kizu.array.elem.59 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.58, i64 %kizu.20
+//   %kizu.22.ptr = select i1 %kizu.array.in_range.56, ptr %kizu.array.elem.59, ptr null
+//   %kizu.arena.at.is_null.60 = icmp eq ptr %kizu.22.ptr, null
+//   br i1 %kizu.arena.at.is_null.60, label %kizu.22.ptr.arena.at.null, label %kizu.22.ptr.ok
 // kizu.22.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
@@ -1040,93 +1118,287 @@ test "a struct holding a handle is copy" {
 //   %kizu.22 = load %kizu.struct.Node, ptr %kizu.22.ptr
 //   %kizu.23 = extractvalue %kizu.struct.Node %kizu.22, 0
 //   %kizu.24 = add i64 %kizu.17, %kizu.23
-//   %kizu.26 = add i64 %kizu.18, 1
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.25 = phi i64 [ %kizu.24, %kizu.22.ptr.ok ], [ %kizu.17, %if.else.2 ]
+//   %kizu.array.handle.null.61 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.62 = select i1 %kizu.array.handle.null.61, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.64 = getelementptr %kizu.array, ptr %kizu.array.handle.62, i64 0, i32 1
+//   %kizu.array.len.63 = load i64, ptr %kizu.array.len.64
+//   %kizu.array.in_range.65 = icmp ult i64 %kizu.15, %kizu.array.len.63
+//   %kizu.array.data.addr.66 = getelementptr %kizu.array, ptr %kizu.array.handle.62, i64 0, i32 0
+//   %kizu.array.data.67 = load ptr, ptr %kizu.array.data.addr.66
+//   %kizu.array.elem.68 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.67, i64 %kizu.15
+//   %kizu.26.ptr = select i1 %kizu.array.in_range.65, ptr %kizu.array.elem.68, ptr null
+//   %kizu.arena.at.is_null.69 = icmp eq ptr %kizu.26.ptr, null
+//   br i1 %kizu.arena.at.is_null.69, label %kizu.26.ptr.arena.at.null, label %kizu.26.ptr.ok
+// kizu.26.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.26.ptr.ok:
+//   %kizu.26 = load %kizu.struct.Node, ptr %kizu.26.ptr
+//   %kizu.27 = extractvalue %kizu.struct.Node %kizu.26, 1
+//   %kizu.28 = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.27, 1
+//   %kizu.29.tag = extractvalue %kizu.opt.std__arena__Handle_Node_ %kizu.27, 0
+//   %kizu.29 = icmp ne i8 %kizu.29.tag, 0
+//   br i1 %kizu.29, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.array.handle.null.70 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.71 = select i1 %kizu.array.handle.null.70, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.73 = getelementptr %kizu.array, ptr %kizu.array.handle.71, i64 0, i32 1
+//   %kizu.array.len.72 = load i64, ptr %kizu.array.len.73
+//   %kizu.array.in_range.74 = icmp ult i64 %kizu.28, %kizu.array.len.72
+//   %kizu.array.data.addr.75 = getelementptr %kizu.array, ptr %kizu.array.handle.71, i64 0, i32 0
+//   %kizu.array.data.76 = load ptr, ptr %kizu.array.data.addr.75
+//   %kizu.array.elem.77 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.76, i64 %kizu.28
+//   %kizu.30.ptr = select i1 %kizu.array.in_range.74, ptr %kizu.array.elem.77, ptr null
+//   %kizu.arena.at.is_null.78 = icmp eq ptr %kizu.30.ptr, null
+//   br i1 %kizu.arena.at.is_null.78, label %kizu.30.ptr.arena.at.null, label %kizu.30.ptr.ok
+// kizu.30.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.30.ptr.ok:
+//   %kizu.30 = load %kizu.struct.Node, ptr %kizu.30.ptr
+//   %kizu.31 = extractvalue %kizu.struct.Node %kizu.30, 0
+//   %kizu.32 = add i64 %kizu.25, %kizu.31
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.33 = phi i64 [ %kizu.32, %kizu.30.ptr.ok ], [ %kizu.25, %if.else.5 ]
+//   %kizu.35.ok = icmp eq i64 15, %kizu.33
+//   br i1 %kizu.35.ok, label %kizu.35.ok.ok, label %kizu.35.ok.fail
+// kizu.35.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 15, i64 %kizu.33, i64 0, i64 0)
+//   unreachable
+// kizu.35.ok.ok:
+//   %kizu.36 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.79 = extractvalue %kizu.array %kizu.36, 0
+//   %kizu.arena.deinit.cap.80 = extractvalue %kizu.array %kizu.36, 2
+//   %kizu.arena.deinit.bytes.81 = mul i64 %kizu.arena.deinit.cap.80, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.79, i64 %kizu.arena.deinit.bytes.81)
+//   %kizu.38 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.38
+// }
+// 
+// define %kizu.error.void @test_an_array_holds_handles_as_a_worklist() {
+// entry:
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.7.elem.slot = alloca %kizu.struct.Node
+//   %kizu.9 = alloca %kizu.array
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.opt.std__arena__Handle_Node_ zeroinitializer, i8 0, 0
+//   %kizu.6.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 1, 0
+//   %kizu.6 = insertvalue %kizu.struct.Node %kizu.6.field0, %kizu.opt.std__arena__Handle_Node_ %kizu.5, 1
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.7, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.7.ok.array.append.fast, label %kizu.7.ok.array.append.slow
+// kizu.7.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.8, i64 %kizu.7
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.7, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.slow:
+//   store %kizu.struct.Node %kizu.6, ptr %kizu.7.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.7.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64))
+//   br label %kizu.7.ok.array.append.join
+// kizu.7.ok.array.append.join:
+//   %kizu.7.ok = phi i1 [ true, %kizu.7.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.7.ok.array.append.slow ]
+//   %kizu.7.bad = xor i1 %kizu.7.ok, true
+//   br i1 %kizu.7.bad, label %kizu.7.bad.arena.add.fail, label %kizu.7.bad.ok
+// kizu.7.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.7.bad.ok:
+//   store %kizu.array zeroinitializer, ptr %kizu.9
+//   %kizu.10 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9, ptr %kizu.1, i64 %kizu.7)
+//   %kizu.11 = load %kizu.array, ptr %kizu.9
+//   %kizu.12 = load %kizu.array, ptr %kizu.3
+//   %kizu.13.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.10, 0
+//   %kizu.13.ok.bool = icmp ne i8 %kizu.13.ok, 0
+//   br i1 %kizu.13.ok.bool, label %kizu.13.try.ok, label %kizu.13.try.err
+// kizu.13.try.err:
+//   %kizu.array.deinit.data.13 = extractvalue %kizu.array %kizu.11, 0
+//   %kizu.array.deinit.cap.14 = extractvalue %kizu.array %kizu.11, 2
+//   %kizu.array.deinit.bytes.15 = mul i64 %kizu.array.deinit.cap.14, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.13, i64 %kizu.array.deinit.bytes.15)
+//   %kizu.arena.deinit.data.17 = extractvalue %kizu.array %kizu.12, 0
+//   %kizu.arena.deinit.cap.18 = extractvalue %kizu.array %kizu.12, 2
+//   %kizu.arena.deinit.bytes.19 = mul i64 %kizu.arena.deinit.cap.18, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.17, i64 %kizu.arena.deinit.bytes.19)
+//   %kizu.try.err.20.code = extractvalue %kizu.error.std__mem__Error.void %kizu.10, 1
+//   %kizu.try.err.20.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.20 = insertvalue %kizu.error.void %kizu.try.err.20.base, i64 %kizu.try.err.20.code, 1
+//   ret %kizu.error.void %kizu.try.err.20
+// kizu.13.try.ok:
+//   %kizu.14 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9, ptr %kizu.1, i64 %kizu.7)
+//   %kizu.15 = load %kizu.array, ptr %kizu.9
+//   %kizu.16 = load %kizu.array, ptr %kizu.3
+//   %kizu.17.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 0
+//   %kizu.17.ok.bool = icmp ne i8 %kizu.17.ok, 0
+//   br i1 %kizu.17.ok.bool, label %kizu.17.try.ok, label %kizu.17.try.err
+// kizu.17.try.err:
+//   %kizu.array.deinit.data.22 = extractvalue %kizu.array %kizu.15, 0
+//   %kizu.array.deinit.cap.23 = extractvalue %kizu.array %kizu.15, 2
+//   %kizu.array.deinit.bytes.24 = mul i64 %kizu.array.deinit.cap.23, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.22, i64 %kizu.array.deinit.bytes.24)
+//   %kizu.arena.deinit.data.26 = extractvalue %kizu.array %kizu.16, 0
+//   %kizu.arena.deinit.cap.27 = extractvalue %kizu.array %kizu.16, 2
+//   %kizu.arena.deinit.bytes.28 = mul i64 %kizu.arena.deinit.cap.27, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.26, i64 %kizu.arena.deinit.bytes.28)
+//   %kizu.try.err.29.code = extractvalue %kizu.error.std__mem__Error.void %kizu.14, 1
+//   %kizu.try.err.29.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.29 = insertvalue %kizu.error.void %kizu.try.err.29.base, i64 %kizu.try.err.29.code, 1
+//   ret %kizu.error.void %kizu.try.err.29
+// kizu.17.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.20 = phi i64 [ 0, %kizu.17.try.ok ], [ %kizu.27, %kizu.25.ptr.ok ]
+//   %kizu.21 = phi i64 [ 0, %kizu.17.try.ok ], [ %kizu.29, %kizu.25.ptr.ok ]
+//   %kizu.22 = call i64 @std__array__Array_len_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9)
+//   %kizu.23 = icmp slt i64 %kizu.21, %kizu.22
+//   br i1 %kizu.23, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.24 = call i64 @std__array__Array_get_or_panic_std_3a_3aarena_3a_3aHandle_3cNode_3e(ptr %kizu.9, i64 %kizu.21)
+//   %kizu.array.handle.null.30 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.31 = select i1 %kizu.array.handle.null.30, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.33 = getelementptr %kizu.array, ptr %kizu.array.handle.31, i64 0, i32 1
+//   %kizu.array.len.32 = load i64, ptr %kizu.array.len.33
+//   %kizu.array.in_range.34 = icmp ult i64 %kizu.24, %kizu.array.len.32
+//   %kizu.array.data.addr.35 = getelementptr %kizu.array, ptr %kizu.array.handle.31, i64 0, i32 0
+//   %kizu.array.data.36 = load ptr, ptr %kizu.array.data.addr.35
+//   %kizu.array.elem.37 = getelementptr %kizu.struct.Node, ptr %kizu.array.data.36, i64 %kizu.24
+//   %kizu.25.ptr = select i1 %kizu.array.in_range.34, ptr %kizu.array.elem.37, ptr null
+//   %kizu.arena.at.is_null.38 = icmp eq ptr %kizu.25.ptr, null
+//   br i1 %kizu.arena.at.is_null.38, label %kizu.25.ptr.arena.at.null, label %kizu.25.ptr.ok
+// kizu.25.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.25.ptr.ok:
+//   %kizu.25 = load %kizu.struct.Node, ptr %kizu.25.ptr
+//   %kizu.26 = extractvalue %kizu.struct.Node %kizu.25, 0
+//   %kizu.27 = add i64 %kizu.20, %kizu.26
+//   %kizu.29 = add i64 %kizu.21, 1
 //   br label %while.header.1
 // while.end.3:
-//   %kizu.28.ok = icmp eq i64 2, %kizu.17
-//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
-// kizu.28.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.17, i64 0, i64 0)
+//   %kizu.31.ok = icmp eq i64 2, %kizu.20
+//   br i1 %kizu.31.ok, label %kizu.31.ok.ok, label %kizu.31.ok.fail
+// kizu.31.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.20, i64 0, i64 0)
 //   unreachable
-// kizu.28.ok.ok:
-//   %kizu.29 = load %kizu.array, ptr %kizu.8
-//   %kizu.array.deinit.data.25 = extractvalue %kizu.array %kizu.29, 0
-//   %kizu.array.deinit.cap.26 = extractvalue %kizu.array %kizu.29, 2
-//   %kizu.array.deinit.bytes.27 = mul i64 %kizu.array.deinit.cap.26, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.25, i64 %kizu.array.deinit.bytes.27)
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.32 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.32
+// kizu.31.ok.ok:
+//   %kizu.32 = load %kizu.array, ptr %kizu.9
+//   %kizu.array.deinit.data.39 = extractvalue %kizu.array %kizu.32, 0
+//   %kizu.array.deinit.cap.40 = extractvalue %kizu.array %kizu.32, 2
+//   %kizu.array.deinit.bytes.41 = mul i64 %kizu.array.deinit.cap.40, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.array.deinit.data.39, i64 %kizu.array.deinit.bytes.41)
+//   %kizu.34 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.42 = extractvalue %kizu.array %kizu.34, 0
+//   %kizu.arena.deinit.cap.43 = extractvalue %kizu.array %kizu.34, 2
+//   %kizu.arena.deinit.bytes.44 = mul i64 %kizu.arena.deinit.cap.43, ptrtoint (ptr getelementptr (%kizu.struct.Node, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.42, i64 %kizu.arena.deinit.bytes.44)
+//   %kizu.36 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.36
 // }
 // 
 // define %kizu.error.void @test_a_struct_holding_a_handle_is_copy() {
 // entry:
-//   %kizu.5.value.slot = alloca %kizu.struct.Item
+//   %kizu.3 = alloca %kizu.array
+//   %kizu.6.elem.slot = alloca %kizu.struct.Item
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
-//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
-//   store %kizu.struct.Item %kizu.4, ptr %kizu.5.value.slot
-//   %kizu.5 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.5.value.slot)
-//   %kizu.5.bad = icmp slt i64 %kizu.5, 0
-//   br i1 %kizu.5.bad, label %kizu.5.bad.arena.add.fail, label %kizu.5.bad.ok
-// kizu.5.bad.arena.add.fail:
+//   store %kizu.array zeroinitializer, ptr %kizu.3
+//   %kizu.5 = insertvalue %kizu.struct.Item zeroinitializer, i64 7, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.6, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.6.ok.array.append.fast, label %kizu.6.ok.array.append.slow
+// kizu.6.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.8, i64 %kizu.6
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.6, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.slow:
+//   store %kizu.struct.Item %kizu.5, ptr %kizu.6.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.3, ptr %kizu.6.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   br label %kizu.6.ok.array.append.join
+// kizu.6.ok.array.append.join:
+//   %kizu.6.ok = phi i1 [ true, %kizu.6.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.6.ok.array.append.slow ]
+//   %kizu.6.bad = xor i1 %kizu.6.ok, true
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.5.bad.ok:
-//   %kizu.7.field0 = insertvalue %kizu.struct.Ref zeroinitializer, i64 %kizu.5, 0
-//   %kizu.7 = insertvalue %kizu.struct.Ref %kizu.7.field0, i64 3, 1
-//   %kizu.9 = extractvalue %kizu.struct.Ref %kizu.7, 0
-//   %kizu.arena.handle.null.1 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.2 = select i1 %kizu.arena.handle.null.1, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.3 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 1
-//   %kizu.arena.len.4 = load i64, ptr %kizu.arena.len.addr.3
-//   %kizu.arena.in_range.5 = icmp ult i64 %kizu.9, %kizu.arena.len.4
-//   %kizu.arena.elem_size.addr.6 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 3
-//   %kizu.arena.elem_size.7 = load i64, ptr %kizu.arena.elem_size.addr.6
-//   %kizu.arena.offset.8 = mul i64 %kizu.9, %kizu.arena.elem_size.7
-//   %kizu.arena.data.addr.9 = getelementptr %kizu.arena, ptr %kizu.arena.handle.2, i64 0, i32 0
-//   %kizu.arena.data.10 = load ptr, ptr %kizu.arena.data.addr.9
-//   %kizu.arena.elem.11 = getelementptr i8, ptr %kizu.arena.data.10, i64 %kizu.arena.offset.8
-//   %kizu.10.ptr = select i1 %kizu.arena.in_range.5, ptr %kizu.arena.elem.11, ptr null
-//   %kizu.arena.at.is_null.12 = icmp eq ptr %kizu.10.ptr, null
-//   br i1 %kizu.arena.at.is_null.12, label %kizu.10.ptr.arena.at.null, label %kizu.10.ptr.ok
-// kizu.10.ptr.arena.at.null:
+// kizu.6.bad.ok:
+//   %kizu.8.field0 = insertvalue %kizu.struct.Ref zeroinitializer, i64 %kizu.6, 0
+//   %kizu.8 = insertvalue %kizu.struct.Ref %kizu.8.field0, i64 3, 1
+//   %kizu.10 = extractvalue %kizu.struct.Ref %kizu.8, 0
+//   %kizu.array.handle.null.12 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.13 = select i1 %kizu.array.handle.null.12, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.15 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 1
+//   %kizu.array.len.14 = load i64, ptr %kizu.array.len.15
+//   %kizu.array.in_range.16 = icmp ult i64 %kizu.10, %kizu.array.len.14
+//   %kizu.array.data.addr.17 = getelementptr %kizu.array, ptr %kizu.array.handle.13, i64 0, i32 0
+//   %kizu.array.data.18 = load ptr, ptr %kizu.array.data.addr.17
+//   %kizu.array.elem.19 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.18, i64 %kizu.10
+//   %kizu.11.ptr = select i1 %kizu.array.in_range.16, ptr %kizu.array.elem.19, ptr null
+//   %kizu.arena.at.is_null.20 = icmp eq ptr %kizu.11.ptr, null
+//   br i1 %kizu.arena.at.is_null.20, label %kizu.11.ptr.arena.at.null, label %kizu.11.ptr.ok
+// kizu.11.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.10.ptr.ok:
-//   %kizu.10 = load %kizu.struct.Item, ptr %kizu.10.ptr
-//   %kizu.11 = extractvalue %kizu.struct.Item %kizu.10, 0
-//   %kizu.12 = extractvalue %kizu.struct.Ref %kizu.7, 0
-//   %kizu.arena.handle.null.13 = icmp eq ptr %kizu.2, null
-//   %kizu.arena.handle.14 = select i1 %kizu.arena.handle.null.13, ptr @kizu.arena.empty, ptr %kizu.2
-//   %kizu.arena.len.addr.15 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 1
-//   %kizu.arena.len.16 = load i64, ptr %kizu.arena.len.addr.15
-//   %kizu.arena.in_range.17 = icmp ult i64 %kizu.12, %kizu.arena.len.16
-//   %kizu.arena.elem_size.addr.18 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 3
-//   %kizu.arena.elem_size.19 = load i64, ptr %kizu.arena.elem_size.addr.18
-//   %kizu.arena.offset.20 = mul i64 %kizu.12, %kizu.arena.elem_size.19
-//   %kizu.arena.data.addr.21 = getelementptr %kizu.arena, ptr %kizu.arena.handle.14, i64 0, i32 0
-//   %kizu.arena.data.22 = load ptr, ptr %kizu.arena.data.addr.21
-//   %kizu.arena.elem.23 = getelementptr i8, ptr %kizu.arena.data.22, i64 %kizu.arena.offset.20
-//   %kizu.13.ptr = select i1 %kizu.arena.in_range.17, ptr %kizu.arena.elem.23, ptr null
-//   %kizu.arena.at.is_null.24 = icmp eq ptr %kizu.13.ptr, null
-//   br i1 %kizu.arena.at.is_null.24, label %kizu.13.ptr.arena.at.null, label %kizu.13.ptr.ok
-// kizu.13.ptr.arena.at.null:
+// kizu.11.ptr.ok:
+//   %kizu.11 = load %kizu.struct.Item, ptr %kizu.11.ptr
+//   %kizu.12 = extractvalue %kizu.struct.Item %kizu.11, 0
+//   %kizu.13 = extractvalue %kizu.struct.Ref %kizu.8, 0
+//   %kizu.array.handle.null.21 = icmp eq ptr %kizu.3, null
+//   %kizu.array.handle.22 = select i1 %kizu.array.handle.null.21, ptr @kizu.array.empty, ptr %kizu.3
+//   %kizu.array.len.24 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 1
+//   %kizu.array.len.23 = load i64, ptr %kizu.array.len.24
+//   %kizu.array.in_range.25 = icmp ult i64 %kizu.13, %kizu.array.len.23
+//   %kizu.array.data.addr.26 = getelementptr %kizu.array, ptr %kizu.array.handle.22, i64 0, i32 0
+//   %kizu.array.data.27 = load ptr, ptr %kizu.array.data.addr.26
+//   %kizu.array.elem.28 = getelementptr %kizu.struct.Item, ptr %kizu.array.data.27, i64 %kizu.13
+//   %kizu.14.ptr = select i1 %kizu.array.in_range.25, ptr %kizu.array.elem.28, ptr null
+//   %kizu.arena.at.is_null.29 = icmp eq ptr %kizu.14.ptr, null
+//   br i1 %kizu.arena.at.is_null.29, label %kizu.14.ptr.arena.at.null, label %kizu.14.ptr.ok
+// kizu.14.ptr.arena.at.null:
 //   call void @kizu_panic_arena_handle(i64 0, i64 0)
 //   unreachable
-// kizu.13.ptr.ok:
-//   %kizu.13 = load %kizu.struct.Item, ptr %kizu.13.ptr
-//   %kizu.14 = extractvalue %kizu.struct.Item %kizu.13, 0
-//   %kizu.15 = add i64 %kizu.11, %kizu.14
-//   %kizu.16 = extractvalue %kizu.struct.Ref %kizu.7, 1
-//   %kizu.17 = add i64 %kizu.15, %kizu.16
-//   %kizu.18.ok = icmp eq i64 17, %kizu.17
-//   br i1 %kizu.18.ok, label %kizu.18.ok.ok, label %kizu.18.ok.fail
-// kizu.18.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 17, i64 %kizu.17, i64 0, i64 0)
+// kizu.14.ptr.ok:
+//   %kizu.14 = load %kizu.struct.Item, ptr %kizu.14.ptr
+//   %kizu.15 = extractvalue %kizu.struct.Item %kizu.14, 0
+//   %kizu.16 = add i64 %kizu.12, %kizu.15
+//   %kizu.17 = extractvalue %kizu.struct.Ref %kizu.8, 1
+//   %kizu.18 = add i64 %kizu.16, %kizu.17
+//   %kizu.19.ok = icmp eq i64 17, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 17, i64 %kizu.18, i64 0, i64 0)
 //   unreachable
-// kizu.18.ok.ok:
-//   call void @kizu_arena_deinit(ptr %kizu.2)
-//   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.20
+// kizu.19.ok.ok:
+//   %kizu.20 = load %kizu.array, ptr %kizu.3
+//   %kizu.arena.deinit.data.30 = extractvalue %kizu.array %kizu.20, 0
+//   %kizu.arena.deinit.cap.31 = extractvalue %kizu.array %kizu.20, 2
+//   %kizu.arena.deinit.bytes.32 = mul i64 %kizu.arena.deinit.cap.31, ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.30, i64 %kizu.arena.deinit.bytes.32)
+//   %kizu.22 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.22
 // }

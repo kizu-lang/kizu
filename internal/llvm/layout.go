@@ -29,9 +29,10 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 	if e.lowersToWord(typ) {
 		return 8, 8, true
 	}
-	// An array is its header: four words describing storage the array owns
-	// elsewhere. The header is what a field or a union payload holds.
-	if isArrayLLVMType(typ) {
+	// An array is its header: three words describing storage the array owns
+	// elsewhere. The header is what a field or a union payload holds, and an
+	// arena is that same header.
+	if isArrayLLVMType(typ) || isArenaLLVMType(typ) {
 		return arrayHeaderSize, 8, true
 	}
 	// A niche optional is its element: the element spells absence itself.
@@ -83,7 +84,7 @@ func (e *emitter) lowersToWord(typ string) bool {
 	if isArenaHandleType(typ) {
 		return true
 	}
-	if isMapLLVMType(typ) || isArenaLLVMType(typ) || isBoxLLVMType(typ) {
+	if isMapLLVMType(typ) || isBoxLLVMType(typ) {
 		return true
 	}
 	if _, ok := e.module.Enums[typ]; ok {

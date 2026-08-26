@@ -4330,6 +4330,10 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (Type, error) {
+			if method == "deinit" {
+				err := c.checkReleaseAllocator("Arena.deinit", rest, env, unsafe)
+				return typeVoid, err
+			}
 			if len(rest) != 0 {
 				return "", errorf("type error: `Arena.%s` expects 0 args, got %d",
 					method, len(rest))
@@ -4339,8 +4343,6 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 				return typeI64, nil
 			case "pop_or_panic":
 				return elem, nil
-			case "deinit":
-				return typeVoid, nil
 			default:
 				return "", errorf("type error: Arena has no storage primitive `%s`", method)
 			}
@@ -6923,16 +6925,26 @@ func checkBorrowTargetShape(expr ast.Expression) error {
 }
 
 // checkArenaAdd validates std::arena::Arena<T>.add(value).
+// checkArenaAdd validates Arena.add(allocator, value). The add is what buys
+// the storage the element goes in, so it names the allocator it buys from: an
+// arena header keeps none of its own (ADR-0131, ADR-0132).
 func (c *Checker) checkArenaAdd(
 	arg string,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if len(args) != 1 {
-		return "", errorf("type error: `arena.add` expects 1 arg, got %d", len(args))
+	if len(args) != 2 {
+		return "", errorf("type error: `arena.add` expects 2 args, got %d", len(args))
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	allocator, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if allocator != Type("Allocator") {
+		return "", errorf("type error: `arena.add` expects Allocator, got %s", allocator)
+	}
+	got, err := c.checkExpr(args[1], env, unsafe)
 	if err != nil {
 		return "", err
 	}

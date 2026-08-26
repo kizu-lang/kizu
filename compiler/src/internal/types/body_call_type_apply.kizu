@@ -1430,6 +1430,15 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
     ) orelse return try self.checker_error_at(
         "type error", ast::zero_span(), "invalid Arena primitive name"
     );
+    if mem::equal_bytes(method, "deinit") {
+        // The raw primitive frees the storage through the allocator the
+        // release names: the header keeps none of its own (ADR-0131).
+        if try self.check_release_allocator(tree, scope, "Arena", method, args, 1) |problem| {
+            return move problem;
+        }
+        out.* = try self.types.void_type();
+        return null;
+    }
     let rest = args.len(tree) - 1;
     if rest != 0 {
         return try self.receiver_arity_error("Arena", method, 0, rest);
@@ -1440,10 +1449,6 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
     }
     if mem::equal_bytes(method, "pop_or_panic") {
         out.* = element;
-        return null;
-    }
-    if mem::equal_bytes(method, "deinit") {
-        out.* = try self.types.void_type();
         return null;
     }
     var message = string::new(self.allocator);
@@ -2160,7 +2165,7 @@ fn (self: &var Checker) enter_instantiation(
         done.* = true;
         return try self.instantiation_depth_error(move key);
     }
-    let retained_key = self.checked_instance_keys.add(move key);
+    let retained_key = self.checked_instance_keys.add(self.allocator, move key);
     let retained = self.checked_instance_keys.at(retained_key);
     let retained_bytes = retained.as_bytes();
     try self.checked_instances.insert(retained_bytes, true);

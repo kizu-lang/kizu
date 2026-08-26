@@ -125,9 +125,13 @@ fn (self: &var Checker) read_control_expr(
         return self.read_catch_guard_expr(tree, env, value, out);
     }
     if move_expr(tree, expression) |value| {
+        // The name is interned before the call: a `&self` receiver travels as
+        // a copy, so a name retained while the arguments are read would land
+        // in a table the copy does not have (ADR-0131).
+        let rendered = try self.names.intern_expression(tree, value.value);
         return try self.error1(
             tree, value.span, "move error: `move` marks a hand-off, and `%s` is only read here",
-            Arg::Str(try self.names.intern_expression(tree, value.value))
+            Arg::Str(rendered)
         );
     }
     return try self.error0(ast::zero_span(), "move error: unsupported expression *ast.RecoveredExpr");
@@ -299,9 +303,10 @@ fn (self: &var Checker) coerce_contextual_literal(
     }
     let value = integer_literal_value(tree, expression) orelse return null;
     if !self.integer_literal_fits_type(value, want) {
+        let rendered = try self.names.intern_expression(tree, expression);
         return try self.error2(
             tree, ast::zero_span(), "move error: integer literal `%s` does not fit %s",
-            Arg::Str(try self.names.intern_expression(tree, expression)), Arg::Str(want)
+            Arg::Str(rendered), Arg::Str(want)
         );
     }
     out.* = want;
@@ -417,19 +422,21 @@ fn (self: &var Checker) move_expr(
     }
     if has_marker and !handed_off {
         if !try self.is_copy_place(tree, env, place) {
+            let rendered = try self.names.intern_expression(tree, place);
             return try self.error1(
                 tree, marker_span,
                 "move error: `move` marks a hand-off from a named place, and `%s` is not one",
-                Arg::Str(try self.names.intern_expression(tree, place))
+                Arg::Str(rendered)
             );
         }
         // A generic body is one source line per instantiation. The owner one
         // hands off and needs the marker, so the copy one accepts it rather
         // than making the function unwritable.
         if !self.in_generic_function() {
+            let rendered = try self.names.intern_expression(tree, place);
             return try self.error1(
                 tree, marker_span, "move error: `%s` is copy data and hands nothing off",
-                Arg::Str(try self.names.intern_expression(tree, place))
+                Arg::Str(rendered)
             );
         }
     }
@@ -880,9 +887,10 @@ fn (self: &var Checker) move_deref_expr(
     if try self.is_copy_type(out.*) {
         return null;
     }
+    let rendered = try self.names.intern_expression(tree, deref.receiver);
     return try self.error1(
         tree, ast::zero_span(), "borrow error: value `%s` cannot be moved out of borrow",
-        Arg::Str(try self.names.intern_expression(tree, deref.receiver))
+        Arg::Str(rendered)
     );
 }
 

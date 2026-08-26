@@ -78,9 +78,9 @@ fn (self: &Chain) total(h: arena::Handle<TreeNode>) -> i64 {
 test "optional handle field links a recursive structure" {
     let allocator = mem::page_allocator();
     var chain = Chain { nodes: arena::new<TreeNode>(allocator) };
-    let tail = chain.nodes.add(TreeNode { value: 30, next: null });
-    let mid = chain.nodes.add(TreeNode { value: 12, next: tail });
-    let head = chain.nodes.add(TreeNode { value: 0, next: mid });
+    let tail = chain.nodes.add(allocator, TreeNode { value: 30, next: null });
+    let mid = chain.nodes.add(allocator, TreeNode { value: 12, next: tail });
+    let head = chain.nodes.add(allocator, TreeNode { value: 0, next: mid });
     testing::expect_equal<i64>(42, chain.total(head));
     chain.deinit(allocator);
 }
@@ -117,8 +117,8 @@ fn (self: &Prog) eval(h: arena::Handle<Expr>) -> i64 {
 test "optional handle field inside a union payload evaluates recursively" {
     let allocator = mem::page_allocator();
     var prog = Prog { exprs: arena::new<Expr>(allocator) };
-    let lit = prog.exprs.add(Expr::Literal(40));
-    let top = prog.exprs.add(Expr::If(Branch { condition: lit, value: 2 }));
+    let lit = prog.exprs.add(allocator, Expr::Literal(40));
+    let top = prog.exprs.add(allocator, Expr::If(Branch { condition: lit, value: 2 }));
     testing::expect_equal<i64>(42, prog.eval(top));
     prog.deinit(allocator);
 }
@@ -140,72 +140,75 @@ test "optional handle field inside a union payload evaluates recursively" {
 // fn Chain.total(%self: Chain, %h: std::arena::Handle<TreeNode>) -> i64 {
 // entry:
 //   %1: std::arena::Arena<TreeNode> = field.nodes %self: Chain
-//   %2: TreeNode = arena.at %1: std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
-//   %3: i64 = field.value %2: TreeNode
-//   %4: std::arena::Arena<TreeNode> = field.nodes %self: Chain
-//   %5: TreeNode = arena.at %4: std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
-//   %6: ?std::arena::Handle<TreeNode> = field.next %5: TreeNode
-//   %7: std::arena::Handle<TreeNode> = opt.value %6: ?std::arena::Handle<TreeNode>
-//   %8: bool = opt.has %6: ?std::arena::Handle<TreeNode>
-//   branch %8: bool, if.then.1, if.else.2
+//   %2: &var std::arena::Arena<TreeNode> = local.slot %1: std::arena::Arena<TreeNode>
+//   %3: TreeNode = arena.at %2: &var std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
+//   %4: i64 = field.value %3: TreeNode
+//   %5: std::arena::Arena<TreeNode> = field.nodes %self: Chain
+//   %6: &var std::arena::Arena<TreeNode> = local.slot %5: std::arena::Arena<TreeNode>
+//   %7: TreeNode = arena.at %6: &var std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
+//   %8: ?std::arena::Handle<TreeNode> = field.next %7: TreeNode
+//   %9: std::arena::Handle<TreeNode> = opt.value %8: ?std::arena::Handle<TreeNode>
+//   %10: bool = opt.has %8: ?std::arena::Handle<TreeNode>
+//   branch %10: bool, if.then.1, if.else.2
 // if.then.1:
-//   %9: i64 = call.Chain.total %self: Chain, %7: std::arena::Handle<TreeNode>
-//   %10: i64 = binary.+ %3: i64, %9: i64
+//   %11: i64 = call.Chain.total %self: Chain, %9: std::arena::Handle<TreeNode>
+//   %12: i64 = binary.+ %4: i64, %11: i64
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   %11: i64 = phi [if.then.1, %10: i64], [if.else.2, %3: i64]
-//   return %11: i64
+//   %13: i64 = phi [if.then.1, %12: i64], [if.else.2, %4: i64]
+//   return %13: i64
 // }
 // fn Prog.eval(%self: Prog, %h: std::arena::Handle<Expr>) -> i64 {
 // entry:
 //   %1: std::arena::Arena<Expr> = field.exprs %self: Prog
-//   %2: &Expr = arena.at %1: std::arena::Arena<Expr>, %h: std::arena::Handle<Expr>
-//   %3: Expr = union.load %2: &Expr
-//   %4: i64 = union.tag %3: Expr
+//   %2: &var std::arena::Arena<Expr> = local.slot %1: std::arena::Arena<Expr>
+//   %3: &Expr = arena.at %2: &var std::arena::Arena<Expr>, %h: std::arena::Handle<Expr>
+//   %4: Expr = union.load %3: &Expr
+//   %5: i64 = union.tag %4: Expr
 //   jump match.check.2
 // match.end.1:
-//   %16: i64 = phi [match.arm.3, %6: i64], [if.end.9, %15: i64]
-//   return %16: i64
+//   %17: i64 = phi [match.arm.3, %7: i64], [if.end.9, %16: i64]
+//   return %17: i64
 // match.check.2:
-//   %5: bool = binary.== %4: i64, 0: i64
-//   branch %5: bool, match.arm.3, match.check.4
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
 // match.arm.3:
-//   %6: i64 = union.payload %3: Expr, Literal
+//   %7: i64 = union.payload %4: Expr, Literal
 //   jump match.end.1
 // match.check.4:
-//   %7: bool = binary.== %4: i64, 1: i64
-//   branch %7: bool, match.arm.5, match.unreachable.6
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.unreachable.6
 // match.arm.5:
-//   %8: Branch = union.payload %3: Expr, If
-//   %9: i64 = field.value %8: Branch
-//   %10: ?std::arena::Handle<Expr> = field.condition %8: Branch
-//   %11: std::arena::Handle<Expr> = opt.value %10: ?std::arena::Handle<Expr>
-//   %12: bool = opt.has %10: ?std::arena::Handle<Expr>
-//   branch %12: bool, if.then.7, if.else.8
+//   %9: Branch = union.payload %4: Expr, If
+//   %10: i64 = field.value %9: Branch
+//   %11: ?std::arena::Handle<Expr> = field.condition %9: Branch
+//   %12: std::arena::Handle<Expr> = opt.value %11: ?std::arena::Handle<Expr>
+//   %13: bool = opt.has %11: ?std::arena::Handle<Expr>
+//   branch %13: bool, if.then.7, if.else.8
 // match.unreachable.6:
 //   unreachable
 // if.then.7:
-//   %13: i64 = call.Prog.eval %self: Prog, %11: std::arena::Handle<Expr>
-//   %14: i64 = binary.+ %9: i64, %13: i64
+//   %14: i64 = call.Prog.eval %self: Prog, %12: std::arena::Handle<Expr>
+//   %15: i64 = binary.+ %10: i64, %14: i64
 //   jump if.end.9
 // if.else.8:
 //   jump if.end.9
 // if.end.9:
-//   %15: i64 = phi [if.then.7, %14: i64], [if.else.8, %9: i64]
+//   %16: i64 = phi [if.then.7, %15: i64], [if.else.8, %10: i64]
 //   jump match.end.1
 // }
 // fn Chain.deinit(%self: Chain, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::arena::Arena<TreeNode> = field.nodes %self: Chain
-//   arena.deinit %1: std::arena::Arena<TreeNode>
+//   arena.deinit %1: std::arena::Arena<TreeNode>, %allocator: Allocator
 //   return void: void
 // }
 // fn Prog.deinit(%self: Prog, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::arena::Arena<Expr> = field.exprs %self: Prog
-//   arena.deinit %1: std::arena::Arena<Expr>
+//   arena.deinit %1: std::arena::Arena<Expr>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.optional_scalar_field_wraps__clears__and_reads_back() -> !void {
@@ -330,49 +333,55 @@ test "optional handle field inside a union payload evaluates recursively" {
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<TreeNode> = arena.new %1: Allocator
 //   %3: Chain = struct.new {nodes: %2: std::arena::Arena<TreeNode>}
-//   %4: std::arena::Arena<TreeNode> = field.nodes %3: Chain
-//   %5: i64 = const 30
-//   %6: ?std::arena::Handle<TreeNode> = opt.null
-//   %7: TreeNode = struct.new {value: %5: i64, next: %6: ?std::arena::Handle<TreeNode>}
-//   %8: std::arena::Handle<TreeNode> = arena.add %4: std::arena::Arena<TreeNode>, %7: TreeNode
-//   %9: std::arena::Arena<TreeNode> = field.nodes %3: Chain
-//   %10: i64 = const 12
-//   %11: ?std::arena::Handle<TreeNode> = opt.some %8: std::arena::Handle<TreeNode>
-//   %12: TreeNode = struct.new {value: %10: i64, next: %11: ?std::arena::Handle<TreeNode>}
-//   %13: std::arena::Handle<TreeNode> = arena.add %9: std::arena::Arena<TreeNode>, %12: TreeNode
-//   %14: std::arena::Arena<TreeNode> = field.nodes %3: Chain
-//   %15: i64 = const 0
-//   %16: ?std::arena::Handle<TreeNode> = opt.some %13: std::arena::Handle<TreeNode>
-//   %17: TreeNode = struct.new {value: %15: i64, next: %16: ?std::arena::Handle<TreeNode>}
-//   %18: std::arena::Handle<TreeNode> = arena.add %14: std::arena::Arena<TreeNode>, %17: TreeNode
-//   %19: i64 = const 42
-//   %20: i64 = call.Chain.total %3: Chain, %18: std::arena::Handle<TreeNode>
-//   test.expect_equal %19: i64, %20: i64, i64
-//   call.Chain.deinit %3: Chain, %1: Allocator
-//   %23: !void = error.ok
-//   return %23: !void
+//   %4: &var Chain = local.slot %3: Chain
+//   %5: &var std::arena::Arena<TreeNode> = field.addr.nodes %4: &var Chain
+//   %6: i64 = const 30
+//   %7: ?std::arena::Handle<TreeNode> = opt.null
+//   %8: TreeNode = struct.new {value: %6: i64, next: %7: ?std::arena::Handle<TreeNode>}
+//   %9: std::arena::Handle<TreeNode> = arena.add %5: &var std::arena::Arena<TreeNode>, %1: Allocator, %8: TreeNode
+//   %10: &var std::arena::Arena<TreeNode> = field.addr.nodes %4: &var Chain
+//   %11: i64 = const 12
+//   %12: ?std::arena::Handle<TreeNode> = opt.some %9: std::arena::Handle<TreeNode>
+//   %13: TreeNode = struct.new {value: %11: i64, next: %12: ?std::arena::Handle<TreeNode>}
+//   %14: std::arena::Handle<TreeNode> = arena.add %10: &var std::arena::Arena<TreeNode>, %1: Allocator, %13: TreeNode
+//   %15: &var std::arena::Arena<TreeNode> = field.addr.nodes %4: &var Chain
+//   %16: i64 = const 0
+//   %17: ?std::arena::Handle<TreeNode> = opt.some %14: std::arena::Handle<TreeNode>
+//   %18: TreeNode = struct.new {value: %16: i64, next: %17: ?std::arena::Handle<TreeNode>}
+//   %19: std::arena::Handle<TreeNode> = arena.add %15: &var std::arena::Arena<TreeNode>, %1: Allocator, %18: TreeNode
+//   %20: i64 = const 42
+//   %21: Chain = ref.load %4: &var Chain
+//   %22: i64 = call.Chain.total %21: Chain, %19: std::arena::Handle<TreeNode>
+//   test.expect_equal %20: i64, %22: i64, i64
+//   %24: Chain = ref.load %4: &var Chain
+//   call.Chain.deinit %24: Chain, %1: Allocator
+//   %26: !void = error.ok
+//   return %26: !void
 // }
 // fn test.optional_handle_field_inside_a_union_payload_evaluates_recursively() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<Expr> = arena.new %1: Allocator
 //   %3: Prog = struct.new {exprs: %2: std::arena::Arena<Expr>}
-//   %4: std::arena::Arena<Expr> = field.exprs %3: Prog
-//   %5: i64 = const 40
-//   %6: Expr = union.new %5: i64, Literal
-//   %7: std::arena::Handle<Expr> = arena.add %4: std::arena::Arena<Expr>, %6: Expr
-//   %8: std::arena::Arena<Expr> = field.exprs %3: Prog
-//   %9: ?std::arena::Handle<Expr> = opt.some %7: std::arena::Handle<Expr>
-//   %10: i64 = const 2
-//   %11: Branch = struct.new {condition: %9: ?std::arena::Handle<Expr>, value: %10: i64}
-//   %12: Expr = union.new %11: Branch, If
-//   %13: std::arena::Handle<Expr> = arena.add %8: std::arena::Arena<Expr>, %12: Expr
-//   %14: i64 = const 42
-//   %15: i64 = call.Prog.eval %3: Prog, %13: std::arena::Handle<Expr>
-//   test.expect_equal %14: i64, %15: i64, i64
-//   call.Prog.deinit %3: Prog, %1: Allocator
-//   %18: !void = error.ok
-//   return %18: !void
+//   %4: &var Prog = local.slot %3: Prog
+//   %5: &var std::arena::Arena<Expr> = field.addr.exprs %4: &var Prog
+//   %6: i64 = const 40
+//   %7: Expr = union.new %6: i64, Literal
+//   %8: std::arena::Handle<Expr> = arena.add %5: &var std::arena::Arena<Expr>, %1: Allocator, %7: Expr
+//   %9: &var std::arena::Arena<Expr> = field.addr.exprs %4: &var Prog
+//   %10: ?std::arena::Handle<Expr> = opt.some %8: std::arena::Handle<Expr>
+//   %11: i64 = const 2
+//   %12: Branch = struct.new {condition: %10: ?std::arena::Handle<Expr>, value: %11: i64}
+//   %13: Expr = union.new %12: Branch, If
+//   %14: std::arena::Handle<Expr> = arena.add %9: &var std::arena::Arena<Expr>, %1: Allocator, %13: Expr
+//   %15: i64 = const 42
+//   %16: Prog = ref.load %4: &var Prog
+//   %17: i64 = call.Prog.eval %16: Prog, %14: std::arena::Handle<Expr>
+//   test.expect_equal %15: i64, %17: i64, i64
+//   %19: Prog = ref.load %4: &var Prog
+//   call.Prog.deinit %19: Prog, %1: Allocator
+//   %21: !void = error.ok
+//   return %21: !void
 // }
 // opt:
 // fn set_limit(%c: &var Config, %n: i64) -> void {
@@ -390,72 +399,75 @@ test "optional handle field inside a union payload evaluates recursively" {
 // fn Chain.total(%self: Chain, %h: std::arena::Handle<TreeNode>) -> i64 {
 // entry:
 //   %1: std::arena::Arena<TreeNode> = field.nodes %self: Chain
-//   %2: TreeNode = arena.at %1: std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
-//   %3: i64 = field.value %2: TreeNode
-//   %4: std::arena::Arena<TreeNode> = field.nodes %self: Chain
-//   %5: TreeNode = arena.at %4: std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
-//   %6: ?std::arena::Handle<TreeNode> = field.next %5: TreeNode
-//   %7: std::arena::Handle<TreeNode> = opt.value %6: ?std::arena::Handle<TreeNode>
-//   %8: bool = opt.has %6: ?std::arena::Handle<TreeNode>
-//   branch %8: bool, if.then.1, if.else.2
+//   %2: &var std::arena::Arena<TreeNode> = local.slot %1: std::arena::Arena<TreeNode>
+//   %3: TreeNode = arena.at %2: &var std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
+//   %4: i64 = field.value %3: TreeNode
+//   %5: std::arena::Arena<TreeNode> = field.nodes %self: Chain
+//   %6: &var std::arena::Arena<TreeNode> = local.slot %5: std::arena::Arena<TreeNode>
+//   %7: TreeNode = arena.at %6: &var std::arena::Arena<TreeNode>, %h: std::arena::Handle<TreeNode>
+//   %8: ?std::arena::Handle<TreeNode> = field.next %7: TreeNode
+//   %9: std::arena::Handle<TreeNode> = opt.value %8: ?std::arena::Handle<TreeNode>
+//   %10: bool = opt.has %8: ?std::arena::Handle<TreeNode>
+//   branch %10: bool, if.then.1, if.else.2
 // if.then.1:
-//   %9: i64 = call.Chain.total %self: Chain, %7: std::arena::Handle<TreeNode>
-//   %10: i64 = binary.+ %3: i64, %9: i64
+//   %11: i64 = call.Chain.total %self: Chain, %9: std::arena::Handle<TreeNode>
+//   %12: i64 = binary.+ %4: i64, %11: i64
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   %11: i64 = phi [if.then.1, %10: i64], [if.else.2, %3: i64]
-//   return %11: i64
+//   %13: i64 = phi [if.then.1, %12: i64], [if.else.2, %4: i64]
+//   return %13: i64
 // }
 // fn Prog.eval(%self: Prog, %h: std::arena::Handle<Expr>) -> i64 {
 // entry:
 //   %1: std::arena::Arena<Expr> = field.exprs %self: Prog
-//   %2: &Expr = arena.at %1: std::arena::Arena<Expr>, %h: std::arena::Handle<Expr>
-//   %3: Expr = union.load %2: &Expr
-//   %4: i64 = union.tag %3: Expr
+//   %2: &var std::arena::Arena<Expr> = local.slot %1: std::arena::Arena<Expr>
+//   %3: &Expr = arena.at %2: &var std::arena::Arena<Expr>, %h: std::arena::Handle<Expr>
+//   %4: Expr = union.load %3: &Expr
+//   %5: i64 = union.tag %4: Expr
 //   jump match.check.2
 // match.end.1:
-//   %16: i64 = phi [match.arm.3, %6: i64], [if.end.9, %15: i64]
-//   return %16: i64
+//   %17: i64 = phi [match.arm.3, %7: i64], [if.end.9, %16: i64]
+//   return %17: i64
 // match.check.2:
-//   %5: bool = binary.== %4: i64, 0: i64
-//   branch %5: bool, match.arm.3, match.check.4
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
 // match.arm.3:
-//   %6: i64 = union.payload %3: Expr, Literal
+//   %7: i64 = union.payload %4: Expr, Literal
 //   jump match.end.1
 // match.check.4:
-//   %7: bool = binary.== %4: i64, 1: i64
-//   branch %7: bool, match.arm.5, match.unreachable.6
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.unreachable.6
 // match.arm.5:
-//   %8: Branch = union.payload %3: Expr, If
-//   %9: i64 = field.value %8: Branch
-//   %10: ?std::arena::Handle<Expr> = field.condition %8: Branch
-//   %11: std::arena::Handle<Expr> = opt.value %10: ?std::arena::Handle<Expr>
-//   %12: bool = opt.has %10: ?std::arena::Handle<Expr>
-//   branch %12: bool, if.then.7, if.else.8
+//   %9: Branch = union.payload %4: Expr, If
+//   %10: i64 = field.value %9: Branch
+//   %11: ?std::arena::Handle<Expr> = field.condition %9: Branch
+//   %12: std::arena::Handle<Expr> = opt.value %11: ?std::arena::Handle<Expr>
+//   %13: bool = opt.has %11: ?std::arena::Handle<Expr>
+//   branch %13: bool, if.then.7, if.else.8
 // match.unreachable.6:
 //   unreachable
 // if.then.7:
-//   %13: i64 = call.Prog.eval %self: Prog, %11: std::arena::Handle<Expr>
-//   %14: i64 = binary.+ %9: i64, %13: i64
+//   %14: i64 = call.Prog.eval %self: Prog, %12: std::arena::Handle<Expr>
+//   %15: i64 = binary.+ %10: i64, %14: i64
 //   jump if.end.9
 // if.else.8:
 //   jump if.end.9
 // if.end.9:
-//   %15: i64 = phi [if.then.7, %14: i64], [if.else.8, %9: i64]
+//   %16: i64 = phi [if.then.7, %15: i64], [if.else.8, %10: i64]
 //   jump match.end.1
 // }
 // fn Chain.deinit(%self: Chain, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::arena::Arena<TreeNode> = field.nodes %self: Chain
-//   arena.deinit %1: std::arena::Arena<TreeNode>
+//   arena.deinit %1: std::arena::Arena<TreeNode>, %allocator: Allocator
 //   return void: void
 // }
 // fn Prog.deinit(%self: Prog, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::arena::Arena<Expr> = field.exprs %self: Prog
-//   arena.deinit %1: std::arena::Arena<Expr>
+//   arena.deinit %1: std::arena::Arena<Expr>, %allocator: Allocator
 //   return void: void
 // }
 // fn test.optional_scalar_field_wraps__clears__and_reads_back() -> !void {
@@ -579,47 +591,53 @@ test "optional handle field inside a union payload evaluates recursively" {
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<TreeNode> = arena.new %1: Allocator
 //   %3: Chain = struct.new {nodes: %2: std::arena::Arena<TreeNode>}
-//   %4: std::arena::Arena<TreeNode> = field.nodes %3: Chain
-//   %5: i64 = const 30
-//   %6: ?std::arena::Handle<TreeNode> = opt.null
-//   %7: TreeNode = struct.new {value: %5: i64, next: %6: ?std::arena::Handle<TreeNode>}
-//   %8: std::arena::Handle<TreeNode> = arena.add %4: std::arena::Arena<TreeNode>, %7: TreeNode
-//   %9: std::arena::Arena<TreeNode> = field.nodes %3: Chain
-//   %10: i64 = const 12
-//   %11: ?std::arena::Handle<TreeNode> = opt.some %8: std::arena::Handle<TreeNode>
-//   %12: TreeNode = struct.new {value: %10: i64, next: %11: ?std::arena::Handle<TreeNode>}
-//   %13: std::arena::Handle<TreeNode> = arena.add %9: std::arena::Arena<TreeNode>, %12: TreeNode
-//   %14: std::arena::Arena<TreeNode> = field.nodes %3: Chain
-//   %15: i64 = const 0
-//   %16: ?std::arena::Handle<TreeNode> = opt.some %13: std::arena::Handle<TreeNode>
-//   %17: TreeNode = struct.new {value: %15: i64, next: %16: ?std::arena::Handle<TreeNode>}
-//   %18: std::arena::Handle<TreeNode> = arena.add %14: std::arena::Arena<TreeNode>, %17: TreeNode
-//   %19: i64 = const 42
-//   %20: i64 = call.Chain.total %3: Chain, %18: std::arena::Handle<TreeNode>
-//   test.expect_equal %19: i64, %20: i64, i64
-//   call.Chain.deinit %3: Chain, %1: Allocator
-//   %23: !void = error.ok
-//   return %23: !void
+//   %4: &var Chain = local.slot %3: Chain
+//   %5: &var std::arena::Arena<TreeNode> = field.addr.nodes %4: &var Chain
+//   %6: i64 = const 30
+//   %7: ?std::arena::Handle<TreeNode> = opt.null
+//   %8: TreeNode = struct.new {value: %6: i64, next: %7: ?std::arena::Handle<TreeNode>}
+//   %9: std::arena::Handle<TreeNode> = arena.add %5: &var std::arena::Arena<TreeNode>, %1: Allocator, %8: TreeNode
+//   %10: &var std::arena::Arena<TreeNode> = field.addr.nodes %4: &var Chain
+//   %11: i64 = const 12
+//   %12: ?std::arena::Handle<TreeNode> = opt.some %9: std::arena::Handle<TreeNode>
+//   %13: TreeNode = struct.new {value: %11: i64, next: %12: ?std::arena::Handle<TreeNode>}
+//   %14: std::arena::Handle<TreeNode> = arena.add %10: &var std::arena::Arena<TreeNode>, %1: Allocator, %13: TreeNode
+//   %15: &var std::arena::Arena<TreeNode> = field.addr.nodes %4: &var Chain
+//   %16: i64 = const 0
+//   %17: ?std::arena::Handle<TreeNode> = opt.some %14: std::arena::Handle<TreeNode>
+//   %18: TreeNode = struct.new {value: %16: i64, next: %17: ?std::arena::Handle<TreeNode>}
+//   %19: std::arena::Handle<TreeNode> = arena.add %15: &var std::arena::Arena<TreeNode>, %1: Allocator, %18: TreeNode
+//   %20: i64 = const 42
+//   %21: Chain = ref.load %4: &var Chain
+//   %22: i64 = call.Chain.total %21: Chain, %19: std::arena::Handle<TreeNode>
+//   test.expect_equal %20: i64, %22: i64, i64
+//   %24: Chain = ref.load %4: &var Chain
+//   call.Chain.deinit %24: Chain, %1: Allocator
+//   %26: !void = error.ok
+//   return %26: !void
 // }
 // fn test.optional_handle_field_inside_a_union_payload_evaluates_recursively() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<Expr> = arena.new %1: Allocator
 //   %3: Prog = struct.new {exprs: %2: std::arena::Arena<Expr>}
-//   %4: std::arena::Arena<Expr> = field.exprs %3: Prog
-//   %5: i64 = const 40
-//   %6: Expr = union.new %5: i64, Literal
-//   %7: std::arena::Handle<Expr> = arena.add %4: std::arena::Arena<Expr>, %6: Expr
-//   %8: std::arena::Arena<Expr> = field.exprs %3: Prog
-//   %9: ?std::arena::Handle<Expr> = opt.some %7: std::arena::Handle<Expr>
-//   %10: i64 = const 2
-//   %11: Branch = struct.new {condition: %9: ?std::arena::Handle<Expr>, value: %10: i64}
-//   %12: Expr = union.new %11: Branch, If
-//   %13: std::arena::Handle<Expr> = arena.add %8: std::arena::Arena<Expr>, %12: Expr
-//   %14: i64 = const 42
-//   %15: i64 = call.Prog.eval %3: Prog, %13: std::arena::Handle<Expr>
-//   test.expect_equal %14: i64, %15: i64, i64
-//   call.Prog.deinit %3: Prog, %1: Allocator
-//   %18: !void = error.ok
-//   return %18: !void
+//   %4: &var Prog = local.slot %3: Prog
+//   %5: &var std::arena::Arena<Expr> = field.addr.exprs %4: &var Prog
+//   %6: i64 = const 40
+//   %7: Expr = union.new %6: i64, Literal
+//   %8: std::arena::Handle<Expr> = arena.add %5: &var std::arena::Arena<Expr>, %1: Allocator, %7: Expr
+//   %9: &var std::arena::Arena<Expr> = field.addr.exprs %4: &var Prog
+//   %10: ?std::arena::Handle<Expr> = opt.some %8: std::arena::Handle<Expr>
+//   %11: i64 = const 2
+//   %12: Branch = struct.new {condition: %10: ?std::arena::Handle<Expr>, value: %11: i64}
+//   %13: Expr = union.new %12: Branch, If
+//   %14: std::arena::Handle<Expr> = arena.add %9: &var std::arena::Arena<Expr>, %1: Allocator, %13: Expr
+//   %15: i64 = const 42
+//   %16: Prog = ref.load %4: &var Prog
+//   %17: i64 = call.Prog.eval %16: Prog, %14: std::arena::Handle<Expr>
+//   test.expect_equal %15: i64, %17: i64, i64
+//   %19: Prog = ref.load %4: &var Prog
+//   call.Prog.deinit %19: Prog, %1: Allocator
+//   %21: !void = error.ok
+//   return %21: !void
 // }

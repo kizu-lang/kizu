@@ -1918,11 +1918,12 @@ func (l *lowerer) lowerTypedContainerPrimitive(
 		return value, true, err
 	}
 	if method, ok := arenaPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		elem := l.resolveType(typeArg)
+		args, err := l.lowerCallArgsAs(arenaPrimitiveParams(method, elem), rawArgs)
 		if err != nil {
 			return Value{}, true, err
 		}
-		value, err := l.lowerArenaPrimitive(method, l.resolveType(typeArg), args)
+		value, err := l.lowerArenaPrimitive(method, elem, args)
 		return value, true, err
 	}
 	return Value{}, false, nil
@@ -2075,9 +2076,8 @@ func (l *lowerer) lowerResolvedMethod(
 			return l.lowerStdContainerMethod(arenaTypeName, method, elem, allArgs)
 		}
 		// Plain elements have no cleanup loop, so the release is the runtime
-		// op. The arena header still keeps the allocator the op frees through,
-		// so the one the call names goes no further than the check of it.
-		return l.lowerArenaMethod(method, receiverType, allArgs[:1])
+		// op, which is handed the allocator the call names.
+		return l.lowerArenaMethod(method, receiverType, allArgs)
 	}
 	if methodName, ok := l.implMethodCalleeName(receiverType, method); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -2093,18 +2093,34 @@ func (l *lowerer) lowerArenaMethod(
 ) (Value, error) {
 	switch name {
 	case "add":
-		return l.emit("arena.add", handleType(receiverType), allArgs, ""), nil
+		return l.emit("arena.add", handleType(receiverType), l.atHeader(allArgs), ""), nil
 	case "at":
 		elem := arenaElementType(receiverType)
 		resultType, _ := l.borrowIRType(elem, false)
-		return l.emit("arena.at", resultType, allArgs, ""), nil
+		return l.emit("arena.at", resultType, l.atHeader(allArgs), ""), nil
 	case "at_mut":
-		return l.emit("arena.at_mut", "?&var "+arenaElementType(receiverType), allArgs, ""), nil
+		return l.emit("arena.at_mut", "?&var "+arenaElementType(receiverType),
+			l.atHeader(allArgs), ""), nil
 	case "deinit":
 		return l.emit("arena.deinit", "void", allArgs, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", name)
 	}
+}
+
+// atHeader gives the container an arena operation works on an address to reach
+// it by. A receiver that already travels as a borrow has one; one that arrived
+// by value is this frame's own copy of the header, and a slot is where a copy
+// lives. Only `deinit` is left with the value, which is all a release reads.
+// The declared container methods get this from their callee's parameter
+// instead; an arena's are the compiler's own and have no callee (ADR-0131).
+func (l *lowerer) atHeader(args []Value) []Value {
+	if len(args) == 0 || isReferenceType(args[0].Type) {
+		return args
+	}
+	out := append([]Value{}, args...)
+	out[0] = l.emit("local.slot", "&var "+args[0].Type, []Value{args[0]}, "")
+	return out
 }
 
 // isBufferIRType reports whether an IR type spelling is a fixed-length stack
@@ -2259,7 +2275,7 @@ func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) P
 	}
 	decl := l.genericDecl(stdmethod.MethodName(base, method))
 	if decl == nil || len(decl.Params) == 0 {
-		return PassValue
+		return containerSelfPassing(base, method)
 	}
 	if decl.Params[0].MutBorrow {
 		return PassCallerStorage
@@ -2269,6 +2285,22 @@ func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) P
 		return passing
 	}
 	return PassValue
+}
+
+// containerSelfPassing says how a container method with no std declaration
+// receives its receiver. Arena's methods are the compiler's own, so there is no
+// `&var self` to read; the container is still a header, and a header is reached
+// at its address either way -- a copy would leave the caller's `data` behind
+// (ADR-0131). What the ownership checker says the method does to storage is
+// what decides whether that address is writable.
+func containerSelfPassing(base string, method string) Passing {
+	if base != arenaTypeName {
+		return PassValue
+	}
+	if ownership.ArenaMethodWritesHeader(method) {
+		return PassCallerStorage
+	}
+	return PassCopyAddress
 }
 
 // stdContainerTypeName names the generic declaration a container instance was
@@ -2337,6 +2369,36 @@ func arrayPrimitiveParams(method string, elem string) []Param {
 	return []Param{self}
 }
 
+// arenaPrimitiveParams says how one arena primitive receives its arena, the
+// way arrayPrimitiveParams does for an array -- the two are the same header.
+// Both `len` and `pop_or_panic` are handed the binding's storage: they are the
+// two halves of std::arena's cleanup loop, and the loop is only right while
+// the count it reads and the pop that shortens it reach the same header.
+// `deinit` receives the header itself, because releasing it is the last thing
+// done with it.
+func arenaPrimitiveParams(method string, elem string) []Param {
+	if method == typ.CleanupMethod {
+		return nil
+	}
+	arena := arenaTypeName + "<" + elem + ">"
+	return []Param{{Type: "&var " + arena, Passing: PassCallerStorage}}
+}
+
+// primitiveInstanceParams names the parameters of a container primitive, which
+// has no declaration for declaredInstanceParams to read. What it answers is
+// how the container arrives: a primitive that writes through the header is
+// handed the binding's storage, so the binding needs a slot of its own rather
+// than a fresh copy per call.
+func (l *lowerer) primitiveInstanceParams(name string, typeArg string) []Param {
+	if method, ok := arrayPrimitives[name]; ok {
+		return arrayPrimitiveParams(method, l.resolveType(typeArg))
+	}
+	if method, ok := arenaPrimitives[name]; ok {
+		return arenaPrimitiveParams(method, l.resolveType(typeArg))
+	}
+	return nil
+}
+
 var arrayPrimitives = map[string]string{
 	"std::internal::builtin::array_append":       "append",
 	"std::internal::builtin::array_append_bytes": "append_bytes",
@@ -2396,9 +2458,9 @@ var arenaPrimitives = map[string]string{
 func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (Value, error) {
 	switch name {
 	case "len":
-		return l.emit("arena.len", "i64", args, ""), nil
+		return l.emit("arena.len", "i64", l.atHeader(args), ""), nil
 	case "pop_or_panic":
-		return l.emit("arena.pop_or_panic", elem, args, ""), nil
+		return l.emit("arena.pop_or_panic", elem, l.atHeader(args), ""), nil
 	case "deinit":
 		return l.emit("arena.deinit", "void", args, ""), nil
 	default:

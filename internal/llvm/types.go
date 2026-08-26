@@ -44,13 +44,11 @@ func (e *emitter) llvmType(typ string) string {
 	if strings.HasPrefix(typ, "std::arena::Handle<") {
 		return "i64"
 	}
-	if strings.HasPrefix(typ, "std::arena::Arena<") {
-		return "ptr"
-	}
 	if isBoxLLVMType(typ) {
 		return "ptr"
 	}
-	if isArrayLLVMType(typ) {
+	// An arena is the header an array is, so the two spell the same type.
+	if isArrayLLVMType(typ) || isArenaLLVMType(typ) {
 		return arrayHeaderType
 	}
 	if _, ok := e.module.Structs[typ]; ok {

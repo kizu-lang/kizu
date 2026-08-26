@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
@@ -274,6 +275,15 @@ func (l *lowerer) markLentMethodArgs(
 	args []ast.Expression,
 	found map[string]bool,
 ) {
+	// Arena's methods are the compiler's own, so there is no declaration here
+	// to read the passing off. The table that classifies what a container
+	// method does to storage is what says the receiver is written through, and
+	// a header is written at its address (ADR-0131). Like the loop below, this
+	// is by name: a same-named method on another type gets a slot it does not
+	// need, which costs stack and changes nothing else.
+	if ownership.ArenaMethodWritesHeader(field.Name) {
+		markIfName(field.Receiver, found)
+	}
 	for _, sig := range l.methodSigs[field.Name] {
 		if len(sig.Params) > 0 && sig.Params[0].Passing == PassCallerStorage {
 			markIfName(field.Receiver, found)
@@ -302,7 +312,7 @@ func (l *lowerer) markLentGenericArgs(
 	}
 	params, err := l.declaredInstanceParams(name, typeApply.TypeArg)
 	if err != nil {
-		return
+		params = l.primitiveInstanceParams(name, typeApply.TypeArg)
 	}
 	for index, arg := range args {
 		if index < len(params) && params[index].Passing == PassCallerStorage {

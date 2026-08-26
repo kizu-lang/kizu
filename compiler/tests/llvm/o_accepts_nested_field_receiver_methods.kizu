@@ -12,7 +12,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
     let wrapper = Wrapper { registry: move registry };
-    wrapper.registry.users.add(User { name: "alice" });
+    wrapper.registry.users.add(allocator, User { name: "alice" });
     wrapper.deinit(allocator);
 }
 
@@ -25,7 +25,7 @@ fn main() {
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // %kizu.union.std__process__ExitStatus = type { i64, [1 x i8] }
 // 
-// %kizu.struct.Registry = type { ptr }
+// %kizu.struct.Registry = type { %kizu.array }
 // %kizu.struct.User = type { %kizu.slice.u8 }
 // %kizu.struct.Wrapper = type { %kizu.struct.Registry }
 // %kizu.struct.std__fs__DirEntry = type { %kizu.slice.u8, %kizu.slice.u8, i1 }
@@ -85,13 +85,17 @@ fn main() {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.arena = type { ptr, i64, i64, i64, ptr }
-// @kizu.arena.empty = private unnamed_addr global %kizu.arena zeroinitializer
-// declare ptr @kizu_arena_new(ptr, i64)
-// declare i64 @kizu_arena_add(ptr, ptr)
-// declare i64 @kizu_arena_len(ptr)
-// declare ptr @kizu_arena_pop(ptr)
-// declare void @kizu_arena_deinit(ptr)
+// %kizu.array = type { ptr, i64, i64 }
+// @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
+// declare ptr @kizu_array_pop(ptr, i64)
+// declare i1 @kizu_array_swap(ptr, i64, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare ptr @std__mem__page_allocator()
 // 
@@ -101,7 +105,10 @@ fn main() {
 // entry:
 //   %kizu.self = load %kizu.struct.Registry, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Registry %kizu.self, 0
-//   call void @kizu_arena_deinit(ptr %kizu.1)
+//   %kizu.arena.deinit.data.1 = extractvalue %kizu.array %kizu.1, 0
+//   %kizu.arena.deinit.cap.2 = extractvalue %kizu.array %kizu.1, 2
+//   %kizu.arena.deinit.bytes.3 = mul i64 %kizu.arena.deinit.cap.2, ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.allocator, ptr %kizu.arena.deinit.data.1, i64 %kizu.arena.deinit.bytes.3)
 //   ret void
 // }
 // 
@@ -117,29 +124,51 @@ fn main() {
 // 
 // define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 // entry:
-//   %kizu.9.value.slot = alloca %kizu.struct.User
-//   %kizu.arg.0.1 = alloca %kizu.struct.Wrapper
+//   %kizu.5 = alloca %kizu.struct.Wrapper
+//   %kizu.10.elem.slot = alloca %kizu.struct.User
+//   %kizu.arg.0.12 = alloca %kizu.struct.Wrapper
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64))
-//   %kizu.3 = insertvalue %kizu.struct.Registry zeroinitializer, ptr %kizu.2, 0
+//   %kizu.3 = insertvalue %kizu.struct.Registry zeroinitializer, %kizu.array zeroinitializer, 0
 //   %kizu.4 = insertvalue %kizu.struct.Wrapper zeroinitializer, %kizu.struct.Registry %kizu.3, 0
-//   %kizu.5 = extractvalue %kizu.struct.Wrapper %kizu.4, 0
-//   %kizu.6 = extractvalue %kizu.struct.Registry %kizu.5, 0
-//   %kizu.7.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
-//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 5, 1
-//   %kizu.8 = insertvalue %kizu.struct.User zeroinitializer, %kizu.slice.u8 %kizu.7, 0
-//   store %kizu.struct.User %kizu.8, ptr %kizu.9.value.slot
-//   %kizu.9 = call i64 @kizu_arena_add(ptr %kizu.6, ptr %kizu.9.value.slot)
-//   %kizu.9.bad = icmp slt i64 %kizu.9, 0
-//   br i1 %kizu.9.bad, label %kizu.9.bad.arena.add.fail, label %kizu.9.bad.ok
-// kizu.9.bad.arena.add.fail:
+//   store %kizu.struct.Wrapper %kizu.4, ptr %kizu.5
+//   %kizu.6 = getelementptr %kizu.struct.Wrapper, ptr %kizu.5, i32 0, i32 0
+//   %kizu.7 = getelementptr %kizu.struct.Registry, ptr %kizu.6, i32 0, i32 0
+//   %kizu.8.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.8.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.8.ptr, 0
+//   %kizu.8 = insertvalue %kizu.slice.u8 %kizu.8.base, i64 5, 1
+//   %kizu.9 = insertvalue %kizu.struct.User zeroinitializer, %kizu.slice.u8 %kizu.8, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.7, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.7
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.10 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.10, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.10.ok.array.append.fast, label %kizu.10.ok.array.append.slow
+// kizu.10.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.User, ptr %kizu.array.data.8, i64 %kizu.10
+//   store %kizu.struct.User %kizu.9, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.10, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.10.ok.array.append.join
+// kizu.10.ok.array.append.slow:
+//   store %kizu.struct.User %kizu.9, ptr %kizu.10.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.7, ptr %kizu.10.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64))
+//   br label %kizu.10.ok.array.append.join
+// kizu.10.ok.array.append.join:
+//   %kizu.10.ok = phi i1 [ true, %kizu.10.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.10.ok.array.append.slow ]
+//   %kizu.10.bad = xor i1 %kizu.10.ok, true
+//   br i1 %kizu.10.bad, label %kizu.10.bad.arena.add.fail, label %kizu.10.bad.ok
+// kizu.10.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.9.bad.ok:
-//   store %kizu.struct.Wrapper %kizu.4, ptr %kizu.arg.0.1
-//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.1, ptr %kizu.1)
+// kizu.10.bad.ok:
+//   %kizu.11 = load %kizu.struct.Wrapper, ptr %kizu.5
+//   store %kizu.struct.Wrapper %kizu.11, ptr %kizu.arg.0.12
+//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.12, ptr %kizu.1)
 //   ret i32 0
 // }
 // opt:
@@ -149,7 +178,7 @@ fn main() {
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // %kizu.union.std__process__ExitStatus = type { i64, [1 x i8] }
 // 
-// %kizu.struct.Registry = type { ptr }
+// %kizu.struct.Registry = type { %kizu.array }
 // %kizu.struct.User = type { %kizu.slice.u8 }
 // %kizu.struct.Wrapper = type { %kizu.struct.Registry }
 // %kizu.struct.std__fs__DirEntry = type { %kizu.slice.u8, %kizu.slice.u8, i1 }
@@ -209,13 +238,17 @@ fn main() {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// %kizu.arena = type { ptr, i64, i64, i64, ptr }
-// @kizu.arena.empty = private unnamed_addr global %kizu.arena zeroinitializer
-// declare ptr @kizu_arena_new(ptr, i64)
-// declare i64 @kizu_arena_add(ptr, ptr)
-// declare i64 @kizu_arena_len(ptr)
-// declare ptr @kizu_arena_pop(ptr)
-// declare void @kizu_arena_deinit(ptr)
+// %kizu.array = type { ptr, i64, i64 }
+// @kizu.array.empty = private unnamed_addr global %kizu.array zeroinitializer
+// declare i1 @kizu_array_append(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
+// declare ptr @kizu_array_pop(ptr, i64)
+// declare i1 @kizu_array_swap(ptr, i64, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
 // declare ptr @std__mem__page_allocator()
 // 
@@ -225,7 +258,10 @@ fn main() {
 // entry:
 //   %kizu.self = load %kizu.struct.Registry, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Registry %kizu.self, 0
-//   call void @kizu_arena_deinit(ptr %kizu.1)
+//   %kizu.arena.deinit.data.1 = extractvalue %kizu.array %kizu.1, 0
+//   %kizu.arena.deinit.cap.2 = extractvalue %kizu.array %kizu.1, 2
+//   %kizu.arena.deinit.bytes.3 = mul i64 %kizu.arena.deinit.cap.2, ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.allocator, ptr %kizu.arena.deinit.data.1, i64 %kizu.arena.deinit.bytes.3)
 //   ret void
 // }
 // 
@@ -241,28 +277,50 @@ fn main() {
 // 
 // define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 // entry:
-//   %kizu.9.value.slot = alloca %kizu.struct.User
-//   %kizu.arg.0.1 = alloca %kizu.struct.Wrapper
+//   %kizu.5 = alloca %kizu.struct.Wrapper
+//   %kizu.10.elem.slot = alloca %kizu.struct.User
+//   %kizu.arg.0.12 = alloca %kizu.struct.Wrapper
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64))
-//   %kizu.3 = insertvalue %kizu.struct.Registry zeroinitializer, ptr %kizu.2, 0
+//   %kizu.3 = insertvalue %kizu.struct.Registry zeroinitializer, %kizu.array zeroinitializer, 0
 //   %kizu.4 = insertvalue %kizu.struct.Wrapper zeroinitializer, %kizu.struct.Registry %kizu.3, 0
-//   %kizu.5 = extractvalue %kizu.struct.Wrapper %kizu.4, 0
-//   %kizu.6 = extractvalue %kizu.struct.Registry %kizu.5, 0
-//   %kizu.7.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
-//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 5, 1
-//   %kizu.8 = insertvalue %kizu.struct.User zeroinitializer, %kizu.slice.u8 %kizu.7, 0
-//   store %kizu.struct.User %kizu.8, ptr %kizu.9.value.slot
-//   %kizu.9 = call i64 @kizu_arena_add(ptr %kizu.6, ptr %kizu.9.value.slot)
-//   %kizu.9.bad = icmp slt i64 %kizu.9, 0
-//   br i1 %kizu.9.bad, label %kizu.9.bad.arena.add.fail, label %kizu.9.bad.ok
-// kizu.9.bad.arena.add.fail:
+//   store %kizu.struct.Wrapper %kizu.4, ptr %kizu.5
+//   %kizu.6 = getelementptr %kizu.struct.Wrapper, ptr %kizu.5, i32 0, i32 0
+//   %kizu.7 = getelementptr %kizu.struct.Registry, ptr %kizu.6, i32 0, i32 0
+//   %kizu.8.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.8.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.8.ptr, 0
+//   %kizu.8 = insertvalue %kizu.slice.u8 %kizu.8.base, i64 5, 1
+//   %kizu.9 = insertvalue %kizu.struct.User zeroinitializer, %kizu.slice.u8 %kizu.8, 0
+//   %kizu.array.handle.null.1 = icmp eq ptr %kizu.7, null
+//   %kizu.array.handle.2 = select i1 %kizu.array.handle.null.1, ptr @kizu.array.empty, ptr %kizu.7
+//   %kizu.array.append.len.addr.4 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 1
+//   %kizu.10 = load i64, ptr %kizu.array.append.len.addr.4
+//   %kizu.array.append.cap.5 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 2
+//   %kizu.array.append.cap.3 = load i64, ptr %kizu.array.append.cap.5
+//   %kizu.array.append.fits.6 = icmp slt i64 %kizu.10, %kizu.array.append.cap.3
+//   br i1 %kizu.array.append.fits.6, label %kizu.10.ok.array.append.fast, label %kizu.10.ok.array.append.slow
+// kizu.10.ok.array.append.fast:
+//   %kizu.array.data.addr.7 = getelementptr %kizu.array, ptr %kizu.array.handle.2, i64 0, i32 0
+//   %kizu.array.data.8 = load ptr, ptr %kizu.array.data.addr.7
+//   %kizu.array.elem.9 = getelementptr %kizu.struct.User, ptr %kizu.array.data.8, i64 %kizu.10
+//   store %kizu.struct.User %kizu.9, ptr %kizu.array.elem.9
+//   %kizu.array.append.grown.10 = add i64 %kizu.10, 1
+//   store i64 %kizu.array.append.grown.10, ptr %kizu.array.append.len.addr.4
+//   br label %kizu.10.ok.array.append.join
+// kizu.10.ok.array.append.slow:
+//   store %kizu.struct.User %kizu.9, ptr %kizu.10.elem.slot
+//   %kizu.array.append.slow.ok.11 = call i1 @kizu_array_append(ptr %kizu.1, ptr %kizu.7, ptr %kizu.10.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64))
+//   br label %kizu.10.ok.array.append.join
+// kizu.10.ok.array.append.join:
+//   %kizu.10.ok = phi i1 [ true, %kizu.10.ok.array.append.fast ], [ %kizu.array.append.slow.ok.11, %kizu.10.ok.array.append.slow ]
+//   %kizu.10.bad = xor i1 %kizu.10.ok, true
+//   br i1 %kizu.10.bad, label %kizu.10.bad.arena.add.fail, label %kizu.10.bad.ok
+// kizu.10.bad.arena.add.fail:
 //   call void @kizu_panic_arena_add(i64 0, i64 0)
 //   unreachable
-// kizu.9.bad.ok:
-//   store %kizu.struct.Wrapper %kizu.4, ptr %kizu.arg.0.1
-//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.1, ptr %kizu.1)
+// kizu.10.bad.ok:
+//   %kizu.11 = load %kizu.struct.Wrapper, ptr %kizu.5
+//   store %kizu.struct.Wrapper %kizu.11, ptr %kizu.arg.0.12
+//   call void @Wrapper_deinit(ptr byval(%kizu.struct.Wrapper) %kizu.arg.0.12, ptr %kizu.1)
 //   ret i32 0
 // }

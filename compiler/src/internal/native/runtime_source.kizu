@@ -48,6 +48,11 @@ pub fn runtime_source() -> []u8 {
         \\ * The alias is what keeps the signatures below reading as strings. */
         \\typedef KizuArray KizuString;
         \\
+        \\/* A std::arena::Arena<T> is that same header too. It owns its elements the way
+        \\ * an array does; what differs is above the runtime -- a Handle is an index
+        \\ * rather than a borrow, and nothing is removed from the middle -- so the arena
+        \\ * has no entry points here and reaches for the array ones. */
+        \\
         \\typedef struct {
         \\    int64_t size;
         \\    _Bool is_dir;
@@ -122,14 +127,6 @@ pub fn runtime_source() -> []u8 {
         \\    int64_t index_cap;
         \\    void *allocator;
         \\} KizuMap;
-        \\
-        \\typedef struct {
-        \\    unsigned char *data;
-        \\    int64_t len;
-        \\    int64_t cap;
-        \\    int64_t elem_size;
-        \\    void *allocator;
-        \\} KizuArena;
         \\
         \\/* An Allocator handle is one pointer. NULL is the page allocator (libc).
         \\   Non-NULL points at a KizuFixedBuffer header that mem_fixed_buffer wrote at
@@ -1318,86 +1315,6 @@ pub fn runtime_source() -> []u8 {
         \\    array.len = 0;
         \\    array.cap = 0;
         \\    return array;
-        \\}
-        \\
-        \\void *kizu_arena_new(void *allocator, int64_t elem_size) {
-        \\    if (elem_size <= 0) {
-        \\        return NULL;
-        \\    }
-        \\    KizuArena *arena = (KizuArena *)kizu_rt_zalloc(allocator, sizeof(KizuArena));
-        \\    if (!arena) {
-        \\        return NULL;
-        \\    }
-        \\    arena->elem_size = elem_size;
-        \\    arena->allocator = allocator;
-        \\    return arena;
-        \\}
-        \\
-        \\static _Bool kizu_arena_reserve(KizuArena *arena, int64_t needed) {
-        \\    if (!arena || needed < 0) {
-        \\        return 0;
-        \\    }
-        \\    if (needed <= arena->cap) {
-        \\        return 1;
-        \\    }
-        \\    /* Grow the way an array does rather than by doubling: a factor below the
-        \\       golden ratio lets a later allocation reuse blocks freed by earlier ones,
-        \\       and an arena holding the AST and the IR is the largest thing the
-        \\       compiler keeps, so the half it would otherwise carry unused is real. */
-        \\    int64_t next = kizu_array_grow_capacity(needed, arena->elem_size);
-        \\    if (arena->elem_size > 0 && next > INT64_MAX / arena->elem_size) {
-        \\        return 0;
-        \\    }
-        \\    unsigned char *data = (unsigned char *)kizu_rt_realloc(
-        \\        arena->allocator, arena->data, arena->cap * arena->elem_size, next * arena->elem_size);
-        \\    if (!data) {
-        \\        return 0;
-        \\    }
-        \\    arena->data = data;
-        \\    arena->cap = next;
-        \\    return 1;
-        \\}
-        \\
-        \\int64_t kizu_arena_add(void *handle, const void *elem) {
-        \\    KizuArena *arena = (KizuArena *)handle;
-        \\    if (!arena || !elem || !kizu_arena_reserve(arena, arena->len + 1)) {
-        \\        return -1;
-        \\    }
-        \\    int64_t index = arena->len;
-        \\    memcpy(arena->data + index * arena->elem_size, elem, (size_t)arena->elem_size);
-        \\    arena->len += 1;
-        \\    return index;
-        \\}
-        \\
-        \\void *kizu_arena_get(void *handle, int64_t index) {
-        \\    KizuArena *arena = (KizuArena *)handle;
-        \\    if (!arena || index < 0 || index >= arena->len) {
-        \\        return NULL;
-        \\    }
-        \\    return arena->data + index * arena->elem_size;
-        \\}
-        \\
-        \\int64_t kizu_arena_len(void *handle) {
-        \\    KizuArena *arena = (KizuArena *)handle;
-        \\    return arena ? arena->len : 0;
-        \\}
-        \\
-        \\void *kizu_arena_pop(void *handle) {
-        \\    KizuArena *arena = (KizuArena *)handle;
-        \\    if (!arena || arena->len <= 0) {
-        \\        return NULL;
-        \\    }
-        \\    arena->len -= 1;
-        \\    return arena->data + arena->len * arena->elem_size;
-        \\}
-        \\
-        \\void kizu_arena_deinit(void *handle) {
-        \\    KizuArena *arena = (KizuArena *)handle;
-        \\    if (!arena) {
-        \\        return;
-        \\    }
-        \\    kizu_rt_free(arena->allocator, arena->data, arena->cap * arena->elem_size);
-        \\    kizu_rt_free(arena->allocator, arena, (int64_t)sizeof(KizuArena));
         \\}
         \\
         \\/* A Box cell is the payload and nothing else. The handle Kizu code carries is

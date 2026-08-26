@@ -7,98 +7,13 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
-// arenaHeaderType names the runtime's KizuArena header in emitted modules.
-// Element access reads these fields rather than calling the runtime for each
-// one, the same reason Array does: the compiler keeps every AST node, IR
-// instruction and type node in an arena and reaches them constantly, and a
-// call the optimizer cannot see through costs more than the access. runtime.c
-// asserts the same offsets, so the two spellings cannot drift apart.
-const arenaHeaderType = "%kizu.arena"
-
-// The field indices of arenaHeaderType.
-const (
-	arenaFieldData     = 0
-	arenaFieldLen      = 1
-	arenaFieldElemSize = 3
-)
-
-// arenaEmptyGlobal is the header read in place of a null handle. An all-zero
-// header holds no elements, so every index is out of range on it -- the same
-// null element the runtime returned for a null arena.
-const arenaEmptyGlobal = "@kizu.arena.empty"
-
-// writeArenaRuntimeDecls writes declarations for the hosted Arena runtime.
-func (e *emitter) writeArenaRuntimeDecls() {
-	if !e.usesArenaRuntime() {
-		return
-	}
-	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, i64, ptr }\n", arenaHeaderType)
-	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
-		arenaEmptyGlobal, arenaHeaderType)
-	e.out.WriteString("declare ptr @kizu_arena_new(ptr, i64)\n")
-	e.out.WriteString("declare i64 @kizu_arena_add(ptr, ptr)\n")
-	e.out.WriteString("declare i64 @kizu_arena_len(ptr)\n")
-	e.out.WriteString("declare ptr @kizu_arena_pop(ptr)\n")
-	e.out.WriteString("declare void @kizu_arena_deinit(ptr)\n\n")
-}
-
-// arenaHandle returns an operand that always points at a readable header.
-func (e *emitter) arenaHandle(operand string) string {
-	nullName := "%" + e.nextSyntheticValue("arena.handle.null")
-	handleName := "%" + e.nextSyntheticValue("arena.handle")
-	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, operand)
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr %s\n",
-		handleName, nullName, arenaEmptyGlobal, operand)
-	return handleName
-}
-
-// arenaLoadField loads one i64 header field.
-func (e *emitter) arenaLoadField(handle string, field int, name string) string {
-	addr := "%" + e.nextSyntheticValue(name+".addr")
-	into := "%" + e.nextSyntheticValue(name)
-	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 0, i32 %d\n",
-		addr, arenaHeaderType, handle, field)
-	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", into, addr)
-	return into
-}
-
-// arenaCheckedElement returns the address of the element a handle names, or
-// null when the handle is outside the arena. The stride is the arena's own
-// elem_size, which is what arena.new sized it by, so the address is the one
-// kizu_arena_get computed. The comparison is unsigned, so a negative index is
-// out of range without a second test.
-func (e *emitter) arenaCheckedElement(arenaOperand string, index string, into string) string {
-	handle := e.arenaHandle(arenaOperand)
-	length := e.arenaLoadField(handle, arenaFieldLen, "arena.len")
-	inRange := "%" + e.nextSyntheticValue("arena.in_range")
-	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
-	elemSize := e.arenaLoadField(handle, arenaFieldElemSize, "arena.elem_size")
-	offset := "%" + e.nextSyntheticValue("arena.offset")
-	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n", offset, index, elemSize)
-	dataAddr := "%" + e.nextSyntheticValue("arena.data.addr")
-	data := "%" + e.nextSyntheticValue("arena.data")
-	elemAddr := "%" + e.nextSyntheticValue("arena.elem")
-	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 0, i32 %d\n",
-		dataAddr, arenaHeaderType, handle, arenaFieldData)
-	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", data, dataAddr)
-	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n", elemAddr, data, offset)
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", into, inRange, elemAddr)
-	return into
-}
-
-// usesArenaRuntime reports whether this module uses std::arena::Arena lowering.
-func (e *emitter) usesArenaRuntime() bool {
-	for _, fn := range e.module.Functions {
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if strings.HasPrefix(instr.Op, "arena.") {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
+// An arena is the header an array is -- `{data, len, cap}` -- and owns its
+// elements the same way, so everything below reaches for the array lowering
+// rather than repeating it. What separates the two is above the backend: a
+// Handle is an index rather than a borrow, and nothing is removed from the
+// middle, which is why the index a handle carries stays the element's for as
+// long as the arena lives. runtime.c has no arena entry points for the same
+// reason (ADR-0131).
 
 // writeArenaInstr dispatches runtime-backed Arena operations.
 func (e *emitter) writeArenaInstr(instr *ir.Instr) error {
@@ -122,15 +37,50 @@ func (e *emitter) writeArenaInstr(instr *ir.Instr) error {
 	}
 }
 
+// writeArenaNew lowers std::arena::new<T>(allocator) to the header value an
+// empty arena is: three zero words, and no allocation to fail at. The first
+// add is what buys storage, and it is the call that names an allocator and
+// says whether it got any (ADR-0131).
+func (e *emitter) writeArenaNew(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || !isArenaLLVMType(instr.Result.Type) {
+		return fmt.Errorf("llvm error: arena.new expects allocator -> Arena<T>")
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "zeroinitializer"}
+	return nil
+}
+
+// writeArenaAdd lowers Arena.add(allocator, value). The element goes where an
+// append would put it, and the length the append started from is the handle:
+// nothing is ever removed from the middle, so that index names the element for
+// as long as the arena holds it.
+func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
+	if len(instr.Args) != 3 || !isArenaHandleType(instr.Result.Type) {
+		return fmt.Errorf("llvm error: arena.add expects Arena<T>, Allocator, T -> Handle<T>")
+	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
+	arena := e.value(instr.Args[0])
+	handle := e.arrayHandle(arena.operand)
+	resultName := localName(instr.Result.Name)
+	okName := resultName + ".ok"
+	e.writeArrayAppendPaths(instr, elem, arena.operand, handle, okName, resultName)
+	badName := resultName + ".bad"
+	fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", badName, okName)
+	e.writeBoolFailure(instr, badName, "arena.add", "arena_add")
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
 // writeArenaLen returns the number of initialized elements still owned by the arena.
 func (e *emitter) writeArenaLen(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: arena.len expects Arena<T> -> i64")
 	}
-	arena := e.value(instr.Args[0])
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_arena_len(ptr %s)\n",
-		resultName, arena.operand)
+	e.arrayLoadField(handle, arrayFieldLen, "arena.len", resultName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -140,9 +90,14 @@ func (e *emitter) writeArenaPopOrPanic(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: arena.pop_or_panic expects Arena<T> -> T")
 	}
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	arena := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_pop(ptr %s)\n", ptrName, arena.operand)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
+		ptrName, arena.operand, e.elementSizeOperand(elem))
 	e.writeNullFailure(instr, ptrName, "arena.pop.panic", "arena_empty")
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
@@ -151,40 +106,17 @@ func (e *emitter) writeArenaPopOrPanic(instr *ir.Instr) error {
 	return nil
 }
 
-// writeArenaNew lowers std::arena::new<T>(allocator).
-func (e *emitter) writeArenaNew(instr *ir.Instr) error {
-	return e.writeContainerNew(instr, "kizu_arena_new",
-		isArenaLLVMType, "arena.new expects allocator -> Arena<T>")
-}
-
-// writeArenaAdd lowers Arena.add(value) to an opaque i64 handle.
-func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || !isArenaHandleType(instr.Result.Type) {
-		return fmt.Errorf("llvm error: arena.add expects Arena<T>, T -> Handle<T>")
-	}
-	arena := e.value(instr.Args[0])
-	valueSlot := e.writeStackValue(localName(instr.Result.Name)+".value", instr.Args[1])
-	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_arena_add(ptr %s, ptr %s)\n",
-		resultName, arena.operand, valueSlot)
-	badName := resultName + ".bad"
-	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", badName, resultName)
-	e.writeBoolFailure(instr, badName, "arena.add", "arena_add")
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
-}
-
 // writeArenaAt lowers Arena.at(handle) to a checked shared borrow. Borrows with
 // value IR load a copy; address-spelled borrows (currently unions) keep the
-// runtime element address.
+// element address.
 func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || !isArenaHandleType(instr.Args[1].Type) {
 		return fmt.Errorf("llvm error: arena.at expects Arena<T>, Handle<T> -> &T")
 	}
-	arena := e.value(instr.Args[0])
-	handle := e.value(instr.Args[1])
-	ptrName := localName(instr.Result.Name) + ".ptr"
-	e.arenaCheckedElement(arena.operand, handle.operand, ptrName)
+	ptrName, err := e.arenaCheckedElement(instr)
+	if err != nil {
+		return err
+	}
 	e.writeNullFailure(instr, ptrName, "arena.at", "arena_handle")
 	if strings.HasPrefix(instr.Result.Type, "&") {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: ptrName}
@@ -198,29 +130,38 @@ func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 }
 
 // writeArenaAtMut lowers Arena.at_mut(handle) to a borrow optional: the
-// runtime's nullable element pointer becomes the payload and its presence,
-// branch-free. It calls the same kizu_arena_get as Arena.at and skips both
-// the trap and the load.
+// nullable element pointer becomes the payload and its presence, branch-free.
+// It reaches the same element Arena.at does and skips both the trap and the
+// load.
 func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || !isArenaHandleType(instr.Args[1].Type) {
 		return fmt.Errorf("llvm error: arena.at_mut expects Arena<T>, Handle<T> -> ?&var T")
 	}
-	arena := e.value(instr.Args[0])
-	handle := e.value(instr.Args[1])
-	ptrName := localName(instr.Result.Name) + ".ptr"
-	e.arenaCheckedElement(arena.operand, handle.operand, ptrName)
+	ptrName, err := e.arenaCheckedElement(instr)
+	if err != nil {
+		return err
+	}
 	return e.writeBorrowOptionalResult(instr, ptrName)
 }
 
-// writeArenaDeinit lowers Arena.deinit().
+// arenaCheckedElement returns the address of the element a handle names, or
+// null when the handle is outside the arena. The address is named after the
+// result rather than synthesized, because continuationLabel predicts the label
+// the trap continues at from that name before this block is written.
+func (e *emitter) arenaCheckedElement(instr *ir.Instr) (string, error) {
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	return e.arrayCheckedElement(instr, handle, e.value(instr.Args[1]).operand,
+		localName(instr.Result.Name)+".ptr")
+}
+
+// writeArenaDeinit lowers Arena.deinit(allocator). It releases the storage and
+// nothing else: the elements are the caller's to consume first, the same way
+// Array.deinit is handed an array whose owners are already gone.
 func (e *emitter) writeArenaDeinit(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Result.Type != "void" {
-		return fmt.Errorf("llvm error: arena.deinit expects Arena<T> -> void")
+	if len(instr.Args) != 2 || instr.Result.Type != "void" {
+		return fmt.Errorf("llvm error: arena.deinit expects Arena<T>, Allocator -> void")
 	}
-	arena := e.value(instr.Args[0])
-	fmt.Fprintf(&e.out, "  call void @kizu_arena_deinit(ptr %s)\n", arena.operand)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
-	return nil
+	return e.writeContainerStorageRelease(instr, "arena.deinit")
 }
 
 // writeBoolFailure reports the named failure when badOperand is true.

@@ -1551,7 +1551,7 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
     users.deinit(allocator);
 }`
@@ -1569,7 +1569,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     defer users.deinit(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
 }`
 	if err := checkSource(source); err != nil {
@@ -2032,7 +2032,7 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     let p = cast<ptr<User>>(alice);
     print(p);
 }`,

@@ -382,6 +382,15 @@ fn (self: &var Lowerer) mark_lent_method_args(
     defer method.deinit(self.allocator);
     try append_text(self.allocator, tree, field.name, &var method);
     let method_bytes = method.as_bytes();
+    // Arena's methods are the compiler's own, so there is no declaration here
+    // to read the passing off. The table that classifies what a container
+    // method does to storage is what says the receiver is written through, and
+    // a header is written at its address (ADR-0131). Like the loop below, this
+    // is by name: a same-named method on another type gets a slot it does not
+    // need, which costs stack and changes nothing else.
+    if ownership::arena_method_writes_header(method_bytes) {
+        try self.mark_if_name(tree, field.receiver);
+    }
     var position = 0;
     while self.method_signature_at(method_bytes, position) |signature| {
         position = position + 1;
@@ -418,6 +427,15 @@ fn (self: &var Lowerer) mark_lent_generic_args(
     var params = no_params();
     if try self.declared_instance_params(tree, name, type_arg, &var params) |failed| {
         failed.deinit(self.allocator);
+        // A container primitive has no declaration to read. Only the arena's
+        // need one read here: std::array's wrapper reaches its storage through
+        // declared methods, and std::arena's reaches it through the primitives
+        // themselves (ADR-0131).
+        if self.lends_arena_storage(name) {
+            if ownership::arg_at(tree, args, 0) |first| {
+                try self.mark_if_name(tree, first);
+            }
+        }
         return;
     }
     var index = 0;
@@ -430,6 +448,15 @@ fn (self: &var Lowerer) mark_lent_generic_args(
         index = index + 1;
     }
     return;
+}
+
+/// Reports whether a callee is an arena primitive handed the binding's
+/// storage. It reads the name and hands back the answer, so nothing holds the
+/// name table borrowed while the caller marks the binding.
+fn (self: &Lowerer) lends_arena_storage(name: Name) -> bool {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    return arena_primitive_writes_header(bytes);
 }
 
 /// Records the local whose storage expr would hand over, the Go

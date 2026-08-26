@@ -1178,8 +1178,10 @@ fn (self: &Checker) not_an_arena_error(
     );
 }
 
-/// Moves one value into an arena and returns a handle, the Go
-/// `checkArenaAdd`.
+/// Moves one value into an arena and returns a handle, the Go `checkArenaAdd`.
+/// The add is the call that buys storage, so it names the allocator it buys
+/// from, the same way an Array append does: the header keeps none of its own
+/// (ADR-0131).
 fn (self: &var Checker) check_arena_add(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1188,15 +1190,26 @@ fn (self: &var Checker) check_arena_add(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let count = arg_count(tree, args);
-    if count != 1 {
+    if count != 2 {
         return try self.error1(
-            tree, ast::zero_span(), "arena error: `arena.add` expects 1 arg, got %d",
+            tree, ast::zero_span(), "arena error: `arena.add` expects 2 args, got %d",
             Arg::Int(count)
         );
     }
     let elem = try self.arena_element_type(arena) orelse
         return try self.not_an_arena_error(tree, arena);
-    let first = args.get_or_panic(tree, 0);
+    let allocator_arg = args.get_or_panic(tree, 0);
+    var allocator = empty_name();
+    if try self.read_expr(tree, env, allocator_arg, &var allocator) |failed| {
+        return move failed;
+    }
+    if !self.names.is(allocator, "Allocator") {
+        return try self.error1(
+            tree, ast::zero_span(), "arena error: `arena.add` expects Allocator, got %s",
+            Arg::Str(allocator)
+        );
+    }
+    let first = args.get_or_panic(tree, 1);
     var got = empty_name();
     if try self.move_contextual_expr(tree, env, first, elem, &var got) |failed| {
         return move failed;

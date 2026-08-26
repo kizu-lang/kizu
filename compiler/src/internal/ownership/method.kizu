@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::typ;
+import std::mem;
 
 // Port of the value receiver method dispatch of internal/ownership/checker.go
 // (checkMethodCallExpr through checkStringByteArg): arena, direct field, Box,
@@ -694,9 +695,23 @@ fn (self: &Checker) string_method_access(method: Name) -> ?ContainerAccess {
     return null;
 }
 
+/// Reports whether an Arena method writes through the arena's own header, the
+/// Go `ArenaMethodWritesHeader`. Every other container declares its methods in
+/// std, where `&var self` says this; Arena's are the compiler's own, so the
+/// lowerer asks here instead -- and this is the same classification
+/// check_container_method_access refuses borrow conflicts by, so the two
+/// cannot come to disagree about what a method does to storage. A cleanup is
+/// not among them: it reads the header to release what it points at and writes
+/// nothing back, since the binding is gone by the time it returns.
+pub fn arena_method_writes_header(method: []u8) -> bool {
+    return mem::equal_bytes(method, "add");
+}
+
 /// Classifies the std::arena::Arena methods.
 fn (self: &Checker) arena_method_access(method: Name) -> ?ContainerAccess {
-    if self.names.is(method, "add") {
+    let retained = name_text(&self.names, method);
+    let method_bytes = retained.as_bytes();
+    if arena_method_writes_header(method_bytes) {
         return ContainerAccess::Mutate;
     }
     if self.names.is(method, "at") {

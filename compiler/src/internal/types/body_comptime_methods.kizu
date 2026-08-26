@@ -740,7 +740,9 @@ fn (self: &var Checker) check_arena_method(
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Validates std::arena::Arena<T>.add(value).
+// Validates std::arena::Arena<T>.add(allocator, value). The add is what buys
+// the storage the element goes in, so it names the allocator it buys from: an
+// arena header keeps none of its own (ADR-0131, ADR-0132).
 fn (self: &var Checker) check_arena_add(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -748,10 +750,19 @@ fn (self: &var Checker) check_arena_add(
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if args.len(tree) != 1 {
-        return try self.named_arity_error("arena.add", 1, args.len(tree));
+    if args.len(tree) != 2 {
+        return try self.named_arity_error("arena.add", 2, args.len(tree));
     }
-    let argument = args.get_or_panic(tree, 0);
+    let allocator_arg = args.get_or_panic(tree, 0);
+    var allocator = empty_type();
+    if try self.check_expr(tree, scope, allocator_arg, &var allocator) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(allocator, "Allocator") {
+        return try self.labeled_arg_type_error(
+            "arena.add", try self.types.intern("Allocator"), allocator);
+    }
+    let argument = args.get_or_panic(tree, 1);
     var got = empty_type();
     if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;

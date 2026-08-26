@@ -5075,6 +5075,13 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (string, error) {
+			if method == "deinit" {
+				// The raw primitive frees the storage through the allocator
+				// the release names: the header keeps none of its own
+				// (ADR-0131, ADR-0132).
+				err := c.readReleaseAllocator("Arena.deinit", nil, rest, env)
+				return "void", err
+			}
 			if len(rest) != 0 {
 				return "", errorf("arena error: `Arena.%s` expects 0 args, got %d",
 					method, len(rest))
@@ -5084,8 +5091,6 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 				return "i64", nil
 			case "pop_or_panic":
 				return typeArg, nil
-			case "deinit":
-				return "void", nil
 			default:
 				return "", errorf("arena error: Arena has no storage primitive `%s`", method)
 			}
@@ -6708,6 +6713,9 @@ type containerAccessTable struct {
 // name what it does to storage before any per-method checker sees it. Box is
 // not here: its borrows are per-field and its conflicts are checked where the
 // field borrow forms.
+// arenaTypeName is the container whose methods the compiler declares itself.
+const arenaTypeName = "std::arena::Arena"
+
 var containerAccessTables = map[string]containerAccessTable{
 	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
 		"append": accessMutate, "append_bytes": accessMutate, "reserve": accessMutate,
@@ -6745,6 +6753,18 @@ var containerAccessTables = map[string]containerAccessTable{
 		"at_mut": accessCapture,
 		"deinit": accessCleanup,
 	}},
+}
+
+// ArenaMethodWritesHeader reports whether an Arena method writes through the
+// arena's own header. Every other container declares its methods in std, where
+// `&var self` says this; Arena's are the compiler's own, so the lowerer asks
+// here instead -- and this is the same classification
+// checkContainerMethodAccess refuses borrow conflicts by, so the two cannot
+// come to disagree about what a method does to storage. A cleanup is not among
+// them: it reads the header to release what it points at and writes nothing
+// back, since the binding is gone by the time it returns.
+func ArenaMethodWritesHeader(name string) bool {
+	return containerAccessTables[arenaTypeName].methods[name] == accessMutate
 }
 
 // checkContainerMethodAccess looks a container method up in the shared table
@@ -7722,15 +7742,25 @@ func (c *Checker) checkImplMethodArg(
 }
 
 // checkArenaAdd moves one value into an arena and returns a handle.
+// checkArenaAdd validates Arena.add(allocator, value). The add is the call
+// that buys storage, so it names the allocator it buys from, the same way an
+// Array append does: the header keeps none of its own (ADR-0131).
 func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("arena error: `arena.add` expects 1 arg, got %d", len(args))
+	if len(args) != 2 {
+		return "", errorf("arena error: `arena.add` expects 2 args, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
 		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
-	got, err := c.moveContextualExpr(args[0], arg, env)
+	allocator, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if allocator != "Allocator" {
+		return "", errorf("arena error: `arena.add` expects Allocator, got %s", allocator)
+	}
+	got, err := c.moveContextualExpr(args[1], arg, env)
 	if err != nil {
 		return "", err
 	}

@@ -667,14 +667,14 @@ const whileSource = `fn main() {
 
 const arenaSource = `import std::arena;
 
-struct User {
+struct Tag {
     name: []u8,
 }
-fn main(allocator: Allocator) {
-    let users = arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
-    print(users.at(alice).name);
-    users.deinit(allocator);
+fn main(heap: Allocator) {
+    let tags = arena::new<Tag>(heap);
+    let first = tags.add(heap, Tag { name: "alice" });
+    print(tags.at(first).name);
+    tags.deinit(heap);
 }`
 
 const comptimeSource = `fn main() {
@@ -768,16 +768,18 @@ while.end.3:
   return void: void
 }`
 
-const arenaSnapshot = `fn main(%allocator: Allocator) -> void {
+const arenaSnapshot = `fn main(%heap: Allocator) -> void {
 entry:
-  %1: std::arena::Arena<User> = arena.new %allocator: Allocator
-  %2: []u8 = const "alice"
-  %3: User = struct.new {name: %2: []u8}
-  %4: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %3: User
-  %5: User = arena.at %1: std::arena::Arena<User>, %4: std::arena::Handle<User>
-  %6: []u8 = field.name %5: User
-  call.print %6: []u8
-  arena.deinit %1: std::arena::Arena<User>
+  %1: std::arena::Arena<Tag> = arena.new %heap: Allocator
+  %2: &var std::arena::Arena<Tag> = local.slot %1: std::arena::Arena<Tag>
+  %3: []u8 = const "alice"
+  %4: Tag = struct.new {name: %3: []u8}
+  %5: std::arena::Handle<Tag> = arena.add %2: &var std::arena::Arena<Tag>, %heap: Allocator, %4: Tag
+  %6: Tag = arena.at %2: &var std::arena::Arena<Tag>, %5: std::arena::Handle<Tag>
+  %7: []u8 = field.name %6: Tag
+  call.print %7: []u8
+  %9: std::arena::Arena<Tag> = ref.load %2: &var std::arena::Arena<Tag>
+  arena.deinit %9: std::arena::Arena<Tag>, %heap: Allocator
   return void: void
 }`
 
