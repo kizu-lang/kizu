@@ -207,21 +207,40 @@ fn (self: &Verifier) verify_call(module: &Module, node: &InstrNode, callee: Name
 /// Reports whether a value of type got can fill param, the Go
 /// `argumentFits`. It is the one slot not always filled by its own type: a
 /// parameter read through an address also accepts the value that address is
-/// taken of, which is what `Param.TakesAddressOf` names; the verifier reads
-/// the module without interning, so the dereference is compared as text.
+/// taken of, which is what `Param.TakesAddressOf` names, and the address the
+/// caller already holds, which a `&var T` binding is when the parameter asks
+/// for `&T`; the verifier reads the module without interning, so the
+/// dereference is compared as text.
 fn argument_fits(module: &Module, param: Param, got: Name) -> bool {
     if same_name(param.type_name, got) {
         return true;
-    }
-    if param.passing != Passing::CopyAddress {
-        return false;
     }
     let param_text = name_text(&module.names, param.type_name);
     let param_bytes = param_text.as_bytes();
     let got_text = name_text(&module.names, got);
     let got_bytes = got_text.as_bytes();
+    if lends_shared_borrow(param_bytes, got_bytes) {
+        return true;
+    }
+    if param.passing != Passing::CopyAddress {
+        return false;
+    }
     let deref = deref_type_bytes(param_bytes);
     return mem::equal_bytes(deref, got_bytes);
+}
+
+/// Reports whether a `&var T` argument fills a `&T` parameter, the Go
+/// `lendsSharedBorrow`. The two spell the same address and the callee may
+/// only read through it, so handing over the one the caller already holds
+/// costs no copy of what it names.
+fn lends_shared_borrow(want: []u8, got: []u8) -> bool {
+    if !mem::starts_with(want, "&") or mem::starts_with(want, "&var ") {
+        return false;
+    }
+    if !mem::starts_with(got, "&var ") {
+        return false;
+    }
+    return mem::equal_bytes(deref_type_bytes(want), deref_type_bytes(got));
 }
 
 /// Returns T for `&T` and `&var T`, and the spelling itself otherwise, the

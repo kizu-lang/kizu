@@ -71,7 +71,7 @@ func (e *emitter) arrayFieldAddr(handle string, field int, name string) string {
 
 // arrayLoadField loads one i64 header field into the named register.
 func (e *emitter) arrayLoadField(handle string, field int, name string, into string) {
-	addr := e.arrayFieldAddr(handle, field, name+".addr")
+	addr := e.arrayFieldAddr(handle, field, name)
 	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", into, addr)
 }
 

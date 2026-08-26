@@ -2004,7 +2004,7 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 // leaves a dead read behind.
 func (l *lowerer) lowerMethodReceiver(field *ast.FieldExpr) (Value, error) {
 	if receiverType := l.assignTargetType(field.Receiver); receiverType != "" &&
-		l.methodTakesSelfStorage(receiverType, field.Name) {
+		l.methodReceivesAddress(receiverType, field.Name) {
 		if storage, ok := l.lowerFieldStorage(field.Receiver); ok {
 			return storage, nil
 		}
@@ -2027,7 +2027,7 @@ func (l *lowerer) lowerMethodCallExpr(
 	// (`array.at(i) |elem|`), which holds a real address; a `&T` parameter is
 	// already erased to its value by the time it is a receiver.
 	wantsStorage := l.methodTakesSelfStorage(receiver.Type, field.Name)
-	if isReferenceType(receiver.Type) && !wantsStorage {
+	if isReferenceType(receiver.Type) && !l.methodReceivesAddress(receiver.Type, field.Name) {
 		receiver = l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, "")
 	}
 	if wantsStorage && !isMutableReferenceType(receiver.Type) {
@@ -2209,12 +2209,29 @@ func (l *lowerer) stdContainerCallOp(
 // methodTakesSelfStorage reports whether the method this receiver resolves
 // declares `&var self`, so the call passes storage instead of a loaded value.
 func (l *lowerer) methodTakesSelfStorage(receiverType string, method string) bool {
-	name, ok := l.implMethodCalleeName(receiverType, method)
-	if !ok {
-		return l.genericMethodTakesSelfStorage(receiverType, method)
+	return l.methodSelfPassing(receiverType, method) == PassCallerStorage
+}
+
+// methodReceivesAddress reports whether a method reads its receiver through an
+// address rather than a copy of it. A receiver that already has storage is then
+// handed that storage: reading an array costs no copy of the header it reads,
+// which for a container wider than a word is the difference between a pointer
+// and a memcpy at every call.
+func (l *lowerer) methodReceivesAddress(receiverType string, method string) bool {
+	passing := l.methodSelfPassing(receiverType, method)
+	return passing == PassCallerStorage || passing == PassCopyAddress
+}
+
+// methodSelfPassing says how a method receives its receiver.
+func (l *lowerer) methodSelfPassing(receiverType string, method string) Passing {
+	if name, ok := l.implMethodCalleeName(receiverType, method); ok {
+		params := l.signatures[name].Params
+		if len(params) == 0 {
+			return PassValue
+		}
+		return params[0].Passing
 	}
-	params := l.signatures[name].Params
-	return len(params) > 0 && params[0].Passing == PassCallerStorage
+	return l.genericMethodSelfPassing(receiverType, method)
 }
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.
@@ -2226,21 +2243,29 @@ func (l *lowerer) implMethodCalleeName(receiver string, method string) (string, 
 	return "", false
 }
 
-// genericMethodTakesSelfStorage answers the same question for a method that is
-// only known as a generic declaration. A std container method is one: its
-// instance is requested at the call, so there is no lowered signature to read
-// before the receiver is lowered, and the declaration is what says whether the
-// receiver arrives as the binding's storage.
-func (l *lowerer) genericMethodTakesSelfStorage(receiverType string, method string) bool {
-	base, ok := stdContainerTypeName(derefType(receiverType))
+// genericMethodSelfPassing answers the same question for a method that is only
+// known as a generic declaration. A std container method is one: its instance
+// is requested at the call, so there is no lowered signature to read before the
+// receiver is lowered, and the declaration is what says how the receiver
+// arrives.
+func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) Passing {
+	container := derefType(receiverType)
+	base, ok := stdContainerTypeName(container)
 	if !ok {
-		return false
+		return PassValue
 	}
 	decl := l.genericDecl(stdmethod.MethodName(base, method))
 	if decl == nil || len(decl.Params) == 0 {
-		return false
+		return PassValue
 	}
-	return decl.Params[0].MutBorrow
+	if decl.Params[0].MutBorrow {
+		return PassCallerStorage
+	}
+	if decl.Params[0].Borrow {
+		_, passing := l.borrowIRType(container, false)
+		return passing
+	}
+	return PassValue
 }
 
 // stdContainerTypeName names the generic declaration a container instance was

@@ -766,7 +766,7 @@ fn (self: &var Lowerer) lower_method_receiver(
     let receiver_type = try self.assign_target_type(tree, field.receiver);
     if !is_empty(receiver_type) {
         let method = try self.text_name(tree, field.name);
-        if try self.method_takes_self_storage(receiver_type, method) {
+        if try self.method_receives_address(receiver_type, method) {
             if try self.lower_field_storage(tree, field.receiver) |storage| {
                 out.* = storage;
                 return null;
@@ -794,7 +794,8 @@ fn (self: &var Lowerer) lower_method_call_expr(
     // capture (`array.at(i) |elem|`), which holds a real address; a `&T`
     // parameter is already erased to its value by the time it is a receiver.
     let wants_storage = try self.method_takes_self_storage(receiver.type_name, method);
-    if self.is_reference_type(receiver.type_name) and !wants_storage {
+    let wants_address = try self.method_receives_address(receiver.type_name, method);
+    if self.is_reference_type(receiver.type_name) and !wants_address {
         let elem = try self.deref_type(receiver.type_name);
         receiver = try self.emit1(Op::RefLoad, elem, receiver);
     }
@@ -1027,28 +1028,51 @@ fn (self: &var Lowerer) std_container_call_op(
 /// the Go `methodTakesSelfStorage`, so the call passes storage instead of a
 /// loaded value.
 fn (self: &var Lowerer) method_takes_self_storage(receiver_type: Name, method: Name) -> !bool {
-    let resolved = try self.impl_method_callee_name(receiver_type, method) orelse
-        return self.generic_method_takes_self_storage(receiver_type, method);
-    let signature = self.signature_named(resolved) orelse return false;
-    let first = self.signature_param(signature, 0) orelse return false;
-    return first.passing == Passing::CallerStorage;
+    let passing = try self.method_self_passing(receiver_type, method);
+    return passing == Passing::CallerStorage;
+}
+
+/// Reports whether a method reads its receiver through an address rather
+/// than a copy of it, the Go `methodReceivesAddress`. A receiver that already
+/// has storage is then handed that storage: reading an array costs no copy of
+/// the header it reads, which for a container wider than a word is the
+/// difference between a pointer and a memcpy at every call.
+fn (self: &var Lowerer) method_receives_address(receiver_type: Name, method: Name) -> !bool {
+    let passing = try self.method_self_passing(receiver_type, method);
+    return passing == Passing::CallerStorage or passing == Passing::CopyAddress;
+}
+
+/// Says how a method receives its receiver, the Go `methodSelfPassing`.
+fn (self: &var Lowerer) method_self_passing(receiver_type: Name, method: Name) -> !Passing {
+    if try self.impl_method_callee_name(receiver_type, method) |resolved| {
+        let signature = self.signature_named(resolved) orelse return Passing::Value;
+        let first = self.signature_param(signature, 0) orelse return Passing::Value;
+        return first.passing;
+    }
+    return self.generic_method_self_passing(receiver_type, method);
 }
 
 /// Answers the same question for a method only known as a generic
-/// declaration, the Go `genericMethodTakesSelfStorage`. A std container
-/// method is one: its instance is requested at the call, so there is no
-/// lowered signature to read before the receiver is lowered, and the
-/// declaration is what says whether the receiver arrives as the binding's
-/// storage.
-fn (self: &var Lowerer) generic_method_takes_self_storage(receiver_type: Name, method: Name) -> !bool {
-    let base = try self.std_container_type_name(receiver_type) orelse return false;
+/// declaration, the Go `genericMethodSelfPassing`. A std container method is
+/// one: its instance is requested at the call, so there is no lowered
+/// signature to read before the receiver is lowered, and the declaration is
+/// what says how the receiver arrives.
+fn (self: &var Lowerer) generic_method_self_passing(receiver_type: Name, method: Name) -> !Passing {
+    let container = try self.deref_type(receiver_type);
+    let base = try self.std_container_type_name(container) orelse return Passing::Value;
     let name = try self.module.names.joined(base, ".", method);
-    let decl = self.generic_decl(name) orelse return false;
+    let decl = self.generic_decl(name) orelse return Passing::Value;
     if self.decl_param_count(decl) == 0 {
-        return false;
+        return Passing::Value;
     }
     let param = self.decl_param(decl, 0);
-    return param.mut_borrow;
+    if param.mut_borrow {
+        return Passing::CallerStorage;
+    }
+    if param.borrow {
+        return self.borrow_passing(container, false);
+    }
+    return Passing::Value;
 }
 
 /// Names the generic declaration a container instance was applied from, the

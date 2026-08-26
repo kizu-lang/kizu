@@ -354,9 +354,9 @@ fn main() -> !void {
 }`)
 	got := Dump(module)
 	for _, want := range []string{
-		"  %12: &Point = opt.value %11: ?&Point\n",
-		"  %14: Point = ref.load %12: &Point\n",
-		"  %15: i64 = call.Point.sum %14: Point\n",
+		"  %11: &Point = opt.value %10: ?&Point\n",
+		"  %13: Point = ref.load %11: &Point\n",
+		"  %14: i64 = call.Point.sum %13: Point\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)

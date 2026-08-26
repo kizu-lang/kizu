@@ -122,9 +122,18 @@ func (v *verifier) call(instr *Instr, callee string) error {
 // argumentFits reports whether a value of type got can fill param. It is the
 // one slot not always filled by its own type: a parameter read through an
 // address also accepts the value that address is taken of, which is what
-// Param.TakesAddressOf names.
+// Param.TakesAddressOf names, and the address the caller already holds, which
+// a `&var T` binding is when the parameter asks for `&T`.
 func argumentFits(param Param, got string) bool {
-	return param.Type == got || param.TakesAddressOf(got)
+	return param.Type == got || param.TakesAddressOf(got) || lendsSharedBorrow(param.Type, got)
+}
+
+// lendsSharedBorrow reports whether a `&var T` argument fills a `&T` parameter.
+// The two spell the same address and the callee may only read through it, so
+// handing over the one the caller already holds costs no copy of what it names.
+func lendsSharedBorrow(want string, got string) bool {
+	return strings.HasPrefix(want, "&") && !strings.HasPrefix(want, "&var ") &&
+		strings.HasPrefix(got, "&var ") && derefType(want) == derefType(got)
 }
 
 // structLiteral checks what a struct literal puts in each declared field.
