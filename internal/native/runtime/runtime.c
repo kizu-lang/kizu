@@ -285,6 +285,7 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
 
 static KizuArray kizu_array_empty(void *allocator);
 _Bool kizu_array_append(void *handle, const void *elem, int64_t elem_size);
+_Bool kizu_array_append_bytes(void *handle, const void *bytes, int64_t length);
 _Bool kizu_array_swap(void *handle, int64_t left, int64_t right, int64_t elem_size);
 _Bool kizu_array_truncate(void *handle, int64_t len);
 static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed, int64_t elem_size);
@@ -816,16 +817,7 @@ void std__internal__builtin__process_env(KizuOptSliceU8 *out, const KizuSliceU8 
 /* kizu_string_append_bytes appends raw bytes to a String buffer, leaving the
  * buffer as it was when the reservation fails. */
 static int kizu_string_append_bytes(KizuString *dst, const char *text, int64_t length) {
-    KizuArray *array = dst;
-    if (!array || (length > 0 && !text)) {
-        return 0;
-    }
-    if (!kizu_array_reserve_storage(array, array->len + length, 1)) {
-        return 0;
-    }
-    memcpy(array->data + array->len, text, (size_t)length);
-    array->len += length;
-    return 1;
+    return kizu_array_append_bytes(dst, text, length) ? 1 : 0;
 }
 
 /* The path of the running executable as the kernel reports it: Linux keeps it
@@ -1483,6 +1475,26 @@ _Bool kizu_array_append(void *handle, const void *elem, int64_t elem_size) {
     }
     memcpy(array->data + array->len * elem_size, elem, (size_t)elem_size);
     array->len += 1;
+    return 1;
+}
+
+/* kizu_array_append_bytes copies a whole run of bytes into a byte array in one
+ * capacity check and one copy. Reaching the same place one byte at a time pays
+ * a check, a store and a length update per byte, and the text a compiler emits
+ * is built out of runs, not bytes. */
+_Bool kizu_array_append_bytes(void *handle, const void *bytes, int64_t length) {
+    KizuArray *array = (KizuArray *)handle;
+    if (!array || length < 0 || (length > 0 && !bytes)) {
+        return 0;
+    }
+    if (length > INT64_MAX - array->len) {
+        return 0;
+    }
+    if (!kizu_array_reserve_storage(array, array->len + length, 1)) {
+        return 0;
+    }
+    memcpy(array->data + array->len, bytes, (size_t)length);
+    array->len += length;
     return 1;
 }
 

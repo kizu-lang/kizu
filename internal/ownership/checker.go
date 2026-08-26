@@ -5080,6 +5080,7 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 		typ, err := c.checkArrayConstructor(typeArg, args, env)
 		return typ, true, err
 	case "std::internal::builtin::array_append",
+		"std::internal::builtin::array_append_bytes",
 		"std::internal::builtin::array_len",
 		"std::internal::builtin::array_capacity",
 		"std::internal::builtin::array_pop", "std::internal::builtin::array_pop_or_panic",
@@ -6566,7 +6567,8 @@ type containerAccessTable struct {
 // field borrow forms.
 var containerAccessTables = map[string]containerAccessTable{
 	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
-		"append": accessMutate, "reserve": accessMutate, "set": accessMutate,
+		"append": accessMutate, "append_bytes": accessMutate, "reserve": accessMutate,
+		"set":  accessMutate,
 		"swap": accessMutate,
 		"pop":  accessMutate, "pop_or_panic": accessMutate,
 		"truncate": accessMutate, "clear": accessMutate,
@@ -6830,6 +6832,8 @@ func (c *Checker) checkArrayMethod(
 	switch name {
 	case "append":
 		return c.checkArrayAppend(elem, args, env)
+	case "append_bytes":
+		return c.checkArrayAppendBytes(elem, args, env)
 	case "reserve":
 		return c.checkArrayCountMutation(name, args, env)
 	case "pop":
@@ -6845,16 +6849,26 @@ func (c *Checker) checkArrayMethod(
 	case "set", "swap":
 		return c.checkArrayIndexedMutation(array, elem, name, args, env)
 	case "deinit":
-		if len(args) != 0 {
-			return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
-		}
-		array.moved = true
-		return "void", nil
+		return c.checkArrayDeinit(array, name, args)
 	default:
 		// Unreachable while this switch and the shared access table agree;
 		// the table refusal above is the user-facing one.
 		return "", errorf("array error: method `%s` is classified but unhandled", name)
 	}
+}
+
+// checkArrayDeinit consumes the array: releasing it is the last thing done
+// with it, so the binding is moved rather than left readable.
+func (c *Checker) checkArrayDeinit(
+	array *binding,
+	name string,
+	args []ast.Expression,
+) (string, error) {
+	if len(args) != 0 {
+		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
+	}
+	array.moved = true
+	return "void", nil
 }
 
 // checkArrayIndexedMutation validates set and owner-safe slot exchange.
@@ -6949,6 +6963,30 @@ func (c *Checker) checkStdArrayStorageMethod(
 		}
 		return c.checkArrayReadNoArgs(name, args)
 	}
+}
+
+// checkArrayAppendBytes validates the run copied by Array.append_bytes. Only a
+// u8 array has elements a byte run spells, and the source is read, not moved:
+// it is a view.
+func (c *Checker) checkArrayAppendBytes(
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if elem != "u8" {
+		return "", errorf("array error: `Array.append_bytes` requires Array<u8>")
+	}
+	if len(args) != 1 {
+		return "", errorf("array error: `Array.append_bytes` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "[]u8" {
+		return "", errorf("array error: `Array.append_bytes` expects []u8, got %s", got)
+	}
+	return "std::mem::Error!void", nil
 }
 
 // isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.

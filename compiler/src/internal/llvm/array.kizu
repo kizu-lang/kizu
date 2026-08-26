@@ -96,6 +96,7 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
         Arg::Lit(array_empty_global()), Arg::Lit(array_header_type())
     );
     try self.line("declare i1 @kizu_array_append(ptr, ptr, i64)");
+    try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr, i64)");
     try self.line("declare i1 @kizu_array_reserve(ptr, i64, i64)");
     try self.line("declare ptr @kizu_array_pop(ptr, i64)");
     try self.line("declare i1 @kizu_array_swap(ptr, i64, i64, i64)");
@@ -250,6 +251,7 @@ fn (self: &var Emitter) write_array_instr(module: &ir::Module, node: &ir::InstrN
         ArrayNew => return self.write_array_new(module, node),
         ArrayLen => return self.write_array_len(module, node),
         ArrayCapacity => return self.write_array_capacity(module, node),
+        ArrayAppendBytes => return self.write_array_append_bytes(module, node),
         ArrayReserve => return self.write_array_reserve(module, node),
         ArrayTruncate => return self.write_array_truncate(module, node),
         ArrayClear => return self.write_array_clear(module, node),
@@ -461,6 +463,31 @@ fn (self: &var Emitter) write_array_reserve(module: &ir::Module, node: &ir::Inst
         Arg::Str(ok_name), Arg::Str(array.operand), Arg::Str(additional.operand), Arg::Str(size)
     );
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayReserve);
+}
+
+/// Lowers Array.append_bytes(bytes) for a u8 array, the Go
+/// `writeArrayAppendBytes`: the run is copied in one runtime call rather than
+/// one element at a time.
+fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0("llvm error: array.append_bytes expects Array<u8>, []u8 -> std::mem::Error!void");
+    }
+    let array = try self.operand(module, node.args.get_or_panic(0));
+    let slice = try self.operand(module, node.args.get_or_panic(1));
+    let synthetic = try self.next_synthetic_value("array.append_bytes");
+    let base = try self.percent(synthetic);
+    let ptr_name = try self.suffixed(base, ".ptr");
+    let len_name = try self.suffixed(base, ".len");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(len_name), Arg::Str(slice.operand));
+    let result_name = try self.local_name(module, node.result.name);
+    let ok_name = try self.suffixed(result_name, ".ok");
+    try self.line4(
+        "  %s = call i1 @kizu_array_append_bytes(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(ok_name), Arg::Str(array.operand), Arg::Str(ptr_name), Arg::Str(len_name)
+    );
+    return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayAppendBytes);
 }
 
 /// Lowers Array.pop(), the Go `writeArrayPop`.

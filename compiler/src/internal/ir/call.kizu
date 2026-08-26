@@ -599,6 +599,12 @@ fn (self: &var Lowerer) array_primitive_param_types(shape: ArrayPrimitiveShape, 
             first: self_type, second: elem, third: empty_name(), fourth: empty_name()
         };
     }
+    if shape.takes_bytes {
+        let bytes_type = try self.module.names.intern("[]u8");
+        return NamedTypes {
+            first: self_type, second: bytes_type, third: empty_name(), fourth: empty_name()
+        };
+    }
     if shape.takes_index_and_element {
         let index_type = try self.module.names.intern("i64");
         return NamedTypes {
@@ -616,7 +622,8 @@ struct ArrayPrimitiveShape {
     releases: bool,
     mutates: bool,
     takes_element: bool,
-    takes_index_and_element: bool
+    takes_index_and_element: bool,
+    takes_bytes: bool
 }
 
 /// Reads the shape of one array primitive from its name.
@@ -625,7 +632,8 @@ fn array_primitive_shape(name: []u8) -> ArrayPrimitiveShape {
         releases: mem::equal_bytes(name, "std::internal::builtin::array_deinit"),
         mutates: array_mutating_primitive(name),
         takes_element: mem::equal_bytes(name, "std::internal::builtin::array_append"),
-        takes_index_and_element: mem::equal_bytes(name, "std::internal::builtin::array_set")
+        takes_index_and_element: mem::equal_bytes(name, "std::internal::builtin::array_set"),
+        takes_bytes: mem::equal_bytes(name, "std::internal::builtin::array_append_bytes")
     };
 }
 
@@ -635,6 +643,7 @@ fn array_primitive_shape(name: []u8) -> ArrayPrimitiveShape {
 /// because releasing it is the last thing done with it.
 fn array_mutating_primitive(name: []u8) -> bool {
     return mem::equal_bytes(name, "std::internal::builtin::array_append") or
+        mem::equal_bytes(name, "std::internal::builtin::array_append_bytes") or
         mem::equal_bytes(name, "std::internal::builtin::array_reserve") or
         mem::equal_bytes(name, "std::internal::builtin::array_pop") or
         mem::equal_bytes(name, "std::internal::builtin::array_pop_or_panic") or
@@ -1129,6 +1138,9 @@ fn array_primitive(name: []u8) -> ?Op {
     if mem::equal_bytes(name, "std::internal::builtin::array_append") {
         return Op::ArrayAppend;
     }
+    if mem::equal_bytes(name, "std::internal::builtin::array_append_bytes") {
+        return Op::ArrayAppendBytes;
+    }
     if mem::equal_bytes(name, "std::internal::builtin::array_as_bytes") {
         return Op::ArrayAsBytes;
     }
@@ -1461,6 +1473,7 @@ fn array_method_result_type(op: Op) -> ?[]u8 {
         // Growing needs memory and nothing else (ADR-0128); the bounds
         // checks carry the array's own set.
         ArrayAppend => return "std::mem::Error!void",
+        ArrayAppendBytes => return "std::mem::Error!void",
         ArrayReserve => return "std::mem::Error!void",
         ArraySet => return "std::array::Error!void",
         ArraySwap => return "std::array::Error!void",

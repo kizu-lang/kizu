@@ -44,6 +44,7 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
 		arrayEmptyGlobal, arrayHeaderType)
 	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, i64, i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_pop(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_swap(ptr, i64, i64, i64)\n")
@@ -154,6 +155,8 @@ func (e *emitter) writeArrayElementInstr(instr *ir.Instr) error {
 	switch instr.Op {
 	case "array.append":
 		return e.writeArrayAppend(instr)
+	case "array.append_bytes":
+		return e.writeArrayAppendBytes(instr)
 	case "array.pop":
 		return e.writeArrayPop(instr)
 	case "array.pop_or_panic":
@@ -314,6 +317,26 @@ func (e *emitter) writeArrayCapacity(instr *ir.Instr) error {
 	e.arrayLoadField(handle, arrayFieldCapacity, "array.capacity", resultName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// writeArrayAppendBytes lowers Array.append_bytes(bytes) for a u8 array: the
+// run is copied in one runtime call rather than one element at a time.
+func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || instr.Args[1].Type != "[]u8" ||
+		instr.Result.Type != "std::mem::Error!void" {
+		return fmt.Errorf(
+			"llvm error: array.append_bytes expects Array<u8>, []u8 -> std::mem::Error!void")
+	}
+	array := e.value(instr.Args[0])
+	slice := e.value(instr.Args[1])
+	ptrName := "%" + e.nextSyntheticValue("array.append_bytes.ptr")
+	lenName := "%" + e.nextSyntheticValue("array.append_bytes.len")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
+	okName := localName(instr.Result.Name) + ".ok"
+	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append_bytes(ptr %s, ptr %s, i64 %s)\n",
+		okName, array.operand, ptrName, lenName)
+	return e.writeArrayBoolResult(instr.Result, okName, "array_append_bytes")
 }
 
 // writeArrayReserve lowers Array.reserve(additional).

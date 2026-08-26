@@ -2304,7 +2304,7 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 // a copy, and `deinit` receives the header itself because releasing it is the
 // last thing done with it.
 var arrayMutatingPrimitives = map[string]bool{
-	"append": true, "reserve": true, "pop": true, "pop_or_panic": true,
+	"append": true, "append_bytes": true, "reserve": true, "pop": true, "pop_or_panic": true,
 	"set": true, "swap": true, "at_mut": true, "clear": true,
 	"truncate": true, "as_mut_bytes": true,
 }
@@ -2326,6 +2326,8 @@ func arrayPrimitiveParams(method string, elem string) []Param {
 	switch method {
 	case "append":
 		return []Param{self, {Type: elem}}
+	case "append_bytes":
+		return []Param{self, {Type: "[]u8"}}
 	case "set":
 		return []Param{self, {Type: "i64"}, {Type: elem}}
 	}
@@ -2334,6 +2336,7 @@ func arrayPrimitiveParams(method string, elem string) []Param {
 
 var arrayPrimitives = map[string]string{
 	"std::internal::builtin::array_append":       "append",
+	"std::internal::builtin::array_append_bytes": "append_bytes",
 	"std::internal::builtin::array_as_bytes":     "as_bytes",
 	"std::internal::builtin::array_as_mut_bytes": "as_mut_bytes",
 	"std::internal::builtin::array_at":           "at",
@@ -2511,7 +2514,7 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 // path rather than lowering them to an instruction.
 func arrayMethodResultType(name string) (string, bool) {
 	switch name {
-	case "append", "reserve":
+	case "append", "append_bytes", "reserve":
 		// Growing needs memory and nothing else (ADR-0128).
 		return "std::mem::Error!void", true
 	case "set", "swap", "truncate":
