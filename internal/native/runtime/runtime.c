@@ -108,18 +108,32 @@ typedef struct {
     uint64_t hash;
 } KizuMapEntry;
 
+/* Like an array, a map is its header rather than a pointer to one: the
+   compiler keeps half a million alive at once and most of them never hold an
+   entry, so a header allocation is what an empty map would cost. The header
+   carries neither the value size nor the allocator -- the compiler knows V at
+   every call and the source names the allocator at every call that needs one
+   (ADR-0131, ADR-0132), so both are passed in. The native backend reads these
+   fields itself (`%kizu.map` in internal/llvm/map.go), so their offsets are
+   part of what it emits and the assertions below are what keeps the two
+   spellings from drifting apart. */
 typedef struct {
     KizuMapEntry *entries;
     int64_t len;
     int64_t cap;
-    int64_t value_size;
     /* index[slot] is an entry number, or -1 for a free slot. index_cap is a
        power of two and is kept above the entry count, so a probe always meets
        a free slot and terminates. */
     int64_t *index;
     int64_t index_cap;
-    void *allocator;
 } KizuMap;
+
+_Static_assert(offsetof(KizuMap, entries) == 0, "KizuMap.entries leads the header");
+_Static_assert(offsetof(KizuMap, len) == 8, "KizuMap.len follows entries");
+_Static_assert(offsetof(KizuMap, cap) == 16, "KizuMap.cap follows len");
+_Static_assert(offsetof(KizuMap, index) == 24, "KizuMap.index follows cap");
+_Static_assert(offsetof(KizuMap, index_cap) == 32, "KizuMap.index_cap follows index");
+_Static_assert(sizeof(KizuMap) == 40, "KizuMap is five words");
 
 /* An Allocator handle is one pointer. NULL is the page allocator (libc).
    Non-NULL points at a KizuFixedBuffer header that mem_fixed_buffer wrote at
@@ -1485,19 +1499,6 @@ KizuSliceU8 kizu_array_as_bytes(void *handle) {
     return result;
 }
 
-void *kizu_map_new(void *allocator, int64_t value_size) {
-    if (value_size <= 0) {
-        return NULL;
-    }
-    KizuMap *map = (KizuMap *)kizu_rt_zalloc(allocator, sizeof(KizuMap));
-    if (!map) {
-        return NULL;
-    }
-    map->value_size = value_size;
-    map->allocator = allocator;
-    return map;
-}
-
 /* kizu_map_read8 and kizu_map_read_tail read a key eight bytes at a time and
    then the rest. The tail of four bytes or more is read as two overlapping
    halves, so neither reader needs a loop or a variable-length copy: one
@@ -1569,7 +1570,7 @@ static int64_t kizu_map_find(KizuMap *map, const unsigned char *key, int64_t key
    rebuilds it. Entries carry their hash, so nothing rehashes the key bytes.   The first index holds eight slots rather than sixteen: the compiler keeps
    half a million maps alive at once and most of them stay small, so what an
    empty one reserves is worth more than the one reindex it saves. */
-static _Bool kizu_map_reindex(KizuMap *map, int64_t needed) {
+static _Bool kizu_map_reindex(void *allocator, KizuMap *map, int64_t needed) {
     int64_t next = map->index_cap == 0 ? 8 : map->index_cap;
     while (needed * 4 > next * 3) {
         if (next > INT64_MAX / (int64_t)sizeof(int64_t) / 2) {
@@ -1580,14 +1581,14 @@ static _Bool kizu_map_reindex(KizuMap *map, int64_t needed) {
     if (next == map->index_cap) {
         return 1;
     }
-    int64_t *index = (int64_t *)kizu_rt_alloc(map->allocator, next * (int64_t)sizeof(int64_t));
+    int64_t *index = (int64_t *)kizu_rt_alloc(allocator, next * (int64_t)sizeof(int64_t));
     if (!index) {
         return 0;
     }
     for (int64_t slot = 0; slot < next; slot += 1) {
         index[slot] = -1;
     }
-    kizu_rt_free(map->allocator, map->index, map->index_cap * (int64_t)sizeof(int64_t));
+    kizu_rt_free(allocator, map->index, map->index_cap * (int64_t)sizeof(int64_t));
     map->index = index;
     map->index_cap = next;
     uint64_t mask = (uint64_t)next - 1;
@@ -1601,7 +1602,7 @@ static _Bool kizu_map_reindex(KizuMap *map, int64_t needed) {
     return 1;
 }
 
-static _Bool kizu_map_reserve(KizuMap *map, int64_t needed) {
+static _Bool kizu_map_reserve(void *allocator, KizuMap *map, int64_t needed) {
     if (!map || needed < 0) {
         return 0;
     }
@@ -1616,7 +1617,7 @@ static _Bool kizu_map_reserve(KizuMap *map, int64_t needed) {
         return 0;
     }
     KizuMapEntry *entries = (KizuMapEntry *)kizu_rt_realloc(
-        map->allocator, map->entries,
+        allocator, map->entries,
         map->cap * (int64_t)sizeof(KizuMapEntry), next * (int64_t)sizeof(KizuMapEntry));
     if (!entries) {
         return 0;
@@ -1627,36 +1628,37 @@ static _Bool kizu_map_reserve(KizuMap *map, int64_t needed) {
     return 1;
 }
 
-_Bool kizu_map_insert(void *handle, const unsigned char *key, int64_t key_len, const void *value) {
-    KizuMap *map = (KizuMap *)handle;
+_Bool kizu_map_insert(
+    void *allocator, KizuMap *map, const unsigned char *key, int64_t key_len,
+    const void *value, int64_t value_size) {
     /* An empty key may arrive with a null pointer; only a non-empty key needs one. */
-    if (!map || (!key && key_len > 0) || key_len < 0 || !value) {
+    if (!map || (!key && key_len > 0) || key_len < 0 || !value || value_size <= 0) {
         return 0;
     }
     /* Before the slot is taken, because growing the index moves every slot. */
-    if (!kizu_map_reindex(map, map->len + 1)) {
+    if (!kizu_map_reindex(allocator, map, map->len + 1)) {
         return 0;
     }
     uint64_t hash = kizu_map_hash(key, key_len);
     int64_t slot = kizu_map_slot(map, key, key_len, hash);
     if (map->index[slot] >= 0) {
-        memcpy(map->entries[map->index[slot]].value, value, (size_t)map->value_size);
+        memcpy(map->entries[map->index[slot]].value, value, (size_t)value_size);
         return 1;
     }
-    if (!kizu_map_reserve(map, map->len + 1)) {
+    if (!kizu_map_reserve(allocator, map, map->len + 1)) {
         return 0;
     }
-    unsigned char *key_copy = (unsigned char *)kizu_rt_alloc(map->allocator, key_len);
-    unsigned char *value_copy = (unsigned char *)kizu_rt_alloc(map->allocator, map->value_size);
+    unsigned char *key_copy = (unsigned char *)kizu_rt_alloc(allocator, key_len);
+    unsigned char *value_copy = (unsigned char *)kizu_rt_alloc(allocator, value_size);
     if ((!key_copy && key_len > 0) || !value_copy) {
-        kizu_rt_free(map->allocator, key_copy, key_len);
-        kizu_rt_free(map->allocator, value_copy, map->value_size);
+        kizu_rt_free(allocator, key_copy, key_len);
+        kizu_rt_free(allocator, value_copy, value_size);
         return 0;
     }
     if (key_len > 0) {
         memcpy(key_copy, key, (size_t)key_len);
     }
-    memcpy(value_copy, value, (size_t)map->value_size);
+    memcpy(value_copy, value, (size_t)value_size);
     map->entries[map->len].key = key_copy;
     map->entries[map->len].key_len = key_len;
     map->entries[map->len].value = value_copy;
@@ -1666,8 +1668,7 @@ _Bool kizu_map_insert(void *handle, const unsigned char *key, int64_t key_len, c
     return 1;
 }
 
-void *kizu_map_get(void *handle, const unsigned char *key, int64_t key_len) {
-    KizuMap *map = (KizuMap *)handle;
+void *kizu_map_get(KizuMap *map, const unsigned char *key, int64_t key_len) {
     int64_t found = kizu_map_find(map, key, key_len);
     if (found < 0) {
         return NULL;
@@ -1678,16 +1679,14 @@ void *kizu_map_get(void *handle, const unsigned char *key, int64_t key_len) {
 /* kizu_map_value_at returns the value stored at insertion position index, or
  * NULL past the end. Only Map.deinit's cascade reads it, so the entry is left
  * as it is: the map is released right after and no lookup runs in between. */
-void *kizu_map_value_at(void *handle, int64_t index) {
-    KizuMap *map = (KizuMap *)handle;
+void *kizu_map_value_at(KizuMap *map, int64_t index) {
     if (!map || index < 0 || index >= map->len) {
         return NULL;
     }
     return map->entries[index].value;
 }
 
-void kizu_map_key_at(KizuOptSliceU8 *out, void *handle, int64_t index) {
-    KizuMap *map = (KizuMap *)handle;
+void kizu_map_key_at(KizuOptSliceU8 *out, KizuMap *map, int64_t index) {
     if (!map || index < 0 || index >= map->len) {
         *out = kizu_opt_null_slice();
         return;
@@ -1698,27 +1697,24 @@ void kizu_map_key_at(KizuOptSliceU8 *out, void *handle, int64_t index) {
     *out = kizu_opt_slice(key);
 }
 
-_Bool kizu_map_contains(void *handle, const unsigned char *key, int64_t key_len) {
-    return kizu_map_find((KizuMap *)handle, key, key_len) >= 0;
+_Bool kizu_map_contains(KizuMap *map, const unsigned char *key, int64_t key_len) {
+    return kizu_map_find(map, key, key_len) >= 0;
 }
 
-int64_t kizu_map_len(void *handle) {
-    KizuMap *map = (KizuMap *)handle;
+int64_t kizu_map_len(KizuMap *map) {
     return map ? map->len : 0;
 }
 
-void kizu_map_deinit(void *handle) {
-    KizuMap *map = (KizuMap *)handle;
+void kizu_map_deinit(void *allocator, KizuMap *map, int64_t value_size) {
     if (!map) {
         return;
     }
     for (int64_t i = 0; i < map->len; i += 1) {
-        kizu_rt_free(map->allocator, map->entries[i].key, map->entries[i].key_len);
-        kizu_rt_free(map->allocator, map->entries[i].value, map->value_size);
+        kizu_rt_free(allocator, map->entries[i].key, map->entries[i].key_len);
+        kizu_rt_free(allocator, map->entries[i].value, value_size);
     }
-    kizu_rt_free(map->allocator, map->entries, map->cap * (int64_t)sizeof(KizuMapEntry));
-    kizu_rt_free(map->allocator, map->index, map->index_cap * (int64_t)sizeof(int64_t));
-    kizu_rt_free(map->allocator, map, (int64_t)sizeof(KizuMap));
+    kizu_rt_free(allocator, map->entries, map->cap * (int64_t)sizeof(KizuMapEntry));
+    kizu_rt_free(allocator, map->index, map->index_cap * (int64_t)sizeof(int64_t));
 }
 
 /* An array header is the binding, so releasing one is releasing the element

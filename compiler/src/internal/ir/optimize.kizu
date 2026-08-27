@@ -32,7 +32,7 @@ fn constant_fold(allocator: Allocator, module: &var Module) -> !void {
             var instr_index = 0;
             while block_instr_at(module, block, instr_index) |instr| {
                 instr_index = instr_index + 1;
-                try fold_instr(module, instr, &var consts);
+                try fold_instr(allocator, module, instr, &var consts);
             }
         }
     }
@@ -54,7 +54,7 @@ fn copy_propagate(allocator: Allocator, module: &var Module) -> !void {
             while block_instr_at(module, block, instr_index) |instr| {
                 instr_index = instr_index + 1;
                 try replace_args(module, instr, &copies);
-                try record_copy(module, instr, &var copies);
+                try record_copy(allocator, module, instr, &var copies);
             }
             replace_terminator_args(module, block, &copies);
         }
@@ -64,7 +64,7 @@ fn copy_propagate(allocator: Allocator, module: &var Module) -> !void {
 
 /// Records the source an id instruction copies, the Go
 /// `copies[instr.Result.Name] = instr.Args[0]`.
-fn record_copy(module: &Module, instr: Instr, copies: &var map::Map<[]u8, Value>) -> !void {
+fn record_copy(allocator: Allocator, module: &Module, instr: Instr, copies: &var map::Map<[]u8, Value>) -> !void {
     let node = module.instrs.at(instr.node);
     if node.op != Op::Id or node.args.len() != 1 {
         return;
@@ -72,7 +72,7 @@ fn record_copy(module: &Module, instr: Instr, copies: &var map::Map<[]u8, Value>
     let source = node.args.get_or_panic(0);
     let result_text = name_text(&module.names, node.result.name);
     let result_bytes = result_text.as_bytes();
-    return copies.insert(result_bytes, source);
+    return copies.insert(allocator, result_bytes, source);
 }
 
 /// Removes unused pure instructions, the Go `DeadCodeEliminate`.
@@ -123,7 +123,7 @@ fn constants_in(allocator: Allocator, module: &Module, block: Block) -> !map::Ma
         if parse_i64(immediate_bytes) |value| {
             let result_text = name_text(&module.names, node.result.name);
             let result_bytes = result_text.as_bytes();
-            try consts.insert(result_bytes, value);
+            try consts.insert(allocator, result_bytes, value);
         }
     }
     return move consts;
@@ -169,7 +169,7 @@ fn parse_i64(text: []u8) -> ?i64 {
 
 /// Folds one instruction when both operands are known constants, the Go
 /// `foldInstr`.
-fn fold_instr(module: &var Module, instr: Instr, consts: &var map::Map<[]u8, i64>) -> !void {
+fn fold_instr(allocator: Allocator, module: &var Module, instr: Instr, consts: &var map::Map<[]u8, i64>) -> !void {
     let node = module.instrs.at(instr.node);
     if node.args.len() != 2 or !module.names.is(node.result.type_name, "i64") {
         return;
@@ -189,7 +189,7 @@ fn fold_instr(module: &var Module, instr: Instr, consts: &var map::Map<[]u8, i64
     }
     let result_text = name_text(&module.names, result_name);
     let result_bytes = result_text.as_bytes();
-    return consts.insert(result_bytes, value);
+    return consts.insert(allocator, result_bytes, value);
 }
 
 /// Returns the constant a value name is known to hold, the Go
@@ -302,36 +302,36 @@ fn used_values(allocator: Allocator, module: &Module, function: Function) -> !ma
             var arg_index = 0;
             while instr_node.args.get(arg_index) |arg| {
                 arg_index = arg_index + 1;
-                try mark_used(module, &var used, arg.name);
+                try mark_used(allocator, module, &var used, arg.name);
             }
             arg_index = 0;
             while instr_node.incoming.get(arg_index) |incoming| {
                 arg_index = arg_index + 1;
-                try mark_used(module, &var used, incoming.value.name);
+                try mark_used(allocator, module, &var used, incoming.value.name);
             }
             arg_index = 0;
             while instr_node.fields.get(arg_index) |field| {
                 arg_index = arg_index + 1;
-                try mark_used(module, &var used, field.value.name);
+                try mark_used(allocator, module, &var used, field.value.name);
             }
             arg_index = 0;
             while instr_node.cleanups.get(arg_index) |cleanup| {
                 arg_index = arg_index + 1;
-                try mark_used(module, &var used, cleanup.arg.name);
-                try mark_used(module, &var used, cleanup.allocator.name);
+                try mark_used(allocator, module, &var used, cleanup.arg.name);
+                try mark_used(allocator, module, &var used, cleanup.allocator.name);
             }
         }
-        try mark_used(module, &var used, block_node.terminator.value.name);
-        try mark_used(module, &var used, block_node.terminator.cond.name);
+        try mark_used(allocator, module, &var used, block_node.terminator.value.name);
+        try mark_used(allocator, module, &var used, block_node.terminator.cond.name);
     }
     return move used;
 }
 
 /// Records one read of an SSA name, the Go `used[name] = true`.
-fn mark_used(module: &Module, used: &var map::Map<[]u8, bool>, name: Name) -> !void {
+fn mark_used(allocator: Allocator, module: &Module, used: &var map::Map<[]u8, bool>, name: Name) -> !void {
     let retained = name_text(&module.names, name);
     let bytes = retained.as_bytes();
-    return used.insert(bytes, true);
+    return used.insert(allocator, bytes, true);
 }
 
 /// Keeps instructions with effects or used results, the Go

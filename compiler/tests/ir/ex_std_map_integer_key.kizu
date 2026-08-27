@@ -4,12 +4,12 @@ import std::mem;
 // A Map key may be `[]u8` or an integer type. The runtime hashes and compares
 // a key as the bytes it occupies either way, so an i64 key is its own eight
 // bytes and needs no encoding step to become one.
-fn count_visit(visits: &var map::Map<i64, i64>, id: i64) -> mem::Error!void {
+fn count_visit(allocator: Allocator, visits: &var map::Map<i64, i64>, id: i64) -> mem::Error!void {
     if visits.at_mut(id) |count| {
         count.* = count.* + 1;
         return;
     }
-    return visits.insert(id, 1);
+    return visits.insert(allocator, id, 1);
 }
 
 fn main() -> !void {
@@ -17,12 +17,12 @@ fn main() -> !void {
     var visits = map::new<i64, i64>(allocator);
     defer visits.deinit(allocator);
 
-    try count_visit(&var visits, 101);
-    try count_visit(&var visits, 205);
-    try count_visit(&var visits, 101);
-    try count_visit(&var visits, 377);
-    try count_visit(&var visits, 205);
-    try count_visit(&var visits, 101);
+    try count_visit(allocator, &var visits, 101);
+    try count_visit(allocator, &var visits, 205);
+    try count_visit(allocator, &var visits, 101);
+    try count_visit(allocator, &var visits, 377);
+    try count_visit(allocator, &var visits, 205);
+    try count_visit(allocator, &var visits, 101);
 
     // key_at walks the keys in insertion order, and an integer key leaves the
     // capture as a value rather than as a view into map storage.
@@ -47,27 +47,25 @@ fn main() -> !void {
 
 // ir
 // lower:
-// fn count_visit(%visits: &var std::map::Map<i64, i64>, %id: i64) -> std::mem::Error!void {
+// fn count_visit(%allocator: Allocator, %visits: &var std::map::Map<i64, i64>, %id: i64) -> std::mem::Error!void {
 // entry:
-//   %1: std::map::Map<i64, i64> = ref.load %visits: &var std::map::Map<i64, i64>
-//   %2: ?&var i64 = call.std::map::Map.at_mut.i64.i64 %1: std::map::Map<i64, i64>, %id: i64
-//   %3: &var i64 = opt.value %2: ?&var i64
-//   %4: bool = opt.has %2: ?&var i64
-//   branch %4: bool, if.then.1, if.else.2
+//   %1: ?&var i64 = call.std::map::Map.at_mut.i64.i64 %visits: &var std::map::Map<i64, i64>, %id: i64
+//   %2: &var i64 = opt.value %1: ?&var i64
+//   %3: bool = opt.has %1: ?&var i64
+//   branch %3: bool, if.then.1, if.else.2
 // if.then.1:
-//   %5: i64 = ref.load %3: &var i64
-//   %6: i64 = const 1
-//   %7: i64 = binary.+ %5: i64, %6: i64
-//   ref.store %3: &var i64, %7: i64
-//   %9: std::mem::Error!void = error.ok
-//   return %9: std::mem::Error!void
+//   %4: i64 = ref.load %2: &var i64
+//   %5: i64 = const 1
+//   %6: i64 = binary.+ %4: i64, %5: i64
+//   ref.store %2: &var i64, %6: i64
+//   %8: std::mem::Error!void = error.ok
+//   return %8: std::mem::Error!void
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   %10: std::map::Map<i64, i64> = ref.load %visits: &var std::map::Map<i64, i64>
-//   %11: i64 = const 1
-//   %12: std::mem::Error!void = call.std::map::Map.insert.i64.i64 %10: std::map::Map<i64, i64>, %id: i64, %11: i64
-//   return %12: std::mem::Error!void
+//   %9: i64 = const 1
+//   %10: std::mem::Error!void = call.std::map::Map.insert.i64.i64 %visits: &var std::map::Map<i64, i64>, %allocator: Allocator, %id: i64, %9: i64
+//   return %10: std::mem::Error!void
 // }
 // fn main() -> !void {
 // entry:
@@ -75,84 +73,80 @@ fn main() -> !void {
 //   %2: std::map::Map<i64, i64> = map.new %1: Allocator
 //   %3: &var std::map::Map<i64, i64> = local.slot %2: std::map::Map<i64, i64>
 //   %4: i64 = const 101
-//   %5: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %4: i64
+//   %5: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %4: i64
 //   %6: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %5: std::mem::Error!void, cleanup map.deinit %6: std::map::Map<i64, i64>
+//   error.try %5: std::mem::Error!void, cleanup map.deinit %6: std::map::Map<i64, i64>, %1: Allocator
 //   %8: i64 = const 205
-//   %9: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %8: i64
+//   %9: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %8: i64
 //   %10: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %9: std::mem::Error!void, cleanup map.deinit %10: std::map::Map<i64, i64>
+//   error.try %9: std::mem::Error!void, cleanup map.deinit %10: std::map::Map<i64, i64>, %1: Allocator
 //   %12: i64 = const 101
-//   %13: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %12: i64
+//   %13: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %12: i64
 //   %14: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %13: std::mem::Error!void, cleanup map.deinit %14: std::map::Map<i64, i64>
+//   error.try %13: std::mem::Error!void, cleanup map.deinit %14: std::map::Map<i64, i64>, %1: Allocator
 //   %16: i64 = const 377
-//   %17: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %16: i64
+//   %17: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %16: i64
 //   %18: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %17: std::mem::Error!void, cleanup map.deinit %18: std::map::Map<i64, i64>
+//   error.try %17: std::mem::Error!void, cleanup map.deinit %18: std::map::Map<i64, i64>, %1: Allocator
 //   %20: i64 = const 205
-//   %21: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %20: i64
+//   %21: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %20: i64
 //   %22: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %21: std::mem::Error!void, cleanup map.deinit %22: std::map::Map<i64, i64>
+//   error.try %21: std::mem::Error!void, cleanup map.deinit %22: std::map::Map<i64, i64>, %1: Allocator
 //   %24: i64 = const 101
-//   %25: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %24: i64
+//   %25: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %24: i64
 //   %26: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %25: std::mem::Error!void, cleanup map.deinit %26: std::map::Map<i64, i64>
+//   error.try %25: std::mem::Error!void, cleanup map.deinit %26: std::map::Map<i64, i64>, %1: Allocator
 //   %28: i64 = const 0
 //   jump while.header.1
 // while.header.1:
-//   %29: i64 = phi [entry, %28: i64], [orelse.end.6, %43: i64]
-//   %30: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   %31: ?i64 = call.std::map::Map.key_at.i64.i64 %30: std::map::Map<i64, i64>, %29: i64
-//   %32: i64 = opt.value %31: ?i64
-//   %33: bool = opt.has %31: ?i64
-//   branch %33: bool, while.body.2, while.end.3
+//   %29: i64 = phi [entry, %28: i64], [orelse.end.6, %41: i64]
+//   %30: ?i64 = call.std::map::Map.key_at.i64.i64 %3: &var std::map::Map<i64, i64>, %29: i64
+//   %31: i64 = opt.value %30: ?i64
+//   %32: bool = opt.has %30: ?i64
+//   branch %32: bool, while.body.2, while.end.3
 // while.body.2:
-//   call.print %32: i64
-//   %35: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   %36: ?i64 = call.std::map::Map.get.i64.i64 %35: std::map::Map<i64, i64>, %32: i64
-//   %37: bool = opt.has %36: ?i64
-//   branch %37: bool, orelse.some.4, orelse.else.5
+//   call.print %31: i64
+//   %34: ?i64 = call.std::map::Map.get.i64.i64 %3: &var std::map::Map<i64, i64>, %31: i64
+//   %35: bool = opt.has %34: ?i64
+//   branch %35: bool, orelse.some.4, orelse.else.5
 // while.end.3:
-//   %44: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   map.deinit %44: std::map::Map<i64, i64>
-//   %46: !void = error.ok
-//   return %46: !void
+//   %42: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
+//   map.deinit %42: std::map::Map<i64, i64>, %1: Allocator
+//   %44: !void = error.ok
+//   return %44: !void
 // orelse.some.4:
-//   %38: i64 = opt.value %36: ?i64
+//   %36: i64 = opt.value %34: ?i64
 //   jump orelse.end.6
 // orelse.else.5:
-//   %39: i64 = const 0
+//   %37: i64 = const 0
 //   jump orelse.end.6
 // orelse.end.6:
-//   %40: i64 = phi [orelse.some.4, %38: i64], [orelse.else.5, %39: i64]
-//   call.print %40: i64
-//   %42: i64 = const 1
-//   %43: i64 = binary.+ %29: i64, %42: i64
+//   %38: i64 = phi [orelse.some.4, %36: i64], [orelse.else.5, %37: i64]
+//   call.print %38: i64
+//   %40: i64 = const 1
+//   %41: i64 = binary.+ %29: i64, %40: i64
 //   jump while.header.1
 // }
 // opt:
-// fn count_visit(%visits: &var std::map::Map<i64, i64>, %id: i64) -> std::mem::Error!void {
+// fn count_visit(%allocator: Allocator, %visits: &var std::map::Map<i64, i64>, %id: i64) -> std::mem::Error!void {
 // entry:
-//   %1: std::map::Map<i64, i64> = ref.load %visits: &var std::map::Map<i64, i64>
-//   %2: ?&var i64 = call.std::map::Map.at_mut.i64.i64 %1: std::map::Map<i64, i64>, %id: i64
-//   %3: &var i64 = opt.value %2: ?&var i64
-//   %4: bool = opt.has %2: ?&var i64
-//   branch %4: bool, if.then.1, if.else.2
+//   %1: ?&var i64 = call.std::map::Map.at_mut.i64.i64 %visits: &var std::map::Map<i64, i64>, %id: i64
+//   %2: &var i64 = opt.value %1: ?&var i64
+//   %3: bool = opt.has %1: ?&var i64
+//   branch %3: bool, if.then.1, if.else.2
 // if.then.1:
-//   %5: i64 = ref.load %3: &var i64
-//   %6: i64 = const 1
-//   %7: i64 = binary.+ %5: i64, %6: i64
-//   ref.store %3: &var i64, %7: i64
-//   %9: std::mem::Error!void = error.ok
-//   return %9: std::mem::Error!void
+//   %4: i64 = ref.load %2: &var i64
+//   %5: i64 = const 1
+//   %6: i64 = binary.+ %4: i64, %5: i64
+//   ref.store %2: &var i64, %6: i64
+//   %8: std::mem::Error!void = error.ok
+//   return %8: std::mem::Error!void
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
-//   %10: std::map::Map<i64, i64> = ref.load %visits: &var std::map::Map<i64, i64>
-//   %11: i64 = const 1
-//   %12: std::mem::Error!void = call.std::map::Map.insert.i64.i64 %10: std::map::Map<i64, i64>, %id: i64, %11: i64
-//   return %12: std::mem::Error!void
+//   %9: i64 = const 1
+//   %10: std::mem::Error!void = call.std::map::Map.insert.i64.i64 %visits: &var std::map::Map<i64, i64>, %allocator: Allocator, %id: i64, %9: i64
+//   return %10: std::mem::Error!void
 // }
 // fn main() -> !void {
 // entry:
@@ -160,59 +154,57 @@ fn main() -> !void {
 //   %2: std::map::Map<i64, i64> = map.new %1: Allocator
 //   %3: &var std::map::Map<i64, i64> = local.slot %2: std::map::Map<i64, i64>
 //   %4: i64 = const 101
-//   %5: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %4: i64
+//   %5: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %4: i64
 //   %6: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %5: std::mem::Error!void, cleanup map.deinit %6: std::map::Map<i64, i64>
+//   error.try %5: std::mem::Error!void, cleanup map.deinit %6: std::map::Map<i64, i64>, %1: Allocator
 //   %8: i64 = const 205
-//   %9: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %8: i64
+//   %9: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %8: i64
 //   %10: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %9: std::mem::Error!void, cleanup map.deinit %10: std::map::Map<i64, i64>
+//   error.try %9: std::mem::Error!void, cleanup map.deinit %10: std::map::Map<i64, i64>, %1: Allocator
 //   %12: i64 = const 101
-//   %13: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %12: i64
+//   %13: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %12: i64
 //   %14: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %13: std::mem::Error!void, cleanup map.deinit %14: std::map::Map<i64, i64>
+//   error.try %13: std::mem::Error!void, cleanup map.deinit %14: std::map::Map<i64, i64>, %1: Allocator
 //   %16: i64 = const 377
-//   %17: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %16: i64
+//   %17: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %16: i64
 //   %18: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %17: std::mem::Error!void, cleanup map.deinit %18: std::map::Map<i64, i64>
+//   error.try %17: std::mem::Error!void, cleanup map.deinit %18: std::map::Map<i64, i64>, %1: Allocator
 //   %20: i64 = const 205
-//   %21: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %20: i64
+//   %21: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %20: i64
 //   %22: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %21: std::mem::Error!void, cleanup map.deinit %22: std::map::Map<i64, i64>
+//   error.try %21: std::mem::Error!void, cleanup map.deinit %22: std::map::Map<i64, i64>, %1: Allocator
 //   %24: i64 = const 101
-//   %25: std::mem::Error!void = call.count_visit %3: &var std::map::Map<i64, i64>, %24: i64
+//   %25: std::mem::Error!void = call.count_visit %1: Allocator, %3: &var std::map::Map<i64, i64>, %24: i64
 //   %26: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   error.try %25: std::mem::Error!void, cleanup map.deinit %26: std::map::Map<i64, i64>
+//   error.try %25: std::mem::Error!void, cleanup map.deinit %26: std::map::Map<i64, i64>, %1: Allocator
 //   %28: i64 = const 0
 //   jump while.header.1
 // while.header.1:
-//   %29: i64 = phi [entry, %28: i64], [orelse.end.6, %43: i64]
-//   %30: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   %31: ?i64 = call.std::map::Map.key_at.i64.i64 %30: std::map::Map<i64, i64>, %29: i64
-//   %32: i64 = opt.value %31: ?i64
-//   %33: bool = opt.has %31: ?i64
-//   branch %33: bool, while.body.2, while.end.3
+//   %29: i64 = phi [entry, %28: i64], [orelse.end.6, %41: i64]
+//   %30: ?i64 = call.std::map::Map.key_at.i64.i64 %3: &var std::map::Map<i64, i64>, %29: i64
+//   %31: i64 = opt.value %30: ?i64
+//   %32: bool = opt.has %30: ?i64
+//   branch %32: bool, while.body.2, while.end.3
 // while.body.2:
-//   call.print %32: i64
-//   %35: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   %36: ?i64 = call.std::map::Map.get.i64.i64 %35: std::map::Map<i64, i64>, %32: i64
-//   %37: bool = opt.has %36: ?i64
-//   branch %37: bool, orelse.some.4, orelse.else.5
+//   call.print %31: i64
+//   %34: ?i64 = call.std::map::Map.get.i64.i64 %3: &var std::map::Map<i64, i64>, %31: i64
+//   %35: bool = opt.has %34: ?i64
+//   branch %35: bool, orelse.some.4, orelse.else.5
 // while.end.3:
-//   %44: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
-//   map.deinit %44: std::map::Map<i64, i64>
-//   %46: !void = error.ok
-//   return %46: !void
+//   %42: std::map::Map<i64, i64> = ref.load %3: &var std::map::Map<i64, i64>
+//   map.deinit %42: std::map::Map<i64, i64>, %1: Allocator
+//   %44: !void = error.ok
+//   return %44: !void
 // orelse.some.4:
-//   %38: i64 = opt.value %36: ?i64
+//   %36: i64 = opt.value %34: ?i64
 //   jump orelse.end.6
 // orelse.else.5:
-//   %39: i64 = const 0
+//   %37: i64 = const 0
 //   jump orelse.end.6
 // orelse.end.6:
-//   %40: i64 = phi [orelse.some.4, %38: i64], [orelse.else.5, %39: i64]
-//   call.print %40: i64
-//   %42: i64 = const 1
-//   %43: i64 = binary.+ %29: i64, %42: i64
+//   %38: i64 = phi [orelse.some.4, %36: i64], [orelse.else.5, %37: i64]
+//   call.print %38: i64
+//   %40: i64 = const 1
+//   %41: i64 = binary.+ %29: i64, %40: i64
 //   jump while.header.1
 // }

@@ -251,7 +251,7 @@ fn (self: &var Checker) check_callable_args(
         ) orelse return try self.checker_error_at(
             "type error", ast::zero_span(), "missing callable parameter metadata"
         );
-        let want = try self.types.substitute_type_params(declared.typ, substitutions);
+        let want = try self.types.substitute_type_params(self.allocator, declared.typ, substitutions);
         let argument = args.get_or_panic(tree, index);
         let callee_name = name.as_bytes();
         if try self.check_callable_arg(
@@ -268,7 +268,7 @@ fn (self: &var Checker) check_callable_args(
         }
         index = index + 1;
     }
-    out.* = try self.types.substitute_type_params(facts.return_type, substitutions);
+    out.* = try self.types.substitute_type_params(self.allocator, facts.return_type, substitutions);
     return null;
 }
 
@@ -604,6 +604,9 @@ fn (self: &var Checker) check_map_at_condition(
     return null;
 }
 
+// Validates Map.insert(allocator, key, value). The insert is what buys the
+// storage the entry goes in, so it names the allocator it buys from: a Map
+// header keeps none of its own (ADR-0131, ADR-0132).
 fn (self: &var Checker) check_map_insert(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -614,11 +617,20 @@ fn (self: &var Checker) check_map_insert(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     let count = args.len(tree) - offset;
-    if count != 2 {
-        return try self.receiver_arity_error("Map", "insert", 2, count);
+    if count != 3 {
+        return try self.receiver_arity_error("Map", "insert", 3, count);
+    }
+    let allocator_arg = args.get_or_panic(tree, offset);
+    var allocator = empty_type();
+    if try self.check_expr(tree, scope, allocator_arg, &var allocator) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(allocator, "Allocator") {
+        let want = try self.types.intern("Allocator");
+        return try self.map_expected_arg_error("insert", "allocator", want, allocator);
     }
     var got_key = empty_type();
-    let argument = args.get_or_panic(tree, offset);
+    let argument = args.get_or_panic(tree, offset + 1);
     if try self.check_contextual_expr(tree, scope, argument, key, &var got_key) |problem| {
         return move problem;
     }
@@ -626,7 +638,7 @@ fn (self: &var Checker) check_map_insert(
         return try self.map_expected_arg_error("insert", "key", key, got_key);
     }
     var got_value = empty_type();
-    let second_argument = args.get_or_panic(tree, offset + 1);
+    let second_argument = args.get_or_panic(tree, offset + 2);
     if try self.check_contextual_expr(
         tree,
         scope,
@@ -1029,7 +1041,7 @@ fn (self: &var Checker) check_std_method(
     var substitutions = map::new<[]u8, Type>(self.allocator);
     defer substitutions.deinit(self.allocator);
     if self.function_type_param_count(handle) == type_args.len() {
-        try self.fill_method_substitutions(handle, type_args, &var substitutions);
+        try self.fill_method_substitutions(self.allocator, handle, type_args, &var substitutions);
     }
     var index = 0;
     while index < expected {
@@ -1039,7 +1051,7 @@ fn (self: &var Checker) check_std_method(
             "type error", ast::zero_span(),
             "missing std method parameter metadata"
         );
-        let want = try self.types.substitute_type_params(parameter.typ, &substitutions);
+        let want = try self.types.substitute_type_params(self.allocator, parameter.typ, &substitutions);
         var got = empty_type();
         let argument = args.get_or_panic(tree, offset + index);
         if try self.check_contextual_expr(tree, scope, argument, want, &var got) |problem| {
@@ -1058,7 +1070,7 @@ fn (self: &var Checker) check_std_method(
         }
         index = index + 1;
     }
-    let result = try self.types.substitute_type_params(facts.return_type, &substitutions);
+    let result = try self.types.substitute_type_params(self.allocator, facts.return_type, &substitutions);
     if try self.revalidate_substituted(tree, result) |problem| {
         return move problem;
     }
@@ -1078,7 +1090,7 @@ fn (self: &var Checker) check_std_method_body(
     }
     var substitutions = map::new<[]u8, Type>(self.allocator);
     defer substitutions.deinit(self.allocator);
-    try self.fill_method_substitutions(method, type_args, &var substitutions);
+    try self.fill_method_substitutions(self.allocator, method, type_args, &var substitutions);
     var fields = map::new<[]u8, MetaFieldHandle>(self.allocator);
     defer fields.deinit(self.allocator);
     return self.check_generic_instantiation(tree, method, &substitutions, &fields);
@@ -1109,6 +1121,8 @@ fn (self: &Checker) function_has_body(function: FunctionHandle) -> bool {
 }
 
 fn (self: &Checker) fill_method_substitutions(
+
+    allocator: Allocator,
     function: FunctionHandle,
     type_args: &array::Array<Type>,
     out: &var map::Map<[]u8, Type>
@@ -1120,7 +1134,7 @@ fn (self: &Checker) fill_method_substitutions(
             if parameter.is_type {
                 if type_args.get(type_index) |argument| {
                     let name = parameter.name.as_bytes();
-                    try out.insert(name, argument);
+                    try out.insert(allocator, name, argument);
                 }
                 type_index = type_index + 1;
             }

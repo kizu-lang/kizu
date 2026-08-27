@@ -113,7 +113,7 @@ fn (self: &var Checker) reject_array_storage_type(
     if self.seen_contains(seen, type_name) {
         return null;
     }
-    try self.mark_seen(seen, type_name, true);
+    try self.mark_seen(self.allocator, seen, type_name, true);
     if self.names.is_raw_pointer(type_name) {
         return try self.error0(ast::zero_span(), "array error: Array element cannot be raw pointer");
     }
@@ -865,12 +865,16 @@ fn (self: &var Checker) check_generic_map_primitive_method(
 ) -> !?diagnostic::Diagnostic {
     if self.names.is(method, "insert") {
         let count = arg_count(tree, args);
-        if count != 2 {
+        if count != 3 {
             return try self.error1(
-                tree, ast::zero_span(), "map error: `Map.insert` expects 2 args, got %d", Arg::Int(count)
+                tree, ast::zero_span(), "map error: `Map.insert` expects 3 args, got %d", Arg::Int(count)
             );
         }
-        let first = args.get_or_panic(tree, 0);
+        let allocator_arg = args.get_or_panic(tree, 0);
+        if try self.read_grow_allocator(tree, env, "Map.insert", allocator_arg) |failed| {
+            return move failed;
+        }
+        let first = args.get_or_panic(tree, 1);
         var got = empty_name();
         if try self.read_expr(tree, env, first, &var got) |failed| {
             return move failed;
@@ -881,7 +885,7 @@ fn (self: &var Checker) check_generic_map_primitive_method(
                 Arg::Str(key_type), Arg::Str(got)
             );
         }
-        let second = args.get_or_panic(tree, 1);
+        let second = args.get_or_panic(tree, 2);
         if try self.move_contextual_expr(tree, env, second, value_type, &var got) |failed| {
             return move failed;
         }
@@ -1097,7 +1101,7 @@ fn (self: &Checker) static_args_count_error(
 fn (self: &Checker) bind_subst_param(out: &var Subst, param: Name, replacement: Name) -> !void {
     let retained = name_text(&self.names, param);
     let bytes = retained.as_bytes();
-    try put_name(&var out.by_name, bytes, replacement);
+    try put_name(self.allocator, &var out.by_name, bytes, replacement);
     let key = try self.names.copy(param);
     errdefer key.deinit(self.allocator);
     let value = try self.names.copy(replacement);
@@ -1183,7 +1187,7 @@ fn (self: &Checker) bound_meta_field(name: Name) -> ?MetaField {
 fn (self: &var Checker) bind_generic_field(name: Name, field: MetaField) -> !void {
     let retained = name_text(&self.names, name);
     let bytes = retained.as_bytes();
-    let _ = try self.meta_fields.bind(bytes, field);
+    let _ = try self.meta_fields.bind(self.allocator, bytes, field);
     return;
 }
 
@@ -1267,6 +1271,7 @@ fn (self: &var Checker) enter_instantiation(
         done.* = true;
         return null;
     }
+    let allocator = self.allocator;
     if self.instantiation_depth >= max_instantiation_depth() {
         done.* = true;
         let key_name = try self.names.intern(key_bytes);
@@ -1276,7 +1281,7 @@ fn (self: &var Checker) enter_instantiation(
             Arg::Int(max_instantiation_depth()), Arg::Str(elided)
         );
     }
-    try put_flag(&var self.checked_instances, key_bytes, true);
+    try put_flag(allocator, &var self.checked_instances, key_bytes, true);
     self.instantiation_depth = self.instantiation_depth + 1;
     return null;
 }

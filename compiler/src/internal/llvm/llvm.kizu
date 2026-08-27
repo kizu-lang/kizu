@@ -399,6 +399,58 @@ fn (self: &var Emitter) line5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: A
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
+/// Renders one format with seven arguments, the widest a call takes.
+fn format_args7(
+    allocator: Allocator,
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg,
+    e: Arg,
+    f: Arg,
+    g: Arg
+) -> !void {
+    errdefer a.deinit(allocator);
+    errdefer b.deinit(allocator);
+    errdefer c.deinit(allocator);
+    errdefer d.deinit(allocator);
+    errdefer e.deinit(allocator);
+    errdefer f.deinit(allocator);
+    errdefer g.deinit(allocator);
+    var position = 0;
+    try place_arg(allocator, out, names, format, &var position, move a);
+    try place_arg(allocator, out, names, format, &var position, move b);
+    try place_arg(allocator, out, names, format, &var position, move c);
+    try place_arg(allocator, out, names, format, &var position, move d);
+    try place_arg(allocator, out, names, format, &var position, move e);
+    try place_arg(allocator, out, names, format, &var position, move f);
+    try place_arg(allocator, out, names, format, &var position, move g);
+    return append_format_rest(allocator, out, format, position);
+}
+
+/// Writes one formatted line with seven arguments.
+fn (self: &var Emitter) line7(
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg,
+    e: Arg,
+    f: Arg,
+    g: Arg
+) -> !void {
+    let allocator = self.allocator;
+    let names = &self.names;
+    try format_args7(
+        allocator, &var self.out, names, format,
+        move a, move b, move c, move d, move e, move f, move g
+    );
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
 /// Writes one formatted line with six arguments.
 fn (self: &var Emitter) line6(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg, f: Arg) -> !void {
     let allocator = self.allocator;
@@ -571,7 +623,7 @@ fn (self: &var Emitter) collect_function_names(module: &ir::Module) -> !void {
         let name = module.function_name(function);
         let retained = ir::name_text(&module.names, name);
         let bytes = retained.as_bytes();
-        try self.function_names.insert(bytes, function);
+        try self.function_names.insert(self.allocator, bytes, function);
     }
     return;
 }
@@ -603,10 +655,10 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
                     let literal_bytes = literal.as_bytes();
                     if !self.strings.contains(literal_bytes) {
                         let global = try self.text1("@.str.%d", Arg::Int(next));
-                        try self.strings.insert(literal_bytes, global);
+                        try self.strings.insert(self.allocator, literal_bytes, global);
                         let global_text = ir::name_text(&self.names, global);
                         let global_bytes = global_text.as_bytes();
-                        try self.string_literals.insert(global_bytes, instr_node.immediate);
+                        try self.string_literals.insert(self.allocator, global_bytes, instr_node.immediate);
                         next = next + 1;
                     }
                 }
@@ -923,7 +975,7 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
             try self.set_value(module, param.value(), operand);
         }
     }
-    try self.register_forwarded_values(module, node);
+    try self.register_forwarded_values(self.allocator, module, node);
     let name_text = ir::name_text(&module.names, node.name);
     let name_bytes = name_text.as_bytes();
     let symbol = try self.llvm_function_name(name_bytes);
@@ -1009,7 +1061,7 @@ fn (self: &Emitter) sprint3(format: []u8, a: Arg, b: Arg, c: Arg) -> !string::St
 /// written, the Go `registerForwardedValues`. A match merge block is
 /// written before the arms that feed it, and a phi that reads a forwarded
 /// value would otherwise name a register nothing ever defines.
-fn (self: &var Emitter) register_forwarded_values(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+fn (self: &var Emitter) register_forwarded_values(allocator: Allocator, module: &ir::Module, node: &ir::FunctionNode) -> !void {
     var defs = map::new<[]u8, ir::Instr>(self.allocator);
     defer defs.deinit(self.allocator);
     var block_index = 0;
@@ -1023,7 +1075,7 @@ fn (self: &var Emitter) register_forwarded_values(module: &ir::Module, node: &ir
             if !ir::is_empty(instr_node.result.name) {
                 let retained = ir::name_text(&module.names, instr_node.result.name);
                 let bytes = retained.as_bytes();
-                try defs.insert(bytes, instr);
+                try defs.insert(allocator, bytes, instr);
             }
         }
     }
@@ -1211,7 +1263,7 @@ fn (self: &var Emitter) write_instr(module: &ir::Module, node: &ir::InstrNode) -
         CallIndirect => return self.write_indirect_call(module, node),
         Cast => return self.write_cast(module, node),
         Phi => return self.write_phi(module, node),
-        StructNew => return self.write_struct_new(module, node),
+        StructNew => return self.write_struct_new(self.allocator, module, node),
         Field => return self.write_field(module, node),
         FieldRef => return self.write_field_ref(module, node),
         FieldAddr => return self.write_field_addr(module, node),

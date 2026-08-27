@@ -227,29 +227,6 @@ func (e *emitter) writeArrayNew(instr *ir.Instr) error {
 	return nil
 }
 
-// writeContainerNew lowers one container constructor to its runtime call:
-// the allocator handle and the element size are the whole ABI.
-func (e *emitter) writeContainerNew(
-	instr *ir.Instr,
-	runtime string,
-	isResultType func(string) bool,
-	shape string,
-) error {
-	if len(instr.Args) != 1 || !isResultType(instr.Result.Type) {
-		return fmt.Errorf("llvm error: %s", shape)
-	}
-	elem, err := e.instrElementType(instr)
-	if err != nil {
-		return err
-	}
-	resultName := localName(instr.Result.Name)
-	allocator := e.value(instr.Args[0])
-	fmt.Fprintf(&e.out, "  %s = call ptr @%s(ptr %s, i64 %s)\n",
-		resultName, runtime, allocator.operand, e.elementSizeOperand(elem))
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
-}
-
 // writeArrayAppend lowers Array.append(allocator, value) and preserves !void
 // failure flow.
 func (e *emitter) writeArrayAppend(instr *ir.Instr) error {

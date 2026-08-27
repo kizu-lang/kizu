@@ -38,6 +38,8 @@ fn (self: std::mem::Box<T>) deinit<T>(allocator: Allocator) -> void
 fn (self: std::array::Array<T>) deinit<T>(allocator: Allocator) -> void
 fn (self: &var std::array::Array<T>) append<T>(allocator: Allocator, value: T) -> !void
 fn (self: &var std::array::Array<T>) reserve<T>(allocator: Allocator, n: i64) -> !void
+fn (self: &var std::map::Map<K, V>) insert<K, V>(allocator: Allocator, key: K, value: V) -> !void
+fn (self: &var std::arena::Arena<T>) add<T>(allocator: Allocator, value: T) -> Handle<T>
 ```
 
 `sizeof(T)` を compile 時の値として渡すのと同じ扱いです。確保にも解放にも必要な

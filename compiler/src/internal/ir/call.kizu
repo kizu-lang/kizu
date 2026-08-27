@@ -522,6 +522,7 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     let array_op = array_primitive(bytes);
     let array_shape = array_primitive_shape(bytes);
     let map_op = map_primitive(bytes);
+    let map_shape = map_primitive_shape(bytes);
     let box_op = box_primitive(bytes);
     let arena_op = arena_primitive(bytes);
     let arena_writes_header = arena_primitive_writes_header(bytes);
@@ -541,11 +542,6 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     }
     if map_op |op| {
         handled.* = true;
-        var args = array::new<Value>(self.allocator);
-        defer args.deinit(self.allocator);
-        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
-            return move failed;
-        }
         let resolved = try self.resolve_type_args(type_arg);
         var key_type = empty_name();
         let value_type = try self.map_primitive_type_args(tree, resolved, &var key_type);
@@ -554,6 +550,12 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
                 tree, "ir error: a std::map::Map primitive takes 2 static arguments, got `%s`",
                 Arg::Str(resolved)
             );
+        }
+        let named = try self.map_primitive_param_types(map_shape, key_type, value_type);
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit(self.allocator);
+        if try self.lower_call_args_named(tree, named, raw_args, &var args) |failed| {
+            return move failed;
         }
         return self.lower_map_method(tree, op, key_type, value_type, &args, out);
     }
@@ -637,6 +639,81 @@ fn array_primitive_shape(name: []u8) -> ArrayPrimitiveShape {
         takes_index_and_element: mem::equal_bytes(name, "std::internal::builtin::array_set"),
         takes_bytes: mem::equal_bytes(name, "std::internal::builtin::array_append_bytes")
     };
+}
+
+/// Says how one map primitive receives its map, the Go `mapPrimitiveParams`
+/// -- a map is its header too. A primitive that writes through the header is
+/// handed the binding's storage; the rest receive the address of a copy, and
+/// `deinit` receives the header itself, because releasing it is the last thing
+/// done with it. The key and value positions are named as well, so an integer
+/// literal written at a call narrows rather than staying i64.
+fn (self: &var Lowerer) map_primitive_param_types(
+    shape: MapPrimitiveShape,
+    key: Name,
+    value: Name
+) -> !NamedTypes {
+    if shape.releases {
+        return no_named_types();
+    }
+    let map_type = try self.map_type_name(key, value);
+    var self_type = try self.module.names.prefixed("&", map_type);
+    if shape.mutates {
+        self_type = try self.module.names.prefixed("&var ", map_type);
+    }
+    if shape.takes_key_and_value {
+        let allocator_type = try self.module.names.intern("Allocator");
+        return NamedTypes {
+            first: self_type, second: allocator_type, third: key, fourth: value
+        };
+    }
+    if shape.takes_key {
+        return NamedTypes {
+            first: self_type, second: key, third: empty_name(), fourth: empty_name()
+        };
+    }
+    if shape.takes_index {
+        let index_type = try self.module.names.intern("i64");
+        return NamedTypes {
+            first: self_type, second: index_type, third: empty_name(), fourth: empty_name()
+        };
+    }
+    return NamedTypes {
+        first: self_type, second: empty_name(), third: empty_name(), fourth: empty_name()
+    };
+}
+
+/// What one map primitive does with the map it is handed, read from its name
+/// while the name table is still borrowed for it.
+struct MapPrimitiveShape {
+    releases: bool,
+    mutates: bool,
+    takes_key_and_value: bool,
+    takes_key: bool,
+    takes_index: bool
+}
+
+/// Reads the shape of one map primitive from its name.
+fn map_primitive_shape(name: []u8) -> MapPrimitiveShape {
+    return MapPrimitiveShape {
+        releases: mem::equal_bytes(name, "std::internal::builtin::map_deinit"),
+        mutates: map_mutating_primitive(name),
+        takes_key_and_value: mem::equal_bytes(name, "std::internal::builtin::map_insert"),
+        takes_key: mem::equal_bytes(name, "std::internal::builtin::map_get") or
+            mem::equal_bytes(name, "std::internal::builtin::map_at") or
+            mem::equal_bytes(name, "std::internal::builtin::map_at_mut") or
+            mem::equal_bytes(name, "std::internal::builtin::map_contains"),
+        takes_index: mem::equal_bytes(name, "std::internal::builtin::map_key_at") or
+            mem::equal_bytes(name, "std::internal::builtin::map_take_value_at")
+    };
+}
+
+/// Names the map primitives that write through the header, the Go
+/// `mapMutatingPrimitives`. They receive the binding's storage; the rest
+/// receive the address of a copy.
+pub fn map_mutating_primitive(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std::internal::builtin::map_insert") or
+        mem::equal_bytes(name, "std::internal::builtin::map_at_mut") or
+        mem::equal_bytes(name, "std::internal::builtin::map_take_value_at");
 }
 
 /// Says how one arena primitive receives its arena, the Go

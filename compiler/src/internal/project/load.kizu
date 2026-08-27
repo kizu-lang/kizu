@@ -59,11 +59,12 @@ fn (self: &Loader) module_pkg_copy(file: arena::Handle<ModuleFile>) -> !string::
 
 /// Records that a name was reached through one of a module's namespaces.
 fn (self: &var Loader) use_namespace(
+    allocator: Allocator,
     file: arena::Handle<ModuleFile>,
     alias: []u8
 ) -> !void {
     if self.files.at_mut(file) |entry| {
-        return entry.used.insert(alias, true);
+        return entry.used.insert(allocator, alias, true);
     }
     return;
 }
@@ -198,7 +199,7 @@ fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnosti
                     try text.append_bytes(self.allocator, "`");
                     return try module_error(self.allocator, move text);
                 }
-                try self.types.insert(
+                try self.types.insert(self.allocator,
                     qualified_bytes,
                     Export { group: group, public: declared.public }
                 );
@@ -245,7 +246,7 @@ fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagn
                         try text.append_bytes(self.allocator, "`");
                         return try module_error(self.allocator, move text);
                     }
-                    try self.functions.insert(
+                    try self.functions.insert(self.allocator,
                         qualified_bytes,
                         Export { group: group, public: value.signature.public }
                     );
@@ -319,7 +320,7 @@ fn (self: &Loader) ordered_modules() -> !OrderResult {
     var index = 0;
     while loaded.at(index) |group| {
         index = index + 1;
-        if try self.visit_module(group.*, &var visiting, &var visited, &var out) |failed| {
+        if try self.visit_module(self.allocator, group.*, &var visiting, &var visited, &var out) |failed| {
             out.deinit(self.allocator);
             return OrderResult::Failed(move failed);
         }
@@ -329,6 +330,7 @@ fn (self: &Loader) ordered_modules() -> !OrderResult {
 
 /// Performs a deterministic DFS over explicit module imports.
 fn (self: &Loader) visit_module(
+    allocator: Allocator,
     group: arena::Handle<ModuleGroup>,
     visiting: &var map::Map<[]u8, bool>,
     visited: &var map::Map<[]u8, bool>,
@@ -349,7 +351,7 @@ fn (self: &Loader) visit_module(
             return try module_error(self.allocator, move text);
         }
     }
-    try visiting.insert(path, true);
+    try visiting.insert(allocator, path, true);
     let imports = try sorted_import_paths(self.allocator, &entry.imports);
     defer imports.deinit(self.allocator);
     var index = 0;
@@ -359,13 +361,13 @@ fn (self: &Loader) visit_module(
         // A package root binds a namespace without naming one module, so there
         // is no single dependency to order this one after.
         if self.group_by_path.get(import_bytes) |imported| {
-            if try self.visit_module(imported, visiting, visited, out) |failed| {
+            if try self.visit_module(allocator, imported, visiting, visited, out) |failed| {
                 return move failed;
             }
         }
     }
-    try visiting.insert(path, false);
-    try visited.insert(path, true);
+    try visiting.insert(allocator, path, false);
+    try visited.insert(allocator, path, true);
     try out.append(self.allocator, group);
     return null;
 }
@@ -462,7 +464,7 @@ fn (self: &var Loader) resolve_imports(
             bound_index = bound_index + 1;
             let target_bytes = import_entry.path.as_bytes();
             if !entry.imports.contains(target_bytes) {
-                try entry.imports.insert(
+                try entry.imports.insert(allocator,
                     target_bytes,
                     try copy_string(allocator, &import_entry.path)
                 );
@@ -476,12 +478,12 @@ fn (self: &var Loader) resolve_imports(
         while bound.at(bound_index) |import_entry| {
             bound_index = bound_index + 1;
             let alias_bytes = import_entry.alias.as_bytes();
-            try entry.imports.insert(alias_bytes, try copy_string(allocator, &import_entry.path));
-            try entry.namespaces.insert(alias_bytes, try copy_string(allocator, &import_entry.path));
+            try entry.imports.insert(allocator, alias_bytes, try copy_string(allocator, &import_entry.path));
+            try entry.namespaces.insert(allocator, alias_bytes, try copy_string(allocator, &import_entry.path));
         }
         let pkg = pkg_text.as_bytes();
         if mem::len(pkg) > 0 and !entry.namespaces.contains(pkg) {
-            try entry.namespaces.insert(pkg, try copy_string(allocator, &pkg_text));
+            try entry.namespaces.insert(allocator, pkg, try copy_string(allocator, &pkg_text));
         }
     }
     return null;

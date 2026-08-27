@@ -469,7 +469,7 @@ fn (self: &var Checker) check_match_stmt(
             }
             value_type = try self.types.borrowed_value_type(value_type);
             if self.match_target(value_type) |target| {
-                return self.check_match_arms(
+                return self.check_match_arms(self.allocator,
                     tree,
                     scope,
                     &arms,
@@ -490,6 +490,7 @@ fn (self: &var Checker) check_match_stmt(
 
 // Validates tag patterns and return flow for match arms.
 fn (self: &var Checker) check_match_arms(
+    allocator: Allocator,
     tree: &var ast::Ast,
     scope: ScopeHandle,
     arms: &array::Array<ast::MatchArm>,
@@ -501,7 +502,7 @@ fn (self: &var Checker) check_match_arms(
 ) -> !?diagnostic::Diagnostic {
     var arm_variants = map::new<[]u8, MetaFieldHandle>(self.allocator);
     defer arm_variants.deinit(self.allocator);
-    if try self.match_arm_variants(tree, meta_capture, meta_owner, &var arm_variants) |problem| {
+    if try self.match_arm_variants(allocator, tree, meta_capture, meta_owner, &var arm_variants) |problem| {
         return move problem;
     }
     let retained_capture = tree.texts.at(meta_capture.node);
@@ -547,7 +548,7 @@ fn (self: &var Checker) check_match_arms(
                         tree, "duplicate match tag `", target, tag, "`"
                     );
                 }
-                try seen.insert(key_bytes, true);
+                try seen.insert(allocator, key_bytes, true);
             } else {
                 if try self.match_payload_type(tree, target, arm, &var payload) |problem| {
                     return move problem;
@@ -557,7 +558,7 @@ fn (self: &var Checker) check_match_arms(
                         tree, "duplicate match tag `", target, tag, "`"
                     );
                 }
-                try seen.insert(tag, true);
+                try seen.insert(allocator, tag, true);
             }
         }
         let arm_scope = self.scopes.new_scope(scope);
@@ -594,6 +595,7 @@ fn (self: &var Checker) check_match_arms(
 // Indexes by tag the variants a `comptime match` arm body is written against.
 // A match written by hand carries no capture and binds nothing.
 fn (self: &var Checker) match_arm_variants(
+    allocator: Allocator,
     tree: &ast::Ast,
     meta_capture: ast::Text,
     meta_owner: ast::Text,
@@ -615,7 +617,7 @@ fn (self: &var Checker) match_arm_variants(
     while variants.get(index) |handle| {
         let field = self.meta_field_entries.at(handle.node);
         let name = field.name.as_bytes();
-        try out.insert(name, handle);
+        try out.insert(allocator, name, handle);
         index = index + 1;
     }
     return null;
@@ -1483,11 +1485,12 @@ fn (self: &var Checker) check_match_expr(
     value_type = try self.types.borrowed_value_type(value_type);
     let target = self.match_target(value_type) orelse
         return try self.match_target_error(value_type);
-    return self.check_match_expr_arms(tree, scope, &arms, target, out);
+    return self.check_match_expr_arms(self.allocator, tree, scope, &arms, target, out);
 }
 
 // Validates match expression arms and returns their common type.
 fn (self: &var Checker) check_match_expr_arms(
+    allocator: Allocator,
     tree: &var ast::Ast,
     scope: ScopeHandle,
     arms: &array::Array<ast::MatchArm>,
@@ -1534,7 +1537,7 @@ fn (self: &var Checker) check_match_expr_arms(
                         tree, "duplicate match tag `", target, tag, "`"
                     );
                 }
-                try seen.insert(key_bytes, true);
+                try seen.insert(allocator, key_bytes, true);
                 let child = self.scopes.new_scope(scope);
                 if try self.check_stmt_value(tree, child, arm.body, &var got) |problem| {
                     return move problem;
@@ -1550,7 +1553,7 @@ fn (self: &var Checker) check_match_expr_arms(
                         tree, "duplicate match tag `", target, tag, "`"
                     );
                 }
-                try seen.insert(tag, true);
+                try seen.insert(allocator, tag, true);
             }
         }
         if index == 0 {

@@ -51,6 +51,9 @@ func (e *emitter) llvmType(typ string) string {
 	if isArrayLLVMType(typ) || isArenaLLVMType(typ) {
 		return arrayHeaderType
 	}
+	if isMapLLVMType(typ) {
+		return mapHeaderType
+	}
 	if _, ok := e.module.Structs[typ]; ok {
 		return llvmStructTypeName(typ)
 	}

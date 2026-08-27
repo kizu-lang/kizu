@@ -14,10 +14,11 @@ struct Scope {
 }
 
 fn (self: &var Scope) declare(
+    allocator: Allocator,
     name: []u8,
     kind: BindingKind
 ) -> !void {
-    try self.symbols.insert(name, kind);
+    try self.symbols.insert(allocator, name, kind);
     return;
 }
 
@@ -44,9 +45,9 @@ test "std map resolver scope" {
 
     try owned_name.append_bytes(allocator, "node");
     let node_name = owned_name.as_bytes();
-    try scope.declare(node_name, BindingKind::Local);
+    try scope.declare(allocator, node_name, BindingKind::Local);
 
-    try scope.declare("parse_expr", BindingKind::Function);
+    try scope.declare(allocator, "parse_expr", BindingKind::Function);
 
     testing::expect_equal<i64>(2, scope.len());
     testing::expect(scope.contains("node"));
@@ -71,7 +72,7 @@ test "std map resolver scope" {
 // 
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // 
-// %kizu.struct.Scope = type { ptr }
+// %kizu.struct.Scope = type { %kizu.map }
 // %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
 // %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
 // %kizu.struct.std__string__Scalar = type { i64, i64 }
@@ -94,20 +95,20 @@ test "std map resolver scope" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// declare ptr @kizu_map_new(ptr, i64)
-// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// %kizu.map = type { ptr, i64, i64, ptr, i64 }
+// declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)
 // declare ptr @kizu_map_get(ptr, ptr, i64)
 // declare ptr @kizu_map_value_at(ptr, i64)
 // declare void @kizu_map_key_at(ptr, ptr, i64)
 // declare i1 @kizu_map_contains(ptr, ptr, i64)
 // declare i64 @kizu_map_len(ptr)
-// declare void @kizu_map_deinit(ptr)
+// declare void @kizu_map_deinit(ptr, ptr, i64)
 // 
-// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare void @std__map__Map_deinit__5b_5du8_BindingKind(ptr, ptr)
-// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, %kizu.slice.u8, i64)
-// declare i64 @std__map__Map_len__5b_5du8_BindingKind(ptr)
+// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map, ptr)
+// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, ptr, %kizu.slice.u8, i64)
+// declare i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(ptr)
@@ -117,11 +118,10 @@ test "std map resolver scope" {
 // 
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define %kizu.error.void @Scope_declare(ptr %kizu.self, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
+// define %kizu.error.void @Scope_declare(ptr %kizu.self, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
 // entry:
-//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
+//   %kizu.1 = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -138,24 +138,24 @@ test "std map resolver scope" {
 // define %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
 //   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret %kizu.opt.BindingKind %kizu.2
 // }
 // 
 // define i64 @Scope_len(ptr %kizu.self) {
 // entry:
 //   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(ptr %kizu.1)
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map %kizu.1)
 //   ret i64 %kizu.2
 // }
 // 
 // define i1 @Scope_contains(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
 //   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret i1 %kizu.2
 // }
 // 
@@ -163,7 +163,7 @@ test "std map resolver scope" {
 // entry:
 //   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   call void @std__map__Map_deinit__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator)
+//   call void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -176,8 +176,7 @@ test "std map resolver scope" {
 //   %kizu.arg.0.10 = alloca %kizu.struct.Scope
 //   %kizu.arg.0.11 = alloca %kizu.struct.Scope
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
-//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, ptr %kizu.2, 0
+//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, %kizu.map zeroinitializer, 0
 //   store %kizu.struct.Scope %kizu.3, ptr %kizu.4
 //   %kizu.5 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.1)
 //   store %kizu.struct.std__string__String %kizu.5, ptr %kizu.6
@@ -200,7 +199,7 @@ test "std map resolver scope" {
 //   ret %kizu.error.void %kizu.try.err.4
 // kizu.11.try.ok:
 //   %kizu.12 = call %kizu.slice.u8 @std__string__String_as_bytes(ptr %kizu.6)
-//   %kizu.14 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.12, i64 1)
+//   %kizu.14 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.12, i64 1)
 //   %kizu.15 = load %kizu.struct.std__string__String, ptr %kizu.6
 //   %kizu.16 = load %kizu.struct.Scope, ptr %kizu.4
 //   %kizu.17.ok = extractvalue %kizu.error.void %kizu.14, 0
@@ -215,7 +214,7 @@ test "std map resolver scope" {
 //   %kizu.18.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.18.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.18.ptr, 0
 //   %kizu.18 = insertvalue %kizu.slice.u8 %kizu.18.base, i64 10, 1
-//   %kizu.20 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.18, i64 0)
+//   %kizu.20 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.18, i64 0)
 //   %kizu.21 = load %kizu.struct.std__string__String, ptr %kizu.6
 //   %kizu.22 = load %kizu.struct.Scope, ptr %kizu.4
 //   %kizu.23.ok = extractvalue %kizu.error.void %kizu.20, 0
@@ -295,7 +294,7 @@ test "std map resolver scope" {
 // 
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // 
-// %kizu.struct.Scope = type { ptr }
+// %kizu.struct.Scope = type { %kizu.map }
 // %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
 // %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
 // %kizu.struct.std__string__Scalar = type { i64, i64 }
@@ -318,20 +317,20 @@ test "std map resolver scope" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// declare ptr @kizu_map_new(ptr, i64)
-// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// %kizu.map = type { ptr, i64, i64, ptr, i64 }
+// declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)
 // declare ptr @kizu_map_get(ptr, ptr, i64)
 // declare ptr @kizu_map_value_at(ptr, i64)
 // declare void @kizu_map_key_at(ptr, ptr, i64)
 // declare i1 @kizu_map_contains(ptr, ptr, i64)
 // declare i64 @kizu_map_len(ptr)
-// declare void @kizu_map_deinit(ptr)
+// declare void @kizu_map_deinit(ptr, ptr, i64)
 // 
-// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare void @std__map__Map_deinit__5b_5du8_BindingKind(ptr, ptr)
-// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, %kizu.slice.u8, i64)
-// declare i64 @std__map__Map_len__5b_5du8_BindingKind(ptr)
+// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map, ptr)
+// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, ptr, %kizu.slice.u8, i64)
+// declare i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare %kizu.slice.u8 @std__string__String_as_bytes(ptr)
@@ -341,11 +340,10 @@ test "std map resolver scope" {
 // 
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define %kizu.error.void @Scope_declare(ptr %kizu.self, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
+// define %kizu.error.void @Scope_declare(ptr %kizu.self, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
 // entry:
-//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
+//   %kizu.1 = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -362,24 +360,24 @@ test "std map resolver scope" {
 // define %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
 //   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret %kizu.opt.BindingKind %kizu.2
 // }
 // 
 // define i64 @Scope_len(ptr %kizu.self) {
 // entry:
 //   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(ptr %kizu.1)
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map %kizu.1)
 //   ret i64 %kizu.2
 // }
 // 
 // define i1 @Scope_contains(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
 //   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret i1 %kizu.2
 // }
 // 
@@ -387,7 +385,7 @@ test "std map resolver scope" {
 // entry:
 //   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   call void @std__map__Map_deinit__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator)
+//   call void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -400,8 +398,7 @@ test "std map resolver scope" {
 //   %kizu.arg.0.10 = alloca %kizu.struct.Scope
 //   %kizu.arg.0.11 = alloca %kizu.struct.Scope
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
-//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, ptr %kizu.2, 0
+//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, %kizu.map zeroinitializer, 0
 //   store %kizu.struct.Scope %kizu.3, ptr %kizu.4
 //   %kizu.5 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.1)
 //   store %kizu.struct.std__string__String %kizu.5, ptr %kizu.6
@@ -424,7 +421,7 @@ test "std map resolver scope" {
 //   ret %kizu.error.void %kizu.try.err.4
 // kizu.11.try.ok:
 //   %kizu.12 = call %kizu.slice.u8 @std__string__String_as_bytes(ptr %kizu.6)
-//   %kizu.14 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.12, i64 1)
+//   %kizu.14 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.12, i64 1)
 //   %kizu.15 = load %kizu.struct.std__string__String, ptr %kizu.6
 //   %kizu.16 = load %kizu.struct.Scope, ptr %kizu.4
 //   %kizu.17.ok = extractvalue %kizu.error.void %kizu.14, 0
@@ -439,7 +436,7 @@ test "std map resolver scope" {
 //   %kizu.18.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
 //   %kizu.18.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.18.ptr, 0
 //   %kizu.18 = insertvalue %kizu.slice.u8 %kizu.18.base, i64 10, 1
-//   %kizu.20 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.18, i64 0)
+//   %kizu.20 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.18, i64 0)
 //   %kizu.21 = load %kizu.struct.std__string__String, ptr %kizu.6
 //   %kizu.22 = load %kizu.struct.Scope, ptr %kizu.4
 //   %kizu.23.ok = extractvalue %kizu.error.void %kizu.20, 0

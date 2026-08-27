@@ -4,14 +4,18 @@
 
 ```text
 std::arena::new<T>(allocator: Allocator) -> std::arena::Arena<T>
-arena.add(value: T) -> std::arena::Handle<T>
+arena.add(allocator: Allocator, value: T) -> std::arena::Handle<T>
 arena.at(handle: std::arena::Handle<T>) -> &T
 arena.at_mut(handle: std::arena::Handle<T>) -> ?&var T
 arena.deinit(allocator: Allocator) -> void
 ```
 
-`new` は明示的な allocator capability を読み取り、`add` は value を arena へ
-move します。返る `Handle<T>` は raw pointer ではなく copy できる opaque ID です。
+`new` は明示的な allocator capability を読み取りますが、header そのものを作る
+だけで何も確保しません。だから失敗しようがなく、`!T` を返しません。storage を
+買うのは最初の `add` で、失敗を言うのもそこです(ADR-0131)。`add` は value を
+arena へ move し、storage を買う call なので allocator を receiver の次に取り
+ます(ADR-0132)。返る `Handle<T>` は raw pointer ではなく copy できる opaque ID
+です。
 要素 storage が移動しても handle は ID のままなので、要素間の関係を handle field
 として持てます。削除 API はありません。
 

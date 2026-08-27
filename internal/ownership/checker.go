@@ -5486,15 +5486,18 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 ) (string, error) {
 	switch name {
 	case "insert":
-		if len(args) != 2 {
-			return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
+		if len(args) != 3 {
+			return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
 		}
-		if got, err := c.readExpr(args[0], env); err != nil {
+		if err := c.readGrowAllocator("Map.insert", args[0], env); err != nil {
+			return "", err
+		}
+		if got, err := c.readExpr(args[1], env); err != nil {
 			return "", err
 		} else if got != keyType {
 			return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
-		got, err := c.moveContextualExpr(args[1], valueType, env)
+		got, err := c.moveContextualExpr(args[2], valueType, env)
 		if err != nil {
 			return "", err
 		}
@@ -7506,22 +7509,27 @@ func (c *Checker) checkMapAtCondition(
 	return "?&" + valueType, nil
 }
 
-// checkMapInsert validates read-only key and copy value insertion.
+// checkMapInsert validates Map.insert(allocator, key, value). The insert is
+// the call that buys storage, so it names the allocator it buys from, the same
+// way an Array append does: the header keeps none of its own (ADR-0131).
 func (c *Checker) checkMapInsert(
 	keyType string,
 	valueType string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if len(args) != 2 {
-		return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
+	if len(args) != 3 {
+		return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
 	}
-	if got, err := c.readContextualExpr(args[0], keyType, env); err != nil {
+	if err := c.readGrowAllocator("Map.insert", args[0], env); err != nil {
+		return "", err
+	}
+	if got, err := c.readContextualExpr(args[1], keyType, env); err != nil {
 		return "", err
 	} else if !sameOwnershipType(got, keyType) {
 		return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 	}
-	got, err := c.moveContextualExpr(args[1], valueType, env)
+	got, err := c.moveContextualExpr(args[2], valueType, env)
 	if err != nil {
 		return "", err
 	}
@@ -7529,6 +7537,19 @@ func (c *Checker) checkMapInsert(
 		return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "std::mem::Error!void", nil
+}
+
+// readGrowAllocator reads the leading Allocator a storage-asking container
+// method names.
+func (c *Checker) readGrowAllocator(what string, arg ast.Expression, env *scope) error {
+	got, err := c.readExpr(arg, env)
+	if err != nil {
+		return err
+	}
+	if got != "Allocator" {
+		return errorf("map error: `%s` expects Allocator, got %s", what, got)
+	}
+	return nil
 }
 
 // checkMapIndexArg validates one i64 insertion-position argument.

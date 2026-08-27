@@ -71,7 +71,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.write_union_types(module);
     try self.write_struct_types(module);
     try self.write_enum_name_tables(module);
-    try self.write_error_name_table(module);
+    try self.write_error_name_table(self.allocator, module);
     var literals = try self.sorted_string_literals();
     defer literals.deinit(self.allocator);
     var index = 0;
@@ -180,7 +180,7 @@ fn hex_value(ch: u8) -> ?i64 {
 /// by the code itself, the Go `writeErrorNameTable`. Codes are global, so
 /// one table serves all sets; row 0 is the reserved "no error" entry and
 /// stays empty.
-fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
+fn (self: &var Emitter) write_error_name_table(allocator: Allocator, module: &ir::Module) -> !void {
     if !try self.needs_error_name_table(module) {
         return;
     }
@@ -203,7 +203,7 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
                 defer key.deinit(self.allocator);
                 try fmt::append_i64(self.allocator, &var key, code);
                 let key_bytes = key.as_bytes();
-                try spellings.insert(key_bytes, spelling_name);
+                try spellings.insert(allocator, key_bytes, spelling_name);
             }
         }
     }
@@ -241,7 +241,7 @@ fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
 /// Declares the failure entries this module reports through, the Go
 /// `writePanicDecls`.
 fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
-    var keys = try self.used_panic_entries(module);
+    var keys = try self.used_panic_entries(self.allocator, module);
     defer keys.deinit(self.allocator);
     var index = 0;
     while keys.at(index) |spelling| {
@@ -261,7 +261,7 @@ fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
 
 /// Returns the failure keys the module reports, sorted, the Go
 /// `usedPanicEntries`.
-fn (self: &var Emitter) used_panic_entries(module: &ir::Module) -> !array::Array<string::String> {
+fn (self: &var Emitter) used_panic_entries(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
     var index = 0;
@@ -277,7 +277,7 @@ fn (self: &var Emitter) used_panic_entries(module: &ir::Module) -> !array::Array
                 instr_index = instr_index + 1;
                 let instr_node = module.instrs.at(instr.node);
                 if instr_panic_entry(module, instr_node) |key| {
-                    try seen.insert(panic_key_spelling(key), true);
+                    try seen.insert(allocator, panic_key_spelling(key), true);
                 }
             }
         }
@@ -401,7 +401,7 @@ fn (self: &var Emitter) sorted_error_union_names(module: &ir::Module) -> !array:
 /// `collectOptionalName` and `collectErrorUnionName`.
 fn (self: &var Emitter) collect_type_name(collector: TypeCollector, seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
     match collector {
-        Optional => return self.collect_optional_name(seen, name),
+        Optional => return self.collect_optional_name(self.allocator, seen, name),
         ErrorUnion => return self.collect_error_union_name(seen, name),
     }
 }
@@ -409,9 +409,9 @@ fn (self: &var Emitter) collect_type_name(collector: TypeCollector, seen: &var m
 /// Records name when it is an optional value type, or an error union whose
 /// success is one (`E!?T` defines `?T`'s aggregate too), the Go
 /// `collectOptionalName`.
-fn (self: &var Emitter) collect_optional_name(seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
+fn (self: &var Emitter) collect_optional_name(allocator: Allocator, seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
     if is_optional_type(name) {
-        return seen.insert(name, true);
+        return seen.insert(allocator, name, true);
     }
     // Only an error union can hold an optional, and every error-union
     // spelling contains `!`; the byte check keeps this walk parse-free for
@@ -422,7 +422,7 @@ fn (self: &var Emitter) collect_optional_name(seen: &var map::Map<[]u8, bool>, n
     if try self.error_union_success_type(name) |success| {
         defer success.deinit(self.allocator);
         let success_bytes = success.as_bytes();
-        return self.collect_optional_name(seen, success_bytes);
+        return self.collect_optional_name(allocator, seen, success_bytes);
     }
     return;
 }
@@ -452,7 +452,7 @@ fn collect_error_union_nodes(
             var rendered = try typ::render(allocator, types, value);
             defer rendered.deinit(allocator);
             let rendered_bytes = rendered.as_bytes();
-            try seen.insert(rendered_bytes, true);
+            try seen.insert(allocator, rendered_bytes, true);
             if node.err |err| {
                 try collect_error_union_nodes(allocator, types, typ::child_type(value, err), seen);
             }
@@ -633,7 +633,7 @@ fn (self: &var Emitter) union_payload_capacity(module: &ir::Module, name: []u8) 
 /// Declares runtime calls that are not defined in the module, the Go
 /// `writeExternalCallDecls`.
 fn (self: &var Emitter) write_external_call_decls(module: &ir::Module) -> !void {
-    var decls = try self.external_call_decls(module);
+    var decls = try self.external_call_decls(self.allocator, module);
     defer decls.deinit(self.allocator);
     var index = 0;
     while decls.at(index) |decl| {
@@ -651,7 +651,7 @@ fn (self: &var Emitter) write_external_call_decls(module: &ir::Module) -> !void 
 /// `externalCallDecls`: one per callee, in name order, the last call to a
 /// callee deciding its declaration. Go keeps the declaration text in a map
 /// it overwrites; here the text is named so the map holds a copy handle.
-fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Array<string::String> {
+fn (self: &var Emitter) external_call_decls(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
     var seen = map::new<[]u8, ir::Name>(self.allocator);
     defer seen.deinit(self.allocator);
     var index = 0;
@@ -679,7 +679,7 @@ fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Arra
                 let decl_name = try self.names.intern_owned(move decl);
                 let callee_text = ir::name_text(&module.names, instr_node.operand);
                 let callee_bytes = callee_text.as_bytes();
-                try seen.insert(callee_bytes, decl_name);
+                try seen.insert(allocator, callee_bytes, decl_name);
             }
         }
     }
@@ -995,7 +995,7 @@ fn printed_enums(allocator: Allocator, module: &ir::Module) -> !array::Array<str
                 let type_text = ir::name_text(&module.names, first.type_name);
                 let type_bytes = type_text.as_bytes();
                 if module.enums.contains(type_bytes) {
-                    try seen.insert(type_bytes, true);
+                    try seen.insert(allocator, type_bytes, true);
                 }
             }
         }

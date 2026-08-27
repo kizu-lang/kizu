@@ -198,7 +198,7 @@ fn (self: MetaBindingStore) deinit(allocator: Allocator) -> void {
     return;
 }
 
-fn (self: &var MetaBindingStore) bind(name: []u8, field: MetaField) -> !?arena::Handle<MetaBinding> {
+fn (self: &var MetaBindingStore) bind(allocator: Allocator, name: []u8, field: MetaField) -> !?arena::Handle<MetaBinding> {
     let previous = self.current;
     let owned_name = try string::from_bytes(self.allocator, name);
     self.current = self.bindings.add(self.allocator, MetaBinding {
@@ -574,7 +574,7 @@ fn (self: &var Checker) check_setup(tree: &ast::Ast, program: &ast::Program) -> 
         return move failed;
     }
     try self.collect_enums(tree, program);
-    try self.collect_error_sets(tree, program);
+    try self.collect_error_sets(self.allocator, tree, program);
     try self.collect_unions(tree, program);
     return self.collect_functions(tree, program);
 }
@@ -619,14 +619,14 @@ fn (self: &var Checker) collect_enums(tree: &ast::Ast, program: &ast::Program) -
     while program.declarations.get(index) |declaration| {
         index = index + 1;
         match tree.declarations.at(declaration.node) {
-            Enum(value) => try self.collect_enum(tree, value),
+            Enum(value) => try self.collect_enum(self.allocator, tree, value),
             _ => {},
         }
     }
     return;
 }
 
-fn (self: &var Checker) collect_enum(tree: &ast::Ast, declaration: &ast::EnumDecl) -> !void {
+fn (self: &var Checker) collect_enum(allocator: Allocator, tree: &ast::Ast, declaration: &ast::EnumDecl) -> !void {
     var info = EnumInfo {
         tags: map::new<[]u8, bool>(self.allocator),
         order: array::new<Name>(self.allocator)
@@ -636,22 +636,21 @@ fn (self: &var Checker) collect_enum(tree: &ast::Ast, declaration: &ast::EnumDec
     while declaration.tags.get(tag_index) |tag| {
         let retained = tree.texts.at(tag.node);
         let bytes = retained.as_bytes();
-        try put_flag(&var info.tags, bytes, true);
+        try put_flag(self.allocator, &var info.tags, bytes, true);
         try info.order.append(self.allocator, try self.names.intern(bytes));
         tag_index = tag_index + 1;
     }
     let name_text = tree.texts.at(declaration.name.node);
     let name_bytes = name_text.as_bytes();
-    let allocator = self.allocator;
     return put_enum(allocator, &var self.enums, name_bytes, move info);
 }
 
-fn put_flag(values: &var map::Map<[]u8, bool>, key: []u8, flag: bool) -> !void {
+fn put_flag(allocator: Allocator, values: &var map::Map<[]u8, bool>, key: []u8, flag: bool) -> !void {
     if values.at_mut(key) |slot| {
         slot.* = flag;
         return;
     }
-    return values.insert(key, flag);
+    return values.insert(allocator, key, flag);
 }
 
 fn put_enum(
@@ -664,12 +663,12 @@ fn put_enum(
         info.deinit(allocator);
         return;
     }
-    return values.insert(key, move info);
+    return values.insert(allocator, key, move info);
 }
 
 /// Records error set declarations for error value reads, the Go
 /// `collectErrorSets`. An error carries nothing, so reading one moves nothing.
-fn (self: &var Checker) collect_error_sets(tree: &ast::Ast, program: &ast::Program) -> !void {
+fn (self: &var Checker) collect_error_sets(allocator: Allocator, tree: &ast::Ast, program: &ast::Program) -> !void {
     var combined = array::new<ast::Declaration>(self.allocator);
     defer combined.deinit(self.allocator);
     var index = 0;
@@ -680,7 +679,7 @@ fn (self: &var Checker) collect_error_sets(tree: &ast::Ast, program: &ast::Progr
                 if value.combines.len() > 0 {
                     try combined.append(self.allocator, declaration);
                 } else {
-                    try self.collect_error_set(tree, value);
+                    try self.collect_error_set(self.allocator, tree, value);
                 }
             },
             _ => {},
@@ -744,7 +743,7 @@ fn (self: &var Checker) collect_combined_error_set(
                     var position = 0;
                     while part.key_at(position) |member| {
                         position = position + 1;
-                        try put_flag(&var members, member, true);
+                        try put_flag(self.allocator, &var members, member, true);
                     }
                 } else {
                     members.deinit(self.allocator);
@@ -765,19 +764,18 @@ fn (self: &var Checker) collect_combined_error_set(
     }
 }
 
-fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::ErrorSetDecl) -> !void {
+fn (self: &var Checker) collect_error_set(allocator: Allocator, tree: &ast::Ast, declaration: &ast::ErrorSetDecl) -> !void {
     var members = map::new<[]u8, bool>(self.allocator);
     errdefer members.deinit(self.allocator);
     var member_index = 0;
     while declaration.members.get(member_index) |member| {
         let retained = tree.texts.at(member.node);
         let bytes = retained.as_bytes();
-        try put_flag(&var members, bytes, true);
+        try put_flag(self.allocator, &var members, bytes, true);
         member_index = member_index + 1;
     }
     let name_text = tree.texts.at(declaration.name.node);
     let name_bytes = name_text.as_bytes();
-    let allocator = self.allocator;
     return put_flags(allocator, &var self.error_sets, name_bytes, move members);
 }
 
@@ -791,7 +789,7 @@ fn put_flags(
         flags.deinit(allocator);
         return;
     }
-    return values.insert(key, move flags);
+    return values.insert(allocator, key, move flags);
 }
 
 /// Records tagged union declarations for variant construction and matches,
@@ -819,7 +817,7 @@ fn (self: &var Checker) collect_union(tree: &ast::Ast, declaration: &ast::UnionD
         let payload = try self.resolved_optional_type(tree, variant.payload);
         let retained = tree.texts.at(variant.name.node);
         let bytes = retained.as_bytes();
-        try put_name(&var info.variants, bytes, payload);
+        try put_name(self.allocator, &var info.variants, bytes, payload);
         try info.order.append(self.allocator, try self.names.intern(bytes));
         variant_index = variant_index + 1;
     }
@@ -829,12 +827,12 @@ fn (self: &var Checker) collect_union(tree: &ast::Ast, declaration: &ast::UnionD
     return put_union(allocator, &var self.unions, name_bytes, move info);
 }
 
-fn put_name(values: &var map::Map<[]u8, Name>, key: []u8, name: Name) -> !void {
+fn put_name(allocator: Allocator, values: &var map::Map<[]u8, Name>, key: []u8, name: Name) -> !void {
     if values.at_mut(key) |slot| {
         slot.* = name;
         return;
     }
-    return values.insert(key, name);
+    return values.insert(allocator, key, name);
 }
 
 fn put_union(
@@ -847,7 +845,7 @@ fn put_union(
         info.deinit(allocator);
         return;
     }
-    return values.insert(key, move info);
+    return values.insert(allocator, key, move info);
 }
 
 /// Names a declared type with its `element<T>` forms resolved, the Go
@@ -897,7 +895,7 @@ fn (self: &var Checker) check_struct(tree: &ast::Ast, declaration: &ast::StructD
         let field_name = try self.names.intern_text(tree, field.name);
         let retained = tree.texts.at(field.name.node);
         let bytes = retained.as_bytes();
-        try put_name(&var info.fields, bytes, field_type);
+        try put_name(self.allocator, &var info.fields, bytes, field_type);
         try info.order.append(self.allocator, field_name);
         if field.public {
             try info.public_order.append(self.allocator, field_name);
@@ -921,7 +919,7 @@ fn put_struct(
         info.deinit(allocator);
         return;
     }
-    return values.insert(key, move info);
+    return values.insert(allocator, key, move info);
 }
 
 /// Names the full field type, including borrow prefixes and with element
@@ -976,7 +974,7 @@ fn (self: &var Checker) register_function(tree: &ast::Ast, name: ast::Text, hand
         slot.* = handle;
         return;
     }
-    return self.functions_by_name.insert(bytes, handle);
+    return self.functions_by_name.insert(self.allocator, bytes, handle);
 }
 
 /// Files a `fn (self: T) name(...)` declaration under the type it is a
@@ -1007,22 +1005,22 @@ fn (self: &var Checker) collect_receiver_method(tree: &ast::Ast, handle: Functio
             Arg::Str(name)
         );
     }
-    try self.register_method(receiver, method, handle);
+    try self.register_method(self.allocator, receiver, method, handle);
     return null;
 }
 
-fn (self: &var Checker) register_method(receiver: Name, method: Name, handle: FunctionHandle) -> !void {
+fn (self: &var Checker) register_method(allocator: Allocator, receiver: Name, method: Name, handle: FunctionHandle) -> !void {
     let receiver_text = name_text(&self.names, receiver);
     let receiver_bytes = receiver_text.as_bytes();
     let method_text = name_text(&self.names, method);
     let method_bytes = method_text.as_bytes();
     if self.impls.at_mut(receiver_bytes) |methods| {
-        return methods.insert(method_bytes, handle);
+        return methods.insert(allocator, method_bytes, handle);
     }
     var methods = map::new<[]u8, FunctionHandle>(self.allocator);
     errdefer methods.deinit(self.allocator);
-    try methods.insert(method_bytes, handle);
-    return self.impls.insert(receiver_bytes, move methods);
+    try methods.insert(allocator, method_bytes, handle);
+    return self.impls.insert(allocator, receiver_bytes, move methods);
 }
 
 /// Extracts the ownership-facing signature for a function, the Go

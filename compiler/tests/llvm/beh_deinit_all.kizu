@@ -49,7 +49,7 @@ test "pop before deinit consumes elements one by one" {
 fn make_table(allocator: Allocator) -> !map::Map<[]u8, i64> {
     let table = map::new<[]u8, i64>(allocator);
     errdefer table.deinit(allocator);
-    try table.insert("seen", 1);
+    try table.insert(allocator, "seen", 1);
     return move table;
 }
 
@@ -73,7 +73,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
 // %kizu.error.Bag = type { i8, %kizu.struct.Bag, i64 }
-// %kizu.error.std__map__Map___u8__i64_ = type { i8, ptr, i64 }
+// %kizu.error.std__map__Map___u8__i64_ = type { i8, %kizu.map, i64 }
 // %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
 // %kizu.error.void = type { i8, i64 }
 // %kizu.error.std__mem__Error.void = type { i8, i64 }
@@ -116,23 +116,23 @@ test "struct deinit forwards owner-element arrays to deinit" {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare ptr @kizu_map_new(ptr, i64)
-// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// %kizu.map = type { ptr, i64, i64, ptr, i64 }
+// declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)
 // declare ptr @kizu_map_get(ptr, ptr, i64)
 // declare ptr @kizu_map_value_at(ptr, i64)
 // declare void @kizu_map_key_at(ptr, ptr, i64)
 // declare i1 @kizu_map_contains(ptr, ptr, i64)
 // declare i64 @kizu_map_len(ptr)
-// declare void @kizu_map_deinit(ptr)
+// declare void @kizu_map_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, ptr, ptr)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, ptr, %kizu.map)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, ptr, %kizu.struct.std__string__String)
 // declare void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array, ptr)
 // declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr)
 // declare i64 @std__array__Array_len_std_3a_3astring_3a_3aString(ptr)
 // declare %kizu.struct.std__string__String @std__array__Array_pop_or_panic_std_3a_3astring_3a_3aString(ptr)
-// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr, %kizu.slice.u8, i64)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr, ptr, %kizu.slice.u8, i64)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
@@ -205,24 +205,29 @@ test "struct deinit forwards owner-element arrays to deinit" {
 // 
 // define %kizu.error.std__map__Map___u8__i64_ @make_table(ptr %kizu.allocator) {
 // entry:
-//   %kizu.1 = call ptr @kizu_map_new(ptr %kizu.allocator, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
-//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
-//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
-//   %kizu.4 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr %kizu.1, %kizu.slice.u8 %kizu.2, i64 1)
-//   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 0
-//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
-//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
-// kizu.5.try.err:
-//   call void @kizu_map_deinit(ptr %kizu.1)
-//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
-//   %kizu.try.err.2.base = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 0, 0
-//   %kizu.try.err.2 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
-//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.2
-// kizu.5.try.ok:
-//   %kizu.6.ok = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 1, 0
-//   %kizu.6 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.6.ok, ptr %kizu.1, 1
-//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.6
+//   %kizu.2 = alloca %kizu.map
+//   %kizu.map.deinit.2.slot = alloca %kizu.map
+//   store %kizu.map zeroinitializer, ptr %kizu.2
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr %kizu.2, ptr %kizu.allocator, %kizu.slice.u8 %kizu.3, i64 1)
+//   %kizu.6 = load %kizu.map, ptr %kizu.2
+//   %kizu.7.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
+//   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
+//   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
+// kizu.7.try.err:
+//   store %kizu.map %kizu.6, ptr %kizu.map.deinit.2.slot
+//   call void @kizu_map_deinit(ptr %kizu.allocator, ptr %kizu.map.deinit.2.slot, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
+//   %kizu.try.err.3.base = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 0, 0
+//   %kizu.try.err.3 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 2
+//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.3
+// kizu.7.try.ok:
+//   %kizu.8 = load %kizu.map, ptr %kizu.2
+//   %kizu.9.ok = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 1, 0
+//   %kizu.9 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.9.ok, %kizu.map %kizu.8, 1
+//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.9
 // }
 // 
 // define void @Bag_deinit(ptr byval(%kizu.struct.Bag) %kizu.self.addr, ptr %kizu.allocator) {
@@ -373,7 +378,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   ret %kizu.error.void %kizu.try.err.2
 // kizu.6.try.ok:
 //   %kizu.6 = extractvalue %kizu.error.std__map__Map___u8__i64_ %kizu.4, 1
-//   %kizu.7 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr %kizu.3, ptr %kizu.1, ptr %kizu.6)
+//   %kizu.7 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr %kizu.3, ptr %kizu.1, %kizu.map %kizu.6)
 //   %kizu.8 = load %kizu.array, ptr %kizu.3
 //   %kizu.9.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.7, 0
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
@@ -429,7 +434,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
 // %kizu.error.Bag = type { i8, %kizu.struct.Bag, i64 }
-// %kizu.error.std__map__Map___u8__i64_ = type { i8, ptr, i64 }
+// %kizu.error.std__map__Map___u8__i64_ = type { i8, %kizu.map, i64 }
 // %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
 // %kizu.error.void = type { i8, i64 }
 // %kizu.error.std__mem__Error.void = type { i8, i64 }
@@ -472,23 +477,23 @@ test "struct deinit forwards owner-element arrays to deinit" {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare ptr @kizu_map_new(ptr, i64)
-// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// %kizu.map = type { ptr, i64, i64, ptr, i64 }
+// declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)
 // declare ptr @kizu_map_get(ptr, ptr, i64)
 // declare ptr @kizu_map_value_at(ptr, i64)
 // declare void @kizu_map_key_at(ptr, ptr, i64)
 // declare i1 @kizu_map_contains(ptr, ptr, i64)
 // declare i64 @kizu_map_len(ptr)
-// declare void @kizu_map_deinit(ptr)
+// declare void @kizu_map_deinit(ptr, ptr, i64)
 // 
-// declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, ptr, ptr)
+// declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr, ptr, %kizu.map)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, ptr, %kizu.struct.std__string__String)
 // declare void @std__array__Array_deinit_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(%kizu.array, ptr)
 // declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(%kizu.array, ptr)
 // declare i64 @std__array__Array_len_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr)
 // declare i64 @std__array__Array_len_std_3a_3astring_3a_3aString(ptr)
 // declare %kizu.struct.std__string__String @std__array__Array_pop_or_panic_std_3a_3astring_3a_3aString(ptr)
-// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr, %kizu.slice.u8, i64)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr, ptr, %kizu.slice.u8, i64)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
@@ -561,24 +566,29 @@ test "struct deinit forwards owner-element arrays to deinit" {
 // 
 // define %kizu.error.std__map__Map___u8__i64_ @make_table(ptr %kizu.allocator) {
 // entry:
-//   %kizu.1 = call ptr @kizu_map_new(ptr %kizu.allocator, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
-//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
-//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
-//   %kizu.4 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr %kizu.1, %kizu.slice.u8 %kizu.2, i64 1)
-//   %kizu.5.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 0
-//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
-//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
-// kizu.5.try.err:
-//   call void @kizu_map_deinit(ptr %kizu.1)
-//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.4, 1
-//   %kizu.try.err.2.base = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 0, 0
-//   %kizu.try.err.2 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
-//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.2
-// kizu.5.try.ok:
-//   %kizu.6.ok = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 1, 0
-//   %kizu.6 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.6.ok, ptr %kizu.1, 1
-//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.6
+//   %kizu.2 = alloca %kizu.map
+//   %kizu.map.deinit.2.slot = alloca %kizu.map
+//   store %kizu.map zeroinitializer, ptr %kizu.2
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_i64(ptr %kizu.2, ptr %kizu.allocator, %kizu.slice.u8 %kizu.3, i64 1)
+//   %kizu.6 = load %kizu.map, ptr %kizu.2
+//   %kizu.7.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
+//   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
+//   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
+// kizu.7.try.err:
+//   store %kizu.map %kizu.6, ptr %kizu.map.deinit.2.slot
+//   call void @kizu_map_deinit(ptr %kizu.allocator, ptr %kizu.map.deinit.2.slot, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.try.err.3.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
+//   %kizu.try.err.3.base = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 0, 0
+//   %kizu.try.err.3 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 2
+//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.try.err.3
+// kizu.7.try.ok:
+//   %kizu.8 = load %kizu.map, ptr %kizu.2
+//   %kizu.9.ok = insertvalue %kizu.error.std__map__Map___u8__i64_ zeroinitializer, i8 1, 0
+//   %kizu.9 = insertvalue %kizu.error.std__map__Map___u8__i64_ %kizu.9.ok, %kizu.map %kizu.8, 1
+//   ret %kizu.error.std__map__Map___u8__i64_ %kizu.9
 // }
 // 
 // define void @Bag_deinit(ptr byval(%kizu.struct.Bag) %kizu.self.addr, ptr %kizu.allocator) {
@@ -729,7 +739,7 @@ test "struct deinit forwards owner-element arrays to deinit" {
 //   ret %kizu.error.void %kizu.try.err.2
 // kizu.6.try.ok:
 //   %kizu.6 = extractvalue %kizu.error.std__map__Map___u8__i64_ %kizu.4, 1
-//   %kizu.7 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr %kizu.3, ptr %kizu.1, ptr %kizu.6)
+//   %kizu.7 = call %kizu.error.std__mem__Error.void @std__array__Array_append_std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e(ptr %kizu.3, ptr %kizu.1, %kizu.map %kizu.6)
 //   %kizu.8 = load %kizu.array, ptr %kizu.3
 //   %kizu.9.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.7, 0
 //   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0

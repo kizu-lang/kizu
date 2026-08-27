@@ -4776,15 +4776,18 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 ) (Type, error) {
 	switch name {
 	case "insert":
-		if len(args) != 2 {
-			return "", errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
+		if len(args) != 3 {
+			return "", errorf("type error: `Map.insert` expects 3 args, got %d", len(args))
 		}
-		if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
+		if err := c.checkGrowAllocator("Map.insert", args[0], env, unsafe); err != nil {
+			return "", err
+		}
+		if got, err := c.checkExpr(args[1], env, unsafe); err != nil {
 			return "", err
 		} else if !sameType(got, Type(keyType)) {
 			return "", errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
-		got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
+		got, err := c.checkContextualExpr(args[2], valueType, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -6663,6 +6666,9 @@ func (c *Checker) checkMapAtCondition(
 }
 
 // checkMapInsert validates Map.insert arguments.
+// checkMapInsert validates Map.insert(allocator, key, value). The insert is
+// what buys the storage the entry goes in, so it names the allocator it buys
+// from: a Map header keeps none of its own (ADR-0131, ADR-0132).
 func (c *Checker) checkMapInsert(
 	keyType Type,
 	valueType Type,
@@ -6670,15 +6676,18 @@ func (c *Checker) checkMapInsert(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if len(args) != 2 {
-		return "", errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
+	if len(args) != 3 {
+		return "", errorf("type error: `Map.insert` expects 3 args, got %d", len(args))
 	}
-	if got, err := c.checkContextualExpr(args[0], keyType, env, unsafe); err != nil {
+	if err := c.checkGrowAllocator("Map.insert", args[0], env, unsafe); err != nil {
+		return "", err
+	}
+	if got, err := c.checkContextualExpr(args[1], keyType, env, unsafe); err != nil {
 		return "", err
 	} else if !sameType(got, keyType) {
 		return "", errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
 	}
-	got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
+	got, err := c.checkContextualExpr(args[2], valueType, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -6686,6 +6695,24 @@ func (c *Checker) checkMapInsert(
 		return "", errorf("type error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "std::mem::Error!void", nil
+}
+
+// checkGrowAllocator validates the leading Allocator a storage-asking
+// container method names.
+func (c *Checker) checkGrowAllocator(
+	what string,
+	arg ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != Type("Allocator") {
+		return errorf("type error: `%s` expects Allocator, got %s", what, got)
+	}
+	return nil
 }
 
 // checkMapKeyArg validates one lookup key against the map's key type.

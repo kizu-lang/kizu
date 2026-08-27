@@ -1904,11 +1904,11 @@ func (l *lowerer) lowerTypedContainerPrimitive(
 		return value, true, err
 	}
 	if method, ok := mapPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		key, value, err := mapPrimitiveTypeArgs(l.resolveTypeArgs(typeArg))
 		if err != nil {
 			return Value{}, true, err
 		}
-		key, value, err := mapPrimitiveTypeArgs(l.resolveTypeArgs(typeArg))
+		args, err := l.lowerCallArgsAs(mapPrimitiveParams(method, key, value), rawArgs)
 		if err != nil {
 			return Value{}, true, err
 		}
@@ -2402,7 +2402,48 @@ func (l *lowerer) primitiveInstanceParams(name string, typeArg string) []Param {
 	if method, ok := arenaPrimitives[name]; ok {
 		return arenaPrimitiveParams(method, l.resolveType(typeArg))
 	}
+	if method, ok := mapPrimitives[name]; ok {
+		key, value, err := mapPrimitiveTypeArgs(l.resolveTypeArgs(typeArg))
+		if err != nil {
+			return nil
+		}
+		return mapPrimitiveParams(method, key, value)
+	}
 	return nil
+}
+
+// mapPrimitiveParams says how one map primitive receives its map, the way
+// arrayPrimitiveParams does for an array -- a map is its header too. A
+// primitive that writes through the header is handed the binding's storage;
+// the rest receive the address of a copy, and `deinit` receives the header
+// itself, because releasing it is the last thing done with it. The key and
+// value positions are named as well, so an integer literal written at a call
+// narrows rather than staying i64.
+func mapPrimitiveParams(method string, key string, value string) []Param {
+	if method == typ.CleanupMethod {
+		return nil
+	}
+	mapType := mapTypeName + "<" + key + ", " + value + ">"
+	self := Param{Type: "&" + mapType, Passing: PassCopyAddress}
+	if mapMutatingPrimitives[method] {
+		self = Param{Type: "&var " + mapType, Passing: PassCallerStorage}
+	}
+	switch method {
+	case "insert":
+		return []Param{self, {Type: "Allocator"}, {Type: key}, {Type: value}}
+	case "get", "at", "at_mut", "contains":
+		return []Param{self, {Type: key}}
+	case "key_at", "take_value_at":
+		return []Param{self, {Type: "i64"}}
+	}
+	return []Param{self}
+}
+
+// mapMutatingPrimitives names the map primitives that write through the
+// header. They receive the binding's storage; the rest receive the address of
+// a copy.
+var mapMutatingPrimitives = map[string]bool{
+	"insert": true, "at_mut": true, "take_value_at": true,
 }
 
 var arrayPrimitives = map[string]string{

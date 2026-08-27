@@ -652,7 +652,9 @@ fn (self: &var Checker) check_map_at_condition(
 }
 
 /// Validates read-only key and copy value insertion, the Go
-/// `checkMapInsert`.
+/// `checkMapInsert`. The insert is the call that buys storage, so it names the
+/// allocator it buys from, the same way an Array append does: the header keeps
+/// none of its own (ADR-0131).
 fn (self: &var Checker) check_owned_map_insert(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -662,13 +664,17 @@ fn (self: &var Checker) check_owned_map_insert(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let count = arg_count(tree, args);
-    if count != 2 {
+    if count != 3 {
         return try self.error1(
-            tree, ast::zero_span(), "map error: `Map.insert` expects 2 args, got %d",
+            tree, ast::zero_span(), "map error: `Map.insert` expects 3 args, got %d",
             Arg::Int(count)
         );
     }
-    let first = args.get_or_panic(tree, 0);
+    let allocator_arg = args.get_or_panic(tree, 0);
+    if try self.read_grow_allocator(tree, env, "Map.insert", allocator_arg) |failed| {
+        return move failed;
+    }
+    let first = args.get_or_panic(tree, 1);
     var got_key = empty_name();
     if try self.read_contextual_expr(tree, env, first, key_type, &var got_key) |failed| {
         return move failed;
@@ -679,7 +685,7 @@ fn (self: &var Checker) check_owned_map_insert(
             Arg::Str(key_type), Arg::Str(got_key)
         );
     }
-    let second = args.get_or_panic(tree, 1);
+    let second = args.get_or_panic(tree, 2);
     var got = empty_name();
     if try self.move_contextual_expr(tree, env, second, value_type, &var got) |failed| {
         return move failed;
@@ -829,6 +835,28 @@ fn (self: &var Checker) read_release_allocator(
         );
     }
     return self.check_release_tie(tree, env, label, receiver, first);
+}
+
+/// Reads the leading Allocator a storage-asking container method names, the
+/// Go `readGrowAllocator`.
+fn (self: &var Checker) read_grow_allocator(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    what: []u8,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var got = empty_name();
+    if try self.read_expr(tree, env, arg, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        let label = try self.names.intern(what);
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `%s` expects Allocator, got %s",
+            Arg::Str(label), Arg::Str(got)
+        );
+    }
+    return null;
 }
 
 /// Requires the allocator a release names to be the one the value was made
@@ -1390,10 +1418,10 @@ fn (self: &var Checker) arena_handle_pairs(
         try resolved.append(self.allocator, type_name);
         let parts = try self.names.split_generic(type_name) orelse continue;
         if self.names.is(parts.base, "std::arena::Arena") {
-            try self.note_pair_index(&var arenas, parts.args, position, param.borrow);
+            try self.note_pair_index(self.allocator, &var arenas, parts.args, position, param.borrow);
         }
         if self.names.is(parts.base, "std::arena::Handle") {
-            try self.note_pair_index(&var handles, parts.args, position, !param.borrow);
+            try self.note_pair_index(self.allocator, &var handles, parts.args, position, !param.borrow);
         }
     }
     var position = 0;
@@ -1424,6 +1452,7 @@ fn ambiguous_pair_index() -> i64 {
 /// closure of the Go `arenaHandlePairs`: a spelling seen before, or one in
 /// an ineligible shape, becomes ambiguous.
 fn (self: &Checker) note_pair_index(
+    allocator: Allocator,
     indices: &var map::Map<[]u8, i64>,
     elem: Name,
     index: i64,
@@ -1436,9 +1465,9 @@ fn (self: &Checker) note_pair_index(
         return;
     }
     if !eligible {
-        return indices.insert(bytes, ambiguous_pair_index());
+        return indices.insert(allocator, bytes, ambiguous_pair_index());
     }
-    return indices.insert(bytes, index);
+    return indices.insert(allocator, bytes, index);
 }
 
 /// Reads the parameter index recorded for one element spelling, the Go

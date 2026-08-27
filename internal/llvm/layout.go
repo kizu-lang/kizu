@@ -35,6 +35,10 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 	if isArrayLLVMType(typ) || isArenaLLVMType(typ) {
 		return arrayHeaderSize, 8, true
 	}
+	// A map is its header too: the entries it owns and the index over them.
+	if isMapLLVMType(typ) {
+		return mapHeaderSize, 8, true
+	}
 	// A niche optional is its element: the element spells absence itself.
 	if elem, ok := nicheOptionalElem(typ); ok {
 		return e.typeLayoutVisiting(elem, seen)
@@ -84,7 +88,7 @@ func (e *emitter) lowersToWord(typ string) bool {
 	if isArenaHandleType(typ) {
 		return true
 	}
-	if isMapLLVMType(typ) || isBoxLLVMType(typ) {
+	if isBoxLLVMType(typ) {
 		return true
 	}
 	if _, ok := e.module.Enums[typ]; ok {

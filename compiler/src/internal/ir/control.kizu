@@ -99,7 +99,7 @@ fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStm
     if has_err_capture {
         let err_capture = try self.text_name(tree, statement.err_capture);
         saved_err = self.saved_binding(err_capture);
-        try self.envs.bind(self.env, err_capture, err_payload);
+        try self.envs.bind(self.allocator, self.env, err_capture, err_payload);
     }
     var else_result = self.blank_branch();
     if try self.lower_branch_block(tree, else_block, else_body, merge_name, false, &var else_result) |failed| {
@@ -163,7 +163,7 @@ fn (self: &Lowerer) saved_binding(name: Name) -> ScopedBinding {
 /// capture.
 fn (self: &var Lowerer) restore_branch_var(branch_env: EnvHandle, saved: ScopedBinding) -> !void {
     if saved.bound {
-        return self.envs.bind(branch_env, saved.name, saved.value);
+        return self.envs.bind(self.allocator, branch_env, saved.name, saved.value);
     }
     return self.envs.unbind(branch_env, saved.name);
 }
@@ -481,7 +481,8 @@ fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStm
 /// Adds one reachable branch's value to the phi an if expression ends in,
 /// the body of the Go loop over `[]branchResult{thenResult, elseResult}`;
 /// the first reachable branch names the result type.
-fn append_branch_incoming(allocator: Allocator, 
+fn append_branch_incoming(
+    allocator: Allocator,
     result: BranchResult,
     incoming: &var array::Array<Incoming>,
     result_type: &var Name
@@ -516,9 +517,9 @@ fn (self: &var Lowerer) merge_envs(
             let phi = try self.add_phi2(
                 block, left_value.type_name, left_block, left_value, right_block, right_value
             );
-            try self.envs.bind(merged, name, phi);
+            try self.envs.bind(self.allocator, merged, name, phi);
         } else {
-            try self.envs.bind(merged, name, right_value);
+            try self.envs.bind(self.allocator, merged, name, right_value);
         }
     }
     return merged;
@@ -740,7 +741,7 @@ fn (self: &var Lowerer) lower_loop_header(
             let phi = try self.create_for_index_phi(block, preheader, loop.start);
             let index = self.module.instr_result(phi);
             let name = try self.text_name(tree, loop.name);
-            try self.envs.bind(self.env, name, index);
+            try self.envs.bind(self.allocator, self.env, name, index);
             let less = try self.name("<");
             let cond = try self.emit_op2(Op::Binary, less, self.common.bool_type, index, loop.end);
             out.* = LoopTest::Indexed(IndexedTest { cond: cond, phi: phi });
@@ -895,7 +896,7 @@ fn (self: &var Lowerer) create_loop_phis(
         let value = self.envs.get(self.env, name) orelse continue;
         let phi = try self.add_open_phi(block, value.type_name, current, value);
         let result = self.module.instr_result(phi);
-        try self.envs.bind(self.env, name, result);
+        try self.envs.bind(self.allocator, self.env, name, result);
         try out.append(self.allocator, LoopPhi { name: name, phi: phi });
     }
     return;
@@ -928,7 +929,7 @@ fn (self: &var Lowerer) close_loop_phis(
             }
         }
         let result = self.module.instr_result(entry.phi);
-        try self.envs.bind(self.env, entry.name, result);
+        try self.envs.bind(self.allocator, self.env, entry.name, result);
     }
     return;
 }
@@ -986,7 +987,7 @@ fn (self: &var Lowerer) finish_loop_exit_phis(
             continue;
         }
         let phi = try self.add_phi(exit, result.type_name, &incoming);
-        try self.envs.bind(self.env, entry.name, phi);
+        try self.envs.bind(self.allocator, self.env, entry.name, phi);
     }
     return;
 }
