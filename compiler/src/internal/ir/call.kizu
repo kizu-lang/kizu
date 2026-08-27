@@ -998,19 +998,9 @@ fn (self: &var Lowerer) lower_resolved_method(
     // A container method that mutates receives the binding's storage, so the
     // receiver arrives spelled as the borrow. The container it names is the
     // same one either way.
-    let container = try self.deref_type(receiver_type);
-    if try self.array_element_type(container) |elem| {
-        return self.lower_std_container_method(tree, "std::array::Array", method, elem, args, out);
-    }
-    if try self.map_static_args(container) |map_args| {
-        return self.lower_std_container_method(tree, "std::map::Map", method, map_args, args, out);
-    }
-    if try self.box_element_type(container) |elem| {
-        return self.lower_std_container_method(tree, "std::mem::Box", method, elem, args, out);
-    }
-    let elem = try self.arena_element_type(container);
-    if !same_name(elem, self.common.unknown) {
-        return self.lower_std_container_method(tree, "std::arena::Arena", method, elem, args, out);
+    if try self.std_container_receiver(receiver_type) |found| {
+        let name = std_container_name(found.container);
+        return self.lower_std_container_method(tree, name, method, found.type_arg, args, out);
     }
     if try self.impl_method_callee_name(receiver_type, method) |method_name| {
         return self.lower_impl_method_call(tree, method_name, args, out);
@@ -1051,15 +1041,9 @@ fn (self: &var Lowerer) method_callee_params(
     method: Name,
     out: &var ParamsView
 ) -> !?diagnostic::Diagnostic {
-    let container = try self.deref_type(receiver);
-    if try self.array_element_type(container) |elem| {
-        return self.std_container_params(tree, "std::array::Array", method, elem, out);
-    }
-    if try self.map_static_args(container) |map_args| {
-        return self.std_container_params(tree, "std::map::Map", method, map_args, out);
-    }
-    if try self.box_element_type(container) |elem| {
-        return self.std_container_params(tree, "std::mem::Box", method, elem, out);
+    if try self.std_container_receiver(receiver) |found| {
+        let container = std_container_name(found.container);
+        return self.std_container_params(tree, container, method, found.type_arg, out);
     }
     if try self.impl_method_callee_name(receiver, method) |name| {
         if self.signature_named(name) |signature| {
@@ -1179,7 +1163,8 @@ fn (self: &var Lowerer) method_self_passing(receiver_type: Name, method: Name) -
 /// what says how the receiver arrives.
 fn (self: &var Lowerer) generic_method_self_passing(receiver_type: Name, method: Name) -> !Passing {
     let container = try self.deref_type(receiver_type);
-    let base = try self.std_container_type_name(container) orelse return Passing::Value;
+    let found = try self.std_container_receiver(receiver_type) orelse return Passing::Value;
+    let base = try self.name(std_container_name(found.container));
     let name = try self.module.names.joined(base, ".", method);
     let decl = self.generic_decl(name) orelse return Passing::Value;
     if self.decl_param_count(decl) == 0 {
@@ -1195,21 +1180,54 @@ fn (self: &var Lowerer) generic_method_self_passing(receiver_type: Name, method:
     return Passing::Value;
 }
 
-/// Names the generic declaration a container instance was applied from, the
-/// name lower_resolved_method dispatches on, the Go `stdContainerTypeName`.
-fn (self: &var Lowerer) std_container_type_name(typ: Name) -> !?Name {
-    let base = try self.deref_type(typ);
-    if try self.array_element_type(base) |_| {
-        return try self.module.names.intern("std::array::Array");
+/// Names one std container a receiver type can be, the Go
+/// `stdContainerReceiver`'s first result.
+enum StdContainer {
+    Array,
+    Map,
+    Box,
+    Arena
+}
+
+/// Spells the generic declaration one std container was applied from.
+fn std_container_name(container: StdContainer) -> []u8 {
+    return match container {
+        Array => "std::array::Array",
+        Map => "std::map::Map",
+        Box => "std::mem::Box",
+        Arena => "std::arena::Arena"
+    };
+}
+
+/// What one receiver type is: the std container it names, and the type
+/// argument it carries.
+struct StdContainerReceiver {
+    container: StdContainer,
+    type_arg: Name
+}
+
+/// Names the std container a receiver type is, and the type argument it
+/// carries, the Go `stdContainerReceiver`. Every reader of that answer goes
+/// through here -- the one that hands arguments over at the types the callee
+/// declares, the one that dispatches to the callee, and the one that asks how
+/// the receiver arrives -- so they cannot disagree about which containers
+/// exist. A receiver missing from one list but not the other is how an arena
+/// method came to hand over a capture's borrow where the declaration says a
+/// handle.
+fn (self: &var Lowerer) std_container_receiver(receiver: Name) -> !?StdContainerReceiver {
+    let base = try self.deref_type(receiver);
+    if try self.array_element_type(base) |elem| {
+        return StdContainerReceiver { container: StdContainer::Array, type_arg: elem };
     }
-    if try self.map_static_args(base) |_| {
-        return try self.module.names.intern("std::map::Map");
+    if try self.map_static_args(base) |map_args| {
+        return StdContainerReceiver { container: StdContainer::Map, type_arg: map_args };
     }
-    if try self.box_element_type(base) |_| {
-        return try self.module.names.intern("std::mem::Box");
+    if try self.box_element_type(base) |elem| {
+        return StdContainerReceiver { container: StdContainer::Box, type_arg: elem };
     }
-    if self.module.names.has_generic_arg(base, "std::arena::Arena") {
-        return try self.module.names.intern("std::arena::Arena");
+    let elem = try self.arena_element_type(base);
+    if !same_name(elem, self.common.unknown) {
+        return StdContainerReceiver { container: StdContainer::Arena, type_arg: elem };
     }
     return null;
 }

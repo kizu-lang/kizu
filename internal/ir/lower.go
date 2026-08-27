@@ -2068,17 +2068,8 @@ func (l *lowerer) lowerResolvedMethod(
 	// receiver arrives spelled as the borrow. The container it names is the
 	// same one either way.
 	receiverType = derefType(receiverType)
-	if elem, ok := arrayElementType(receiverType); ok {
-		return l.lowerStdContainerMethod(arrayTypeName, method, elem, allArgs)
-	}
-	if args, ok := mapStaticArgs(receiverType); ok {
-		return l.lowerStdContainerMethod(mapTypeName, method, args, allArgs)
-	}
-	if elem, ok := boxElementType(receiverType); ok {
-		return l.lowerStdContainerMethod(boxTypeName, method, elem, allArgs)
-	}
-	if elem := arenaElementType(receiverType); elem != "unknown" {
-		return l.lowerStdContainerMethod(arenaTypeName, method, elem, allArgs)
+	if container, typeArg, ok := stdContainerReceiver(receiverType); ok {
+		return l.lowerStdContainerMethod(container, method, typeArg, allArgs)
 	}
 	if methodName, ok := l.implMethodCalleeName(receiverType, method); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -2119,19 +2110,37 @@ func (l *lowerer) lowerBufferMethod(
 // arguments keep the types they carry themselves.
 func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, error) {
 	receiver = derefType(receiver)
-	if elem, ok := arrayElementType(receiver); ok {
-		return l.stdContainerParams(arrayTypeName, method, elem)
-	}
-	if args, ok := mapStaticArgs(receiver); ok {
-		return l.stdContainerParams(mapTypeName, method, args)
-	}
-	if elem, ok := boxElementType(receiver); ok {
-		return l.stdContainerParams(boxTypeName, method, elem)
+	if container, typeArg, ok := stdContainerReceiver(receiver); ok {
+		return l.stdContainerParams(container, method, typeArg)
 	}
 	if name, ok := l.implMethodCalleeName(receiver, method); ok {
 		return paramsAfterSelf(l.signatures[name].Params), nil
 	}
 	return nil, nil
+}
+
+// stdContainerReceiver names the std container a receiver type is, and the
+// type argument it carries. Both readers of that answer go through here -- the
+// one that hands arguments over at the types the callee declares, and the one
+// that dispatches to the callee -- so they cannot disagree about which
+// containers exist. A receiver missing from one list but not the other is how
+// an arena method came to hand over a capture's borrow where the declaration
+// says a handle.
+func stdContainerReceiver(receiver string) (string, string, bool) {
+	receiver = derefType(receiver)
+	if elem, ok := arrayElementType(receiver); ok {
+		return arrayTypeName, elem, true
+	}
+	if args, ok := mapStaticArgs(receiver); ok {
+		return mapTypeName, args, true
+	}
+	if elem, ok := boxElementType(receiver); ok {
+		return boxTypeName, elem, true
+	}
+	if elem := arenaElementType(receiver); elem != "unknown" {
+		return arenaTypeName, elem, true
+	}
+	return "", "", false
 }
 
 // stdContainerParams returns the parameters std declares for one container
@@ -2233,7 +2242,7 @@ func (l *lowerer) implMethodCalleeName(receiver string, method string) (string, 
 // arrives.
 func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) Passing {
 	container := derefType(receiverType)
-	base, ok := stdContainerTypeName(container)
+	base, _, ok := stdContainerReceiver(container)
 	if !ok {
 		return PassValue
 	}
@@ -2249,24 +2258,6 @@ func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) P
 		return passing
 	}
 	return PassValue
-}
-
-// stdContainerTypeName names the generic declaration a container instance was
-// applied from, the name lowerResolvedMethod dispatches on.
-func stdContainerTypeName(typ string) (string, bool) {
-	if _, ok := arrayElementType(typ); ok {
-		return arrayTypeName, true
-	}
-	if _, ok := mapStaticArgs(typ); ok {
-		return mapTypeName, true
-	}
-	if _, ok := boxElementType(typ); ok {
-		return boxTypeName, true
-	}
-	if strings.HasPrefix(typ, arenaTypeName+"<") && strings.HasSuffix(typ, ">") {
-		return arenaTypeName, true
-	}
-	return "", false
 }
 
 // lowerImplMethodCall lowers receiver.method(args) as Type.method(receiver, args).
