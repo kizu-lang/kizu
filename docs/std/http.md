@@ -165,6 +165,105 @@ pub fn default_limits() -> std::http::Limits
 | `UnsupportedEncoding` | 501 |
 | その他 | 500 |
 
+## URL と percent 符号化
+
+```kizu
+pub struct Url {
+    pub scheme: std::string::String,
+    pub host: std::string::String,
+    pub port: i64,
+    pub target: std::string::String,
+}
+
+pub fn parse_url(allocator: Allocator, text: []u8) -> std::http::Failure!std::http::Url
+fn (self: &Url) authority(allocator, out: &var String) -> std::http::Failure!void
+fn (self: Url) deinit(allocator: Allocator) -> void
+
+pub fn percent_decode(allocator, text, out: &var String) -> std::http::Failure!void
+pub fn form_decode(allocator, text, out: &var String) -> std::http::Failure!void
+pub fn percent_encode(allocator, text, out: &var String) -> std::http::Failure!void
+pub fn form_value(allocator, query, name, out: &var String)
+    -> std::http::Failure!bool
+```
+
+`parse_url` が読むのは `http://host[:port][/target]` です。**`https` は
+`Error::UnsupportedScheme` で拒否します** —— TLS が要り、std は持っていません。
+暗号化を頼まれたものを黙って平文で送るのが、出してはいけない唯一の答えです。
+
+`target` は path と query をまとめて持ちます。request line に載るのがそれ
+そのものだからで、分けるときは server 側と同じ `path_of` / `query_of` を
+使います。
+
+`percent_decode` は `%XX` だけを戻します。`form_decode` はそれに加えて
+`+` を空白にします —— query と form body の中だけの規則で、path の `+` は
+`+` だからです。2 つの名前なのは 2 つの規則だからです。
+
+`%` の後に 16 進数 2 桁が続かないのは `Error::InvalidEncoding` です。literal の
+`%` として扱いません: 推測する decoder は攻撃者に操縦できる decoder です。
+
+`form_value` は `a=1&b=2` から名前を探して復号した値を追記し、あったかどうかを
+返します。key 自体も percent 符号化されうるので、比較は 1 byte ずつ復号しながら
+行います —— lookup が答えるために確保しません。
+
+## Routing
+
+routing は**登録する表ではなく、聞く質問**です。
+
+```kizu
+pub struct Param {
+    pub name: std::string::String,
+    pub value: std::string::String,
+}
+
+pub fn params_new(allocator: Allocator) -> std::http::Params
+fn (self: &Params) count() -> i64
+fn (self: &Params) at(index: i64) -> ?&std::http::Param
+fn (self: &Params) find(name: []u8) -> ?&std::http::Param
+fn (self: &var Params) clear(allocator: Allocator) -> void
+fn (self: Params) deinit(allocator: Allocator) -> void
+
+pub fn route(
+    allocator: Allocator,
+    pattern: []u8,
+    method: []u8,
+    path: []u8,
+    params: &var std::http::Params,
+) -> std::http::Failure!bool
+```
+
+pattern の綴りは Go 1.22 の `ServeMux` です。
+
+```text
+GET /items/{id}          method を固定し、1 segment を id として取る
+/items/{id}              method は問わない
+/files/{rest...}         残り全部を、その中の `/` ごと rest として取る
+/                        root だけに一致する
+```
+
+`{name}` は**空でない 1 segment**に一致します。`{name...}` は最後にしか置けません。
+捕捉した値は percent 復号します —— segment に分けた**後**なので安全です。1 つの
+segment の中の `%2F` はその segment の text の中の `/` であって、新しい segment
+ではありません。
+
+`params` が捕捉を持つのは答えが true のときだけです。呼ぶ前に clear するので、
+1 つの `Params` が `if` の連鎖全体を通して使えます。
+
+pattern が pattern でない(先頭の `/` が無い、capture 名が空、`{rest...}` が
+最後でない)ときは `Error::InvalidPattern` です。
+
+```kizu
+if try http::route(allocator, "GET /items/{id}", method, path, &var params) {
+    if params.find("id") |entry| {
+        let id = entry.value.as_bytes();
+        ...
+    }
+}
+```
+
+handler の登録簿は同じ質問を lookup の中で答えるだけで、選ばれた handler は
+呼び出し元から見えません。`if` の連鎖なら、その path で何が動くかは path を
+名指した場所に書いてあります。
+
 ## 今は話さないこと
 
 - **keep-alive**: 1 接続 1 request で、response は `Connection: close` を送ります
@@ -178,7 +277,8 @@ pub fn default_limits() -> std::http::Limits
 
 `std::http::Error` は `MalformedRequest`、`HeadTooLarge`、`BodyTooLarge`、
 `UnsupportedVersion`、`UnsupportedEncoding`、`Incomplete`、`InvalidStatus`、
-`InvalidHeader`、`InvalidUrl`、`ResponseFinished`、`InvalidEncoding` を持ちます。
+`InvalidHeader`、`InvalidUrl`、`UnsupportedScheme`、`MalformedResponse`、
+`ResponseFinished`、`InvalidEncoding`、`InvalidPattern` を持ちます。
 
 `std::http::Failure` はその和 —— `Error or std::net::Error or std::mem::Error` ——
 です。どれも変換されないので、`match` した caller はどの層が拒否したかを見ます。

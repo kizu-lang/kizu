@@ -1,0 +1,236 @@
+// Routing is a question you ask, not a table you register in.
+//
+// `route` answers whether one pattern matches one request, and hands back
+// what the pattern captured. A handler registry would answer the same
+// question -- it would just answer it inside a lookup, for a handler the
+// caller cannot see being chosen. Here the caller writes the `if` chain, and
+// what runs for a path is at the place that named the path.
+//
+// The pattern language is Go 1.22's ServeMux: `GET /items/{id}` captures one
+// segment as `id`, and `/files/{rest...}` captures everything left, including
+// the slashes in it.
+
+pub struct Param {
+    pub name: std::string::String,
+    pub value: std::string::String,
+}
+
+fn (self: std::http::Param) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
+    self.value.deinit(allocator);
+    return;
+}
+
+// Params is what one match captured. It is reused across matches: `route`
+// clears it before it starts, so one buffer serves a whole `if` chain.
+pub struct Params {
+    entries: std::array::Array<std::http::Param>,
+}
+
+pub fn params_new(allocator: Allocator) -> std::http::Params {
+    return Params { entries: std::array::new<std::http::Param>(allocator) };
+}
+
+fn (self: &std::http::Params) count() -> i64 {
+    return self.entries.len();
+}
+
+fn (self: &std::http::Params) at(index: i64) -> ?&std::http::Param {
+    return self.entries.at(index);
+}
+
+// find is the capture under a name. The value is read through the borrow the
+// way a header value is: `let text = param.value.as_bytes();`.
+fn (self: &std::http::Params) find(name: []u8) -> ?&std::http::Param {
+    var index = 0;
+    while self.entries.at(index) |entry| {
+        let entry_name = entry.name.as_bytes();
+        if std::mem::equal_bytes(entry_name, name) {
+            return self.entries.at(index);
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &var std::http::Params) clear(allocator: Allocator) -> void {
+    while self.entries.len() > 0 {
+        let dropped = self.entries.pop_or_panic();
+        dropped.deinit(allocator);
+    }
+    return;
+}
+
+fn (self: std::http::Params) deinit(allocator: Allocator) -> void {
+    self.entries.deinit(allocator);
+    return;
+}
+
+// route matches one pattern against one request.
+//
+// A pattern is `METHOD /path` or just `/path`; without a method it matches
+// any. `{name}` takes exactly one non-empty segment, `{name...}` takes the
+// rest including its slashes and must be last. Captured values are
+// percent-decoded, which is safe after the split: a `%2F` inside one segment
+// is a slash in that segment's text, not a new segment.
+//
+// `params` holds the captures only when the answer is true. It is cleared
+// first, so the same Params serves every arm of an `if` chain.
+pub fn route(
+    allocator: Allocator,
+    pattern: []u8,
+    method: []u8,
+    path: []u8,
+    params: &var std::http::Params
+) -> std::http::Failure!bool {
+    params.clear(allocator);
+    let matched = try match_route(allocator, pattern, method, path, params);
+    if !matched {
+        params.clear(allocator);
+    }
+    return matched;
+}
+
+fn match_route(
+    allocator: Allocator,
+    pattern: []u8,
+    method: []u8,
+    path: []u8,
+    params: &var std::http::Params
+) -> std::http::Failure!bool {
+    let pattern_length = std::mem::len(pattern);
+    var shape = pattern[0..pattern_length];
+    if std::http::index_of(pattern, cast<u8>(32), 0) |space| {
+        let wanted = pattern[0..space];
+        if std::mem::len(wanted) == 0 {
+            return std::http::Error::InvalidPattern;
+        }
+        // Methods are compared byte for byte: HTTP method names are
+        // case-sensitive, and `get` is not `GET`.
+        if !std::mem::equal_bytes(wanted, method) {
+            return false;
+        }
+        shape = pattern[space + 1..pattern_length];
+    }
+    if std::mem::len(shape) == 0 or shape[0] != cast<u8>(47) {
+        return std::http::Error::InvalidPattern;
+    }
+    if std::mem::len(path) == 0 or path[0] != cast<u8>(47) {
+        return false;
+    }
+    return match_segments(allocator, shape, path, params);
+}
+
+// Segment is one run between slashes, and where to resume after it. `next`
+// past the end is what says the walk is done, which is why it is one past the
+// length rather than the length itself.
+struct Segment {
+    start: i64,
+    end: i64,
+    next: i64,
+}
+
+fn segment_at(text: []u8, from: i64) -> std::http::Segment {
+    let length = std::mem::len(text);
+    if std::http::index_of(text, cast<u8>(47), from) |slash| {
+        return Segment { start: from, end: slash, next: slash + 1 };
+    }
+    return Segment { start: from, end: length, next: length + 1 };
+}
+
+fn match_segments(
+    allocator: Allocator,
+    shape: []u8,
+    path: []u8,
+    params: &var std::http::Params
+) -> std::http::Failure!bool {
+    let shape_length = std::mem::len(shape);
+    let path_length = std::mem::len(path);
+    var shape_cursor = 1;
+    var path_cursor = 1;
+    while shape_cursor <= shape_length {
+        let piece = segment_at(shape, shape_cursor);
+        let name = shape[piece.start..piece.end];
+        if is_rest_capture(name) {
+            if piece.next <= shape_length {
+                return std::http::Error::InvalidPattern;
+            }
+            let label = capture_name(name, 4);
+            if std::mem::len(label) == 0 {
+                return std::http::Error::InvalidPattern;
+            }
+            if path_cursor > path_length {
+                return false;
+            }
+            try capture(allocator, params, label, path[path_cursor..path_length]);
+            return true;
+        }
+        if path_cursor > path_length {
+            return false;
+        }
+        let actual = segment_at(path, path_cursor);
+        let text = path[actual.start..actual.end];
+        if is_capture(name) {
+            let label = capture_name(name, 1);
+            if std::mem::len(label) == 0 {
+                return std::http::Error::InvalidPattern;
+            }
+            // A capture stands for a segment, and an empty run between two
+            // slashes is not one.
+            if std::mem::len(text) == 0 {
+                return false;
+            }
+            try capture(allocator, params, label, text);
+        } else {
+            if !std::mem::equal_bytes(name, text) {
+                return false;
+            }
+        }
+        shape_cursor = piece.next;
+        path_cursor = actual.next;
+    }
+    return path_cursor > path_length;
+}
+
+// is_capture reports whether a pattern segment is `{name}`.
+fn is_capture(piece: []u8) -> bool {
+    let length = std::mem::len(piece);
+    if length < 2 {
+        return false;
+    }
+    return piece[0] == cast<u8>(123) and piece[length - 1] == cast<u8>(125);
+}
+
+// is_rest_capture reports whether a pattern segment is `{name...}`.
+fn is_rest_capture(piece: []u8) -> bool {
+    let length = std::mem::len(piece);
+    if length < 5 or !is_capture(piece) {
+        return false;
+    }
+    return std::mem::equal_bytes(piece[length - 4..length], "...}");
+}
+
+// capture_name strips `{` from the front and `}` -- or `...}` -- from the back.
+fn capture_name(piece: []u8, tail: i64) -> []u8 {
+    let length = std::mem::len(piece);
+    if length < tail + 1 {
+        return piece[0..0];
+    }
+    return piece[1..length - tail];
+}
+
+fn capture(
+    allocator: Allocator,
+    params: &var std::http::Params,
+    name: []u8,
+    raw: []u8
+) -> std::http::Failure!void {
+    var owned_name = try std::string::from_bytes(allocator, name);
+    errdefer owned_name.deinit(allocator);
+    var value = std::string::new(allocator);
+    errdefer value.deinit(allocator);
+    try std::http::percent_decode(allocator, raw, &var value);
+    let entry = Param { name: move owned_name, value: move value };
+    try params.entries.append(allocator, move entry);
+    return;
+}
