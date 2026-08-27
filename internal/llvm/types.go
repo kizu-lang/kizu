@@ -48,7 +48,10 @@ func (e *emitter) llvmType(typ string) string {
 		return "ptr"
 	}
 	// An arena is the header an array is, so the two spell the same type.
-	if isArrayLLVMType(typ) || isArenaLLVMType(typ) {
+	if isArenaLLVMType(typ) {
+		return arenaHeaderType
+	}
+	if isArrayLLVMType(typ) {
 		return arrayHeaderType
 	}
 	if isMapLLVMType(typ) {

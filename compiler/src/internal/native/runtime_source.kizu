@@ -48,10 +48,34 @@ pub fn runtime_source() -> []u8 {
         \\ * The alias is what keeps the signatures below reading as strings. */
         \\typedef KizuArray KizuString;
         \\
-        \\/* A std::arena::Arena<T> is that same header too. It owns its elements the way
-        \\ * an array does; what differs is above the runtime -- a Handle is an index
-        \\ * rather than a borrow, and nothing is removed from the middle -- so the arena
-        \\ * has no entry points here and reaches for the array ones. */
+        \\/* A std::arena::Arena<T> leads with that same header. It owns its elements the
+        \\ * way an array does; what differs is above the runtime -- a Handle is an index
+        \\ * rather than a borrow, and nothing is removed from the middle -- so growing
+        \\ * and releasing an arena's storage reaches for the array entry points, which
+        \\ * are handed a pointer and read only the leading three fields.
+        \\ *
+        \\ * The fourth word says which arena instance those three belong to. Handles are
+        \\ * otherwise the same small integers in every arena, so one that reached the
+        \\ * wrong arena would read a live element of it and answer with the wrong value.
+        \\ * A handle carries the id beside its index, and a read compares them. */
+        \\typedef struct {
+        \\    KizuArray storage;
+        \\    int64_t id;
+        \\} KizuArena;
+        \\
+        \\_Static_assert(offsetof(KizuArena, storage) == 0,
+        \\               "KizuArena leads with the array header");
+        \\_Static_assert(offsetof(KizuArena, id) == 24,
+        \\               "KizuArena.id follows the three the array runtime reads");
+        \\_Static_assert(sizeof(KizuArena) == 32, "KizuArena is four words");
+        \\
+        \\/* An index gets the low half of a handle and the instance gets the high half,
+        \\ * so both stop at the same place: KIZU_ARENA_MAX_LEN is the length an add
+        \\ * refuses to pass, and KIZU_ARENA_INSTANCE_MAX the count of arenas a program
+        \\ * may build. */
+        \\#define KIZU_ARENA_INDEX_BITS 32
+        \\#define KIZU_ARENA_MAX_LEN INT64_C(0xFFFFFFFF)
+        \\#define KIZU_ARENA_INSTANCE_MAX INT64_C(0xFFFFFFFF)
         \\
         \\typedef struct {
         \\    int64_t size;
@@ -572,6 +596,37 @@ pub fn runtime_source() -> []u8 {
         \\void kizu_panic_arena_handle(int64_t line, int64_t column) {
         \\    kizu_panic_summary("invalid arena handle", line, column);
         \\    abort();
+        \\}
+        \\
+        \\void kizu_panic_arena_full(int64_t line, int64_t column) {
+        \\    kizu_panic_summary("arena is full", line, column);
+        \\    abort();
+        \\}
+        \\
+        \\/*
+        \\ * kizu_arena_origin hands back the number one arena's handles count from: an
+        \\ * instance of its own in the half of a word an index does not need, plus the
+        \\ * one that keeps zero free for `?Handle<T>`. A handle is that number plus an
+        \\ * element's index, so subtracting it back off at the read both recovers the
+        \\ * index and says whether the handle came from here -- one from elsewhere lands
+        \\ * a whole multiple of 2^32 away, which is past any length an arena is allowed
+        \\ * to reach.
+        \\ *
+        \\ * No two arenas are ever given the same one. Reusing a released arena's would
+        \\ * let a handle left over from it name an element of the arena that took it
+        \\ * next, which is the read this exists to refuse. Running out is reported
+        \\ * rather than wrapped around: a program that built four billion arenas hears
+        \\ * that it did, instead of quietly getting handles that fit two of them.
+        \\ */
+        \\static int64_t kizu_arena_instances = 0;
+        \\
+        \\int64_t kizu_arena_origin(void) {
+        \\    if (kizu_arena_instances >= KIZU_ARENA_INSTANCE_MAX) {
+        \\        fputs("runtime error: arena instances exhausted\n", stderr);
+        \\        abort();
+        \\    }
+        \\    kizu_arena_instances += 1;
+        \\    return (kizu_arena_instances << KIZU_ARENA_INDEX_BITS) + 1;
         \\}
         \\
         \\void kizu_panic_test_fail(const unsigned char *s, int64_t len,

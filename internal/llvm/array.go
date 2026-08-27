@@ -571,8 +571,11 @@ func (e *emitter) writeContainerStorageRelease(instr *ir.Instr, what string) err
 	if err != nil {
 		return err
 	}
-	data := e.arrayFieldOf(container.operand, arrayFieldData, what+".data")
-	capacity := e.arrayFieldOf(container.operand, arrayFieldCapacity, what+".cap")
+	// An arena's header leads with the array's three fields but is not the
+	// same type, so the extract names whichever one it was handed.
+	header := e.llvmType(instr.Args[0].Type)
+	data := e.arrayFieldOf(header, container.operand, arrayFieldData, what+".data")
+	capacity := e.arrayFieldOf(header, container.operand, arrayFieldCapacity, what+".cap")
 	allocator := e.value(instr.Args[1])
 	bytes := "%" + e.nextSyntheticValue(what+".bytes")
 	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n",
@@ -583,10 +586,10 @@ func (e *emitter) writeContainerStorageRelease(instr *ir.Instr, what string) err
 	return nil
 }
 
-// arrayFieldOf reads one field out of an array header value.
-func (e *emitter) arrayFieldOf(value string, field int, name string) string {
+// arrayFieldOf reads one field out of a container header value.
+func (e *emitter) arrayFieldOf(header string, value string, field int, name string) string {
 	out := "%" + e.nextSyntheticValue(name)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n", out, arrayHeaderType, value, field)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n", out, header, value, field)
 	return out
 }
 

@@ -875,8 +875,16 @@ fn (self: &var Emitter) write_container_storage_release(
     defer bytes_name.deinit(self.allocator);
     try bytes_name.append_bytes(self.allocator, ".bytes");
     let bytes_label = bytes_name.as_bytes();
-    let data = try self.array_field_of(container.operand, array_field_data(), data_bytes);
-    let capacity = try self.array_field_of(container.operand, array_field_capacity(), cap_bytes);
+    // An arena's header leads with the array's three fields but is not the
+    // same type, so the extract names whichever one it was handed.
+    var header = array_header_type();
+    let container_type = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
+    let container_bytes = container_type.as_bytes();
+    if is_arena_llvm_type(container_bytes) {
+        header = arena_header_type();
+    }
+    let data = try self.array_field_of(header, container.operand, array_field_data(), data_bytes);
+    let capacity = try self.array_field_of(header, container.operand, array_field_capacity(), cap_bytes);
     let allocator = try self.operand(module, node.args.get_or_panic(1));
     let elem_size = try self.element_size_operand_bytes(module, elem_bytes);
     let bytes_synthetic = try self.next_synthetic_value(bytes_label);
@@ -893,13 +901,13 @@ fn (self: &var Emitter) write_container_storage_release(
     return null;
 }
 
-/// Reads one field out of an array header value, the Go `arrayFieldOf`.
-fn (self: &var Emitter) array_field_of(value: ir::Name, field: i64, name: []u8) -> !ir::Name {
+/// Reads one field out of a container header value, the Go `arrayFieldOf`.
+fn (self: &var Emitter) array_field_of(header: []u8, value: ir::Name, field: i64, name: []u8) -> !ir::Name {
     let synthetic = try self.next_synthetic_value(name);
     let out = try self.percent(synthetic);
     try self.line4(
         "  %s = extractvalue %s %s, %s",
-        Arg::Str(out), Arg::Lit(array_header_type()), Arg::Str(value), Arg::Int(field)
+        Arg::Str(out), Arg::Lit(header), Arg::Str(value), Arg::Int(field)
     );
     return out;
 }
