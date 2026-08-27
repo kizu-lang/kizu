@@ -98,6 +98,7 @@ layout table はそれぞれの header の大きさで答えます。
 | `Array` を copy 禁止にして borrow だけで扱う | `Array` は既に move-only。問題は copy の可否ではなく、mutator が header のどこに書くか |
 | pointer header のまま `map::new` / `arena::new` を `!Map` / `!Arena` にする | 失敗の綴りは 1 つになるが、空の map を作るだけで 703 箇所に `try` が付く。header を値にすれば確保自体が無くなり、`try` も要らない |
 | `&T` の copy は残し、`b.show(b.put(v))` を borrow 検査で拒否する | 規則を 1 つ増やして利用者に区別を課す(原理 6)。`&T` が copy にも address にもなること自体が経路 2 本(原理 9)なので、そちらを畳む |
+| `arena.add` は OOM で panic する(Rust の `Vec::push` と同じ) | Rust の global allocator は OS で「memory が無い = マシンが終わり」だが、Kizu の allocator は capability で、`mem::fixed_buffer` の上に arena を置ける。固定バッファが尽きるのは正常系の分岐であってバグではない。zig の `ArrayList.append` と同じく `!` を返す |
 | Arena の `add` / `at` / `at_mut` は compiler の中に置いたままにする | 「receiver がどう届くか」の答えが 2 本になる。他の 3 つは宣言の `&var self` が答え、Arena だけ ownership checker の access table が答えるので、両者がずれても誰も気づけない(原理 9)。宣言を書けば 4 つとも同じ 1 本を読む |
 
 ## Consequences
@@ -117,6 +118,11 @@ layout table はそれぞれの header の大きさで答えます。
   自分自身の check の peak RSS は 489MB から 465MB になった
 - `kizu_array_new` / `kizu_map_new` / `kizu_arena_new` は無くなった。header を
   確保するものが無い。arena は entry point も無く、array のものを使う
+- `arena.add` は refused な確保を `std::mem::Error!` で返す。以前は
+  `abort()` していて、`array.append` と同じ問いに違う答えを出していた
+  (原理 7)。落ちるのはプログラムが間違っているとき —— `Arena.at` に別 arena の
+  handle を渡したとき —— だけで、allocator が memory をくれないのはそれには
+  当たらない(`mem::fixed_buffer` は使い切るのが正常系)
 - Arena が std 宣言を持ったことで、それが無いことに対する特例が消えた ——
   受け渡しを決める `containerSelfPassing`、slot 解析の arena 分岐、
   ownership から ir へ渡す `ArenaMethodWritesHeader`、型検査の手書き署名、

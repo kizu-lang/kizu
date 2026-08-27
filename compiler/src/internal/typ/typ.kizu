@@ -185,8 +185,8 @@ pub fn new_builder(allocator: Allocator) -> Builder {
 }
 
 /// Retains one node and returns its identity inside this graph.
-fn (self: &var Builder) add(node: Node) -> arena::Handle<Node> {
-    return self.nodes.add(self.allocator, move node);
+fn (self: &var Builder) add(node: Node) -> !arena::Handle<Node> {
+    return try self.nodes.add(self.allocator, move node);
 }
 
 fn copy_path(allocator: Allocator, source: &array::Array<string::String>) -> !array::Array<string::String> {
@@ -209,9 +209,9 @@ fn (self: &Builder) at(handle: arena::Handle<Node>) -> &Node {
 }
 
 /// Transfers the completed graph into its phase table.
-pub fn finish_builder(allocator: Allocator, builder: Builder, table: &var Table, root: arena::Handle<Node>) -> Type {
+pub fn finish_builder(allocator: Allocator, builder: Builder, table: &var Table, root: arena::Handle<Node>) -> !Type {
     let tree = TypeTree { nodes: move builder.nodes, root: root };
-    let tree_handle = table.trees.add(allocator, move tree);
+    let tree_handle = try table.trees.add(allocator, move tree);
     return Type { tree: tree_handle, root: root };
 }
 
@@ -222,7 +222,7 @@ fn (self: &var Table) parse(text: []u8) -> !Type {
     }
     let tree = try parse_tree(self.allocator, text);
     let root = tree.root;
-    let tree_handle = self.trees.add(self.allocator, move tree);
+    let tree_handle = try self.trees.add(self.allocator, move tree);
     let value = Type {
         tree: tree_handle, root: root
     };
@@ -257,7 +257,7 @@ fn (self: &var Parser) parse_type() -> !arena::Handle<Node> {
         return left;
     }
     let ok = try self.parse_prefix();
-    return self.nodes.add(self.allocator, Node::ErrorUnion(ErrorUnion {
+    return try self.nodes.add(self.allocator, Node::ErrorUnion(ErrorUnion {
         err: left,
         ok: ok
     }));
@@ -267,7 +267,7 @@ fn (self: &var Parser) parse_type() -> !arena::Handle<Node> {
 fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
     if self.accept("!") {
         let elem = try self.parse_prefix();
-        return self.nodes.add(self.allocator, Node::ErrorUnion(ErrorUnion {
+        return try self.nodes.add(self.allocator, Node::ErrorUnion(ErrorUnion {
             err: null,
             ok: elem
         }));
@@ -277,25 +277,25 @@ fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
     }
     if self.accept("&var ") {
         let elem = try self.parse_prefix();
-        return self.nodes.add(self.allocator, Node::Borrow(Borrow {
+        return try self.nodes.add(self.allocator, Node::Borrow(Borrow {
             elem: elem,
             mutable: true
         }));
     }
     if self.accept("&") {
         let elem = try self.parse_prefix();
-        return self.nodes.add(self.allocator, Node::Borrow(Borrow {
+        return try self.nodes.add(self.allocator, Node::Borrow(Borrow {
             elem: elem,
             mutable: false
         }));
     }
     if self.accept("?") {
         let elem = try self.parse_prefix();
-        return self.nodes.add(self.allocator, Node::Optional(Optional { elem: elem }));
+        return try self.nodes.add(self.allocator, Node::Optional(Optional { elem: elem }));
     }
     if self.accept("const ") {
         let elem = try self.parse_prefix();
-        return self.nodes.add(self.allocator, Node::Const(Const { elem: elem }));
+        return try self.nodes.add(self.allocator, Node::Const(Const { elem: elem }));
     }
     if self.accept("unsafe fn(") {
         return self.parse_func(true);
@@ -328,7 +328,7 @@ fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
         return Error::ExpectedResultArrow;
     }
     let result = try self.parse_type();
-    return self.nodes.add(self.allocator, Node::Func(Func {
+    return try self.nodes.add(self.allocator, Node::Func(Func {
         params: move params,
         result: result,
         unsafe_call: unsafe_call
@@ -339,7 +339,7 @@ fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
 fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
     if self.accept("[]") {
         let elem = try self.parse_prefix();
-        return self.nodes.add(self.allocator, Node::Slice(Slice { elem: elem }));
+        return try self.nodes.add(self.allocator, Node::Slice(Slice { elem: elem }));
     }
     self.position = self.position + 1;
     let start = self.position;
@@ -360,7 +360,7 @@ fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
         return Error::ExpectedBufferClose;
     }
     let elem = try self.parse_prefix();
-    return self.nodes.add(self.allocator, Node::Buffer(Buffer {
+    return try self.nodes.add(self.allocator, Node::Buffer(Buffer {
         size: size,
         elem: elem
     }));
@@ -397,7 +397,7 @@ fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
             return Error::UnclosedArguments;
         }
     }
-    return self.nodes.add(self.allocator, Node::Name(Name {
+    return try self.nodes.add(self.allocator, Node::Name(Name {
         path: move path,
         args: move args
     }));
@@ -968,7 +968,7 @@ fn transform_names<M, F>(source: &Table, value: Type, destination: &var Table, m
     var builder = new_builder(allocator);
     errdefer builder.deinit(allocator);
     let root = try map_names_node<M, F>(allocator, &var builder, source.trees.at(value.tree), value.root, mapper, folder);
-    return finish_builder(allocator, move builder, destination, root);
+    return try finish_builder(allocator, move builder, destination, root);
 }
 
 fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, handle: arena::Handle<Node>, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
@@ -976,26 +976,26 @@ fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &Typ
         Name(node) => try map_name_node<M, F>(builder, value, node, mapper, folder),
         Slice(node) => {
             let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
-            builder.nodes.add(allocator, Node::Slice(Slice { elem: elem }))
+            try builder.nodes.add(allocator, Node::Slice(Slice { elem: elem }))
         },
         Buffer(node) => {
             let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
-            builder.nodes.add(allocator, Node::Buffer(Buffer { size: node.size, elem: elem }))
+            try builder.nodes.add(allocator, Node::Buffer(Buffer { size: node.size, elem: elem }))
         },
         Borrow(node) => {
             let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
-            builder.nodes.add(allocator, Node::Borrow(Borrow {
+            try builder.nodes.add(allocator, Node::Borrow(Borrow {
                 elem: elem,
                 mutable: node.mutable
             }))
         },
         Optional(node) => {
             let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
-            builder.nodes.add(allocator, Node::Optional(Optional { elem: elem }))
+            try builder.nodes.add(allocator, Node::Optional(Optional { elem: elem }))
         },
         Const(node) => {
             let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
-            builder.nodes.add(allocator, Node::Const(Const { elem: elem }))
+            try builder.nodes.add(allocator, Node::Const(Const { elem: elem }))
         },
         ErrorUnion(node) => try map_error_union_names<M, F>(allocator, builder, value, node, mapper, folder),
         Func(node) => try map_func_names<M, F>(builder, value, node, mapper, folder),
@@ -1012,7 +1012,7 @@ fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, ma
         index = index + 1;
     }
     let result = try map_names_node<M, F>(builder.allocator, builder, value, node.result, mapper, folder);
-    return builder.nodes.add(allocator, Node::Func(Func {
+    return try builder.nodes.add(allocator, Node::Func(Func {
         params: move params,
         result: result,
         unsafe_call: node.unsafe_call
@@ -1038,9 +1038,9 @@ fn map_error_union_names<M, F>(allocator: Allocator, builder: &var Builder, valu
     let ok = try map_names_node<M, F>(allocator, builder, value, node.ok, mapper, folder);
     if node.err |source_err| {
         let err = try map_names_node<M, F>(allocator, builder, value, source_err, mapper, folder);
-        return builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
+        return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
     }
-    return builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
+    return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
 }
 
 /// Replaces whole-name type parameters and retains the resulting graph.
@@ -1063,7 +1063,7 @@ pub fn substitute(
         substitutions,
         true
     );
-    return finish_builder(allocator, move builder, table, root);
+    return try finish_builder(allocator, move builder, table, root);
 }
 
 /// Retains one parsed type wrapped in an explicit borrow node.
@@ -1085,11 +1085,11 @@ pub fn wrap_borrow(
         &substitutions,
         false
     );
-    let root = builder.nodes.add(allocator, Node::Borrow(Borrow {
+    let root = try builder.nodes.add(allocator, Node::Borrow(Borrow {
         elem: elem,
         mutable: mutable
     }));
-    return finish_builder(allocator, move builder, table, root);
+    return try finish_builder(allocator, move builder, table, root);
 }
 
 fn substitute_node(
@@ -1115,19 +1115,19 @@ fn substitute_node(
             let elem = try substitute_node(allocator,
                 builder, table, tree, node.elem, substitutions, replace_names
             );
-            builder.nodes.add(allocator, Node::Slice(Slice { elem: elem }))
+            try builder.nodes.add(allocator, Node::Slice(Slice { elem: elem }))
         },
         Buffer(node) => {
             let elem = try substitute_node(allocator,
                 builder, table, tree, node.elem, substitutions, replace_names
             );
-            builder.nodes.add(allocator, Node::Buffer(Buffer { size: node.size, elem: elem }))
+            try builder.nodes.add(allocator, Node::Buffer(Buffer { size: node.size, elem: elem }))
         },
         Borrow(node) => {
             let elem = try substitute_node(allocator,
                 builder, table, tree, node.elem, substitutions, replace_names
             );
-            builder.nodes.add(allocator, Node::Borrow(Borrow {
+            try builder.nodes.add(allocator, Node::Borrow(Borrow {
                 elem: elem,
                 mutable: node.mutable
             }))
@@ -1136,13 +1136,13 @@ fn substitute_node(
             let elem = try substitute_node(allocator,
                 builder, table, tree, node.elem, substitutions, replace_names
             );
-            builder.nodes.add(allocator, Node::Optional(Optional { elem: elem }))
+            try builder.nodes.add(allocator, Node::Optional(Optional { elem: elem }))
         },
         Const(node) => {
             let elem = try substitute_node(allocator,
                 builder, table, tree, node.elem, substitutions, replace_names
             );
-            builder.nodes.add(allocator, Node::Const(Const { elem: elem }))
+            try builder.nodes.add(allocator, Node::Const(Const { elem: elem }))
         },
         ErrorUnion(node) => try substitute_error_union(allocator,
             builder,
@@ -1184,7 +1184,7 @@ fn substitute_func(
     let result = try substitute_node(allocator,
         builder, table, tree, node.result, substitutions, replace_names
     );
-    return builder.nodes.add(allocator, Node::Func(Func {
+    return try builder.nodes.add(allocator, Node::Func(Func {
         params: move params,
         result: result,
         unsafe_call: node.unsafe_call
@@ -1250,9 +1250,9 @@ fn substitute_error_union(
         let err = try substitute_node(allocator,
             builder, table, tree, source_err, substitutions, replace_names
         );
-        return builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
+        return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
     }
-    return builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
+    return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
 }
 
 /// Replaces type parameters in a spelling and renders the owned result.

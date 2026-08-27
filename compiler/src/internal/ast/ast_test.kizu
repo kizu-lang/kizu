@@ -31,7 +31,7 @@ fn add_ident_expression(
     name: []u8
 ) -> !Expression {
     let retained = try retained_text(tree, name);
-    return tree.add_expression(ExpressionNode::Ident(IdentExpr {
+    return try tree.add_expression(ExpressionNode::Ident(IdentExpr {
         name: retained,
         span: zero_span()
     }));
@@ -42,7 +42,7 @@ fn add_int_expression(
     value: []u8
 ) -> !Expression {
     let retained = try retained_text(tree, value);
-    return tree.add_expression(ExpressionNode::Int(IntExpr {
+    return try tree.add_expression(ExpressionNode::Int(IntExpr {
         value: retained
     }));
 }
@@ -50,8 +50,8 @@ fn add_int_expression(
 fn add_empty_block(
     allocator: Allocator,
     tree: &var Ast
-) -> Block {
-    return tree.add_block(BlockStmt {
+) -> !Block {
+    return try tree.add_block(BlockStmt {
         statements: array::new<Statement>(allocator)
     });
 }
@@ -324,7 +324,7 @@ fn add_struct_with_field(
     });
     let declaration_name = try retained_text(tree, name);
     let declaration_doc = try retained_text(tree, "");
-    let declaration = tree.add_declaration(DeclarationNode::Struct(
+    let declaration = try tree.add_declaration(DeclarationNode::Struct(
         StructDecl {
         name: declaration_name,
         doc: declaration_doc,
@@ -335,7 +335,7 @@ fn add_struct_with_field(
             requires_unsafe: false
     }
     ));
-    return program.add_declaration(allocator, declaration);
+    return try program.add_declaration(allocator, declaration);
 }
 
 fn add_union_with_payload(
@@ -355,7 +355,7 @@ fn add_union_with_payload(
     });
     let declaration_name = try retained_text(tree, name);
     let declaration_doc = try retained_text(tree, "");
-    let declaration = tree.add_declaration(DeclarationNode::Union(
+    let declaration = try tree.add_declaration(DeclarationNode::Union(
         UnionDecl {
         name: declaration_name,
         doc: declaration_doc,
@@ -364,7 +364,7 @@ fn add_union_with_payload(
         public: false
     }
     ));
-    return program.add_declaration(allocator, declaration);
+    return try program.add_declaration(allocator, declaration);
 }
 
 fn add_cleanup_function(
@@ -378,7 +378,7 @@ fn add_cleanup_function(
     errdefer signature.deinit(allocator);
     signature.receiver = true;
     let doc = try retained_text(tree, "");
-    let declaration = tree.add_declaration(DeclarationNode::Function(
+    let declaration = try tree.add_declaration(DeclarationNode::Function(
         FunctionDecl {
         signature: move signature,
         doc: doc,
@@ -386,7 +386,7 @@ fn add_cleanup_function(
         body: null
     }
     ));
-    return program.add_declaration(allocator, declaration);
+    return try program.add_declaration(allocator, declaration);
 }
 
 fn expect_owner(
@@ -522,7 +522,7 @@ test "match arms recognize only the wildcard tag" {
     let allocator = mem::page_allocator();
     var tree = new(allocator);
     defer tree.deinit(allocator);
-    let retained_body = tree.add_block(BlockStmt {
+    let retained_body = try tree.add_block(BlockStmt {
         statements: array::new<Statement>(allocator)
     });
     let body = retained_body.as_statement();
@@ -571,19 +571,19 @@ test "field paths retain their root and dotted suffix" {
         end: Position { line: 3, column: 9 }
     };
     let root_name = try retained_text(&var tree, "owner");
-    let root = tree.add_expression(ExpressionNode::Ident(IdentExpr {
+    let root = try tree.add_expression(ExpressionNode::Ident(IdentExpr {
         name: root_name,
         span: root_span
     }));
     let first_name = try retained_text(&var tree, "a");
-    let first = tree.add_expression(ExpressionNode::Field(FieldExpr {
+    let first = try tree.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: root,
         name: first_name,
         namespace: false,
         span: zero_span()
     }));
     let second_name = try retained_text(&var tree, "b");
-    let second = tree.add_expression(ExpressionNode::Field(FieldExpr {
+    let second = try tree.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: first,
         name: second_name,
         namespace: false,
@@ -612,7 +612,7 @@ test "field paths retain their root and dotted suffix" {
         testing::fail("identifier was accepted as a field path");
     }
     let namespace_name = try retained_text(&var tree, "Item");
-    let namespaced = tree.add_expression(ExpressionNode::Field(FieldExpr {
+    let namespaced = try tree.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: root,
         name: namespace_name,
         namespace: true,
@@ -623,7 +623,7 @@ test "field paths retain their root and dotted suffix" {
         testing::fail("namespace field was accepted as a runtime path");
     }
     let nested_name = try retained_text(&var tree, "value");
-    let nested_namespace = tree.add_expression(ExpressionNode::Field(
+    let nested_namespace = try tree.add_expression(ExpressionNode::Field(
         FieldExpr {
         receiver: namespaced,
         name: nested_name,
@@ -636,11 +636,11 @@ test "field paths retain their root and dotted suffix" {
         testing::fail("runtime field above a namespace field was accepted");
     }
     let integer_text = try retained_text(&var tree, "1");
-    let integer = tree.add_expression(ExpressionNode::Int(IntExpr {
+    let integer = try tree.add_expression(ExpressionNode::Int(IntExpr {
         value: integer_text
     }));
     let invalid_name = try retained_text(&var tree, "value");
-    let invalid_root = tree.add_expression(ExpressionNode::Field(
+    let invalid_root = try tree.add_expression(ExpressionNode::Field(
         FieldExpr {
         receiver: integer,
         name: invalid_name,
@@ -666,7 +666,7 @@ test "expression rendering covers values operators calls and access" {
     try expect_expression_render(allocator, &tree, x, "x");
     try expect_expression_render(allocator, &tree, forty_one, "41");
     let string_text = try retained_text(&var tree, "café");
-    let string_value = tree.add_expression(ExpressionNode::String(
+    let string_value = try tree.add_expression(ExpressionNode::String(
         StringExpr { value: string_text }
     ));
     try expect_expression_render(
@@ -675,20 +675,20 @@ test "expression rendering covers values operators calls and access" {
         string_value,
         \\"caf\xC3\xA9"
     );
-    let null_value = tree.add_expression(ExpressionNode::Null(
+    let null_value = try tree.add_expression(ExpressionNode::Null(
         NullExpr { span: zero_span() }
     ));
     try expect_expression_render(allocator, &tree, null_value, "null");
-    let true_value = tree.add_expression(ExpressionNode::Bool(
+    let true_value = try tree.add_expression(ExpressionNode::Bool(
         BoolExpr { value: true }
     ));
-    let false_value = tree.add_expression(ExpressionNode::Bool(
+    let false_value = try tree.add_expression(ExpressionNode::Bool(
         BoolExpr { value: false }
     ));
     try expect_expression_render(allocator, &tree, true_value, "true");
     try expect_expression_render(allocator, &tree, false_value, "false");
     let type_name = try retained_text(&var tree, "i64");
-    let type_value = tree.add_expression(ExpressionNode::Type(
+    let type_value = try tree.add_expression(ExpressionNode::Type(
         TypeExpr { type_name: type_name }
     ));
     try expect_expression_render(
@@ -697,7 +697,7 @@ test "expression rendering covers values operators calls and access" {
         type_value,
         "type<i64>"
     );
-    let comptime_value = tree.add_expression(ExpressionNode::Comptime(
+    let comptime_value = try tree.add_expression(ExpressionNode::Comptime(
         ComptimeExpr { expr: x }
     ));
     try expect_expression_render(
@@ -707,12 +707,12 @@ test "expression rendering covers values operators calls and access" {
         "comptime x"
     );
     let minus = try retained_text(&var tree, "-");
-    let prefix = tree.add_expression(ExpressionNode::Prefix(
+    let prefix = try tree.add_expression(ExpressionNode::Prefix(
         PrefixExpr { operator: minus, right: forty_one }
     ));
     try expect_expression_render(allocator, &tree, prefix, "(-41)");
     let plus = try retained_text(&var tree, "+");
-    let binary = tree.add_expression(ExpressionNode::Binary(
+    let binary = try tree.add_expression(ExpressionNode::Binary(
         BinaryExpr {
         left: forty_one,
         operator: plus,
@@ -730,8 +730,8 @@ test "expression rendering covers values operators calls and access" {
     errdefer args.deinit(allocator);
     try args.append(allocator, x);
     try args.append(allocator, forty_one);
-    let retained_args = tree.add_expression_list(move args);
-    let call = tree.add_expression(ExpressionNode::Call(CallExpr {
+    let retained_args = try tree.add_expression_list(move args);
+    let call = try tree.add_expression(ExpressionNode::Call(CallExpr {
         callee: foo,
         args: retained_args
     }));
@@ -742,7 +742,7 @@ test "expression rendering covers values operators calls and access" {
         "foo(x, 41)"
     );
     let static_arg = try retained_text(&var tree, "i64");
-    let applied = tree.add_expression(ExpressionNode::TypeApply(
+    let applied = try tree.add_expression(ExpressionNode::TypeApply(
         TypeApplyExpr { callee: foo, type_arg: static_arg }
     ));
     try expect_expression_render(
@@ -751,7 +751,7 @@ test "expression rendering covers values operators calls and access" {
         applied,
         "foo<i64>"
     );
-    let cast = tree.add_expression(ExpressionNode::Cast(CastExpr {
+    let cast = try tree.add_expression(ExpressionNode::Cast(CastExpr {
         target_type: integer_type,
         value: x,
         keyword_span: zero_span()
@@ -762,14 +762,14 @@ test "expression rendering covers values operators calls and access" {
         cast,
         "cast<i64>(x)"
     );
-    let tried = tree.add_expression(ExpressionNode::Try(
+    let tried = try tree.add_expression(ExpressionNode::Try(
         TryExpr { value: call }
     ));
-    let moved = tree.add_expression(ExpressionNode::Move(
+    let moved = try tree.add_expression(ExpressionNode::Move(
         MoveExpr { value: x, span: zero_span() }
     ));
     let safety = try retained_text(&var tree, "checked by caller");
-    let unsafe_value = tree.add_expression(ExpressionNode::Unsafe(
+    let unsafe_value = try tree.add_expression(ExpressionNode::Unsafe(
         UnsafeExpr { value: x, safety: safety, span: zero_span() }
     ));
     try expect_expression_render(
@@ -785,7 +785,7 @@ test "expression rendering covers values operators calls and access" {
         unsafe_value,
         "unsafe x"
     );
-    let indexed = tree.add_expression(ExpressionNode::Index(
+    let indexed = try tree.add_expression(ExpressionNode::Index(
         IndexExpr {
         target: x,
         index: one,
@@ -795,7 +795,7 @@ test "expression rendering covers values operators calls and access" {
         span: zero_span()
     }
     ));
-    let sliced = tree.add_expression(ExpressionNode::Index(
+    let sliced = try tree.add_expression(ExpressionNode::Index(
         IndexExpr {
         target: x,
         index: null,
@@ -805,7 +805,7 @@ test "expression rendering covers values operators calls and access" {
         span: zero_span()
     }
     ));
-    let open_slice = tree.add_expression(ExpressionNode::Index(
+    let open_slice = try tree.add_expression(ExpressionNode::Index(
         IndexExpr {
         target: x,
         index: null,
@@ -829,7 +829,7 @@ test "expression rendering covers values operators calls and access" {
         "x[..]"
     );
     let field_name = try retained_text(&var tree, "value");
-    let field = tree.add_expression(ExpressionNode::Field(FieldExpr {
+    let field = try tree.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: x,
         name: field_name,
         namespace: false,
@@ -837,7 +837,7 @@ test "expression rendering covers values operators calls and access" {
     }));
     let owner = try add_ident_expression(&var tree, "Type");
     let variant_name = try retained_text(&var tree, "Item");
-    let namespace = tree.add_expression(ExpressionNode::Field(
+    let namespace = try tree.add_expression(ExpressionNode::Field(
         FieldExpr {
         receiver: owner,
         name: variant_name,
@@ -845,7 +845,7 @@ test "expression rendering covers values operators calls and access" {
         span: zero_span()
     }
     ));
-    let deref = tree.add_expression(ExpressionNode::Deref(
+    let deref = try tree.add_expression(ExpressionNode::Deref(
         DerefExpr { receiver: x, operator_span: zero_span() }
     ));
     try expect_expression_render(allocator, &tree, field, "x.value");
@@ -856,10 +856,10 @@ test "expression rendering covers values operators calls and access" {
         "Type::Item"
     );
     try expect_expression_render(allocator, &tree, deref, "x.*");
-    let returned = tree.add_statement(StatementNode::Return(
+    let returned = try tree.add_statement(StatementNode::Return(
         ReturnStmt { value: x }
     ));
-    let guarded = tree.add_expression(ExpressionNode::OrelseGuard(
+    let guarded = try tree.add_expression(ExpressionNode::OrelseGuard(
         OrelseGuardExpr {
         condition: x,
         exit: returned,
@@ -884,7 +884,7 @@ test "expression rendering covers composite and control forms" {
     let capture_name = try retained_text(&var tree, "captured");
     let meta_owner = try retained_text(&var tree, "Option");
     let one = try add_int_expression(&var tree, "1");
-    let true_value = tree.add_expression(ExpressionNode::Bool(
+    let true_value = try tree.add_expression(ExpressionNode::Bool(
         BoolExpr { value: true }
     ));
     var fields = array::new<FieldValue>(allocator);
@@ -898,14 +898,14 @@ test "expression rendering covers composite and control forms" {
         value: value
     });
     let point_name = try retained_text(&var tree, "Point");
-    let literal = tree.add_expression(ExpressionNode::StructLiteral(
+    let literal = try tree.add_expression(ExpressionNode::StructLiteral(
         StructLiteralExpr {
         type_name: point_name,
         fields: move fields,
         span: zero_span()
     }
     ));
-    let buffer = tree.add_expression(ExpressionNode::BufferLiteral(
+    let buffer = try tree.add_expression(ExpressionNode::BufferLiteral(
         BufferLiteralExpr { size: 4, span: zero_span() }
     ));
     try expect_expression_render(
@@ -920,10 +920,10 @@ test "expression rendering covers composite and control forms" {
         buffer,
         "[4]u8{}"
     );
-    let consequence = add_empty_block(allocator, &var tree);
-    let alternative = add_empty_block(allocator, &var tree);
+    let consequence = try add_empty_block(allocator, &var tree);
+    let alternative = try add_empty_block(allocator, &var tree);
     let no_err_capture = try retained_text(&var tree, "");
-    let conditional = tree.add_expression(ExpressionNode::If(IfStmt {
+    let conditional = try tree.add_expression(ExpressionNode::If(IfStmt {
         condition: true_value,
         consequence: consequence,
         alternative: alternative,
@@ -936,10 +936,10 @@ test "expression rendering covers composite and control forms" {
         conditional,
         "if true {  } else {  }"
     );
-    let bare_body = tree.add_statement(StatementNode::Expr(
+    let bare_body = try tree.add_statement(StatementNode::Expr(
         ExprStmt { expr: payload, semicolon: false }
     ));
-    let return_body = tree.add_statement(StatementNode::Return(
+    let return_body = try tree.add_statement(StatementNode::Return(
         ReturnStmt { value: null }
     ));
     var arms = array::new<MatchArm>(allocator);
@@ -956,7 +956,7 @@ test "expression rendering covers composite and control forms" {
         body: return_body,
         tag_set: empty
     });
-    let matched = tree.add_expression(ExpressionNode::Match(MatchStmt {
+    let matched = try tree.add_expression(ExpressionNode::Match(MatchStmt {
         value: value,
         arms: move arms,
         meta_capture: capture_name,
@@ -985,39 +985,39 @@ test "statement rendering covers control and compile-time forms" {
     let zero = try add_int_expression(&var tree, "0");
     let one = try add_int_expression(&var tree, "1");
     let three = try add_int_expression(&var tree, "3");
-    let true_value = tree.add_expression(ExpressionNode::Bool(
+    let true_value = try tree.add_expression(ExpressionNode::Bool(
         BoolExpr { value: true }
     ));
     let foo = try add_ident_expression(&var tree, "foo");
-    let no_args = tree.add_expression_list(
+    let no_args = try tree.add_expression_list(
         array::new<Expression>(allocator)
     );
-    let call = tree.add_expression(ExpressionNode::Call(CallExpr {
+    let call = try tree.add_expression(ExpressionNode::Call(CallExpr {
         callee: foo,
         args: no_args
     }));
-    let let_statement = tree.add_statement(StatementNode::Let(
+    let let_statement = try tree.add_statement(StatementNode::Let(
         LetStmt { mutable: false, name: x_name, value: one }
     ));
-    let var_statement = tree.add_statement(StatementNode::Let(
+    let var_statement = try tree.add_statement(StatementNode::Let(
         LetStmt { mutable: true, name: x_name, value: zero }
     ));
-    let assignment = tree.add_statement(StatementNode::Assign(
+    let assignment = try tree.add_statement(StatementNode::Assign(
         AssignStmt { target: x, value: one }
     ));
-    let empty_return = tree.add_statement(StatementNode::Return(
+    let empty_return = try tree.add_statement(StatementNode::Return(
         ReturnStmt { value: null }
     ));
-    let value_return = tree.add_statement(StatementNode::Return(
+    let value_return = try tree.add_statement(StatementNode::Return(
         ReturnStmt { value: x }
     ));
-    let deferred = tree.add_statement(StatementNode::Defer(
+    let deferred = try tree.add_statement(StatementNode::Defer(
         DeferStmt { expr: call }
     ));
-    let error_deferred = tree.add_statement(StatementNode::ErrDefer(
+    let error_deferred = try tree.add_statement(StatementNode::ErrDefer(
         ErrDeferStmt { expr: call }
     ));
-    let expression_statement = tree.add_statement(StatementNode::Expr(
+    let expression_statement = try tree.add_statement(StatementNode::Expr(
         ExprStmt { expr: x, semicolon: false }
     ));
     try expect_statement_render(
@@ -1044,17 +1044,17 @@ test "statement rendering covers control and compile-time forms" {
     try expect_statement_render(
         allocator, &tree, expression_statement, "x;"
     );
-    let empty_body = add_empty_block(allocator, &var tree);
-    let other_body = add_empty_block(allocator, &var tree);
+    let empty_body = try add_empty_block(allocator, &var tree);
+    let other_body = try add_empty_block(allocator, &var tree);
     let no_err_capture = try retained_text(&var tree, "");
-    let conditional = tree.add_statement(StatementNode::If(IfStmt {
+    let conditional = try tree.add_statement(StatementNode::If(IfStmt {
         condition: true_value,
         consequence: empty_body,
         alternative: other_body,
         capture: payload_name,
         err_capture: no_err_capture
     }));
-    let while_statement = tree.add_statement(StatementNode::While(
+    let while_statement = try tree.add_statement(StatementNode::While(
         WhileStmt {
         label: outer,
         condition: true_value,
@@ -1062,7 +1062,7 @@ test "statement rendering covers control and compile-time forms" {
         capture: payload_name
     }
     ));
-    let for_statement = tree.add_statement(StatementNode::For(
+    let for_statement = try tree.add_statement(StatementNode::For(
         ForStmt {
         label: outer,
         name: item_name,
@@ -1071,16 +1071,16 @@ test "statement rendering covers control and compile-time forms" {
         body: empty_body
     }
     ));
-    let plain_break = tree.add_statement(StatementNode::Break(
+    let plain_break = try tree.add_statement(StatementNode::Break(
         BreakStmt { label: empty }
     ));
-    let named_break = tree.add_statement(StatementNode::Break(
+    let named_break = try tree.add_statement(StatementNode::Break(
         BreakStmt { label: outer }
     ));
-    let plain_continue = tree.add_statement(StatementNode::Continue(
+    let plain_continue = try tree.add_statement(StatementNode::Continue(
         ContinueStmt { label: empty }
     ));
-    let named_continue = tree.add_statement(StatementNode::Continue(
+    let named_continue = try tree.add_statement(StatementNode::Continue(
         ContinueStmt { label: outer }
     ));
     try expect_statement_render(
@@ -1115,7 +1115,7 @@ test "statement rendering covers control and compile-time forms" {
     );
     var arms = array::new<MatchArm>(allocator);
     errdefer arms.deinit(allocator);
-    let terminated_body = tree.add_statement(StatementNode::Expr(
+    let terminated_body = try tree.add_statement(StatementNode::Expr(
         ExprStmt { expr: x, semicolon: true }
     ));
     try arms.append(allocator, MatchArm {
@@ -1124,7 +1124,7 @@ test "statement rendering covers control and compile-time forms" {
         body: terminated_body,
         tag_set: empty
     });
-    let match_statement = tree.add_statement(StatementNode::Match(
+    let match_statement = try tree.add_statement(StatementNode::Match(
         MatchStmt {
         value: x,
         arms: move arms,
@@ -1138,21 +1138,21 @@ test "statement rendering covers control and compile-time forms" {
         match_statement,
         "match x { Ready => x; }"
     );
-    let comptime_if = tree.add_statement(StatementNode::ComptimeIf(
+    let comptime_if = try tree.add_statement(StatementNode::ComptimeIf(
         ComptimeIfStmt {
         condition: true_value,
         consequence: empty_body,
         alternative: other_body
     }
     ));
-    let comptime_for = tree.add_statement(StatementNode::ComptimeFor(
+    let comptime_for = try tree.add_statement(StatementNode::ComptimeFor(
         ComptimeForStmt {
         list: values,
         name: item_name,
         body: empty_body
     }
     ));
-    let comptime_match = tree.add_statement(StatementNode::ComptimeMatch(
+    let comptime_match = try tree.add_statement(StatementNode::ComptimeMatch(
         ComptimeMatchStmt {
         value: x,
         name: variant_name,
@@ -1178,13 +1178,13 @@ test "statement rendering covers control and compile-time forms" {
         comptime_match,
         "comptime match x |Variant, payload| {  }"
     );
-    let empty_block = add_empty_block(allocator, &var tree);
+    let empty_block = try add_empty_block(allocator, &var tree);
     try expect_block_render(allocator, &tree, empty_block, "{  }");
     var statements = array::new<Statement>(allocator);
     errdefer statements.deinit(allocator);
     try statements.append(allocator, let_statement);
     try statements.append(allocator, value_return);
-    let populated_block = tree.add_block(BlockStmt {
+    let populated_block = try tree.add_block(BlockStmt {
         statements: move statements
     });
     try expect_block_render(
@@ -1218,7 +1218,7 @@ test "declaration and program rendering cover every top level form" {
     errdefer import_path.deinit(allocator);
     try import_path.append(allocator, try retained_text(&var tree, "std"));
     try import_path.append(allocator, try retained_text(&var tree, "mem"));
-    let import_decl = tree.add_declaration(DeclarationNode::Import(
+    let import_decl = try tree.add_declaration(DeclarationNode::Import(
         ImportDecl { path: move import_path }
     ));
     try program.add_declaration(allocator, import_decl);
@@ -1271,8 +1271,8 @@ test "declaration and program rendering cover every top level form" {
         borrow: false,
         mut_borrow: false
     });
-    let function_body = add_empty_block(allocator, &var tree);
-    let function_decl = tree.add_declaration(DeclarationNode::Function(
+    let function_body = try add_empty_block(allocator, &var tree);
+    let function_decl = try tree.add_declaration(DeclarationNode::Function(
         FunctionDecl {
         signature: move function_signature,
         doc: ignored_doc,
@@ -1299,8 +1299,8 @@ test "declaration and program rendering cover every top level form" {
         &var tree,
         "C ABI"
     );
-    let extern_body = add_empty_block(allocator, &var tree);
-    let extern_decl = tree.add_declaration(DeclarationNode::Function(
+    let extern_body = try add_empty_block(allocator, &var tree);
+    let extern_decl = try tree.add_declaration(DeclarationNode::Function(
         FunctionDecl {
         signature: move extern_signature,
         doc: ignored_doc,
@@ -1316,8 +1316,8 @@ test "declaration and program rendering cover every top level form" {
         \\pub unsafe extern "C ABI" fn write()
     );
     let present_test_name = try retained_text(&var tree, "check");
-    let present_test_body = add_empty_block(allocator, &var tree);
-    let present_test = tree.add_declaration(DeclarationNode::Test(
+    let present_test_body = try add_empty_block(allocator, &var tree);
+    let present_test = try tree.add_declaration(DeclarationNode::Test(
         TestDecl {
         name: present_test_name,
         body: present_test_body
@@ -1331,7 +1331,7 @@ test "declaration and program rendering cover every top level form" {
         \\test "check" {  }
     );
     let missing_test_name = try retained_text(&var tree, "検査");
-    let missing_test = tree.add_declaration(DeclarationNode::Test(
+    let missing_test = try tree.add_declaration(DeclarationNode::Test(
         TestDecl {
         name: missing_test_name,
         body: null
@@ -1381,7 +1381,7 @@ test "declaration and program rendering cover every top level form" {
         public: false
     });
     let struct_name = try retained_text(&var tree, "Pair");
-    let struct_decl = tree.add_declaration(DeclarationNode::Struct(
+    let struct_decl = try tree.add_declaration(DeclarationNode::Struct(
         StructDecl {
         name: struct_name,
         doc: ignored_doc,
@@ -1407,7 +1407,7 @@ test "declaration and program rendering cover every top level form" {
     errdefer tag_docs.deinit(allocator);
     try tag_docs.insert(allocator, "Ready", ignored_doc);
     let enum_name = try retained_text(&var tree, "State");
-    let enum_decl = tree.add_declaration(DeclarationNode::Enum(
+    let enum_decl = try tree.add_declaration(DeclarationNode::Enum(
         EnumDecl {
         name: enum_name,
         doc: ignored_doc,
@@ -1431,7 +1431,7 @@ test "declaration and program rendering cover every top level form" {
     errdefer member_docs.deinit(allocator);
     try member_docs.insert(allocator, "Missing", ignored_doc);
     let error_name = try retained_text(&var tree, "Failure");
-    let error_decl = tree.add_declaration(DeclarationNode::ErrorSet(
+    let error_decl = try tree.add_declaration(DeclarationNode::ErrorSet(
         ErrorSetDecl {
         name: error_name,
         doc: ignored_doc,
@@ -1467,7 +1467,7 @@ test "declaration and program rendering cover every top level form" {
         payload: null
     });
     let union_name = try retained_text(&var tree, "Result");
-    let union_decl = tree.add_declaration(DeclarationNode::Union(
+    let union_decl = try tree.add_declaration(DeclarationNode::Union(
         UnionDecl {
         name: union_name,
         doc: ignored_doc,
@@ -1511,7 +1511,7 @@ test "declaration and program rendering cover every top level form" {
         body: null
     });
     let contract_name = try retained_text(&var tree, "Visitor");
-    let contract_decl = tree.add_declaration(DeclarationNode::Contract(
+    let contract_decl = try tree.add_declaration(DeclarationNode::Contract(
         ContractDecl {
         name: contract_name,
         methods: move methods,
@@ -1530,7 +1530,7 @@ test "declaration and program rendering cover every top level form" {
         "Visitor"
     );
     let impl_type_name = try retained_text(&var tree, "Walker");
-    let impl_decl = tree.add_declaration(DeclarationNode::Impl(
+    let impl_decl = try tree.add_declaration(DeclarationNode::Impl(
         ImplDecl {
         contract_name: impl_contract_name,
         type_name: impl_type_name
@@ -1573,7 +1573,7 @@ test "program retains declaration handles and nested contract methods" {
     defer program.deinit(allocator);
     var body_statements = array::new<Statement>(allocator);
     errdefer body_statements.deinit(allocator);
-    let body = tree.add_block(BlockStmt {
+    let body = try tree.add_block(BlockStmt {
         statements: move body_statements
     });
     var signature = try empty_signature(allocator, &var tree, "visit");
@@ -1596,7 +1596,7 @@ test "program retains declaration handles and nested contract methods" {
         derived: false,
         body: body
     };
-    let function = tree.add_declaration(DeclarationNode::Function(
+    let function = try tree.add_declaration(DeclarationNode::Function(
         move function_decl
     ));
     try program.add_declaration(allocator, function);
@@ -1616,7 +1616,7 @@ test "program retains declaration handles and nested contract methods" {
         methods: move methods,
         public: true
     };
-    let contract_decl = tree.add_declaration(DeclarationNode::Contract(
+    let contract_decl = try tree.add_declaration(DeclarationNode::Contract(
         move contract_node
     ));
     try program.add_declaration(allocator, contract_decl);
@@ -1638,7 +1638,7 @@ test "program retains declaration handles and nested contract methods" {
         tag_docs: move tag_docs,
         public: true
     };
-    let enum_decl = tree.add_declaration(DeclarationNode::Enum(move enum_node));
+    let enum_decl = try tree.add_declaration(DeclarationNode::Enum(move enum_node));
     try program.add_declaration(allocator, enum_decl);
     let error_name = try retained_text(&var tree, "Failure");
     let error_doc = try retained_text(&var tree, "");
@@ -1650,7 +1650,7 @@ test "program retains declaration handles and nested contract methods" {
         public: false,
         combines: array::new<Text>(allocator)
     };
-    let error_decl = tree.add_declaration(DeclarationNode::ErrorSet(
+    let error_decl = try tree.add_declaration(DeclarationNode::ErrorSet(
         move error_node
     ));
     try program.add_declaration(allocator, error_decl);
@@ -1864,7 +1864,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
     errdefer type_params.deinit(allocator);
     try type_params.append(allocator, try retained_text(&var tree, "T"));
     let visitor_name = try retained_text(&var tree, "Visitor");
-    let declaration = tree.add_declaration(DeclarationNode::Struct(
+    let declaration = try tree.add_declaration(DeclarationNode::Struct(
         StructDecl {
         name: visitor_name,
         doc: empty,
@@ -1884,7 +1884,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
         &owners,
         declaration
     ) |function| {
-        let generated = tree.add_declaration(DeclarationNode::Function(
+        let generated = try tree.add_declaration(DeclarationNode::Function(
             move function
         ));
         match tree.declarations.at(generated.node) {
@@ -2017,7 +2017,7 @@ test "derived union deinit matches every variant and consumes owner payload" {
         payload: null
     });
     let slot_name = try retained_text(&var tree, "std::Slot");
-    let declaration = tree.add_declaration(DeclarationNode::Union(
+    let declaration = try tree.add_declaration(DeclarationNode::Union(
         UnionDecl {
         name: slot_name,
         doc: empty,
@@ -2035,7 +2035,7 @@ test "derived union deinit matches every variant and consumes owner payload" {
         &owners,
         declaration
     ) |function| {
-        let generated = tree.add_declaration(DeclarationNode::Function(
+        let generated = try tree.add_declaration(DeclarationNode::Function(
             move function
         ));
         match tree.declarations.at(generated.node) {
@@ -2164,13 +2164,13 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     var tree = new(allocator);
     defer tree.deinit(allocator);
     let subject_name = try retained_text(&var tree, "slot");
-    let subject = tree.add_expression(ExpressionNode::Ident(IdentExpr {
+    let subject = try tree.add_expression(ExpressionNode::Ident(IdentExpr {
         name: subject_name,
         span: zero_span()
     }));
     var body_statements = array::new<Statement>(allocator);
     errdefer body_statements.deinit(allocator);
-    let body = tree.add_block(BlockStmt {
+    let body = try tree.add_block(BlockStmt {
         statements: move body_statements
     });
     let capture_name = try retained_text(&var tree, "variant");
@@ -2185,7 +2185,7 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
         binding: payload_name,
         body: body
     };
-    let comptime_stmt = tree.add_statement(StatementNode::ComptimeMatch(
+    let comptime_stmt = try tree.add_statement(StatementNode::ComptimeMatch(
         comptime_node
     ));
     var variants = array::new<MetaVariant>(allocator);
@@ -2229,7 +2229,7 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
         },
         _ => testing::fail("comptime match was not retained in the statement arena"),
     }
-    let no_args = tree.add_expression_list(array::new<Expression>(allocator));
+    let no_args = try tree.add_expression_list(array::new<Expression>(allocator));
     let tag = try variant_expansion(
         &var tree,
         "Slot",
@@ -2240,8 +2240,8 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     var source_args = array::new<Expression>(allocator);
     errdefer source_args.deinit(allocator);
     try source_args.append(allocator, subject);
-    let source_args_list = tree.add_expression_list(move source_args);
-    let source_call = tree.add_expression(ExpressionNode::Call(CallExpr {
+    let source_args_list = try tree.add_expression_list(move source_args);
+    let source_call = try tree.add_expression(ExpressionNode::Call(CallExpr {
         callee: subject,
         args: source_args_list
     }));
@@ -2278,15 +2278,15 @@ test "construct expansion builds fields in order and marks owner handoff" {
     var tree = new(allocator);
     defer tree.deinit(allocator);
     let subject_name = try retained_text(&var tree, "input");
-    let subject = tree.add_expression(ExpressionNode::Ident(IdentExpr {
+    let subject = try tree.add_expression(ExpressionNode::Ident(IdentExpr {
         name: subject_name,
         span: zero_span()
     }));
     var source_args = array::new<Expression>(allocator);
     errdefer source_args.deinit(allocator);
     try source_args.append(allocator, subject);
-    let source_args_list = tree.add_expression_list(move source_args);
-    let source_call = tree.add_expression(ExpressionNode::Call(CallExpr {
+    let source_args_list = try tree.add_expression_list(move source_args);
+    let source_call = try tree.add_expression(ExpressionNode::Call(CallExpr {
         callee: subject,
         args: source_args_list
     }));
@@ -2392,33 +2392,33 @@ test "typed handles retain a shared expression graph" {
     var tree = new(allocator);
     defer tree.deinit(allocator);
     let literal_text = try retained_text(&var tree, "41");
-    let literal = tree.add_expression(ExpressionNode::Int(IntExpr {
+    let literal = try tree.add_expression(ExpressionNode::Int(IntExpr {
         value: literal_text
     }));
-    let marker = tree.add_expression(ExpressionNode::Move(MoveExpr {
+    let marker = try tree.add_expression(ExpressionNode::Move(MoveExpr {
         value: literal,
         span: zero_span()
     }));
-    let comptime_marker = tree.add_expression(ExpressionNode::Comptime(
+    let comptime_marker = try tree.add_expression(ExpressionNode::Comptime(
         ComptimeExpr { expr: literal }
     ));
     let safety = try retained_text(
         &var tree,
         "integer literal has no unsafe effect"
     );
-    let unsafe_marker = tree.add_expression(ExpressionNode::Unsafe(UnsafeExpr {
+    let unsafe_marker = try tree.add_expression(ExpressionNode::Unsafe(UnsafeExpr {
         value: literal,
         safety: safety,
         span: zero_span()
     }));
-    let statement = tree.add_statement(StatementNode::Expr(ExprStmt {
+    let statement = try tree.add_statement(StatementNode::Expr(ExprStmt {
         expr: marker,
         semicolon: true
     }));
     var statements = array::new<Statement>(allocator);
     errdefer statements.deinit(allocator);
     try statements.append(allocator, statement);
-    let block = tree.add_block(BlockStmt {
+    let block = try tree.add_block(BlockStmt {
         statements: move statements
     });
     let first_block = block.as_statement();

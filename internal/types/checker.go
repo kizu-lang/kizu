@@ -7026,7 +7026,7 @@ func (c *Checker) checkArenaAdd(
 	if !sameType(got, elem) {
 		return "", errorf("type error: `Arena.add` expects %s, got %s", elem, got)
 	}
-	return Type(fmt.Sprintf("std::arena::Handle<%s>", elem)), nil
+	return Type(fmt.Sprintf("std::mem::Error!std::arena::Handle<%s>", elem)), nil
 }
 
 // checkArenaHandleArg validates the one handle argument an arena accessor

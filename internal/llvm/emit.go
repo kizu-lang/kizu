@@ -151,7 +151,6 @@ var panicEntries = map[string]panicEntry{
 	"array_empty":  {entry: "kizu_panic_array_empty"},
 	"arena_empty":  {entry: "kizu_panic_arena_empty"},
 	"arena_handle": {entry: "kizu_panic_arena_handle"},
-	"arena_add":    {entry: "kizu_panic_arena_add"},
 	"test_fail":    {entry: "kizu_panic_test_fail", params: []string{"ptr", "i64"}},
 	"panic_fail":   {entry: "kizu_panic_fail", params: []string{"ptr", "i64"}},
 	"expect_int":   {entry: "kizu_panic_expect_equal_int", params: []string{"i64", "i64"}},
@@ -181,6 +180,7 @@ func panicPosition(span ast.Span) []string {
 // *value* (a recoverable !T), as opposed to panicEntries, which abort. The
 // member is named here; its number comes from the set declaration in std.
 var failureErrors = map[string]struct{ set, member string }{
+	"arena_add":          {"std::mem::Error", "OutOfMemory"},
 	"array_append":       {"std::mem::Error", "OutOfMemory"},
 	"array_append_bytes": {"std::mem::Error", "OutOfMemory"},
 	"array_bounds":       {"std::array::Error", "OutOfBounds"},
@@ -307,8 +307,6 @@ func instrPanicEntries(instr *ir.Instr) []string {
 		return []string{"arena_empty"}
 	case "arena.at":
 		return []string{"arena_handle"}
-	case "arena.add":
-		return []string{"arena_add"}
 	case "test.fail":
 		return []string{"test_fail"}
 	case "panic.fail":

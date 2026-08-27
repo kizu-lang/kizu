@@ -201,7 +201,7 @@ fn (self: MetaBindingStore) deinit(allocator: Allocator) -> void {
 fn (self: &var MetaBindingStore) bind(allocator: Allocator, name: []u8, field: MetaField) -> !?arena::Handle<MetaBinding> {
     let previous = self.current;
     let owned_name = try string::from_bytes(self.allocator, name);
-    self.current = self.bindings.add(self.allocator, MetaBinding {
+    self.current = try self.bindings.add(self.allocator, MetaBinding {
         parent: previous,
         name: move owned_name,
         field: field
@@ -277,14 +277,14 @@ fn (self: SubstStore) deinit(allocator: Allocator) -> void {
 /// Selects a substitution for the body about to be checked and returns the
 /// previous selection. An empty substitution selects none, the Go
 /// `c.typeArgValues = nil`.
-fn (self: &var SubstStore) enter(values: Subst) -> ?arena::Handle<Subst> {
+fn (self: &var SubstStore) enter(values: Subst) -> !?arena::Handle<Subst> {
     let previous = self.current;
     if values.by_name.len() == 0 {
         values.deinit(self.allocator);
         self.current = null;
         return previous;
     }
-    self.current = self.frames.add(self.allocator, move values);
+    self.current = try self.frames.add(self.allocator, move values);
     return previous;
 }
 
@@ -368,13 +368,13 @@ pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program
     errdefer deinit_owners.deinit(allocator);
     let declared_deinits = try ast::declared_deinits(allocator, tree, program);
     errdefer declared_deinits.deinit(allocator);
-    var names = new_name_table(allocator);
+    var names = try new_name_table(allocator);
     errdefer names.deinit(allocator);
     let common = try intern_common(&var names);
     var store = new_scope_store(allocator);
     errdefer store.deinit(allocator);
     let scratch = store.blank_binding(0, empty_name(), empty_name());
-    let scratch_binding = store.retain(move scratch);
+    let scratch_binding = try store.retain(move scratch);
     return Checker {
         allocator: allocator,
         names: move names,
@@ -955,7 +955,7 @@ fn (self: &var Checker) collect_functions(tree: &ast::Ast, program: &ast::Progra
             Function(value) => {
                 let name = try self.names.intern_text(tree, value.signature.name);
                 let info = try self.function_info_from_decl(tree, name, value);
-                let handle = FunctionHandle { index: self.functions.add(self.allocator, move info) };
+                let handle = FunctionHandle { index: try self.functions.add(self.allocator, move info) };
                 try self.register_function(tree, value.signature.name, handle);
                 if try self.collect_receiver_method(tree, handle) |failed| {
                     return move failed;
@@ -1072,12 +1072,12 @@ fn (self: &var Checker) check_function(tree: &var ast::Ast, handle: FunctionHand
     if self.functions.at(handle.index).has_extern_abi {
         return null;
     }
-    let env = self.store.new_scope(null);
+    let env = try self.store.new_scope(null);
     if try self.define_params(tree, handle, env, false) |failed| {
         return move failed;
     }
     while self.pending_alloc_taints.pop() |_| {}
-    let previous = self.enter_function(handle, self.empty_subst());
+    let previous = try self.enter_function(handle, self.empty_subst());
     if try self.check_function_body(tree, handle, env) |failed| {
         self.restore_function(previous);
         return move failed;
@@ -1088,12 +1088,12 @@ fn (self: &var Checker) check_function(tree: &var ast::Ast, handle: FunctionHand
 
 // Saves the per-function state and selects fn, the prologue of the Go
 // `checkFunction` / `checkGenericInstantiation`.
-fn (self: &var Checker) enter_function(handle: FunctionHandle, subst: Subst) -> FunctionRestore {
+fn (self: &var Checker) enter_function(handle: FunctionHandle, subst: Subst) -> !FunctionRestore {
     let previous = FunctionRestore {
         loop_depth: self.loop_depth,
         current_function: self.current_function,
         current_std: self.current_std,
-        type_arg_values: self.type_arg_values.enter(move subst)
+        type_arg_values: try self.type_arg_values.enter(move subst)
     };
     self.loop_depth = 0;
     self.current_function = handle;
@@ -1285,7 +1285,7 @@ fn (self: &var Checker) check_test_decl(tree: &var ast::Ast, test: &ast::TestDec
         return_type: try self.names.intern("!void"),
         body: test.body
     };
-    let handle = FunctionHandle { index: self.functions.add(self.allocator, move info) };
+    let handle = FunctionHandle { index: try self.functions.add(self.allocator, move info) };
     return self.check_function(tree, handle);
 }
 

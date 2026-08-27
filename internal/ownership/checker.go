@@ -5142,7 +5142,7 @@ func (c *Checker) readArenaPrimitiveAdd(
 	if _, err := c.readExpr(args[1], env); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("std::arena::Handle<%s>", elem), nil
+	return fmt.Sprintf("std::mem::Error!std::arena::Handle<%s>", elem), nil
 }
 
 // readArenaPrimitiveHandle reads the one handle argument an arena accessor
@@ -7843,7 +7843,7 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 	if got != arg {
 		return "", errorf("arena error: `Arena.add` expects %s, got %s", arg, got)
 	}
-	return fmt.Sprintf("std::arena::Handle<%s>", arg), nil
+	return fmt.Sprintf("std::mem::Error!std::arena::Handle<%s>", arg), nil
 }
 
 // checkArenaAt reads a handle and returns a shared borrow tied to the arena.
@@ -8397,7 +8397,16 @@ func (c *Checker) matchesOwnerUnionDeinit(value ast.Expression, valueType string
 }
 
 // arenaAddReceiver returns the arena binding for arena.add(value) expressions.
+// An add reports a refused allocation, so what a handle is bound to is a `try`
+// over the call; the arena it came from is the same one either way, and losing
+// it here would lose the provenance every later handle rule reads (§10).
 func (c *Checker) arenaAddReceiver(expr ast.Expression, env *scope) *binding {
+	if try, ok := expr.(*ast.TryExpr); ok {
+		return c.arenaAddReceiver(try.Value, env)
+	}
+	if inner, ok := transparentExprValue(expr); ok {
+		return c.arenaAddReceiver(inner, env)
+	}
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return nil

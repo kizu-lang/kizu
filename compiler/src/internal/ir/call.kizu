@@ -1397,7 +1397,8 @@ fn (self: &var Lowerer) lower_arena_primitive(
     var result_type = empty_name();
     match op {
         ArenaAdd => {
-            result_type = try self.arena_handle_type(elem);
+            let handle = try self.arena_handle_type(elem);
+            result_type = try self.module.names.prefixed("std::mem::Error!", handle);
         },
         ArenaAt => {
             result_type = try self.borrow_ir_type(elem, false);
@@ -1420,8 +1421,21 @@ fn (self: &var Lowerer) lower_arena_primitive(
             return try self.fail1(tree, "ir error: unknown arena primitive `%s`", Arg::Str(name));
         },
     }
-    out.* = try self.emit_with(op, empty_name(), result_type, empty_name(), args);
-    return null;
+    let value = try self.emit_with(op, empty_name(), result_type, empty_name(), args);
+    match op {
+        ArenaAdd => {
+            // args are the receiver, the allocator the growth names, and the
+            // element; a failed add releases the element through that same
+            // allocator, which is the one it was built from (ADR-0132).
+            let owner = args.get_or_panic(2);
+            let allocator = args.get_or_panic(1);
+            return self.release_owner_on_failure(tree, value, owner, allocator, out);
+        },
+        _ => {
+            out.* = value;
+            return null;
+        },
+    }
 }
 
 /// Lowers the runtime primitive one std::mem::Box<T> wrapper forwards to,

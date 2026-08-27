@@ -567,11 +567,6 @@ void kizu_panic_arena_handle(int64_t line, int64_t column) {
     abort();
 }
 
-void kizu_panic_arena_add(int64_t line, int64_t column) {
-    kizu_panic_summary("arena add failed", line, column);
-    abort();
-}
-
 void kizu_panic_test_fail(const unsigned char *s, int64_t len,
                           int64_t line, int64_t column) {
     fputs("runtime error: ", stderr);

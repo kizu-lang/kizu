@@ -143,8 +143,8 @@ fn (self: &ScopeStore) id_mark() -> i64 {
 }
 
 /// Retains a binding that belongs to no scope, such as a receiver projection.
-fn (self: &var ScopeStore) retain(value: Binding) -> BindingHandle {
-    return BindingHandle { node: self.bindings.add(self.allocator, move value) };
+fn (self: &var ScopeStore) retain(value: Binding) -> !BindingHandle {
+    return BindingHandle { node: try self.bindings.add(self.allocator, move value) };
 }
 
 /// Reads one binding.
@@ -158,9 +158,9 @@ fn (self: &var ScopeStore) binding_mut(handle: BindingHandle) -> ?&var Binding {
 }
 
 /// Creates a lexical ownership scope, the Go `newScope`.
-fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> ScopeHandle {
+fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
     return ScopeHandle {
-        node: self.scopes.add(self.allocator, Scope {
+        node: try self.scopes.add(self.allocator, Scope {
             parent: parent,
             values: map::new<[]u8, BindingHandle>(self.allocator)
         })
@@ -168,14 +168,14 @@ fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> ScopeHandle {
 }
 
 /// Creates a nested lexical ownership scope, the Go `scope.child`.
-fn (self: &var ScopeStore) child(parent: ScopeHandle) -> ScopeHandle {
+fn (self: &var ScopeStore) child(parent: ScopeHandle) -> !ScopeHandle {
     return self.new_scope(parent);
 }
 
 /// Binds a local name in the current scope, the Go `scope.define`; a name
 /// already bound there is replaced.
 fn (self: &var ScopeStore) define(scope: ScopeHandle, name: []u8, value: Binding) -> !BindingHandle {
-    let handle = self.retain(move value);
+    let handle = try self.retain(move value);
     try self.define_handle(self.allocator, scope, name, handle);
     return handle;
 }
@@ -500,13 +500,13 @@ fn (self: &var ScopeStore) clone_scope(scope: ScopeHandle) -> !ScopeHandle {
     if parent |parent_handle| {
         parent = try self.clone_scope(parent_handle);
     }
-    let cloned = self.new_scope(parent);
+    let cloned = try self.new_scope(parent);
     var index = 0;
     while self.scope_value_at(scope, index) |value| {
         let name = try self.scope_key_copy(scope, index);
         defer name.deinit(self.allocator);
         let copied = try self.clone_binding(value);
-        let handle = self.retain(move copied);
+        let handle = try self.retain(move copied);
         let name_bytes = name.as_bytes();
         try self.define_handle(self.allocator, cloned, name_bytes, handle);
         index = index + 1;

@@ -48,12 +48,12 @@ fn (self: &var Checker) check_comptime_if_stmt(
         },
     }
     if selected {
-        let child = self.scopes.new_scope(scope);
+        let child = try self.scopes.new_scope(scope);
         return self.check_block(tree, child, statement.consequence, want_return, out);
     }
     if statement.alternative |alternative| {
         let child = self.scopes.new_scope(scope);
-        return self.check_block(tree, child, alternative, want_return, out);
+        return self.check_block(tree, try child, alternative, want_return, out);
     }
     out.* = false;
     return null;
@@ -83,7 +83,7 @@ fn (self: &var Checker) check_comptime_for_stmt(
     while fields.get(index) |field| {
         let name = owned_name.as_bytes();
         try self.bind_meta_field(name, field);
-        let child = self.scopes.new_scope(scope);
+        let child = try self.scopes.new_scope(scope);
         var expansion_returns = false;
         if try self.check_block(
             tree,
@@ -361,10 +361,10 @@ fn (self: &Checker) expand_comptime_match(
     defer owner_name.deinit(self.allocator);
     let owner_bytes = owner_name.as_bytes();
     let owner_text = try tree.add_text_from_bytes(owner_bytes);
-    let empty = tree.add_empty_text();
+    let empty = try tree.add_empty_text();
     let expanded = try ast::comptime_match_expansion(self.allocator, statement, owner_text, empty, &meta_variants
     );
-    return tree.add_statement(ast::StatementNode::Match(move expanded));
+    return try tree.add_statement(ast::StatementNode::Match(move expanded));
 }
 
 fn (self: &Checker) comptime_match_subject_error(value_type: Type) -> !diagnostic::Diagnostic {
@@ -791,7 +791,8 @@ fn (self: &var Checker) check_arena_add(
     if !same_type(got, elem) {
         return try self.labeled_arg_type_error("Arena.add", elem, got);
     }
-    out.* = try self.intern_arena_handle_type(elem);
+    let handle = try self.intern_arena_handle_type(elem);
+    out.* = try self.intern_declared_error_type("std::mem::Error", handle);
     return null;
 }
 
@@ -952,7 +953,7 @@ fn (self: &var Checker) check_function(
     if try self.check_main_return_type(name, facts.return_type) |problem| {
         return move problem;
     }
-    let root = self.scopes.new_scope(null);
+    let root = try self.scopes.new_scope(null);
     var static_values = map::new<[]u8, Type>(self.allocator);
     errdefer static_values.deinit(self.allocator);
     if try self.define_static_value_params(self.allocator, root, function, &var static_values) |problem| {

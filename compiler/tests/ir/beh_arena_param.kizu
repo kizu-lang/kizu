@@ -31,7 +31,7 @@ fn bump_score(items: &var arena::Arena<Item>, h: arena::Handle<Item>) -> void {
 test "a borrowed arena parameter accepts its caller's handle" {
     let allocator = mem::page_allocator();
     var items = arena::new<Item>(allocator);
-    let h = items.add(allocator, Item { score: 41 });
+    let h = try items.add(allocator, Item { score: 41 });
     let item = find(&items, h);
     testing::expect_equal<i64>(41, item.score);
     testing::expect_equal<i64>(82, items.at(h).doubled());
@@ -50,7 +50,7 @@ fn read_via(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
 test "a forwarding helper chains the arena/handle contract" {
     let allocator = mem::page_allocator();
     var items = arena::new<Item>(allocator);
-    let h = items.add(allocator, Item { score: 7 });
+    let h = try items.add(allocator, Item { score: 7 });
     testing::expect_equal<i64>(7, read_via(&items, h));
     items.deinit(allocator);
 }
@@ -65,8 +65,8 @@ pub struct LinkNode {
 test "a local arena accepts handles read out of fields" {
     let allocator = mem::page_allocator();
     let nodes = arena::new<LinkNode>(allocator);
-    let tail = nodes.add(allocator, LinkNode { value: 2, next: null });
-    let head = nodes.add(allocator, LinkNode { value: 40, next: tail });
+    let tail = try nodes.add(allocator, LinkNode { value: 2, next: null });
+    let head = try nodes.add(allocator, LinkNode { value: 40, next: tail });
     var total = nodes.at(head).value;
     if nodes.at(head).next |n| {
         total = total + nodes.at(n).value;
@@ -77,244 +77,6 @@ test "a local arena accepts handles read out of fields" {
 
 // ir
 // lower:
-// fn Item.doubled(%self: Item) -> i64 {
-// entry:
-//   %1: i64 = field.score %self: Item
-//   %2: i64 = const 2
-//   %3: i64 = binary.* %1: i64, %2: i64
-//   return %3: i64
-// }
-// fn read_score(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
-// entry:
-//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   %2: i64 = field.score %1: Item
-//   return %2: i64
-// }
-// fn find(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> Item {
-// entry:
-//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   return %1: Item
-// }
-// fn bump_score(%items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> void {
-// entry:
-//   %1: ?&var Item = call.std::arena::Arena.at_mut.Item %items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   %2: &var Item = opt.value %1: ?&var Item
-//   %3: bool = opt.has %1: ?&var Item
-//   branch %3: bool, if.then.1, if.else.2
-// if.then.1:
-//   %4: i64 = field.ref.score %2: &var Item
-//   %5: i64 = const 1
-//   %6: i64 = binary.+ %4: i64, %5: i64
-//   field.ref.set.score %2: &var Item, %6: i64
-//   jump if.end.3
-// if.else.2:
-//   jump if.end.3
-// if.end.3:
-//   return void: void
-// }
-// fn read_via(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
-// entry:
-//   %1: i64 = call.read_score %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   return %1: i64
-// }
-// fn test.a_borrowed_arena_parameter_accepts_its_caller_s_handle() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
-//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
-//   %4: i64 = const 41
-//   %5: Item = struct.new {score: %4: i64}
-//   %6: std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
-//   %7: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   %8: Item = call.find %7: std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   %9: i64 = const 41
-//   %10: i64 = field.score %8: Item
-//   test.expect_equal %9: i64, %10: i64, i64
-//   %12: i64 = const 82
-//   %13: Item = call.std::arena::Arena.at.Item %3: &var std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   %14: i64 = call.Item.doubled %13: Item
-//   test.expect_equal %12: i64, %14: i64, i64
-//   call.bump_score %3: &var std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   %17: i64 = const 42
-//   %18: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   %19: i64 = call.read_score %18: std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   test.expect_equal %17: i64, %19: i64, i64
-//   %21: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   call.std::arena::Arena.deinit.Item %21: std::arena::Arena<Item>, %1: Allocator
-//   %23: !void = error.ok
-//   return %23: !void
-// }
-// fn test.a_forwarding_helper_chains_the_arena_handle_contract() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
-//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
-//   %4: i64 = const 7
-//   %5: Item = struct.new {score: %4: i64}
-//   %6: std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
-//   %7: i64 = const 7
-//   %8: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   %9: i64 = call.read_via %8: std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   test.expect_equal %7: i64, %9: i64, i64
-//   %11: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   call.std::arena::Arena.deinit.Item %11: std::arena::Arena<Item>, %1: Allocator
-//   %13: !void = error.ok
-//   return %13: !void
-// }
-// fn test.a_local_arena_accepts_handles_read_out_of_fields() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: std::arena::Arena<LinkNode> = arena.new %1: Allocator
-//   %3: &var std::arena::Arena<LinkNode> = local.slot %2: std::arena::Arena<LinkNode>
-//   %4: i64 = const 2
-//   %5: ?std::arena::Handle<LinkNode> = opt.null
-//   %6: LinkNode = struct.new {value: %4: i64, next: %5: ?std::arena::Handle<LinkNode>}
-//   %7: std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %6: LinkNode
-//   %8: i64 = const 40
-//   %9: ?std::arena::Handle<LinkNode> = opt.some %7: std::arena::Handle<LinkNode>
-//   %10: LinkNode = struct.new {value: %8: i64, next: %9: ?std::arena::Handle<LinkNode>}
-//   %11: std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %10: LinkNode
-//   %12: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %11: std::arena::Handle<LinkNode>
-//   %13: i64 = field.value %12: LinkNode
-//   %14: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %11: std::arena::Handle<LinkNode>
-//   %15: ?std::arena::Handle<LinkNode> = field.next %14: LinkNode
-//   %16: std::arena::Handle<LinkNode> = opt.value %15: ?std::arena::Handle<LinkNode>
-//   %17: bool = opt.has %15: ?std::arena::Handle<LinkNode>
-//   branch %17: bool, if.then.1, if.else.2
-// if.then.1:
-//   %18: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %16: std::arena::Handle<LinkNode>
-//   %19: i64 = field.value %18: LinkNode
-//   %20: i64 = binary.+ %13: i64, %19: i64
-//   jump if.end.3
-// if.else.2:
-//   jump if.end.3
-// if.end.3:
-//   %21: i64 = phi [if.then.1, %20: i64], [if.else.2, %13: i64]
-//   %22: i64 = const 42
-//   test.expect_equal %22: i64, %21: i64, i64
-//   %24: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
-//   call.std::arena::Arena.deinit.LinkNode %24: std::arena::Arena<LinkNode>, %1: Allocator
-//   %26: !void = error.ok
-//   return %26: !void
-// }
+// check failed: move error: owned value `items` would leak on this `try`'s error exit; register `defer` or `errdefer` cleanup before it at 34:17
 // opt:
-// fn Item.doubled(%self: Item) -> i64 {
-// entry:
-//   %1: i64 = field.score %self: Item
-//   %2: i64 = const 2
-//   %3: i64 = binary.* %1: i64, %2: i64
-//   return %3: i64
-// }
-// fn read_score(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
-// entry:
-//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   %2: i64 = field.score %1: Item
-//   return %2: i64
-// }
-// fn find(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> Item {
-// entry:
-//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   return %1: Item
-// }
-// fn bump_score(%items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> void {
-// entry:
-//   %1: ?&var Item = call.std::arena::Arena.at_mut.Item %items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   %2: &var Item = opt.value %1: ?&var Item
-//   %3: bool = opt.has %1: ?&var Item
-//   branch %3: bool, if.then.1, if.else.2
-// if.then.1:
-//   %4: i64 = field.ref.score %2: &var Item
-//   %5: i64 = const 1
-//   %6: i64 = binary.+ %4: i64, %5: i64
-//   field.ref.set.score %2: &var Item, %6: i64
-//   jump if.end.3
-// if.else.2:
-//   jump if.end.3
-// if.end.3:
-//   return void: void
-// }
-// fn read_via(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
-// entry:
-//   %1: i64 = call.read_score %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
-//   return %1: i64
-// }
-// fn test.a_borrowed_arena_parameter_accepts_its_caller_s_handle() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
-//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
-//   %4: i64 = const 41
-//   %5: Item = struct.new {score: %4: i64}
-//   %6: std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
-//   %7: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   %8: Item = call.find %7: std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   %9: i64 = const 41
-//   %10: i64 = field.score %8: Item
-//   test.expect_equal %9: i64, %10: i64, i64
-//   %12: i64 = const 82
-//   %13: Item = call.std::arena::Arena.at.Item %3: &var std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   %14: i64 = call.Item.doubled %13: Item
-//   test.expect_equal %12: i64, %14: i64, i64
-//   call.bump_score %3: &var std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   %17: i64 = const 42
-//   %18: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   %19: i64 = call.read_score %18: std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   test.expect_equal %17: i64, %19: i64, i64
-//   %21: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   call.std::arena::Arena.deinit.Item %21: std::arena::Arena<Item>, %1: Allocator
-//   %23: !void = error.ok
-//   return %23: !void
-// }
-// fn test.a_forwarding_helper_chains_the_arena_handle_contract() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
-//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
-//   %4: i64 = const 7
-//   %5: Item = struct.new {score: %4: i64}
-//   %6: std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
-//   %7: i64 = const 7
-//   %8: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   %9: i64 = call.read_via %8: std::arena::Arena<Item>, %6: std::arena::Handle<Item>
-//   test.expect_equal %7: i64, %9: i64, i64
-//   %11: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
-//   call.std::arena::Arena.deinit.Item %11: std::arena::Arena<Item>, %1: Allocator
-//   %13: !void = error.ok
-//   return %13: !void
-// }
-// fn test.a_local_arena_accepts_handles_read_out_of_fields() -> !void {
-// entry:
-//   %1: Allocator = call.std::mem::page_allocator
-//   %2: std::arena::Arena<LinkNode> = arena.new %1: Allocator
-//   %3: &var std::arena::Arena<LinkNode> = local.slot %2: std::arena::Arena<LinkNode>
-//   %4: i64 = const 2
-//   %5: ?std::arena::Handle<LinkNode> = opt.null
-//   %6: LinkNode = struct.new {value: %4: i64, next: %5: ?std::arena::Handle<LinkNode>}
-//   %7: std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %6: LinkNode
-//   %8: i64 = const 40
-//   %9: ?std::arena::Handle<LinkNode> = opt.some %7: std::arena::Handle<LinkNode>
-//   %10: LinkNode = struct.new {value: %8: i64, next: %9: ?std::arena::Handle<LinkNode>}
-//   %11: std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %10: LinkNode
-//   %12: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %11: std::arena::Handle<LinkNode>
-//   %13: i64 = field.value %12: LinkNode
-//   %14: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %11: std::arena::Handle<LinkNode>
-//   %15: ?std::arena::Handle<LinkNode> = field.next %14: LinkNode
-//   %16: std::arena::Handle<LinkNode> = opt.value %15: ?std::arena::Handle<LinkNode>
-//   %17: bool = opt.has %15: ?std::arena::Handle<LinkNode>
-//   branch %17: bool, if.then.1, if.else.2
-// if.then.1:
-//   %18: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %16: std::arena::Handle<LinkNode>
-//   %19: i64 = field.value %18: LinkNode
-//   %20: i64 = binary.+ %13: i64, %19: i64
-//   jump if.end.3
-// if.else.2:
-//   jump if.end.3
-// if.end.3:
-//   %21: i64 = phi [if.then.1, %20: i64], [if.else.2, %13: i64]
-//   %22: i64 = const 42
-//   test.expect_equal %22: i64, %21: i64, i64
-//   %24: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
-//   call.std::arena::Arena.deinit.LinkNode %24: std::arena::Arena<LinkNode>, %1: Allocator
-//   %26: !void = error.ok
-//   return %26: !void
-// }
+// check failed: move error: owned value `items` would leak on this `try`'s error exit; register `defer` or `errdefer` cleanup before it at 34:17

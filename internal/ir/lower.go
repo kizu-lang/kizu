@@ -2464,7 +2464,12 @@ var arenaPrimitives = map[string]string{
 func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (Value, error) {
 	switch name {
 	case "add":
-		return l.emit("arena.add", arenaHandleType(elem), args, ""), nil
+		// args are the receiver, the allocator the growth names, and the
+		// element; a failed add releases the element through that same
+		// allocator, which is the one it was built from (ADR-0132).
+		return l.releaseOwnerOnFailure(
+			l.emit("arena.add", "std::mem::Error!"+arenaHandleType(elem), args, ""),
+			args[2], args[1])
 	case "at":
 		resultType, _ := l.borrowIRType(elem, false)
 		return l.emit("arena.at", resultType, args, ""), nil

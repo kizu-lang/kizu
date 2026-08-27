@@ -3,12 +3,14 @@ struct User { name: []u8 }
 fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
     print(users.at(user).name);
 }
-fn main() {
+fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(allocator, User { name: "alice" });
+    errdefer users.deinit(allocator);
+    let alice = try users.add(allocator, User { name: "alice" });
     show(&users, alice);
     users.deinit(allocator);
+    return;
 }
 
 
@@ -16,6 +18,9 @@ fn main() {
 // emit:
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.error.void = type { i8, i64 }
+// %kizu.error.std__mem__Error.std__arena__Handle_User_ = type { i8, i64, i64 }
+// 
 // %kizu.union.std__json__Value = type { i64, [40 x i8] }
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // %kizu.union.std__process__ExitStatus = type { i64, [1 x i8] }
@@ -90,7 +95,7 @@ fn main() {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare i64 @std__arena__Arena_add_User(ptr, ptr, %kizu.struct.User)
+// declare %kizu.error.std__mem__Error.std__arena__Handle_User_ @std__arena__Arena_add_User(ptr, ptr, %kizu.struct.User)
 // declare %kizu.struct.User @std__arena__Arena_at_User(ptr, i64)
 // declare void @std__arena__Arena_deinit_User(%kizu.array, ptr)
 // declare ptr @std__mem__page_allocator()
@@ -108,7 +113,7 @@ fn main() {
 // define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 // entry:
 //   %kizu.3 = alloca %kizu.array
-//   %kizu.arg.0.1 = alloca %kizu.array, align 8
+//   %kizu.arg.0.7 = alloca %kizu.array, align 8
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   store %kizu.array zeroinitializer, ptr %kizu.3
@@ -116,17 +121,51 @@ fn main() {
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 5, 1
 //   %kizu.5 = insertvalue %kizu.struct.User zeroinitializer, %kizu.slice.u8 %kizu.4, 0
-//   %kizu.6 = call i64 @std__arena__Arena_add_User(ptr %kizu.3, ptr %kizu.1, %kizu.struct.User %kizu.5)
+//   %kizu.6 = call %kizu.error.std__mem__Error.std__arena__Handle_User_ @std__arena__Arena_add_User(ptr %kizu.3, ptr %kizu.1, %kizu.struct.User %kizu.5)
 //   %kizu.7 = load %kizu.array, ptr %kizu.3
-//   store %kizu.array %kizu.7, ptr %kizu.arg.0.1, align 8
-//   call void @show(ptr %kizu.arg.0.1, i64 %kizu.6)
+//   %kizu.8.ok = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_User_ %kizu.6, 0
+//   %kizu.8.ok.bool = icmp ne i8 %kizu.8.ok, 0
+//   br i1 %kizu.8.ok.bool, label %kizu.8.try.ok, label %kizu.8.try.err
+// kizu.8.try.err:
+//   %kizu.arena.deinit.data.2 = extractvalue %kizu.array %kizu.7, 0
+//   %kizu.arena.deinit.cap.3 = extractvalue %kizu.array %kizu.7, 2
+//   %kizu.arena.deinit.bytes.4 = mul i64 %kizu.arena.deinit.cap.3, ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.2, i64 %kizu.arena.deinit.bytes.4)
+//   %kizu.main.err.code.5 = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_User_ %kizu.6, 2
+//   %kizu.main.err.name.6.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.5
+//   %kizu.main.err.name.6.ptr = load ptr, ptr %kizu.main.err.name.6.row
+//   %kizu.main.err.name.6.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.6.row, i64 0, i32 1
+//   %kizu.main.err.name.6.len = load i64, ptr %kizu.main.err.name.6.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.6.ptr, i64 %kizu.main.err.name.6.len)
+//   ret i32 1
+// kizu.8.try.ok:
+//   %kizu.8 = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_User_ %kizu.6, 1
 //   %kizu.9 = load %kizu.array, ptr %kizu.3
-//   call void @std__arena__Arena_deinit_User(%kizu.array %kizu.9, ptr %kizu.1)
+//   store %kizu.array %kizu.9, ptr %kizu.arg.0.7, align 8
+//   call void @show(ptr %kizu.arg.0.7, i64 %kizu.8)
+//   %kizu.11 = load %kizu.array, ptr %kizu.3
+//   call void @std__arena__Arena_deinit_User(%kizu.array %kizu.11, ptr %kizu.1)
+//   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   %kizu.main.ok.8 = extractvalue %kizu.error.void %kizu.13, 0
+//   %kizu.main.ok.8.bool = icmp ne i8 %kizu.main.ok.8, 0
+//   br i1 %kizu.main.ok.8.bool, label %kizu.main.exit.ok.10, label %kizu.main.exit.fail.11
+// kizu.main.exit.fail.11:
+//   %kizu.main.err.code.12 = extractvalue %kizu.error.void %kizu.13, 1
+//   %kizu.main.err.name.13.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.12
+//   %kizu.main.err.name.13.ptr = load ptr, ptr %kizu.main.err.name.13.row
+//   %kizu.main.err.name.13.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.13.row, i64 0, i32 1
+//   %kizu.main.err.name.13.len = load i64, ptr %kizu.main.err.name.13.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.13.ptr, i64 %kizu.main.err.name.13.len)
+//   ret i32 1
+// kizu.main.exit.ok.10:
 //   ret i32 0
 // }
 // opt:
 // ; Kizu LLVM IR
 // %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.error.void = type { i8, i64 }
+// %kizu.error.std__mem__Error.std__arena__Handle_User_ = type { i8, i64, i64 }
+// 
 // %kizu.union.std__json__Value = type { i64, [40 x i8] }
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // %kizu.union.std__process__ExitStatus = type { i64, [1 x i8] }
@@ -201,7 +240,7 @@ fn main() {
 // declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
 // declare void @kizu_array_deinit(ptr, ptr, i64)
 // 
-// declare i64 @std__arena__Arena_add_User(ptr, ptr, %kizu.struct.User)
+// declare %kizu.error.std__mem__Error.std__arena__Handle_User_ @std__arena__Arena_add_User(ptr, ptr, %kizu.struct.User)
 // declare %kizu.struct.User @std__arena__Arena_at_User(ptr, i64)
 // declare void @std__arena__Arena_deinit_User(%kizu.array, ptr)
 // declare ptr @std__mem__page_allocator()
@@ -219,7 +258,7 @@ fn main() {
 // define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 // entry:
 //   %kizu.3 = alloca %kizu.array
-//   %kizu.arg.0.1 = alloca %kizu.array, align 8
+//   %kizu.arg.0.7 = alloca %kizu.array, align 8
 //   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
 //   %kizu.1 = call ptr @std__mem__page_allocator()
 //   store %kizu.array zeroinitializer, ptr %kizu.3
@@ -227,11 +266,42 @@ fn main() {
 //   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
 //   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 5, 1
 //   %kizu.5 = insertvalue %kizu.struct.User zeroinitializer, %kizu.slice.u8 %kizu.4, 0
-//   %kizu.6 = call i64 @std__arena__Arena_add_User(ptr %kizu.3, ptr %kizu.1, %kizu.struct.User %kizu.5)
+//   %kizu.6 = call %kizu.error.std__mem__Error.std__arena__Handle_User_ @std__arena__Arena_add_User(ptr %kizu.3, ptr %kizu.1, %kizu.struct.User %kizu.5)
 //   %kizu.7 = load %kizu.array, ptr %kizu.3
-//   store %kizu.array %kizu.7, ptr %kizu.arg.0.1, align 8
-//   call void @show(ptr %kizu.arg.0.1, i64 %kizu.6)
+//   %kizu.8.ok = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_User_ %kizu.6, 0
+//   %kizu.8.ok.bool = icmp ne i8 %kizu.8.ok, 0
+//   br i1 %kizu.8.ok.bool, label %kizu.8.try.ok, label %kizu.8.try.err
+// kizu.8.try.err:
+//   %kizu.arena.deinit.data.2 = extractvalue %kizu.array %kizu.7, 0
+//   %kizu.arena.deinit.cap.3 = extractvalue %kizu.array %kizu.7, 2
+//   %kizu.arena.deinit.bytes.4 = mul i64 %kizu.arena.deinit.cap.3, ptrtoint (ptr getelementptr (%kizu.struct.User, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.1, ptr %kizu.arena.deinit.data.2, i64 %kizu.arena.deinit.bytes.4)
+//   %kizu.main.err.code.5 = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_User_ %kizu.6, 2
+//   %kizu.main.err.name.6.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.5
+//   %kizu.main.err.name.6.ptr = load ptr, ptr %kizu.main.err.name.6.row
+//   %kizu.main.err.name.6.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.6.row, i64 0, i32 1
+//   %kizu.main.err.name.6.len = load i64, ptr %kizu.main.err.name.6.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.6.ptr, i64 %kizu.main.err.name.6.len)
+//   ret i32 1
+// kizu.8.try.ok:
+//   %kizu.8 = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_User_ %kizu.6, 1
 //   %kizu.9 = load %kizu.array, ptr %kizu.3
-//   call void @std__arena__Arena_deinit_User(%kizu.array %kizu.9, ptr %kizu.1)
+//   store %kizu.array %kizu.9, ptr %kizu.arg.0.7, align 8
+//   call void @show(ptr %kizu.arg.0.7, i64 %kizu.8)
+//   %kizu.11 = load %kizu.array, ptr %kizu.3
+//   call void @std__arena__Arena_deinit_User(%kizu.array %kizu.11, ptr %kizu.1)
+//   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   %kizu.main.ok.8 = extractvalue %kizu.error.void %kizu.13, 0
+//   %kizu.main.ok.8.bool = icmp ne i8 %kizu.main.ok.8, 0
+//   br i1 %kizu.main.ok.8.bool, label %kizu.main.exit.ok.10, label %kizu.main.exit.fail.11
+// kizu.main.exit.fail.11:
+//   %kizu.main.err.code.12 = extractvalue %kizu.error.void %kizu.13, 1
+//   %kizu.main.err.name.13.row = getelementptr [36 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.12
+//   %kizu.main.err.name.13.ptr = load ptr, ptr %kizu.main.err.name.13.row
+//   %kizu.main.err.name.13.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.13.row, i64 0, i32 1
+//   %kizu.main.err.name.13.len = load i64, ptr %kizu.main.err.name.13.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.13.ptr, i64 %kizu.main.err.name.13.len)
+//   ret i32 1
+// kizu.main.exit.ok.10:
 //   ret i32 0
 // }
