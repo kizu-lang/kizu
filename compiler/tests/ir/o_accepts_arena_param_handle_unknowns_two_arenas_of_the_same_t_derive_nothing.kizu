@@ -7,14 +7,17 @@ fn pick(
 ) -> void {
     print(a.at(user).name);
 }
-fn main() {
+fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
+    errdefer left.deinit(allocator);
     let right = std::arena::new<User>(allocator);
-    let alice = left.add(allocator, User { name: "alice" });
+    errdefer right.deinit(allocator);
+    let alice = try left.add(allocator, User { name: "alice" });
     pick(&left, &right, alice);
     left.deinit(allocator);
     right.deinit(allocator);
+    return;
 }
 
 
@@ -22,12 +25,12 @@ fn main() {
 // lower:
 // fn pick(%a: &std::arena::Arena<User>, %b: &std::arena::Arena<User>, %user: std::arena::Handle<User>) -> void {
 // entry:
-//   %1: User = arena.at %a: &std::arena::Arena<User>, %user: std::arena::Handle<User>
+//   %1: User = call.std::arena::Arena.at.User %a: &std::arena::Arena<User>, %user: std::arena::Handle<User>
 //   %2: []u8 = field.name %1: User
 //   call.print %2: []u8
 //   return void: void
 // }
-// fn main() -> void {
+// fn main() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<User> = arena.new %1: Allocator
@@ -35,23 +38,26 @@ fn main() {
 //   %4: std::arena::Arena<User> = arena.new %1: Allocator
 //   %5: []u8 = const "alice"
 //   %6: User = struct.new {name: %5: []u8}
-//   %7: std::arena::Handle<User> = arena.add %3: &var std::arena::Arena<User>, %1: Allocator, %6: User
+//   %7: std::mem::Error!std::arena::Handle<User> = call.std::arena::Arena.add.User %3: &var std::arena::Arena<User>, %1: Allocator, %6: User
 //   %8: std::arena::Arena<User> = ref.load %3: &var std::arena::Arena<User>
-//   call.pick %8: std::arena::Arena<User>, %4: std::arena::Arena<User>, %7: std::arena::Handle<User>
+//   %9: std::arena::Handle<User> = error.try %7: std::mem::Error!std::arena::Handle<User>, cleanup arena.deinit %4: std::arena::Arena<User>, %1: Allocator; arena.deinit %8: std::arena::Arena<User>, %1: Allocator
 //   %10: std::arena::Arena<User> = ref.load %3: &var std::arena::Arena<User>
-//   arena.deinit %10: std::arena::Arena<User>, %1: Allocator
-//   arena.deinit %4: std::arena::Arena<User>, %1: Allocator
-//   return void: void
+//   call.pick %10: std::arena::Arena<User>, %4: std::arena::Arena<User>, %9: std::arena::Handle<User>
+//   %12: std::arena::Arena<User> = ref.load %3: &var std::arena::Arena<User>
+//   call.std::arena::Arena.deinit.User %12: std::arena::Arena<User>, %1: Allocator
+//   call.std::arena::Arena.deinit.User %4: std::arena::Arena<User>, %1: Allocator
+//   %15: !void = error.ok
+//   return %15: !void
 // }
 // opt:
 // fn pick(%a: &std::arena::Arena<User>, %b: &std::arena::Arena<User>, %user: std::arena::Handle<User>) -> void {
 // entry:
-//   %1: User = arena.at %a: &std::arena::Arena<User>, %user: std::arena::Handle<User>
+//   %1: User = call.std::arena::Arena.at.User %a: &std::arena::Arena<User>, %user: std::arena::Handle<User>
 //   %2: []u8 = field.name %1: User
 //   call.print %2: []u8
 //   return void: void
 // }
-// fn main() -> void {
+// fn main() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<User> = arena.new %1: Allocator
@@ -59,11 +65,14 @@ fn main() {
 //   %4: std::arena::Arena<User> = arena.new %1: Allocator
 //   %5: []u8 = const "alice"
 //   %6: User = struct.new {name: %5: []u8}
-//   %7: std::arena::Handle<User> = arena.add %3: &var std::arena::Arena<User>, %1: Allocator, %6: User
+//   %7: std::mem::Error!std::arena::Handle<User> = call.std::arena::Arena.add.User %3: &var std::arena::Arena<User>, %1: Allocator, %6: User
 //   %8: std::arena::Arena<User> = ref.load %3: &var std::arena::Arena<User>
-//   call.pick %8: std::arena::Arena<User>, %4: std::arena::Arena<User>, %7: std::arena::Handle<User>
+//   %9: std::arena::Handle<User> = error.try %7: std::mem::Error!std::arena::Handle<User>, cleanup arena.deinit %4: std::arena::Arena<User>, %1: Allocator; arena.deinit %8: std::arena::Arena<User>, %1: Allocator
 //   %10: std::arena::Arena<User> = ref.load %3: &var std::arena::Arena<User>
-//   arena.deinit %10: std::arena::Arena<User>, %1: Allocator
-//   arena.deinit %4: std::arena::Arena<User>, %1: Allocator
-//   return void: void
+//   call.pick %10: std::arena::Arena<User>, %4: std::arena::Arena<User>, %9: std::arena::Handle<User>
+//   %12: std::arena::Arena<User> = ref.load %3: &var std::arena::Arena<User>
+//   call.std::arena::Arena.deinit.User %12: std::arena::Arena<User>, %1: Allocator
+//   call.std::arena::Arena.deinit.User %4: std::arena::Arena<User>, %1: Allocator
+//   %15: !void = error.ok
+//   return %15: !void
 // }

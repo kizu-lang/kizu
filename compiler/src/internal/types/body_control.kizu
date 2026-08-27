@@ -37,8 +37,8 @@ fn (self: &var Checker) check_if_stmt(
     let owned_err = try string::from_bytes(self.allocator, source_err);
     defer owned_err.deinit(self.allocator);
     let err_capture = owned_err.as_bytes();
-    let consequence = self.scopes.new_scope(scope);
-    let alternative_scope = self.scopes.new_scope(scope);
+    let consequence = try self.scopes.new_scope(scope);
+    let alternative_scope = try self.scopes.new_scope(scope);
     var handled = false;
     if try self.bind_container_borrow_capture(
         tree, scope, capture, condition, consequence, &var handled
@@ -308,7 +308,7 @@ fn (self: &var Checker) check_while_stmt(
     let owned_capture = try string::from_bytes(self.allocator, source_capture);
     defer owned_capture.deinit(self.allocator);
     let capture = owned_capture.as_bytes();
-    let body = self.scopes.new_scope(scope);
+    let body = try self.scopes.new_scope(scope);
     var handled = false;
     if try self.bind_container_borrow_capture(
         tree, scope, capture, condition, body, &var handled
@@ -360,7 +360,7 @@ fn (self: &var Checker) check_for_stmt(
     if try self.enter_loop(label) |problem| {
         return move problem;
     }
-    let child = self.scopes.new_scope(scope);
+    let child = try self.scopes.new_scope(scope);
     let retained_name = tree.texts.at(name_text.node);
     let name = retained_name.as_bytes();
     let index_type = try self.types.i64_type();
@@ -540,7 +540,7 @@ fn (self: &var Checker) check_match_arms(
                     key.deinit(self.allocator);
                     return move problem;
                 }
-                let retained_key = self.match_value_keys.add(self.allocator, move key);
+                let retained_key = try self.match_value_keys.add(self.allocator, move key);
                 let stored = self.match_value_keys.at(retained_key);
                 let key_bytes = stored.as_bytes();
                 if seen.contains(key_bytes) {
@@ -561,7 +561,7 @@ fn (self: &var Checker) check_match_arms(
                 try seen.insert(allocator, tag, true);
             }
         }
-        let arm_scope = self.scopes.new_scope(scope);
+        let arm_scope = try self.scopes.new_scope(scope);
         let retained_binding = tree.texts.at(arm.binding.node);
         let binding = retained_binding.as_bytes();
         if !same_type(payload, empty_type()) and mem::len(binding) > 0 {
@@ -1358,12 +1358,12 @@ fn (self: &var Checker) check_if_expr(
     let alternative_block = alternative orelse return try self.checker_error_at(
         "type error", ast::zero_span(), "if expression requires else branch"
     );
-    let left_scope = self.scopes.new_scope(scope);
+    let left_scope = try self.scopes.new_scope(scope);
     var left = empty_type();
     if try self.check_block_value(tree, left_scope, consequence, &var left) |problem| {
         return move problem;
     }
-    let right_scope = self.scopes.new_scope(scope);
+    let right_scope = try self.scopes.new_scope(scope);
     var right = empty_type();
     if try self.check_block_value(tree, right_scope, alternative_block, &var right) |problem| {
         return move problem;
@@ -1458,7 +1458,7 @@ fn (self: &var Checker) check_stmt_value(
             "expression match arm cannot `return`"
         ),
         Block(_) => {
-            let child = self.scopes.new_scope(scope);
+            let child = try self.scopes.new_scope(scope);
             return self.check_block_value(tree, child, ast::Block { node: statement.node }, out);
         },
         _ => return try self.checker_error_at(
@@ -1515,7 +1515,7 @@ fn (self: &var Checker) check_match_expr_arms(
                 );
             }
             wildcard = true;
-            let child = self.scopes.new_scope(scope);
+            let child = try self.scopes.new_scope(scope);
             if try self.check_stmt_value(tree, child, arm.body, &var got) |problem| {
                 return move problem;
             }
@@ -1527,7 +1527,7 @@ fn (self: &var Checker) check_match_expr_arms(
                     key.deinit(self.allocator);
                     return move problem;
                 }
-                let retained_key = self.match_value_keys.add(self.allocator, move key);
+                let retained_key = try self.match_value_keys.add(self.allocator, move key);
                 let stored = self.match_value_keys.at(retained_key);
                 let key_bytes = stored.as_bytes();
                 let retained_tag = tree.texts.at(arm.tag.node);
@@ -1539,7 +1539,7 @@ fn (self: &var Checker) check_match_expr_arms(
                 }
                 try seen.insert(allocator, key_bytes, true);
                 let child = self.scopes.new_scope(scope);
-                if try self.check_stmt_value(tree, child, arm.body, &var got) |problem| {
+                if try self.check_stmt_value(tree, try child, arm.body, &var got) |problem| {
                     return move problem;
                 }
             } else {
@@ -1587,14 +1587,14 @@ fn (self: &var Checker) check_match_expr_arm(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if arm.is_wildcard(tree) {
-        let child = self.scopes.new_scope(scope);
+        let child = try self.scopes.new_scope(scope);
         return self.check_stmt_value(tree, child, arm.body, out);
     }
     var payload = empty_type();
     if try self.match_payload_type(tree, target, arm, &var payload) |problem| {
         return move problem;
     }
-    let arm_scope = self.scopes.new_scope(scope);
+    let arm_scope = try self.scopes.new_scope(scope);
     let retained_binding = tree.texts.at(arm.binding.node);
     let binding = retained_binding.as_bytes();
     if !same_type(payload, empty_type()) and mem::len(binding) > 0 {

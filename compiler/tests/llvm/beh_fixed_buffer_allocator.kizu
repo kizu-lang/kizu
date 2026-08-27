@@ -28,7 +28,7 @@ test "fixed buffer allocator backs containers" {
 
     let visitors = arena::new<Visitor>(alloc);
     defer visitors.deinit(alloc);
-    let alice = visitors.add(alloc, Visitor { name: "alice" });
+    let alice = try visitors.add(alloc, Visitor { name: "alice" });
     testing::expect_equal<[]u8>("alice", visitors.at(alice).name);
 }
 
@@ -91,6 +91,7 @@ test "fixed buffer is reusable between rounds" {
 // %kizu.error.i64 = type { i8, i64, i64 }
 // %kizu.error.std__array__Array_i64_ = type { i8, %kizu.array, i64 }
 // %kizu.error.void = type { i8, i64 }
+// %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ = type { i8, i64, i64 }
 // %kizu.error.std__mem__Error.void = type { i8, i64 }
 // 
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
@@ -131,6 +132,8 @@ test "fixed buffer is reusable between rounds" {
 // 
 // declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
 // 
+// declare %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ @std__arena__Arena_add_Visitor(ptr, ptr, %kizu.struct.Visitor)
+// declare %kizu.struct.Visitor @std__arena__Arena_at_Visitor(ptr, i64)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
 // declare i64 @std__array__Array_len_i64(ptr)
@@ -140,8 +143,6 @@ test "fixed buffer is reusable between rounds" {
 // declare i64 @std__string__String_len(ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
-// declare void @kizu_panic_arena_add(i64, i64)
-// declare void @kizu_panic_arena_handle(i64, i64)
 // declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
@@ -232,7 +233,6 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.7 = alloca %kizu.array
 //   %kizu.24 = alloca %kizu.struct.std__string__String
 //   %kizu.34 = alloca %kizu.array
-//   %kizu.37.elem.slot = alloca %kizu.struct.Visitor
 //   store [4096 x i8] zeroinitializer, ptr %kizu.1
 //   store ptr %kizu.1, ptr %kizu.2
 //   %kizu.3 = load ptr, ptr %kizu.2
@@ -318,78 +318,58 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.35.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.35.ptr, 0
 //   %kizu.35 = insertvalue %kizu.slice.u8 %kizu.35.base, i64 5, 1
 //   %kizu.36 = insertvalue %kizu.struct.Visitor zeroinitializer, %kizu.slice.u8 %kizu.35, 0
-//   %kizu.array.handle.null.17 = icmp eq ptr %kizu.34, null
-//   %kizu.array.handle.18 = select i1 %kizu.array.handle.null.17, ptr @kizu.array.empty, ptr %kizu.34
-//   %kizu.array.append.len.addr.20 = getelementptr %kizu.array, ptr %kizu.array.handle.18, i64 0, i32 1
-//   %kizu.37 = load i64, ptr %kizu.array.append.len.addr.20
-//   %kizu.array.append.cap.21 = getelementptr %kizu.array, ptr %kizu.array.handle.18, i64 0, i32 2
-//   %kizu.array.append.cap.19 = load i64, ptr %kizu.array.append.cap.21
-//   %kizu.array.append.fits.22 = icmp slt i64 %kizu.37, %kizu.array.append.cap.19
-//   br i1 %kizu.array.append.fits.22, label %kizu.37.ok.array.append.fast, label %kizu.37.ok.array.append.slow
-// kizu.37.ok.array.append.fast:
-//   %kizu.array.data.addr.23 = getelementptr %kizu.array, ptr %kizu.array.handle.18, i64 0, i32 0
-//   %kizu.array.data.24 = load ptr, ptr %kizu.array.data.addr.23
-//   %kizu.array.elem.25 = getelementptr %kizu.struct.Visitor, ptr %kizu.array.data.24, i64 %kizu.37
-//   store %kizu.struct.Visitor %kizu.36, ptr %kizu.array.elem.25
-//   %kizu.array.append.grown.26 = add i64 %kizu.37, 1
-//   store i64 %kizu.array.append.grown.26, ptr %kizu.array.append.len.addr.20
-//   br label %kizu.37.ok.array.append.join
-// kizu.37.ok.array.append.slow:
-//   store %kizu.struct.Visitor %kizu.36, ptr %kizu.37.elem.slot
-//   %kizu.array.append.slow.ok.27 = call i1 @kizu_array_append(ptr %kizu.5, ptr %kizu.34, ptr %kizu.37.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64))
-//   br label %kizu.37.ok.array.append.join
-// kizu.37.ok.array.append.join:
-//   %kizu.37.ok = phi i1 [ true, %kizu.37.ok.array.append.fast ], [ %kizu.array.append.slow.ok.27, %kizu.37.ok.array.append.slow ]
-//   %kizu.37.bad = xor i1 %kizu.37.ok, true
-//   br i1 %kizu.37.bad, label %kizu.37.bad.arena.add.fail, label %kizu.37.bad.ok
-// kizu.37.bad.arena.add.fail:
-//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   %kizu.37 = call %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ @std__arena__Arena_add_Visitor(ptr %kizu.34, ptr %kizu.5, %kizu.struct.Visitor %kizu.36)
+//   %kizu.38 = load %kizu.array, ptr %kizu.34
+//   %kizu.39 = load %kizu.struct.std__string__String, ptr %kizu.24
+//   %kizu.40 = load %kizu.array, ptr %kizu.7
+//   %kizu.41.ok = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ %kizu.37, 0
+//   %kizu.41.ok.bool = icmp ne i8 %kizu.41.ok, 0
+//   br i1 %kizu.41.ok.bool, label %kizu.41.try.ok, label %kizu.41.try.err
+// kizu.41.try.err:
+//   %kizu.arena.deinit.data.18 = extractvalue %kizu.array %kizu.38, 0
+//   %kizu.arena.deinit.cap.19 = extractvalue %kizu.array %kizu.38, 2
+//   %kizu.arena.deinit.bytes.20 = mul i64 %kizu.arena.deinit.cap.19, ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.arena.deinit.data.18, i64 %kizu.arena.deinit.bytes.20)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.39, ptr %kizu.5)
+//   %kizu.array.deinit.data.23 = extractvalue %kizu.array %kizu.40, 0
+//   %kizu.array.deinit.cap.24 = extractvalue %kizu.array %kizu.40, 2
+//   %kizu.array.deinit.bytes.25 = mul i64 %kizu.array.deinit.cap.24, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.23, i64 %kizu.array.deinit.bytes.25)
+//   %kizu.try.err.26.code = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ %kizu.37, 2
+//   %kizu.try.err.26.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.26 = insertvalue %kizu.error.void %kizu.try.err.26.base, i64 %kizu.try.err.26.code, 1
+//   ret %kizu.error.void %kizu.try.err.26
+// kizu.41.try.ok:
+//   %kizu.41 = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ %kizu.37, 1
+//   %kizu.42.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.42.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.42.ptr, 0
+//   %kizu.42 = insertvalue %kizu.slice.u8 %kizu.42.base, i64 5, 1
+//   %kizu.43 = call %kizu.struct.Visitor @std__arena__Arena_at_Visitor(ptr %kizu.34, i64 %kizu.41)
+//   %kizu.44 = extractvalue %kizu.struct.Visitor %kizu.43, 0
+//   %kizu.45.left.ptr = extractvalue %kizu.slice.u8 %kizu.42, 0
+//   %kizu.45.left.len = extractvalue %kizu.slice.u8 %kizu.42, 1
+//   %kizu.45.right.ptr = extractvalue %kizu.slice.u8 %kizu.44, 0
+//   %kizu.45.right.len = extractvalue %kizu.slice.u8 %kizu.44, 1
+//   %kizu.45.ok = call i1 @kizu_bytes_equal(ptr %kizu.45.left.ptr, i64 %kizu.45.left.len, ptr %kizu.45.right.ptr, i64 %kizu.45.right.len)
+//   br i1 %kizu.45.ok, label %kizu.45.ok.ok, label %kizu.45.ok.fail
+// kizu.45.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.45.left.ptr, i64 %kizu.45.left.len, ptr %kizu.45.right.ptr, i64 %kizu.45.right.len, i64 0, i64 0)
 //   unreachable
-// kizu.37.bad.ok:
-//   %kizu.38.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.38.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.38.ptr, 0
-//   %kizu.38 = insertvalue %kizu.slice.u8 %kizu.38.base, i64 5, 1
-//   %kizu.array.handle.null.28 = icmp eq ptr %kizu.34, null
-//   %kizu.array.handle.29 = select i1 %kizu.array.handle.null.28, ptr @kizu.array.empty, ptr %kizu.34
-//   %kizu.array.len.31 = getelementptr %kizu.array, ptr %kizu.array.handle.29, i64 0, i32 1
-//   %kizu.array.len.30 = load i64, ptr %kizu.array.len.31
-//   %kizu.array.in_range.32 = icmp ult i64 %kizu.37, %kizu.array.len.30
-//   %kizu.array.data.addr.33 = getelementptr %kizu.array, ptr %kizu.array.handle.29, i64 0, i32 0
-//   %kizu.array.data.34 = load ptr, ptr %kizu.array.data.addr.33
-//   %kizu.array.elem.35 = getelementptr %kizu.struct.Visitor, ptr %kizu.array.data.34, i64 %kizu.37
-//   %kizu.39.ptr = select i1 %kizu.array.in_range.32, ptr %kizu.array.elem.35, ptr null
-//   %kizu.arena.at.is_null.36 = icmp eq ptr %kizu.39.ptr, null
-//   br i1 %kizu.arena.at.is_null.36, label %kizu.39.ptr.arena.at.null, label %kizu.39.ptr.ok
-// kizu.39.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.39.ptr.ok:
-//   %kizu.39 = load %kizu.struct.Visitor, ptr %kizu.39.ptr
-//   %kizu.40 = extractvalue %kizu.struct.Visitor %kizu.39, 0
-//   %kizu.41.left.ptr = extractvalue %kizu.slice.u8 %kizu.38, 0
-//   %kizu.41.left.len = extractvalue %kizu.slice.u8 %kizu.38, 1
-//   %kizu.41.right.ptr = extractvalue %kizu.slice.u8 %kizu.40, 0
-//   %kizu.41.right.len = extractvalue %kizu.slice.u8 %kizu.40, 1
-//   %kizu.41.ok = call i1 @kizu_bytes_equal(ptr %kizu.41.left.ptr, i64 %kizu.41.left.len, ptr %kizu.41.right.ptr, i64 %kizu.41.right.len)
-//   br i1 %kizu.41.ok, label %kizu.41.ok.ok, label %kizu.41.ok.fail
-// kizu.41.ok.fail:
-//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.41.left.ptr, i64 %kizu.41.left.len, ptr %kizu.41.right.ptr, i64 %kizu.41.right.len, i64 0, i64 0)
-//   unreachable
-// kizu.41.ok.ok:
-//   %kizu.42 = load %kizu.array, ptr %kizu.34
-//   %kizu.arena.deinit.data.37 = extractvalue %kizu.array %kizu.42, 0
-//   %kizu.arena.deinit.cap.38 = extractvalue %kizu.array %kizu.42, 2
-//   %kizu.arena.deinit.bytes.39 = mul i64 %kizu.arena.deinit.cap.38, ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.arena.deinit.data.37, i64 %kizu.arena.deinit.bytes.39)
-//   %kizu.44 = load %kizu.struct.std__string__String, ptr %kizu.24
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.44, ptr %kizu.5)
-//   %kizu.46 = load %kizu.array, ptr %kizu.7
-//   %kizu.array.deinit.data.40 = extractvalue %kizu.array %kizu.46, 0
-//   %kizu.array.deinit.cap.41 = extractvalue %kizu.array %kizu.46, 2
-//   %kizu.array.deinit.bytes.42 = mul i64 %kizu.array.deinit.cap.41, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.40, i64 %kizu.array.deinit.bytes.42)
-//   %kizu.48 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.48
+// kizu.45.ok.ok:
+//   %kizu.46 = load %kizu.array, ptr %kizu.34
+//   %kizu.arena.deinit.data.27 = extractvalue %kizu.array %kizu.46, 0
+//   %kizu.arena.deinit.cap.28 = extractvalue %kizu.array %kizu.46, 2
+//   %kizu.arena.deinit.bytes.29 = mul i64 %kizu.arena.deinit.cap.28, ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.arena.deinit.data.27, i64 %kizu.arena.deinit.bytes.29)
+//   %kizu.48 = load %kizu.struct.std__string__String, ptr %kizu.24
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.48, ptr %kizu.5)
+//   %kizu.50 = load %kizu.array, ptr %kizu.7
+//   %kizu.array.deinit.data.30 = extractvalue %kizu.array %kizu.50, 0
+//   %kizu.array.deinit.cap.31 = extractvalue %kizu.array %kizu.50, 2
+//   %kizu.array.deinit.bytes.32 = mul i64 %kizu.array.deinit.cap.31, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.30, i64 %kizu.array.deinit.bytes.32)
+//   %kizu.52 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.52
 // }
 // 
 // define %kizu.error.void @test_fixed_buffer_allocator_flows_through_helpers() {
@@ -523,6 +503,7 @@ test "fixed buffer is reusable between rounds" {
 // %kizu.error.i64 = type { i8, i64, i64 }
 // %kizu.error.std__array__Array_i64_ = type { i8, %kizu.array, i64 }
 // %kizu.error.void = type { i8, i64 }
+// %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ = type { i8, i64, i64 }
 // %kizu.error.std__mem__Error.void = type { i8, i64 }
 // 
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
@@ -563,6 +544,8 @@ test "fixed buffer is reusable between rounds" {
 // 
 // declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
 // 
+// declare %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ @std__arena__Arena_add_Visitor(ptr, ptr, %kizu.struct.Visitor)
+// declare %kizu.struct.Visitor @std__arena__Arena_at_Visitor(ptr, i64)
 // declare %kizu.error.std__mem__Error.void @std__array__Array_append_i64(ptr, ptr, i64)
 // declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
 // declare i64 @std__array__Array_len_i64(ptr)
@@ -572,8 +555,6 @@ test "fixed buffer is reusable between rounds" {
 // declare i64 @std__string__String_len(ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // 
-// declare void @kizu_panic_arena_add(i64, i64)
-// declare void @kizu_panic_arena_handle(i64, i64)
 // declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
@@ -664,7 +645,6 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.7 = alloca %kizu.array
 //   %kizu.24 = alloca %kizu.struct.std__string__String
 //   %kizu.34 = alloca %kizu.array
-//   %kizu.37.elem.slot = alloca %kizu.struct.Visitor
 //   store [4096 x i8] zeroinitializer, ptr %kizu.1
 //   store ptr %kizu.1, ptr %kizu.2
 //   %kizu.3 = load ptr, ptr %kizu.2
@@ -750,78 +730,58 @@ test "fixed buffer is reusable between rounds" {
 //   %kizu.35.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.35.ptr, 0
 //   %kizu.35 = insertvalue %kizu.slice.u8 %kizu.35.base, i64 5, 1
 //   %kizu.36 = insertvalue %kizu.struct.Visitor zeroinitializer, %kizu.slice.u8 %kizu.35, 0
-//   %kizu.array.handle.null.17 = icmp eq ptr %kizu.34, null
-//   %kizu.array.handle.18 = select i1 %kizu.array.handle.null.17, ptr @kizu.array.empty, ptr %kizu.34
-//   %kizu.array.append.len.addr.20 = getelementptr %kizu.array, ptr %kizu.array.handle.18, i64 0, i32 1
-//   %kizu.37 = load i64, ptr %kizu.array.append.len.addr.20
-//   %kizu.array.append.cap.21 = getelementptr %kizu.array, ptr %kizu.array.handle.18, i64 0, i32 2
-//   %kizu.array.append.cap.19 = load i64, ptr %kizu.array.append.cap.21
-//   %kizu.array.append.fits.22 = icmp slt i64 %kizu.37, %kizu.array.append.cap.19
-//   br i1 %kizu.array.append.fits.22, label %kizu.37.ok.array.append.fast, label %kizu.37.ok.array.append.slow
-// kizu.37.ok.array.append.fast:
-//   %kizu.array.data.addr.23 = getelementptr %kizu.array, ptr %kizu.array.handle.18, i64 0, i32 0
-//   %kizu.array.data.24 = load ptr, ptr %kizu.array.data.addr.23
-//   %kizu.array.elem.25 = getelementptr %kizu.struct.Visitor, ptr %kizu.array.data.24, i64 %kizu.37
-//   store %kizu.struct.Visitor %kizu.36, ptr %kizu.array.elem.25
-//   %kizu.array.append.grown.26 = add i64 %kizu.37, 1
-//   store i64 %kizu.array.append.grown.26, ptr %kizu.array.append.len.addr.20
-//   br label %kizu.37.ok.array.append.join
-// kizu.37.ok.array.append.slow:
-//   store %kizu.struct.Visitor %kizu.36, ptr %kizu.37.elem.slot
-//   %kizu.array.append.slow.ok.27 = call i1 @kizu_array_append(ptr %kizu.5, ptr %kizu.34, ptr %kizu.37.elem.slot, i64 ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64))
-//   br label %kizu.37.ok.array.append.join
-// kizu.37.ok.array.append.join:
-//   %kizu.37.ok = phi i1 [ true, %kizu.37.ok.array.append.fast ], [ %kizu.array.append.slow.ok.27, %kizu.37.ok.array.append.slow ]
-//   %kizu.37.bad = xor i1 %kizu.37.ok, true
-//   br i1 %kizu.37.bad, label %kizu.37.bad.arena.add.fail, label %kizu.37.bad.ok
-// kizu.37.bad.arena.add.fail:
-//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   %kizu.37 = call %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ @std__arena__Arena_add_Visitor(ptr %kizu.34, ptr %kizu.5, %kizu.struct.Visitor %kizu.36)
+//   %kizu.38 = load %kizu.array, ptr %kizu.34
+//   %kizu.39 = load %kizu.struct.std__string__String, ptr %kizu.24
+//   %kizu.40 = load %kizu.array, ptr %kizu.7
+//   %kizu.41.ok = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ %kizu.37, 0
+//   %kizu.41.ok.bool = icmp ne i8 %kizu.41.ok, 0
+//   br i1 %kizu.41.ok.bool, label %kizu.41.try.ok, label %kizu.41.try.err
+// kizu.41.try.err:
+//   %kizu.arena.deinit.data.18 = extractvalue %kizu.array %kizu.38, 0
+//   %kizu.arena.deinit.cap.19 = extractvalue %kizu.array %kizu.38, 2
+//   %kizu.arena.deinit.bytes.20 = mul i64 %kizu.arena.deinit.cap.19, ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.arena.deinit.data.18, i64 %kizu.arena.deinit.bytes.20)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.39, ptr %kizu.5)
+//   %kizu.array.deinit.data.23 = extractvalue %kizu.array %kizu.40, 0
+//   %kizu.array.deinit.cap.24 = extractvalue %kizu.array %kizu.40, 2
+//   %kizu.array.deinit.bytes.25 = mul i64 %kizu.array.deinit.cap.24, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.23, i64 %kizu.array.deinit.bytes.25)
+//   %kizu.try.err.26.code = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ %kizu.37, 2
+//   %kizu.try.err.26.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.26 = insertvalue %kizu.error.void %kizu.try.err.26.base, i64 %kizu.try.err.26.code, 1
+//   ret %kizu.error.void %kizu.try.err.26
+// kizu.41.try.ok:
+//   %kizu.41 = extractvalue %kizu.error.std__mem__Error.std__arena__Handle_Visitor_ %kizu.37, 1
+//   %kizu.42.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.42.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.42.ptr, 0
+//   %kizu.42 = insertvalue %kizu.slice.u8 %kizu.42.base, i64 5, 1
+//   %kizu.43 = call %kizu.struct.Visitor @std__arena__Arena_at_Visitor(ptr %kizu.34, i64 %kizu.41)
+//   %kizu.44 = extractvalue %kizu.struct.Visitor %kizu.43, 0
+//   %kizu.45.left.ptr = extractvalue %kizu.slice.u8 %kizu.42, 0
+//   %kizu.45.left.len = extractvalue %kizu.slice.u8 %kizu.42, 1
+//   %kizu.45.right.ptr = extractvalue %kizu.slice.u8 %kizu.44, 0
+//   %kizu.45.right.len = extractvalue %kizu.slice.u8 %kizu.44, 1
+//   %kizu.45.ok = call i1 @kizu_bytes_equal(ptr %kizu.45.left.ptr, i64 %kizu.45.left.len, ptr %kizu.45.right.ptr, i64 %kizu.45.right.len)
+//   br i1 %kizu.45.ok, label %kizu.45.ok.ok, label %kizu.45.ok.fail
+// kizu.45.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.45.left.ptr, i64 %kizu.45.left.len, ptr %kizu.45.right.ptr, i64 %kizu.45.right.len, i64 0, i64 0)
 //   unreachable
-// kizu.37.bad.ok:
-//   %kizu.38.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.38.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.38.ptr, 0
-//   %kizu.38 = insertvalue %kizu.slice.u8 %kizu.38.base, i64 5, 1
-//   %kizu.array.handle.null.28 = icmp eq ptr %kizu.34, null
-//   %kizu.array.handle.29 = select i1 %kizu.array.handle.null.28, ptr @kizu.array.empty, ptr %kizu.34
-//   %kizu.array.len.31 = getelementptr %kizu.array, ptr %kizu.array.handle.29, i64 0, i32 1
-//   %kizu.array.len.30 = load i64, ptr %kizu.array.len.31
-//   %kizu.array.in_range.32 = icmp ult i64 %kizu.37, %kizu.array.len.30
-//   %kizu.array.data.addr.33 = getelementptr %kizu.array, ptr %kizu.array.handle.29, i64 0, i32 0
-//   %kizu.array.data.34 = load ptr, ptr %kizu.array.data.addr.33
-//   %kizu.array.elem.35 = getelementptr %kizu.struct.Visitor, ptr %kizu.array.data.34, i64 %kizu.37
-//   %kizu.39.ptr = select i1 %kizu.array.in_range.32, ptr %kizu.array.elem.35, ptr null
-//   %kizu.arena.at.is_null.36 = icmp eq ptr %kizu.39.ptr, null
-//   br i1 %kizu.arena.at.is_null.36, label %kizu.39.ptr.arena.at.null, label %kizu.39.ptr.ok
-// kizu.39.ptr.arena.at.null:
-//   call void @kizu_panic_arena_handle(i64 0, i64 0)
-//   unreachable
-// kizu.39.ptr.ok:
-//   %kizu.39 = load %kizu.struct.Visitor, ptr %kizu.39.ptr
-//   %kizu.40 = extractvalue %kizu.struct.Visitor %kizu.39, 0
-//   %kizu.41.left.ptr = extractvalue %kizu.slice.u8 %kizu.38, 0
-//   %kizu.41.left.len = extractvalue %kizu.slice.u8 %kizu.38, 1
-//   %kizu.41.right.ptr = extractvalue %kizu.slice.u8 %kizu.40, 0
-//   %kizu.41.right.len = extractvalue %kizu.slice.u8 %kizu.40, 1
-//   %kizu.41.ok = call i1 @kizu_bytes_equal(ptr %kizu.41.left.ptr, i64 %kizu.41.left.len, ptr %kizu.41.right.ptr, i64 %kizu.41.right.len)
-//   br i1 %kizu.41.ok, label %kizu.41.ok.ok, label %kizu.41.ok.fail
-// kizu.41.ok.fail:
-//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.41.left.ptr, i64 %kizu.41.left.len, ptr %kizu.41.right.ptr, i64 %kizu.41.right.len, i64 0, i64 0)
-//   unreachable
-// kizu.41.ok.ok:
-//   %kizu.42 = load %kizu.array, ptr %kizu.34
-//   %kizu.arena.deinit.data.37 = extractvalue %kizu.array %kizu.42, 0
-//   %kizu.arena.deinit.cap.38 = extractvalue %kizu.array %kizu.42, 2
-//   %kizu.arena.deinit.bytes.39 = mul i64 %kizu.arena.deinit.cap.38, ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.arena.deinit.data.37, i64 %kizu.arena.deinit.bytes.39)
-//   %kizu.44 = load %kizu.struct.std__string__String, ptr %kizu.24
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.44, ptr %kizu.5)
-//   %kizu.46 = load %kizu.array, ptr %kizu.7
-//   %kizu.array.deinit.data.40 = extractvalue %kizu.array %kizu.46, 0
-//   %kizu.array.deinit.cap.41 = extractvalue %kizu.array %kizu.46, 2
-//   %kizu.array.deinit.bytes.42 = mul i64 %kizu.array.deinit.cap.41, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
-//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.40, i64 %kizu.array.deinit.bytes.42)
-//   %kizu.48 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.48
+// kizu.45.ok.ok:
+//   %kizu.46 = load %kizu.array, ptr %kizu.34
+//   %kizu.arena.deinit.data.27 = extractvalue %kizu.array %kizu.46, 0
+//   %kizu.arena.deinit.cap.28 = extractvalue %kizu.array %kizu.46, 2
+//   %kizu.arena.deinit.bytes.29 = mul i64 %kizu.arena.deinit.cap.28, ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.arena.deinit.data.27, i64 %kizu.arena.deinit.bytes.29)
+//   %kizu.48 = load %kizu.struct.std__string__String, ptr %kizu.24
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.48, ptr %kizu.5)
+//   %kizu.50 = load %kizu.array, ptr %kizu.7
+//   %kizu.array.deinit.data.30 = extractvalue %kizu.array %kizu.50, 0
+//   %kizu.array.deinit.cap.31 = extractvalue %kizu.array %kizu.50, 2
+//   %kizu.array.deinit.bytes.32 = mul i64 %kizu.array.deinit.cap.31, ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64)
+//   call void @kizu_array_deinit(ptr %kizu.5, ptr %kizu.array.deinit.data.30, i64 %kizu.array.deinit.bytes.32)
+//   %kizu.52 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.52
 // }
 // 
 // define %kizu.error.void @test_fixed_buffer_allocator_flows_through_helpers() {

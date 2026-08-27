@@ -1548,12 +1548,14 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
     name: []u8,
 }
-fn main() {
+fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(allocator, User { name: "alice" });
+    errdefer users.deinit(allocator);
+    let alice = try users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
     users.deinit(allocator);
+    return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1565,12 +1567,13 @@ func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 	source := `struct User {
     name: []u8,
 }
-fn main() {
+fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     defer users.deinit(allocator);
-    let alice = users.add(allocator, User { name: "alice" });
+    let alice = try users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
+    return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1729,7 +1732,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     users.deinit(1);
 }`,
-			want: "`arena.deinit` expects Allocator, got i64",
+			want: "`Arena.deinit` expects Allocator, got i64",
 		},
 	}
 	runErrorCases(t, cases)
@@ -2029,12 +2032,14 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 		{
 			name: "handle is not pointer",
 			source: `struct User { name: []u8 }
-fn main() {
+fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(allocator, User { name: "alice" });
+    defer users.deinit(allocator);
+    let alice = try users.add(allocator, User { name: "alice" });
     let p = cast<ptr<User>>(alice);
     print(p);
+    return;
 }`,
 			want: "cannot cast std::arena::Handle<User> to ptr<User>",
 		},

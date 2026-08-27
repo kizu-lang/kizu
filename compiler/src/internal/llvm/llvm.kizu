@@ -30,7 +30,7 @@ pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::Str
         allocator: allocator,
         void_name: void_name,
         types: typ::new(allocator),
-        names: ir::new_name_table(allocator),
+        names: try ir::new_name_table(allocator),
         out: string::new(allocator),
         strings: map::new<[]u8, ir::Name>(allocator),
         string_literals: map::new<[]u8, ir::Name>(allocator),
@@ -677,7 +677,6 @@ enum PanicKey {
     ArrayEmpty,
     ArenaEmpty,
     ArenaHandle,
-    ArenaAdd,
     TestFail,
     PanicFail,
     ExpectInt,
@@ -693,7 +692,6 @@ fn panic_key_spelling(key: PanicKey) -> []u8 {
         ArrayEmpty => "array_empty",
         ArenaEmpty => "arena_empty",
         ArenaHandle => "arena_handle",
-        ArenaAdd => "arena_add",
         TestFail => "test_fail",
         PanicFail => "panic_fail",
         ExpectInt => "expect_int",
@@ -719,9 +717,6 @@ fn parse_panic_key(spelling: []u8) -> ?PanicKey {
     }
     if mem::equal_bytes(spelling, "arena_handle") {
         return PanicKey::ArenaHandle;
-    }
-    if mem::equal_bytes(spelling, "arena_add") {
-        return PanicKey::ArenaAdd;
     }
     if mem::equal_bytes(spelling, "test_fail") {
         return PanicKey::TestFail;
@@ -759,7 +754,6 @@ fn panic_entry(key: PanicKey) -> PanicEntry {
         ArrayEmpty => PanicEntry { entry: "kizu_panic_array_empty", params: "" },
         ArenaEmpty => PanicEntry { entry: "kizu_panic_arena_empty", params: "" },
         ArenaHandle => PanicEntry { entry: "kizu_panic_arena_handle", params: "" },
-        ArenaAdd => PanicEntry { entry: "kizu_panic_arena_add", params: "" },
         TestFail => PanicEntry { entry: "kizu_panic_test_fail", params: "ptr, i64" },
         PanicFail => PanicEntry { entry: "kizu_panic_fail", params: "ptr, i64" },
         ExpectInt => PanicEntry { entry: "kizu_panic_expect_equal_int", params: "i64, i64" },
@@ -825,6 +819,7 @@ fn (self: &var Emitter) panic_position(span: ast::Span) -> !ir::Name {
 /// *value* (a recoverable !T), as opposed to the panic entries, which abort;
 /// the keys of the Go `failureErrors` map.
 enum FailureKey {
+    ArenaAdd,
     ArrayAppend,
     ArrayAppendBytes,
     ArrayBounds,
@@ -845,6 +840,7 @@ struct FailureError {
 /// Returns the set and member of one failure, the Go `failureErrors`.
 fn failure_error(key: FailureKey) -> FailureError {
     return match key {
+        ArenaAdd => FailureError { set: "std::mem::Error", member: "OutOfMemory" },
         ArrayAppend => FailureError { set: "std::mem::Error", member: "OutOfMemory" },
         ArrayAppendBytes => FailureError { set: "std::mem::Error", member: "OutOfMemory" },
         ArrayBounds => FailureError { set: "std::array::Error", member: "OutOfBounds" },
@@ -859,6 +855,7 @@ fn failure_error(key: FailureKey) -> FailureError {
 /// Returns the key spelling of one failure, the Go map key.
 fn failure_key_spelling(key: FailureKey) -> []u8 {
     return match key {
+        ArenaAdd => "arena_add",
         ArrayAppend => "array_append",
         ArrayAppendBytes => "array_append_bytes",
         ArrayBounds => "array_bounds",
@@ -1439,7 +1436,6 @@ fn (self: &var Emitter) continuation_label(module: &ir::Module, node: &ir::Instr
         MapTakeValueAt => return self.result_helper_label(module, node, ".ptr", "ok"),
         ArenaAt => return self.result_helper_label(module, node, ".ptr", "ok"),
         ArenaPopOrPanic => return self.result_helper_label(module, node, ".ptr", "ok"),
-        ArenaAdd => return self.result_helper_label(module, node, ".bad", "ok"),
         TestExpectEqual => return self.result_helper_label(module, node, ".ok", "ok"),
         _ => return ir::empty_name(),
     }
@@ -1863,6 +1859,21 @@ fn (self: &var Emitter) write_array_bool_result(
     ok_operand: ir::Name,
     failure_key: FailureKey
 ) -> !?diagnostic::Diagnostic {
+    return self.write_error_union_from_bool(module, result, ok_operand, failure_key, null, "");
+}
+
+/// Builds the error union a runtime boolean stands for, the Go
+/// `writeErrorUnionFromBool`: the tag says whether it succeeded, the payload is
+/// what it produced, and the failure code is written unconditionally because
+/// only the tag decides which half is read. A null payload is the `!void` case.
+fn (self: &var Emitter) write_error_union_from_bool(
+    module: &ir::Module,
+    result: ir::Value,
+    ok_operand: ir::Name,
+    failure_key: FailureKey,
+    payload: ?ir::Name,
+    payload_type: []u8
+) -> !?diagnostic::Diagnostic {
     let looked_up = try self.failure_error_code(module, failure_key);
     match looked_up {
         Error(failed) => return move failed,
@@ -1872,10 +1883,19 @@ fn (self: &var Emitter) write_array_bool_result(
             let result_type = result_text.as_bytes();
             let union_type = try self.llvm_type(module, result_type);
             let failure_index = try self.error_union_failure_index(result_type);
-            let base_name = try self.suffixed(result_name, ".base");
+            var base_name = try self.suffixed(result_name, ".base");
             let ok_byte_name = try self.suffixed(result_name, ".ok.byte");
             try self.line2("  %s = zext i1 %s to i8", Arg::Str(ok_byte_name), Arg::Str(ok_operand));
             try self.line3("  %s = insertvalue %s zeroinitializer, i8 %s, 0", Arg::Str(base_name), Arg::Str(union_type), Arg::Str(ok_byte_name));
+            if payload |carried| {
+                let payload_name = try self.suffixed(result_name, ".payload");
+                try self.line5(
+                    "  %s = insertvalue %s %s, %s %s, 1",
+                    Arg::Str(payload_name), Arg::Str(union_type), Arg::Str(base_name),
+                    Arg::Lit(payload_type), Arg::Str(carried)
+                );
+                base_name = payload_name;
+            }
             try self.line5(
                 "  %s = insertvalue %s %s, i64 %d, %d",
                 Arg::Str(result_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Int(code), Arg::Int(failure_index)

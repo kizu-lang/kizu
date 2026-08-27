@@ -4310,7 +4310,7 @@ func (c *Checker) requireAllocatorHeaderFirst(typeArg string) error {
 }
 
 // checkBuiltinArenaTypeApply validates the Arena constructor and the storage
-// primitives used only by std::arena's owner-element cleanup wrapper.
+// primitives std::arena's methods forward to.
 func (c *Checker) checkBuiltinArenaTypeApply(
 	name string,
 	typeArg string,
@@ -4330,23 +4330,53 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (Type, error) {
-			if method == "deinit" {
-				err := c.checkReleaseAllocator("Arena.deinit", rest, env, unsafe)
-				return typeVoid, err
-			}
-			if len(rest) != 0 {
-				return "", errorf("type error: `Arena.%s` expects 0 args, got %d",
-					method, len(rest))
-			}
-			switch method {
-			case "len":
-				return typeI64, nil
-			case "pop_or_panic":
-				return elem, nil
-			default:
-				return "", errorf("type error: Arena has no storage primitive `%s`", method)
-			}
+			return c.checkArenaPrimitiveMethod(elem, method, rest, env, unsafe)
 		}, args, env, unsafe)
+}
+
+// checkArenaPrimitiveMethod validates Arena primitives that back source
+// wrappers. Only std::arena's own bodies reach them, so the capture rule
+// `Arena.at_mut` carries at a call site is not restated here: the wrapper
+// returns the borrow optional, and the rule applies where the wrapper is
+// called.
+func (c *Checker) checkArenaPrimitiveMethod(
+	elem Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	switch name {
+	case "add":
+		return c.checkArenaAdd(elem, args, env, unsafe)
+	case "at":
+		if err := c.checkArenaHandleArg(elem, args, env, unsafe, "Arena.at"); err != nil {
+			return "", err
+		}
+		return Type("&" + string(elem)), nil
+	case "at_mut":
+		if err := c.checkArenaHandleArg(elem, args, env, unsafe, "Arena.at_mut"); err != nil {
+			return "", err
+		}
+		return Type("?&var " + string(elem)), nil
+	case "deinit":
+		// The raw primitive frees only the storage, with no owner-element
+		// rule: it is the one escape `Arena.deinit` uses after consuming the
+		// elements, and only std source can name it.
+		err := c.checkReleaseAllocator("Arena.deinit", args, env, unsafe)
+		return typeVoid, err
+	}
+	if len(args) != 0 {
+		return "", errorf("type error: `Arena.%s` expects 0 args, got %d", name, len(args))
+	}
+	switch name {
+	case "len":
+		return typeI64, nil
+	case "pop_or_panic":
+		return elem, nil
+	default:
+		return "", errorf("type error: Arena has no storage primitive `%s`", name)
+	}
 }
 
 // checkBuiltinTestingTypeApply validates typed std::testing primitives.
@@ -5990,46 +6020,65 @@ func (c *Checker) checkArenaOrImplMethod(
 		}
 		return "", errorf("type error: `%s` has no method `%s`", receiver, field.Name)
 	}
-	switch field.Name {
-	case "add":
-		return c.checkArenaAdd(arg, args, env, unsafe)
-	case "at":
-		return c.checkArenaAt(arg, args, env, unsafe)
-	case "at_mut":
-		return c.checkArenaAtMut(field, arg, args, env, unsafe)
-	case "deinit":
-		return c.checkArenaDeinit(field, args, env, unsafe)
-	default:
-		return "", errorf("type error: unknown arena method `%s`", field.Name)
-	}
+	return c.checkArenaReceiverMethod(field, Type(arg), args, env, unsafe)
 }
 
-// checkArenaAtMut validates std::arena::Arena<T>.at_mut(handle): capture
-// conditions consume the `?&var T` it returns, everywhere else refuses it.
-func (c *Checker) checkArenaAtMut(
+// checkArenaReceiverMethod validates receiver-sensitive Arena<T> methods, then
+// reads the rest off std's declaration the way Array and Box do. What is left
+// here is what a declaration cannot state: which receiver place a method may
+// come from, and that `at_mut` hands out a borrow only a capture can consume.
+func (c *Checker) checkArenaReceiverMethod(
 	field *ast.FieldExpr,
-	arg string,
+	elem Type,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if !c.captureCondition {
-		return "", errorf("type error: `Arena.at_mut` must be consumed by a capture" +
-			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+	switch field.Name {
+	case "at_mut":
+		if !c.captureCondition {
+			return "", errorf("type error: `Arena.at_mut` must be consumed by a capture" +
+				" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+		}
+		if !mutableReceiverPlace(field.Receiver, env) {
+			return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
+		}
+		// The flag covers exactly this call: off while the argument is read --
+		// a nested at_mut in argument position refuses as usual -- and back on
+		// for the result the call gate reads.
+		c.captureCondition = false
+		result, err := c.checkArenaStdMethod(elem, field.Name, args, env, unsafe)
+		c.captureCondition = true
+		return result, err
+	case typ.CleanupMethod:
+		if err := c.checkArenaCleanupReceiver(field, env); err != nil {
+			return "", err
+		}
 	}
-	if !mutableReceiverPlace(field.Receiver, env) {
-		return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
+	return c.checkArenaStdMethod(elem, field.Name, args, env, unsafe)
+}
+
+// checkArenaStdMethod reads one Arena method off std's declaration.
+func (c *Checker) checkArenaStdMethod(
+	elem Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	return c.checkStdMethod("std::arena::Arena", []Type{elem}, "Arena", name, args, env, unsafe)
+}
+
+// checkArenaCleanupReceiver keeps arena cleanup on a place it may consume.
+func (c *Checker) checkArenaCleanupReceiver(field *ast.FieldExpr, env *scope) error {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok && !c.directFieldCleanupReceiver(field.Receiver, env) {
+		return errorf("type error: `Arena.deinit` requires local arena receiver")
 	}
-	// The flag covers exactly this call: off while the argument is read —
-	// a nested at/at_mut in argument position refuses as usual — and back
-	// on for the result the call gate reads.
-	c.captureCondition = false
-	err := c.checkArenaHandleArg(arg, args, env, unsafe, "Arena.at_mut")
-	c.captureCondition = true
-	if err != nil {
-		return "", err
+	if ok && env.isBorrowed(ident.Name) {
+		return errorf("type error: `Arena.deinit` requires owned arena receiver")
 	}
-	return Type("?&var " + arg), nil
+	return nil
 }
 
 // checkStringReceiverMethod validates receiver-sensitive String methods.
@@ -6951,53 +7000,39 @@ func checkBorrowTargetShape(expr ast.Expression) error {
 		"type error: borrow target must be a local binding or field path")
 }
 
-// checkArenaAdd validates std::arena::Arena<T>.add(value).
-// checkArenaAdd validates Arena.add(allocator, value). The add is what buys
-// the storage the element goes in, so it names the allocator it buys from: an
+// checkArenaAdd validates the arena_add primitive: the add is what buys the
+// storage the element goes in, so it names the allocator it buys from -- an
 // arena header keeps none of its own (ADR-0131, ADR-0132).
 func (c *Checker) checkArenaAdd(
-	arg string,
+	elem Type,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
 	if len(args) != 2 {
-		return "", errorf("type error: `arena.add` expects 2 args, got %d", len(args))
+		return "", errorf("type error: `Arena.add` expects 2 args, got %d", len(args))
 	}
 	allocator, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if allocator != Type("Allocator") {
-		return "", errorf("type error: `arena.add` expects Allocator, got %s", allocator)
+		return "", errorf("type error: `Arena.add` expects Allocator, got %s", allocator)
 	}
 	got, err := c.checkExpr(args[1], env, unsafe)
 	if err != nil {
 		return "", err
 	}
-	if !sameType(got, Type(arg)) {
-		return "", errorf("type error: `arena.add` expects %s, got %s", arg, got)
+	if !sameType(got, elem) {
+		return "", errorf("type error: `Arena.add` expects %s, got %s", elem, got)
 	}
-	return Type(fmt.Sprintf("std::arena::Handle<%s>", arg)), nil
-}
-
-// checkArenaAt validates std::arena::Arena<T>.at(std::arena::Handle<T>).
-func (c *Checker) checkArenaAt(
-	arg string,
-	args []ast.Expression,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "arena.at"); err != nil {
-		return "", err
-	}
-	return Type("&" + arg), nil
+	return Type(fmt.Sprintf("std::mem::Error!std::arena::Handle<%s>", elem)), nil
 }
 
 // checkArenaHandleArg validates the one handle argument an arena accessor
 // takes against the arena's element type. label names the accessor in errors.
 func (c *Checker) checkArenaHandleArg(
-	arg string,
+	elem Type,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
@@ -7010,31 +7045,11 @@ func (c *Checker) checkArenaHandleArg(
 	if err != nil {
 		return err
 	}
-	want := Type(fmt.Sprintf("std::arena::Handle<%s>", arg))
+	want := Type(fmt.Sprintf("std::arena::Handle<%s>", elem))
 	if !sameType(got, want) {
 		return errorf("type error: `%s` expects %s, got %s", label, want, got)
 	}
 	return nil
-}
-
-// checkArenaDeinit validates explicit arena cleanup syntax.
-func (c *Checker) checkArenaDeinit(
-	field *ast.FieldExpr,
-	args []ast.Expression,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	ident, ok := field.Receiver.(*ast.IdentExpr)
-	if !ok && !c.directFieldCleanupReceiver(field.Receiver, env) {
-		return "", errorf("type error: `arena.deinit` requires local arena receiver")
-	}
-	if ok && env.isBorrowed(ident.Name) {
-		return "", errorf("type error: `arena.deinit` requires owned arena receiver")
-	}
-	if err := c.checkReleaseAllocator("arena.deinit", args, env, unsafe); err != nil {
-		return "", err
-	}
-	return typeVoid, nil
 }
 
 // directFieldCleanupReceiver reports whether expr names one direct field, the

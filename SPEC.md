@@ -1681,6 +1681,8 @@ core arena の構築は明示 allocator capability を要求し、
 `std::arena::new<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
 `arena::new` は header そのものを作るだけで何も確保しないので、失敗しません。
 storage を買うのは最初の `add` で、失敗を言うのもそこです。
+allocator が断るのは壊れたプログラムではなく(`mem::fixed_buffer` は使い切るのが
+普通の動作です)、`add` は `std::mem::Error!` で返します。
 
 `std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
 値を所有するのは arena なので、handle は copy 型です(§8)。
@@ -1691,7 +1693,9 @@ storage を買うのは最初の `add` で、失敗を言うのもそこです�
   header そのものを作るだけで何も確保しない
 * `std::arena::Arena<T>.add(allocator, value)` は value を arena に move する。
   storage を買う call なので allocator を名指す(§14.3)
-* `std::arena::Arena<T>.add(allocator, value)` は `std::arena::Handle<T>` を返す
+* `std::arena::Arena<T>.add(allocator, value)` は
+  `std::mem::Error!std::arena::Handle<T>` を返す。storage を買う call なので、
+  allocator が断ったことを言うのもここ(§11)
 * `std::arena::Arena<T>.at(handle)` は arena に tied な shared borrow `&T` を返す。
   直接 field / method / match を読め、local binding に束縛した場合は最後の使用まで
   arena を borrow する。その間は `add` / `deinit` を実行できず、要素を move

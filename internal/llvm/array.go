@@ -241,7 +241,7 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	array := e.value(instr.Args[0])
 	handle := e.arrayHandle(array.operand)
 	okName := localName(instr.Result.Name) + ".ok"
-	e.writeArrayAppendPaths(instr, elem, array.operand, handle, okName, "")
+	e.writeArrayAppendPaths(instr, elem, array.operand, handle, okName)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_append")
 }
 
@@ -250,22 +250,18 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 // the storage. The slow path is given the handle as it came, not the readable
 // stand-in, so a null handle still comes back as the failure it is.
 //
-// The length the append starts from is the index the element lands at. An
-// array has no use for it; an arena hands it back as the handle that names the
-// element, so it is read into indexName, the register the arena's result is
-// resolved by (ADR-0131). An empty indexName synthesizes one.
+// It returns the length the append started from, the index the element lands
+// at. An array has no use for it; an arena hands it back as the handle that
+// names the element (ADR-0131). The load dominates the join, so the name is
+// readable wherever the ok phi is.
 func (e *emitter) writeArrayAppendPaths(
 	instr *ir.Instr,
 	elem string,
 	handleOperand string,
 	handle string,
 	okName string,
-	indexName string,
-) {
-	length := indexName
-	if length == "" {
-		length = "%" + e.nextSyntheticValue("array.append.len")
-	}
+) string {
+	length := "%" + e.nextSyntheticValue("array.append.len")
 	capacity := "%" + e.nextSyntheticValue("array.append.cap")
 	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append.len.addr")
 	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", length, lengthAddr)
@@ -295,6 +291,7 @@ func (e *emitter) writeArrayAppendPaths(
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
 	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ %s, %%%s ]\n",
 		okName, fastLabel, slowOk, slowLabel)
+	return length
 }
 
 // writeBoundsFailure traps when index is outside the array. The comparison is
@@ -641,6 +638,20 @@ func (e *emitter) writeArrayBoolResult(
 	okOperand string,
 	failureKey string,
 ) error {
+	return e.writeErrorUnionFromBool(result, okOperand, failureKey, "", "")
+}
+
+// writeErrorUnionFromBool builds the error union a runtime boolean stands for:
+// the tag says whether it succeeded, the payload is what it produced, and the
+// failure code is written unconditionally because only the tag decides which
+// half is read. A payload of "" is the `!void` case.
+func (e *emitter) writeErrorUnionFromBool(
+	result ir.Value,
+	okOperand string,
+	failureKey string,
+	payload string,
+	payloadType string,
+) error {
 	code, err := e.failureErrorCode(failureKey)
 	if err != nil {
 		return err
@@ -652,6 +663,12 @@ func (e *emitter) writeArrayBoolResult(
 	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", okByteName, okOperand)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
 		baseName, unionType, okByteName)
+	if payload != "" {
+		payloadName := resultName + ".payload"
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
+			payloadName, unionType, baseName, payloadType, payload)
+		baseName = payloadName
+	}
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %d, %d\n",
 		resultName, unionType, baseName, code, e.errorUnionFailureIndex(result.Type))
 	e.values[result.Name] = valueInfo{typ: result.Type, operand: resultName}

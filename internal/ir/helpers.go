@@ -207,12 +207,8 @@ func runtimeBuiltinReturnType(name string) (string, bool) {
 	}
 }
 
-// handleType returns std::arena::Handle<T> for std::arena::Arena<T>.
-func handleType(arena string) string {
-	elem := arenaElementType(arena)
-	if elem == "unknown" {
-		return "std::arena::Handle<unknown>"
-	}
+// arenaHandleType returns std::arena::Handle<T> for an element type T.
+func arenaHandleType(elem string) string {
 	return "std::arena::Handle<" + elem + ">"
 }
 

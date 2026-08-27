@@ -593,13 +593,13 @@ pub fn new_program(allocator: Allocator) -> Program {
 }
 
 /// Retains owned text and returns its copyable identity.
-fn (self: &var Ast) add_text(value: string::String) -> Text {
-    return Text { node: self.texts.add(self.allocator, move value) };
+fn (self: &var Ast) add_text(value: string::String) -> !Text {
+    return Text { node: try self.texts.add(self.allocator, move value) };
 }
 
 /// Retains an empty text value without a fallible byte copy.
-fn (self: &var Ast) add_empty_text() -> Text {
-    return self.add_text(string::new(self.allocator));
+fn (self: &var Ast) add_empty_text() -> !Text {
+    return try self.add_text(string::new(self.allocator));
 }
 
 /// Copies borrowed bytes into text retained for the Ast lifetime.
@@ -607,15 +607,15 @@ fn (self: &var Ast) add_text_from_bytes(
     bytes: []u8
 ) -> !Text {
     let value = try string::from_bytes(self.allocator, bytes);
-    return self.add_text(move value);
+    return try self.add_text(move value);
 }
 
 /// Retains one immutable expression handle list for shared call sites.
 fn (self: &var Ast) add_expression_list(
     values: array::Array<Expression>
-) -> ExpressionList {
+) -> !ExpressionList {
     return ExpressionList {
-        node: self.expression_lists.add(self.allocator, move values)
+        node: try self.expression_lists.add(self.allocator, move values)
     };
 }
 
@@ -642,9 +642,9 @@ fn expression_list_get_or_panic(
 }
 
 /// Retains one declaration node and returns its typed handle.
-fn (self: &var Ast) add_declaration(node: DeclarationNode) -> Declaration {
+fn (self: &var Ast) add_declaration(node: DeclarationNode) -> !Declaration {
     return Declaration {
-        node: self.declarations.add(self.allocator, move node)
+        node: try self.declarations.add(self.allocator, move node)
     };
 }
 
@@ -657,50 +657,50 @@ fn (self: &var Program) add_declaration(
 }
 
 /// Retains one expression node and returns its typed handle.
-fn (self: &var Ast) add_expression(node: ExpressionNode) -> Expression {
+fn (self: &var Ast) add_expression(node: ExpressionNode) -> !Expression {
     return Expression {
-        node: self.expressions.add(self.allocator, move node)
+        node: try self.expressions.add(self.allocator, move node)
     };
 }
 
 /// Retains one statement node and returns its typed handle.
-fn (self: &var Ast) add_statement(node: StatementNode) -> Statement {
+fn (self: &var Ast) add_statement(node: StatementNode) -> !Statement {
     return Statement {
-        node: self.statements.add(self.allocator, move node)
+        node: try self.statements.add(self.allocator, move node)
     };
 }
 
 /// Retains one block and returns its typed handle.
-fn (self: &var Ast) add_block(block: BlockStmt) -> Block {
+fn (self: &var Ast) add_block(block: BlockStmt) -> !Block {
     return Block {
-        node: self.statements.add(self.allocator, StatementNode::Block(move block))
+        node: try self.statements.add(self.allocator, StatementNode::Block(move block))
     };
 }
 
 /// Retains the recovery declaration for a parse that gave up at `span`.
-fn (self: &var Ast) add_recovered_declaration(span: Span) -> Declaration {
-    return self.add_declaration(DeclarationNode::Recovered(RecoveredNode {
+fn (self: &var Ast) add_recovered_declaration(span: Span) -> !Declaration {
+    return try self.add_declaration(DeclarationNode::Recovered(RecoveredNode {
         span: span
     }));
 }
 
 /// Retains the recovery statement for a parse that gave up at `span`.
-fn (self: &var Ast) add_recovered_statement(span: Span) -> Statement {
-    return self.add_statement(StatementNode::Recovered(RecoveredNode {
+fn (self: &var Ast) add_recovered_statement(span: Span) -> !Statement {
+    return try self.add_statement(StatementNode::Recovered(RecoveredNode {
         span: span
     }));
 }
 
 /// Retains the recovery expression for a parse that gave up at `span`.
-fn (self: &var Ast) add_recovered_expression(span: Span) -> Expression {
-    return self.add_expression(ExpressionNode::Recovered(RecoveredNode {
+fn (self: &var Ast) add_recovered_expression(span: Span) -> !Expression {
+    return try self.add_expression(ExpressionNode::Recovered(RecoveredNode {
         span: span
     }));
 }
 
 /// Retains an empty block using the syntax graph's allocator.
-fn (self: &var Ast) add_empty_block() -> Block {
-    return self.add_block(BlockStmt {
+fn (self: &var Ast) add_empty_block() -> !Block {
+    return try self.add_block(BlockStmt {
         statements: array::new<Statement>(self.allocator)
     });
 }
@@ -1809,12 +1809,12 @@ fn add_variant_path(
     ast: &var Ast,
     owner_name: Text,
     variant_name: Text
-) -> Expression {
-    let receiver = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+) -> !Expression {
+    let receiver = try ast.add_expression(ExpressionNode::Ident(IdentExpr {
         name: owner_name,
         span: zero_span()
     }));
-    return ast.add_expression(ExpressionNode::Field(FieldExpr {
+    return try ast.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: receiver,
         name: variant_name,
         namespace: true,
@@ -1835,8 +1835,8 @@ pub fn variant_expansion(
     if !has_args {
         return add_variant_path(ast, owner_name, variant_name);
     }
-    let path = add_variant_path(ast, owner_name, variant_name);
-    return ast.add_expression(ExpressionNode::Call(CallExpr {
+    let path = try add_variant_path(ast, owner_name, variant_name);
+    return try ast.add_expression(ExpressionNode::Call(CallExpr {
         callee: path,
         args: args
     }));
@@ -2063,7 +2063,7 @@ pub fn add_derived_deinits(
                     &owners,
                     declaration
                 ) |function| {
-                    let retained = ast.add_declaration(
+                    let retained = try ast.add_declaration(
                         DeclarationNode::Function(move function)
                     );
                     try derived.append(allocator, retained);
@@ -2127,15 +2127,15 @@ fn new_derived_names(
         typ::cleanup_method()
     );
     let allocator_name = try ast.add_text_from_bytes("allocator");
-    let empty = ast.add_empty_text();
-    let empty_args = ast.add_expression_list(
+    let empty = try ast.add_empty_text();
+    let empty_args = try ast.add_expression_list(
         array::new<Expression>(allocator)
     );
-    let handed = add_derived_ident(ast, allocator_name);
+    let handed = try add_derived_ident(ast, allocator_name);
     var allocator_arg_values = array::new<Expression>(allocator);
     errdefer allocator_arg_values.deinit(allocator);
     try allocator_arg_values.append(allocator, handed);
-    let allocator_args = ast.add_expression_list(move allocator_arg_values);
+    let allocator_args = try ast.add_expression_list(move allocator_arg_values);
     return DerivedNames {
         receiver: receiver,
         capture: capture,
@@ -2168,18 +2168,18 @@ fn derive_struct_deinit(
         match kind {
             OptionalOwner => {
                 // Only if may consume a field that while could read twice.
-                let read = add_derived_field_read(
+                let read = try add_derived_field_read(
                     ast,
                     names.receiver,
                     field.name
                 );
-                let held = add_derived_ident(ast, names.capture);
-                let cleanup = add_derived_cleanup(ast, names, held);
+                let held = try add_derived_ident(ast, names.capture);
+                let cleanup = try add_derived_cleanup(ast, names, held);
                 let consequence = try add_derived_block(allocator,
                     ast,
                     cleanup
                 );
-                try statements.append(allocator, ast.add_statement(StatementNode::If(
+                try statements.append(allocator, try ast.add_statement(StatementNode::If(
                     IfStmt {
                     condition: read,
                     consequence: consequence,
@@ -2195,10 +2195,10 @@ fn derive_struct_deinit(
                     names.receiver,
                     field.name
                 );
-                try statements.append(allocator, add_derived_cleanup(
+                try statements.append(allocator, try add_derived_cleanup(
                     ast,
                     names,
-                    read
+                    try read
                 ));
             },
             Copy => {},
@@ -2267,11 +2267,11 @@ fn derive_union_deinit(
         }
         if payload_owned {
             owned = true;
-            let held = add_derived_ident(ast, names.capture);
+            let held = try add_derived_ident(ast, names.capture);
             try arms.append(allocator, MatchArm {
                 tag: variant.name,
                 binding: names.capture,
-                body: add_derived_cleanup(ast, names, held),
+                body: try add_derived_cleanup(ast, names, held),
                 tag_set: names.empty
             });
         } else {
@@ -2290,8 +2290,8 @@ fn derive_union_deinit(
         arms.deinit(allocator);
         return null;
     }
-    let receiver = add_derived_ident(ast, names.receiver);
-    let statement = ast.add_statement(StatementNode::Match(MatchStmt {
+    let receiver = try add_derived_ident(ast, names.receiver);
+    let statement = try ast.add_statement(StatementNode::Match(MatchStmt {
         value: receiver,
         arms: move arms,
         meta_capture: names.empty,
@@ -2319,7 +2319,7 @@ fn derive_decl(
 ) -> !FunctionDecl {
     var body = move statements;
     errdefer body.deinit(allocator);
-    let returned = ast.add_statement(StatementNode::Return(ReturnStmt {
+    let returned = try ast.add_statement(StatementNode::Return(ReturnStmt {
         value: null
     }));
     try body.append(allocator, returned);
@@ -2366,7 +2366,7 @@ fn derive_decl(
         typ::cleanup_method()
     );
     let return_type = try ast.types.parse("void");
-    let body_block = ast.add_block(BlockStmt { statements: move body });
+    let body_block = try ast.add_block(BlockStmt { statements: move body });
     return FunctionDecl {
         signature: FunctionSignature {
             receiver: true,
@@ -2440,8 +2440,8 @@ fn copy_retained_text(
     return string::from_bytes(allocator, bytes);
 }
 
-fn add_derived_ident(ast: &var Ast, name: Text) -> Expression {
-    return ast.add_expression(ExpressionNode::Ident(IdentExpr {
+fn add_derived_ident(ast: &var Ast, name: Text) -> !Expression {
+    return try ast.add_expression(ExpressionNode::Ident(IdentExpr {
         name: name,
         span: zero_span()
     }));
@@ -2451,9 +2451,9 @@ fn add_derived_field_read(
     ast: &var Ast,
     receiver_name: Text,
     field_name: Text
-) -> Expression {
-    let receiver = add_derived_ident(ast, receiver_name);
-    return ast.add_expression(ExpressionNode::Field(FieldExpr {
+) -> !Expression {
+    let receiver = try add_derived_ident(ast, receiver_name);
+    return try ast.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: receiver,
         name: field_name,
         namespace: false,
@@ -2465,18 +2465,18 @@ fn add_derived_cleanup(
     ast: &var Ast,
     names: &DerivedNames,
     value: Expression
-) -> Statement {
-    let method = ast.add_expression(ExpressionNode::Field(FieldExpr {
+) -> !Statement {
+    let method = try ast.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: value,
         name: names.cleanup,
         namespace: false,
         span: zero_span()
     }));
-    let call = ast.add_expression(ExpressionNode::Call(CallExpr {
+    let call = try ast.add_expression(ExpressionNode::Call(CallExpr {
         callee: method,
         args: names.allocator_args
     }));
-    return ast.add_statement(StatementNode::Expr(ExprStmt {
+    return try ast.add_statement(StatementNode::Expr(ExprStmt {
         expr: call,
         semicolon: true
     }));
@@ -2490,14 +2490,14 @@ fn add_derived_block(
     var statements = array::new<Statement>(allocator);
     errdefer statements.deinit(allocator);
     try statements.append(allocator, statement);
-    return ast.add_block(BlockStmt { statements: move statements });
+    return try ast.add_block(BlockStmt { statements: move statements });
 }
 
 fn add_derived_empty_block(
     allocator: Allocator,
     ast: &var Ast
 ) -> !Block {
-    return ast.add_block(BlockStmt {
+    return try ast.add_block(BlockStmt {
         statements: array::new<Statement>(allocator)
     });
 }
@@ -2515,7 +2515,7 @@ fn joined_text(
     try out.append_bytes(allocator, left);
     try out.append_bytes(allocator, middle);
     try out.append_bytes(allocator, right);
-    return ast.add_text(move out);
+    return try ast.add_text(move out);
 }
 
 fn construct_binding(
@@ -2531,22 +2531,22 @@ fn add_construct_cleanup(
     binding: Text,
     method_name: Text,
     args: ExpressionList
-) -> Statement {
-    let receiver = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+) -> !Statement {
+    let receiver = try ast.add_expression(ExpressionNode::Ident(IdentExpr {
         name: binding,
         span: zero_span()
     }));
-    let method = ast.add_expression(ExpressionNode::Field(FieldExpr {
+    let method = try ast.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: receiver,
         name: method_name,
         namespace: false,
         span: zero_span()
     }));
-    let call = ast.add_expression(ExpressionNode::Call(CallExpr {
+    let call = try ast.add_expression(ExpressionNode::Call(CallExpr {
         callee: method,
         args: args
     }));
-    return ast.add_statement(StatementNode::ErrDefer(ErrDeferStmt {
+    return try ast.add_statement(StatementNode::ErrDefer(ErrDeferStmt {
         expr: call
     }));
 }
@@ -2565,38 +2565,38 @@ fn add_construct_field(
     let binding = try construct_binding(allocator, ast, field.name);
     let type_arg = try joined_text(allocator, ast, owner, ", ", field.name);
     let field_name = try ast.add_text_from_bytes(field.name);
-    let worker_expr = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+    let worker_expr = try ast.add_expression(ExpressionNode::Ident(IdentExpr {
         name: worker_name,
         span: zero_span()
     }));
-    let applied = ast.add_expression(ExpressionNode::TypeApply(TypeApplyExpr {
+    let applied = try ast.add_expression(ExpressionNode::TypeApply(TypeApplyExpr {
         callee: worker_expr,
         type_arg: type_arg
     }));
-    let call = ast.add_expression(ExpressionNode::Call(CallExpr {
+    let call = try ast.add_expression(ExpressionNode::Call(CallExpr {
         callee: applied,
         args: args
     }));
-    let value = ast.add_expression(ExpressionNode::Try(TryExpr {
+    let value = try ast.add_expression(ExpressionNode::Try(TryExpr {
         value: call
     }));
-    let statement = ast.add_statement(StatementNode::Let(LetStmt {
+    let statement = try ast.add_statement(StatementNode::Let(LetStmt {
         mutable: false,
         name: binding,
         value: value
     }));
-    let field_value = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+    let field_value = try ast.add_expression(ExpressionNode::Ident(IdentExpr {
         name: binding,
         span: zero_span()
     }));
     if owner_type(owners, field.type_name) {
-        let cleanup = add_construct_cleanup(
+        let cleanup = try add_construct_cleanup(
             ast,
             binding,
             cleanup_method,
             release_args
         );
-        let moved = ast.add_expression(ExpressionNode::Move(MoveExpr {
+        let moved = try ast.add_expression(ExpressionNode::Move(MoveExpr {
             value: field_value,
             span: zero_span()
         }));
@@ -2658,7 +2658,7 @@ fn begin_construct(
     if args.len(ast) > 0 {
         try release_values.append(allocator, args.get_or_panic(ast, 0));
     }
-    let release_args = ast.add_expression_list(move release_values);
+    let release_args = try ast.add_expression_list(move release_values);
     return ConstructBuilder {
         statements: move statements,
         values: move values,
@@ -2696,10 +2696,12 @@ fn (self: &var ConstructBuilder) add_field(
 }
 
 fn finish_construct(
+    allocator: Allocator,
     ast: &var Ast,
     builder: ConstructBuilder
-) -> ConstructResult {
-    let literal = ast.add_expression(ExpressionNode::StructLiteral(StructLiteralExpr {
+) -> !ConstructResult {
+    errdefer builder.deinit(allocator);
+    let literal = try ast.add_expression(ExpressionNode::StructLiteral(StructLiteralExpr {
         type_name: builder.type_name,
         fields: move builder.values,
         span: zero_span()
@@ -2728,7 +2730,7 @@ pub fn construct_expansion(
         try builder.add_field(allocator, ast, owner, field, args, owners);
         index = index + 1;
     }
-    return finish_construct(ast, move builder);
+    return finish_construct(allocator, ast, move builder);
 }
 
 /// Expands one reflected struct construction whose field names and type
@@ -2756,7 +2758,7 @@ pub fn construct_expansion_from_names(
         }
         index = index + 1;
     }
-    return finish_construct(ast, move builder);
+    return finish_construct(allocator, ast, move builder);
 }
 
 /// Returns the expression covered by a value-transparent marker.

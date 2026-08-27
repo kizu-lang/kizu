@@ -59,13 +59,24 @@ fn is_arena_handle_name(names: &ir::NameTable, typ_name: ir::Name) -> bool {
     return is_arena_handle_type(bytes);
 }
 
-/// Lowers Arena.add(allocator, value), the Go `writeArenaAdd`. The element
+/// Lowers try Arena.add(allocator, value), the Go `writeArenaAdd`. The element
 /// goes where an append would put it, and the length the append started from
 /// is the handle: nothing is ever removed from the middle, so that index names
-/// the element for as long as the arena holds it.
+/// the element for as long as the arena holds it. This is the call that buys
+/// storage, so an allocator that refuses comes back as the failure half of the
+/// union, the same way an append's does (ADR-0131).
 fn (self: &var Emitter) write_arena_add(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 3 or !is_arena_handle_name(&module.names, node.result.type_name) {
-        return try self.fail0("llvm error: arena.add expects Arena<T>, Allocator, T -> Handle<T>");
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    var success_is_handle = false;
+    if try self.error_union_success_type(result_type) |success| {
+        defer success.deinit(self.allocator);
+        let success_bytes = success.as_bytes();
+        success_is_handle = is_arena_handle_type(success_bytes);
+    }
+    if node.args.len() != 3 or !success_is_handle {
+        return try self.fail0(
+            "llvm error: arena.add expects Arena<T>, Allocator, T -> std::mem::Error!Handle<T>");
     }
     var elem = string::new(self.allocator);
     defer elem.deinit(self.allocator);
@@ -78,13 +89,10 @@ fn (self: &var Emitter) write_arena_add(module: &ir::Module, node: &ir::InstrNod
     let handle = try self.array_handle(arena.operand);
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    try self.write_array_append_paths(
-        module, node, arena.operand, handle, ok_name, elem_bytes, result_name);
-    let bad_name = try self.suffixed(result_name, ".bad");
-    try self.line2("  %s = xor i1 %s, true", Arg::Str(bad_name), Arg::Str(ok_name));
-    try self.write_bool_failure(module, node, bad_name, "arena.add", PanicKey::ArenaAdd);
-    try self.set_value(module, node.result, result_name);
-    return null;
+    let index = try self.write_array_append_paths(
+        module, node, arena.operand, handle, ok_name, elem_bytes);
+    return self.write_error_union_from_bool(
+        module, node.result, ok_name, FailureKey::ArenaAdd, index, "i64");
 }
 
 /// Returns the number of initialized elements still owned by the arena, the
@@ -202,27 +210,3 @@ fn (self: &var Emitter) write_arena_deinit(module: &ir::Module, node: &ir::Instr
     return self.write_container_storage_release(module, node, "arena.deinit");
 }
 
-/// Reports the named failure when bad_operand is true, the Go
-/// `writeBoolFailure`.
-fn (self: &var Emitter) write_bool_failure(
-    module: &ir::Module,
-    node: &ir::InstrNode,
-    bad_operand: ir::Name,
-    prefix: []u8,
-    key: PanicKey
-) -> !void {
-    var fail_suffix = try string::from_bytes(self.allocator, prefix);
-    defer fail_suffix.deinit(self.allocator);
-    try fail_suffix.append_bytes(self.allocator, ".fail");
-    let fail_suffix_bytes = fail_suffix.as_bytes();
-    let fail_label = try self.helper_label_local(bad_operand, fail_suffix_bytes);
-    let ok_label = try self.helper_label_local(bad_operand, "ok");
-    try self.mark_current_block_exit(module, ok_label);
-    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(bad_operand), Arg::Str(fail_label), Arg::Str(ok_label));
-    try self.line1("%s:", Arg::Str(fail_label));
-    let spec = panic_entry(key);
-    let position = try self.panic_position(node.span);
-    try self.line2("  call void @%s(%s)", Arg::Lit(spec.entry), Arg::Str(position));
-    try self.line("  unreachable");
-    return self.line1("%s:", Arg::Str(ok_label));
-}

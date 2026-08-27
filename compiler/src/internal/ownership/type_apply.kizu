@@ -343,9 +343,11 @@ fn (self: &var Checker) check_builtin_container_type_apply(
     return self.check_builtin_testing_type_apply(tree, env, name, type_arg, args, handled, out);
 }
 
-/// Validates the Arena constructor and the storage primitives reserved to
-/// std::arena's owner-element cleanup wrapper, the Go
-/// `checkBuiltinArenaTypeApply`.
+/// Validates the Arena constructor and the storage primitives std::arena's
+/// methods forward to, the Go `checkBuiltinArenaTypeApply`. Handle provenance
+/// is not asked here: only std::arena's own bodies reach a primitive, and the
+/// handle they pass on is the one the call site already had checked against
+/// the arena it names.
 fn (self: &var Checker) check_builtin_arena_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -375,6 +377,21 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
         return null;
     }
     let rest = try self.rest_args(tree, args, 1);
+    if self.names.is(method, "add") {
+        return self.read_arena_primitive_add(tree, env, type_arg, rest, out);
+    }
+    if self.names.is(method, "at") or self.names.is(method, "at_mut") {
+        let label = try self.names.format("Arena.%s", method, empty_name(), empty_name());
+        if try self.read_arena_primitive_handle(tree, env, label, type_arg, rest) |failed| {
+            return move failed;
+        }
+        if self.names.is(method, "at") {
+            out.* = try self.names.prefixed("&", type_arg);
+            return null;
+        }
+        out.* = try self.names.prefixed("?&var ", type_arg);
+        return null;
+    }
     let count = arg_count(tree, rest);
     if count != 0 {
         return try self.error2(
@@ -393,6 +410,75 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
     return try self.error1(
         tree, ast::zero_span(), "arena error: Arena has no storage primitive `%s`", Arg::Str(method)
     );
+}
+
+/// Reads the allocator the storage is bought from and the element handed over
+/// to the arena, the Go `readArenaPrimitiveAdd`.
+fn (self: &var Checker) read_arena_primitive_add(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 2 {
+        return try self.error1(
+            tree, ast::zero_span(), "arena error: `Arena.add` expects 2 args, got %d",
+            Arg::Int(count)
+        );
+    }
+    let allocator_arg = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, allocator_arg, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error1(
+            tree, ast::zero_span(), "arena error: `Arena.add` expects Allocator, got %s",
+            Arg::Str(got)
+        );
+    }
+    let element_arg = args.get_or_panic(tree, 1);
+    var value = empty_name();
+    if try self.read_expr(tree, env, element_arg, &var value) |failed| {
+        return move failed;
+    }
+    out.* = try self.names.format(
+        "std::mem::Error!std::arena::Handle<%s>", elem, empty_name(), empty_name());
+    return null;
+}
+
+/// Reads the one handle argument an arena accessor takes, the Go
+/// `readArenaPrimitiveHandle`. what names the accessor in errors.
+fn (self: &var Checker) read_arena_primitive_handle(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    what: Name,
+    elem: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "arena error: `%s` expects 1 arg, got %d",
+            Arg::Str(what), Arg::Int(count)
+        );
+    }
+    let handle_arg = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, handle_arg, &var got) |failed| {
+        return move failed;
+    }
+    let want = try self.names.format(
+        "std::arena::Handle<%s>", elem, empty_name(), empty_name());
+    if !same_name(got, want) {
+        return try self.error3(
+            tree, ast::zero_span(), "arena error: `%s` expects %s, got %s",
+            Arg::Str(what), Arg::Str(want), Arg::Str(got)
+        );
+    }
+    return null;
 }
 
 /// Validates typed std::testing primitives, the Go
@@ -741,7 +827,7 @@ fn (self: &var Checker) check_array_primitive_call(
     }
     let array_type = try self.names.format("std::array::Array<%s>", elem, empty_name(), empty_name());
     let blank = self.store.blank_binding(0, empty_name(), array_type);
-    let array = self.store.retain(move blank);
+    let array = try self.store.retain(move blank);
     return self.check_array_method(tree, env, array, elem, method, args, out);
 }
 
@@ -792,7 +878,7 @@ fn (self: &var Checker) check_builtin_map_method(
     }
     let rest = try self.rest_args(tree, args, 1);
     let blank = self.store.blank_binding(0, empty_name(), receiver);
-    let map_value = self.store.retain(move blank);
+    let map_value = try self.store.retain(move blank);
     return self.check_map_primitive_method(tree, env, map_value, key_type, value_type, method, rest, out);
 }
 
@@ -1209,8 +1295,8 @@ fn (self: &var Checker) check_generic_instantiation(
         subst.deinit(self.allocator);
         return null;
     }
-    let env = self.store.new_scope(null);
-    let previous = self.enter_function(function, move subst);
+    let env = try self.store.new_scope(null);
+    let previous = try self.enter_function(function, move subst);
     if try self.define_params(tree, function, env, true) |failed| {
         self.restore_function(previous);
         self.instantiation_depth = self.instantiation_depth - 1;

@@ -52,10 +52,14 @@ func (e *emitter) writeArenaNew(instr *ir.Instr) error {
 // writeArenaAdd lowers Arena.add(allocator, value). The element goes where an
 // append would put it, and the length the append started from is the handle:
 // nothing is ever removed from the middle, so that index names the element for
-// as long as the arena holds it.
+// as long as the arena holds it. This is the call that buys storage, so an
+// allocator that refuses comes back as the failure half of the union, the same
+// way an append's does (ADR-0131).
 func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
-	if len(instr.Args) != 3 || !isArenaHandleType(instr.Result.Type) {
-		return fmt.Errorf("llvm error: arena.add expects Arena<T>, Allocator, T -> Handle<T>")
+	success, ok := e.errorUnionSuccessType(instr.Result.Type)
+	if len(instr.Args) != 3 || !ok || !isArenaHandleType(success) {
+		return fmt.Errorf(
+			"llvm error: arena.add expects Arena<T>, Allocator, T -> std::mem::Error!Handle<T>")
 	}
 	elem, err := e.instrElementType(instr)
 	if err != nil {
@@ -63,14 +67,9 @@ func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
 	}
 	arena := e.value(instr.Args[0])
 	handle := e.arrayHandle(arena.operand)
-	resultName := localName(instr.Result.Name)
-	okName := resultName + ".ok"
-	e.writeArrayAppendPaths(instr, elem, arena.operand, handle, okName, resultName)
-	badName := resultName + ".bad"
-	fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", badName, okName)
-	e.writeBoolFailure(instr, badName, "arena.add", "arena_add")
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
+	okName := localName(instr.Result.Name) + ".ok"
+	index := e.writeArrayAppendPaths(instr, elem, arena.operand, handle, okName)
+	return e.writeErrorUnionFromBool(instr.Result, okName, "arena_add", index, "i64")
 }
 
 // writeArenaLen returns the number of initialized elements still owned by the arena.
@@ -162,24 +161,6 @@ func (e *emitter) writeArenaDeinit(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: arena.deinit expects Arena<T>, Allocator -> void")
 	}
 	return e.writeContainerStorageRelease(instr, "arena.deinit")
-}
-
-// writeBoolFailure reports the named failure when badOperand is true.
-func (e *emitter) writeBoolFailure(
-	instr *ir.Instr,
-	badOperand string,
-	prefix string,
-	key string,
-) {
-	failLabel := helperLabel(badOperand, prefix+".fail")
-	okLabel := helperLabel(badOperand, "ok")
-	e.markCurrentBlockExit(okLabel)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badOperand, failLabel, okLabel)
-	fmt.Fprintf(&e.out, "%s:\n", failLabel)
-	fmt.Fprintf(&e.out, "  call void @%s(%s)\n",
-		panicEntries[key].entry, strings.Join(panicPosition(instr.Span), ", "))
-	e.out.WriteString("  unreachable\n")
-	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 }
 
 // isArenaLLVMType reports whether a lowered IR type is a std::arena::Arena<T>.
