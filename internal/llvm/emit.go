@@ -127,6 +127,7 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_main_error_message(ptr, i64)\n\n")
 	e.out.WriteString("declare void @kizu_runtime_init_args(i32, ptr)\n\n")
 	e.writeArrayRuntimeDecls()
+	e.writeArenaRuntimeDecls()
 	e.writeMapRuntimeDecls()
 	e.writeBoxRuntimeDecls()
 	e.writeTestRuntimeDecls()
@@ -152,6 +153,7 @@ var panicEntries = map[string]panicEntry{
 	"array_empty":  {entry: "kizu_panic_array_empty"},
 	"arena_empty":  {entry: "kizu_panic_arena_empty"},
 	"arena_handle": {entry: "kizu_panic_arena_handle"},
+	"arena_full":   {entry: "kizu_panic_arena_full"},
 	"test_fail":    {entry: "kizu_panic_test_fail", params: []string{"ptr", "i64"}},
 	"panic_fail":   {entry: "kizu_panic_fail", params: []string{"ptr", "i64"}},
 	"expect_int":   {entry: "kizu_panic_expect_equal_int", params: []string{"i64", "i64"}},
@@ -306,6 +308,8 @@ func instrPanicEntries(instr *ir.Instr) []string {
 		return []string{"array_empty"}
 	case "arena.pop_or_panic":
 		return []string{"arena_empty"}
+	case "arena.add":
+		return []string{"arena_full"}
 	case "arena.at":
 		return []string{"arena_handle"}
 	case "test.fail":

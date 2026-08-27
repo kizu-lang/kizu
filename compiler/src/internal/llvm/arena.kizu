@@ -5,13 +5,64 @@ import std::string;
 
 // Mechanical port of internal/llvm/arena.go.
 //
-// An arena is the header an array is -- `{data, len, cap}` -- and owns its
-// elements the same way, so everything below reaches for the array lowering
-// rather than repeating it. What separates the two is above the backend: a
-// Handle is an index rather than a borrow, and nothing is removed from the
-// middle, which is why the index a handle carries stays the element's for as
-// long as the arena lives. runtime.c has no arena entry points for the same
-// reason (ADR-0131).
+// An arena leads with the header an array is -- `{data, len, cap}` -- and owns
+// its elements the same way, so everything below reaches for the array
+// lowering rather than repeating it. The array runtime is handed a pointer to
+// the header and reads only those three fields, so an append grows an arena
+// the way it grows an array (ADR-0131). What separates the two is above the
+// backend: a Handle is an index rather than a borrow, and nothing is removed
+// from the middle, which is why the index a handle carries stays the element's
+// for as long as the arena lives.
+//
+// A fourth word says which arena instance those three belong to. Handles from
+// two arenas are otherwise the same small integers, so a handle that reached
+// the wrong arena reads a live element of it and returns the wrong value
+// without failing.
+//
+// That word is the number this arena's handles count from: its instance in the
+// half of a word an index does not need, plus the one the index is biased by.
+// A handle is that number plus the element's index, and reading one subtracts
+// it back off. The subtraction is what tells the arenas apart. A handle from
+// elsewhere comes back off by a whole multiple of 2^32, which is past any
+// length an arena can have, so the range test the read already ran rejects
+// it -- the same answer, from the same comparison, as an index past the end.
+// Nothing is added to the read but the word it subtracts.
+//
+// The one thing this asks in return is that a length stay under 2^32, which is
+// why the add that would pass it stops instead.
+
+/// Names the arena header in emitted modules, the Go `arenaHeaderType`. Its
+/// first three fields are array_header_type's, at the same offsets, which is
+/// what lets the array runtime grow and release an arena's storage.
+pub fn arena_header_type() -> []u8 {
+    return "%kizu.arena";
+}
+
+/// What arena_header_type occupies, the Go `arenaHeaderSize`: the array's
+/// three words and the number this arena's handles count from.
+pub fn arena_header_size() -> i64 {
+    return 32;
+}
+
+/// Where arena_header_type keeps that number, the Go `arenaFieldOrigin`.
+fn arena_field_origin() -> i64 {
+    return 3;
+}
+
+/// The arena's counterpart to array_empty_global, the Go `arenaEmptyGlobal`:
+/// the header read in place of a null one. It counts from zero, which no arena
+/// does, so a handle read against it fails the way any other handle from
+/// elsewhere does.
+fn arena_empty_global() -> []u8 {
+    return "@kizu.arena.empty";
+}
+
+/// The length an add refuses to pass, the Go `arenaMaxLen`. An arena holding
+/// more elements than an index's half of a handle can name would let a handle
+/// from another one land inside it.
+fn arena_max_len() -> i64 {
+    return 4294967295;
+}
 
 /// Reports whether a lowered IR type is a std::arena::Arena<T>, the Go
 /// `isArenaLLVMType`.
@@ -46,9 +97,90 @@ fn (self: &var Emitter) write_arena_new(module: &ir::Module, node: &ir::InstrNod
     if node.args.len() != 1 or !is_arena_llvm_type(result_type) {
         return try self.fail0("llvm error: arena.new expects allocator -> Arena<T>");
     }
-    let zero = try self.names.intern("zeroinitializer");
-    try self.set_value(module, node.result, zero);
+    let origin_synthetic = try self.next_synthetic_value("arena.new.origin");
+    let origin = try self.percent(origin_synthetic);
+    try self.line1("  %s = call i64 @kizu_arena_origin()", Arg::Str(origin));
+    let header_synthetic = try self.next_synthetic_value("arena.new.header");
+    let header = try self.percent(header_synthetic);
+    try self.line4(
+        "  %s = insertvalue %s zeroinitializer, i64 %s, %d",
+        Arg::Str(header), Arg::Lit(arena_header_type()), Arg::Str(origin), Arg::Int(arena_field_origin())
+    );
+    try self.set_value(module, node.result, header);
     return null;
+}
+
+/// Declares the arena header and the counter that hands out the number one
+/// instance's handles are told apart by, the Go `writeArenaRuntimeDecls`.
+fn (self: &var Emitter) write_arena_runtime_decls(module: &ir::Module) -> !void {
+    if !self.uses_arena_runtime(module) {
+        return;
+    }
+    try self.line1("%s = type { ptr, i64, i64, i64 }", Arg::Lit(arena_header_type()));
+    try self.line2(
+        "%s = private unnamed_addr global %s zeroinitializer",
+        Arg::Lit(arena_empty_global()), Arg::Lit(arena_header_type())
+    );
+    try self.line("declare i64 @kizu_arena_origin()");
+    return self.line("");
+}
+
+/// Reports whether this module names an arena at all, the Go
+/// `usesArenaRuntime`.
+fn (self: &Emitter) uses_arena_runtime(module: &ir::Module) -> bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                let spelling = ir::op_spelling(instr_node.op);
+                if mem::starts_with(spelling, "arena.") {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Returns an operand that always points at a readable arena header, the way
+/// array_handle does for an array's, the Go `arenaHandle`.
+fn (self: &var Emitter) arena_handle(operand: ir::Name) -> !ir::Name {
+    let null_synthetic = try self.next_synthetic_value("arena.handle.null");
+    let null_name = try self.percent(null_synthetic);
+    let header_synthetic = try self.next_synthetic_value("arena.header");
+    let header_name = try self.percent(header_synthetic);
+    try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(null_name), Arg::Str(operand));
+    try self.line4(
+        "  %s = select i1 %s, ptr %s, ptr %s",
+        Arg::Str(header_name), Arg::Str(null_name), Arg::Lit(arena_empty_global()), Arg::Str(operand)
+    );
+    return header_name;
+}
+
+/// Reads the number an arena's handles count from, the Go `arenaOrigin`.
+fn (self: &var Emitter) arena_origin(header: ir::Name, name: []u8) -> !ir::Name {
+    var addr_name = try string::from_bytes(self.allocator, name);
+    defer addr_name.deinit(self.allocator);
+    try addr_name.append_bytes(self.allocator, ".addr");
+    let addr_bytes = addr_name.as_bytes();
+    let addr_synthetic = try self.next_synthetic_value(addr_bytes);
+    let addr = try self.percent(addr_synthetic);
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 0, i32 %d",
+        Arg::Str(addr), Arg::Lit(arena_header_type()), Arg::Str(header), Arg::Int(arena_field_origin())
+    );
+    let out_synthetic = try self.next_synthetic_value(name);
+    let out = try self.percent(out_synthetic);
+    try self.line2("  %s = load i64, ptr %s", Arg::Str(out), Arg::Str(addr));
+    return out;
 }
 
 /// Reports whether a type the module names is std::arena::Handle<T>, the Go
@@ -86,38 +218,78 @@ fn (self: &var Emitter) write_arena_add(module: &ir::Module, node: &ir::InstrNod
     }
     let elem_bytes = elem.as_bytes();
     let arena = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.array_handle(arena.operand);
+    let header = try self.arena_handle(arena.operand);
+    try self.write_arena_full_failure(module, node, header);
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
     let index = try self.write_array_append_paths(
-        module, node, arena.operand, handle, ok_name, elem_bytes);
-    let carried = try self.arena_handle_of(index);
+        module, node, arena.operand, header, ok_name, elem_bytes);
+    let carried = try self.arena_handle_of(header, index);
     return self.write_error_union_from_bool(
         module, node.result, ok_name, FailureKey::ArenaAdd, carried, "i64");
 }
 
 /// Turns the index an add settled on into the handle it hands back, the Go
-/// `arenaHandleOf`. A handle is the index biased by one so that zero is a bit
-/// pattern no live handle carries, which is what lets
-/// `?std::arena::Handle<T>` be one word instead of two (ADR-0133). The bias is
+/// `arenaHandleOf`, and arena_index_of reads that index again. A handle is the
+/// index plus what this arena counts from, which is its instance in the half
+/// of a word an index does not need plus the one that keeps zero free -- so no
+/// live handle is ever all zero, which is what lets
+/// `?std::arena::Handle<T>` be one word instead of two (ADR-0133). Both are
 /// invisible above the backend: a handle is opaque and only ever compared for
-/// equality, and biasing is a bijection.
-fn (self: &var Emitter) arena_handle_of(index: ir::Name) -> !ir::Name {
-    let helper = try self.next_synthetic_value("arena.handle");
-    let handle = try self.percent(helper);
-    try self.line2("  %s = add i64 %s, 1", Arg::Str(handle), Arg::Str(index));
+/// equality, and offsetting is a bijection.
+fn (self: &var Emitter) arena_handle_of(header: ir::Name, index: ir::Name) -> !ir::Name {
+    let origin = try self.arena_origin(header, "arena.handle.origin");
+    let handle_synthetic = try self.next_synthetic_value("arena.handle");
+    let handle = try self.percent(handle_synthetic);
+    try self.line3("  %s = add i64 %s, %s", Arg::Str(handle), Arg::Str(origin), Arg::Str(index));
     return handle;
 }
 
-/// Undoes arena_handle_of, the Go `arenaIndexOf`. An absent handle is zero, so
-/// the index it reads is -1, which the unsigned range test rejects like any
-/// other index past the end -- the same answer the element it does not name
-/// would get.
-fn (self: &var Emitter) arena_index_of(handle: ir::Name) -> !ir::Name {
-    let helper = try self.next_synthetic_value("arena.index");
-    let index = try self.percent(helper);
-    try self.line2("  %s = sub i64 %s, 1", Arg::Str(index), Arg::Str(handle));
+/// Undoes arena_handle_of, the Go `arenaIndexOf`. An absent handle is zero and
+/// a handle from another arena is off by a multiple of 2^32; both come back as
+/// indices the unsigned range test rejects like any other index past the
+/// end -- the same answer the element they do not name would get.
+fn (self: &var Emitter) arena_index_of(header: ir::Name, handle: ir::Name) -> !ir::Name {
+    let origin = try self.arena_origin(header, "arena.origin");
+    let index_synthetic = try self.next_synthetic_value("arena.index");
+    let index = try self.percent(index_synthetic);
+    try self.line3("  %s = sub i64 %s, %s", Arg::Str(index), Arg::Str(handle), Arg::Str(origin));
     return index;
+}
+
+/// Stops an add that would carry the arena past the length its handles can
+/// name, the Go `writeArenaFullFailure`. Handles from two arenas are a whole
+/// 2^32 apart, so that distance is what makes a foreign handle land outside a
+/// range test (arena_checked_element); an arena allowed to grow that far would
+/// have room for one to land inside. The read stays two instructions by
+/// refusing the growth here, where an add is already asking the allocator for
+/// room.
+fn (self: &var Emitter) write_arena_full_failure(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    header: ir::Name
+) -> !void {
+    let len_synthetic = try self.next_synthetic_value("arena.add.len");
+    let length = try self.percent(len_synthetic);
+    try self.array_load_field(header, array_field_len(), "arena.add.len.addr", length);
+    let room_synthetic = try self.next_synthetic_value("arena.add.room");
+    let room = try self.percent(room_synthetic);
+    let fail_label = try self.helper_label_local(room, "arena.add.full");
+    let ok_label = try self.helper_label_local(room, "ok");
+    try self.mark_current_block_exit(module, ok_label);
+    try self.line3(
+        "  %s = icmp ult i64 %s, %d",
+        Arg::Str(room), Arg::Str(length), Arg::Int(arena_max_len())
+    );
+    try self.line3(
+        "  br i1 %s, label %%%s, label %%%s",
+        Arg::Str(room), Arg::Str(ok_label), Arg::Str(fail_label)
+    );
+    try self.line1("%s:", Arg::Str(fail_label));
+    let none = self.no_names();
+    defer none.deinit(self.allocator);
+    try self.write_panic_call(node, PanicKey::ArenaFull, &none);
+    return self.line1("%s:", Arg::Str(ok_label));
 }
 
 /// Returns the number of initialized elements still owned by the arena, the
@@ -203,10 +375,15 @@ fn (self: &var Emitter) write_arena_at_mut(module: &ir::Module, node: &ir::Instr
 }
 
 /// Returns the address of the element a handle names, or null when the handle
-/// is outside the arena, the Go `arenaCheckedElement`. The address is named
-/// after the result rather than synthesized, because continuation_label
-/// predicts the label the trap continues at from that name before this block
-/// is written.
+/// does not name one of this arena's, the Go `arenaCheckedElement`.
+/// Subtracting what this arena counts from is the whole test: a handle it made
+/// comes back as the element's index, and a handle another arena made comes
+/// back off by a whole multiple of 2^32, which no length reaches. So the range
+/// test the read was already running answers both questions with the one
+/// comparison it already had, and the failure arrives at the one null the trap
+/// already watches for. The address is named after the result rather than
+/// synthesized, because continuation_label predicts the label the trap
+/// continues at from that name before this block is written.
 fn (self: &var Emitter) arena_checked_element(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -219,11 +396,11 @@ fn (self: &var Emitter) arena_checked_element(
     let elem_bytes = elem.as_bytes();
     let arena = try self.operand(module, node.args.get_or_panic(0));
     let carried = try self.operand(module, node.args.get_or_panic(1));
-    let handle = try self.array_handle(arena.operand);
-    let index = try self.arena_index_of(carried.operand);
+    let header = try self.arena_handle(arena.operand);
+    let index = try self.arena_index_of(header, carried.operand);
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    return try self.array_checked_element(module, node, handle, index, elem_bytes, ptr_name);
+    return try self.array_checked_element(module, node, header, index, elem_bytes, ptr_name);
 }
 
 /// Lowers Arena.deinit(allocator), the Go `writeArenaDeinit`. It releases the

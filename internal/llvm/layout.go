@@ -30,9 +30,13 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 		return 8, 8, true
 	}
 	// An array is its header: three words describing storage the array owns
-	// elsewhere. The header is what a field or a union payload holds, and an
-	// arena is that same header.
-	if isArrayLLVMType(typ) || isArenaLLVMType(typ) {
+	// elsewhere. The header is what a field or a union payload holds. An arena
+	// leads with those same three and adds the id of the instance they belong
+	// to.
+	if isArenaLLVMType(typ) {
+		return arenaHeaderSize, 8, true
+	}
+	if isArrayLLVMType(typ) {
 		return arrayHeaderSize, 8, true
 	}
 	// A map is its header too: the entries it owns and the index over them.

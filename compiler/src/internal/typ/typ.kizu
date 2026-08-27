@@ -9,9 +9,6 @@ import std::string;
 // renderer, structural equality, and walk. One Table owns the parsed trees for
 // a compiler phase; Type and child edges are copy handles into those trees.
 
-pub struct TreeNodes {}
-pub struct Trees {}
-
 pub error Error {
     ExpectedName,
     TrailingText,
@@ -29,20 +26,20 @@ pub error Error {
 /// Owns every parsed type tree retained by one compiler phase.
 pub struct Table {
     allocator: Allocator,
-    trees: arena::Arena<TypeTree, Trees>,
+    trees: arena::Arena<TypeTree>,
     parsed: map::Map<[]u8, Type>
 }
 
 /// Identifies one node in a type tree retained by a Table.
 pub struct Type {
-    tree: arena::Handle<TypeTree, Trees>,
-    root: arena::Handle<Node, TreeNodes>
+    tree: arena::Handle<TypeTree>,
+    root: arena::Handle<Node>
 }
 
 // TypeTree owns the node storage for one independently built type graph.
 struct TypeTree {
-    nodes: arena::Arena<Node, TreeNodes>,
-    root: arena::Handle<Node, TreeNodes>
+    nodes: arena::Arena<Node>,
+    root: arena::Handle<Node>
 }
 
 /// Is one node in a parsed type.
@@ -60,48 +57,48 @@ pub union Node {
 /// Is a primitive, declared type, type parameter, or generic application.
 pub struct Name {
     pub path: array::Array<string::String>,
-    pub args: array::Array<arena::Handle<Node, TreeNodes>>
+    pub args: array::Array<arena::Handle<Node>>
 }
 
 /// Is `[]T`.
 pub struct Slice {
-    pub elem: arena::Handle<Node, TreeNodes>
+    pub elem: arena::Handle<Node>
 }
 
 /// Is `[N]T`.
 pub struct Buffer {
     pub size: i64,
-    pub elem: arena::Handle<Node, TreeNodes>
+    pub elem: arena::Handle<Node>
 }
 
 /// Is `&T` or `&var T`.
 pub struct Borrow {
-    pub elem: arena::Handle<Node, TreeNodes>,
+    pub elem: arena::Handle<Node>,
     pub mutable: bool
 }
 
 /// Is `?T`.
 pub struct Optional {
-    pub elem: arena::Handle<Node, TreeNodes>
+    pub elem: arena::Handle<Node>
 }
 
 /// Is `const T` inside a static argument list.
 pub struct Const {
-    pub elem: arena::Handle<Node, TreeNodes>
+    pub elem: arena::Handle<Node>
 }
 
 /// Is `!T`, or `E!T` when err is present.
 pub struct ErrorUnion {
-    pub err: ?arena::Handle<Node, TreeNodes>,
-    pub ok: arena::Handle<Node, TreeNodes>
+    pub err: ?arena::Handle<Node>,
+    pub ok: arena::Handle<Node>
 }
 
 /// Is `fn(T, ...) -> R`, or `unsafe fn(...) -> R` when the function it points
 /// at carries an obligation. The two are different types, so an unsafe
 /// function cannot reach a safe call.
 pub struct Func {
-    pub params: array::Array<arena::Handle<Node, TreeNodes>>,
-    pub result: arena::Handle<Node, TreeNodes>,
+    pub params: array::Array<arena::Handle<Node>>,
+    pub result: arena::Handle<Node>,
     pub unsafe_call: bool
 }
 
@@ -138,7 +135,7 @@ pub contract NameMapper {
 
 /// Describes a post-order whole-name fold into a distinct type graph.
 pub contract NameFolder {
-    fn fold_name(builder: &var Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<Node, TreeNodes>>) -> !arena::Handle<Node, TreeNodes>;
+    fn fold_name(builder: &var Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<Node>>) -> !arena::Handle<Node>;
 }
 
 struct PlainNameTransform {}
@@ -156,13 +153,13 @@ struct Parser {
     allocator: Allocator,
     input: []u8,
     position: i64,
-    nodes: arena::Arena<Node, TreeNodes>
+    nodes: arena::Arena<Node>
 }
 
 /// Owns one type graph until it is transferred into a phase Table.
 pub struct Builder {
     allocator: Allocator,
-    nodes: arena::Arena<Node, TreeNodes>
+    nodes: arena::Arena<Node>
 }
 
 struct Span {
@@ -174,29 +171,21 @@ struct Span {
 pub fn new(allocator: Allocator) -> Table {
     return Table {
         allocator: allocator,
-        trees: arena::new<TypeTree, Trees>(allocator),
+        trees: arena::new<TypeTree>(allocator),
         parsed: map::new<[]u8, Type>(allocator)
     };
-}
-
-/// Buys the node storage one in-progress type graph is built in. Both the
-/// parser and the builder start from here, because a marker names one arena
-/// and these are the same one: what the parser fills is what a TypeTree ends
-/// up owning (ADR-0134).
-fn new_node_storage(allocator: Allocator) -> arena::Arena<Node, TreeNodes> {
-    return arena::new<Node, TreeNodes>(allocator);
 }
 
 /// Creates an empty graph builder for one parsed or transformed type.
 pub fn new_builder(allocator: Allocator) -> Builder {
     return Builder {
         allocator: allocator,
-        nodes: new_node_storage(allocator)
+        nodes: arena::new<Node>(allocator)
     };
 }
 
 /// Retains one node and returns its identity inside this graph.
-fn (self: &var Builder) add(node: Node) -> !arena::Handle<Node, TreeNodes> {
+fn (self: &var Builder) add(node: Node) -> !arena::Handle<Node> {
     return try self.nodes.add(self.allocator, move node);
 }
 
@@ -215,12 +204,12 @@ fn copy_path(allocator: Allocator, source: &array::Array<string::String>) -> !ar
 }
 
 // Borrows a node already retained in this in-progress graph.
-fn (self: &Builder) at(handle: arena::Handle<Node, TreeNodes>) -> &Node {
+fn (self: &Builder) at(handle: arena::Handle<Node>) -> &Node {
     return self.nodes.at(handle);
 }
 
 /// Transfers the completed graph into its phase table.
-pub fn finish_builder(allocator: Allocator, builder: Builder, table: &var Table, root: arena::Handle<Node, TreeNodes>) -> !Type {
+pub fn finish_builder(allocator: Allocator, builder: Builder, table: &var Table, root: arena::Handle<Node>) -> !Type {
     let tree = TypeTree { nodes: move builder.nodes, root: root };
     let tree_handle = try table.trees.add(allocator, move tree);
     return Type { tree: tree_handle, root: root };
@@ -247,7 +236,7 @@ fn parse_tree(allocator: Allocator, text: []u8) -> !TypeTree {
         allocator: allocator,
         input: text,
         position: 0,
-        nodes: new_node_storage(allocator)
+        nodes: arena::new<Node>(allocator)
     };
     errdefer parser.deinit(allocator);
     let root = try parser.parse_type();
@@ -262,7 +251,7 @@ fn parse_tree(allocator: Allocator, text: []u8) -> !TypeTree {
 
 // parse_type reads a type, including the `E!T` spelling whose error type sits
 // to the left of the `!`.
-fn (self: &var Parser) parse_type() -> !arena::Handle<Node, TreeNodes> {
+fn (self: &var Parser) parse_type() -> !arena::Handle<Node> {
     let left = try self.parse_prefix();
     if !self.accept("!") {
         return left;
@@ -275,7 +264,7 @@ fn (self: &var Parser) parse_type() -> !arena::Handle<Node, TreeNodes> {
 }
 
 // parse_prefix reads the spellings that wrap a type from the left.
-fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node, TreeNodes> {
+fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
     if self.accept("!") {
         let elem = try self.parse_prefix();
         return try self.nodes.add(self.allocator, Node::ErrorUnion(ErrorUnion {
@@ -319,8 +308,8 @@ fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node, TreeNodes> {
 
 // parse_func reads a function pointer spelling once its `fn(` is consumed. An
 // empty parameter list is the `fn() -> T` a nullary function points at.
-fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node, TreeNodes> {
-    var params = array::new<arena::Handle<Node, TreeNodes>>(self.allocator);
+fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
+    var params = array::new<arena::Handle<Node>>(self.allocator);
     errdefer params.deinit(self.allocator);
     if !self.accept(")") {
         while true {
@@ -347,7 +336,7 @@ fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node, Tre
 }
 
 // parse_bracketed reads the `[]T` and `[N]T` spellings.
-fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node, TreeNodes> {
+fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
     if self.accept("[]") {
         let elem = try self.parse_prefix();
         return try self.nodes.add(self.allocator, Node::Slice(Slice { elem: elem }));
@@ -378,7 +367,7 @@ fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node, TreeNodes> {
 }
 
 // parse_name reads a `::` separated name and its static arguments.
-fn (self: &var Parser) parse_name() -> !arena::Handle<Node, TreeNodes> {
+fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
     var path = array::new<string::String>(self.allocator);
     errdefer path.deinit(self.allocator);
     while true {
@@ -393,7 +382,7 @@ fn (self: &var Parser) parse_name() -> !arena::Handle<Node, TreeNodes> {
             break;
         }
     }
-    var args = array::new<arena::Handle<Node, TreeNodes>>(self.allocator);
+    var args = array::new<arena::Handle<Node>>(self.allocator);
     errdefer args.deinit(self.allocator);
     if self.accept("<") {
         while true {
@@ -629,230 +618,6 @@ pub fn cleanup_method() -> []u8 {
     return "deinit";
 }
 
-/// Returns the first index of one byte in a spelling, or -1.
-fn index_of_byte_in(text: []u8, byte: u8) -> i64 {
-    var index = 0;
-    while index < mem::len(text) {
-        if text[index] == byte {
-            return index;
-        }
-        index = index + 1;
-    }
-    return -1;
-}
-
-/// Names the compiler-known arena type constructor, the Go `ArenaTypeName`.
-pub fn arena_type_name() -> []u8 {
-    return "std::arena::Arena";
-}
-
-/// Names the compiler-known arena handle constructor, the Go
-/// `ArenaHandleTypeName`.
-pub fn arena_handle_type_name() -> []u8 {
-    return "std::arena::Handle";
-}
-
-/// Rewrites the marker of every arena spelling inside a type. An empty marker
-/// drops it (the Go `EraseArenaMarker`) and a named one puts it back (the Go
-/// `AttachArenaMarker`). Below the type checker a marker answers nothing --
-/// every arena has the same header and every handle the same word -- so it is
-/// dropped there; std declares its arena methods without one, so the checker
-/// puts the receiver's back (ADR-0134).
-struct ArenaMarkerFold {
-    marker: []u8
-}
-
-fn (self: &var ArenaMarkerFold) fold_name(
-    builder: &var Builder,
-    path: array::Array<string::String>,
-    args: array::Array<arena::Handle<Node, TreeNodes>>
-) -> !arena::Handle<Node, TreeNodes> {
-    var name_path = move path;
-    var name_args = move args;
-    errdefer name_path.deinit(builder.allocator);
-    errdefer name_args.deinit(builder.allocator);
-    if !arena_constructor_path(&name_path) {
-        return builder.add(Node::Name(Name { path: move name_path, args: move name_args }));
-    }
-    if mem::len(self.marker) == 0 {
-        if name_args.len() != 2 {
-            return builder.add(Node::Name(Name { path: move name_path, args: move name_args }));
-        }
-        var kept = try first_arg_only(builder.allocator, &name_args);
-        errdefer kept.deinit(builder.allocator);
-        name_args.deinit(builder.allocator);
-        return builder.add(Node::Name(Name { path: move name_path, args: move kept }));
-    }
-    if name_args.len() != 1 {
-        return builder.add(Node::Name(Name { path: move name_path, args: move name_args }));
-    }
-    var marker_path = try split_marker_path(builder.allocator, self.marker);
-    errdefer marker_path.deinit(builder.allocator);
-    let node = try builder.add(Node::Name(Name {
-        path: move marker_path,
-        args: array::new<arena::Handle<Node, TreeNodes>>(builder.allocator)
-    }));
-    try name_args.append(builder.allocator, node);
-    return builder.add(Node::Name(Name { path: move name_path, args: move name_args }));
-}
-
-/// Reports whether a name path is one of the two arena constructors.
-fn arena_constructor_path(path: &array::Array<string::String>) -> bool {
-    if path.len() != 3 {
-        return false;
-    }
-    if !path_part_is(path, 0, "std") or !path_part_is(path, 1, "arena") {
-        return false;
-    }
-    return path_part_is(path, 2, "Arena") or path_part_is(path, 2, "Handle");
-}
-
-fn path_part_is(path: &array::Array<string::String>, index: i64, want: []u8) -> bool {
-    if path.at(index) |part| {
-        let bytes = part.as_bytes();
-        return mem::equal_bytes(bytes, want);
-    }
-    return false;
-}
-
-/// Copies the first static argument of a list, which is what an arena holds.
-fn first_arg_only(
-    allocator: Allocator,
-    args: &array::Array<arena::Handle<Node, TreeNodes>>
-) -> !array::Array<arena::Handle<Node, TreeNodes>> {
-    var kept = array::new<arena::Handle<Node, TreeNodes>>(allocator);
-    errdefer kept.deinit(allocator);
-    if args.get(0) |first| {
-        try kept.append(allocator, first);
-    }
-    return move kept;
-}
-
-/// Splits a marker's `::` separated spelling into the path a name carries.
-fn split_marker_path(allocator: Allocator, marker: []u8) -> !array::Array<string::String> {
-    var path = array::new<string::String>(allocator);
-    errdefer path.deinit(allocator);
-    var start = 0;
-    var index = 0;
-    while index < mem::len(marker) {
-        if index + 1 < mem::len(marker) and marker[index] == cast<u8>(58)
-            and marker[index + 1] == cast<u8>(58) {
-            let part = try owned_text(allocator, marker[start..index]);
-            errdefer part.deinit(allocator);
-            try path.append(allocator, move part);
-            index = index + 2;
-            start = index;
-        } else {
-            index = index + 1;
-        }
-    }
-    let last = try owned_text(allocator, marker[start..mem::len(marker)]);
-    errdefer last.deinit(allocator);
-    try path.append(allocator, move last);
-    return move path;
-}
-
-/// Reports whether a spelling names an arena anywhere inside it. Names that
-/// are not types reach the tables this runs for -- a method key spells its
-/// receiver and then the method (`std::arena::Arena.at`), a diagnostic quotes
-/// one (`\"std::arena::Arena\"`) -- and a type spelling holds none of the
-/// characters those need, which is what separates the two.
-fn holds_arena_spelling(text: []u8) -> bool {
-    if index_of_byte_in(text, cast<u8>(46)) >= 0 {
-        return false;
-    }
-    if index_of_byte_in(text, cast<u8>(34)) >= 0 {
-        return false;
-    }
-    if index_of_byte_in(text, cast<u8>(96)) >= 0 {
-        return false;
-    }
-    let needle = "std::arena::";
-    let length = mem::len(text);
-    let width = mem::len(needle);
-    if length < width {
-        return false;
-    }
-    var index = 0;
-    while index + width <= length {
-        if mem::equal_bytes(text[index..index + width], needle) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-/// Drops the marker from every arena spelling inside a type, the Go
-/// `EraseArenaMarker`.
-pub fn erase_arena_marker(allocator: Allocator, text: []u8) -> !string::String {
-    return rewrite_arena_marker(allocator, text, "");
-}
-
-/// Puts one marker back into every arena spelling written without one, the Go
-/// `AttachArenaMarker`.
-pub fn attach_arena_marker(
-    allocator: Allocator,
-    text: []u8,
-    marker: []u8
-) -> !string::String {
-    return rewrite_arena_marker(allocator, text, marker);
-}
-
-fn rewrite_arena_marker(
-    allocator: Allocator,
-    text: []u8,
-    marker: []u8
-) -> !string::String {
-    // Most spellings hold no arena at all, and answer without a parse.
-    if !holds_arena_spelling(text) {
-        return owned_text(allocator, text);
-    }
-    // A static argument list reaches here as well as a type -- `[]u8, V` is
-    // what a Map is instantiated at -- and a list is not a type, so each entry
-    // is rewritten on its own.
-    var parts = try split_args_optional(allocator, text) orelse
-        return rewrite_one_arena_marker(allocator, text, marker);
-    defer parts.deinit(allocator);
-    if parts.len() == 1 {
-        return rewrite_one_arena_marker(allocator, text, marker);
-    }
-    var out = string::new(allocator);
-    errdefer out.deinit(allocator);
-    var index = 0;
-    while parts.at(index) |part| {
-        if index > 0 {
-            try out.append_bytes(allocator, ", ");
-        }
-        let bytes = part.as_bytes();
-        let rewritten = try rewrite_one_arena_marker(allocator, bytes, marker);
-        defer rewritten.deinit(allocator);
-        let rewritten_bytes = rewritten.as_bytes();
-        try out.append_bytes(allocator, rewritten_bytes);
-        index = index + 1;
-    }
-    return move out;
-}
-
-fn rewrite_one_arena_marker(
-    allocator: Allocator,
-    text: []u8,
-    marker: []u8
-) -> !string::String {
-    if !holds_arena_spelling(text) {
-        return owned_text(allocator, text);
-    }
-    var source = new(allocator);
-    defer source.deinit(allocator);
-    var destination = new(allocator);
-    defer destination.deinit(allocator);
-    let parsed = try source.parse(text);
-    var folder = ArenaMarkerFold { marker: marker };
-    let rewritten = try fold_names_into<ArenaMarkerFold>(
-        &source, parsed, &var destination, &var folder);
-    return render(allocator, &destination, rewritten);
-}
-
 /// Renders one retained type back to its canonical spelling.
 pub fn render(
     allocator: Allocator,
@@ -888,7 +653,7 @@ pub fn root_node(table: &Table, value: Type) -> &Node {
 /// Converts one child edge into a Type handle in its parent's tree.
 pub fn child_type(
     parent: Type,
-    child: arena::Handle<Node, TreeNodes>
+    child: arena::Handle<Node>
 ) -> Type {
     return Type { tree: parent.tree, root: child };
 }
@@ -898,7 +663,7 @@ fn append_tree_node(
     allocator: Allocator,
     out: &var string::String,
     tree: &TypeTree,
-    root: arena::Handle<Node, TreeNodes>
+    root: arena::Handle<Node>
 ) -> !void {
     let lookup = NoReplacements {};
     return append_tree_node_with<NoReplacements>(allocator,
@@ -911,7 +676,7 @@ fn append_tree_node_with<R>(
     allocator: Allocator,
     out: &var string::String,
     tree: &TypeTree,
-    root: arena::Handle<Node, TreeNodes>,
+    root: arena::Handle<Node>,
     lookup: &R
 ) -> !void {
     match tree.nodes.at(root) {
@@ -1058,9 +823,9 @@ pub fn equal(
 
 fn equal_node(
     left: &TypeTree,
-    left_handle: arena::Handle<Node, TreeNodes>,
+    left_handle: arena::Handle<Node>,
     right: &TypeTree,
-    right_handle: arena::Handle<Node, TreeNodes>
+    right_handle: arena::Handle<Node>
 ) -> bool {
     return match left.nodes.at(left_handle) {
         Name(a) => match right.nodes.at(right_handle) {
@@ -1194,7 +959,7 @@ fn (self: &var PlainNameTransform) rename_path(allocator: Allocator, path: &arra
     return copy_path(allocator, path);
 }
 
-fn (self: &var PlainNameTransform) fold_name(builder: &var Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<Node, TreeNodes>>) -> !arena::Handle<Node, TreeNodes> {
+fn (self: &var PlainNameTransform) fold_name(builder: &var Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<Node>>) -> !arena::Handle<Node> {
     return builder.add(Node::Name(Name { path: move path, args: move args }));
 }
 
@@ -1206,7 +971,7 @@ fn transform_names<M, F>(source: &Table, value: Type, destination: &var Table, m
     return try finish_builder(allocator, move builder, destination, root);
 }
 
-fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, handle: arena::Handle<Node, TreeNodes>, mapper: &var M, folder: &var F) -> !arena::Handle<Node, TreeNodes> {
+fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, handle: arena::Handle<Node>, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     return match value.nodes.at(handle) {
         Name(node) => try map_name_node<M, F>(builder, value, node, mapper, folder),
         Slice(node) => {
@@ -1237,9 +1002,9 @@ fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &Typ
     };
 }
 
-fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, mapper: &var M, folder: &var F) -> !arena::Handle<Node, TreeNodes> {
+fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     let allocator = builder.allocator;
-    var params = array::new<arena::Handle<Node, TreeNodes>>(allocator);
+    var params = array::new<arena::Handle<Node>>(allocator);
     errdefer params.deinit(builder.allocator);
     var index = 0;
     while node.params.get(index) |param| {
@@ -1254,11 +1019,11 @@ fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, ma
     }));
 }
 
-fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, mapper: &var M, folder: &var F) -> !arena::Handle<Node, TreeNodes> {
+fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     var path = try mapper.rename_path(builder.allocator, &node.path);
     errdefer path.deinit(builder.allocator);
     let allocator = builder.allocator;
-    var args = array::new<arena::Handle<Node, TreeNodes>>(allocator);
+    var args = array::new<arena::Handle<Node>>(allocator);
     errdefer args.deinit(builder.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
@@ -1269,7 +1034,7 @@ fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, map
 }
 
 // map_error_union_names keeps Go's callback order: success before error.
-fn map_error_union_names<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, node: &ErrorUnion, mapper: &var M, folder: &var F) -> !arena::Handle<Node, TreeNodes> {
+fn map_error_union_names<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, node: &ErrorUnion, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     let ok = try map_names_node<M, F>(allocator, builder, value, node.ok, mapper, folder);
     if node.err |source_err| {
         let err = try map_names_node<M, F>(allocator, builder, value, source_err, mapper, folder);
@@ -1333,10 +1098,10 @@ fn substitute_node(
     builder: &var Builder,
     table: &Table,
     tree: &TypeTree,
-    handle: arena::Handle<Node, TreeNodes>,
+    handle: arena::Handle<Node>,
     substitutions: &map::Map<[]u8, Type>,
     replace_names: bool
-) -> !arena::Handle<Node, TreeNodes> {
+) -> !arena::Handle<Node> {
     return match tree.nodes.at(handle) {
         Name(node) => try substitute_name(
             builder,
@@ -1405,9 +1170,9 @@ fn substitute_func(
     node: &Func,
     substitutions: &map::Map<[]u8, Type>,
     replace_names: bool
-) -> !arena::Handle<Node, TreeNodes> {
+) -> !arena::Handle<Node> {
     let allocator = builder.allocator;
-    var params = array::new<arena::Handle<Node, TreeNodes>>(allocator);
+    var params = array::new<arena::Handle<Node>>(allocator);
     errdefer params.deinit(allocator);
     var index = 0;
     while node.params.get(index) |param| {
@@ -1433,7 +1198,7 @@ fn substitute_name(
     node: &Name,
     substitutions: &map::Map<[]u8, Type>,
     replace_names: bool
-) -> !arena::Handle<Node, TreeNodes> {
+) -> !arena::Handle<Node> {
     let allocator = builder.allocator;
     if replace_names and node.path.len() == 1 and node.args.len() == 0 {
         if node.path.at(0) |part| {
@@ -1450,7 +1215,7 @@ fn substitute_name(
             }
         }
     }
-    var args = array::new<arena::Handle<Node, TreeNodes>>(allocator);
+    var args = array::new<arena::Handle<Node>>(allocator);
     errdefer args.deinit(allocator);
     var index = 0;
     while node.args.get(index) |arg| {
@@ -1477,7 +1242,7 @@ fn substitute_error_union(
     node: &ErrorUnion,
     substitutions: &map::Map<[]u8, Type>,
     replace_names: bool
-) -> !arena::Handle<Node, TreeNodes> {
+) -> !arena::Handle<Node> {
     let ok = try substitute_node(allocator,
         builder, table, tree, node.ok, substitutions, replace_names
     );
@@ -1587,7 +1352,7 @@ pub fn walk<V>(table: &Table, value: Type, visitor: &var V) -> void {
 
 fn walk_node<V>(
     value: &TypeTree,
-    handle: arena::Handle<Node, TreeNodes>,
+    handle: arena::Handle<Node>,
     visitor: &var V
 ) -> void {
     visitor.visit(value.nodes.at(handle));

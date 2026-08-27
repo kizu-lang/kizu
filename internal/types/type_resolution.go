@@ -21,8 +21,6 @@ const (
 	typeResolutionSingleGenericArity
 	typeResolutionMapArity
 	typeResolutionMapKey
-	typeResolutionArenaArity
-	typeResolutionArenaMarker
 	typeResolutionUnknownGeneric
 	typeResolutionUserGenericArity
 	typeResolutionOptionalOptional
@@ -88,14 +86,6 @@ func typeResolutionError(issue typeResolutionIssue) error {
 	case typeResolutionMapKey:
 		return errorf("type error: std::map::Map key type must be one of %s",
 			typ.MapKeyTypeNames())
-	case typeResolutionArenaArity:
-		return errorf(
-			"type error: `%s` expects 2 static arguments, the element type and"+
-				" the marker naming which arena it is", issue.subject)
-	case typeResolutionArenaMarker:
-		return errorf(
-			"type error: an arena marker must be a struct with no fields, got `%s`",
-			issue.subject)
 	case typeResolutionUnknownGeneric:
 		return errorf("type error: unknown generic type `%s`", issue.subject)
 	case typeResolutionUserGenericArity:
@@ -296,8 +286,6 @@ func (c *Checker) resolveGenericType(
 		return name, typeResolutionIssue{}
 	case "std::map::Map":
 		return c.resolveMapType(name, args)
-	case typ.ArenaTypeName, typ.ArenaHandleTypeName:
-		return c.resolveArenaType(name, base, args)
 	case "ptr":
 		arg, issue := singleTypeArg(base, args)
 		if issue.present() {
@@ -396,71 +384,6 @@ func (c *Checker) resolveMapType(
 		return "", issue
 	}
 	return name, typeResolutionIssue{}
-}
-
-// resolveArenaType validates an `Arena<T, M>` or `Handle<T, M>` spelling. The
-// marker is the second argument because it is the rarer half of the answer:
-// what the arena holds is what a reader asks first, and which arena it is is
-// what the type checker asks (ADR-0134).
-func (c *Checker) resolveArenaType(
-	name Type,
-	base Type,
-	args []typ.Type,
-) (Type, typeResolutionIssue) {
-	if len(args) == 1 && c.currentStd {
-		// std declares its arena methods on `Arena<T>` because a method works
-		// on every marker alike; the receiver's marker is put back where the
-		// call is checked (ADR-0134). Only std source may leave it out.
-		return c.resolveTypeNodeAs(name, args[0])
-	}
-	if len(args) != 2 {
-		return "", typeResolutionIssue{kind: typeResolutionArenaArity, subject: base}
-	}
-	if _, issue := c.resolveTypeNode(args[0]); issue.present() {
-		return "", issue
-	}
-	if issue := c.resolveArenaMarker(Type(args[1].String())); issue.present() {
-		return "", issue
-	}
-	return name, typeResolutionIssue{}
-}
-
-// resolveTypeNodeAs resolves one static argument and answers with the spelling
-// its container was asked about.
-func (c *Checker) resolveTypeNodeAs(name Type, arg typ.Type) (Type, typeResolutionIssue) {
-	if _, issue := c.resolveTypeNode(arg); issue.present() {
-		return "", issue
-	}
-	return name, typeResolutionIssue{}
-}
-
-// resolveArenaMarker validates the type standing in an arena's marker
-// position. A marker holds nothing, so a struct with no fields is the whole of
-// what it may be; a type parameter passes because the instance it binds to is
-// checked where it is written.
-func (c *Checker) resolveArenaMarker(marker Type) typeResolutionIssue {
-	if c.typeParams.contains(string(marker)) {
-		return typeResolutionIssue{}
-	}
-	declaration := c.structs[string(marker)]
-	if declaration == nil {
-		// A signature can name a marker declared in a file collected later.
-		// Whether it is a struct with no fields is answered at the `new` that
-		// makes the arena, which is a body and runs after every declaration
-		// is in (ADR-0134).
-		if c.declaredTypes[string(marker)] {
-			return typeResolutionIssue{}
-		}
-		return typeResolutionIssue{
-			kind: typeResolutionArenaMarker, subject: marker,
-		}
-	}
-	if len(declaration.Fields) != 0 || len(declaration.TypeParams) != 0 {
-		return typeResolutionIssue{
-			kind: typeResolutionArenaMarker, subject: marker,
-		}
-	}
-	return typeResolutionIssue{}
 }
 
 // resolveNullableType validates nullable pointer and value types.

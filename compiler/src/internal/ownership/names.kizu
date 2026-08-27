@@ -14,10 +14,8 @@ import std::string;
 // only read spellings live here as well.
 
 /// Identifies one retained text; a null node is the empty text.
-pub struct NameTexts {}
-
 pub struct Name {
-    node: ?arena::Handle<string::String, NameTexts>
+    node: ?arena::Handle<string::String>
 }
 
 /// Returns the empty text, the Go `""`.
@@ -60,14 +58,14 @@ pub struct ErrorUnionParts {
 /// Retains every text one checker run names.
 pub struct NameTable {
     allocator: Allocator,
-    texts: arena::Arena<string::String, NameTexts>,
+    texts: arena::Arena<string::String>,
     by_text: map::Map<[]u8, Name>,
-    empty: arena::Handle<string::String, NameTexts>,
+    empty: arena::Handle<string::String>,
     parsed: typ::Table
 }
 
 pub fn new_name_table(allocator: Allocator) -> !NameTable {
-    var texts = arena::new<string::String, NameTexts>(allocator);
+    var texts = arena::new<string::String>(allocator);
     errdefer texts.deinit(allocator);
     let empty = try texts.add(allocator, string::new(allocator));
     return NameTable {
@@ -104,23 +102,6 @@ fn (self: &var NameTable) intern(text: []u8) -> !Name {
     return self.intern_owned(move owned);
 }
 
-fn (self: &var NameTable) intern_erased(text: string::String) -> !Name {
-    if text.len() == 0 {
-        text.deinit(self.allocator);
-        return empty_name();
-    }
-    if self.find_name(&text) |known| {
-        text.deinit(self.allocator);
-        return known;
-    }
-    let handle = try self.texts.add(self.allocator, move text);
-    let name = Name { node: handle };
-    let retained = self.texts.at(handle);
-    let retained_bytes = retained.as_bytes();
-    try self.by_text.insert(self.allocator, retained_bytes, name);
-    return name;
-}
-
 /// Names bytes `start..end` of an already retained name. The lookup runs
 /// while the source text is borrowed; only a miss copies, after the borrow
 /// has ended, so the table can then retain the copy.
@@ -139,10 +120,20 @@ fn (self: &var NameTable) intern_slice(name: Name, start: i64, end: i64) -> !Nam
 
 /// Returns the one name that spells an owned text, consuming the text.
 fn (self: &var NameTable) intern_owned(text: string::String) -> !Name {
-    defer text.deinit(self.allocator);
-    let bytes = text.as_bytes();
-    let erased = try typ::erase_arena_marker(self.allocator, bytes);
-    return self.intern_erased(move erased);
+    if text.len() == 0 {
+        text.deinit(self.allocator);
+        return empty_name();
+    }
+    if self.find_name(&text) |known| {
+        text.deinit(self.allocator);
+        return known;
+    }
+    let handle = try self.texts.add(self.allocator, move text);
+    let name = Name { node: handle };
+    let retained = self.texts.at(handle);
+    let retained_bytes = retained.as_bytes();
+    try self.by_text.insert(self.allocator, retained_bytes, name);
+    return name;
 }
 
 fn (self: &NameTable) find_name(text: &string::String) -> ?Name {
@@ -158,16 +149,9 @@ fn (self: &var NameTable) intern_text(tree: &ast::Ast, text: ast::Text) -> !Name
 }
 
 /// Names the canonical spelling of one parsed type, as `typ.Text` does.
-// Retains one declared type's spelling with arena markers dropped: which
-// arena a handle came from is answered by the type checker before ownership
-// runs (ADR-0134), so every arena of one element type is a single spelling
-// here and the rules below state themselves once.
 fn (self: &var NameTable) intern_type(tree: &ast::Ast, value: typ::Type) -> !Name {
     let rendered = try typ::render(self.allocator, &tree.types, value);
-    defer rendered.deinit(self.allocator);
-    let bytes = rendered.as_bytes();
-    let erased = try typ::erase_arena_marker(self.allocator, bytes);
-    return self.intern_erased(move erased);
+    return self.intern_owned(move rendered);
 }
 
 /// Names a parsed type that may be absent, as `typ.Text(nil)` is `""`.
