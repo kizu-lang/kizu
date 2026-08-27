@@ -7,16 +7,19 @@ import std::string;
 // Owns the maps selected while one generic instantiation is checked. A
 // selected map is a copy handle so entering a nested instance never moves a
 // Checker field that resolver calls may already reference.
+pub struct ContextFrames {}
+pub struct ContextMetaBindings {}
+
 struct TypeValueFrameStore {
     allocator: Allocator,
-    frames: arena::Arena<map::Map<[]u8, Type>>,
-    current: ?arena::Handle<map::Map<[]u8, Type>>
+    frames: arena::Arena<map::Map<[]u8, Type>, ContextFrames>,
+    current: ?arena::Handle<map::Map<[]u8, Type>, ContextFrames>
 }
 
 fn new_type_value_frame_store(allocator: Allocator) -> TypeValueFrameStore {
     return TypeValueFrameStore {
         allocator: allocator,
-        frames: arena::new<map::Map<[]u8, Type>>(allocator),
+        frames: arena::new<map::Map<[]u8, Type>, ContextFrames>(allocator),
         current: null
     };
 }
@@ -36,7 +39,7 @@ fn (self: &var TypeValueFrameStore) bind(allocator: Allocator, name: []u8, value
 
 fn (self: &var TypeValueFrameStore) enter(
     values: map::Map<[]u8, Type>
-) -> !?arena::Handle<map::Map<[]u8, Type>> {
+) -> !?arena::Handle<map::Map<[]u8, Type>, ContextFrames> {
     let previous = self.current;
     if values.len() == 0 {
         values.deinit(self.allocator);
@@ -48,7 +51,7 @@ fn (self: &var TypeValueFrameStore) enter(
 }
 
 fn (self: &var TypeValueFrameStore) restore(
-    previous: ?arena::Handle<map::Map<[]u8, Type>>
+    previous: ?arena::Handle<map::Map<[]u8, Type>, ContextFrames>
 ) -> void {
     self.current = previous;
     return;
@@ -83,21 +86,21 @@ fn (self: &TypeValueFrameStore) substitute(table: &var TypeTable, value: Type) -
 // restoring its previous handle removes every name pushed by an expansion
 // without requiring deletion from std::map.
 struct MetaBinding {
-    parent: ?arena::Handle<MetaBinding>,
+    parent: ?arena::Handle<MetaBinding, ContextMetaBindings>,
     name: string::String,
     field: MetaFieldHandle
 }
 
 struct MetaBindingStore {
     allocator: Allocator,
-    bindings: arena::Arena<MetaBinding>,
-    current: ?arena::Handle<MetaBinding>
+    bindings: arena::Arena<MetaBinding, ContextMetaBindings>,
+    current: ?arena::Handle<MetaBinding, ContextMetaBindings>
 }
 
 fn new_meta_binding_store(allocator: Allocator) -> MetaBindingStore {
     return MetaBindingStore {
         allocator: allocator,
-        bindings: arena::new<MetaBinding>(allocator),
+        bindings: arena::new<MetaBinding, ContextMetaBindings>(allocator),
         current: null
     };
 }
@@ -107,7 +110,7 @@ fn (self: &var MetaBindingStore) bind(
     allocator: Allocator,
     name: []u8,
     field: MetaFieldHandle
-) -> !?arena::Handle<MetaBinding> {
+) -> !?arena::Handle<MetaBinding, ContextMetaBindings> {
     let previous = self.current;
     let owned_name = try string::from_bytes(self.allocator, name);
     self.current = try self.bindings.add(self.allocator, MetaBinding {
@@ -118,7 +121,7 @@ fn (self: &var MetaBindingStore) bind(
     return previous;
 }
 
-fn (self: &var MetaBindingStore) restore(previous: ?arena::Handle<MetaBinding>) -> void {
+fn (self: &var MetaBindingStore) restore(previous: ?arena::Handle<MetaBinding, ContextMetaBindings>) -> void {
     self.current = previous;
     return;
 }
@@ -151,10 +154,10 @@ union CurrentFunction {
 }
 
 struct BodyContextRestore {
-    body: ?arena::Handle<BodyContext>,
-    type_params: ?arena::Handle<map::Map<[]u8, bool>>,
-    type_args: ?arena::Handle<map::Map<[]u8, Type>>,
-    static_values: ?arena::Handle<map::Map<[]u8, Type>>
+    body: ?arena::Handle<BodyContext, BodyContexts>,
+    type_params: ?arena::Handle<map::Map<[]u8, bool>, TypeParamFrames>,
+    type_args: ?arena::Handle<map::Map<[]u8, Type>, ContextFrames>,
+    static_values: ?arena::Handle<map::Map<[]u8, Type>, ContextFrames>
 }
 
 fn (self: &var Checker) enter_body_context(

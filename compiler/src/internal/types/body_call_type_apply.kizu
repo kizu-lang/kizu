@@ -82,6 +82,14 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if try self.reject_optional_static_args(type_arg) |problem| {
         return move problem;
     }
+    // `arena::new<T, M>` is the one source-declared wrapper whose call names
+    // more static arguments than its declaration does: std cannot name the
+    // marker, so the marker is read here and the wrapper is checked at the
+    // element alone (ADR-0134).
+    if mem::equal_bytes(name_bytes, "std::arena::new") {
+        let span = expression_span(tree, expression.callee);
+        return self.check_arena_new(tree, scope, type_arg, span, args, out);
+    }
     var handled = false;
     if try self.check_meta_apply(
         tree,
@@ -296,6 +304,90 @@ fn (self: &Checker) pointer_cast_arg_error(
 }
 
 // Validates a source generic call with explicit static arguments.
+// Validates `arena::new<T, M>(allocator)` at the call, the Go
+// `checkArenaNew`. The wrapper std declares takes the element alone, so the
+// marker is read off the call and put back on the arena the wrapper hands
+// over (ADR-0134).
+fn (self: &var Checker) check_arena_new(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let arena = try self.split_arena_args(type_arg);
+    if same_type(arena.marker, empty_type()) {
+        return try self.checker_error_at("type error", span,
+            "`std::arena::new` expects 2 static arguments, the element type and the marker naming which arena it is");
+    }
+    if try self.resolve_arena_marker(tree, arena.marker) |issue| {
+        return try self.type_resolution_diagnostic(issue);
+    }
+    if try self.claim_arena_marker(arena.marker, span) |problem| {
+        return move problem;
+    }
+    let element = try self.types.copy_text(self.allocator, arena.elem);
+    defer element.deinit(self.allocator);
+    let element_bytes = element.as_bytes();
+    var handled = false;
+    var result = empty_type();
+    if try self.check_generic_user_type_apply(
+        tree, scope, "std::arena::new", element_bytes, args, &var handled, &var result
+    ) |problem| {
+        return move problem;
+    }
+    out.* = try self.put_arena_marker_back(result, arena.marker);
+    return null;
+}
+
+// Records the `arena::new` a marker names, and refuses a second one. A marker
+// is the whole of what makes two arenas of one element type two types
+// (ADR-0134): naming one at two `new` calls would hand both arenas the same
+// handle type, which is the confusion the marker exists to stop. A type
+// parameter claims nothing, and the same `new` reached twice -- as a generic
+// body checked per instantiation is -- claims what it already holds.
+fn (self: &var Checker) claim_arena_marker(
+    marker: Type,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    if self.is_type_parameter(marker) {
+        return null;
+    }
+    let spelling = try self.types.copy_text(self.allocator, marker);
+    defer spelling.deinit(self.allocator);
+    let bytes = spelling.as_bytes();
+    if self.arena_markers.get(bytes) |held| {
+        if same_span(held, span) {
+            return null;
+        }
+        return try self.duplicate_arena_marker_error(bytes, held, span);
+    }
+    try self.arena_markers.insert(self.allocator, bytes, span);
+    return null;
+}
+
+fn (self: &var Checker) duplicate_arena_marker_error(
+    marker: []u8,
+    held: ast::Span,
+    span: ast::Span
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "arena marker `");
+    try message.append_bytes(self.allocator, marker);
+    try message.append_bytes(self.allocator, "` already names the arena made at line ");
+    try fmt::append_i64(self.allocator, &var message, held.start.line);
+    try message.append_bytes(self.allocator,
+        "\nhelp: give this arena a marker of its own, so a handle of one cannot be read at the other");
+    return self.checker_message_at("type error", span, move message);
+}
+
+fn same_span(left: ast::Span, right: ast::Span) -> bool {
+    return left.start.line == right.start.line
+        and left.start.column == right.start.column;
+}
+
 fn (self: &var Checker) check_generic_user_type_apply(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1966,14 +2058,29 @@ fn (self: &var Checker) check_generic_instantiation(
     }
     let previous_meta = self.meta_bindings.current;
     try self.bind_static_meta_fields(fields);
+    // The instance's own parameter and return types resolve under the same
+    // std-or-not answer its body does: std writes `Arena<T>` without a marker,
+    // and substituting T does not make that spelling a program's (ADR-0134).
+    let previous_std = self.current_std;
+    self.current_std = self.function_is_std(function);
     if try self.check_generic_instantiation_bound(self.allocator, tree, function, substitutions) |problem| {
+        self.current_std = previous_std;
         self.meta_bindings.restore(previous_meta);
         self.leave_instantiation();
         return move problem;
     }
+    self.current_std = previous_std;
     self.meta_bindings.restore(previous_meta);
     self.leave_instantiation();
     return null;
+}
+
+// Reports whether one collected function was declared in std source.
+fn (self: &Checker) function_is_std(function: FunctionHandle) -> bool {
+    if self.metadata.functions.at(function.index) |value| {
+        return value.signature.std;
+    }
+    return false;
 }
 
 fn (self: &var Checker) check_generic_instantiation_bound(

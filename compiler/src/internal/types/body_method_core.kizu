@@ -145,9 +145,9 @@ fn (self: &var Checker) check_arena_or_impl_method(
     defer retained.deinit(self.allocator);
     let receiver_text = retained.as_bytes();
     if split_generic_type(receiver_text) |parts| {
-        if mem::equal_bytes(parts.base, "std::arena::Arena") {
-            let elem = try self.types.intern(parts.args);
-            return self.check_arena_method(tree, scope, field, name, elem, args, out);
+        if mem::equal_bytes(parts.base, typ::arena_type_name()) {
+            let arena = try self.split_arena_args(parts.args);
+            return self.check_arena_method(tree, scope, field, name, arena, args, out);
         }
     }
     if self.impl_method(receiver_text, name) |method| {
@@ -910,6 +910,7 @@ fn (self: &var Checker) check_array_std_method(
         name,
         args,
         offset,
+        empty_type(),
         out
     );
 }
@@ -1021,6 +1022,7 @@ fn (self: &var Checker) check_std_method(
     name: []u8,
     args: ast::ExpressionList,
     offset: i64,
+    arena_marker: Type,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     let handle = self.impl_method(receiver, name) orelse
@@ -1051,7 +1053,8 @@ fn (self: &var Checker) check_std_method(
             "type error", ast::zero_span(),
             "missing std method parameter metadata"
         );
-        let want = try self.types.substitute_type_params(self.allocator, parameter.typ, &substitutions);
+        let substituted = try self.types.substitute_type_params(self.allocator, parameter.typ, &substitutions);
+        let want = try self.put_arena_marker_back(substituted, arena_marker);
         var got = empty_type();
         let argument = args.get_or_panic(tree, offset + index);
         if try self.check_contextual_expr(tree, scope, argument, want, &var got) |problem| {
@@ -1070,12 +1073,33 @@ fn (self: &var Checker) check_std_method(
         }
         index = index + 1;
     }
-    let result = try self.types.substitute_type_params(self.allocator, facts.return_type, &substitutions);
+    let returned = try self.types.substitute_type_params(self.allocator, facts.return_type, &substitutions);
+    let result = try self.put_arena_marker_back(returned, arena_marker);
     if try self.revalidate_substituted(tree, result) |problem| {
         return move problem;
     }
     out.* = result;
     return null;
+}
+
+// Puts one arena's marker back into every arena spelling a std declaration
+// wrote without one. std declares its arena methods on `Arena<T>` because a
+// method works on every marker alike; what a call hands over and hands back is
+// the receiver's own marker, and this is where that is said (ADR-0134).
+fn (self: &var Checker) put_arena_marker_back(value: Type, marker: Type) -> !Type {
+    if same_type(marker, empty_type()) {
+        return value;
+    }
+    let marker_text = try self.types.copy_text(self.allocator, marker);
+    defer marker_text.deinit(self.allocator);
+    let value_text = try self.types.copy_text(self.allocator, value);
+    defer value_text.deinit(self.allocator);
+    let marker_bytes = marker_text.as_bytes();
+    let value_bytes = value_text.as_bytes();
+    let attached = try typ::attach_arena_marker(self.allocator, value_bytes, marker_bytes);
+    defer attached.deinit(self.allocator);
+    let attached_bytes = attached.as_bytes();
+    return self.types.intern(attached_bytes);
 }
 
 fn (self: &var Checker) check_std_method_body(

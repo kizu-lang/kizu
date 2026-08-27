@@ -17,6 +17,8 @@ import std::string;
 /// Identifies one retained text by the order it was retained in; 0 is the
 /// empty text. The number is dense, so a table keyed by a name can be an
 /// array indexed by it rather than a hash of the spelling.
+pub struct NameTexts {}
+
 pub struct Name {
     id: i64
 }
@@ -45,22 +47,22 @@ pub fn is_empty(name: Name) -> bool {
 /// Retains every text one module names.
 pub struct NameTable {
     allocator: Allocator,
-    texts: arena::Arena<string::String>,
+    texts: arena::Arena<string::String, NameTexts>,
     // handles[id - 1] is the text name id names; the empty text has no entry.
-    handles: array::Array<arena::Handle<string::String>>,
+    handles: array::Array<arena::Handle<string::String, NameTexts>>,
     by_text: map::Map<[]u8, Name>,
-    empty: arena::Handle<string::String>
+    empty: arena::Handle<string::String, NameTexts>
 }
 
 /// Creates a table holding only the empty text.
 pub fn new_name_table(allocator: Allocator) -> !NameTable {
-    var texts = arena::new<string::String>(allocator);
+    var texts = arena::new<string::String, NameTexts>(allocator);
     errdefer texts.deinit(allocator);
     let empty = try texts.add(allocator, string::new(allocator));
     return NameTable {
         allocator: allocator,
         texts: move texts,
-        handles: array::new<arena::Handle<string::String>>(allocator),
+        handles: array::new<arena::Handle<string::String, NameTexts>>(allocator),
         by_text: map::new<[]u8, Name>(allocator),
         empty: empty
     };
@@ -94,7 +96,20 @@ pub fn (self: &var NameTable) intern(text: []u8) -> !Name {
 }
 
 /// Returns the one name that spells an owned text, consuming the text.
+// Every name enters here or through intern, and every one of them arrives
+// with arena markers dropped: a marker says which arena a handle came from,
+// which the type checker answers before anything is lowered (ADR-0134), and
+// nothing below reads one -- every arena has the same header, every handle the
+// same word.
 pub fn (self: &var NameTable) intern_owned(text: string::String) -> !Name {
+    defer text.deinit(self.allocator);
+    let bytes = text.as_bytes();
+    let erased = try typ::erase_arena_marker(self.allocator, bytes);
+    return self.intern_erased(move erased);
+}
+
+/// Retains one already-erased spelling.
+fn (self: &var NameTable) intern_erased(text: string::String) -> !Name {
     if text.len() == 0 {
         text.deinit(self.allocator);
         return empty_name();

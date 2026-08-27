@@ -4,10 +4,21 @@ import std::mem;
 import std::testing;
 
 // A handle is an opaque ID into its arena; the arena owns the value, so
-// duplicating the ID creates no cleanup obligation and `Handle<T>` is copy
+// duplicating the ID creates no cleanup obligation and `Handle<T, M>` is copy
 // (#1605). Rebinding, storing, and passing by value all leave the source
 // binding usable, and a struct holding only handles and copy data is itself
 // copy by structural propagation (#1597).
+//
+// Every arena here names its own marker, because every one of them is its own
+// arena (ADR-0134). A helper that works on any of them says so with a static
+// parameter, and a struct that stores a handle names the marker it stores.
+
+pub struct RebindItems {}
+pub struct HelperItems {}
+pub struct StoredItems {}
+pub struct SharedNodes {}
+pub struct WorklistNodes {}
+pub struct CaptureNodes {}
 
 pub struct Item {
     pub value: i64,
@@ -15,21 +26,27 @@ pub struct Item {
 
 pub struct Node {
     pub value: i64,
-    pub child: ?arena::Handle<Node>,
+    pub child: ?arena::Handle<Node, SharedNodes>,
+}
+
+pub struct Leaf {
+    pub value: i64,
 }
 
 pub struct Ref {
-    pub h: arena::Handle<Item>,
+    pub h: arena::Handle<Item, StoredItems>,
     pub weight: i64,
 }
 
-fn read_value(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
+// The helper works on any arena of Items, which is what a static marker
+// parameter says. Its caller's marker is what it is instantiated at.
+fn read_value<M>(items: &arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> i64 {
     return items.at(h).value;
 }
 
 test "handle assignment leaves the source usable" {
     let allocator = mem::page_allocator();
-    let items = arena::new<Item>(allocator);
+    let items = arena::new<Item, RebindItems>(allocator);
     defer items.deinit(allocator);
     let h = try items.add(allocator, Item { value: 7 });
     let h2 = h;
@@ -38,15 +55,17 @@ test "handle assignment leaves the source usable" {
 
 test "a helper takes the same handle twice" {
     let allocator = mem::page_allocator();
-    let items = arena::new<Item>(allocator);
+    let items = arena::new<Item, HelperItems>(allocator);
     defer items.deinit(allocator);
     let h = try items.add(allocator, Item { value: 21 });
-    testing::expect_equal<i64>(42, read_value(&items, h) + read_value(&items, h));
+    testing::expect_equal<i64>(
+        42,
+        read_value<HelperItems>(&items, h) + read_value<HelperItems>(&items, h));
 }
 
 test "two parents share one child" {
     let allocator = mem::page_allocator();
-    let nodes = arena::new<Node>(allocator);
+    let nodes = arena::new<Node, SharedNodes>(allocator);
     defer nodes.deinit(allocator);
     let leaf = try nodes.add(allocator, Node { value: 5, child: null });
     let a = try nodes.add(allocator, Node { value: 10, child: leaf });
@@ -63,10 +82,10 @@ test "two parents share one child" {
 
 test "an array holds handles as a worklist" {
     let allocator = mem::page_allocator();
-    let nodes = arena::new<Node>(allocator);
+    let nodes = arena::new<Leaf, WorklistNodes>(allocator);
     defer nodes.deinit(allocator);
-    let leaf = try nodes.add(allocator, Node { value: 1, child: null });
-    var work = array::new<arena::Handle<Node>>(allocator);
+    let leaf = try nodes.add(allocator, Leaf { value: 1 });
+    var work = array::new<arena::Handle<Leaf, WorklistNodes>>(allocator);
     defer work.deinit(allocator);
     try work.append(allocator, leaf);
     try work.append(allocator, leaf);
@@ -81,10 +100,25 @@ test "an array holds handles as a worklist" {
 
 test "a struct holding a handle is copy" {
     let allocator = mem::page_allocator();
-    let items = arena::new<Item>(allocator);
+    let items = arena::new<Item, StoredItems>(allocator);
     defer items.deinit(allocator);
     let h = try items.add(allocator, Item { value: 7 });
     let r = Ref { h: h, weight: 3 };
     let r2 = r;
     testing::expect_equal<i64>(17, items.at(r.h).value + items.at(r2.h).value + r.weight);
+}
+
+test "a borrow capture hands a handle over as a value" {
+    let allocator = mem::page_allocator();
+    let nodes = arena::new<Leaf, CaptureNodes>(allocator);
+    defer nodes.deinit(allocator);
+    let leaf = try nodes.add(allocator, Leaf { value: 9 });
+    var work = array::new<arena::Handle<Leaf, CaptureNodes>>(allocator);
+    defer work.deinit(allocator);
+    try work.append(allocator, leaf);
+    var total = 0;
+    if work.at(0) |h| {
+        total = nodes.at(h).value;
+    }
+    testing::expect_equal<i64>(9, total);
 }

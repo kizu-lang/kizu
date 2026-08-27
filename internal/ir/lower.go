@@ -174,6 +174,11 @@ func (l *lowerer) resolveType(name string) string {
 	// A `std::meta` form written where a type goes resolves first: it names a
 	// type through the capture in force rather than being one (ADR-0113).
 	name = l.resolveMetaTypeDeep(name)
+	// An arena marker says which arena a handle came from, and the type
+	// checker has already answered that (ADR-0134). Nothing below here can
+	// read it -- every arena has the same header, every handle the same word
+	// -- so it is dropped at the one place a type spelling enters the lowerer.
+	name = typ.EraseArenaMarker(name)
 	if bound, ok := l.typeBindings[name]; ok {
 		return bound
 	}
@@ -184,7 +189,7 @@ func (l *lowerer) resolveType(name string) string {
 	if err != nil {
 		return name
 	}
-	return resolved
+	return typ.EraseArenaMarker(resolved)
 }
 
 // resolveTypeArgs binds the type parameters in force across a static argument
@@ -273,7 +278,7 @@ func (l *lowerer) genericBindings(
 		// A compile-time value reaches the body as a constant, or -- for a
 		// `Function` parameter -- as the name of the function to forward to.
 		instance.values[param.Name] = staticValue{
-			typ: typ.Text(param.Type), text: l.resolveStaticValue(args[i]),
+			typ: erasedText(param.Type), text: l.resolveStaticValue(args[i]),
 		}
 	}
 	return decl, instance, nil
@@ -349,7 +354,7 @@ func (l *lowerer) bindInstanceFields(
 			owner = bindings[param.Name]
 			continue
 		}
-		if typ.Text(param.Type) != "Field" {
+		if erasedText(param.Type) != "Field" {
 			continue
 		}
 		fields, err := l.publicFields(owner)
@@ -603,7 +608,7 @@ func lowerUnion(decl *ast.UnionDecl) Union {
 	for index, variant := range decl.Variants {
 		variants[variant.Name] = UnionVariant{
 			Name: variant.Name, Index: index,
-			Payload: stdmeta.ResolveElementTypeForms(typ.Text(variant.Payload)),
+			Payload: stdmeta.ResolveElementTypeForms(erasedText(variant.Payload)),
 		}
 	}
 	return Union{Name: decl.Name, Variants: variants}
@@ -724,7 +729,8 @@ func lowerStruct(decl *ast.StructDecl) Struct {
 	for _, field := range decl.Fields {
 		fields = append(fields, Field{
 			Name: field.Name,
-			Type: stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName)),
+			Type: stdmeta.ResolveElementTypeForms(
+				erasedText(field.TypeName)),
 		})
 	}
 	return Struct{Name: decl.Name, Fields: fields}
@@ -736,7 +742,7 @@ func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
 	for _, param := range sig.Params {
 		params = append(params, l.lowerParam(param))
 	}
-	returned := l.lowerReturnType(l.resolveType(typ.Text(sig.ReturnType)))
+	returned := l.lowerReturnType(l.resolveType(erasedText(sig.ReturnType)))
 	return Signature{Params: params, Return: returned, Unsafe: sig.RequiresUnsafe}
 }
 
@@ -809,7 +815,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 // is the same observation and stays the cheaper shape -- except for unions,
 // where matching needs an address and the copy is made for the call.
 func (l *lowerer) lowerParam(param ast.Param) Param {
-	typeName := l.resolveType(typ.Text(param.TypeName))
+	typeName := l.resolveType(erasedText(param.TypeName))
 	lowered := Param{Name: "%" + param.Name, Type: typeName, Passing: PassValue}
 	if param.Borrow || param.MutBorrow {
 		lowered.Type, lowered.Passing = l.borrowIRType(typeName, param.MutBorrow)
@@ -1345,7 +1351,11 @@ func (l *lowerer) lowerTypeApplyCall(
 	// element by, and a spelling that still names a type parameter or a
 	// `std::meta` form measures the wrong thing.
 	case "std::arena::new":
-		return l.lowerArenaConstructor(l.resolveType(typeApply.TypeArg), args)
+		// `arena::new<T, M>` is the one call that writes a marker as a static
+		// argument. It names which arena is being made, which the type checker
+		// has read; the element is all that is left to lower (ADR-0134).
+		return l.lowerArenaConstructor(
+			l.resolveType(splitStaticArgs(typeApply.TypeArg)[0]), args)
 	case "std::array::new":
 		return l.lowerArrayConstructor(l.resolveType(typeApply.TypeArg), args)
 	case "std::map::new":
@@ -1660,7 +1670,8 @@ func (l *lowerer) lowerCastExpr(expr *ast.CastExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("cast", typ.Text(expr.TargetType), []Value{value}, typ.Text(expr.TargetType)), nil
+	target := erasedText(expr.TargetType)
+	return l.emit("cast", target, []Value{value}, target), nil
 }
 
 // lowerPrefixExpr lowers unary operators.
@@ -1756,7 +1767,7 @@ func (l *lowerer) lowerFuncPointerCall(expr *ast.CallExpr) (Value, bool, error) 
 		}
 		args = append(args, arg)
 	}
-	return l.emit("call.indirect", typ.Text(node.Result), args, ""), true, nil
+	return l.emit("call.indirect", erasedText(node.Result), args, ""), true, nil
 }
 
 // funcPointerNode parses a function pointer spelling, and reports whether the
@@ -2068,17 +2079,8 @@ func (l *lowerer) lowerResolvedMethod(
 	// receiver arrives spelled as the borrow. The container it names is the
 	// same one either way.
 	receiverType = derefType(receiverType)
-	if elem, ok := arrayElementType(receiverType); ok {
-		return l.lowerStdContainerMethod(arrayTypeName, method, elem, allArgs)
-	}
-	if args, ok := mapStaticArgs(receiverType); ok {
-		return l.lowerStdContainerMethod(mapTypeName, method, args, allArgs)
-	}
-	if elem, ok := boxElementType(receiverType); ok {
-		return l.lowerStdContainerMethod(boxTypeName, method, elem, allArgs)
-	}
-	if elem := arenaElementType(receiverType); elem != "unknown" {
-		return l.lowerStdContainerMethod(arenaTypeName, method, elem, allArgs)
+	if container, typeArg, ok := stdContainerReceiver(receiverType); ok {
+		return l.lowerStdContainerMethod(container, method, typeArg, allArgs)
 	}
 	if methodName, ok := l.implMethodCalleeName(receiverType, method); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -2119,19 +2121,37 @@ func (l *lowerer) lowerBufferMethod(
 // arguments keep the types they carry themselves.
 func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, error) {
 	receiver = derefType(receiver)
-	if elem, ok := arrayElementType(receiver); ok {
-		return l.stdContainerParams(arrayTypeName, method, elem)
-	}
-	if args, ok := mapStaticArgs(receiver); ok {
-		return l.stdContainerParams(mapTypeName, method, args)
-	}
-	if elem, ok := boxElementType(receiver); ok {
-		return l.stdContainerParams(boxTypeName, method, elem)
+	if container, typeArg, ok := stdContainerReceiver(receiver); ok {
+		return l.stdContainerParams(container, method, typeArg)
 	}
 	if name, ok := l.implMethodCalleeName(receiver, method); ok {
 		return paramsAfterSelf(l.signatures[name].Params), nil
 	}
 	return nil, nil
+}
+
+// stdContainerReceiver names the std container a receiver type is, and the
+// type argument it carries. Both readers of that answer go through here -- the
+// one that hands arguments over at the types the callee declares, and the one
+// that dispatches to the callee -- so they cannot disagree about which
+// containers exist. A receiver missing from one list but not the other is how
+// an arena method came to hand over a capture's borrow where the declaration
+// says a handle.
+func stdContainerReceiver(receiver string) (string, string, bool) {
+	receiver = derefType(receiver)
+	if elem, ok := arrayElementType(receiver); ok {
+		return arrayTypeName, elem, true
+	}
+	if args, ok := mapStaticArgs(receiver); ok {
+		return mapTypeName, args, true
+	}
+	if elem, ok := boxElementType(receiver); ok {
+		return boxTypeName, elem, true
+	}
+	if elem := arenaElementType(receiver); elem != "unknown" {
+		return arenaTypeName, elem, true
+	}
+	return "", "", false
 }
 
 // stdContainerParams returns the parameters std declares for one container
@@ -2233,7 +2253,7 @@ func (l *lowerer) implMethodCalleeName(receiver string, method string) (string, 
 // arrives.
 func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) Passing {
 	container := derefType(receiverType)
-	base, ok := stdContainerTypeName(container)
+	base, _, ok := stdContainerReceiver(container)
 	if !ok {
 		return PassValue
 	}
@@ -2249,24 +2269,6 @@ func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) P
 		return passing
 	}
 	return PassValue
-}
-
-// stdContainerTypeName names the generic declaration a container instance was
-// applied from, the name lowerResolvedMethod dispatches on.
-func stdContainerTypeName(typ string) (string, bool) {
-	if _, ok := arrayElementType(typ); ok {
-		return arrayTypeName, true
-	}
-	if _, ok := mapStaticArgs(typ); ok {
-		return mapTypeName, true
-	}
-	if _, ok := boxElementType(typ); ok {
-		return boxTypeName, true
-	}
-	if strings.HasPrefix(typ, arenaTypeName+"<") && strings.HasSuffix(typ, ">") {
-		return arenaTypeName, true
-	}
-	return "", false
 }
 
 // lowerImplMethodCall lowers receiver.method(args) as Type.method(receiver, args).

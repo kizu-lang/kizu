@@ -2,20 +2,22 @@ import std::arena;
 import std::mem;
 import std::testing;
 
+pub struct RegistryItems {}
+
 pub struct Item {
     pub value: i64,
 }
 
 pub struct Registry {
-    pub items: arena::Arena<Item>,
+    pub items: arena::Arena<Item, RegistryItems>,
 }
 
-fn (self: &var Registry) add_direct(allocator: Allocator, v: i64) -> !arena::Handle<Item> {
-    return try self.try items.add(allocator, Item { value: v });
+fn (self: &var Registry) add_direct(allocator: Allocator, v: i64) -> !arena::Handle<Item, RegistryItems> {
+    return self.items.add(allocator, Item { value: v });
 }
 
-fn (self: &var Registry) add_bound(allocator: Allocator, v: i64) -> !arena::Handle<Item> {
-    let handle = try self.try items.add(allocator, Item { value: v });
+fn (self: &var Registry) add_bound(allocator: Allocator, v: i64) -> !arena::Handle<Item, RegistryItems> {
+    let handle = try self.items.add(allocator, Item { value: v });
     return handle;
 }
 
@@ -24,15 +26,113 @@ fn (self: &var Registry) add_bound(allocator: Allocator, v: i64) -> !arena::Hand
 // (§10). A handle from an arena the frame itself owns still cannot escape.
 test "a factory method returns a handle into its receiver's field arena" {
     let allocator = mem::page_allocator();
-    var registry = Registry { items: arena::new<Item>(allocator) };
-    let first = registry.add_direct(allocator, 7);
-    let second = registry.add_bound(allocator, 35);
+    var registry = Registry { items: arena::new<Item, RegistryItems>(allocator) };
+    defer registry.deinit(allocator);
+    let first = try registry.add_direct(allocator, 7);
+    let second = try registry.add_bound(allocator, 35);
     testing::expect_equal<i64>(42, registry.items.at(first).value + registry.items.at(second).value);
-    registry.deinit(allocator);
 }
 
 // ir
 // lower:
-// check failed: expected next token identifier, got `try` at 14:20
+// fn Registry.add_direct(%self: &var Registry, %allocator: Allocator, %v: i64) -> !std::arena::Handle<Item> {
+// entry:
+//   %1: &var std::arena::Arena<Item> = field.addr.items %self: &var Registry
+//   %2: Item = struct.new {value: %v: i64}
+//   %3: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %1: &var std::arena::Arena<Item>, %allocator: Allocator, %2: Item
+//   return %3: std::mem::Error!std::arena::Handle<Item>
+// }
+// fn Registry.add_bound(%self: &var Registry, %allocator: Allocator, %v: i64) -> !std::arena::Handle<Item> {
+// entry:
+//   %1: &var std::arena::Arena<Item> = field.addr.items %self: &var Registry
+//   %2: Item = struct.new {value: %v: i64}
+//   %3: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %1: &var std::arena::Arena<Item>, %allocator: Allocator, %2: Item
+//   %4: std::arena::Handle<Item> = error.try %3: std::mem::Error!std::arena::Handle<Item>
+//   %5: !std::arena::Handle<Item> = error.ok %4: std::arena::Handle<Item>
+//   return %5: !std::arena::Handle<Item>
+// }
+// fn Registry.deinit(%self: Registry, %allocator: Allocator) -> void {
+// entry:
+//   %1: std::arena::Arena<Item> = field.items %self: Registry
+//   call.std::arena::Arena.deinit.Item %1: std::arena::Arena<Item>, %allocator: Allocator
+//   return void: void
+// }
+// fn test.a_factory_method_returns_a_handle_into_its_receiver_s_field_arena() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
+//   %3: Registry = struct.new {items: %2: std::arena::Arena<Item>}
+//   %4: &var Registry = local.slot %3: Registry
+//   %5: i64 = const 7
+//   %6: !std::arena::Handle<Item> = call.Registry.add_direct %4: &var Registry, %1: Allocator, %5: i64
+//   %7: Registry = ref.load %4: &var Registry
+//   %8: std::arena::Handle<Item> = error.try %6: !std::arena::Handle<Item>, cleanup call.Registry.deinit %7: Registry, %1: Allocator
+//   %9: i64 = const 35
+//   %10: !std::arena::Handle<Item> = call.Registry.add_bound %4: &var Registry, %1: Allocator, %9: i64
+//   %11: Registry = ref.load %4: &var Registry
+//   %12: std::arena::Handle<Item> = error.try %10: !std::arena::Handle<Item>, cleanup call.Registry.deinit %11: Registry, %1: Allocator
+//   %13: i64 = const 42
+//   %14: &var std::arena::Arena<Item> = field.addr.items %4: &var Registry
+//   %15: Item = call.std::arena::Arena.at.Item %14: &var std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %16: i64 = field.value %15: Item
+//   %17: &var std::arena::Arena<Item> = field.addr.items %4: &var Registry
+//   %18: Item = call.std::arena::Arena.at.Item %17: &var std::arena::Arena<Item>, %12: std::arena::Handle<Item>
+//   %19: i64 = field.value %18: Item
+//   %20: i64 = binary.+ %16: i64, %19: i64
+//   test.expect_equal %13: i64, %20: i64, i64
+//   %22: Registry = ref.load %4: &var Registry
+//   call.Registry.deinit %22: Registry, %1: Allocator
+//   %24: !void = error.ok
+//   return %24: !void
+// }
 // opt:
-// check failed: expected next token identifier, got `try` at 14:20
+// fn Registry.add_direct(%self: &var Registry, %allocator: Allocator, %v: i64) -> !std::arena::Handle<Item> {
+// entry:
+//   %1: &var std::arena::Arena<Item> = field.addr.items %self: &var Registry
+//   %2: Item = struct.new {value: %v: i64}
+//   %3: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %1: &var std::arena::Arena<Item>, %allocator: Allocator, %2: Item
+//   return %3: std::mem::Error!std::arena::Handle<Item>
+// }
+// fn Registry.add_bound(%self: &var Registry, %allocator: Allocator, %v: i64) -> !std::arena::Handle<Item> {
+// entry:
+//   %1: &var std::arena::Arena<Item> = field.addr.items %self: &var Registry
+//   %2: Item = struct.new {value: %v: i64}
+//   %3: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %1: &var std::arena::Arena<Item>, %allocator: Allocator, %2: Item
+//   %4: std::arena::Handle<Item> = error.try %3: std::mem::Error!std::arena::Handle<Item>
+//   %5: !std::arena::Handle<Item> = error.ok %4: std::arena::Handle<Item>
+//   return %5: !std::arena::Handle<Item>
+// }
+// fn Registry.deinit(%self: Registry, %allocator: Allocator) -> void {
+// entry:
+//   %1: std::arena::Arena<Item> = field.items %self: Registry
+//   call.std::arena::Arena.deinit.Item %1: std::arena::Arena<Item>, %allocator: Allocator
+//   return void: void
+// }
+// fn test.a_factory_method_returns_a_handle_into_its_receiver_s_field_arena() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
+//   %3: Registry = struct.new {items: %2: std::arena::Arena<Item>}
+//   %4: &var Registry = local.slot %3: Registry
+//   %5: i64 = const 7
+//   %6: !std::arena::Handle<Item> = call.Registry.add_direct %4: &var Registry, %1: Allocator, %5: i64
+//   %7: Registry = ref.load %4: &var Registry
+//   %8: std::arena::Handle<Item> = error.try %6: !std::arena::Handle<Item>, cleanup call.Registry.deinit %7: Registry, %1: Allocator
+//   %9: i64 = const 35
+//   %10: !std::arena::Handle<Item> = call.Registry.add_bound %4: &var Registry, %1: Allocator, %9: i64
+//   %11: Registry = ref.load %4: &var Registry
+//   %12: std::arena::Handle<Item> = error.try %10: !std::arena::Handle<Item>, cleanup call.Registry.deinit %11: Registry, %1: Allocator
+//   %13: i64 = const 42
+//   %14: &var std::arena::Arena<Item> = field.addr.items %4: &var Registry
+//   %15: Item = call.std::arena::Arena.at.Item %14: &var std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %16: i64 = field.value %15: Item
+//   %17: &var std::arena::Arena<Item> = field.addr.items %4: &var Registry
+//   %18: Item = call.std::arena::Arena.at.Item %17: &var std::arena::Arena<Item>, %12: std::arena::Handle<Item>
+//   %19: i64 = field.value %18: Item
+//   %20: i64 = binary.+ %16: i64, %19: i64
+//   test.expect_equal %13: i64, %20: i64, i64
+//   %22: Registry = ref.load %4: &var Registry
+//   call.Registry.deinit %22: Registry, %1: Allocator
+//   %24: !void = error.ok
+//   return %24: !void
+// }

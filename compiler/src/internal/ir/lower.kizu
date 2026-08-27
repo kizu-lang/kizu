@@ -24,6 +24,11 @@ import std::string;
 /// the first failure comes back as a diagnostic. The ownership checker was
 /// read for the errdefers a move retired (ADR-0114) when the lowerer was
 /// created, and std_errors gives the codes std error sets lower to.
+pub struct DeclFacts {}
+pub struct GenericArgSlots {}
+pub struct MetaBindings {}
+pub struct SignatureNodes {}
+
 pub fn (self: &var Lowerer) lower(
     tree: &var ast::Ast,
     program: &ast::Program,
@@ -65,12 +70,12 @@ pub struct ParamFacts {
 
 /// Identifies one FunctionFacts retained by the lowerer.
 pub struct FactsHandle {
-    node: arena::Handle<FunctionFacts>
+    node: arena::Handle<FunctionFacts, DeclFacts>
 }
 
 /// Identifies one Signature retained by the lowerer.
 pub struct SignatureHandle {
-    node: arena::Handle<Signature>
+    node: arena::Handle<Signature, SignatureNodes>
 }
 
 /// Names the parameters a call hands its arguments over at: a signature's
@@ -154,7 +159,7 @@ pub struct GenericArgs {
 
 /// Identifies one GenericArgs retained by the lowerer.
 pub struct GenericArgsHandle {
-    node: arena::Handle<GenericArgs>
+    node: arena::Handle<GenericArgs, GenericArgSlots>
 }
 
 /// Is one generic function with its static parameters bound, the Go
@@ -207,7 +212,7 @@ pub fn empty_meta_field() -> MetaField {
 // MetaBinding is one `comptime` capture in force, the Go `metaFields` map
 // entry; the chain through parent is the map, newest first.
 struct MetaBinding {
-    parent: ?arena::Handle<MetaBinding>,
+    parent: ?arena::Handle<MetaBinding, MetaBindings>,
     name: Name,
     field: MetaField
 }
@@ -215,14 +220,14 @@ struct MetaBinding {
 /// Identifies the captures in force before a bind, what its restore puts
 /// back, the Go closure `bindMetaField` returns.
 pub struct MetaMark {
-    previous: ?arena::Handle<MetaBinding>
+    previous: ?arena::Handle<MetaBinding, MetaBindings>
 }
 
 /// Is one errdefer receiver the ownership checker retired at one return
 /// statement or try expression, the Go `Result` maps flattened.
 pub struct RetiredReceiver {
-    pub statement: ?arena::Handle<ast::StatementNode>,
-    pub expression: ?arena::Handle<ast::ExpressionNode>,
+    pub statement: ?arena::Handle<ast::StatementNode, ast::Statements>,
+    pub expression: ?arena::Handle<ast::ExpressionNode, ast::Expressions>,
     pub name: Name
 }
 
@@ -248,7 +253,7 @@ pub struct Lowerer {
     common: CommonNames,
     // decls lists the program's function declarations in order; tests the
     // test blocks, which lower after the functions.
-    decl_facts: arena::Arena<FunctionFacts>,
+    decl_facts: arena::Arena<FunctionFacts, DeclFacts>,
     decls: array::Array<FactsHandle>,
     // scratch_facts, scratch_args and scratch_signature fill result slots
     // before a resolver writes them, so out parameters need no optional
@@ -261,7 +266,7 @@ pub struct Lowerer {
     // way, which is all markLentMethodArgs looks at.
     storage_self_signature: SignatureHandle,
     tests: array::Array<TestFacts>,
-    signature_nodes: arena::Arena<Signature>,
+    signature_nodes: arena::Arena<Signature, SignatureNodes>,
     signatures: map::Map<[]u8, SignatureHandle>,
     // method_signatures groups the signatures by the method name they
     // end with, the Go `methodSigs`, so a method call reads the handful
@@ -278,7 +283,7 @@ pub struct Lowerer {
     // current_args binds the type parameters and static values in force:
     // those of the generic function being instantiated, the Go
     // `typeBindings` and `staticValues`. null binds nothing.
-    generic_args: arena::Arena<GenericArgs>,
+    generic_args: arena::Arena<GenericArgs, GenericArgSlots>,
     current_args: ?GenericArgsHandle,
     // instantiated records the generic instances already requested, keyed
     // by the symbol they were given; pending the ones still to lower, read
@@ -302,8 +307,8 @@ pub struct Lowerer {
     union_decls: map::Map<[]u8, ast::Declaration>,
     // meta_fields binds the captures of the `comptime for` expansions
     // currently being lowered.
-    meta_bindings: arena::Arena<MetaBinding>,
-    meta_current: ?arena::Handle<MetaBinding>,
+    meta_bindings: arena::Arena<MetaBinding, MetaBindings>,
+    meta_current: ?arena::Handle<MetaBinding, MetaBindings>,
     // extern_symbols maps a resolved extern "c" function name to its C
     // symbol.
     extern_symbols: array::Array<Name>,
@@ -353,7 +358,7 @@ pub fn new_lowerer(
         })
     };
     let scratch_block = try module.add_block(scratch_function, empty_name());
-    var decl_facts = arena::new<FunctionFacts>(allocator);
+    var decl_facts = arena::new<FunctionFacts, DeclFacts>(allocator);
     errdefer decl_facts.deinit(allocator);
     let scratch_facts = FactsHandle {
         node: try decl_facts.add(allocator, FunctionFacts {
@@ -366,10 +371,10 @@ pub fn new_lowerer(
             body: null
         })
     };
-    var generic_args = arena::new<GenericArgs>(allocator);
+    var generic_args = arena::new<GenericArgs, GenericArgSlots>(allocator);
     errdefer generic_args.deinit(allocator);
     let scratch_args = GenericArgsHandle { node: try generic_args.add(allocator, blank_generic_args(allocator)) };
-    var signature_nodes = arena::new<Signature>(allocator);
+    var signature_nodes = arena::new<Signature, SignatureNodes>(allocator);
     errdefer signature_nodes.deinit(allocator);
     let scratch_signature = SignatureHandle {
         node: try signature_nodes.add(allocator, Signature {
@@ -423,7 +428,7 @@ pub fn new_lowerer(
         struct_decls: map::new<[]u8, ast::Declaration>(allocator),
         enum_decls: map::new<[]u8, ast::Declaration>(allocator),
         union_decls: map::new<[]u8, ast::Declaration>(allocator),
-        meta_bindings: arena::new<MetaBinding>(allocator),
+        meta_bindings: arena::new<MetaBinding, MetaBindings>(allocator),
         meta_current: null,
         extern_symbols: array::new<Name>(allocator),
         next_error_code: 0,
@@ -541,10 +546,16 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
     return FactsHandle { node: try self.decl_facts.add(self.allocator, move facts) };
 }
 
-/// Names the canonical spelling of one parsed type, the Go `typ.Text`.
+/// Names the canonical spelling of one parsed type, the Go `erasedText`, with
+/// arena markers dropped. A marker names which arena a handle came from, which
+/// the type checker answers before anything is lowered (ADR-0134); no layer
+/// from here down can read one, so this is where they stop.
 fn (self: &var Lowerer) intern_type(tree: &ast::Ast, value: typ::Type) -> !Name {
     let rendered = try typ::render(self.allocator, &tree.types, value);
-    return self.module.names.intern_owned(move rendered);
+    defer rendered.deinit(self.allocator);
+    let bytes = rendered.as_bytes();
+    let erased = try typ::erase_arena_marker(self.allocator, bytes);
+    return self.module.names.intern_owned(move erased);
 }
 
 /// Copies the errdefer receivers the ownership checker retired, the Go
@@ -1504,7 +1515,12 @@ fn (self: &var Lowerer) parse_type(name: Name) -> !typ::Type {
 fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
     // A `std::meta` form written where a type goes resolves first: it names
     // a type through the capture in force rather than being one (ADR-0113).
-    let resolved = try self.resolve_meta_type_deep(name);
+    let meta_resolved = try self.resolve_meta_type_deep(name);
+    // An arena marker says which arena a handle came from, and the type
+    // checker has already answered that (ADR-0134). Nothing below here can
+    // read it, so it is dropped at the one place a type spelling enters the
+    // lowerer.
+    let resolved = try self.erase_arena_marker_name(meta_resolved);
     let args = self.current_args orelse return resolved;
     if self.bound_type(args, resolved) |bound| {
         return bound;
@@ -1517,7 +1533,28 @@ fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
     let bytes = retained.as_bytes();
     let substituted = try typ::substitute_owned_text(self.allocator, bytes, &node.binding_names, &node.binding_types
     );
-    return self.module.names.intern_owned(move substituted);
+    let interned = try self.module.names.intern_owned(move substituted);
+    return self.erase_arena_marker_name(interned);
+}
+
+/// Drops the marker from every arena spelling inside one retained name.
+fn (self: &var Lowerer) erase_arena_marker_name(name: Name) -> !Name {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    let erased = try typ::erase_arena_marker(self.allocator, bytes);
+    defer erased.deinit(self.allocator);
+    let erased_bytes = erased.as_bytes();
+    return self.module.names.intern(erased_bytes);
+}
+
+/// Names the first static argument of a list.
+fn (self: &var Lowerer) first_static_arg(list: Name) -> !Name {
+    var args = try self.split_static_args(list);
+    defer args.deinit(self.allocator);
+    if args.get(0) |first| {
+        return first;
+    }
+    return list;
 }
 
 /// Binds the type parameters in force across a static argument list, the Go

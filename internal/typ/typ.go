@@ -477,6 +477,89 @@ func SplitMethodName(name string) (string, string, bool) {
 	return name[:idx], name[idx+1:], true
 }
 
+// ArenaTypeName and ArenaHandleTypeName are the compiler-known arena type
+// constructors. Both take the element type and then the marker naming which
+// arena it is (ADR-0134): the marker is what makes two arenas of one element
+// type two types, so a handle from one is a type error at the other. It holds
+// nothing at run time and EraseArenaMarker drops it before anything is
+// lowered.
+const (
+	ArenaTypeName       = "std::arena::Arena"
+	ArenaHandleTypeName = "std::arena::Handle"
+)
+
+// EraseArenaMarker drops the marker from every arena spelling inside a type,
+// however deep it sits. Below the type checker a marker answers nothing --
+// every arena has the same header and every handle the same word -- so the
+// lowerer reads the one-argument spelling and no layer under it learns that
+// markers exist.
+func EraseArenaMarker(text string) string {
+	parsed, err := Parse(text)
+	if err != nil {
+		return text
+	}
+	return eraseArenaMarker(parsed).String()
+}
+
+// AttachArenaMarker is EraseArenaMarker's inverse for one marker: every arena
+// spelling written with the element alone gets this marker put back. std
+// declares its arena methods without a marker because a method works on every
+// marker alike (ADR-0134), and the checker reads the receiver's marker and
+// puts it back through here.
+func AttachArenaMarker(text string, marker string) string {
+	parsed, err := Parse(text)
+	if err != nil {
+		return text
+	}
+	return mapArenaArgs(parsed, func(args []Type) []Type {
+		if len(args) != 1 {
+			return args
+		}
+		return append(args, &Name{Path: strings.Split(marker, "::")})
+	}).String()
+}
+
+// eraseArenaMarker rewrites one parsed type, returning it unchanged when it
+// holds no arena spelling.
+func eraseArenaMarker(node Type) Type {
+	return mapArenaArgs(node, func(args []Type) []Type {
+		if len(args) != 2 {
+			return args
+		}
+		return args[:1]
+	})
+}
+
+// mapArenaArgs rewrites the static arguments of every arena spelling inside a
+// type, however deep it sits, and leaves every other spelling alone.
+func mapArenaArgs(node Type, rewrite func([]Type) []Type) Type {
+	switch value := node.(type) {
+	case *Name:
+		args := make([]Type, 0, len(value.Args))
+		for _, arg := range value.Args {
+			args = append(args, mapArenaArgs(arg, rewrite))
+		}
+		path := strings.Join(value.Path, "::")
+		if path == ArenaTypeName || path == ArenaHandleTypeName {
+			args = rewrite(args)
+		}
+		return &Name{Path: value.Path, Args: args}
+	case *Optional:
+		return &Optional{Elem: mapArenaArgs(value.Elem, rewrite)}
+	case *Slice:
+		return &Slice{Elem: mapArenaArgs(value.Elem, rewrite)}
+	case *Buffer:
+		return &Buffer{Size: value.Size, Elem: mapArenaArgs(value.Elem, rewrite)}
+	case *Borrow:
+		return &Borrow{Elem: mapArenaArgs(value.Elem, rewrite), Mut: value.Mut}
+	case *Const:
+		return &Const{Elem: mapArenaArgs(value.Elem, rewrite)}
+	case *ErrorUnion:
+		return &ErrorUnion{Err: value.Err, Ok: mapArenaArgs(value.Ok, rewrite)}
+	}
+	return node
+}
+
 // CleanupMethod is the method name that discharges an owner's consume
 // obligation (ADR-0091). There is one: `deinit` releases the value and whatever
 // it holds, so a container needs no second name for the case where its elements

@@ -1,14 +1,23 @@
-// `std::arena::Arena<T>` and `std::arena::Handle<T>` are types the compiler
-// knows, and the storage behind them is the array's (ADR-0131). Every method
-// an arena has is declared here, forwarding to one primitive, the way
-// std::array and std::map do: the declaration is what says how the receiver
+// `std::arena::Arena<T, M>` and `std::arena::Handle<T, M>` are types the
+// compiler knows, and the storage behind them is the array's (ADR-0131). `M`
+// is the marker naming which arena this is: it holds nothing at run time and
+// is gone by the time anything is lowered, but it is what makes two arenas of
+// the same element type two different types, so a handle from one is a type
+// error at the other (ADR-0134). It is not a parameter of the methods below:
+// a method on an arena works on every marker alike, and the marker the
+// receiver carries is what its handles carry, so the checker reads it off the
+// receiver rather than making std name it.
+//
+// Every method an arena has is declared here, forwarding to one primitive, the
+// way std::array and std::map do: the declaration is what says how the receiver
 // arrives -- `&var self` writes through the header, `&self` reads it -- so the
 // checkers and the lowerer read one line instead of each restating it.
 
 // new builds the header an empty arena is and asks the allocator for nothing,
 // so it has nothing to fail at. The first `add` is what buys storage, and that
 // is where a program hears about a refusal (ADR-0131). The allocator named
-// here is what the checker holds every later call to.
+// here is what the checker holds every later call to. The marker named here is
+// this arena's alone: no other `new` in the program may name it (ADR-0134).
 pub fn new<T>(allocator: Allocator) -> std::arena::Arena<T> {
     return std::internal::builtin::arena<T>(allocator);
 }
@@ -30,9 +39,10 @@ fn (self: &var std::arena::Arena<T>) add<T>(
     return std::internal::builtin::arena_add<T>(self, allocator, value);
 }
 
-// at reads the element a handle names. A handle is only ever made by `add` on
-// this arena, so the read is not optional the way `Array.at(index)` is: an
-// index the caller computed can be outside the array, a handle cannot.
+// at reads the element a handle names. The handle's marker is this arena's, so
+// the read is not optional the way `Array.at(index)` is: an index the caller
+// computed can be outside the array, a handle carrying this arena's marker
+// cannot (ADR-0134).
 fn (self: &std::arena::Arena<T>) at<T>(handle: std::arena::Handle<T>) -> &T {
     return std::internal::builtin::arena_at<T>(self, handle);
 }
