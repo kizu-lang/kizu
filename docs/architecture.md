@@ -37,6 +37,7 @@ lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
 tests/behavior/      振る舞いの assert を 1 package に束ねたもの
 tests/fixtures/      module 解決などが使う固定入力
+docs/tutorial/       1 つのものを最初から最後まで作る文書と、その sample package
 docs/, docs/adr/     設計ドキュメントと ADR
 ```
 
@@ -93,7 +94,7 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 
 | 層 | 実行方法 | 内容 |
 | --- | --- | --- |
-| conformance | `go test ./cmd/kizu` | `examples/` と `tests/behavior/` を全件実行。case を書いていない例があれば落ちる |
+| conformance | `go test ./cmd/kizu` | `examples/`、`tests/behavior/`、`docs/tutorial/` を全件実行。case を書いていない例があれば落ちる |
 | ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke + std lexer/parser parity(native 実行)|
 | commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査。数秒 |
 
@@ -124,6 +125,7 @@ CI は push/PR ごとに 1 job(`go test ./...` + gofmt)。定時実行は置き�
 | 開発ルール・禁止事項 | AGENTS.md |
 | メモリ安全モデル | docs/memory-safety.md |
 | std の API リファレンス | docs/std/ |
+| 作りながら覚える(web server など) | docs/tutorial/ |
 | stdlib の移行計画と builtin registry | docs/stdlib.md |
 | 性能作業の記録 | docs/perf.md |
 | self-host の移植を選んだ理由 | docs/adr/0130-selfhost-by-mechanical-porting.md |

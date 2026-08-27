@@ -1,0 +1,89 @@
+// A tiny client, so the tutorial is one program you can run.
+//
+// A real service loops on `accept` and clients arrive from elsewhere. Kizu has
+// no concurrency API yet (SPEC §15), so this program has to be both ends: it
+// connects, writes a request, lets the server answer it, and reads the reply.
+// Nothing in `service` knows this module exists.
+
+import std::fmt;
+import std::http;
+import std::mem;
+import std::net;
+import std::string;
+
+pub error Failure = http::Failure;
+
+// connect opens a stream to a port on the loopback address.
+pub fn connect(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+// request writes `METHOD target HTTP/1.1` with a Host and no body.
+pub fn request(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    method: []u8,
+    target: []u8
+) -> Failure!void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, method);
+    try out.append_byte(allocator, cast<u8>(32));
+    try out.append_bytes(allocator, target);
+    try out.append_bytes(allocator, " HTTP/1.1");
+    try crlf(allocator, &var out);
+    try out.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var out);
+    try crlf(allocator, &var out);
+    let bytes = out.as_bytes();
+    try stream.write_all(handle, bytes);
+    return;
+}
+
+// show reads to the close and prints the status line and the body. The
+// headers between them are the same three every time, so they are left out.
+pub fn show(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream
+) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try stream.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try stream.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    let end = http::head_end(wire, 0) orelse return http::Error::Incomplete;
+    let first = status_line_end(wire) orelse return http::Error::MalformedResponse;
+    print(wire[0..first]);
+    print(wire[end..mem::len(wire)]);
+    return;
+}
+
+fn status_line_end(wire: []u8) -> ?i64 {
+    let length = mem::len(wire);
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(13) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// crlf writes the two bytes that end an HTTP line. Kizu string literals carry
+// no escapes (SPEC §7), so CR is written as the number it is.
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}

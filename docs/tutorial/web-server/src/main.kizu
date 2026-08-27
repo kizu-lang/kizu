@@ -1,0 +1,96 @@
+// A visits service, end to end.
+//
+// The loop below is the whole server: accept one connection, answer it, let
+// it close, repeat. That is what `serve_forever` would be too -- the only
+// difference is that this one stops, so the tutorial can show what it printed.
+//
+// Read `service/service.kizu` for the part that is actually the service.
+// `wire/wire.kizu` is only here so this is one program you can run: Kizu has
+// no concurrency yet, so the client has to be the same process.
+
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import visits::service;
+import visits::wire;
+
+pub error Failure = service::Failure or net::Error or mem::Error;
+
+pub fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+
+    // Limits are the caller's. These are the defaults; a service behind a
+    // proxy and one on the open internet do not want the same ceiling.
+    var server = try http::listen_with(
+        handle, "127.0.0.1:0", http::default_limits());
+    defer server.deinit();
+    let port = try server.local_port();
+
+    var visits = service::visits_new(allocator);
+    defer visits.deinit(allocator);
+
+    try exchange(handle, allocator, &var server, &var visits, port, "GET", "/");
+    try exchange(handle, allocator, &var server, &var visits, port,
+        "POST", "/users/alice/visits");
+    try exchange(handle, allocator, &var server, &var visits, port,
+        "POST", "/users/alice/visits");
+    try exchange(handle, allocator, &var server, &var visits, port,
+        "GET", "/users/alice");
+    try exchange(handle, allocator, &var server, &var visits, port,
+        "GET", "/users/bob");
+    try exchange(handle, allocator, &var server, &var visits, port,
+        "DELETE", "/users/alice");
+    return;
+}
+
+// exchange is one request from a client and one answer from the server. In a
+// real service the two halves are two processes; here they take turns.
+fn exchange(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    visits: &var service::Visits,
+    port: i64,
+    method: []u8,
+    target: []u8
+) -> Failure!void {
+    var client = try wire::connect(handle, allocator, port);
+    defer client.deinit();
+    try wire::request(handle, allocator, &var client, method, target);
+    try serve_one(handle, allocator, server, visits);
+    try wire::show(handle, allocator, &var client);
+    return;
+}
+
+// serve_one is the loop body. It is its own frame so the exchange -- and the
+// connection with it -- is released before anyone reads: the response said
+// Connection: close, and the close is what ends the body.
+fn serve_one(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    visits: &var service::Visits
+) -> Failure!void {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try service::answer(handle, allocator, visits, &var held);
+    return;
+}
+
+// run
+// features: net http routing modules std-map io error-union
+// output:
+// HTTP/1.1 200 OK
+// visits service
+// HTTP/1.1 201 Created
+// alice has 1
+// HTTP/1.1 201 Created
+// alice has 2
+// HTTP/1.1 200 OK
+// alice has 2
+// HTTP/1.1 404 Not Found
+// no such user
+// HTTP/1.1 404 Not Found
+// no such path

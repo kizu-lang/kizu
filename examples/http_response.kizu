@@ -1,0 +1,99 @@
+// A response is built whole and then sent.
+//
+// Nothing reaches a socket until `encode` runs, which is what lets the status
+// line carry a Content-Length the body actually has. The alternative is
+// chunked transfer encoding, and that is a framing this implementation does
+// not speak -- so buffering is the honest shape rather than a partial one
+// that lies about its length.
+//
+// This example never opens a socket. Encoding is a function from a response
+// to bytes, so it can be read on its own.
+
+import std::http;
+import std::mem;
+import std::string;
+
+fn main() -> http::Failure!void {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+
+    try response.set_status(201);
+    try response.header(allocator, "Content-Type", "application/json");
+    try response.header(allocator, "X-Trace", "abc123");
+    // A Content-Length the caller sets is dropped. The body is right here, and
+    // a length that disagreed with it would desynchronise the connection.
+    try response.header(allocator, "Content-Length", "999");
+    // Kizu literals carry no escapes, so a JSON body with quotes in it is
+    // written as a multi-line literal (SPEC §7).
+    let body =
+        \\{"ok": true}
+    ;
+    try response.write(allocator, body);
+
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try response.encode(allocator, http::Version::Http11, false, &var wire);
+    let bytes = wire.as_bytes();
+    show(bytes);
+
+    // finish closes the response. Everything that would change it fails
+    // afterwards, so a second write cannot arrive behind a body already sent.
+    response.finish();
+    if response.write(allocator, "late") {
+        print("a write after finish was accepted");
+    } else |err| {
+        print("a write after finish was refused");
+    }
+
+    // A status that carries no body carries no Content-Length either: sending
+    // one is what makes a client wait for bytes that never come.
+    var empty = http::response_new(allocator);
+    defer empty.deinit(allocator);
+    try empty.set_status(304);
+    try empty.write(allocator, "ignored");
+    var head = string::new(allocator);
+    defer head.deinit(allocator);
+    try empty.encode(allocator, http::Version::Http11, false, &var head);
+    let head_bytes = head.as_bytes();
+    show(head_bytes);
+    return;
+}
+
+// show writes one message line at a time with the CR left off, so the wire
+// reads as text here. The bytes still end every line with CR LF.
+fn show(wire: []u8) -> void {
+    let length = mem::len(wire);
+    var start = 0;
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(10) {
+            var end = index;
+            if end > start and wire[end - 1] == cast<u8>(13) {
+                end = end - 1;
+            }
+            print(wire[start..end]);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    if start < length {
+        print(wire[start..length]);
+    }
+    return;
+}
+
+// run
+// features: http error-union
+// output:
+// HTTP/1.1 201 Created
+// Content-Type: application/json
+// X-Trace: abc123
+// Content-Length: 12
+// Connection: close
+//
+// {"ok": true}
+// a write after finish was refused
+// HTTP/1.1 304 Not Modified
+// Connection: close
+//

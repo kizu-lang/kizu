@@ -1,0 +1,203 @@
+// Serving a file is the two halves of std put together: a `{rest...}` route
+// says which file was asked for, and std::fs reads it under an explicit
+// ceiling. Nothing about it is special-cased in std::http -- a body is bytes,
+// and where the bytes came from is the program's business.
+//
+// The path a client sends is never joined to a directory as-is. `{rest...}`
+// hands back one decoded run, and this checks it before it becomes a path:
+// a `..` in a request is exactly what a traversal is made of.
+
+import std::fmt;
+import std::fs;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or fs::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+
+    try ask(handle, allocator, &var server, port, "GET /files/config.txt HTTP/1.1");
+    try ask(handle, allocator, &var server, port, "GET /files/../secret HTTP/1.1");
+    try ask(handle, allocator, &var server, port, "GET /files/missing.txt HTTP/1.1");
+    return;
+}
+
+fn serve_one(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var exchange = try server.accept(handle, allocator);
+    defer exchange.deinit(allocator);
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    let status = try read_file_for(handle, allocator, &exchange.request, &var body);
+    let text = body.as_bytes();
+    try exchange.respond_text(handle, allocator, status, "text/plain", text);
+    return;
+}
+
+// read_file_for answers with the status and fills the body. It is a separate
+// call from responding so that the read of `request` is over before the
+// exchange is taken mutably to answer.
+fn read_file_for(
+    handle: Io,
+    allocator: Allocator,
+    request: &http::Request,
+    body: &var string::String
+) -> Failure!i64 {
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    let method = request.method.as_bytes();
+    let target = request.target.as_bytes();
+    let path = http::path_of(target);
+    if !try http::route(allocator, "GET /files/{rest...}", method, path, &var params) {
+        try body.append_bytes(allocator, "no route");
+        return 404;
+    }
+    if params.find("rest") |entry| {
+        let name = entry.value.as_bytes();
+        if !safe_name(name) {
+            try body.append_bytes(allocator, "refused");
+            return 400;
+        }
+        return read_fixture(handle, allocator, name, body);
+    }
+    try body.append_bytes(allocator, "no name");
+    return 400;
+}
+
+fn read_fixture(
+    handle: Io,
+    allocator: Allocator,
+    name: []u8,
+    body: &var string::String
+) -> Failure!i64 {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, "examples/fixtures/");
+    try path.append_bytes(allocator, name);
+    let path_bytes = path.as_bytes();
+    if fs::read_file(handle, allocator, path_bytes, mem::Limit::Bytes(65536)) |text| {
+        var owned = move text;
+        defer owned.deinit(allocator);
+        let bytes = owned.as_bytes();
+        try body.append_bytes(allocator, bytes);
+        return 200;
+    } else |err| {
+        try body.append_bytes(allocator, "not found");
+        return 404;
+    }
+}
+
+// safe_name refuses everything that is not a plain file name. A `..` is what
+// a traversal is made of, and a leading `/` would leave the directory too.
+fn safe_name(name: []u8) -> bool {
+    let length = mem::len(name);
+    if length == 0 {
+        return false;
+    }
+    var index = 0;
+    while index < length {
+        let byte = name[index];
+        if byte == cast<u8>(47) or byte == cast<u8>(0) {
+            return false;
+        }
+        if byte == cast<u8>(46) and index + 1 < length and name[index + 1] == cast<u8>(46) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn ask(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    port: i64,
+    line: []u8
+) -> Failure!void {
+    var client = try open_client(handle, allocator, port);
+    defer client.deinit();
+    try send(handle, allocator, &var client, line);
+    try serve_one(handle, allocator, server);
+    try show(handle, allocator, &var client);
+    return;
+}
+
+fn open_client(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn send(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+    return;
+}
+
+fn show(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try client.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try client.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    let end = http::head_end(wire, 0) orelse return http::Error::Incomplete;
+    let first = line_end(wire) orelse return http::Error::MalformedResponse;
+    print(wire[0..first]);
+    print(wire[end..mem::len(wire)]);
+    return;
+}
+
+fn line_end(wire: []u8) -> ?i64 {
+    let length = mem::len(wire);
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(13) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http fs routing error-union
+// output:
+// HTTP/1.1 200 OK
+// kizu fs fixture
+//
+// HTTP/1.1 400 Bad Request
+// refused
+// HTTP/1.1 404 Not Found
+// not found

@@ -2954,6 +2954,36 @@ runtime selection の方針は ADR-0039 に従います。
 * safe Kizu に file descriptor や socket pointer は出さない
 * I/O failure は `!T` error として返す
 
+`std::http`:
+
+* `std::http::listen(io, address)` / `listen_with(io, address, limits)` は
+  `!std::http::Server` を返す
+* `server.accept(io, allocator)` は 1 接続を受け、request を 1 つ読み、
+  `!std::http::Exchange` を返す。**handler は取らない** —— 関数値は borrow を
+  運べないので handler に request を渡せず、pull の loop が残る形
+* `exchange.request` / `exchange.response` は public field
+* `exchange.respond(io, allocator)` / `respond_text(io, allocator, status,
+  content_type, body)` は `!void` を返し、2 度目は `Error::ResponseFinished`
+* `std::http::Request` は method / target / version / headers / body を所有
+  する。path と query は field ではなく、`path_of` / `query_of` が target の
+  中の run として返す
+* `std::http::Response` は組み立ててから送る。`Content-Length` /
+  `Transfer-Encoding` / `Connection` は message の実体から書き、caller が
+  set したものは落とす
+* `std::http::Limits` は request head の byte 数、header の個数、body の
+  byte 数の上限を caller が名指すもの
+* `std::http::route(allocator, pattern, method, path, params)` は
+  Go 1.22 `ServeMux` 綴りの pattern 1 つを照合して `!bool` を返す。
+  routing は登録簿ではなく、呼ぶ側が書く質問
+* `std::http::get` / `post` / `fetch` / `fetch_with` は
+  `!std::http::ClientResponse` を返す。`https` は `Error::UnsupportedScheme`
+  —— TLS を持たないので、暗号化を頼まれたものを平文で送らない
+* `std::http::write_request` / `read_response_from` は client の 2 つの半分。
+  stream を所有するのは呼ぶ側
+* keep-alive、chunked transfer encoding、TLS、HTTP/2、HTTP/3 は持たない。
+  request の `Transfer-Encoding` は `Error::UnsupportedEncoding`
+* 並行 API が無い(§15)ので 1 接続ずつ。2 人目は listen backlog で待つ
+
 `std::path`:
 
 * `std::path::join(allocator, left, right)` は `!std::string::String` を返す
