@@ -2,10 +2,6 @@ import std::arena;
 import std::mem;
 import std::testing;
 
-pub struct ParamItems {}
-pub struct ViaItems {}
-pub struct LinkNodes {}
-
 pub struct Item {
     pub score: i64,
 }
@@ -14,15 +10,15 @@ fn (self: &Item) doubled() -> i64 {
     return self.score * 2;
 }
 
-fn read_score<M>(items: &arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> i64 {
+fn read_score(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
     return items.at(h).score;
 }
 
-fn find<M>(items: &arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> &Item {
+fn find(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> &Item {
     return items.at(h);
 }
 
-fn bump_score<M>(items: &var arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> void {
+fn bump_score(items: &var arena::Arena<Item>, h: arena::Handle<Item>) -> void {
     if items.at_mut(h) |item| {
         item.score = item.score + 1;
     }
@@ -34,41 +30,41 @@ fn bump_score<M>(items: &var arena::Arena<Item, M>, h: arena::Handle<Item, M>) -
 // the same handle feeds each call without being handed back.
 test "a borrowed arena parameter accepts its caller's handle" {
     let allocator = mem::page_allocator();
-    var items = arena::new<Item, ParamItems>(allocator);
+    var items = arena::new<Item>(allocator);
     defer items.deinit(allocator);
     let h = try items.add(allocator, Item { score: 41 });
-    let item = find<ParamItems>(&items, h);
+    let item = find(&items, h);
     testing::expect_equal<i64>(41, item.score);
     testing::expect_equal<i64>(82, items.at(h).doubled());
-    bump_score<ParamItems>(items, h);
-    testing::expect_equal<i64>(42, read_score<ParamItems>(&items, h));
+    bump_score(items, h);
+    testing::expect_equal<i64>(42, read_score(&items, h));
 }
 
-fn read_via<M>(items: &arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> i64 {
-    return read_score<M>(items, h);
+fn read_via(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
+    return read_score(items, h);
 }
 
-// A forwarding helper carries the marker through: its inner call names the
-// same static parameter, so the arena and the handle stay the one arena's at
-// every hop (ADR-0134).
+// A forwarding helper chains the derived arena/handle pairing: at its inner
+// call site neither origin is visible, so the signature keeps carrying the
+// contract instead of the check failing closed.
 test "a forwarding helper chains the arena/handle contract" {
     let allocator = mem::page_allocator();
-    var items = arena::new<Item, ViaItems>(allocator);
+    var items = arena::new<Item>(allocator);
     defer items.deinit(allocator);
     let h = try items.add(allocator, Item { score: 7 });
-    testing::expect_equal<i64>(7, read_via<ViaItems>(&items, h));
+    testing::expect_equal<i64>(7, read_via(&items, h));
 }
 
 pub struct LinkNode {
     pub value: i64,
-    pub next: ?arena::Handle<LinkNode, LinkNodes>,
+    pub next: ?arena::Handle<LinkNode>,
 }
 
 // A handle read out of an optional field has no visible origin, so a local
 // arena accepts it the same way a borrowed one does.
 test "a local arena accepts handles read out of fields" {
     let allocator = mem::page_allocator();
-    let nodes = arena::new<LinkNode, LinkNodes>(allocator);
+    let nodes = arena::new<LinkNode>(allocator);
     defer nodes.deinit(allocator);
     let tail = try nodes.add(allocator, LinkNode { value: 2, next: null });
     let head = try nodes.add(allocator, LinkNode { value: 40, next: tail });

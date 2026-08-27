@@ -87,7 +87,7 @@ func (l *lowerer) variants(typeArg string) ([]metaField, error) {
 		out = append(out, metaField{
 			owner:   typeArg,
 			name:    variant.Name,
-			typ:     stdmeta.ResolveElementTypeForms(erasedText(variant.Payload)),
+			typ:     stdmeta.ResolveElementTypeForms(typ.Text(variant.Payload)),
 			variant: true,
 		})
 	}
@@ -109,7 +109,7 @@ func (l *lowerer) publicFields(typeArg string) ([]metaField, error) {
 		fields = append(fields, metaField{
 			owner: typeArg,
 			name:  field.Name,
-			typ:   stdmeta.ResolveElementTypeForms(erasedText(field.TypeName)),
+			typ:   stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName)),
 		})
 	}
 	return fields, nil

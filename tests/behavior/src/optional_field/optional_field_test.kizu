@@ -2,9 +2,6 @@ import std::arena;
 import std::mem;
 import std::testing;
 
-pub struct ChainNodes {}
-pub struct ProgExprs {}
-
 pub struct Config {
     pub limit: ?i64,
     pub label: []u8,
@@ -61,14 +58,14 @@ test "optional copy struct field captures its payload" {
 
 pub struct TreeNode {
     pub value: i64,
-    pub next: ?arena::Handle<TreeNode, ChainNodes>,
+    pub next: ?arena::Handle<TreeNode>,
 }
 
 pub struct Chain {
-    pub nodes: arena::Arena<TreeNode, ChainNodes>,
+    pub nodes: arena::Arena<TreeNode>,
 }
 
-fn (self: &Chain) total(h: arena::Handle<TreeNode, ChainNodes>) -> i64 {
+fn (self: &Chain) total(h: arena::Handle<TreeNode>) -> i64 {
     var sum = self.nodes.at(h).value;
     if self.nodes.at(h).next |n| {
         sum = sum + self.total(n);
@@ -80,7 +77,7 @@ fn (self: &Chain) total(h: arena::Handle<TreeNode, ChainNodes>) -> i64 {
 // a recursive structure walks itself through the arena without sentinels.
 test "optional handle field links a recursive structure" {
     let allocator = mem::page_allocator();
-    var chain = Chain { nodes: arena::new<TreeNode, ChainNodes>(allocator) };
+    var chain = Chain { nodes: arena::new<TreeNode>(allocator) };
     defer chain.deinit(allocator);
     let tail = try chain.nodes.add(allocator, TreeNode { value: 30, next: null });
     let mid = try chain.nodes.add(allocator, TreeNode { value: 12, next: tail });
@@ -89,7 +86,7 @@ test "optional handle field links a recursive structure" {
 }
 
 pub struct Branch {
-    pub condition: ?arena::Handle<Expr, ProgExprs>,
+    pub condition: ?arena::Handle<Expr>,
     pub value: i64,
 }
 
@@ -99,10 +96,10 @@ pub union Expr {
 }
 
 pub struct Prog {
-    pub exprs: arena::Arena<Expr, ProgExprs>,
+    pub exprs: arena::Arena<Expr>,
 }
 
-fn (self: &Prog) eval(h: arena::Handle<Expr, ProgExprs>) -> i64 {
+fn (self: &Prog) eval(h: arena::Handle<Expr>) -> i64 {
     return match self.exprs.at(h) {
         Literal(n) => n,
         If(b) => {
@@ -119,7 +116,7 @@ fn (self: &Prog) eval(h: arena::Handle<Expr, ProgExprs>) -> i64 {
 // tagged-union ABI lays the optional out as its presence tag plus payload.
 test "optional handle field inside a union payload evaluates recursively" {
     let allocator = mem::page_allocator();
-    var prog = Prog { exprs: arena::new<Expr, ProgExprs>(allocator) };
+    var prog = Prog { exprs: arena::new<Expr>(allocator) };
     defer prog.deinit(allocator);
     let lit = try prog.exprs.add(allocator, Expr::Literal(40));
     let top = try prog.exprs.add(allocator, Expr::If(Branch { condition: lit, value: 2 }));

@@ -801,11 +801,11 @@ func TestParseMatchLastArmCommaOptional(t *testing.T) {
 
 // TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
 func TestParseArenaAndStructLiteral(t *testing.T) {
-	input := `struct UserArena {} struct User {
+	input := `struct User {
     name: []u8,
 }
 fn main() {
-    let users = std::arena::new<User, UserArena>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(allocator, User { name: "alice" });
     print(users.get(alice).name);
 }`
@@ -814,9 +814,8 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `struct UserArena {  }
-struct User { name: []u8 }
-fn main() { let users = std::arena::new<User, UserArena>(allocator); ` +
+	want := `struct User { name: []u8 }
+fn main() { let users = std::arena::new<User>(allocator); ` +
 		`let alice = users.add(allocator, User { name: "alice" }); ` +
 		`print(users.get(alice).name); }`
 	if got := program.String(); got != want {

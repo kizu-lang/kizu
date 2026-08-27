@@ -391,7 +391,7 @@ func (c *Checker) collectUnions(program *ast.Program) {
 		order := make([]string, 0, len(unionDecl.Variants))
 		for _, variant := range unionDecl.Variants {
 			variants[variant.Name] = stdmeta.ResolveElementTypeForms(
-				erasedText(variant.Payload))
+				typ.Text(variant.Payload))
 			order = append(order, variant.Name)
 		}
 		c.unions[unionDecl.Name] = variants
@@ -478,12 +478,12 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 	params := make([]paramInfo, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		params = append(params, paramInfo{
-			typeName: erasedText(param.TypeName), borrow: param.Borrow, mutBorrow: param.MutBorrow,
+			typeName: typ.Text(param.TypeName), borrow: param.Borrow, mutBorrow: param.MutBorrow,
 		})
 	}
 	return &functionInfo{
 		name: name, sig: fn.FunctionSignature, params: params,
-		returnType: erasedText(fn.ReturnType), body: fn.Body,
+		returnType: typ.Text(fn.ReturnType), body: fn.Body,
 	}
 }
 
@@ -550,7 +550,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		if param.IsType() {
 			continue
 		}
-		env.define(c.newBinding(param.Name, erasedText(param.Type)))
+		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
 	}
 	for idx, param := range fn.sig.Params {
 		typeName := fn.params[idx].typeName
@@ -2660,7 +2660,7 @@ func optionalPayloadName(typeName string) string {
 	}
 	if parsed, err := typ.Parse(typeName); err == nil {
 		if _, success, ok := typ.ErrorUnionParts(parsed); ok {
-			return erasedText(success)
+			return typ.Text(success)
 		}
 	}
 	return typeName
@@ -3639,7 +3639,7 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 	if _, err := c.readExpr(expr.Value, env); err != nil {
 		return "", err
 	}
-	return erasedText(expr.TargetType), nil
+	return typ.Text(expr.TargetType), nil
 }
 
 // moveExpr checks an expression in a move context and enforces the `move`
@@ -4237,7 +4237,7 @@ func (c *Checker) checkFuncPointerCall(
 			return "", err
 		}
 	}
-	return erasedText(node.Result), nil
+	return typ.Text(node.Result), nil
 }
 
 // checkUserCall validates one declared-function call. sanctioned marks the
@@ -4964,20 +4964,6 @@ func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, erro
 	return name, c.instantiateTypeArgText(expr.TypeArg), nil
 }
 
-// arenaNewElementArg drops the marker `arena::new<T, M>` names at the call.
-// std's declaration takes the element alone, because which arena a handle came
-// from is the type checker's question (ADR-0134); ownership reads the wrapper
-// at the element.
-func arenaNewElementArg(name string, typeArg string) string {
-	if name != "std::arena::new" {
-		return typeArg
-	}
-	if parts, ok := splitGenericArgs(typeArg); ok && len(parts) == 2 {
-		return parts[0]
-	}
-	return typeArg
-}
-
 // checkTypeApplyCallExpr validates typed std constructor ownership effects.
 func (c *Checker) checkTypeApplyCallExpr(
 	expr *ast.TypeApplyExpr,
@@ -4994,7 +4980,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "ptr_from_int" || name == "int_from_ptr" {
 		return c.checkPointerIntCastBuiltin(name, typeArg, args, env)
 	}
-	typeArg = arenaNewElementArg(name, typeArg)
 	if typ, ok, err := c.checkGenericUserTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, err
 	}
@@ -5026,15 +5011,6 @@ func (c *Checker) checkAllocatorFrom(
 		}
 	}
 	return "Allocator", nil
-}
-
-// erasedText is the spelling one declared type has for ownership, with arena
-// markers dropped. A marker answers which arena a handle came from, and the
-// type checker answers that before ownership runs (ADR-0134), so every arena
-// of one element type is a single spelling here and the rules below state
-// themselves once.
-func erasedText(node typ.Type) string {
-	return typ.EraseArenaMarker(typ.Text(node))
 }
 
 // checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
@@ -5744,7 +5720,7 @@ func (c *Checker) genericCallFields(fn *functionInfo, typeArg string) map[string
 			owner = strings.TrimSpace(staticArgs[idx])
 			continue
 		}
-		if erasedText(param.Type) != "Field" {
+		if typ.Text(param.Type) != "Field" {
 			continue
 		}
 		name := strings.TrimSpace(staticArgs[idx])
@@ -8566,7 +8542,7 @@ func (c *Checker) errorUnionParts(typeName string) (string, string, bool) {
 		return "", "", false
 	}
 	errorType, success, ok := typ.ErrorUnionParts(parsed)
-	return erasedText(errorType), erasedText(success), ok
+	return typ.Text(errorType), typ.Text(success), ok
 }
 
 // returnTypeName returns void for functions without an explicit return type.
@@ -8607,11 +8583,7 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 		return c.resolveMetaTypeText(substituteOwnershipType(typeArg, c.typeArgValues))
 	}
 	for idx, arg := range args {
-		// A static argument may spell an arena, and which arena a handle came
-		// from is the type checker's question (ADR-0134). Ownership reads one
-		// spelling per element type.
-		args[idx] = typ.EraseArenaMarker(
-			c.resolveMetaTypeText(substituteOwnershipType(arg, c.typeArgValues)))
+		args[idx] = c.resolveMetaTypeText(substituteOwnershipType(arg, c.typeArgValues))
 	}
 	return strings.Join(args, ", ")
 }
@@ -8710,12 +8682,12 @@ func sameOwnershipType(left string, right string) bool {
 // fieldOwnershipType returns the full field type, including borrow prefixes.
 func fieldOwnershipType(field ast.Field) string {
 	if !field.Borrow {
-		return erasedText(field.TypeName)
+		return typ.Text(field.TypeName)
 	}
 	if field.MutBorrow {
-		return "&var " + erasedText(field.TypeName)
+		return "&var " + typ.Text(field.TypeName)
 	}
-	return "&" + erasedText(field.TypeName)
+	return "&" + typ.Text(field.TypeName)
 }
 
 // explicitOwnershipBorrowType extracts &T and &var T spellings.

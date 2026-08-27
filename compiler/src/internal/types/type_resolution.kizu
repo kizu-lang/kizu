@@ -12,12 +12,6 @@ import std::string;
 // diagnostic construction. Allocation failure and a malformed spelling minted
 // by the compiler remain operational `!`; source types arrive as parsed nodes.
 
-pub struct BodyContexts {}
-pub struct CheckedInstanceKeys {}
-pub struct DeinitOwnerMaps {}
-pub struct MatchValueKeys {}
-pub struct MetaFieldEntries {}
-
 struct TypeArityIssue {
     pub subject: Type,
     pub expected: i64
@@ -61,8 +55,6 @@ union TypeResolutionIssue {
     SingleGenericArity(Type),
     MapArity,
     MapKey,
-    ArenaArity(Type),
-    ArenaMarker(Type),
     UnknownGeneric(Type),
     UserGenericArity(TypeArityIssue),
     OptionalOptional(Type),
@@ -83,7 +75,7 @@ union TypeResolution {
 }
 
 struct MetaFieldHandle {
-    node: arena::Handle<MetaField, MetaFieldEntries>
+    node: arena::Handle<MetaField>
 }
 
 struct MetaField {
@@ -106,25 +98,19 @@ struct Checker {
     metadata: CheckerMetadata,
     type_params: TypeParamStore,
     type_args: TypeValueFrameStore,
-    meta_field_entries: arena::Arena<MetaField, MetaFieldEntries>,
+    meta_field_entries: arena::Arena<MetaField>,
     meta_bindings: MetaBindingStore,
-    body_contexts: arena::Arena<BodyContext, BodyContexts>,
-    current_body: ?arena::Handle<BodyContext, BodyContexts>,
+    body_contexts: arena::Arena<BodyContext>,
+    current_body: ?arena::Handle<BodyContext>,
     static_values: TypeValueFrameStore,
     checked_instances: map::Map<[]u8, bool>,
-    checked_instance_keys: arena::Arena<string::String, CheckedInstanceKeys>,
-    match_value_keys: arena::Arena<string::String, MatchValueKeys>,
+    checked_instance_keys: arena::Arena<string::String>,
+    match_value_keys: arena::Arena<string::String>,
     instantiation_depth: i64,
     capture_condition: bool,
-    deinit_owner_maps: arena::Arena<map::Map<[]u8, bool>, DeinitOwnerMaps>,
-    deinit_owners: ?arena::Handle<map::Map<[]u8, bool>, DeinitOwnerMaps>,
+    deinit_owner_maps: arena::Arena<map::Map<[]u8, bool>>,
+    deinit_owners: ?arena::Handle<map::Map<[]u8, bool>>,
     scopes: ScopeStore,
-    // The `arena::new` each marker names, and whether the declaration being
-    // read is std's. A marker makes one arena its own type, so naming one
-    // twice would make two arenas interchangeable again; std writes no marker
-    // at all, because a method works on every marker alike (ADR-0134).
-    arena_markers: map::Map<[]u8, ast::Span>,
-    current_std: bool,
     mark: UnsafeMark
 }
 
@@ -135,21 +121,19 @@ fn new_checker(allocator: Allocator) -> Checker {
         metadata: new_checker_metadata(allocator),
         type_params: new_type_param_store(allocator),
         type_args: new_type_value_frame_store(allocator),
-        meta_field_entries: arena::new<MetaField, MetaFieldEntries>(allocator),
+        meta_field_entries: arena::new<MetaField>(allocator),
         meta_bindings: new_meta_binding_store(allocator),
-        body_contexts: arena::new<BodyContext, BodyContexts>(allocator),
+        body_contexts: arena::new<BodyContext>(allocator),
         current_body: null,
         static_values: new_type_value_frame_store(allocator),
         checked_instances: map::new<[]u8, bool>(allocator),
-        checked_instance_keys: arena::new<string::String, CheckedInstanceKeys>(allocator),
-        match_value_keys: arena::new<string::String, MatchValueKeys>(allocator),
+        checked_instance_keys: arena::new<string::String>(allocator),
+        match_value_keys: arena::new<string::String>(allocator),
         instantiation_depth: 0,
         capture_condition: false,
-        deinit_owner_maps: arena::new<map::Map<[]u8, bool>, DeinitOwnerMaps>(allocator),
+        deinit_owner_maps: arena::new<map::Map<[]u8, bool>>(allocator),
         deinit_owners: null,
         scopes: new_scope_store(allocator),
-        arena_markers: map::new<[]u8, ast::Span>(allocator),
-        current_std: false,
         mark: UnsafeMark { used: null }
     };
 }
@@ -432,10 +416,6 @@ fn (self: &var Checker) resolve_generic_type(
     if mem::equal_bytes(base, "std::map::Map") {
         return self.resolve_map_type(tree, name, parsed, node);
     }
-    if mem::equal_bytes(base, typ::arena_type_name())
-        or mem::equal_bytes(base, typ::arena_handle_type_name()) {
-        return self.resolve_arena_type(tree, name, base_type, parsed, node);
-    }
     if mem::equal_bytes(base, "ptr") {
         if node.args.len() != 1 {
             return TypeResolution::Issue(TypeResolutionIssue::SingleGenericArity(base_type));
@@ -495,81 +475,6 @@ fn (self: &var Checker) resolve_user_generic_type(
         index = index + 1;
     }
     return TypeResolution::Value(name);
-}
-
-// Validates an `Arena<T, M>` or `Handle<T, M>` spelling, the Go
-// `resolveArenaType`. The marker is the second argument because it is the
-// rarer half of the answer: what the arena holds is what a reader asks first,
-// and which arena it is is what the type checker asks (ADR-0134).
-fn (self: &var Checker) resolve_arena_type(
-    tree: &ast::Ast,
-    name: Type,
-    base: Type,
-    parsed: typ::Type,
-    node: &typ::Name
-) -> !TypeResolution {
-    if node.args.len() == 1 and (self.current_std or self.checking_std_body()) {
-        // std declares its arena methods on `Arena<T>` because a method works
-        // on every marker alike; the receiver's marker is put back where the
-        // call is checked. Only std source may leave it out.
-        let only = typ::child_type(parsed, node.args.get_or_panic(0));
-        let retained = try self.types.retain_parsed(only);
-        return retain_resolution_name(name, try self.resolve_type_value(tree, retained));
-    }
-    if node.args.len() != 2 {
-        return TypeResolution::Issue(TypeResolutionIssue::ArenaArity(base));
-    }
-    let elem_node = typ::child_type(parsed, node.args.get_or_panic(0));
-    let elem = try self.types.retain_parsed(elem_node);
-    match try self.resolve_type_value(tree, elem) {
-        Issue(issue) => return TypeResolution::Issue(issue),
-        Value(_) => {},
-    }
-    let marker_node = typ::child_type(parsed, node.args.get_or_panic(1));
-    let marker = try self.types.retain_parsed(marker_node);
-    if try self.resolve_arena_marker(tree, marker) |issue| {
-        return TypeResolution::Issue(issue);
-    }
-    return TypeResolution::Value(name);
-}
-
-// Validates the type standing in an arena's marker position, the Go
-// `resolveArenaMarker`. A marker holds nothing, so a struct with no fields is
-// the whole of what it may be; a type parameter passes because the instance it
-// binds to is checked where it is written, and a name whose declaration has not
-// been collected yet passes because the `new` that makes the arena answers it.
-fn (self: &var Checker) resolve_arena_marker(
-    tree: &ast::Ast,
-    marker: Type
-) -> !?TypeResolutionIssue {
-    if self.is_type_parameter(marker) {
-        return null;
-    }
-    let spelling = try self.types.copy_text(self.allocator, marker);
-    defer spelling.deinit(self.allocator);
-    let bytes = spelling.as_bytes();
-    if self.metadata.structs.get(bytes) |declaration| {
-        if arena_marker_declaration(tree, declaration) {
-            return null;
-        }
-        return TypeResolutionIssue::ArenaMarker(marker);
-    }
-    // A signature can name a marker declared in a file collected later.
-    // Whether it is a struct with no fields is answered at the `new` that
-    // makes the arena, which is a body and runs after every declaration is in.
-    if self.metadata.declared_types.get(bytes) |_| {
-        return null;
-    }
-    return TypeResolutionIssue::ArenaMarker(marker);
-}
-
-// Reports whether one declaration is a struct that can be an arena marker: a
-// marker holds nothing, so no fields and no static parameters.
-fn arena_marker_declaration(tree: &ast::Ast, declaration: ast::Declaration) -> bool {
-    match tree.declarations.at(declaration.node) {
-        Struct(node) => return node.fields.len() == 0 and node.type_params.len() == 0,
-        _ => return false,
-    }
 }
 
 fn (self: &var Checker) resolve_map_type(

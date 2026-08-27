@@ -207,19 +207,9 @@ func runtimeBuiltinReturnType(name string) (string, bool) {
 	}
 }
 
-// erasedText is the spelling one declared type has for the lowerer, with arena
-// markers dropped. A marker names which arena a handle came from, which the
-// type checker answers before anything is lowered (ADR-0134); no layer from
-// here down can read one, so this is where they stop.
-func erasedText(node typ.Type) string {
-	return typ.EraseArenaMarker(typ.Text(node))
-}
-
-// arenaHandleType returns std::arena::Handle<T> for an element type T. Markers
-// are erased before anything is lowered (ADR-0134), so every arena of one
-// element type is one spelling here.
+// arenaHandleType returns std::arena::Handle<T> for an element type T.
 func arenaHandleType(elem string) string {
-	return typ.ArenaHandleTypeName + "<" + elem + ">"
+	return "std::arena::Handle<" + elem + ">"
 }
 
 // arenaElementType returns T for std::arena::Arena<T>.
@@ -253,5 +243,5 @@ func errorUnionParts(types *typ.Table, result string) (string, string, bool) {
 		return "", "", false
 	}
 	errorType, success, ok := typ.ErrorUnionParts(parsed)
-	return erasedText(errorType), erasedText(success), ok
+	return typ.Text(errorType), typ.Text(success), ok
 }

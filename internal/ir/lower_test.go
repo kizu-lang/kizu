@@ -251,11 +251,11 @@ func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 // TestLowerErrDeferRunsOnlyOnErrorReturn checks errdefer cleanup attaches to
 // the try error path and an explicit error return, but is skipped on success.
 func TestLowerErrDeferRunsOnlyOnErrorReturn(t *testing.T) {
-	errorReturn := lowerSource(t, `struct UserArena {} error BuildError { Boom }
+	errorReturn := lowerSource(t, `error BuildError { Boom }
 struct User { name: []u8 }
-fn make() -> !std::arena::Arena<User, UserArena> {
+fn make() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User, UserArena>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit(allocator);
     return BuildError::Boom;
 }
@@ -265,11 +265,11 @@ fn main() {}`)
 		t.Fatalf("error return must emit errdefer cleanup:\n%s", dump)
 	}
 
-	successReturn := lowerSource(t, `struct UserArena {} error BuildError { Boom }
+	successReturn := lowerSource(t, `error BuildError { Boom }
 struct User { name: []u8 }
-fn make() -> !std::arena::Arena<User, UserArena> {
+fn make() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User, UserArena>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit(allocator);
     return move users;
 }
