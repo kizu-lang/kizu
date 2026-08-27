@@ -99,7 +99,7 @@ pub fn parse_request_head(
     var request = request_new(allocator);
     errdefer request.deinit(allocator);
     let after_line = try parse_request_line(allocator, &var request, head);
-    try parse_fields(allocator, &var request.headers, head, after_line, limits);
+    try parse_header_fields(allocator, &var request.headers, head, after_line, limits);
     return move request;
 }
 
@@ -138,6 +138,10 @@ fn parse_request_line(
     return line_end + 2;
 }
 
+// A token that is not shaped like a version at all is a malformed request
+// line; one that is, and names a version this does not speak, is the other
+// failure. The two are different answers to different questions
+// (docs/principles.md §7), and only the second is worth a 505.
 fn parse_version(text: []u8) -> std::http::Failure!std::http::Version {
     if std::mem::equal_bytes(text, "HTTP/1.1") {
         return std::http::Version::Http11;
@@ -145,7 +149,10 @@ fn parse_version(text: []u8) -> std::http::Failure!std::http::Version {
     if std::mem::equal_bytes(text, "HTTP/1.0") {
         return std::http::Version::Http10;
     }
-    return std::http::Error::UnsupportedVersion;
+    if std::mem::starts_with(text, "HTTP/") {
+        return std::http::Error::UnsupportedVersion;
+    }
+    return std::http::Error::MalformedRequest;
 }
 
 // valid_target refuses a target with a byte no URI may carry. A space would
@@ -164,11 +171,13 @@ fn valid_target(target: []u8) -> bool {
     return true;
 }
 
-// parse_fields reads `NAME ":" OWS VALUE OWS CRLF` lines until the blank one.
+// parse_header_fields reads `NAME ":" OWS VALUE OWS CRLF` lines until the
+// blank one. A request head and a response head differ only in their first
+// line, so both read their fields here.
 // A line that starts with space or tab is a folded continuation, which RFC
 // 9110 removed from the protocol: it is refused rather than joined, because
 // joining it is what lets one header be smuggled inside another.
-fn parse_fields(
+pub fn parse_header_fields(
     allocator: Allocator,
     headers: &var std::http::Headers,
     head: []u8,
@@ -241,4 +250,55 @@ fn trim_ows(value: []u8) -> []u8 {
         end = end - 1;
     }
     return value[start..end];
+}
+
+// read_head reads from a stream until the blank line that ends a message
+// head, and answers with how many bytes that head is. Reading past it is
+// expected: a peer sends the head and the body in whatever packets it likes,
+// so the extra bytes are the start of the body and the caller carries on from
+// there.
+//
+// A request head and a response head end the same way, so both read here.
+pub fn read_head(
+    io: Io,
+    allocator: Allocator,
+    stream: &var std::net::TcpStream,
+    buffer: &var std::string::String,
+    limits: std::http::Limits
+) -> std::http::Failure!i64 {
+    var scanned = 0;
+    while true {
+        let found = scan_head(buffer, scanned);
+        if found |end| {
+            // The ceiling is on the head, not on what one read happened to
+            // bring: a head that arrived whole in one packet is still too
+            // large if it is past the limit.
+            if end > limits.max_head_bytes {
+                return std::http::Error::HeadTooLarge;
+            }
+            return end;
+        }
+        if buffer.len() >= limits.max_head_bytes {
+            return std::http::Error::HeadTooLarge;
+        }
+        // A CRLF CRLF can straddle the boundary by at most three bytes, so
+        // resuming three back is what makes the scan linear over the head
+        // rather than quadratic in the number of reads.
+        scanned = buffer.len() - 3;
+        if scanned < 0 {
+            scanned = 0;
+        }
+        let got = try stream.read_into(io, allocator, buffer, 4096);
+        if got == 0 {
+            return std::http::Error::Incomplete;
+        }
+    }
+    return std::http::Error::Incomplete;
+}
+
+// scan_head keeps the borrow of the buffer inside one call, so the read that
+// grows it next is free to take the buffer mutably.
+fn scan_head(buffer: &std::string::String, from: i64) -> ?i64 {
+    let bytes = buffer.as_bytes();
+    return head_end(bytes, from);
 }

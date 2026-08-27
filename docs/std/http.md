@@ -264,6 +264,63 @@ handler の登録簿は同じ質問を lookup の中で答えるだけで、選�
 呼び出し元から見えません。`if` の連鎖なら、その path で何が動くかは path を
 名指した場所に書いてあります。
 
+## Client
+
+```kizu
+pub struct ClientResponse {
+    pub status: i64,
+    pub version: std::http::Version,
+    pub reason: std::string::String,
+    pub headers: std::http::Headers,
+    pub body: std::string::String,
+}
+
+pub fn get(io, allocator, url) -> std::http::Failure!std::http::ClientResponse
+pub fn post(io, allocator, url, content_type, body)
+    -> std::http::Failure!std::http::ClientResponse
+pub fn fetch(io, allocator, method, url, content_type, body)
+    -> std::http::Failure!std::http::ClientResponse
+pub fn fetch_with(io, allocator, method, url, content_type, body, limits)
+    -> std::http::Failure!std::http::ClientResponse
+
+pub fn write_request(io, allocator, stream, method, url: &Url, content_type, body)
+    -> std::http::Failure!void
+pub fn read_response_from(io, allocator, stream, method, limits)
+    -> std::http::Failure!std::http::ClientResponse
+pub fn parse_response_head(allocator, head, limits)
+    -> std::http::Failure!std::http::ClientResponse
+```
+
+`get` は 1 呼び出しです —— connect、write、答えを丸ごと read、close。
+`Connection: close` を送ったとおりに閉じます。
+
+**connection pool も redirect 追従もありません。** どちらも policy(socket を
+どれだけ保つか、別 host への 301 は同じ request か)で、library が選んだ policy は
+呼ぶ側から見えない policy です。返るのは server が言ったことです。
+
+`ClientResponse` は `Response` とは別の型です。片方は server がまだ組み立てて
+いるもの、もう片方は client がもう持っているものだからです(原理 7)。
+
+### 2 つに割れている理由
+
+`get` は connect して write して **read で待つ**ので、同じプロセスの server に
+対しては使えません —— 答えるはずの accept が同じ thread にあるからです。これは
+並行性の欠落(SPEC §15)であって client の欠落ではありません。
+
+だから `write_request` と `read_response_from` が公開されています。stream を
+持つのは呼ぶ側で、`fetch` はその 2 つを connect で挟んだものです。これは同時に、
+まだ無い層が刺さる継ぎ目でもあります —— TLS も proxy も、client ではなく stream を
+所有します。
+
+### 答えの framing
+
+`Content-Length` があればその長さちょうど。無ければ **close が framing** です ——
+`Connection: close` を送ったので、end of stream が body の終わりです。推測では
+なく、protocol がそう言っています。
+
+`Transfer-Encoding` のある答えは `Error::UnsupportedEncoding` です。HEAD の答えと
+1xx / 204 / 304 は body を取りません。
+
 ## 今は話さないこと
 
 - **keep-alive**: 1 接続 1 request で、response は `Connection: close` を送ります

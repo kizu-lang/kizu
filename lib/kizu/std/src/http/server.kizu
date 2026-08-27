@@ -141,62 +141,14 @@ fn read_request(
 ) -> std::http::Failure!std::http::Request {
     var buffer = std::string::new(allocator);
     defer buffer.deinit(allocator);
-    let head_length = try read_head(io, allocator, stream, &var buffer, limits);
-    var request = try parse_head(allocator, &buffer, head_length, limits);
+    let head_length = try std::http::read_head(io, allocator, stream, &var buffer, limits);
+    var request = try parse_request_at(allocator, &buffer, head_length, limits);
     errdefer request.deinit(allocator);
-    try read_body(io, allocator, stream, &var buffer, &var request, head_length, limits);
+    try read_request_body(io, allocator, stream, &var buffer, &var request, head_length, limits);
     return move request;
 }
 
-// read_head reads until the blank line that ends the head, and answers with
-// how many bytes that head is. Reading past it is expected: a client sends the
-// head and the body in whatever packets it likes, so the extra bytes are the
-// start of the body and read_body carries on from there.
-fn read_head(
-    io: Io,
-    allocator: Allocator,
-    stream: &var std::net::TcpStream,
-    buffer: &var std::string::String,
-    limits: std::http::Limits
-) -> std::http::Failure!i64 {
-    var scanned = 0;
-    while true {
-        let found = scan_head(buffer, scanned);
-        if found |end| {
-            // The ceiling is on the head, not on what one read happened to
-            // bring: a head that arrived whole in one packet is still too
-            // large if it is past the limit.
-            if end > limits.max_head_bytes {
-                return std::http::Error::HeadTooLarge;
-            }
-            return end;
-        }
-        if buffer.len() >= limits.max_head_bytes {
-            return std::http::Error::HeadTooLarge;
-        }
-        // A CRLF CRLF can straddle the boundary by at most three bytes, so
-        // resuming three back is what makes the scan linear over the head
-        // rather than quadratic in the number of reads.
-        scanned = buffer.len() - 3;
-        if scanned < 0 {
-            scanned = 0;
-        }
-        let got = try stream.read_into(io, allocator, buffer, 4096);
-        if got == 0 {
-            return std::http::Error::Incomplete;
-        }
-    }
-    return std::http::Error::Incomplete;
-}
-
-// scan_head keeps the borrow of the buffer inside one call, so the read that
-// grows it next is free to take the buffer mutably.
-fn scan_head(buffer: &std::string::String, from: i64) -> ?i64 {
-    let bytes = buffer.as_bytes();
-    return std::http::head_end(bytes, from);
-}
-
-fn parse_head(
+fn parse_request_at(
     allocator: Allocator,
     buffer: &std::string::String,
     head_length: i64,
@@ -210,7 +162,7 @@ fn parse_head(
 // A message with no Content-Length has no body: without one there is nothing
 // that says where a body would end, and guessing is how two requests become
 // one (request smuggling).
-fn read_body(
+fn read_request_body(
     io: Io,
     allocator: Allocator,
     stream: &var std::net::TcpStream,
@@ -240,11 +192,11 @@ fn read_body(
             return std::http::Error::Incomplete;
         }
     }
-    try copy_body(allocator, buffer, request, head_length, length);
+    try copy_request_body(allocator, buffer, request, head_length, length);
     return;
 }
 
-fn copy_body(
+fn copy_request_body(
     allocator: Allocator,
     buffer: &std::string::String,
     request: &var std::http::Request,
