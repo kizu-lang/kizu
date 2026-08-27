@@ -806,7 +806,7 @@ func TestParseArenaAndStructLiteral(t *testing.T) {
 }
 fn main() {
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     print(users.get(alice).name);
 }`
 	p := New(lexer.New(input))
@@ -816,7 +816,7 @@ fn main() {
 	}
 	want := `struct User { name: []u8 }
 fn main() { let users = std::arena::new<User>(allocator); ` +
-		`let alice = users.add(User { name: "alice" }); ` +
+		`let alice = users.add(allocator, User { name: "alice" }); ` +
 		`print(users.get(alice).name); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)

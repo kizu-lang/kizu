@@ -88,7 +88,7 @@ fn (self: &Checker) validate_owner_union_cleanup(
                                             if owner_union_ident_is(
                                                 tree, matched.value, self_name
                                             ) {
-                                                return self.check_owner_union_arms(
+                                                return self.check_owner_union_arms(self.allocator,
                                                     tree, declaration, union_type,
                                                     matched, method);
                                             }
@@ -99,7 +99,7 @@ fn (self: &Checker) validate_owner_union_cleanup(
                                                     if owner_union_ident_is(
                                                         tree, matched.value, self_name
                                                     ) {
-                                                        return self.check_owner_union_arms(
+                                                        return self.check_owner_union_arms(self.allocator,
                                                             tree, declaration, union_type,
                                                             matched, method);
                                                     }
@@ -123,6 +123,8 @@ fn (self: &Checker) validate_owner_union_cleanup(
 }
 
 fn (self: &Checker) check_owner_union_arms(
+
+    allocator: Allocator,
     tree: &ast::Ast, declaration: &ast::UnionDecl,
     union_type: &UnionType, matched: &ast::MatchStmt, method: FunctionHandle
 ) -> !?OwnerUnionProblem {
@@ -137,7 +139,7 @@ fn (self: &Checker) check_owner_union_arms(
         if mem::equal_bytes(tag, "_") {
             return OwnerUnionProblem::Wildcard;
         }
-        try arms.insert(tag, index);
+        try arms.insert(allocator, tag, index);
         index = index + 1;
     }
     index = 0;
@@ -235,17 +237,17 @@ fn (self: &Checker) owner_union_diagnostic(
             try append_owner_union_subject(self.allocator, &var message, tree, owner);
         },
         Binding(variant) => {
-            try append_owner_union_variant(self.allocator, 
+            try append_owner_union_variant(self.allocator,
                 &var message, tree, owner, variant);
         },
         Cleanup(value) => {
-            try append_owner_union_variant(self.allocator, 
+            try append_owner_union_variant(self.allocator,
                 &var message, tree, owner, value.variant);
         },
         _ => try append_owner_union_subject(self.allocator, &var message, tree, owner),
     }
     match problem {
-        Generic => try message.append_bytes(self.allocator, 
+        Generic => try message.append_bytes(self.allocator,
             " is unsupported; use a concrete owner union with explicit `deinit`"),
         ReturnVoid => try message.append_bytes(self.allocator, " deinit must return void"),
         OnlySelf => {
@@ -265,14 +267,14 @@ fn (self: &Checker) owner_union_diagnostic(
             try self.append_owner_union_self_name(&var message, method);
             try message.append_bytes(self.allocator, "` with an exhaustive `match`");
         },
-        Wildcard => try message.append_bytes(self.allocator, 
+        Wildcard => try message.append_bytes(self.allocator,
             " deinit `match` cannot use `_`; clean each variant explicitly"),
         Missing(variant) => {
             try message.append_bytes(self.allocator, " deinit must handle variant `");
             try append_collection_text(self.allocator, &var message, tree, variant);
             try message.append_byte(self.allocator, cast<u8>(96));
         },
-        Binding(_) => try message.append_bytes(self.allocator, 
+        Binding(_) => try message.append_bytes(self.allocator,
             "` must bind its payload to clean it in deinit"),
         Cleanup(value) => {
             try message.append_bytes(self.allocator, "` must clean its payload via `");
@@ -291,7 +293,9 @@ fn append_owner_union_subject(allocator: Allocator, out: &var string::String, tr
     return out.append_byte(allocator, cast<u8>(96));
 }
 
-fn append_owner_union_variant(allocator: Allocator, 
+fn append_owner_union_variant(
+
+    allocator: Allocator,
     out: &var string::String, tree: &ast::Ast, owner: ast::Text, variant: ast::Text
 ) -> !void {
     try out.append_bytes(allocator, "owner-payload union variant `");

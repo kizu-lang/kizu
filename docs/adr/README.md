@@ -124,6 +124,6 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0128: std の allocation 失敗は `std::mem::Error::OutOfMemory` の 1 値にする](0128-std-allocation-error-taxonomy.md)
 - [ADR-0129: Allocator を user 実装に開く。安全性は tie が持つ](0129-user-defined-allocator.md) (ADR-0092 決定 1 の改訂)
 - [ADR-0130: selfhost は機械移植で作り、Go は seed として残す](0130-selfhost-by-mechanical-porting.md)
-- [ADR-0131: `Array<T>` は header そのもので、header への pointer ではない](0131-array-is-its-header.md)
+- [ADR-0131: container は header そのもので、header への pointer ではない](0131-a-container-is-its-header.md)
 - [ADR-0132: 解放は allocator を名指す](0132-release-names-its-allocator.md)
 - [ADR-0133: optional は要素が持つ niche を使う](0133-optional-uses-the-niche-its-element-has.md)

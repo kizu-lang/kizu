@@ -2,6 +2,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
 import std::mem;
+import std::string;
 
 // Mechanical port of internal/llvm/map.go: the hosted Map runtime
 // declarations and the `map.*` instructions. writeSliceParts, which other
@@ -13,20 +14,41 @@ fn is_map_llvm_type(typ_name: []u8) -> bool {
     return mem::starts_with(typ_name, "std::map::Map<") and ir::ends_with_bytes(typ_name, ">");
 }
 
+/// Names the runtime's KizuMap header in emitted modules, the Go
+/// `mapHeaderType`. A map is its header rather than a pointer to one, so an
+/// empty map costs no allocation at all: the compiler keeps half a million
+/// alive at once and most of them never hold an entry. runtime.c asserts the
+/// same offsets, so the two spellings cannot drift apart (ADR-0131).
+fn map_header_type() -> []u8 {
+    return "%kizu.map";
+}
+
+/// What map_header_type occupies, the Go `mapHeaderSize`: the entry storage
+/// and its count, plus the index that makes a lookup O(1). Neither the value
+/// size nor the allocator is among them (ADR-0132).
+pub fn map_header_size() -> i64 {
+    return 40;
+}
+
+/// The field index of the entry count, which is all Map.len reads.
+fn map_field_len() -> i64 {
+    return 1;
+}
+
 /// Writes declarations for the hosted Map runtime, the Go
 /// `writeMapRuntimeDecls`.
 fn (self: &var Emitter) write_map_runtime_decls(module: &ir::Module) -> !void {
     if !self.uses_map_runtime(module) {
         return;
     }
-    try self.line("declare ptr @kizu_map_new(ptr, i64)");
-    try self.line("declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)");
+    try self.line1("%s = type { ptr, i64, i64, ptr, i64 }", Arg::Lit(map_header_type()));
+    try self.line("declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)");
     try self.line("declare ptr @kizu_map_get(ptr, ptr, i64)");
     try self.line("declare ptr @kizu_map_value_at(ptr, i64)");
     try self.line("declare void @kizu_map_key_at(ptr, ptr, i64)");
     try self.line("declare i1 @kizu_map_contains(ptr, ptr, i64)");
     try self.line("declare i64 @kizu_map_len(ptr)");
-    try self.line("declare void @kizu_map_deinit(ptr)");
+    try self.line("declare void @kizu_map_deinit(ptr, ptr, i64)");
     return self.line("");
 }
 
@@ -74,9 +96,21 @@ fn (self: &var Emitter) write_map_instr(module: &ir::Module, node: &ir::InstrNod
     }
 }
 
-/// Lowers std::map::new<K, V>(allocator), the Go `writeMapNew`.
+/// Lowers std::map::new<K, V>(allocator) to the header value an empty map is,
+/// the Go `writeMapNew`: five zero words. An empty map owns no storage, so it
+/// needs none, and it keeps nothing about how to grow either -- the allocator
+/// the constructor names is read by the checker, which requires every later
+/// call that allocates or releases to name the same one (ADR-0131, ADR-0132).
+/// So the construction costs no instruction at all.
 fn (self: &var Emitter) write_map_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    return self.write_container_new(module, node, "kizu_map_new", ContainerKind::Map, "map.new expects allocator -> Map<K, V>");
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if node.args.len() != 1 or !is_map_llvm_type(result_type) {
+        return try self.fail0("llvm error: map.new expects allocator -> Map<K, V>");
+    }
+    let zero = try self.names.intern("zeroinitializer");
+    try self.set_value(module, node.result, zero);
+    return null;
 }
 
 /// Renders one key as the (pointer, length) pair the runtime hashes and
@@ -118,24 +152,38 @@ fn (self: &var Emitter) write_map_key_parts(
     return null;
 }
 
-/// Lowers Map.insert(key, value), the Go `writeMapInsert`.
+/// Lowers Map.insert(allocator, key, value), the Go `writeMapInsert`. The
+/// insert is what buys the storage the entry goes in, so it names the
+/// allocator it buys from and the width of the value it copies: the header
+/// keeps neither (ADR-0132).
 fn (self: &var Emitter) write_map_insert(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 3 or !module.names.is(node.result.type_name, "std::mem::Error!void") {
-        return try self.fail0("llvm error: map.insert expects Map, K, V -> std::mem::Error!void");
+    if node.args.len() != 4 or !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0(
+            "llvm error: map.insert expects Map, Allocator, K, V -> std::mem::Error!void");
     }
+    var value_type = string::new(self.allocator);
+    defer value_type.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var value_type) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let value_bytes = value_type.as_bytes();
     let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
     let key_base = try self.suffixed(result_name, ".key");
     var key_parts = empty_slice_parts();
-    if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(1), &var key_parts) |failed| {
+    if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(2), &var key_parts) |failed| {
         return move failed;
     }
     let value_base = try self.suffixed(result_name, ".value");
-    let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(2));
+    let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(3));
     let ok_name = try self.suffixed(result_name, ".ok");
-    try self.line5(
-        "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, i64 %s, ptr %s)",
-        Arg::Str(ok_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(value_slot)
+    let size = try self.element_size_operand_bytes(module, value_bytes);
+    try self.line7(
+        "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)",
+        Arg::Str(ok_name), Arg::Str(allocator.operand), Arg::Str(map_value.operand),
+        Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(value_slot), Arg::Str(size)
     );
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::MapInsert);
 }
@@ -318,18 +366,43 @@ fn (self: &var Emitter) write_map_len(module: &ir::Module, node: &ir::InstrNode)
     }
     let map_value = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
-    try self.line2("  %s = call i64 @kizu_map_len(ptr %s)", Arg::Str(result_name), Arg::Str(map_value.operand));
+    let addr_synthetic = try self.next_synthetic_value("map.len.addr");
+    let addr = try self.percent(addr_synthetic);
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 0, i32 %d",
+        Arg::Str(addr), Arg::Lit(map_header_type()), Arg::Str(map_value.operand),
+        Arg::Int(map_field_len())
+    );
+    try self.line2("  %s = load i64, ptr %s", Arg::Str(result_name), Arg::Str(addr));
     try self.set_value(module, node.result, result_name);
     return null;
 }
 
 /// Lowers Map.deinit(), the Go `writeMapDeinit`.
 fn (self: &var Emitter) write_map_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
-        return try self.fail0("llvm error: map.deinit expects Map -> void");
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: map.deinit expects Map, Allocator -> void");
     }
-    let map_value = try self.operand(module, node.args.get_or_panic(0));
-    try self.line1("  call void @kizu_map_deinit(ptr %s)", Arg::Str(map_value.operand));
+    var value_type = string::new(self.allocator);
+    defer value_type.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var value_type) {
+        return try self.fail0(
+            "llvm error: emitter bug: a release measures an element but was handed no container");
+    }
+    let value_bytes = value_type.as_bytes();
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
+    // The release is handed the header itself, the way Array.deinit is. The
+    // runtime walks the entries it frees, so the header goes to a slot the
+    // call can reach it through; nothing reads it back, since the binding is
+    // gone by the time this returns.
+    let map_synthetic = try self.next_synthetic_value("map.deinit");
+    let map_base = try self.percent(map_synthetic);
+    let slot = try self.write_stack_value(module, map_base, node.args.get_or_panic(0));
+    let size = try self.element_size_operand_bytes(module, value_bytes);
+    try self.line3(
+        "  call void @kizu_map_deinit(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(allocator.operand), Arg::Str(slot), Arg::Str(size)
+    );
     try self.set_void_value(module, node.result);
     return null;
 }

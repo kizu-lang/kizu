@@ -8,19 +8,34 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
+// mapHeaderType names the runtime's KizuMap header in emitted modules. A map
+// is its header rather than a pointer to one, so an empty map costs no
+// allocation at all: the compiler keeps half a million alive at once and most
+// of them never hold an entry. runtime.c asserts the same offsets, so the two
+// spellings cannot drift apart (ADR-0131).
+const mapHeaderType = "%kizu.map"
+
+// mapHeaderSize is what mapHeaderType occupies: the entry storage and its
+// count, plus the index that makes a lookup O(1). Neither the value size nor
+// the allocator is among them (ADR-0132).
+const mapHeaderSize = 40
+
+// The field index of the entry count, which is all Map.len reads.
+const mapFieldLen = 1
+
 // writeMapRuntimeDecls writes declarations for the hosted Map runtime.
 func (e *emitter) writeMapRuntimeDecls() {
 	if !e.usesMapRuntime() {
 		return
 	}
-	e.out.WriteString("declare ptr @kizu_map_new(ptr, i64)\n")
-	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)\n")
+	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, ptr, i64 }\n", mapHeaderType)
+	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_map_value_at(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_map_key_at(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_map_len(ptr)\n")
-	e.out.WriteString("declare void @kizu_map_deinit(ptr)\n\n")
+	e.out.WriteString("declare void @kizu_map_deinit(ptr, ptr, i64)\n\n")
 }
 
 // usesMapRuntime reports whether this module uses std::map::Map lowering.
@@ -63,27 +78,45 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeMapNew lowers std::map::new<K, V>(allocator).
+// writeMapNew lowers std::map::new<K, V>(allocator) to the header value an
+// empty map is: five zero words. An empty map owns no storage, so it needs
+// none, and it keeps nothing about how to grow either -- the allocator the
+// constructor names is read by the checker, which requires every later call
+// that allocates or releases to name the same one (ADR-0131, ADR-0132). So
+// the construction costs no instruction at all.
 func (e *emitter) writeMapNew(instr *ir.Instr) error {
-	return e.writeContainerNew(instr, "kizu_map_new",
-		isMapLLVMType, "map.new expects allocator -> Map<K, V>")
+	if len(instr.Args) != 1 || !isMapLLVMType(instr.Result.Type) {
+		return fmt.Errorf("llvm error: map.new expects allocator -> Map<K, V>")
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "zeroinitializer"}
+	return nil
 }
 
-// writeMapInsert lowers Map.insert(key, value).
+// writeMapInsert lowers Map.insert(allocator, key, value). The insert is what
+// buys the storage the entry goes in, so it names the allocator it buys from
+// and the width of the value it copies: the header keeps neither (ADR-0132).
 func (e *emitter) writeMapInsert(instr *ir.Instr) error {
-	if len(instr.Args) != 3 || instr.Result.Type != "std::mem::Error!void" {
-		return fmt.Errorf("llvm error: map.insert expects Map, K, V -> std::mem::Error!void")
+	if len(instr.Args) != 4 || instr.Result.Type != "std::mem::Error!void" {
+		return fmt.Errorf(
+			"llvm error: map.insert expects Map, Allocator, K, V -> std::mem::Error!void")
 	}
-	mapValue := e.value(instr.Args[0])
-	keyPtr, keyLen, err := e.writeMapKeyParts(
-		localName(instr.Result.Name)+".key", instr.Args[1])
+	value, err := e.instrElementType(instr)
 	if err != nil {
 		return err
 	}
-	valueSlot := e.writeStackValue(localName(instr.Result.Name)+".value", instr.Args[2])
+	mapValue := e.value(instr.Args[0])
+	allocator := e.value(instr.Args[1])
+	keyPtr, keyLen, err := e.writeMapKeyParts(
+		localName(instr.Result.Name)+".key", instr.Args[2])
+	if err != nil {
+		return err
+	}
+	valueSlot := e.writeStackValue(localName(instr.Result.Name)+".value", instr.Args[3])
 	okName := localName(instr.Result.Name) + ".ok"
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, i64 %s, ptr %s)\n",
-		okName, mapValue.operand, keyPtr, keyLen, valueSlot)
+	fmt.Fprintf(&e.out,
+		"  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)\n",
+		okName, allocator.operand, mapValue.operand, keyPtr, keyLen, valueSlot,
+		e.elementSizeOperand(value))
 	return e.writeArrayBoolResult(instr.Result, okName, "map_insert")
 }
 
@@ -239,25 +272,39 @@ func (e *emitter) writeMapContains(instr *ir.Instr) error {
 	return nil
 }
 
-// writeMapLen lowers Map.len().
+// writeMapLen lowers Map.len(), which is one header field.
 func (e *emitter) writeMapLen(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: map.len expects Map -> i64")
 	}
-	mapValue := e.value(instr.Args[0])
+	addr := "%" + e.nextSyntheticValue("map.len.addr")
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_map_len(ptr %s)\n", resultName, mapValue.operand)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 0, i32 %d\n",
+		addr, mapHeaderType, e.value(instr.Args[0]).operand, mapFieldLen)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", resultName, addr)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 
-// writeMapDeinit lowers Map.deinit().
+// writeMapDeinit lowers Map.deinit(allocator). It releases the entries, the
+// keys and values they point at, and the index; the values are the caller's to
+// consume first, the same way Array.deinit is handed an array whose owners are
+// already gone.
 func (e *emitter) writeMapDeinit(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Result.Type != "void" {
-		return fmt.Errorf("llvm error: map.deinit expects Map -> void")
+	if len(instr.Args) != 2 || instr.Result.Type != "void" {
+		return fmt.Errorf("llvm error: map.deinit expects Map, Allocator -> void")
 	}
-	mapValue := e.value(instr.Args[0])
-	fmt.Fprintf(&e.out, "  call void @kizu_map_deinit(ptr %s)\n", mapValue.operand)
+	value, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
+	// The release is handed the header itself, the way Array.deinit is. The
+	// runtime walks the entries it frees, so the header goes to a slot the
+	// call can reach it through; nothing reads it back, since the binding is
+	// gone by the time this returns.
+	slot := e.writeStackValue("%"+e.nextSyntheticValue("map.deinit"), instr.Args[0])
+	fmt.Fprintf(&e.out, "  call void @kizu_map_deinit(ptr %s, ptr %s, i64 %s)\n",
+		e.value(instr.Args[1]).operand, slot, e.elementSizeOperand(value))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }

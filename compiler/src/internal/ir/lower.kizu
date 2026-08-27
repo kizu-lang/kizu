@@ -345,7 +345,7 @@ pub fn new_lowerer(
     // current slots until the first function opens, so the fields need no
     // optional wrapper.
     let scratch_function = Function {
-        node: module.function_nodes.add(FunctionNode {
+        node: module.function_nodes.add(allocator, FunctionNode {
             name: empty_name(),
             params: array::new<Param>(allocator),
             return_type: empty_name(),
@@ -356,7 +356,7 @@ pub fn new_lowerer(
     var decl_facts = arena::new<FunctionFacts>(allocator);
     errdefer decl_facts.deinit(allocator);
     let scratch_facts = FactsHandle {
-        node: decl_facts.add(FunctionFacts {
+        node: decl_facts.add(allocator, FunctionFacts {
             name: empty_name(),
             static_params: array::new<StaticParamFacts>(allocator),
             params: array::new<ParamFacts>(allocator),
@@ -368,11 +368,11 @@ pub fn new_lowerer(
     };
     var generic_args = arena::new<GenericArgs>(allocator);
     errdefer generic_args.deinit(allocator);
-    let scratch_args = GenericArgsHandle { node: generic_args.add(blank_generic_args(allocator)) };
+    let scratch_args = GenericArgsHandle { node: generic_args.add(allocator, blank_generic_args(allocator)) };
     var signature_nodes = arena::new<Signature>(allocator);
     errdefer signature_nodes.deinit(allocator);
     let scratch_signature = SignatureHandle {
-        node: signature_nodes.add(Signature {
+        node: signature_nodes.add(allocator, Signature {
             params: array::new<Param>(allocator),
             return_type: empty_name(),
             requires_unsafe: false
@@ -384,7 +384,7 @@ pub fn new_lowerer(
         name: empty_name(), type_name: empty_name(), passing: Passing::CallerStorage
     });
     let storage_self_signature = SignatureHandle {
-        node: signature_nodes.add(Signature {
+        node: signature_nodes.add(allocator, Signature {
             params: move storage_self_params,
             return_type: empty_name(),
             requires_unsafe: false
@@ -465,7 +465,7 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
                 try self.decls.append(self.allocator, handle);
                 let facts = self.decl_facts.at(handle.node);
                 if facts.static_params.len() > 0 {
-                    try self.generic_decls.insert(name_id(facts.name), handle);
+                    try self.generic_decls.insert(self.allocator, name_id(facts.name), handle);
                 }
             },
             Test(test) => {
@@ -478,17 +478,17 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
             Struct(declared) => {
                 let retained = tree.texts.at(declared.name.node);
                 let name_bytes = retained.as_bytes();
-                try self.struct_decls.insert(name_bytes, declaration);
+                try self.struct_decls.insert(self.allocator, name_bytes, declaration);
             },
             Enum(declared) => {
                 let retained = tree.texts.at(declared.name.node);
                 let name_bytes = retained.as_bytes();
-                try self.enum_decls.insert(name_bytes, declaration);
+                try self.enum_decls.insert(self.allocator, name_bytes, declaration);
             },
             Union(declared) => {
                 let retained = tree.texts.at(declared.name.node);
                 let name_bytes = retained.as_bytes();
-                try self.union_decls.insert(name_bytes, declaration);
+                try self.union_decls.insert(self.allocator, name_bytes, declaration);
             },
             _ => {},
         }
@@ -538,7 +538,7 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
         requires_unsafe: function.signature.requires_unsafe,
         body: function.body
     };
-    return FactsHandle { node: self.decl_facts.add(move facts) };
+    return FactsHandle { node: self.decl_facts.add(self.allocator, move facts) };
 }
 
 /// Names the canonical spelling of one parsed type, the Go `typ.Text`.
@@ -660,7 +660,7 @@ fn (self: &var Lowerer) lower_tests(tree: &var ast::Ast) -> !?diagnostic::Diagno
             requires_unsafe: false,
             body: test.body
         };
-        let handle = FactsHandle { node: self.decl_facts.add(move facts) };
+        let handle = FactsHandle { node: self.decl_facts.add(self.allocator, move facts) };
         if try self.lower_function_named(tree, handle, test.symbol) |failed| {
             return move failed;
         }
@@ -681,15 +681,15 @@ fn (self: &var Lowerer) collect_decls(
         index = index + 1;
         match tree.declarations.at(declaration.node) {
             Struct(declared) => try self.lower_struct(tree, declared),
-            Enum(declared) => try self.lower_enum(tree, declared),
+            Enum(declared) => try self.lower_enum(self.allocator, tree, declared),
             ErrorSet(declared) => {
                 if declared.combines.len() > 0 {
                     try combined.append(self.allocator, declaration);
                 } else {
-                    try self.lower_error_set(tree, declared, std_errors);
+                    try self.lower_error_set(self.allocator, tree, declared, std_errors);
                 }
             },
-            Union(declared) => try self.lower_union(tree, declared),
+            Union(declared) => try self.lower_union(self.allocator, tree, declared),
             _ => {},
         }
     }
@@ -787,7 +787,7 @@ fn (self: &var Lowerer) add_method_signature(method: []u8, signature: SignatureH
     var list = array::new<SignatureHandle>(allocator);
     errdefer list.deinit(allocator);
     try list.append(allocator, signature);
-    return self.method_signatures.insert(method, move list);
+    return self.method_signatures.insert(allocator, method, move list);
 }
 
 /// Returns the position-th declared method named method, null past the last.
@@ -808,7 +808,7 @@ fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle)
         slot.* = signature;
         return;
     }
-    return self.signatures.insert(name_bytes, signature);
+    return self.signatures.insert(self.allocator, name_bytes, signature);
 }
 
 /// Records the C symbol an extern "c" declaration links to.
@@ -847,7 +847,7 @@ fn (self: &Lowerer) qualification_end(name: Name) -> i64 {
 }
 
 /// Converts an AST union declaration to IR metadata, the Go `lowerUnion`.
-fn (self: &var Lowerer) lower_union(tree: &ast::Ast, declared: &ast::UnionDecl) -> !void {
+fn (self: &var Lowerer) lower_union(allocator: Allocator, tree: &ast::Ast, declared: &ast::UnionDecl) -> !void {
     var variants = map::new<[]u8, UnionVariant>(self.allocator);
     errdefer variants.deinit(self.allocator);
     var index = 0;
@@ -859,7 +859,7 @@ fn (self: &var Lowerer) lower_union(tree: &ast::Ast, declared: &ast::UnionDecl) 
         let variant_name = try self.module.names.intern_text(tree, variant.name);
         let retained = name_text(&self.module.names, variant_name);
         let variant_bytes = retained.as_bytes();
-        try variants.insert(variant_bytes, UnionVariant {
+        try variants.insert(allocator, variant_bytes, UnionVariant {
             name: variant_name, index: index, payload: payload
         });
         index = index + 1;
@@ -867,24 +867,24 @@ fn (self: &var Lowerer) lower_union(tree: &ast::Ast, declared: &ast::UnionDecl) 
     let name = try self.module.names.intern_text(tree, declared.name);
     let retained = name_text(&self.module.names, name);
     let name_bytes = retained.as_bytes();
-    return self.module.unions.insert(name_bytes, Union { name: name, variants: move variants });
+    return self.module.unions.insert(allocator, name_bytes, Union { name: name, variants: move variants });
 }
 
 /// Converts an AST enum declaration to IR metadata, the Go `lowerEnum`.
-fn (self: &var Lowerer) lower_enum(tree: &ast::Ast, declared: &ast::EnumDecl) -> !void {
+fn (self: &var Lowerer) lower_enum(allocator: Allocator, tree: &ast::Ast, declared: &ast::EnumDecl) -> !void {
     var tags = map::new<[]u8, i64>(self.allocator);
     errdefer tags.deinit(self.allocator);
     var index = 0;
     while declared.tags.at(index) |tag| {
         let retained = tree.texts.at(tag.node);
         let tag_bytes = retained.as_bytes();
-        try tags.insert(tag_bytes, index);
+        try tags.insert(allocator, tag_bytes, index);
         index = index + 1;
     }
     let name = try self.module.names.intern_text(tree, declared.name);
     let retained = name_text(&self.module.names, name);
     let name_bytes = retained.as_bytes();
-    return self.module.enums.insert(name_bytes, Enum {
+    return self.module.enums.insert(allocator, name_bytes, Enum {
         name: name,
         tags: move tags,
         origins: array::new<Name>(self.allocator)
@@ -896,6 +896,7 @@ fn (self: &var Lowerer) lower_enum(tree: &ast::Ast, declared: &ast::EnumDecl) ->
 /// keep the codes std assigns, and sets a program declares take the codes
 /// after them.
 fn (self: &var Lowerer) lower_error_set(
+    allocator: Allocator,
     tree: &ast::Ast,
     declared: &ast::ErrorSetDecl,
     std_errors: &project::StdErrorCodes
@@ -910,10 +911,10 @@ fn (self: &var Lowerer) lower_error_set(
         while codes.key_at(position) |member| {
             position = position + 1;
             if codes.get(member) |code| {
-                try members.insert(member, code);
+                try members.insert(allocator, member, code);
             }
         }
-        return self.module.error_sets.insert(name_bytes, Enum {
+        return self.module.error_sets.insert(allocator, name_bytes, Enum {
             name: name,
             tags: move members,
             origins: array::new<Name>(self.allocator)
@@ -927,10 +928,10 @@ fn (self: &var Lowerer) lower_error_set(
         index = index + 1;
         let member_text = tree.texts.at(member.node);
         let member_bytes = member_text.as_bytes();
-        try members.insert(member_bytes, self.next_error_code);
+        try members.insert(allocator, member_bytes, self.next_error_code);
         self.next_error_code = self.next_error_code + 1;
     }
-    return self.module.error_sets.insert(name_bytes, Enum {
+    return self.module.error_sets.insert(allocator, name_bytes, Enum {
         name: name,
         tags: move members,
         origins: array::new<Name>(self.allocator)
@@ -966,7 +967,7 @@ fn (self: &var Lowerer) lower_combined_error_sets(
                 continue;
             }
             var resolved = false;
-            try self.lower_combined_error_set(tree, declaration, &var resolved);
+            try self.lower_combined_error_set(self.allocator, tree, declaration, &var resolved);
             if resolved {
                 progress = true;
                 remaining = remaining - 1;
@@ -986,6 +987,7 @@ fn (self: &var Lowerer) lower_combined_error_sets(
 /// Files one combined error set when every set it names is already filed,
 /// reporting whether it was.
 fn (self: &var Lowerer) lower_combined_error_set(
+    allocator: Allocator,
     tree: &ast::Ast,
     declaration: ast::Declaration,
     resolved: &var bool
@@ -1028,7 +1030,7 @@ fn (self: &var Lowerer) lower_combined_error_set(
                     if seen.contains(origin_bytes) {
                         continue;
                     }
-                    try seen.insert(origin_bytes, true);
+                    try seen.insert(allocator, origin_bytes, true);
                     try origins.append(self.allocator, origin.*);
                 }
             }
@@ -1040,7 +1042,7 @@ fn (self: &var Lowerer) lower_combined_error_set(
     }
     let retained = name_text(&self.module.names, name);
     let name_bytes = retained.as_bytes();
-    try self.module.error_sets.insert(name_bytes, Enum {
+    try self.module.error_sets.insert(allocator, name_bytes, Enum {
         name: name,
         tags: map::new<[]u8, i64>(self.allocator),
         origins: move origins
@@ -1064,7 +1066,7 @@ fn (self: &var Lowerer) lower_struct(tree: &ast::Ast, declared: &ast::StructDecl
     let name = try self.module.names.intern_text(tree, declared.name);
     let retained = name_text(&self.module.names, name);
     let name_bytes = retained.as_bytes();
-    return self.module.structs.insert(name_bytes, Struct { name: name, fields: move fields });
+    return self.module.structs.insert(self.allocator, name_bytes, Struct { name: name, fields: move fields });
 }
 
 /// Names a declared type with its `std::meta::element<T>` forms resolved,
@@ -1090,7 +1092,7 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     let resolved = try self.resolve_bound_type(declared_return);
     let returned = try self.lower_return_type(resolved);
     let requires_unsafe = self.decl_facts.at(decl.node).requires_unsafe;
-    let handle = self.signature_nodes.add(Signature {
+    let handle = self.signature_nodes.add(self.allocator, Signature {
         params: move params,
         return_type: returned,
         requires_unsafe: requires_unsafe
@@ -1307,7 +1309,7 @@ fn (self: &var Lowerer) lower_function_named(
         index = index + 1;
     }
     self.current = Function {
-        node: self.module.function_nodes.add(FunctionNode {
+        node: self.module.function_nodes.add(self.allocator, FunctionNode {
             name: name,
             params: move params,
             return_type: self.signature_return(signature),
@@ -1333,7 +1335,7 @@ fn (self: &var Lowerer) lower_function_named(
     while index < count {
         let facts = self.decl_param(decl, index);
         if self.signature_param(signature, index) |param| {
-            try self.envs.bind(self.env, facts.name, param.value());
+            try self.envs.bind(self.allocator, self.env, facts.name, param.value());
             // A parameter that arrives as the caller's storage is a storage
             // name like a lent local: reads load, assignments store, and
             // address consumers take the pointer itself.
@@ -1341,8 +1343,11 @@ fn (self: &var Lowerer) lower_function_named(
                 try self.slots.append(self.allocator, facts.name);
             } else {
                 // One that arrives as a value and is written through needs
-                // storage of its own, which is the copy it was handed.
-                if self.has_slot(facts.name) {
+                // storage of its own, which is the copy it was handed. One
+                // that arrives as an address already reaches storage, and it
+                // is the caller's: wrapping it again would hand the callee a
+                // borrow of a borrow.
+                if self.has_slot(facts.name) and !self.is_reference_type(param.type_name) {
                     try value_slots.append(self.allocator, facts.name);
                 }
             }
@@ -1357,7 +1362,7 @@ fn (self: &var Lowerer) lower_function_named(
         if self.envs.get(self.env, slot_name) |value| {
             let slot_type = try self.module.names.prefixed("&var ", value.type_name);
             let slot = try self.emit1(Op::LocalSlot, slot_type, value);
-            try self.envs.bind(self.env, slot_name, slot);
+            try self.envs.bind(self.allocator, self.env, slot_name, slot);
         }
     }
     if self.decl_body(decl) |body| {
@@ -1422,10 +1427,14 @@ fn (self: &var Lowerer) borrow_ir_type(elem: Name, mutable: bool) -> !Name {
     if self.module.has_union(elem) {
         return self.module.names.prefixed("&", elem);
     }
-    // An array is its header, and the header is wider than a word. A shared
-    // borrow of one hands over the address of a copy rather than the copy
-    // itself, so a reader reaches the same fields a writer does.
-    if try self.array_element_type(elem) |_| {
+    // A borrow of an owner reaches the value the caller has, not a copy of
+    // it. An owner is where a container header lives, and the header is the
+    // storage it describes (ADR-0131): a copy of one stops seeing what the
+    // original goes on to own, so the two answer differently the moment
+    // anything writes through the original -- `b.show(b.put(v))` would show
+    // the value from before the put. Copy data has no such interior, so a
+    // borrow of it travels flat.
+    if self.is_owner_type(elem) {
         return self.module.names.prefixed("&", elem);
     }
     return elem;
@@ -1443,7 +1452,7 @@ fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
     if self.module.has_union(elem) {
         return Passing::CopyAddress;
     }
-    if self.module.names.has_generic_arg(elem, "std::array::Array") {
+    if self.is_owner_type(elem) {
         return Passing::CopyAddress;
     }
     return Passing::Value;

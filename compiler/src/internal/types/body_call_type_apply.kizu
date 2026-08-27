@@ -403,7 +403,7 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     let previous_meta = self.meta_bindings.current;
     try self.bind_static_meta_fields(&checked.field_args);
     let declared_return = self.function_return_type(handle);
-    let substituted = try self.types.substitute_type_params(
+    let substituted = try self.types.substitute_type_params(self.allocator,
         declared_return, &checked.substitutions
     );
     if try self.resolve_instance_type(tree, substituted, out) |problem| {
@@ -443,7 +443,7 @@ fn (self: &var Checker) check_static_args(
     errdefer checked.deinit(self.allocator);
     var index = 0;
     while index < arguments.len() {
-        if try self.check_static_arg(
+        if try self.check_static_arg(self.allocator,
             tree,
             function,
             function_name,
@@ -462,6 +462,7 @@ fn (self: &var Checker) check_static_args(
 // Checks one static argument against its declared parameter and records the
 // accepted value in checked.
 fn (self: &var Checker) check_static_arg(
+    allocator: Allocator,
     tree: &ast::Ast,
     function: FunctionHandle,
     function_name: []u8,
@@ -496,7 +497,7 @@ fn (self: &var Checker) check_static_arg(
                 Issue(issue) => return try self.type_resolution_diagnostic(issue),
             }
             try checked.type_args.append(self.allocator, resolved);
-            try checked.substitutions.insert(parameter_name, resolved);
+            try checked.substitutions.insert(allocator, parameter_name, resolved);
         } else {
             if self.types.is_text(parameter_type, "Field") {
                 let result = try self.field_static_arg(
@@ -510,7 +511,7 @@ fn (self: &var Checker) check_static_arg(
                 );
                 match result {
                     Value(field) => {
-                        try checked.field_args.insert(parameter_name, field);
+                        try checked.field_args.insert(allocator, parameter_name, field);
                     },
                     Unbound => {},
                     Problem(problem) => return move problem,
@@ -555,7 +556,7 @@ fn (self: &var Checker) check_generic_user_arg(
 ) -> !?diagnostic::Diagnostic {
     let declared = self.callable_param_facts(function, index) orelse
         return try self.undefined_function_error(name);
-    let want = try self.types.substitute_type_params(declared.typ, substitutions);
+    let want = try self.types.substitute_type_params(self.allocator, declared.typ, substitutions);
     var checked_argument = argument;
     if try self.prepare_borrow_argument(
         tree,
@@ -1381,7 +1382,7 @@ fn (self: &var Checker) require_allocator_header_first(
     errdefer message.deinit(self.allocator);
     try message.append_byte(self.allocator, cast<u8>(96));
     try message.append_bytes(self.allocator, type_arg);
-    try message.append_bytes(self.allocator, 
+    try message.append_bytes(self.allocator,
         "` must declare `std::mem::AllocatorHeader` as its first field to back an allocator");
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
@@ -1430,6 +1431,15 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
     ) orelse return try self.checker_error_at(
         "type error", ast::zero_span(), "invalid Arena primitive name"
     );
+    if mem::equal_bytes(method, "deinit") {
+        // The raw primitive frees the storage through the allocator the
+        // release names: the header keeps none of its own (ADR-0131).
+        if try self.check_release_allocator(tree, scope, "Arena", method, args, 1) |problem| {
+            return move problem;
+        }
+        out.* = try self.types.void_type();
+        return null;
+    }
     let rest = args.len(tree) - 1;
     if rest != 0 {
         return try self.receiver_arity_error("Arena", method, 0, rest);
@@ -1440,10 +1450,6 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
     }
     if mem::equal_bytes(method, "pop_or_panic") {
         out.* = element;
-        return null;
-    }
-    if mem::equal_bytes(method, "deinit") {
-        out.* = try self.types.void_type();
         return null;
     }
     var message = string::new(self.allocator);
@@ -1936,7 +1942,7 @@ fn (self: &var Checker) check_generic_instantiation(
     }
     let previous_meta = self.meta_bindings.current;
     try self.bind_static_meta_fields(fields);
-    if try self.check_generic_instantiation_bound(tree, function, substitutions) |problem| {
+    if try self.check_generic_instantiation_bound(self.allocator, tree, function, substitutions) |problem| {
         self.meta_bindings.restore(previous_meta);
         self.leave_instantiation();
         return move problem;
@@ -1947,6 +1953,8 @@ fn (self: &var Checker) check_generic_instantiation(
 }
 
 fn (self: &var Checker) check_generic_instantiation_bound(
+
+    allocator: Allocator,
     tree: &var ast::Ast,
     function: FunctionHandle,
     substitutions: &map::Map<[]u8, Type>
@@ -1998,7 +2006,7 @@ fn (self: &var Checker) check_generic_instantiation_bound(
     while static_params.at(index) |parameter| {
         let parameter_name = parameter.name.as_bytes();
         if parameter.is_type {
-            try type_params.insert(parameter_name, true);
+            try type_params.insert(allocator, parameter_name, true);
         } else {
             let defined = try self.define_scope_param(
                 root,
@@ -2013,13 +2021,13 @@ fn (self: &var Checker) check_generic_instantiation_bound(
                 static_values.deinit(self.allocator);
                 return move problem;
             }
-            try static_values.insert(parameter_name, parameter.type_name);
+            try static_values.insert(allocator, parameter_name, parameter.type_name);
         }
         index = index + 1;
     }
     index = 0;
     while runtime_params.at(index) |parameter| {
-        let parameter_type = try self.types.substitute_type_params(
+        let parameter_type = try self.types.substitute_type_params(allocator,
             parameter.type_name, substitutions
         );
         if try self.revalidate_substituted(tree, parameter_type) |problem| {
@@ -2044,7 +2052,7 @@ fn (self: &var Checker) check_generic_instantiation_bound(
         index = index + 1;
     }
     let declared_return = facts.return_type;
-    let substituted_return = try self.types.substitute_type_params(declared_return, substitutions);
+    let substituted_return = try self.types.substitute_type_params(allocator, declared_return, substitutions);
     var return_type = empty_type();
     if try self.resolve_instance_type(tree, substituted_return, &var return_type) |problem| {
         type_params.deinit(self.allocator);
@@ -2160,10 +2168,10 @@ fn (self: &var Checker) enter_instantiation(
         done.* = true;
         return try self.instantiation_depth_error(move key);
     }
-    let retained_key = self.checked_instance_keys.add(move key);
+    let retained_key = self.checked_instance_keys.add(self.allocator, move key);
     let retained = self.checked_instance_keys.at(retained_key);
     let retained_bytes = retained.as_bytes();
-    try self.checked_instances.insert(retained_bytes, true);
+    try self.checked_instances.insert(self.allocator, retained_bytes, true);
     self.instantiation_depth = self.instantiation_depth + 1;
     done.* = false;
     return null;
@@ -2310,7 +2318,7 @@ fn copy_type_value_map(
     var index = 0;
     while source.key_at(index) |name| {
         if source.get(name) |value| {
-            try copied.insert(name, value);
+            try copied.insert(allocator, name, value);
         }
         index = index + 1;
     }
@@ -2402,7 +2410,7 @@ fn (self: &var Checker) check_array_storage_struct(
             var index = 0;
             while value.fields.at(index) |field| {
                 var field_type = empty_type();
-                match try self.resolve_type_node(tree, field.type_name) {
+                match try self.resolve_type_node(self.allocator, tree, field.type_name) {
                     Value(resolved) => {
                         field_type = resolved;
                     },

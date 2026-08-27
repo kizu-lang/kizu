@@ -14,10 +14,11 @@ struct Scope {
 }
 
 fn (self: &var Scope) declare(
+    allocator: Allocator,
     name: []u8,
     kind: BindingKind
 ) -> !void {
-    try self.symbols.insert(name, kind);
+    try self.symbols.insert(allocator, name, kind);
     return;
 }
 
@@ -44,9 +45,9 @@ test "std map resolver scope" {
 
     try owned_name.append_bytes(allocator, "node");
     let node_name = owned_name.as_bytes();
-    try scope.declare(node_name, BindingKind::Local);
+    try scope.declare(allocator, node_name, BindingKind::Local);
 
-    try scope.declare("parse_expr", BindingKind::Function);
+    try scope.declare(allocator, "parse_expr", BindingKind::Function);
 
     testing::expect_equal<i64>(2, scope.len());
     testing::expect(scope.contains("node"));
@@ -71,7 +72,7 @@ test "std map resolver scope" {
 // 
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // 
-// %kizu.struct.Scope = type { ptr }
+// %kizu.struct.Scope = type { %kizu.map }
 // %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
 // %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
 // %kizu.struct.std__string__Scalar = type { i64, i64 }
@@ -94,34 +95,33 @@ test "std map resolver scope" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// declare ptr @kizu_map_new(ptr, i64)
-// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// %kizu.map = type { ptr, i64, i64, ptr, i64 }
+// declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)
 // declare ptr @kizu_map_get(ptr, ptr, i64)
 // declare ptr @kizu_map_value_at(ptr, i64)
 // declare void @kizu_map_key_at(ptr, ptr, i64)
 // declare i1 @kizu_map_contains(ptr, ptr, i64)
 // declare i64 @kizu_map_len(ptr)
-// declare void @kizu_map_deinit(ptr)
+// declare void @kizu_map_deinit(ptr, ptr, i64)
 // 
-// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare void @std__map__Map_deinit__5b_5du8_BindingKind(ptr, ptr)
-// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, %kizu.slice.u8, i64)
-// declare i64 @std__map__Map_len__5b_5du8_BindingKind(ptr)
+// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map, ptr)
+// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, ptr, %kizu.slice.u8, i64)
+// declare i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
-// declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
+// declare %kizu.slice.u8 @std__string__String_as_bytes(ptr)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // declare void @std__testing__expect(i1)
 // 
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define %kizu.error.void @Scope_declare(ptr %kizu.self, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
+// define %kizu.error.void @Scope_declare(ptr %kizu.self, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
 // entry:
-//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
+//   %kizu.1 = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -135,27 +135,27 @@ test "std map resolver scope" {
 //   ret %kizu.error.void %kizu.4
 // }
 // 
-// define %kizu.opt.BindingKind @Scope_resolve(ptr byval(%kizu.struct.Scope) %kizu.self.addr, %kizu.slice.u8 %kizu.name) {
+// define %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
-//   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
-//   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret %kizu.opt.BindingKind %kizu.2
 // }
 // 
-// define i64 @Scope_len(ptr byval(%kizu.struct.Scope) %kizu.self.addr) {
+// define i64 @Scope_len(ptr %kizu.self) {
 // entry:
-//   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
-//   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(ptr %kizu.1)
+//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map %kizu.1)
 //   ret i64 %kizu.2
 // }
 // 
-// define i1 @Scope_contains(ptr byval(%kizu.struct.Scope) %kizu.self.addr, %kizu.slice.u8 %kizu.name) {
+// define i1 @Scope_contains(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
-//   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
-//   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret i1 %kizu.2
 // }
 // 
@@ -163,7 +163,7 @@ test "std map resolver scope" {
 // entry:
 //   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   call void @std__map__Map_deinit__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator)
+//   call void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -175,14 +175,8 @@ test "std map resolver scope" {
 //   %kizu.arg.0.7 = alloca %kizu.struct.Scope
 //   %kizu.arg.0.10 = alloca %kizu.struct.Scope
 //   %kizu.arg.0.11 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.12 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.13 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.14 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.15 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.16 = alloca %kizu.struct.Scope
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
-//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, ptr %kizu.2, 0
+//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, %kizu.map zeroinitializer, 0
 //   store %kizu.struct.Scope %kizu.3, ptr %kizu.4
 //   %kizu.5 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.1)
 //   store %kizu.struct.std__string__String %kizu.5, ptr %kizu.6
@@ -204,102 +198,91 @@ test "std map resolver scope" {
 //   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
 //   ret %kizu.error.void %kizu.try.err.4
 // kizu.11.try.ok:
-//   %kizu.12 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   %kizu.13 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.12)
-//   %kizu.15 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.13, i64 1)
-//   %kizu.16 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   %kizu.17 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.18.ok = extractvalue %kizu.error.void %kizu.15, 0
-//   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
-//   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
-// kizu.18.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.16, ptr %kizu.1)
-//   store %kizu.struct.Scope %kizu.17, ptr %kizu.arg.0.7
+//   %kizu.12 = call %kizu.slice.u8 @std__string__String_as_bytes(ptr %kizu.6)
+//   %kizu.14 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.12, i64 1)
+//   %kizu.15 = load %kizu.struct.std__string__String, ptr %kizu.6
+//   %kizu.16 = load %kizu.struct.Scope, ptr %kizu.4
+//   %kizu.17.ok = extractvalue %kizu.error.void %kizu.14, 0
+//   %kizu.17.ok.bool = icmp ne i8 %kizu.17.ok, 0
+//   br i1 %kizu.17.ok.bool, label %kizu.17.try.ok, label %kizu.17.try.err
+// kizu.17.try.err:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.15, ptr %kizu.1)
+//   store %kizu.struct.Scope %kizu.16, ptr %kizu.arg.0.7
 //   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.7, ptr %kizu.1)
-//   ret %kizu.error.void %kizu.15
-// kizu.18.try.ok:
-//   %kizu.19.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
-//   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 10, 1
-//   %kizu.21 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.19, i64 0)
-//   %kizu.22 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   %kizu.23 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.24.ok = extractvalue %kizu.error.void %kizu.21, 0
-//   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
-//   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
-// kizu.24.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.22, ptr %kizu.1)
-//   store %kizu.struct.Scope %kizu.23, ptr %kizu.arg.0.10
+//   ret %kizu.error.void %kizu.14
+// kizu.17.try.ok:
+//   %kizu.18.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.18.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.18.ptr, 0
+//   %kizu.18 = insertvalue %kizu.slice.u8 %kizu.18.base, i64 10, 1
+//   %kizu.20 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.18, i64 0)
+//   %kizu.21 = load %kizu.struct.std__string__String, ptr %kizu.6
+//   %kizu.22 = load %kizu.struct.Scope, ptr %kizu.4
+//   %kizu.23.ok = extractvalue %kizu.error.void %kizu.20, 0
+//   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
+//   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
+// kizu.23.try.err:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.21, ptr %kizu.1)
+//   store %kizu.struct.Scope %kizu.22, ptr %kizu.arg.0.10
 //   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.10, ptr %kizu.1)
-//   ret %kizu.error.void %kizu.21
-// kizu.24.try.ok:
-//   %kizu.26 = load %kizu.struct.Scope, ptr %kizu.4
-//   store %kizu.struct.Scope %kizu.26, ptr %kizu.arg.0.11
-//   %kizu.27 = call i64 @Scope_len(ptr byval(%kizu.struct.Scope) %kizu.arg.0.11)
-//   %kizu.28.ok = icmp eq i64 2, %kizu.27
-//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
-// kizu.28.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.27, i64 0, i64 0)
+//   ret %kizu.error.void %kizu.20
+// kizu.23.try.ok:
+//   %kizu.25 = call i64 @Scope_len(ptr %kizu.4)
+//   %kizu.26.ok = icmp eq i64 2, %kizu.25
+//   br i1 %kizu.26.ok, label %kizu.26.ok.ok, label %kizu.26.ok.fail
+// kizu.26.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.25, i64 0, i64 0)
 //   unreachable
-// kizu.28.ok.ok:
-//   %kizu.29 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.30.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+// kizu.26.ok.ok:
+//   %kizu.27.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.27.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.27.ptr, 0
+//   %kizu.27 = insertvalue %kizu.slice.u8 %kizu.27.base, i64 4, 1
+//   %kizu.28 = call i1 @Scope_contains(ptr %kizu.4, %kizu.slice.u8 %kizu.27)
+//   call void @std__testing__expect(i1 %kizu.28)
+//   %kizu.30.ptr = getelementptr inbounds [8 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.30.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.30.ptr, 0
-//   %kizu.30 = insertvalue %kizu.slice.u8 %kizu.30.base, i64 4, 1
-//   store %kizu.struct.Scope %kizu.29, ptr %kizu.arg.0.12
-//   %kizu.31 = call i1 @Scope_contains(ptr byval(%kizu.struct.Scope) %kizu.arg.0.12, %kizu.slice.u8 %kizu.30)
-//   call void @std__testing__expect(i1 %kizu.31)
-//   %kizu.33 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.34.ptr = getelementptr inbounds [8 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.30 = insertvalue %kizu.slice.u8 %kizu.30.base, i64 7, 1
+//   %kizu.31 = call i1 @Scope_contains(ptr %kizu.4, %kizu.slice.u8 %kizu.30)
+//   %kizu.32 = xor i1 %kizu.31, true
+//   call void @std__testing__expect(i1 %kizu.32)
+//   %kizu.34.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
 //   %kizu.34.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.34.ptr, 0
-//   %kizu.34 = insertvalue %kizu.slice.u8 %kizu.34.base, i64 7, 1
-//   store %kizu.struct.Scope %kizu.33, ptr %kizu.arg.0.13
-//   %kizu.35 = call i1 @Scope_contains(ptr byval(%kizu.struct.Scope) %kizu.arg.0.13, %kizu.slice.u8 %kizu.34)
-//   %kizu.36 = xor i1 %kizu.35, true
-//   call void @std__testing__expect(i1 %kizu.36)
-//   %kizu.38 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.39.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
-//   %kizu.39.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.39.ptr, 0
-//   %kizu.39 = insertvalue %kizu.slice.u8 %kizu.39.base, i64 4, 1
-//   store %kizu.struct.Scope %kizu.38, ptr %kizu.arg.0.14
-//   %kizu.40 = call %kizu.opt.BindingKind @Scope_resolve(ptr byval(%kizu.struct.Scope) %kizu.arg.0.14, %kizu.slice.u8 %kizu.39)
-//   %kizu.41.tag = extractvalue %kizu.opt.BindingKind %kizu.40, 0
-//   %kizu.41 = icmp ne i8 %kizu.41.tag, 0
-//   br i1 %kizu.41, label %orelse.some.1, label %orelse.else.2
+//   %kizu.34 = insertvalue %kizu.slice.u8 %kizu.34.base, i64 4, 1
+//   %kizu.35 = call %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.4, %kizu.slice.u8 %kizu.34)
+//   %kizu.36.tag = extractvalue %kizu.opt.BindingKind %kizu.35, 0
+//   %kizu.36 = icmp ne i8 %kizu.36.tag, 0
+//   br i1 %kizu.36, label %orelse.some.1, label %orelse.else.2
 // orelse.some.1:
-//   %kizu.42 = extractvalue %kizu.opt.BindingKind %kizu.40, 1
+//   %kizu.37 = extractvalue %kizu.opt.BindingKind %kizu.35, 1
 //   br label %orelse.end.3
 // orelse.else.2:
 //   br label %orelse.end.3
 // orelse.end.3:
-//   %kizu.44 = phi i64 [ %kizu.42, %orelse.some.1 ], [ 2, %orelse.else.2 ]
-//   %kizu.46 = icmp eq i64 %kizu.44, 1
-//   call void @std__testing__expect(i1 %kizu.46)
-//   %kizu.48 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.49.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
-//   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 10, 1
-//   store %kizu.struct.Scope %kizu.48, ptr %kizu.arg.0.15
-//   %kizu.50 = call %kizu.opt.BindingKind @Scope_resolve(ptr byval(%kizu.struct.Scope) %kizu.arg.0.15, %kizu.slice.u8 %kizu.49)
-//   %kizu.51.tag = extractvalue %kizu.opt.BindingKind %kizu.50, 0
-//   %kizu.51 = icmp ne i8 %kizu.51.tag, 0
-//   br i1 %kizu.51, label %orelse.some.4, label %orelse.else.5
+//   %kizu.39 = phi i64 [ %kizu.37, %orelse.some.1 ], [ 2, %orelse.else.2 ]
+//   %kizu.41 = icmp eq i64 %kizu.39, 1
+//   call void @std__testing__expect(i1 %kizu.41)
+//   %kizu.43.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.43.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.43.ptr, 0
+//   %kizu.43 = insertvalue %kizu.slice.u8 %kizu.43.base, i64 10, 1
+//   %kizu.44 = call %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.4, %kizu.slice.u8 %kizu.43)
+//   %kizu.45.tag = extractvalue %kizu.opt.BindingKind %kizu.44, 0
+//   %kizu.45 = icmp ne i8 %kizu.45.tag, 0
+//   br i1 %kizu.45, label %orelse.some.4, label %orelse.else.5
 // orelse.some.4:
-//   %kizu.52 = extractvalue %kizu.opt.BindingKind %kizu.50, 1
+//   %kizu.46 = extractvalue %kizu.opt.BindingKind %kizu.44, 1
 //   br label %orelse.end.6
 // orelse.else.5:
 //   br label %orelse.end.6
 // orelse.end.6:
-//   %kizu.54 = phi i64 [ %kizu.52, %orelse.some.4 ], [ 2, %orelse.else.5 ]
-//   %kizu.56 = icmp eq i64 %kizu.54, 0
-//   call void @std__testing__expect(i1 %kizu.56)
-//   %kizu.58 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58, ptr %kizu.1)
-//   %kizu.60 = load %kizu.struct.Scope, ptr %kizu.4
-//   store %kizu.struct.Scope %kizu.60, ptr %kizu.arg.0.16
-//   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.16, ptr %kizu.1)
-//   %kizu.62 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.62
+//   %kizu.48 = phi i64 [ %kizu.46, %orelse.some.4 ], [ 2, %orelse.else.5 ]
+//   %kizu.50 = icmp eq i64 %kizu.48, 0
+//   call void @std__testing__expect(i1 %kizu.50)
+//   %kizu.52 = load %kizu.struct.std__string__String, ptr %kizu.6
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.52, ptr %kizu.1)
+//   %kizu.54 = load %kizu.struct.Scope, ptr %kizu.4
+//   store %kizu.struct.Scope %kizu.54, ptr %kizu.arg.0.11
+//   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.11, ptr %kizu.1)
+//   %kizu.56 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.56
 // }
 // opt:
 // ; Kizu LLVM IR
@@ -311,7 +294,7 @@ test "std map resolver scope" {
 // 
 // %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
 // 
-// %kizu.struct.Scope = type { ptr }
+// %kizu.struct.Scope = type { %kizu.map }
 // %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
 // %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
 // %kizu.struct.std__string__Scalar = type { i64, i64 }
@@ -334,34 +317,33 @@ test "std map resolver scope" {
 // 
 // declare void @kizu_runtime_init_args(i32, ptr)
 // 
-// declare ptr @kizu_map_new(ptr, i64)
-// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// %kizu.map = type { ptr, i64, i64, ptr, i64 }
+// declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)
 // declare ptr @kizu_map_get(ptr, ptr, i64)
 // declare ptr @kizu_map_value_at(ptr, i64)
 // declare void @kizu_map_key_at(ptr, ptr, i64)
 // declare i1 @kizu_map_contains(ptr, ptr, i64)
 // declare i64 @kizu_map_len(ptr)
-// declare void @kizu_map_deinit(ptr)
+// declare void @kizu_map_deinit(ptr, ptr, i64)
 // 
-// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare void @std__map__Map_deinit__5b_5du8_BindingKind(ptr, ptr)
-// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr, %kizu.slice.u8)
-// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, %kizu.slice.u8, i64)
-// declare i64 @std__map__Map_len__5b_5du8_BindingKind(ptr)
+// declare i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map, ptr)
+// declare %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map, %kizu.slice.u8)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr, ptr, %kizu.slice.u8, i64)
+// declare i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map)
 // declare ptr @std__mem__page_allocator()
 // declare %kizu.error.std__mem__Error.void @std__string__String_append_bytes(ptr, ptr, %kizu.slice.u8)
-// declare %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String)
+// declare %kizu.slice.u8 @std__string__String_as_bytes(ptr)
 // declare void @std__string__String_deinit(%kizu.struct.std__string__String, ptr)
 // declare %kizu.struct.std__string__String @std__string__new(ptr)
 // declare void @std__testing__expect(i1)
 // 
 // declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
 // 
-// define %kizu.error.void @Scope_declare(ptr %kizu.self, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
+// define %kizu.error.void @Scope_declare(ptr %kizu.self, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind) {
 // entry:
-//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
-//   %kizu.1 = load ptr, ptr %kizu.1.ptr
-//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
+//   %kizu.1 = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.2 = call %kizu.error.std__mem__Error.void @std__map__Map_insert__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator, %kizu.slice.u8 %kizu.name, i64 %kizu.kind)
 //   %kizu.3.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.2, 0
 //   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
 //   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
@@ -375,27 +357,27 @@ test "std map resolver scope" {
 //   ret %kizu.error.void %kizu.4
 // }
 // 
-// define %kizu.opt.BindingKind @Scope_resolve(ptr byval(%kizu.struct.Scope) %kizu.self.addr, %kizu.slice.u8 %kizu.name) {
+// define %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
-//   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
-//   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt.BindingKind @std__map__Map_get__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret %kizu.opt.BindingKind %kizu.2
 // }
 // 
-// define i64 @Scope_len(ptr byval(%kizu.struct.Scope) %kizu.self.addr) {
+// define i64 @Scope_len(ptr %kizu.self) {
 // entry:
-//   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
-//   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(ptr %kizu.1)
+//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i64 @std__map__Map_len__5b_5du8_BindingKind(%kizu.map %kizu.1)
 //   ret i64 %kizu.2
 // }
 // 
-// define i1 @Scope_contains(ptr byval(%kizu.struct.Scope) %kizu.self.addr, %kizu.slice.u8 %kizu.name) {
+// define i1 @Scope_contains(ptr %kizu.self, %kizu.slice.u8 %kizu.name) {
 // entry:
-//   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
-//   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(ptr %kizu.1, %kizu.slice.u8 %kizu.name)
+//   %kizu.1.ptr = getelementptr %kizu.struct.Scope, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load %kizu.map, ptr %kizu.1.ptr
+//   %kizu.2 = call i1 @std__map__Map_contains__5b_5du8_BindingKind(%kizu.map %kizu.1, %kizu.slice.u8 %kizu.name)
 //   ret i1 %kizu.2
 // }
 // 
@@ -403,7 +385,7 @@ test "std map resolver scope" {
 // entry:
 //   %kizu.self = load %kizu.struct.Scope, ptr %kizu.self.addr
 //   %kizu.1 = extractvalue %kizu.struct.Scope %kizu.self, 0
-//   call void @std__map__Map_deinit__5b_5du8_BindingKind(ptr %kizu.1, ptr %kizu.allocator)
+//   call void @std__map__Map_deinit__5b_5du8_BindingKind(%kizu.map %kizu.1, ptr %kizu.allocator)
 //   ret void
 // }
 // 
@@ -415,14 +397,8 @@ test "std map resolver scope" {
 //   %kizu.arg.0.7 = alloca %kizu.struct.Scope
 //   %kizu.arg.0.10 = alloca %kizu.struct.Scope
 //   %kizu.arg.0.11 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.12 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.13 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.14 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.15 = alloca %kizu.struct.Scope
-//   %kizu.arg.0.16 = alloca %kizu.struct.Scope
 //   %kizu.1 = call ptr @std__mem__page_allocator()
-//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
-//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, ptr %kizu.2, 0
+//   %kizu.3 = insertvalue %kizu.struct.Scope zeroinitializer, %kizu.map zeroinitializer, 0
 //   store %kizu.struct.Scope %kizu.3, ptr %kizu.4
 //   %kizu.5 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.1)
 //   store %kizu.struct.std__string__String %kizu.5, ptr %kizu.6
@@ -444,100 +420,89 @@ test "std map resolver scope" {
 //   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
 //   ret %kizu.error.void %kizu.try.err.4
 // kizu.11.try.ok:
-//   %kizu.12 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   %kizu.13 = call %kizu.slice.u8 @std__string__String_as_bytes(%kizu.struct.std__string__String %kizu.12)
-//   %kizu.15 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.13, i64 1)
-//   %kizu.16 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   %kizu.17 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.18.ok = extractvalue %kizu.error.void %kizu.15, 0
-//   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
-//   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
-// kizu.18.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.16, ptr %kizu.1)
-//   store %kizu.struct.Scope %kizu.17, ptr %kizu.arg.0.7
+//   %kizu.12 = call %kizu.slice.u8 @std__string__String_as_bytes(ptr %kizu.6)
+//   %kizu.14 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.12, i64 1)
+//   %kizu.15 = load %kizu.struct.std__string__String, ptr %kizu.6
+//   %kizu.16 = load %kizu.struct.Scope, ptr %kizu.4
+//   %kizu.17.ok = extractvalue %kizu.error.void %kizu.14, 0
+//   %kizu.17.ok.bool = icmp ne i8 %kizu.17.ok, 0
+//   br i1 %kizu.17.ok.bool, label %kizu.17.try.ok, label %kizu.17.try.err
+// kizu.17.try.err:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.15, ptr %kizu.1)
+//   store %kizu.struct.Scope %kizu.16, ptr %kizu.arg.0.7
 //   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.7, ptr %kizu.1)
-//   ret %kizu.error.void %kizu.15
-// kizu.18.try.ok:
-//   %kizu.19.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
-//   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 10, 1
-//   %kizu.21 = call %kizu.error.void @Scope_declare(ptr %kizu.4, %kizu.slice.u8 %kizu.19, i64 0)
-//   %kizu.22 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   %kizu.23 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.24.ok = extractvalue %kizu.error.void %kizu.21, 0
-//   %kizu.24.ok.bool = icmp ne i8 %kizu.24.ok, 0
-//   br i1 %kizu.24.ok.bool, label %kizu.24.try.ok, label %kizu.24.try.err
-// kizu.24.try.err:
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.22, ptr %kizu.1)
-//   store %kizu.struct.Scope %kizu.23, ptr %kizu.arg.0.10
+//   ret %kizu.error.void %kizu.14
+// kizu.17.try.ok:
+//   %kizu.18.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.18.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.18.ptr, 0
+//   %kizu.18 = insertvalue %kizu.slice.u8 %kizu.18.base, i64 10, 1
+//   %kizu.20 = call %kizu.error.void @Scope_declare(ptr %kizu.4, ptr %kizu.1, %kizu.slice.u8 %kizu.18, i64 0)
+//   %kizu.21 = load %kizu.struct.std__string__String, ptr %kizu.6
+//   %kizu.22 = load %kizu.struct.Scope, ptr %kizu.4
+//   %kizu.23.ok = extractvalue %kizu.error.void %kizu.20, 0
+//   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
+//   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
+// kizu.23.try.err:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.21, ptr %kizu.1)
+//   store %kizu.struct.Scope %kizu.22, ptr %kizu.arg.0.10
 //   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.10, ptr %kizu.1)
-//   ret %kizu.error.void %kizu.21
-// kizu.24.try.ok:
-//   %kizu.26 = load %kizu.struct.Scope, ptr %kizu.4
-//   store %kizu.struct.Scope %kizu.26, ptr %kizu.arg.0.11
-//   %kizu.27 = call i64 @Scope_len(ptr byval(%kizu.struct.Scope) %kizu.arg.0.11)
-//   %kizu.28.ok = icmp eq i64 2, %kizu.27
-//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
-// kizu.28.ok.fail:
-//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.27, i64 0, i64 0)
+//   ret %kizu.error.void %kizu.20
+// kizu.23.try.ok:
+//   %kizu.25 = call i64 @Scope_len(ptr %kizu.4)
+//   %kizu.26.ok = icmp eq i64 2, %kizu.25
+//   br i1 %kizu.26.ok, label %kizu.26.ok.ok, label %kizu.26.ok.fail
+// kizu.26.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.25, i64 0, i64 0)
 //   unreachable
-// kizu.28.ok.ok:
-//   %kizu.29 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.30.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+// kizu.26.ok.ok:
+//   %kizu.27.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.27.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.27.ptr, 0
+//   %kizu.27 = insertvalue %kizu.slice.u8 %kizu.27.base, i64 4, 1
+//   %kizu.28 = call i1 @Scope_contains(ptr %kizu.4, %kizu.slice.u8 %kizu.27)
+//   call void @std__testing__expect(i1 %kizu.28)
+//   %kizu.30.ptr = getelementptr inbounds [8 x i8], ptr @.str.2, i64 0, i64 0
 //   %kizu.30.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.30.ptr, 0
-//   %kizu.30 = insertvalue %kizu.slice.u8 %kizu.30.base, i64 4, 1
-//   store %kizu.struct.Scope %kizu.29, ptr %kizu.arg.0.12
-//   %kizu.31 = call i1 @Scope_contains(ptr byval(%kizu.struct.Scope) %kizu.arg.0.12, %kizu.slice.u8 %kizu.30)
-//   call void @std__testing__expect(i1 %kizu.31)
-//   %kizu.33 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.34.ptr = getelementptr inbounds [8 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.30 = insertvalue %kizu.slice.u8 %kizu.30.base, i64 7, 1
+//   %kizu.31 = call i1 @Scope_contains(ptr %kizu.4, %kizu.slice.u8 %kizu.30)
+//   %kizu.32 = xor i1 %kizu.31, true
+//   call void @std__testing__expect(i1 %kizu.32)
+//   %kizu.34.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
 //   %kizu.34.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.34.ptr, 0
-//   %kizu.34 = insertvalue %kizu.slice.u8 %kizu.34.base, i64 7, 1
-//   store %kizu.struct.Scope %kizu.33, ptr %kizu.arg.0.13
-//   %kizu.35 = call i1 @Scope_contains(ptr byval(%kizu.struct.Scope) %kizu.arg.0.13, %kizu.slice.u8 %kizu.34)
-//   %kizu.36 = xor i1 %kizu.35, true
-//   call void @std__testing__expect(i1 %kizu.36)
-//   %kizu.38 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.39.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
-//   %kizu.39.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.39.ptr, 0
-//   %kizu.39 = insertvalue %kizu.slice.u8 %kizu.39.base, i64 4, 1
-//   store %kizu.struct.Scope %kizu.38, ptr %kizu.arg.0.14
-//   %kizu.40 = call %kizu.opt.BindingKind @Scope_resolve(ptr byval(%kizu.struct.Scope) %kizu.arg.0.14, %kizu.slice.u8 %kizu.39)
-//   %kizu.41.tag = extractvalue %kizu.opt.BindingKind %kizu.40, 0
-//   %kizu.41 = icmp ne i8 %kizu.41.tag, 0
-//   br i1 %kizu.41, label %orelse.some.1, label %orelse.else.2
+//   %kizu.34 = insertvalue %kizu.slice.u8 %kizu.34.base, i64 4, 1
+//   %kizu.35 = call %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.4, %kizu.slice.u8 %kizu.34)
+//   %kizu.36.tag = extractvalue %kizu.opt.BindingKind %kizu.35, 0
+//   %kizu.36 = icmp ne i8 %kizu.36.tag, 0
+//   br i1 %kizu.36, label %orelse.some.1, label %orelse.else.2
 // orelse.some.1:
-//   %kizu.42 = extractvalue %kizu.opt.BindingKind %kizu.40, 1
+//   %kizu.37 = extractvalue %kizu.opt.BindingKind %kizu.35, 1
 //   br label %orelse.end.3
 // orelse.else.2:
 //   br label %orelse.end.3
 // orelse.end.3:
-//   %kizu.44 = phi i64 [ %kizu.42, %orelse.some.1 ], [ 2, %orelse.else.2 ]
-//   %kizu.46 = icmp eq i64 %kizu.44, 1
-//   call void @std__testing__expect(i1 %kizu.46)
-//   %kizu.48 = load %kizu.struct.Scope, ptr %kizu.4
-//   %kizu.49.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
-//   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
-//   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 10, 1
-//   store %kizu.struct.Scope %kizu.48, ptr %kizu.arg.0.15
-//   %kizu.50 = call %kizu.opt.BindingKind @Scope_resolve(ptr byval(%kizu.struct.Scope) %kizu.arg.0.15, %kizu.slice.u8 %kizu.49)
-//   %kizu.51.tag = extractvalue %kizu.opt.BindingKind %kizu.50, 0
-//   %kizu.51 = icmp ne i8 %kizu.51.tag, 0
-//   br i1 %kizu.51, label %orelse.some.4, label %orelse.else.5
+//   %kizu.39 = phi i64 [ %kizu.37, %orelse.some.1 ], [ 2, %orelse.else.2 ]
+//   %kizu.41 = icmp eq i64 %kizu.39, 1
+//   call void @std__testing__expect(i1 %kizu.41)
+//   %kizu.43.ptr = getelementptr inbounds [11 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.43.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.43.ptr, 0
+//   %kizu.43 = insertvalue %kizu.slice.u8 %kizu.43.base, i64 10, 1
+//   %kizu.44 = call %kizu.opt.BindingKind @Scope_resolve(ptr %kizu.4, %kizu.slice.u8 %kizu.43)
+//   %kizu.45.tag = extractvalue %kizu.opt.BindingKind %kizu.44, 0
+//   %kizu.45 = icmp ne i8 %kizu.45.tag, 0
+//   br i1 %kizu.45, label %orelse.some.4, label %orelse.else.5
 // orelse.some.4:
-//   %kizu.52 = extractvalue %kizu.opt.BindingKind %kizu.50, 1
+//   %kizu.46 = extractvalue %kizu.opt.BindingKind %kizu.44, 1
 //   br label %orelse.end.6
 // orelse.else.5:
 //   br label %orelse.end.6
 // orelse.end.6:
-//   %kizu.54 = phi i64 [ %kizu.52, %orelse.some.4 ], [ 2, %orelse.else.5 ]
-//   %kizu.56 = icmp eq i64 %kizu.54, 0
-//   call void @std__testing__expect(i1 %kizu.56)
-//   %kizu.58 = load %kizu.struct.std__string__String, ptr %kizu.6
-//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.58, ptr %kizu.1)
-//   %kizu.60 = load %kizu.struct.Scope, ptr %kizu.4
-//   store %kizu.struct.Scope %kizu.60, ptr %kizu.arg.0.16
-//   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.16, ptr %kizu.1)
-//   %kizu.62 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-//   ret %kizu.error.void %kizu.62
+//   %kizu.48 = phi i64 [ %kizu.46, %orelse.some.4 ], [ 2, %orelse.else.5 ]
+//   %kizu.50 = icmp eq i64 %kizu.48, 0
+//   call void @std__testing__expect(i1 %kizu.50)
+//   %kizu.52 = load %kizu.struct.std__string__String, ptr %kizu.6
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.52, ptr %kizu.1)
+//   %kizu.54 = load %kizu.struct.Scope, ptr %kizu.4
+//   store %kizu.struct.Scope %kizu.54, ptr %kizu.arg.0.11
+//   call void @Scope_deinit(ptr byval(%kizu.struct.Scope) %kizu.arg.0.11, ptr %kizu.1)
+//   %kizu.56 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.56
 // }

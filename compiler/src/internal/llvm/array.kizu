@@ -15,28 +15,6 @@ fn is_array_llvm_type(typ_name: []u8) -> bool {
     return mem::starts_with(typ_name, "std::array::Array<") and ir::ends_with_bytes(typ_name, ">");
 }
 
-/// Copies T out of a `std::array::Array<T>` spelling, through a borrow of one,
-/// and reports whether the spelling was one.
-fn copy_array_element(allocator: Allocator, names: &ir::NameTable, type_name: ir::Name, out: &var string::String) -> !bool {
-    let retained = ir::name_text(names, type_name);
-    let spelling = retained.as_bytes();
-    var start = 0;
-    if mem::starts_with(spelling, "&var ") {
-        start = 5;
-    } else {
-        if mem::starts_with(spelling, "&") {
-            start = 1;
-        }
-    }
-    let base = spelling[start..mem::len(spelling)];
-    if !is_array_llvm_type(base) {
-        return false;
-    }
-    let elem = spelling[start + 18..mem::len(spelling) - 1];
-    try out.append_bytes(allocator, elem);
-    return true;
-}
-
 /// Copies the type an instruction measures into out, the Go
 /// `instrElementType`. A container spells its element in its own type, so the
 /// two can never disagree and no instruction can arrive without one -- a
@@ -222,11 +200,7 @@ fn (self: &var Emitter) array_field_addr(handle: ir::Name, field: i64, name: []u
 /// Loads one i64 header field into the named register, the Go
 /// `arrayLoadField`.
 fn (self: &var Emitter) array_load_field(handle: ir::Name, field: i64, name: []u8, into: ir::Name) -> !void {
-    var addr_name = try string::from_bytes(self.allocator, name);
-    defer addr_name.deinit(self.allocator);
-    try addr_name.append_bytes(self.allocator, ".addr");
-    let addr_bytes = addr_name.as_bytes();
-    let addr = try self.array_field_addr(handle, field, addr_bytes);
+    let addr = try self.array_field_addr(handle, field, name);
     return self.line2("  %s = load i64, ptr %s", Arg::Str(into), Arg::Str(addr));
 }
 
@@ -283,7 +257,8 @@ fn (self: &var Emitter) array_checked_element(
     node: &ir::InstrNode,
     handle: ir::Name,
     index: ir::Name,
-    elem_bytes: []u8
+    elem_bytes: []u8,
+    into: ?ir::Name
 ) -> !ir::Name {
     let len_synthetic = try self.next_synthetic_value("array.len");
     let length = try self.percent(len_synthetic);
@@ -292,8 +267,13 @@ fn (self: &var Emitter) array_checked_element(
     let in_range = try self.percent(range_synthetic);
     try self.line3("  %s = icmp ult i64 %s, %s", Arg::Str(in_range), Arg::Str(index), Arg::Str(length));
     let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, index);
-    let checked_synthetic = try self.next_synthetic_value("array.checked");
-    let checked = try self.percent(checked_synthetic);
+    var checked = ir::empty_name();
+    if into |named| {
+        checked = named;
+    } else {
+        let checked_synthetic = try self.next_synthetic_value("array.checked");
+        checked = try self.percent(checked_synthetic);
+    }
     try self.line3(
         "  %s = select i1 %s, ptr %s, ptr null",
         Arg::Str(checked), Arg::Str(in_range), Arg::Str(elem_addr)
@@ -326,8 +306,9 @@ fn (self: &var Emitter) write_bounds_failure(
     return self.line1("%s:", Arg::Str(ok_label));
 }
 
-/// Reports whether this module uses std::array::Array lowering, the Go
-/// `usesArrayRuntime`.
+/// Reports whether this module uses the array header lowering, the Go
+/// `usesArrayRuntime`. An arena is that header, so an arena op needs the same
+/// declarations even in a module that names no array.
 fn (self: &Emitter) uses_array_runtime(module: &ir::Module) -> bool {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -341,7 +322,8 @@ fn (self: &Emitter) uses_array_runtime(module: &ir::Module) -> bool {
             while block_node.instrs.get(instr_index) |instr| {
                 instr_index = instr_index + 1;
                 let instr_node = module.instrs.at(instr.node);
-                if mem::starts_with(ir::op_spelling(instr_node.op), "array.") {
+                let spelling = ir::op_spelling(instr_node.op);
+                if mem::starts_with(spelling, "array.") or mem::starts_with(spelling, "arena.") {
                     return true;
                 }
             }
@@ -455,7 +437,7 @@ fn (self: &var Emitter) write_array_append(module: &ir::Module, node: &ir::Instr
     let handle = try self.array_handle(array.operand);
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    try self.write_array_append_paths(module, node, array.operand, handle, ok_name, elem_bytes);
+    try self.write_array_append_paths(module, node, array.operand, handle, ok_name, elem_bytes, null);
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayAppend);
 }
 
@@ -464,16 +446,27 @@ fn (self: &var Emitter) write_array_append(module: &ir::Module, node: &ir::Instr
 /// storage is what the runtime owns. The slow path is given the handle as it
 /// came, not the readable stand-in, so a null handle still comes back as the
 /// failure it is.
+///
+/// The length the append starts from is the index the element lands at. An
+/// array has no use for it; an arena hands it back as the handle that names
+/// the element, so it is read into index_name, the register the arena's result
+/// is resolved by (ADR-0131). A null index_name synthesizes one.
 fn (self: &var Emitter) write_array_append_paths(
     module: &ir::Module,
     node: &ir::InstrNode,
     handle_operand: ir::Name,
     handle: ir::Name,
     ok_name: ir::Name,
-    elem_bytes: []u8
+    elem_bytes: []u8,
+    index_name: ?ir::Name
 ) -> !void {
-    let len_synthetic = try self.next_synthetic_value("array.append.len");
-    let length = try self.percent(len_synthetic);
+    var length = ir::empty_name();
+    if index_name |named| {
+        length = named;
+    } else {
+        let len_synthetic = try self.next_synthetic_value("array.append.len");
+        length = try self.percent(len_synthetic);
+    }
     let cap_synthetic = try self.next_synthetic_value("array.append.cap");
     let capacity = try self.percent(cap_synthetic);
     let length_addr = try self.array_field_addr(handle, array_field_len(), "array.append.len.addr");
@@ -694,7 +687,7 @@ fn (self: &var Emitter) write_array_get(module: &ir::Module, node: &ir::InstrNod
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let handle = try self.array_handle(array.operand);
-    let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes);
+    let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes, null);
     return self.write_array_optional_load_result(module, node, checked);
 }
 
@@ -742,7 +735,7 @@ fn (self: &var Emitter) write_array_at(module: &ir::Module, node: &ir::InstrNode
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let handle = try self.array_handle(array.operand);
-    let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes);
+    let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes, null);
     return self.write_borrow_optional_result(module, node, checked);
 }
 
@@ -851,21 +844,47 @@ fn (self: &var Emitter) write_array_deinit(module: &ir::Module, node: &ir::Instr
     if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
         return try self.fail0("llvm error: array.deinit expects Array<T>, Allocator -> void");
     }
-    let array = try self.operand(module, node.args.get_or_panic(0));
+    return self.write_container_storage_release(module, node, "array.deinit");
+}
+
+/// Releases the storage a container header owns: the data pointer, measured by
+/// the capacity it was sized at, the Go `writeContainerStorageRelease`.
+/// Array.deinit and Arena.deinit are both this, since the two are the same
+/// header and whatever owners the elements held are already gone by the time
+/// either runs.
+fn (self: &var Emitter) write_container_storage_release(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    what: []u8
+) -> !?diagnostic::Diagnostic {
+    let container = try self.operand(module, node.args.get_or_panic(0));
     // A cleanup carries no immediate, so the element the release measures is
-    // read from the array it was handed: the one place the type is written
+    // read from the container it was handed: the one place the type is written
     // down either way.
     var elem = string::new(self.allocator);
     defer elem.deinit(self.allocator);
-    if !try copy_array_element(self.allocator, &module.names, node.args.get_or_panic(0).type_name, &var elem) {
-        return try self.fail0("llvm error: array.deinit expects Array<T> -> void");
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: a release measures an element but was handed no container");
     }
     let elem_bytes = elem.as_bytes();
-    let data = try self.array_field_of(array.operand, array_field_data(), "array.deinit.data");
-    let capacity = try self.array_field_of(array.operand, array_field_capacity(), "array.deinit.cap");
+    var data_name = try string::from_bytes(self.allocator, what);
+    defer data_name.deinit(self.allocator);
+    try data_name.append_bytes(self.allocator, ".data");
+    let data_bytes = data_name.as_bytes();
+    var cap_name = try string::from_bytes(self.allocator, what);
+    defer cap_name.deinit(self.allocator);
+    try cap_name.append_bytes(self.allocator, ".cap");
+    let cap_bytes = cap_name.as_bytes();
+    var bytes_name = try string::from_bytes(self.allocator, what);
+    defer bytes_name.deinit(self.allocator);
+    try bytes_name.append_bytes(self.allocator, ".bytes");
+    let bytes_label = bytes_name.as_bytes();
+    let data = try self.array_field_of(container.operand, array_field_data(), data_bytes);
+    let capacity = try self.array_field_of(container.operand, array_field_capacity(), cap_bytes);
     let allocator = try self.operand(module, node.args.get_or_panic(1));
     let elem_size = try self.element_size_operand_bytes(module, elem_bytes);
-    let bytes_synthetic = try self.next_synthetic_value("array.deinit.bytes");
+    let bytes_synthetic = try self.next_synthetic_value(bytes_label);
     let bytes = try self.percent(bytes_synthetic);
     try self.line3(
         "  %s = mul i64 %s, %s",

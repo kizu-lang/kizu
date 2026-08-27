@@ -3,159 +3,20 @@ import compiler::internal::ir;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/llvm/arena.go: the hosted Arena runtime
-// declarations and the `arena.*` instructions.
+// Mechanical port of internal/llvm/arena.go.
+//
+// An arena is the header an array is -- `{data, len, cap}` -- and owns its
+// elements the same way, so everything below reaches for the array lowering
+// rather than repeating it. What separates the two is above the backend: a
+// Handle is an index rather than a borrow, and nothing is removed from the
+// middle, which is why the index a handle carries stays the element's for as
+// long as the arena lives. runtime.c has no arena entry points for the same
+// reason (ADR-0131).
 
 /// Reports whether a lowered IR type is a std::arena::Arena<T>, the Go
 /// `isArenaLLVMType`.
 fn is_arena_llvm_type(typ_name: []u8) -> bool {
     return mem::starts_with(typ_name, "std::arena::Arena<") and ir::ends_with_bytes(typ_name, ">");
-}
-
-/// Writes declarations for the hosted Arena runtime, the Go
-/// `writeArenaRuntimeDecls`.
-/// Names the runtime's KizuArena header, the Go `arenaHeaderType`. Element
-/// access reads these fields rather than calling the runtime for each one, the
-/// same reason Array does: the compiler keeps every AST node, IR instruction
-/// and type node in an arena and reaches them constantly, and a call the
-/// optimizer cannot see through costs more than the access.
-fn arena_header_type() -> []u8 {
-    return "%kizu.arena";
-}
-
-/// The header read in place of a null handle, the Go `arenaEmptyGlobal`. An
-/// all-zero header holds no elements, so every index is out of range on it --
-/// the same null element the runtime returned for a null arena.
-fn arena_empty_global() -> []u8 {
-    return "@kizu.arena.empty";
-}
-
-/// The field index of the element storage.
-fn arena_field_data() -> i64 {
-    return 0;
-}
-
-/// The field index of the element count.
-fn arena_field_len() -> i64 {
-    return 1;
-}
-
-/// The field index of the element stride.
-fn arena_field_elem_size() -> i64 {
-    return 3;
-}
-
-/// Returns an operand that always points at a readable header, the Go
-/// `arenaHandle`.
-fn (self: &var Emitter) arena_handle(operand: ir::Name) -> !ir::Name {
-    let null_synthetic = try self.next_synthetic_value("arena.handle.null");
-    let null_name = try self.percent(null_synthetic);
-    let handle_synthetic = try self.next_synthetic_value("arena.handle");
-    let handle_name = try self.percent(handle_synthetic);
-    try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(null_name), Arg::Str(operand));
-    try self.line4(
-        "  %s = select i1 %s, ptr %s, ptr %s",
-        Arg::Str(handle_name), Arg::Str(null_name), Arg::Lit(arena_empty_global()), Arg::Str(operand)
-    );
-    return handle_name;
-}
-
-/// Loads one i64 header field, the Go `arenaLoadField`.
-fn (self: &var Emitter) arena_load_field(handle: ir::Name, field: i64, name: []u8) -> !ir::Name {
-    let addr_synthetic = try self.next_synthetic_value_suffixed(name, ".addr");
-    let addr = try self.percent(addr_synthetic);
-    let into_synthetic = try self.next_synthetic_value(name);
-    let into = try self.percent(into_synthetic);
-    try self.line4(
-        "  %s = getelementptr %s, ptr %s, i64 0, i32 %d",
-        Arg::Str(addr), Arg::Lit(arena_header_type()), Arg::Str(handle), Arg::Int(field)
-    );
-    try self.line2("  %s = load i64, ptr %s", Arg::Str(into), Arg::Str(addr));
-    return into;
-}
-
-/// Writes the address of the element a handle names into `into`, or null when
-/// the handle is outside the arena, the Go `arenaCheckedElement`. The stride is
-/// the arena's own elem_size, which is what arena.new sized it by, so the
-/// address is the one kizu_arena_get computed. The comparison is unsigned, so a
-/// negative index is out of range without a second test.
-fn (self: &var Emitter) arena_checked_element(
-    arena_operand: ir::Name,
-    index: ir::Name,
-    into: ir::Name
-) -> !void {
-    let handle = try self.arena_handle(arena_operand);
-    let length = try self.arena_load_field(handle, arena_field_len(), "arena.len");
-    let in_range_synthetic = try self.next_synthetic_value("arena.in_range");
-    let in_range = try self.percent(in_range_synthetic);
-    try self.line3(
-        "  %s = icmp ult i64 %s, %s",
-        Arg::Str(in_range), Arg::Str(index), Arg::Str(length)
-    );
-    let elem_size = try self.arena_load_field(handle, arena_field_elem_size(), "arena.elem_size");
-    let offset_synthetic = try self.next_synthetic_value("arena.offset");
-    let offset = try self.percent(offset_synthetic);
-    try self.line3("  %s = mul i64 %s, %s", Arg::Str(offset), Arg::Str(index), Arg::Str(elem_size));
-    let data_addr_synthetic = try self.next_synthetic_value("arena.data.addr");
-    let data_addr = try self.percent(data_addr_synthetic);
-    let data_synthetic = try self.next_synthetic_value("arena.data");
-    let data = try self.percent(data_synthetic);
-    let elem_synthetic = try self.next_synthetic_value("arena.elem");
-    let elem_addr = try self.percent(elem_synthetic);
-    try self.line4(
-        "  %s = getelementptr %s, ptr %s, i64 0, i32 %d",
-        Arg::Str(data_addr), Arg::Lit(arena_header_type()), Arg::Str(handle), Arg::Int(arena_field_data())
-    );
-    try self.line2("  %s = load ptr, ptr %s", Arg::Str(data), Arg::Str(data_addr));
-    try self.line3(
-        "  %s = getelementptr i8, ptr %s, i64 %s",
-        Arg::Str(elem_addr), Arg::Str(data), Arg::Str(offset)
-    );
-    return self.line3(
-        "  %s = select i1 %s, ptr %s, ptr null",
-        Arg::Str(into), Arg::Str(in_range), Arg::Str(elem_addr)
-    );
-}
-
-fn (self: &var Emitter) write_arena_runtime_decls(module: &ir::Module) -> !void {
-    if !self.uses_arena_runtime(module) {
-        return;
-    }
-    try self.line1("%s = type { ptr, i64, i64, i64, ptr }", Arg::Lit(arena_header_type()));
-    try self.line2(
-        "%s = private unnamed_addr global %s zeroinitializer",
-        Arg::Lit(arena_empty_global()), Arg::Lit(arena_header_type())
-    );
-    try self.line("declare ptr @kizu_arena_new(ptr, i64)");
-    try self.line("declare i64 @kizu_arena_add(ptr, ptr)");
-    try self.line("declare i64 @kizu_arena_len(ptr)");
-    try self.line("declare ptr @kizu_arena_pop(ptr)");
-    try self.line("declare void @kizu_arena_deinit(ptr)");
-    return self.line("");
-}
-
-/// Reports whether this module uses std::arena::Arena lowering, the Go
-/// `usesArenaRuntime`.
-fn (self: &Emitter) uses_arena_runtime(module: &ir::Module) -> bool {
-    var index = 0;
-    while module.functions.get(index) |function| {
-        index = index + 1;
-        let node = module.function_nodes.at(function.node);
-        var block_index = 0;
-        while node.blocks.get(block_index) |block| {
-            block_index = block_index + 1;
-            let block_node = module.blocks.at(block.node);
-            var instr_index = 0;
-            while block_node.instrs.get(instr_index) |instr| {
-                instr_index = instr_index + 1;
-                let instr_node = module.instrs.at(instr.node);
-                if mem::starts_with(ir::op_spelling(instr_node.op), "arena.") {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
 }
 
 /// Dispatches runtime-backed Arena operations, the Go `writeArenaInstr`.
@@ -175,41 +36,19 @@ fn (self: &var Emitter) write_arena_instr(module: &ir::Module, node: &ir::InstrN
     }
 }
 
-/// Returns the number of initialized elements still owned by the arena, the
-/// Go `writeArenaLen`.
-fn (self: &var Emitter) write_arena_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
-        return try self.fail0("llvm error: arena.len expects Arena<T> -> i64");
-    }
-    let arena = try self.operand(module, node.args.get_or_panic(0));
-    let result_name = try self.local_name(module, node.result.name);
-    try self.line2("  %s = call i64 @kizu_arena_len(ptr %s)", Arg::Str(result_name), Arg::Str(arena.operand));
-    try self.set_value(module, node.result, result_name);
-    return null;
-}
-
-/// Moves the last element out for Arena.deinit's cleanup cascade, the Go
-/// `writeArenaPopOrPanic`.
-fn (self: &var Emitter) write_arena_pop_or_panic(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 {
-        return try self.fail0("llvm error: arena.pop_or_panic expects Arena<T> -> T");
-    }
-    let arena = try self.operand(module, node.args.get_or_panic(0));
-    let result_name = try self.local_name(module, node.result.name);
-    let ptr_name = try self.suffixed(result_name, ".ptr");
-    try self.line2("  %s = call ptr @kizu_arena_pop(ptr %s)", Arg::Str(ptr_name), Arg::Str(arena.operand));
-    let none = self.no_names();
-    defer none.deinit(self.allocator);
-    try self.write_null_failure(module, node, ptr_name, "arena.pop.panic", PanicKey::ArenaEmpty, &none);
-    let result_type = try self.llvm_type_of(module, node.result.type_name);
-    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
-    try self.set_value(module, node.result, result_name);
-    return null;
-}
-
-/// Lowers std::arena::new<T>(allocator), the Go `writeArenaNew`.
+/// Lowers std::arena::new<T>(allocator) to the header value an empty arena is,
+/// the Go `writeArenaNew`: three zero words, and no allocation to fail at. The
+/// first add is what buys storage, and it is the call that names an allocator
+/// and says whether it got any (ADR-0131).
 fn (self: &var Emitter) write_arena_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    return self.write_container_new(module, node, "kizu_arena_new", ContainerKind::Arena, "arena.new expects allocator -> Arena<T>");
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if node.args.len() != 1 or !is_arena_llvm_type(result_type) {
+        return try self.fail0("llvm error: arena.new expects allocator -> Arena<T>");
+    }
+    let zero = try self.names.intern("zeroinitializer");
+    try self.set_value(module, node.result, zero);
+    return null;
 }
 
 /// Reports whether a type the module names is std::arena::Handle<T>, the Go
@@ -220,38 +59,88 @@ fn is_arena_handle_name(names: &ir::NameTable, typ_name: ir::Name) -> bool {
     return is_arena_handle_type(bytes);
 }
 
-/// Lowers Arena.add(value) to an opaque i64 handle, the Go `writeArenaAdd`.
+/// Lowers Arena.add(allocator, value), the Go `writeArenaAdd`. The element
+/// goes where an append would put it, and the length the append started from
+/// is the handle: nothing is ever removed from the middle, so that index names
+/// the element for as long as the arena holds it.
 fn (self: &var Emitter) write_arena_add(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or !is_arena_handle_name(&module.names, node.result.type_name) {
-        return try self.fail0("llvm error: arena.add expects Arena<T>, T -> Handle<T>");
+    if node.args.len() != 3 or !is_arena_handle_name(&module.names, node.result.type_name) {
+        return try self.fail0("llvm error: arena.add expects Arena<T>, Allocator, T -> Handle<T>");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    let handle = try self.array_handle(arena.operand);
+    let result_name = try self.local_name(module, node.result.name);
+    let ok_name = try self.suffixed(result_name, ".ok");
+    try self.write_array_append_paths(
+        module, node, arena.operand, handle, ok_name, elem_bytes, result_name);
+    let bad_name = try self.suffixed(result_name, ".bad");
+    try self.line2("  %s = xor i1 %s, true", Arg::Str(bad_name), Arg::Str(ok_name));
+    try self.write_bool_failure(module, node, bad_name, "arena.add", PanicKey::ArenaAdd);
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Returns the number of initialized elements still owned by the arena, the
+/// Go `writeArenaLen`.
+fn (self: &var Emitter) write_arena_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("llvm error: arena.len expects Arena<T> -> i64");
     }
     let arena = try self.operand(module, node.args.get_or_panic(0));
+    let handle = try self.array_handle(arena.operand);
     let result_name = try self.local_name(module, node.result.name);
-    let value_base = try self.suffixed(result_name, ".value");
-    let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(1));
+    try self.array_load_field(handle, array_field_len(), "arena.len", result_name);
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Moves the last element out for Arena.deinit's cleanup cascade, the Go
+/// `writeArenaPopOrPanic`.
+fn (self: &var Emitter) write_arena_pop_or_panic(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: arena.pop_or_panic expects Arena<T> -> T");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var elem) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let elem_bytes = elem.as_bytes();
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
     try self.line3(
-        "  %s = call i64 @kizu_arena_add(ptr %s, ptr %s)",
-        Arg::Str(result_name), Arg::Str(arena.operand), Arg::Str(value_slot)
+        "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(arena.operand), Arg::Str(size)
     );
-    let bad_name = try self.suffixed(result_name, ".bad");
-    try self.line2("  %s = icmp slt i64 %s, 0", Arg::Str(bad_name), Arg::Str(result_name));
-    try self.write_bool_failure(module, node, bad_name, "arena.add", PanicKey::ArenaAdd);
+    let none = self.no_names();
+    defer none.deinit(self.allocator);
+    try self.write_null_failure(module, node, ptr_name, "arena.pop.panic", PanicKey::ArenaEmpty, &none);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
     try self.set_value(module, node.result, result_name);
     return null;
 }
 
 /// Lowers Arena.at(handle) to a checked shared borrow, the Go `writeArenaAt`.
 /// Borrows with value IR load a copy; address-spelled borrows (currently
-/// unions) keep the runtime element address.
+/// unions) keep the element address.
 fn (self: &var Emitter) write_arena_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !is_arena_handle_name(&module.names, node.args.get_or_panic(1).type_name) {
         return try self.fail0("llvm error: arena.at expects Arena<T>, Handle<T> -> &T");
     }
-    let arena = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.operand(module, node.args.get_or_panic(1));
-    let result_name = try self.local_name(module, node.result.name);
-    let ptr_name = try self.suffixed(result_name, ".ptr");
-    try self.arena_checked_element(arena.operand, handle.operand, ptr_name);
+    let ptr_name = try self.arena_checked_element(module, node) orelse
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
     let none = self.no_names();
     defer none.deinit(self.allocator);
     try self.write_null_failure(module, node, ptr_name, "arena.at", PanicKey::ArenaHandle, &none);
@@ -259,6 +148,7 @@ fn (self: &var Emitter) write_arena_at(module: &ir::Module, node: &ir::InstrNode
         try self.set_value(module, node.result, ptr_name);
         return null;
     }
+    let result_name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
     try self.set_value(module, node.result, result_name);
@@ -266,30 +156,50 @@ fn (self: &var Emitter) write_arena_at(module: &ir::Module, node: &ir::InstrNode
 }
 
 /// Lowers Arena.at_mut(handle) to a borrow optional, the Go
-/// `writeArenaAtMut`: the runtime's nullable element pointer becomes the
-/// payload and its presence, branch-free. It calls the same kizu_arena_get
-/// as Arena.at and skips both the trap and the load.
+/// `writeArenaAtMut`: the nullable element pointer becomes the payload and its
+/// presence, branch-free. It reaches the same element Arena.at does and skips
+/// both the trap and the load.
 fn (self: &var Emitter) write_arena_at_mut(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !is_arena_handle_name(&module.names, node.args.get_or_panic(1).type_name) {
         return try self.fail0("llvm error: arena.at_mut expects Arena<T>, Handle<T> -> ?&var T");
     }
-    let arena = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.operand(module, node.args.get_or_panic(1));
-    let result_name = try self.local_name(module, node.result.name);
-    let ptr_name = try self.suffixed(result_name, ".ptr");
-    try self.arena_checked_element(arena.operand, handle.operand, ptr_name);
+    let ptr_name = try self.arena_checked_element(module, node) orelse
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
     return self.write_borrow_optional_result(module, node, ptr_name);
 }
 
-/// Lowers Arena.deinit(), the Go `writeArenaDeinit`.
-fn (self: &var Emitter) write_arena_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
-        return try self.fail0("llvm error: arena.deinit expects Arena<T> -> void");
+/// Returns the address of the element a handle names, or null when the handle
+/// is outside the arena, the Go `arenaCheckedElement`. The address is named
+/// after the result rather than synthesized, because continuation_label
+/// predicts the label the trap continues at from that name before this block
+/// is written.
+fn (self: &var Emitter) arena_checked_element(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?ir::Name {
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var elem) {
+        return null;
     }
+    let elem_bytes = elem.as_bytes();
     let arena = try self.operand(module, node.args.get_or_panic(0));
-    try self.line1("  call void @kizu_arena_deinit(ptr %s)", Arg::Str(arena.operand));
-    try self.set_void_value(module, node.result);
-    return null;
+    let index = try self.operand(module, node.args.get_or_panic(1));
+    let handle = try self.array_handle(arena.operand);
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    return try self.array_checked_element(module, node, handle, index.operand, elem_bytes, ptr_name);
+}
+
+/// Lowers Arena.deinit(allocator), the Go `writeArenaDeinit`. It releases the
+/// storage and nothing else: the elements are the caller's to consume first,
+/// the same way Array.deinit is handed an array whose owners are already gone.
+fn (self: &var Emitter) write_arena_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: arena.deinit expects Arena<T>, Allocator -> void");
+    }
+    return self.write_container_storage_release(module, node, "arena.deinit");
 }
 
 /// Reports the named failure when bad_operand is true, the Go

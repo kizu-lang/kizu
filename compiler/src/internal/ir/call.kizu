@@ -522,8 +522,10 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     let array_op = array_primitive(bytes);
     let array_shape = array_primitive_shape(bytes);
     let map_op = map_primitive(bytes);
+    let map_shape = map_primitive_shape(bytes);
     let box_op = box_primitive(bytes);
     let arena_op = arena_primitive(bytes);
+    let arena_writes_header = arena_primitive_writes_header(bytes);
     // A container primitive carries its element type as an immediate the
     // backend reads, so the call itself declares no parameter types to hand
     // over.
@@ -540,11 +542,6 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     }
     if map_op |op| {
         handled.* = true;
-        var args = array::new<Value>(self.allocator);
-        defer args.deinit(self.allocator);
-        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
-            return move failed;
-        }
         let resolved = try self.resolve_type_args(type_arg);
         var key_type = empty_name();
         let value_type = try self.map_primitive_type_args(tree, resolved, &var key_type);
@@ -553,6 +550,12 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
                 tree, "ir error: a std::map::Map primitive takes 2 static arguments, got `%s`",
                 Arg::Str(resolved)
             );
+        }
+        let named = try self.map_primitive_param_types(map_shape, key_type, value_type);
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit(self.allocator);
+        if try self.lower_call_args_named(tree, named, raw_args, &var args) |failed| {
+            return move failed;
         }
         return self.lower_map_method(tree, op, key_type, value_type, &args, out);
     }
@@ -568,12 +571,13 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
     }
     if arena_op |op| {
         handled.* = true;
+        let elem = try self.resolve_bound_type(type_arg);
+        let named = try self.arena_primitive_param_types(arena_writes_header, elem);
         var args = array::new<Value>(self.allocator);
         defer args.deinit(self.allocator);
-        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
+        if try self.lower_call_args_named(tree, named, raw_args, &var args) |failed| {
             return move failed;
         }
-        let elem = try self.resolve_bound_type(type_arg);
         return self.lower_arena_primitive(tree, op, elem, &args, out);
     }
     return null;
@@ -635,6 +639,108 @@ fn array_primitive_shape(name: []u8) -> ArrayPrimitiveShape {
         takes_index_and_element: mem::equal_bytes(name, "std::internal::builtin::array_set"),
         takes_bytes: mem::equal_bytes(name, "std::internal::builtin::array_append_bytes")
     };
+}
+
+/// Says how one map primitive receives its map, the Go `mapPrimitiveParams`
+/// -- a map is its header too. A primitive that writes through the header is
+/// handed the binding's storage; the rest receive the address of a copy, and
+/// `deinit` receives the header itself, because releasing it is the last thing
+/// done with it. The key and value positions are named as well, so an integer
+/// literal written at a call narrows rather than staying i64.
+fn (self: &var Lowerer) map_primitive_param_types(
+    shape: MapPrimitiveShape,
+    key: Name,
+    value: Name
+) -> !NamedTypes {
+    if shape.releases {
+        return no_named_types();
+    }
+    let map_type = try self.map_type_name(key, value);
+    var self_type = try self.module.names.prefixed("&", map_type);
+    if shape.mutates {
+        self_type = try self.module.names.prefixed("&var ", map_type);
+    }
+    if shape.takes_key_and_value {
+        let allocator_type = try self.module.names.intern("Allocator");
+        return NamedTypes {
+            first: self_type, second: allocator_type, third: key, fourth: value
+        };
+    }
+    if shape.takes_key {
+        return NamedTypes {
+            first: self_type, second: key, third: empty_name(), fourth: empty_name()
+        };
+    }
+    if shape.takes_index {
+        let index_type = try self.module.names.intern("i64");
+        return NamedTypes {
+            first: self_type, second: index_type, third: empty_name(), fourth: empty_name()
+        };
+    }
+    return NamedTypes {
+        first: self_type, second: empty_name(), third: empty_name(), fourth: empty_name()
+    };
+}
+
+/// What one map primitive does with the map it is handed, read from its name
+/// while the name table is still borrowed for it.
+struct MapPrimitiveShape {
+    releases: bool,
+    mutates: bool,
+    takes_key_and_value: bool,
+    takes_key: bool,
+    takes_index: bool
+}
+
+/// Reads the shape of one map primitive from its name.
+fn map_primitive_shape(name: []u8) -> MapPrimitiveShape {
+    return MapPrimitiveShape {
+        releases: mem::equal_bytes(name, "std::internal::builtin::map_deinit"),
+        mutates: map_mutating_primitive(name),
+        takes_key_and_value: mem::equal_bytes(name, "std::internal::builtin::map_insert"),
+        takes_key: mem::equal_bytes(name, "std::internal::builtin::map_get") or
+            mem::equal_bytes(name, "std::internal::builtin::map_at") or
+            mem::equal_bytes(name, "std::internal::builtin::map_at_mut") or
+            mem::equal_bytes(name, "std::internal::builtin::map_contains"),
+        takes_index: mem::equal_bytes(name, "std::internal::builtin::map_key_at") or
+            mem::equal_bytes(name, "std::internal::builtin::map_take_value_at")
+    };
+}
+
+/// Names the map primitives that write through the header, the Go
+/// `mapMutatingPrimitives`. They receive the binding's storage; the rest
+/// receive the address of a copy.
+pub fn map_mutating_primitive(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std::internal::builtin::map_insert") or
+        mem::equal_bytes(name, "std::internal::builtin::map_at_mut") or
+        mem::equal_bytes(name, "std::internal::builtin::map_take_value_at");
+}
+
+/// Says how one arena primitive receives its arena, the Go
+/// `arenaPrimitiveParams` -- an arena is the header an array is. Both `len`
+/// and `pop_or_panic` are handed the binding's storage: they are the two
+/// halves of std::arena's cleanup loop, and the loop is only right while the
+/// count it reads and the pop that shortens it reach the same header.
+/// `deinit` receives the header itself, because releasing it is the last thing
+/// done with it.
+fn (self: &var Lowerer) arena_primitive_param_types(writes_header: bool, elem: Name) -> !NamedTypes {
+    if !writes_header {
+        return no_named_types();
+    }
+    let arena_type = try self.module.names.wrapped("std::arena::Arena<", elem, ">");
+    let self_type = try self.module.names.prefixed("&var ", arena_type);
+    return NamedTypes {
+        first: self_type, second: empty_name(), third: empty_name(), fourth: empty_name()
+    };
+}
+
+/// Names the arena primitives that write through the header, the storage half
+/// of `arenaPrimitiveParams`. The slot pass reads it too: a primitive handed
+/// the binding's storage is what says the binding needs a slot of its own
+/// rather than a fresh copy per call.
+pub fn arena_primitive_writes_header(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std::internal::builtin::arena_len") or
+        mem::equal_bytes(name, "std::internal::builtin::arena_pop_or_panic");
 }
 
 /// Names the array primitives that write through the header, the Go
@@ -863,27 +969,20 @@ fn (self: &var Lowerer) lower_resolved_method(
     if try self.box_element_type(container) |elem| {
         return self.lower_std_container_method(tree, "std::mem::Box", method, elem, args, out);
     }
-    let elem = try self.arena_element_type(receiver_type);
+    let elem = try self.arena_element_type(container);
     let cleanup = typ::cleanup_method();
     if !same_name(elem, self.common.unknown) and self.name_is(method, cleanup) {
         if self.is_owner_type(elem) {
             return self.lower_std_container_method(tree, "std::arena::Arena", method, elem, args, out);
         }
         // Plain elements have no cleanup loop, so the release is the runtime
-        // op. The arena header still keeps the allocator the op frees
-        // through, so the one the call names goes no further than the check
-        // of it (ADR-0132).
-        var receiver_only = array::new<Value>(self.allocator);
-        defer receiver_only.deinit(self.allocator);
-        if args.get(0) |receiver| {
-            try receiver_only.append(self.allocator, receiver);
-        }
-        return self.lower_arena_method(tree, method, receiver_type, &receiver_only, out);
+        // op, which is handed the allocator the call names.
+        return self.lower_arena_method(tree, method, container, args, out);
     }
     if try self.impl_method_callee_name(receiver_type, method) |method_name| {
         return self.lower_impl_method_call(tree, method_name, args, out);
     }
-    return self.lower_arena_method(tree, method, receiver_type, args, out);
+    return self.lower_arena_method(tree, method, container, args, out);
 }
 
 /// Lowers the compiler-known arena methods, the Go `lowerArenaMethod`.
@@ -894,28 +993,53 @@ fn (self: &var Lowerer) lower_arena_method(
     args: &array::Array<Value>,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
+    if self.name_is(name, "deinit") {
+        out.* = try self.emit_with(Op::ArenaDeinit, empty_name(), self.common.void_type, empty_name(), args);
+        return null;
+    }
+    var at = array::new<Value>(self.allocator);
+    defer at.deinit(self.allocator);
+    try self.at_header(args, &var at);
     if self.name_is(name, "add") {
         let handle = try self.handle_type(receiver_type);
-        out.* = try self.emit_with(Op::ArenaAdd, empty_name(), handle, empty_name(), args);
+        out.* = try self.emit_with(Op::ArenaAdd, empty_name(), handle, empty_name(), &at);
         return null;
     }
     if self.name_is(name, "at") {
         let elem = try self.arena_element_type(receiver_type);
         let result_type = try self.borrow_ir_type(elem, false);
-        out.* = try self.emit_with(Op::ArenaAt, empty_name(), result_type, empty_name(), args);
+        out.* = try self.emit_with(Op::ArenaAt, empty_name(), result_type, empty_name(), &at);
         return null;
     }
     if self.name_is(name, "at_mut") {
         let elem = try self.arena_element_type(receiver_type);
         let result_type = try self.module.names.prefixed("?&var ", elem);
-        out.* = try self.emit_with(Op::ArenaAtMut, empty_name(), result_type, empty_name(), args);
-        return null;
-    }
-    if self.name_is(name, "deinit") {
-        out.* = try self.emit_with(Op::ArenaDeinit, empty_name(), self.common.void_type, empty_name(), args);
+        out.* = try self.emit_with(Op::ArenaAtMut, empty_name(), result_type, empty_name(), &at);
         return null;
     }
     return try self.fail1(tree, "ir error: unknown method `%s`", Arg::Str(name));
+}
+
+/// Gives the container an arena operation works on an address to reach it by,
+/// the Go `atHeader`. A receiver that already travels as a borrow has one; one
+/// that arrived by value is this frame's own copy of the header, and a slot is
+/// where a copy lives. Only `deinit` is left with the value, which is all a
+/// release reads. The declared container methods get this from their callee's
+/// parameter instead; an arena's are the compiler's own and have no callee
+/// (ADR-0131).
+fn (self: &var Lowerer) at_header(args: &array::Array<Value>, out: &var array::Array<Value>) -> !void {
+    var index = 0;
+    while args.get(index) |arg| {
+        index = index + 1;
+        try out.append(self.allocator, arg);
+    }
+    let first = out.get(0) orelse return;
+    if self.is_reference_type(first.type_name) {
+        return;
+    }
+    let slot_type = try self.module.names.prefixed("&var ", first.type_name);
+    let slot = try self.emit1(Op::LocalSlot, slot_type, first);
+    return out.set(0, slot);
 }
 
 /// Lowers stack buffer view methods (ADR-0097), the Go `lowerBufferMethod`.
@@ -1079,9 +1203,9 @@ fn (self: &var Lowerer) generic_method_self_passing(receiver_type: Name, method:
     let container = try self.deref_type(receiver_type);
     let base = try self.std_container_type_name(container) orelse return Passing::Value;
     let name = try self.module.names.joined(base, ".", method);
-    let decl = self.generic_decl(name) orelse return Passing::Value;
+    let decl = self.generic_decl(name) orelse return self.container_self_passing(base, method);
     if self.decl_param_count(decl) == 0 {
-        return Passing::Value;
+        return self.container_self_passing(base, method);
     }
     let param = self.decl_param(decl, 0);
     if param.mut_borrow {
@@ -1091,6 +1215,24 @@ fn (self: &var Lowerer) generic_method_self_passing(receiver_type: Name, method:
         return self.borrow_passing(container, false);
     }
     return Passing::Value;
+}
+
+/// Says how a container method with no std declaration receives its receiver,
+/// the Go `containerSelfPassing`. Arena's methods are the compiler's own, so
+/// there is no `&var self` to read; the container is still a header, and a
+/// header is reached at its address either way -- a copy would leave the
+/// caller's `data` behind (ADR-0131). What the ownership checker says the
+/// method does to storage is what decides whether that address is writable.
+fn (self: &Lowerer) container_self_passing(base: Name, method: Name) -> Passing {
+    if !self.name_is(base, "std::arena::Arena") {
+        return Passing::Value;
+    }
+    let retained = name_text(&self.module.names, method);
+    let method_bytes = retained.as_bytes();
+    if ownership::arena_method_writes_header(method_bytes) {
+        return Passing::CallerStorage;
+    }
+    return Passing::CopyAddress;
 }
 
 /// Names the generic declaration a container instance was applied from, the

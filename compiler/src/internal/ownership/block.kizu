@@ -305,14 +305,14 @@ fn (self: &var Checker) validate_err_defer_receivers(
 /// ADR-0091 requires every exit path to consume, the Go
 /// `valueTypeNeedsConsume`. Owner-ness has one definition, ast.DeinitOwners,
 /// seeded per program.
-fn (self: &var Checker) value_type_needs_consume(type_name: Name) -> !bool {
+fn (self: &var Checker) value_type_needs_consume(allocator: Allocator, type_name: Name) -> !bool {
     let retained = name_text(&self.names, type_name);
     let bytes = retained.as_bytes();
     if self.consume_needs.get(bytes) |needs| {
         return needs;
     }
     let needs = ast::owner_type(&self.deinit_owners, bytes);
-    try self.consume_needs.insert(bytes, needs);
+    try self.consume_needs.insert(allocator, bytes, needs);
     return needs;
 }
 
@@ -322,9 +322,9 @@ fn (self: &var Checker) value_type_needs_consume(type_name: Name) -> !bool {
 /// owner field does; the deinit that discharges it opens the optional first.
 fn (self: &var Checker) field_type_needs_consume(type_name: Name) -> !bool {
     if try self.names.optional_elem(type_name) |elem| {
-        return self.value_type_needs_consume(elem);
+        return self.value_type_needs_consume(self.allocator, elem);
     }
-    return self.value_type_needs_consume(type_name);
+    return self.value_type_needs_consume(self.allocator, type_name);
 }
 
 /// Reports whether a produced value owes cleanup once it is unwrapped, the Go
@@ -342,7 +342,7 @@ fn (self: &var Checker) result_type_needs_consume(type_name: Name) -> !bool {
             current = elem;
             continue;
         }
-        return self.value_type_needs_consume(current);
+        return self.value_type_needs_consume(self.allocator, current);
     }
     return false;
 }
@@ -364,7 +364,7 @@ fn (self: &var Checker) binding_needs_consume(value: BindingHandle) -> !bool {
     if try self.all_owner_fields_consumed(value) {
         return false;
     }
-    return self.value_type_needs_consume(record.type_name);
+    return self.value_type_needs_consume(self.allocator, record.type_name);
 }
 
 /// Reports whether a value taken apart field by field has nothing left to
@@ -495,10 +495,11 @@ fn (self: &var Checker) check_cleanup_receiver_overwrite(
             return null;
         }
     }
+    let spelling = try self.names.intern(keyword);
     return try self.error2(
         tree, expression_span(tree, statement.value),
         "move error: `%s` cleanup receiver `%s` cannot be assigned over; bind the new value to its own name",
-        Arg::Str(try self.names.intern(keyword)), Arg::Str(name)
+        Arg::Str(spelling), Arg::Str(name)
     );
 }
 

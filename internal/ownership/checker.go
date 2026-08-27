@@ -5075,6 +5075,13 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (string, error) {
+			if method == "deinit" {
+				// The raw primitive frees the storage through the allocator
+				// the release names: the header keeps none of its own
+				// (ADR-0131, ADR-0132).
+				err := c.readReleaseAllocator("Arena.deinit", nil, rest, env)
+				return "void", err
+			}
 			if len(rest) != 0 {
 				return "", errorf("arena error: `Arena.%s` expects 0 args, got %d",
 					method, len(rest))
@@ -5084,8 +5091,6 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 				return "i64", nil
 			case "pop_or_panic":
 				return typeArg, nil
-			case "deinit":
-				return "void", nil
 			default:
 				return "", errorf("arena error: Arena has no storage primitive `%s`", method)
 			}
@@ -5298,7 +5303,11 @@ func (c *Checker) checkReleaseTie(
 			what, receiver.name)
 	}
 	for _, source := range sources {
-		if source == tied {
+		// By id, not by pointer: a branch or a loop body is checked against a
+		// clone of the scope, so the allocator an argument resolves to there
+		// is a copy of the one the owner recorded. The id copies with the
+		// binding and names the same declaration on both sides.
+		if source.id == tied.id {
 			return nil
 		}
 	}
@@ -5481,15 +5490,18 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 ) (string, error) {
 	switch name {
 	case "insert":
-		if len(args) != 2 {
-			return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
+		if len(args) != 3 {
+			return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
 		}
-		if got, err := c.readExpr(args[0], env); err != nil {
+		if err := c.readGrowAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
+			return "", err
+		}
+		if got, err := c.readExpr(args[1], env); err != nil {
 			return "", err
 		} else if got != keyType {
 			return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
-		got, err := c.moveContextualExpr(args[1], valueType, env)
+		got, err := c.moveContextualExpr(args[2], valueType, env)
 		if err != nil {
 			return "", err
 		}
@@ -6708,6 +6720,9 @@ type containerAccessTable struct {
 // name what it does to storage before any per-method checker sees it. Box is
 // not here: its borrows are per-field and its conflicts are checked where the
 // field borrow forms.
+// arenaTypeName is the container whose methods the compiler declares itself.
+const arenaTypeName = "std::arena::Arena"
+
 var containerAccessTables = map[string]containerAccessTable{
 	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
 		"append": accessMutate, "append_bytes": accessMutate, "reserve": accessMutate,
@@ -6745,6 +6760,18 @@ var containerAccessTables = map[string]containerAccessTable{
 		"at_mut": accessCapture,
 		"deinit": accessCleanup,
 	}},
+}
+
+// ArenaMethodWritesHeader reports whether an Arena method writes through the
+// arena's own header. Every other container declares its methods in std, where
+// `&var self` says this; Arena's are the compiler's own, so the lowerer asks
+// here instead -- and this is the same classification
+// checkContainerMethodAccess refuses borrow conflicts by, so the two cannot
+// come to disagree about what a method does to storage. A cleanup is not among
+// them: it reads the header to release what it points at and writes nothing
+// back, since the binding is gone by the time it returns.
+func ArenaMethodWritesHeader(name string) bool {
+	return containerAccessTables[arenaTypeName].methods[name] == accessMutate
 }
 
 // checkContainerMethodAccess looks a container method up in the shared table
@@ -6812,9 +6839,9 @@ func (c *Checker) checkStringMethod(
 	}
 	switch name {
 	case "append_bytes", "append_byte", "reserve", "truncate":
-		return c.checkStringAppendOrReserve(name, args, env)
+		return c.checkStringAppendOrReserve(str, name, args, env)
 	case "append_string":
-		if err := c.readStringGrowAllocator(name, args, env); err != nil {
+		if err := c.readStringGrowAllocator(str, name, args, env); err != nil {
 			return "", err
 		}
 		return c.checkStringSourceArg(name, args[1:], env)
@@ -6848,13 +6875,14 @@ func (c *Checker) checkStringMethod(
 // A growth names the allocator its storage comes from first: a String keeps
 // none of its own (ADR-0132). `truncate` neither grows nor frees.
 func (c *Checker) checkStringAppendOrReserve(
+	str *binding,
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
 	rest := args
 	if stringGrowMethod(name) {
-		if err := c.readStringGrowAllocator(name, args, env); err != nil {
+		if err := c.readStringGrowAllocator(str, name, args, env); err != nil {
 			return "", err
 		}
 		rest = args[1:]
@@ -6881,6 +6909,7 @@ func stringGrowMethod(name string) bool {
 
 // readStringGrowAllocator reads the leading Allocator a growth names.
 func (c *Checker) readStringGrowAllocator(
+	str *binding,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -6888,14 +6917,7 @@ func (c *Checker) readStringGrowAllocator(
 	if len(args) != 2 {
 		return errorf("string error: `String.%s` expects 2 args, got %d", name, len(args))
 	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return err
-	}
-	if got != "Allocator" {
-		return errorf("string error: `String.%s` expects Allocator, got %s", name, got)
-	}
-	return nil
+	return c.readGrowAllocator("string", "String."+name, str, args[0], env)
 }
 
 // checkStringNoArgs validates no-argument String methods.
@@ -7017,7 +7039,7 @@ func (c *Checker) checkArrayMethod(
 		return c.checkStdArrayStorageMethod(elem, name, args, env)
 	}
 	if arrayGrowMethod(name) {
-		return c.checkArrayGrowth(elem, name, args, env)
+		return c.checkArrayGrowth(array, elem, name, args, env)
 	}
 	switch name {
 	case "pop":
@@ -7215,12 +7237,13 @@ func arrayGrowMethod(name string) bool {
 // the allocator its storage comes from first: an Array header keeps none of
 // its own (ADR-0132).
 func (c *Checker) checkArrayGrowth(
+	array *binding,
 	elem string,
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if err := c.readArrayGrowAllocator(name, args, env); err != nil {
+	if err := c.readArrayGrowAllocator(array, name, args, env); err != nil {
 		return "", err
 	}
 	switch name {
@@ -7235,6 +7258,7 @@ func (c *Checker) checkArrayGrowth(
 
 // readArrayGrowAllocator reads the leading Allocator a growth names.
 func (c *Checker) readArrayGrowAllocator(
+	array *binding,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -7242,14 +7266,7 @@ func (c *Checker) readArrayGrowAllocator(
 	if len(args) != 2 {
 		return errorf("array error: `Array.%s` expects 2 args, got %d", name, len(args))
 	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return err
-	}
-	if got != "Allocator" {
-		return errorf("array error: `Array.%s` expects Allocator, got %s", name, got)
-	}
-	return nil
+	return c.readGrowAllocator("array", "Array."+name, array, args[0], env)
 }
 
 // checkArrayAppend validates append mutation and element move.
@@ -7419,7 +7436,7 @@ func (c *Checker) checkMapMethod(
 	}
 	switch name {
 	case "insert":
-		return c.checkMapInsert(keyType, valueType, args, env)
+		return c.checkMapInsert(mapValue, keyType, valueType, args, env)
 	case "get":
 		if err := c.checkMapKeyArg(keyType, name, args, env); err != nil {
 			return "", err
@@ -7486,22 +7503,28 @@ func (c *Checker) checkMapAtCondition(
 	return "?&" + valueType, nil
 }
 
-// checkMapInsert validates read-only key and copy value insertion.
+// checkMapInsert validates Map.insert(allocator, key, value). The insert is
+// the call that buys storage, so it names the allocator it buys from, the same
+// way an Array append does: the header keeps none of its own (ADR-0131).
 func (c *Checker) checkMapInsert(
+	mapValue *binding,
 	keyType string,
 	valueType string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if len(args) != 2 {
-		return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
+	if len(args) != 3 {
+		return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
 	}
-	if got, err := c.readContextualExpr(args[0], keyType, env); err != nil {
+	if err := c.readGrowAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
+		return "", err
+	}
+	if got, err := c.readContextualExpr(args[1], keyType, env); err != nil {
 		return "", err
 	} else if !sameOwnershipType(got, keyType) {
 		return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 	}
-	got, err := c.moveContextualExpr(args[1], valueType, env)
+	got, err := c.moveContextualExpr(args[2], valueType, env)
 	if err != nil {
 		return "", err
 	}
@@ -7509,6 +7532,28 @@ func (c *Checker) checkMapInsert(
 		return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "std::mem::Error!void", nil
+}
+
+// readGrowAllocator reads the leading Allocator a storage-asking container
+// method names, and requires it to be the one the container was built from.
+// The storage a growth buys is released by the container's `deinit`, which
+// names one allocator for all of it: a growth that named another would leave
+// the release freeing bytes it never handed out (ADR-0132).
+func (c *Checker) readGrowAllocator(
+	kind string,
+	what string,
+	receiver *binding,
+	arg ast.Expression,
+	env *scope,
+) error {
+	got, err := c.readExpr(arg, env)
+	if err != nil {
+		return err
+	}
+	if got != "Allocator" {
+		return errorf("%s error: `%s` expects Allocator, got %s", kind, what, got)
+	}
+	return c.checkReleaseTie(what, receiver, arg, env)
 }
 
 // checkMapIndexArg validates one i64 insertion-position argument.
@@ -7722,15 +7767,21 @@ func (c *Checker) checkImplMethodArg(
 }
 
 // checkArenaAdd moves one value into an arena and returns a handle.
+// checkArenaAdd validates Arena.add(allocator, value). The add is the call
+// that buys storage, so it names the allocator it buys from, the same way an
+// Array append does: the header keeps none of its own (ADR-0131).
 func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("arena error: `arena.add` expects 1 arg, got %d", len(args))
+	if len(args) != 2 {
+		return "", errorf("arena error: `arena.add` expects 2 args, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
 		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
-	got, err := c.moveContextualExpr(args[0], arg, env)
+	if err := c.readGrowAllocator("arena", "arena.add", arena, args[0], env); err != nil {
+		return "", err
+	}
+	got, err := c.moveContextualExpr(args[1], arg, env)
 	if err != nil {
 		return "", err
 	}

@@ -82,11 +82,12 @@ fn (self: &Loader) missing_lib_file(file: []u8) -> !diagnostic::Diagnostic {
 
 /// Records which paths name a module of the standard library with sources.
 fn (self: &var Loader) remember_std_modules(graph: &Graph) -> !void {
+    let allocator = self.allocator;
     var index = 0;
     while graph.modules.at(index) |module| {
         index = index + 1;
         if module.files.len() > 0 {
-            try set_insert(&var self.std_modules, &module.path);
+            try set_insert(allocator, &var self.std_modules, &module.path);
         }
     }
     return;
@@ -143,7 +144,7 @@ fn (self: &Loader) std_modules_for(
         while wanted.at(wanted_index) |module_path| {
             wanted_index = wanted_index + 1;
             let module_bytes = module_path.as_bytes();
-            try loader.visit(graph, module_bytes, sources);
+            try loader.visit(self.allocator, graph, module_bytes, sources);
         }
     }
     var modules = array::new<Module>(self.allocator);
@@ -218,6 +219,7 @@ fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> 
 
 /// Adds one std module after adding the modules its source names.
 fn (self: &var StdLoader) visit(
+    allocator: Allocator,
     graph: &Graph,
     module_path: []u8,
     sources: &var map::Map<[]u8, string::String>
@@ -227,7 +229,7 @@ fn (self: &var StdLoader) visit(
     if self.visited.contains(module_path) {
         return;
     }
-    try self.visited.insert(module_path, true);
+    try self.visited.insert(allocator, module_path, true);
     var graph_index = 0;
     while graph.modules.at(graph_index) |module| {
         graph_index = graph_index + 1;
@@ -242,12 +244,12 @@ fn (self: &var StdLoader) visit(
             errdefer text.deinit(self.allocator);
             let dependencies = try self.references(&text);
             defer dependencies.deinit(self.allocator);
-            try sources.insert(file_bytes, move text);
+            try sources.insert(allocator, file_bytes, move text);
             var dependency_index = 0;
             while dependencies.at(dependency_index) |dependency| {
                 dependency_index = dependency_index + 1;
                 let dependency_bytes = dependency.as_bytes();
-                try self.visit(graph, dependency_bytes, sources);
+                try self.visit(allocator, graph, dependency_bytes, sources);
             }
         }
     }
@@ -310,7 +312,7 @@ fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
             segments = segments + 1;
             if segments > 2 {
                 let prefix_bytes = prefix.as_bytes();
-                try seen.insert(prefix_bytes, true);
+                try seen.insert(allocator, prefix_bytes, true);
             }
             try prefix.append_bytes(allocator, "::");
             try prefix.append_string(allocator, &part.literal);
@@ -372,7 +374,7 @@ fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::St
                         if set_contains(&seen, &joined) {
                             joined.deinit(self.allocator);
                         } else {
-                            try set_insert(&var seen, &joined);
+                            try set_insert(self.allocator, &var seen, &joined);
                             try paths.append(self.allocator, move joined);
                         }
                     },
@@ -425,7 +427,7 @@ fn (self: &var Loader) add_source_overrides(
         defer cleaned.deinit(self.allocator);
         let cleaned_bytes = cleaned.as_bytes();
         if sources.at(key) |text| {
-            try self.source_overrides.insert(cleaned_bytes, try copy_string(self.allocator, text));
+            try self.source_overrides.insert(self.allocator, cleaned_bytes, try copy_string(self.allocator, text));
         }
     }
     return;
@@ -473,7 +475,7 @@ pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
                     file_index = file_index + 1;
                     let file_bytes = file.as_bytes();
                     let module_path = module.path.as_bytes();
-                    if try self.collect_error_sets(file_bytes, module_path, &var sets, &var code) |failed| {
+                    if try self.collect_error_sets(self.allocator, file_bytes, module_path, &var sets, &var code) |failed| {
                         sets.deinit(self.allocator);
                         return StdErrorCodesResult::Error(move failed);
                     }
@@ -487,6 +489,7 @@ pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
 /// Parses one std file on its own and records the error sets it declares
 /// under their module-qualified names, numbering members from code on.
 fn (self: &Loader) collect_error_sets(
+    allocator: Allocator,
     file: []u8,
     module_path: []u8,
     sets: &var map::Map<[]u8, map::Map<[]u8, i64>>,
@@ -517,7 +520,7 @@ fn (self: &Loader) collect_error_sets(
                     member_index = member_index + 1;
                     let member_text = tree.texts.at(member.node);
                     let member_bytes = member_text.as_bytes();
-                    try members.insert(member_bytes, code.*);
+                    try members.insert(allocator, member_bytes, code.*);
                     code.* = code.* + 1;
                 }
                 var qualified = try string::from_bytes(self.allocator, module_path);
@@ -526,7 +529,7 @@ fn (self: &Loader) collect_error_sets(
                 let set_name = tree.texts.at(set.name.node);
                 try qualified.append_string(self.allocator, set_name);
                 let qualified_bytes = qualified.as_bytes();
-                try sets.insert(qualified_bytes, move members);
+                try sets.insert(allocator, qualified_bytes, move members);
             },
             _ => {},
         }

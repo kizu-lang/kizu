@@ -38,6 +38,8 @@ fn (self: std::mem::Box<T>) deinit<T>(allocator: Allocator) -> void
 fn (self: std::array::Array<T>) deinit<T>(allocator: Allocator) -> void
 fn (self: &var std::array::Array<T>) append<T>(allocator: Allocator, value: T) -> !void
 fn (self: &var std::array::Array<T>) reserve<T>(allocator: Allocator, n: i64) -> !void
+fn (self: &var std::map::Map<K, V>) insert<K, V>(allocator: Allocator, key: K, value: V) -> !void
+fn (self: &var std::arena::Arena<T>) add<T>(allocator: Allocator, value: T) -> Handle<T>
 ```
 
 `sizeof(T)` を compile 時の値として渡すのと同じ扱いです。確保にも解放にも必要な
@@ -75,10 +77,22 @@ fn (self: Node) deinit(allocator: Allocator) -> void {
 
 ### tie 規則
 
-解放に渡す `Allocator` は、その owner を作った allocator と同じ tie を持たな
-ければなりません(SPEC §14.3)。`fixed_buffer` / `allocator_from` から作った
-allocator は tied なので、取り違えは compile error です。tie を持たない
-`page_allocator()` 同士は同じ allocator なので検査は要りません。
+**確保に渡す `Allocator` も、解放に渡すものも**、その owner を作った allocator と
+同じ tie を持たなければなりません(SPEC §14.3)。`fixed_buffer` /
+`allocator_from` から作った allocator は tied なので、取り違えは compile error
+です。tie を持たない `page_allocator()` 同士は同じ allocator なので検査は要り
+ません。
+
+確保側を外すと解放側だけでは足りません。`array::new(heap)` した array に
+`append(scratch, ..)` して `deinit(heap)` すると、解放は自分が配っていない
+byte を `free` に渡すことになります —— 解放側の 3 つの綴りはどれも一致して
+いるのに、実行すると落ちます。だから `append` / `append_bytes` / `reserve` /
+`insert` / `add` も `deinit` と同じ検査を通ります。
+
+tie の同一性は binding の id で見ます。branch や loop body は scope の clone に
+対して検査されるので、そこで argument が解決する allocator は owner が記録した
+ものの copy です。id は binding と一緒に copy されるので、両側で同じ宣言を
+名指します。
 
 container の解放は要素の解放に自分の allocator を渡すので、要素と container が
 違う allocator から来ていると取り違えになります。これに別の検査は要りません ——

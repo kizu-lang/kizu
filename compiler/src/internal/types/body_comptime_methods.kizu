@@ -380,7 +380,7 @@ fn (self: &Checker) comptime_match_capture_error(owner: Type) -> !diagnostic::Di
     errdefer message.deinit(self.allocator);
     try message.append_bytes(self.allocator, "comptime match on `");
     try self.append_checker_type(&var message, owner);
-    try message.append_bytes(self.allocator, 
+    try message.append_bytes(self.allocator,
         "` needs a payload capture, as in `comptime match value |variant, payload| { ... }`"
     );
     return self.comptime_message(move message);
@@ -740,7 +740,9 @@ fn (self: &var Checker) check_arena_method(
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Validates std::arena::Arena<T>.add(value).
+// Validates std::arena::Arena<T>.add(allocator, value). The add is what buys
+// the storage the element goes in, so it names the allocator it buys from: an
+// arena header keeps none of its own (ADR-0131, ADR-0132).
 fn (self: &var Checker) check_arena_add(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -748,10 +750,19 @@ fn (self: &var Checker) check_arena_add(
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if args.len(tree) != 1 {
-        return try self.named_arity_error("arena.add", 1, args.len(tree));
+    if args.len(tree) != 2 {
+        return try self.named_arity_error("arena.add", 2, args.len(tree));
     }
-    let argument = args.get_or_panic(tree, 0);
+    let allocator_arg = args.get_or_panic(tree, 0);
+    var allocator = empty_type();
+    if try self.check_expr(tree, scope, allocator_arg, &var allocator) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(allocator, "Allocator") {
+        return try self.labeled_arg_type_error(
+            "arena.add", try self.types.intern("Allocator"), allocator);
+    }
+    let argument = args.get_or_panic(tree, 1);
     var got = empty_type();
     if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;
@@ -945,7 +956,7 @@ fn (self: &var Checker) check_function(
     let root = self.scopes.new_scope(null);
     var static_values = map::new<[]u8, Type>(self.allocator);
     errdefer static_values.deinit(self.allocator);
-    if try self.define_static_value_params(root, function, &var static_values) |problem| {
+    if try self.define_static_value_params(self.allocator, root, function, &var static_values) |problem| {
         static_values.deinit(self.allocator);
         return move problem;
     }
@@ -977,7 +988,7 @@ fn (self: &var Checker) check_function(
         }
         index = index + 1;
     }
-    let type_params = try self.signature_type_params(function);
+    let type_params = try self.signature_type_params(self.allocator, function);
     let type_args = map::new<[]u8, Type>(self.allocator);
     let previous_context = try self.enter_body_context(
         CurrentFunction::Value(function),
@@ -1025,7 +1036,7 @@ fn (self: &Checker) function_implicit_return(function: FunctionHandle) -> bool {
 }
 
 // Collects the type-valued static parameter names of one cached signature.
-fn (self: &Checker) signature_type_params(function: FunctionHandle) -> !map::Map<[]u8, bool> {
+fn (self: &Checker) signature_type_params(allocator: Allocator, function: FunctionHandle) -> !map::Map<[]u8, bool> {
     var names = map::new<[]u8, bool>(self.allocator);
     errdefer names.deinit(self.allocator);
     if self.metadata.functions.at(function.index) |value| {
@@ -1033,7 +1044,7 @@ fn (self: &Checker) signature_type_params(function: FunctionHandle) -> !map::Map
         while value.signature.static_params.at(index) |parameter| {
             if parameter.is_type {
                 let name = parameter.name.as_bytes();
-                try names.insert(name, true);
+                try names.insert(allocator, name, true);
             }
             index = index + 1;
         }

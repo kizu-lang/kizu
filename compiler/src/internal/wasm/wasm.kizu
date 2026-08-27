@@ -334,6 +334,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
 /// Collects the string constants in deterministic IR order, the Go
 /// `sortedStringLiteralsByDiscovery`.
 fn (self: &Emitter) collect_literals(
+    allocator: Allocator,
     module: &ir::Module,
     literals: &var array::Array<ir::Name>
 ) -> !void {
@@ -360,7 +361,7 @@ fn (self: &Emitter) collect_literals(
                 if found.contains(literal_bytes) {
                     continue;
                 }
-                try found.insert(literal_bytes, true);
+                try found.insert(allocator, literal_bytes, true);
                 try literals.append(self.allocator, instr_node.immediate);
             }
         }
@@ -372,7 +373,7 @@ fn (self: &Emitter) collect_literals(
 fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     var literals = array::new<ir::Name>(self.allocator);
     defer literals.deinit(self.allocator);
-    try self.collect_literals(module, &var literals);
+    try self.collect_literals(self.allocator, module, &var literals);
     var offset = data_offset();
     var index = 0;
     while literals.get(index) |literal| {
@@ -405,7 +406,7 @@ fn (self: &var Emitter) record_literal(
 
 /// Files one data entry under its key and keeps the order it was assigned in.
 fn (self: &var Emitter) record_data(key: []u8, offset: i64, length: i64) -> !void {
-    try self.strings.insert(key, DataRef { offset: offset, length: length });
+    try self.strings.insert(self.allocator, key, DataRef { offset: offset, length: length });
     let name = try self.names.intern(key);
     return self.data_order.append(self.allocator, name);
 }
@@ -454,7 +455,7 @@ fn (self: &var Emitter) intern_table_entry(module: &ir::Module, name: ir::Name) 
         return;
     }
     let position = self.table.len();
-    try self.table_index.insert(bytes, position);
+    try self.table_index.insert(self.allocator, bytes, position);
     return self.table.append(self.allocator, name);
 }
 
@@ -487,7 +488,7 @@ fn (self: &var Emitter) intern_signature(module: &ir::Module, node: &ir::InstrNo
         return known;
     }
     let position = self.signatures.len();
-    try self.signature_index.insert(key_bytes, position);
+    try self.signature_index.insert(self.allocator, key_bytes, position);
     try self.signatures.append(self.allocator, move declaration);
     return position;
 }
@@ -685,7 +686,7 @@ fn (self: &var Emitter) write_function(
     try self.line("      (loop $dispatch");
     var index = map::new<[]u8, DispatchBlock>(self.allocator);
     defer index.deinit(self.allocator);
-    try block_indexes(module, node, &var index);
+    try block_indexes(self.allocator, module, node, &var index);
     var block_index = 0;
     while node.blocks.get(block_index) |block| {
         let id = block_index;
@@ -785,6 +786,7 @@ struct DispatchBlock {
 /// declares it: lowering numbers each function's blocks from scratch, so
 /// `entry` and `while.header.1` name a block in every function that has one.
 fn block_indexes(
+    allocator: Allocator,
     module: &ir::Module,
     node: &ir::FunctionNode,
     out: &var map::Map<[]u8, DispatchBlock>
@@ -794,7 +796,7 @@ fn block_indexes(
         let name = module.block_name(block);
         let retained = ir::name_text(&module.names, name);
         let bytes = retained.as_bytes();
-        try out.insert(bytes, DispatchBlock { block: block, id: index });
+        try out.insert(allocator, bytes, DispatchBlock { block: block, id: index });
         index = index + 1;
     }
     return;
@@ -840,7 +842,7 @@ fn (self: &var Emitter) set_value(
 ) -> !void {
     let retained = ir::name_text(&module.names, result.name);
     let bytes = retained.as_bytes();
-    return self.values.insert(bytes, ValueInfo {
+    return self.values.insert(self.allocator, bytes, ValueInfo {
         typ: result.type_name,
         expr: expr,
         length: length,

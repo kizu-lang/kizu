@@ -118,7 +118,8 @@ fn (self: &var Lowerer) collect_mut_borrows_children(
 /// one this walk knows. An unknown node is an error rather than an empty
 /// answer: a name missed here is a local that keeps its value while the
 /// callee writes into storage nobody reads.
-fn statement_children(allocator: Allocator, 
+fn statement_children(
+    allocator: Allocator,
     tree: &ast::Ast,
     statement: ast::Statement,
     exprs: &var array::Array<ast::Expression>,
@@ -178,7 +179,8 @@ fn statement_children(allocator: Allocator,
 /// Appends the children of an `if`, the `IfStmt` arm of the Go
 /// `nestingStatementChildren`: the condition, then the blocks that are
 /// present (the Go `blocks`).
-fn if_children(allocator: Allocator, 
+fn if_children(
+    allocator: Allocator,
     branch: ast::IfStmt,
     exprs: &var array::Array<ast::Expression>,
     stmts: &var array::Array<ast::Statement>
@@ -194,7 +196,8 @@ fn if_children(allocator: Allocator,
 /// Appends the children of a `match`, the `MatchStmt` arm of the Go
 /// `nestingStatementChildren`: the value, then the statement each arm runs
 /// (the Go `matchArmBodies`).
-fn match_children(allocator: Allocator, 
+fn match_children(
+    allocator: Allocator,
     value: &ast::MatchStmt,
     exprs: &var array::Array<ast::Expression>,
     stmts: &var array::Array<ast::Statement>
@@ -263,7 +266,8 @@ fn (self: &var Lowerer) collect_mut_borrows_value_stmt(tree: &var ast::Ast, expr
 /// Appends the expressions written inside expr, the Go `expressionChildren`
 /// (with `structLiteralValues` and `guardExpressionChildren` folded in), and
 /// reports whether the node is one this walk knows.
-fn expression_children(allocator: Allocator, 
+fn expression_children(
+    allocator: Allocator,
     tree: &ast::Ast,
     expression: ast::Expression,
     children: &var array::Array<ast::Expression>
@@ -382,6 +386,15 @@ fn (self: &var Lowerer) mark_lent_method_args(
     defer method.deinit(self.allocator);
     try append_text(self.allocator, tree, field.name, &var method);
     let method_bytes = method.as_bytes();
+    // Arena's methods are the compiler's own, so there is no declaration here
+    // to read the passing off. The table that classifies what a container
+    // method does to storage is what says the receiver is written through, and
+    // a header is written at its address (ADR-0131). Like the loop below, this
+    // is by name: a same-named method on another type gets a slot it does not
+    // need, which costs stack and changes nothing else.
+    if ownership::arena_method_writes_header(method_bytes) {
+        try self.mark_if_name(tree, field.receiver);
+    }
     var position = 0;
     while self.method_signature_at(method_bytes, position) |signature| {
         position = position + 1;
@@ -418,6 +431,15 @@ fn (self: &var Lowerer) mark_lent_generic_args(
     var params = no_params();
     if try self.declared_instance_params(tree, name, type_arg, &var params) |failed| {
         failed.deinit(self.allocator);
+        // A container primitive has no declaration to read. std::array's
+        // wrapper reaches its storage through declared methods; std::arena's
+        // and std::map's reach it through the primitives themselves, so those
+        // are the ones read here (ADR-0131).
+        if self.lends_container_storage(name) {
+            if ownership::arg_at(tree, args, 0) |first| {
+                try self.mark_if_name(tree, first);
+            }
+        }
         return;
     }
     var index = 0;
@@ -430,6 +452,15 @@ fn (self: &var Lowerer) mark_lent_generic_args(
         index = index + 1;
     }
     return;
+}
+
+/// Reports whether a callee is a container primitive handed the binding's
+/// storage. It reads the name and hands back the answer, so nothing holds the
+/// name table borrowed while the caller marks the binding.
+fn (self: &Lowerer) lends_container_storage(name: Name) -> bool {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    return arena_primitive_writes_header(bytes) or map_mutating_primitive(bytes);
 }
 
 /// Records the local whose storage expr would hand over, the Go
@@ -454,11 +485,11 @@ fn (self: &var Lowerer) mark_if_name(tree: &ast::Ast, expression: ast::Expressio
 /// the same place.
 fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
     if !self.has_slot(name) {
-        return self.envs.bind(self.env, name, value);
+        return self.envs.bind(self.allocator, self.env, name, value);
     }
     let slot_type = try self.module.names.prefixed("&var ", value.type_name);
     let slot = try self.emit1(Op::LocalSlot, slot_type, value);
-    return self.envs.bind(self.env, name, slot);
+    return self.envs.bind(self.allocator, self.env, name, slot);
 }
 
 /// Binds a capture the same way bind_local binds a declaration, the Go
@@ -468,11 +499,11 @@ fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
 /// already binds a borrow is an address, and one address is all it needs.
 fn (self: &var Lowerer) bind_capture(name: Name, value: Value) -> !void {
     if !self.has_slot(name) or self.is_reference_type(value.type_name) {
-        return self.envs.bind(self.env, name, value);
+        return self.envs.bind(self.allocator, self.env, name, value);
     }
     let slot_type = try self.module.names.prefixed("&var ", value.type_name);
     let slot = try self.emit1(Op::LocalSlot, slot_type, value);
-    return self.envs.bind(self.env, name, slot);
+    return self.envs.bind(self.allocator, self.env, name, slot);
 }
 
 /// Unwraps explicit `&var x` call-site syntax to the name whose storage the

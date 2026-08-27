@@ -773,8 +773,10 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 			continue
 		}
 		// One that arrives as a value and is written through needs storage of
-		// its own, which is the copy it was handed.
-		if l.slots[param.Name] {
+		// its own, which is the copy it was handed. One that arrives as an
+		// address already reaches storage, and it is the caller's: wrapping it
+		// again would hand the callee a borrow of a borrow.
+		if l.slots[param.Name] && !isReferenceType(signature.Params[index].Type) {
 			valueSlots = append(valueSlots, param.Name)
 		}
 	}
@@ -833,10 +835,14 @@ func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 	if _, ok := l.module.Unions[elem]; ok {
 		return "&" + elem, PassCopyAddress
 	}
-	// An array is its header, and the header is wider than a word. A shared
-	// borrow of one hands over the address of a copy rather than the copy
-	// itself, so a reader reaches the same fields a writer does.
-	if _, ok := arrayElementType(elem); ok {
+	// A borrow of an owner reaches the value the caller has, not a copy of
+	// it. An owner is where a container header lives, and the header is the
+	// storage it describes (ADR-0131): a copy of one stops seeing what the
+	// original goes on to own, so the two answer differently the moment
+	// anything writes through the original -- `b.show(b.put(v))` would show
+	// the value from before the put. Copy data has no such interior, so a
+	// borrow of it travels flat.
+	if ast.OwnerType(l.deinitOwners, elem) {
 		return "&" + elem, PassCopyAddress
 	}
 	return elem, PassValue
@@ -1898,11 +1904,11 @@ func (l *lowerer) lowerTypedContainerPrimitive(
 		return value, true, err
 	}
 	if method, ok := mapPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		key, value, err := mapPrimitiveTypeArgs(l.resolveTypeArgs(typeArg))
 		if err != nil {
 			return Value{}, true, err
 		}
-		key, value, err := mapPrimitiveTypeArgs(l.resolveTypeArgs(typeArg))
+		args, err := l.lowerCallArgsAs(mapPrimitiveParams(method, key, value), rawArgs)
 		if err != nil {
 			return Value{}, true, err
 		}
@@ -1918,11 +1924,12 @@ func (l *lowerer) lowerTypedContainerPrimitive(
 		return value, true, err
 	}
 	if method, ok := arenaPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		elem := l.resolveType(typeArg)
+		args, err := l.lowerCallArgsAs(arenaPrimitiveParams(method, elem), rawArgs)
 		if err != nil {
 			return Value{}, true, err
 		}
-		value, err := l.lowerArenaPrimitive(method, l.resolveType(typeArg), args)
+		value, err := l.lowerArenaPrimitive(method, elem, args)
 		return value, true, err
 	}
 	return Value{}, false, nil
@@ -2075,9 +2082,8 @@ func (l *lowerer) lowerResolvedMethod(
 			return l.lowerStdContainerMethod(arenaTypeName, method, elem, allArgs)
 		}
 		// Plain elements have no cleanup loop, so the release is the runtime
-		// op. The arena header still keeps the allocator the op frees through,
-		// so the one the call names goes no further than the check of it.
-		return l.lowerArenaMethod(method, receiverType, allArgs[:1])
+		// op, which is handed the allocator the call names.
+		return l.lowerArenaMethod(method, receiverType, allArgs)
 	}
 	if methodName, ok := l.implMethodCalleeName(receiverType, method); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -2093,18 +2099,34 @@ func (l *lowerer) lowerArenaMethod(
 ) (Value, error) {
 	switch name {
 	case "add":
-		return l.emit("arena.add", handleType(receiverType), allArgs, ""), nil
+		return l.emit("arena.add", handleType(receiverType), l.atHeader(allArgs), ""), nil
 	case "at":
 		elem := arenaElementType(receiverType)
 		resultType, _ := l.borrowIRType(elem, false)
-		return l.emit("arena.at", resultType, allArgs, ""), nil
+		return l.emit("arena.at", resultType, l.atHeader(allArgs), ""), nil
 	case "at_mut":
-		return l.emit("arena.at_mut", "?&var "+arenaElementType(receiverType), allArgs, ""), nil
+		return l.emit("arena.at_mut", "?&var "+arenaElementType(receiverType),
+			l.atHeader(allArgs), ""), nil
 	case "deinit":
 		return l.emit("arena.deinit", "void", allArgs, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", name)
 	}
+}
+
+// atHeader gives the container an arena operation works on an address to reach
+// it by. A receiver that already travels as a borrow has one; one that arrived
+// by value is this frame's own copy of the header, and a slot is where a copy
+// lives. Only `deinit` is left with the value, which is all a release reads.
+// The declared container methods get this from their callee's parameter
+// instead; an arena's are the compiler's own and have no callee (ADR-0131).
+func (l *lowerer) atHeader(args []Value) []Value {
+	if len(args) == 0 || isReferenceType(args[0].Type) {
+		return args
+	}
+	out := append([]Value{}, args...)
+	out[0] = l.emit("local.slot", "&var "+args[0].Type, []Value{args[0]}, "")
+	return out
 }
 
 // isBufferIRType reports whether an IR type spelling is a fixed-length stack
@@ -2259,7 +2281,7 @@ func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) P
 	}
 	decl := l.genericDecl(stdmethod.MethodName(base, method))
 	if decl == nil || len(decl.Params) == 0 {
-		return PassValue
+		return containerSelfPassing(base, method)
 	}
 	if decl.Params[0].MutBorrow {
 		return PassCallerStorage
@@ -2269,6 +2291,22 @@ func (l *lowerer) genericMethodSelfPassing(receiverType string, method string) P
 		return passing
 	}
 	return PassValue
+}
+
+// containerSelfPassing says how a container method with no std declaration
+// receives its receiver. Arena's methods are the compiler's own, so there is no
+// `&var self` to read; the container is still a header, and a header is reached
+// at its address either way -- a copy would leave the caller's `data` behind
+// (ADR-0131). What the ownership checker says the method does to storage is
+// what decides whether that address is writable.
+func containerSelfPassing(base string, method string) Passing {
+	if base != arenaTypeName {
+		return PassValue
+	}
+	if ownership.ArenaMethodWritesHeader(method) {
+		return PassCallerStorage
+	}
+	return PassCopyAddress
 }
 
 // stdContainerTypeName names the generic declaration a container instance was
@@ -2337,6 +2375,77 @@ func arrayPrimitiveParams(method string, elem string) []Param {
 	return []Param{self}
 }
 
+// arenaPrimitiveParams says how one arena primitive receives its arena, the
+// way arrayPrimitiveParams does for an array -- the two are the same header.
+// Both `len` and `pop_or_panic` are handed the binding's storage: they are the
+// two halves of std::arena's cleanup loop, and the loop is only right while
+// the count it reads and the pop that shortens it reach the same header.
+// `deinit` receives the header itself, because releasing it is the last thing
+// done with it.
+func arenaPrimitiveParams(method string, elem string) []Param {
+	if method == typ.CleanupMethod {
+		return nil
+	}
+	arena := arenaTypeName + "<" + elem + ">"
+	return []Param{{Type: "&var " + arena, Passing: PassCallerStorage}}
+}
+
+// primitiveInstanceParams names the parameters of a container primitive, which
+// has no declaration for declaredInstanceParams to read. What it answers is
+// how the container arrives: a primitive that writes through the header is
+// handed the binding's storage, so the binding needs a slot of its own rather
+// than a fresh copy per call.
+func (l *lowerer) primitiveInstanceParams(name string, typeArg string) []Param {
+	if method, ok := arrayPrimitives[name]; ok {
+		return arrayPrimitiveParams(method, l.resolveType(typeArg))
+	}
+	if method, ok := arenaPrimitives[name]; ok {
+		return arenaPrimitiveParams(method, l.resolveType(typeArg))
+	}
+	if method, ok := mapPrimitives[name]; ok {
+		key, value, err := mapPrimitiveTypeArgs(l.resolveTypeArgs(typeArg))
+		if err != nil {
+			return nil
+		}
+		return mapPrimitiveParams(method, key, value)
+	}
+	return nil
+}
+
+// mapPrimitiveParams says how one map primitive receives its map, the way
+// arrayPrimitiveParams does for an array -- a map is its header too. A
+// primitive that writes through the header is handed the binding's storage;
+// the rest receive the address of a copy, and `deinit` receives the header
+// itself, because releasing it is the last thing done with it. The key and
+// value positions are named as well, so an integer literal written at a call
+// narrows rather than staying i64.
+func mapPrimitiveParams(method string, key string, value string) []Param {
+	if method == typ.CleanupMethod {
+		return nil
+	}
+	mapType := mapTypeName + "<" + key + ", " + value + ">"
+	self := Param{Type: "&" + mapType, Passing: PassCopyAddress}
+	if mapMutatingPrimitives[method] {
+		self = Param{Type: "&var " + mapType, Passing: PassCallerStorage}
+	}
+	switch method {
+	case "insert":
+		return []Param{self, {Type: "Allocator"}, {Type: key}, {Type: value}}
+	case "get", "at", "at_mut", "contains":
+		return []Param{self, {Type: key}}
+	case "key_at", "take_value_at":
+		return []Param{self, {Type: "i64"}}
+	}
+	return []Param{self}
+}
+
+// mapMutatingPrimitives names the map primitives that write through the
+// header. They receive the binding's storage; the rest receive the address of
+// a copy.
+var mapMutatingPrimitives = map[string]bool{
+	"insert": true, "at_mut": true, "take_value_at": true,
+}
+
 var arrayPrimitives = map[string]string{
 	"std::internal::builtin::array_append":       "append",
 	"std::internal::builtin::array_append_bytes": "append_bytes",
@@ -2396,9 +2505,9 @@ var arenaPrimitives = map[string]string{
 func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (Value, error) {
 	switch name {
 	case "len":
-		return l.emit("arena.len", "i64", args, ""), nil
+		return l.emit("arena.len", "i64", l.atHeader(args), ""), nil
 	case "pop_or_panic":
-		return l.emit("arena.pop_or_panic", elem, args, ""), nil
+		return l.emit("arena.pop_or_panic", elem, l.atHeader(args), ""), nil
 	case "deinit":
 		return l.emit("arena.deinit", "void", args, ""), nil
 	default:

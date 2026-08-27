@@ -1,11 +1,11 @@
 import std;
 struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: &var Registry) add_direct(name: []u8) -> std::arena::Handle<User> {
-    return self.users.add(User { name: name });
+fn (self: &var Registry) add_direct(allocator: Allocator, name: []u8) -> std::arena::Handle<User> {
+    return self.users.add(allocator, User { name: name });
 }
-fn (self: &var Registry) add_bound(name: []u8) -> std::arena::Handle<User> {
-    let handle = self.users.add(User { name: name });
+fn (self: &var Registry) add_bound(allocator: Allocator, name: []u8) -> std::arena::Handle<User> {
+    let handle = self.users.add(allocator, User { name: name });
     return handle;
 }
 fn (self: Registry) deinit(allocator: Allocator) -> void {
@@ -14,8 +14,8 @@ fn (self: Registry) deinit(allocator: Allocator) -> void {
 fn main() {
     let allocator = std::mem::page_allocator();
     var registry = Registry { users: std::arena::new<User>(allocator) };
-    let alice = registry.add_direct("alice");
-    let bob = registry.add_bound("bob");
+    let alice = registry.add_direct(allocator, "alice");
+    let bob = registry.add_bound(allocator, "bob");
     print(registry.users.at(alice).name);
     print(registry.users.at(bob).name);
     registry.deinit(allocator);
@@ -24,24 +24,24 @@ fn main() {
 
 // ir
 // lower:
-// fn Registry.add_direct(%self: &var Registry, %name: []u8) -> std::arena::Handle<User> {
+// fn Registry.add_direct(%self: &var Registry, %allocator: Allocator, %name: []u8) -> std::arena::Handle<User> {
 // entry:
-//   %1: std::arena::Arena<User> = field.ref.users %self: &var Registry
+//   %1: &var std::arena::Arena<User> = field.addr.users %self: &var Registry
 //   %2: User = struct.new {name: %name: []u8}
-//   %3: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %2: User
+//   %3: std::arena::Handle<User> = arena.add %1: &var std::arena::Arena<User>, %allocator: Allocator, %2: User
 //   return %3: std::arena::Handle<User>
 // }
-// fn Registry.add_bound(%self: &var Registry, %name: []u8) -> std::arena::Handle<User> {
+// fn Registry.add_bound(%self: &var Registry, %allocator: Allocator, %name: []u8) -> std::arena::Handle<User> {
 // entry:
-//   %1: std::arena::Arena<User> = field.ref.users %self: &var Registry
+//   %1: &var std::arena::Arena<User> = field.addr.users %self: &var Registry
 //   %2: User = struct.new {name: %name: []u8}
-//   %3: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %2: User
+//   %3: std::arena::Handle<User> = arena.add %1: &var std::arena::Arena<User>, %allocator: Allocator, %2: User
 //   return %3: std::arena::Handle<User>
 // }
 // fn Registry.deinit(%self: Registry, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::arena::Arena<User> = field.users %self: Registry
-//   arena.deinit %1: std::arena::Arena<User>
+//   arena.deinit %1: std::arena::Arena<User>, %allocator: Allocator
 //   return void: void
 // }
 // fn main() -> void {
@@ -51,15 +51,15 @@ fn main() {
 //   %3: Registry = struct.new {users: %2: std::arena::Arena<User>}
 //   %4: &var Registry = local.slot %3: Registry
 //   %5: []u8 = const "alice"
-//   %6: std::arena::Handle<User> = call.Registry.add_direct %4: &var Registry, %5: []u8
+//   %6: std::arena::Handle<User> = call.Registry.add_direct %4: &var Registry, %1: Allocator, %5: []u8
 //   %7: []u8 = const "bob"
-//   %8: std::arena::Handle<User> = call.Registry.add_bound %4: &var Registry, %7: []u8
-//   %9: std::arena::Arena<User> = field.ref.users %4: &var Registry
-//   %10: User = arena.at %9: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %8: std::arena::Handle<User> = call.Registry.add_bound %4: &var Registry, %1: Allocator, %7: []u8
+//   %9: &var std::arena::Arena<User> = field.addr.users %4: &var Registry
+//   %10: User = arena.at %9: &var std::arena::Arena<User>, %6: std::arena::Handle<User>
 //   %11: []u8 = field.name %10: User
 //   call.print %11: []u8
-//   %13: std::arena::Arena<User> = field.ref.users %4: &var Registry
-//   %14: User = arena.at %13: std::arena::Arena<User>, %8: std::arena::Handle<User>
+//   %13: &var std::arena::Arena<User> = field.addr.users %4: &var Registry
+//   %14: User = arena.at %13: &var std::arena::Arena<User>, %8: std::arena::Handle<User>
 //   %15: []u8 = field.name %14: User
 //   call.print %15: []u8
 //   %17: Registry = ref.load %4: &var Registry
@@ -67,24 +67,24 @@ fn main() {
 //   return void: void
 // }
 // opt:
-// fn Registry.add_direct(%self: &var Registry, %name: []u8) -> std::arena::Handle<User> {
+// fn Registry.add_direct(%self: &var Registry, %allocator: Allocator, %name: []u8) -> std::arena::Handle<User> {
 // entry:
-//   %1: std::arena::Arena<User> = field.ref.users %self: &var Registry
+//   %1: &var std::arena::Arena<User> = field.addr.users %self: &var Registry
 //   %2: User = struct.new {name: %name: []u8}
-//   %3: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %2: User
+//   %3: std::arena::Handle<User> = arena.add %1: &var std::arena::Arena<User>, %allocator: Allocator, %2: User
 //   return %3: std::arena::Handle<User>
 // }
-// fn Registry.add_bound(%self: &var Registry, %name: []u8) -> std::arena::Handle<User> {
+// fn Registry.add_bound(%self: &var Registry, %allocator: Allocator, %name: []u8) -> std::arena::Handle<User> {
 // entry:
-//   %1: std::arena::Arena<User> = field.ref.users %self: &var Registry
+//   %1: &var std::arena::Arena<User> = field.addr.users %self: &var Registry
 //   %2: User = struct.new {name: %name: []u8}
-//   %3: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %2: User
+//   %3: std::arena::Handle<User> = arena.add %1: &var std::arena::Arena<User>, %allocator: Allocator, %2: User
 //   return %3: std::arena::Handle<User>
 // }
 // fn Registry.deinit(%self: Registry, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::arena::Arena<User> = field.users %self: Registry
-//   arena.deinit %1: std::arena::Arena<User>
+//   arena.deinit %1: std::arena::Arena<User>, %allocator: Allocator
 //   return void: void
 // }
 // fn main() -> void {
@@ -94,15 +94,15 @@ fn main() {
 //   %3: Registry = struct.new {users: %2: std::arena::Arena<User>}
 //   %4: &var Registry = local.slot %3: Registry
 //   %5: []u8 = const "alice"
-//   %6: std::arena::Handle<User> = call.Registry.add_direct %4: &var Registry, %5: []u8
+//   %6: std::arena::Handle<User> = call.Registry.add_direct %4: &var Registry, %1: Allocator, %5: []u8
 //   %7: []u8 = const "bob"
-//   %8: std::arena::Handle<User> = call.Registry.add_bound %4: &var Registry, %7: []u8
-//   %9: std::arena::Arena<User> = field.ref.users %4: &var Registry
-//   %10: User = arena.at %9: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %8: std::arena::Handle<User> = call.Registry.add_bound %4: &var Registry, %1: Allocator, %7: []u8
+//   %9: &var std::arena::Arena<User> = field.addr.users %4: &var Registry
+//   %10: User = arena.at %9: &var std::arena::Arena<User>, %6: std::arena::Handle<User>
 //   %11: []u8 = field.name %10: User
 //   call.print %11: []u8
-//   %13: std::arena::Arena<User> = field.ref.users %4: &var Registry
-//   %14: User = arena.at %13: std::arena::Arena<User>, %8: std::arena::Handle<User>
+//   %13: &var std::arena::Arena<User> = field.addr.users %4: &var Registry
+//   %14: User = arena.at %13: &var std::arena::Arena<User>, %8: std::arena::Handle<User>
 //   %15: []u8 = field.name %14: User
 //   call.print %15: []u8
 //   %17: Registry = ref.load %4: &var Registry

@@ -100,6 +100,7 @@ func (e *emitter) arrayCheckedElement(
 	instr *ir.Instr,
 	handle string,
 	index string,
+	into string,
 ) (string, error) {
 	elem, err := e.instrElementType(instr)
 	if err != nil {
@@ -110,17 +111,23 @@ func (e *emitter) arrayCheckedElement(
 	inRange := "%" + e.nextSyntheticValue("array.in_range")
 	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
 	elemAddr := e.arrayElementAddr(handle, elem, index)
-	checked := "%" + e.nextSyntheticValue("array.checked")
+	checked := into
+	if checked == "" {
+		checked = "%" + e.nextSyntheticValue("array.checked")
+	}
 	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", checked, inRange, elemAddr)
 	return checked, nil
 }
 
-// usesArrayRuntime reports whether this module uses std::array::Array lowering.
+// usesArrayRuntime reports whether this module uses the array header lowering.
+// An arena is that header, so an arena op needs the same declarations even in
+// a module that names no array.
 func (e *emitter) usesArrayRuntime() bool {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if strings.HasPrefix(instr.Op, "array.") {
+				if strings.HasPrefix(instr.Op, "array.") ||
+					strings.HasPrefix(instr.Op, "arena.") {
 					return true
 				}
 			}
@@ -220,29 +227,6 @@ func (e *emitter) writeArrayNew(instr *ir.Instr) error {
 	return nil
 }
 
-// writeContainerNew lowers one container constructor to its runtime call:
-// the allocator handle and the element size are the whole ABI.
-func (e *emitter) writeContainerNew(
-	instr *ir.Instr,
-	runtime string,
-	isResultType func(string) bool,
-	shape string,
-) error {
-	if len(instr.Args) != 1 || !isResultType(instr.Result.Type) {
-		return fmt.Errorf("llvm error: %s", shape)
-	}
-	elem, err := e.instrElementType(instr)
-	if err != nil {
-		return err
-	}
-	resultName := localName(instr.Result.Name)
-	allocator := e.value(instr.Args[0])
-	fmt.Fprintf(&e.out, "  %s = call ptr @%s(ptr %s, i64 %s)\n",
-		resultName, runtime, allocator.operand, e.elementSizeOperand(elem))
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
-}
-
 // writeArrayAppend lowers Array.append(allocator, value) and preserves !void
 // failure flow.
 func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
@@ -257,7 +241,7 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	array := e.value(instr.Args[0])
 	handle := e.arrayHandle(array.operand)
 	okName := localName(instr.Result.Name) + ".ok"
-	e.writeArrayAppendPaths(instr, elem, array.operand, handle, okName)
+	e.writeArrayAppendPaths(instr, elem, array.operand, handle, okName, "")
 	return e.writeArrayBoolResult(instr.Result, okName, "array_append")
 }
 
@@ -265,14 +249,23 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 // otherwise hands the append back to the runtime, which is what owns growing
 // the storage. The slow path is given the handle as it came, not the readable
 // stand-in, so a null handle still comes back as the failure it is.
+//
+// The length the append starts from is the index the element lands at. An
+// array has no use for it; an arena hands it back as the handle that names the
+// element, so it is read into indexName, the register the arena's result is
+// resolved by (ADR-0131). An empty indexName synthesizes one.
 func (e *emitter) writeArrayAppendPaths(
 	instr *ir.Instr,
 	elem string,
 	handleOperand string,
 	handle string,
 	okName string,
+	indexName string,
 ) {
-	length := "%" + e.nextSyntheticValue("array.append.len")
+	length := indexName
+	if length == "" {
+		length = "%" + e.nextSyntheticValue("array.append.len")
+	}
 	capacity := "%" + e.nextSyntheticValue("array.append.cap")
 	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append.len.addr")
 	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", length, lengthAddr)
@@ -430,7 +423,7 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	}
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	checked, err := e.arrayCheckedElement(instr, handle, index.operand)
+	checked, err := e.arrayCheckedElement(instr, handle, index.operand, "")
 	if err != nil {
 		return err
 	}
@@ -468,7 +461,7 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	}
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	checked, err := e.arrayCheckedElement(instr, handle, index.operand)
+	checked, err := e.arrayCheckedElement(instr, handle, index.operand, "")
 	if err != nil {
 		return err
 	}
@@ -565,18 +558,26 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Result.Type != "void" {
 		return fmt.Errorf("llvm error: array.deinit expects Array<T>, Allocator -> void")
 	}
-	array := e.value(instr.Args[0])
+	return e.writeContainerStorageRelease(instr, "array.deinit")
+}
+
+// writeContainerStorageRelease releases the storage a container header owns:
+// the data pointer, measured by the capacity it was sized at. Array.deinit and
+// Arena.deinit are both this, since the two are the same header and whatever
+// owners the elements held are already gone by the time either runs.
+func (e *emitter) writeContainerStorageRelease(instr *ir.Instr, what string) error {
+	container := e.value(instr.Args[0])
 	// A cleanup carries no immediate, so the element the release measures is
-	// read from the array it was handed: the one place the type is written
+	// read from the container it was handed: the one place the type is written
 	// down either way.
-	elem, ok := arrayElementLLVMType(instr.Args[0].Type)
-	if !ok {
-		return fmt.Errorf("llvm error: array.deinit expects Array<T> -> void")
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return err
 	}
-	data := e.arrayFieldOf(array.operand, arrayFieldData, "array.deinit.data")
-	capacity := e.arrayFieldOf(array.operand, arrayFieldCapacity, "array.deinit.cap")
+	data := e.arrayFieldOf(container.operand, arrayFieldData, what+".data")
+	capacity := e.arrayFieldOf(container.operand, arrayFieldCapacity, what+".cap")
 	allocator := e.value(instr.Args[1])
-	bytes := "%" + e.nextSyntheticValue("array.deinit.bytes")
+	bytes := "%" + e.nextSyntheticValue(what+".bytes")
 	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n",
 		bytes, capacity, e.elementSizeOperand(elem))
 	fmt.Fprintf(&e.out, "  call void @kizu_array_deinit(ptr %s, ptr %s, i64 %s)\n",

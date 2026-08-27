@@ -920,7 +920,7 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
     users.deinit(allocator);
 }`
@@ -938,7 +938,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     defer users.deinit(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
 }`
 	if err := checkSource(source); err != nil {
@@ -979,7 +979,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    let alice = left.add(User { name: "alice" });
+    let alice = left.add(allocator, User { name: "alice" });
     print(right.at(alice).name);
 }`,
 			want: "handle `alice` does not belong to arena `right`",
@@ -991,7 +991,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    print(right.at(left.add(User { name: "alice" })).name);
+    print(right.at(left.add(allocator, User { name: "alice" })).name);
 }`,
 			want: "handle from `left` does not belong to arena `right`",
 		},
@@ -1001,7 +1001,7 @@ fn main() {
 fn make() -> std::arena::Handle<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     return alice;
 }`,
 			want: "handle `alice` cannot outlive its arena",
@@ -1016,7 +1016,7 @@ fn (self: Registry) deinit(allocator: Allocator) -> void {
 fn make() -> std::arena::Handle<User> {
     let allocator = std::mem::page_allocator();
     var registry = Registry { users: std::arena::new<User>(allocator) };
-    return registry.users.add(User { name: "alice" });
+    return registry.users.add(allocator, User { name: "alice" });
 }`,
 			want: "handle from `registry.users` cannot outlive its arena",
 		},
@@ -1031,11 +1031,11 @@ fn make() -> std::arena::Handle<User> {
 func TestCheckAcceptsFieldArenaHandleReturn(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: &var Registry) add_direct(name: []u8) -> std::arena::Handle<User> {
-    return self.users.add(User { name: name });
+fn (self: &var Registry) add_direct(allocator: Allocator, name: []u8) -> std::arena::Handle<User> {
+    return self.users.add(allocator, User { name: name });
 }
-fn (self: &var Registry) add_bound(name: []u8) -> std::arena::Handle<User> {
-    let handle = self.users.add(User { name: name });
+fn (self: &var Registry) add_bound(allocator: Allocator, name: []u8) -> std::arena::Handle<User> {
+    let handle = self.users.add(allocator, User { name: name });
     return handle;
 }
 fn (self: Registry) deinit(allocator: Allocator) -> void {
@@ -1044,8 +1044,8 @@ fn (self: Registry) deinit(allocator: Allocator) -> void {
 fn main() {
     let allocator = std::mem::page_allocator();
     var registry = Registry { users: std::arena::new<User>(allocator) };
-    let alice = registry.add_direct("alice");
-    let bob = registry.add_bound("bob");
+    let alice = registry.add_direct(allocator, "alice");
+    let bob = registry.add_bound(allocator, "bob");
     print(registry.users.at(alice).name);
     print(registry.users.at(bob).name);
     registry.deinit(allocator);
@@ -1067,7 +1067,7 @@ fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     show(&users, alice);
     users.deinit(allocator);
 }`
@@ -1096,7 +1096,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    let alice = left.add(User { name: "alice" });
+    let alice = left.add(allocator, User { name: "alice" });
     show(&right, alice);
 }`,
 			want: "handle `alice` does not belong to arena `right`",
@@ -1113,7 +1113,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     var right = std::arena::new<User>(allocator);
-    let alice = left.add(User { name: "alice" });
+    let alice = left.add(allocator, User { name: "alice" });
     touch(right, alice);
 }`,
 			want: "handle `alice` does not belong to arena `right`",
@@ -1128,7 +1128,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    show(&right, left.add(User { name: "alice" }));
+    show(&right, left.add(allocator, User { name: "alice" }));
 }`,
 			want: "handle from `left` does not belong to arena `right`",
 		},
@@ -1154,7 +1154,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    let alice = left.add(User { name: "alice" });
+    let alice = left.add(allocator, User { name: "alice" });
     show<User>(&right, alice);
 }`,
 			want: "handle `alice` does not belong to arena `right`",
@@ -1170,7 +1170,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    let alice = left.add(User { name: "alice" });
+    let alice = left.add(allocator, User { name: "alice" });
     let viewer = Viewer { id: 1 };
     viewer.show(&right, alice);
 }`,
@@ -1201,7 +1201,7 @@ fn outer(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> voi
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     outer(&users, alice);
     users.deinit(allocator);
 }`,
@@ -1220,7 +1220,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    let alice = left.add(User { name: "alice" });
+    let alice = left.add(allocator, User { name: "alice" });
     pick(&left, &right, alice);
     left.deinit(allocator);
     right.deinit(allocator);
@@ -1239,7 +1239,7 @@ fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
-    let alice = registry.users.add(User { name: "alice" });
+    let alice = registry.users.add(allocator, User { name: "alice" });
     show(&registry.users, alice);
     registry.deinit(allocator);
 }`,
@@ -1269,7 +1269,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
     let stray = std::arena::new<User>(allocator);
-    let alice = stray.add(User { name: "alice" });
+    let alice = stray.add(allocator, User { name: "alice" });
     show(&registry.users, alice);
 }`
 	err := checkSource(source)
@@ -1295,7 +1295,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let user = User { name: "alice" };
-    let alice = users.add(move user);
+    let alice = users.add(allocator, move user);
     print(user.name);
     print(users.at(alice).name);
 }`,
@@ -1309,7 +1309,7 @@ fn take(user: User) { print(user.name); }
 fn main() {
     let allocator = std::mem::page_allocator();
     let boxes = std::arena::new<Box>(allocator);
-    let h = boxes.add(Box { user: User { name: "alice" } });
+    let h = boxes.add(allocator, Box { user: User { name: "alice" } });
     take(boxes.at(h).user);
 }`,
 			want: "arena.at returns &T, so its fields cannot be moved",
@@ -1343,7 +1343,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     users.deinit(allocator);
-    users.add(User { name: "alice" });
+    users.add(allocator, User { name: "alice" });
 }`,
 			want: "arena `users` was deinitialized",
 		},
@@ -1353,7 +1353,7 @@ fn main() {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     users.deinit(allocator);
     print(users.at(alice).name);
 			}`,
@@ -1388,7 +1388,7 @@ fn main() {
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { name: "alice" });
+    let alice = users.add(allocator, User { name: "alice" });
     users.deinit(allocator);
     print(alice);
 }`,
@@ -2085,8 +2085,8 @@ fn main() {
 func TestCheckAcceptsDirectFieldReceiverMethods(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) add(user: User) -> void {
-    let handle = self.users.add(move user);
+fn (self: &var Registry) add(allocator: Allocator, user: User) -> void {
+    let handle = self.users.add(allocator, move user);
     print(self.users.at(handle).name);
     return;
 }
@@ -2096,8 +2096,8 @@ fn (self: Registry) deinit(allocator: Allocator) -> void {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let registry = Registry { users: std::arena::new<User>(allocator) };
-    registry.add(User { name: "alice" });
+    var registry = Registry { users: std::arena::new<User>(allocator) };
+    registry.add(allocator, User { name: "alice" });
     registry.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
@@ -2121,7 +2121,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
     let wrapper = Wrapper { registry: move registry };
-    wrapper.registry.users.add(User { name: "alice" });
+    wrapper.registry.users.add(allocator, User { name: "alice" });
     wrapper.deinit(allocator);
 }`
 	if err := checkSource(source); err != nil {
@@ -2156,7 +2156,7 @@ fn main() {
 struct Registry { users: std::arena::Arena<User> }
 fn (self: Registry) deinit(allocator: Allocator) -> void {
     self.users.deinit(allocator);
-    self.users.add(User { name: "alice" });
+    self.users.add(allocator, User { name: "alice" });
     return;
 }
 fn main() {

@@ -1671,23 +1671,27 @@ import std::mem;
 import std::arena;
 
 let allocator = mem::page_allocator();
-let users = arena::new<User>(allocator);
-let alice = users.add(User { name: "alice" });
+var users = arena::new<User>(allocator);
+let alice = users.add(allocator, User { name: "alice" });
 print(users.at(alice).name);
 ```
 
 `std::arena::Arena<T>` は複数の `T` を所有します。
 core arena の構築は明示 allocator capability を要求し、
 `std::arena::new<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
+`arena::new` は header そのものを作るだけで何も確保しないので、失敗しません。
+storage を買うのは最初の `add` で、失敗を言うのもそこです。
 
 `std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
 値を所有するのは arena なので、handle は copy 型です(§8)。
 
 ルール:
 
-* `std::arena::new<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る
-* `std::arena::Arena<T>.add(value)` は value を arena に move する
-* `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
+* `std::arena::new<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る。
+  header そのものを作るだけで何も確保しない
+* `std::arena::Arena<T>.add(allocator, value)` は value を arena に move する。
+  storage を買う call なので allocator を名指す(§14.3)
+* `std::arena::Arena<T>.add(allocator, value)` は `std::arena::Handle<T>` を返す
 * `std::arena::Arena<T>.at(handle)` は arena に tied な shared borrow `&T` を返す。
   直接 field / method / match を読め、local binding に束縛した場合は最後の使用まで
   arena を borrow する。その間は `add` / `deinit` を実行できず、要素を move
@@ -2612,8 +2616,8 @@ allocation が失敗し得る API は `!T` または `!void` で失敗を返し�
 **確保も解放も allocator を名指します。** owner の `deinit` は receiver と
 `Allocator` の 2 つを取り、storage を要求し得る method —— `Array.append` /
 `append_bytes` / `reserve`、`String.append_bytes` / `append_byte` /
-`append_string` / `reserve` —— も同じく allocator を receiver の次に取ります
-(§8、ADR-0132)。値は自分を作った allocator の複製を持たないので、確保にも
+`append_string` / `reserve`、`Map.insert`、`Arena.add` —— も同じく allocator を
+receiver の次に取ります(§8、§10、ADR-0132)。値は自分を作った allocator の複製を持たないので、確保にも
 解放にも必要なものは呼び出し側が綴ります —— `sizeof(T)` を compile 時の値として
 渡すのと同じ扱いで、原理 4「hidden allocation を持たない」の表と裏です。
 owner を持つすべての型が `deinit` のこの 1 つの形を取り、導出 `deinit` は
@@ -2626,17 +2630,24 @@ defer values.deinit(allocator);
 try values.append(allocator, 7);
 ```
 
-`std::array::new<T>(allocator)` は何も確保しません。空の `Array<T>` は
-`{data, len, cap}` の 3 word で、allocator も element size も覚えないためです
-(Rust の `Vec` と同じ 3 word)。構築が受け取る `Allocator` は compile 時の
-provenance で、後続の確保・解放が同じものを名指すことを checker が要求します。
-`truncate` / `clear` / `pop` / `len` / `capacity` は確保も解放もしないので
-allocator を取りません。
+**container の構築は何も確保しません。** `std::array::new<T>(allocator)`、
+`std::map::new<K, V>(allocator)`、`std::arena::new<T>(allocator)` はどれも
+header そのものを作るだけです。空の `Array<T>` と `Arena<T>` は
+`{data, len, cap}` の 3 word(Rust の `Vec` と同じ)、空の `Map<K, V>` は
+entry 列とその index の 5 word で、allocator も element size も覚えません
+(ADR-0131)。だから構築は失敗しようがなく、`!T` を返しません。storage を買うのは
+最初の `append` / `insert` / `add` で、失敗を言うのもそこです。構築が受け取る
+`Allocator` は compile 時の provenance で、後続の確保・解放が同じものを名指す
+ことを checker が要求します。`truncate` / `clear` / `pop` / `len` / `capacity`
+は確保も解放もしないので allocator を取りません。
 
 `defer` / `errdefer` の cleanup が運ぶ引数は、**`defer` が書かれた場所で読み**、
 block を出るときに走るのはその値です(§8)。
 
-解放に渡す `Allocator` は、その owner を作ったものと同じでなければなりません。
+**確保に渡す `Allocator` も、解放に渡すものも、その owner を作ったものと同じで
+なければなりません。** 確保だけ別の allocator から取ると、解放は自分が配って
+いない byte を返すことになります —— `append` / `insert` / `add` / `reserve` と
+`deinit` は 1 つの規則の表と裏です。
 検査できるのは tied allocator だけです —— tie を持たない `page_allocator()`
 同士は区別が付かず、区別する必要もないためです。tied allocator から作った
 owner を別の tied allocator で、あるいは tie の無い allocator で解放するのは

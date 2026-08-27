@@ -127,7 +127,6 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_runtime_init_args(i32, ptr)\n\n")
 	e.writeArrayRuntimeDecls()
 	e.writeMapRuntimeDecls()
-	e.writeArenaRuntimeDecls()
 	e.writeBoxRuntimeDecls()
 	e.writeTestRuntimeDecls()
 	e.writeExternalCallDecls()

@@ -1,3 +1,7 @@
+// new builds the header an empty map is and asks the allocator for nothing,
+// so it has nothing to fail at. The first `insert` is what buys storage, and
+// that is where a program hears about a refusal (ADR-0131). The allocator
+// named here is what the checker holds every later call to.
 pub fn new<K, V>(allocator: Allocator) -> std::map::Map<K, V> {
     return std::internal::builtin::map<K, V>(allocator);
 }
@@ -7,7 +11,11 @@ pub fn new<K, V>(allocator: Allocator) -> std::map::Map<K, V> {
 // rather than leaking it — the same answer `Array.set` gives, decided at run
 // time because occupancy is not knowable earlier (ADR-0123). Replacing one is
 // `at_mut` in place. A copy value carries no such obligation and overwrites.
-fn (self: std::map::Map<K, V>) insert<K, V>(key: K, value: V) -> std::mem::Error!void {
+fn (self: &var std::map::Map<K, V>) insert<K, V>(
+    allocator: Allocator,
+    key: K,
+    value: V
+) -> std::mem::Error!void {
     comptime if std::meta::is_owner<V>() {
         if self.contains(key) {
             std::internal::builtin::panic(
@@ -15,12 +23,12 @@ fn (self: std::map::Map<K, V>) insert<K, V>(key: K, value: V) -> std::mem::Error
         }
     } else {
     }
-    return std::internal::builtin::map_insert<K, V>(self, key, value);
+    return std::internal::builtin::map_insert<K, V>(self, allocator, key, value);
 }
 
 // get copies the value out, so it is the copy-value read. An owner value
 // leaves through the at/at_mut borrows instead.
-fn (self: std::map::Map<K, V>) get<K, V>(key: K) -> ?V {
+fn (self: &std::map::Map<K, V>) get<K, V>(key: K) -> ?V {
     return std::internal::builtin::map_get<K, V>(self, key);
 }
 
@@ -28,11 +36,11 @@ fn (self: std::map::Map<K, V>) get<K, V>(key: K) -> ?V {
 // is absent (ADR-0104). The borrow aliases map storage, so a capture is the
 // one consumer: it holds the map borrowed while the value borrow is in scope,
 // and insert or deinit must wait.
-fn (self: std::map::Map<K, V>) at<K, V>(key: K) -> ?&V {
+fn (self: &std::map::Map<K, V>) at<K, V>(key: K) -> ?&V {
     return std::internal::builtin::map_at<K, V>(self, key);
 }
 
-fn (self: std::map::Map<K, V>) at_mut<K, V>(key: K) -> ?&var V {
+fn (self: &var std::map::Map<K, V>) at_mut<K, V>(key: K) -> ?&var V {
     return std::internal::builtin::map_at_mut<K, V>(self, key);
 }
 
@@ -41,15 +49,15 @@ fn (self: std::map::Map<K, V>) at_mut<K, V>(key: K) -> ?&var V {
 // storage, so a capture is the one consumer for it: it holds the map borrowed
 // while the key is in scope, and insert or deinit must wait. An integer key is
 // a value and carries no such tie.
-fn (self: std::map::Map<K, V>) key_at<K, V>(index: i64) -> ?K {
+fn (self: &std::map::Map<K, V>) key_at<K, V>(index: i64) -> ?K {
     return std::internal::builtin::map_key_at<K, V>(self, index);
 }
 
-fn (self: std::map::Map<K, V>) contains<K, V>(key: K) -> bool {
+fn (self: &std::map::Map<K, V>) contains<K, V>(key: K) -> bool {
     return std::internal::builtin::map_contains<K, V>(self, key);
 }
 
-fn (self: std::map::Map<K, V>) len<K, V>() -> i64 {
+fn (self: &std::map::Map<K, V>) len<K, V>() -> i64 {
     return std::internal::builtin::map_len<K, V>(self);
 }
 
@@ -73,5 +81,5 @@ fn (self: std::map::Map<K, V>) deinit<K, V>(allocator: Allocator) -> void {
         }
     } else {
     }
-    std::internal::builtin::map_deinit<K, V>(self);
+    std::internal::builtin::map_deinit<K, V>(self, allocator);
 }

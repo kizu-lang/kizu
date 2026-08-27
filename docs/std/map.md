@@ -4,7 +4,7 @@ symbol table と scope lookup のための最小 owned map です。
 
 ```text
 std::map::new<K, V>(allocator: Allocator) -> std::map::Map<K, V>
-map.insert(key: K, value: V) -> std::mem::Error!void
+map.insert(allocator: Allocator, key: K, value: V) -> std::mem::Error!void
 map.get(key: K) -> ?V
 map.at(key: K) -> ?&V
 map.at_mut(key: K) -> ?&var V
@@ -20,6 +20,10 @@ key は占めている byte 列として hash・比較されるので、byte 表
 対応する型だけが key になれます。`f32` / `f64` はそうではありません ——
 `0.0` と `-0.0` は byte が違うのに等しく、NaN は自分の byte と等しくないためです。
 struct と enum は padding と表現の取り決めが要るので、今は持ちません。
+`new` は header そのものを作るだけで、何も確保しません。だから失敗しようがなく、
+`!T` を返しません。storage を買うのは最初の `insert` で、失敗を言うのもそこです
+(ADR-0131)。`insert` は storage を買う call なので、`Array.append` と同じく
+allocator を receiver の次に取ります(ADR-0132)。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
 `get` は missing key を `null` として返します(docs/style.md)。
 in-place 更新は 1 回の lookup で書けます(ADR-0104)。
@@ -28,7 +32,7 @@ in-place 更新は 1 回の lookup で書けます(ADR-0104)。
 if m.at_mut(key) |v| {
     v.* = next;
 } else {
-    try m.insert(key, next);
+    try m.insert(allocator, key, next);
 }
 ```
 

@@ -517,7 +517,7 @@ fn (self: &var Checker) check_assignable_index(
                 !self.scopes.is_mut_borrowed(scope, name) {
                 var message = string::new(self.allocator);
                 errdefer message.deinit(self.allocator);
-                try message.append_bytes(self.allocator, 
+                try message.append_bytes(self.allocator,
                     "indexed assignment requires a writable slice view (`&var []u8`), `"
                 );
                 try message.append_bytes(self.allocator, name);
@@ -715,7 +715,7 @@ fn (self: &var Checker) check_assignable_deref(
                         errdefer message.deinit(self.allocator);
                         try message.append_byte(self.allocator, cast<u8>(96));
                         try message.append_bytes(self.allocator, source_name);
-                        try message.append_bytes(self.allocator, 
+                        try message.append_bytes(self.allocator,
                             ".*` cannot re-point a slice view; write elements with `"
                         );
                         try message.append_bytes(self.allocator, source_name);
@@ -765,6 +765,7 @@ fn (self: &var Checker) check_assignable_deref(
 
 // Unions the parameter names that can back a returned view of expression.
 fn (self: &var Checker) expr_borrow_sources(
+    allocator: Allocator,
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: ast::Expression,
@@ -772,7 +773,7 @@ fn (self: &var Checker) expr_borrow_sources(
 ) -> !?diagnostic::Diagnostic {
     match tree.expressions.at(expression.node) {
         String(_) => {
-            try out.insert("$static", true);
+            try out.insert(allocator, "$static", true);
             return null;
         },
         Ident(identifier) => {
@@ -785,11 +786,11 @@ fn (self: &var Checker) expr_borrow_sources(
             if !value.slice {
                 return null;
             }
-            return self.expr_borrow_sources(tree, scope, value.target, out);
+            return self.expr_borrow_sources(allocator, tree, scope, value.target, out);
         },
-        Try(value) => return self.expr_borrow_sources(tree, scope, value.value, out),
-        Unsafe(value) => return self.expr_borrow_sources(tree, scope, value.value, out),
-        Move(value) => return self.expr_borrow_sources(tree, scope, value.value, out),
+        Try(value) => return self.expr_borrow_sources(allocator, tree, scope, value.value, out),
+        Unsafe(value) => return self.expr_borrow_sources(allocator, tree, scope, value.value, out),
+        Move(value) => return self.expr_borrow_sources(allocator, tree, scope, value.value, out),
         Call(value) => {
             let copied = ast::CallExpr {
                 callee: value.callee, args: value.args
@@ -820,12 +821,13 @@ fn (self: &Checker) ident_borrow_sources(
 ) -> !void {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
-    return self.collect_borrow_roots(scope, name, &var seen, roots);
+    return self.collect_borrow_roots(self.allocator, scope, name, &var seen, roots);
 }
 
 // Visits one recorded source name once, adding it to roots when nothing
 // backs it, and walking its own recorded sources otherwise.
 fn (self: &Checker) collect_borrow_roots(
+    allocator: Allocator,
     scope: ScopeHandle,
     source: []u8,
     seen: &var map::Map<[]u8, bool>,
@@ -834,13 +836,13 @@ fn (self: &Checker) collect_borrow_roots(
     if seen.contains(source) {
         return;
     }
-    try seen.insert(source, true);
+    try seen.insert(allocator, source, true);
     var current = optional_scope(scope);
     while current |handle| {
         let retained = self.scopes.scopes.at(handle.node);
         if retained.bindings.at(source) |binding| {
             if binding.borrow_sources.len() == 0 {
-                return roots.insert(source, true);
+                return roots.insert(allocator, source, true);
             }
             var index = 0;
             while binding.borrow_sources.at(index) |recorded| {
@@ -848,9 +850,9 @@ fn (self: &Checker) collect_borrow_roots(
                 if mem::equal_bytes(candidate, source) {
                     // A name whose recorded provenance includes itself is a
                     // root.
-                    try roots.insert(source, true);
+                    try roots.insert(allocator, source, true);
                 } else {
-                    try self.collect_borrow_roots(scope, candidate, seen, roots);
+                    try self.collect_borrow_roots(allocator, scope, candidate, seen, roots);
                 }
                 index = index + 1;
             }
@@ -858,7 +860,7 @@ fn (self: &Checker) collect_borrow_roots(
         }
         current = retained.parent;
     }
-    return roots.insert(source, true);
+    return roots.insert(allocator, source, true);
 }
 
 // Maps returned borrow provenance back to call arguments.
@@ -904,7 +906,7 @@ fn (self: &var Checker) structural_return_sources(
         let tie_capable = try self.tie_capable_param(parameter.typ, parameter.borrow);
         if tie_capable {
             if structural_arg_at(tree, receiver, args, index) |argument| {
-                if try self.expr_borrow_sources(tree, scope, argument, out) |problem| {
+                if try self.expr_borrow_sources(self.allocator, tree, scope, argument, out) |problem| {
                     return move problem;
                 }
             }
@@ -1004,7 +1006,7 @@ fn (self: &var Checker) method_receiver_borrow_sources(
         mem::equal_bytes(name, "at") or
         mem::equal_bytes(name, "at_mut") {
         handled.* = true;
-        return self.expr_borrow_sources(tree, scope, field.receiver, out);
+        return self.expr_borrow_sources(self.allocator, tree, scope, field.receiver, out);
     }
     return null;
 }
@@ -1021,7 +1023,7 @@ fn (self: &var Checker) expr_borrow_source_list(
 ) -> !void {
     var sources = map::new<[]u8, bool>(self.allocator);
     defer sources.deinit(self.allocator);
-    if try self.expr_borrow_sources(tree, scope, expression, &var sources) |problem| {
+    if try self.expr_borrow_sources(self.allocator, tree, scope, expression, &var sources) |problem| {
         problem.deinit(self.allocator);
         return;
     }
@@ -1047,7 +1049,7 @@ fn (self: &var Checker) field_borrow_sources(
     if field.namespace {
         return null;
     }
-    return self.expr_borrow_sources(tree, scope, field.receiver, out);
+    return self.expr_borrow_sources(self.allocator, tree, scope, field.receiver, out);
 }
 
 // Unions borrow sources from stored field values, in declaration order.
@@ -1064,7 +1066,7 @@ fn (self: &var Checker) struct_literal_borrow_sources(
     while index < count {
         let written = written_struct_field_value(tree, declaration, expression, index);
         if written |value| {
-            if try self.expr_borrow_sources(tree, scope, value, out) |problem| {
+            if try self.expr_borrow_sources(self.allocator, tree, scope, value, out) |problem| {
                 return move problem;
             }
         }

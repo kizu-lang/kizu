@@ -23,10 +23,10 @@ fn main() {
     let nodes = arena::new<Node>(allocator);
     // A handle is a copy ID: storing `shared` in two parents leaves it
     // usable for the direct read below.
-    let shared = nodes.add(Node { value: 5, left: null, right: null });
-    let a = nodes.add(Node { value: 10, left: shared, right: null });
-    let b = nodes.add(Node { value: 20, left: shared, right: null });
-    let root = nodes.add(Node { value: 1, left: a, right: b });
+    let shared = nodes.add(allocator, Node { value: 5, left: null, right: null });
+    let a = nodes.add(allocator, Node { value: 10, left: shared, right: null });
+    let b = nodes.add(allocator, Node { value: 20, left: shared, right: null });
+    let root = nodes.add(allocator, Node { value: 1, left: a, right: b });
     print(sum(&nodes, root));
     print(nodes.at(shared).value);
     nodes.deinit(allocator);
@@ -40,30 +40,30 @@ fn main() {
 
 // ir
 // lower:
-// fn sum(%nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>) -> i64 {
+// fn sum(%nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>) -> i64 {
 // entry:
-//   %1: Node = arena.at %nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %1: Node = arena.at %nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>
 //   %2: i64 = field.value %1: Node
-//   %3: Node = arena.at %nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %3: Node = arena.at %nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>
 //   %4: ?std::arena::Handle<Node> = field.left %3: Node
 //   %5: std::arena::Handle<Node> = opt.value %4: ?std::arena::Handle<Node>
 //   %6: bool = opt.has %4: ?std::arena::Handle<Node>
 //   branch %6: bool, if.then.1, if.else.2
 // if.then.1:
-//   %7: i64 = call.sum %nodes: std::arena::Arena<Node>, %5: std::arena::Handle<Node>
+//   %7: i64 = call.sum %nodes: &std::arena::Arena<Node>, %5: std::arena::Handle<Node>
 //   %8: i64 = binary.+ %2: i64, %7: i64
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
 //   %9: i64 = phi [if.then.1, %8: i64], [if.else.2, %2: i64]
-//   %10: Node = arena.at %nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %10: Node = arena.at %nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>
 //   %11: ?std::arena::Handle<Node> = field.right %10: Node
 //   %12: std::arena::Handle<Node> = opt.value %11: ?std::arena::Handle<Node>
 //   %13: bool = opt.has %11: ?std::arena::Handle<Node>
 //   branch %13: bool, if.then.4, if.else.5
 // if.then.4:
-//   %14: i64 = call.sum %nodes: std::arena::Arena<Node>, %12: std::arena::Handle<Node>
+//   %14: i64 = call.sum %nodes: &std::arena::Arena<Node>, %12: std::arena::Handle<Node>
 //   %15: i64 = binary.+ %9: i64, %14: i64
 //   jump if.end.6
 // if.else.5:
@@ -76,59 +76,62 @@ fn main() {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<Node> = arena.new %1: Allocator
-//   %3: i64 = const 5
-//   %4: ?std::arena::Handle<Node> = opt.null
+//   %3: &var std::arena::Arena<Node> = local.slot %2: std::arena::Arena<Node>
+//   %4: i64 = const 5
 //   %5: ?std::arena::Handle<Node> = opt.null
-//   %6: Node = struct.new {value: %3: i64, left: %4: ?std::arena::Handle<Node>, right: %5: ?std::arena::Handle<Node>}
-//   %7: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %6: Node
-//   %8: i64 = const 10
-//   %9: ?std::arena::Handle<Node> = opt.some %7: std::arena::Handle<Node>
-//   %10: ?std::arena::Handle<Node> = opt.null
-//   %11: Node = struct.new {value: %8: i64, left: %9: ?std::arena::Handle<Node>, right: %10: ?std::arena::Handle<Node>}
-//   %12: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %11: Node
-//   %13: i64 = const 20
-//   %14: ?std::arena::Handle<Node> = opt.some %7: std::arena::Handle<Node>
-//   %15: ?std::arena::Handle<Node> = opt.null
-//   %16: Node = struct.new {value: %13: i64, left: %14: ?std::arena::Handle<Node>, right: %15: ?std::arena::Handle<Node>}
-//   %17: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %16: Node
-//   %18: i64 = const 1
-//   %19: ?std::arena::Handle<Node> = opt.some %12: std::arena::Handle<Node>
-//   %20: ?std::arena::Handle<Node> = opt.some %17: std::arena::Handle<Node>
-//   %21: Node = struct.new {value: %18: i64, left: %19: ?std::arena::Handle<Node>, right: %20: ?std::arena::Handle<Node>}
-//   %22: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %21: Node
-//   %23: i64 = call.sum %2: std::arena::Arena<Node>, %22: std::arena::Handle<Node>
-//   call.print %23: i64
-//   %25: Node = arena.at %2: std::arena::Arena<Node>, %7: std::arena::Handle<Node>
-//   %26: i64 = field.value %25: Node
-//   call.print %26: i64
-//   arena.deinit %2: std::arena::Arena<Node>
+//   %6: ?std::arena::Handle<Node> = opt.null
+//   %7: Node = struct.new {value: %4: i64, left: %5: ?std::arena::Handle<Node>, right: %6: ?std::arena::Handle<Node>}
+//   %8: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %7: Node
+//   %9: i64 = const 10
+//   %10: ?std::arena::Handle<Node> = opt.some %8: std::arena::Handle<Node>
+//   %11: ?std::arena::Handle<Node> = opt.null
+//   %12: Node = struct.new {value: %9: i64, left: %10: ?std::arena::Handle<Node>, right: %11: ?std::arena::Handle<Node>}
+//   %13: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %12: Node
+//   %14: i64 = const 20
+//   %15: ?std::arena::Handle<Node> = opt.some %8: std::arena::Handle<Node>
+//   %16: ?std::arena::Handle<Node> = opt.null
+//   %17: Node = struct.new {value: %14: i64, left: %15: ?std::arena::Handle<Node>, right: %16: ?std::arena::Handle<Node>}
+//   %18: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %17: Node
+//   %19: i64 = const 1
+//   %20: ?std::arena::Handle<Node> = opt.some %13: std::arena::Handle<Node>
+//   %21: ?std::arena::Handle<Node> = opt.some %18: std::arena::Handle<Node>
+//   %22: Node = struct.new {value: %19: i64, left: %20: ?std::arena::Handle<Node>, right: %21: ?std::arena::Handle<Node>}
+//   %23: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %22: Node
+//   %24: std::arena::Arena<Node> = ref.load %3: &var std::arena::Arena<Node>
+//   %25: i64 = call.sum %24: std::arena::Arena<Node>, %23: std::arena::Handle<Node>
+//   call.print %25: i64
+//   %27: Node = arena.at %3: &var std::arena::Arena<Node>, %8: std::arena::Handle<Node>
+//   %28: i64 = field.value %27: Node
+//   call.print %28: i64
+//   %30: std::arena::Arena<Node> = ref.load %3: &var std::arena::Arena<Node>
+//   arena.deinit %30: std::arena::Arena<Node>, %1: Allocator
 //   return void: void
 // }
 // opt:
-// fn sum(%nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>) -> i64 {
+// fn sum(%nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>) -> i64 {
 // entry:
-//   %1: Node = arena.at %nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %1: Node = arena.at %nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>
 //   %2: i64 = field.value %1: Node
-//   %3: Node = arena.at %nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %3: Node = arena.at %nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>
 //   %4: ?std::arena::Handle<Node> = field.left %3: Node
 //   %5: std::arena::Handle<Node> = opt.value %4: ?std::arena::Handle<Node>
 //   %6: bool = opt.has %4: ?std::arena::Handle<Node>
 //   branch %6: bool, if.then.1, if.else.2
 // if.then.1:
-//   %7: i64 = call.sum %nodes: std::arena::Arena<Node>, %5: std::arena::Handle<Node>
+//   %7: i64 = call.sum %nodes: &std::arena::Arena<Node>, %5: std::arena::Handle<Node>
 //   %8: i64 = binary.+ %2: i64, %7: i64
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
 // if.end.3:
 //   %9: i64 = phi [if.then.1, %8: i64], [if.else.2, %2: i64]
-//   %10: Node = arena.at %nodes: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %10: Node = arena.at %nodes: &std::arena::Arena<Node>, %h: std::arena::Handle<Node>
 //   %11: ?std::arena::Handle<Node> = field.right %10: Node
 //   %12: std::arena::Handle<Node> = opt.value %11: ?std::arena::Handle<Node>
 //   %13: bool = opt.has %11: ?std::arena::Handle<Node>
 //   branch %13: bool, if.then.4, if.else.5
 // if.then.4:
-//   %14: i64 = call.sum %nodes: std::arena::Arena<Node>, %12: std::arena::Handle<Node>
+//   %14: i64 = call.sum %nodes: &std::arena::Arena<Node>, %12: std::arena::Handle<Node>
 //   %15: i64 = binary.+ %9: i64, %14: i64
 //   jump if.end.6
 // if.else.5:
@@ -141,31 +144,34 @@ fn main() {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
 //   %2: std::arena::Arena<Node> = arena.new %1: Allocator
-//   %3: i64 = const 5
-//   %4: ?std::arena::Handle<Node> = opt.null
+//   %3: &var std::arena::Arena<Node> = local.slot %2: std::arena::Arena<Node>
+//   %4: i64 = const 5
 //   %5: ?std::arena::Handle<Node> = opt.null
-//   %6: Node = struct.new {value: %3: i64, left: %4: ?std::arena::Handle<Node>, right: %5: ?std::arena::Handle<Node>}
-//   %7: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %6: Node
-//   %8: i64 = const 10
-//   %9: ?std::arena::Handle<Node> = opt.some %7: std::arena::Handle<Node>
-//   %10: ?std::arena::Handle<Node> = opt.null
-//   %11: Node = struct.new {value: %8: i64, left: %9: ?std::arena::Handle<Node>, right: %10: ?std::arena::Handle<Node>}
-//   %12: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %11: Node
-//   %13: i64 = const 20
-//   %14: ?std::arena::Handle<Node> = opt.some %7: std::arena::Handle<Node>
-//   %15: ?std::arena::Handle<Node> = opt.null
-//   %16: Node = struct.new {value: %13: i64, left: %14: ?std::arena::Handle<Node>, right: %15: ?std::arena::Handle<Node>}
-//   %17: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %16: Node
-//   %18: i64 = const 1
-//   %19: ?std::arena::Handle<Node> = opt.some %12: std::arena::Handle<Node>
-//   %20: ?std::arena::Handle<Node> = opt.some %17: std::arena::Handle<Node>
-//   %21: Node = struct.new {value: %18: i64, left: %19: ?std::arena::Handle<Node>, right: %20: ?std::arena::Handle<Node>}
-//   %22: std::arena::Handle<Node> = arena.add %2: std::arena::Arena<Node>, %21: Node
-//   %23: i64 = call.sum %2: std::arena::Arena<Node>, %22: std::arena::Handle<Node>
-//   call.print %23: i64
-//   %25: Node = arena.at %2: std::arena::Arena<Node>, %7: std::arena::Handle<Node>
-//   %26: i64 = field.value %25: Node
-//   call.print %26: i64
-//   arena.deinit %2: std::arena::Arena<Node>
+//   %6: ?std::arena::Handle<Node> = opt.null
+//   %7: Node = struct.new {value: %4: i64, left: %5: ?std::arena::Handle<Node>, right: %6: ?std::arena::Handle<Node>}
+//   %8: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %7: Node
+//   %9: i64 = const 10
+//   %10: ?std::arena::Handle<Node> = opt.some %8: std::arena::Handle<Node>
+//   %11: ?std::arena::Handle<Node> = opt.null
+//   %12: Node = struct.new {value: %9: i64, left: %10: ?std::arena::Handle<Node>, right: %11: ?std::arena::Handle<Node>}
+//   %13: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %12: Node
+//   %14: i64 = const 20
+//   %15: ?std::arena::Handle<Node> = opt.some %8: std::arena::Handle<Node>
+//   %16: ?std::arena::Handle<Node> = opt.null
+//   %17: Node = struct.new {value: %14: i64, left: %15: ?std::arena::Handle<Node>, right: %16: ?std::arena::Handle<Node>}
+//   %18: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %17: Node
+//   %19: i64 = const 1
+//   %20: ?std::arena::Handle<Node> = opt.some %13: std::arena::Handle<Node>
+//   %21: ?std::arena::Handle<Node> = opt.some %18: std::arena::Handle<Node>
+//   %22: Node = struct.new {value: %19: i64, left: %20: ?std::arena::Handle<Node>, right: %21: ?std::arena::Handle<Node>}
+//   %23: std::arena::Handle<Node> = arena.add %3: &var std::arena::Arena<Node>, %1: Allocator, %22: Node
+//   %24: std::arena::Arena<Node> = ref.load %3: &var std::arena::Arena<Node>
+//   %25: i64 = call.sum %24: std::arena::Arena<Node>, %23: std::arena::Handle<Node>
+//   call.print %25: i64
+//   %27: Node = arena.at %3: &var std::arena::Arena<Node>, %8: std::arena::Handle<Node>
+//   %28: i64 = field.value %27: Node
+//   call.print %28: i64
+//   %30: std::arena::Arena<Node> = ref.load %3: &var std::arena::Arena<Node>
+//   arena.deinit %30: std::arena::Arena<Node>, %1: Allocator
 //   return void: void
 // }

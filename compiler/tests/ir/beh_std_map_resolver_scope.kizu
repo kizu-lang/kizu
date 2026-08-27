@@ -14,10 +14,11 @@ struct Scope {
 }
 
 fn (self: &var Scope) declare(
+    allocator: Allocator,
     name: []u8,
     kind: BindingKind
 ) -> !void {
-    try self.symbols.insert(name, kind);
+    try self.symbols.insert(allocator, name, kind);
     return;
 }
 
@@ -44,9 +45,9 @@ test "std map resolver scope" {
 
     try owned_name.append_bytes(allocator, "node");
     let node_name = owned_name.as_bytes();
-    try scope.declare(node_name, BindingKind::Local);
+    try scope.declare(allocator, node_name, BindingKind::Local);
 
-    try scope.declare("parse_expr", BindingKind::Function);
+    try scope.declare(allocator, "parse_expr", BindingKind::Function);
 
     testing::expect_equal<i64>(2, scope.len());
     testing::expect(scope.contains("node"));
@@ -62,29 +63,29 @@ test "std map resolver scope" {
 
 // ir
 // lower:
-// fn Scope.declare(%self: &var Scope, %name: []u8, %kind: BindingKind) -> !void {
+// fn Scope.declare(%self: &var Scope, %allocator: Allocator, %name: []u8, %kind: BindingKind) -> !void {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &var Scope
-//   %2: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>, %name: []u8, %kind: BindingKind
+//   %1: &var std::map::Map<[]u8, BindingKind> = field.addr.symbols %self: &var Scope
+//   %2: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.BindingKind %1: &var std::map::Map<[]u8, BindingKind>, %allocator: Allocator, %name: []u8, %kind: BindingKind
 //   error.try %2: std::mem::Error!void
 //   %4: !void = error.ok
 //   return %4: !void
 // }
-// fn Scope.resolve(%self: Scope, %name: []u8) -> ?BindingKind {
+// fn Scope.resolve(%self: &Scope, %name: []u8) -> ?BindingKind {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.symbols %self: Scope
+//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &Scope
 //   %2: ?BindingKind = call.std::map::Map.get._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>, %name: []u8
 //   return %2: ?BindingKind
 // }
-// fn Scope.len(%self: Scope) -> i64 {
+// fn Scope.len(%self: &Scope) -> i64 {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.symbols %self: Scope
+//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &Scope
 //   %2: i64 = call.std::map::Map.len._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>
 //   return %2: i64
 // }
-// fn Scope.contains(%self: Scope, %name: []u8) -> bool {
+// fn Scope.contains(%self: &Scope, %name: []u8) -> bool {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.symbols %self: Scope
+//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &Scope
 //   %2: bool = call.std::map::Map.contains._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>, %name: []u8
 //   return %2: bool
 // }
@@ -107,95 +108,89 @@ test "std map resolver scope" {
 //   %9: std::string::String = ref.load %6: &var std::string::String
 //   %10: Scope = ref.load %4: &var Scope
 //   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %1: Allocator; call.Scope.deinit %10: Scope, %1: Allocator
-//   %12: std::string::String = ref.load %6: &var std::string::String
-//   %13: []u8 = call.std::string::String.as_bytes %12: std::string::String
-//   %14: BindingKind = const 1
-//   %15: !void = call.Scope.declare %4: &var Scope, %13: []u8, %14: BindingKind
-//   %16: std::string::String = ref.load %6: &var std::string::String
-//   %17: Scope = ref.load %4: &var Scope
-//   error.try %15: !void, cleanup call.std::string::String.deinit %16: std::string::String, %1: Allocator; call.Scope.deinit %17: Scope, %1: Allocator
-//   %19: []u8 = const "parse_expr"
-//   %20: BindingKind = const 0
-//   %21: !void = call.Scope.declare %4: &var Scope, %19: []u8, %20: BindingKind
-//   %22: std::string::String = ref.load %6: &var std::string::String
-//   %23: Scope = ref.load %4: &var Scope
-//   error.try %21: !void, cleanup call.std::string::String.deinit %22: std::string::String, %1: Allocator; call.Scope.deinit %23: Scope, %1: Allocator
-//   %25: i64 = const 2
-//   %26: Scope = ref.load %4: &var Scope
-//   %27: i64 = call.Scope.len %26: Scope
-//   test.expect_equal %25: i64, %27: i64, i64
-//   %29: Scope = ref.load %4: &var Scope
-//   %30: []u8 = const "node"
-//   %31: bool = call.Scope.contains %29: Scope, %30: []u8
-//   call.std::testing::expect %31: bool
-//   %33: Scope = ref.load %4: &var Scope
-//   %34: []u8 = const "missing"
-//   %35: bool = call.Scope.contains %33: Scope, %34: []u8
-//   %36: bool = unary.! %35: bool
-//   call.std::testing::expect %36: bool
-//   %38: Scope = ref.load %4: &var Scope
-//   %39: []u8 = const "node"
-//   %40: ?BindingKind = call.Scope.resolve %38: Scope, %39: []u8
-//   %41: bool = opt.has %40: ?BindingKind
-//   branch %41: bool, orelse.some.1, orelse.else.2
+//   %12: []u8 = call.std::string::String.as_bytes %6: &var std::string::String
+//   %13: BindingKind = const 1
+//   %14: !void = call.Scope.declare %4: &var Scope, %1: Allocator, %12: []u8, %13: BindingKind
+//   %15: std::string::String = ref.load %6: &var std::string::String
+//   %16: Scope = ref.load %4: &var Scope
+//   error.try %14: !void, cleanup call.std::string::String.deinit %15: std::string::String, %1: Allocator; call.Scope.deinit %16: Scope, %1: Allocator
+//   %18: []u8 = const "parse_expr"
+//   %19: BindingKind = const 0
+//   %20: !void = call.Scope.declare %4: &var Scope, %1: Allocator, %18: []u8, %19: BindingKind
+//   %21: std::string::String = ref.load %6: &var std::string::String
+//   %22: Scope = ref.load %4: &var Scope
+//   error.try %20: !void, cleanup call.std::string::String.deinit %21: std::string::String, %1: Allocator; call.Scope.deinit %22: Scope, %1: Allocator
+//   %24: i64 = const 2
+//   %25: i64 = call.Scope.len %4: &var Scope
+//   test.expect_equal %24: i64, %25: i64, i64
+//   %27: []u8 = const "node"
+//   %28: bool = call.Scope.contains %4: &var Scope, %27: []u8
+//   call.std::testing::expect %28: bool
+//   %30: []u8 = const "missing"
+//   %31: bool = call.Scope.contains %4: &var Scope, %30: []u8
+//   %32: bool = unary.! %31: bool
+//   call.std::testing::expect %32: bool
+//   %34: []u8 = const "node"
+//   %35: ?BindingKind = call.Scope.resolve %4: &var Scope, %34: []u8
+//   %36: bool = opt.has %35: ?BindingKind
+//   branch %36: bool, orelse.some.1, orelse.else.2
 // orelse.some.1:
-//   %42: BindingKind = opt.value %40: ?BindingKind
+//   %37: BindingKind = opt.value %35: ?BindingKind
 //   jump orelse.end.3
 // orelse.else.2:
-//   %43: BindingKind = const 2
+//   %38: BindingKind = const 2
 //   jump orelse.end.3
 // orelse.end.3:
-//   %44: BindingKind = phi [orelse.some.1, %42: BindingKind], [orelse.else.2, %43: BindingKind]
-//   %45: BindingKind = const 1
-//   %46: bool = binary.== %44: BindingKind, %45: BindingKind
-//   call.std::testing::expect %46: bool
-//   %48: Scope = ref.load %4: &var Scope
-//   %49: []u8 = const "parse_expr"
-//   %50: ?BindingKind = call.Scope.resolve %48: Scope, %49: []u8
-//   %51: bool = opt.has %50: ?BindingKind
-//   branch %51: bool, orelse.some.4, orelse.else.5
+//   %39: BindingKind = phi [orelse.some.1, %37: BindingKind], [orelse.else.2, %38: BindingKind]
+//   %40: BindingKind = const 1
+//   %41: bool = binary.== %39: BindingKind, %40: BindingKind
+//   call.std::testing::expect %41: bool
+//   %43: []u8 = const "parse_expr"
+//   %44: ?BindingKind = call.Scope.resolve %4: &var Scope, %43: []u8
+//   %45: bool = opt.has %44: ?BindingKind
+//   branch %45: bool, orelse.some.4, orelse.else.5
 // orelse.some.4:
-//   %52: BindingKind = opt.value %50: ?BindingKind
+//   %46: BindingKind = opt.value %44: ?BindingKind
 //   jump orelse.end.6
 // orelse.else.5:
-//   %53: BindingKind = const 2
+//   %47: BindingKind = const 2
 //   jump orelse.end.6
 // orelse.end.6:
-//   %54: BindingKind = phi [orelse.some.4, %52: BindingKind], [orelse.else.5, %53: BindingKind]
-//   %55: BindingKind = const 0
-//   %56: bool = binary.== %54: BindingKind, %55: BindingKind
-//   call.std::testing::expect %56: bool
-//   %58: std::string::String = ref.load %6: &var std::string::String
-//   call.std::string::String.deinit %58: std::string::String, %1: Allocator
-//   %60: Scope = ref.load %4: &var Scope
-//   call.Scope.deinit %60: Scope, %1: Allocator
-//   %62: !void = error.ok
-//   return %62: !void
+//   %48: BindingKind = phi [orelse.some.4, %46: BindingKind], [orelse.else.5, %47: BindingKind]
+//   %49: BindingKind = const 0
+//   %50: bool = binary.== %48: BindingKind, %49: BindingKind
+//   call.std::testing::expect %50: bool
+//   %52: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %52: std::string::String, %1: Allocator
+//   %54: Scope = ref.load %4: &var Scope
+//   call.Scope.deinit %54: Scope, %1: Allocator
+//   %56: !void = error.ok
+//   return %56: !void
 // }
 // opt:
-// fn Scope.declare(%self: &var Scope, %name: []u8, %kind: BindingKind) -> !void {
+// fn Scope.declare(%self: &var Scope, %allocator: Allocator, %name: []u8, %kind: BindingKind) -> !void {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &var Scope
-//   %2: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>, %name: []u8, %kind: BindingKind
+//   %1: &var std::map::Map<[]u8, BindingKind> = field.addr.symbols %self: &var Scope
+//   %2: std::mem::Error!void = call.std::map::Map.insert._5b_5du8.BindingKind %1: &var std::map::Map<[]u8, BindingKind>, %allocator: Allocator, %name: []u8, %kind: BindingKind
 //   error.try %2: std::mem::Error!void
 //   %4: !void = error.ok
 //   return %4: !void
 // }
-// fn Scope.resolve(%self: Scope, %name: []u8) -> ?BindingKind {
+// fn Scope.resolve(%self: &Scope, %name: []u8) -> ?BindingKind {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.symbols %self: Scope
+//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &Scope
 //   %2: ?BindingKind = call.std::map::Map.get._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>, %name: []u8
 //   return %2: ?BindingKind
 // }
-// fn Scope.len(%self: Scope) -> i64 {
+// fn Scope.len(%self: &Scope) -> i64 {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.symbols %self: Scope
+//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &Scope
 //   %2: i64 = call.std::map::Map.len._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>
 //   return %2: i64
 // }
-// fn Scope.contains(%self: Scope, %name: []u8) -> bool {
+// fn Scope.contains(%self: &Scope, %name: []u8) -> bool {
 // entry:
-//   %1: std::map::Map<[]u8, BindingKind> = field.symbols %self: Scope
+//   %1: std::map::Map<[]u8, BindingKind> = field.ref.symbols %self: &Scope
 //   %2: bool = call.std::map::Map.contains._5b_5du8.BindingKind %1: std::map::Map<[]u8, BindingKind>, %name: []u8
 //   return %2: bool
 // }
@@ -218,68 +213,62 @@ test "std map resolver scope" {
 //   %9: std::string::String = ref.load %6: &var std::string::String
 //   %10: Scope = ref.load %4: &var Scope
 //   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %1: Allocator; call.Scope.deinit %10: Scope, %1: Allocator
-//   %12: std::string::String = ref.load %6: &var std::string::String
-//   %13: []u8 = call.std::string::String.as_bytes %12: std::string::String
-//   %14: BindingKind = const 1
-//   %15: !void = call.Scope.declare %4: &var Scope, %13: []u8, %14: BindingKind
-//   %16: std::string::String = ref.load %6: &var std::string::String
-//   %17: Scope = ref.load %4: &var Scope
-//   error.try %15: !void, cleanup call.std::string::String.deinit %16: std::string::String, %1: Allocator; call.Scope.deinit %17: Scope, %1: Allocator
-//   %19: []u8 = const "parse_expr"
-//   %20: BindingKind = const 0
-//   %21: !void = call.Scope.declare %4: &var Scope, %19: []u8, %20: BindingKind
-//   %22: std::string::String = ref.load %6: &var std::string::String
-//   %23: Scope = ref.load %4: &var Scope
-//   error.try %21: !void, cleanup call.std::string::String.deinit %22: std::string::String, %1: Allocator; call.Scope.deinit %23: Scope, %1: Allocator
-//   %25: i64 = const 2
-//   %26: Scope = ref.load %4: &var Scope
-//   %27: i64 = call.Scope.len %26: Scope
-//   test.expect_equal %25: i64, %27: i64, i64
-//   %29: Scope = ref.load %4: &var Scope
-//   %30: []u8 = const "node"
-//   %31: bool = call.Scope.contains %29: Scope, %30: []u8
-//   call.std::testing::expect %31: bool
-//   %33: Scope = ref.load %4: &var Scope
-//   %34: []u8 = const "missing"
-//   %35: bool = call.Scope.contains %33: Scope, %34: []u8
-//   %36: bool = unary.! %35: bool
-//   call.std::testing::expect %36: bool
-//   %38: Scope = ref.load %4: &var Scope
-//   %39: []u8 = const "node"
-//   %40: ?BindingKind = call.Scope.resolve %38: Scope, %39: []u8
-//   %41: bool = opt.has %40: ?BindingKind
-//   branch %41: bool, orelse.some.1, orelse.else.2
+//   %12: []u8 = call.std::string::String.as_bytes %6: &var std::string::String
+//   %13: BindingKind = const 1
+//   %14: !void = call.Scope.declare %4: &var Scope, %1: Allocator, %12: []u8, %13: BindingKind
+//   %15: std::string::String = ref.load %6: &var std::string::String
+//   %16: Scope = ref.load %4: &var Scope
+//   error.try %14: !void, cleanup call.std::string::String.deinit %15: std::string::String, %1: Allocator; call.Scope.deinit %16: Scope, %1: Allocator
+//   %18: []u8 = const "parse_expr"
+//   %19: BindingKind = const 0
+//   %20: !void = call.Scope.declare %4: &var Scope, %1: Allocator, %18: []u8, %19: BindingKind
+//   %21: std::string::String = ref.load %6: &var std::string::String
+//   %22: Scope = ref.load %4: &var Scope
+//   error.try %20: !void, cleanup call.std::string::String.deinit %21: std::string::String, %1: Allocator; call.Scope.deinit %22: Scope, %1: Allocator
+//   %24: i64 = const 2
+//   %25: i64 = call.Scope.len %4: &var Scope
+//   test.expect_equal %24: i64, %25: i64, i64
+//   %27: []u8 = const "node"
+//   %28: bool = call.Scope.contains %4: &var Scope, %27: []u8
+//   call.std::testing::expect %28: bool
+//   %30: []u8 = const "missing"
+//   %31: bool = call.Scope.contains %4: &var Scope, %30: []u8
+//   %32: bool = unary.! %31: bool
+//   call.std::testing::expect %32: bool
+//   %34: []u8 = const "node"
+//   %35: ?BindingKind = call.Scope.resolve %4: &var Scope, %34: []u8
+//   %36: bool = opt.has %35: ?BindingKind
+//   branch %36: bool, orelse.some.1, orelse.else.2
 // orelse.some.1:
-//   %42: BindingKind = opt.value %40: ?BindingKind
+//   %37: BindingKind = opt.value %35: ?BindingKind
 //   jump orelse.end.3
 // orelse.else.2:
-//   %43: BindingKind = const 2
+//   %38: BindingKind = const 2
 //   jump orelse.end.3
 // orelse.end.3:
-//   %44: BindingKind = phi [orelse.some.1, %42: BindingKind], [orelse.else.2, %43: BindingKind]
-//   %45: BindingKind = const 1
-//   %46: bool = binary.== %44: BindingKind, %45: BindingKind
-//   call.std::testing::expect %46: bool
-//   %48: Scope = ref.load %4: &var Scope
-//   %49: []u8 = const "parse_expr"
-//   %50: ?BindingKind = call.Scope.resolve %48: Scope, %49: []u8
-//   %51: bool = opt.has %50: ?BindingKind
-//   branch %51: bool, orelse.some.4, orelse.else.5
+//   %39: BindingKind = phi [orelse.some.1, %37: BindingKind], [orelse.else.2, %38: BindingKind]
+//   %40: BindingKind = const 1
+//   %41: bool = binary.== %39: BindingKind, %40: BindingKind
+//   call.std::testing::expect %41: bool
+//   %43: []u8 = const "parse_expr"
+//   %44: ?BindingKind = call.Scope.resolve %4: &var Scope, %43: []u8
+//   %45: bool = opt.has %44: ?BindingKind
+//   branch %45: bool, orelse.some.4, orelse.else.5
 // orelse.some.4:
-//   %52: BindingKind = opt.value %50: ?BindingKind
+//   %46: BindingKind = opt.value %44: ?BindingKind
 //   jump orelse.end.6
 // orelse.else.5:
-//   %53: BindingKind = const 2
+//   %47: BindingKind = const 2
 //   jump orelse.end.6
 // orelse.end.6:
-//   %54: BindingKind = phi [orelse.some.4, %52: BindingKind], [orelse.else.5, %53: BindingKind]
-//   %55: BindingKind = const 0
-//   %56: bool = binary.== %54: BindingKind, %55: BindingKind
-//   call.std::testing::expect %56: bool
-//   %58: std::string::String = ref.load %6: &var std::string::String
-//   call.std::string::String.deinit %58: std::string::String, %1: Allocator
-//   %60: Scope = ref.load %4: &var Scope
-//   call.Scope.deinit %60: Scope, %1: Allocator
-//   %62: !void = error.ok
-//   return %62: !void
+//   %48: BindingKind = phi [orelse.some.4, %46: BindingKind], [orelse.else.5, %47: BindingKind]
+//   %49: BindingKind = const 0
+//   %50: bool = binary.== %48: BindingKind, %49: BindingKind
+//   call.std::testing::expect %50: bool
+//   %52: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %52: std::string::String, %1: Allocator
+//   %54: Scope = ref.load %4: &var Scope
+//   call.Scope.deinit %54: Scope, %1: Allocator
+//   %56: !void = error.ok
+//   return %56: !void
 // }

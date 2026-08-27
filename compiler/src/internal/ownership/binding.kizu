@@ -144,7 +144,7 @@ fn (self: &ScopeStore) id_mark() -> i64 {
 
 /// Retains a binding that belongs to no scope, such as a receiver projection.
 fn (self: &var ScopeStore) retain(value: Binding) -> BindingHandle {
-    return BindingHandle { node: self.bindings.add(move value) };
+    return BindingHandle { node: self.bindings.add(self.allocator, move value) };
 }
 
 /// Reads one binding.
@@ -160,7 +160,7 @@ fn (self: &var ScopeStore) binding_mut(handle: BindingHandle) -> ?&var Binding {
 /// Creates a lexical ownership scope, the Go `newScope`.
 fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> ScopeHandle {
     return ScopeHandle {
-        node: self.scopes.add(Scope {
+        node: self.scopes.add(self.allocator, Scope {
             parent: parent,
             values: map::new<[]u8, BindingHandle>(self.allocator)
         })
@@ -176,18 +176,18 @@ fn (self: &var ScopeStore) child(parent: ScopeHandle) -> ScopeHandle {
 /// already bound there is replaced.
 fn (self: &var ScopeStore) define(scope: ScopeHandle, name: []u8, value: Binding) -> !BindingHandle {
     let handle = self.retain(move value);
-    try self.define_handle(scope, name, handle);
+    try self.define_handle(self.allocator, scope, name, handle);
     return handle;
 }
 
 /// Binds an already retained binding in the current scope.
-fn (self: &var ScopeStore) define_handle(scope: ScopeHandle, name: []u8, handle: BindingHandle) -> !void {
+fn (self: &var ScopeStore) define_handle(allocator: Allocator, scope: ScopeHandle, name: []u8, handle: BindingHandle) -> !void {
     if self.scopes.at_mut(scope.node) |current| {
         if current.values.at_mut(name) |slot| {
             slot.* = handle;
             return;
         }
-        return current.values.insert(name, handle);
+        return current.values.insert(allocator, name, handle);
     }
     return;
 }
@@ -382,8 +382,9 @@ fn (self: &ScopeStore) partially_consumed_field_index(handle: BindingHandle) -> 
 /// Records that an owned direct field has been cleaned up, the Go
 /// `binding.markFieldDeinit`.
 fn (self: &var ScopeStore) mark_field_deinit(handle: BindingHandle, field: []u8) -> !void {
+    let allocator = self.allocator;
     if self.binding_mut(handle) |value| {
-        return put_bool(&var value.field_deinit, field, true);
+        return put_bool(allocator, &var value.field_deinit, field, true);
     }
     return;
 }
@@ -399,25 +400,26 @@ fn (self: &var ScopeStore) clear_field_deinit(handle: BindingHandle, field: []u8
     return;
 }
 
-fn put_bool(values: &var map::Map<[]u8, bool>, key: []u8, flag: bool) -> !void {
+fn put_bool(allocator: Allocator, values: &var map::Map<[]u8, bool>, key: []u8, flag: bool) -> !void {
     if values.at_mut(key) |slot| {
         slot.* = flag;
         return;
     }
-    return values.insert(key, flag);
+    return values.insert(allocator, key, flag);
 }
 
-fn add_count(counts: &var map::Map<[]u8, i64>, key: []u8, delta: i64) -> !void {
+fn add_count(allocator: Allocator, counts: &var map::Map<[]u8, i64>, key: []u8, delta: i64) -> !void {
     if counts.at_mut(key) |slot| {
         slot.* = slot.* + delta;
         return;
     }
-    return counts.insert(key, delta);
+    return counts.insert(allocator, key, delta);
 }
 
 /// Records one active whole-value or field borrow on a target, the Go
 /// `activateBorrow`.
 fn (self: &var ScopeStore) activate_borrow(target: BindingHandle, field: []u8, mutable: bool) -> !void {
+    let allocator = self.allocator;
     if self.binding_mut(target) |value| {
         if mem::len(field) == 0 {
             if mutable {
@@ -428,9 +430,9 @@ fn (self: &var ScopeStore) activate_borrow(target: BindingHandle, field: []u8, m
             return;
         }
         if mutable {
-            return add_count(&var value.field_mut_borrows, field, 1);
+            return add_count(allocator, &var value.field_mut_borrows, field, 1);
         }
-        return add_count(&var value.field_borrows, field, 1);
+        return add_count(allocator, &var value.field_borrows, field, 1);
     }
     return;
 }
@@ -506,7 +508,7 @@ fn (self: &var ScopeStore) clone_scope(scope: ScopeHandle) -> !ScopeHandle {
         let copied = try self.clone_binding(value);
         let handle = self.retain(move copied);
         let name_bytes = name.as_bytes();
-        try self.define_handle(cloned, name_bytes, handle);
+        try self.define_handle(self.allocator, cloned, name_bytes, handle);
         index = index + 1;
     }
     return cloned;
@@ -563,7 +565,7 @@ fn copy_int_map(allocator: Allocator, source: &map::Map<[]u8, i64>) -> !map::Map
     errdefer out.deinit(allocator);
     var index = 0;
     while source.key_at(index) |key| {
-        try out.insert(key, source.get(key) orelse 0);
+        try out.insert(allocator, key, source.get(key) orelse 0);
         index = index + 1;
     }
     return move out;
@@ -575,7 +577,7 @@ fn copy_bool_map(allocator: Allocator, source: &map::Map<[]u8, bool>) -> !map::M
     errdefer out.deinit(allocator);
     var index = 0;
     while source.key_at(index) |key| {
-        try out.insert(key, source.get(key) orelse false);
+        try out.insert(allocator, key, source.get(key) orelse false);
         index = index + 1;
     }
     return move out;

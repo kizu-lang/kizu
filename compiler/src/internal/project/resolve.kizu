@@ -137,7 +137,7 @@ fn (self: &Loader) namespace_target(
 fn (self: &var Loader) use_first(file: arena::Handle<ModuleFile>, parts: &array::Array<string::String>) -> !void {
     if parts.at(0) |first| {
         let first_bytes = first.as_bytes();
-        return self.use_namespace(file, first_bytes);
+        return self.use_namespace(self.allocator, file, first_bytes);
     }
     return;
 }
@@ -423,7 +423,7 @@ fn (self: &var Loader) resolve_type(tree: &var ast::Ast, file: arena::Handle<Mod
     // table here has no optional parse, and every spelling that reaches this
     // point was produced by the parser, so a parse failure is propagated.
     let parsed = try tree.types.parse(name);
-    let outcome = try self.resolve_type_node(tree, file, parsed);
+    let outcome = try self.resolve_type_node(self.allocator, tree, file, parsed);
     match outcome {
         Type(resolved) => return NameResolution::Name(try typ::render(self.allocator, &tree.types, resolved)),
         Failed(failed) => return NameResolution::Failed(move failed),
@@ -433,6 +433,7 @@ fn (self: &var Loader) resolve_type(tree: &var ast::Ast, file: arena::Handle<Mod
 /// Rewrites every name a type mentions to its package-qualified form, keeping
 /// the structure around it.
 fn (self: &var Loader) resolve_type_node(
+    allocator: Allocator,
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
     value: typ::Type
@@ -451,7 +452,7 @@ fn (self: &var Loader) resolve_type_node(
         }
         let outcome = try self.resolve_base(file, name_bytes);
         match outcome {
-            Name(resolved) => try renames.resolved.insert(name_bytes, move resolved),
+            Name(resolved) => try renames.resolved.insert(allocator, name_bytes, move resolved),
             Failed(failed) => return TypeNodeResolution::Failed(move failed),
         }
     }
@@ -517,7 +518,7 @@ fn (self: &var NameRenames) rename_path(
 /// Resolves one non-generic type base.
 fn (self: &var Loader) resolve_base(file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
     if mem::starts_with(name, "std::") {
-        try self.use_namespace(file, std_root());
+        try self.use_namespace(self.allocator, file, std_root());
         let reachable = try self.reachable(file, name);
         if !reachable {
             return NameResolution::Failed(try self.internal_module_error(name, file));

@@ -104,9 +104,9 @@ type containerCleanup struct {
 	shallowOp string
 	typeArg   string
 	// shallowNamesAllocator is whether the runtime op takes the allocator the
-	// release names. A Box cell stores nothing but its payload and an Array
-	// header is `{data, len, cap}`, so their ops are handed one; a Map and an
-	// Arena still keep an allocator in the heap header their op reads.
+	// release names. Every container header is now the value, and none of
+	// them keeps an allocator, so every op is handed one; the field is what
+	// says a container's release reads it (ADR-0132).
 	shallowNamesAllocator bool
 }
 
@@ -117,13 +117,13 @@ func stdContainerCleanup(receiverType string) (containerCleanup, bool) {
 		return containerCleanup{arrayTypeName, "array.deinit", elem, true}, true
 	}
 	if args, ok := mapStaticArgs(receiverType); ok {
-		return containerCleanup{mapTypeName, "map.deinit", args, false}, true
+		return containerCleanup{mapTypeName, "map.deinit", args, true}, true
 	}
 	if elem, ok := boxElementType(receiverType); ok {
 		return containerCleanup{boxTypeName, "box.deinit", elem, true}, true
 	}
 	if elem := arenaElementType(receiverType); elem != "unknown" {
-		return containerCleanup{arenaTypeName, "arena.deinit", elem, false}, true
+		return containerCleanup{arenaTypeName, "arena.deinit", elem, true}, true
 	}
 	return containerCleanup{}, false
 }
