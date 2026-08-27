@@ -2933,6 +2933,27 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::testing::failing_io()` は deterministic failing I/O として、テストで I/O error path を確認する。
   失敗する implementation は test 用の道具なので `std::io` ではなく `std::testing` が持つ
 
+`std::net`:
+
+* `std::net::tcp_listen(io, address)` は `!std::net::TcpListener` を返す。
+  address は `host:port`、IPv6 の host は bracket で囲む(`[::1]:8080`)。
+  port 0 は host に空き port を選ばせる
+* `std::net::tcp_connect(io, address)` は `!std::net::TcpStream` を返す
+* `std::net::parse_address(address)` は `!std::net::Address` を返す。text を
+  分けるだけで、名前解決はしない
+* `listener.accept(io)` は `!std::net::TcpStream` を返す
+* `listener.local_port()` は `!i64` を返す。port 0 で bind した listener が
+  どの port になったかを言う唯一の手段
+* `stream.read_into(io, allocator, out, max)` は 1 回の read が追記した byte 数を
+  `!i64` で返す。**0 は相手が閉じたこと**を意味し、`max <= 0` は
+  `Error::InvalidLength`
+* `stream.write_all(io, bytes)` は `!void` を返す。部分書き込みは返さない
+* `TcpListener` / `TcpStream` は非 copy の owner で、`deinit` は `self` を値で
+  取る。close 後の使用は型 error であり、runtime の報告ではない
+* `std::net::Address` は `host: []u8` と `port: i64` だけを持つ
+* safe Kizu に file descriptor や socket pointer は出さない
+* I/O failure は `!T` error として返す
+
 `std::path`:
 
 * `std::path::join(allocator, left, right)` は `!std::string::String` を返す

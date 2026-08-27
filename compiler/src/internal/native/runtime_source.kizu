@@ -14,8 +14,12 @@ pub fn runtime_source() -> []u8 {
         \\#include <dirent.h>
         \\#include <errno.h>
         \\#include <signal.h>
+        \\#include <sys/socket.h>
         \\#include <sys/stat.h>
         \\#include <sys/wait.h>
+        \\#include <netdb.h>
+        \\#include <netinet/in.h>
+        \\#include <netinet/tcp.h>
         \\#include <time.h>
         \\#include <unistd.h>
         \\#if defined(__APPLE__)
@@ -1348,6 +1352,342 @@ pub fn runtime_source() -> []u8 {
         \\
         \\void std__internal__builtin__fs_remove_file(KizuErrorVoid *out, void *io, const KizuSliceU8 *path) {
         \\    *out = kizu_std_builtin_fs_remove_file_result(io, *path);
+        \\}
+        \\
+        \\/* std::net is a thin, honest layer over the POSIX stream socket calls. A
+        \\ * listener and a stream are each one descriptor; the Kizu side keeps it in a
+        \\ * private field, so a program reaches a socket only through the two owners
+        \\ * std::net declares. Everything above -- splitting host from port, framing
+        \\ * HTTP -- is Kizu source, because it can be. */
+        \\
+        \\/* A descriptor is an int on every host here, so a negative value is not one.
+        \\ * The Kizu owners set their field to this when they release, which is what
+        \\ * makes a use after deinit a named failure rather than a read of a descriptor
+        \\ * the process has since handed to something else. */
+        \\#define KIZU_NET_CLOSED_FD INT64_C(-1)
+        \\
+        \\/* The listen backlog. Nothing above chooses it: with one connection served at
+        \\ * a time, the queue is what keeps a caller from being refused while the
+        \\ * previous one is answered, and 128 is what the platform defaults settled on. */
+        \\#define KIZU_NET_BACKLOG 128
+        \\
+        \\static int64_t kizu_net_errno_failure(int code) {
+        \\    switch (code) {
+        \\    case EADDRINUSE:
+        \\        return KIZU_ERR_STD_NET_ERROR_ADDRESS_IN_USE;
+        \\    case EACCES:
+        \\    case EPERM:
+        \\        return KIZU_ERR_STD_NET_ERROR_PERMISSION_DENIED;
+        \\    case ECONNREFUSED:
+        \\        return KIZU_ERR_STD_NET_ERROR_CONNECTION_REFUSED;
+        \\    case ECONNRESET:
+        \\    case EPIPE:
+        \\    case ENOTCONN:
+        \\        return KIZU_ERR_STD_NET_ERROR_CONNECTION_RESET;
+        \\    case EMFILE:
+        \\    case ENFILE:
+        \\        return KIZU_ERR_STD_NET_ERROR_TOO_MANY_OPEN_FILES;
+        \\    case ETIMEDOUT:
+        \\        return KIZU_ERR_STD_NET_ERROR_TIMED_OUT;
+        \\    case EADDRNOTAVAIL:
+        \\    case EAFNOSUPPORT:
+        \\        return KIZU_ERR_STD_NET_ERROR_INVALID_ADDRESS;
+        \\    case ENOMEM:
+        \\        return KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY;
+        \\    default:
+        \\        return KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED;
+        \\    }
+        \\}
+        \\
+        \\/* kizu_net_resolve turns a host and a port into the address list to try, and
+        \\ * returns 0 or the failure to report. An empty host means the wildcard for a
+        \\ * listener and the loopback for a connect, which is what getaddrinfo already
+        \\ * says with AI_PASSIVE and a null node. */
+        \\static int64_t kizu_net_resolve(
+        \\    KizuSliceU8 host,
+        \\    int64_t port,
+        \\    int passive,
+        \\    struct addrinfo **out
+        \\) {
+        \\    *out = NULL;
+        \\    if (port < 0 || port > 65535) {
+        \\        return KIZU_ERR_STD_NET_ERROR_INVALID_ADDRESS;
+        \\    }
+        \\    char service[8];
+        \\    snprintf(service, sizeof service, "%d", (int)port);
+        \\    char *node = NULL;
+        \\    if (host.len > 0) {
+        \\        node = kizu_slice_to_cstr(host);
+        \\        if (!node) {
+        \\            return KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY;
+        \\        }
+        \\    }
+        \\    struct addrinfo hints;
+        \\    memset(&hints, 0, sizeof hints);
+        \\    hints.ai_family = AF_UNSPEC;
+        \\    hints.ai_socktype = SOCK_STREAM;
+        \\    if (passive) {
+        \\        hints.ai_flags = AI_PASSIVE;
+        \\    }
+        \\    int code = getaddrinfo(node, service, &hints, out);
+        \\    free(node);
+        \\    if (code != 0) {
+        \\        *out = NULL;
+        \\        if (code == EAI_MEMORY) {
+        \\            return KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY;
+        \\        }
+        \\        return KIZU_ERR_STD_NET_ERROR_ADDRESS_NOT_FOUND;
+        \\    }
+        \\    return 0;
+        \\}
+        \\
+        \\static KizuErrorI64 kizu_std_builtin_net_listen_result(
+        \\    void *io,
+        \\    KizuSliceU8 host,
+        \\    int64_t port
+        \\) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    struct addrinfo *list = NULL;
+        \\    int64_t failure = kizu_net_resolve(host, port, 1, &list);
+        \\    if (failure != 0) {
+        \\        return kizu_err_i64(failure);
+        \\    }
+        \\    int64_t last = KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED;
+        \\    for (struct addrinfo *it = list; it; it = it->ai_next) {
+        \\        int fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        \\        if (fd < 0) {
+        \\            last = kizu_net_errno_failure(errno);
+        \\            continue;
+        \\        }
+        \\        int one = 1;
+        \\        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        \\        if (bind(fd, it->ai_addr, it->ai_addrlen) != 0) {
+        \\            last = kizu_net_errno_failure(errno);
+        \\            close(fd);
+        \\            continue;
+        \\        }
+        \\        if (listen(fd, KIZU_NET_BACKLOG) != 0) {
+        \\            last = kizu_net_errno_failure(errno);
+        \\            close(fd);
+        \\            continue;
+        \\        }
+        \\        freeaddrinfo(list);
+        \\        return kizu_ok_i64((int64_t)fd);
+        \\    }
+        \\    freeaddrinfo(list);
+        \\    return kizu_err_i64(last);
+        \\}
+        \\
+        \\void std__internal__builtin__net_listen(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    const KizuSliceU8 *host,
+        \\    int64_t port
+        \\) {
+        \\    *out = kizu_std_builtin_net_listen_result(io, *host, port);
+        \\}
+        \\
+        \\static KizuErrorI64 kizu_std_builtin_net_connect_result(
+        \\    void *io,
+        \\    KizuSliceU8 host,
+        \\    int64_t port
+        \\) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    struct addrinfo *list = NULL;
+        \\    int64_t failure = kizu_net_resolve(host, port, 0, &list);
+        \\    if (failure != 0) {
+        \\        return kizu_err_i64(failure);
+        \\    }
+        \\    int64_t last = KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED;
+        \\    for (struct addrinfo *it = list; it; it = it->ai_next) {
+        \\        int fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        \\        if (fd < 0) {
+        \\            last = kizu_net_errno_failure(errno);
+        \\            continue;
+        \\        }
+        \\        int connected;
+        \\        do {
+        \\            connected = connect(fd, it->ai_addr, it->ai_addrlen);
+        \\        } while (connected != 0 && errno == EINTR);
+        \\        if (connected != 0) {
+        \\            last = kizu_net_errno_failure(errno);
+        \\            close(fd);
+        \\            continue;
+        \\        }
+        \\        int one = 1;
+        \\        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        \\        freeaddrinfo(list);
+        \\        return kizu_ok_i64((int64_t)fd);
+        \\    }
+        \\    freeaddrinfo(list);
+        \\    return kizu_err_i64(last);
+        \\}
+        \\
+        \\void std__internal__builtin__net_connect(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    const KizuSliceU8 *host,
+        \\    int64_t port
+        \\) {
+        \\    *out = kizu_std_builtin_net_connect_result(io, *host, port);
+        \\}
+        \\
+        \\static KizuErrorI64 kizu_std_builtin_net_accept_result(void *io, int64_t fd) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    if (fd < 0) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    for (;;) {
+        \\        int conn = accept((int)fd, NULL, NULL);
+        \\        if (conn >= 0) {
+        \\            int one = 1;
+        \\            setsockopt(conn, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        \\            return kizu_ok_i64((int64_t)conn);
+        \\        }
+        \\        if (errno == EINTR) {
+        \\            continue;
+        \\        }
+        \\        return kizu_err_i64(kizu_net_errno_failure(errno));
+        \\    }
+        \\}
+        \\
+        \\void std__internal__builtin__net_accept(KizuErrorI64 *out, void *io, int64_t fd) {
+        \\    *out = kizu_std_builtin_net_accept_result(io, fd);
+        \\}
+        \\
+        \\/* One recv, appended to the caller's String, and the count is the answer.
+        \\ * A stream has no length to read to, so the loop that decides when a message
+        \\ * is complete belongs to whoever knows the protocol; this returns 0 at end of
+        \\ * stream and lets that loop see it. */
+        \\static KizuErrorI64 kizu_std_builtin_net_read_result(
+        \\    void *io,
+        \\    void *allocator,
+        \\    int64_t fd,
+        \\    KizuString *dst,
+        \\    int64_t max
+        \\) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    if (max <= 0) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
+        \\    }
+        \\    KizuArray *array = dst;
+        \\    if (!array) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_READ_FAILED);
+        \\    }
+        \\    if (fd < 0) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    int64_t want = max > 65536 ? 65536 : max;
+        \\    if (!kizu_array_reserve_storage(allocator, array, array->len + want, 1)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+        \\    }
+        \\    for (;;) {
+        \\        ssize_t got = recv((int)fd, array->data + array->len, (size_t)want, 0);
+        \\        if (got < 0) {
+        \\            if (errno == EINTR) {
+        \\                continue;
+        \\            }
+        \\            return kizu_err_i64(kizu_net_errno_failure(errno));
+        \\        }
+        \\        array->len += (int64_t)got;
+        \\        return kizu_ok_i64((int64_t)got);
+        \\    }
+        \\}
+        \\
+        \\void std__internal__builtin__net_read(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    void *allocator,
+        \\    int64_t fd,
+        \\    KizuString *dst,
+        \\    int64_t max
+        \\) {
+        \\    *out = kizu_std_builtin_net_read_result(io, allocator, fd, dst, max);
+        \\}
+        \\
+        \\/* send returns after writing some of what it was given, so writing all of it
+        \\ * is a loop. The name says that: a partial write is not a result the caller
+        \\ * has to notice, because there is no shape of it this can return. */
+        \\static KizuErrorVoid kizu_std_builtin_net_write_all_result(
+        \\    void *io,
+        \\    int64_t fd,
+        \\    KizuSliceU8 bytes
+        \\) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    if (bytes.len < 0 || (bytes.len > 0 && !bytes.ptr)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_WRITE_FAILED);
+        \\    }
+        \\    if (fd < 0) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    int64_t sent = 0;
+        \\    while (sent < bytes.len) {
+        \\        ssize_t wrote = send((int)fd, bytes.ptr + sent, (size_t)(bytes.len - sent), 0);
+        \\        if (wrote < 0) {
+        \\            if (errno == EINTR) {
+        \\                continue;
+        \\            }
+        \\            return kizu_err_void(kizu_net_errno_failure(errno));
+        \\        }
+        \\        sent += (int64_t)wrote;
+        \\    }
+        \\    return kizu_ok_void();
+        \\}
+        \\
+        \\void std__internal__builtin__net_write_all(
+        \\    KizuErrorVoid *out,
+        \\    void *io,
+        \\    int64_t fd,
+        \\    const KizuSliceU8 *bytes
+        \\) {
+        \\    *out = kizu_std_builtin_net_write_all_result(io, fd, *bytes);
+        \\}
+        \\
+        \\/* The port the kernel picked. Binding port 0 is how a test asks for one that
+        \\ * is free, and without this the program could not then say where it is. */
+        \\static KizuErrorI64 kizu_std_builtin_net_local_port_result(int64_t fd) {
+        \\    if (fd < 0) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    struct sockaddr_storage addr;
+        \\    socklen_t length = sizeof addr;
+        \\    memset(&addr, 0, sizeof addr);
+        \\    if (getsockname((int)fd, (struct sockaddr *)&addr, &length) != 0) {
+        \\        return kizu_err_i64(kizu_net_errno_failure(errno));
+        \\    }
+        \\    if (addr.ss_family == AF_INET) {
+        \\        struct sockaddr_in *v4 = (struct sockaddr_in *)&addr;
+        \\        return kizu_ok_i64((int64_t)ntohs(v4->sin_port));
+        \\    }
+        \\    if (addr.ss_family == AF_INET6) {
+        \\        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&addr;
+        \\        return kizu_ok_i64((int64_t)ntohs(v6->sin6_port));
+        \\    }
+        \\    return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_INVALID_ADDRESS);
+        \\}
+        \\
+        \\void std__internal__builtin__net_local_port(KizuErrorI64 *out, int64_t fd) {
+        \\    *out = kizu_std_builtin_net_local_port_result(fd);
+        \\}
+        \\
+        \\/* Releasing a descriptor is what deinit does, and deinit does not fail: the
+        \\ * caller has nothing left to decide by the time it runs. What close reports is
+        \\ * about writes that already happened, and those were already reported by the
+        \\ * write that made them. */
+        \\void std__internal__builtin__net_close(int64_t fd) {
+        \\    if (fd >= 0) {
+        \\        close((int)fd);
+        \\    }
         \\}
         \\
         \\_Bool kizu_bytes_equal(

@@ -1,0 +1,177 @@
+// std::net is TCP, and nothing more than TCP. A listener accepts, a stream
+// reads and writes bytes, and both are owners that release their descriptor
+// when their frame ends. Everything a protocol needs on top of that -- framing,
+// headers, status lines -- is Kizu source elsewhere (std::http).
+//
+// Safe Kizu never sees a descriptor. The two owners keep theirs in a private
+// field, so the only way to reach a socket is through a value this module
+// handed out, and the only way to release one is the deinit that value carries.
+
+pub error Error {
+    InvalidAddress,
+    AddressNotFound,
+    AddressInUse,
+    ConnectionRefused,
+    ConnectionReset,
+    PermissionDenied,
+    TooManyOpenFiles,
+    TimedOut,
+    InvalidLength,
+    ReadFailed,
+    WriteFailed,
+    OutOfMemory,
+    LimitExceeded,
+    IoFailing,
+    OperationFailed,
+    Closed,
+}
+
+// An address is `host:port`, the way every other tool writes one. An IPv6
+// host is bracketed (`[::1]:8080`) so the colons inside it are not read as the
+// separator. An empty host means every interface for `tcp_listen` and the
+// loopback for `tcp_connect`, which is what the host resolver already says.
+pub struct Address {
+    pub host: []u8,
+    pub port: i64,
+}
+
+pub struct TcpListener {
+    fd: i64,
+}
+
+pub struct TcpStream {
+    fd: i64,
+}
+
+// parse_address splits `host:port`. It reads text and nothing else: a name
+// that has to be looked up is looked up by `tcp_listen` / `tcp_connect`, where
+// the failure has an Io to be attributed to.
+pub fn parse_address(address: []u8) -> std::net::Error!std::net::Address {
+    let length = std::mem::len(address);
+    if length == 0 {
+        return std::net::Error::InvalidAddress;
+    }
+    if address[0] == cast<u8>(91) {
+        let close = index_of_byte(address, cast<u8>(93), 0) orelse
+            return std::net::Error::InvalidAddress;
+        if close + 1 >= length or address[close + 1] != cast<u8>(58) {
+            return std::net::Error::InvalidAddress;
+        }
+        let port = try parse_port(address[close + 2..length]);
+        return Address { host: address[1..close], port: port };
+    }
+    let colon = last_index_of_byte(address, cast<u8>(58)) orelse
+        return std::net::Error::InvalidAddress;
+    let port = try parse_port(address[colon + 1..length]);
+    return Address { host: address[0..colon], port: port };
+}
+
+// tcp_listen binds and starts listening. Port 0 asks the host for a free one;
+// `local_port` then says which, so a program that must not collide with
+// another does not have to guess.
+pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListener {
+    let parsed = try parse_address(address);
+    let fd = try std::internal::builtin::net_listen(io, parsed.host, parsed.port);
+    return TcpListener { fd: fd };
+}
+
+// tcp_connect opens a stream to a listening peer.
+pub fn tcp_connect(io: Io, address: []u8) -> std::net::Error!std::net::TcpStream {
+    let parsed = try parse_address(address);
+    let fd = try std::internal::builtin::net_connect(io, parsed.host, parsed.port);
+    return TcpStream { fd: fd };
+}
+
+// accept waits for the next connection and returns it as an owned stream. The
+// listener stays open, so the caller decides when to stop accepting by
+// leaving the loop, not by the listener running out.
+fn (self: &var TcpListener) accept(io: Io) -> std::net::Error!std::net::TcpStream {
+    let fd = try std::internal::builtin::net_accept(io, self.fd);
+    return TcpStream { fd: fd };
+}
+
+// local_port is the port this listener is actually on.
+fn (self: &TcpListener) local_port() -> std::net::Error!i64 {
+    let port = try std::internal::builtin::net_local_port(self.fd);
+    return port;
+}
+
+// deinit consumes the listener and releases its descriptor. Consuming rather
+// than borrowing is what makes a use after release a type error instead of a
+// runtime one: there is no listener left to call anything on.
+fn (self: std::net::TcpListener) deinit() -> void {
+    std::internal::builtin::net_close(self.fd);
+    return;
+}
+
+// read_into appends what one read returns to the caller's buffer and answers
+// with how many bytes that was. Zero means the peer closed its side: a stream
+// has no length, so the loop that decides a message is complete belongs to
+// whoever knows the protocol.
+fn (self: &var TcpStream) read_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!i64 {
+    let count = try std::internal::builtin::net_read(io, allocator, self.fd, out, max);
+    return count;
+}
+
+// write_all writes every byte or reports why it could not. A partial write is
+// not a result the caller has to handle, because there is no shape of it this
+// returns.
+fn (self: &var TcpStream) write_all(io: Io, bytes: []u8) -> std::net::Error!void {
+    try std::internal::builtin::net_write_all(io, self.fd, bytes);
+    return;
+}
+
+// deinit consumes the stream and releases its descriptor.
+fn (self: std::net::TcpStream) deinit() -> void {
+    std::internal::builtin::net_close(self.fd);
+    return;
+}
+
+fn parse_port(text: []u8) -> std::net::Error!i64 {
+    let length = std::mem::len(text);
+    if length == 0 or length > 5 {
+        return std::net::Error::InvalidAddress;
+    }
+    var value = 0;
+    var index = 0;
+    while index < length {
+        let byte = text[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return std::net::Error::InvalidAddress;
+        }
+        value = value * 10 + cast<i64>(byte) - 48;
+        index = index + 1;
+    }
+    if value > 65535 {
+        return std::net::Error::InvalidAddress;
+    }
+    return value;
+}
+
+fn index_of_byte(bytes: []u8, needle: u8, from: i64) -> ?i64 {
+    let length = std::mem::len(bytes);
+    var index = from;
+    while index < length {
+        if bytes[index] == needle {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn last_index_of_byte(bytes: []u8, needle: u8) -> ?i64 {
+    var index = std::mem::len(bytes);
+    while index > 0 {
+        index = index - 1;
+        if bytes[index] == needle {
+            return index;
+        }
+    }
+    return null;
+}

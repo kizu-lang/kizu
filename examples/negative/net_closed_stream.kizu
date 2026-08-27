@@ -1,0 +1,30 @@
+// A std::net owner's deinit consumes it. That is what makes closing a socket
+// a thing the type system can see: after the close there is no stream left to
+// read from, so the mistake is refused where it is written rather than
+// reported by a descriptor the process has since handed to something else.
+
+import std::io;
+import std::mem;
+import std::net;
+
+error Failure = net::Error or mem::Error;
+
+fn use_after_close(handle: Io, allocator: Allocator) -> Failure!void {
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    var client = try net::tcp_connect(handle, "127.0.0.1:0");
+    client.deinit();
+    try client.write_all(handle, "late");
+    return;
+}
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    try use_after_close(handle, allocator);
+    return;
+}
+
+// check-fails
+// features: net ownership
+// error: moved value `client` was used

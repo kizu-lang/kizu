@@ -194,7 +194,12 @@ func compileRuntime(source string, output string, options Options) error {
 // runtimeErrorSets names the sets the runtime reports its failures with. It
 // refers to all of them whatever a program uses, so a build that does not carry
 // them would fail in the C compiler with an undeclared name.
-var runtimeErrorSets = []string{"std::fs::Error", "std::io::Error", "std::process::Error"}
+var runtimeErrorSets = []string{
+	"std::fs::Error",
+	"std::io::Error",
+	"std::net::Error",
+	"std::process::Error",
+}
 
 // requireRuntimeErrorSets rejects a build that cannot name what the runtime
 // returns.

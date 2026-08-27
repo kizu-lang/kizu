@@ -128,6 +128,7 @@ Current builtin thinning candidates:
 | `std::internal::builtin::box<T>`, `std::internal::builtin::box_borrow<T>`, `std::internal::builtin::box_borrow_mut<T>`, `std::internal::builtin::box_deinit<T>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/mem/mem.kizu`; direct user calls are rejected |
 | `std::internal::builtin::string_*` | Removed | `std::string::String` behavior lives in `lib/kizu/std/src/string/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary. |
 | `std::internal::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
+| `std::internal::builtin::net_*` | Host primitive | Keep as the explicit-Io TCP socket boundary; public wrappers live in `lib/kizu/std/src/net/net.kizu`. The descriptor never leaves std: `TcpListener` / `TcpStream` hold it in a private field |
 | `std::internal::builtin::process_arg_count`, `std::internal::builtin::process_arg`, `std::internal::builtin::process_env` | Host primitive | Keep as host process boundary |
 | `std::internal::builtin::process_exit_code` | Removed | Implemented in `lib/kizu/std/src/process/process.kizu` as a pure value helper |
 | `std::internal::builtin::array<T>`, `std::internal::builtin::array_*<T>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/array/array.kizu`; `array_swap` exchanges initialized storage slots without copying or dropping owners; direct user calls are rejected |
