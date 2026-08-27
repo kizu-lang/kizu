@@ -1,0 +1,272 @@
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+import std::testing;
+
+// One process is both ends. Connecting to a listening socket completes against
+// its backlog, so a client can write a whole request before anything accepts
+// it, and the exchange then runs in order on one thread.
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+// crlf appends the two bytes that end an HTTP line. Kizu literals carry no
+// escapes, so CR is written as the number it is.
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+fn send_request(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    line: []u8,
+    body: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    if mem::len(body) > 0 {
+        try wire.append_bytes(allocator, "Content-Length: ");
+        try fmt::append_i64(allocator, &var wire, mem::len(body));
+        try crlf(allocator, &var wire);
+    }
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, body);
+    let bytes = wire.as_bytes();
+    try stream.write_all(handle, bytes);
+    return;
+}
+
+// drain reads until the peer closes, which is what Connection: close means.
+fn drain(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    out: &var string::String
+) -> Failure!void {
+    var read = try stream.read_into(handle, allocator, out, 4096);
+    while read > 0 {
+        read = try stream.read_into(handle, allocator, out, 4096);
+    }
+    return;
+}
+
+fn contains(haystack: []u8, needle: []u8) -> bool {
+    let length = mem::len(haystack);
+    let needle_length = mem::len(needle);
+    if needle_length == 0 {
+        return true;
+    }
+    var index = 0;
+    while index + needle_length <= length {
+        if mem::equal_bytes(haystack[index..index + needle_length], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// answer accepts one exchange and echoes the request's method, path and body.
+// It is its own frame so the connection is released before the client reads:
+// the response promised Connection: close, and the close is the end of body.
+fn answer(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var exchange = try server.accept(handle, allocator);
+    defer exchange.deinit(allocator);
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    let method = exchange.request.method.as_bytes();
+    try reply.append_bytes(allocator, method);
+    try reply.append_byte(allocator, cast<u8>(32));
+    let target = exchange.request.target.as_bytes();
+    let path = http::path_of(target);
+    try reply.append_bytes(allocator, path);
+    try reply.append_byte(allocator, cast<u8>(32));
+    let body = exchange.request.body.as_bytes();
+    try reply.append_bytes(allocator, body);
+    let text = reply.as_bytes();
+    try exchange.respond_text(handle, allocator, 200, "text/plain", text);
+    return;
+}
+
+// refused accepts a connection this server cannot read a request from, and
+// answers what the read failure maps to.
+fn refused(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    if server.accept(handle, allocator) |exchange| {
+        exchange.deinit(allocator);
+        testing::fail("a malformed request produced an exchange");
+        return;
+    } else |err| {
+        return err;
+    }
+}
+
+test "a request reaches the server and the answer reaches the client" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "POST /echo?x=1 HTTP/1.1", "hello");
+    try answer(handle, allocator, &var server);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect(contains(wire, "HTTP/1.1 200 OK"));
+    testing::expect(contains(wire, "Content-Type: text/plain"));
+    testing::expect(contains(wire, "Connection: close"));
+    testing::expect(contains(wire, "POST /echo hello"));
+}
+
+test "a body arrives whole even when it follows the head in the same read" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    var index = 0;
+    while index < 5000 {
+        try body.append_byte(allocator, cast<u8>(97));
+        index = index + 1;
+    }
+    let body_bytes = body.as_bytes();
+    try send_request(handle, allocator, &var client, "PUT /big HTTP/1.1", body_bytes);
+    try answer(handle, allocator, &var server);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    // The echo is "PUT /big " plus the 5000 bytes.
+    testing::expect(contains(wire, "Content-Length: 5009"));
+}
+
+test "a malformed request line is answered 400 and reported to the caller" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "NOT-A-REQUEST");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server) {
+        testing::fail("a malformed request was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "HTTP/1.1 400 Bad Request"));
+}
+
+test "a head past the ceiling is answered 431" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_head_bytes = 256;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "GET / HTTP/1.1");
+    try crlf(allocator, &var wire);
+    var index = 0;
+    while index < 40 {
+        try wire.append_bytes(allocator, "X-Pad: 0123456789");
+        try crlf(allocator, &var wire);
+        index = index + 1;
+    }
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server) {
+        testing::fail("an oversized head was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "431"));
+}
+
+test "a HEAD request is answered with the length and no body" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "HEAD /echo HTTP/1.1", "");
+    try answer(handle, allocator, &var server);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    // "HEAD" + " " + "/echo" + " " + an empty body is 11 bytes.
+    testing::expect(contains(wire, "Content-Length: 11"));
+    testing::expect(!contains(wire, "HEAD /echo "));
+}

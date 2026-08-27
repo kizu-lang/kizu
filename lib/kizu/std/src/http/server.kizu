@@ -1,0 +1,297 @@
+// The server is a loop the caller writes.
+//
+// `accept` hands back one Exchange -- the request that arrived and the
+// response to fill in -- and returns. There is no handler registry and no
+// callback, so what happens to a request is in the source that asked for it,
+// at the place it asked. Go and Zig both take a handler because both can pass
+// one; Kizu's function values cannot carry a borrow, so a handler could not be
+// given the request, and a pull loop is what remains -- which is also the
+// shape that keeps the control flow visible (docs/principles.md §2).
+//
+// One connection is served at a time. Kizu has no concurrency API (SPEC §15),
+// so a second caller waits in the listen backlog until the first is answered.
+
+pub struct Server {
+    listener: std::net::TcpListener,
+    limits: std::http::Limits,
+}
+
+// listen binds an address with the default limits. `address` is what
+// std::net reads: `host:port`, IPv6 host bracketed, port 0 for a free one.
+pub fn listen(io: Io, address: []u8) -> std::http::Failure!std::http::Server {
+    return listen_with(io, address, std::http::default_limits());
+}
+
+// listen_with binds an address under limits the caller chose. A server behind
+// a proxy and one on the open internet do not want the same ceiling.
+pub fn listen_with(
+    io: Io,
+    address: []u8,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Server {
+    let listener = try std::net::tcp_listen(io, address);
+    return Server { listener: move listener, limits: limits };
+}
+
+// local_port is the port this server is on. Binding port 0 and asking is how
+// a program takes a free port without racing another for a fixed one.
+fn (self: &std::http::Server) local_port() -> std::http::Failure!i64 {
+    let port = try self.listener.local_port();
+    return port;
+}
+
+fn (self: std::http::Server) deinit() -> void {
+    self.listener.deinit();
+    return;
+}
+
+// accept waits for one connection, reads one request off it, and hands back
+// the exchange. A request this server cannot read is answered on the spot --
+// the client is owed a status, and the caller cannot send one for a request
+// that never parsed -- and then the failure is returned.
+fn (self: &var std::http::Server) accept(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!std::http::Exchange {
+    var stream = try self.listener.accept(io);
+    errdefer stream.deinit();
+    if read_request(io, allocator, &var stream, self.limits) |request| {
+        var owned = move request;
+        errdefer owned.deinit(allocator);
+        return Exchange {
+            stream: move stream,
+            request: move owned,
+            response: std::http::response_new(allocator),
+            answered: false,
+        };
+    } else |failure| {
+        refuse(io, allocator, &var stream, failure);
+        return failure;
+    }
+}
+
+// An Exchange is one request and the response owed for it. Both are fields, so
+// a caller reads `exchange.request.headers` and writes
+// `exchange.response.write(...)` the way it would any other struct.
+pub struct Exchange {
+    stream: std::net::TcpStream,
+    pub request: std::http::Request,
+    pub response: std::http::Response,
+    answered: bool,
+}
+
+// respond sends the response and marks the exchange answered. It is called
+// once: a second call is Error::ResponseFinished rather than a second message
+// on a connection the first one already framed.
+fn (self: &var std::http::Exchange) respond(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!void {
+    if self.answered {
+        return std::http::Error::ResponseFinished;
+    }
+    self.response.finish();
+    let method = self.request.method.as_bytes();
+    let head_only = std::mem::equal_bytes(method, "HEAD");
+    let version = self.request.version;
+    var out = std::string::new(allocator);
+    defer out.deinit(allocator);
+    try self.response.encode(allocator, version, head_only, &var out);
+    let wire = out.as_bytes();
+    try self.stream.write_all(io, wire);
+    self.answered = true;
+    return;
+}
+
+// respond_text is the whole answer in one call: a status, a content type, and
+// a body. It is what most handlers want, and writing it out by hand is what
+// the fields are still there for.
+fn (self: &var std::http::Exchange) respond_text(
+    io: Io,
+    allocator: Allocator,
+    status: i64,
+    content_type: []u8,
+    body: []u8
+) -> std::http::Failure!void {
+    try self.response.set_status(status);
+    try self.response.header(allocator, "Content-Type", content_type);
+    try self.response.write(allocator, body);
+    try self.respond(io, allocator);
+    return;
+}
+
+fn (self: &std::http::Exchange) is_answered() -> bool {
+    return self.answered;
+}
+
+fn (self: std::http::Exchange) deinit(allocator: Allocator) -> void {
+    self.stream.deinit();
+    self.request.deinit(allocator);
+    self.response.deinit(allocator);
+    return;
+}
+
+// read_request reads one whole message off a stream: the head up to the blank
+// line, then exactly the body Content-Length declared.
+fn read_request(
+    io: Io,
+    allocator: Allocator,
+    stream: &var std::net::TcpStream,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Request {
+    var buffer = std::string::new(allocator);
+    defer buffer.deinit(allocator);
+    let head_length = try read_head(io, allocator, stream, &var buffer, limits);
+    var request = try parse_head(allocator, &buffer, head_length, limits);
+    errdefer request.deinit(allocator);
+    try read_body(io, allocator, stream, &var buffer, &var request, head_length, limits);
+    return move request;
+}
+
+// read_head reads until the blank line that ends the head, and answers with
+// how many bytes that head is. Reading past it is expected: a client sends the
+// head and the body in whatever packets it likes, so the extra bytes are the
+// start of the body and read_body carries on from there.
+fn read_head(
+    io: Io,
+    allocator: Allocator,
+    stream: &var std::net::TcpStream,
+    buffer: &var std::string::String,
+    limits: std::http::Limits
+) -> std::http::Failure!i64 {
+    var scanned = 0;
+    while true {
+        let found = scan_head(buffer, scanned);
+        if found |end| {
+            // The ceiling is on the head, not on what one read happened to
+            // bring: a head that arrived whole in one packet is still too
+            // large if it is past the limit.
+            if end > limits.max_head_bytes {
+                return std::http::Error::HeadTooLarge;
+            }
+            return end;
+        }
+        if buffer.len() >= limits.max_head_bytes {
+            return std::http::Error::HeadTooLarge;
+        }
+        // A CRLF CRLF can straddle the boundary by at most three bytes, so
+        // resuming three back is what makes the scan linear over the head
+        // rather than quadratic in the number of reads.
+        scanned = buffer.len() - 3;
+        if scanned < 0 {
+            scanned = 0;
+        }
+        let got = try stream.read_into(io, allocator, buffer, 4096);
+        if got == 0 {
+            return std::http::Error::Incomplete;
+        }
+    }
+    return std::http::Error::Incomplete;
+}
+
+// scan_head keeps the borrow of the buffer inside one call, so the read that
+// grows it next is free to take the buffer mutably.
+fn scan_head(buffer: &std::string::String, from: i64) -> ?i64 {
+    let bytes = buffer.as_bytes();
+    return std::http::head_end(bytes, from);
+}
+
+fn parse_head(
+    allocator: Allocator,
+    buffer: &std::string::String,
+    head_length: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Request {
+    let bytes = buffer.as_bytes();
+    return std::http::parse_request_head(allocator, bytes[0..head_length], limits);
+}
+
+// read_body reads what Content-Length declared and copies it into the request.
+// A message with no Content-Length has no body: without one there is nothing
+// that says where a body would end, and guessing is how two requests become
+// one (request smuggling).
+fn read_body(
+    io: Io,
+    allocator: Allocator,
+    stream: &var std::net::TcpStream,
+    buffer: &var std::string::String,
+    request: &var std::http::Request,
+    head_length: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!void {
+    if request.headers.has("Transfer-Encoding") {
+        return std::http::Error::UnsupportedEncoding;
+    }
+    let declared = try request.content_length();
+    var length = 0;
+    if declared |value| {
+        length = value;
+    }
+    if length == 0 {
+        return;
+    }
+    if length > limits.max_body_bytes {
+        return std::http::Error::BodyTooLarge;
+    }
+    while buffer.len() - head_length < length {
+        let missing = length - (buffer.len() - head_length);
+        let got = try stream.read_into(io, allocator, buffer, missing);
+        if got == 0 {
+            return std::http::Error::Incomplete;
+        }
+    }
+    try copy_body(allocator, buffer, request, head_length, length);
+    return;
+}
+
+fn copy_body(
+    allocator: Allocator,
+    buffer: &std::string::String,
+    request: &var std::http::Request,
+    head_length: i64,
+    length: i64
+) -> std::http::Failure!void {
+    let bytes = buffer.as_bytes();
+    try request.body.append_bytes(allocator, bytes[head_length..head_length + length]);
+    return;
+}
+
+// refuse answers a request that could not be read. The client is owed a
+// status, and the caller never got an exchange to send one with. A write that
+// fails here is dropped: the failure being reported is the one that already
+// happened, and the peer that would not take the answer cannot be told twice.
+fn refuse(
+    io: Io,
+    allocator: Allocator,
+    stream: &var std::net::TcpStream,
+    failure: std::http::Failure
+) -> void {
+    let status = refusal_status(failure);
+    var out = std::string::new(allocator);
+    defer out.deinit(allocator);
+    var response = std::http::response_new(allocator);
+    defer response.deinit(allocator);
+    response.set_status(status) catch return;
+    response.header(allocator, "Content-Type", "text/plain") catch return;
+    response.write(allocator, std::http::status_text(status)) catch return;
+    response.encode(allocator, std::http::Version::Http11, false, &var out) catch return;
+    let wire = out.as_bytes();
+    stream.write_all(io, wire) catch return;
+    return;
+}
+
+// refusal_status maps a read failure to what the client should be told. A
+// ceiling this server chose is a 4xx about the request; anything else is this
+// server's own trouble.
+fn refusal_status(failure: std::http::Failure) -> i64 {
+    return match failure {
+        MalformedRequest => 400,
+        Incomplete => 400,
+        InvalidHeader => 400,
+        HeadTooLarge => 431,
+        BodyTooLarge => 413,
+        UnsupportedVersion => 505,
+        UnsupportedEncoding => 501,
+        _ => 500,
+    };
+}

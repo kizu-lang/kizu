@@ -1,0 +1,244 @@
+// A Request is what arrived, owned. The method, the target and every header
+// are copies of the wire bytes, so the buffer they were read from can be
+// reused for the next message while the request is still being answered.
+//
+// The path and the query are not fields: both are runs inside the target, and
+// a view into a String is a borrow of the field it lives in, so they are read
+// with `path_of` / `query_of` over `request.target.as_bytes()` rather than
+// copied a second time.
+pub struct Request {
+    pub method: std::string::String,
+    pub target: std::string::String,
+    pub version: std::http::Version,
+    pub headers: std::http::Headers,
+    pub body: std::string::String,
+}
+
+pub fn request_new(allocator: Allocator) -> std::http::Request {
+    return Request {
+        method: std::string::new(allocator),
+        target: std::string::new(allocator),
+        version: std::http::Version::Http11,
+        headers: std::http::headers_new(allocator),
+        body: std::string::new(allocator),
+    };
+}
+
+fn (self: std::http::Request) deinit(allocator: Allocator) -> void {
+    self.method.deinit(allocator);
+    self.target.deinit(allocator);
+    self.headers.deinit(allocator);
+    self.body.deinit(allocator);
+    return;
+}
+
+// content_length is what the head says the body is. Absent is null, which is
+// not the same as zero: a request with no Content-Length and no body is
+// complete, and one whose Content-Length cannot be read is malformed.
+fn (self: &std::http::Request) content_length() -> std::http::Failure!?i64 {
+    if self.headers.find("Content-Length") |field| {
+        let text = field.value.as_bytes();
+        let value = std::http::parse_decimal(text) orelse
+            return std::http::Error::MalformedRequest;
+        return value;
+    }
+    return null;
+}
+
+// path_of is the target up to the first `?`. The target is what the client
+// wrote; nothing here decodes it, because a `%2F` in a path segment is not a
+// separator and folding it into one is how a path traversal gets through.
+pub fn path_of(target: []u8) -> []u8 {
+    let length = std::mem::len(target);
+    if std::http::index_of(target, cast<u8>(63), 0) |mark| {
+        return target[0..mark];
+    }
+    return target[0..length];
+}
+
+// query_of is the target after the first `?`, without the `?`. A target with
+// no `?` has an empty query, which is the same thing an empty `?` means.
+pub fn query_of(target: []u8) -> []u8 {
+    let length = std::mem::len(target);
+    if std::http::index_of(target, cast<u8>(63), 0) |mark| {
+        return target[mark + 1..length];
+    }
+    return target[0..0];
+}
+
+// head_end finds one past the blank line that ends a message head, or null
+// while more bytes are still needed. It is the one place that knows a head
+// ends with CRLF CRLF, so the read loop can ask without knowing the format.
+// `from` is where to resume: a read loop that has already scanned a prefix
+// starts three bytes back from it, which is the most a CRLF CRLF can straddle.
+pub fn head_end(bytes: []u8, from: i64) -> ?i64 {
+    let length = std::mem::len(bytes);
+    var index = from;
+    if index < 0 {
+        index = 0;
+    }
+    while index + 3 < length {
+        if bytes[index] == cast<u8>(13) and bytes[index + 1] == cast<u8>(10) {
+            if bytes[index + 2] == cast<u8>(13) and bytes[index + 3] == cast<u8>(10) {
+                return index + 4;
+            }
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// parse_request_head reads the request line and the header fields out of the
+// head a read loop collected. `head` runs from the first byte through the
+// blank line that ends it, which is exactly what `head_end` measured.
+pub fn parse_request_head(
+    allocator: Allocator,
+    head: []u8,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Request {
+    var request = request_new(allocator);
+    errdefer request.deinit(allocator);
+    let after_line = try parse_request_line(allocator, &var request, head);
+    try parse_fields(allocator, &var request.headers, head, after_line, limits);
+    return move request;
+}
+
+// parse_request_line reads `METHOD SP TARGET SP HTTP/1.x CRLF` and answers with
+// where the header fields start.
+fn parse_request_line(
+    allocator: Allocator,
+    request: &var std::http::Request,
+    head: []u8
+) -> std::http::Failure!i64 {
+    let line_end = std::http::index_of(head, cast<u8>(13), 0) orelse
+        return std::http::Error::MalformedRequest;
+    if line_end + 1 >= std::mem::len(head) or head[line_end + 1] != cast<u8>(10) {
+        return std::http::Error::MalformedRequest;
+    }
+    let line = head[0..line_end];
+    let first_space = std::http::index_of(line, cast<u8>(32), 0) orelse
+        return std::http::Error::MalformedRequest;
+    let second_space = std::http::index_of(line, cast<u8>(32), first_space + 1) orelse
+        return std::http::Error::MalformedRequest;
+    let method = line[0..first_space];
+    let target = line[first_space + 1..second_space];
+    let version = line[second_space + 1..line_end];
+    if !std::http::valid_field_name(method) {
+        return std::http::Error::MalformedRequest;
+    }
+    if std::mem::len(target) == 0 {
+        return std::http::Error::MalformedRequest;
+    }
+    if !valid_target(target) {
+        return std::http::Error::MalformedRequest;
+    }
+    request.version = try parse_version(version);
+    try request.method.append_bytes(allocator, method);
+    try request.target.append_bytes(allocator, target);
+    return line_end + 2;
+}
+
+fn parse_version(text: []u8) -> std::http::Failure!std::http::Version {
+    if std::mem::equal_bytes(text, "HTTP/1.1") {
+        return std::http::Version::Http11;
+    }
+    if std::mem::equal_bytes(text, "HTTP/1.0") {
+        return std::http::Version::Http10;
+    }
+    return std::http::Error::UnsupportedVersion;
+}
+
+// valid_target refuses a target with a byte no URI may carry. A space would
+// have ended the target already; a control byte would let the request line be
+// forged into two.
+fn valid_target(target: []u8) -> bool {
+    let length = std::mem::len(target);
+    var index = 0;
+    while index < length {
+        let byte = target[index];
+        if byte <= cast<u8>(32) or byte == cast<u8>(127) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// parse_fields reads `NAME ":" OWS VALUE OWS CRLF` lines until the blank one.
+// A line that starts with space or tab is a folded continuation, which RFC
+// 9110 removed from the protocol: it is refused rather than joined, because
+// joining it is what lets one header be smuggled inside another.
+fn parse_fields(
+    allocator: Allocator,
+    headers: &var std::http::Headers,
+    head: []u8,
+    from: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!void {
+    var cursor = from;
+    var count = 0;
+    let length = std::mem::len(head);
+    while cursor < length {
+        let line_end = std::http::index_of(head, cast<u8>(13), cursor) orelse
+            return std::http::Error::MalformedRequest;
+        if line_end + 1 >= length or head[line_end + 1] != cast<u8>(10) {
+            return std::http::Error::MalformedRequest;
+        }
+        if line_end == cursor {
+            return;
+        }
+        if count >= limits.max_headers {
+            return std::http::Error::HeadTooLarge;
+        }
+        let line = head[cursor..line_end];
+        try parse_field(allocator, headers, line);
+        count = count + 1;
+        cursor = line_end + 2;
+    }
+    return;
+}
+
+fn parse_field(
+    allocator: Allocator,
+    headers: &var std::http::Headers,
+    line: []u8
+) -> std::http::Failure!void {
+    if std::http::is_space_or_tab(line[0]) {
+        return std::http::Error::MalformedRequest;
+    }
+    let colon = std::http::index_of(line, cast<u8>(58), 0) orelse
+        return std::http::Error::MalformedRequest;
+    let name = line[0..colon];
+    if !std::http::valid_field_name(name) {
+        return std::http::Error::MalformedRequest;
+    }
+    let raw = line[colon + 1..std::mem::len(line)];
+    let value = trim_ows(raw);
+    if !std::http::valid_field_value(value) {
+        return std::http::Error::MalformedRequest;
+    }
+    try headers.add_unchecked(allocator, name, value);
+    return;
+}
+
+// trim_ows drops the optional whitespace HTTP allows around a header value.
+// It is space and tab only: `std::mem::trim_ascii` would also eat CR and LF,
+// and those cannot be inside a value that has already been split on CRLF.
+fn trim_ows(value: []u8) -> []u8 {
+    let length = std::mem::len(value);
+    var start = 0;
+    while start < length {
+        if !std::http::is_space_or_tab(value[start]) {
+            break;
+        }
+        start = start + 1;
+    }
+    var end = length;
+    while end > start {
+        if !std::http::is_space_or_tab(value[end - 1]) {
+            break;
+        }
+        end = end - 1;
+    }
+    return value[start..end];
+}

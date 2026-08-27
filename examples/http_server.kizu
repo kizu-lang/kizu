@@ -1,0 +1,179 @@
+// An HTTP server in Kizu is a loop you can see.
+//
+// `accept` hands back one Exchange -- the request that arrived, and the
+// response owed for it -- and returns. There is no handler registry and no
+// callback, so what happens to a request is written where the request is
+// asked for. Routing is a `match` on the path, which is the same decision a
+// router makes, spelled where you can read it.
+//
+// One connection is served at a time: Kizu has no concurrency API yet
+// (SPEC §15), so a second caller waits in the listen backlog. This example is
+// both ends of one connection, which is why it can print a fixed answer --
+// connecting completes against the backlog, so the request is written before
+// anything accepts it.
+
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+
+    // Port 0 asks the host for a free port, so this example never collides
+    // with whatever else is listening on the machine running it.
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+
+    var client = try open_client(handle, allocator, port);
+    defer client.deinit();
+    try request(handle, allocator, &var client, "GET /greet?name=alice HTTP/1.1");
+
+    try serve_one(handle, allocator, &var server);
+    try show_answer(handle, allocator, &var client);
+    return;
+}
+
+// serve_one is the loop body a real server would repeat. It is its own frame
+// so the exchange -- and the connection with it -- is released before anyone
+// reads the answer: the response said Connection: close, and the close is
+// what tells the client the body ended.
+fn serve_one(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var exchange = try server.accept(handle, allocator);
+    defer exchange.deinit(allocator);
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    // Routing reads the request and writes the body; answering needs the
+    // exchange mutably. Keeping them in separate calls is what keeps the read
+    // of `request.target` from still being alive when the response is sent.
+    let status = try route(allocator, &exchange.request, &var body);
+    let text = body.as_bytes();
+    try exchange.respond_text(handle, allocator, status, "text/plain", text);
+    return;
+}
+
+// route is the whole router: a match on the path, written where you can read
+// it. A registry of handlers would put this same decision behind a table.
+fn route(
+    allocator: Allocator,
+    request: &http::Request,
+    body: &var string::String
+) -> Failure!i64 {
+    let target = request.target.as_bytes();
+    let path = http::path_of(target);
+    let query = http::query_of(target);
+    if mem::equal_bytes(path, "/greet") {
+        try body.append_bytes(allocator, "hello, ");
+        let name = name_of(query);
+        try body.append_bytes(allocator, name);
+        return 200;
+    }
+    try body.append_bytes(allocator, "no such path");
+    return 404;
+}
+
+// name_of reads `name=` out of a query without allocating. A real service
+// would use std::http::form_value, which also percent-decodes.
+fn name_of(query: []u8) -> []u8 {
+    let length = mem::len(query);
+    if mem::starts_with(query, "name=") {
+        return query[5..length];
+    }
+    return "world";
+}
+
+fn open_client(
+    handle: Io,
+    allocator: Allocator,
+    port: i64
+) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn request(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+    return;
+}
+
+fn show_answer(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream
+) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try client.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try client.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    print_lines(wire);
+    return;
+}
+
+// print_lines writes one message line at a time with the CR left off, so the
+// answer reads as text here. The bytes on the wire still end every line with
+// CR LF; this is only how the example shows them.
+fn print_lines(wire: []u8) -> void {
+    let length = mem::len(wire);
+    var start = 0;
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(10) {
+            var end = index;
+            if end > start and wire[end - 1] == cast<u8>(13) {
+                end = end - 1;
+            }
+            print(wire[start..end]);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    if start < length {
+        print(wire[start..length]);
+    }
+    return;
+}
+
+// crlf writes the two bytes that end an HTTP line. Kizu string literals carry
+// no escapes (SPEC §7), so CR is written as the number it is.
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http io error-union
+// output:
+// HTTP/1.1 200 OK
+// Content-Type: text/plain
+// Content-Length: 12
+// Connection: close
+//
+// hello, alice
