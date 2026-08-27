@@ -1,4 +1,5 @@
 import compiler::internal::ir;
+import compiler::internal::stdfmt;
 import compiler::internal::typ;
 import std::mem;
 import std::string;
@@ -63,7 +64,7 @@ fn (self: &var Emitter) llvm_type(module: &ir::Module, typ_name: []u8) -> !ir::N
         return self.llvm_error_union_type_name(typ_name);
     }
     if typ::optional_elem(typ_name) |_| {
-        return self.llvm_optional_type_name(typ_name);
+        return self.llvm_optional_type_name(module, typ_name);
     }
     if mem::starts_with(typ_name, "std::arena::Handle<") {
         return self.names.intern("i64");
@@ -303,33 +304,142 @@ fn (self: &var Emitter) llvm_union_type_name(name: []u8) -> !ir::Name {
     return self.names.intern_owned(move out);
 }
 
-/// Returns the element of an optional whose absence a value of the element
-/// type can already spell, and null when there is none, the Go
-/// `nicheOptionalElem`.
+/// Reports whether a value of this type leaves one bit pattern unwritten, the
+/// Go `hasNiche`.
 ///
-/// A Box handle is the address of its payload and a borrow is the address of
-/// what it borrows; neither can be null while it exists, so null is a spelling
-/// no live element uses and `?T` needs no tag beside the pointer to say which
-/// it is. That halves the recursive shape this exists for -- a node holding
-/// `?Box<Node>` twice is two words, not four -- and costs no branch: presence
-/// is the comparison the tag byte was computed from anyway.
+/// A niche is a bit pattern a type never writes for a live value, and `?T`
+/// spends no tag when T has one: absence is that pattern and presence is
+/// everything else. Three types have one. A Box handle is the address of its
+/// payload and a borrow is the address of what it borrows, so neither is null
+/// while it exists; an arena handle is an index biased by one, so it is never
+/// zero either (ADR-0133).
 ///
-/// A Map or an Arena handle is a pointer too, but its constructor hands back
-/// null when the allocation fails and the value carries that on, so null is a
-/// live value there and the niche is not free.
-pub fn niche_optional_elem(name: []u8) -> ?[]u8 {
+/// The pattern is always zero, which is what lets a niche sit at a depth
+/// rather than only at the surface: `zeroinitializer` spells absence for a
+/// struct that reaches its niche through a field the same way it does for a
+/// bare pointer. So a niche is only ever a path to the field that carries it,
+/// and a struct inherits the niche of its first field that has one.
+///
+/// An optional is not a source -- a niche optional already spends its zero on
+/// being absent, and a tagged one would hand out a pattern its tag byte owns.
+///
+/// The walk needs no cycle guard. A struct that reaches itself does so through
+/// a Box or a container header: the Box answers before recursing and a header
+/// is not a struct, so a chain of plain fields is as finite as the size the
+/// type checker already proved it has.
+pub fn has_niche(module: &ir::Module, typ_name: []u8) -> bool {
+    if is_box_llvm_type(typ_name) or mem::starts_with(typ_name, "&") or
+        is_arena_handle_type(typ_name) {
+        return true;
+    }
+    if typ::optional_elem(typ_name) |_| {
+        return false;
+    }
+    if module.structs.at(typ_name) |declared| {
+        var index = 0;
+        while declared.fields.at(index) |field| {
+            index = index + 1;
+            let field_type = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_type.as_bytes();
+            if has_niche(module, field_bytes) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Returns the element of an optional that spends no tag, and null when there
+/// is none, the Go `nicheOptionalElem`.
+pub fn niche_optional_elem(module: &ir::Module, name: []u8) -> ?[]u8 {
     let elem = typ::optional_elem(name) orelse return null;
-    if is_box_llvm_type(elem) or mem::starts_with(elem, "&") {
+    if has_niche(module, elem) {
         return elem;
     }
     return null;
 }
 
+/// Reports whether an element's zero is spelled `null` rather than
+/// `zeroinitializer`, the Go `nicheAbsentIsNull`. That zero is what an absent
+/// optional is, and only a pointer-shaped element spells it `null`. Go returns
+/// the spelling itself; here the answer is a bool so the literal the caller
+/// picks is its own, not a view tied to the element it asked about.
+pub fn niche_absent_is_null(elem: []u8) -> bool {
+    return is_box_llvm_type(elem) or mem::starts_with(elem, "&");
+}
+
+/// The word a niche sits in. Go names it by its LLVM type; here it is a tag,
+/// so the caller's spelling is a literal of its own rather than a view tied to
+/// the type it asked about.
+pub enum NicheWord {
+    Pointer,
+    Index
+}
+
+/// Names the LLVM type of the word a niche sits in.
+pub fn niche_word_type(word: NicheWord) -> []u8 {
+    return match word {
+        Pointer => "ptr",
+        Index => "i64"
+    };
+}
+
+/// Names the zero an absent value writes into the word a niche sits in.
+pub fn niche_word_zero(word: NicheWord) -> []u8 {
+    return match word {
+        Pointer => "null",
+        Index => "0"
+    };
+}
+
+/// Writes the extractvalue index list that reaches a type's niche into `path`
+/// and returns the word it lands on, or null when the type has no niche, the
+/// Go `nichePath`. An empty `path` means the value is that
+/// word. Only write_opt_has needs the path; every other caller asks
+/// `has_niche`, which walks the same shape without building one.
+pub fn niche_path(
+    allocator: Allocator,
+    module: &ir::Module,
+    typ_name: []u8,
+    path: &var string::String
+) -> !?NicheWord {
+    if is_box_llvm_type(typ_name) or mem::starts_with(typ_name, "&") {
+        return NicheWord::Pointer;
+    }
+    if is_arena_handle_type(typ_name) {
+        return NicheWord::Index;
+    }
+    if typ::optional_elem(typ_name) |_| {
+        return null;
+    }
+    if module.structs.at(typ_name) |declared| {
+        var index = 0;
+        while declared.fields.at(index) |field| {
+            let position = index;
+            index = index + 1;
+            let field_type = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_type.as_bytes();
+            if !has_niche(module, field_bytes) {
+                continue;
+            }
+            if path.len() > 0 {
+                try path.append_bytes(allocator, ", ");
+            }
+            try stdfmt::append_i64(allocator, &var path, position);
+            return try niche_path(allocator, module, field_bytes, &var path);
+        }
+    }
+    return null;
+}
+
 /// Names the LLVM aggregate of one optional type, the Go
-/// `llvmOptionalTypeName`.
-fn (self: &var Emitter) llvm_optional_type_name(name: []u8) -> !ir::Name {
-    if niche_optional_elem(name) |_| {
-        return self.names.intern("ptr");
+/// `llvmOptionalTypeName`. A niche optional has none of its own: it is spelled
+/// as the element it is.
+fn (self: &var Emitter) llvm_optional_type_name(
+    module: &ir::Module, name: []u8
+) -> !ir::Name {
+    if niche_optional_elem(module, name) |elem| {
+        return self.llvm_type(module, elem);
     }
     var out = try string::from_bytes(self.allocator, "%kizu.opt.");
     errdefer out.deinit(self.allocator);

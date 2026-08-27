@@ -41,6 +41,8 @@ pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::Str
         next_label: 0,
         current_block: ir::empty_name(),
         block_exit_label: array::new<ExitLabel>(allocator),
+        niche_aliases: array::new<NicheAlias>(allocator),
+        niche_alias_count: 0,
         local_names: array::new<ir::Name>(allocator),
         owned_names: array::new<ir::Name>(allocator),
         llvm_types: array::new<ir::Name>(allocator),
@@ -95,6 +97,13 @@ struct Emitter {
     current_block: ir::Name,
     // Indexed by the module name id of the block, the way values is.
     block_exit_label: array::Array<ExitLabel>,
+    // An association list, not a table indexed by name id: a function has a
+    // handful of these and the ids are the module's, so a table would cost a
+    // slot for every name in the program to hold a few. The storage is reused
+    // across functions and niche_alias_count says how much of it this one
+    // filled, which is what stands in for emptying it.
+    niche_aliases: array::Array<NicheAlias>,
+    niche_alias_count: i64,
     // Three answers that depend on nothing but the module name asked about,
     // each indexed by its id. The emitter asks for all three once per operand
     // and once per type, so they are computed once rather than rebuilt and
@@ -116,6 +125,17 @@ struct ValueInfo {
     typ: ir::Name,
     operand: ir::Name,
     generation: i64
+}
+
+/// Is the value a niche optional's result stands for, the Go `niches` entry.
+/// A phi at a loop header names values the body defines further down, and a
+/// niche `opt.some` or `opt.value` writes no instruction to define one -- the
+/// payload already is the optional -- so a forward reference has to be
+/// resolved through what it aliases rather than assumed to be a register of
+/// its own.
+struct NicheAlias {
+    result: ir::Name,
+    source: ir::Value
 }
 
 /// Is the concrete LLVM label that continues one IR block, the value of
@@ -947,6 +967,7 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     self.entry_param_loads.clear();
     self.wrote_param_loads = false;
     try self.precompute_block_exit_labels(module, node);
+    try self.precompute_niche_aliases(module, node);
     var return_type = try self.llvm_type_of(module, node.return_type);
     let return_text = ir::name_text(&module.names, node.return_type);
     let return_bytes = return_text.as_bytes();
@@ -1625,9 +1646,104 @@ fn (self: &var Emitter) operand(module: &ir::Module, value: ir::Value) -> !Value
         }
     }
     let typ_name = try self.own(module, value.type_name);
+    if self.niche_alias_source(value.name) |source| {
+        let carried = try self.operand(module, source);
+        return ValueInfo {
+            typ: typ_name, operand: carried.operand, generation: self.generation
+        };
+    }
     let local = try self.local_name(module, value.name);
     return ValueInfo { typ: typ_name, operand: local, generation: self.generation };
 }
+
+/// Follows a niche optional's result back to the value it is, the Go
+/// `nicheAliasSource`.
+fn (self: &Emitter) niche_alias_source(name: ir::Name) -> ?ir::Value {
+    var source = self.recalled_niche_alias(name) orelse return null;
+    while self.recalled_niche_alias(source.name) |next| {
+        if ir::name_id(next.name) == ir::name_id(source.name) {
+            return source;
+        }
+        source = next;
+    }
+    return source;
+}
+
+/// Reads one recorded alias, or null when this result has none. The scan is
+/// linear over a list a function fills with a few entries, and it is only
+/// reached when a value is named before the block that defines it is written.
+fn (self: &Emitter) recalled_niche_alias(name: ir::Name) -> ?ir::Value {
+    let id = ir::name_id(name);
+    var index = 0;
+    while index < self.niche_alias_count {
+        if self.niche_aliases.get(index) |recorded| {
+            if ir::name_id(recorded.result) == id {
+                return recorded.source;
+            }
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Adds one alias to the list, reusing a slot an earlier function left behind
+/// rather than growing storage every time.
+fn (self: &var Emitter) record_niche_alias(result: ir::Name, source: ir::Value) -> !void {
+    let recorded = NicheAlias { result: result, source: source };
+    if self.niche_alias_count < self.niche_aliases.len() {
+        self.niche_aliases.set(self.niche_alias_count, recorded);
+    } else {
+        try self.niche_aliases.append(self.allocator, recorded);
+    }
+    self.niche_alias_count = self.niche_alias_count + 1;
+    return;
+}
+
+/// Records every result a niche optional hands back unchanged, so operand()
+/// can resolve one before its block is written, the Go
+/// `precomputeNicheAliases`.
+fn (self: &var Emitter) precompute_niche_aliases(
+    module: &ir::Module, node: &ir::FunctionNode
+) -> !void {
+    self.niche_alias_count = 0;
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var index = 0;
+        while block_node.instrs.get(index) |instr| {
+            index = index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.args.len() != 1 {
+                continue;
+            }
+            let source = instr_node.args.get_or_panic(0);
+            var aliases = false;
+            match instr_node.op {
+                OptSome => {
+                    let result_text = ir::name_text(&module.names, instr_node.result.type_name);
+                    let result_type = result_text.as_bytes();
+                    if niche_optional_elem(module, result_type) |_| {
+                        aliases = true;
+                    }
+                },
+                OptValue => {
+                    let source_text = ir::name_text(&module.names, source.type_name);
+                    let source_type = source_text.as_bytes();
+                    if niche_optional_elem(module, source_type) |_| {
+                        aliases = true;
+                    }
+                },
+                _ => {},
+            }
+            if aliases {
+                try self.record_niche_alias(instr_node.result.name, source);
+            }
+        }
+    }
+    return;
+}
+
 
 /// Records the operand that stands for a result, the Go
 /// `e.values[instr.Result.Name] = valueInfo{...}`.
@@ -1666,7 +1782,7 @@ fn (self: &var Emitter) write_borrow_optional_result(
         let shown = try self.own(module, node.result.type_name);
         return try self.fail2("llvm error: %s expects a borrow optional result, got %s", Arg::Str(op), Arg::Str(shown));
     }
-    if niche_optional_elem(result_type) |_| {
+    if niche_optional_elem(module, result_type) |_| {
         // A borrow is a niche optional, so the pointer is the whole value:
         // null is the absent one, which is what the runtime already returned.
         try self.set_value(module, node.result, ptr_name);
@@ -1980,18 +2096,30 @@ fn (self: &var Emitter) write_optional_load_result(
         } else {
             try self.line3("  %s = load %s, ptr %s", Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name));
         }
-        let some_name = try self.suffixed(result_name, ".some");
-        let ok_name = try self.suffixed(result_name, ".ok");
-        try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(some_name), Arg::Str(opt_type));
-        try self.line5(
-            "  %s = insertvalue %s %s, %s %s, 1",
-            Arg::Str(ok_name), Arg::Str(opt_type), Arg::Str(some_name), Arg::Str(elem_type), Arg::Str(value_name)
-        );
+        // A niche element is already the optional, so the element the ok path
+        // loaded is what the join hands back and the null path spells absence
+        // with the zero the niche reserves (ADR-0133).
+        var ok_name = value_name;
+        if niche_optional_elem(module, result_type) |_| {
+        } else {
+            let some_name = try self.suffixed(result_name, ".some");
+            ok_name = try self.suffixed(result_name, ".ok");
+            try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(some_name), Arg::Str(opt_type));
+            try self.line5(
+                "  %s = insertvalue %s %s, %s %s, 1",
+                Arg::Str(ok_name), Arg::Str(opt_type), Arg::Str(some_name), Arg::Str(elem_type), Arg::Str(value_name)
+            );
+        }
+        var absent = "zeroinitializer";
+        if niche_absent_is_null(elem) {
+            absent = "null";
+        }
+        let absent_name = try self.names.intern(absent);
         try self.line1("  br label %%%s", Arg::Str(labels.join));
         try self.line1("%s:", Arg::Str(labels.join));
-        try self.line5(
-            "  %s = phi %s [ zeroinitializer, %%%s ], [ %s, %%%s ]",
-            Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(labels.fail), Arg::Str(ok_name), Arg::Str(labels.ok)
+        try self.line6(
+            "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]",
+            Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(absent_name), Arg::Str(labels.fail), Arg::Str(ok_name), Arg::Str(labels.ok)
         );
         try self.set_value(module, node.result, result_name);
         return null;

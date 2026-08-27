@@ -39,7 +39,7 @@ func (e *emitter) llvmType(typ string) string {
 		return e.llvmErrorUnionTypeName(typ)
 	}
 	if _, ok := optionalElemLLVM(typ); ok {
-		return llvmOptionalTypeName(typ)
+		return e.llvmOptionalTypeName(typ)
 	}
 	if strings.HasPrefix(typ, "std::arena::Handle<") {
 		return "i64"

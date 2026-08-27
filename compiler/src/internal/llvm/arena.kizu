@@ -91,8 +91,33 @@ fn (self: &var Emitter) write_arena_add(module: &ir::Module, node: &ir::InstrNod
     let ok_name = try self.suffixed(result_name, ".ok");
     let index = try self.write_array_append_paths(
         module, node, arena.operand, handle, ok_name, elem_bytes);
+    let carried = try self.arena_handle_of(index);
     return self.write_error_union_from_bool(
-        module, node.result, ok_name, FailureKey::ArenaAdd, index, "i64");
+        module, node.result, ok_name, FailureKey::ArenaAdd, carried, "i64");
+}
+
+/// Turns the index an add settled on into the handle it hands back, the Go
+/// `arenaHandleOf`. A handle is the index biased by one so that zero is a bit
+/// pattern no live handle carries, which is what lets
+/// `?std::arena::Handle<T>` be one word instead of two (ADR-0133). The bias is
+/// invisible above the backend: a handle is opaque and only ever compared for
+/// equality, and biasing is a bijection.
+fn (self: &var Emitter) arena_handle_of(index: ir::Name) -> !ir::Name {
+    let helper = try self.next_synthetic_value("arena.handle");
+    let handle = try self.percent(helper);
+    try self.line2("  %s = add i64 %s, 1", Arg::Str(handle), Arg::Str(index));
+    return handle;
+}
+
+/// Undoes arena_handle_of, the Go `arenaIndexOf`. An absent handle is zero, so
+/// the index it reads is -1, which the unsigned range test rejects like any
+/// other index past the end -- the same answer the element it does not name
+/// would get.
+fn (self: &var Emitter) arena_index_of(handle: ir::Name) -> !ir::Name {
+    let helper = try self.next_synthetic_value("arena.index");
+    let index = try self.percent(helper);
+    try self.line2("  %s = sub i64 %s, 1", Arg::Str(index), Arg::Str(handle));
+    return index;
 }
 
 /// Returns the number of initialized elements still owned by the arena, the
@@ -193,11 +218,12 @@ fn (self: &var Emitter) arena_checked_element(
     }
     let elem_bytes = elem.as_bytes();
     let arena = try self.operand(module, node.args.get_or_panic(0));
-    let index = try self.operand(module, node.args.get_or_panic(1));
+    let carried = try self.operand(module, node.args.get_or_panic(1));
     let handle = try self.array_handle(arena.operand);
+    let index = try self.arena_index_of(carried.operand);
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    return try self.array_checked_element(module, node, handle, index.operand, elem_bytes, ptr_name);
+    return try self.array_checked_element(module, node, handle, index, elem_bytes, ptr_name);
 }
 
 /// Lowers Arena.deinit(allocator), the Go `writeArenaDeinit`. It releases the

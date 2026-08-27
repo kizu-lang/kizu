@@ -200,7 +200,7 @@ func (e *emitter) writeMapKeyAt(instr *ir.Instr) error {
 	// module holding no `[]u8` of its own still has.
 	slotType := mapKeySlotType
 	if keyType == "[]u8" {
-		slotType = llvmOptionalTypeName(instr.Result.Type)
+		slotType = e.llvmOptionalTypeName(instr.Result.Type)
 	}
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, slotType)
 	fmt.Fprintf(&e.out, "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s)\n",
