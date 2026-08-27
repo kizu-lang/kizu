@@ -1,0 +1,248 @@
+// Cookies are headers with a grammar. Setting one is a `Set-Cookie` line the
+// server writes; reading one is a name in the `Cookie` line the client sent.
+//
+// A value is opaque bytes. Nothing here percent-decodes or base64-decodes it:
+// a cookie carries whatever the program that set it put there, and a library
+// that guessed at an encoding would be guessing about somebody else's data.
+
+pub enum SameSite {
+    // Unset writes no SameSite attribute, which leaves the browser's default.
+    // Saying nothing and saying "Lax" are different things, so they are
+    // different values here.
+    Unset,
+    Strict,
+    Lax,
+    None,
+}
+
+// A cookie as a server sets it. The attributes are the ones RFC 6265bis keeps;
+// `Expires` is not among them because `Max-Age` says the same thing without a
+// date format, and a std with no calendar cannot honestly write one.
+pub struct Cookie {
+    pub name: std::string::String,
+    pub value: std::string::String,
+    pub path: std::string::String,
+    pub domain: std::string::String,
+    // Seconds until the cookie expires. Negative means the attribute is not
+    // written at all (a session cookie); 0 means delete it now, which is what
+    // a browser does with `Max-Age=0`.
+    pub max_age: i64,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: std::http::SameSite,
+}
+
+// cookie_new makes a session cookie with no attributes set. A name that is not
+// a token, or a value carrying a byte a cookie may not, is refused here rather
+// than written into a header the client will read.
+pub fn cookie_new(
+    allocator: Allocator,
+    name: []u8,
+    value: []u8
+) -> std::http::Failure!std::http::Cookie {
+    if !std::http::valid_field_name(name) {
+        return std::http::Error::InvalidHeader;
+    }
+    if !valid_cookie_value(value) {
+        return std::http::Error::InvalidHeader;
+    }
+    var owned_name = try std::string::from_bytes(allocator, name);
+    errdefer owned_name.deinit(allocator);
+    var owned_value = try std::string::from_bytes(allocator, value);
+    errdefer owned_value.deinit(allocator);
+    return Cookie {
+        name: move owned_name,
+        value: move owned_value,
+        path: std::string::new(allocator),
+        domain: std::string::new(allocator),
+        max_age: -1,
+        secure: false,
+        http_only: false,
+        same_site: std::http::SameSite::Unset,
+    };
+}
+
+fn (self: std::http::Cookie) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
+    self.value.deinit(allocator);
+    self.path.deinit(allocator);
+    self.domain.deinit(allocator);
+    return;
+}
+
+fn (self: &var std::http::Cookie) set_path(
+    allocator: Allocator,
+    path: []u8
+) -> std::http::Failure!void {
+    if !std::http::valid_field_value(path) {
+        return std::http::Error::InvalidHeader;
+    }
+    self.path.clear();
+    try self.path.append_bytes(allocator, path);
+    return;
+}
+
+fn (self: &var std::http::Cookie) set_domain(
+    allocator: Allocator,
+    domain: []u8
+) -> std::http::Failure!void {
+    if !std::http::valid_field_value(domain) {
+        return std::http::Error::InvalidHeader;
+    }
+    self.domain.clear();
+    try self.domain.append_bytes(allocator, domain);
+    return;
+}
+
+// append_set_cookie writes the header value this cookie is. It is the value,
+// not the whole line: `Response.set_cookie` is what puts a name in front of it.
+fn (self: &std::http::Cookie) append_set_cookie(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    let name = self.name.as_bytes();
+    try out.append_bytes(allocator, name);
+    try out.append_byte(allocator, cast<u8>(61));
+    let value = self.value.as_bytes();
+    try out.append_bytes(allocator, value);
+    if self.path.len() > 0 {
+        try out.append_bytes(allocator, "; Path=");
+        let path = self.path.as_bytes();
+        try out.append_bytes(allocator, path);
+    }
+    if self.domain.len() > 0 {
+        try out.append_bytes(allocator, "; Domain=");
+        let domain = self.domain.as_bytes();
+        try out.append_bytes(allocator, domain);
+    }
+    if self.max_age >= 0 {
+        try out.append_bytes(allocator, "; Max-Age=");
+        try std::fmt::append_i64(allocator, out, self.max_age);
+    }
+    if self.secure {
+        try out.append_bytes(allocator, "; Secure");
+    }
+    if self.http_only {
+        try out.append_bytes(allocator, "; HttpOnly");
+    }
+    let same_site = same_site_text(self.same_site);
+    if std::mem::len(same_site) > 0 {
+        try out.append_bytes(allocator, "; SameSite=");
+        try out.append_bytes(allocator, same_site);
+    }
+    return;
+}
+
+fn same_site_text(same_site: std::http::SameSite) -> []u8 {
+    return match same_site {
+        Unset => "",
+        Strict => "Strict",
+        Lax => "Lax",
+        None => "None",
+    };
+}
+
+// set_cookie adds one Set-Cookie line. It adds rather than replaces: a
+// response may set several cookies, and each needs its own line.
+fn (self: &var std::http::Response) set_cookie(
+    allocator: Allocator,
+    cookie: &std::http::Cookie
+) -> std::http::Failure!void {
+    if self.finished {
+        return std::http::Error::ResponseFinished;
+    }
+    var value = std::string::new(allocator);
+    defer value.deinit(allocator);
+    try cookie.append_set_cookie(allocator, &var value);
+    let bytes = value.as_bytes();
+    try self.headers.add(allocator, "Set-Cookie", bytes);
+    return;
+}
+
+// cookie_value finds one name in a `Cookie` header -- `a=1; b=2` -- and
+// appends its value, answering whether it was there. The value is copied as
+// it was sent: a cookie is opaque to everything but the program that set it.
+pub fn cookie_value(
+    allocator: Allocator,
+    header: []u8,
+    name: []u8,
+    out: &var std::string::String
+) -> std::http::Failure!bool {
+    let length = std::mem::len(header);
+    var start = 0;
+    while start <= length {
+        var end = length;
+        if std::http::index_of(header, cast<u8>(59), start) |semicolon| {
+            end = semicolon;
+        }
+        let pair = trim_spaces(header[start..end]);
+        let pair_length = std::mem::len(pair);
+        if pair_length > 0 {
+            if std::http::index_of(pair, cast<u8>(61), 0) |equals| {
+                if std::mem::equal_bytes(pair[0..equals], name) {
+                    try out.append_bytes(allocator, pair[equals + 1..pair_length]);
+                    return true;
+                }
+            }
+        }
+        if end == length {
+            return false;
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
+// request_cookie is cookie_value against the request's own Cookie header.
+fn (self: &std::http::Request) cookie(
+    allocator: Allocator,
+    name: []u8,
+    out: &var std::string::String
+) -> std::http::Failure!bool {
+    if self.headers.find("Cookie") |field| {
+        let header = field.value.as_bytes();
+        return cookie_value(allocator, header, name, out);
+    }
+    return false;
+}
+
+fn trim_spaces(value: []u8) -> []u8 {
+    let length = std::mem::len(value);
+    var start = 0;
+    while start < length {
+        if !std::http::is_space_or_tab(value[start]) {
+            break;
+        }
+        start = start + 1;
+    }
+    var end = length;
+    while end > start {
+        if !std::http::is_space_or_tab(value[end - 1]) {
+            break;
+        }
+        end = end - 1;
+    }
+    return value[start..end];
+}
+
+// valid_cookie_value reports whether every byte may appear in a cookie value
+// unquoted. Space, comma, semicolon, backslash and the control bytes are what
+// a second cookie -- or a second header -- would be smuggled in with.
+fn valid_cookie_value(value: []u8) -> bool {
+    let length = std::mem::len(value);
+    var index = 0;
+    while index < length {
+        let byte = value[index];
+        if byte < cast<u8>(33) or byte > cast<u8>(126) {
+            return false;
+        }
+        if byte == cast<u8>(34) or byte == cast<u8>(44) {
+            return false;
+        }
+        if byte == cast<u8>(59) or byte == cast<u8>(92) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}

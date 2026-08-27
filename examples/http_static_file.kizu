@@ -35,9 +35,16 @@ fn serve_one(handle: Io, allocator: Allocator, server: &var http::Server) -> Fai
     defer exchange.deinit(allocator);
     var body = string::new(allocator);
     defer body.deinit(allocator);
-    let status = try read_file_for(handle, allocator, &exchange.request, &var body);
+    var name = string::new(allocator);
+    defer name.deinit(allocator);
+    let status = try read_file_for(
+        handle, allocator, &exchange.request, &var name, &var body);
+    // The media type comes from the extension. Sniffing the bytes is how a
+    // server ends up serving somebody's upload as HTML.
+    let name_bytes = name.as_bytes();
+    let content_type = http::content_type_for(name_bytes);
     let text = body.as_bytes();
-    try exchange.respond_text(handle, allocator, status, "text/plain", text);
+    try exchange.respond_text(handle, allocator, status, content_type, text);
     return;
 }
 
@@ -48,6 +55,7 @@ fn read_file_for(
     handle: Io,
     allocator: Allocator,
     request: &http::Request,
+    name_out: &var string::String,
     body: &var string::String
 ) -> Failure!i64 {
     var params = http::params_new(allocator);
@@ -65,6 +73,7 @@ fn read_file_for(
             try body.append_bytes(allocator, "refused");
             return 400;
         }
+        try name_out.append_bytes(allocator, name);
         return read_fixture(handle, allocator, name, body);
     }
     try body.append_bytes(allocator, "no name");
@@ -169,7 +178,26 @@ fn show(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failur
     let end = http::head_end(wire, 0) orelse return http::Error::Incomplete;
     let first = line_end(wire) orelse return http::Error::MalformedResponse;
     print(wire[0..first]);
+    show_content_type(wire, end);
     print(wire[end..mem::len(wire)]);
+    return;
+}
+
+// show_content_type prints the media type the answer declared, which is the
+// point of this example beside the body.
+fn show_content_type(wire: []u8, head_end: i64) -> void {
+    var start = 0;
+    while start < head_end {
+        var stop = start;
+        while stop < head_end and wire[stop] != cast<u8>(13) {
+            stop = stop + 1;
+        }
+        if mem::starts_with(wire[start..stop], "Content-Type: ") {
+            print(wire[start + 14..stop]);
+            return;
+        }
+        start = stop + 2;
+    }
     return;
 }
 
@@ -195,9 +223,12 @@ fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
 // features: net http fs routing error-union
 // output:
 // HTTP/1.1 200 OK
+// text/plain; charset=utf-8
 // kizu fs fixture
 //
 // HTTP/1.1 400 Bad Request
+// application/octet-stream
 // refused
 // HTTP/1.1 404 Not Found
+// text/plain; charset=utf-8
 // not found

@@ -321,6 +321,69 @@ pub fn parse_response_head(allocator, head, limits)
 `Transfer-Encoding` のある答えは `Error::UnsupportedEncoding` です。HEAD の答えと
 1xx / 204 / 304 は body を取りません。
 
+## Cookie
+
+```kizu
+pub enum SameSite { Unset, Strict, Lax, None }
+
+pub struct Cookie {
+    pub name: std::string::String,
+    pub value: std::string::String,
+    pub path: std::string::String,
+    pub domain: std::string::String,
+    pub max_age: i64,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: std::http::SameSite,
+}
+
+pub fn cookie_new(allocator, name, value) -> std::http::Failure!std::http::Cookie
+fn (self: &var Cookie) set_path(allocator, path) -> std::http::Failure!void
+fn (self: &var Cookie) set_domain(allocator, domain) -> std::http::Failure!void
+fn (self: &Cookie) append_set_cookie(allocator, out: &var String)
+    -> std::http::Failure!void
+fn (self: Cookie) deinit(allocator) -> void
+
+fn (self: &var Response) set_cookie(allocator, cookie: &Cookie)
+    -> std::http::Failure!void
+fn (self: &Request) cookie(allocator, name, out: &var String)
+    -> std::http::Failure!bool
+pub fn cookie_value(allocator, header, name, out: &var String)
+    -> std::http::Failure!bool
+```
+
+`set_cookie` は **add** です(replace ではありません)—— browser は
+`Set-Cookie` 1 行につき cookie 1 つを読むので、2 つ set すれば 2 行です。
+
+**値は opaque な byte 列です。** percent 復号も base64 復号もしません。
+cookie が運ぶのは、それを set したプログラムが入れたものだからです。
+
+`max_age` は **負なら書きません**(session cookie)。**0 は書きます** ——
+`Max-Age=0` が cookie を消す綴りだからです。`SameSite::Unset` は attribute を
+書かず、`SameSite::None` は書きます。「言わない」と「None と言う」は違う
+ことなので、値も違います。
+
+`Expires` は持ちません。`Max-Age` が同じことを date 形式なしで言い、暦を
+持たない std が date を正直に書けないためです。
+
+cookie の名前は token、値は空白・カンマ・セミコロン・バックスラッシュ・
+制御 byte を拒否します —— それが 2 つ目の cookie(や 2 つ目の header)を
+密輸する道です。
+
+## Content type
+
+```kizu
+pub fn content_type_for(path: []u8) -> []u8
+```
+
+拡張子だけを読みます。byte を覗いて推測(sniffing)しません —— それが誰かの
+upload を HTML として配ってしまう道です。知らない拡張子は
+`application/octet-stream` で、これは「型を誰も言っていない byte 列」という
+正直な答えです。
+
+directory 名の中のドットは拡張子ではなく、先頭のドットは名前です
+(`.gitignore` は拡張子なし)。
+
 ## 今は話さないこと
 
 - **keep-alive**: 1 接続 1 request で、response は `Connection: close` を送ります
@@ -328,6 +391,8 @@ pub fn parse_response_head(allocator, head, limits)
   `Error::UnsupportedEncoding` です。推測して読むのが request smuggling の
   通り道なので、拒否します
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
+- **`Date` header**: std に暦がないので、書けないものを書きません
+- **multipart / form-data**、**compression**
 - **header folding**: RFC 9110 が protocol から外したもので、繋ぐのではなく拒否します
 
 ## エラー
