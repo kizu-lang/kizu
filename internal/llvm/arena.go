@@ -69,7 +69,8 @@ func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
 	handle := e.arrayHandle(arena.operand)
 	okName := localName(instr.Result.Name) + ".ok"
 	index := e.writeArrayAppendPaths(instr, elem, arena.operand, handle, okName)
-	return e.writeErrorUnionFromBool(instr.Result, okName, "arena_add", index, "i64")
+	return e.writeErrorUnionFromBool(
+		instr.Result, okName, "arena_add", e.arenaHandleOf(index), "i64")
 }
 
 // writeArenaLen returns the number of initialized elements still owned by the arena.
@@ -149,8 +150,30 @@ func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
 // the trap continues at from that name before this block is written.
 func (e *emitter) arenaCheckedElement(instr *ir.Instr) (string, error) {
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
-	return e.arrayCheckedElement(instr, handle, e.value(instr.Args[1]).operand,
+	index := e.arenaIndexOf(e.value(instr.Args[1]).operand)
+	return e.arrayCheckedElement(instr, handle, index,
 		localName(instr.Result.Name)+".ptr")
+}
+
+// arenaHandleOf turns the index an add settled on into the handle it hands
+// back, and arenaIndexOf reads that index again. A handle is the index biased
+// by one so that zero is a bit pattern no live handle carries, which is what
+// lets `?std::arena::Handle<T>` be one word instead of two (ADR-0133). The
+// bias is invisible above the backend: a handle is opaque and only ever
+// compared for equality, and biasing is a bijection.
+func (e *emitter) arenaHandleOf(index string) string {
+	handle := "%" + e.nextSyntheticValue("arena.handle")
+	fmt.Fprintf(&e.out, "  %s = add i64 %s, 1\n", handle, index)
+	return handle
+}
+
+// arenaIndexOf undoes arenaHandleOf. An absent handle is zero, so the index it
+// reads is -1, which the unsigned range test rejects like any other index past
+// the end -- the same answer the element it does not name would get.
+func (e *emitter) arenaIndexOf(handle string) string {
+	index := "%" + e.nextSyntheticValue("arena.index")
+	fmt.Fprintf(&e.out, "  %s = sub i64 %s, 1\n", index, handle)
+	return index
 }
 
 // writeArenaDeinit lowers Arena.deinit(allocator). It releases the storage and
