@@ -21,8 +21,12 @@ import std::string;
 /// Lists the active errdefer receivers one exit must skip because an earlier
 /// move retired them; the Go `Result` maps keyed by return statement and
 /// try expression.
+pub struct Frames {}
+pub struct Functions {}
+pub struct MetaBindings {}
+
 pub struct RetiredErrDefers {
-    pub node: arena::Handle<ast::StatementNode>,
+    pub node: arena::Handle<ast::StatementNode, ast::Statements>,
     pub names: array::Array<Name>
 }
 
@@ -39,7 +43,7 @@ pub struct Result {
 
 /// Is the try expression half of Result.
 pub struct RetiredTry {
-    pub node: arena::Handle<ast::ExpressionNode>,
+    pub node: arena::Handle<ast::ExpressionNode, ast::Expressions>,
     pub names: array::Array<Name>
 }
 
@@ -68,7 +72,7 @@ fn (self: RetiredTry) deinit(allocator: Allocator) -> void {
 
 /// Identifies one function the checker collected.
 pub struct FunctionHandle {
-    index: arena::Handle<FunctionInfo>
+    index: arena::Handle<FunctionInfo, Functions>
 }
 
 /// Is one static parameter of a signature as the ownership check reads it.
@@ -174,21 +178,21 @@ pub struct MetaField {
 /// Names one active compile-time capture. Bindings form a lexical stack:
 /// restoring the previous handle removes every name pushed since.
 struct MetaBinding {
-    parent: ?arena::Handle<MetaBinding>,
+    parent: ?arena::Handle<MetaBinding, MetaBindings>,
     name: string::String,
     field: MetaField
 }
 
 struct MetaBindingStore {
     allocator: Allocator,
-    bindings: arena::Arena<MetaBinding>,
-    current: ?arena::Handle<MetaBinding>
+    bindings: arena::Arena<MetaBinding, MetaBindings>,
+    current: ?arena::Handle<MetaBinding, MetaBindings>
 }
 
 fn new_meta_binding_store(allocator: Allocator) -> MetaBindingStore {
     return MetaBindingStore {
         allocator: allocator,
-        bindings: arena::new<MetaBinding>(allocator),
+        bindings: arena::new<MetaBinding, MetaBindings>(allocator),
         current: null
     };
 }
@@ -198,7 +202,7 @@ fn (self: MetaBindingStore) deinit(allocator: Allocator) -> void {
     return;
 }
 
-fn (self: &var MetaBindingStore) bind(allocator: Allocator, name: []u8, field: MetaField) -> !?arena::Handle<MetaBinding> {
+fn (self: &var MetaBindingStore) bind(allocator: Allocator, name: []u8, field: MetaField) -> !?arena::Handle<MetaBinding, MetaBindings> {
     let previous = self.current;
     let owned_name = try string::from_bytes(self.allocator, name);
     self.current = try self.bindings.add(self.allocator, MetaBinding {
@@ -209,7 +213,7 @@ fn (self: &var MetaBindingStore) bind(allocator: Allocator, name: []u8, field: M
     return previous;
 }
 
-fn (self: &var MetaBindingStore) restore(previous: ?arena::Handle<MetaBinding>) -> void {
+fn (self: &var MetaBindingStore) restore(previous: ?arena::Handle<MetaBinding, MetaBindings>) -> void {
     self.current = previous;
     return;
 }
@@ -257,14 +261,14 @@ fn (self: &Checker) empty_subst() -> Subst {
 /// the previous one without moving an owner field.
 struct SubstStore {
     allocator: Allocator,
-    frames: arena::Arena<Subst>,
-    current: ?arena::Handle<Subst>
+    frames: arena::Arena<Subst, Frames>,
+    current: ?arena::Handle<Subst, Frames>
 }
 
 fn new_subst_store(allocator: Allocator) -> SubstStore {
     return SubstStore {
         allocator: allocator,
-        frames: arena::new<Subst>(allocator),
+        frames: arena::new<Subst, Frames>(allocator),
         current: null
     };
 }
@@ -277,7 +281,7 @@ fn (self: SubstStore) deinit(allocator: Allocator) -> void {
 /// Selects a substitution for the body about to be checked and returns the
 /// previous selection. An empty substitution selects none, the Go
 /// `c.typeArgValues = nil`.
-fn (self: &var SubstStore) enter(values: Subst) -> !?arena::Handle<Subst> {
+fn (self: &var SubstStore) enter(values: Subst) -> !?arena::Handle<Subst, Frames> {
     let previous = self.current;
     if values.by_name.len() == 0 {
         values.deinit(self.allocator);
@@ -288,7 +292,7 @@ fn (self: &var SubstStore) enter(values: Subst) -> !?arena::Handle<Subst> {
     return previous;
 }
 
-fn (self: &var SubstStore) restore(previous: ?arena::Handle<Subst>) -> void {
+fn (self: &var SubstStore) restore(previous: ?arena::Handle<Subst, Frames>) -> void {
     self.current = previous;
     return;
 }
@@ -317,7 +321,7 @@ pub struct Checker {
     // scratch_binding is a blank record that fills result slots before a
     // resolver writes them, so out parameters need no optional wrapper.
     scratch_binding: BindingHandle,
-    functions: arena::Arena<FunctionInfo>,
+    functions: arena::Arena<FunctionInfo, Functions>,
     functions_by_name: map::Map<[]u8, FunctionHandle>,
     impls: map::Map<[]u8, map::Map<[]u8, FunctionHandle>>,
     structs: map::Map<[]u8, StructInfo>,
@@ -381,7 +385,7 @@ pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program
         common: common,
         store: move store,
         scratch_binding: scratch_binding,
-        functions: arena::new<FunctionInfo>(allocator),
+        functions: arena::new<FunctionInfo, Functions>(allocator),
         functions_by_name: map::new<[]u8, FunctionHandle>(allocator),
         impls: map::new<[]u8, map::Map<[]u8, FunctionHandle>>(allocator),
         structs: map::new<[]u8, StructInfo>(allocator),
@@ -1114,7 +1118,7 @@ struct FunctionRestore {
     loop_depth: i64,
     current_function: ?FunctionHandle,
     current_std: bool,
-    type_arg_values: ?arena::Handle<Subst>
+    type_arg_values: ?arena::Handle<Subst, Frames>
 }
 
 fn (self: &var Checker) check_function_body(

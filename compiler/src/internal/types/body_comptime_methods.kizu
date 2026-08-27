@@ -461,6 +461,7 @@ fn (self: &var Checker) check_box_std_method(
         name,
         args,
         0,
+        empty_type(),
         out
     );
 }
@@ -710,6 +711,28 @@ fn is_string_mutating_method(name: []u8) -> bool {
         mem::equal_bytes(name, "deinit");
 }
 
+// Splits the `T, M` static argument list an arena spelling carries, the Go
+// `splitArenaArgs`. A one-argument list is std's own marker-less arena.
+fn (self: &var Checker) split_arena_args(args: []u8) -> !ArenaArgs {
+    var split = try typ::split_args_optional(self.allocator, args) orelse
+        return ArenaArgs { elem: try self.types.intern(args), marker: empty_type() };
+    defer split.deinit(self.allocator);
+    if split.len() != 2 {
+        return ArenaArgs { elem: try self.types.intern(args), marker: empty_type() };
+    }
+    var elem = empty_type();
+    var marker = empty_type();
+    if split.at(0) |first| {
+        let bytes = first.as_bytes();
+        elem = try self.types.intern(bytes);
+    }
+    if split.at(1) |second| {
+        let bytes = second.as_bytes();
+        marker = try self.types.intern(bytes);
+    }
+    return ArenaArgs { elem: elem, marker: marker };
+}
+
 // Validates the receiver-sensitive std::arena::Arena<T> methods, then reads
 // the rest off std's declaration the way Array and Box do. What is left here
 // is what a declaration cannot state: which receiver place a method may come
@@ -719,33 +742,43 @@ fn (self: &var Checker) check_arena_method(
     scope: ScopeHandle,
     field: &ast::FieldExpr,
     name: []u8,
-    elem: Type,
+    arena: ArenaArgs,
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if mem::equal_bytes(name, "at_mut") {
-        return self.check_arena_at_mut(tree, scope, field, elem, args, out);
+        return self.check_arena_at_mut(tree, scope, field, arena, args, out);
     }
     if mem::equal_bytes(name, "deinit") {
         if try self.check_arena_cleanup_receiver(tree, scope, field) |problem| {
             return move problem;
         }
     }
-    return self.check_arena_std_method(tree, scope, elem, name, args, out);
+    return self.check_arena_std_method(tree, scope, arena, name, args, out);
+}
+
+// What every arena spelling carries: the element type, and the marker naming
+// which arena it is (ADR-0134). They travel together because every question
+// about an arena needs both -- what a read hands back is the element, and
+// whether a handle belongs here is the marker. std source works on a
+// marker-less arena, which is what a null marker is.
+struct ArenaArgs {
+    elem: Type,
+    marker: Type
 }
 
 // Reads one Arena method off std's declaration.
 fn (self: &var Checker) check_arena_std_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
-    elem: Type,
+    arena: ArenaArgs,
     name: []u8,
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     var type_args = array::new<Type>(self.allocator);
     defer type_args.deinit(self.allocator);
-    try type_args.append(self.allocator, elem);
+    try type_args.append(self.allocator, arena.elem);
     return self.check_std_method(
         tree,
         scope,
@@ -755,6 +788,7 @@ fn (self: &var Checker) check_arena_std_method(
         name,
         args,
         0,
+        arena.marker,
         out
     );
 }
@@ -802,7 +836,7 @@ fn (self: &var Checker) check_arena_at_mut(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     field: &ast::FieldExpr,
-    elem: Type,
+    arena: ArenaArgs,
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -821,7 +855,7 @@ fn (self: &var Checker) check_arena_at_mut(
     // The flag covers exactly this call: off while the argument is read,
     // and back on for the result the call gate reads.
     self.capture_condition = false;
-    if try self.check_arena_std_method(tree, scope, elem, "at_mut", args, out) |problem| {
+    if try self.check_arena_std_method(tree, scope, arena, "at_mut", args, out) |problem| {
         self.capture_condition = true;
         return move problem;
     }
@@ -865,6 +899,8 @@ fn (self: &var Checker) check_arena_handle_arg(
     offset: i64,
     label: []u8
 ) -> !?diagnostic::Diagnostic {
+    // std source reaches this with a marker-less arena; a program's arena
+    // carries one, and the wrapper's own check compares it (ADR-0134).
     let count = args.len(tree) - offset;
     if count != 1 {
         return try self.named_arity_error(label, 1, count);

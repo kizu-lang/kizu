@@ -58,8 +58,12 @@ type Checker struct {
 	currentReturn   Type
 	currentFunction *functionType
 	currentStd      bool
-	typeParams      typeParamStore
-	typeArgValues   map[string]Type
+	// arenaMarkers is the `arena::new` each marker names. A marker is what
+	// makes one arena its own type, so naming one twice would make two arenas
+	// interchangeable again and is refused (ADR-0134).
+	arenaMarkers  map[Type]ast.Span
+	typeParams    typeParamStore
+	typeArgValues map[string]Type
 	// staticParams holds the compile-time value parameters of the generic being
 	// checked, by declared type. A runtime local of the same name is not one of
 	// these, which is what separates forwarding a static value from reading a
@@ -760,6 +764,12 @@ func (c *Checker) newDeclaredFunctionType(fn *ast.FunctionDecl) (*functionType, 
 func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, error) {
 	previousTypeParams := c.typeParams.enterSignature(fn)
 	defer c.typeParams.restore(previousTypeParams)
+	// The signature's own types resolve under the same std-or-not answer its
+	// body does, which is what lets std declare its arena methods on
+	// `Arena<T>` while a program must name the marker (ADR-0134).
+	previousStd := c.currentStd
+	c.currentStd = fn.Std
+	defer func() { c.currentStd = previousStd }()
 
 	if index, reserved := reservedFunctionStaticParamIndex(fn); reserved {
 		param := fn.StaticParams[index]
@@ -4150,6 +4160,14 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "int_from_ptr" {
 		return c.checkIntFromPtr(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
+	// `arena::new<T, M>` is the one source-declared wrapper whose call names
+	// more static arguments than its declaration does: std cannot name the
+	// marker, so the marker is read here and the wrapper is checked at the
+	// element alone (ADR-0134).
+	if name == arenaNewName {
+		return c.checkArenaNew(
+			typeArg, expressionSpan(expr.Callee), args, env, unsafe)
+	}
 	if typ, ok, err := c.checkGenericUserTypeApply(
 		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
@@ -4168,7 +4186,104 @@ func (c *Checker) checkTypeApplyCallExpr(
 	return "", errorf("type error: `%s` does not take static arguments", name)
 }
 
-// checkArenaTypeApply validates std::arena::new<T>(allocator).
+// arenaArgs is what every arena spelling carries: the element type, and the
+// marker naming which arena it is (ADR-0134). They travel together because
+// every question about an arena needs both -- what a read hands back is the
+// element, and whether a handle belongs here is the marker.
+type arenaArgs struct {
+	elem   Type
+	marker Type
+}
+
+// handle spells the Handle type these arguments name. A marker-less arena is
+// what std source works on, and its handles are marker-less too.
+func (a arenaArgs) handle() Type {
+	if a.marker == "" {
+		return Type(fmt.Sprintf("%s<%s>", typ.ArenaHandleTypeName, a.elem))
+	}
+	return Type(fmt.Sprintf("%s<%s, %s>", typ.ArenaHandleTypeName, a.elem, a.marker))
+}
+
+// attachMarker puts this arena's marker back into every arena spelling of a
+// type std wrote without one. std declares `Handle<T>` because a method works
+// on every marker alike; what a call hands over and hands back is the
+// receiver's own marker, and this is where that is said (ADR-0134).
+func (a arenaArgs) attachMarker(t Type) Type {
+	return Type(typ.AttachArenaMarker(string(t), string(a.marker)))
+}
+
+// splitArenaArgs reads the two static arguments of an arena spelling.
+func splitArenaArgs(text string) (arenaArgs, bool) {
+	parts, ok := splitGenericArgs(text)
+	if !ok || len(parts) != 2 {
+		return arenaArgs{}, false
+	}
+	return arenaArgs{elem: Type(parts[0]), marker: Type(parts[1])}, true
+}
+
+// claimArenaMarker records the `arena::new` a marker names, and refuses a
+// second one. A marker is the whole of what makes two arenas of one element
+// type two types (ADR-0134): naming one at two `new` calls would hand both
+// arenas the same handle type, which is the confusion the marker exists to
+// stop. A type parameter claims nothing -- the instance it binds to is
+// claimed where it is written -- and the same `new` reached twice, as a
+// generic body checked per instantiation is, claims what it already holds.
+func (c *Checker) claimArenaMarker(marker Type, span ast.Span) error {
+	if c.typeParams.contains(string(marker)) {
+		return nil
+	}
+	if c.arenaMarkers == nil {
+		c.arenaMarkers = map[Type]ast.Span{}
+	}
+	held, taken := c.arenaMarkers[marker]
+	if !taken {
+		c.arenaMarkers[marker] = span
+		return nil
+	}
+	if held == span {
+		return nil
+	}
+	return errorAt(span,
+		"type error: arena marker `%s` already names the arena made at line %d"+
+			"\nhelp: give this arena a marker of its own, so a handle of one"+
+			" cannot be read at the other",
+		marker, held.Start.Line)
+}
+
+// arenaNewName is the source spelling that makes an arena.
+const arenaNewName = "std::arena::new"
+
+// checkArenaNew validates `arena::new<T, M>(allocator)` at the call. The
+// wrapper std declares takes the element alone, so the marker is read off the
+// call and put back on the arena the wrapper hands over (ADR-0134).
+func (c *Checker) checkArenaNew(
+	typeArg string,
+	span ast.Span,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	arena, ok := splitArenaArgs(typeArg)
+	if !ok {
+		return "", errorAt(span,
+			"type error: `%s` expects 2 static arguments, the element type and"+
+				" the marker naming which arena it is", arenaNewName)
+	}
+	if issue := c.resolveArenaMarker(arena.marker); issue.present() {
+		return "", typeResolutionError(issue)
+	}
+	if err := c.claimArenaMarker(arena.marker, span); err != nil {
+		return "", err
+	}
+	result, _, err := c.checkGenericUserTypeApply(
+		arenaNewName, string(arena.elem), args, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	return arena.attachMarker(result), nil
+}
+
+// checkArenaTypeApply validates the arena constructor primitive.
 func (c *Checker) checkArenaTypeApply(
 	typeArg string,
 	args []ast.Expression,
@@ -4177,7 +4292,7 @@ func (c *Checker) checkArenaTypeApply(
 ) (Type, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
-		return "", errorf("type error: std::arena::new expects 1 type argument")
+		return "", errorf("type error: the arena primitive expects 1 type argument")
 	}
 	elem, err := c.parseType(parts[0])
 	if err != nil {
@@ -4185,7 +4300,7 @@ func (c *Checker) checkArenaTypeApply(
 	}
 	if len(args) != 1 {
 		return "", errorf(
-			"type error: `std::arena::new<%s>` expects exactly one allocator argument",
+			"type error: the arena primitive at `%s` expects exactly one allocator argument",
 			elem)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
@@ -4193,10 +4308,10 @@ func (c *Checker) checkArenaTypeApply(
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", errorf("type error: `std::arena::new<%s>` expects Allocator, got %s",
+		return "", errorf("type error: the arena primitive at `%s` expects Allocator, got %s",
 			elem, got)
 	}
-	return Type(fmt.Sprintf("std::arena::Arena<%s>", elem)), nil
+	return Type(typ.ArenaTypeName + "<" + string(elem) + ">"), nil
 }
 
 // checkBuiltinTypeApply validates std-only generic runtime primitives.
@@ -4326,11 +4441,14 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 	if err != nil {
 		return "", true, err
 	}
-	receiver := Type(fmt.Sprintf("std::arena::Arena<%s>", elem))
+	// Only std source reaches a primitive, and std writes no marker: the
+	// marker was compared where the wrapper was called (ADR-0134).
+	arena := arenaArgs{elem: elem}
 	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
-	return c.checkBuiltinReceiverMethod(name, receiver,
+	return c.checkBuiltinReceiverMethod(name,
+		Type(typ.ArenaTypeName+"<"+string(elem)+">"),
 		func(rest []ast.Expression) (Type, error) {
-			return c.checkArenaPrimitiveMethod(elem, method, rest, env, unsafe)
+			return c.checkArenaPrimitiveMethod(arena, method, rest, env, unsafe)
 		}, args, env, unsafe)
 }
 
@@ -4340,7 +4458,7 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 // returns the borrow optional, and the rule applies where the wrapper is
 // called.
 func (c *Checker) checkArenaPrimitiveMethod(
-	elem Type,
+	arena arenaArgs,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -4348,17 +4466,17 @@ func (c *Checker) checkArenaPrimitiveMethod(
 ) (Type, error) {
 	switch name {
 	case "add":
-		return c.checkArenaAdd(elem, args, env, unsafe)
+		return c.checkArenaAdd(arena, args, env, unsafe)
 	case "at":
-		if err := c.checkArenaHandleArg(elem, args, env, unsafe, "Arena.at"); err != nil {
+		if err := c.checkArenaHandleArg(arena, args, env, unsafe, "Arena.at"); err != nil {
 			return "", err
 		}
-		return Type("&" + string(elem)), nil
+		return Type("&" + string(arena.elem)), nil
 	case "at_mut":
-		if err := c.checkArenaHandleArg(elem, args, env, unsafe, "Arena.at_mut"); err != nil {
+		if err := c.checkArenaHandleArg(arena, args, env, unsafe, "Arena.at_mut"); err != nil {
 			return "", err
 		}
-		return Type("?&var " + string(elem)), nil
+		return Type("?&var " + string(arena.elem)), nil
 	case "deinit":
 		// The raw primitive frees only the storage, with no owner-element
 		// rule: it is the one escape `Arena.deinit` uses after consuming the
@@ -4373,7 +4491,7 @@ func (c *Checker) checkArenaPrimitiveMethod(
 	case "len":
 		return typeI64, nil
 	case "pop_or_panic":
-		return elem, nil
+		return arena.elem, nil
 	default:
 		return "", errorf("type error: Arena has no storage primitive `%s`", name)
 	}
@@ -6012,7 +6130,8 @@ func (c *Checker) checkArenaOrImplMethod(
 	unsafe unsafeMark,
 ) (Type, error) {
 	base, arg, ok := splitGenericType(string(receiver))
-	if !ok || base != "std::arena::Arena" {
+	arena, split := splitArenaArgs(arg)
+	if !ok || base != typ.ArenaTypeName || !split {
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
 			return c.checkMethodArgs(method, receiver, field.Receiver, expressionSpan(field),
@@ -6020,7 +6139,7 @@ func (c *Checker) checkArenaOrImplMethod(
 		}
 		return "", errorf("type error: `%s` has no method `%s`", receiver, field.Name)
 	}
-	return c.checkArenaReceiverMethod(field, Type(arg), args, env, unsafe)
+	return c.checkArenaReceiverMethod(field, arena, args, env, unsafe)
 }
 
 // checkArenaReceiverMethod validates receiver-sensitive Arena<T> methods, then
@@ -6029,7 +6148,7 @@ func (c *Checker) checkArenaOrImplMethod(
 // come from, and that `at_mut` hands out a borrow only a capture can consume.
 func (c *Checker) checkArenaReceiverMethod(
 	field *ast.FieldExpr,
-	elem Type,
+	arena arenaArgs,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
@@ -6047,7 +6166,7 @@ func (c *Checker) checkArenaReceiverMethod(
 		// a nested at_mut in argument position refuses as usual -- and back on
 		// for the result the call gate reads.
 		c.captureCondition = false
-		result, err := c.checkArenaStdMethod(elem, field.Name, args, env, unsafe)
+		result, err := c.checkArenaStdMethod(arena, field.Name, args, env, unsafe)
 		c.captureCondition = true
 		return result, err
 	case typ.CleanupMethod:
@@ -6055,18 +6174,20 @@ func (c *Checker) checkArenaReceiverMethod(
 			return "", err
 		}
 	}
-	return c.checkArenaStdMethod(elem, field.Name, args, env, unsafe)
+	return c.checkArenaStdMethod(arena, field.Name, args, env, unsafe)
 }
 
 // checkArenaStdMethod reads one Arena method off std's declaration.
 func (c *Checker) checkArenaStdMethod(
-	elem Type,
+	arena arenaArgs,
 	name string,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	return c.checkStdMethod("std::arena::Arena", []Type{elem}, "Arena", name, args, env, unsafe)
+	return c.checkStdMethodAs(
+		typ.ArenaTypeName, []Type{arena.elem}, "Arena", name, args, env, unsafe,
+		arena.attachMarker)
 }
 
 // checkArenaCleanupReceiver keeps arena cleanup on a place it may consume.
@@ -6456,6 +6577,28 @@ func (c *Checker) checkStdMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	return c.checkStdMethodAs(
+		receiver, typeArgs, label, name, args, env, unsafe, nil)
+}
+
+// checkStdMethodAs is checkStdMethod with one rewrite applied to every type
+// the declaration states, after its static arguments are bound. It is what
+// carries a fact the declaration cannot state itself: an arena's marker
+// (ADR-0134) belongs to the receiver rather than to the method, so std writes
+// `Handle<T>` and the receiver's marker is put back here.
+func (c *Checker) checkStdMethodAs(
+	receiver string,
+	typeArgs []Type,
+	label string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+	rewrite func(Type) Type,
+) (Type, error) {
+	if rewrite == nil {
+		rewrite = func(t Type) Type { return t }
+	}
 	method := c.implMethod(receiver, name)
 	if method == nil || len(method.params) == 0 {
 		return "", errorf("type error: %s has no method `%s`", label, name)
@@ -6476,7 +6619,7 @@ func (c *Checker) checkStdMethod(
 	}
 	for idx, arg := range args {
 		paramIndex := idx + 1
-		want := c.types.substituteTypeParams(method.params[paramIndex], subst)
+		want := rewrite(c.types.substituteTypeParams(method.params[paramIndex], subst))
 		got, err := c.checkContextualExpr(arg, want, env, unsafe)
 		if err != nil {
 			return "", err
@@ -6491,7 +6634,7 @@ func (c *Checker) checkStdMethod(
 			return "", errorf("type error: `%s.%s` expects %s, got %s", label, name, want, got)
 		}
 	}
-	result := c.types.substituteTypeParams(method.returnType, subst)
+	result := rewrite(c.types.substituteTypeParams(method.returnType, subst))
 	if err := c.revalidateSubstituted(result); err != nil {
 		return "", err
 	}
@@ -7004,7 +7147,7 @@ func checkBorrowTargetShape(expr ast.Expression) error {
 // storage the element goes in, so it names the allocator it buys from -- an
 // arena header keeps none of its own (ADR-0131, ADR-0132).
 func (c *Checker) checkArenaAdd(
-	elem Type,
+	arena arenaArgs,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
@@ -7023,16 +7166,19 @@ func (c *Checker) checkArenaAdd(
 	if err != nil {
 		return "", err
 	}
-	if !sameType(got, elem) {
-		return "", errorf("type error: `Arena.add` expects %s, got %s", elem, got)
+	if !sameType(got, arena.elem) {
+		return "", errorf("type error: `Arena.add` expects %s, got %s", arena.elem, got)
 	}
-	return Type(fmt.Sprintf("std::mem::Error!std::arena::Handle<%s>", elem)), nil
+	return Type("std::mem::Error!" + string(arena.handle())), nil
 }
 
 // checkArenaHandleArg validates the one handle argument an arena accessor
-// takes against the arena's element type. label names the accessor in errors.
+// takes against the arena's own element type and marker. The marker is what
+// rejects a handle another arena made: two arenas holding the same element
+// type are two types because their markers differ (ADR-0134). label names the
+// accessor in errors.
 func (c *Checker) checkArenaHandleArg(
-	elem Type,
+	arena arenaArgs,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
@@ -7045,7 +7191,7 @@ func (c *Checker) checkArenaHandleArg(
 	if err != nil {
 		return err
 	}
-	want := Type(fmt.Sprintf("std::arena::Handle<%s>", elem))
+	want := arena.handle()
 	if !sameType(got, want) {
 		return errorf("type error: `%s` expects %s, got %s", label, want, got)
 	}

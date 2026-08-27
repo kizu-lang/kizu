@@ -1545,12 +1545,12 @@ fn main() {
 
 // TestCheckAcceptsArenaHandle checks Phase 6 arena and handle types.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
-	source := `struct User {
+	source := `struct UserArena {} struct User {
     name: []u8,
 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
+    let users = std::arena::new<User, UserArena>(allocator);
     errdefer users.deinit(allocator);
     let alice = try users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
@@ -1564,12 +1564,12 @@ fn main() -> !void {
 
 // TestCheckAcceptsDeferredArenaCleanup checks block-exit cleanup registration.
 func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
-	source := `struct User {
+	source := `struct UserArena {} struct User {
     name: []u8,
 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
+    let users = std::arena::new<User, UserArena>(allocator);
     defer users.deinit(allocator);
     let alice = try users.add(allocator, User { name: "alice" });
     print(users.at(alice).name);
@@ -1582,9 +1582,9 @@ fn main() -> !void {
 
 // TestCheckAcceptsArrayResourceElements checks resource-owning Array element types.
 func TestCheckAcceptsArrayResourceElements(t *testing.T) {
-	source := `struct User { name: []u8 }
+	source := `struct UserArena {} struct User { name: []u8 }
 struct Parsed {
-    users: std::arena::Arena<User>,
+    users: std::arena::Arena<User, UserArena>,
     ids: std::array::Array<i64>,
 }
 fn (self: Parsed) deinit(allocator: Allocator) -> void {
@@ -1674,12 +1674,12 @@ fn main() {}`)
 
 // TestCheckAcceptsErrDeferredCleanup checks errdefer type-checks like defer.
 func TestCheckAcceptsErrDeferredCleanup(t *testing.T) {
-	source := `struct User {
+	source := `struct UserArena {} struct User {
     name: []u8,
 }
-fn build() -> !std::arena::Arena<User> {
+fn build() -> !std::arena::Arena<User, UserArena> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
+    let users = std::arena::new<User, UserArena>(allocator);
     errdefer users.deinit(allocator);
     return users;
 }
@@ -1726,10 +1726,10 @@ func TestCheckRejectsArenaDeinitErrors(t *testing.T) {
 	}{
 		{
 			name: "arg",
-			source: `struct User { name: []u8 }
+			source: `struct UserArena {} struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
+    let users = std::arena::new<User, UserArena>(allocator);
     users.deinit(1);
 }`,
 			want: "`Arena.deinit` expects Allocator, got i64",
@@ -1740,15 +1740,15 @@ fn main() {
 
 // TestCheckAcceptsOwnerFieldCleanup allows direct field cleanup inside owner deinit.
 func TestCheckAcceptsOwnerFieldCleanup(t *testing.T) {
-	source := `struct User { name: []u8 }
-struct Registry { users: std::arena::Arena<User> }
+	source := `struct UserArena {} struct User { name: []u8 }
+struct Registry { users: std::arena::Arena<User, UserArena> }
 fn (self: Registry) deinit(allocator: Allocator) -> void {
     self.users.deinit(allocator);
     return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
+    let users = std::arena::new<User, UserArena>(allocator);
     let registry = Registry { users: users };
     registry.deinit(allocator);
 }`
@@ -2031,23 +2031,23 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 		},
 		{
 			name: "handle is not pointer",
-			source: `struct User { name: []u8 }
+			source: `struct UserArena {} struct User { name: []u8 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
+    let users = std::arena::new<User, UserArena>(allocator);
     defer users.deinit(allocator);
     let alice = try users.add(allocator, User { name: "alice" });
     let p = cast<ptr<User>>(alice);
     print(p);
     return;
 }`,
-			want: "cannot cast std::arena::Handle<User> to ptr<User>",
+			want: "cannot cast std::arena::Handle<User, UserArena> to ptr<User>",
 		},
 		{
 			name: "arena non allocator",
-			source: `struct User { name: []u8 }
+			source: `struct UserArena {} struct User { name: []u8 }
 fn main() {
-    let users = std::arena::new<User>(1);
+    let users = std::arena::new<User, UserArena>(1);
     print(users);
 }`,
 			want: "`std::arena::new` allocator expects Allocator, got i64",

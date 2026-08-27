@@ -2,6 +2,10 @@ import std::arena;
 import std::mem;
 import std::testing;
 
+pub struct ParamItems {}
+pub struct ViaItems {}
+pub struct LinkNodes {}
+
 pub struct Item {
     pub score: i64,
 }
@@ -10,15 +14,15 @@ fn (self: &Item) doubled() -> i64 {
     return self.score * 2;
 }
 
-fn read_score(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
+fn read_score<M>(items: &arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> i64 {
     return items.at(h).score;
 }
 
-fn find(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> &Item {
+fn find<M>(items: &arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> &Item {
     return items.at(h);
 }
 
-fn bump_score(items: &var arena::Arena<Item>, h: arena::Handle<Item>) -> void {
+fn bump_score<M>(items: &var arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> void {
     if items.at_mut(h) |item| {
         item.score = item.score + 1;
     }
@@ -30,41 +34,42 @@ fn bump_score(items: &var arena::Arena<Item>, h: arena::Handle<Item>) -> void {
 // the same handle feeds each call without being handed back.
 test "a borrowed arena parameter accepts its caller's handle" {
     let allocator = mem::page_allocator();
-    var items = arena::new<Item>(allocator);
+    var items = arena::new<Item, ParamItems>(allocator);
+    defer items.deinit(allocator);
     let h = try items.add(allocator, Item { score: 41 });
-    let item = find(&items, h);
+    let item = find<ParamItems>(&items, h);
     testing::expect_equal<i64>(41, item.score);
     testing::expect_equal<i64>(82, items.at(h).doubled());
-    bump_score(items, h);
-    testing::expect_equal<i64>(42, read_score(&items, h));
-    items.deinit(allocator);
+    bump_score<ParamItems>(items, h);
+    testing::expect_equal<i64>(42, read_score<ParamItems>(&items, h));
 }
 
-fn read_via(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
-    return read_score(items, h);
+fn read_via<M>(items: &arena::Arena<Item, M>, h: arena::Handle<Item, M>) -> i64 {
+    return read_score<M>(items, h);
 }
 
-// A forwarding helper chains the derived arena/handle pairing: at its inner
-// call site neither origin is visible, so the signature keeps carrying the
-// contract instead of the check failing closed.
+// A forwarding helper carries the marker through: its inner call names the
+// same static parameter, so the arena and the handle stay the one arena's at
+// every hop (ADR-0134).
 test "a forwarding helper chains the arena/handle contract" {
     let allocator = mem::page_allocator();
-    var items = arena::new<Item>(allocator);
+    var items = arena::new<Item, ViaItems>(allocator);
+    defer items.deinit(allocator);
     let h = try items.add(allocator, Item { score: 7 });
-    testing::expect_equal<i64>(7, read_via(&items, h));
-    items.deinit(allocator);
+    testing::expect_equal<i64>(7, read_via<ViaItems>(&items, h));
 }
 
 pub struct LinkNode {
     pub value: i64,
-    pub next: ?arena::Handle<LinkNode>,
+    pub next: ?arena::Handle<LinkNode, LinkNodes>,
 }
 
 // A handle read out of an optional field has no visible origin, so a local
 // arena accepts it the same way a borrowed one does.
 test "a local arena accepts handles read out of fields" {
     let allocator = mem::page_allocator();
-    let nodes = arena::new<LinkNode>(allocator);
+    let nodes = arena::new<LinkNode, LinkNodes>(allocator);
+    defer nodes.deinit(allocator);
     let tail = try nodes.add(allocator, LinkNode { value: 2, next: null });
     let head = try nodes.add(allocator, LinkNode { value: 40, next: tail });
     var total = nodes.at(head).value;
@@ -72,11 +77,276 @@ test "a local arena accepts handles read out of fields" {
         total = total + nodes.at(n).value;
     }
     testing::expect_equal<i64>(42, total);
-    nodes.deinit(allocator);
 }
 
 // ir
 // lower:
-// check failed: move error: owned value `items` would leak on this `try`'s error exit; register `defer` or `errdefer` cleanup before it at 34:17
+// fn Item.doubled(%self: Item) -> i64 {
+// entry:
+//   %1: i64 = field.score %self: Item
+//   %2: i64 = const 2
+//   %3: i64 = binary.* %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn test.a_borrowed_arena_parameter_accepts_its_caller_s_handle() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
+//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
+//   %4: i64 = const 41
+//   %5: Item = struct.new {score: %4: i64}
+//   %6: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
+//   %7: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %8: std::arena::Handle<Item> = error.try %6: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %7: std::arena::Arena<Item>, %1: Allocator
+//   %9: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %10: Item = call.find.ParamItems %9: std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %11: i64 = const 41
+//   %12: i64 = field.score %10: Item
+//   test.expect_equal %11: i64, %12: i64, i64
+//   %14: i64 = const 82
+//   %15: Item = call.std::arena::Arena.at.Item %3: &var std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %16: i64 = call.Item.doubled %15: Item
+//   test.expect_equal %14: i64, %16: i64, i64
+//   call.bump_score.ParamItems %3: &var std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %19: i64 = const 42
+//   %20: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %21: i64 = call.read_score.ParamItems %20: std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   test.expect_equal %19: i64, %21: i64, i64
+//   %23: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   arena.deinit %23: std::arena::Arena<Item>, %1: Allocator
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.a_forwarding_helper_chains_the_arena_handle_contract() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
+//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
+//   %4: i64 = const 7
+//   %5: Item = struct.new {score: %4: i64}
+//   %6: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
+//   %7: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %8: std::arena::Handle<Item> = error.try %6: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %7: std::arena::Arena<Item>, %1: Allocator
+//   %9: i64 = const 7
+//   %10: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %11: i64 = call.read_via.ViaItems %10: std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   test.expect_equal %9: i64, %11: i64, i64
+//   %13: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   arena.deinit %13: std::arena::Arena<Item>, %1: Allocator
+//   %15: !void = error.ok
+//   return %15: !void
+// }
+// fn test.a_local_arena_accepts_handles_read_out_of_fields() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<LinkNode> = arena.new %1: Allocator
+//   %3: &var std::arena::Arena<LinkNode> = local.slot %2: std::arena::Arena<LinkNode>
+//   %4: i64 = const 2
+//   %5: ?std::arena::Handle<LinkNode> = opt.null
+//   %6: LinkNode = struct.new {value: %4: i64, next: %5: ?std::arena::Handle<LinkNode>}
+//   %7: std::mem::Error!std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %6: LinkNode
+//   %8: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
+//   %9: std::arena::Handle<LinkNode> = error.try %7: std::mem::Error!std::arena::Handle<LinkNode>, cleanup arena.deinit %8: std::arena::Arena<LinkNode>, %1: Allocator
+//   %10: i64 = const 40
+//   %11: ?std::arena::Handle<LinkNode> = opt.some %9: std::arena::Handle<LinkNode>
+//   %12: LinkNode = struct.new {value: %10: i64, next: %11: ?std::arena::Handle<LinkNode>}
+//   %13: std::mem::Error!std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %12: LinkNode
+//   %14: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
+//   %15: std::arena::Handle<LinkNode> = error.try %13: std::mem::Error!std::arena::Handle<LinkNode>, cleanup arena.deinit %14: std::arena::Arena<LinkNode>, %1: Allocator
+//   %16: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %15: std::arena::Handle<LinkNode>
+//   %17: i64 = field.value %16: LinkNode
+//   %18: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %15: std::arena::Handle<LinkNode>
+//   %19: ?std::arena::Handle<LinkNode> = field.next %18: LinkNode
+//   %20: std::arena::Handle<LinkNode> = opt.value %19: ?std::arena::Handle<LinkNode>
+//   %21: bool = opt.has %19: ?std::arena::Handle<LinkNode>
+//   branch %21: bool, if.then.1, if.else.2
+// if.then.1:
+//   %22: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %20: std::arena::Handle<LinkNode>
+//   %23: i64 = field.value %22: LinkNode
+//   %24: i64 = binary.+ %17: i64, %23: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %25: i64 = phi [if.then.1, %24: i64], [if.else.2, %17: i64]
+//   %26: i64 = const 42
+//   test.expect_equal %26: i64, %25: i64, i64
+//   %28: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
+//   arena.deinit %28: std::arena::Arena<LinkNode>, %1: Allocator
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn find.ParamItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> Item {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   return %1: Item
+// }
+// fn bump_score.ParamItems(%items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> void {
+// entry:
+//   %1: ?&var Item = call.std::arena::Arena.at_mut.Item %items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: &var Item = opt.value %1: ?&var Item
+//   %3: bool = opt.has %1: ?&var Item
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: i64 = field.ref.score %2: &var Item
+//   %5: i64 = const 1
+//   %6: i64 = binary.+ %4: i64, %5: i64
+//   field.ref.set.score %2: &var Item, %6: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn read_score.ParamItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: i64 = field.score %1: Item
+//   return %2: i64
+// }
+// fn read_via.ViaItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: i64 = call.read_score.ViaItems %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   return %1: i64
+// }
+// fn read_score.ViaItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: i64 = field.score %1: Item
+//   return %2: i64
+// }
 // opt:
-// check failed: move error: owned value `items` would leak on this `try`'s error exit; register `defer` or `errdefer` cleanup before it at 34:17
+// fn Item.doubled(%self: Item) -> i64 {
+// entry:
+//   %1: i64 = field.score %self: Item
+//   %2: i64 = const 2
+//   %3: i64 = binary.* %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn test.a_borrowed_arena_parameter_accepts_its_caller_s_handle() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
+//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
+//   %4: i64 = const 41
+//   %5: Item = struct.new {score: %4: i64}
+//   %6: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
+//   %7: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %8: std::arena::Handle<Item> = error.try %6: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %7: std::arena::Arena<Item>, %1: Allocator
+//   %9: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %10: Item = call.find.ParamItems %9: std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %11: i64 = const 41
+//   %12: i64 = field.score %10: Item
+//   test.expect_equal %11: i64, %12: i64, i64
+//   %14: i64 = const 82
+//   %15: Item = call.std::arena::Arena.at.Item %3: &var std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %16: i64 = call.Item.doubled %15: Item
+//   test.expect_equal %14: i64, %16: i64, i64
+//   call.bump_score.ParamItems %3: &var std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   %19: i64 = const 42
+//   %20: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %21: i64 = call.read_score.ParamItems %20: std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   test.expect_equal %19: i64, %21: i64, i64
+//   %23: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   arena.deinit %23: std::arena::Arena<Item>, %1: Allocator
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.a_forwarding_helper_chains_the_arena_handle_contract() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Item> = arena.new %1: Allocator
+//   %3: &var std::arena::Arena<Item> = local.slot %2: std::arena::Arena<Item>
+//   %4: i64 = const 7
+//   %5: Item = struct.new {score: %4: i64}
+//   %6: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %3: &var std::arena::Arena<Item>, %1: Allocator, %5: Item
+//   %7: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %8: std::arena::Handle<Item> = error.try %6: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %7: std::arena::Arena<Item>, %1: Allocator
+//   %9: i64 = const 7
+//   %10: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   %11: i64 = call.read_via.ViaItems %10: std::arena::Arena<Item>, %8: std::arena::Handle<Item>
+//   test.expect_equal %9: i64, %11: i64, i64
+//   %13: std::arena::Arena<Item> = ref.load %3: &var std::arena::Arena<Item>
+//   arena.deinit %13: std::arena::Arena<Item>, %1: Allocator
+//   %15: !void = error.ok
+//   return %15: !void
+// }
+// fn test.a_local_arena_accepts_handles_read_out_of_fields() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<LinkNode> = arena.new %1: Allocator
+//   %3: &var std::arena::Arena<LinkNode> = local.slot %2: std::arena::Arena<LinkNode>
+//   %4: i64 = const 2
+//   %5: ?std::arena::Handle<LinkNode> = opt.null
+//   %6: LinkNode = struct.new {value: %4: i64, next: %5: ?std::arena::Handle<LinkNode>}
+//   %7: std::mem::Error!std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %6: LinkNode
+//   %8: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
+//   %9: std::arena::Handle<LinkNode> = error.try %7: std::mem::Error!std::arena::Handle<LinkNode>, cleanup arena.deinit %8: std::arena::Arena<LinkNode>, %1: Allocator
+//   %10: i64 = const 40
+//   %11: ?std::arena::Handle<LinkNode> = opt.some %9: std::arena::Handle<LinkNode>
+//   %12: LinkNode = struct.new {value: %10: i64, next: %11: ?std::arena::Handle<LinkNode>}
+//   %13: std::mem::Error!std::arena::Handle<LinkNode> = call.std::arena::Arena.add.LinkNode %3: &var std::arena::Arena<LinkNode>, %1: Allocator, %12: LinkNode
+//   %14: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
+//   %15: std::arena::Handle<LinkNode> = error.try %13: std::mem::Error!std::arena::Handle<LinkNode>, cleanup arena.deinit %14: std::arena::Arena<LinkNode>, %1: Allocator
+//   %16: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %15: std::arena::Handle<LinkNode>
+//   %17: i64 = field.value %16: LinkNode
+//   %18: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %15: std::arena::Handle<LinkNode>
+//   %19: ?std::arena::Handle<LinkNode> = field.next %18: LinkNode
+//   %20: std::arena::Handle<LinkNode> = opt.value %19: ?std::arena::Handle<LinkNode>
+//   %21: bool = opt.has %19: ?std::arena::Handle<LinkNode>
+//   branch %21: bool, if.then.1, if.else.2
+// if.then.1:
+//   %22: LinkNode = call.std::arena::Arena.at.LinkNode %3: &var std::arena::Arena<LinkNode>, %20: std::arena::Handle<LinkNode>
+//   %23: i64 = field.value %22: LinkNode
+//   %24: i64 = binary.+ %17: i64, %23: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %25: i64 = phi [if.then.1, %24: i64], [if.else.2, %17: i64]
+//   %26: i64 = const 42
+//   test.expect_equal %26: i64, %25: i64, i64
+//   %28: std::arena::Arena<LinkNode> = ref.load %3: &var std::arena::Arena<LinkNode>
+//   arena.deinit %28: std::arena::Arena<LinkNode>, %1: Allocator
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn find.ParamItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> Item {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   return %1: Item
+// }
+// fn bump_score.ParamItems(%items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> void {
+// entry:
+//   %1: ?&var Item = call.std::arena::Arena.at_mut.Item %items: &var std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: &var Item = opt.value %1: ?&var Item
+//   %3: bool = opt.has %1: ?&var Item
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: i64 = field.ref.score %2: &var Item
+//   %5: i64 = const 1
+//   %6: i64 = binary.+ %4: i64, %5: i64
+//   field.ref.set.score %2: &var Item, %6: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn read_score.ParamItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: i64 = field.score %1: Item
+//   return %2: i64
+// }
+// fn read_via.ViaItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: i64 = call.read_score.ViaItems %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   return %1: i64
+// }
+// fn read_score.ViaItems(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: i64 = field.score %1: Item
+//   return %2: i64
+// }

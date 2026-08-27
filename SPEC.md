@@ -206,8 +206,8 @@ borrow は次のことができません。
 
 ```text
 std::mem::Box<T>
-std::arena::Arena<T>
-std::arena::Handle<T>
+std::arena::Arena<T, M>
+std::arena::Handle<T, M>
 ```
 
 ## 5. 実装方針
@@ -1143,7 +1143,7 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
   generic 実体化が作る綴り(`Array<!i64>` の `pop()` が返す `?!i64`)も
   同じ規則で拒否される
 * struct field に置けるのは plain copy data、arena handle、owner の optional
-  (`?i64`、`?arena::Handle<T>`、`?std::string::String` など)。view を包んだ
+  (`?i64`、`?arena::Handle<T, M>`、`?std::string::String` など)。view を包んだ
   optional(`?[]u8`)は field に置けない —— view の義務は借用で、それを開く
   capture が field 型を読む規則から見えないため。union payload・static
   argument(`Array<?u8>` など)・borrow(`&?T`)の対象にはできない
@@ -1160,8 +1160,8 @@ std::array::Array<T>
 std::map::Map<K, V>
 std::string::String
 std::mem::Box<T>
-std::arena::Arena<T>
-std::arena::Handle<T>
+std::arena::Arena<T, M>
+std::arena::Handle<T, M>
 ```
 
 まだ持たない ownership / container 型:
@@ -1173,7 +1173,8 @@ shared<T>
 ```
 
 full generics を実装しません。
-`std::arena::Arena<T>`、`std::arena::Handle<T>` は compiler-known な stdlib 型コンストラクタです。
+`std::arena::Arena<T, M>`、`std::arena::Handle<T, M>` は compiler-known な
+stdlib 型コンストラクタです。
 `!T` と raw pointer 型は専用の型構文として扱います。
 ADR-0066 の最小明示 function generics だけを採用します。
 
@@ -1297,11 +1298,11 @@ bool / void
 i8 / i16 / i32 / i64 / u8 / u16 / u32 / u64 / usize / isize
 f32 / f64
 enum / error set
-std::arena::Handle<T>
+std::arena::Handle<T, M>
 copy aggregate
 ```
 
-`std::arena::Handle<T>` は arena 内の値を指す opaque な ID で、値を
+`std::arena::Handle<T, M>` は arena 内の値を指す opaque な ID で、値を
 所有するのは arena です。ID の複製は解放責務を生まないため copy です
 (§10)。
 
@@ -1326,7 +1327,7 @@ owner aggregate と、明示 deinit を宣言した struct / union
 
 木や入れ子のような再帰的データ構造は、子を `std::mem::Box<T>` の
 struct / union payload として直接持つ形でも、要素を
-`std::arena::Arena<T>` に置き、子を `?arena::Handle<T>` field で
+`std::arena::Arena<T, M>` に置き、子を `?arena::Handle<T, M>` field で
 参照する平坦な形でも表せます(§7 optional field、§10)。
 
 owner field または owner payload を含む struct / union は owner aggregate です。
@@ -1664,7 +1665,7 @@ fn main() -> void {
 
 ## 10. arena / handle
 
-Kizu は、長寿命の参照を複雑な lifetime で表さず、`std::arena::Arena<T>` と `std::arena::Handle<T>` で表します。
+Kizu は、長寿命の参照を複雑な lifetime で表さず、`std::arena::Arena<T, M>` と `std::arena::Handle<T, M>` で表します。
 
 ```kizu
 import std::mem;
@@ -1676,7 +1677,7 @@ let alice = users.add(allocator, User { name: "alice" });
 print(users.at(alice).name);
 ```
 
-`std::arena::Arena<T>` は複数の `T` を所有します。
+`std::arena::Arena<T, M>` は複数の `T` を所有します。
 core arena の構築は明示 allocator capability を要求し、
 `std::arena::new<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
 `arena::new` は header そのものを作るだけで何も確保しないので、失敗しません。
@@ -1684,27 +1685,35 @@ storage を買うのは最初の `add` で、失敗を言うのもそこです�
 allocator が断るのは壊れたプログラムではなく(`mem::fixed_buffer` は使い切るのが
 普通の動作です)、`add` は `std::mem::Error!` で返します。
 
-`std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
+`std::arena::Handle<T, M>` はポインタではありません。arena 内の値を指す opaque な ID です。
 値を所有するのは arena なので、handle は copy 型です(§8)。
 
 ルール:
 
-* `std::arena::new<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る。
-  header そのものを作るだけで何も確保しない
-* `std::arena::Arena<T>.add(allocator, value)` は value を arena に move する。
+* `std::arena::new<T, M>(allocator)` は `Allocator` を明示して
+  `std::arena::Arena<T, M>` を作る。header そのものを作るだけで何も確保しない
+* `M` は marker で、この arena がどれかを型で名乗る。field を持たない struct
+  でなければならず、実行時には何も持たない。marker が違えば型が違うので、
+  同じ要素型の arena が複数あっても handle は互いに通らない(ADR-0134)
+* 1 つの marker を名乗れる `std::arena::new` は program 全体で 1 か所に限る。
+  2 つの arena が同じ marker を名乗ると handle が交換可能に戻るため
+* std source だけが marker 抜きの `std::arena::Arena<T>` を書ける。arena の
+  method はどの marker でも同じように動くので、receiver の marker を検査が
+  付け直す
+* `std::arena::Arena<T, M>.add(allocator, value)` は value を arena に move する。
   storage を買う call なので allocator を名指す(§14.3)
-* `std::arena::Arena<T>.add(allocator, value)` は
-  `std::mem::Error!std::arena::Handle<T>` を返す。storage を買う call なので、
+* `std::arena::Arena<T, M>.add(allocator, value)` は
+  `std::mem::Error!std::arena::Handle<T, M>` を返す。storage を買う call なので、
   allocator が断ったことを言うのもここ(§11)
-* `std::arena::Arena<T>.at(handle)` は arena に tied な shared borrow `&T` を返す。
+* `std::arena::Arena<T, M>.at(handle)` は arena に tied な shared borrow `&T` を返す。
   直接 field / method / match を読め、local binding に束縛した場合は最後の使用まで
   arena を borrow する。その間は `add` / `deinit` を実行できず、要素を move
   できない。borrow parameter を根に持つ arena からは返せるが、local arena 由来の
   borrow は function から escape できない
-* `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
-* `std::arena::Arena<T>.deinit(allocator)` は initialized element を各要素の
+* `std::arena::Arena<T, M>.at_mut(handle)` は borrow optional `?&var T` を返す
+* `std::arena::Arena<T, M>.deinit(allocator)` は initialized element を各要素の
   `deinit(allocator)` で consume してから arena storage を解放し、binding を無効化する
-* `std::arena::Arena<T>.deinit(allocator)` は owned local receiver の呼び出しだけを許可する
+* `std::arena::Arena<T, M>.deinit(allocator)` は owned local receiver の呼び出しだけを許可する
 * `owner.field.deinit(allocator)` は値を保持している場所の direct field だけ許可する(§8)
 * handle は copy 型で、代入・値渡し・格納しても元の binding は使い続けられる。
   複製は元と同じ arena 由来を引き継ぎ、以下の規則は複製にも適用される
@@ -1713,18 +1722,18 @@ allocator が断るのは壊れたプログラムではなく(`mem::fixed_buffer
 * `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない
 * handle は raw pointer ではない
 * arena からの削除は実装しない
-* `?arena::Handle<T>` は struct field に置ける(§7)。「子が無い」を
+* `?arena::Handle<T, M>` は struct field に置ける(§7)。「子が無い」を
   番兵値でなく型で表し、再帰的データ構造は arena + optional handle の
   平坦な形で書く
-* handle と arena の取り違えは、両者の由来が判明している場合だけ拒否する。
-  borrow で受けた arena や field から読んだ handle は由来不明として通り、
-  契約は署名が運ぶ(ADR-0098)。由来不明の handle が範囲外を指した場合、
-  `at_mut` は null を返し、`at` は runtime error で停止する
-* 署名に借用 `Arena<T>` 引数と値渡し `Handle<T>` 引数が同じ `T` で
-  1 つずつだけ現れる場合、caller はその組を「この handle はこの arena の
-  もの」という契約として署名から導出し、call site で両引数の由来が判明して
-  いれば一致を検査する。片方でも由来不明なら通り、契約は次の署名に連鎖する。
-  同じ `T` の arena 引数が複数あるなど組が曖昧な署名からは導出しない
+* handle と arena の取り違えは marker が型で拒否する。field を経由しても
+  container に入れても関数境界を越えても、型が運ぶので出自は消えない
+* 同じ 1 つの `std::arena::new` から作った 2 つの arena は同じ marker を持つ。
+  その 2 つの取り違えは、同一 frame の local どうしであれば binding ごとの
+  由来検査が拒否し、それ以外は通る。`at_mut` は null を返し、`at` は runtime
+  error で停止する
+* 任意の arena に対して動く function は marker を静的パラメータにして書ける
+  (`fn read<M>(a: &Arena<T, M>, h: Handle<T, M>)`)。struct は marker を
+  具体的に名指す(§7)
 
 `at_mut` は handle の指す値への borrow optional `?&var T` を返し、capture
 条件だけが消費できます(§7)。`at_mut` は mutable な受け手(`var` binding
@@ -1739,8 +1748,8 @@ if users.at_mut(alice) |u| {
 }
 ```
 
-handle の由来は静的 provenance 検査が保証するため、capture の else 分岐が
-受けるのは検査をすり抜けた別 arena handle の残余だけで、通常の経路では
+handle が名指す arena は marker が型で固定するので、capture の else 分岐が
+受けるのは同じ `new` から作られた別 instance の handle だけで、通常の経路では
 到達しません。
 
 ## 11. エラー処理
@@ -2612,7 +2621,7 @@ size を受け取ります。2 関数は `unsafe fn` で、契約 —— 返し�
 同じ規則に従います。
 
 tie のない `Allocator`(`page_allocator()`)は copy 型です。`Array<T>`、
-`String`、`Map<K, V>`、`Box<T>`、`std::arena::Arena<T>` の構築に渡しても
+`String`、`Map<K, V>`、`Box<T>`、`std::arena::Arena<T, M>` の構築に渡しても
 allocator binding は move されません。
 `Allocator` 値そのものに user-visible cleanup method はありません。
 allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
@@ -2727,7 +2736,7 @@ mutable borrow 中はすべての操作が capture の最終使用まで待ち�
 `Map.key_at` が返す key は、key 型が `[]u8` のときだけ map storage への view
 なので capture 限定です。整数 key は値なので、その制限は付きません。
 
-`Arena.at(handle)` は handle provenance により要素の存在を静的に扱えるため、
+`Arena.at(handle)` は handle が名指す arena を marker が型で固定するため、
 optional ではない `&T` を返します。直接 read するほか local binding に保存でき、
 その binding の最後の使用まで arena を shared borrow します。borrow 中の `add` と
 `deinit`、および borrow からの owner move は拒否します。borrow parameter を根に

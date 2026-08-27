@@ -15,11 +15,13 @@ import std::string;
 // a caller-owned Ast, which retains both syntax and parsed type graphs.
 
 /// Consumes tokens and builds one source file into a caller-owned AST graph.
+pub struct Tokens {}
+
 pub struct Parser {
     allocator: Allocator,
     scanner: lexer::Lexer,
-    tokens: arena::Arena<token::Token>,
-    stream: array::Array<arena::Handle<token::Token>>,
+    tokens: arena::Arena<token::Token, Tokens>,
+    stream: array::Array<arena::Handle<token::Token, Tokens>>,
     position: i64,
     diagnostics_store: array::Array<diagnostic::Diagnostic>,
     safety: ?ast::Text
@@ -34,9 +36,9 @@ struct NameList {
 pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
     var input = move scanner;
     errdefer input.deinit(allocator);
-    var tokens = arena::new<token::Token>(allocator);
+    var tokens = arena::new<token::Token, Tokens>(allocator);
     errdefer tokens.deinit(allocator);
-    var stream = array::new<arena::Handle<token::Token>>(allocator);
+    var stream = array::new<arena::Handle<token::Token, Tokens>>(allocator);
     errdefer stream.deinit(allocator);
     try append_next_token(allocator, &var input, &var tokens, &var stream);
     try append_next_token(allocator, &var input, &var tokens, &var stream);
@@ -2536,7 +2538,7 @@ fn (self: &var Parser) parse_type_name(tree: &var ast::Ast) -> !?typ::Type {
 
 fn (self: &var Parser) parse_type_node(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     match self.current_kind() {
         Bang => return self.parse_error_union_type(builder),
         Amp => return self.parse_borrow_type(builder),
@@ -2558,7 +2560,7 @@ fn (self: &var Parser) parse_type_node(
 // else may follow it.
 fn (self: &var Parser) parse_unsafe_func_type(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     if self.peek_kind() != token::Kind::Function {
         try self.error_token("expected `fn` after `unsafe` in a type, got ", self.peek_token());
         return null;
@@ -2571,13 +2573,13 @@ fn (self: &var Parser) parse_unsafe_func_type(
 fn (self: &var Parser) parse_func_type(
     builder: &var typ::Builder,
     unsafe_call: bool
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     if self.peek_kind() != token::Kind::LParen {
         try self.error_token("expected `(` after `fn` in a type, got ", self.peek_token());
         return null;
     }
     try self.next_token();
-    var params = array::new<arena::Handle<typ::Node>>(self.allocator);
+    var params = array::new<arena::Handle<typ::Node, typ::TreeNodes>>(self.allocator);
     errdefer params.deinit(self.allocator);
     if self.peek_kind() != token::Kind::RParen {
         while true {
@@ -2622,7 +2624,7 @@ fn (self: &var Parser) parse_func_type(
 
 fn (self: &var Parser) parse_optional_type(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     try self.next_token();
     let parsed = try self.parse_type_node(builder);
     if parsed |inner| {
@@ -2635,7 +2637,7 @@ fn (self: &var Parser) parse_optional_type(
 
 fn (self: &var Parser) parse_error_union_type(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     try self.next_token();
     let parsed = try self.parse_type_node(builder);
     if parsed |ok| {
@@ -2649,7 +2651,7 @@ fn (self: &var Parser) parse_error_union_type(
 
 fn (self: &var Parser) parse_borrow_type(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     try self.next_token();
     let mutable = self.current_kind() == token::Kind::Var;
     if mutable {
@@ -2667,12 +2669,12 @@ fn (self: &var Parser) parse_borrow_type(
 
 fn (self: &var Parser) parse_named_type(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     var path = try self.parse_type_path();
     errdefer path.deinit(self.allocator);
     let allow_const = type_path_is_ptr(&path);
     if self.peek_kind() == token::Kind::Bang {
-        let args = array::new<arena::Handle<typ::Node>>(self.allocator);
+        let args = array::new<arena::Handle<typ::Node, typ::TreeNodes>>(self.allocator);
         let err = try builder.add(typ::Node::Name(typ::Name {
             path: move path,
             args: move args
@@ -2689,13 +2691,13 @@ fn (self: &var Parser) parse_named_type(
         return null;
     }
     if self.peek_kind() != token::Kind::Lt {
-        let args = array::new<arena::Handle<typ::Node>>(self.allocator);
+        let args = array::new<arena::Handle<typ::Node, typ::TreeNodes>>(self.allocator);
         return try builder.add(typ::Node::Name(typ::Name {
             path: move path,
             args: move args
         }));
     }
-    var args = array::new<arena::Handle<typ::Node>>(self.allocator);
+    var args = array::new<arena::Handle<typ::Node, typ::TreeNodes>>(self.allocator);
     errdefer args.deinit(self.allocator);
     try self.next_token();
     try self.next_token();
@@ -2731,7 +2733,7 @@ fn (self: &var Parser) parse_type_path() -> !array::Array<string::String> {
 
 fn (self: &var Parser) parse_type_arguments(
     builder: &var typ::Builder,
-    args: &var array::Array<arena::Handle<typ::Node>>,
+    args: &var array::Array<arena::Handle<typ::Node, typ::TreeNodes>>,
     allow_const: bool
 ) -> !bool {
     while true {
@@ -2929,7 +2931,7 @@ fn (self: &var Parser) parse_static_type_arg(
 fn (self: &var Parser) parse_type_argument(
     builder: &var typ::Builder,
     allow_const: bool
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     let is_const = self.current_kind() == token::Kind::Ident and
         token_literal_equal(self.current_token(), "const");
     if !is_const {
@@ -2949,7 +2951,7 @@ fn (self: &var Parser) parse_type_argument(
 
 fn (self: &var Parser) parse_bracket_type(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     if self.peek_kind() == token::Kind::Int {
         return self.parse_buffer_type(builder);
     }
@@ -2966,7 +2968,7 @@ fn (self: &var Parser) parse_bracket_type(
 
 fn (self: &var Parser) parse_buffer_type(
     builder: &var typ::Builder
-) -> !?arena::Handle<typ::Node> {
+) -> !?arena::Handle<typ::Node, typ::TreeNodes> {
     try self.next_token();
     let current = self.current_token();
     var size = 0;
@@ -3342,7 +3344,7 @@ fn can_type_apply_target(tree: &ast::Ast, expression: ast::Expression) -> bool {
 }
 
 fn retained_text_has_bytes(
-    texts: &arena::Arena<string::String>,
+    texts: &arena::Arena<string::String, ast::Texts>,
     value: ast::Text
 ) -> bool {
     return retained_string_has_bytes(texts.at(value.node));
@@ -3452,8 +3454,8 @@ fn append_next_token(
 
     allocator: Allocator,
     scanner: &var lexer::Lexer,
-    tokens: &var arena::Arena<token::Token>,
-    stream: &var array::Array<arena::Handle<token::Token>>
+    tokens: &var arena::Arena<token::Token, Tokens>,
+    stream: &var array::Array<arena::Handle<token::Token, Tokens>>
 ) -> !void {
     // Reserve before scanning so stream growth failure cannot leave the
     // scanner frontier ahead of the ordered handle stream.
