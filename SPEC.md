@@ -2644,7 +2644,10 @@ entry 列とその index の 5 word で、allocator も element size も覚え�
 `defer` / `errdefer` の cleanup が運ぶ引数は、**`defer` が書かれた場所で読み**、
 block を出るときに走るのはその値です(§8)。
 
-解放に渡す `Allocator` は、その owner を作ったものと同じでなければなりません。
+**確保に渡す `Allocator` も、解放に渡すものも、その owner を作ったものと同じで
+なければなりません。** 確保だけ別の allocator から取ると、解放は自分が配って
+いない byte を返すことになります —— `append` / `insert` / `add` / `reserve` と
+`deinit` は 1 つの規則の表と裏です。
 検査できるのは tied allocator だけです —— tie を持たない `page_allocator()`
 同士は区別が付かず、区別する必要もないためです。tied allocator から作った
 owner を別の tied allocator で、あるいは tie の無い allocator で解放するのは

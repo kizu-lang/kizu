@@ -35,7 +35,7 @@ fn (self: &var Checker) check_array_method(
     // header keeps none of its own (ADR-0132).
     if self.names.is(method, "append") or self.names.is(method, "append_bytes") or
         self.names.is(method, "reserve") {
-        if try self.read_array_grow_allocator(tree, env, method, args) |failed| {
+        if try self.read_array_grow_allocator(tree, env, array, method, args) |failed| {
             return move failed;
         }
         let rest = try self.rest_args(tree, args, 1);
@@ -559,7 +559,7 @@ fn (self: &var Checker) check_map_method(
         return move failed;
     }
     if self.names.is(method, "insert") {
-        return self.check_owned_map_insert(tree, env, key_type, value_type, args, out);
+        return self.check_owned_map_insert(tree, env, map_value, key_type, value_type, args, out);
     }
     if self.names.is(method, "get") {
         if try self.check_map_key_arg(tree, env, method, key_type, args) |failed| {
@@ -658,6 +658,7 @@ fn (self: &var Checker) check_map_at_condition(
 fn (self: &var Checker) check_owned_map_insert(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    map_value: BindingHandle,
     key_type: Name,
     value_type: Name,
     args: ast::ExpressionList,
@@ -671,7 +672,9 @@ fn (self: &var Checker) check_owned_map_insert(
         );
     }
     let allocator_arg = args.get_or_panic(tree, 0);
-    if try self.read_grow_allocator(tree, env, "Map.insert", allocator_arg) |failed| {
+    if try self.read_grow_allocator(
+        tree, env, "map", "Map.insert", map_value, allocator_arg
+    ) |failed| {
         return move failed;
     }
     let first = args.get_or_panic(tree, 1);
@@ -781,6 +784,7 @@ fn (self: &var Checker) check_map_read_no_args(
 fn (self: &var Checker) read_array_grow_allocator(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    array: BindingHandle,
     method: Name,
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
@@ -791,18 +795,9 @@ fn (self: &var Checker) read_array_grow_allocator(
             Arg::Str(method), Arg::Int(count)
         );
     }
+    let what = try self.names.format("Array.%s", method, empty_name(), empty_name());
     let first = args.get_or_panic(tree, 0);
-    var got = empty_name();
-    if try self.read_expr(tree, env, first, &var got) |failed| {
-        return move failed;
-    }
-    if !self.names.is(got, "Allocator") {
-        return try self.error2(
-            tree, ast::zero_span(), "array error: `Array.%s` expects Allocator, got %s",
-            Arg::Str(method), Arg::Str(got)
-        );
-    }
-    return null;
+    return self.read_grow_allocator_named(tree, env, "array", what, array, first);
 }
 
 /// Reads the single Allocator a release names. A value keeps no copy of the
@@ -837,12 +832,31 @@ fn (self: &var Checker) read_release_allocator(
     return self.check_release_tie(tree, env, label, receiver, first);
 }
 
-/// Reads the leading Allocator a storage-asking container method names, the
-/// Go `readGrowAllocator`.
+/// Reads the leading Allocator a storage-asking container method names, and
+/// requires it to be the one the container was built from, the Go
+/// `readGrowAllocator`. The storage a growth buys is released by the
+/// container's `deinit`, which names one allocator for all of it: a growth
+/// that named another would leave the release freeing bytes it never handed
+/// out (ADR-0132).
 fn (self: &var Checker) read_grow_allocator(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    kind: []u8,
     what: []u8,
+    receiver: ?BindingHandle,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let label = try self.names.intern(what);
+    return self.read_grow_allocator_named(tree, env, kind, label, receiver, arg);
+}
+
+/// The same, for a caller that already named the method.
+fn (self: &var Checker) read_grow_allocator_named(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    kind: []u8,
+    what: Name,
+    receiver: ?BindingHandle,
     arg: ast::Expression
 ) -> !?diagnostic::Diagnostic {
     var got = empty_name();
@@ -850,13 +864,13 @@ fn (self: &var Checker) read_grow_allocator(
         return move failed;
     }
     if !self.names.is(got, "Allocator") {
-        let label = try self.names.intern(what);
-        return try self.error2(
-            tree, ast::zero_span(), "map error: `%s` expects Allocator, got %s",
-            Arg::Str(label), Arg::Str(got)
+        let kind_name = try self.names.intern(kind);
+        return try self.error3(
+            tree, ast::zero_span(), "%s error: `%s` expects Allocator, got %s",
+            Arg::Str(kind_name), Arg::Str(what), Arg::Str(got)
         );
     }
-    return null;
+    return self.check_release_tie(tree, env, what, receiver, arg);
 }
 
 /// Requires the allocator a release names to be the one the value was made
@@ -881,7 +895,11 @@ fn (self: &var Checker) check_release_tie(
         }
         sources = sources + 1;
         if tied |named| {
-            if named.node == source.target.node {
+            // By id, not by handle: a branch or a loop body is checked against
+            // a clone of the scope, so the allocator an argument resolves to
+            // there is a copy of the one the owner recorded. The id copies
+            // with the binding and names the same declaration on both sides.
+            if self.binding(named).id == self.binding(source.target).id {
                 return null;
             }
         }
@@ -1227,15 +1245,10 @@ fn (self: &var Checker) check_arena_add(
     let elem = try self.arena_element_type(arena) orelse
         return try self.not_an_arena_error(tree, arena);
     let allocator_arg = args.get_or_panic(tree, 0);
-    var allocator = empty_name();
-    if try self.read_expr(tree, env, allocator_arg, &var allocator) |failed| {
+    if try self.read_grow_allocator(
+        tree, env, "arena", "arena.add", arena, allocator_arg
+    ) |failed| {
         return move failed;
-    }
-    if !self.names.is(allocator, "Allocator") {
-        return try self.error1(
-            tree, ast::zero_span(), "arena error: `arena.add` expects Allocator, got %s",
-            Arg::Str(allocator)
-        );
     }
     let first = args.get_or_panic(tree, 1);
     var got = empty_name();
