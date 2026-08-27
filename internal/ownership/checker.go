@@ -1220,7 +1220,7 @@ func (c *Checker) checkArenaBorrowReturn(
 	}
 	if !paramRootedBinding(source.target) {
 		return true, errorAt(expressionSpan(expr),
-			"borrow error: arena.at borrow from local `%s` cannot escape", source.target.name)
+			"borrow error: Arena.at borrow from local `%s` cannot escape", source.target.name)
 	}
 	return true, nil
 }
@@ -3773,7 +3773,7 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 			return typeName, nil
 		}
 		return "", errorAt(expressionSpan(expr),
-			"arena error: arena.at returns &T and cannot be moved")
+			"arena error: Arena.at returns &T and cannot be moved")
 	}
 	if st, ok := expr.(*ast.StructLiteralExpr); ok {
 		return c.moveStructLiteralExpr(st, env)
@@ -5060,7 +5060,7 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 }
 
 // checkBuiltinArenaTypeApply validates the Arena constructor and the storage
-// primitives reserved to std::arena's owner-element cleanup wrapper.
+// primitives std::arena's methods forward to.
 func (c *Checker) checkBuiltinArenaTypeApply(
 	name string,
 	typeArg string,
@@ -5075,26 +5075,96 @@ func (c *Checker) checkBuiltinArenaTypeApply(
 	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (string, error) {
-			if method == "deinit" {
-				// The raw primitive frees the storage through the allocator
-				// the release names: the header keeps none of its own
-				// (ADR-0131, ADR-0132).
-				err := c.readReleaseAllocator("Arena.deinit", nil, rest, env)
-				return "void", err
-			}
-			if len(rest) != 0 {
-				return "", errorf("arena error: `Arena.%s` expects 0 args, got %d",
-					method, len(rest))
-			}
-			switch method {
-			case "len":
-				return "i64", nil
-			case "pop_or_panic":
-				return typeArg, nil
-			default:
-				return "", errorf("arena error: Arena has no storage primitive `%s`", method)
-			}
+			return c.checkArenaPrimitiveMethod(typeArg, method, rest, env)
 		}, args, env)
+}
+
+// checkArenaPrimitiveMethod validates Arena primitives that back source
+// wrappers. Handle provenance is not asked here: only std::arena's own bodies
+// reach a primitive, and the handle they pass on is the one the call site
+// already had checked against the arena it names.
+func (c *Checker) checkArenaPrimitiveMethod(
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
+	case "add":
+		return c.readArenaPrimitiveAdd(elem, args, env)
+	case "at":
+		if err := c.readArenaPrimitiveHandle("Arena.at", elem, args, env); err != nil {
+			return "", err
+		}
+		return "&" + elem, nil
+	case "at_mut":
+		if err := c.readArenaPrimitiveHandle("Arena.at_mut", elem, args, env); err != nil {
+			return "", err
+		}
+		return "?&var " + elem, nil
+	case "deinit":
+		// The raw primitive frees the storage through the allocator the
+		// release names: the header keeps none of its own (ADR-0131,
+		// ADR-0132).
+		err := c.readReleaseAllocator("Arena.deinit", nil, args, env)
+		return "void", err
+	}
+	if len(args) != 0 {
+		return "", errorf("arena error: `Arena.%s` expects 0 args, got %d", name, len(args))
+	}
+	switch name {
+	case "len":
+		return "i64", nil
+	case "pop_or_panic":
+		return elem, nil
+	default:
+		return "", errorf("arena error: Arena has no storage primitive `%s`", name)
+	}
+}
+
+// readArenaPrimitiveAdd reads the allocator the storage is bought from and the
+// element handed over to the arena.
+func (c *Checker) readArenaPrimitiveAdd(
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 2 {
+		return "", errorf("arena error: `Arena.add` expects 2 args, got %d", len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", errorf("arena error: `Arena.add` expects Allocator, got %s", got)
+	}
+	if _, err := c.readExpr(args[1], env); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("std::arena::Handle<%s>", elem), nil
+}
+
+// readArenaPrimitiveHandle reads the one handle argument an arena accessor
+// takes. what names the accessor in errors.
+func (c *Checker) readArenaPrimitiveHandle(
+	what string,
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if len(args) != 1 {
+		return errorf("arena error: `%s` expects 1 arg, got %d", what, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return err
+	}
+	want := fmt.Sprintf("std::arena::Handle<%s>", elem)
+	if got != want {
+		return errorf("arena error: `%s` expects %s, got %s", what, want, got)
+	}
+	return nil
 }
 
 // checkBuiltinTestingTypeApply validates typed std::testing primitives.
@@ -6053,7 +6123,7 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	if c.containsArenaAt(expr.Receiver, env) {
 		return "", errorAt(
 			expr.Span,
-			"arena error: arena.at returns &T, so its fields cannot be moved",
+			"arena error: Arena.at returns &T, so its fields cannot be moved",
 		)
 	}
 	if err := c.consumeOwnerField(expr, env); err != nil {
@@ -6611,7 +6681,7 @@ func (c *Checker) checkFieldArenaAt(
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
-		return "", errorf("arena error: `arena.at` expects 1 arg, got %d", len(args))
+		return "", errorf("arena error: `Arena.at` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
@@ -6720,9 +6790,6 @@ type containerAccessTable struct {
 // name what it does to storage before any per-method checker sees it. Box is
 // not here: its borrows are per-field and its conflicts are checked where the
 // field borrow forms.
-// arenaTypeName is the container whose methods the compiler declares itself.
-const arenaTypeName = "std::arena::Arena"
-
 var containerAccessTables = map[string]containerAccessTable{
 	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
 		"append": accessMutate, "append_bytes": accessMutate, "reserve": accessMutate,
@@ -6760,18 +6827,6 @@ var containerAccessTables = map[string]containerAccessTable{
 		"at_mut": accessCapture,
 		"deinit": accessCleanup,
 	}},
-}
-
-// ArenaMethodWritesHeader reports whether an Arena method writes through the
-// arena's own header. Every other container declares its methods in std, where
-// `&var self` says this; Arena's are the compiler's own, so the lowerer asks
-// here instead -- and this is the same classification
-// checkContainerMethodAccess refuses borrow conflicts by, so the two cannot
-// come to disagree about what a method does to storage. A cleanup is not among
-// them: it reads the header to release what it points at and writes nothing
-// back, since the binding is gone by the time it returns.
-func ArenaMethodWritesHeader(name string) bool {
-	return containerAccessTables[arenaTypeName].methods[name] == accessMutate
 }
 
 // checkContainerMethodAccess looks a container method up in the shared table
@@ -7772,13 +7827,13 @@ func (c *Checker) checkImplMethodArg(
 // Array append does: the header keeps none of its own (ADR-0131).
 func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
 	if len(args) != 2 {
-		return "", errorf("arena error: `arena.add` expects 2 args, got %d", len(args))
+		return "", errorf("arena error: `Arena.add` expects 2 args, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
 		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
-	if err := c.readGrowAllocator("arena", "arena.add", arena, args[0], env); err != nil {
+	if err := c.readGrowAllocator("arena", "Arena.add", arena, args[0], env); err != nil {
 		return "", err
 	}
 	got, err := c.moveContextualExpr(args[1], arg, env)
@@ -7786,14 +7841,14 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 		return "", err
 	}
 	if got != arg {
-		return "", errorf("arena error: `arena.add` expects %s, got %s", arg, got)
+		return "", errorf("arena error: `Arena.add` expects %s, got %s", arg, got)
 	}
 	return fmt.Sprintf("std::arena::Handle<%s>", arg), nil
 }
 
 // checkArenaAt reads a handle and returns a shared borrow tied to the arena.
 func (c *Checker) checkArenaAt(arena *binding, args []ast.Expression, env *scope) (string, error) {
-	elem, err := c.checkArenaHandleArg(arena, args, env, "arena.at")
+	elem, err := c.checkArenaHandleArg(arena, args, env, "Arena.at")
 	if err != nil {
 		return "", err
 	}
@@ -7831,7 +7886,7 @@ func (c *Checker) checkArenaDeinit(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if err := c.readReleaseAllocator("arena.deinit", arena, args, env); err != nil {
+	if err := c.readReleaseAllocator("Arena.deinit", arena, args, env); err != nil {
 		return "", err
 	}
 	arena.deinitialized = true

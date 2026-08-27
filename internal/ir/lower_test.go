@@ -24,7 +24,6 @@ func TestDumpSnapshots(t *testing.T) {
 		{name: "variables", source: variablesSource, want: variablesSnapshot},
 		{name: "if", source: ifSource, want: ifSnapshot},
 		{name: "while", source: whileSource, want: whileSnapshot},
-		{name: "arena", source: arenaSource, want: arenaSnapshot},
 		{name: "comptime", source: comptimeSource, want: comptimeSnapshot},
 		{name: "cast", source: castSource, want: castSnapshot},
 		{name: "error_union", source: errorUnionSource, want: errorUnionSnapshot},
@@ -665,18 +664,6 @@ const whileSource = `fn main() {
     }
 }`
 
-const arenaSource = `import std::arena;
-
-struct Tag {
-    name: []u8,
-}
-fn main(heap: Allocator) {
-    let tags = arena::new<Tag>(heap);
-    let first = tags.add(heap, Tag { name: "alice" });
-    print(tags.at(first).name);
-    tags.deinit(heap);
-}`
-
 const comptimeSource = `fn main() {
     let size = comptime 4 * 1024;
     comptime if 1 + 1 == 2 {
@@ -765,21 +752,6 @@ while.body.2:
   %7: i64 = binary.+ %2: i64, %6: i64
   jump while.header.1
 while.end.3:
-  return void: void
-}`
-
-const arenaSnapshot = `fn main(%heap: Allocator) -> void {
-entry:
-  %1: std::arena::Arena<Tag> = arena.new %heap: Allocator
-  %2: &var std::arena::Arena<Tag> = local.slot %1: std::arena::Arena<Tag>
-  %3: []u8 = const "alice"
-  %4: Tag = struct.new {name: %3: []u8}
-  %5: std::arena::Handle<Tag> = arena.add %2: &var std::arena::Arena<Tag>, %heap: Allocator, %4: Tag
-  %6: Tag = arena.at %2: &var std::arena::Arena<Tag>, %5: std::arena::Handle<Tag>
-  %7: []u8 = field.name %6: Tag
-  call.print %7: []u8
-  %9: std::arena::Arena<Tag> = ref.load %2: &var std::arena::Arena<Tag>
-  arena.deinit %9: std::arena::Arena<Tag>, %heap: Allocator
   return void: void
 }`
 

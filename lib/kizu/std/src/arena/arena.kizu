@@ -1,7 +1,9 @@
-// Arena storage is provided by the Go implementation for now:
 // `std::arena::Arena<T>` and `std::arena::Handle<T>` are types the compiler
-// knows. This file declares the public construction and cleanup boundary so
-// owner elements follow the same source-visible deinit cascade as Array.
+// knows, and the storage behind them is the array's (ADR-0131). Every method
+// an arena has is declared here, forwarding to one primitive, the way
+// std::array and std::map do: the declaration is what says how the receiver
+// arrives -- `&var self` writes through the header, `&self` reads it -- so the
+// checkers and the lowerer read one line instead of each restating it.
 
 // new builds the header an empty arena is and asks the allocator for nothing,
 // so it has nothing to fail at. The first `add` is what buys storage, and that
@@ -9,6 +11,31 @@
 // here is what the checker holds every later call to.
 pub fn new<T>(allocator: Allocator) -> std::arena::Arena<T> {
     return std::internal::builtin::arena<T>(allocator);
+}
+
+// add puts the value in the arena and names the allocator the storage is
+// bought from, the way `Array.append` does: an Arena header is `{data, len,
+// cap}` and keeps no allocator of its own (ADR-0131, ADR-0132). The handle it
+// returns is the length the add started from, and nothing is removed from the
+// middle, so that index names the element for as long as the arena holds it.
+fn (self: &var std::arena::Arena<T>) add<T>(
+    allocator: Allocator,
+    value: T
+) -> std::arena::Handle<T> {
+    return std::internal::builtin::arena_add<T>(self, allocator, value);
+}
+
+// at reads the element a handle names. A handle is only ever made by `add` on
+// this arena, so the read is not optional the way `Array.at(index)` is: an
+// index the caller computed can be outside the array, a handle cannot.
+fn (self: &std::arena::Arena<T>) at<T>(handle: std::arena::Handle<T>) -> &T {
+    return std::internal::builtin::arena_at<T>(self, handle);
+}
+
+fn (self: &var std::arena::Arena<T>) at_mut<T>(
+    handle: std::arena::Handle<T>
+) -> ?&var T {
+    return std::internal::builtin::arena_at_mut<T>(self, handle);
 }
 
 // deinit consumes every initialized element, then releases the arena storage.

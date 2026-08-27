@@ -710,7 +710,10 @@ fn is_string_mutating_method(name: []u8) -> bool {
         mem::equal_bytes(name, "deinit");
 }
 
-// Validates the std::arena::Arena<T> methods a receiver call may name.
+// Validates the receiver-sensitive std::arena::Arena<T> methods, then reads
+// the rest off std's declaration the way Array and Box do. What is left here
+// is what a declaration cannot state: which receiver place a method may come
+// from, and that `at_mut` hands out a borrow only a capture can consume.
 fn (self: &var Checker) check_arena_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -720,72 +723,75 @@ fn (self: &var Checker) check_arena_method(
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if mem::equal_bytes(name, "add") {
-        return self.check_arena_add(tree, scope, elem, args, out);
-    }
-    if mem::equal_bytes(name, "at") {
-        return self.check_arena_at(tree, scope, elem, args, out);
-    }
     if mem::equal_bytes(name, "at_mut") {
         return self.check_arena_at_mut(tree, scope, field, elem, args, out);
     }
     if mem::equal_bytes(name, "deinit") {
-        return self.check_arena_deinit(tree, scope, field, args, out);
+        if try self.check_arena_cleanup_receiver(tree, scope, field) |problem| {
+            return move problem;
+        }
     }
-    var message = string::new(self.allocator);
-    errdefer message.deinit(self.allocator);
-    try message.append_bytes(self.allocator, "unknown arena method `");
-    try message.append_bytes(self.allocator, name);
-    try message.append_byte(self.allocator, cast<u8>(96));
-    return try self.checker_message_at("type error", ast::zero_span(), move message);
+    return self.check_arena_std_method(tree, scope, elem, name, args, out);
 }
 
-// Validates std::arena::Arena<T>.add(allocator, value). The add is what buys
-// the storage the element goes in, so it names the allocator it buys from: an
-// arena header keeps none of its own (ADR-0131, ADR-0132).
+// Reads one Arena method off std's declaration.
+fn (self: &var Checker) check_arena_std_method(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    elem: Type,
+    name: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var type_args = array::new<Type>(self.allocator);
+    defer type_args.deinit(self.allocator);
+    try type_args.append(self.allocator, elem);
+    return self.check_std_method(
+        tree,
+        scope,
+        "std::arena::Arena",
+        &type_args,
+        "Arena",
+        name,
+        args,
+        0,
+        out
+    );
+}
+
+// Validates the arena_add primitive: the add is what buys the storage the
+// element goes in, so it names the allocator it buys from -- an arena header
+// keeps none of its own (ADR-0131, ADR-0132).
 fn (self: &var Checker) check_arena_add(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     elem: Type,
     args: ast::ExpressionList,
+    offset: i64,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if args.len(tree) != 2 {
-        return try self.named_arity_error("arena.add", 2, args.len(tree));
+    let count = args.len(tree) - offset;
+    if count != 2 {
+        return try self.receiver_arity_error("Arena", "add", 2, count);
     }
-    let allocator_arg = args.get_or_panic(tree, 0);
+    let allocator_arg = args.get_or_panic(tree, offset);
     var allocator = empty_type();
     if try self.check_expr(tree, scope, allocator_arg, &var allocator) |problem| {
         return move problem;
     }
     if !self.types.is_text(allocator, "Allocator") {
         return try self.labeled_arg_type_error(
-            "arena.add", try self.types.intern("Allocator"), allocator);
+            "Arena.add", try self.types.intern("Allocator"), allocator);
     }
-    let argument = args.get_or_panic(tree, 1);
+    let argument = args.get_or_panic(tree, offset + 1);
     var got = empty_type();
     if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;
     }
     if !same_type(got, elem) {
-        return try self.labeled_arg_type_error("arena.add", elem, got);
+        return try self.labeled_arg_type_error("Arena.add", elem, got);
     }
     out.* = try self.intern_arena_handle_type(elem);
-    return null;
-}
-
-// Validates std::arena::Arena<T>.at(std::arena::Handle<T>).
-fn (self: &var Checker) check_arena_at(
-    tree: &var ast::Ast,
-    scope: ScopeHandle,
-    elem: Type,
-    args: ast::ExpressionList,
-    out: &var Type
-) -> !?diagnostic::Diagnostic {
-    if try self.check_arena_handle_arg(tree, scope, elem, args, "arena.at") |problem| {
-        return move problem;
-    }
-    out.* = try self.types.borrow_wrapped_type(true, false, elem);
     return null;
 }
 
@@ -814,12 +820,37 @@ fn (self: &var Checker) check_arena_at_mut(
     // The flag covers exactly this call: off while the argument is read,
     // and back on for the result the call gate reads.
     self.capture_condition = false;
-    if try self.check_arena_handle_arg(tree, scope, elem, args, "Arena.at_mut") |problem| {
+    if try self.check_arena_std_method(tree, scope, elem, "at_mut", args, out) |problem| {
         self.capture_condition = true;
         return move problem;
     }
     self.capture_condition = true;
-    out.* = try self.intern_optional_borrow_type(elem, true);
+    return null;
+}
+
+// Keeps arena cleanup on a place it may consume.
+fn (self: &var Checker) check_arena_cleanup_receiver(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    field: &ast::FieldExpr
+) -> !?diagnostic::Diagnostic {
+    if receiver_ident(tree, field.receiver) |identifier| {
+        let retained = tree.texts.at(identifier.name.node);
+        let binding = retained.as_bytes();
+        if self.scopes.is_borrowed(scope, binding) {
+            return try self.checker_error_at(
+                "type error", ast::zero_span(),
+                "`Arena.deinit` requires owned arena receiver"
+            );
+        }
+        return null;
+    }
+    if !self.direct_field_cleanup_receiver(tree, scope, field.receiver) {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "`Arena.deinit` requires local arena receiver"
+        );
+    }
     return null;
 }
 
@@ -830,12 +861,14 @@ fn (self: &var Checker) check_arena_handle_arg(
     scope: ScopeHandle,
     elem: Type,
     args: ast::ExpressionList,
+    offset: i64,
     label: []u8
 ) -> !?diagnostic::Diagnostic {
-    if args.len(tree) != 1 {
-        return try self.named_arity_error(label, 1, args.len(tree));
+    let count = args.len(tree) - offset;
+    if count != 1 {
+        return try self.named_arity_error(label, 1, count);
     }
-    let argument = args.get_or_panic(tree, 0);
+    let argument = args.get_or_panic(tree, offset);
     var got = empty_type();
     if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;
@@ -844,40 +877,6 @@ fn (self: &var Checker) check_arena_handle_arg(
     if !same_type(got, want) {
         return try self.labeled_arg_type_error(label, want, got);
     }
-    return null;
-}
-
-// Validates explicit arena cleanup syntax.
-fn (self: &var Checker) check_arena_deinit(
-    tree: &var ast::Ast,
-    scope: ScopeHandle,
-    field: &ast::FieldExpr,
-    args: ast::ExpressionList,
-    out: &var Type
-) -> !?diagnostic::Diagnostic {
-    if receiver_ident(tree, field.receiver) |identifier| {
-        let retained = tree.texts.at(identifier.name.node);
-        let binding = retained.as_bytes();
-        if self.scopes.is_borrowed(scope, binding) {
-            return try self.checker_error_at(
-                "type error", ast::zero_span(),
-                "`arena.deinit` requires owned arena receiver"
-            );
-        }
-    } else {
-        if !self.direct_field_cleanup_receiver(tree, scope, field.receiver) {
-            return try self.checker_error_at(
-                "type error", ast::zero_span(),
-                "`arena.deinit` requires local arena receiver"
-            );
-        }
-    }
-    if try self.check_release_allocator(
-        tree, scope, "arena", "deinit", args, 0
-    ) |problem| {
-        return move problem;
-    }
-    out.* = try self.types.void_type();
     return null;
 }
 

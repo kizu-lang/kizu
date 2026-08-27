@@ -47,6 +47,12 @@ backend より上にあります —— Handle が borrow ではなく index で
 `arena.add` は array の append そのもので、**append 直前の len がそのまま
 handle** です。
 
+**method を宣言するのは std で、compiler ではありません。** 4 つの container は
+どれも `lib/kizu/std/src/*/*.kizu` に method を書き、body は
+`std::internal::builtin::*` primitive 1 つへ forward します。receiver がどう届くか
+(`&var self` は header を書く、`&self` は読む)を言うのはその宣言 1 行で、型検査
+も lowerer も slot 解析もそこを読みます。
+
 header は `elem_size` を持ちません。`sizeof(T)` は compile 時に決まる値で、
 compiler はそれを必要とする全ての呼び出しで知っています。header が持つと、
 全ての array と、array of array の全要素が、呼び出し側の持っている値を
@@ -92,6 +98,7 @@ layout table はそれぞれの header の大きさで答えます。
 | `Array` を copy 禁止にして borrow だけで扱う | `Array` は既に move-only。問題は copy の可否ではなく、mutator が header のどこに書くか |
 | pointer header のまま `map::new` / `arena::new` を `!Map` / `!Arena` にする | 失敗の綴りは 1 つになるが、空の map を作るだけで 703 箇所に `try` が付く。header を値にすれば確保自体が無くなり、`try` も要らない |
 | `&T` の copy は残し、`b.show(b.put(v))` を borrow 検査で拒否する | 規則を 1 つ増やして利用者に区別を課す(原理 6)。`&T` が copy にも address にもなること自体が経路 2 本(原理 9)なので、そちらを畳む |
+| Arena の `add` / `at` / `at_mut` は compiler の中に置いたままにする | 「receiver がどう届くか」の答えが 2 本になる。他の 3 つは宣言の `&var self` が答え、Arena だけ ownership checker の access table が答えるので、両者がずれても誰も気づけない(原理 9)。宣言を書けば 4 つとも同じ 1 本を読む |
 
 ## Consequences
 
@@ -110,3 +117,8 @@ layout table はそれぞれの header の大きさで答えます。
   自分自身の check の peak RSS は 489MB から 465MB になった
 - `kizu_array_new` / `kizu_map_new` / `kizu_arena_new` は無くなった。header を
   確保するものが無い。arena は entry point も無く、array のものを使う
+- Arena が std 宣言を持ったことで、それが無いことに対する特例が消えた ——
+  受け渡しを決める `containerSelfPassing`、slot 解析の arena 分岐、
+  ownership から ir へ渡す `ArenaMethodWritesHeader`、型検査の手書き署名、
+  そして受け皿だった `atHeader`。`arena.at` は呼び出しごとに展開されず、
+  `Array.at` と同じく element 型ごとの wrapper 1 つになる

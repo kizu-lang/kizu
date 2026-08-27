@@ -1312,7 +1312,7 @@ fn main() {
     let h = boxes.add(allocator, Box { user: User { name: "alice" } });
     take(boxes.at(h).user);
 }`,
-			want: "arena.at returns &T, so its fields cannot be moved",
+			want: "Arena.at returns &T, so its fields cannot be moved",
 		},
 	}
 	runErrorCases(t, cases)

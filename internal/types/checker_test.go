@@ -1729,7 +1729,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     users.deinit(1);
 }`,
-			want: "`arena.deinit` expects Allocator, got i64",
+			want: "`Arena.deinit` expects Allocator, got i64",
 		},
 	}
 	runErrorCases(t, cases)
