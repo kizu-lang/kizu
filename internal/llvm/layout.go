@@ -40,7 +40,7 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 		return mapHeaderSize, 8, true
 	}
 	// A niche optional is its element: the element spells absence itself.
-	if elem, ok := nicheOptionalElem(typ); ok {
+	if elem, ok := e.nicheOptionalElem(typ); ok {
 		return e.typeLayoutVisiting(elem, seen)
 	}
 	// Every other optional is the two-field aggregate writeOptionalTypes

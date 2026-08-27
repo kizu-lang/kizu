@@ -619,15 +619,22 @@ func (e *emitter) writeArrayOptionalLoadResult(
 	valueName := resultName + ".value"
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
 		valueName, e.llvmType(elem), ptrName, alignSuffix(loadAlign))
-	someName := resultName + ".some"
-	okName := resultName + ".ok"
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n", someName, optType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
-		okName, optType, someName, e.llvmType(elem), valueName)
+	// A niche element is already the optional, so the element the ok path
+	// loaded is what the join hands back and the null path spells absence
+	// with the zero the niche reserves (ADR-0133).
+	okName := valueName
+	if _, ok := e.nicheOptionalElem(instr.Result.Type); !ok {
+		someName := resultName + ".some"
+		okName = resultName + ".ok"
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
+			someName, optType)
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
+			okName, optType, someName, e.llvmType(elem), valueName)
+	}
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
-	fmt.Fprintf(&e.out, "  %s = phi %s [ zeroinitializer, %%%s ], [ %s, %%%s ]\n",
-		resultName, optType, nullLabel, okName, okLabel)
+	fmt.Fprintf(&e.out, "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]\n",
+		resultName, optType, nicheAbsent(elem), nullLabel, okName, okLabel)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

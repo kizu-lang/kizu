@@ -321,8 +321,9 @@ fn (self: &var Emitter) write_opt_some(module: &ir::Module, node: &ir::InstrNode
     let result_type = result_text.as_bytes();
     if typ::optional_elem(result_type) |elem| {
         if node.args.len() == 1 {
-            if niche_optional_elem(result_type) |_| {
-                // The payload is the whole value: a live element is never null.
+            if niche_optional_elem(module, result_type) |_| {
+                // The payload is the whole value: a live element never writes
+                // the zero its niche reserves.
                 let carried = try self.operand(module, node.args.get_or_panic(0));
                 try self.set_value(module, node.result, carried.operand);
                 return null;
@@ -351,8 +352,12 @@ fn (self: &var Emitter) write_opt_null(module: &ir::Module, node: &ir::InstrNode
     if !is_optional_type(result_type) or node.args.len() != 0 {
         return try self.fail0("llvm error: opt.null expects no args and a `?T` result");
     }
-    if niche_optional_elem(result_type) |_| {
-        let absent = try self.names.intern("null");
+    if niche_optional_elem(module, result_type) |elem| {
+        var spelling = "zeroinitializer";
+        if niche_absent_is_null(elem) {
+            spelling = "null";
+        }
+        let absent = try self.names.intern(spelling);
         try self.set_value(module, node.result, absent);
         return null;
     }
@@ -378,9 +383,10 @@ fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode)
         return try self.fail1("llvm error: opt.has expects `?T`, got %s", Arg::Str(shown));
     }
     let result_name = try self.local_name(module, node.result.name);
-    if niche_optional_elem(source_type) |_| {
-        let carried = try self.operand(module, source);
-        try self.line2("  %s = icmp ne ptr %s, null", Arg::Str(result_name), Arg::Str(carried.operand));
+    if niche_optional_elem(module, source_type) |elem| {
+        if try self.write_niche_presence(module, elem, source, result_name) |failed| {
+            return move failed;
+        }
         try self.set_value(module, node.result, result_name);
         return null;
     }
@@ -390,6 +396,42 @@ fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode)
     try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(tag_name), Arg::Str(opt_type), Arg::Str(info.operand));
     try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(result_name), Arg::Str(tag_name));
     try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Tests whether a niche optional holds a value by reading the word its niche
+/// sits in and comparing it against the zero only an absent value writes, the
+/// Go `writeNichePresence`. The read is one extractvalue however deep the word
+/// is, so a niche a struct inherited costs what a bare pointer's costs.
+fn (self: &var Emitter) write_niche_presence(
+    module: &ir::Module,
+    elem: []u8,
+    source: ir::Value,
+    into: ir::Name
+) -> !?diagnostic::Diagnostic {
+    var path = string::new(self.allocator);
+    defer path.deinit(self.allocator);
+    let word = try niche_path(self.allocator, module, elem, &var path) orelse
+        return try self.fail0("llvm error: a niche optional has no niche");
+    let carried = try self.operand(module, source);
+    var field = carried.operand;
+    if path.len() > 0 {
+        let elem_type = try self.llvm_type(module, elem);
+        let path_bytes = path.as_bytes();
+        let indices = try self.names.intern(path_bytes);
+        let helper = try self.next_synthetic_value("opt.niche");
+        field = try self.percent(helper);
+        try self.line4(
+            "  %s = extractvalue %s %s, %s",
+            Arg::Str(field), Arg::Str(elem_type), Arg::Str(carried.operand), Arg::Str(indices)
+        );
+    }
+    let zero = try self.names.intern(niche_word_zero(word));
+    let word_type = try self.names.intern(niche_word_type(word));
+    try self.line4(
+        "  %s = icmp ne %s %s, %s",
+        Arg::Str(into), Arg::Str(word_type), Arg::Str(field), Arg::Str(zero)
+    );
     return null;
 }
 
@@ -409,7 +451,7 @@ fn (self: &var Emitter) write_opt_value(module: &ir::Module, node: &ir::InstrNod
             let result_shown = try self.own(module, node.result.type_name);
             return try self.fail2("llvm error: opt.value returns %s, got %s", Arg::Str(elem_shown), Arg::Str(result_shown));
         }
-        if niche_optional_elem(source_type) |_| {
+        if niche_optional_elem(module, source_type) |_| {
             let carried = try self.operand(module, source);
             try self.set_value(module, node.result, carried.operand);
             return null;

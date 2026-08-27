@@ -43,6 +43,7 @@ type emitter struct {
 	nextLabel       int
 	currentBlock    string
 	blockExitLabel  map[string]string
+	niches          map[string]ir.Value
 	entryParamLoads []string
 	wroteParamLoads bool
 }
@@ -358,12 +359,12 @@ func (e *emitter) writeOptionalTypes() {
 	names := e.sortedOptionalNames()
 	written := 0
 	for _, name := range names {
-		if _, ok := nicheOptionalElem(name); ok {
+		if _, ok := e.nicheOptionalElem(name); ok {
 			continue
 		}
 		elem, _ := optionalElemLLVM(name)
 		fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
-			llvmOptionalTypeName(name), e.llvmType(elem))
+			e.llvmOptionalTypeName(name), e.llvmType(elem))
 		written++
 	}
 	if written > 0 {
@@ -399,30 +400,6 @@ func optionalElemLLVM(name string) (string, bool) {
 	return typ.OptionalElem(name)
 }
 
-// nicheOptionalElem returns the element of an optional whose absence a value
-// of the element type can already spell, and true when there is one.
-//
-// A Box handle is the address of its payload and a borrow is the address of
-// what it borrows; neither can be null while it exists, so null is a spelling
-// no live element uses and `?T` needs no tag beside the pointer to say which
-// it is. That halves the recursive shape this exists for -- a node holding
-// `?Box<Node>` twice is two words, not four -- and costs no branch: presence
-// is the comparison the tag byte was computed from anyway.
-//
-// A Map or an Arena handle is a pointer too, but its constructor hands back
-// null when the allocation fails and the value carries that on, so null is a
-// live value there and the niche is not free.
-func nicheOptionalElem(name string) (string, bool) {
-	elem, ok := optionalElemLLVM(name)
-	if !ok {
-		return "", false
-	}
-	if isBoxLLVMType(elem) || strings.HasPrefix(elem, "&") {
-		return elem, true
-	}
-	return "", false
-}
-
 // writeBorrowOptionalResult hands a nullable runtime pointer back as a borrow
 // optional. A borrow is a niche optional, so the pointer is the whole value:
 // null is the absent one, which is what the runtime already returned. Array.at,
@@ -433,7 +410,7 @@ func (e *emitter) writeBorrowOptionalResult(instr *ir.Instr, ptrName string) err
 			"llvm error: %s expects a borrow optional result, got %s",
 			instr.Op, instr.Result.Type)
 	}
-	if _, ok := nicheOptionalElem(instr.Result.Type); ok {
+	if _, ok := e.nicheOptionalElem(instr.Result.Type); ok {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: ptrName}
 		return nil
 	}
@@ -452,11 +429,11 @@ func (e *emitter) writeBorrowOptionalResult(instr *ir.Instr, ptrName string) err
 	return nil
 }
 
-// llvmOptionalTypeName names the LLVM aggregate of one optional type.
-func llvmOptionalTypeName(name string) string {
-	if elem, ok := nicheOptionalElem(name); ok {
-		_ = elem
-		return "ptr"
+// llvmOptionalTypeName names the LLVM aggregate of one optional type. A niche
+// optional has none of its own: it is spelled as the element it is.
+func (e *emitter) llvmOptionalTypeName(name string) string {
+	if elem, ok := e.nicheOptionalElem(name); ok {
+		return e.llvmType(elem)
 	}
 	elem, _ := optionalElemLLVM(name)
 	return "%kizu.opt." + llvmNamePart(elem)
@@ -788,6 +765,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.currentBlock = ""
 	e.blockExitLabel = map[string]string{}
 	e.entryParamLoads = nil
+	e.precomputeNicheAliases(fn)
 	e.wroteParamLoads = false
 	e.precomputeBlockExitLabels(fn)
 	returnType := e.llvmType(fn.Return)
@@ -1044,8 +1022,9 @@ func (e *emitter) writeOptSome(instr *ir.Instr) error {
 	if !ok || len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: opt.some expects one payload and a `?T` result")
 	}
-	if _, ok := nicheOptionalElem(instr.Result.Type); ok {
-		// The payload is the whole value: a live element is never null.
+	if _, ok := e.nicheOptionalElem(instr.Result.Type); ok {
+		// The payload is the whole value: a live element never writes the
+		// zero its niche reserves.
 		e.values[instr.Result.Name] = valueInfo{
 			typ: instr.Result.Type, operand: e.value(instr.Args[0]).operand}
 		return nil
@@ -1066,8 +1045,9 @@ func (e *emitter) writeOptNull(instr *ir.Instr) error {
 	if _, ok := optionalElemLLVM(instr.Result.Type); !ok || len(instr.Args) != 0 {
 		return fmt.Errorf("llvm error: opt.null expects no args and a `?T` result")
 	}
-	if _, ok := nicheOptionalElem(instr.Result.Type); ok {
-		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+	if elem, ok := e.nicheOptionalElem(instr.Result.Type); ok {
+		e.values[instr.Result.Name] = valueInfo{
+			typ: instr.Result.Type, operand: nicheAbsent(elem)}
 		return nil
 	}
 	resultName := localName(instr.Result.Name)
@@ -1087,9 +1067,11 @@ func (e *emitter) writeOptHas(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: opt.has expects `?T`, got %s", source.Type)
 	}
 	resultName := localName(instr.Result.Name)
-	if _, ok := nicheOptionalElem(source.Type); ok {
-		fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n",
-			resultName, e.value(source).operand)
+	if elem, ok := e.nicheOptionalElem(source.Type); ok {
+		if err := e.writeNichePresence(
+			elem, e.value(source).operand, resultName); err != nil {
+			return err
+		}
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
 		return nil
 	}
@@ -1115,7 +1097,7 @@ func (e *emitter) writeOptValue(instr *ir.Instr) error {
 	if instr.Result.Type != elem {
 		return fmt.Errorf("llvm error: opt.value returns %s, got %s", elem, instr.Result.Type)
 	}
-	if _, ok := nicheOptionalElem(source.Type); ok {
+	if _, ok := e.nicheOptionalElem(source.Type); ok {
 		e.values[instr.Result.Name] = valueInfo{typ: elem, operand: e.value(source).operand}
 		return nil
 	}
@@ -2871,5 +2853,53 @@ func (e *emitter) value(value ir.Value) valueInfo {
 	if found, ok := e.values[value.Name]; ok {
 		return found
 	}
+	if source, ok := e.nicheAliasSource(value.Name); ok {
+		return valueInfo{typ: value.Type, operand: e.value(source).operand}
+	}
 	return valueInfo{typ: value.Type, operand: localName(value.Name)}
+}
+
+// nicheAliasSource follows a niche optional's result back to the value it is.
+// A phi at a loop header names values the body defines further down, and a
+// niche `opt.some` or `opt.value` writes no instruction to define one -- the
+// payload already is the optional -- so a forward reference has to be resolved
+// through what it aliases rather than assumed to be a register of its own.
+func (e *emitter) nicheAliasSource(name string) (ir.Value, bool) {
+	source, ok := e.niches[name]
+	if !ok {
+		return ir.Value{}, false
+	}
+	for {
+		next, ok := e.niches[source.Name]
+		if !ok || next.Name == source.Name {
+			return source, true
+		}
+		source = next
+	}
+}
+
+// precomputeNicheAliases records every result a niche optional hands back
+// unchanged, so value() can resolve one before its block is written.
+func (e *emitter) precomputeNicheAliases(fn *ir.Function) {
+	e.niches = map[string]ir.Value{}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if len(instr.Args) != 1 {
+				continue
+			}
+			switch instr.Op {
+			case "opt.some":
+				if _, ok := e.nicheOptionalElem(instr.Result.Type); !ok {
+					continue
+				}
+			case "opt.value":
+				if _, ok := e.nicheOptionalElem(instr.Args[0].Type); !ok {
+					continue
+				}
+			default:
+				continue
+			}
+			e.niches[instr.Result.Name] = instr.Args[0]
+		}
+	}
 }
