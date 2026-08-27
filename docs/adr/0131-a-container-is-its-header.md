@@ -38,14 +38,16 @@ pointer header にはもう 1 つ、数字に出ない傷があります。**構
 | 型 | header | word |
 | --- | --- | --- |
 | `Array<T>` | `{data, len, cap}` | 3 |
-| `Arena<T>` | `{data, len, cap}` | 3 |
+| `Arena<T>` | `{data, len, cap, origin}` | 4 |
 | `Map<K, V>` | `{entries, len, cap, index, index_cap}` | 5 |
 
-`Arena<T>` は `Array<T>` と同じ header です。要素の所有の仕方が同じで、違いは
-backend より上にあります —— Handle が borrow ではなく index であること、途中の
-要素を取り除かないこと。だから runtime に arena の entry point は 1 つも無く、
-`arena.add` は array の append そのもので、**append 直前の len がそのまま
-handle** です。
+`Arena<T>` は `Array<T>` の header で始まります。要素の所有の仕方が同じで、
+違いは backend より上にあります —— Handle が borrow ではなく index であること、
+途中の要素を取り除かないこと。runtime は header への pointer を渡されて先頭
+3 word しか読まないので、**arena の entry point は 1 つも無く**、`arena.add`
+は array の append そのものです。4 word 目の `origin` は handle が何から数え
+始めるかで、append 直前の len にそれを足したものが handle になります
+(ADR-0134)。
 
 **method を宣言するのは std で、compiler ではありません。** 4 つの container は
 どれも `lib/kizu/std/src/*/*.kizu` に method を書き、body は

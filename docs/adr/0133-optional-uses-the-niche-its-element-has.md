@@ -27,8 +27,10 @@ address で、borrow は借りた先の address です。どちらも生きて�
 
 同じことが `std::arena::Handle<T>` にも言えます。handle は arena 内の index で、
 `add` が返した index は必ず要素を名指します。index 0 も live なので、そのままでは
-空き値がありません —— **handle を index + 1 で持てば 0 が空きます**。handle は
-opaque な ID で等値比較しかされない(SPEC §10)ので、bias は綴りから見えません。
+空き値がありません —— **handle を index からずらして持てば 0 が空きます**。
+handle は opaque な ID で等値比較しかされない(SPEC §10)ので、ずれは綴りから
+見えません。ずらす量は arena が自分の instance を名乗る `origin` で、最下位の
+1 がここで言う bias にあたります(ADR-0134)。
 
 ## Decision
 
@@ -37,7 +39,7 @@ opaque な ID で等値比較しかされない(SPEC §10)ので、bias は綴�
 ```text
 ?std::mem::Box<T>          ->  ptr    (null が不在)
 ?&T / ?&var T              ->  ptr    (null が不在)
-?std::arena::Handle<T>     ->  i64    (0 が不在。handle は index + 1)
+?std::arena::Handle<T>     ->  i64    (0 が不在。handle は index + arena の origin)
 ?T (T が niche を持つ field を持つ struct) -> T
 その他の ?T                 ->  { i8, T }  (従来どおり)
 ```
@@ -87,7 +89,7 @@ operand をそこから解きます。
 | tag を残す | 再帰的な節点が倍のまま。`?Box<T>` が 8 byte で足りるのに 16 byte 払う |
 | pointer の null だけを niche にする(この ADR の初版) | handle と、handle を包む struct が対象外のままになる。selfhost の AST は `?Handle` を包んだ struct の集まりで、そこが一番効く |
 | すべての pointer を niche 扱いにする | container header の data pointer は空の container で null。null が live な値なので、不在と区別できなくなる |
-| handle を bias せず、`i64::MIN` を空き値にする | zero が不在という 1 つの規則が崩れ、`zeroinitializer` が不在を意味しなくなる。struct が field 越しに継ぐ形もそこで止まる |
+| handle をずらさず、`i64::MIN` を空き値にする | zero が不在という 1 つの規則が崩れ、`zeroinitializer` が不在を意味しなくなる。struct が field 越しに継ぐ形もそこで止まる |
 | tagged optional の tag byte の空き値(2..255)を niche にする | 不在を表す bit 列が zero でなくなる型が生まれ、深さを持つ niche の前提が壊れる |
 | enum / error set の未使用 tag を niche にする | 同じ理由。加えて、どの tag が空いているかは宣言ごとに違い、型ごとに追う表を要求する |
 | niche を言語に見せる(`?T` の size を綴れるようにする) | 表現は言語の定義ではない。SPEC は `?T` が何を意味するかだけを持つ |

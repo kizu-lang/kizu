@@ -20,11 +20,34 @@ arena へ move し、storage を買う call なので allocator を receiver の
 要素 storage が移動しても handle は ID のままなので、要素間の関係を handle field
 として持てます。削除 API はありません。
 
+**handle は自分を作った arena instance を運びます。** だから別の arena に渡した
+handle は読み取りが拒否し、`at` は runtime error で停止、`at_mut` は null を
+返します。同じ `arena::new` を 2 回実行して作った 2 本も別 instance なので、
+互いの handle は通りません(ADR-0134)。
+
+```kizu
+fn new_nodes(allocator: Allocator) -> arena::Arena<Node> {
+    return arena::new<Node>(allocator);
+}
+
+var left = new_nodes(allocator);
+var right = new_nodes(allocator);
+let first = try left.add(allocator, Node { value: 1 });
+right.at(first);
+// runtime error: invalid arena handle
+```
+
+これは値の大きさを何も変えません。handle は i64 のまま、`?Handle<T>` の niche
+(ADR-0133)もそのままです。header は 24 から 32 byte になり、`at` は引き算 1 つ
+ぶんの命令が増えます。1 つの arena が保持できる要素は 2^32 - 1 個までで、
+越える `add` は停止します。
+
 `at` は arena に tied な shared borrow `&T` を返します。式から直接 field / method /
 match を読めるほか、local binding に束縛できます。binding が生きている間は同じ
 arena の `add` / `deinit` を実行できず、borrow から owner を move できません。
 borrow parameter 由来の arena なら `&T` を返せますが、local arena 由来の borrow は
-function から escape できません。`at_mut` は capture 条件でだけ開ける `?&var T` です。
+function から escape できません。`at_mut` は capture 条件でだけ開ける `?&var T` です。その null は、handle が
+この arena のものでないときに開かないための答えでもあります。
 handle provenance の規則は SPEC §10 にあります。
 
 要素型 `T` は owner でもかまいません。`deinit` は initialized element をそれぞれ

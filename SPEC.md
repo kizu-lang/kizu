@@ -1686,6 +1686,9 @@ allocator が断るのは壊れたプログラムではなく(`mem::fixed_buffer
 
 `std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
 値を所有するのは arena なので、handle は copy 型です(§8)。
+handle は自分を作った arena instance を運びます。だから field を経由しても
+container に入れても関数境界を越えても出自は消えず、別の arena に渡した handle は
+読み取りが拒否します(ADR-0134)。
 
 ルール:
 
@@ -1713,13 +1716,19 @@ allocator が断るのは壊れたプログラムではなく(`mem::fixed_buffer
 * `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない
 * handle は raw pointer ではない
 * arena からの削除は実装しない
+* 1 つの arena が保持できる要素は 2^32 - 1 個まで。これを越える `add` は
+  runtime error で停止する。handle が自分の arena instance を運ぶための
+  上限で、越えると別 instance の handle が区別できなくなる(ADR-0134)
 * `?arena::Handle<T>` は struct field に置ける(§7)。「子が無い」を
   番兵値でなく型で表し、再帰的データ構造は arena + optional handle の
   平坦な形で書く
-* handle と arena の取り違えは、両者の由来が判明している場合だけ拒否する。
-  borrow で受けた arena や field から読んだ handle は由来不明として通り、
-  契約は署名が運ぶ(ADR-0098)。由来不明の handle が範囲外を指した場合、
-  `at_mut` は null を返し、`at` は runtime error で停止する
+* handle と arena の取り違えは、両者の由来が compile 時に判明していれば
+  その場で拒否する。borrow で受けた arena や field から読んだ handle は
+  由来不明として型検査を通るが、**読み取りが実行時に拒否する** ——
+  handle は自分を作った arena instance を値として運ぶので、別の arena に
+  渡した handle は `at` では runtime error で停止し、`at_mut` では null を
+  返す(ADR-0134)。同じ `arena::new` を 2 回実行して作った 2 本も別 instance
+  であり、互いの handle は通らない
 * 署名に借用 `Arena<T>` 引数と値渡し `Handle<T>` 引数が同じ `T` で
   1 つずつだけ現れる場合、caller はその組を「この handle はこの arena の
   もの」という契約として署名から導出し、call site で両引数の由来が判明して

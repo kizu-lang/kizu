@@ -23,9 +23,10 @@ Array と Map はこの表に従うが、Arena だけは borrow を返す read a
 ## 決定
 
 1. **`Arena.get(handle)` を `Arena.at(handle)` に改名する。** シグネチャは
-   明示的に `&T` とする。handle の存在は静的
-   provenance 検査が保証するため、Array / Map と違って不在がなく、
-   `?` は付かない。optional の有無は不在意味論の差で、`at` の意味
+   明示的に `&T` とする。Array / Map の `at` が `?` を付けるのは呼び出し側が
+   計算した index が不在でありうるからで、handle にその不在は無い —— 名指す
+   先が無い handle は壊れた program なので、範囲外 index と同じく trap する
+   (ADR-0134)。optional の有無は不在意味論の差で、`at` の意味
    「位置への borrow read」は 3 container で揃う。
 2. **`get` は copy accessor 専用の綴りとする。** Arena に copy accessor は
    ない(element は owner)ので、Arena から `get` は消える。
@@ -48,8 +49,8 @@ Array と Map はこの表に従うが、Arena だけは borrow を返す read a
   すると言語内の mutability 語が 2 つに割れる。`_mut` は型綴りではなく
   method 命名の慣用 suffix として扱う。
 - **`Arena.at -> ?&T` capture 限定に揃える**: 表の形は完全に揃うが、
-  不在のない読み取りに毎回 capture の 2 行を課す。静的に存在が証明済みの
-  handle read は直接式で読めるべきで、失うものしかない。
+  不在のない読み取りに毎回 capture の 2 行を課す。しかも optional が表すのは
+  不在ではなく取り違えになり、意味が合わない(ADR-0134)。
 
 ## 帰結
 
@@ -60,3 +61,7 @@ Array と Map はこの表に従うが、Arena だけは borrow を返す read a
 - breaking change だが、`Arena.get` の使用箇所は examples / tests のみ。
 - 却下判断により `at` / `at_mut` / `&var` / `_mut` suffix の組は言語の
   確定綴りになる。
+- この ADR を書いた時点の決定 1 の根拠は「handle の存在は静的 provenance 検査が
+  保証する」だったが、それは成立していなかった。既知の出自どうしの取り違えしか
+  止まらず、field や container を経由した handle は素通りしていた。いまの根拠は
+  静的な保証ではなく、取り違えを実行時に止めること(ADR-0134)である。
