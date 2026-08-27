@@ -334,7 +334,7 @@ func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
 func TestEmitStructParamsUseByValPointerABI(t *testing.T) {
 	got := emitTestModule(t, structParamABIModule())
 	for _, want := range []string{
-		"define i64 @read(ptr byval(%kizu.struct.Big) %kizu.big.addr, " +
+		"define internal i64 @read(ptr byval(%kizu.struct.Big) %kizu.big.addr, " +
 			"ptr byval(%kizu.struct.Id) %kizu.id.addr)",
 		"%kizu.big = load %kizu.struct.Big, ptr %kizu.big.addr",
 		"%kizu.id = load %kizu.struct.Id, ptr %kizu.id.addr",
@@ -701,7 +701,7 @@ func TestEmitErrorUnionFailure(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"define %kizu.error.i64 @read()",
+		"define internal %kizu.error.i64 @read()",
 		"%kizu.error.i64 = type { i8, i64, i64 }",
 		"= insertvalue %kizu.error.i64 %kizu.2.base, i64 ",
 		"ret %kizu.error.i64 %kizu.2",
@@ -743,9 +743,9 @@ func TestEmitSliceFunctionABI(t *testing.T) {
 	}
 	for _, want := range []string{
 		"%kizu.slice.u8 = type { ptr, i64 }",
-		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.value)",
+		"define internal %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.value)",
 		"ret %kizu.slice.u8 %kizu.value",
-		"define %kizu.slice.u8 @message()",
+		"define internal %kizu.slice.u8 @message()",
 		"%kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 5, 1",
 		"%kizu.2 = call %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.1)",
 	} {
@@ -1181,7 +1181,7 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define i64 @add(i64 %kizu.a, i64 %kizu.b) {
+define internal i64 @add(i64 %kizu.a, i64 %kizu.b) {
 entry:
   %kizu.1 = add i64 %kizu.a, %kizu.b
   ret i64 %kizu.1
@@ -1314,7 +1314,7 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define %kizu.error.i64 @read() {
+define internal %kizu.error.i64 @read() {
 entry:
   %kizu.2.ok = insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0
   %kizu.2 = insertvalue %kizu.error.i64 %kizu.2.ok, i64 1, 1

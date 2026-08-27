@@ -372,6 +372,23 @@ fn format_args6(
     return append_format_rest(allocator, out, format, position);
 }
 
+/// Gives every function but the entry point internal linkage, the Go
+/// `functionLinkage`.
+///
+/// A Kizu program exports nothing: `extern "c" fn` imports a C symbol and
+/// there is no way to spell the other direction, so the only name the outside
+/// world needs is `main`. Left external, a Kizu function's name would be the
+/// symbol the linker offers everyone -- including the C runtime linked beside
+/// it. A program with `fn send(...)` in it would have the runtime's socket
+/// write call that instead of libc's, which is a program that compiles and
+/// then recurses until the stack ends.
+fn function_linkage(is_entry_point: bool) -> []u8 {
+    if is_entry_point {
+        return "";
+    }
+    return "internal ";
+}
+
 /// Writes one line of LLVM text with no interpolation, the Go
 /// `e.out.WriteString("...\n")`.
 fn (self: &var Emitter) line(text: []u8) -> !void {
@@ -1003,8 +1020,15 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     let name_text = ir::name_text(&module.names, node.name);
     let name_bytes = name_text.as_bytes();
     let symbol = try self.llvm_function_name(name_bytes);
+    let linkage = function_linkage(module.names.is(node.name, "main"));
     let joined = try string::join(self.allocator, &params, ", ");
-    try self.line3("define %s @%s(%s) {", Arg::Str(return_type), Arg::Str(symbol), Arg::Owned(move joined));
+    try self.line4(
+        "define %s%s @%s(%s) {",
+        Arg::Lit(linkage),
+        Arg::Str(return_type),
+        Arg::Str(symbol),
+        Arg::Owned(move joined)
+    );
     let body_start = self.out.len();
     var block_index = 0;
     while node.blocks.get(block_index) |block| {

@@ -787,7 +787,8 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	}
 	e.registerForwardedValues(fn)
 	fmt.Fprintf(&e.out,
-		"define %s @%s(%s) {\n",
+		"define %s%s @%s(%s) {\n",
+		functionLinkage(fn.Name),
 		returnType,
 		llvmFunctionName(fn.Name),
 		strings.Join(params, ", "),
@@ -1441,6 +1442,23 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// functionLinkage gives every function but the entry point internal linkage.
+//
+// A Kizu program exports nothing: `extern "c" fn` imports a C symbol and there
+// is no way to spell the other direction, so the only name the outside world
+// needs is `main`. Left external, a Kizu function's name would be the symbol
+// the linker offers everyone -- including the C runtime linked beside it. A
+// program with `fn send(...)` in it would have the runtime's socket write call
+// that instead of libc's, which is a program that compiles and then recurses
+// until the stack ends. Internal linkage is what keeps a name a program chose
+// for itself from being an answer to somebody else's question.
+func functionLinkage(name string) string {
+	if name == "main" {
+		return ""
+	}
+	return "internal "
 }
 
 // writeInternalCall adapts module-local struct values to Kizu's explicit

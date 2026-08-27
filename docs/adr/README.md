@@ -128,3 +128,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0132: 解放は allocator を名指す](0132-release-names-its-allocator.md)
 - [ADR-0133: optional は要素が持つ niche を使う](0133-optional-uses-the-niche-its-element-has.md)
 - [ADR-0134: arena は自分の instance を見分ける](0134-an-arena-tells-its-instances-apart.md)
+- [ADR-0135: プログラムは自分が export していない名前に答えない](0135-a-program-does-not-answer-for-a-name-it-did-not-export.md)
