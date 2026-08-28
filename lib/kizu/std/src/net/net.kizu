@@ -311,6 +311,22 @@ fn (self: &var TcpStream) clear_write_deadline() -> void {
     return;
 }
 
+// write_some sends what fits right now and answers with how many bytes that
+// was. **Zero is not an error and not the end**: it is "not right now", and the
+// caller comes back when a poller says this stream is writable again.
+//
+// This is the half of writing that `write_all` cannot do. `write_all` finishes
+// or fails, so a peer that stopped reading holds the caller until its deadline;
+// a loop over `write_some` keeps what is left and goes back to the wait, which
+// is what lets one thread serve everyone else meanwhile.
+//
+// It never waits, so a write deadline does not apply. The waiting belongs to
+// the poller, and the deadline that bounds it is the one on `Poller.wait`.
+fn (self: &var TcpStream) write_some(io: Io, bytes: []u8) -> std::net::Error!i64 {
+    let count = try std::internal::builtin::net_write_some(io, self.fd, bytes);
+    return count;
+}
+
 // deinit consumes the stream and releases its descriptor.
 fn (self: std::net::TcpStream) deinit() -> void {
     std::internal::builtin::net_close(self.fd);

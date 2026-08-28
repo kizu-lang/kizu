@@ -312,3 +312,81 @@ fn speak_at(
     }
     return;
 }
+
+test "write_some offers rather than insists" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var client = try connect_to(handle, &address);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    // More than the buffers between here and a peer that never reads.
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    var filled = 0;
+    while filled < 400000 {
+        try body.append_bytes(allocator, "0123456789");
+        filled = filled + 1;
+    }
+    let bytes = body.as_bytes();
+
+    // write_all would hold this thread until its deadline; this returns with
+    // what fit, and the rest stays with the caller.
+    let took = try served.write_some(handle, bytes);
+    testing::expect(took > 0);
+    testing::expect(took < body.len());
+
+    // Full now, so the next offer is answered with zero -- not an error, and
+    // not the end of anything.
+    let again = try served.write_some(handle, bytes);
+    testing::expect_equal<i64>(0, again);
+}
+
+test "write_some of nothing is nothing" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var client = try connect_to(handle, &address);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    let none = try served.write_some(handle, "");
+    testing::expect_equal<i64>(0, none);
+}
+
+test "what write_some took is what the peer receives" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var client = try connect_to(handle, &address);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    let took = try served.write_some(handle, "a short message");
+    testing::expect_equal<i64>(15, took);
+    var back = string::new(allocator);
+    defer back.deinit(allocator);
+    let read = try client.read_into(handle, allocator, &var back, 64);
+    testing::expect_equal<i64>(15, read);
+    let bytes = back.as_bytes();
+    testing::expect_equal<[]u8>("a short message", bytes);
+}

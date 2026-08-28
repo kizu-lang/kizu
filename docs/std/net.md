@@ -26,6 +26,7 @@ fn (self: &var TcpStream) read_into(
     max: i64,
 ) -> std::net::Error!i64
 fn (self: &var TcpStream) write_all(io: Io, bytes: []u8) -> std::net::Error!void
+fn (self: &var TcpStream) write_some(io: Io, bytes: []u8) -> std::net::Error!i64
 fn (self: &var TcpStream) set_read_deadline(at: i64) -> void
 fn (self: &var TcpStream) set_write_deadline(at: i64) -> void
 fn (self: &var TcpStream) clear_read_deadline() -> void
@@ -75,8 +76,8 @@ stream が残らないので、**close 後の使用は型 error** です —— 
 buffer 全体の上限ではありません —— 全体の上限は呼ぶ側が積算します
 (`std::http` の request header 上限がその例)。
 
-`write_all` は全 byte を書くか失敗を返すかのどちらかです。部分書き込みは
-caller が扱う結果ではありません。
+`write_all` は全 byte を書くか失敗を返すかのどちらかです。部分書き込みを
+caller が扱いたいときは [`write_some`](#write_all-と-write_some) です。
 
 ## deadline
 
@@ -121,6 +122,27 @@ deadline は自分で更新しません。
 
 `set_accept_deadline` は `accept` に期限を与えます。定期的な仕事を挟みたい loop は
 期限を設け、`TimedOut` をその合図として受け取り、次の期限を設けます。
+
+## write_all と write_some
+
+```kizu
+fn (self: &var TcpStream) write_all(io, bytes) -> Error!void   // 全部書くか失敗
+fn (self: &var TcpStream) write_some(io, bytes) -> Error!i64   // 今入る分だけ
+```
+
+`write_all` は**終わるまで返りません**。送らなければならない message には正しい
+契約ですが、evented な loop では間違いです —— 読むのをやめた peer が、deadline
+まで呼び出し元の thread を握ります。実測で 1 本の write が loop を 1 秒(deadline
+いっぱい)止めました。
+
+`write_some` は**申し出ます**。今入る分を送り、その数を返します。残りは caller が
+持ったまま wait に戻ります。
+
+**0 は error でも終端でもありません。**「今は書けない」で、いつ再試行するかは
+poller が言います。同じ測定が 1000 ms → **0 ms** になりました。
+
+`write_some` は待たないので、write deadline は掛かりません。待つのは poller の
+仕事で、それを縛るのは `Poller.wait` の deadline です。
 
 ## Poller —— 多数を同時に待つ
 

@@ -2959,6 +2959,9 @@ coroutine が要り、function coloring が生えるためです。
   `!i64` で返す。**0 は相手が閉じたこと**を意味し、`max <= 0` は
   `Error::InvalidLength`
 * `stream.write_all(io, bytes)` は `!void` を返す。部分書き込みは返さない
+* `stream.write_some(io, bytes)` は今書けた byte 数を `!i64` で返す。**0 は
+  「今は書けない」**で、error でも終端でもない。待たないので write deadline は
+  掛からず、いつ再試行するかは `Poller` が言う
 * deadline は**時点**であって 1 回の呼び出しの budget ではない。
   `std::net::deadline_in_millis(millis)` が今からの距離を時点にし、
   `set_read_deadline` / `set_write_deadline` / `set_accept_deadline` がそれを

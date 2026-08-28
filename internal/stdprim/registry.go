@@ -101,6 +101,10 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Args:   []ArgKind{ArgIo, ArgI64, ArgBytes, ArgI64},
 		Return: "std::net::Error!void",
 	},
+	"std::internal::builtin::net_write_some": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgBytes},
+		Return: "std::net::Error!i64",
+	},
 	"std::internal::builtin::net_local_port": {
 		Args:   []ArgKind{ArgI64},
 		Return: "std::net::Error!i64",
@@ -224,6 +228,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::net_poller_wait":              true,
 	"std::internal::builtin::net_read":                     true,
 	"std::internal::builtin::net_write_all":                true,
+	"std::internal::builtin::net_write_some":               true,
 	"std::internal::builtin::panic":                        true,
 	"std::internal::builtin::process_arg":                  true,
 	"std::internal::builtin::process_arg_count":            true,

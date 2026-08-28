@@ -1795,6 +1795,54 @@ static KizuErrorVoid kizu_std_builtin_net_write_all_result(
     return kizu_ok_void();
 }
 
+/* write_some sends what fits and answers with how much that was. Zero is "not
+ * right now", which is the answer a caller with a poller wants: it goes back
+ * to the wait with the rest still in hand rather than holding the thread until
+ * a slow peer has taken everything.
+ *
+ * It never waits, so a deadline has nothing to bound here. The waiting is the
+ * poller's, and the deadline that matters is the one on that wait. */
+static KizuErrorI64 kizu_std_builtin_net_write_some_result(
+    void *io,
+    int64_t fd,
+    KizuSliceU8 bytes
+) {
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+    }
+    if (bytes.len < 0 || (bytes.len > 0 && !bytes.ptr)) {
+        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_WRITE_FAILED);
+    }
+    if (fd < 0) {
+        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
+    }
+    if (bytes.len == 0) {
+        return kizu_ok_i64(0);
+    }
+    for (;;) {
+        ssize_t wrote = send((int)fd, bytes.ptr, (size_t)bytes.len, MSG_DONTWAIT);
+        if (wrote >= 0) {
+            return kizu_ok_i64((int64_t)wrote);
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (kizu_net_would_block(errno)) {
+            return kizu_ok_i64(0);
+        }
+        return kizu_err_i64(kizu_net_errno_failure(errno));
+    }
+}
+
+void std__internal__builtin__net_write_some(
+    KizuErrorI64 *out,
+    void *io,
+    int64_t fd,
+    const KizuSliceU8 *bytes
+) {
+    *out = kizu_std_builtin_net_write_some_result(io, fd, *bytes);
+}
+
 void std__internal__builtin__net_write_all(
     KizuErrorVoid *out,
     void *io,
