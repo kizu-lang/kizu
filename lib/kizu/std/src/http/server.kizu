@@ -101,6 +101,8 @@ fn (self: &var std::http::Server) accept_message(
             answered: false,
             pending: move pending,
             pending_at: 0,
+            owed: 0,
+            counting: false,
             limits: self.limits,
         };
     } else |failure| {
@@ -133,6 +135,11 @@ pub struct Exchange {
     // did not copy into the request starts here rather than on the socket.
     pending: std::string::String,
     pending_at: i64,
+    // What is left of the length the head declared, and whether there is one
+    // to count against. `Length(n)` is the only framing that gives a number
+    // to hold a caller to; the others have nothing to contradict.
+    owed: i64,
+    counting: bool,
     // The server's policy, carried so `respond` can make the write deadline
     // when the write starts. A deadline stamped at accept would already be
     // spent by whatever the caller did in between.
@@ -171,7 +178,37 @@ fn (self: &var std::http::Exchange) respond_head(
         return std::http::Error::ResponseFinished;
     }
     try self.send_head(io, allocator, framing, true);
+    self.start_counting(framing);
     return;
+}
+
+// start_counting remembers what a `Length` head promised. Nothing else has a
+// number: `UntilClose` ends at the close and `Raw` framed nothing at all.
+fn (self: &var std::http::Exchange) start_counting(framing: std::http::Framing) -> void {
+    self.owed = match framing {
+        Length(count) => count,
+        Buffered => 0,
+        UntilClose => 0,
+        Raw => 0,
+    };
+    self.counting = match framing {
+        Length(_) => true,
+        Buffered => false,
+        UntilClose => false,
+        Raw => false,
+    };
+    return;
+}
+
+// owes is how many bytes of a declared body have not been written yet, and 0
+// when nothing is being counted. A caller that finished early can see it; this
+// module cannot report it for them, because the place a short body becomes
+// visible is `deinit`, and a deinit has nowhere to fail to.
+fn (self: &std::http::Exchange) owes() -> i64 {
+    if !self.counting {
+        return 0;
+    }
+    return self.owed;
 }
 
 fn (self: &var std::http::Exchange) send_head(
@@ -201,10 +238,22 @@ fn (self: &var std::http::Exchange) send_head(
 // and re-arming here would hand a fresh budget back on every call -- which is
 // the per-call timeout this module does not have. A stream that outlives one
 // phase pushes its own deadline forward with `set_write_deadline`.
+//
+// A head that declared a length is held to it. Writing past it is refused
+// before the bytes reach the connection: past that point the message
+// contradicts its own framing, and the peer would read the excess as the start
+// of another one.
 fn (self: &var std::http::Exchange) write_all(
     io: Io,
     bytes: []u8
 ) -> std::http::Failure!void {
+    let count = std::mem::len(bytes);
+    if self.counting {
+        if count > self.owed {
+            return std::http::Error::ResponseOverrun;
+        }
+        self.owed = self.owed - count;
+    }
     try self.stream.write_all(io, bytes);
     return;
 }

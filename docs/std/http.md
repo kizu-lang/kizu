@@ -45,6 +45,7 @@ fn (self: &var Exchange) respond_head(
     io: Io, allocator: Allocator, framing: std::http::Framing,
 ) -> std::http::Failure!void
 fn (self: &var Exchange) write_all(io: Io, bytes: []u8) -> std::http::Failure!void
+fn (self: &Exchange) owes() -> i64
 fn (self: &var Exchange) read_into(
     io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
 ) -> std::http::Failure!i64
@@ -247,8 +248,27 @@ fn (self: &var Exchange) write_all(io, bytes) -> Failure!void
 | `UntilClose` | 書かない | `close` | SSE、長さ不明の stream |
 | `Raw` | 書かない | **書かない** | 101 Switching Protocols |
 
-`Length(n)` の `n` は **caller の申告**です。見ていない byte を数えられないので
-検証はしません。`Buffered` だけが実測なのはそのためです。
+`Length(n)` の `n` は **caller の申告**で、`Buffered` だけが実測です。ただし
+申告した以上、**書きすぎは拒否します** —— `write_all` は全 byte を通るので
+数えられます。
+
+```kizu
+try held.respond_head(handle, allocator, http::Framing::Length(6));
+try held.write_all(handle, "abc");        // owes() == 3
+try held.write_all(handle, "toolong");    // Error::ResponseOverrun
+```
+
+socket に届く前に拒否するので、残りの数は変わりません。超過分が線に乗ると、
+peer はそれを次の message の始まりとして読みます。
+
+**足りない**方は拒否できません。body が短いことが分かるのは close の時点で、
+`deinit` は失敗を返せないからです。代わりに `owes()` が残りを答えます。
+
+```kizu
+fn (self: &Exchange) owes() -> i64
+```
+
+`Length` 以外の framing は数を持たないので、`owes()` は常に 0 です。
 
 `Raw` は caller の header をそのまま出し、framing field を落としもしません。
 101 に `Connection: close` を書いたら間違った message になるからです。この 1 語を
@@ -528,7 +548,13 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 `std::http::Error` は `MalformedRequest`、`HeadTooLarge`、`BodyTooLarge`、
 `UnsupportedVersion`、`UnsupportedEncoding`、`Incomplete`、`InvalidStatus`、
 `InvalidHeader`、`InvalidUrl`、`UnsupportedScheme`、`MalformedResponse`、
-`ResponseFinished`、`InvalidEncoding`、`InvalidPattern` を持ちます。
+`ResponseFinished`、`InvalidEncoding`、`InvalidPattern`、`ResponseOverrun` を
+持ちます。
+
+`BodyTooLarge` と `ResponseOverrun` は似て非なるものです。前者は request 側 ——
+この server が決めた上限を入力が超えたので、入力を拒否して回復します。後者は
+response 側 —— message が自分の framing と矛盾しており、回復するものがないので
+接続に届く前に拒否します(原理 7)。
 
 `std::http::Failure` はその和 —— `Error or std::net::Error or std::mem::Error` ——
 です。どれも変換されないので、`match` した caller はどの層が拒否したかを見ます。

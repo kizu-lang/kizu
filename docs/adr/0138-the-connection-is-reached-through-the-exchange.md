@@ -36,9 +36,11 @@ caller が `write_all` で書きます。`Framing` は head が「body がどこ
 
 ## Consequences
 
-`Length(n)` の `n` は caller の申告で、検証しません。見ていない byte は数えられず、
-`Buffered` だけが実測です。申告と実際が食い違えば接続は desync しますが、これは
-「body を自分で書く」の意味そのものです。
+`Length(n)` の `n` は caller の申告ですが、**書きすぎは拒否します**。`write_all`
+は全 byte を通るので数えられ、超過分が線に乗ると peer はそれを次の message の
+始まりとして読みます。足りない側は close の時点でしか分からず、`deinit` は失敗を
+返せないので拒否できません —— `owes()` が残りを答えるところまでです。半分だけ
+型で閉じられる、が正確な状態です(原理 5)。
 
 `Raw` は framing field を一切書かず、caller の header をそのまま出します。
 std::http が組み立てなかった head はこの 1 語を grep すれば全部出ます(原理 3)。

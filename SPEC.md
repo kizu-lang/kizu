@@ -2976,6 +2976,9 @@ runtime selection の方針は ADR-0039 に従います。
   `UntilClose`(close が終わり、length 無し)/ `Raw`(framing field を書かず、
   head は caller のもの)。送った後は answered なので `respond` は
   `Error::ResponseFinished`
+* `Length(n)` を送った後、宣言を超える `write_all` は socket に届く前に
+  `Error::ResponseOverrun` になる。足りない側は close でしか分からないので
+  拒否できず、`exchange.owes()` が残りを答える
 * `server.accept_head(io, allocator)` は空行で止まり、body を接続に残す。
   `max_body_bytes` は掛からない。caller は `exchange.read_into(io, allocator,
   out, max)` で読む —— `std::net::read_into` と同じ契約で、head 読みで先に

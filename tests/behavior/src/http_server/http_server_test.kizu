@@ -706,3 +706,80 @@ test "a caller that took the body owns its deadline" {
         testing::expect(true);
     }
 }
+
+test "writing past a declared length is refused before it reaches the peer" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /stream HTTP/1.1", "");
+
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.respond_head(handle, allocator, http::Framing::Length(6));
+    try held.write_all(handle, "abc");
+    testing::expect_equal<i64>(3, held.owes());
+    if held.write_all(handle, "much longer than three") {
+        testing::fail("a body past its declared length was written");
+    } else |err| {
+        testing::expect(true);
+    }
+    // The refusal happened before the socket, so what is owed is untouched and
+    // the caller can still write the rest correctly.
+    testing::expect_equal<i64>(3, held.owes());
+    try held.write_all(handle, "def");
+    testing::expect_equal<i64>(0, held.owes());
+}
+
+test "a body that stops short is visible to the caller" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /stream HTTP/1.1", "");
+
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.respond_head(handle, allocator, http::Framing::Length(10));
+    try held.write_all(handle, "short");
+    // Nothing can refuse this one: a body that is never finished only becomes
+    // wrong at the close, and a deinit has nowhere to report it. The count is
+    // what a caller checks instead.
+    testing::expect_equal<i64>(5, held.owes());
+}
+
+test "framings without a length count nothing" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /events HTTP/1.1", "");
+
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.respond_head(handle, allocator, http::Framing::UntilClose);
+    testing::expect_equal<i64>(0, held.owes());
+    try held.write_all(handle, "as much as it likes, there is no number");
+    testing::expect_equal<i64>(0, held.owes());
+}
