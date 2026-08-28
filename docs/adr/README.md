@@ -132,3 +132,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0136: HTTP server は見える loop で、handler を取らない](0136-an-http-server-is-a-loop-you-can-see.md)
 - [ADR-0137: deadline は時点で、socket の owner が持つ](0137-a-deadline-is-a-moment-the-socket-owner-holds.md)
 - [ADR-0138: 接続には Exchange 越しに届く。渡しはしない](0138-the-connection-is-reached-through-the-exchange.md)
+- [ADR-0139: 接続が 2 通目を運ぶのは、頼まれたときだけ](0139-a-connection-carries-more-than-one-request-only-when-asked.md)
