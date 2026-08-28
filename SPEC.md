@@ -3006,22 +3006,27 @@ coroutine が要り、function coloring が生えるためです。
   terminator を書き、`Length` は数が足りなければ `Error::ResponseIncomplete`。
   2 度目は `Error::ResponseFinished`。呼ばずに `deinit` した場合の残りは
   `exchange.owes()` が答える
+* `server.accept(io, allocator, max)` は head を読み、body を `max` byte まで
+  `exchange.body` に読む。上限が引数なのは body の大きさが endpoint の性質で
+  あって server の policy ではないため
 * `server.accept_head(io, allocator)` は空行で止まり、body を接続に残す。
-  `max_body_bytes` は掛からない。caller は `exchange.read_into(io, allocator,
+  保持しないので上限も無い。caller は `exchange.read_into(io, allocator,
   out, max)` で読む —— `std::net::read_into` と同じ契約で、head 読みで先に
-  届いていた byte から出る。`Transfer-Encoding` はこの経路でも拒否する
+  届いていた byte から出る。待たない版が `exchange.read_ready_into(...)` で、
+  `?i64` の null が「今は何も来ていない」
 * `Exchange` は `TcpStream` を渡さない。`write_all` / `read_into` /
   `set_read_deadline` / `set_write_deadline` / `clear_*` が通り道で、head 読みの
   残り byte を飛ばせないのがその理由
-* `std::http::Request` は method / target / version / headers / body を所有
-  する。path と query は field ではなく、`path_of` / `query_of` が target の
+* `std::http::Request` は method / target / version / headers を所有する。
+  **body は持たない** —— body は接続から読むもので、何 byte 取るかは求める側が
+  名乗る。path と query は field ではなく、`path_of` / `query_of` が target の
   中の run として返す
 * `std::http::Response` は組み立ててから送る。`Content-Length` /
   `Transfer-Encoding` / `Connection` は message の実体から書き、caller が
   set したものは落とす
-* `std::http::Limits` は request head の byte 数、header の個数、body の
-  byte 数、および head / body / write の各 phase に許す時間(ミリ秒)を
-  caller が名指すもの。時間は duration であり、各 phase が始まるときに
+* `std::http::Limits` は request head の byte 数、header の個数、および
+  head / body / write の各 phase に許す時間(ミリ秒)を caller が名指すもの。
+  body の byte 数はここに無く、body を読む呼び出しの引数。時間は duration であり、各 phase が始まるときに
   deadline になる。0 はその phase に deadline を置かない
 * `std::http::route(allocator, pattern, method, path, params)` は
   Go 1.22 `ServeMux` 綴りの pattern 1 つを照合して `!bool` を返す。
@@ -3033,11 +3038,11 @@ coroutine が要り、function coloring が生えるためです。
   stream を所有するのは呼ぶ側
 * `server.accept_ready(io, allocator)` は待たずに接続を取り、`?Exchange` を返す。
   その exchange に request はまだ無い。`exchange.advance(io, allocator)` が届いた
-  分だけ進め、`std::http::Progress` —— `NeedMore`(poller に戻る)/ `Request`
-  (request が揃った)/ `Closed`(揃う前に peer が去った) —— を返す。
+  分だけ head を進め、`std::http::Progress` —— `NeedMore`(poller に戻る)/
+  `Request`(head が揃った)/ `Closed`(揃う前に peer が去った) —— を返す。
   `exchange.watch_read(io, poller, token)` が poller に登録する
-* `exchange.next(io, allocator)` は同じ接続の次の request を読み、あったかを
-  `!bool` で返す。false は接続が終わったこと。まだ答えていない / 自分の body を
+* `exchange.next(io, allocator, max)` は同じ接続の次の request を読み、あったかを
+  `!bool` で返す。`exchange.next_head(io, allocator)` は head だけを読む。false は接続が終わったこと。まだ答えていない / 自分の body を
   `finish_body` で閉じていない / `accept_head` の request body を読み切って
   いない場合は `Error::ExchangeUnfinished`
 * 接続が次を運ぶのは 3 つが揃うときだけ —— `served + 1 < limits.max_requests`、
@@ -3052,8 +3057,6 @@ coroutine が要り、function coloring が生えるためです。
   coding は `Error::UnsupportedEncoding`、size や CRLF が読めなければ
   `Error::MalformedChunk`。chunk extension は読み飛ばし、trailer は消費して
   捨てる(上限は `max_head_bytes`)
-* `max_body_bytes` が掛かるのは body を保持する経路(`accept`、client)だけ。
-  `accept_head` は保持しないので掛からない
 * TLS、HTTP/2、HTTP/3 は持たない
 * 並行 API が無い(§15)ので 1 接続ずつ。2 人目は listen backlog で待つ
 

@@ -13,8 +13,8 @@ ADR-0136 の server は `accept` が `Exchange` を返し、`respond` が答え�
 - server-sent events —— head を送ってから書き続ける
 - `101 Switching Protocols` / WebSocket —— head の後は別の protocol
 - 大きな response —— body 全体を組み立ててから送るので、100 MB の答えに 100 MB
-- 大きな request —— body を `max_body_bytes` の下で保持するので、upload は
-  「読める」ではなく「上限まで」
+- 大きな request —— body を上限の下で保持するので、upload は「読める」ではなく
+  「上限まで」
 
 client 側は既に開いていました(`write_request` / `read_response_from` は caller の
 stream を取る)。閉じているのは server 側だけ、という非対称でした。
@@ -28,8 +28,8 @@ caller が `write_all` で書きます。`Framing` は head が「body がどこ
 ついて何と言ったかで、`Buffered` / `Length(n)` / `UntilClose` / `Raw` の 4 つです。
 
 **読む側**は `accept_head` が空行で止まり、body を接続に残します。caller は
-`read_into` で読みます。`max_body_bytes` は掛かりません —— body を保持していない
-ので、上限を掛ける対象がありません。
+`read_into` で読みます。上限は掛かりません —— body を保持していないので、
+掛ける対象がありません(ADR-0143 がこの非対称を両側に広げました)。
 
 **接続そのもの**は private のままで、`write_all` / `read_into` /
 `set_read_deadline` / `set_write_deadline` / `clear_*` だけが通ります。

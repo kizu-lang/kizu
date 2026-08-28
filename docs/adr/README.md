@@ -136,3 +136,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0140: message は自分の長さを 2 回言えない](0140-a-message-does-not-get-to-say-its-length-twice.md)
 - [ADR-0141: 多数を待つことは値であって、切り替えるものではない](0141-waiting-on-many-is-a-value-not-a-mode.md)
 - [ADR-0142: 汎用の cleanup は「解放が何を名指すか」を聞く](0142-generic-cleanup-asks-what-release-names.md)
+- [ADR-0143: body は保持するものではなく読むもの](0143-a-body-is-read-not-held.md)

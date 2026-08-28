@@ -9,10 +9,14 @@
 ```kizu
 var server = try http::listen(handle, "127.0.0.1:8080");
 defer server.deinit();
-var exchange = try server.accept(handle, allocator);
+var exchange = try server.accept(handle, allocator, 1048576);
 defer exchange.deinit(allocator);
 try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
 ```
+
+`accept` の 3 つ目は body をメモリに読む上限です。上限が引数なのは、body の
+大きさは受け取る endpoint が決めるものだからです —— upload と form が同じ数を
+共有する理由がありません。
 
 Go と Zig はどちらも handler を取りますが、それはどちらも handler を**渡せる**
 からです。Kizu の関数値は borrow を運べないので、handler に request を渡せません。
@@ -30,7 +34,7 @@ pub fn listen_with(io: Io, address: []u8, limits: Limits)
     -> std::http::Failure!std::http::Server
 
 fn (self: &Server) local_port() -> std::http::Failure!i64
-fn (self: &var Server) accept(io: Io, allocator: Allocator)
+fn (self: &var Server) accept(io: Io, allocator: Allocator, max: i64)
     -> std::http::Failure!std::http::Exchange
 fn (self: &var Server) accept_head(io: Io, allocator: Allocator)
     -> std::http::Failure!std::http::Exchange
@@ -51,6 +55,9 @@ fn (self: &Exchange) owes() -> i64
 fn (self: &var Exchange) read_into(
     io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
 ) -> std::http::Failure!i64
+fn (self: &var Exchange) read_ready_into(
+    io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
+) -> std::http::Failure!?i64
 fn (self: &var Exchange) set_read_deadline(at: i64) -> void
 fn (self: &var Exchange) set_write_deadline(at: i64) -> void
 fn (self: &var Exchange) clear_read_deadline() -> void
@@ -60,14 +67,19 @@ fn (self: &var Exchange) advance(io: Io, allocator: Allocator)
 fn (self: &Exchange) watch_read(
     io: Io, poller: &var std::net::Poller, token: i64,
 ) -> std::http::Failure!void
-fn (self: &var Exchange) next(io: Io, allocator: Allocator)
+fn (self: &var Exchange) next(io: Io, allocator: Allocator, max: i64)
+    -> std::http::Failure!bool
+fn (self: &var Exchange) next_head(io: Io, allocator: Allocator)
     -> std::http::Failure!bool
 fn (self: &Exchange) is_answered() -> bool
 fn (self: Exchange) deinit(allocator: Allocator) -> void
 ```
 
-`Exchange` は `request` と `response` を public field に持ちます。
+`Exchange` は `request`、`response`、`body` を public field に持ちます。
 `exchange.request.headers` を読み、`exchange.response.write(...)` を書きます。
+
+`body` は **`accept` が読んだときだけ**入っています。`accept_head` は空のまま
+返し、body は接続に残ります —— そちらは `read_into` で読みます。
 
 ## Request
 
@@ -77,9 +89,14 @@ pub struct Request {
     pub target: std::string::String,
     pub version: std::http::Version,
     pub headers: std::http::Headers,
-    pub body: std::string::String,
 }
 ```
+
+**body はここにありません。** body はまだ届きつつある byte で、ここに持たせると
+「この process が何 byte 受け取るか」を、誰も用途を言わないうちに決めることに
+なります。だから body は接続を持つ `Exchange` 越しに読み、上限は byte を求める
+側が名乗ります。Go の `r.Body`、Zig の `request.reader()`、hyper の `Incoming` が
+3 つとも同じ形です。
 
 method・target・header は**所有した copy** です。読み取り buffer は次の message の
 ために再利用されるので、そこを borrow していたら次の read で dangling view に
@@ -165,7 +182,6 @@ server には chunked encoding が要ります。それが入るまで、bufferi
 pub struct Limits {
     pub max_head_bytes: i64,     // default 8192
     pub max_headers: i64,        // default 64
-    pub max_body_bytes: i64,     // default 1048576
     pub read_head_millis: i64,   // default 10000
     pub read_body_millis: i64,   // default 30000
     pub write_millis: i64,       // default 30000
@@ -178,6 +194,19 @@ pub fn default_limits() -> std::http::Limits
 上限は caller のものです。proxy の後ろの server と、公開 internet の server が
 同じ上限を欲しがるとは限らず、名指せない上限は誰にも上げられません。
 
+### body の上限はここにありません
+
+`accept` と `next` の引数です。
+
+```kizu
+var exchange = try server.accept(handle, allocator, 65536);
+```
+
+head の大きさは protocol の都合なので全 endpoint で同じでいい。body の大きさは
+**その endpoint が何を受け取るか**で決まるので、1 つの数にまとめると必ずどこかが
+窮屈になるかどこかが緩すぎるかになります。Go が `MaxHeaderBytes` を `Server` に
+置きながら body の上限を持たないのはこの区別です。
+
 ### 時間の上限
 
 `*_millis` は 1 message の各 phase に許す時間です。**duration** であって
@@ -189,7 +218,7 @@ phase は 3 つで、それぞれが**自分の deadline を、自分が始ま�
 | field | 覆う範囲 |
 | --- | --- |
 | `read_head_millis` | 接続を受けてから、head の空行までを読み切るまで |
-| `read_body_millis` | body の 1 byte 目から、`Content-Length` 分を読み切るまで |
+| `read_body_millis` | head を読み終えてから、body を読み終えるまで |
 | `write_millis` | `respond` が response を書き始めてから、書き切るまで |
 
 body に head と別の deadline を与えているのは、共有すると大きな body が
@@ -211,6 +240,15 @@ phase の deadline は全体を覆うので、4 秒ごとに 1 byte 送る相手
 から失敗を返します。client は status を受け取る権利があり、caller は parse すら
 していない request に対して status を送れないからです。
 
+その書き込みは **1 回だけ**で、待ちません。読むのをやめた peer に何かを伝える
+ことはできず、そのために待つのは接続 1 本で loop 全体を止める形です
+(ADR-0141)。入り切らなかった分は接続ごと落とします。
+
+**接続が閉じた・reset された相手には何も返しません。** もう誰もいないので、
+health check ごとに log が 1 行増えるのは報告ではありません。Go も
+`isCommonNetReadError` で同じ区別をしています。同じ理由で、head を 1 byte も
+送らずに消えた接続は request でも失敗でもなく、`accept` は次の接続を取ります。
+
 | 失敗 | status |
 | --- | --- |
 | `MalformedRequest` / `Incomplete` / `InvalidHeader` | 400 |
@@ -228,7 +266,7 @@ phase の deadline は全体を覆うので、4 秒ごとに 1 byte 送る相手
 ことです。100 MB の答えに 100 MB のメモリは払えませんし、終わりの決まっていない
 stream には書ける length がありません。
 
-`accept` も同じ形で、body を `max_body_bytes` の下で request に読み切ります。
+`accept` も同じ形で、body を `max` の下で `exchange.body` に読み切ります。
 form には正しく、upload には間違っています —— 上限があるのは body を保持して
 いるからです。
 
@@ -324,10 +362,11 @@ grep すれば「std::http が組み立てなかった head」が全部出ます
 ```kizu
 fn (self: &var Server) accept_head(io, allocator) -> Failure!Exchange
 fn (self: &var Exchange) read_into(io, allocator, out, max) -> Failure!i64
+fn (self: &var Exchange) read_ready_into(io, allocator, out, max) -> Failure!?i64
 ```
 
-`accept_head` は空行で止まります。body は接続に残り、`max_body_bytes` は
-**掛かりません** —— body を保持していないので、上限を掛ける対象がありません。
+`accept_head` は空行で止まります。body は接続に残り、上限は**掛かりません**
+—— body を保持していないので、掛ける対象がありません。
 `read_into` は `std::net::read_into` と同じ契約(追記した byte 数、0 は終端)で、
 完結を判断する loop は caller が持ちます。
 
@@ -345,6 +384,10 @@ while got > 0 {
 }
 ```
 
+`read_ready_into` は同じ読みを**待たずに**します。null は「今は何も来ていない」
+で、0 は今まで通り body の終わりです。poller の loop はこちらを使います
+—— `read_into` で待つと、その 1 接続が他の全部を止めます。
+
 ### 接続そのものは渡しません
 
 `Exchange` は `TcpStream` を private に持ち、`write_all` / `read_into` /
@@ -360,7 +403,8 @@ byte は既に `Exchange` の中にあります。socket を渡すと caller は
 復活して、[`std::net` が避けた形](net.md#deadline)に戻ります。
 
 - `respond_head` が write phase の deadline を 1 回置く
-- `accept_head` が read phase の deadline を 1 回置く
+- `accept` / `accept_head` が head の deadline を置き、head を読み終えた時点で
+  body の deadline に置き換える
 - 1 つの phase より長く生きる caller(101 の後の protocol など)は
   `exchange.set_read_deadline(net::deadline_in_millis(n))` で自分で押し直す
 
@@ -368,7 +412,7 @@ byte は既に `Exchange` の中にあります。socket を渡すと caller は
 
 長さを事前に知らない client は `Content-Length` を書けないので、body を
 `SIZE CRLF DATA CRLF` の列にして最後に size 0 を送ります。`accept` は decode して
-`request.body` に入れ、`accept_head` は `read_into` が decode します。
+`exchange.body` に入れ、`accept_head` は `read_into` が decode します。
 
 chunk の extension(`3;name=value`)は読み飛ばします —— framing を変えるものが
 無いので、理解できない値は message を拒否する理由になりません。terminator の
@@ -385,14 +429,14 @@ message が 2 つになる」経路を閉じるためのものです。
 | `Content-Length` と `Transfer-Encoding` の両方 | `Error::ConflictingFraming` (400) |
 | `Transfer-Encoding` が `chunked` 以外(`gzip, chunked`、`identity`、list) | `Error::UnsupportedEncoding` (501) |
 | size が hex でない / chunk の後ろが CRLF でない | `Error::MalformedChunk` (400) |
-| decode 後の合計が `max_body_bytes` 超え | `Error::BodyTooLarge` (413) |
+| decode 後の合計が `accept` に渡した上限を超え | `Error::BodyTooLarge` (413) |
 
 1 つ目が肝です。RFC 9112 は「encoding が勝つ」と言いますが、**前段の proxy が
 逆に判断したときに 1 つの request が 2 つになります**。自分の長さについて 2 つの
 ことを言う message は、どちらかを選ぶのではなく読みません。
 
-`max_body_bytes` が掛かるのは `accept`(body を保持する)だけです。`accept_head`
-では掛かりません —— 保持していないので、上限を掛ける対象がありません。
+上限が掛かるのは `accept`(body を保持する)だけです。`accept_head` では
+掛かりません —— 保持していないので、掛ける対象がありません。
 
 送る側の chunked は [`Framing::Chunked`](#chunked) です。
 
@@ -408,7 +452,7 @@ fn (self: &Exchange) watch_read(io, poller: &var net::Poller, token) -> Failure!
 ```
 
 `accept_ready` は待たずに接続を取り、**request がまだ無い** exchange を返します。
-`advance` が届いた分だけ message を進め、何が起きたかを答えます。
+`advance` が届いた分だけ head を進め、何が起きたかを答えます。
 
 ```kizu
 pub union Progress {
@@ -417,6 +461,10 @@ pub union Progress {
     Closed,     // 揃う前に peer が去った。失敗ではない
 }
 ```
+
+`Request` は **head が揃った**という意味です。body があればそこから
+`read_ready_into` で読みます —— `accept_head` が `read_into` に任せるのと同じ
+分担で、待たない版がこちらというだけです。
 
 loop はこうなります —— **待つのは poller 1 回だけ**で、全接続について同時に。
 
@@ -443,20 +491,22 @@ while index < count {
 ## keep-alive
 
 ```kizu
-fn (self: &var Exchange) next(io, allocator) -> Failure!bool
+fn (self: &var Exchange) next(io, allocator, max) -> Failure!bool
+fn (self: &var Exchange) next_head(io, allocator) -> Failure!bool
 ```
 
-`next` は同じ接続の次の request を読み、**あったかどうか**を返します。false は
+`next` は同じ接続の次の request を読み、**あったかどうか**を返します。
+`accept` / `accept_head` と同じ対で、`next_head` は head だけを読みます。false は
 接続が終わったこと —— この server がもう運ばないと言った、peer が同じことを
 言った、あるいは peer が閉じた —— なので、それで終わる loop が接続の寿命です。
 
 ```kizu
-var held = try server.accept(handle, allocator);
+var held = try server.accept(handle, allocator, 1048576);
 defer held.deinit(allocator);
 var more = true;
 while more {
     try answer(handle, allocator, &var held);
-    more = try held.next(handle, allocator);
+    more = try held.next(handle, allocator, 1048576);
 }
 ```
 

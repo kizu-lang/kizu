@@ -114,7 +114,8 @@ fn answer(
     handle: Io,
     allocator: Allocator,
     pair: &var Pair,
-    reply: []u8
+    reply: []u8,
+    body: &var string::String
 ) -> Failure!http::Request {
     var served = try pair.listener.accept(handle);
     errdefer served.deinit();
@@ -129,7 +130,7 @@ fn answer(
     // The client wrote the head and the body in one call, so whatever follows
     // the head in the buffer is the body. A server would read to the declared
     // Content-Length; this only has to see what one write delivered.
-    try request.body.append_bytes(allocator, raw[head_length..mem::len(raw)]);
+    try body.append_bytes(allocator, raw[head_length..mem::len(raw)]);
     try served.write_all(handle, reply);
     served.deinit();
     return move request;
@@ -148,7 +149,9 @@ test "a written request carries the method, the target and the Host" {
     var reply = try wire(allocator, "HTTP/1.1 204 No Content");
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     defer request.deinit(allocator);
 
     let method = request.method.as_bytes();
@@ -168,7 +171,7 @@ test "a written request carries the method, the target and the Host" {
     } else {
         testing::fail("the request carried no Content-Length");
     }
-    let body = request.body.as_bytes();
+    let body = sent.as_bytes();
     testing::expect_equal<[]u8>("hi", body);
 }
 
@@ -190,7 +193,9 @@ test "a response with a Content-Length is read to exactly that length" {
     try crlf(allocator, &var reply);
     try reply.append_bytes(allocator, "there and more");
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
     var response = try http::read_response_from(
@@ -219,7 +224,9 @@ test "a response with no Content-Length is framed by the close" {
     try crlf(allocator, &var reply);
     try reply.append_bytes(allocator, "everything until the close");
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
     var response = try http::read_response_from(
@@ -246,7 +253,9 @@ test "a HEAD answer keeps the length and takes no body" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
     var response = try http::read_response_from(
@@ -331,7 +340,9 @@ test "a chunked answer is decoded" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
     var response = try http::read_response_from(
@@ -358,7 +369,9 @@ test "an encoding this client does not speak is refused" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
     if http::read_response_from(
@@ -391,7 +404,9 @@ test "a message that says two things about its length is refused" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
     if http::read_response_from(
@@ -421,7 +436,9 @@ test "a body past the ceiling is refused" {
     try crlf(allocator, &var reply);
     try crlf(allocator, &var reply);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
     var limits = http::default_limits();

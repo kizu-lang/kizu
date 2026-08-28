@@ -32,7 +32,7 @@ Kizu の server は **見える loop** です。handler の登録簿も callback
 ありません。
 
 ```kizu
-var exchange = try server.accept(handle, allocator);   // 1 接続、1 request
+var exchange = try server.accept(handle, allocator, 1048576);   // 1 接続、1 request
 defer exchange.deinit(allocator);
 try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
 ```
@@ -86,7 +86,7 @@ address は `host:port` です。IPv6 の host は bracket で囲みます
 fn serve_one(handle: Io, allocator: Allocator, server: &var http::Server)
     -> http::Failure!void
 {
-    var exchange = try server.accept(handle, allocator);
+    var exchange = try server.accept(handle, allocator, 1048576);
     defer exchange.deinit(allocator);
     try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
     return;
@@ -242,14 +242,23 @@ routing は `exchange.request` を読み、答えるのは `exchange` を可変�
 var limits = http::default_limits();
 limits.max_head_bytes = 4096;
 limits.max_headers = 32;
-limits.max_body_bytes = 65536;
 var server = try http::listen_with(handle, "127.0.0.1:8080", limits);
 ```
 
 上限は **caller のもの**です。proxy の後ろの service と公開 internet の
 service が同じ上限を欲しがるとは限らず、名指せない上限は誰にも上げられません。
 
-既定は request head 8 KiB、header 64 個、body 1 MiB です。
+既定は request head 8 KiB、header 64 個です。
+
+**body の上限はここにありません。** `accept` の引数です。
+
+```kizu
+var exchange = try server.accept(handle, allocator, 65536);
+```
+
+body の大きさは endpoint が決めるものだからです —— upload と form が同じ数を
+共有する理由がありません。Go も `MaxHeaderBytes` は server に置き、body の上限は
+`MaxBytesReader` として handler に渡します。
 
 上限は head **そのもの**に対して測ります —— 1 回の read がたまたま全部運んで
 きても、上限を超えた head は超えた head です。

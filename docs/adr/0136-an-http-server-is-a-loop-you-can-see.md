@@ -39,7 +39,7 @@ parameter(SPEC §13)は型検査だけあって lowering を持たず、呼べ�
 戻ります。loop は呼ぶ側が書きます。
 
 ```kizu
-var exchange = try server.accept(handle, allocator);
+var exchange = try server.accept(handle, allocator, 1048576);
 defer exchange.deinit(allocator);
 try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
 ```

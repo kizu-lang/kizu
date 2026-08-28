@@ -97,7 +97,7 @@ fn contains(haystack: []u8, needle: []u8) -> bool {
 // It is its own frame so the connection is released before the client reads:
 // the response promised Connection: close, and the close is the end of body.
 fn answer(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
-    var exchange = try server.accept(handle, allocator);
+    var exchange = try server.accept(handle, allocator, 1048576);
     defer exchange.deinit(allocator);
     var reply = string::new(allocator);
     defer reply.deinit(allocator);
@@ -108,7 +108,7 @@ fn answer(handle: Io, allocator: Allocator, server: &var http::Server) -> Failur
     let path = http::path_of(target);
     try reply.append_bytes(allocator, path);
     try reply.append_byte(allocator, cast<u8>(32));
-    let body = exchange.request.body.as_bytes();
+    let body = exchange.body.as_bytes();
     try reply.append_bytes(allocator, body);
     let text = reply.as_bytes();
     try exchange.respond_text(handle, allocator, 200, "text/plain", text);
@@ -117,8 +117,13 @@ fn answer(handle: Io, allocator: Allocator, server: &var http::Server) -> Failur
 
 // refused accepts a connection this server cannot read a request from, and
 // answers what the read failure maps to.
-fn refused(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
-    if server.accept(handle, allocator) |exchange| {
+fn refused(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    max: i64
+) -> Failure!void {
+    if server.accept(handle, allocator, max) |exchange| {
         exchange.deinit(allocator);
         testing::fail("a malformed request produced an exchange");
         return;
@@ -203,7 +208,7 @@ test "a malformed request line is answered 400 and reported to the caller" {
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
-    if refused(handle, allocator, &var server) {
+    if refused(handle, allocator, &var server, 1048576) {
         testing::fail("a malformed request was accepted");
     } else |err| {
         testing::expect(true);
@@ -244,7 +249,7 @@ test "a head past the ceiling is answered 431" {
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
-    if refused(handle, allocator, &var server) {
+    if refused(handle, allocator, &var server, 1048576) {
         testing::fail("an oversized head was accepted");
     } else |err| {
         testing::expect(true);
@@ -304,7 +309,7 @@ test "a head that stops halfway is answered 408 rather than waited on" {
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
-    if refused(handle, allocator, &var server) {
+    if refused(handle, allocator, &var server, 1048576) {
         testing::fail("an unfinished head was accepted");
     } else |err| {
         testing::expect(true);
@@ -343,7 +348,7 @@ test "a body that stops halfway is answered 408" {
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
-    if refused(handle, allocator, &var server) {
+    if refused(handle, allocator, &var server, 1048576) {
         testing::fail("an unfinished body was accepted");
     } else |err| {
         testing::expect(true);
@@ -392,7 +397,7 @@ fn serve_streamed(
     server: &var http::Server,
     pieces: i64
 ) -> Failure!void {
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.response.header(allocator, "Content-Type", "text/plain");
     try held.respond_head(handle, allocator, http::Framing::Length(pieces * 3));
@@ -435,7 +440,7 @@ fn serve_until_close(
     allocator: Allocator,
     server: &var http::Server
 ) -> Failure!void {
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::UntilClose);
     try held.write_all(handle, allocator, "one");
@@ -468,7 +473,7 @@ test "a body of unknown length is framed by the close" {
 }
 
 fn serve_upgrade(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.response.set_status(101);
     try held.response.header(allocator, "Upgrade", "echo");
@@ -525,7 +530,7 @@ test "respond after respond_head is refused" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET / HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::UntilClose);
     if held.respond(handle, allocator) {
@@ -546,7 +551,7 @@ fn count_upload(
 ) -> Failure!void {
     var held = try server.accept_head(handle, allocator);
     defer held.deinit(allocator);
-    testing::expect_equal<i64>(0, held.request.body.len());
+    testing::expect_equal<i64>(0, held.body.len());
 
     let declared = try held.request.content_length();
     var want = 0;
@@ -575,10 +580,9 @@ fn count_upload(
 test "accept_head leaves the body on the connection to be streamed" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var limits = http::default_limits();
-    // Small enough that `accept` would refuse this upload outright.
-    limits.max_body_bytes = 64;
-    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    // `accept` with a ceiling of 64 would refuse this upload outright.
+    // `accept_head` has no ceiling to refuse it with.
+    var server = try http::listen(handle, "127.0.0.1:0");
     defer server.deinit();
     let port = try server.local_port();
     var address = try loopback(allocator, port);
@@ -613,9 +617,7 @@ test "accept_head leaves the body on the connection to be streamed" {
 test "accept still refuses a body past the ceiling" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var limits = http::default_limits();
-    limits.max_body_bytes = 64;
-    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    var server = try http::listen(handle, "127.0.0.1:0");
     defer server.deinit();
     let port = try server.local_port();
     var address = try loopback(allocator, port);
@@ -634,7 +636,7 @@ test "accept still refuses a body past the ceiling" {
     let body_bytes = body.as_bytes();
     try send_request(handle, allocator, &var client, "POST /upload HTTP/1.1", body_bytes);
 
-    if refused(handle, allocator, &var server) {
+    if refused(handle, allocator, &var server, 64) {
         testing::fail("an oversized body was accepted");
     } else |err| {
         testing::expect(true);
@@ -650,9 +652,7 @@ test "accept still refuses a body past the ceiling" {
 test "accept_head streams a chunked body the same way" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var limits = http::default_limits();
-    limits.max_body_bytes = 64;
-    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    var server = try http::listen(handle, "127.0.0.1:0");
     defer server.deinit();
     let port = try server.local_port();
     var address = try loopback(allocator, port);
@@ -678,7 +678,7 @@ test "accept_head streams a chunked body the same way" {
 
     var held = try server.accept_head(handle, allocator);
     defer held.deinit(allocator);
-    testing::expect_equal<i64>(0, held.request.body.len());
+    testing::expect_equal<i64>(0, held.body.len());
     var body = string::new(allocator);
     defer body.deinit(allocator);
     var got = try held.read_into(handle, allocator, &var body, 4096);
@@ -723,9 +723,9 @@ test "accept reads a chunked body whole" {
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
-    let body = held.request.body.as_bytes();
+    let body = held.body.as_bytes();
     testing::expect_equal<[]u8>("abcdef", body);
     testing::expect(!held.request.headers.has("X-Checksum"));
 }
@@ -733,9 +733,7 @@ test "accept reads a chunked body whole" {
 test "a chunked body past the ceiling is refused" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var limits = http::default_limits();
-    limits.max_body_bytes = 4;
-    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    var server = try http::listen(handle, "127.0.0.1:0");
     defer server.deinit();
     let port = try server.local_port();
     var address = try loopback(allocator, port);
@@ -758,7 +756,7 @@ test "a chunked body past the ceiling is refused" {
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
-    if refused(handle, allocator, &var server) {
+    if refused(handle, allocator, &var server, 4) {
         testing::fail("a chunked body past the ceiling was accepted");
     } else |err| {
         testing::expect(true);
@@ -795,7 +793,7 @@ test "a request that says two things about its length is refused" {
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
-    if refused(handle, allocator, &var server) {
+    if refused(handle, allocator, &var server, 1048576) {
         testing::fail("a request with two framings was accepted");
     } else |err| {
         testing::expect(true);
@@ -892,7 +890,7 @@ test "writing past a declared length is refused before it reaches the peer" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET /stream HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::Length(6));
     try held.write_all(handle, allocator, "abc");
@@ -923,7 +921,7 @@ test "a body that stops short is visible to the caller" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET /stream HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::Length(10));
     try held.write_all(handle, allocator, "short");
@@ -947,7 +945,7 @@ test "framings without a length count nothing" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET /events HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::UntilClose);
     testing::expect_equal<i64>(0, held.owes());
@@ -960,7 +958,7 @@ fn serve_chunked(
     allocator: Allocator,
     server: &var http::Server
 ) -> Failure!void {
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.response.header(allocator, "Content-Type", "text/plain");
     try held.respond_head(handle, allocator, http::Framing::Chunked);
@@ -1014,7 +1012,7 @@ test "a declared length that was not written is refused at finish" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET /short HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::Length(10));
     try held.write_all(handle, allocator, "short");
@@ -1042,7 +1040,7 @@ test "finishing a body twice is refused" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET /chunked HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::Chunked);
     try held.write_all(handle, allocator, "one");
@@ -1062,7 +1060,7 @@ fn serve_connection(
     allocator: Allocator,
     server: &var http::Server
 ) -> Failure!i64 {
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     var answered = 0;
     var more = true;
@@ -1074,7 +1072,7 @@ fn serve_connection(
         let text = body.as_bytes();
         try held.respond_text(handle, allocator, 200, "text/plain", text);
         answered = answered + 1;
-        more = try held.next(handle, allocator);
+        more = try held.next(handle, allocator, 1048576);
     }
     return answered;
 }
@@ -1178,14 +1176,14 @@ test "a body framed by the close ends the connection with it" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET /events HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::UntilClose);
     try held.write_all(handle, allocator, "no length to find");
     try held.finish_body(handle, allocator);
     // The peer has no way to know where this body ended except the close, so
     // the connection cannot carry another request whatever the limits say.
-    testing::expect(!try held.next(handle, allocator));
+    testing::expect(!try held.next(handle, allocator, 1048576));
 }
 
 test "asking for the next request before answering this one is a failure" {
@@ -1204,9 +1202,9 @@ test "asking for the next request before answering this one is a failure" {
     defer client.deinit();
     try send_request(handle, allocator, &var client, "GET / HTTP/1.1", "");
 
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
-    if held.next(handle, allocator) |_| {
+    if held.next(handle, allocator, 1048576) |_| {
         testing::fail("an unanswered exchange carried on to the next request");
     } else |err| {
         testing::expect(true);
@@ -1222,13 +1220,13 @@ fn serve_chunked_then_one(
     allocator: Allocator,
     server: &var http::Server
 ) -> Failure!void {
-    var held = try server.accept(handle, allocator);
+    var held = try server.accept(handle, allocator, 1048576);
     defer held.deinit(allocator);
     try held.respond_head(handle, allocator, http::Framing::Chunked);
     try held.write_all(handle, allocator, "first");
     try held.finish_body(handle, allocator);
     // Chunked says where the body ended without ending the connection.
-    testing::expect(try held.next(handle, allocator));
+    testing::expect(try held.next(handle, allocator, 1048576));
     try held.respond_text(handle, allocator, 200, "text/plain", "second");
     return;
 }
@@ -1290,7 +1288,7 @@ test "a connection can be taken before its request is complete" {
     testing::expect_equal<[]u8>("/slow", target);
 }
 
-test "a body arriving in pieces is assembled without waiting" {
+test "a body arriving in pieces is read without waiting" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var server = try http::listen(handle, "127.0.0.1:0");
@@ -1314,15 +1312,41 @@ test "a body arriving in pieces is assembled without waiting" {
 
     var held = try take_ready(handle, allocator, &var server);
     defer held.deinit(allocator);
-    // The head is whole and the body is not, so there is more to come.
-    testing::expect_equal<[]u8>("need more", try state(handle, allocator, &var held));
-    // Half a body: this stays "need more" however many times it is asked.
-    try client.write_all(handle, "01234");
-    testing::expect_equal<[]u8>("need more", try state(handle, allocator, &var held));
-    try client.write_all(handle, "56789");
+    // The head is what `advance` reads. It is complete, so the request is.
     testing::expect_equal<[]u8>("request", try settled(handle, allocator, &var held));
-    let body = held.request.body.as_bytes();
-    testing::expect_equal<[]u8>("0123456789", body);
+
+    // The body is the caller's to read, and reading it never waits either.
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try client.write_all(handle, "01234");
+    try soak(handle, allocator, &var held, &var body, 5);
+    let half = body.as_bytes();
+    testing::expect_equal<[]u8>("01234", half);
+    try client.write_all(handle, "56789");
+    try soak(handle, allocator, &var held, &var body, 10);
+    let whole = body.as_bytes();
+    testing::expect_equal<[]u8>("0123456789", whole);
+}
+
+// soak reads what has arrived, without waiting, until the body holds `want`
+// bytes. A poller loop would go back to its wait between these calls; this
+// spins because the test is both ends of the connection.
+fn soak(
+    handle: Io,
+    allocator: Allocator,
+    held: &var http::Exchange,
+    out: &var string::String,
+    want: i64
+) -> Failure!void {
+    while out.len() < want {
+        let got = try held.read_ready_into(handle, allocator, out, 4096);
+        if got |count| {
+            if count == 0 {
+                return;
+            }
+        }
+    }
+    return;
 }
 
 test "a peer that goes away before finishing is closed, not a failure" {
