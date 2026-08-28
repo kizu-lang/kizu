@@ -90,15 +90,15 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_accept": {
-		Args:   []ArgKind{ArgIo, ArgI64},
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64},
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_read": {
-		Args:   []ArgKind{ArgIo, ArgAllocator, ArgI64, ArgStringOut, ArgI64},
+		Args:   []ArgKind{ArgIo, ArgAllocator, ArgI64, ArgStringOut, ArgI64, ArgI64},
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_write_all": {
-		Args:   []ArgKind{ArgIo, ArgI64, ArgBytes},
+		Args:   []ArgKind{ArgIo, ArgI64, ArgBytes, ArgI64},
 		Return: "std::net::Error!void",
 	},
 	"std::internal::builtin::net_local_port": {

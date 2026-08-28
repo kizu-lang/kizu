@@ -2948,6 +2948,12 @@ runtime selection の方針は ADR-0039 に従います。
   `!i64` で返す。**0 は相手が閉じたこと**を意味し、`max <= 0` は
   `Error::InvalidLength`
 * `stream.write_all(io, bytes)` は `!void` を返す。部分書き込みは返さない
+* deadline は**時点**であって 1 回の呼び出しの budget ではない。
+  `std::net::deadline_in_millis(millis)` が今からの距離を時点にし、
+  `set_read_deadline` / `set_write_deadline` / `set_accept_deadline` がそれを
+  受け取る。設定した時点は以後のその向きの呼び出し**全体**を覆い、自動では
+  更新されない。過ぎた後の呼び出しは待たずに `Error::TimedOut` を返す。
+  `clear_*_deadline` で外す
 * `TcpListener` / `TcpStream` は非 copy の owner で、`deinit` は `self` を値で
   取る。close 後の使用は型 error であり、runtime の報告ではない
 * `std::net::Address` は `host: []u8` と `port: i64` だけを持つ

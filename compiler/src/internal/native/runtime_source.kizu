@@ -20,6 +20,7 @@ pub fn runtime_source() -> []u8 {
         \\#include <netdb.h>
         \\#include <netinet/in.h>
         \\#include <netinet/tcp.h>
+        \\#include <poll.h>
         \\#include <time.h>
         \\#include <unistd.h>
         \\#if defined(__APPLE__)
@@ -927,12 +928,19 @@ pub fn runtime_source() -> []u8 {
         \\    *out = kizu_std_builtin_process_executable_path_into_result(allocator, dst);
         \\}
         \\
-        \\int64_t std__internal__builtin__process_monotonic_millis(void) {
+        \\/* The clock every deadline in this process is measured against. std::net
+        \\ * turns a deadline into a poll budget with it, and std::process hands the same
+        \\ * reading to Kizu, so the two cannot drift apart. */
+        \\static int64_t kizu_monotonic_millis(void) {
         \\    struct timespec ts;
         \\    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         \\        return 0;
         \\    }
         \\    return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
+        \\}
+        \\
+        \\int64_t std__internal__builtin__process_monotonic_millis(void) {
+        \\    return kizu_monotonic_millis();
         \\}
         \\
         \\int64_t std__internal__builtin__process_unix_millis(void) {
@@ -1399,6 +1407,61 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\}
         \\
+        \\/* A deadline is a moment to be finished by, not a budget each syscall gets
+        \\ * back. That distinction is the whole point: a peer that sends one byte every
+        \\ * four seconds never trips a four-second-per-recv timeout, but it does run out
+        \\ * of a deadline. The Kizu side owns the moment and hands down what is left of
+        \\ * it; these turn that into what poll wants.
+        \\ *
+        \\ * A negative budget means no deadline, which is what every call did before
+        \\ * deadlines existed and what a stream that has not set one still does. */
+        \\#define KIZU_NET_NO_DEADLINE INT64_C(-1)
+        \\#define KIZU_NET_WAIT_READY INT64_C(0)
+        \\#define KIZU_NET_WAIT_RETRY INT64_C(-1)
+        \\
+        \\static int64_t kizu_net_deadline(int64_t timeout_ms) {
+        \\    if (timeout_ms < 0) {
+        \\        return KIZU_NET_NO_DEADLINE;
+        \\    }
+        \\    return kizu_monotonic_millis() + timeout_ms;
+        \\}
+        \\
+        \\/* What is left of a deadline, floored at zero: an expired one still asks, it
+        \\ * just does not wait. Recomputing this per attempt is what keeps a retry from
+        \\ * handing the budget back. */
+        \\static int64_t kizu_net_remaining(int64_t deadline) {
+        \\    if (deadline < 0) {
+        \\        return KIZU_NET_NO_DEADLINE;
+        \\    }
+        \\    int64_t left = deadline - kizu_monotonic_millis();
+        \\    return left < 0 ? 0 : left;
+        \\}
+        \\
+        \\/* kizu_net_wait blocks until the descriptor is ready or the budget runs out.
+        \\ * With no deadline it does not poll at all -- the blocking call that follows
+        \\ * is the wait -- so a stream without one pays nothing for this. */
+        \\static int64_t kizu_net_wait(int fd, short events, int64_t remaining) {
+        \\    if (remaining < 0) {
+        \\        return KIZU_NET_WAIT_READY;
+        \\    }
+        \\    int budget = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
+        \\    struct pollfd pfd;
+        \\    pfd.fd = fd;
+        \\    pfd.events = events;
+        \\    pfd.revents = 0;
+        \\    int ready = poll(&pfd, 1, budget);
+        \\    if (ready > 0) {
+        \\        return KIZU_NET_WAIT_READY;
+        \\    }
+        \\    if (ready == 0) {
+        \\        return KIZU_ERR_STD_NET_ERROR_TIMED_OUT;
+        \\    }
+        \\    if (errno == EINTR) {
+        \\        return KIZU_NET_WAIT_RETRY;
+        \\    }
+        \\    return kizu_net_errno_failure(errno);
+        \\}
+        \\
         \\/* kizu_net_resolve turns a host and a port into the address list to try, and
         \\ * returns 0 or the failure to report. An empty host means the wildcard for a
         \\ * listener and the loopback for a connect, which is what getaddrinfo already
@@ -1536,14 +1599,26 @@ pub fn runtime_source() -> []u8 {
         \\    *out = kizu_std_builtin_net_connect_result(io, *host, port);
         \\}
         \\
-        \\static KizuErrorI64 kizu_std_builtin_net_accept_result(void *io, int64_t fd) {
+        \\static KizuErrorI64 kizu_std_builtin_net_accept_result(
+        \\    void *io,
+        \\    int64_t fd,
+        \\    int64_t timeout_ms
+        \\) {
         \\    if (kizu_io_is_failing(io)) {
         \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
         \\    }
         \\    if (fd < 0) {
         \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
         \\    }
+        \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    for (;;) {
+        \\        int64_t wait = kizu_net_wait((int)fd, POLLIN, kizu_net_remaining(deadline));
+        \\        if (wait == KIZU_NET_WAIT_RETRY) {
+        \\            continue;
+        \\        }
+        \\        if (wait != KIZU_NET_WAIT_READY) {
+        \\            return kizu_err_i64(wait);
+        \\        }
         \\        int conn = accept((int)fd, NULL, NULL);
         \\        if (conn >= 0) {
         \\            int one = 1;
@@ -1557,8 +1632,13 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\}
         \\
-        \\void std__internal__builtin__net_accept(KizuErrorI64 *out, void *io, int64_t fd) {
-        \\    *out = kizu_std_builtin_net_accept_result(io, fd);
+        \\void std__internal__builtin__net_accept(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    int64_t fd,
+        \\    int64_t timeout_ms
+        \\) {
+        \\    *out = kizu_std_builtin_net_accept_result(io, fd, timeout_ms);
         \\}
         \\
         \\/* One recv, appended to the caller's String, and the count is the answer.
@@ -1570,7 +1650,8 @@ pub fn runtime_source() -> []u8 {
         \\    void *allocator,
         \\    int64_t fd,
         \\    KizuString *dst,
-        \\    int64_t max
+        \\    int64_t max,
+        \\    int64_t timeout_ms
         \\) {
         \\    if (kizu_io_is_failing(io)) {
         \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
@@ -1589,7 +1670,15 @@ pub fn runtime_source() -> []u8 {
         \\    if (!kizu_array_reserve_storage(allocator, array, array->len + want, 1)) {
         \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
         \\    }
+        \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    for (;;) {
+        \\        int64_t wait = kizu_net_wait((int)fd, POLLIN, kizu_net_remaining(deadline));
+        \\        if (wait == KIZU_NET_WAIT_RETRY) {
+        \\            continue;
+        \\        }
+        \\        if (wait != KIZU_NET_WAIT_READY) {
+        \\            return kizu_err_i64(wait);
+        \\        }
         \\        ssize_t got = recv((int)fd, array->data + array->len, (size_t)want, 0);
         \\        if (got < 0) {
         \\            if (errno == EINTR) {
@@ -1608,9 +1697,10 @@ pub fn runtime_source() -> []u8 {
         \\    void *allocator,
         \\    int64_t fd,
         \\    KizuString *dst,
-        \\    int64_t max
+        \\    int64_t max,
+        \\    int64_t timeout_ms
         \\) {
-        \\    *out = kizu_std_builtin_net_read_result(io, allocator, fd, dst, max);
+        \\    *out = kizu_std_builtin_net_read_result(io, allocator, fd, dst, max, timeout_ms);
         \\}
         \\
         \\/* send returns after writing some of what it was given, so writing all of it
@@ -1619,7 +1709,8 @@ pub fn runtime_source() -> []u8 {
         \\static KizuErrorVoid kizu_std_builtin_net_write_all_result(
         \\    void *io,
         \\    int64_t fd,
-        \\    KizuSliceU8 bytes
+        \\    KizuSliceU8 bytes,
+        \\    int64_t timeout_ms
         \\) {
         \\    if (kizu_io_is_failing(io)) {
         \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
@@ -1630,8 +1721,16 @@ pub fn runtime_source() -> []u8 {
         \\    if (fd < 0) {
         \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_CLOSED);
         \\    }
+        \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    int64_t sent = 0;
         \\    while (sent < bytes.len) {
+        \\        int64_t wait = kizu_net_wait((int)fd, POLLOUT, kizu_net_remaining(deadline));
+        \\        if (wait == KIZU_NET_WAIT_RETRY) {
+        \\            continue;
+        \\        }
+        \\        if (wait != KIZU_NET_WAIT_READY) {
+        \\            return kizu_err_void(wait);
+        \\        }
         \\        ssize_t wrote = send((int)fd, bytes.ptr + sent, (size_t)(bytes.len - sent), 0);
         \\        if (wrote < 0) {
         \\            if (errno == EINTR) {
@@ -1648,9 +1747,10 @@ pub fn runtime_source() -> []u8 {
         \\    KizuErrorVoid *out,
         \\    void *io,
         \\    int64_t fd,
-        \\    const KizuSliceU8 *bytes
+        \\    const KizuSliceU8 *bytes,
+        \\    int64_t timeout_ms
         \\) {
-        \\    *out = kizu_std_builtin_net_write_all_result(io, fd, *bytes);
+        \\    *out = kizu_std_builtin_net_write_all_result(io, fd, *bytes, timeout_ms);
         \\}
         \\
         \\/* The port the kernel picked. Binding port 0 is how a test asks for one that

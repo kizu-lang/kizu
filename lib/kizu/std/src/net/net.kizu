@@ -35,12 +35,34 @@ pub struct Address {
     pub port: i64,
 }
 
+// A deadline is a moment on the monotonic clock that an operation must be
+// finished by, and 0 means there is none. It lives here rather than in the
+// kernel so the type says a call changed it: `SO_RCVTIMEO` would be a budget
+// each recv gets back, which a peer sending one byte at a time never spends.
 pub struct TcpListener {
     fd: i64,
+    accept_deadline_ms: i64,
 }
 
 pub struct TcpStream {
     fd: i64,
+    read_deadline_ms: i64,
+    write_deadline_ms: i64,
+}
+
+// deadline_in_millis is the moment `millis` from now, on the same monotonic
+// clock `std::process::monotonic_millis` reads. It is what the setters below
+// take: a deadline is a point, and this is how far away you want the point.
+//
+// Passing a bare duration to a setter by mistake asks for a moment near boot,
+// which has already gone by, so the first call fails loudly with `TimedOut`
+// rather than quietly never expiring.
+pub fn deadline_in_millis(millis: i64) -> i64 {
+    let now = std::process::monotonic_millis();
+    if millis <= 0 {
+        return now;
+    }
+    return now + millis;
 }
 
 // parse_address splits `host:port`. It reads text and nothing else: a name
@@ -72,28 +94,42 @@ pub fn parse_address(address: []u8) -> std::net::Error!std::net::Address {
 pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListener {
     let parsed = try parse_address(address);
     let fd = try std::internal::builtin::net_listen(io, parsed.host, parsed.port);
-    return TcpListener { fd: fd };
+    return TcpListener { fd: fd, accept_deadline_ms: 0 };
 }
 
 // tcp_connect opens a stream to a listening peer.
 pub fn tcp_connect(io: Io, address: []u8) -> std::net::Error!std::net::TcpStream {
     let parsed = try parse_address(address);
     let fd = try std::internal::builtin::net_connect(io, parsed.host, parsed.port);
-    return TcpStream { fd: fd };
+    return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
 }
 
 // accept waits for the next connection and returns it as an owned stream. The
 // listener stays open, so the caller decides when to stop accepting by
 // leaving the loop, not by the listener running out.
 fn (self: &var TcpListener) accept(io: Io) -> std::net::Error!std::net::TcpStream {
-    let fd = try std::internal::builtin::net_accept(io, self.fd);
-    return TcpStream { fd: fd };
+    let budget = remaining_millis(self.accept_deadline_ms);
+    let fd = try std::internal::builtin::net_accept(io, self.fd, budget);
+    return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
 }
 
 // local_port is the port this listener is actually on.
 fn (self: &TcpListener) local_port() -> std::net::Error!i64 {
     let port = try std::internal::builtin::net_local_port(self.fd);
     return port;
+}
+
+// set_accept_deadline gives every later `accept` until the deadline, not each
+// one. A loop that has other work to do sets one, takes `TimedOut` as its cue
+// to do that work, and sets the next.
+fn (self: &var TcpListener) set_accept_deadline(at: i64) -> void {
+    self.accept_deadline_ms = at;
+    return;
+}
+
+fn (self: &var TcpListener) clear_accept_deadline() -> void {
+    self.accept_deadline_ms = 0;
+    return;
 }
 
 // deinit consumes the listener and releases its descriptor. Consuming rather
@@ -114,7 +150,9 @@ fn (self: &var TcpStream) read_into(
     out: &var std::string::String,
     max: i64
 ) -> std::net::Error!i64 {
-    let count = try std::internal::builtin::net_read(io, allocator, self.fd, out, max);
+    let budget = remaining_millis(self.read_deadline_ms);
+    let count = try std::internal::builtin::net_read(
+        io, allocator, self.fd, out, max, budget);
     return count;
 }
 
@@ -122,7 +160,32 @@ fn (self: &var TcpStream) read_into(
 // not a result the caller has to handle, because there is no shape of it this
 // returns.
 fn (self: &var TcpStream) write_all(io: Io, bytes: []u8) -> std::net::Error!void {
-    try std::internal::builtin::net_write_all(io, self.fd, bytes);
+    let budget = remaining_millis(self.write_deadline_ms);
+    try std::internal::builtin::net_write_all(io, self.fd, bytes, budget);
+    return;
+}
+
+// set_read_deadline covers every later read until it passes, so a peer that
+// drips one byte at a time still runs out. It is one moment for the whole
+// message, which means a connection that serves more than one message has to
+// push it forward between them -- the deadline does not renew itself.
+fn (self: &var TcpStream) set_read_deadline(at: i64) -> void {
+    self.read_deadline_ms = at;
+    return;
+}
+
+fn (self: &var TcpStream) set_write_deadline(at: i64) -> void {
+    self.write_deadline_ms = at;
+    return;
+}
+
+fn (self: &var TcpStream) clear_read_deadline() -> void {
+    self.read_deadline_ms = 0;
+    return;
+}
+
+fn (self: &var TcpStream) clear_write_deadline() -> void {
+    self.write_deadline_ms = 0;
     return;
 }
 
@@ -130,6 +193,21 @@ fn (self: &var TcpStream) write_all(io: Io, bytes: []u8) -> std::net::Error!void
 fn (self: std::net::TcpStream) deinit() -> void {
     std::internal::builtin::net_close(self.fd);
     return;
+}
+
+// remaining_millis is what the primitives take: a negative budget means there
+// is no deadline and the call blocks, and zero means the deadline is gone and
+// the call must not wait. Recomputing it per call is what keeps a deadline
+// from being handed back a full budget every time.
+fn remaining_millis(deadline: i64) -> i64 {
+    if deadline == 0 {
+        return -1;
+    }
+    let left = deadline - std::process::monotonic_millis();
+    if left < 0 {
+        return 0;
+    }
+    return left;
 }
 
 fn parse_port(text: []u8) -> std::net::Error!i64 {

@@ -11,9 +11,12 @@ field に持つので、socket に届く唯一の道はこの module が返し�
 pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListener
 pub fn tcp_connect(io: Io, address: []u8) -> std::net::Error!std::net::TcpStream
 pub fn parse_address(address: []u8) -> std::net::Error!std::net::Address
+pub fn deadline_in_millis(millis: i64) -> i64
 
 fn (self: &var TcpListener) accept(io: Io) -> std::net::Error!std::net::TcpStream
 fn (self: &TcpListener) local_port() -> std::net::Error!i64
+fn (self: &var TcpListener) set_accept_deadline(at: i64) -> void
+fn (self: &var TcpListener) clear_accept_deadline() -> void
 fn (self: TcpListener) deinit() -> void
 
 fn (self: &var TcpStream) read_into(
@@ -23,6 +26,10 @@ fn (self: &var TcpStream) read_into(
     max: i64,
 ) -> std::net::Error!i64
 fn (self: &var TcpStream) write_all(io: Io, bytes: []u8) -> std::net::Error!void
+fn (self: &var TcpStream) set_read_deadline(at: i64) -> void
+fn (self: &var TcpStream) set_write_deadline(at: i64) -> void
+fn (self: &var TcpStream) clear_read_deadline() -> void
+fn (self: &var TcpStream) clear_write_deadline() -> void
 fn (self: TcpStream) deinit() -> void
 ```
 
@@ -59,6 +66,40 @@ buffer 全体の上限ではありません —— 全体の上限は呼ぶ側�
 `write_all` は全 byte を書くか失敗を返すかのどちらかです。部分書き込みは
 caller が扱う結果ではありません。
 
+## deadline
+
+deadline は **時点** です。duration ではありません。
+
+```kizu
+stream.set_read_deadline(net::deadline_in_millis(5000));
+```
+
+`deadline_in_millis(5000)` が「今から 5000ms 後の時点」を作り、setter がその時点を
+受け取ります。Go の `conn.SetReadDeadline(time.Now().Add(d))` と同じ形です。
+
+**この 1 つの時点が、以後の read 全体を覆います。** 1 回の read ごとに配り直される
+budget ではありません。この差が全部です —— 4 秒ごとに 1 byte 送る相手は
+「read あたり 5 秒」の timeout に永久に引っかかりませんが、deadline は使い切ります。
+`SO_RCVTIMEO` を使わず field に持っているのはこのためで、Rust std / Python / Java の
+`set_read_timeout` / `settimeout` / `setSoTimeout` は前者、Kizu と Go は後者です。
+
+覆うのが全体である以上、**1 本の接続で複数の message を扱うなら、間で押し直します**。
+deadline は自分で更新しません。
+
+`clear_read_deadline` で外すと、deadline が無い状態(初期値)に戻り、read は待ち
+続けます。deadline を過ぎた後の呼び出しは待たずに `Error::TimedOut` を返します。
+
+### duration を渡してしまったら
+
+`set_read_deadline(5000)` は時点として読まれます。monotonic clock の 5000ms は
+この host が起動して 5 秒後で、とうに過ぎているので、**最初の read が
+`TimedOut` で落ちます**。静かに無期限になるより気付ける方向に倒してあります。
+
+### listener の deadline
+
+`set_accept_deadline` は `accept` に期限を与えます。定期的な仕事を挟みたい loop は
+期限を設け、`TimedOut` をその合図として受け取り、次の期限を設けます。
+
 ## 並行性
 
 現在の Kizu に並行 API はありません(SPEC §15)。したがって
@@ -79,7 +120,7 @@ ConnectionRefused   相手が listen していない
 ConnectionReset     接続が切れた
 PermissionDenied    その port / address を開く権限が無い
 TooManyOpenFiles    descriptor が尽きた
-TimedOut            接続が時間内に確立しなかった
+TimedOut            deadline を過ぎた、または接続が時間内に確立しなかった
 InvalidLength       read の上限が 0 以下
 ReadFailed          read が失敗した
 WriteFailed         write が失敗した
