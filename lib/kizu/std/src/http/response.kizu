@@ -1,0 +1,306 @@
+// A Response is built whole and then sent. Nothing reaches the socket until
+// `encode` runs, which is what lets the status line carry a Content-Length
+// the body actually has -- the alternative is chunked transfer encoding, and
+// that is a framing this implementation does not speak.
+//
+// The cost is that a response is as large as its body. A server that has to
+// stream a large one needs chunked encoding, and until it has that, buffering
+// is the honest shape rather than a partial one that lies about its length.
+pub struct Response {
+    status: i64,
+    pub headers: std::http::Headers,
+    body: std::string::String,
+    finished: bool,
+}
+
+pub fn response_new(allocator: Allocator) -> std::http::Response {
+    return Response {
+        status: 200,
+        headers: std::http::headers_new(allocator),
+        body: std::string::new(allocator),
+        finished: false,
+    };
+}
+
+fn (self: &std::http::Response) status() -> i64 {
+    return self.status;
+}
+
+fn (self: &std::http::Response) body_len() -> i64 {
+    return self.body.len();
+}
+
+fn (self: &std::http::Response) is_finished() -> bool {
+    return self.finished;
+}
+
+// set_status names the status line's number. 100..999 is the whole range a
+// status line can carry; whether a number in it is registered is
+// `status_text`'s question, not this one's.
+fn (self: &var std::http::Response) set_status(status: i64) -> std::http::Failure!void {
+    if self.finished {
+        return std::http::Error::ResponseFinished;
+    }
+    if status < 100 or status > 999 {
+        return std::http::Error::InvalidStatus;
+    }
+    self.status = status;
+    return;
+}
+
+// header is `Header().Set` under another name: the field carries exactly this
+// value afterwards.
+fn (self: &var std::http::Response) header(
+    allocator: Allocator,
+    name: []u8,
+    value: []u8
+) -> std::http::Failure!void {
+    if self.finished {
+        return std::http::Error::ResponseFinished;
+    }
+    try self.headers.set(allocator, name, value);
+    return;
+}
+
+fn (self: &var std::http::Response) write(
+    allocator: Allocator,
+    bytes: []u8
+) -> std::http::Failure!void {
+    if self.finished {
+        return std::http::Error::ResponseFinished;
+    }
+    try self.body.append_bytes(allocator, bytes);
+    return;
+}
+
+// finish says the response is complete. Everything that would change it fails
+// afterwards, so a second write cannot arrive behind a body already sent.
+fn (self: &var std::http::Response) finish() -> void {
+    self.finished = true;
+    return;
+}
+
+// reset returns the response to what response_new made, keeping the storage
+// it already grew. A connection that answers more than once reuses it.
+fn (self: &var std::http::Response) reset(allocator: Allocator) -> void {
+    self.status = 200;
+    self.headers.clear(allocator);
+    self.body.clear();
+    self.finished = false;
+    return;
+}
+
+fn (self: std::http::Response) deinit(allocator: Allocator) -> void {
+    self.headers.deinit(allocator);
+    self.body.deinit(allocator);
+    return;
+}
+
+// encode renders the whole message into `out`. `head_only` is what a HEAD
+// request asks for -- and what `respond_head` asks for on every request: the
+// same head, including the Content-Length the body would have had, and none
+// of the body.
+//
+// `framing` decides what the head says about where the body ends. Only
+// `Buffered` appends one, because only `Buffered` has one here.
+fn (self: &std::http::Response) encode(
+    allocator: Allocator,
+    version: std::http::Version,
+    framing: std::http::Framing,
+    persist: bool,
+    head_only: bool,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    let carries_body = std::http::status_carries_body(self.status);
+    try out.append_bytes(allocator, std::http::version_text(version));
+    try out.append_byte(allocator, cast<u8>(32));
+    try std::fmt::append_i64(allocator, out, self.status);
+    try out.append_byte(allocator, cast<u8>(32));
+    try out.append_bytes(allocator, std::http::status_text(self.status));
+    try std::http::append_crlf(allocator, out);
+    try self.encode_fields(allocator, framing, version, persist, carries_body, out);
+    try std::http::append_crlf(allocator, out);
+    if head_only or !carries_body or !is_buffered(framing) {
+        return;
+    }
+    let body = self.body.as_bytes();
+    try out.append_bytes(allocator, body);
+    return;
+}
+
+// encode_fields writes the caller's fields, then the ones the framing needs.
+// For a buffered body the length is computed rather than trusted: the body is
+// right here, and a length that disagreed with it would desynchronise the
+// connection. For a body the caller writes, the length is the caller's claim,
+// because nothing here can measure bytes it never sees.
+//
+// `Raw` writes the caller's fields and stops. That is what it is for: a 101
+// carries `Connection: Upgrade`, and a head this function had finished for it
+// would be the wrong message.
+fn (self: &std::http::Response) encode_fields(
+    allocator: Allocator,
+    framing: std::http::Framing,
+    version: std::http::Version,
+    persist: bool,
+    carries_body: bool,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    let raw = is_raw(framing);
+    var index = 0;
+    while self.headers.at(index) |field| {
+        let name = field.name.as_bytes();
+        if raw or !is_framing_field(name) {
+            let value = field.value.as_bytes();
+            try out.append_bytes(allocator, name);
+            try out.append_bytes(allocator, ": ");
+            try out.append_bytes(allocator, value);
+            try std::http::append_crlf(allocator, out);
+        }
+        index = index + 1;
+    }
+    if raw {
+        return;
+    }
+    if carries_body {
+        try self.append_length(allocator, framing, out);
+        if is_chunked(framing) {
+            try out.append_bytes(allocator, "Transfer-Encoding: chunked");
+            try std::http::append_crlf(allocator, out);
+        }
+    }
+    try append_connection(allocator, version, persist, out);
+    return;
+}
+
+// append_connection says whether the connection carries another request.
+// `close` has to be written, because it is what lets a 1.1 client stop waiting
+// instead of timing out, and it is what ends an `UntilClose` body. Persisting
+// is the 1.1 default and needs no field; 1.0 is the other way round and has to
+// be told.
+fn append_connection(
+    allocator: Allocator,
+    version: std::http::Version,
+    persist: bool,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    if !persist {
+        try out.append_bytes(allocator, "Connection: close");
+        try std::http::append_crlf(allocator, out);
+        return;
+    }
+    return match version {
+        Http11 => ok_void(),
+        Http10 => append_keep_alive(allocator, out),
+    };
+}
+
+fn ok_void() -> std::http::Failure!void {
+    return;
+}
+
+fn append_keep_alive(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    try out.append_bytes(allocator, "Connection: keep-alive");
+    try std::http::append_crlf(allocator, out);
+    return;
+}
+
+// append_length writes the Content-Length this framing gives the head, if it
+// gives one at all.
+fn (self: &std::http::Response) append_length(
+    allocator: Allocator,
+    framing: std::http::Framing,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    if !declares_length(framing) {
+        return;
+    }
+    let length = self.length_of(framing);
+    try out.append_bytes(allocator, "Content-Length: ");
+    try std::fmt::append_i64(allocator, out, length);
+    try std::http::append_crlf(allocator, out);
+    return;
+}
+
+// declares_length reports whether this framing has a length to write.
+// UntilClose has none by definition -- the close is the end -- and Raw writes
+// no framing field at all.
+fn declares_length(framing: std::http::Framing) -> bool {
+    return match framing {
+        Buffered => true,
+        Length(_) => true,
+        UntilClose => false,
+        Chunked => false,
+        Raw => false,
+    };
+}
+
+fn is_chunked(framing: std::http::Framing) -> bool {
+    return match framing {
+        Chunked => true,
+        Buffered => false,
+        Length(_) => false,
+        UntilClose => false,
+        Raw => false,
+    };
+}
+
+// length_of is only asked after declares_length said yes. The other two arms
+// are here because a match is total, not because the number means anything.
+fn (self: &std::http::Response) length_of(framing: std::http::Framing) -> i64 {
+    return match framing {
+        Buffered => self.body.len(),
+        Length(count) => count,
+        UntilClose => 0,
+        Chunked => 0,
+        Raw => 0,
+    };
+}
+
+fn is_buffered(framing: std::http::Framing) -> bool {
+    return match framing {
+        Buffered => true,
+        Length(_) => false,
+        UntilClose => false,
+        Chunked => false,
+        Raw => false,
+    };
+}
+
+fn is_raw(framing: std::http::Framing) -> bool {
+    return match framing {
+        Raw => true,
+        Buffered => false,
+        Length(_) => false,
+        UntilClose => false,
+        Chunked => false,
+    };
+}
+
+// is_framing_field reports whether a field decides how the message is framed.
+// Those are written from what the message actually is, so one the caller set
+// is dropped rather than sent beside a contradicting one.
+fn is_framing_field(name: []u8) -> bool {
+    if std::http::equal_ascii_fold(name, "Content-Length") {
+        return true;
+    }
+    if std::http::equal_ascii_fold(name, "Transfer-Encoding") {
+        return true;
+    }
+    return std::http::equal_ascii_fold(name, "Connection");
+}
+
+// status_carries_body reports whether a status may be followed by one. 1xx,
+// 204 and 304 may not, and sending a Content-Length with them is what makes a
+// client wait for bytes that never come.
+pub fn status_carries_body(status: i64) -> bool {
+    if status >= 100 and status < 200 {
+        return false;
+    }
+    if status == 204 or status == 304 {
+        return false;
+    }
+    return true;
+}

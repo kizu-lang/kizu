@@ -1,0 +1,72 @@
+// std::net is TCP and nothing else: a listener accepts, a stream carries
+// bytes. Both are owners, so the descriptor behind each one is released by
+// the deinit the value carries -- and consumed by it, which is why a use
+// after close is a type error rather than a read of somebody else's socket.
+//
+// One process can be both ends. Connecting to a listening socket completes
+// against its backlog, so the client below is connected before anything has
+// accepted it, and the whole exchange runs in order on one thread.
+
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = net::Error or mem::Error;
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+fn exchange(handle: Io, allocator: Allocator) -> Failure!void {
+    // Port 0 asks the host for a free port, so this example never collides
+    // with whatever else is listening on the machine running it.
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try client.write_all(handle, "ping");
+
+    var served = try listener.accept(handle);
+    defer served.deinit();
+    var question = string::new(allocator);
+    defer question.deinit(allocator);
+    let asked = try served.read_into(handle, allocator, &var question, 64);
+    let asked_bytes = question.as_bytes();
+    print(asked);
+    print(asked_bytes);
+    try served.write_all(handle, "pong");
+
+    var answer = string::new(allocator);
+    defer answer.deinit(allocator);
+    let answered = try client.read_into(handle, allocator, &var answer, 64);
+    let answer_bytes = answer.as_bytes();
+    print(answered);
+    print(answer_bytes);
+    return;
+}
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    try exchange(handle, allocator);
+    return;
+}
+
+// run
+// features: net io error-union
+// output:
+// 4
+// ping
+// 4
+// pong

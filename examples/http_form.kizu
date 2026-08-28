@@ -1,0 +1,82 @@
+// A query is text until you decode it, and decoding is where a URL stops
+// being one string and starts being values.
+//
+// `form_value` finds a name in `a=1&b=2` and appends its decoded value.
+// `percent_decode` restores `%XX`; `form_decode` adds the one rule that only
+// holds inside a query, that `+` stands for a space. Two rules, two names --
+// a `+` in a path is a `+`.
+//
+// Nothing here opens a socket: these are functions over bytes.
+
+import std::http;
+import std::mem;
+import std::string;
+
+fn main() -> http::Failure!void {
+    let allocator = mem::page_allocator();
+    let target = "/search?q=kizu+lang&page=2&flag&where=a%2Fb";
+
+    let path = http::path_of(target);
+    print(path);
+    let query = http::query_of(target);
+    print(query);
+
+    try show_value(allocator, query, "q");
+    try show_value(allocator, query, "page");
+    // A bare name is present with an empty value, which is what a flag means.
+    try show_value(allocator, query, "flag");
+    // %2F inside a value is a slash in that value, not a path separator.
+    try show_value(allocator, query, "where");
+    try show_value(allocator, query, "missing");
+
+    // Encoding is the other direction: everything outside the unreserved set
+    // becomes %XX, so a value can be put back into a URL unambiguously.
+    var encoded = string::new(allocator);
+    defer encoded.deinit(allocator);
+    try http::percent_encode(allocator, "a b/c~d", &var encoded);
+    let bytes = encoded.as_bytes();
+    print(bytes);
+
+    // A `%` that is not followed by two hex digits is a failure, not a
+    // literal `%`: a decoder that guesses is one an attacker can steer.
+    var broken = string::new(allocator);
+    defer broken.deinit(allocator);
+    if http::percent_decode(allocator, "a%2", &var broken) {
+        print("a truncated escape was accepted");
+    } else |err| {
+        print("a truncated escape was refused");
+    }
+    return;
+}
+
+fn show_value(allocator: Allocator, query: []u8, name: []u8) -> http::Failure!void {
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    let found = try http::form_value(allocator, query, name, &var value);
+    print(name);
+    if found {
+        let bytes = value.as_bytes();
+        print(bytes);
+    } else {
+        print("(absent)");
+    }
+    return;
+}
+
+// run
+// features: http url error-union
+// output:
+// /search
+// q=kizu+lang&page=2&flag&where=a%2Fb
+// q
+// kizu lang
+// page
+// 2
+// flag
+//
+// where
+// a/b
+// missing
+// (absent)
+// a%20b%2Fc~d
+// a truncated escape was refused

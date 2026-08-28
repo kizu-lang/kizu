@@ -81,6 +81,31 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		},
 		Return: "std::process::Error!i64",
 	},
+	"std::internal::builtin::net_listen": {
+		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_connect": {
+		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_accept": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_read": {
+		Args:   []ArgKind{ArgIo, ArgAllocator, ArgI64, ArgStringOut, ArgI64, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_write_all": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgBytes, ArgI64},
+		Return: "std::net::Error!void",
+	},
+	"std::internal::builtin::net_local_port": {
+		Args:   []ArgKind{ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_close": {Args: []ArgKind{ArgI64}, Return: "void"},
 	"std::internal::builtin::test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
 	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
@@ -160,6 +185,13 @@ var primitives = map[string]bool{
 	"std::internal::builtin::mem_fixed_buffer":             true,
 	"std::internal::builtin::mem_len":                      true,
 	"std::internal::builtin::mem_page_allocator":           true,
+	"std::internal::builtin::net_accept":                   true,
+	"std::internal::builtin::net_close":                    true,
+	"std::internal::builtin::net_connect":                  true,
+	"std::internal::builtin::net_listen":                   true,
+	"std::internal::builtin::net_local_port":               true,
+	"std::internal::builtin::net_read":                     true,
+	"std::internal::builtin::net_write_all":                true,
 	"std::internal::builtin::panic":                        true,
 	"std::internal::builtin::process_arg":                  true,
 	"std::internal::builtin::process_arg_count":            true,

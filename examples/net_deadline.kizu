@@ -1,0 +1,112 @@
+// A deadline is a moment, not a budget per read.
+//
+// The peer here connects and then says nothing, which is the cheapest way to
+// stop a server that waits without a deadline. The read below sets one, so the
+// wait ends and the program keeps going.
+//
+// The second half is the part worth reading twice: the deadline covers every
+// read after it, so a peer that sends one byte and then stalls does not get a
+// fresh wait for the second read. That is the difference between a deadline
+// and a per-read timeout, and it is the difference that matters -- one byte
+// every four seconds never trips a four-second-per-read timeout.
+
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = net::Error or mem::Error;
+
+fn silent_peer(handle: Io, allocator: Allocator) -> Failure!void {
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var caller = try net::tcp_connect(handle, address_bytes);
+    defer caller.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    // 50 milliseconds from now, as a moment. `deadline_in_millis` is what
+    // turns the duration into one; the setter takes only the moment.
+    served.set_read_deadline(net::deadline_in_millis(50));
+    var buffer = string::new(allocator);
+    defer buffer.deinit(allocator);
+    if served.read_into(handle, allocator, &var buffer, 64) |_| {
+        print("read returned");
+    } else |failure| {
+        if failure == net::Error::TimedOut {
+            print("silent peer: timed out");
+        } else {
+            print("silent peer: other failure");
+        }
+    }
+    return;
+}
+
+fn stalling_peer(handle: Io, allocator: Allocator) -> Failure!void {
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var caller = try net::tcp_connect(handle, address_bytes);
+    defer caller.deinit();
+    try caller.write_all(handle, "a");
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    served.set_read_deadline(net::deadline_in_millis(50));
+    var buffer = string::new(allocator);
+    defer buffer.deinit(allocator);
+    let first = try served.read_into(handle, allocator, &var buffer, 64);
+    print_count("first read", first);
+    // The same deadline is still the one in force. A per-read timeout would
+    // start over here; a deadline does not.
+    if served.read_into(handle, allocator, &var buffer, 64) |_| {
+        print("second read returned");
+    } else |failure| {
+        if failure == net::Error::TimedOut {
+            print("stalling peer: timed out");
+        } else {
+            print("stalling peer: other failure");
+        }
+    }
+    return;
+}
+
+fn print_count(label: []u8, count: i64) -> void {
+    print(label);
+    print(count);
+    return;
+}
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    try silent_peer(handle, allocator);
+    try stalling_peer(handle, allocator);
+    return;
+}
+
+// run
+// features: net io error-union
+// output:
+// silent peer: timed out
+// first read
+// 1
+// stalling peer: timed out

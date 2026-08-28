@@ -1,0 +1,135 @@
+// The HTTP client, in two halves.
+//
+// `http::get(io, allocator, url)` is one call: connect, write, read the
+// answer whole, close. It cannot be shown against a server in this same
+// program, because it blocks reading and the accept that would answer it is
+// on the same thread -- that is the concurrency gap (SPEC §15), not a gap in
+// the client.
+//
+// So the two halves are public. `write_request` writes a request onto a
+// stream the caller owns and `read_response_from` reads one answer off one,
+// which is what lets this example be both ends. It is also the seam the
+// missing layers plug into: TLS and a proxy own the stream, not the client.
+
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let address_bytes = address.as_bytes();
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+
+    // The client writes. Connecting completed against the listen backlog, so
+    // the bytes are on their way before anything accepted them.
+    var url = try build_url(allocator, port);
+    defer url.deinit(allocator);
+    try http::write_request(
+        handle, allocator, &var client, "POST", &url, "text/plain", "ping");
+
+    try answer(handle, allocator, &var listener);
+
+    // The client reads what came back.
+    var response = try http::read_response_from(
+        handle, allocator, &var client, "POST", http::default_limits());
+    defer response.deinit(allocator);
+    print(response.status);
+    let reason = response.reason.as_bytes();
+    print(reason);
+    if response.headers.find("content-type") |field| {
+        let value = field.value.as_bytes();
+        print(value);
+    }
+    let body = response.body.as_bytes();
+    print(body);
+    return;
+}
+
+fn build_url(allocator: Allocator, port: i64) -> Failure!http::Url {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, "http://127.0.0.1:");
+    try fmt::append_i64(allocator, &var text, port);
+    try text.append_bytes(allocator, "/echo?times=2");
+    let bytes = text.as_bytes();
+    let url = try http::parse_url(allocator, bytes);
+    return move url;
+}
+
+// answer accepts the pending connection, reads what the client wrote, prints
+// it, and sends a response back. It is its own frame so the connection is
+// released -- the close is what tells the client the answer ended.
+fn answer(handle: Io, allocator: Allocator, listener: &var net::TcpListener) -> Failure!void {
+    var served = try listener.accept(handle);
+    defer served.deinit();
+    var buffer = string::new(allocator);
+    defer buffer.deinit(allocator);
+    let head_length = try http::read_head(
+        handle, allocator, &var served, &var buffer, http::default_limits());
+    let raw = buffer.as_bytes();
+    var request = try http::parse_request_head(
+        allocator, raw[0..head_length], http::default_limits());
+    defer request.deinit(allocator);
+
+    let method = request.method.as_bytes();
+    print(method);
+    let target = request.target.as_bytes();
+    print(target);
+    if request.headers.find("host") |field| {
+        let host = field.value.as_bytes();
+        print(mem::len(host) > 0);
+    }
+    // The client wrote the head and the body in one call, so what follows the
+    // head in the buffer is the body.
+    print(raw[head_length..mem::len(raw)]);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try reply.append_bytes(allocator, "HTTP/1.1 200 OK");
+    try crlf(allocator, &var reply);
+    try reply.append_bytes(allocator, "Content-Type: text/plain");
+    try crlf(allocator, &var reply);
+    try reply.append_bytes(allocator, "Content-Length: 4");
+    try crlf(allocator, &var reply);
+    try crlf(allocator, &var reply);
+    try reply.append_bytes(allocator, "pong");
+    let wire = reply.as_bytes();
+    try served.write_all(handle, wire);
+    return;
+}
+
+// crlf writes the two bytes that end an HTTP line. Kizu string literals carry
+// no escapes (SPEC §7), so CR is written as the number it is.
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http client io error-union
+// output:
+// POST
+// /echo?times=2
+// true
+// ping
+// 200
+// OK
+// text/plain
+// pong

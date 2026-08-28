@@ -1,0 +1,330 @@
+import std::http;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The wire format, tested without a socket: parsing a head is a pure function
+// over bytes, and encoding a response is a pure function into a String. What
+// needs a connection is tested in http_server.
+
+// crlf_wire rewrites an LF-separated literal as CRLF wire bytes and closes the
+// head with the blank line. Kizu literals carry no escapes, so CR is written
+// as the number it is.
+fn crlf_wire(allocator: Allocator, text: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    let length = mem::len(text);
+    while index < length {
+        if text[index] == cast<u8>(10) {
+            try out.append_byte(allocator, cast<u8>(13));
+        }
+        try out.append_byte(allocator, text[index]);
+        index = index + 1;
+    }
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return move out;
+}
+
+// A combined error set is compared by naming the member it carries: `==`
+// wants both sides to be the same set, and `Failure` is the union of three.
+// Rendering the name also makes a failing expectation say which one arrived.
+fn failure_name(failure: http::Failure) -> []u8 {
+    return match failure {
+        MalformedRequest => "MalformedRequest",
+        HeadTooLarge => "HeadTooLarge",
+        BodyTooLarge => "BodyTooLarge",
+        UnsupportedVersion => "UnsupportedVersion",
+        UnsupportedEncoding => "UnsupportedEncoding",
+        ConflictingFraming => "ConflictingFraming",
+        MalformedChunk => "MalformedChunk",
+        Incomplete => "Incomplete",
+        InvalidStatus => "InvalidStatus",
+        InvalidHeader => "InvalidHeader",
+        InvalidUrl => "InvalidUrl",
+        ResponseFinished => "ResponseFinished",
+        InvalidEncoding => "InvalidEncoding",
+        _ => "other",
+    };
+}
+
+fn parse(allocator: Allocator, wire: &string::String) -> http::Failure!http::Request {
+    let bytes = wire.as_bytes();
+    let end = http::head_end(bytes, 0) orelse return http::Error::Incomplete;
+    return http::parse_request_head(allocator, bytes[0..end], http::default_limits());
+}
+
+fn parse_text(allocator: Allocator, text: []u8) -> http::Failure!http::Request {
+    var wire = try crlf_wire(allocator, text);
+    defer wire.deinit(allocator);
+    return parse(allocator, &wire);
+}
+
+test "status_text names a registered status and classes an unregistered one" {
+    testing::expect_equal<[]u8>("Not Found", http::status_text(404));
+    testing::expect_equal<[]u8>("I'm a teapot", http::status_text(418));
+    testing::expect_equal<[]u8>("Client Error", http::status_text(499));
+    testing::expect_equal<[]u8>("Unknown", http::status_text(42));
+}
+
+test "header names compare without ASCII case and values do not" {
+    testing::expect(http::equal_ascii_fold("Content-Type", "content-TYPE"));
+    testing::expect(!http::equal_ascii_fold("Content-Type", "content-typo"));
+    testing::expect(!http::equal_ascii_fold("a", "ab"));
+}
+
+test "a request line and its fields parse into owned bytes" {
+    let allocator = mem::page_allocator();
+    let text =
+        \\GET /items?id=7 HTTP/1.1
+        \\Host: example.test
+        \\X-Trace:   spaced
+        \\
+    ;
+    var request = try parse_text(allocator, text);
+    defer request.deinit(allocator);
+    let method = request.method.as_bytes();
+    testing::expect_equal<[]u8>("GET", method);
+    let target = request.target.as_bytes();
+    let path = http::path_of(target);
+    testing::expect_equal<[]u8>("/items", path);
+    let query = http::query_of(target);
+    testing::expect_equal<[]u8>("id=7", query);
+    testing::expect(request.version == http::Version::Http11);
+    testing::expect_equal<i64>(2, request.headers.count());
+    if request.headers.find("host") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("example.test", value);
+    } else {
+        testing::fail("Host was not found");
+    }
+    // The optional whitespace around a value is not part of it.
+    if request.headers.find("X-TRACE") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("spaced", value);
+    } else {
+        testing::fail("X-Trace was not found");
+    }
+}
+
+test "a target without a query has an empty query, not a missing one" {
+    testing::expect_equal<[]u8>("/", http::path_of("/"));
+    testing::expect_equal<i64>(0, mem::len(http::query_of("/")));
+    testing::expect_equal<[]u8>("/a", http::path_of("/a?"));
+    testing::expect_equal<i64>(0, mem::len(http::query_of("/a?")));
+}
+
+test "a folded header line is refused rather than joined" {
+    let allocator = mem::page_allocator();
+    let text =
+        \\GET / HTTP/1.1
+        \\Host: example.test
+        \\ continued
+        \\
+    ;
+    if parse_text(allocator, text) |request| {
+        request.deinit(allocator);
+        testing::fail("a folded header was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("MalformedRequest", failure_name(err));
+    }
+}
+
+test "a version this implementation does not speak is named as such" {
+    let allocator = mem::page_allocator();
+    let text =
+        \\GET / HTTP/2.0
+        \\
+    ;
+    if parse_text(allocator, text) |request| {
+        request.deinit(allocator);
+        testing::fail("HTTP/2.0 was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("UnsupportedVersion", failure_name(err));
+    }
+}
+
+test "a header count past the ceiling is refused" {
+    let allocator = mem::page_allocator();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "GET / HTTP/1.1");
+    try wire.append_byte(allocator, cast<u8>(13));
+    try wire.append_byte(allocator, cast<u8>(10));
+    var index = 0;
+    while index < 70 {
+        try wire.append_bytes(allocator, "X-Pad: 1");
+        try wire.append_byte(allocator, cast<u8>(13));
+        try wire.append_byte(allocator, cast<u8>(10));
+        index = index + 1;
+    }
+    try wire.append_byte(allocator, cast<u8>(13));
+    try wire.append_byte(allocator, cast<u8>(10));
+    if parse(allocator, &wire) |request| {
+        request.deinit(allocator);
+        testing::fail("71 headers passed a ceiling of 64");
+    } else |err| {
+        testing::expect_equal<[]u8>("HeadTooLarge", failure_name(err));
+    }
+}
+
+test "a header a message could be forged with is refused" {
+    let allocator = mem::page_allocator();
+    var headers = http::headers_new(allocator);
+    defer headers.deinit(allocator);
+    if headers.add(allocator, "Bad Name", "x") {
+        testing::fail("a space in a header name was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidHeader", failure_name(err));
+    }
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    try value.append_bytes(allocator, "one");
+    try value.append_byte(allocator, cast<u8>(13));
+    try value.append_bytes(allocator, "Injected: yes");
+    let raw = value.as_bytes();
+    if headers.add(allocator, "X-Note", raw) {
+        testing::fail("a CR in a header value was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidHeader", failure_name(err));
+    }
+}
+
+test "set replaces every field of a name and add keeps them" {
+    let allocator = mem::page_allocator();
+    var headers = http::headers_new(allocator);
+    defer headers.deinit(allocator);
+    try headers.add(allocator, "X-Trace", "one");
+    try headers.add(allocator, "X-Trace", "two");
+    try headers.add(allocator, "Host", "example.test");
+    testing::expect_equal<i64>(3, headers.count());
+    try headers.set(allocator, "x-trace", "only");
+    testing::expect_equal<i64>(2, headers.count());
+    if headers.find("X-Trace") |field| {
+        let found = field.value.as_bytes();
+        testing::expect_equal<[]u8>("only", found);
+    } else {
+        testing::fail("X-Trace was not found after set");
+    }
+    // Removing one name leaves the others where they were.
+    testing::expect(headers.has("Host"));
+}
+
+test "a response renders its own Content-Length and closes the connection" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.set_status(201);
+    try response.header(allocator, "Content-Type", "text/plain");
+    // A Content-Length the caller set is dropped: the body is right here, and
+    // a length that disagreed with it would desynchronise the connection.
+    try response.header(allocator, "Content-Length", "999");
+    try response.write(allocator, "created");
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try response.encode(allocator, http::Version::Http11, http::Framing::Buffered, false, false, &var out);
+    let wire = out.as_bytes();
+    let expected =
+        \\HTTP/1.1 201 Created
+        \\Content-Type: text/plain
+        \\Content-Length: 7
+        \\Connection: close
+        \\
+        \\created
+    ;
+    var want = string::new(allocator);
+    defer want.deinit(allocator);
+    var index = 0;
+    let length = mem::len(expected);
+    while index < length {
+        if expected[index] == cast<u8>(10) {
+            try want.append_byte(allocator, cast<u8>(13));
+        }
+        try want.append_byte(allocator, expected[index]);
+        index = index + 1;
+    }
+    let want_bytes = want.as_bytes();
+    testing::expect_equal<[]u8>(want_bytes, wire);
+}
+
+test "a status that carries no body carries no Content-Length either" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.set_status(204);
+    try response.write(allocator, "ignored");
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try response.encode(allocator, http::Version::Http11, http::Framing::Buffered, false, false, &var out);
+    let wire = out.as_bytes();
+    testing::expect(!contains(wire, "Content-Length"));
+    testing::expect(!contains(wire, "ignored"));
+}
+
+test "a HEAD response keeps the length and drops the body" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.write(allocator, "twelve bytes");
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try response.encode(allocator, http::Version::Http11, http::Framing::Buffered, false, true, &var out);
+    let wire = out.as_bytes();
+    testing::expect(contains(wire, "Content-Length: 12"));
+    testing::expect(!contains(wire, "twelve bytes"));
+}
+
+test "a finished response refuses every further change" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    response.finish();
+    if response.write(allocator, "late") {
+        testing::fail("a write after finish was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("ResponseFinished", failure_name(err));
+    }
+    if response.set_status(500) {
+        testing::fail("a status after finish was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("ResponseFinished", failure_name(err));
+    }
+    if response.header(allocator, "X-Late", "yes") {
+        testing::fail("a header after finish was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("ResponseFinished", failure_name(err));
+    }
+}
+
+test "a status outside the range a status line can carry is refused" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    if response.set_status(99) {
+        testing::fail("99 was accepted as a status");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidStatus", failure_name(err));
+    }
+    if response.set_status(1000) {
+        testing::fail("1000 was accepted as a status");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidStatus", failure_name(err));
+    }
+}
+
+fn contains(haystack: []u8, needle: []u8) -> bool {
+    let length = mem::len(haystack);
+    let needle_length = mem::len(needle);
+    if needle_length == 0 {
+        return true;
+    }
+    var index = 0;
+    while index + needle_length <= length {
+        if mem::equal_bytes(haystack[index..index + needle_length], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}

@@ -2933,6 +2933,102 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::testing::failing_io()` は deterministic failing I/O として、テストで I/O error path を確認する。
   失敗する implementation は test 用の道具なので `std::io` ではなく `std::testing` が持つ
 
+`std::net`:
+
+* `std::net::tcp_listen(io, address)` は `!std::net::TcpListener` を返す。
+  address は `host:port`、IPv6 の host は bracket で囲む(`[::1]:8080`)。
+  port 0 は host に空き port を選ばせる
+* `std::net::tcp_connect(io, address)` は `!std::net::TcpStream` を返す
+* `std::net::parse_address(address)` は `!std::net::Address` を返す。text を
+  分けるだけで、名前解決はしない
+* `listener.accept(io)` は `!std::net::TcpStream` を返す
+* `listener.local_port()` は `!i64` を返す。port 0 で bind した listener が
+  どの port になったかを言う唯一の手段
+* `stream.read_into(io, allocator, out, max)` は 1 回の read が追記した byte 数を
+  `!i64` で返す。**0 は相手が閉じたこと**を意味し、`max <= 0` は
+  `Error::InvalidLength`
+* `stream.write_all(io, bytes)` は `!void` を返す。部分書き込みは返さない
+* deadline は**時点**であって 1 回の呼び出しの budget ではない。
+  `std::net::deadline_in_millis(millis)` が今からの距離を時点にし、
+  `set_read_deadline` / `set_write_deadline` / `set_accept_deadline` がそれを
+  受け取る。設定した時点は以後のその向きの呼び出し**全体**を覆い、自動では
+  更新されない。過ぎた後の呼び出しは待たずに `Error::TimedOut` を返す。
+  `clear_*_deadline` で外す
+* `TcpListener` / `TcpStream` は非 copy の owner で、`deinit` は `self` を値で
+  取る。close 後の使用は型 error であり、runtime の報告ではない
+* `std::net::Address` は `host: []u8` と `port: i64` だけを持つ
+* safe Kizu に file descriptor や socket pointer は出さない
+* I/O failure は `!T` error として返す
+
+`std::http`:
+
+* `std::http::listen(io, address)` / `listen_with(io, address, limits)` は
+  `!std::http::Server` を返す
+* `server.accept(io, allocator)` は 1 接続を受け、request を 1 つ読み、
+  `!std::http::Exchange` を返す。**handler は取らない** —— 関数値は borrow を
+  運べないので handler に request を渡せず、pull の loop が残る形
+* `exchange.request` / `exchange.response` は public field
+* `exchange.respond(io, allocator)` / `respond_text(io, allocator, status,
+  content_type, body)` は `!void` を返し、2 度目は `Error::ResponseFinished`
+* `exchange.respond_head(io, allocator, framing)` は head だけを送り、body は
+  caller が `exchange.write_all(io, bytes)` で書く。`std::http::Framing` は
+  `Buffered`(Response が持つ body、length は実測)/ `Length(n)`(caller の申告)/
+  `UntilClose`(close が終わり、length 無し)/ `Chunked`(1 write = 1 chunk、
+  `finish_body` が terminator を書く)/ `Raw`(framing field を書かず、
+  head は caller のもの)。送った後は answered なので `respond` は
+  `Error::ResponseFinished`
+* `exchange.write_all(io, allocator, bytes)` は body を書く。`Length(n)` の
+  宣言を超える write は socket に届く前に `Error::ResponseOverrun` になる
+* `exchange.finish_body(io, allocator)` は body を閉じる。`Chunked` は
+  terminator を書き、`Length` は数が足りなければ `Error::ResponseIncomplete`。
+  2 度目は `Error::ResponseFinished`。呼ばずに `deinit` した場合の残りは
+  `exchange.owes()` が答える
+* `server.accept_head(io, allocator)` は空行で止まり、body を接続に残す。
+  `max_body_bytes` は掛からない。caller は `exchange.read_into(io, allocator,
+  out, max)` で読む —— `std::net::read_into` と同じ契約で、head 読みで先に
+  届いていた byte から出る。`Transfer-Encoding` はこの経路でも拒否する
+* `Exchange` は `TcpStream` を渡さない。`write_all` / `read_into` /
+  `set_read_deadline` / `set_write_deadline` / `clear_*` が通り道で、head 読みの
+  残り byte を飛ばせないのがその理由
+* `std::http::Request` は method / target / version / headers / body を所有
+  する。path と query は field ではなく、`path_of` / `query_of` が target の
+  中の run として返す
+* `std::http::Response` は組み立ててから送る。`Content-Length` /
+  `Transfer-Encoding` / `Connection` は message の実体から書き、caller が
+  set したものは落とす
+* `std::http::Limits` は request head の byte 数、header の個数、body の
+  byte 数、および head / body / write の各 phase に許す時間(ミリ秒)を
+  caller が名指すもの。時間は duration であり、各 phase が始まるときに
+  deadline になる。0 はその phase に deadline を置かない
+* `std::http::route(allocator, pattern, method, path, params)` は
+  Go 1.22 `ServeMux` 綴りの pattern 1 つを照合して `!bool` を返す。
+  routing は登録簿ではなく、呼ぶ側が書く質問
+* `std::http::get` / `post` / `fetch` / `fetch_with` は
+  `!std::http::ClientResponse` を返す。`https` は `Error::UnsupportedScheme`
+  —— TLS を持たないので、暗号化を頼まれたものを平文で送らない
+* `std::http::write_request` / `read_response_from` は client の 2 つの半分。
+  stream を所有するのは呼ぶ側
+* `exchange.next(io, allocator)` は同じ接続の次の request を読み、あったかを
+  `!bool` で返す。false は接続が終わったこと。まだ答えていない / 自分の body を
+  `finish_body` で閉じていない / `accept_head` の request body を読み切って
+  いない場合は `Error::ExchangeUnfinished`
+* 接続が次を運ぶのは 3 つが揃うときだけ —— `served + 1 < limits.max_requests`、
+  framing が終わりを示せる(`Buffered` / `Length` / `Chunked`)、request が
+  許している(HTTP/1.1 は `Connection: close` が無ければ、HTTP/1.0 は
+  `Connection: keep-alive` があれば)。揃わなければ head に `Connection: close`
+  を書く
+* `limits.max_requests` の既定は 1。並行 API が無い(§15)ので 1 接続ずつしか
+  捌けず、2 通目のために接続を保持する peer は他の全員に対して保持している
+* `Transfer-Encoding: chunked` は request も response も decode する。
+  `Content-Length` と併記されたら `Error::ConflictingFraming`、`chunked` 以外の
+  coding は `Error::UnsupportedEncoding`、size や CRLF が読めなければ
+  `Error::MalformedChunk`。chunk extension は読み飛ばし、trailer は消費して
+  捨てる(上限は `max_head_bytes`)
+* `max_body_bytes` が掛かるのは body を保持する経路(`accept`、client)だけ。
+  `accept_head` は保持しないので掛からない
+* TLS、HTTP/2、HTTP/3 は持たない
+* 並行 API が無い(§15)ので 1 接続ずつ。2 人目は listen backlog で待つ
+
 `std::path`:
 
 * `std::path::join(allocator, left, right)` は `!std::string::String` を返す

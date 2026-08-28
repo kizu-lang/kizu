@@ -1,0 +1,136 @@
+// The service: what this server is, with no socket plumbing in it.
+//
+// `Visits` is the state, `answer` is one exchange, and `route_request` is the
+// router. Every one of them is a function you can read top to bottom, because
+// nothing here is registered anywhere -- the loop that calls `answer` is in
+// main.kizu, and you can see it.
+
+import std::fmt;
+import std::http;
+import std::map;
+import std::string;
+
+pub error Error {
+    NotFound,
+}
+
+// Failure is what a handler can fail with. It carries http's, the socket's,
+// the allocator's, and this service's own, and converts none of them: a caller
+// that matches on it sees which layer said no.
+pub error Failure = Error or http::Failure;
+
+// Visits counts what each user has done. One connection is served at a time,
+// so nothing here needs a lock -- and when concurrency arrives, this is the
+// state that will need a decision, which is worth being able to point at.
+pub struct Visits {
+    counts: map::Map<[]u8, i64>,
+}
+
+pub fn visits_new(allocator: Allocator) -> Visits {
+    return Visits { counts: map::new<[]u8, i64>(allocator) };
+}
+
+pub fn (self: Visits) deinit(allocator: Allocator) -> void {
+    self.counts.deinit(allocator);
+    return;
+}
+
+// record adds one visit for a user and returns the new count.
+pub fn (self: &var Visits) record(allocator: Allocator, user: []u8) -> Failure!i64 {
+    var count = 1;
+    if self.counts.get(user) |seen| {
+        count = seen + 1;
+    }
+    try self.counts.insert(allocator, user, count);
+    return count;
+}
+
+// count is what a user has done so far, or null for a user nobody has seen.
+pub fn (self: &Visits) count(user: []u8) -> ?i64 {
+    return self.counts.get(user);
+}
+
+// answer handles one exchange: route the request into a body and a status,
+// then send it.
+//
+// The routing and the answering are separate calls on purpose. Routing reads
+// `exchange.request`, and answering takes `exchange` mutably; keeping them in
+// two calls is what ends the read before the write begins.
+pub fn answer(
+    handle: Io,
+    allocator: Allocator,
+    visits: &var Visits,
+    exchange: &var http::Exchange
+) -> Failure!void {
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    let status = try route_request(allocator, visits, &exchange.request, &var body);
+    let text = body.as_bytes();
+    try exchange.respond_text(handle, allocator, status, "text/plain", text);
+    return;
+}
+
+// route_request is the router. Every arm asks the same question with a
+// different pattern, and the first that says yes is the one that answers.
+pub fn route_request(
+    allocator: Allocator,
+    visits: &var Visits,
+    request: &http::Request,
+    body: &var string::String
+) -> Failure!i64 {
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    let method = request.method.as_bytes();
+    let target = request.target.as_bytes();
+    let path = http::path_of(target);
+
+    if try http::route(allocator, "GET /", method, path, &var params) {
+        try body.append_bytes(allocator, "visits service");
+        return 200;
+    }
+    if try http::route(allocator, "POST /users/{name}/visits", method, path, &var params) {
+        return record_visit(allocator, visits, &params, body);
+    }
+    if try http::route(allocator, "GET /users/{name}", method, path, &var params) {
+        return show_user(allocator, visits, &params, body);
+    }
+    try body.append_bytes(allocator, "no such path");
+    return 404;
+}
+
+fn record_visit(
+    allocator: Allocator,
+    visits: &var Visits,
+    params: &http::Params,
+    body: &var string::String
+) -> Failure!i64 {
+    if params.find("name") |entry| {
+        let name = entry.value.as_bytes();
+        let count = try visits.record(allocator, name);
+        try body.append_bytes(allocator, name);
+        try body.append_bytes(allocator, " has ");
+        try fmt::append_i64(allocator, body, count);
+        return 201;
+    }
+    return Error::NotFound;
+}
+
+fn show_user(
+    allocator: Allocator,
+    visits: &var Visits,
+    params: &http::Params,
+    body: &var string::String
+) -> Failure!i64 {
+    if params.find("name") |entry| {
+        let name = entry.value.as_bytes();
+        if visits.count(name) |count| {
+            try body.append_bytes(allocator, name);
+            try body.append_bytes(allocator, " has ");
+            try fmt::append_i64(allocator, body, count);
+            return 200;
+        }
+        try body.append_bytes(allocator, "no such user");
+        return 404;
+    }
+    return Error::NotFound;
+}

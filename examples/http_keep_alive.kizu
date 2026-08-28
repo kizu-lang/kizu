@@ -1,0 +1,187 @@
+// One connection, more than one request.
+//
+// A connection costs a handshake to open. Serving one request and closing it
+// pays that cost per request, which is what `Connection: close` means and what
+// this server does by default.
+//
+// The default is not the protocol's. HTTP/1.1 connections are persistent
+// unless they say otherwise; this one closes unless the caller says otherwise.
+// The reason is about this server rather than the protocol: one connection is
+// served at a time (SPEC §15), so a peer holding a connection open for a
+// second request is holding it against everyone else. Keep-alive saves a
+// handshake and costs the whole service, until there is concurrency to spend
+// it from -- so it is a number the caller raises, not a default they inherit.
+//
+// `next` reads the following request and answers whether there was one. The
+// loop it ends is the connection's lifetime, written where it can be read.
+
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+
+    var limits = http::default_limits();
+    // Up to three requests on one connection, and five seconds of quiet
+    // between them before this server gives the connection up.
+    limits.max_requests = 3;
+    limits.idle_millis = 5000;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+
+    var client = try open_client(handle, allocator, port);
+    defer client.deinit();
+    // Three requests written before anything is answered, the way a client
+    // that pipelines or simply asks again would send them.
+    try request(handle, allocator, &var client, "GET /one HTTP/1.1");
+    try request(handle, allocator, &var client, "GET /two HTTP/1.1");
+    try request(handle, allocator, &var client, "GET /three HTTP/1.1");
+
+    let answered = try serve_connection(handle, allocator, &var server);
+    print("answered");
+    print(answered);
+    try show(handle, allocator, &var client);
+    return;
+}
+
+// serve_connection answers everything one connection carries. It is its own
+// frame so the connection is released before anyone reads the answers: the
+// last one said Connection: close, and the close is what ends its body.
+fn serve_connection(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server
+) -> Failure!i64 {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    var answered = 0;
+    var more = true;
+    while more {
+        try answer(handle, allocator, &var held);
+        answered = answered + 1;
+        // False is the connection being done: this server will not carry
+        // another, the peer said it would not, or the peer closed.
+        more = try held.next(handle, allocator);
+    }
+    return answered;
+}
+
+fn answer(handle: Io, allocator: Allocator, held: &var http::Exchange) -> Failure!void {
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try body.append_bytes(allocator, "answering ");
+    let target = held.request.target.as_bytes();
+    let path = http::path_of(target);
+    try body.append_bytes(allocator, path);
+    // A newline so the three answers do not run together on the wire: the
+    // next status line starts right where this body ends.
+    try body.append_byte(allocator, cast<u8>(10));
+    let text = body.as_bytes();
+    try held.respond_text(handle, allocator, 200, "text/plain", text);
+    return;
+}
+
+fn open_client(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn request(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+    return;
+}
+
+// show prints the status line and the body of each answer, so the three
+// answers on one connection are visible as three.
+fn show(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try client.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try client.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    print_interesting(wire);
+    return;
+}
+
+// print_interesting shows the status lines, the Connection field where there
+// is one, and the bodies -- which is what tells the three answers apart.
+fn print_interesting(wire: []u8) -> void {
+    let length = mem::len(wire);
+    var start = 0;
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(10) {
+            var end = index;
+            if end > start and wire[end - 1] == cast<u8>(13) {
+                end = end - 1;
+            }
+            let line = wire[start..end];
+            if interesting(line) {
+                print(line);
+            }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    if start < length {
+        print(wire[start..length]);
+    }
+    return;
+}
+
+fn interesting(line: []u8) -> bool {
+    if mem::starts_with(line, "HTTP/") {
+        return true;
+    }
+    if mem::starts_with(line, "Connection:") {
+        return true;
+    }
+    return mem::starts_with(line, "answering ");
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http io error-union
+// output:
+// answered
+// 3
+// HTTP/1.1 200 OK
+// answering /one
+// HTTP/1.1 200 OK
+// answering /two
+// HTTP/1.1 200 OK
+// Connection: close
+// answering /three

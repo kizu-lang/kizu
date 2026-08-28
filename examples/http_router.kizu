@@ -1,0 +1,193 @@
+// Routing in Kizu is a question you ask, not a table you register in.
+//
+// `http::route` answers whether one pattern matches one request and hands
+// back what it captured. A handler registry would answer the same question --
+// it would just answer it inside a lookup, choosing a handler you cannot see
+// from the place that made the request. Here the `if` chain is the router, and
+// what runs for a path is written where the path is named.
+//
+// The pattern language is Go 1.22's ServeMux: `GET /items/{id}` captures one
+// segment, `{rest...}` captures everything left including its slashes.
+
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+
+    try ask(handle, allocator, &var server, port, "GET /items/42 HTTP/1.1");
+    try ask(handle, allocator, &var server, port, "GET /users/al%20ice/visits HTTP/1.1");
+    try ask(handle, allocator, &var server, port, "GET /files/a/b/c.txt HTTP/1.1");
+    try ask(handle, allocator, &var server, port, "POST /items/42 HTTP/1.1");
+    return;
+}
+
+// handle_one is the whole server: accept, route, answer. It is its own frame
+// so the connection is released before the client reads -- the response said
+// Connection: close, and the close is what ends the body.
+fn handle_one(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server
+) -> Failure!void {
+    var exchange = try server.accept(handle, allocator);
+    defer exchange.deinit(allocator);
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    let status = try dispatch(allocator, &exchange.request, &var body);
+    let text = body.as_bytes();
+    try exchange.respond_text(handle, allocator, status, "text/plain", text);
+    return;
+}
+
+// dispatch is the router. Every arm asks the same question with a different
+// pattern, and the first one that says yes is the one that answers.
+fn dispatch(
+    allocator: Allocator,
+    request: &http::Request,
+    body: &var string::String
+) -> Failure!i64 {
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    let method = request.method.as_bytes();
+    let target = request.target.as_bytes();
+    let path = http::path_of(target);
+
+    if try http::route(allocator, "GET /items/{id}", method, path, &var params) {
+        try body.append_bytes(allocator, "item ");
+        try append_param(allocator, &params, "id", body);
+        return 200;
+    }
+    if try http::route(
+        allocator, "GET /users/{name}/visits", method, path, &var params
+    ) {
+        try body.append_bytes(allocator, "visits for ");
+        try append_param(allocator, &params, "name", body);
+        return 200;
+    }
+    if try http::route(allocator, "GET /files/{rest...}", method, path, &var params) {
+        try body.append_bytes(allocator, "file ");
+        try append_param(allocator, &params, "rest", body);
+        return 200;
+    }
+    try body.append_bytes(allocator, "no route");
+    return 404;
+}
+
+fn append_param(
+    allocator: Allocator,
+    params: &http::Params,
+    name: []u8,
+    body: &var string::String
+) -> Failure!void {
+    if params.find(name) |entry| {
+        let value = entry.value.as_bytes();
+        try body.append_bytes(allocator, value);
+    }
+    return;
+}
+
+// ask opens one connection, sends one request line, lets the server answer it,
+// and prints the status line and the body.
+fn ask(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    port: i64,
+    line: []u8
+) -> Failure!void {
+    var client = try open_client(handle, allocator, port);
+    defer client.deinit();
+    try send(handle, allocator, &var client, line);
+    try handle_one(handle, allocator, server);
+    try show(handle, allocator, &var client);
+    return;
+}
+
+fn open_client(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn send(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+    return;
+}
+
+// show prints the status line and the body, which is what this example is
+// about; the headers between them are the same three every time.
+fn show(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try client.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try client.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    let end = http::head_end(wire, 0) orelse return http::Error::Incomplete;
+    let first = line_end(wire) orelse return http::Error::MalformedResponse;
+    print(wire[0..first]);
+    print(wire[end..mem::len(wire)]);
+    return;
+}
+
+// line_end finds the CR that ends the status line.
+fn line_end(wire: []u8) -> ?i64 {
+    let length = mem::len(wire);
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(13) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// crlf writes the two bytes that end an HTTP line. Kizu string literals carry
+// no escapes (SPEC §7), so CR is written as the number it is.
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http routing io error-union
+// output:
+// HTTP/1.1 200 OK
+// item 42
+// HTTP/1.1 200 OK
+// visits for al ice
+// HTTP/1.1 200 OK
+// file a/b/c.txt
+// HTTP/1.1 404 Not Found
+// no route

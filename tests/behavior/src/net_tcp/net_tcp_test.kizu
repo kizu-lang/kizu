@@ -1,0 +1,256 @@
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+import std::testing;
+
+// std::net's contract: an address is text until a call resolves it, a
+// listener on port 0 can say which port it got, a read answers with how many
+// bytes it appended, and a read of a peer that closed answers 0.
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+test "parse_address splits host from port" {
+    let parsed = try net::parse_address("127.0.0.1:8080");
+    testing::expect_equal<[]u8>("127.0.0.1", parsed.host);
+    testing::expect_equal<i64>(8080, parsed.port);
+}
+
+test "parse_address reads a bracketed IPv6 host" {
+    let parsed = try net::parse_address("[::1]:443");
+    testing::expect_equal<[]u8>("::1", parsed.host);
+    testing::expect_equal<i64>(443, parsed.port);
+}
+
+test "parse_address keeps an empty host, which means every interface" {
+    let parsed = try net::parse_address(":9000");
+    testing::expect_equal<i64>(0, mem::len(parsed.host));
+    testing::expect_equal<i64>(9000, parsed.port);
+}
+
+test "parse_address refuses an address without a port" {
+    if net::parse_address("127.0.0.1") |_| {
+        testing::fail("an address with no port was accepted");
+    } else |err| {
+        testing::expect(err == net::Error::InvalidAddress);
+    }
+}
+
+test "parse_address refuses a port above the 16-bit range" {
+    if net::parse_address("127.0.0.1:70000") |_| {
+        testing::fail("a port above 65535 was accepted");
+    } else |err| {
+        testing::expect(err == net::Error::InvalidAddress);
+    }
+}
+
+test "a listener on port 0 reports the port the host chose" {
+    let handle = io::blocking();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    testing::expect(port > 0);
+    testing::expect(port <= 65535);
+}
+
+test "a stream carries bytes both ways and reports end of stream" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    // Closing the client is what the server reads as end of stream, so this
+    // one is released by name below rather than at the end of the frame.
+    errdefer client.deinit();
+    try client.write_all(handle, "request");
+
+    var served = try listener.accept(handle);
+    defer served.deinit();
+    var asked = string::new(allocator);
+    defer asked.deinit(allocator);
+    let read = try served.read_into(handle, allocator, &var asked, 64);
+    testing::expect_equal<i64>(7, read);
+    let asked_bytes = asked.as_bytes();
+    testing::expect_equal<[]u8>("request", asked_bytes);
+
+    try served.write_all(handle, "answer");
+    var answer = string::new(allocator);
+    defer answer.deinit(allocator);
+    let back = try client.read_into(handle, allocator, &var answer, 64);
+    testing::expect_equal<i64>(6, back);
+    let answer_bytes = answer.as_bytes();
+    testing::expect_equal<[]u8>("answer", answer_bytes);
+
+    // Closing the client is what the server sees as end of stream.
+    client.deinit();
+    var trailing = string::new(allocator);
+    defer trailing.deinit(allocator);
+    let eof = try served.read_into(handle, allocator, &var trailing, 64);
+    testing::expect_equal<i64>(0, eof);
+}
+
+test "read_into refuses a ceiling of zero" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if client.read_into(handle, allocator, &var out, 0) |_| {
+        testing::fail("a read of zero bytes was accepted");
+    } else |err| {
+        testing::expect(err == net::Error::InvalidLength);
+    }
+}
+
+test "failing io refuses every net call without touching the host" {
+    let handle = testing::failing_io();
+    if net::tcp_listen(handle, "127.0.0.1:0") |_| {
+        testing::fail("failing io accepted a listen");
+    } else |err| {
+        testing::expect(err == net::Error::IoFailing);
+    }
+}
+
+test "a read deadline ends a wait for a peer that says nothing" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // The client connects and then says nothing, which is what a read with no
+    // deadline waits for until the peer gives up or the process is killed.
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    served.set_read_deadline(net::deadline_in_millis(50));
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if served.read_into(handle, allocator, &var out, 64) |_| {
+        testing::fail("a read of a silent peer returned");
+    } else |err| {
+        testing::expect(err == net::Error::TimedOut);
+    }
+}
+
+test "a deadline covers every read after it, not each one" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try client.write_all(handle, "a");
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    served.set_read_deadline(net::deadline_in_millis(50));
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    // The first read is answered, so a per-call budget would start over here.
+    let first = try served.read_into(handle, allocator, &var out, 64);
+    testing::expect_equal<i64>(1, first);
+    // The second has the same deadline, and nothing more is coming.
+    if served.read_into(handle, allocator, &var out, 64) |_| {
+        testing::fail("the deadline was handed back for the second read");
+    } else |err| {
+        testing::expect(err == net::Error::TimedOut);
+    }
+}
+
+test "clearing a deadline puts the wait back" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    errdefer client.deinit();
+    try client.write_all(handle, "late");
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    // A deadline that has already gone by, then taken off again.
+    served.set_read_deadline(net::deadline_in_millis(1));
+    served.clear_read_deadline();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let read = try served.read_into(handle, allocator, &var out, 64);
+    testing::expect_equal<i64>(4, read);
+    client.deinit();
+}
+
+test "an accept deadline ends a wait for a caller that never comes" {
+    let handle = io::blocking();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    listener.set_accept_deadline(net::deadline_in_millis(50));
+    if listener.accept(handle) |stream| {
+        var opened = move stream;
+        opened.deinit();
+        testing::fail("accept returned with nothing connected");
+    } else |err| {
+        testing::expect(err == net::Error::TimedOut);
+    }
+}
+
+test "a duration passed where a deadline belongs fails loudly" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    // 5000 is a duration, not a moment. Read as a moment it is five seconds
+    // after this host booted, which has gone by, so the first read says so
+    // rather than quietly never expiring.
+    served.set_read_deadline(5000);
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if served.read_into(handle, allocator, &var out, 64) |_| {
+        testing::fail("a deadline in the past was waited on");
+    } else |err| {
+        testing::expect(err == net::Error::TimedOut);
+    }
+}

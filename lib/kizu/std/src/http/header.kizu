@@ -1,0 +1,230 @@
+// A header field is a name and a value the message owns. The bytes a request
+// arrived in are a buffer this module reuses and then drops, so a field that
+// borrowed from it would be a dangling view the moment the next read happened.
+// Owning them costs one copy per field and makes the request outlive its wire
+// bytes, which is what every caller wants.
+// The name is kept as it was written: HTTP compares names without case, but
+// it does not rewrite them. Both are public because a view into a String is a
+// borrow of the field it lives in (ADR-0111), so a caller reads them with
+// `let bytes = field.value.as_bytes();` -- an accessor could not hand the same
+// view back out of the method that made it.
+pub struct Field {
+    pub name: std::string::String,
+    pub value: std::string::String,
+}
+
+// Headers is the ordered list of fields a message carries. Order is kept
+// because HTTP gives it meaning for repeated names (Set-Cookie, and any
+// comma-list split across lines), and lookup folds case because HTTP compares
+// names that way.
+//
+// It is a list, not a map: a message carries tens of fields, a scan over them
+// is a handful of comparisons, and a map would make the order something the
+// implementation has to restore rather than something it never lost.
+pub struct Headers {
+    fields: std::array::Array<std::http::Field>,
+}
+
+pub fn headers_new(allocator: Allocator) -> std::http::Headers {
+    return Headers {
+        fields: std::array::new<std::http::Field>(allocator),
+    };
+}
+
+fn (self: &std::http::Headers) count() -> i64 {
+    return self.fields.len();
+}
+
+// at returns the field at one position, so a caller can walk every field
+// including repeated names.
+fn (self: &std::http::Headers) at(index: i64) -> ?&std::http::Field {
+    return self.fields.at(index);
+}
+
+// find is the first field under a name, compared without case. A name that
+// appears more than once is walked with `at`; folding repeats into one comma
+// list is the caller's decision, not this one's.
+fn (self: &std::http::Headers) find(name: []u8) -> ?&std::http::Field {
+    var index = 0;
+    while self.index_of(index, name) |found| {
+        return self.fields.at(found);
+    }
+    return null;
+}
+
+// header_has_token reports whether a field carries `token` in its
+// comma-separated list. `Connection: keep-alive, Upgrade` says both, and a
+// field read as one string would say neither.
+pub fn header_has_token(
+    headers: &std::http::Headers,
+    name: []u8,
+    token: []u8
+) -> bool {
+    if headers.find(name) |field| {
+        let value = field.value.as_bytes();
+        return list_has_token(value, token);
+    }
+    return false;
+}
+
+fn list_has_token(value: []u8, token: []u8) -> bool {
+    let length = std::mem::len(value);
+    var start = 0;
+    while start <= length {
+        var end = start;
+        while end < length and value[end] != cast<u8>(44) {
+            end = end + 1;
+        }
+        let item = std::http::trim_ows(value[start..end]);
+        if std::http::equal_ascii_fold(item, token) {
+            return true;
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
+fn (self: &std::http::Headers) has(name: []u8) -> bool {
+    if self.index_of(0, name) |_| {
+        return true;
+    }
+    return false;
+}
+
+// index_of is where the case-folded scan lives, so `find`, `has`, and `remove`
+// all ask the same question the same way.
+fn (self: &std::http::Headers) index_of(from: i64, name: []u8) -> ?i64 {
+    var index = from;
+    while self.fields.at(index) |field| {
+        let field_name = field.name.as_bytes();
+        if std::http::equal_ascii_fold(field_name, name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// add appends a field, keeping any field of the same name already there.
+fn (self: &var std::http::Headers) add(
+    allocator: Allocator,
+    name: []u8,
+    value: []u8
+) -> std::http::Failure!void {
+    if !std::http::valid_field_name(name) {
+        return std::http::Error::InvalidHeader;
+    }
+    if !std::http::valid_field_value(value) {
+        return std::http::Error::InvalidHeader;
+    }
+    try self.add_unchecked(allocator, name, value);
+    return;
+}
+
+// add_unchecked is the append the parser uses: it validated the bytes while
+// finding them, so checking again would be the same walk a second time.
+fn (self: &var std::http::Headers) add_unchecked(
+    allocator: Allocator,
+    name: []u8,
+    value: []u8
+) -> std::mem::Error!void {
+    var owned_name = try std::string::from_bytes(allocator, name);
+    errdefer owned_name.deinit(allocator);
+    var owned_value = try std::string::from_bytes(allocator, value);
+    errdefer owned_value.deinit(allocator);
+    let field = Field { name: move owned_name, value: move owned_value };
+    try self.fields.append(allocator, move field);
+    return;
+}
+
+// set makes a name carry exactly this value, dropping whatever it carried.
+fn (self: &var std::http::Headers) set(
+    allocator: Allocator,
+    name: []u8,
+    value: []u8
+) -> std::http::Failure!void {
+    self.remove(allocator, name);
+    try self.add(allocator, name, value);
+    return;
+}
+
+// remove drops every field under a name.
+fn (self: &var std::http::Headers) remove(allocator: Allocator, name: []u8) -> void {
+    var kept = 0;
+    var index = 0;
+    let total = self.fields.len();
+    while index < total {
+        var matched = false;
+        if self.fields.at(index) |field| {
+            let field_name = field.name.as_bytes();
+            matched = std::http::equal_ascii_fold(field_name, name);
+        }
+        if !matched {
+            if kept != index {
+                // swap moves initialized slots without copying or dropping the
+                // owners in them, so the kept prefix is built in place.
+                self.fields.swap(kept, index) catch return;
+            }
+            kept = kept + 1;
+        }
+        index = index + 1;
+    }
+    while self.fields.len() > kept {
+        let dropped = self.fields.pop_or_panic();
+        dropped.deinit(allocator);
+    }
+    return;
+}
+
+// clear drops every field, keeping the storage the list already grew.
+fn (self: &var std::http::Headers) clear(allocator: Allocator) -> void {
+    while self.fields.len() > 0 {
+        let dropped = self.fields.pop_or_panic();
+        dropped.deinit(allocator);
+    }
+    return;
+}
+
+fn (self: std::http::Field) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
+    self.value.deinit(allocator);
+    return;
+}
+
+fn (self: std::http::Headers) deinit(allocator: Allocator) -> void {
+    self.fields.deinit(allocator);
+    return;
+}
+
+// valid_field_name reports whether every byte may appear in a header name.
+// A name with a colon or a space in it is how a header gets forged out of
+// data, so it is refused where it is written rather than sent.
+pub fn valid_field_name(name: []u8) -> bool {
+    let length = std::mem::len(name);
+    if length == 0 {
+        return false;
+    }
+    var index = 0;
+    while index < length {
+        if !std::http::is_token_byte(name[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// valid_field_value reports whether every byte may appear in a header value.
+// CR and LF are what a response splitting attack needs, and they are not
+// value bytes.
+pub fn valid_field_value(value: []u8) -> bool {
+    let length = std::mem::len(value);
+    var index = 0;
+    while index < length {
+        if !std::http::is_value_byte(value[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}

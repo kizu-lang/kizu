@@ -1,0 +1,246 @@
+// Chunked transfer decoding.
+//
+// A chunked body is a sequence of `SIZE CRLF DATA CRLF`, ending with a zero
+// size and whatever trailer fields follow it. The size is hex, and it may
+// carry extensions after a `;` that nothing here reads.
+//
+// This is the part of HTTP/1 that request smuggling lives in, so the rules it
+// keeps are the ones that make two messages out of one:
+//
+//   - `Transfer-Encoding` and `Content-Length` together are refused. RFC 9112
+//     says the encoding wins, but a proxy in front that decided the other way
+//     is exactly how one request becomes two. A message that says two things
+//     about its own length does not get to be read.
+//   - `Transfer-Encoding` is refused unless it is exactly `chunked`. A list,
+//     an unknown coding, or `identity` is a message this cannot frame.
+//   - A size that is not hex, or a chunk not followed by CRLF, ends the read.
+//     Nothing is guessed.
+//
+// The decoder is a state machine over a buffer the caller refills, so the
+// same one serves a body read whole and a body handed out a piece at a time.
+
+// ChunkState is where a partly-read body is. `left` is what remains of the
+// chunk being handed out, and the two flags say whether a header has been read
+// and whether the terminator has.
+pub struct ChunkState {
+    left: i64,
+    started: bool,
+    closing: bool,
+    done: bool,
+    seen: i64,
+    trailer_bytes: i64,
+    // How much decoded body this decoder may produce. A body being read into
+    // memory is bounded by what the caller will hold; a body being handed out
+    // a piece at a time is not, because nothing is holding it.
+    limit: std::mem::Limit,
+}
+
+pub fn chunk_state_new(limit: std::mem::Limit) -> std::http::ChunkState {
+    return ChunkState {
+        left: 0,
+        started: false,
+        closing: false,
+        done: false,
+        seen: 0,
+        trailer_bytes: 0,
+        limit: limit,
+    };
+}
+
+// ChunkTake is what one pass over the buffer did: how many decoded bytes it
+// appended, how much of the buffer it used, and whether it stopped because the
+// buffer ran out rather than because it was finished.
+pub struct ChunkTake {
+    pub taken: i64,
+    pub consumed: i64,
+    pub need_more: bool,
+}
+
+fn (self: &std::http::ChunkState) is_done() -> bool {
+    return self.done;
+}
+
+fn (self: &std::http::ChunkState) decoded() -> i64 {
+    return self.seen;
+}
+
+// take appends up to `max` decoded bytes from `source[from..]` and answers
+// what it did. It consumes whole pieces only: a header or a CRLF that is not
+// all there yet is left for the next call, so a caller that refills the buffer
+// and calls again loses nothing.
+fn (self: &var std::http::ChunkState) take(
+    allocator: Allocator,
+    source: []u8,
+    from: i64,
+    limits: std::http::Limits,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!std::http::ChunkTake {
+    let length = std::mem::len(source);
+    var at = from;
+    var taken = 0;
+    while true {
+        if self.done {
+            return ChunkTake { taken: taken, consumed: at, need_more: false };
+        }
+        if self.closing {
+            let trailers = try self.consume_trailers(source, at, limits);
+            if trailers.need_more {
+                return ChunkTake {
+                    taken: taken,
+                    consumed: trailers.consumed,
+                    need_more: true,
+                };
+            }
+            at = trailers.consumed;
+            continue;
+        }
+        if !self.started {
+            let header = try self.read_header(source, at, limits);
+            if header.need_more {
+                return ChunkTake { taken: taken, consumed: at, need_more: true };
+            }
+            at = header.consumed;
+            continue;
+        }
+        if self.left > 0 {
+            if taken >= max {
+                return ChunkTake { taken: taken, consumed: at, need_more: false };
+            }
+            let available = length - at;
+            if available <= 0 {
+                return ChunkTake { taken: taken, consumed: at, need_more: true };
+            }
+            var want = self.left;
+            if want > max - taken {
+                want = max - taken;
+            }
+            if want > available {
+                want = available;
+            }
+            try out.append_bytes(allocator, source[at..at + want]);
+            at = at + want;
+            self.left = self.left - want;
+            taken = taken + want;
+            continue;
+        }
+        // The chunk's data is out; the CRLF behind it says so.
+        if length - at < 2 {
+            return ChunkTake { taken: taken, consumed: at, need_more: true };
+        }
+        if source[at] != cast<u8>(13) or source[at + 1] != cast<u8>(10) {
+            return std::http::Error::MalformedChunk;
+        }
+        at = at + 2;
+        self.started = false;
+    }
+    return ChunkTake { taken: taken, consumed: at, need_more: false };
+}
+
+// read_header reads `SIZE[;extensions] CRLF`. A zero size is the terminator,
+// after which only trailers remain.
+fn (self: &var std::http::ChunkState) read_header(
+    source: []u8,
+    at: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::ChunkTake {
+    let line_end = std::http::index_of(source, cast<u8>(13), at) orelse
+        return ChunkTake { taken: 0, consumed: at, need_more: true };
+    if line_end + 1 >= std::mem::len(source) {
+        return ChunkTake { taken: 0, consumed: at, need_more: true };
+    }
+    if source[line_end + 1] != cast<u8>(10) {
+        return std::http::Error::MalformedChunk;
+    }
+    let line = source[at..line_end];
+    let size = try chunk_size(line);
+    if size == 0 {
+        self.closing = true;
+        return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
+    }
+    let ceiling = std::mem::limit_bytes(self.limit);
+    if ceiling >= 0 and self.seen + size > ceiling {
+        return std::http::Error::BodyTooLarge;
+    }
+    self.seen = self.seen + size;
+    self.left = size;
+    self.started = true;
+    return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
+}
+
+// consume_trailers reads the fields behind the terminator up to the blank line
+// that ends them. Nothing keeps them: a trailer this server was not told to
+// expect is one RFC 9110 lets a recipient drop, and dropping is honest where
+// pretending to have read them would not be.
+fn (self: &var std::http::ChunkState) consume_trailers(
+    source: []u8,
+    at: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::ChunkTake {
+    let line_end = std::http::index_of(source, cast<u8>(13), at) orelse
+        return ChunkTake { taken: 0, consumed: at, need_more: true };
+    if line_end + 1 >= std::mem::len(source) {
+        return ChunkTake { taken: 0, consumed: at, need_more: true };
+    }
+    if source[line_end + 1] != cast<u8>(10) {
+        return std::http::Error::MalformedChunk;
+    }
+    if line_end == at {
+        self.done = true;
+        return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
+    }
+    // Trailers are head-shaped, so the head's ceiling is the one that bounds
+    // them. Without it a peer could send them forever after saying it was done.
+    self.trailer_bytes = self.trailer_bytes + (line_end + 2 - at);
+    if self.trailer_bytes > limits.max_head_bytes {
+        return std::http::Error::HeadTooLarge;
+    }
+    return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
+}
+
+// chunk_size reads the hex size, stopping at the `;` that starts extensions.
+// Nothing reads the extensions: none of them change the framing, and a value
+// this does not understand is not a reason to refuse a message it can frame.
+fn chunk_size(line: []u8) -> std::http::Failure!i64 {
+    var end = std::mem::len(line);
+    if std::http::index_of(line, cast<u8>(59), 0) |semicolon| {
+        end = semicolon;
+    }
+    let digits = line[0..end];
+    let count = std::mem::len(digits);
+    if count == 0 or count > 15 {
+        return std::http::Error::MalformedChunk;
+    }
+    var value = 0;
+    var index = 0;
+    while index < count {
+        let digit = std::http::hex_value(digits[index]) orelse
+            return std::http::Error::MalformedChunk;
+        value = value * 16 + digit;
+        index = index + 1;
+    }
+    return value;
+}
+
+
+// chunked_framing reports how a message says its body is framed, and refuses
+// the shapes that let a message mean two things at once.
+pub fn chunked_framing(headers: &std::http::Headers) -> std::http::Failure!bool {
+    if !headers.has("Transfer-Encoding") {
+        return false;
+    }
+    // Both at once is the classic smuggling pair: RFC 9112 says the encoding
+    // wins, and every proxy that decided otherwise turned one request into two.
+    if headers.has("Content-Length") {
+        return std::http::Error::ConflictingFraming;
+    }
+    if headers.find("Transfer-Encoding") |field| {
+        let value = field.value.as_bytes();
+        let coding = std::http::trim_ows(value);
+        if !std::http::equal_ascii_fold(coding, "chunked") {
+            return std::http::Error::UnsupportedEncoding;
+        }
+        return true;
+    }
+    return false;
+}

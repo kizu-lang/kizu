@@ -1,0 +1,342 @@
+// A URL, split into the parts a request is built from. The pieces are owned,
+// because a client keeps them across the connect and the write, and the text
+// they came from is usually a literal the caller no longer holds.
+pub struct Url {
+    pub scheme: std::string::String,
+    pub host: std::string::String,
+    pub port: i64,
+    // The request target: the path, and the query behind its `?` if there was
+    // one. It is kept whole because that is exactly what goes on the request
+    // line; `path_of` and `query_of` split it the same way they split a
+    // server's target.
+    pub target: std::string::String,
+}
+
+fn (self: std::http::Url) deinit(allocator: Allocator) -> void {
+    self.scheme.deinit(allocator);
+    self.host.deinit(allocator);
+    self.target.deinit(allocator);
+    return;
+}
+
+// authority renders `host:port` the way std::net reads an address, bracketing
+// an IPv6 host so the colons inside it are not read as the separator.
+fn (self: &std::http::Url) authority(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    let host = self.host.as_bytes();
+    let bracketed = std::http::index_of(host, cast<u8>(58), 0);
+    if bracketed |_| {
+        try out.append_byte(allocator, cast<u8>(91));
+        try out.append_bytes(allocator, host);
+        try out.append_byte(allocator, cast<u8>(93));
+    } else {
+        try out.append_bytes(allocator, host);
+    }
+    try out.append_byte(allocator, cast<u8>(58));
+    try std::fmt::append_i64(allocator, out, self.port);
+    return;
+}
+
+// parse_url reads `http://host[:port][/target]`. Only `http` is accepted:
+// `https` needs TLS, std has none, and quietly sending in the clear what the
+// caller asked to encrypt is the one answer that must not be given.
+pub fn parse_url(
+    allocator: Allocator,
+    text: []u8
+) -> std::http::Failure!std::http::Url {
+    let length = std::mem::len(text);
+    let mark = find_scheme_end(text) orelse return std::http::Error::InvalidUrl;
+    let scheme = text[0..mark];
+    if !std::http::equal_ascii_fold(scheme, "http") {
+        if std::http::equal_ascii_fold(scheme, "https") {
+            return std::http::Error::UnsupportedScheme;
+        }
+        return std::http::Error::UnsupportedScheme;
+    }
+    let rest = text[mark + 3..length];
+    let rest_length = std::mem::len(rest);
+    var authority_end = rest_length;
+    if std::http::index_of(rest, cast<u8>(47), 0) |slash| {
+        authority_end = slash;
+    }
+    let authority = rest[0..authority_end];
+    let target = rest[authority_end..rest_length];
+    var url = Url {
+        scheme: std::string::new(allocator),
+        host: std::string::new(allocator),
+        port: 80,
+        target: std::string::new(allocator),
+    };
+    errdefer url.deinit(allocator);
+    try url.scheme.append_bytes(allocator, "http");
+    try split_authority(allocator, &var url, authority);
+    if std::mem::len(target) == 0 {
+        try url.target.append_byte(allocator, cast<u8>(47));
+    } else {
+        try url.target.append_bytes(allocator, target);
+    }
+    return move url;
+}
+
+// find_scheme_end returns where the scheme stops, checking that `://` follows.
+fn find_scheme_end(text: []u8) -> ?i64 {
+    let length = std::mem::len(text);
+    let mark = std::http::index_of(text, cast<u8>(58), 0) orelse return null;
+    if mark == 0 or mark + 2 >= length {
+        return null;
+    }
+    if text[mark + 1] != cast<u8>(47) or text[mark + 2] != cast<u8>(47) {
+        return null;
+    }
+    return mark;
+}
+
+// split_authority reads `host`, `host:port`, `[v6]` or `[v6]:port`.
+fn split_authority(
+    allocator: Allocator,
+    url: &var std::http::Url,
+    authority: []u8
+) -> std::http::Failure!void {
+    let length = std::mem::len(authority);
+    if length == 0 {
+        return std::http::Error::InvalidUrl;
+    }
+    if authority[0] == cast<u8>(91) {
+        let close = std::http::index_of(authority, cast<u8>(93), 0) orelse
+            return std::http::Error::InvalidUrl;
+        try url.host.append_bytes(allocator, authority[1..close]);
+        if close + 1 == length {
+            return;
+        }
+        if authority[close + 1] != cast<u8>(58) {
+            return std::http::Error::InvalidUrl;
+        }
+        url.port = try read_port(authority[close + 2..length]);
+        return;
+    }
+    if std::http::index_of(authority, cast<u8>(58), 0) |colon| {
+        try url.host.append_bytes(allocator, authority[0..colon]);
+        url.port = try read_port(authority[colon + 1..length]);
+        return;
+    }
+    try url.host.append_bytes(allocator, authority);
+    return;
+}
+
+fn read_port(text: []u8) -> std::http::Failure!i64 {
+    let value = std::http::parse_decimal(text) orelse
+        return std::http::Error::InvalidUrl;
+    if value == 0 or value > 65535 {
+        return std::http::Error::InvalidUrl;
+    }
+    return value;
+}
+
+// percent_decode appends `text` with every `%XX` turned back into its byte.
+// A `%` that is not followed by two hex digits is a failure, not a literal
+// `%`: a decoder that guesses is one an attacker can steer.
+pub fn percent_decode(
+    allocator: Allocator,
+    text: []u8,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    try decode_into(allocator, text, false, out);
+    return;
+}
+
+// form_decode is percent_decode plus the one rule that only applies inside a
+// query or a form body: `+` stands for a space. It is a separate name because
+// it is a separate rule -- a `+` in a path is a `+`.
+pub fn form_decode(
+    allocator: Allocator,
+    text: []u8,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    try decode_into(allocator, text, true, out);
+    return;
+}
+
+fn decode_into(
+    allocator: Allocator,
+    text: []u8,
+    plus_is_space: bool,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    let length = std::mem::len(text);
+    var index = 0;
+    while index < length {
+        let byte = text[index];
+        if byte == cast<u8>(37) {
+            if index + 2 >= length {
+                return std::http::Error::InvalidEncoding;
+            }
+            let high = hex_value(text[index + 1]) orelse
+                return std::http::Error::InvalidEncoding;
+            let low = hex_value(text[index + 2]) orelse
+                return std::http::Error::InvalidEncoding;
+            try out.append_byte(allocator, cast<u8>(high * 16 + low));
+            index = index + 3;
+            continue;
+        }
+        if plus_is_space and byte == cast<u8>(43) {
+            try out.append_byte(allocator, cast<u8>(32));
+            index = index + 1;
+            continue;
+        }
+        try out.append_byte(allocator, byte);
+        index = index + 1;
+    }
+    return;
+}
+
+// percent_encode appends `text` with everything outside the unreserved set
+// written as `%XX`. The unreserved set is RFC 3986's: it is what never needs
+// escaping anywhere in a URL, so one encoder is right for a path segment and
+// for a query value alike.
+pub fn percent_encode(
+    allocator: Allocator,
+    text: []u8,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    let length = std::mem::len(text);
+    var index = 0;
+    while index < length {
+        let byte = text[index];
+        if is_unreserved(byte) {
+            try out.append_byte(allocator, byte);
+        } else {
+            try out.append_byte(allocator, cast<u8>(37));
+            try out.append_byte(allocator, hex_digit(cast<i64>(byte) / 16));
+            try out.append_byte(allocator, hex_digit(cast<i64>(byte) % 16));
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn is_unreserved(byte: u8) -> bool {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+        return true;
+    }
+    // - . _ ~
+    if byte == cast<u8>(45) or byte == cast<u8>(46) {
+        return true;
+    }
+    return byte == cast<u8>(95) or byte == cast<u8>(126);
+}
+
+fn hex_value(byte: u8) -> ?i64 {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return cast<i64>(byte) - 48;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
+        return cast<i64>(byte) - 87;
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
+        return cast<i64>(byte) - 55;
+    }
+    return null;
+}
+
+fn hex_digit(value: i64) -> u8 {
+    if value < 10 {
+        return cast<u8>(48 + value);
+    }
+    return cast<u8>(55 + value);
+}
+
+// form_value finds `name` in an `a=1&b=2` query and appends its decoded value,
+// answering whether it was there. A name with no `=` is present with an empty
+// value, which is what a bare flag in a query means.
+pub fn form_value(
+    allocator: Allocator,
+    query: []u8,
+    name: []u8,
+    out: &var std::string::String
+) -> std::http::Failure!bool {
+    let length = std::mem::len(query);
+    var start = 0;
+    while start <= length {
+        var end = length;
+        if std::http::index_of(query, cast<u8>(38), start) |amp| {
+            end = amp;
+        }
+        if end > start {
+            let pair = query[start..end];
+            let pair_length = std::mem::len(pair);
+            var key_end = pair_length;
+            var value_start = pair_length;
+            if std::http::index_of(pair, cast<u8>(61), 0) |equals| {
+                key_end = equals;
+                value_start = equals + 1;
+            }
+            if matches_key(pair[0..key_end], name) {
+                try form_decode(allocator, pair[value_start..pair_length], out);
+                return true;
+            }
+        }
+        if end == length {
+            return false;
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
+// matches_key compares a query key to a name after decoding the key. Keys are
+// percent-encoded too, and a key that fails to decode simply does not match --
+// a malformed pair somewhere else in the query is not this lookup's failure.
+fn matches_key(key: []u8, name: []u8) -> bool {
+    if std::mem::equal_bytes(key, name) {
+        return true;
+    }
+    if std::http::index_of(key, cast<u8>(37), 0) |_| {
+        return decoded_key_matches(key, name);
+    }
+    if std::http::index_of(key, cast<u8>(43), 0) |_| {
+        return decoded_key_matches(key, name);
+    }
+    return false;
+}
+
+// decoded_key_matches decodes one key against the name a byte at a time, so a
+// lookup never has to allocate to answer.
+fn decoded_key_matches(key: []u8, name: []u8) -> bool {
+    let key_length = std::mem::len(key);
+    let name_length = std::mem::len(name);
+    var index = 0;
+    var at = 0;
+    while index < key_length {
+        if at >= name_length {
+            return false;
+        }
+        var byte = key[index];
+        if byte == cast<u8>(37) {
+            if index + 2 >= key_length {
+                return false;
+            }
+            let high = hex_value(key[index + 1]) orelse return false;
+            let low = hex_value(key[index + 2]) orelse return false;
+            byte = cast<u8>(high * 16 + low);
+            index = index + 2;
+        } else {
+            if byte == cast<u8>(43) {
+                byte = cast<u8>(32);
+            }
+        }
+        if byte != name[at] {
+            return false;
+        }
+        at = at + 1;
+        index = index + 1;
+    }
+    return at == name_length;
+}

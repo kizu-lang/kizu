@@ -1,0 +1,161 @@
+// A server that cannot be stopped by one caller saying nothing.
+//
+// The peer here opens a connection, writes a request line, and stops. Without
+// a deadline the server waits for the rest of the head for as long as that
+// peer cares to hold the socket -- and since one connection is served at a
+// time, everyone else waits with it. That is the cheapest denial of service
+// there is, and it needs no traffic at all.
+//
+// `Limits` names how long each phase of one message may take. The head phase
+// here is given 50 milliseconds; the server answers 408 when it runs out,
+// closes, and goes back to accepting.
+//
+// Zero means no deadline. That is a thing a caller can ask for -- behind a
+// proxy that already bounds this, say -- but it is an answer, not a default.
+
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+
+    // The three phases of one message, in milliseconds. A deadline is made
+    // from these when each phase starts, so a phase gets the time named here
+    // and not whatever the phase before it left over.
+    var limits = http::default_limits();
+    limits.read_head_millis = 50;
+    limits.read_body_millis = 50;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+
+    // First caller: a request line, and then silence.
+    try stalled_caller(handle, allocator, port, &var server);
+    // Second caller: a whole request, answered normally. The point is that
+    // this one is answered at all -- the first caller did not take the server
+    // with it.
+    try whole_caller(handle, allocator, port, &var server);
+    return;
+}
+
+// stalled_caller writes half a head and never finishes it. The server's head
+// deadline runs out, and `accept` answers the status that says so before
+// returning the failure -- the caller never gets an exchange for a request
+// that never arrived, but the peer is still owed an answer.
+fn stalled_caller(
+    handle: Io,
+    allocator: Allocator,
+    port: i64,
+    server: &var http::Server
+) -> Failure!void {
+    var client = try open_client(handle, allocator, port);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "GET /slow HTTP/1.1");
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+
+    if server.accept(handle, allocator) |exchange| {
+        exchange.deinit(allocator);
+        print("an unfinished head was accepted");
+        return;
+    } else |failure| {
+        print("head deadline ran out");
+    }
+    try show_answer(handle, allocator, &var client);
+    return;
+}
+
+fn whole_caller(
+    handle: Io,
+    allocator: Allocator,
+    port: i64,
+    server: &var http::Server
+) -> Failure!void {
+    var client = try open_client(handle, allocator, port);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "GET /fast HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+
+    try serve_one(handle, allocator, server);
+    try show_answer(handle, allocator, &var client);
+    return;
+}
+
+fn serve_one(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var exchange = try server.accept(handle, allocator);
+    defer exchange.deinit(allocator);
+    try exchange.respond_text(handle, allocator, 200, "text/plain", "on time");
+    return;
+}
+
+fn open_client(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+// show_answer prints the status line and nothing else, which is the part this
+// example is about.
+fn show_answer(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream
+) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try client.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try client.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    print_status_line(wire);
+    return;
+}
+
+fn print_status_line(wire: []u8) -> void {
+    let length = mem::len(wire);
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(13) {
+            print(wire[0..index]);
+            return;
+        }
+        index = index + 1;
+    }
+    print(wire);
+    return;
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http io error-union
+// output:
+// head deadline ran out
+// HTTP/1.1 408 Request Timeout
+// HTTP/1.1 200 OK

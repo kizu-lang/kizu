@@ -1,0 +1,175 @@
+import std::http;
+import std::mem;
+import std::string;
+import std::testing;
+
+// Cookies are headers with a grammar, and content types are an extension
+// table. Both are functions over bytes, so neither needs a socket.
+
+fn failure_name(failure: http::Failure) -> []u8 {
+    return match failure {
+        InvalidHeader => "InvalidHeader",
+        ResponseFinished => "ResponseFinished",
+        _ => "other",
+    };
+}
+
+fn rendered(allocator: Allocator, cookie: &http::Cookie) -> http::Failure!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try cookie.append_set_cookie(allocator, &var out);
+    return move out;
+}
+
+fn expect_text(expected: []u8, actual: &string::String) -> void {
+    let bytes = actual.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+test "a session cookie is a name, a value and nothing else" {
+    let allocator = mem::page_allocator();
+    var cookie = try http::cookie_new(allocator, "session", "abc123");
+    defer cookie.deinit(allocator);
+    var text = try rendered(allocator, &cookie);
+    defer text.deinit(allocator);
+    expect_text("session=abc123", &text);
+}
+
+test "every attribute a cookie carries is written in the order RFC 6265 uses" {
+    let allocator = mem::page_allocator();
+    var cookie = try http::cookie_new(allocator, "session", "abc123");
+    defer cookie.deinit(allocator);
+    try cookie.set_path(allocator, "/app");
+    try cookie.set_domain(allocator, "example.test");
+    cookie.max_age = 3600;
+    cookie.secure = true;
+    cookie.http_only = true;
+    cookie.same_site = http::SameSite::Strict;
+    var text = try rendered(allocator, &cookie);
+    defer text.deinit(allocator);
+    expect_text(
+        "session=abc123; Path=/app; Domain=example.test; Max-Age=3600; Secure; HttpOnly; SameSite=Strict",
+        &text);
+}
+
+test "Max-Age of zero is written, and a negative one is a session cookie" {
+    let allocator = mem::page_allocator();
+    var cookie = try http::cookie_new(allocator, "gone", "x");
+    defer cookie.deinit(allocator);
+    // Zero is how a cookie is deleted, so it has to reach the header.
+    cookie.max_age = 0;
+    var deleting = try rendered(allocator, &cookie);
+    defer deleting.deinit(allocator);
+    expect_text("gone=x; Max-Age=0", &deleting);
+    cookie.max_age = -1;
+    var session = try rendered(allocator, &cookie);
+    defer session.deinit(allocator);
+    expect_text("gone=x", &session);
+}
+
+test "SameSite unset and SameSite None are different answers" {
+    let allocator = mem::page_allocator();
+    var cookie = try http::cookie_new(allocator, "s", "v");
+    defer cookie.deinit(allocator);
+    var silent = try rendered(allocator, &cookie);
+    defer silent.deinit(allocator);
+    expect_text("s=v", &silent);
+    cookie.same_site = http::SameSite::None;
+    var spoken = try rendered(allocator, &cookie);
+    defer spoken.deinit(allocator);
+    expect_text("s=v; SameSite=None", &spoken);
+}
+
+test "a value a second cookie could be smuggled in is refused" {
+    let allocator = mem::page_allocator();
+    if http::cookie_new(allocator, "s", "a; admin=1") |cookie| {
+        cookie.deinit(allocator);
+        testing::fail("a semicolon in a cookie value was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidHeader", failure_name(err));
+    }
+    if http::cookie_new(allocator, "s", "a b") |cookie| {
+        cookie.deinit(allocator);
+        testing::fail("a space in a cookie value was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidHeader", failure_name(err));
+    }
+    if http::cookie_new(allocator, "bad name", "v") |cookie| {
+        cookie.deinit(allocator);
+        testing::fail("a space in a cookie name was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidHeader", failure_name(err));
+    }
+}
+
+test "set_cookie adds a line rather than replacing one" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    var first = try http::cookie_new(allocator, "a", "1");
+    defer first.deinit(allocator);
+    var second = try http::cookie_new(allocator, "b", "2");
+    defer second.deinit(allocator);
+    try response.set_cookie(allocator, &first);
+    try response.set_cookie(allocator, &second);
+    // Two cookies are two lines: a browser reads one cookie per Set-Cookie.
+    testing::expect_equal<i64>(2, response.headers.count());
+    response.finish();
+    if response.set_cookie(allocator, &first) {
+        testing::fail("a cookie after finish was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("ResponseFinished", failure_name(err));
+    }
+}
+
+test "a cookie is read out of the header the client sent" {
+    let allocator = mem::page_allocator();
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    let found = try http::cookie_value(
+        allocator, "a=1; session=xyz; b=2", "session", &var value);
+    testing::expect(found);
+    expect_text("xyz", &value);
+}
+
+test "a cookie name that is not there answers false" {
+    let allocator = mem::page_allocator();
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    let found = try http::cookie_value(allocator, "a=1; b=2", "session", &var value);
+    testing::expect(!found);
+    testing::expect_equal<i64>(0, value.len());
+}
+
+test "a cookie value is taken as sent, not decoded" {
+    let allocator = mem::page_allocator();
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    // %20 is what the program that set it put there; nothing here guesses at
+    // somebody else's encoding.
+    let found = try http::cookie_value(allocator, "t=a%20b", "t", &var value);
+    testing::expect(found);
+    expect_text("a%20b", &value);
+}
+
+test "content_type_for reads the extension and nothing else" {
+    testing::expect_equal<[]u8>("text/html; charset=utf-8",
+        http::content_type_for("index.html"));
+    testing::expect_equal<[]u8>("text/css; charset=utf-8",
+        http::content_type_for("a/b/style.CSS"));
+    testing::expect_equal<[]u8>("application/json",
+        http::content_type_for("data.json"));
+    testing::expect_equal<[]u8>("image/png", http::content_type_for("logo.png"));
+    // An extension nobody registered is bytes whose type nobody said.
+    testing::expect_equal<[]u8>("application/octet-stream",
+        http::content_type_for("archive.tar.gz"));
+    testing::expect_equal<[]u8>("application/octet-stream",
+        http::content_type_for("noext"));
+    // A dot in a directory name is not an extension.
+    testing::expect_equal<[]u8>("application/octet-stream",
+        http::content_type_for("dir.with.dots/name"));
+    // A leading dot is a name, not an extension.
+    testing::expect_equal<[]u8>("application/octet-stream",
+        http::content_type_for(".gitignore"));
+}

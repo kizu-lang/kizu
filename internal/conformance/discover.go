@@ -10,8 +10,11 @@ import (
 )
 
 // Roots are the trees a case can live in: the examples, which are programs
-// worth reading, and the behavior suite, which is one package of assertions.
-var Roots = []string{"examples", "tests/behavior"}
+// worth reading, the behavior suite, which is one package of assertions, and
+// the tutorials, whose sample code is the document's claim about what running
+// it prints. A tutorial that stopped compiling would be a document that lies,
+// so the sample is walked like any other case rather than trusted.
+var Roots = []string{"examples", "tests/behavior", "docs/tutorial"}
 
 // Discover returns every case declared under Roots, read from the repository
 // rooted at dir. A directory with a kizu.toml is one package and therefore one

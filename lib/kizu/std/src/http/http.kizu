@@ -1,0 +1,475 @@
+// std::http is HTTP/1 over std::net, written in Kizu.
+//
+// The server is a loop you can see. There is no handler registry and no
+// callback: `accept` hands back one Exchange -- the request that arrived and
+// the response to fill in -- and the program decides what to do with it. That
+// is the shape Kizu can honestly offer today (a function value cannot take a
+// borrow, so a handler could not be given the request), and it is also the
+// shape that keeps the control flow in the caller's source.
+//
+// One connection is served at a time. Kizu has no concurrency API (SPEC §15),
+// so the second caller waits for the first. That is what Zig's std.http.Server
+// ships too; the difference is that a Kizu caller has nothing to bring yet.
+
+pub error Error {
+    // The request line or a header did not parse.
+    MalformedRequest,
+    // The request head passed the byte or count ceiling.
+    HeadTooLarge,
+    // The body passed the byte ceiling, or Content-Length said it would.
+    BodyTooLarge,
+    // The version token was neither HTTP/1.0 nor HTTP/1.1.
+    UnsupportedVersion,
+    // A Transfer-Encoding this implementation does not speak.
+    UnsupportedEncoding,
+    // The peer closed before the head was complete.
+    Incomplete,
+    // A status outside 100..999.
+    InvalidStatus,
+    // A header name or value carried a byte a header may not.
+    InvalidHeader,
+    // The URL a client was given did not parse.
+    InvalidUrl,
+    // A URL scheme this implementation does not speak. `https` needs TLS,
+    // which std has none of, and pretending otherwise would send a request in
+    // the clear that the caller asked to have encrypted.
+    UnsupportedScheme,
+    // A status line or a header a server sent did not parse.
+    MalformedResponse,
+    // The response has been finished; nothing more can be added.
+    ResponseFinished,
+    // Percent-decoding met a `%` that was not followed by two hex digits.
+    InvalidEncoding,
+    // A route pattern that is not a pattern: no leading `/`, an unclosed
+    // `{`, an empty capture name, or a `{rest...}` that is not last.
+    InvalidPattern,
+    // A message said two things about where its own body ends -- both
+    // `Content-Length` and `Transfer-Encoding`. RFC 9112 says the encoding
+    // wins, and every proxy that decided otherwise turned one message into
+    // two, so a message that cannot say this once is not read at all.
+    ConflictingFraming,
+    // A chunk size or the CRLF behind a chunk did not parse. It is neither a
+    // malformed request nor a malformed response: it is the body's framing,
+    // and both directions use the same one.
+    MalformedChunk,
+    // A connection was asked to carry another request while this exchange was
+    // not finished: the answer was never sent, its body was never closed, or
+    // the request's own body is still on the connection.
+    ExchangeUnfinished,
+    // A caller finished a body shorter than the head it sent declared.
+    ResponseIncomplete,
+    // A caller wrote more of its own body than the head it sent declared.
+    // BodyTooLarge is the request side of this -- input past a ceiling this
+    // server chose, which it recovers from by refusing the input. This is the
+    // response side: the message contradicts its own framing, which nothing
+    // recovers from, so it is refused before it reaches the connection.
+    ResponseOverrun,
+}
+
+// Failure carries what an http call can fail with: its own refusals, the
+// socket's, and running out of memory. Nothing is converted -- a caller that
+// matches on it sees which layer said no (ADR-0128).
+pub error Failure = Error or std::net::Error or std::mem::Error;
+
+pub enum Version {
+    Http10,
+    Http11,
+}
+
+// version_text renders a version the way a request line and a status line
+// spell it.
+pub fn version_text(version: std::http::Version) -> []u8 {
+    return match version {
+        Http10 => "HTTP/1.0",
+        Http11 => "HTTP/1.1",
+    };
+}
+
+// Limits bounds what one connection may make this process allocate. They are
+// the caller's, not a constant here: a server behind a proxy and one on the
+// open internet do not want the same ceiling, and a ceiling that cannot be
+// named is one nobody can raise.
+pub struct Limits {
+    pub max_head_bytes: i64,
+    pub max_headers: i64,
+    pub max_body_bytes: i64,
+    // How long each phase of one message may take, in milliseconds. Zero means
+    // no deadline, which is a peer that can stop this process by connecting and
+    // saying nothing -- it is a choice, not the default.
+    //
+    // These are durations because that is what a policy is. Each phase turns
+    // its duration into a deadline when the phase starts, so the whole phase
+    // has to finish inside it: a peer sending one byte at a time is spending
+    // one budget, not being handed a new one per read.
+    pub read_head_millis: i64,
+    pub read_body_millis: i64,
+    pub write_millis: i64,
+    // How many requests one connection may serve, and how long it may sit
+    // between them.
+    //
+    // The default is 1, which is not the HTTP/1.1 default. It is the right one
+    // here for a reason that is about this server and not about the protocol:
+    // one connection is served at a time (SPEC §15), so a peer holding a
+    // connection open for a second request is holding it against everyone
+    // else. Keep-alive saves a handshake and costs the whole service, until
+    // there is concurrency to spend it from.
+    pub max_requests: i64,
+    pub idle_millis: i64,
+}
+
+// default_limits is what a server that has not thought about it should use:
+// 8 KiB of request head, 64 header fields, 1 MiB of body, and 10s / 30s / 30s
+// for the three phases.
+//
+// Go leaves its timeouts at zero and asks the caller to remember; a server that
+// forgot is one connection away from being stopped, so the default here is a
+// number rather than a promise to think about it later.
+pub fn default_limits() -> std::http::Limits {
+    return Limits {
+        max_head_bytes: 8192,
+        max_headers: 64,
+        max_body_bytes: 1048576,
+        read_head_millis: 10000,
+        read_body_millis: 30000,
+        write_millis: 30000,
+        max_requests: 1,
+        idle_millis: 5000,
+    };
+}
+
+// Framing says how a response's body ends, which is the same question as who
+// writes it. `Buffered` is what `respond` uses: the body is in the Response,
+// so its length is known and written. The other three are a caller that will
+// write the body itself, through `exchange.write_all`.
+//
+// This is the one place a caller can put bytes on the connection that std::http
+// did not frame, so it is spelled rather than inferred -- `Raw` in particular
+// hands over the whole head, and a grep for it finds every place that happens
+// (docs/principles.md §3).
+pub union Framing {
+    // The Response owns the body. Content-Length is what it measures.
+    Buffered,
+    // The caller writes exactly this many bytes after the head.
+    Length(i64),
+    // The caller writes until it releases the exchange, and the close is what
+    // ends the body. This is what a stream of unknown length has without
+    // chunked transfer encoding.
+    UntilClose,
+    // Each write is one chunk, and `finish_body` writes the terminator. This
+    // is the framing that says where a body of unknown length ends without
+    // ending the connection with it, which is what a persistent connection
+    // needs and what `UntilClose` cannot give it.
+    Chunked,
+    // No framing fields at all: the head is exactly what the caller set. This
+    // is what a 101 needs, because `Connection: close` is the wrong answer to
+    // an upgrade.
+    Raw,
+}
+
+// append_hex writes a non-negative number the way a chunk size is written:
+// hex, no leading zeros, and "0" for zero. The digits are the upper-case ones
+// percent-encoding already uses -- a chunk size is `1*HEXDIG`, which is
+// case-insensitive, so there is no reason for a second table.
+pub fn append_hex(
+    allocator: Allocator,
+    out: &var std::string::String,
+    value: i64
+) -> std::mem::Error!void {
+    if value <= 0 {
+        try out.append_byte(allocator, cast<u8>(48));
+        return;
+    }
+    // The most significant digit first, so nothing has to be held and
+    // reversed: find its place value, then walk down.
+    var place = 1;
+    var probe = value;
+    while probe >= 16 {
+        place = place * 16;
+        probe = probe / 16;
+    }
+    while place > 0 {
+        let nibble = (value / place) % 16;
+        try out.append_byte(allocator, std::http::hex_digit(nibble));
+        place = place / 16;
+    }
+    return;
+}
+
+// arm_read / arm_write turn one phase's duration into the deadline that phase
+// runs under. Zero is the caller saying there is no deadline, which is why it
+// clears rather than asking for a moment that has already gone by.
+fn arm_read(stream: &var std::net::TcpStream, millis: i64) -> void {
+    if millis <= 0 {
+        stream.clear_read_deadline();
+        return;
+    }
+    stream.set_read_deadline(std::net::deadline_in_millis(millis));
+    return;
+}
+
+fn arm_write(stream: &var std::net::TcpStream, millis: i64) -> void {
+    if millis <= 0 {
+        stream.clear_write_deadline();
+        return;
+    }
+    stream.set_write_deadline(std::net::deadline_in_millis(millis));
+    return;
+}
+
+// status_text is the reason phrase RFC 9110 registers for a status. An
+// unregistered status is not an error -- the number is what the protocol
+// carries -- so it answers with the class instead.
+pub fn status_text(status: i64) -> []u8 {
+    if status == 100 { return "Continue"; }
+    if status == 101 { return "Switching Protocols"; }
+    if status == 200 { return "OK"; }
+    if status == 201 { return "Created"; }
+    if status == 202 { return "Accepted"; }
+    if status == 204 { return "No Content"; }
+    if status == 206 { return "Partial Content"; }
+    if status == 301 { return "Moved Permanently"; }
+    if status == 302 { return "Found"; }
+    if status == 303 { return "See Other"; }
+    if status == 304 { return "Not Modified"; }
+    if status == 307 { return "Temporary Redirect"; }
+    if status == 308 { return "Permanent Redirect"; }
+    if status == 400 { return "Bad Request"; }
+    if status == 401 { return "Unauthorized"; }
+    if status == 403 { return "Forbidden"; }
+    if status == 404 { return "Not Found"; }
+    if status == 405 { return "Method Not Allowed"; }
+    if status == 406 { return "Not Acceptable"; }
+    if status == 408 { return "Request Timeout"; }
+    if status == 409 { return "Conflict"; }
+    if status == 410 { return "Gone"; }
+    if status == 411 { return "Length Required"; }
+    if status == 413 { return "Content Too Large"; }
+    if status == 414 { return "URI Too Long"; }
+    if status == 415 { return "Unsupported Media Type"; }
+    if status == 418 { return "I'm a teapot"; }
+    if status == 422 { return "Unprocessable Content"; }
+    if status == 429 { return "Too Many Requests"; }
+    if status == 431 { return "Request Header Fields Too Large"; }
+    if status == 500 { return "Internal Server Error"; }
+    if status == 501 { return "Not Implemented"; }
+    if status == 502 { return "Bad Gateway"; }
+    if status == 503 { return "Service Unavailable"; }
+    if status == 504 { return "Gateway Timeout"; }
+    if status == 505 { return "HTTP Version Not Supported"; }
+    if status >= 100 and status < 200 { return "Informational"; }
+    if status >= 200 and status < 300 { return "Success"; }
+    if status >= 300 and status < 400 { return "Redirection"; }
+    if status >= 400 and status < 500 { return "Client Error"; }
+    if status >= 500 and status < 600 { return "Server Error"; }
+    return "Unknown";
+}
+
+// content_type_for names the media type a file name conventionally carries.
+// It reads the extension and nothing else -- sniffing the bytes is how a
+// server ends up serving somebody's upload as HTML.
+//
+// An extension this does not know is `application/octet-stream`, which is the
+// honest answer: bytes whose type nobody said.
+pub fn content_type_for(path: []u8) -> []u8 {
+    let extension = extension_of(path);
+    if equal_ascii_fold(extension, "html") or equal_ascii_fold(extension, "htm") {
+        return "text/html; charset=utf-8";
+    }
+    if equal_ascii_fold(extension, "css") {
+        return "text/css; charset=utf-8";
+    }
+    if equal_ascii_fold(extension, "js") or equal_ascii_fold(extension, "mjs") {
+        return "text/javascript; charset=utf-8";
+    }
+    if equal_ascii_fold(extension, "json") {
+        return "application/json";
+    }
+    if equal_ascii_fold(extension, "txt") or equal_ascii_fold(extension, "md") {
+        return "text/plain; charset=utf-8";
+    }
+    if equal_ascii_fold(extension, "csv") {
+        return "text/csv; charset=utf-8";
+    }
+    if equal_ascii_fold(extension, "xml") {
+        return "application/xml";
+    }
+    if equal_ascii_fold(extension, "svg") {
+        return "image/svg+xml";
+    }
+    if equal_ascii_fold(extension, "png") {
+        return "image/png";
+    }
+    if equal_ascii_fold(extension, "jpg") or equal_ascii_fold(extension, "jpeg") {
+        return "image/jpeg";
+    }
+    if equal_ascii_fold(extension, "gif") {
+        return "image/gif";
+    }
+    if equal_ascii_fold(extension, "webp") {
+        return "image/webp";
+    }
+    if equal_ascii_fold(extension, "ico") {
+        return "image/vnd.microsoft.icon";
+    }
+    if equal_ascii_fold(extension, "woff2") {
+        return "font/woff2";
+    }
+    if equal_ascii_fold(extension, "wasm") {
+        return "application/wasm";
+    }
+    if equal_ascii_fold(extension, "pdf") {
+        return "application/pdf";
+    }
+    return "application/octet-stream";
+}
+
+// extension_of is the run after the last `.` of the last path segment. A dot
+// in a directory name is not an extension, and a leading dot is a name.
+fn extension_of(path: []u8) -> []u8 {
+    let length = std::mem::len(path);
+    var start = 0;
+    var index = length;
+    while index > 0 {
+        index = index - 1;
+        if path[index] == cast<u8>(47) {
+            start = index + 1;
+            break;
+        }
+    }
+    var dot = length;
+    index = length;
+    while index > start {
+        index = index - 1;
+        if path[index] == cast<u8>(46) {
+            dot = index;
+            break;
+        }
+    }
+    if dot == length or dot == start {
+        return path[0..0];
+    }
+    return path[dot + 1..length];
+}
+
+// ascii_lower folds one byte the way HTTP compares header names: A-Z only,
+// never the locale's idea of case.
+fn ascii_lower(byte: u8) -> u8 {
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return byte + cast<u8>(32);
+    }
+    return byte;
+}
+
+// equal_ascii_fold compares two byte runs case-insensitively over A-Z. Header
+// names are compared this way; header values never are.
+pub fn equal_ascii_fold(left: []u8, right: []u8) -> bool {
+    let length = std::mem::len(left);
+    if length != std::mem::len(right) {
+        return false;
+    }
+    var index = 0;
+    while index < length {
+        if ascii_lower(left[index]) != ascii_lower(right[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn is_digit(byte: u8) -> bool {
+    return byte >= cast<u8>(48) and byte <= cast<u8>(57);
+}
+
+// is_token_byte reports whether a byte may appear in an HTTP token -- a method
+// name or a header name. The set is RFC 9110's tchar.
+fn is_token_byte(byte: u8) -> bool {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+        return true;
+    }
+    // ! # $ % & ' * + - . ^ _ ` | ~
+    if byte == cast<u8>(33) or byte == cast<u8>(35) or byte == cast<u8>(36) {
+        return true;
+    }
+    if byte == cast<u8>(37) or byte == cast<u8>(38) or byte == cast<u8>(39) {
+        return true;
+    }
+    if byte == cast<u8>(42) or byte == cast<u8>(43) or byte == cast<u8>(45) {
+        return true;
+    }
+    if byte == cast<u8>(46) or byte == cast<u8>(94) or byte == cast<u8>(95) {
+        return true;
+    }
+    if byte == cast<u8>(96) or byte == cast<u8>(124) or byte == cast<u8>(126) {
+        return true;
+    }
+    return false;
+}
+
+// is_value_byte reports whether a byte may appear in a header value: visible
+// ASCII, space, and tab. A control byte in a value is how a response gets
+// split in two, so it is refused rather than passed on.
+fn is_value_byte(byte: u8) -> bool {
+    if byte == cast<u8>(9) {
+        return true;
+    }
+    return byte >= cast<u8>(32) and byte != cast<u8>(127);
+}
+
+// append_crlf writes the two bytes that end every line of an HTTP message.
+// Kizu string literals carry no escapes (SPEC §7), so CR and LF are written as
+// the numbers they are, in the one place that has to know them.
+fn append_crlf(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+fn is_space_or_tab(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(9);
+}
+
+// index_of finds the first `needle` at or after `from`.
+fn index_of(bytes: []u8, needle: u8, from: i64) -> ?i64 {
+    let length = std::mem::len(bytes);
+    var index = from;
+    if index < 0 {
+        index = 0;
+    }
+    while index < length {
+        if bytes[index] == needle {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// parse_decimal reads a non-negative decimal number, refusing anything that is
+// not entirely digits and anything that would overflow.
+fn parse_decimal(text: []u8) -> ?i64 {
+    let length = std::mem::len(text);
+    if length == 0 or length > 18 {
+        return null;
+    }
+    var value = 0;
+    var index = 0;
+    while index < length {
+        let byte = text[index];
+        if !is_digit(byte) {
+            return null;
+        }
+        value = value * 10 + cast<i64>(byte) - 48;
+        index = index + 1;
+    }
+    return value;
+}

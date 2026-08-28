@@ -1,0 +1,78 @@
+// A name a program chooses for itself is not an answer to somebody else's
+// question.
+//
+// Kizu programs are linked beside a C runtime, and that runtime calls libc by
+// name -- `send`, `recv`, `close`. If a function this program declares were an
+// external symbol, `fn send(...)` below would be what the linker hands the
+// runtime's socket write, and the program would recurse until the stack ended.
+// Every function but `main` has internal linkage for that reason.
+
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = net::Error or mem::Error;
+
+// These four names are libc's too. The program is what decides what they mean
+// here, and the runtime linked beside it still reaches libc's.
+fn send(handle: Io, stream: &var net::TcpStream, bytes: []u8) -> Failure!void {
+    try stream.write_all(handle, bytes);
+    return;
+}
+
+fn recv(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    out: &var string::String
+) -> Failure!i64 {
+    let count = try stream.read_into(handle, allocator, out, 64);
+    return count;
+}
+
+fn close(stream: net::TcpStream) -> void {
+    stream.deinit();
+    return;
+}
+
+fn read(value: i64) -> i64 {
+    return value;
+}
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    // `close` takes the stream, so the errdefer retires when it runs.
+    errdefer client.deinit();
+    try send(handle, &var client, "ping");
+    close(move client);
+
+    var served = try listener.accept(handle);
+    defer served.deinit();
+    var heard = string::new(allocator);
+    defer heard.deinit(allocator);
+    let count = try recv(handle, allocator, &var served, &var heard);
+    print(read(count));
+    let text = heard.as_bytes();
+    print(text);
+    return;
+}
+
+// run
+// features: net linkage io error-union
+// output:
+// 4
+// ping

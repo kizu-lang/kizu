@@ -1,0 +1,285 @@
+import std::http;
+import std::mem;
+import std::string;
+import std::testing;
+
+// URL parsing, percent coding, query lookup and route matching are pure
+// functions over bytes: none of them needs a socket, so none of them is
+// tested with one.
+
+fn failure_name(failure: http::Failure) -> []u8 {
+    return match failure {
+        InvalidUrl => "InvalidUrl",
+        UnsupportedScheme => "UnsupportedScheme",
+        InvalidEncoding => "InvalidEncoding",
+        InvalidPattern => "InvalidPattern",
+        _ => "other",
+    };
+}
+
+fn decoded(allocator: Allocator, text: []u8) -> http::Failure!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try http::percent_decode(allocator, text, &var out);
+    return move out;
+}
+
+fn encoded(allocator: Allocator, text: []u8) -> http::Failure!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try http::percent_encode(allocator, text, &var out);
+    return move out;
+}
+
+fn expect_text(expected: []u8, actual: &string::String) -> void {
+    let bytes = actual.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+test "a URL splits into host, port and request target" {
+    let allocator = mem::page_allocator();
+    var url = try http::parse_url(allocator, "http://example.test:8080/a/b?x=1");
+    defer url.deinit(allocator);
+    expect_text("example.test", &url.host);
+    testing::expect_equal<i64>(8080, url.port);
+    expect_text("/a/b?x=1", &url.target);
+}
+
+test "a URL without a port or a path gets the defaults a request needs" {
+    let allocator = mem::page_allocator();
+    var url = try http::parse_url(allocator, "http://example.test");
+    defer url.deinit(allocator);
+    expect_text("example.test", &url.host);
+    testing::expect_equal<i64>(80, url.port);
+    // A request line must carry a target, and the origin of a host is `/`.
+    expect_text("/", &url.target);
+}
+
+test "a bracketed IPv6 host survives the round trip through authority" {
+    let allocator = mem::page_allocator();
+    var url = try http::parse_url(allocator, "http://[::1]:9000/x");
+    defer url.deinit(allocator);
+    expect_text("::1", &url.host);
+    testing::expect_equal<i64>(9000, url.port);
+    var authority = string::new(allocator);
+    defer authority.deinit(allocator);
+    try url.authority(allocator, &var authority);
+    expect_text("[::1]:9000", &authority);
+}
+
+test "https is refused by name rather than sent in the clear" {
+    let allocator = mem::page_allocator();
+    if http::parse_url(allocator, "https://example.test/") |url| {
+        url.deinit(allocator);
+        testing::fail("https was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("UnsupportedScheme", failure_name(err));
+    }
+}
+
+test "a URL with no scheme separator is refused" {
+    let allocator = mem::page_allocator();
+    if http::parse_url(allocator, "example.test/x") |url| {
+        url.deinit(allocator);
+        testing::fail("a scheme-less URL was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidUrl", failure_name(err));
+    }
+}
+
+test "percent decoding turns every escape back into its byte" {
+    let allocator = mem::page_allocator();
+    var text = try decoded(allocator, "a%2Fb%20c%7E");
+    defer text.deinit(allocator);
+    expect_text("a/b c~", &text);
+}
+
+test "a `+` is a space in a query and a `+` everywhere else" {
+    let allocator = mem::page_allocator();
+    var raw = try decoded(allocator, "a+b");
+    defer raw.deinit(allocator);
+    expect_text("a+b", &raw);
+    var form = string::new(allocator);
+    defer form.deinit(allocator);
+    try http::form_decode(allocator, "a+b", &var form);
+    expect_text("a b", &form);
+}
+
+test "a truncated or non-hex escape is a failure, not a literal percent" {
+    let allocator = mem::page_allocator();
+    if decoded(allocator, "a%2") |text| {
+        text.deinit(allocator);
+        testing::fail("a truncated escape was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidEncoding", failure_name(err));
+    }
+    if decoded(allocator, "a%zz") |text| {
+        text.deinit(allocator);
+        testing::fail("a non-hex escape was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidEncoding", failure_name(err));
+    }
+}
+
+test "percent encoding escapes everything outside the unreserved set" {
+    let allocator = mem::page_allocator();
+    var text = try encoded(allocator, "a b/c-d_e.f~g");
+    defer text.deinit(allocator);
+    expect_text("a%20b%2Fc-d_e.f~g", &text);
+}
+
+test "a query value is found by name and decoded" {
+    let allocator = mem::page_allocator();
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    let found = try http::form_value(
+        allocator, "a=1&name=al+ice&b=2", "name", &var value);
+    testing::expect(found);
+    expect_text("al ice", &value);
+}
+
+test "a query name that is not there answers false and writes nothing" {
+    let allocator = mem::page_allocator();
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    let found = try http::form_value(allocator, "a=1&b=2", "c", &var value);
+    testing::expect(!found);
+    testing::expect_equal<i64>(0, value.len());
+}
+
+test "a bare name in a query is present with an empty value" {
+    let allocator = mem::page_allocator();
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    let found = try http::form_value(allocator, "a&b=2", "a", &var value);
+    testing::expect(found);
+    testing::expect_equal<i64>(0, value.len());
+}
+
+test "a percent-encoded query name is matched without allocating" {
+    let allocator = mem::page_allocator();
+    var value = string::new(allocator);
+    defer value.deinit(allocator);
+    let found = try http::form_value(
+        allocator, "first%20name=ada", "first name", &var value);
+    testing::expect(found);
+    expect_text("ada", &value);
+}
+
+fn matched(
+    allocator: Allocator,
+    pattern: []u8,
+    method: []u8,
+    path: []u8,
+    params: &var http::Params
+) -> http::Failure!bool {
+    return http::route(allocator, pattern, method, path, params);
+}
+
+fn expect_param(params: &http::Params, name: []u8, expected: []u8) -> void {
+    if params.find(name) |entry| {
+        let value = entry.value.as_bytes();
+        testing::expect_equal<[]u8>(expected, value);
+    } else {
+        testing::fail("route did not capture the parameter");
+    }
+    return;
+}
+
+test "a route captures one segment under its name" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    testing::expect(try matched(
+        allocator, "GET /items/{id}", "GET", "/items/42", &var params));
+    testing::expect_equal<i64>(1, params.count());
+    expect_param(&params, "id", "42");
+}
+
+test "a route with a method matches only that method" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    testing::expect(!try matched(
+        allocator, "GET /items/{id}", "POST", "/items/42", &var params));
+    // A pattern with no method matches whatever arrived.
+    testing::expect(try matched(
+        allocator, "/items/{id}", "POST", "/items/42", &var params));
+}
+
+test "a segment capture does not reach across a slash" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    testing::expect(!try matched(
+        allocator, "GET /items/{id}", "GET", "/items/42/edit", &var params));
+    testing::expect(!try matched(
+        allocator, "GET /items/{id}", "GET", "/items/", &var params));
+    testing::expect(!try matched(
+        allocator, "GET /items/{id}", "GET", "/items", &var params));
+}
+
+test "a rest capture takes everything left, slashes and all" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    testing::expect(try matched(
+        allocator, "/files/{rest...}", "GET", "/files/a/b/c.txt", &var params));
+    expect_param(&params, "rest", "a/b/c.txt");
+}
+
+test "a captured value is percent-decoded after the split, not before" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    testing::expect(try matched(
+        allocator, "GET /users/{name}", "GET", "/users/al%20ice", &var params));
+    expect_param(&params, "name", "al ice");
+    // A %2F inside one segment stays inside it: decoding it never adds a
+    // segment the router already walked past.
+    testing::expect(try matched(
+        allocator, "GET /users/{name}", "GET", "/users/a%2Fb", &var params));
+    expect_param(&params, "name", "a/b");
+}
+
+test "params is cleared when a route does not match" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    testing::expect(try matched(
+        allocator, "/items/{id}", "GET", "/items/42", &var params));
+    testing::expect_equal<i64>(1, params.count());
+    testing::expect(!try matched(
+        allocator, "/items/{id}/edit", "GET", "/items/42", &var params));
+    testing::expect_equal<i64>(0, params.count());
+}
+
+test "a pattern that is not a pattern is named as such" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    if matched(allocator, "items/{id}", "GET", "/items/42", &var params) |_| {
+        testing::fail("a pattern without a leading slash was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidPattern", failure_name(err));
+    }
+    if matched(allocator, "/{rest...}/tail", "GET", "/a/tail", &var params) |_| {
+        testing::fail("a rest capture before the end was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidPattern", failure_name(err));
+    }
+    if matched(allocator, "/{}", "GET", "/a", &var params) |_| {
+        testing::fail("an empty capture name was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("InvalidPattern", failure_name(err));
+    }
+}
+
+test "the root pattern matches the root path and nothing under it" {
+    let allocator = mem::page_allocator();
+    var params = http::params_new(allocator);
+    defer params.deinit(allocator);
+    testing::expect(try matched(allocator, "/", "GET", "/", &var params));
+    testing::expect(!try matched(allocator, "/", "GET", "/a", &var params));
+}
