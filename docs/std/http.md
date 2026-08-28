@@ -32,6 +32,8 @@ pub fn listen_with(io: Io, address: []u8, limits: Limits)
 fn (self: &Server) local_port() -> std::http::Failure!i64
 fn (self: &var Server) accept(io: Io, allocator: Allocator)
     -> std::http::Failure!std::http::Exchange
+fn (self: &var Server) accept_head(io: Io, allocator: Allocator)
+    -> std::http::Failure!std::http::Exchange
 fn (self: Server) deinit() -> void
 
 fn (self: &var Exchange) respond(io: Io, allocator: Allocator)
@@ -39,6 +41,17 @@ fn (self: &var Exchange) respond(io: Io, allocator: Allocator)
 fn (self: &var Exchange) respond_text(
     io: Io, allocator: Allocator, status: i64, content_type: []u8, body: []u8,
 ) -> std::http::Failure!void
+fn (self: &var Exchange) respond_head(
+    io: Io, allocator: Allocator, framing: std::http::Framing,
+) -> std::http::Failure!void
+fn (self: &var Exchange) write_all(io: Io, bytes: []u8) -> std::http::Failure!void
+fn (self: &var Exchange) read_into(
+    io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
+) -> std::http::Failure!i64
+fn (self: &var Exchange) set_read_deadline(at: i64) -> void
+fn (self: &var Exchange) set_write_deadline(at: i64) -> void
+fn (self: &var Exchange) clear_read_deadline() -> void
+fn (self: &var Exchange) clear_write_deadline() -> void
 fn (self: &Exchange) is_answered() -> bool
 fn (self: Exchange) deinit(allocator: Allocator) -> void
 ```
@@ -195,6 +208,88 @@ phase の deadline は全体を覆うので、4 秒ごとに 1 byte 送る相手
 | `UnsupportedEncoding` | 501 |
 | `net::Error::TimedOut` | 408 |
 | その他 | 500 |
+
+## body を自分で書く / 自分で読む
+
+`respond` は message 全体を組み立ててから送ります。Content-Length を body の
+実測値から書けるのがその見返りで、代償は **response が body の大きさになる**
+ことです。100 MB の答えに 100 MB のメモリは払えませんし、終わりの決まっていない
+stream には書ける length がありません。
+
+`accept` も同じ形で、body を `max_body_bytes` の下で request に読み切ります。
+form には正しく、upload には間違っています —— 上限があるのは body を保持して
+いるからです。
+
+その 2 つを開けるのがこの節です。
+
+### 送る側: `respond_head` と `Framing`
+
+```kizu
+pub union Framing {
+    Buffered,       // Response が持つ body。length は実測
+    Length(i64),    // caller が head の後にちょうどこの数だけ書く
+    UntilClose,     // close が body の終わり。length は無い
+    Raw,            // framing field を一切書かない。head は caller のもの
+}
+
+fn (self: &var Exchange) respond_head(io, allocator, framing) -> Failure!void
+fn (self: &var Exchange) write_all(io, bytes) -> Failure!void
+```
+
+`respond_head` は head を送って止まります。その後の body は caller が
+`write_all` で書きます。head が「body がどこで終わるか」について何と言ったかが
+`Framing` です。
+
+| framing | Content-Length | Connection | 用途 |
+| --- | --- | --- | --- |
+| `Buffered` | 実測値 | `close` | `respond` が使う既定 |
+| `Length(n)` | `n` | `close` | 大きさの分かる file |
+| `UntilClose` | 書かない | `close` | SSE、長さ不明の stream |
+| `Raw` | 書かない | **書かない** | 101 Switching Protocols |
+
+`Length(n)` の `n` は **caller の申告**です。見ていない byte を数えられないので
+検証はしません。`Buffered` だけが実測なのはそのためです。
+
+`Raw` は caller の header をそのまま出し、framing field を落としもしません。
+101 に `Connection: close` を書いたら間違った message になるからです。この 1 語を
+grep すれば「std::http が組み立てなかった head」が全部出ます(原理 3)。
+
+`respond_head` の後は answered なので、`respond` は `Error::ResponseFinished`
+です。head は既に線の上にあり、2 通目はそれが framing していない message です。
+
+### 読む側: `accept_head` と `read_into`
+
+```kizu
+fn (self: &var Server) accept_head(io, allocator) -> Failure!Exchange
+fn (self: &var Exchange) read_into(io, allocator, out, max) -> Failure!i64
+```
+
+`accept_head` は空行で止まります。body は接続に残り、`max_body_bytes` は
+**掛かりません** —— body を保持していないので、上限を掛ける対象がありません。
+`read_into` は `std::net::read_into` と同じ契約(追記した byte 数、0 は終端)で、
+完結を判断する loop は caller が持ちます。
+
+`Transfer-Encoding` は `accept_head` でも拒否します。framing を決めるのが
+1 つの request を 2 つにする道(request smuggling)なので、そこまでは開けません。
+
+### 接続そのものは渡しません
+
+`Exchange` は `TcpStream` を private に持ち、`write_all` / `read_into` /
+`set_read_deadline` / `set_write_deadline` / `clear_*` だけを通します。
+
+理由は head 読みの**残り**です。head を読むと packet 単位で読むので、次に来る
+byte は既に `Exchange` の中にあります。socket を渡すと caller はその残りを
+飛ばします。Go の `Hijacker` が接続と一緒に buffered reader を返すのも同じ理由です。
+
+### deadline は phase のもの
+
+`write_all` と `read_into` は deadline に触りません。触ると呼び出しごとに budget が
+復活して、[`std::net` が避けた形](net.md#deadline)に戻ります。
+
+- `respond_head` が write phase の deadline を 1 回置く
+- `accept_head` が read phase の deadline を 1 回置く
+- 1 つの phase より長く生きる caller(101 の後の protocol など)は
+  `exchange.set_read_deadline(net::deadline_in_millis(n))` で自分で押し直す
 
 ## URL と percent 符号化
 
@@ -421,7 +516,8 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
   接続を跨いで生きる idle deadline もまだありません —— 押し直す相手がいないので
 - **chunked transfer encoding**: request に `Transfer-Encoding` があれば
   `Error::UnsupportedEncoding` です。推測して読むのが request smuggling の
-  通り道なので、拒否します
+  通り道なので、拒否します。長さの分からない response は
+  `Framing::UntilClose`(close が終わり)で送ります
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
 - **`Date` header**: std に暦がないので、書けないものを書きません
 - **multipart / form-data**、**compression**

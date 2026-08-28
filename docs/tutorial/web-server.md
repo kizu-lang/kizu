@@ -337,7 +337,7 @@ pub fn main() -> Failure!void {
 | 接続を跨ぐ idle 期限 | 1 接続 1 request なので、押し直す相手がまだいない |
 | `connect` の期限 | `tcp_connect` は黒穴宛てに host の既定(~75s)まで固まる |
 | keep-alive | 1 接続 1 request。response は `Connection: close` を送る |
-| chunked transfer encoding | request に `Transfer-Encoding` があれば `Error::UnsupportedEncoding`。推測して読むのが request smuggling の通り道 |
+| chunked transfer encoding | request に `Transfer-Encoding` があれば `Error::UnsupportedEncoding`。推測して読むのが request smuggling の通り道。長さの分からない response は `Framing::UntilClose` で送る |
 | TLS / HTTPS | `std::http::get` は `https` を `Error::UnsupportedScheme` で拒否する。暗号化を頼まれたものを平文で送らない |
 | HTTP/2 / HTTP/3 | 無い |
 | header folding | RFC 9110 が protocol から外したもので、繋ぐのではなく拒否する |
@@ -361,6 +361,8 @@ pub fn main() -> Failure!void {
 - [`examples/http_client.kizu`](../../examples/http_client.kizu) —— client の 2 つの半分
 - [`examples/http_response.kizu`](../../examples/http_response.kizu) —— response の状態
 - [`examples/http_timeout.kizu`](../../examples/http_timeout.kizu) —— 期限切れの head と 408
+- [`examples/http_stream.kizu`](../../examples/http_stream.kizu) —— body を自分で書く
+- [`examples/http_upload.kizu`](../../examples/http_upload.kizu) —— body を自分で読む
 - [`examples/net_deadline.kizu`](../../examples/net_deadline.kizu) —— deadline が budget ではないこと
 
 API 一覧は [`docs/std/http.md`](../std/http.md) と

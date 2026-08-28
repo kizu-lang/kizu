@@ -2970,6 +2970,19 @@ runtime selection の方針は ADR-0039 に従います。
 * `exchange.request` / `exchange.response` は public field
 * `exchange.respond(io, allocator)` / `respond_text(io, allocator, status,
   content_type, body)` は `!void` を返し、2 度目は `Error::ResponseFinished`
+* `exchange.respond_head(io, allocator, framing)` は head だけを送り、body は
+  caller が `exchange.write_all(io, bytes)` で書く。`std::http::Framing` は
+  `Buffered`(Response が持つ body、length は実測)/ `Length(n)`(caller の申告)/
+  `UntilClose`(close が終わり、length 無し)/ `Raw`(framing field を書かず、
+  head は caller のもの)。送った後は answered なので `respond` は
+  `Error::ResponseFinished`
+* `server.accept_head(io, allocator)` は空行で止まり、body を接続に残す。
+  `max_body_bytes` は掛からない。caller は `exchange.read_into(io, allocator,
+  out, max)` で読む —— `std::net::read_into` と同じ契約で、head 読みで先に
+  届いていた byte から出る。`Transfer-Encoding` はこの経路でも拒否する
+* `Exchange` は `TcpStream` を渡さない。`write_all` / `read_into` /
+  `set_read_deadline` / `set_write_deadline` / `clear_*` が通り道で、head 読みの
+  残り byte を飛ばせないのがその理由
 * `std::http::Request` は method / target / version / headers / body を所有
   する。path と query は field ではなく、`path_of` / `query_of` が target の
   中の run として返す

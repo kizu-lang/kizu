@@ -97,11 +97,16 @@ fn (self: std::http::Response) deinit(allocator: Allocator) -> void {
 }
 
 // encode renders the whole message into `out`. `head_only` is what a HEAD
-// request asks for: the same head, including the Content-Length the body
-// would have had, and none of the body.
+// request asks for -- and what `respond_head` asks for on every request: the
+// same head, including the Content-Length the body would have had, and none
+// of the body.
+//
+// `framing` decides what the head says about where the body ends. Only
+// `Buffered` appends one, because only `Buffered` has one here.
 fn (self: &std::http::Response) encode(
     allocator: Allocator,
     version: std::http::Version,
+    framing: std::http::Framing,
     head_only: bool,
     out: &var std::string::String
 ) -> std::http::Failure!void {
@@ -112,9 +117,9 @@ fn (self: &std::http::Response) encode(
     try out.append_byte(allocator, cast<u8>(32));
     try out.append_bytes(allocator, std::http::status_text(self.status));
     try std::http::append_crlf(allocator, out);
-    try self.encode_fields(allocator, carries_body, out);
+    try self.encode_fields(allocator, framing, carries_body, out);
     try std::http::append_crlf(allocator, out);
-    if head_only or !carries_body {
+    if head_only or !carries_body or !is_buffered(framing) {
         return;
     }
     let body = self.body.as_bytes();
@@ -122,18 +127,26 @@ fn (self: &std::http::Response) encode(
     return;
 }
 
-// encode_fields writes the caller's fields, then the two the framing needs.
-// Content-Length is computed rather than trusted: the body is right here, and
-// a length that disagreed with it would desynchronise the connection.
+// encode_fields writes the caller's fields, then the ones the framing needs.
+// For a buffered body the length is computed rather than trusted: the body is
+// right here, and a length that disagreed with it would desynchronise the
+// connection. For a body the caller writes, the length is the caller's claim,
+// because nothing here can measure bytes it never sees.
+//
+// `Raw` writes the caller's fields and stops. That is what it is for: a 101
+// carries `Connection: Upgrade`, and a head this function had finished for it
+// would be the wrong message.
 fn (self: &std::http::Response) encode_fields(
     allocator: Allocator,
+    framing: std::http::Framing,
     carries_body: bool,
     out: &var std::string::String
 ) -> std::http::Failure!void {
+    let raw = is_raw(framing);
     var index = 0;
     while self.headers.at(index) |field| {
         let name = field.name.as_bytes();
-        if !is_framing_field(name) {
+        if raw or !is_framing_field(name) {
             let value = field.value.as_bytes();
             try out.append_bytes(allocator, name);
             try out.append_bytes(allocator, ": ");
@@ -142,16 +155,76 @@ fn (self: &std::http::Response) encode_fields(
         }
         index = index + 1;
     }
+    if raw {
+        return;
+    }
     if carries_body {
-        try out.append_bytes(allocator, "Content-Length: ");
-        try std::fmt::append_i64(allocator, out, self.body.len());
-        try std::http::append_crlf(allocator, out);
+        try self.append_length(allocator, framing, out);
     }
     // One request per connection (keep-alive is not implemented), and saying
-    // so is what lets a 1.1 client stop waiting instead of timing out.
+    // so is what lets a 1.1 client stop waiting instead of timing out. It is
+    // also what ends an `UntilClose` body, which has no length to give.
     try out.append_bytes(allocator, "Connection: close");
     try std::http::append_crlf(allocator, out);
     return;
+}
+
+// append_length writes the Content-Length this framing gives the head, if it
+// gives one at all.
+fn (self: &std::http::Response) append_length(
+    allocator: Allocator,
+    framing: std::http::Framing,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    if !declares_length(framing) {
+        return;
+    }
+    let length = self.length_of(framing);
+    try out.append_bytes(allocator, "Content-Length: ");
+    try std::fmt::append_i64(allocator, out, length);
+    try std::http::append_crlf(allocator, out);
+    return;
+}
+
+// declares_length reports whether this framing has a length to write.
+// UntilClose has none by definition -- the close is the end -- and Raw writes
+// no framing field at all.
+fn declares_length(framing: std::http::Framing) -> bool {
+    return match framing {
+        Buffered => true,
+        Length(_) => true,
+        UntilClose => false,
+        Raw => false,
+    };
+}
+
+// length_of is only asked after declares_length said yes. The other two arms
+// are here because a match is total, not because the number means anything.
+fn (self: &std::http::Response) length_of(framing: std::http::Framing) -> i64 {
+    return match framing {
+        Buffered => self.body.len(),
+        Length(count) => count,
+        UntilClose => 0,
+        Raw => 0,
+    };
+}
+
+fn is_buffered(framing: std::http::Framing) -> bool {
+    return match framing {
+        Buffered => true,
+        Length(_) => false,
+        UntilClose => false,
+        Raw => false,
+    };
+}
+
+fn is_raw(framing: std::http::Framing) -> bool {
+    return match framing {
+        Raw => true,
+        Buffered => false,
+        Length(_) => false,
+        UntilClose => false,
+    };
 }
 
 // is_framing_field reports whether a field decides how the message is framed.

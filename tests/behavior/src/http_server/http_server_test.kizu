@@ -373,3 +373,336 @@ test "limits of zero are the caller asking for no deadline" {
     testing::expect(contains(answer_bytes, "HTTP/1.1 200 OK"));
     testing::expect(contains(answer_bytes, "GET /"));
 }
+
+// serve_streamed answers with a head that declares a length and then writes
+// the body itself, one piece at a time, straight onto the connection.
+fn serve_streamed(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    pieces: i64
+) -> Failure!void {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.response.header(allocator, "Content-Type", "text/plain");
+    try held.respond_head(handle, allocator, http::Framing::Length(pieces * 3));
+    var sent = 0;
+    while sent < pieces {
+        try held.write_all(handle, "ab" );
+        try held.write_all(handle, "c");
+        sent = sent + 1;
+    }
+    return;
+}
+
+test "a response can declare a length and write the body itself" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /stream HTTP/1.1", "");
+    try serve_streamed(handle, allocator, &var server, 4);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect(contains(wire, "HTTP/1.1 200 OK"));
+    // The length is the caller's claim: nothing buffered the body to measure.
+    testing::expect(contains(wire, "Content-Length: 12"));
+    testing::expect(contains(wire, "abcabcabcabc"));
+}
+
+fn serve_until_close(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server
+) -> Failure!void {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.respond_head(handle, allocator, http::Framing::UntilClose);
+    try held.write_all(handle, "one");
+    try held.write_all(handle, "two");
+    return;
+}
+
+test "a body of unknown length is framed by the close" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /events HTTP/1.1", "");
+    try serve_until_close(handle, allocator, &var server);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect(contains(wire, "Connection: close"));
+    testing::expect(!contains(wire, "Content-Length"));
+    testing::expect(contains(wire, "onetwo"));
+}
+
+fn serve_upgrade(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.response.set_status(101);
+    try held.response.header(allocator, "Upgrade", "echo");
+    try held.response.header(allocator, "Connection", "Upgrade");
+    // Raw hands the whole head over: `Connection: close` is the wrong answer
+    // to an upgrade, so nothing is written that the caller did not set.
+    try held.respond_head(handle, allocator, http::Framing::Raw);
+    // The connection is the caller's protocol now.
+    var asked = string::new(allocator);
+    defer asked.deinit(allocator);
+    let _ = try held.read_into(handle, allocator, &var asked, 64);
+    let bytes = asked.as_bytes();
+    try held.write_all(handle, bytes);
+    return;
+}
+
+test "a 101 keeps the head the caller wrote and hands over the connection" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /upgrade HTTP/1.1", "");
+    try client.write_all(handle, "after the head");
+    try serve_upgrade(handle, allocator, &var server);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect(contains(wire, "HTTP/1.1 101 Switching Protocols"));
+    testing::expect(contains(wire, "Connection: Upgrade"));
+    testing::expect(!contains(wire, "Connection: close"));
+    testing::expect(contains(wire, "after the head"));
+}
+
+test "respond after respond_head is refused" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET / HTTP/1.1", "");
+
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.respond_head(handle, allocator, http::Framing::UntilClose);
+    if held.respond(handle, allocator) {
+        testing::fail("a second head was sent");
+    } else |err| {
+        testing::expect(true);
+    }
+}
+
+// count_upload reads a body this server never held, and answers with how many
+// bytes it counted. The point is that the number is larger than the ceiling
+// `accept` would have refused: nothing is holding the body for a ceiling to
+// bound.
+fn count_upload(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server
+) -> Failure!void {
+    var held = try server.accept_head(handle, allocator);
+    defer held.deinit(allocator);
+    testing::expect_equal<i64>(0, held.request.body.len());
+
+    let declared = try held.request.content_length();
+    var want = 0;
+    if declared |length| {
+        want = length;
+    }
+    var seen = 0;
+    var chunk = string::new(allocator);
+    defer chunk.deinit(allocator);
+    while seen < want {
+        chunk.clear();
+        let got = try held.read_into(handle, allocator, &var chunk, 4096);
+        if got == 0 {
+            break;
+        }
+        seen = seen + got;
+    }
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try fmt::append_i64(allocator, &var reply, seen);
+    let text = reply.as_bytes();
+    try held.respond_text(handle, allocator, 200, "text/plain", text);
+    return;
+}
+
+test "accept_head leaves the body on the connection to be streamed" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    // Small enough that `accept` would refuse this upload outright.
+    limits.max_body_bytes = 64;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // The body is longer than one read of the head can hold, so the count is
+    // right only if the bytes already buffered and the bytes still on the
+    // socket are both counted, and neither twice.
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    var written = 0;
+    while written < 1000 {
+        try body.append_bytes(allocator, "0123456789");
+        written = written + 1;
+    }
+    let body_bytes = body.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "POST /upload HTTP/1.1", body_bytes);
+    try count_upload(handle, allocator, &var server);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect(contains(wire, "HTTP/1.1 200 OK"));
+    testing::expect(contains(wire, "10000"));
+}
+
+test "accept still refuses a body past the ceiling" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_body_bytes = 64;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    var written = 0;
+    while written < 20 {
+        try body.append_bytes(allocator, "0123456789");
+        written = written + 1;
+    }
+    let body_bytes = body.as_bytes();
+    try send_request(handle, allocator, &var client, "POST /upload HTTP/1.1", body_bytes);
+
+    if refused(handle, allocator, &var server) {
+        testing::fail("an oversized body was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "413"));
+}
+
+test "accept_head still refuses a framing this server does not speak" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /upload HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if server.accept_head(handle, allocator) |exchange| {
+        exchange.deinit(allocator);
+        testing::fail("a chunked body was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+}
+
+test "a caller that took the body owns its deadline" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // The head promises a hundred bytes and four arrive.
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /upload HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Content-Length: 100");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "four");
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    var held = try server.accept_head(handle, allocator);
+    defer held.deinit(allocator);
+    held.set_read_deadline(net::deadline_in_millis(50));
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    // The four buffered bytes come out without touching the socket.
+    let first = try held.read_into(handle, allocator, &var out, 4096);
+    testing::expect_equal<i64>(4, first);
+    // The rest never arrives, and the deadline is not handed back per call.
+    if held.read_into(handle, allocator, &var out, 4096) |_| {
+        testing::fail("a read of the missing body returned");
+    } else |err| {
+        testing::expect(true);
+    }
+}

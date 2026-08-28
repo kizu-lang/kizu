@@ -103,6 +103,30 @@ pub fn default_limits() -> std::http::Limits {
     };
 }
 
+// Framing says how a response's body ends, which is the same question as who
+// writes it. `Buffered` is what `respond` uses: the body is in the Response,
+// so its length is known and written. The other three are a caller that will
+// write the body itself, through `exchange.stream`.
+//
+// This is the one place a caller can put bytes on the connection that std::http
+// did not frame, so it is spelled rather than inferred -- `Raw` in particular
+// hands over the whole head, and a grep for it finds every place that happens
+// (docs/principles.md §3).
+pub union Framing {
+    // The Response owns the body. Content-Length is what it measures.
+    Buffered,
+    // The caller writes exactly this many bytes after the head.
+    Length(i64),
+    // The caller writes until it releases the exchange, and the close is what
+    // ends the body. This is what a stream of unknown length has without
+    // chunked transfer encoding.
+    UntilClose,
+    // No framing fields at all: the head is exactly what the caller set. This
+    // is what a 101 needs, because `Connection: close` is the wrong answer to
+    // an upgrade.
+    Raw,
+}
+
 // arm_read / arm_write turn one phase's duration into the deadline that phase
 // runs under. Zero is the caller saying there is no deadline, which is why it
 // clears rather than asking for a moment that has already gone by.

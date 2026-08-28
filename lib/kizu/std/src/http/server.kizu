@@ -53,9 +53,45 @@ fn (self: &var std::http::Server) accept(
     io: Io,
     allocator: Allocator
 ) -> std::http::Failure!std::http::Exchange {
+    return self.accept_message(io, allocator, true);
+}
+
+// accept_head stops at the blank line. The body is left where it is, so a
+// caller that wants to stream an upload rather than hold it reads it with
+// `exchange.read_body_into` -- and `max_body_bytes` never applies, because
+// nothing here is holding the body for it to bound.
+//
+// `Transfer-Encoding` is still refused. Deciding the framing is what makes
+// two requests out of one (request smuggling), and handing that decision over
+// is a bigger door than this one opens.
+fn (self: &var std::http::Server) accept_head(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!std::http::Exchange {
+    var held = try self.accept_message(io, allocator, false);
+    // The body phase starts here, because the caller is the one reading it.
+    // One deadline covers the whole body; a caller reading for longer than a
+    // body pushes it forward itself.
+    let read_millis = self.limits.read_body_millis;
+    held.arm_read_phase(read_millis);
+    return move held;
+}
+
+fn (self: &var std::http::Exchange) arm_read_phase(millis: i64) -> void {
+    std::http::arm_read(&var self.stream, millis);
+    return;
+}
+
+fn (self: &var std::http::Server) accept_message(
+    io: Io,
+    allocator: Allocator,
+    read_body: bool
+) -> std::http::Failure!std::http::Exchange {
     var stream = try self.listener.accept(io);
     errdefer stream.deinit();
-    if read_request(io, allocator, &var stream, self.limits) |request| {
+    var pending = std::string::new(allocator);
+    errdefer pending.deinit(allocator);
+    if read_request(io, allocator, &var stream, self.limits, read_body, &var pending) |request| {
         var owned = move request;
         errdefer owned.deinit(allocator);
         return Exchange {
@@ -63,6 +99,8 @@ fn (self: &var std::http::Server) accept(
             request: move owned,
             response: std::http::response_new(allocator),
             answered: false,
+            pending: move pending,
+            pending_at: 0,
             limits: self.limits,
         };
     } else |failure| {
@@ -71,14 +109,30 @@ fn (self: &var std::http::Server) accept(
     }
 }
 
-// An Exchange is one request and the response owed for it. Both are fields, so
-// a caller reads `exchange.request.headers` and writes
-// `exchange.response.write(...)` the way it would any other struct.
+// An Exchange is one request, the response owed for it, and the connection
+// the two travel on. All three are fields, so a caller reads
+// `exchange.request.headers` and writes `exchange.response.write(...)` the
+// way it would any other struct.
+//
+// The connection is not a field a caller reaches. `write_all` and `read_into`
+// are, and they are the whole of what a caller can do to it -- which is enough
+// to write a body this module did not frame, or to speak whatever protocol a
+// 101 upgraded to.
+//
+// Handing out the stream itself would be handing out half of it: reading a
+// head reads whole packets, so the first bytes of what comes next are already
+// in `pending` and a read that went to the socket would skip them. Go hands a
+// hijacker its buffered reader beside the connection for the same reason.
 pub struct Exchange {
     stream: std::net::TcpStream,
     pub request: std::http::Request,
     pub response: std::http::Response,
     answered: bool,
+    // Bytes that arrived behind the head and have not been handed out. Reading
+    // the head reads whatever the peer had already sent, so a body this server
+    // did not copy into the request starts here rather than on the socket.
+    pending: std::string::String,
+    pending_at: i64,
     // The server's policy, carried so `respond` can make the write deadline
     // when the write starts. A deadline stamped at accept would already be
     // spent by whatever the caller did in between.
@@ -95,18 +149,129 @@ fn (self: &var std::http::Exchange) respond(
     if self.answered {
         return std::http::Error::ResponseFinished;
     }
-    self.response.finish();
     let method = self.request.method.as_bytes();
     let head_only = std::mem::equal_bytes(method, "HEAD");
+    try self.send_head(io, allocator, std::http::Framing::Buffered, head_only);
+    return;
+}
+
+// respond_head sends the head and stops. What follows the head is then the
+// caller's to write through `stream`, and `framing` is what the head told the
+// peer about where that body ends.
+//
+// The exchange is answered afterwards, so `respond` cannot also send one --
+// the head is already on the connection, and a second one would be a second
+// message the first did not frame.
+fn (self: &var std::http::Exchange) respond_head(
+    io: Io,
+    allocator: Allocator,
+    framing: std::http::Framing
+) -> std::http::Failure!void {
+    if self.answered {
+        return std::http::Error::ResponseFinished;
+    }
+    try self.send_head(io, allocator, framing, true);
+    return;
+}
+
+fn (self: &var std::http::Exchange) send_head(
+    io: Io,
+    allocator: Allocator,
+    framing: std::http::Framing,
+    head_only: bool
+) -> std::http::Failure!void {
+    self.response.finish();
     let version = self.request.version;
     var out = std::string::new(allocator);
     defer out.deinit(allocator);
-    try self.response.encode(allocator, version, head_only, &var out);
+    try self.response.encode(allocator, version, framing, head_only, &var out);
     let wire = out.as_bytes();
     let write_millis = self.limits.write_millis;
     std::http::arm_write(&var self.stream, write_millis);
     try self.stream.write_all(io, wire);
     self.answered = true;
+    return;
+}
+
+// write_all puts bytes on the connection with nothing added. It is what a
+// caller uses after `respond_head`: the head said how the body ends, and these
+// are the body.
+//
+// It does not touch the deadline. `respond_head` set one for the write phase,
+// and re-arming here would hand a fresh budget back on every call -- which is
+// the per-call timeout this module does not have. A stream that outlives one
+// phase pushes its own deadline forward with `set_write_deadline`.
+fn (self: &var std::http::Exchange) write_all(
+    io: Io,
+    bytes: []u8
+) -> std::http::Failure!void {
+    try self.stream.write_all(io, bytes);
+    return;
+}
+
+// The connection's deadlines, for a caller that has taken the body or the
+// protocol over. One phase's deadline is set when that phase starts; a caller
+// whose work is not one phase says so here.
+fn (self: &var std::http::Exchange) set_read_deadline(at: i64) -> void {
+    self.stream.set_read_deadline(at);
+    return;
+}
+
+fn (self: &var std::http::Exchange) set_write_deadline(at: i64) -> void {
+    self.stream.set_write_deadline(at);
+    return;
+}
+
+fn (self: &var std::http::Exchange) clear_read_deadline() -> void {
+    self.stream.clear_read_deadline();
+    return;
+}
+
+fn (self: &var std::http::Exchange) clear_write_deadline() -> void {
+    self.stream.clear_write_deadline();
+    return;
+}
+
+// read_into is how a caller reads what this server did not: a body left on
+// the connection by `accept_head`, or whatever a 101 upgraded to. It answers
+// the way `std::net::read_into` does -- how many bytes it appended, and 0 for
+// the end of the stream -- so the loop that knows when the message is complete
+// is still the caller's.
+//
+// The bytes that arrived behind the head come out first, which is the reason
+// this exists rather than the socket being handed over.
+fn (self: &var std::http::Exchange) read_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!i64 {
+    if max <= 0 {
+        return std::net::Error::InvalidLength;
+    }
+    let held = self.pending.len() - self.pending_at;
+    if held > 0 {
+        var take = held;
+        if take > max {
+            take = max;
+        }
+        let start = self.pending_at;
+        try self.copy_pending(allocator, out, start, start + take);
+        self.pending_at = start + take;
+        return take;
+    }
+    let count = try self.stream.read_into(io, allocator, out, max);
+    return count;
+}
+
+fn (self: &std::http::Exchange) copy_pending(
+    allocator: Allocator,
+    out: &var std::string::String,
+    from: i64,
+    to: i64
+) -> std::http::Failure!void {
+    let bytes = self.pending.as_bytes();
+    try out.append_bytes(allocator, bytes[from..to]);
     return;
 }
 
@@ -135,16 +300,21 @@ fn (self: std::http::Exchange) deinit(allocator: Allocator) -> void {
     self.stream.deinit();
     self.request.deinit(allocator);
     self.response.deinit(allocator);
+    self.pending.deinit(allocator);
     return;
 }
 
-// read_request reads one whole message off a stream: the head up to the blank
-// line, then exactly the body Content-Length declared.
+// read_request reads the head up to the blank line, and then -- if the caller
+// asked for it -- exactly the body Content-Length declared. Whatever arrived
+// behind what it took is copied into `pending`, because reading a head reads
+// whole packets and those bytes are the peer's, not this buffer's to drop.
 fn read_request(
     io: Io,
     allocator: Allocator,
     stream: &var std::net::TcpStream,
-    limits: std::http::Limits
+    limits: std::http::Limits,
+    read_body: bool,
+    pending: &var std::string::String
 ) -> std::http::Failure!std::http::Request {
     var buffer = std::string::new(allocator);
     defer buffer.deinit(allocator);
@@ -152,8 +322,36 @@ fn read_request(
     let head_length = try std::http::read_head(io, allocator, stream, &var buffer, limits);
     var request = try parse_request_at(allocator, &buffer, head_length, limits);
     errdefer request.deinit(allocator);
-    try read_request_body(io, allocator, stream, &var buffer, &var request, head_length, limits);
+    // Guessing how a body is framed is how two requests become one (request
+    // smuggling), so a framing this server does not speak is refused whether
+    // or not it is the one reading the body.
+    if request.headers.has("Transfer-Encoding") {
+        return std::http::Error::UnsupportedEncoding;
+    }
+    var consumed = head_length;
+    if read_body {
+        let length = try read_request_body(
+            io, allocator, stream, &var buffer, &var request, head_length, limits);
+        consumed = head_length + length;
+    }
+    try copy_tail(allocator, &buffer, pending, consumed);
     return move request;
+}
+
+// copy_tail keeps what arrived behind the message this server took.
+fn copy_tail(
+    allocator: Allocator,
+    buffer: &std::string::String,
+    pending: &var std::string::String,
+    from: i64
+) -> std::http::Failure!void {
+    let bytes = buffer.as_bytes();
+    let length = std::mem::len(bytes);
+    if from >= length {
+        return;
+    }
+    try pending.append_bytes(allocator, bytes[from..length]);
+    return;
 }
 
 fn parse_request_at(
@@ -178,17 +376,14 @@ fn read_request_body(
     request: &var std::http::Request,
     head_length: i64,
     limits: std::http::Limits
-) -> std::http::Failure!void {
-    if request.headers.has("Transfer-Encoding") {
-        return std::http::Error::UnsupportedEncoding;
-    }
+) -> std::http::Failure!i64 {
     let declared = try request.content_length();
     var length = 0;
     if declared |value| {
         length = value;
     }
     if length == 0 {
-        return;
+        return 0;
     }
     if length > limits.max_body_bytes {
         return std::http::Error::BodyTooLarge;
@@ -204,7 +399,7 @@ fn read_request_body(
         }
     }
     try copy_request_body(allocator, buffer, request, head_length, length);
-    return;
+    return length;
 }
 
 fn copy_request_body(
@@ -238,7 +433,9 @@ fn refuse(
     response.set_status(status) catch return;
     response.header(allocator, "Content-Type", "text/plain") catch return;
     response.write(allocator, std::http::status_text(status)) catch return;
-    response.encode(allocator, std::http::Version::Http11, false, &var out) catch return;
+    response.encode(
+        allocator, std::http::Version::Http11, std::http::Framing::Buffered,
+        false, &var out) catch return;
     let wire = out.as_bytes();
     std::http::arm_write(stream, limits.write_millis);
     stream.write_all(io, wire) catch return;

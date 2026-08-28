@@ -1,0 +1,197 @@
+// Sending a body std::http did not buffer.
+//
+// `respond` builds the whole message in memory before any of it reaches the
+// socket, which is what lets it write a Content-Length the body actually has.
+// For a large file or an open-ended stream that is the wrong trade: a 100 MB
+// answer should not cost 100 MB of memory, and a stream of events has no
+// length to write at all.
+//
+// `respond_head` sends the head and stops. What the head said about where the
+// body ends is `Framing`, and after that the body is the caller's to write.
+//
+//   Framing::Length(n)   the caller writes exactly n bytes
+//   Framing::UntilClose  the close is the end -- no length to give
+//   Framing::Raw         no framing fields at all; the head is the caller's
+//
+// This example does the first two. `Raw` is what a 101 needs and is in
+// tests/behavior/src/http_server.
+
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+
+    try ask(handle, allocator, port, &var server, "GET /rows HTTP/1.1", true);
+    try ask(handle, allocator, port, &var server, "GET /events HTTP/1.1", false);
+    return;
+}
+
+fn ask(
+    handle: Io,
+    allocator: Allocator,
+    port: i64,
+    server: &var http::Server,
+    line: []u8,
+    counted: bool
+) -> Failure!void {
+    var client = try open_client(handle, allocator, port);
+    defer client.deinit();
+    try request(handle, allocator, &var client, line);
+    if counted {
+        try serve_counted(handle, allocator, server);
+    } else {
+        try serve_open_ended(handle, allocator, server);
+    }
+    try show(handle, allocator, &var client);
+    return;
+}
+
+// serve_counted knows the length before it writes a byte of the body, so it
+// says so. A client can show a progress bar against a number like this one,
+// which is why it is worth computing when it can be.
+fn serve_counted(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    let rows = 3;
+    try held.response.header(allocator, "Content-Type", "text/plain");
+    // Each row is "row N" and a newline: six bytes.
+    try held.respond_head(handle, allocator, http::Framing::Length(rows * 6));
+    var index = 0;
+    while index < rows {
+        var row = string::new(allocator);
+        defer row.deinit(allocator);
+        try row.append_bytes(allocator, "row ");
+        try fmt::append_i64(allocator, &var row, index);
+        try row.append_byte(allocator, cast<u8>(10));
+        let bytes = row.as_bytes();
+        try held.write_all(handle, bytes);
+        index = index + 1;
+    }
+    return;
+}
+
+// serve_open_ended has no length to give, so the close is the end of the body.
+// That is what HTTP/1.1 has without chunked transfer encoding, and it is why
+// this answer cannot also be a keep-alive one.
+fn serve_open_ended(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.response.header(allocator, "Content-Type", "text/event-stream");
+    try held.respond_head(handle, allocator, http::Framing::UntilClose);
+    try event(handle, allocator, &var held, "data: one");
+    try event(handle, allocator, &var held, "data: two");
+    return;
+}
+
+// event writes one SSE record. Kizu string literals carry no escapes (SPEC
+// §7), so the newline that ends it is written as the number it is.
+fn event(
+    handle: Io,
+    allocator: Allocator,
+    held: &var http::Exchange,
+    line: []u8
+) -> Failure!void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, line);
+    try out.append_byte(allocator, cast<u8>(10));
+    let bytes = out.as_bytes();
+    try held.write_all(handle, bytes);
+    return;
+}
+
+fn open_client(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn request(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+    return;
+}
+
+fn show(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try client.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try client.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    print_lines(wire);
+    return;
+}
+
+fn print_lines(wire: []u8) -> void {
+    let length = mem::len(wire);
+    var start = 0;
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(10) {
+            var end = index;
+            if end > start and wire[end - 1] == cast<u8>(13) {
+                end = end - 1;
+            }
+            print(wire[start..end]);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    if start < length {
+        print(wire[start..length]);
+    }
+    return;
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http io error-union
+// output:
+// HTTP/1.1 200 OK
+// Content-Type: text/plain
+// Content-Length: 18
+// Connection: close
+//
+// row 0
+// row 1
+// row 2
+// HTTP/1.1 200 OK
+// Content-Type: text/event-stream
+// Connection: close
+//
+// data: one
+// data: two
