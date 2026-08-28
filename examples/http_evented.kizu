@@ -1,0 +1,253 @@
+// An HTTP server that serves many connections on one thread.
+//
+// examples/http_server.kizu serves one connection at a time: `accept` reads a
+// whole request before it returns, so while it waits for one caller to finish
+// its head, nobody else is heard. That is the loop this one replaces.
+//
+// `accept_ready` takes a connection without waiting and hands back an exchange
+// with no request in it yet. `advance` moves that request on by whatever has
+// arrived and answers what happened:
+//
+//   NeedMore   nothing more can be done -- back to the poller
+//   Request    exchange.request is complete
+//   Closed     the peer went away before it finished
+//
+// The parsing is the same parsing the blocking `accept` does. The only
+// difference is who waits: there, the read; here, the poller, once, for all of
+// them at the same time.
+//
+// The callers here are this process too, because Kizu has no concurrency. A
+// real server would have only the loop.
+
+import std::array;
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+    var open = array::new<http::Exchange>(allocator);
+    defer open.deinit(allocator);
+    var poller = try net::poller_new(handle, 16);
+    defer poller.deinit();
+
+    // Three callers connect. Each sends only its request line: none of them
+    // has a complete head yet.
+    var index = 0;
+    while index < 3 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        index = index + 1;
+    }
+    try start(handle, allocator, &var callers, 0, "GET /alpha HTTP/1.1");
+    try start(handle, allocator, &var callers, 1, "GET /beta HTTP/1.1");
+    try start(handle, allocator, &var callers, 2, "GET /gamma HTTP/1.1");
+
+    // Take all three without waiting on any of them.
+    var taken = 0;
+    while taken < 3 {
+        if try server.accept_ready(handle, allocator) |held| {
+            let token = open.len();
+            try open.append(allocator, move held);
+            try watch(handle, &var poller, &open, token);
+            taken = taken + 1;
+        }
+    }
+    print("connections open");
+    print(open.len());
+
+    // Nobody has finished a head, so nothing is answerable yet.
+    var answered = 0;
+    answered = answered + try serve_ready(handle, allocator, &var poller, &var open);
+    print("answered before anyone finished");
+    print(answered);
+
+    // They finish in the reverse of the order they connected, and the loop
+    // follows the finishing.
+    try finish(handle, allocator, &var callers, 2);
+    answered = answered + try serve_ready(handle, allocator, &var poller, &var open);
+    try finish(handle, allocator, &var callers, 0);
+    answered = answered + try serve_ready(handle, allocator, &var poller, &var open);
+    try finish(handle, allocator, &var callers, 1);
+    answered = answered + try serve_ready(handle, allocator, &var poller, &var open);
+    print("answered in total");
+    print(answered);
+    return;
+}
+
+// serve_ready waits once for all of them, moves whichever spoke, and answers
+// the ones whose request is complete. It answers how many that was.
+fn serve_ready(
+    handle: Io,
+    allocator: Allocator,
+    poller: &var net::Poller,
+    open: &var array::Array<http::Exchange>
+) -> Failure!i64 {
+    let count = try poller.wait(handle, net::deadline_in_millis(200));
+    var answered = 0;
+    var index = 0;
+    while index < count {
+        if poller.ready(index) |event| {
+            if event.readable {
+                answered = answered + try step_one(handle, allocator, open, event.token);
+            }
+        }
+        index = index + 1;
+    }
+    return answered;
+}
+
+// step_one moves one connection and answers it if its request arrived.
+fn step_one(
+    handle: Io,
+    allocator: Allocator,
+    open: &var array::Array<http::Exchange>,
+    token: i64
+) -> Failure!i64 {
+    var done = false;
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    if open.at_mut(token) |held| {
+        let progress = try held.advance(handle, allocator);
+        done = is_request(progress);
+        if done {
+            try remember_path(allocator, held, &var path);
+        }
+    }
+    if !done {
+        return 0;
+    }
+    let target = path.as_bytes();
+    print(target);
+    try answer(handle, allocator, open, token, target);
+    return 1;
+}
+
+fn is_request(progress: http::Progress) -> bool {
+    return match progress {
+        Request => true,
+        NeedMore => false,
+        Closed => false,
+    };
+}
+
+// remember_path copies the path out before the exchange is used mutably: a
+// view into the request is a borrow of the exchange it lives in.
+fn remember_path(
+    allocator: Allocator,
+    held: &http::Exchange,
+    out: &var string::String
+) -> Failure!void {
+    let target = held.request.target.as_bytes();
+    let path = http::path_of(target);
+    try out.append_bytes(allocator, path);
+    return;
+}
+
+fn answer(
+    handle: Io,
+    allocator: Allocator,
+    open: &var array::Array<http::Exchange>,
+    token: i64,
+    path: []u8
+) -> Failure!void {
+    if open.at_mut(token) |held| {
+        try held.respond_text(handle, allocator, 200, "text/plain", path);
+    }
+    return;
+}
+
+fn watch(
+    handle: Io,
+    poller: &var net::Poller,
+    open: &array::Array<http::Exchange>,
+    token: i64
+) -> Failure!void {
+    if open.at(token) |held| {
+        try held.watch_read(handle, poller, token);
+    }
+    return;
+}
+
+// start sends a request line and stops, so the head is not complete.
+fn start(
+    handle: Io,
+    allocator: Allocator,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    if callers.at_mut(index) |caller| {
+        try caller.write_all(handle, bytes);
+    }
+    return;
+}
+
+// finish sends the blank line that ends the head.
+fn finish(
+    handle: Io,
+    allocator: Allocator,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    if callers.at_mut(index) |caller| {
+        try caller.write_all(handle, bytes);
+    }
+    return;
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+fn connect_to(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+// run
+// features: net http io error-union
+// output:
+// connections open
+// 3
+// answered before anyone finished
+// 0
+// /gamma
+// /alpha
+// /beta
+// answered in total
+// 3

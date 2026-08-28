@@ -3031,6 +3031,11 @@ coroutine が要り、function coloring が生えるためです。
   —— TLS を持たないので、暗号化を頼まれたものを平文で送らない
 * `std::http::write_request` / `read_response_from` は client の 2 つの半分。
   stream を所有するのは呼ぶ側
+* `server.accept_ready(io, allocator)` は待たずに接続を取り、`?Exchange` を返す。
+  その exchange に request はまだ無い。`exchange.advance(io, allocator)` が届いた
+  分だけ進め、`std::http::Progress` —— `NeedMore`(poller に戻る)/ `Request`
+  (request が揃った)/ `Closed`(揃う前に peer が去った) —— を返す。
+  `exchange.watch_read(io, poller, token)` が poller に登録する
 * `exchange.next(io, allocator)` は同じ接続の次の request を読み、あったかを
   `!bool` で返す。false は接続が終わったこと。まだ答えていない / 自分の body を
   `finish_body` で閉じていない / `accept_head` の request body を読み切って

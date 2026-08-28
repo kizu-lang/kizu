@@ -34,6 +34,8 @@ fn (self: &var Server) accept(io: Io, allocator: Allocator)
     -> std::http::Failure!std::http::Exchange
 fn (self: &var Server) accept_head(io: Io, allocator: Allocator)
     -> std::http::Failure!std::http::Exchange
+fn (self: &var Server) accept_ready(io: Io, allocator: Allocator)
+    -> std::http::Failure!?std::http::Exchange
 fn (self: Server) deinit() -> void
 
 fn (self: &var Exchange) respond(io: Io, allocator: Allocator)
@@ -53,6 +55,11 @@ fn (self: &var Exchange) set_read_deadline(at: i64) -> void
 fn (self: &var Exchange) set_write_deadline(at: i64) -> void
 fn (self: &var Exchange) clear_read_deadline() -> void
 fn (self: &var Exchange) clear_write_deadline() -> void
+fn (self: &var Exchange) advance(io: Io, allocator: Allocator)
+    -> std::http::Failure!std::http::Progress
+fn (self: &Exchange) watch_read(
+    io: Io, poller: &var std::net::Poller, token: i64,
+) -> std::http::Failure!void
 fn (self: &var Exchange) next(io: Io, allocator: Allocator)
     -> std::http::Failure!bool
 fn (self: &Exchange) is_answered() -> bool
@@ -388,6 +395,50 @@ message が 2 つになる」経路を閉じるためのものです。
 では掛かりません —— 保持していないので、上限を掛ける対象がありません。
 
 送る側の chunked は [`Framing::Chunked`](#chunked) です。
+
+## 1 thread で多数の接続を扱う
+
+`accept` は request を読み切ってから返ります。1 接続ずつなら正しい形ですが、
+多数を扱う loop では、1 人が head を書き終えるまで他の誰の声も聞こえません。
+
+```kizu
+fn (self: &var Server) accept_ready(io, allocator) -> Failure!?Exchange
+fn (self: &var Exchange) advance(io, allocator) -> Failure!Progress
+fn (self: &Exchange) watch_read(io, poller: &var net::Poller, token) -> Failure!void
+```
+
+`accept_ready` は待たずに接続を取り、**request がまだ無い** exchange を返します。
+`advance` が届いた分だけ message を進め、何が起きたかを答えます。
+
+```kizu
+pub union Progress {
+    NeedMore,   // これ以上は進めない。poller に戻る
+    Request,    // exchange.request が揃った
+    Closed,     // 揃う前に peer が去った。失敗ではない
+}
+```
+
+loop はこうなります —— **待つのは poller 1 回だけ**で、全接続について同時に。
+
+```kizu
+let count = try poller.wait(handle, net::deadline_in_millis(200));
+var index = 0;
+while index < count {
+    if poller.ready(index) |event| {
+        // event.token で自分の exchange を引き、advance する
+    }
+    index = index + 1;
+}
+```
+
+`examples/http_evented.kizu` が 3 接続を 1 thread で捌いています —— 繋いだ順では
+なく **head を書き終えた順**に答えます。
+
+### 大きな response は `write_some`
+
+`respond_text` / `respond` は書き切るまで返ります。小さい答えなら問題ありませんが、
+遅い相手への大きな body は [`net::write_some`](net.md#write_all-と-write_some) の
+形が要ります —— `respond_head` で head を出し、残りを自分で申し出ます。
 
 ## keep-alive
 

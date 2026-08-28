@@ -252,6 +252,20 @@ fn (self: &var TcpListener) accept(io: Io) -> std::net::Error!std::net::TcpStrea
     return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
 }
 
+// accept_ready takes a connection if one is waiting and answers null if none
+// is. It never waits, which is what a poller loop needs: the loop already
+// asked, and being told "not right now" is an answer it can act on.
+fn (self: &var TcpListener) accept_ready(io: Io) -> std::net::Error!?std::net::TcpStream {
+    if std::internal::builtin::net_accept(io, self.fd, 0) |fd| {
+        return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
+    } else |failure| {
+        if failure == std::net::Error::TimedOut {
+            return null;
+        }
+        return failure;
+    }
+}
+
 // local_port is the port this listener is actually on.
 fn (self: &TcpListener) local_port() -> std::net::Error!i64 {
     let port = try std::internal::builtin::net_local_port(self.fd);
@@ -326,6 +340,28 @@ fn (self: &var TcpStream) clear_read_deadline() -> void {
 fn (self: &var TcpStream) clear_write_deadline() -> void {
     self.write_deadline_ms = 0;
     return;
+}
+
+// read_ready takes what has already arrived and answers null if nothing has.
+// It never waits, which is the read counterpart of `write_some`: a poller loop
+// asked already, and "nothing right now" is an answer it can act on.
+//
+// Zero still means the peer closed. Null and zero are different answers to
+// different questions -- one is "not yet", the other is "not ever".
+fn (self: &var TcpStream) read_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!?i64 {
+    if std::internal::builtin::net_read(io, allocator, self.fd, out, max, 0) |count| {
+        return count;
+    } else |failure| {
+        if failure == std::net::Error::TimedOut {
+            return null;
+        }
+        return failure;
+    }
 }
 
 // write_some sends what fits right now and answers with how many bytes that

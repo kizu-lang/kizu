@@ -1259,3 +1259,151 @@ test "a chunked answer keeps the connection" {
     testing::expect(contains(wire, "first"));
     testing::expect(contains(wire, "second"));
 }
+
+test "a connection can be taken before its request is complete" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    // A request line and nothing else: the head is not finished.
+    try client.write_all(handle, "GET /slow HTTP/1.1");
+    try crlf_on(handle, allocator, &var client);
+
+    var held = try take_ready(handle, allocator, &var server);
+    defer held.deinit(allocator);
+
+    // Nothing waits: the answer is that there is more to come.
+    testing::expect_equal<[]u8>("need more", try state(handle, allocator, &var held));
+    testing::expect_equal<[]u8>("need more", try state(handle, allocator, &var held));
+
+    // The blank line finishes it, and the same call says so.
+    try crlf_on(handle, allocator, &var client);
+    testing::expect_equal<[]u8>("request", try settled(handle, allocator, &var held));
+    let target = held.request.target.as_bytes();
+    testing::expect_equal<[]u8>("/slow", target);
+}
+
+test "a body arriving in pieces is assembled without waiting" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var head = string::new(allocator);
+    defer head.deinit(allocator);
+    try head.append_bytes(allocator, "POST /upload HTTP/1.1");
+    try crlf(allocator, &var head);
+    try head.append_bytes(allocator, "Content-Length: 10");
+    try crlf(allocator, &var head);
+    try crlf(allocator, &var head);
+    let head_bytes = head.as_bytes();
+    try client.write_all(handle, head_bytes);
+
+    var held = try take_ready(handle, allocator, &var server);
+    defer held.deinit(allocator);
+    // The head is whole and the body is not, so there is more to come.
+    testing::expect_equal<[]u8>("need more", try state(handle, allocator, &var held));
+    // Half a body: this stays "need more" however many times it is asked.
+    try client.write_all(handle, "01234");
+    testing::expect_equal<[]u8>("need more", try state(handle, allocator, &var held));
+    try client.write_all(handle, "56789");
+    testing::expect_equal<[]u8>("request", try settled(handle, allocator, &var held));
+    let body = held.request.body.as_bytes();
+    testing::expect_equal<[]u8>("0123456789", body);
+}
+
+test "a peer that goes away before finishing is closed, not a failure" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    errdefer client.deinit();
+    try client.write_all(handle, "GET /gone HTTP/1.1");
+    try crlf_on(handle, allocator, &var client);
+
+    var held = try take_ready(handle, allocator, &var server);
+    defer held.deinit(allocator);
+    testing::expect_equal<[]u8>("need more", try state(handle, allocator, &var held));
+    client.deinit();
+    testing::expect_equal<[]u8>("closed", try settled(handle, allocator, &var held));
+}
+
+// take_ready loops accept_ready until the connection this test just opened is
+// there. In a server the poller says when; a test can ask again.
+fn take_ready(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server
+) -> Failure!http::Exchange {
+    while true {
+        if try server.accept_ready(handle, allocator) |held| {
+            return move held;
+        }
+    }
+    return http::Error::Incomplete;
+}
+
+fn state(
+    handle: Io,
+    allocator: Allocator,
+    held: &var http::Exchange
+) -> Failure![]u8 {
+    let progress = try held.advance(handle, allocator);
+    return match progress {
+        NeedMore => "need more",
+        Request => "request",
+        Closed => "closed",
+    };
+}
+
+// settled is `state` for the answers that arrive rather than the ones that do
+// not. `advance` reads once and reports what it found, so bytes still in
+// flight read as "need more" -- which a server hears from its poller and a
+// test has to ask for again.
+fn settled(
+    handle: Io,
+    allocator: Allocator,
+    held: &var http::Exchange
+) -> Failure![]u8 {
+    var tries = 0;
+    while tries < 10000 {
+        let answer = try state(handle, allocator, held);
+        if !mem::equal_bytes(answer, "need more") {
+            return answer;
+        }
+        tries = tries + 1;
+    }
+    return "need more";
+}
+
+fn crlf_on(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try stream.write_all(handle, bytes);
+    return;
+}
