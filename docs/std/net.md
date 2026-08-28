@@ -89,6 +89,16 @@ stream.set_read_deadline(net::deadline_in_millis(5000));
 `deadline_in_millis(5000)` が「今から 5000ms 後の時点」を作り、setter がその時点を
 受け取ります。Go の `conn.SetReadDeadline(time.Now().Add(d))` と同じ形です。
 
+deadline は **待つ場所**まで決めます。descriptor は内部で non-blocking にしてあり、
+待つのは syscall の中ではなく `poll` です。blocking な `send` は部分書き込みで
+返らず、渡された分が全部入るまで kernel に留まるので、その中にいる間は deadline を
+誰も読めません —— 読まない peer への大きな write が期限を無視するのはそれが理由
+でした。`MSG_DONTWAIT` は Darwin の stream socket では無視されるので、答えは
+`O_NONBLOCK` です。
+
+**呼ぶ側からは何も変わりません。** deadline が無ければ `poll` が無期限に待ち、
+`WouldBlock` は Kizu に出ません。`write_all` は今も「全部書くか失敗するか」です。
+
 **この 1 つの時点が、以後の read 全体を覆います。** 1 回の read ごとに配り直される
 budget ではありません。この差が全部です —— 4 秒ごとに 1 byte 送る相手は
 「read あたり 5 秒」の timeout に永久に引っかかりませんが、deadline は使い切ります。

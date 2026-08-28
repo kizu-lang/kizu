@@ -254,3 +254,63 @@ test "a duration passed where a deadline belongs fails loudly" {
         testing::expect(err == net::Error::TimedOut);
     }
 }
+
+test "a write deadline ends a write to a peer that stopped reading" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    // More than the two socket buffers can hold, to a peer that never reads.
+    // The waiting has to happen where the deadline can be read: a blocking
+    // send does not come back after a partial write, so one of those would
+    // sit past this deadline with nothing able to interrupt it.
+    var payload = string::new(allocator);
+    defer payload.deinit(allocator);
+    var filled = 0;
+    while filled < 400000 {
+        try payload.append_bytes(allocator, "0123456789");
+        filled = filled + 1;
+    }
+    let bytes = payload.as_bytes();
+
+    served.set_write_deadline(net::deadline_in_millis(50));
+    if served.write_all(handle, bytes) {
+        testing::fail("a write to a peer that stopped reading finished");
+    } else |err| {
+        testing::expect(err == net::Error::TimedOut);
+    }
+}
+
+test "a write with no deadline still waits" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    // The descriptors are non-blocking underneath, and nothing above sees it:
+    // a write with no deadline finishes rather than answering "not now".
+    try served.write_all(handle, "small enough to fit");
+    var back = string::new(allocator);
+    defer back.deinit(allocator);
+    let read = try client.read_into(handle, allocator, &var back, 64);
+    testing::expect_equal<i64>(19, read);
+}

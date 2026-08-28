@@ -13,6 +13,7 @@ pub fn runtime_source() -> []u8 {
         \\#include <string.h>
         \\#include <dirent.h>
         \\#include <errno.h>
+        \\#include <fcntl.h>
         \\#include <signal.h>
         \\#include <sys/socket.h>
         \\#include <sys/stat.h>
@@ -1382,6 +1383,11 @@ pub fn runtime_source() -> []u8 {
         \\ * previous one is answered, and 128 is what the platform defaults settled on. */
         \\#define KIZU_NET_BACKLOG 128
         \\
+        \\/* How much of a body one send may be handed. Small enough that a peer which
+        \\ * stopped reading cannot hold the caller past its deadline by more than this,
+        \\ * and large enough that a body which fits goes in one call. */
+        \\#define KIZU_NET_WRITE_CHUNK INT64_C(65536)
+        \\
         \\static int64_t kizu_net_errno_failure(int code) {
         \\    switch (code) {
         \\    case EADDRINUSE:
@@ -1422,6 +1428,22 @@ pub fn runtime_source() -> []u8 {
         \\#define KIZU_NET_WAIT_READY INT64_C(0)
         \\#define KIZU_NET_WAIT_RETRY INT64_C(-1)
         \\
+        \\/* Every socket this module hands out is non-blocking, and the waiting happens
+        \\ * in poll rather than in the syscall. That is what makes a deadline exact: a
+        \\ * blocking send does not come back after a partial write, it blocks until
+        \\ * everything it was handed is accepted, and MSG_DONTWAIT does not change that
+        \\ * on Darwin. A caller with a deadline would sit in one send past it.
+        \\ *
+        \\ * Nothing above sees this. Without a deadline the poll waits forever, which is
+        \\ * the blocking behaviour the API already promised. */
+        \\static void kizu_net_set_nonblocking(int fd) {
+        \\    int flags = fcntl(fd, F_GETFL, 0);
+        \\    if (flags < 0) {
+        \\        return;
+        \\    }
+        \\    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        \\}
+        \\
         \\static int64_t kizu_net_deadline(int64_t timeout_ms) {
         \\    if (timeout_ms < 0) {
         \\        return KIZU_NET_NO_DEADLINE;
@@ -1440,14 +1462,15 @@ pub fn runtime_source() -> []u8 {
         \\    return left < 0 ? 0 : left;
         \\}
         \\
+        \\
         \\/* kizu_net_wait blocks until the descriptor is ready or the budget runs out.
         \\ * With no deadline it does not poll at all -- the blocking call that follows
         \\ * is the wait -- so a stream without one pays nothing for this. */
         \\static int64_t kizu_net_wait(int fd, short events, int64_t remaining) {
-        \\    if (remaining < 0) {
-        \\        return KIZU_NET_WAIT_READY;
+        \\    int budget = -1;
+        \\    if (remaining >= 0) {
+        \\        budget = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
         \\    }
-        \\    int budget = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
         \\    struct pollfd pfd;
         \\    pfd.fd = fd;
         \\    pfd.events = events;
@@ -1463,6 +1486,12 @@ pub fn runtime_source() -> []u8 {
         \\        return KIZU_NET_WAIT_RETRY;
         \\    }
         \\    return kizu_net_errno_failure(errno);
+        \\}
+        \\
+        \\/* would_block reports the two spellings a non-blocking syscall uses for
+        \\ * "nothing right now", which is the poll's answer to give, not the caller's. */
+        \\static int kizu_net_would_block(int code) {
+        \\    return code == EAGAIN || code == EWOULDBLOCK;
         \\}
         \\
         \\/* kizu_net_resolve turns a host and a port into the address list to try, and
@@ -1534,6 +1563,7 @@ pub fn runtime_source() -> []u8 {
         \\            close(fd);
         \\            continue;
         \\        }
+        \\        kizu_net_set_nonblocking(fd);
         \\        if (listen(fd, KIZU_NET_BACKLOG) != 0) {
         \\            last = kizu_net_errno_failure(errno);
         \\            close(fd);
@@ -1586,6 +1616,10 @@ pub fn runtime_source() -> []u8 {
         \\        }
         \\        int one = 1;
         \\        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        \\        /* After the connect, so the connect itself keeps waiting the way it
+        \\         * always did. A non-blocking connect answers EINPROGRESS and needs a
+        \\         * poll of its own, which is the connect deadline this does not have. */
+        \\        kizu_net_set_nonblocking(fd);
         \\        freeaddrinfo(list);
         \\        return kizu_ok_i64((int64_t)fd);
         \\    }
@@ -1626,9 +1660,13 @@ pub fn runtime_source() -> []u8 {
         \\        if (conn >= 0) {
         \\            int one = 1;
         \\            setsockopt(conn, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        \\            kizu_net_set_nonblocking(conn);
         \\            return kizu_ok_i64((int64_t)conn);
         \\        }
-        \\        if (errno == EINTR) {
+        \\        /* A pending connection can be reset between the poll and here, which
+        \\         * is the accept-after-poll race poll(2) documents. Non-blocking turns
+        \\         * it into another wait rather than a stall. */
+        \\        if (errno == EINTR || kizu_net_would_block(errno)) {
         \\            continue;
         \\        }
         \\        return kizu_err_i64(kizu_net_errno_failure(errno));
@@ -1684,7 +1722,7 @@ pub fn runtime_source() -> []u8 {
         \\        }
         \\        ssize_t got = recv((int)fd, array->data + array->len, (size_t)want, 0);
         \\        if (got < 0) {
-        \\            if (errno == EINTR) {
+        \\            if (errno == EINTR || kizu_net_would_block(errno)) {
         \\                continue;
         \\            }
         \\            return kizu_err_i64(kizu_net_errno_failure(errno));
@@ -1734,9 +1772,27 @@ pub fn runtime_source() -> []u8 {
         \\        if (wait != KIZU_NET_WAIT_READY) {
         \\            return kizu_err_void(wait);
         \\        }
-        \\        ssize_t wrote = send((int)fd, bytes.ptr + sent, (size_t)(bytes.len - sent), 0);
+        \\        /* A chunk at a time, because a blocking send does not come back after a
+        \\         * partial write: it blocks until everything it was handed is accepted.
+        \\         * Handing it the whole body would put one send in the kernel for as
+        \\         * long as a peer that stopped reading cares to leave it there, and the
+        \\         * poll above -- and the deadline with it -- would never be read again.
+        \\         *
+        \\         * MSG_DONTWAIT asks for only what fits, which is what makes the
+        \\         * deadline exact. Darwin ignores it for stream sockets, so the chunk
+        \\         * is what bounds the overshoot there: one chunk, not one body. */
+        \\        int64_t want = bytes.len - sent;
+        \\        if (want > KIZU_NET_WRITE_CHUNK) {
+        \\            want = KIZU_NET_WRITE_CHUNK;
+        \\        }
+        \\        ssize_t wrote = send((int)fd, bytes.ptr + sent, (size_t)want, MSG_DONTWAIT);
         \\        if (wrote < 0) {
         \\            if (errno == EINTR) {
+        \\                continue;
+        \\            }
+        \\            if (kizu_net_would_block(errno)) {
+        \\                /* The room poll saw is gone. Poll again, which is where the
+        \\                 * deadline is read. */
         \\                continue;
         \\            }
         \\            return kizu_err_void(kizu_net_errno_failure(errno));
