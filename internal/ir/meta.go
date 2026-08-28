@@ -218,7 +218,7 @@ func (l *lowerer) lowerMetaApply(
 		value, err := l.lowerMetaConstruct(typeArg, args)
 		return value, true, err
 	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
-		stdmeta.IsOwner, stdmeta.HasPayload:
+		stdmeta.IsOwner, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
 		known, err := l.metaPredicate(form, typeArg)
 		if err != nil {
 			return Value{}, true, err
@@ -382,6 +382,8 @@ func (l *lowerer) metaPredicate(form stdmeta.Form, typeArg string) (bool, error)
 		return ok, nil
 	case stdmeta.IsOwner:
 		return ast.OwnerType(l.deinitOwners, subject), nil
+	case stdmeta.ReleaseNamesAllocator:
+		return ast.ReleaseNames(l.releaseAllocators, subject), nil
 	case stdmeta.HasPublicFields:
 		fields, err := l.publicFields(subject)
 		return err == nil && len(fields) > 0, nil

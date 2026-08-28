@@ -1,3 +1,4 @@
+import std::array;
 import std::fmt;
 import std::io;
 import std::mem;
@@ -205,4 +206,109 @@ test "failing io refuses to open a poller" {
     } else |err| {
         testing::expect(err == net::Error::IoFailing);
     }
+}
+
+test "a collection can hold connections and release them" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    // The connections live in an Array, whose deinit closes each of them.
+    // A socket releases a descriptor rather than memory, so the element
+    // cleanup has to call the deinit it declares (ADR-0142).
+    var held = array::new<net::TcpStream>(allocator);
+    defer held.deinit(allocator);
+
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+
+    var opened = 0;
+    while opened < 3 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        let served = try listener.accept(handle);
+        try held.append(allocator, move served);
+        opened = opened + 1;
+    }
+    testing::expect_equal<i64>(3, held.len());
+    testing::expect_equal<i64>(3, callers.len());
+}
+
+test "a poller can watch every connection a collection holds" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var held = array::new<net::TcpStream>(allocator);
+    defer held.deinit(allocator);
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+
+    var poller = try net::poller_new(handle, 16);
+    defer poller.deinit();
+
+    var opened = 0;
+    while opened < 4 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        let served = try listener.accept(handle);
+        try held.append(allocator, move served);
+        // The token is the index, which is how a ready event finds its
+        // connection again.
+        try watch_at(handle, &var poller, &held, opened);
+        opened = opened + 1;
+    }
+
+    // Only the third caller speaks.
+    try speak_at(handle, &var callers, 2);
+    let count = try poller.wait(handle, net::deadline_in_millis(1000));
+    testing::expect_equal<i64>(1, count);
+    if poller.ready(0) |event| {
+        testing::expect_equal<i64>(2, event.token);
+    } else {
+        testing::fail("a ready connection produced no event");
+    }
+}
+
+// connect_to binds the address bytes inside its own frame, so the view does
+// not outlive the loop that used it.
+fn connect_to(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn watch_at(
+    handle: Io,
+    poller: &var net::Poller,
+    held: &array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    if held.at(index) |stream| {
+        try poller.watch_stream(handle, stream, index, net::Interest::Read);
+    } else {
+        testing::fail("a connection just appended was not there");
+    }
+    return;
+}
+
+fn speak_at(
+    handle: Io,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    if callers.at_mut(index) |caller| {
+        try caller.write_all(handle, "here");
+    } else {
+        testing::fail("a caller just appended was not there");
+    }
+    return;
 }

@@ -180,6 +180,12 @@ func (c *Checker) metaPredicateCall(expr *ast.CallExpr) (bool, bool) {
 	if known, ok := c.declaredKindPredicate(form, subject); ok {
 		return known, true
 	}
+	return c.shapePredicate(form, subject)
+}
+
+// shapePredicate answers the predicates a type's own spelling or its cleanup
+// contract decides, without reading a declaration.
+func (c *Checker) shapePredicate(form stdmeta.Form, subject string) (bool, bool) {
 	switch form {
 	case stdmeta.IsOptional:
 		_, known := typ.OptionalElem(subject)
@@ -192,6 +198,8 @@ func (c *Checker) metaPredicateCall(expr *ast.CallExpr) (bool, bool) {
 		return metaGenericBase(subject) == "std::map::Map", true
 	case stdmeta.IsOwner:
 		return ast.OwnerType(c.deinitOwners, subject), true
+	case stdmeta.ReleaseNamesAllocator:
+		return ast.ReleaseNames(c.releaseAllocators, subject), true
 	case stdmeta.HasPublicFields:
 		return len(c.structPublicOrder[subject]) > 0, true
 	default:

@@ -84,6 +84,9 @@ type Checker struct {
 	// deinitOwners marks the base type names whose values carry a deinit
 	// contract, seeded from ast.DeinitOwners — the one definition of owner-ness.
 	deinitOwners map[string]bool
+	// releaseAllocators marks the base type names whose deinit takes an
+	// allocator, which generic cleanup asks before calling one (ADR-0132).
+	releaseAllocators map[string]bool
 	// captureCondition is set while an if/while capture condition is typed.
 	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
 	// `?&var T` only in this context and refuse everywhere else.
@@ -104,6 +107,7 @@ func New() *Checker {
 // Check validates the program and returns the first type error.
 func (c *Checker) Check(program *ast.Program) error {
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
@@ -138,6 +142,7 @@ func (c *Checker) Check(program *ast.Program) error {
 // depend on still fail fast, since later errors would be noise without them.
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
@@ -7251,6 +7256,11 @@ func (c *Checker) checkVolatileWrite(
 // ownerType reports whether values of typ carry a deinit contract (ADR-0091).
 func (c *Checker) ownerType(typ Type) bool {
 	return ast.OwnerType(c.deinitOwners, string(typ))
+}
+
+// releaseNamesAllocator reports whether releasing typ takes an allocator.
+func (c *Checker) releaseNamesAllocator(typ Type) bool {
+	return ast.ReleaseNames(c.releaseAllocators, string(typ))
 }
 
 // isCopyType reports whether values of typ can be duplicated safe code.

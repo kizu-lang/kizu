@@ -84,6 +84,9 @@ type lowerer struct {
 	// deinitOwners names the types that carry a deinit contract, seeded from
 	// ast.DeinitOwners so lowering reads the same owner-ness the checkers do.
 	deinitOwners map[string]bool
+	// releaseAllocators names the types whose deinit takes an allocator, so a
+	// generic cleanup lowers the call the element actually declares.
+	releaseAllocators map[string]bool
 	// ownership is the preceding phase's output. Keeping it beside the syntax
 	// tree makes the phase boundary explicit and leaves AST nodes immutable.
 	ownership ownership.Result
@@ -151,18 +154,19 @@ func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer
 			ErrorSets: map[string]Enum{},
 			Unions:    map[string]Union{},
 		},
-		signatures:    map[string]Signature{},
-		typeBindings:  map[string]string{},
-		instantiated:  map[string]bool{},
-		staticValues:  map[string]staticValue{},
-		externSymbols: map[string]string{},
-		genericDecls:  generics,
-		structDecls:   structs,
-		enumDecls:     enums,
-		unionDecls:    unions,
-		metaFields:    map[string]metaField{},
-		deinitOwners:  ast.DeinitOwners(program),
-		ownership:     ownershipResult,
+		signatures:        map[string]Signature{},
+		typeBindings:      map[string]string{},
+		instantiated:      map[string]bool{},
+		staticValues:      map[string]staticValue{},
+		externSymbols:     map[string]string{},
+		genericDecls:      generics,
+		structDecls:       structs,
+		enumDecls:         enums,
+		unionDecls:        unions,
+		metaFields:        map[string]metaField{},
+		deinitOwners:      ast.DeinitOwners(program),
+		releaseAllocators: ast.ReleaseNamesAllocator(program),
+		ownership:         ownershipResult,
 	}
 }
 

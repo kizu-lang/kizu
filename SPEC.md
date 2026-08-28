@@ -2408,6 +2408,7 @@ std::meta::is_array<T>()           -> bool    comptime-only
 std::meta::is_box<T>()             -> bool    comptime-only
 std::meta::is_map<T>()             -> bool    comptime-only
 std::meta::is_owner<T>()           -> bool    comptime-only
+std::meta::release_names_allocator<T>() -> bool comptime-only
 std::meta::has_public_fields<T>()  -> bool    comptime-only
 std::meta::element<T>                         comptime-only、型の位置に書く
 std::meta::public_fields<T>()                 comptime-only list、comptime for 専用
@@ -2446,6 +2447,12 @@ compile error です(値の行き先が無いため)。
 `is_owner<T>()` は、その型の値が deinit 契約を持つかを答えます。`T` を保持する
 generic code が「解放するとは中身も解放することか」を問う唯一の手段で、答えは
 checker が使うものと同じです。
+
+`release_names_allocator<T>()` は、その解放が allocator を名指すか
+—— `deinit` が allocator を取るか —— を答えます(ADR-0132)。memory を解放する
+owner と descriptor を閉じる owner は同じ引数を取らないので、要素を解放する
+container はこれを聞いてから呼びます。宣言された `deinit` の parameter list が
+答えで、宣言していない owner は derived deinit が allocator を渡すので true です。
 
 `unsupported<T>()` は、その型を扱う case が無いことを compile error にします。
 `comptime if` は選ばれた branch だけを検査するので、最後の else に書けば、

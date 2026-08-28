@@ -24,6 +24,9 @@ type Checker struct {
 	nextID       int
 	consumeNeeds map[string]bool
 	deinitOwners map[string]bool
+	// releaseAllocators names the types whose deinit takes an allocator, which
+	// a generic cleanup asks before calling one (ADR-0132).
+	releaseAllocators map[string]bool
 	// declaredDeinits names the types whose cleanup an author wrote. Those hold
 	// an obligation of their own, so their fields cannot be taken one at a time.
 	declaredDeinits map[string]bool
@@ -217,6 +220,7 @@ func (c *Checker) Result() Result {
 func (c *Checker) Check(program *ast.Program) error {
 	c.result = newResult()
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
 		return err
@@ -280,6 +284,7 @@ func (c *Checker) MissingMoveMarkers(program *ast.Program) ([]MissingMarker, err
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.result = newResult()
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
 		return []error{err}

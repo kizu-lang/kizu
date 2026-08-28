@@ -14,11 +14,11 @@
 // coroutines, which needs function coloring, which SPEC §15 does not have.
 // Waiting on many things is written, not switched on.
 //
-// The three connections are three named variables rather than a collection.
-// A std collection requires its elements to release with an allocator, and a
-// socket releases a descriptor instead (docs/language-gaps.md). That is what
-// stands between this and a general evented server.
+// The connections live in an Array, and the token a descriptor is registered
+// with is its index there. That is the whole of "find the state this event
+// belongs to" -- no map, no lookup, because the caller chose the token.
 
+import std::array;
 import std::fmt;
 import std::io;
 import std::mem;
@@ -35,70 +35,61 @@ fn main() -> Failure!void {
     let port = try listener.local_port();
     var address = try loopback(allocator, port);
     defer address.deinit(allocator);
-    let address_bytes = address.as_bytes();
 
-    // Three callers, connected in this order.
-    var first = try net::tcp_connect(handle, address_bytes);
-    defer first.deinit();
-    var second = try net::tcp_connect(handle, address_bytes);
-    defer second.deinit();
-    var third = try net::tcp_connect(handle, address_bytes);
-    defer third.deinit();
+    // Both ends live here, because Kizu has no concurrency: the callers are
+    // this process too. A real server would have only the right-hand side.
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+    var served = array::new<net::TcpStream>(allocator);
+    defer served.deinit(allocator);
 
-    var one = try listener.accept(handle);
-    defer one.deinit();
-    var two = try listener.accept(handle);
-    defer two.deinit();
-    var three = try listener.accept(handle);
-    defer three.deinit();
-
-    // One poller, three descriptors, one thread.
-    var poller = try net::poller_new(handle, 8);
+    // One poller, one thread, every connection at once.
+    var poller = try net::poller_new(handle, 16);
     defer poller.deinit();
-    try poller.watch_stream(handle, &one, 1, net::Interest::Read);
-    try poller.watch_stream(handle, &two, 2, net::Interest::Read);
-    try poller.watch_stream(handle, &three, 3, net::Interest::Read);
+
+    var opened = 0;
+    while opened < 3 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        let accepted = try listener.accept(handle);
+        try served.append(allocator, move accepted);
+        // The token is the index. Finding the state an event belongs to is
+        // then an index, because the caller is the one who chose the token.
+        try watch_at(handle, &var poller, &served, opened);
+        opened = opened + 1;
+    }
 
     // Nothing has spoken, so the wait ends on its deadline with nothing ready.
     let quiet = try poller.wait(handle, net::deadline_in_millis(50));
     print("ready with nobody speaking");
     print(quiet);
 
-    // They speak in the reverse of the order they connected.
-    try third.write_all(handle, "third");
-    try serve_one(handle, allocator, &var poller, &var one, &var two, &var three);
-    try first.write_all(handle, "first");
-    try serve_one(handle, allocator, &var poller, &var one, &var two, &var three);
-    try second.write_all(handle, "second");
-    try serve_one(handle, allocator, &var poller, &var one, &var two, &var three);
+    // They speak in the reverse of the order they connected, and the loop
+    // follows the speaking.
+    try speak(handle, &var callers, 2, "third");
+    try serve_ready(handle, allocator, &var poller, &var served);
+    try speak(handle, &var callers, 0, "first");
+    try serve_ready(handle, allocator, &var poller, &var served);
+    try speak(handle, &var callers, 1, "second");
+    try serve_ready(handle, allocator, &var poller, &var served);
     return;
 }
 
-// serve_one waits until something is ready and answers whoever it was. The
-// dispatch is an if chain because the three connections are three variables;
-// with a collection it would be an index.
-fn serve_one(
+// serve_ready waits until something is ready and answers whoever it was. This
+// is the loop an evented server runs: one thread, every connection, work
+// driven by what arrived rather than by what was accepted first.
+fn serve_ready(
     handle: Io,
     allocator: Allocator,
     poller: &var net::Poller,
-    one: &var net::TcpStream,
-    two: &var net::TcpStream,
-    three: &var net::TcpStream
+    served: &var array::Array<net::TcpStream>
 ) -> Failure!void {
     let count = try poller.wait(handle, net::deadline_in_millis(1000));
     var index = 0;
     while index < count {
         if poller.ready(index) |event| {
             if event.readable {
-                if event.token == 1 {
-                    try drain(handle, allocator, one, "one");
-                }
-                if event.token == 2 {
-                    try drain(handle, allocator, two, "two");
-                }
-                if event.token == 3 {
-                    try drain(handle, allocator, three, "three");
-                }
+                try drain_at(handle, allocator, served, event.token);
             }
         }
         index = index + 1;
@@ -106,23 +97,60 @@ fn serve_one(
     return;
 }
 
-// drain reads what is there. The poller said this descriptor is readable, so
-// this read does not wait -- which is the point: the thread is never parked on
-// a connection that has nothing to say.
-fn drain(
+// drain_at reads what is there. The poller said this descriptor is readable,
+// so the read does not wait -- which is the point: the thread is never parked
+// on a connection that has nothing to say.
+fn drain_at(
     handle: Io,
     allocator: Allocator,
-    stream: &var net::TcpStream,
-    name: []u8
+    served: &var array::Array<net::TcpStream>,
+    token: i64
 ) -> Failure!void {
     var said = string::new(allocator);
     defer said.deinit(allocator);
-    let count = try stream.read_into(handle, allocator, &var said, 64);
+    if served.at_mut(token) |stream| {
+        let count = try stream.read_into(handle, allocator, &var said, 64);
+        print(token);
+        print(count);
+    } else {
+        print("no connection for that token");
+        return;
+    }
     let bytes = said.as_bytes();
-    print(name);
-    print(count);
     print(bytes);
     return;
+}
+
+fn watch_at(
+    handle: Io,
+    poller: &var net::Poller,
+    served: &array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    if served.at(index) |stream| {
+        try poller.watch_stream(handle, stream, index, net::Interest::Read);
+    }
+    return;
+}
+
+fn speak(
+    handle: Io,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64,
+    text: []u8
+) -> Failure!void {
+    if callers.at_mut(index) |caller| {
+        try caller.write_all(handle, text);
+    }
+    return;
+}
+
+// connect_to binds the address bytes in its own frame, so the view does not
+// outlive the loop that used it.
+fn connect_to(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
 }
 
 fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
@@ -138,12 +166,12 @@ fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
 // output:
 // ready with nobody speaking
 // 0
-// three
+// 2
 // 5
 // third
-// one
+// 0
 // 5
 // first
-// two
+// 1
 // 6
 // second

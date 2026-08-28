@@ -160,14 +160,17 @@ read と write の両方が立った descriptor は、host によって 1 回と
 `capacity` は 1 回の `wait` が報告できる上限です。溢れた分は失われません ——
 まだ ready なので次の `wait` が即座に返します。
 
-### 今これで書けないもの
+### 接続は collection に持てます
 
-接続を **collection に持てません**。`Array<T>` / `Arena<T>` は要素が
-`deinit(allocator)` で解放されることを要求し、socket は allocator ではなく
-descriptor を解放するので `deinit()` です(`docs/language-gaps.md`)。
+```kizu
+var served = array::new<net::TcpStream>(allocator);
+defer served.deinit(allocator);
+// token は index。event から state を引くのは lookup ではなく添字
+try poller.watch_stream(handle, stream, index, net::Interest::Read);
+```
 
-`examples/net_poller.kizu` が接続を 3 つの名前付き変数で持っているのはこのため
-です。汎用の evented server と、この example の間に立っているのはこれだけです。
+collection の element cleanup は「解放が allocator を名指すか」を comptime で
+聞いてから呼びます(ADR-0142)。socket は descriptor を解放するので名指しません。
 
 ## 並行性
 
