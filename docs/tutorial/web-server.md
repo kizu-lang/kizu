@@ -37,16 +37,18 @@ defer exchange.deinit(allocator);
 try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
 ```
 
-Go の `http.HandleFunc` も Zig の handler も、**関数を渡せる**から取ります。
-Kizu の関数値は borrow を運べないので、handler に request を渡せません。
-残るのは pull の loop で、それは control flow が source に見えたままになる形
-でもあります(`docs/principles.md` §2)。
+Go は `http.HandleFunc` で関数を渡せるから渡します。Zig は関数 pointer を渡せる
+のに渡さず、`receiveHead` の pull にしています —— control flow が source に見えた
+ままになる形だからです(`docs/principles.md` §2)。Kizu には closure も関数 pointer
+も無いので、pull は妥協ではなく順当な選択です。
 
-もう 1 つ: **1 接続ずつです。** Kizu に並行 API はまだありません
-(`SPEC.md` §15)。2 人目の caller は 1 人目が答え終わるまで listen backlog で
-待ちます。これは Zig の `std.http.Server` が今日出荷している形と同じで、
-並行性は呼ぶ側が持ち込みます —— ただし Kizu の呼ぶ側はまだ何も持ち込めません。
-つまりこれは **milestone であって production server ではありません**。
+もう 1 つ: **`accept` は 1 接続ずつです。** 2 人目の caller は 1 人目が答え終わる
+まで listen backlog で待ちます。多数を 1 thread で捌くには `first` と `next` を
+使います(`docs/std/http.md`)—— 答え方は同じで、その間に誰の声を聞いているかだけ
+が違います。
+
+並行性(複数 thread)はまだありません(`SPEC.md` §15)。1 thread で多数を捌くのと
+2 つのことを同時にするのは別の話で、後者はまだ書けません。
 
 ---
 
@@ -60,8 +62,8 @@ import std::mem;
 pub fn main() -> http::Failure!void {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var server = try http::listen(handle, "127.0.0.1:8080");
-    defer server.deinit();
+    var server = try http::listen(handle, allocator, "127.0.0.1:8080");
+    defer server.deinit(allocator);
     return;
 }
 ```
@@ -242,7 +244,7 @@ routing は `exchange.request` を読み、答えるのは `exchange` を可変�
 var limits = http::default_limits();
 limits.max_head_bytes = 4096;
 limits.max_headers = 32;
-var server = try http::listen_with(handle, "127.0.0.1:8080", limits);
+var server = try http::listen_with(handle, allocator, "127.0.0.1:8080", limits);
 ```
 
 上限は **caller のもの**です。proxy の後ろの service と公開 internet の
@@ -318,8 +320,8 @@ deadline を **時点**として持っています(→ [ADR-0137](../adr/0137-a-
 pub fn main() -> Failure!void {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var server = try http::listen(handle, "127.0.0.1:8080");
-    defer server.deinit();
+    var server = try http::listen(handle, allocator, "127.0.0.1:8080");
+    defer server.deinit(allocator);
     var visits = service::visits_new(allocator);
     defer visits.deinit(allocator);
     while true {

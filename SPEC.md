@@ -3024,6 +3024,9 @@ coroutine が要り、function coloring が生えるためです。
 * `std::http::Response` は組み立ててから送る。`Content-Length` /
   `Transfer-Encoding` / `Connection` は message の実体から書き、caller が
   set したものは落とす
+* `std::http::listen(io, allocator, address)` / `listen_with(..., limits)` が
+  server を作り、`server.deinit(allocator)` が閉じる。allocator は多数を捌く
+  ときに接続を持つ `Array` のもの
 * `std::http::Limits` は request head の byte 数、header の個数、および
   head / body / write の各 phase に許す時間(ミリ秒)を caller が名指すもの。
   body の byte 数はここに無く、body を読む呼び出しの引数。時間は duration であり、各 phase が始まるときに
@@ -3040,6 +3043,11 @@ coroutine が要り、function coloring が生えるためです。
   書き、`receive` が答えの head を読んで止まり、body は `read_into` /
   `read_ready_into` が出す。`read_body` が上限つきで `response.body` に読む。
   `ClientResponse` の `body` が埋まるのはその経路だけ
+* `server.first(io, allocator, max)` は完成した request を 1 つ渡し、
+  `server.next(io, allocator, done, max)` は 1 つ受け取って次を渡す。受け取る形
+  なので、借りた接続を返さずに次を得る道が無い。他の接続の accept / 前進 /
+  期限切れの close は `next` の中で起きる。`first_head` / `next_head` は body を
+  接続に残す対。loop は caller のもので、止めるのは `break`
 * `server.accept_ready(io, allocator)` は待たずに接続を取り、`?Exchange` を返す。
   その exchange に request はまだ無い。`exchange.advance(io, allocator)` が届いた
   分だけ head を進め、`std::http::Progress` —— `NeedMore`(poller に戻る)/

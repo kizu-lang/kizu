@@ -3,34 +3,68 @@
 // `accept` hands back one Exchange -- the request that arrived and the
 // response to fill in -- and returns. There is no handler registry and no
 // callback, so what happens to a request is in the source that asked for it,
-// at the place it asked. Go and Zig both take a handler because both can pass
-// one; Kizu's function values cannot carry a borrow, so a handler could not be
-// given the request, and a pull loop is what remains -- which is also the
-// shape that keeps the control flow visible (docs/principles.md §2).
+// at the place it asked. Go takes a handler because Go can pass one; Zig can
+// pass one and still does not, because a pull loop is what keeps the control
+// flow visible (docs/principles.md §2). Kizu has neither closures nor function
+// pointers, so pull is the only shape here -- and the one both of them would
+// recognise.
 //
-// One connection is served at a time. Kizu has no concurrency API (SPEC §15),
-// so a second caller waits in the listen backlog until the first is answered.
+// `accept` serves one connection at a time: the second caller waits in the
+// listen backlog until the first is answered. `first` and `next` serve many,
+// on the same thread, by holding everyone who is still talking and handing
+// out whichever request finished. Answering is the same either way -- what
+// differs is who else is being listened to meanwhile.
 
 pub struct Server {
     listener: std::net::TcpListener,
     limits: std::http::Limits,
+    // Every connection this server holds. The one the caller is answering is
+    // not in here: it was handed out, and `next` is the only way to get
+    // another, so handing it back is the only way forward. A caller cannot
+    // forget to return a connection it cannot proceed without returning.
+    open: std::array::Array<std::http::Exchange>,
+    // What the connections in `open` are waited on with. The listener is in
+    // here too, so a new caller wakes the same wait a talking one does.
+    poller: std::net::Poller,
+}
+
+// The listener's token. A connection's token is its index in `open`, and an
+// index is never negative, so nothing collides with this.
+fn listener_token() -> i64 {
+    return -1;
 }
 
 // listen binds an address with the default limits. `address` is what
 // std::net reads: `host:port`, IPv6 host bracketed, port 0 for a free one.
-pub fn listen(io: Io, address: []u8) -> std::http::Failure!std::http::Server {
-    return listen_with(io, address, std::http::default_limits());
+pub fn listen(
+    io: Io,
+    allocator: Allocator,
+    address: []u8
+) -> std::http::Failure!std::http::Server {
+    return listen_with(io, allocator, address, std::http::default_limits());
 }
 
 // listen_with binds an address under limits the caller chose. A server behind
 // a proxy and one on the open internet do not want the same ceiling.
 pub fn listen_with(
     io: Io,
+    allocator: Allocator,
     address: []u8,
     limits: std::http::Limits
 ) -> std::http::Failure!std::http::Server {
-    let listener = try std::net::tcp_listen(io, address);
-    return Server { listener: move listener, limits: limits };
+    var listener = try std::net::tcp_listen(io, address);
+    errdefer listener.deinit();
+    // 64 events per wait. More ready descriptors than that are not lost: they
+    // are still ready, so the next wait returns them (ADR-0141).
+    var poller = try std::net::poller_new(io, 64);
+    errdefer poller.deinit();
+    try poller.watch_listener(io, &listener, listener_token());
+    return Server {
+        listener: move listener,
+        limits: limits,
+        open: std::array::new<std::http::Exchange>(allocator),
+        poller: move poller,
+    };
 }
 
 // local_port is the port this server is on. Binding port 0 and asking is how
@@ -40,7 +74,9 @@ fn (self: &std::http::Server) local_port() -> std::http::Failure!i64 {
     return port;
 }
 
-fn (self: std::http::Server) deinit() -> void {
+fn (self: std::http::Server) deinit(allocator: Allocator) -> void {
+    self.open.deinit(allocator);
+    self.poller.deinit();
     self.listener.deinit();
     return;
 }
@@ -171,6 +207,355 @@ fn (self: &var std::http::Server) accept_ready(
         return move held;
     }
     return null;
+}
+
+// first and next serve many connections on one thread.
+//
+// `first` takes the first request that finishes. `next` takes one back and
+// hands out the following one -- and taking one back is the only way to get
+// another, so a caller cannot forget to return the connection it was lent.
+// The type system says it: there is no `next` that does not consume one.
+//
+// Everyone else waits inside the server: accepted, watched, advanced by
+// whatever arrived, and dropped when their time runs out. A caller writes the
+// loop and none of that.
+fn (self: &var std::http::Server) first(
+    io: Io,
+    allocator: Allocator,
+    max: i64
+) -> std::http::Failure!std::http::Exchange {
+    var held = try self.first_head(io, allocator);
+    errdefer held.deinit(allocator);
+    if held.take_whole_body(io, allocator, max) |_| {
+        return move held;
+    } else |failure| {
+        held.refuse(io, allocator, failure);
+        return failure;
+    }
+}
+
+fn (self: &var std::http::Server) next(
+    io: Io,
+    allocator: Allocator,
+    done: std::http::Exchange,
+    max: i64
+) -> std::http::Failure!std::http::Exchange {
+    var held = try self.next_head(io, allocator, move done);
+    errdefer held.deinit(allocator);
+    if held.take_whole_body(io, allocator, max) |_| {
+        return move held;
+    } else |failure| {
+        held.refuse(io, allocator, failure);
+        return failure;
+    }
+}
+
+// first_head and next_head are the same pair with the body left on the
+// connection, the way `accept_head` is to `accept`.
+fn (self: &var std::http::Server) first_head(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!std::http::Exchange {
+    return self.wait_for_one(io, allocator);
+}
+
+fn (self: &var std::http::Server) next_head(
+    io: Io,
+    allocator: Allocator,
+    done: std::http::Exchange
+) -> std::http::Failure!std::http::Exchange {
+    try self.keep(io, allocator, move done);
+    return self.wait_for_one(io, allocator);
+}
+
+// keep takes a finished exchange back. A connection that can carry another
+// request rejoins the ones being listened to; one that cannot is closed here,
+// which is what the head that said `Connection: close` promised.
+fn (self: &var std::http::Server) keep(
+    io: Io,
+    allocator: Allocator,
+    done: std::http::Exchange
+) -> std::http::Failure!void {
+    var held = move done;
+    if !held.carries_another() {
+        held.deinit(allocator);
+        return;
+    }
+    try self.rejoin(io, allocator, move held);
+    return;
+}
+
+// rejoin puts a connection that can carry another request back among the ones
+// being listened to.
+fn (self: &var std::http::Server) rejoin(
+    io: Io,
+    allocator: Allocator,
+    done: std::http::Exchange
+) -> std::http::Failure!void {
+    var held = move done;
+    errdefer held.deinit(allocator);
+    try held.reopen(allocator);
+    try self.hold(io, allocator, move held);
+    return;
+}
+
+// hold puts a connection under the poller and into the table. The token is the
+// index it lands at, so finding it again when it speaks is a lookup rather
+// than a search.
+fn (self: &var std::http::Server) hold(
+    io: Io,
+    allocator: Allocator,
+    held: std::http::Exchange
+) -> std::http::Failure!void {
+    let token = self.open.len();
+    var taken = move held;
+    errdefer taken.deinit(allocator);
+    try taken.watch_read(io, &var self.poller, token);
+    try self.open.append(allocator, move taken);
+    return;
+}
+
+// wait_for_one runs the server until one request is complete, and hands that
+// one out. Everything the loop does between requests -- accepting, advancing,
+// closing what ran out of time -- happens here, once per turn round.
+fn (self: &var std::http::Server) wait_for_one(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!std::http::Exchange {
+    while true {
+        // What is already in hand first: a connection that pipelined its next
+        // request has it in its buffer, and no wait will ever mention it.
+        if try self.settled(allocator) |index| {
+            let held = try self.take_out(io, allocator, index);
+            return move held;
+        }
+        let at = self.nearest_deadline();
+        let count = try self.poller.wait(io, at);
+        try self.hear(io, allocator, count);
+        try self.sweep(io, allocator);
+    }
+    return std::http::Error::Incomplete;
+}
+
+// settled answers the index of a connection whose request is complete, using
+// only what has already arrived. It reads no sockets, so calling it every turn
+// costs one parse attempt per connection and no syscalls.
+fn (self: &var std::http::Server) settled(
+    allocator: Allocator
+) -> std::http::Failure!?i64 {
+    var index = 0;
+    while index < self.open.len() {
+        let done = try self.step_at(allocator, index);
+        if done {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &var std::http::Server) step_at(
+    allocator: Allocator,
+    index: i64
+) -> std::http::Failure!bool {
+    if self.open.at_mut(index) |held| {
+        let progress = try held.step(allocator);
+        return !needs_more(progress);
+    }
+    return false;
+}
+
+// hear moves every connection the wait named. A new caller arrives on the
+// listener's token; everyone else moves by whatever they sent.
+fn (self: &var std::http::Server) hear(
+    io: Io,
+    allocator: Allocator,
+    count: i64
+) -> std::http::Failure!void {
+    var index = 0;
+    while index < count {
+        let event = self.poller.ready(index);
+        if event |ready| {
+            if ready.token == listener_token() {
+                try self.take_new(io, allocator);
+            } else {
+                try self.fill_at(io, allocator, ready.token);
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// take_new accepts everyone waiting in the backlog, not just one. The listener
+// reports itself readable once for however many arrived while nobody looked.
+fn (self: &var std::http::Server) take_new(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!void {
+    while true {
+        if try self.accept_ready(io, allocator) |held| {
+            try self.hold(io, allocator, move held);
+        } else {
+            return;
+        }
+    }
+    return;
+}
+
+// fill_at reads what one connection sent. A peer that went away is closed
+// here: it is the ordinary end of a connection, not a failure to report.
+fn (self: &var std::http::Server) fill_at(
+    io: Io,
+    allocator: Allocator,
+    token: i64
+) -> std::http::Failure!void {
+    let gone = try self.advance_at(io, allocator, token);
+    if gone {
+        try self.drop_at(io, allocator, token);
+    }
+    return;
+}
+
+fn (self: &var std::http::Server) advance_at(
+    io: Io,
+    allocator: Allocator,
+    token: i64
+) -> std::http::Failure!bool {
+    if self.open.at_mut(token) |held| {
+        if held.advance(io, allocator) |progress| {
+            return is_closed(progress);
+        } else |_| {
+            // A connection this server could not read has already been told
+            // why by `advance`. It has nothing further to say to the loop.
+            return true;
+        }
+    }
+    return false;
+}
+
+fn is_closed(progress: std::http::Progress) -> bool {
+    return match progress {
+        Closed => true,
+        NeedMore => false,
+        Request => false,
+    };
+}
+
+// sweep closes the connections that ran out of time. A poller reports the ones
+// that spoke, so a peer running its clock down in silence is exactly the one
+// it never mentions -- looking is the only way to find it.
+fn (self: &var std::http::Server) sweep(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!void {
+    let now = std::process::monotonic_millis();
+    // Backwards, because closing one moves the last into its place.
+    var index = self.open.len() - 1;
+    while index >= 0 {
+        let out_of_time = self.expired_at(index, now);
+        if out_of_time {
+            try self.refuse_at(io, allocator, index);
+            try self.drop_at(io, allocator, index);
+        }
+        index = index - 1;
+    }
+    return;
+}
+
+fn (self: &std::http::Server) expired_at(index: i64, now: i64) -> bool {
+    if self.open.at(index) |held| {
+        return held.expired(now);
+    }
+    return false;
+}
+
+fn (self: &var std::http::Server) refuse_at(
+    io: Io,
+    allocator: Allocator,
+    index: i64
+) -> std::http::Failure!void {
+    if self.open.at_mut(index) |held| {
+        held.refuse_expired(io, allocator);
+    }
+    return;
+}
+
+// nearest_deadline is when the wait has to end to be in time for whichever
+// connection runs out first. Zero is nobody having one, which `wait` reads as
+// no deadline at all.
+fn (self: &std::http::Server) nearest_deadline() -> i64 {
+    var nearest = 0;
+    var index = 0;
+    while index < self.open.len() {
+        let at = self.deadline_at(index);
+        if at > 0 {
+            if nearest == 0 or at < nearest {
+                nearest = at;
+            }
+        }
+        index = index + 1;
+    }
+    return nearest;
+}
+
+fn (self: &std::http::Server) deadline_at(index: i64) -> i64 {
+    if self.open.at(index) |held| {
+        return held.deadline_at();
+    }
+    return 0;
+}
+
+// take_out lifts one connection out of the table and hands it to the caller.
+// The one that was last takes its place, so the token that named it has to be
+// registered again -- a token is an index, and the index changed.
+fn (self: &var std::http::Server) take_out(
+    io: Io,
+    allocator: Allocator,
+    index: i64
+) -> std::http::Failure!std::http::Exchange {
+    try self.forget_at(io, index);
+    let last = self.open.len() - 1;
+    try self.open.swap(index, last);
+    var taken = self.open.pop_or_panic();
+    errdefer taken.deinit(allocator);
+    try self.rewatch_at(io, index);
+    return move taken;
+}
+
+// drop_at closes one connection and takes it out of the table.
+fn (self: &var std::http::Server) drop_at(
+    io: Io,
+    allocator: Allocator,
+    index: i64
+) -> std::http::Failure!void {
+    let held = try self.take_out(io, allocator, index);
+    held.deinit(allocator);
+    return;
+}
+
+fn (self: &var std::http::Server) forget_at(
+    io: Io,
+    index: i64
+) -> std::http::Failure!void {
+    if self.open.at_mut(index) |held| {
+        try held.forget_read(io, &var self.poller);
+    }
+    return;
+}
+
+fn (self: &var std::http::Server) rewatch_at(
+    io: Io,
+    index: i64
+) -> std::http::Failure!void {
+    if index >= self.open.len() {
+        return;
+    }
+    if self.open.at_mut(index) |held| {
+        try held.forget_read(io, &var self.poller);
+        try held.watch_read(io, &var self.poller, index);
+    }
+    return;
 }
 
 // opening builds an exchange that has a connection and nothing else yet.
@@ -614,6 +999,39 @@ fn delimited(framing: std::http::Framing) -> bool {
     };
 }
 
+// carries_another answers whether this exchange is finished and its connection
+// may hold the next request. It is what `next_head` asks before it decides
+// whether to close.
+fn (self: &std::http::Exchange) carries_another() -> bool {
+    if !self.answered or self.body_open {
+        return false;
+    }
+    if self.reader.owes() > 0 {
+        return false;
+    }
+    if self.reader.is_chunked() and !self.reader.chunks_done() {
+        return false;
+    }
+    return self.persisted;
+}
+
+// deadline_at is when this connection's phase runs out, or 0 for never. The
+// server reads it to know how long a wait may last.
+fn (self: &std::http::Exchange) deadline_at() -> i64 {
+    return self.deadline;
+}
+
+// forget_read takes this connection back off a poller. Handing the exchange
+// out means the loop no longer waits on it, and closing one means nothing
+// waits on it again.
+fn (self: &std::http::Exchange) forget_read(
+    io: Io,
+    poller: &var std::net::Poller
+) -> std::http::Failure!void {
+    try self.reader.forget(io, poller);
+    return;
+}
+
 // next reads the head of the following request on this connection and answers
 // whether there was one. False is the connection being done -- this server said
 // it would not carry another, the peer said the same, or the peer closed -- so
@@ -639,7 +1057,6 @@ fn (self: &var std::http::Exchange) next_head(
     if !self.persisted {
         return false;
     }
-    self.served = self.served + 1;
     try self.reopen(allocator);
     if self.reader.held_len() == 0 {
         // Nothing was read ahead, so whether there is another request is a
@@ -732,6 +1149,9 @@ fn (self: &var std::http::Exchange) append_body(
 fn (self: &var std::http::Exchange) reopen(
     allocator: Allocator
 ) -> std::http::Failure!void {
+    // The request that just ended counts against `max_requests`, which is what
+    // decides whether the one after it will be offered the connection again.
+    self.served = self.served + 1;
     try self.reader.reopen(allocator);
     self.phase = std::http::Phase::ReadingHead;
     self.request.reset(allocator);

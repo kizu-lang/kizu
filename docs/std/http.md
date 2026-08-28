@@ -7,8 +7,8 @@
 を返して戻ります。request に何をするかは、request を求めた場所のソースに書きます。
 
 ```kizu
-var server = try http::listen(handle, "127.0.0.1:8080");
-defer server.deinit();
+var server = try http::listen(handle, allocator, "127.0.0.1:8080");
+defer server.deinit(allocator);
 var exchange = try server.accept(handle, allocator, 1048576);
 defer exchange.deinit(allocator);
 try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
@@ -23,14 +23,16 @@ Go と Zig はどちらも handler を取りますが、それはどちらも ha
 残るのは pull の loop で、それは control flow が見えたままになる形でもあります
 (`docs/principles.md` §2)。
 
-**1 接続ずつです。** Kizu に並行 API はありません(SPEC §15)ので、2 人目の
-caller は 1 人目が答え終わるまで listen backlog で待ちます。
+**`accept` は 1 接続ずつです。** 2 人目の caller は 1 人目が答え終わるまで listen
+backlog で待ちます。多数を 1 thread で捌くには [`first` と `next`](#first-と-next)
+を使います —— 答え方は同じで、その間に誰の声を聞いているかだけが違います。
 
 ## API
 
 ```kizu
-pub fn listen(io: Io, address: []u8) -> std::http::Failure!std::http::Server
-pub fn listen_with(io: Io, address: []u8, limits: Limits)
+pub fn listen(io: Io, allocator: Allocator, address: []u8)
+    -> std::http::Failure!std::http::Server
+pub fn listen_with(io: Io, allocator: Allocator, address: []u8, limits: Limits)
     -> std::http::Failure!std::http::Server
 
 fn (self: &Server) local_port() -> std::http::Failure!i64
@@ -40,7 +42,17 @@ fn (self: &var Server) accept_head(io: Io, allocator: Allocator)
     -> std::http::Failure!std::http::Exchange
 fn (self: &var Server) accept_ready(io: Io, allocator: Allocator)
     -> std::http::Failure!?std::http::Exchange
-fn (self: Server) deinit() -> void
+fn (self: &var Server) first(io: Io, allocator: Allocator, max: i64)
+    -> std::http::Failure!std::http::Exchange
+fn (self: &var Server) next(
+    io: Io, allocator: Allocator, done: std::http::Exchange, max: i64,
+) -> std::http::Failure!std::http::Exchange
+fn (self: &var Server) first_head(io: Io, allocator: Allocator)
+    -> std::http::Failure!std::http::Exchange
+fn (self: &var Server) next_head(
+    io: Io, allocator: Allocator, done: std::http::Exchange,
+) -> std::http::Failure!std::http::Exchange
+fn (self: Server) deinit(allocator: Allocator) -> void
 
 fn (self: &var Exchange) respond(io: Io, allocator: Allocator)
     -> std::http::Failure!void
@@ -444,6 +456,61 @@ message が 2 つになる」経路を閉じるためのものです。
 
 `accept` は request を読み切ってから返ります。1 接続ずつなら正しい形ですが、
 多数を扱う loop では、1 人が head を書き終えるまで他の誰の声も聞こえません。
+
+## `first` と `next`
+
+```kizu
+fn (self: &var Server) first(io, allocator, max) -> Failure!Exchange
+fn (self: &var Server) next(io, allocator, done: Exchange, max) -> Failure!Exchange
+fn (self: &var Server) first_head(io, allocator) -> Failure!Exchange
+fn (self: &var Server) next_head(io, allocator, done: Exchange) -> Failure!Exchange
+```
+
+`first` は**完成した request を 1 つ**渡します。`next` は**1 つ受け取って**次を
+渡します。他の接続は server の中で accept され、watch され、届いた分だけ進み、
+期限が切れれば閉じられます —— caller は loop を書き、それ以外は書きません。
+
+```kizu
+var current = try server.first(handle, allocator, 1048576);
+current = try turn(handle, allocator, &var server, move current);
+current = try turn(handle, allocator, &var server, move current);
+```
+
+**返さずに次を貰う道がありません。** `next` は `Exchange` を消費するので、
+借りた接続を忘れることが型として書けません。`http_evented.kizu` が手で書いている
+もの —— poller、token 表、期限の sweep —— が全部この中です。
+
+`first_head` / `next_head` は body を接続に残す対で、`accept_head` が `accept` に
+対してそうであるのと同じです。
+
+### loop の 1 周は関数になります
+
+答えている間 `Exchange` は所有されていて、**手渡しで再代入される変数には
+`errdefer` を付けられません**(`docs/language-gaps.md`)。なので 1 周を関数にして、
+その frame が所有します。
+
+```kizu
+fn turn(handle, allocator, server: &var http::Server, held: http::Exchange)
+    -> Failure!http::Exchange
+{
+    var current = move held;
+    errdefer current.deinit(allocator);
+    try current.respond_text(handle, allocator, 200, "text/plain", "ok");
+    let following = try server.next(handle, allocator, move current, 1048576);
+    return move following;
+}
+```
+
+### 止め方
+
+`serve` はありません。loop が caller のものなので、**止めるのは `break`** です。
+最後に持っている `Exchange` は `deinit` すれば接続が閉じ、残りは
+`server.deinit(allocator)` が閉じます。
+
+停止を server の capability にする案は取っていません —— 単一 thread で、signal も
+無い今、`stop()` を呼べる場所は loop の中だけで、そこには既に `break` があります。
+
+`examples/http_serve.kizu` が 3 接続を 1 thread で捌きます。
 
 ```kizu
 fn (self: &var Server) accept_ready(io, allocator) -> Failure!?Exchange
@@ -872,5 +939,12 @@ request の body と response の body の両方を読みます。
 response 側 —— message が自分の framing と矛盾しており、回復するものがないので
 接続に届く前に拒否します(原理 7)。
 
-`std::http::Failure` はその和 —— `Error or std::net::Error or std::mem::Error` ——
-です。どれも変換されないので、`match` した caller はどの層が拒否したかを見ます。
+`std::http::Failure` はその和 —— `Error or std::net::Error or std::mem::Error or
+std::array::Error` —— です。どれも変換されないので、`match` した caller はどの層が
+拒否したかを見ます。
+
+`std::array::Error` が入っているのは、多数を捌く server が接続を `Array` に
+持つからです。member は 1 つで、ここに到達する経路はありません(index は array
+自身の長さから来る)。変換すれば原因を発明することになり、握り潰せばこの言語が
+持たない隠れた分岐になります。`std::sort` が同じ理由で同じものを propagate
+します。
