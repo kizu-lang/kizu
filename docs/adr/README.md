@@ -130,3 +130,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0134: arena は自分の instance を見分ける](0134-an-arena-tells-its-instances-apart.md)
 - [ADR-0135: プログラムは自分が export していない名前に答えない](0135-a-program-does-not-answer-for-a-name-it-did-not-export.md)
 - [ADR-0136: HTTP server は見える loop で、handler を取らない](0136-an-http-server-is-a-loop-you-can-see.md)
+- [ADR-0137: deadline は時点で、socket の owner が持つ](0137-a-deadline-is-a-moment-the-socket-owner-holds.md)
