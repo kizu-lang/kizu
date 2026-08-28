@@ -314,3 +314,75 @@ test "a write with no deadline still waits" {
     let read = try client.read_into(handle, allocator, &var back, 64);
     testing::expect_equal<i64>(19, read);
 }
+
+test "a connect deadline does not get in the way of a peer that is there" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // A listening peer completes against the backlog, so this finishes inside
+    // any deadline worth setting.
+    var client = try net::tcp_connect_before(
+        handle, address_bytes, net::deadline_in_millis(1000));
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+    try client.write_all(handle, "through");
+    var back = string::new(allocator);
+    defer back.deinit(allocator);
+    let read = try served.read_into(handle, allocator, &var back, 64);
+    testing::expect_equal<i64>(7, read);
+}
+
+test "a connect with no deadline is the plain connect" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // Zero is no deadline, the same way it is everywhere else here.
+    var client = try net::tcp_connect_before(handle, address_bytes, 0);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+    testing::expect(true);
+}
+
+// released_port binds a port, learns which it was, and gives it back -- the
+// closest a test can get to a port with nothing on it without guessing one.
+fn released_port(handle: Io) -> net::Error!i64 {
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    errdefer listener.deinit();
+    let port = try listener.local_port();
+    listener.deinit();
+    return port;
+}
+
+test "nothing listening is refused rather than waited on" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    // A port that was bound and released is the closest thing to a port with
+    // nothing on it that a test can name without guessing.
+    let port = try released_port(handle);
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    if net::tcp_connect_before(handle, address_bytes, net::deadline_in_millis(1000)) |stream| {
+        stream.deinit();
+        testing::expect(true);
+    } else |err| {
+        // Refused is the ordinary answer; the deadline is for an address that
+        // says nothing at all, which a loopback port never does.
+        testing::expect(err == net::Error::ConnectionRefused);
+    }
+}

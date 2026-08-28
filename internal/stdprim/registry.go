@@ -86,7 +86,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_connect": {
-		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64},
+		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64, ArgI64},
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_accept": {

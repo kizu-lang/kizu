@@ -1578,10 +1578,35 @@ void std__internal__builtin__net_listen(
     *out = kizu_std_builtin_net_listen_result(io, *host, port);
 }
 
+/* connect on a non-blocking descriptor answers EINPROGRESS and finishes in the
+ * background, so the wait is a poll for writability and the result is read out
+ * of SO_ERROR afterwards. That is what gives a connect a deadline: a blocking
+ * one waits as long as the host's own retry policy says, which is on the order
+ * of a minute for an address that answers nothing. */
+static int64_t kizu_net_finish_connect(int fd, int64_t deadline) {
+    int64_t wait = kizu_net_wait(fd, POLLOUT, kizu_net_remaining(deadline));
+    if (wait == KIZU_NET_WAIT_RETRY) {
+        return kizu_net_finish_connect(fd, deadline);
+    }
+    if (wait != KIZU_NET_WAIT_READY) {
+        return wait;
+    }
+    int error = 0;
+    socklen_t length = sizeof error;
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0) {
+        return kizu_net_errno_failure(errno);
+    }
+    if (error != 0) {
+        return kizu_net_errno_failure(error);
+    }
+    return 0;
+}
+
 static KizuErrorI64 kizu_std_builtin_net_connect_result(
     void *io,
     KizuSliceU8 host,
-    int64_t port
+    int64_t port,
+    int64_t timeout_ms
 ) {
     if (kizu_io_is_failing(io)) {
         return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
@@ -1591,6 +1616,7 @@ static KizuErrorI64 kizu_std_builtin_net_connect_result(
     if (failure != 0) {
         return kizu_err_i64(failure);
     }
+    int64_t deadline = kizu_net_deadline(timeout_ms);
     int64_t last = KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED;
     for (struct addrinfo *it = list; it; it = it->ai_next) {
         int fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
@@ -1598,21 +1624,26 @@ static KizuErrorI64 kizu_std_builtin_net_connect_result(
             last = kizu_net_errno_failure(errno);
             continue;
         }
+        kizu_net_set_nonblocking(fd);
         int connected;
         do {
             connected = connect(fd, it->ai_addr, it->ai_addrlen);
         } while (connected != 0 && errno == EINTR);
         if (connected != 0) {
-            last = kizu_net_errno_failure(errno);
-            close(fd);
-            continue;
+            if (errno != EINPROGRESS) {
+                last = kizu_net_errno_failure(errno);
+                close(fd);
+                continue;
+            }
+            int64_t pending = kizu_net_finish_connect(fd, deadline);
+            if (pending != 0) {
+                last = pending;
+                close(fd);
+                continue;
+            }
         }
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        /* After the connect, so the connect itself keeps waiting the way it
-         * always did. A non-blocking connect answers EINPROGRESS and needs a
-         * poll of its own, which is the connect deadline this does not have. */
-        kizu_net_set_nonblocking(fd);
         freeaddrinfo(list);
         return kizu_ok_i64((int64_t)fd);
     }
@@ -1624,9 +1655,10 @@ void std__internal__builtin__net_connect(
     KizuErrorI64 *out,
     void *io,
     const KizuSliceU8 *host,
-    int64_t port
+    int64_t port,
+    int64_t timeout_ms
 ) {
-    *out = kizu_std_builtin_net_connect_result(io, *host, port);
+    *out = kizu_std_builtin_net_connect_result(io, *host, port, timeout_ms);
 }
 
 static KizuErrorI64 kizu_std_builtin_net_accept_result(

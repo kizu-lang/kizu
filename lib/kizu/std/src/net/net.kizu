@@ -219,10 +219,27 @@ pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListene
     return TcpListener { fd: fd, accept_deadline_ms: 0 };
 }
 
-// tcp_connect opens a stream to a listening peer.
+// tcp_connect opens a stream to a listening peer. It waits as long as the host
+// will, which for an address that answers nothing is on the order of a minute:
+// `tcp_connect_before` is the one that says otherwise.
 pub fn tcp_connect(io: Io, address: []u8) -> std::net::Error!std::net::TcpStream {
+    let stream = try tcp_connect_before(io, address, 0);
+    return move stream;
+}
+
+// tcp_connect_before gives the connect a deadline -- the same kind of moment
+// `set_read_deadline` takes, and 0 for none. An address that is not answering
+// is the case it exists for: nothing else in this module can bound that wait,
+// because there is no stream yet to set a deadline on.
+pub fn tcp_connect_before(
+    io: Io,
+    address: []u8,
+    at: i64
+) -> std::net::Error!std::net::TcpStream {
     let parsed = try parse_address(address);
-    let fd = try std::internal::builtin::net_connect(io, parsed.host, parsed.port);
+    let budget = remaining_millis(at);
+    let fd = try std::internal::builtin::net_connect(
+        io, parsed.host, parsed.port, budget);
     return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
 }
 

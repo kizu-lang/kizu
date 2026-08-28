@@ -10,6 +10,8 @@ field に持つので、socket に届く唯一の道はこの module が返し�
 ```kizu
 pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListener
 pub fn tcp_connect(io: Io, address: []u8) -> std::net::Error!std::net::TcpStream
+pub fn tcp_connect_before(io: Io, address: []u8, at: i64)
+    -> std::net::Error!std::net::TcpStream
 pub fn parse_address(address: []u8) -> std::net::Error!std::net::Address
 pub fn deadline_in_millis(millis: i64) -> i64
 
@@ -117,6 +119,22 @@ deadline は自分で更新しません。
 `set_read_deadline(5000)` は時点として読まれます。monotonic clock の 5000ms は
 この host が起動して 5 秒後で、とうに過ぎているので、**最初の read が
 `TimedOut` で落ちます**。静かに無期限になるより気付ける方向に倒してあります。
+
+### connect の deadline
+
+`tcp_connect` は host が待つだけ待ちます —— 何も答えない address に対して 1 分
+前後です。`tcp_connect_before(io, address, at)` がそれを縛ります。
+
+```kizu
+// 203.0.113.1 は TEST-NET-3。どこにも routing されない
+var stream = try net::tcp_connect_before(
+    handle, "203.0.113.1:80", net::deadline_in_millis(300));
+```
+
+実測で 303 ms でした(縛らないと host 既定まで待ちます)。
+
+deadline を stream に設定できないのはこの 1 箇所だけです —— まだ stream が
+無いので、期限は connect の引数として渡すしかありません。
 
 ### listener の deadline
 

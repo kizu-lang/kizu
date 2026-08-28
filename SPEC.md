@@ -2949,7 +2949,9 @@ coroutine が要り、function coloring が生えるためです。
 * `std::net::tcp_listen(io, address)` は `!std::net::TcpListener` を返す。
   address は `host:port`、IPv6 の host は bracket で囲む(`[::1]:8080`)。
   port 0 は host に空き port を選ばせる
-* `std::net::tcp_connect(io, address)` は `!std::net::TcpStream` を返す
+* `std::net::tcp_connect(io, address)` は `!std::net::TcpStream` を返す。
+  `tcp_connect_before(io, address, at)` は同じものに deadline を与える ——
+  stream がまだ無いので、期限は引数として渡す
 * `std::net::parse_address(address)` は `!std::net::Address` を返す。text を
   分けるだけで、名前解決はしない
 * `listener.accept(io)` は `!std::net::TcpStream` を返す
