@@ -107,6 +107,7 @@ fn (self: &std::http::Response) encode(
     allocator: Allocator,
     version: std::http::Version,
     framing: std::http::Framing,
+    persist: bool,
     head_only: bool,
     out: &var std::string::String
 ) -> std::http::Failure!void {
@@ -117,7 +118,7 @@ fn (self: &std::http::Response) encode(
     try out.append_byte(allocator, cast<u8>(32));
     try out.append_bytes(allocator, std::http::status_text(self.status));
     try std::http::append_crlf(allocator, out);
-    try self.encode_fields(allocator, framing, carries_body, out);
+    try self.encode_fields(allocator, framing, version, persist, carries_body, out);
     try std::http::append_crlf(allocator, out);
     if head_only or !carries_body or !is_buffered(framing) {
         return;
@@ -139,6 +140,8 @@ fn (self: &std::http::Response) encode(
 fn (self: &std::http::Response) encode_fields(
     allocator: Allocator,
     framing: std::http::Framing,
+    version: std::http::Version,
+    persist: bool,
     carries_body: bool,
     out: &var std::string::String
 ) -> std::http::Failure!void {
@@ -160,11 +163,46 @@ fn (self: &std::http::Response) encode_fields(
     }
     if carries_body {
         try self.append_length(allocator, framing, out);
+        if is_chunked(framing) {
+            try out.append_bytes(allocator, "Transfer-Encoding: chunked");
+            try std::http::append_crlf(allocator, out);
+        }
     }
-    // One request per connection (keep-alive is not implemented), and saying
-    // so is what lets a 1.1 client stop waiting instead of timing out. It is
-    // also what ends an `UntilClose` body, which has no length to give.
-    try out.append_bytes(allocator, "Connection: close");
+    try append_connection(allocator, version, persist, out);
+    return;
+}
+
+// append_connection says whether the connection carries another request.
+// `close` has to be written, because it is what lets a 1.1 client stop waiting
+// instead of timing out, and it is what ends an `UntilClose` body. Persisting
+// is the 1.1 default and needs no field; 1.0 is the other way round and has to
+// be told.
+fn append_connection(
+    allocator: Allocator,
+    version: std::http::Version,
+    persist: bool,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    if !persist {
+        try out.append_bytes(allocator, "Connection: close");
+        try std::http::append_crlf(allocator, out);
+        return;
+    }
+    return match version {
+        Http11 => ok_void(),
+        Http10 => append_keep_alive(allocator, out),
+    };
+}
+
+fn ok_void() -> std::http::Failure!void {
+    return;
+}
+
+fn append_keep_alive(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    try out.append_bytes(allocator, "Connection: keep-alive");
     try std::http::append_crlf(allocator, out);
     return;
 }
@@ -194,6 +232,17 @@ fn declares_length(framing: std::http::Framing) -> bool {
         Buffered => true,
         Length(_) => true,
         UntilClose => false,
+        Chunked => false,
+        Raw => false,
+    };
+}
+
+fn is_chunked(framing: std::http::Framing) -> bool {
+    return match framing {
+        Chunked => true,
+        Buffered => false,
+        Length(_) => false,
+        UntilClose => false,
         Raw => false,
     };
 }
@@ -205,6 +254,7 @@ fn (self: &std::http::Response) length_of(framing: std::http::Framing) -> i64 {
         Buffered => self.body.len(),
         Length(count) => count,
         UntilClose => 0,
+        Chunked => 0,
         Raw => 0,
     };
 }
@@ -214,6 +264,7 @@ fn is_buffered(framing: std::http::Framing) -> bool {
         Buffered => true,
         Length(_) => false,
         UntilClose => false,
+        Chunked => false,
         Raw => false,
     };
 }
@@ -224,6 +275,7 @@ fn is_raw(framing: std::http::Framing) -> bool {
         Buffered => false,
         Length(_) => false,
         UntilClose => false,
+        Chunked => false,
     };
 }
 

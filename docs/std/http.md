@@ -53,6 +53,8 @@ fn (self: &var Exchange) set_read_deadline(at: i64) -> void
 fn (self: &var Exchange) set_write_deadline(at: i64) -> void
 fn (self: &var Exchange) clear_read_deadline() -> void
 fn (self: &var Exchange) clear_write_deadline() -> void
+fn (self: &var Exchange) next(io: Io, allocator: Allocator)
+    -> std::http::Failure!bool
 fn (self: &Exchange) is_answered() -> bool
 fn (self: Exchange) deinit(allocator: Allocator) -> void
 ```
@@ -160,6 +162,8 @@ pub struct Limits {
     pub read_head_millis: i64,   // default 10000
     pub read_body_millis: i64,   // default 30000
     pub write_millis: i64,       // default 30000
+    pub max_requests: i64,       // default 1
+    pub idle_millis: i64,        // default 5000
 }
 pub fn default_limits() -> std::http::Limits
 ```
@@ -230,11 +234,13 @@ pub union Framing {
     Buffered,       // Response が持つ body。length は実測
     Length(i64),    // caller が head の後にちょうどこの数だけ書く
     UntilClose,     // close が body の終わり。length は無い
+    Chunked,        // 1 write = 1 chunk。terminator が終わり
     Raw,            // framing field を一切書かない。head は caller のもの
 }
 
 fn (self: &var Exchange) respond_head(io, allocator, framing) -> Failure!void
-fn (self: &var Exchange) write_all(io, bytes) -> Failure!void
+fn (self: &var Exchange) write_all(io, allocator, bytes) -> Failure!void
+fn (self: &var Exchange) finish_body(io, allocator) -> Failure!void
 ```
 
 `respond_head` は head を送って止まります。その後の body は caller が
@@ -246,6 +252,7 @@ fn (self: &var Exchange) write_all(io, bytes) -> Failure!void
 | `Buffered` | 実測値 | `close` | `respond` が使う既定 |
 | `Length(n)` | `n` | `close` | 大きさの分かる file |
 | `UntilClose` | 書かない | `close` | SSE、長さ不明の stream |
+| `Chunked` | 書かない(`Transfer-Encoding: chunked`) | `close` | 長さ不明で、接続を閉じたくないとき |
 | `Raw` | 書かない | **書かない** | 101 Switching Protocols |
 
 `Length(n)` の `n` は **caller の申告**で、`Buffered` だけが実測です。ただし
@@ -261,14 +268,42 @@ try held.write_all(handle, "toolong");    // Error::ResponseOverrun
 socket に届く前に拒否するので、残りの数は変わりません。超過分が線に乗ると、
 peer はそれを次の message の始まりとして読みます。
 
-**足りない**方は拒否できません。body が短いことが分かるのは close の時点で、
-`deinit` は失敗を返せないからです。代わりに `owes()` が残りを答えます。
+**足りない**方は `finish_body` で拒否します —— caller が「書き終えた」と言った
+瞬間が、短いことを言える唯一の場所です。
+
+```kizu
+try held.respond_head(handle, allocator, http::Framing::Length(10));
+try held.write_all(handle, allocator, "short");
+try held.finish_body(handle, allocator);   // Error::ResponseIncomplete
+```
+
+`finish_body` を呼ばずに `deinit` した場合は検出できません(`deinit` は失敗を
+返せない)。その場合の残りは `owes()` が答えます。
 
 ```kizu
 fn (self: &Exchange) owes() -> i64
 ```
 
 `Length` 以外の framing は数を持たないので、`owes()` は常に 0 です。
+
+### `Chunked`
+
+`write_all` 1 回が 1 chunk で、size を hex で前置きします。長さゼロの write は
+落とします —— 長さゼロの chunk は terminator で、それを送るのは
+`finish_body` の仕事だからです。
+
+```
+8\r\npiece 0\n\r\n8\r\npiece 1\n\r\n0\r\n\r\n
+```
+
+`UntilClose` との差は **接続を閉じるかどうか**です。`UntilClose` は close が
+body の終わりなので、その接続は次を運べません。`Chunked` は terminator が
+終わりなので運べます —— [keep-alive](#keep-alive) が使えるのはこちらだけです。
+
+`finish_body` は body を閉じます。`Chunked` は terminator を線に出し、
+`Length` は数が合っているかを見ます。`UntilClose` と `Raw` は何も要りません
+—— 前者は close が、後者は caller が終わりを決めます。2 度目の `finish_body` は
+`Error::ResponseFinished` です。
 
 `Raw` は caller の header をそのまま出し、framing field を落としもしません。
 101 に `Connection: close` を書いたら間違った message になるからです。この 1 語を
@@ -310,6 +345,65 @@ byte は既に `Exchange` の中にあります。socket を渡すと caller は
 - `accept_head` が read phase の deadline を 1 回置く
 - 1 つの phase より長く生きる caller(101 の後の protocol など)は
   `exchange.set_read_deadline(net::deadline_in_millis(n))` で自分で押し直す
+
+## keep-alive
+
+```kizu
+fn (self: &var Exchange) next(io, allocator) -> Failure!bool
+```
+
+`next` は同じ接続の次の request を読み、**あったかどうか**を返します。false は
+接続が終わったこと —— この server がもう運ばないと言った、peer が同じことを
+言った、あるいは peer が閉じた —— なので、それで終わる loop が接続の寿命です。
+
+```kizu
+var held = try server.accept(handle, allocator);
+defer held.deinit(allocator);
+var more = true;
+while more {
+    try answer(handle, allocator, &var held);
+    more = try held.next(handle, allocator);
+}
+```
+
+### 既定は 1 request です
+
+`max_requests` の既定は **1** で、これは HTTP/1.1 の既定ではありません。
+
+理由は protocol ではなくこの server にあります。並行 API が無い(SPEC §15)ので
+1 接続ずつしか捌けません。つまり 2 通目のために接続を開けたままにする peer は、
+**他の全員に対して**開けたままにしています。keep-alive が節約するのは handshake
+1 回、払うのは service 全体です。並行性が入るまでは、これは caller が上げる数値
+であって、黙って継ぐ既定ではありません。
+
+`idle_millis` は request と request の間に許す静けさです。`next` はこれを deadline
+にして次の head を待ちます。
+
+### 接続が続く条件
+
+`respond` / `respond_head` が head を書く時点で 3 つを同時に見ます。
+
+| 条件 | 満たさないと |
+| --- | --- |
+| `served + 1 < max_requests` | この server がもう運ばない |
+| framing が終わりを示せる(`Buffered` / `Length` / `Chunked`) | peer が body の終わりを close でしか知れない |
+| request が許している | HTTP/1.1 は `Connection: close` が無ければ許す。HTTP/1.0 は `Connection: keep-alive` が要る |
+
+どれか 1 つでも欠ければ head に `Connection: close` を書き、`next` は false を
+返します。続く場合、HTTP/1.1 には何も書きません(persistent が既定)。HTTP/1.0 には
+`Connection: keep-alive` を書きます。
+
+### 終わっていない exchange は失敗です
+
+`next` は次の 3 つを `Error::ExchangeUnfinished` で拒否します。false ではなく
+失敗なのは、どれも caller の bug で、接続が黙って終わるとそれが隠れるからです。
+
+- まだ答えていない
+- 自分で書いていた body を `finish_body` で閉じていない
+- `accept_head` で受けた request body をまだ読み切っていない
+
+3 つ目のために、`accept_head` の後の `read_into` は **`Content-Length` を超えて
+読みません**。超えて読むと、それは次の request です。
 
 ## URL と percent 符号化
 
@@ -532,12 +626,12 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 
 ## 今は話さないこと
 
-- **keep-alive**: 1 接続 1 request で、response は `Connection: close` を送ります。
-  接続を跨いで生きる idle deadline もまだありません —— 押し直す相手がいないので
-- **chunked transfer encoding**: request に `Transfer-Encoding` があれば
+- **pipelining**: 先読みした request は順に処理しますが、答えを重ねて送る
+  ことはしません。1 つ答えてから次を読みます
+- **chunked な request**: request に `Transfer-Encoding` があれば
   `Error::UnsupportedEncoding` です。推測して読むのが request smuggling の
-  通り道なので、拒否します。長さの分からない response は
-  `Framing::UntilClose`(close が終わり)で送ります
+  通り道なので、拒否します。response 側の chunked は `Framing::Chunked` で
+  送れます
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
 - **`Date` header**: std に暦がないので、書けないものを書きません
 - **multipart / form-data**、**compression**
@@ -548,8 +642,8 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 `std::http::Error` は `MalformedRequest`、`HeadTooLarge`、`BodyTooLarge`、
 `UnsupportedVersion`、`UnsupportedEncoding`、`Incomplete`、`InvalidStatus`、
 `InvalidHeader`、`InvalidUrl`、`UnsupportedScheme`、`MalformedResponse`、
-`ResponseFinished`、`InvalidEncoding`、`InvalidPattern`、`ResponseOverrun` を
-持ちます。
+`ResponseFinished`、`InvalidEncoding`、`InvalidPattern`、`ResponseOverrun`、
+`ResponseIncomplete`、`ExchangeUnfinished` を持ちます。
 
 `BodyTooLarge` と `ResponseOverrun` は似て非なるものです。前者は request 側 ——
 この server が決めた上限を入力が超えたので、入力を拒否して回復します。後者は

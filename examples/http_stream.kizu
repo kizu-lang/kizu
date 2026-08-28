@@ -32,8 +32,9 @@ fn main() -> Failure!void {
     defer server.deinit();
     let port = try server.local_port();
 
-    try ask(handle, allocator, port, &var server, "GET /rows HTTP/1.1", true);
-    try ask(handle, allocator, port, &var server, "GET /events HTTP/1.1", false);
+    try ask(handle, allocator, port, &var server, "GET /rows HTTP/1.1", 0);
+    try ask(handle, allocator, port, &var server, "GET /events HTTP/1.1", 1);
+    try ask(handle, allocator, port, &var server, "GET /chunks HTTP/1.1", 2);
     return;
 }
 
@@ -43,15 +44,19 @@ fn ask(
     port: i64,
     server: &var http::Server,
     line: []u8,
-    counted: bool
+    kind: i64
 ) -> Failure!void {
     var client = try open_client(handle, allocator, port);
     defer client.deinit();
     try request(handle, allocator, &var client, line);
-    if counted {
+    if kind == 0 {
         try serve_counted(handle, allocator, server);
     } else {
-        try serve_open_ended(handle, allocator, server);
+        if kind == 1 {
+            try serve_open_ended(handle, allocator, server);
+        } else {
+            try serve_chunked(handle, allocator, server);
+        }
     }
     try show(handle, allocator, &var client);
     return;
@@ -75,7 +80,7 @@ fn serve_counted(handle: Io, allocator: Allocator, server: &var http::Server) ->
         try fmt::append_i64(allocator, &var row, index);
         try row.append_byte(allocator, cast<u8>(10));
         let bytes = row.as_bytes();
-        try held.write_all(handle, bytes);
+        try held.write_all(handle, allocator, bytes);
         index = index + 1;
     }
     return;
@@ -107,7 +112,32 @@ fn event(
     try out.append_bytes(allocator, line);
     try out.append_byte(allocator, cast<u8>(10));
     let bytes = out.as_bytes();
-    try held.write_all(handle, bytes);
+    try held.write_all(handle, allocator, bytes);
+    return;
+}
+
+// serve_chunked has no length either, but says where the body ends without
+// ending the connection with it: each write is a chunk with its size in front,
+// and `finish_body` writes the zero-length chunk that closes the body. This is
+// the framing a persistent connection needs, and the one `UntilClose` cannot
+// give it.
+fn serve_chunked(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    try held.response.header(allocator, "Content-Type", "text/plain");
+    try held.respond_head(handle, allocator, http::Framing::Chunked);
+    var index = 0;
+    while index < 2 {
+        var piece = string::new(allocator);
+        defer piece.deinit(allocator);
+        try piece.append_bytes(allocator, "piece ");
+        try fmt::append_i64(allocator, &var piece, index);
+        try piece.append_byte(allocator, cast<u8>(10));
+        let bytes = piece.as_bytes();
+        try held.write_all(handle, allocator, bytes);
+        index = index + 1;
+    }
+    try held.finish_body(handle, allocator);
     return;
 }
 
@@ -151,6 +181,9 @@ fn show(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failur
     return;
 }
 
+// print_lines shows the bytes as they went out, CR left off. For the chunked
+// answer that means the framing is visible: a size, the piece, a blank line
+// where the chunk's own CRLF was, and the zero that ends the body.
 fn print_lines(wire: []u8) -> void {
     let length = mem::len(wire);
     var start = 0;
@@ -195,3 +228,16 @@ fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
 //
 // data: one
 // data: two
+// HTTP/1.1 200 OK
+// Content-Type: text/plain
+// Transfer-Encoding: chunked
+// Connection: close
+//
+// 8
+// piece 0
+//
+// 8
+// piece 1
+//
+// 0
+//

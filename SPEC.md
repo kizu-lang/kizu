@@ -2973,12 +2973,16 @@ runtime selection の方針は ADR-0039 に従います。
 * `exchange.respond_head(io, allocator, framing)` は head だけを送り、body は
   caller が `exchange.write_all(io, bytes)` で書く。`std::http::Framing` は
   `Buffered`(Response が持つ body、length は実測)/ `Length(n)`(caller の申告)/
-  `UntilClose`(close が終わり、length 無し)/ `Raw`(framing field を書かず、
+  `UntilClose`(close が終わり、length 無し)/ `Chunked`(1 write = 1 chunk、
+  `finish_body` が terminator を書く)/ `Raw`(framing field を書かず、
   head は caller のもの)。送った後は answered なので `respond` は
   `Error::ResponseFinished`
-* `Length(n)` を送った後、宣言を超える `write_all` は socket に届く前に
-  `Error::ResponseOverrun` になる。足りない側は close でしか分からないので
-  拒否できず、`exchange.owes()` が残りを答える
+* `exchange.write_all(io, allocator, bytes)` は body を書く。`Length(n)` の
+  宣言を超える write は socket に届く前に `Error::ResponseOverrun` になる
+* `exchange.finish_body(io, allocator)` は body を閉じる。`Chunked` は
+  terminator を書き、`Length` は数が足りなければ `Error::ResponseIncomplete`。
+  2 度目は `Error::ResponseFinished`。呼ばずに `deinit` した場合の残りは
+  `exchange.owes()` が答える
 * `server.accept_head(io, allocator)` は空行で止まり、body を接続に残す。
   `max_body_bytes` は掛からない。caller は `exchange.read_into(io, allocator,
   out, max)` で読む —— `std::net::read_into` と同じ契約で、head 読みで先に
@@ -3004,8 +3008,19 @@ runtime selection の方針は ADR-0039 に従います。
   —— TLS を持たないので、暗号化を頼まれたものを平文で送らない
 * `std::http::write_request` / `read_response_from` は client の 2 つの半分。
   stream を所有するのは呼ぶ側
-* keep-alive、chunked transfer encoding、TLS、HTTP/2、HTTP/3 は持たない。
-  request の `Transfer-Encoding` は `Error::UnsupportedEncoding`
+* `exchange.next(io, allocator)` は同じ接続の次の request を読み、あったかを
+  `!bool` で返す。false は接続が終わったこと。まだ答えていない / 自分の body を
+  `finish_body` で閉じていない / `accept_head` の request body を読み切って
+  いない場合は `Error::ExchangeUnfinished`
+* 接続が次を運ぶのは 3 つが揃うときだけ —— `served + 1 < limits.max_requests`、
+  framing が終わりを示せる(`Buffered` / `Length` / `Chunked`)、request が
+  許している(HTTP/1.1 は `Connection: close` が無ければ、HTTP/1.0 は
+  `Connection: keep-alive` があれば)。揃わなければ head に `Connection: close`
+  を書く
+* `limits.max_requests` の既定は 1。並行 API が無い(§15)ので 1 接続ずつしか
+  捌けず、2 通目のために接続を保持する peer は他の全員に対して保持している
+* TLS、HTTP/2、HTTP/3 は持たない。request の `Transfer-Encoding` は
+  `Error::UnsupportedEncoding`
 * 並行 API が無い(§15)ので 1 接続ずつ。2 人目は listen backlog で待つ
 
 `std::path`:

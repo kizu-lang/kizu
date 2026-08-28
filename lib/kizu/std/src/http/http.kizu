@@ -43,6 +43,12 @@ pub error Error {
     // A route pattern that is not a pattern: no leading `/`, an unclosed
     // `{`, an empty capture name, or a `{rest...}` that is not last.
     InvalidPattern,
+    // A connection was asked to carry another request while this exchange was
+    // not finished: the answer was never sent, its body was never closed, or
+    // the request's own body is still on the connection.
+    ExchangeUnfinished,
+    // A caller finished a body shorter than the head it sent declared.
+    ResponseIncomplete,
     // A caller wrote more of its own body than the head it sent declared.
     // BodyTooLarge is the request side of this -- input past a ceiling this
     // server chose, which it recovers from by refusing the input. This is the
@@ -89,6 +95,17 @@ pub struct Limits {
     pub read_head_millis: i64,
     pub read_body_millis: i64,
     pub write_millis: i64,
+    // How many requests one connection may serve, and how long it may sit
+    // between them.
+    //
+    // The default is 1, which is not the HTTP/1.1 default. It is the right one
+    // here for a reason that is about this server and not about the protocol:
+    // one connection is served at a time (SPEC §15), so a peer holding a
+    // connection open for a second request is holding it against everyone
+    // else. Keep-alive saves a handshake and costs the whole service, until
+    // there is concurrency to spend it from.
+    pub max_requests: i64,
+    pub idle_millis: i64,
 }
 
 // default_limits is what a server that has not thought about it should use:
@@ -106,6 +123,8 @@ pub fn default_limits() -> std::http::Limits {
         read_head_millis: 10000,
         read_body_millis: 30000,
         write_millis: 30000,
+        max_requests: 1,
+        idle_millis: 5000,
     };
 }
 
@@ -127,10 +146,44 @@ pub union Framing {
     // ends the body. This is what a stream of unknown length has without
     // chunked transfer encoding.
     UntilClose,
+    // Each write is one chunk, and `finish_body` writes the terminator. This
+    // is the framing that says where a body of unknown length ends without
+    // ending the connection with it, which is what a persistent connection
+    // needs and what `UntilClose` cannot give it.
+    Chunked,
     // No framing fields at all: the head is exactly what the caller set. This
     // is what a 101 needs, because `Connection: close` is the wrong answer to
     // an upgrade.
     Raw,
+}
+
+// append_hex writes a non-negative number the way a chunk size is written:
+// hex, no leading zeros, and "0" for zero. The digits are the upper-case ones
+// percent-encoding already uses -- a chunk size is `1*HEXDIG`, which is
+// case-insensitive, so there is no reason for a second table.
+pub fn append_hex(
+    allocator: Allocator,
+    out: &var std::string::String,
+    value: i64
+) -> std::mem::Error!void {
+    if value <= 0 {
+        try out.append_byte(allocator, cast<u8>(48));
+        return;
+    }
+    // The most significant digit first, so nothing has to be held and
+    // reversed: find its place value, then walk down.
+    var place = 1;
+    var probe = value;
+    while probe >= 16 {
+        place = place * 16;
+        probe = probe / 16;
+    }
+    while place > 0 {
+        let nibble = (value / place) % 16;
+        try out.append_byte(allocator, std::http::hex_digit(nibble));
+        place = place / 16;
+    }
+    return;
 }
 
 // arm_read / arm_write turn one phase's duration into the deadline that phase

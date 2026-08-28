@@ -336,7 +336,7 @@ pub fn main() -> Failure!void {
 | 並行性 | 1 接続ずつ。2 人目は backlog で待つ |
 | 接続を跨ぐ idle 期限 | 1 接続 1 request なので、押し直す相手がまだいない |
 | `connect` の期限 | `tcp_connect` は黒穴宛てに host の既定(~75s)まで固まる |
-| keep-alive | 1 接続 1 request。response は `Connection: close` を送る |
+| keep-alive の既定 | 既定は 1 接続 1 request。`limits.max_requests` を上げると `exchange.next` で続けられる |
 | chunked transfer encoding | request に `Transfer-Encoding` があれば `Error::UnsupportedEncoding`。推測して読むのが request smuggling の通り道。長さの分からない response は `Framing::UntilClose` で送る |
 | TLS / HTTPS | `std::http::get` は `https` を `Error::UnsupportedScheme` で拒否する。暗号化を頼まれたものを平文で送らない |
 | HTTP/2 / HTTP/3 | 無い |
@@ -363,6 +363,7 @@ pub fn main() -> Failure!void {
 - [`examples/http_timeout.kizu`](../../examples/http_timeout.kizu) —— 期限切れの head と 408
 - [`examples/http_stream.kizu`](../../examples/http_stream.kizu) —— body を自分で書く
 - [`examples/http_upload.kizu`](../../examples/http_upload.kizu) —— body を自分で読む
+- [`examples/http_keep_alive.kizu`](../../examples/http_keep_alive.kizu) —— 1 接続で複数 request
 - [`examples/net_deadline.kizu`](../../examples/net_deadline.kizu) —— deadline が budget ではないこと
 
 API 一覧は [`docs/std/http.md`](../std/http.md) と

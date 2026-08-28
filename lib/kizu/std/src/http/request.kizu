@@ -24,6 +24,18 @@ pub fn request_new(allocator: Allocator) -> std::http::Request {
     };
 }
 
+// reset returns the request to what request_new made, keeping the storage it
+// already grew. A connection that carries more than one request reuses it,
+// which is most of what keep-alive is for.
+fn (self: &var std::http::Request) reset(allocator: Allocator) -> void {
+    self.method.clear();
+    self.target.clear();
+    self.version = std::http::Version::Http11;
+    self.headers.clear(allocator);
+    self.body.clear();
+    return;
+}
+
 fn (self: std::http::Request) deinit(allocator: Allocator) -> void {
     self.method.deinit(allocator);
     self.target.deinit(allocator);
@@ -98,9 +110,37 @@ pub fn parse_request_head(
 ) -> std::http::Failure!std::http::Request {
     var request = request_new(allocator);
     errdefer request.deinit(allocator);
-    let after_line = try parse_request_line(allocator, &var request, head);
-    try parse_header_fields(allocator, &var request.headers, head, after_line, limits);
+    try parse_request_head_into(allocator, &var request, head, limits);
     return move request;
+}
+
+// parse_request_head_into fills a request that already exists. A connection
+// serving more than one request parses into the same one rather than building
+// a new one per message.
+pub fn parse_request_head_into(
+    allocator: Allocator,
+    request: &var std::http::Request,
+    head: []u8,
+    limits: std::http::Limits
+) -> std::http::Failure!void {
+    let after_line = try parse_request_line(allocator, request, head);
+    try parse_header_fields(allocator, &var request.headers, head, after_line, limits);
+    return;
+}
+
+// allows_keep_alive reports whether this request lets the connection carry
+// another. HTTP/1.1 is persistent unless it says `close`; HTTP/1.0 is the
+// other way round and has to ask.
+pub fn allows_keep_alive(request: &std::http::Request) -> bool {
+    let closing = std::http::header_has_token(&request.headers, "Connection", "close");
+    if closing {
+        return false;
+    }
+    return match request.version {
+        Http11 => true,
+        Http10 => std::http::header_has_token(
+            &request.headers, "Connection", "keep-alive"),
+    };
 }
 
 // parse_request_line reads `METHOD SP TARGET SP HTTP/1.x CRLF` and answers with
