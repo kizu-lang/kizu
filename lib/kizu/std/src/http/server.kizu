@@ -181,24 +181,16 @@ fn (self: &std::http::Server) opening(
     stream: std::net::TcpStream
 ) -> std::http::Failure!std::http::Exchange {
     return Exchange {
-        stream: move stream,
+        reader: std::http::reader_new(allocator, move stream, self.limits),
         request: std::http::request_new(allocator),
         response: std::http::response_new(allocator),
         body: std::string::new(allocator),
         answered: false,
-        pending: std::string::new(allocator),
-        pending_at: 0,
         phase: std::http::Phase::ReadingHead,
-        inbox: std::string::new(allocator),
-        scanned: 0,
         framing: std::http::Framing::Buffered,
         body_open: false,
         owed: 0,
         counting: false,
-        inbound_owed: 0,
-        inbound_bounded: true,
-        inbound_chunked: false,
-        chunks: std::http::chunk_state_new(std::mem::Limit::Unlimited),
         served: 0,
         persisted: false,
         limits: self.limits,
@@ -206,7 +198,7 @@ fn (self: &std::http::Server) opening(
 }
 
 fn (self: &var std::http::Exchange) arm_read_phase(millis: i64) -> void {
-    std::http::arm_read(&var self.stream, millis);
+    self.reader.arm_read(millis);
     return;
 }
 
@@ -218,7 +210,7 @@ fn (self: &std::http::Exchange) watch_read(
     poller: &var std::net::Poller,
     token: i64
 ) -> std::http::Failure!void {
-    try poller.watch_stream(io, &self.stream, token, std::net::Interest::Read);
+    try self.reader.watch(io, poller, token, std::net::Interest::Read);
     return;
 }
 
@@ -260,7 +252,7 @@ fn (self: &var std::http::Exchange) fill_ready(
     io: Io,
     allocator: Allocator
 ) -> std::http::Failure!?i64 {
-    let count = try self.stream.read_ready(io, allocator, &var self.inbox, 4096);
+    let count = try self.reader.fill_ready(io, allocator);
     return count;
 }
 
@@ -270,7 +262,7 @@ fn (self: &var std::http::Exchange) fill_waiting(
     io: Io,
     allocator: Allocator
 ) -> std::http::Failure!i64 {
-    let count = try self.stream.read_into(io, allocator, &var self.inbox, 4096);
+    let count = try self.reader.fill_waiting(io, allocator);
     return count;
 }
 
@@ -294,8 +286,7 @@ fn (self: &var std::http::Exchange) step_head(
     allocator: Allocator
 ) -> std::http::Failure!std::http::Progress {
     let limits = self.limits;
-    let from = self.scanned;
-    let found = scan_inbox(&self.inbox, from);
+    let found = self.reader.find_head();
     if found |head_length| {
         // The ceiling is on the head, not on what one read happened to bring.
         if head_length > limits.max_head_bytes {
@@ -306,27 +297,19 @@ fn (self: &var std::http::Exchange) step_head(
         // is bounded by `max_head_bytes`, so the copy is bounded too.
         var head = std::string::new(allocator);
         defer head.deinit(allocator);
-        try copy_inbox(allocator, &self.inbox, 0, head_length, &var head);
+        try self.reader.copy_head(allocator, head_length, &var head);
         try parse_staged_head(allocator, &head, limits, &var self.request);
-        try self.begin_body(allocator, head_length);
+        self.reader.took(head_length);
+        try self.begin_body(allocator);
         return std::http::Progress::Request;
     }
-    if self.inbox.len() >= limits.max_head_bytes {
+    if self.reader.held_len() >= limits.max_head_bytes {
         return std::http::Error::HeadTooLarge;
     }
-    // A CRLF CRLF can straddle a read boundary by at most three bytes, so
-    // resuming three back is what keeps the scan linear over the head rather
-    // than quadratic in the number of reads.
-    var next = self.inbox.len() - 3;
-    if next < 0 {
-        next = 0;
-    }
-    self.scanned = next;
     return std::http::Progress::NeedMore;
 }
 
-// begin_body settles where this message ends and moves what arrived behind the
-// head to where `read_into` hands it out from.
+// begin_body settles where this message ends.
 //
 // How the body is framed is decided here and nowhere else, because a message
 // that says two things about its own length is what turns one request into two
@@ -337,56 +320,16 @@ fn (self: &var std::http::Exchange) step_head(
 // zero rather than left open. `respond_head(Raw)` is what opens the connection
 // back up for a caller that took the protocol over.
 fn (self: &var std::http::Exchange) begin_body(
-    allocator: Allocator,
-    head_length: i64
+    allocator: Allocator
 ) -> std::http::Failure!void {
     if try std::http::chunked_framing(&self.request.headers) {
-        self.inbound_chunked = true;
-        self.inbound_bounded = false;
-        self.inbound_owed = 0;
-        self.chunks = std::http::chunk_state_new(std::mem::Limit::Unlimited);
+        self.reader.bind_chunked(std::mem::Limit::Unlimited);
     } else {
         let declared = try self.request.content_length();
-        self.inbound_chunked = false;
-        self.inbound_bounded = true;
-        self.inbound_owed = declared orelse 0;
+        self.reader.bind_length(declared orelse 0);
     }
-    try self.carry_tail(allocator, head_length);
     self.phase = std::http::Phase::Ready;
     return;
-}
-
-// carry_tail moves what arrived behind the head into `pending`, which is where
-// `read_into` looks first. Reading a head reads whole packets, so the first
-// bytes of the body are already here rather than on the socket.
-fn (self: &var std::http::Exchange) carry_tail(
-    allocator: Allocator,
-    from: i64
-) -> std::http::Failure!void {
-    var tail = std::string::new(allocator);
-    defer tail.deinit(allocator);
-    let end = self.inbox.len();
-    try copy_inbox(allocator, &self.inbox, from, end, &var tail);
-    self.pending.clear();
-    self.pending_at = 0;
-    try self.keep_tail(allocator, &tail);
-    self.inbox.clear();
-    self.scanned = 0;
-    return;
-}
-
-fn (self: &var std::http::Exchange) keep_tail(
-    allocator: Allocator,
-    tail: &std::string::String
-) -> std::http::Failure!void {
-    let bytes = tail.as_bytes();
-    try self.pending.append_bytes(allocator, bytes);
-    return;
-}
-
-fn scan_inbox(inbox: &std::string::String, from: i64) -> ?i64 {
-    let bytes = inbox.as_bytes();
-    return std::http::head_end(bytes, from);
 }
 
 fn parse_staged_head(
@@ -397,21 +340,6 @@ fn parse_staged_head(
 ) -> std::http::Failure!void {
     let bytes = head.as_bytes();
     try std::http::parse_request_head_into(allocator, request, bytes, limits);
-    return;
-}
-
-fn copy_inbox(
-    allocator: Allocator,
-    inbox: &std::string::String,
-    from: i64,
-    to: i64,
-    out: &var std::string::String
-) -> std::http::Failure!void {
-    if from >= to {
-        return;
-    }
-    let bytes = inbox.as_bytes();
-    try out.append_bytes(allocator, bytes[from..to]);
     return;
 }
 
@@ -430,7 +358,11 @@ fn copy_inbox(
 // in `pending` and a read that went to the socket would skip them. Go hands a
 // hijacker its buffered reader beside the connection for the same reason.
 pub struct Exchange {
-    stream: std::net::TcpStream,
+    // The connection and the bytes read off it that nobody has taken yet.
+    // It is not handed out: reading a head reads whole packets, so the first
+    // bytes of the body are already in here and a caller given the socket
+    // would skip them.
+    reader: std::http::Reader,
     pub request: std::http::Request,
     pub response: std::http::Response,
     // The body, when `accept` was the one that read it. `accept_head` leaves
@@ -438,21 +370,10 @@ pub struct Exchange {
     // between the two calls.
     pub body: std::string::String,
     answered: bool,
-    // Bytes that arrived behind the head and have not been handed out. Reading
-    // the head reads whatever the peer had already sent, so a body this server
-    // did not copy into the request starts here rather than on the socket.
-    pending: std::string::String,
-    pending_at: i64,
-    // Where this connection is in reading the message it is on, and the bytes
-    // it has read towards it. A blocking read and a poller loop differ only in
-    // how the inbox is filled -- what it means is decided in one place (`step`).
+    // Where this connection is in reading the message it is on. A blocking
+    // read and a poller loop differ only in how the reader is filled -- what
+    // it means is decided in one place (`step`).
     phase: std::http::Phase,
-    inbox: std::string::String,
-    // How far the head scan has looked. A CRLF CRLF can straddle a read
-    // boundary, so this resumes three bytes back rather than at the end --
-    // which is what keeps the scan linear over the head instead of quadratic
-    // in the number of reads.
-    scanned: i64,
     // How the head this exchange sent framed its body, and whether that body
     // is still open. `write_all` reads them to know whether to count bytes,
     // wrap them in a chunk, or pass them straight through.
@@ -462,16 +383,6 @@ pub struct Exchange {
     // number to hold a caller to; the others have nothing to contradict.
     owed: i64,
     counting: bool,
-    // What is left of this message's body, so `read_into` stops at the end of
-    // it rather than reading into whatever follows. Bounded at zero is a
-    // message with no body at all, which is what a head that framed none
-    // means; unbounded is a caller that took the connection over.
-    inbound_owed: i64,
-    inbound_bounded: bool,
-    // Where a chunked request body has got to, when the caller is the one
-    // reading it. `inbound_chunked` says which of the two bounds applies.
-    inbound_chunked: bool,
-    chunks: std::http::ChunkState,
     // How many requests this connection has answered, and whether the last
     // answer left it able to carry another.
     served: i64,
@@ -528,9 +439,7 @@ fn (self: &var std::http::Exchange) open_body(framing: std::http::Framing) -> vo
     // so what it reads next is no longer this message's body and no bound of
     // this module's applies to it.
     if is_raw_framing(framing) {
-        self.inbound_bounded = false;
-        self.inbound_chunked = false;
-        self.inbound_owed = 0;
+        self.reader.bind_until_close();
     }
     self.owed = match framing {
         Length(count) => count,
@@ -569,7 +478,7 @@ fn (self: &var std::http::Exchange) finish_body(
         try std::http::append_crlf(allocator, &var out);
         try std::http::append_crlf(allocator, &var out);
         let wire = out.as_bytes();
-        try self.stream.write_all(io, wire);
+        try self.reader.write_all(io, wire);
     }
     self.body_open = false;
     return;
@@ -620,8 +529,8 @@ fn (self: &var std::http::Exchange) send_head(
     try self.response.encode(allocator, version, framing, persist, head_only, &var out);
     let wire = out.as_bytes();
     let write_millis = self.limits.write_millis;
-    std::http::arm_write(&var self.stream, write_millis);
-    try self.stream.write_all(io, wire);
+    self.reader.arm_write(write_millis);
+    try self.reader.write_all(io, wire);
     self.answered = true;
     self.persisted = persist;
     return;
@@ -670,10 +579,10 @@ fn (self: &var std::http::Exchange) next_head(
     if !self.answered or self.body_open {
         return std::http::Error::ExchangeUnfinished;
     }
-    if self.inbound_bounded and self.inbound_owed > 0 {
+    if self.reader.owes() > 0 {
         return std::http::Error::ExchangeUnfinished;
     }
-    if self.inbound_chunked and !self.chunks.is_done() {
+    if self.reader.is_chunked() and !self.reader.chunks_done() {
         return std::http::Error::ExchangeUnfinished;
     }
     if !self.persisted {
@@ -681,7 +590,7 @@ fn (self: &var std::http::Exchange) next_head(
     }
     self.served = self.served + 1;
     try self.reopen(allocator);
-    if self.inbox.len() == 0 {
+    if self.reader.held_len() == 0 {
         // Nothing was read ahead, so whether there is another request is a
         // question for the socket. A peer that closed here is done, which is
         // the ordinary end of a persistent connection rather than a failure.
@@ -766,18 +675,13 @@ fn (self: &var std::http::Exchange) append_body(
 }
 
 // reopen returns this exchange to what `opening` made, keeping the connection
-// and moving what was read ahead of the last message to where the head scan
-// looks. The storage the last request grew is kept: a connection carrying
-// several requests reusing it is most of what keep-alive is for.
+// and whatever was read ahead of the last message. The storage the last
+// request grew is kept: a connection carrying several requests reusing it is
+// most of what keep-alive is for.
 fn (self: &var std::http::Exchange) reopen(
     allocator: Allocator
 ) -> std::http::Failure!void {
-    var carry = std::string::new(allocator);
-    defer carry.deinit(allocator);
-    try self.take_pending(allocator, &var carry);
-    self.inbox.clear();
-    try self.refill_inbox(allocator, &carry);
-    self.scanned = 0;
+    try self.reader.reopen(allocator);
     self.phase = std::http::Phase::ReadingHead;
     self.request.reset(allocator);
     self.response.reset(allocator);
@@ -786,35 +690,6 @@ fn (self: &var std::http::Exchange) reopen(
     self.framing = std::http::Framing::Buffered;
     self.owed = 0;
     self.counting = false;
-    self.inbound_chunked = false;
-    self.inbound_bounded = true;
-    self.inbound_owed = 0;
-    self.chunks = std::http::chunk_state_new(std::mem::Limit::Unlimited);
-    return;
-}
-
-fn (self: &var std::http::Exchange) refill_inbox(
-    allocator: Allocator,
-    carry: &std::string::String
-) -> std::http::Failure!void {
-    let bytes = carry.as_bytes();
-    try self.inbox.append_bytes(allocator, bytes);
-    return;
-}
-
-// take_pending moves what has been read ahead into `carry` and empties the
-// field, so the same String can hold what the next read leaves over.
-fn (self: &var std::http::Exchange) take_pending(
-    allocator: Allocator,
-    carry: &var std::string::String
-) -> std::http::Failure!void {
-    let held = self.pending.len() - self.pending_at;
-    if held > 0 {
-        let start = self.pending_at;
-        try self.copy_pending(allocator, carry, start, start + held);
-    }
-    self.pending.clear();
-    self.pending_at = 0;
     return;
 }
 
@@ -847,7 +722,7 @@ fn (self: &var std::http::Exchange) write_all(
         try self.write_chunk(io, allocator, bytes, count);
         return;
     }
-    try self.stream.write_all(io, bytes);
+    try self.reader.write_all(io, bytes);
     return;
 }
 
@@ -870,7 +745,7 @@ fn (self: &var std::http::Exchange) write_chunk(
     try out.append_bytes(allocator, bytes);
     try std::http::append_crlf(allocator, &var out);
     let wire = out.as_bytes();
-    try self.stream.write_all(io, wire);
+    try self.reader.write_all(io, wire);
     return;
 }
 
@@ -878,231 +753,51 @@ fn (self: &var std::http::Exchange) write_chunk(
 // protocol over. One phase's deadline is set when that phase starts; a caller
 // whose work is not one phase says so here.
 fn (self: &var std::http::Exchange) set_read_deadline(at: i64) -> void {
-    self.stream.set_read_deadline(at);
+    self.reader.set_read_deadline(at);
     return;
 }
 
 fn (self: &var std::http::Exchange) set_write_deadline(at: i64) -> void {
-    self.stream.set_write_deadline(at);
+    self.reader.set_write_deadline(at);
     return;
 }
 
 fn (self: &var std::http::Exchange) clear_read_deadline() -> void {
-    self.stream.clear_read_deadline();
+    self.reader.clear_read_deadline();
     return;
 }
 
 fn (self: &var std::http::Exchange) clear_write_deadline() -> void {
-    self.stream.clear_write_deadline();
+    self.reader.clear_write_deadline();
     return;
 }
 
-// read_into is how a caller reads what this server did not: a body left on
-// the connection by `accept_head`, or whatever a 101 upgraded to. It answers
-// the way `std::net::read_into` does -- how many bytes it appended, and 0 for
-// the end of the stream -- so the loop that knows when the message is complete
-// is still the caller's.
+// read_into and read_ready_into are how a caller reads what this server did
+// not: a body left on the connection by `accept_head`, or whatever a 101
+// upgraded to. The bytes that arrived behind the head come out first, which is
+// the reason these exist rather than the socket being handed over.
 //
-// The bytes that arrived behind the head come out first, which is the reason
-// this exists rather than the socket being handed over.
+// `read_into` waits under whatever deadline the phase set. `read_ready_into`
+// does not, and answers null for "nothing right now" -- a poller loop uses
+// that one, because waiting here would stop it for everyone else.
 fn (self: &var std::http::Exchange) read_into(
     io: Io,
     allocator: Allocator,
     out: &var std::string::String,
     max: i64
 ) -> std::http::Failure!i64 {
-    if max <= 0 {
-        return std::net::Error::InvalidLength;
-    }
-    if self.inbound_chunked {
-        let count = try self.read_chunked_into(io, allocator, out, max);
-        return count;
-    }
-    var want = max;
-    if self.inbound_bounded {
-        if self.inbound_owed <= 0 {
-            return 0;
-        }
-        if want > self.inbound_owed {
-            want = self.inbound_owed;
-        }
-    }
-    let held = self.pending.len() - self.pending_at;
-    if held > 0 {
-        let take = try self.hand_out_pending(allocator, out, want);
-        return take;
-    }
-    let count = try self.stream.read_into(io, allocator, out, want);
-    self.spend_inbound(count);
+    let count = try self.reader.read_into(io, allocator, out, max);
     return count;
 }
 
-// read_ready_into is `read_into` for a caller with a poller: it hands out what
-// has already arrived and answers null rather than waiting for more. Zero is
-// still the end of the body, which is what makes the two calls answer the same
-// question in the same words.
 fn (self: &var std::http::Exchange) read_ready_into(
     io: Io,
     allocator: Allocator,
     out: &var std::string::String,
     max: i64
 ) -> std::http::Failure!?i64 {
-    if max <= 0 {
-        return std::net::Error::InvalidLength;
-    }
-    if self.inbound_chunked {
-        let count = try self.read_ready_chunked_into(io, allocator, out, max);
-        return count;
-    }
-    var want = max;
-    if self.inbound_bounded {
-        if self.inbound_owed <= 0 {
-            return 0;
-        }
-        if want > self.inbound_owed {
-            want = self.inbound_owed;
-        }
-    }
-    let held = self.pending.len() - self.pending_at;
-    if held > 0 {
-        let take = try self.hand_out_pending(allocator, out, want);
-        return take;
-    }
-    let count = try self.stream.read_ready(io, allocator, out, want);
-    if count |got| {
-        self.spend_inbound(got);
-        return got;
-    }
-    return null;
-}
-
-// read_ready_chunked_into decodes what has arrived and stops there. Null is
-// the decoder wanting bytes the connection has not delivered yet.
-fn (self: &var std::http::Exchange) read_ready_chunked_into(
-    io: Io,
-    allocator: Allocator,
-    out: &var std::string::String,
-    max: i64
-) -> std::http::Failure!?i64 {
-    while true {
-        if self.chunks.is_done() {
-            return 0;
-        }
-        let take = try self.take_pending_chunks(allocator, out, max);
-        self.pending_at = take.consumed;
-        self.compact_pending();
-        if take.taken > 0 {
-            return take.taken;
-        }
-        if !take.need_more {
-            continue;
-        }
-        let got = try self.stream.read_ready(io, allocator, &var self.pending, 4096);
-        if got |count| {
-            if count == 0 {
-                return std::http::Error::Incomplete;
-            }
-        } else {
-            return null;
-        }
-    }
-    return null;
-}
-
-// hand_out_pending gives the caller what arrived behind the head, up to what
-// it asked for.
-fn (self: &var std::http::Exchange) hand_out_pending(
-    allocator: Allocator,
-    out: &var std::string::String,
-    want: i64
-) -> std::http::Failure!i64 {
-    let held = self.pending.len() - self.pending_at;
-    var take = held;
-    if take > want {
-        take = want;
-    }
-    let start = self.pending_at;
-    try self.copy_pending(allocator, out, start, start + take);
-    self.pending_at = start + take;
-    self.spend_inbound(take);
-    return take;
-}
-
-// read_chunked_into hands out the next decoded bytes of a chunked body,
-// refilling from the connection when the decoder runs out of whole pieces.
-// Zero is the terminator, which is the same answer `read_into` gives for the
-// end of any body.
-fn (self: &var std::http::Exchange) read_chunked_into(
-    io: Io,
-    allocator: Allocator,
-    out: &var std::string::String,
-    max: i64
-) -> std::http::Failure!i64 {
-    while true {
-        if self.chunks.is_done() {
-            return 0;
-        }
-        let take = try self.take_pending_chunks(allocator, out, max);
-        self.pending_at = take.consumed;
-        self.compact_pending();
-        if take.taken > 0 {
-            return take.taken;
-        }
-        if !take.need_more {
-            continue;
-        }
-        let got = try self.stream.read_into(io, allocator, &var self.pending, 4096);
-        if got == 0 {
-            return std::http::Error::Incomplete;
-        }
-    }
-    return 0;
-}
-
-fn (self: &var std::http::Exchange) take_pending_chunks(
-    allocator: Allocator,
-    out: &var std::string::String,
-    max: i64
-) -> std::http::Failure!std::http::ChunkTake {
-    // The decoder state is plain data, so it comes out by value and goes back
-    // in. Borrowing it and the buffer at once would be two borrows of `self`,
-    // and the state is six numbers -- copying it is cheaper than the shape
-    // that would avoid copying it.
-    let limits = self.limits;
-    let at = self.pending_at;
-    var chunks = self.chunks;
-    let take = try take_chunks(
-        allocator, &var chunks, &self.pending, at, limits, out, max);
-    self.chunks = chunks;
-    return take;
-}
-
-// compact_pending drops what has been handed out once nothing is left, so a
-// body larger than memory is read a buffer at a time rather than accumulated.
-fn (self: &var std::http::Exchange) compact_pending() -> void {
-    if self.pending_at >= self.pending.len() {
-        self.pending.clear();
-        self.pending_at = 0;
-    }
-    return;
-}
-
-fn (self: &var std::http::Exchange) spend_inbound(count: i64) -> void {
-    if self.inbound_bounded {
-        self.inbound_owed = self.inbound_owed - count;
-    }
-    return;
-}
-
-fn (self: &std::http::Exchange) copy_pending(
-    allocator: Allocator,
-    out: &var std::string::String,
-    from: i64,
-    to: i64
-) -> std::http::Failure!void {
-    let bytes = self.pending.as_bytes();
-    try out.append_bytes(allocator, bytes[from..to]);
-    return;
+    let count = try self.reader.read_ready_into(io, allocator, out, max);
+    return count;
 }
 
 // respond_text is the whole answer in one call: a status, a content type, and
@@ -1127,28 +822,11 @@ fn (self: &std::http::Exchange) is_answered() -> bool {
 }
 
 fn (self: std::http::Exchange) deinit(allocator: Allocator) -> void {
-    self.stream.deinit();
+    self.reader.deinit(allocator);
     self.request.deinit(allocator);
     self.response.deinit(allocator);
     self.body.deinit(allocator);
-    self.pending.deinit(allocator);
-    self.inbox.deinit(allocator);
     return;
-}
-
-// take_chunks is the decoder called with the buffer as its source. It is a
-// free function because the state and the bytes are two different borrows.
-fn take_chunks(
-    allocator: Allocator,
-    chunks: &var std::http::ChunkState,
-    buffer: &std::string::String,
-    at: i64,
-    limits: std::http::Limits,
-    out: &var std::string::String,
-    max: i64
-) -> std::http::Failure!std::http::ChunkTake {
-    let source = buffer.as_bytes();
-    return chunks.take(allocator, source, at, limits, out, max);
 }
 
 // refuse tells the peer why its request was not read. The caller never got an
@@ -1182,7 +860,7 @@ fn (self: &var std::http::Exchange) refuse(
         allocator, std::http::Version::Http11, std::http::Framing::Buffered,
         false, false, &var out) catch return;
     let wire = out.as_bytes();
-    self.stream.write_some(io, wire) catch return;
+    self.reader.write_some(io, wire) catch return;
     return;
 }
 

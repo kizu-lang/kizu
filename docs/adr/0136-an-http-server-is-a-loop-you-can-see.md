@@ -67,15 +67,14 @@ body の実際の長さを持つ `Content-Length` を運べます。代償は「
 runtime が「その descriptor は閉じている」と言うのではなく、書いた場所で
 拒否されます(原理 5)。
 
-### client は 2 つの半分としても公開する
+### client は分解しても公開する
 
 `get` / `post` / `fetch` は connect + write + read + close の 1 呼び出しですが、
-`write_request` と `read_response_from` も公開します。stream を所有するのは
-呼ぶ側です。
+書く側と読む側は `Connection` として別々にも呼べます(ADR-0143)。
 
 理由は 2 つあります。`get` は read で待つので、同じプロセスの server に対しては
-使えません(accept が同じ thread にある)—— 2 つの半分が、test が両端になれる
-唯一の道です。そしてこれは、まだ無い層 —— TLS、proxy —— が刺さる継ぎ目でも
+使えません(accept が同じ thread にある)—— 分解できることが、test が両端に
+なれる唯一の道です。そしてこれは、まだ無い層 —— TLS、proxy —— が刺さる継ぎ目でも
 あります。それらは stream を所有するのであって、client を置き換えるのでは
 ありません。
 

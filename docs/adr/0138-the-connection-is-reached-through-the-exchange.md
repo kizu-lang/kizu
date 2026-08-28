@@ -16,8 +16,9 @@ ADR-0136 の server は `accept` が `Exchange` を返し、`respond` が答え�
 - 大きな request —— body を上限の下で保持するので、upload は「読める」ではなく
   「上限まで」
 
-client 側は既に開いていました(`write_request` / `read_response_from` は caller の
-stream を取る)。閉じているのは server 側だけ、という非対称でした。
+client 側は既に開いていました —— caller の stream を取る 2 つの半分があったので。
+閉じているのは server 側だけ、という非対称でした(ADR-0143 が両側を同じ形に
+しました)。
 
 ## Decision
 

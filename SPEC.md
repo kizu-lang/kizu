@@ -3032,10 +3032,14 @@ coroutine が要り、function coloring が生えるためです。
   Go 1.22 `ServeMux` 綴りの pattern 1 つを照合して `!bool` を返す。
   routing は登録簿ではなく、呼ぶ側が書く質問
 * `std::http::get` / `post` / `fetch` / `fetch_with` は
-  `!std::http::ClientResponse` を返す。`https` は `Error::UnsupportedScheme`
-  —— TLS を持たないので、暗号化を頼まれたものを平文で送らない
-* `std::http::write_request` / `read_response_from` は client の 2 つの半分。
-  stream を所有するのは呼ぶ側
+  `!std::http::ClientResponse` を返す。body の上限は引数。`https` は
+  `Error::UnsupportedScheme` —— TLS を持たないので、暗号化を頼まれたものを
+  平文で送らない
+* `std::http::Connection` は client 側の接続と、読んで誰も取っていない byte。
+  `connect` が開き、`take` が caller の stream を包む。`send` が request を
+  書き、`receive` が答えの head を読んで止まり、body は `read_into` /
+  `read_ready_into` が出す。`read_body` が上限つきで `response.body` に読む。
+  `ClientResponse` の `body` が埋まるのはその経路だけ
 * `server.accept_ready(io, allocator)` は待たずに接続を取り、`?Exchange` を返す。
   その exchange に request はまだ無い。`exchange.advance(io, allocator)` が届いた
   分だけ head を進め、`std::http::Progress` —— `NeedMore`(poller に戻る)/

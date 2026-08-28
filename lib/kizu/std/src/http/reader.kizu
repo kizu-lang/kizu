@@ -1,0 +1,467 @@
+// A Reader is a connection and the bytes read off it that nobody has taken
+// yet. Both halves of std::http hold one: the server's `Exchange` and the
+// client's `Connection` differ in what they mean by a message, not in how
+// bytes arrive.
+//
+// It exists because reading a head reads whole packets. The first bytes of
+// the body are already in hand when the head is parsed, so a caller handed
+// the socket instead would skip them. Go's `http.ReadResponse` takes a
+// `*bufio.Reader` for exactly this reason, and its `Hijacker` returns a
+// buffered reader beside the connection rather than the connection alone.
+//
+// One buffer serves the head and the body. `at` is how much has been handed
+// out, so the body starts where the head ended without the bytes moving.
+pub struct Reader {
+    stream: std::net::TcpStream,
+    held: std::string::String,
+    at: i64,
+    // How far the head scan has looked. A CRLF CRLF can straddle a read
+    // boundary, so this resumes three bytes back rather than at the end --
+    // which is what keeps the scan linear over the head instead of quadratic
+    // in the number of reads.
+    scanned: i64,
+    // What is left of this message's body, so a read stops at the end of it
+    // rather than running on into whatever follows. Bounded at zero is a
+    // message with no body at all; unbounded is a caller that took the
+    // connection over.
+    owed: i64,
+    bounded: bool,
+    chunked: bool,
+    chunks: std::http::ChunkState,
+    limits: std::http::Limits,
+}
+
+pub fn reader_new(
+    allocator: Allocator,
+    stream: std::net::TcpStream,
+    limits: std::http::Limits
+) -> std::http::Reader {
+    return Reader {
+        stream: move stream,
+        held: std::string::new(allocator),
+        at: 0,
+        scanned: 0,
+        owed: 0,
+        bounded: true,
+        chunked: false,
+        chunks: std::http::chunk_state_new(std::mem::Limit::Unlimited),
+        limits: limits,
+    };
+}
+
+fn (self: std::http::Reader) deinit(allocator: Allocator) -> void {
+    self.stream.deinit();
+    self.held.deinit(allocator);
+    return;
+}
+
+// reopen returns the reader to reading a head, keeping whatever arrived behind
+// the last message. A connection carrying several messages reuses the storage,
+// which is most of what keep-alive is for.
+fn (self: &var std::http::Reader) reopen(allocator: Allocator) -> std::http::Failure!void {
+    try self.compact(allocator);
+    self.scanned = 0;
+    self.owed = 0;
+    self.bounded = true;
+    self.chunked = false;
+    self.chunks = std::http::chunk_state_new(std::mem::Limit::Unlimited);
+    return;
+}
+
+// compact drops what has been handed out, so a body larger than memory is read
+// a buffer at a time rather than accumulated.
+fn (self: &var std::http::Reader) compact(
+    allocator: Allocator
+) -> std::http::Failure!void {
+    if self.at <= 0 {
+        return;
+    }
+    if self.at >= self.held.len() {
+        self.held.clear();
+        self.at = 0;
+        return;
+    }
+    var tail = std::string::new(allocator);
+    defer tail.deinit(allocator);
+    let from = self.at;
+    let end = self.held.len();
+    try self.copy_held(allocator, from, end, &var tail);
+    self.held.clear();
+    self.at = 0;
+    try self.take_tail(allocator, &tail);
+    return;
+}
+
+fn (self: &var std::http::Reader) take_tail(
+    allocator: Allocator,
+    tail: &std::string::String
+) -> std::http::Failure!void {
+    let bytes = tail.as_bytes();
+    try self.held.append_bytes(allocator, bytes);
+    return;
+}
+
+fn (self: &std::http::Reader) copy_held(
+    allocator: Allocator,
+    from: i64,
+    to: i64,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    if from >= to {
+        return;
+    }
+    let bytes = self.held.as_bytes();
+    try out.append_bytes(allocator, bytes[from..to]);
+    return;
+}
+
+// find_head answers how long the head is, once all of it has arrived. Null is
+// "not yet", and the scan resumes where the last one stopped.
+fn (self: &var std::http::Reader) find_head() -> ?i64 {
+    let bytes = self.held.as_bytes();
+    let found = std::http::head_end(bytes, self.scanned);
+    if found |end| {
+        return end - self.at;
+    }
+    var next = self.held.len() - 3;
+    if next < self.at {
+        next = self.at;
+    }
+    self.scanned = next;
+    return null;
+}
+
+// held_len is how many bytes have arrived towards the message being read.
+fn (self: &std::http::Reader) held_len() -> i64 {
+    return self.held.len() - self.at;
+}
+
+fn (self: &std::http::Reader) copy_head(
+    allocator: Allocator,
+    length: i64,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    let from = self.at;
+    try self.copy_held(allocator, from, from + length, out);
+    return;
+}
+
+// took marks bytes as handed out. The head calls it once; the body calls it
+// as it is read.
+fn (self: &var std::http::Reader) took(count: i64) -> void {
+    self.at = self.at + count;
+    self.scanned = self.at;
+    return;
+}
+
+// The three ways a message says where its body ends, and the fourth that says
+// this module is no longer the one framing it.
+fn (self: &var std::http::Reader) bind_length(length: i64) -> void {
+    self.chunked = false;
+    self.bounded = true;
+    self.owed = length;
+    return;
+}
+
+fn (self: &var std::http::Reader) bind_chunked(limit: std::mem::Limit) -> void {
+    self.chunked = true;
+    self.bounded = false;
+    self.owed = 0;
+    self.chunks = std::http::chunk_state_new(limit);
+    return;
+}
+
+fn (self: &var std::http::Reader) bind_until_close() -> void {
+    self.chunked = false;
+    self.bounded = false;
+    self.owed = 0;
+    return;
+}
+
+fn (self: &std::http::Reader) owes() -> i64 {
+    if !self.bounded {
+        return 0;
+    }
+    return self.owed;
+}
+
+fn (self: &std::http::Reader) is_bounded() -> bool {
+    return self.bounded;
+}
+
+fn (self: &std::http::Reader) is_chunked() -> bool {
+    return self.chunked;
+}
+
+fn (self: &std::http::Reader) chunks_done() -> bool {
+    return self.chunks.is_done();
+}
+
+// fill_waiting reads once, waiting under whatever deadline the phase set.
+fn (self: &var std::http::Reader) fill_waiting(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!i64 {
+    let count = try self.stream.read_into(io, allocator, &var self.held, 4096);
+    return count;
+}
+
+// fill_ready reads once without waiting. Null is "nothing right now"; zero is
+// the peer closing, which is a different answer.
+fn (self: &var std::http::Reader) fill_ready(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!?i64 {
+    let count = try self.stream.read_ready(io, allocator, &var self.held, 4096);
+    return count;
+}
+
+// read_into hands out the body, waiting for it when it has not arrived. It
+// answers the way `std::net::read_into` does -- how many bytes it appended, and
+// 0 for the end -- so the loop that knows when a message is complete stays the
+// caller's. Zero is the end whichever framing carried it, which is why that
+// loop does not have to know which one.
+fn (self: &var std::http::Reader) read_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!i64 {
+    if max <= 0 {
+        return std::net::Error::InvalidLength;
+    }
+    if self.chunked {
+        let count = try self.read_chunked_into(io, allocator, out, max);
+        return count;
+    }
+    var want = max;
+    if self.bounded {
+        if self.owed <= 0 {
+            return 0;
+        }
+        if want > self.owed {
+            want = self.owed;
+        }
+    }
+    if self.held_len() > 0 {
+        let take = try self.hand_out(allocator, out, want);
+        return take;
+    }
+    let count = try self.stream.read_into(io, allocator, out, want);
+    self.spend(count);
+    return count;
+}
+
+// read_ready_into is the same read for a caller with a poller: it hands out
+// what has already arrived and answers null rather than waiting for more.
+fn (self: &var std::http::Reader) read_ready_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!?i64 {
+    if max <= 0 {
+        return std::net::Error::InvalidLength;
+    }
+    if self.chunked {
+        let count = try self.read_ready_chunked_into(io, allocator, out, max);
+        return count;
+    }
+    var want = max;
+    if self.bounded {
+        if self.owed <= 0 {
+            return 0;
+        }
+        if want > self.owed {
+            want = self.owed;
+        }
+    }
+    if self.held_len() > 0 {
+        let take = try self.hand_out(allocator, out, want);
+        return take;
+    }
+    let count = try self.stream.read_ready(io, allocator, out, want);
+    if count |got| {
+        self.spend(got);
+        return got;
+    }
+    return null;
+}
+
+// read_chunked_into hands out the next decoded bytes of a chunked body,
+// refilling from the connection when the decoder runs out of whole pieces.
+fn (self: &var std::http::Reader) read_chunked_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!i64 {
+    while true {
+        if self.chunks.is_done() {
+            return 0;
+        }
+        let take = try self.decode(allocator, out, max);
+        if take.taken > 0 {
+            return take.taken;
+        }
+        if !take.need_more {
+            continue;
+        }
+        let got = try self.fill_waiting(io, allocator);
+        if got == 0 {
+            return std::http::Error::Incomplete;
+        }
+    }
+    return 0;
+}
+
+// read_ready_chunked_into decodes what has arrived and stops there. Null is
+// the decoder wanting bytes the connection has not delivered yet.
+fn (self: &var std::http::Reader) read_ready_chunked_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!?i64 {
+    while true {
+        if self.chunks.is_done() {
+            return 0;
+        }
+        let take = try self.decode(allocator, out, max);
+        if take.taken > 0 {
+            return take.taken;
+        }
+        if !take.need_more {
+            continue;
+        }
+        let got = try self.fill_ready(io, allocator);
+        if got |count| {
+            if count == 0 {
+                return std::http::Error::Incomplete;
+            }
+        } else {
+            return null;
+        }
+    }
+    return null;
+}
+
+// decode runs the chunk decoder over what has arrived and marks what it read.
+// The decoder state comes out by value and goes back in: borrowing it and the
+// buffer at once would be two borrows of `self`, and the state is six numbers
+// -- copying it is cheaper than the shape that would avoid copying it.
+fn (self: &var std::http::Reader) decode(
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!std::http::ChunkTake {
+    let limits = self.limits;
+    let at = self.at;
+    var chunks = self.chunks;
+    let take = try take_chunks(allocator, &var chunks, &self.held, at, limits, out, max);
+    self.chunks = chunks;
+    self.at = take.consumed;
+    self.scanned = self.at;
+    try self.compact(allocator);
+    return take;
+}
+
+// take_chunks is the decoder called with the buffer as its source. It is a
+// free function because the state and the bytes are two different borrows.
+fn take_chunks(
+    allocator: Allocator,
+    chunks: &var std::http::ChunkState,
+    buffer: &std::string::String,
+    at: i64,
+    limits: std::http::Limits,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!std::http::ChunkTake {
+    let source = buffer.as_bytes();
+    return chunks.take(allocator, source, at, limits, out, max);
+}
+
+// hand_out gives the caller what arrived behind the head, up to what it asked
+// for.
+fn (self: &var std::http::Reader) hand_out(
+    allocator: Allocator,
+    out: &var std::string::String,
+    want: i64
+) -> std::http::Failure!i64 {
+    var take = self.held_len();
+    if take > want {
+        take = want;
+    }
+    let from = self.at;
+    try self.copy_held(allocator, from, from + take, out);
+    self.at = from + take;
+    self.scanned = self.at;
+    self.spend(take);
+    try self.compact(allocator);
+    return take;
+}
+
+fn (self: &var std::http::Reader) spend(count: i64) -> void {
+    if self.bounded {
+        self.owed = self.owed - count;
+    }
+    return;
+}
+
+// The connection itself, for what a message is not: writing a body this module
+// did not frame, and the deadlines a caller whose work is not one phase sets.
+fn (self: &var std::http::Reader) write_all(
+    io: Io,
+    bytes: []u8
+) -> std::http::Failure!void {
+    try self.stream.write_all(io, bytes);
+    return;
+}
+
+fn (self: &var std::http::Reader) write_some(
+    io: Io,
+    bytes: []u8
+) -> std::http::Failure!i64 {
+    let count = try self.stream.write_some(io, bytes);
+    return count;
+}
+
+fn (self: &var std::http::Reader) arm_read(millis: i64) -> void {
+    std::http::arm_read(&var self.stream, millis);
+    return;
+}
+
+fn (self: &var std::http::Reader) arm_write(millis: i64) -> void {
+    std::http::arm_write(&var self.stream, millis);
+    return;
+}
+
+fn (self: &var std::http::Reader) set_read_deadline(at: i64) -> void {
+    self.stream.set_read_deadline(at);
+    return;
+}
+
+fn (self: &var std::http::Reader) set_write_deadline(at: i64) -> void {
+    self.stream.set_write_deadline(at);
+    return;
+}
+
+fn (self: &var std::http::Reader) clear_read_deadline() -> void {
+    self.stream.clear_read_deadline();
+    return;
+}
+
+fn (self: &var std::http::Reader) clear_write_deadline() -> void {
+    self.stream.clear_write_deadline();
+    return;
+}
+
+fn (self: &std::http::Reader) watch(
+    io: Io,
+    poller: &var std::net::Poller,
+    token: i64,
+    interest: std::net::Interest
+) -> std::http::Failure!void {
+    try poller.watch_stream(io, &self.stream, token, interest);
+    return;
+}

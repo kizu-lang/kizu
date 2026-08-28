@@ -659,24 +659,35 @@ pub struct ClientResponse {
     pub body: std::string::String,
 }
 
-pub fn get(io, allocator, url) -> std::http::Failure!std::http::ClientResponse
-pub fn post(io, allocator, url, content_type, body)
+pub fn get(io, allocator, url, max) -> std::http::Failure!std::http::ClientResponse
+pub fn post(io, allocator, url, content_type, body, max)
     -> std::http::Failure!std::http::ClientResponse
-pub fn fetch(io, allocator, method, url, content_type, body)
+pub fn fetch(io, allocator, method, url, content_type, body, max)
     -> std::http::Failure!std::http::ClientResponse
-pub fn fetch_with(io, allocator, method, url, content_type, body, limits)
+pub fn fetch_with(io, allocator, method, url, content_type, body, limits, max)
     -> std::http::Failure!std::http::ClientResponse
 
-pub fn write_request(io, allocator, stream, method, url: &Url, content_type, body)
+pub fn connect(io, allocator, address, limits)
+    -> std::http::Failure!std::http::Connection
+pub fn take(allocator, stream: std::net::TcpStream, limits) -> std::http::Connection
+fn (self: &var Connection) send(io, allocator, method, url: &Url, content_type, body, write_millis)
     -> std::http::Failure!void
-pub fn read_response_from(io, allocator, stream, method, limits)
+fn (self: &var Connection) receive(io, allocator, method, limits)
     -> std::http::Failure!std::http::ClientResponse
+fn (self: &var Connection) read_into(io, allocator, out, max) -> std::http::Failure!i64
+fn (self: &var Connection) read_ready_into(io, allocator, out, max)
+    -> std::http::Failure!?i64
+fn (self: &var Connection) read_body(io, allocator, response: &var ClientResponse, max)
+    -> std::http::Failure!void
+fn (self: Connection) deinit(allocator) -> void
+
 pub fn parse_response_head(allocator, head, limits)
     -> std::http::Failure!std::http::ClientResponse
 ```
 
-`get` は 1 呼び出しです —— connect、write、答えを丸ごと read、close。
-`Connection: close` を送ったとおりに閉じます。
+`get` は 1 呼び出しです —— connect、write、答えを `max` byte まで read、close。
+`Connection: close` を送ったとおりに閉じます。上限が引数なのは server 側と同じ
+理由で、答えの大きさは**それを求めた側**が知っているものだからです。
 
 **connection pool も redirect 追従もありません。** どちらも policy(socket を
 どれだけ保つか、別 host への 301 は同じ request か)で、library が選んだ policy は
@@ -685,25 +696,55 @@ pub fn parse_response_head(allocator, head, limits)
 `ClientResponse` は `Response` とは別の型です。片方は server がまだ組み立てて
 いるもの、もう片方は client がもう持っているものだからです(原理 7)。
 
-### 2 つに割れている理由
+### `Connection` —— 答えを保持しないで読む
 
-`get` は connect して write して **read で待つ**ので、同じプロセスの server に
-対しては使えません —— 答えるはずの accept が同じ thread にあるからです。これは
-並行性の欠落(SPEC §15)であって client の欠落ではありません。
+`get` は答えを丸ごとメモリに載せます。2 GB の download にはそれが要りません。
 
-だから `write_request` と `read_response_from` が公開されています。stream を
-持つのは呼ぶ側で、`fetch` はその 2 つを connect で挟んだものです。これは同時に、
-まだ無い層が刺さる継ぎ目でもあります —— TLS も proxy も、client ではなく stream を
-所有します。
+```kizu
+var open = try http::connect(handle, allocator, "example.com:80", limits);
+defer open.deinit(allocator);
+try open.send(handle, allocator, "GET", &url, "", "", limits.write_millis);
+var head = try open.receive(handle, allocator, "GET", limits);   // 空行で止まる
+defer head.deinit(allocator);
+var piece = string::new(allocator);
+defer piece.deinit(allocator);
+var got = try open.read_into(handle, allocator, &var piece, 4096);
+while got > 0 {
+    // piece を file に流す
+    piece.clear();
+    got = try open.read_into(handle, allocator, &var piece, 4096);
+}
+```
+
+server 側の `accept` と `accept_head` と**同じ割れ方**です。`receive` は head で
+止め、body は接続に残して `read_into` に任せます。`response.body` が埋まるのは
+`fetch` 族と `read_body` を呼んだときだけです。
+
+**stream は返しません。** head を読むと packet 単位で読むので、body の先頭 byte は
+既に `Connection` の中にあります。socket を渡すと caller はそこを飛ばします。Go の
+`http.ReadResponse` が `net.Conn` ではなく `*bufio.Reader` を取るのと同じ理由です。
+
+TLS や proxy は `take` で刺さります —— stream を包むのが `TcpStream` か別のものかの
+違いになるだけです。
+
+### 同じプロセスの server には `get` を使えません
+
+`get` は connect して write して **read で待つ**ので、答えるはずの accept が同じ
+thread にあると止まります。これは並行性の欠落(SPEC §15)であって client の欠落
+ではありません。両端を 1 プロセスで持つ test は `Connection` の `send` と
+`receive` を別々に呼びます。
 
 ### 答えの framing
 
-`Content-Length` があればその長さちょうど。無ければ **close が framing** です ——
-`Connection: close` を送ったので、end of stream が body の終わりです。推測では
-なく、protocol がそう言っています。
+`Content-Length` があればその長さちょうど。`Transfer-Encoding: chunked` なら
+terminator まで。どちらも無ければ **close が framing** です —— `Connection: close`
+を送ったので、end of stream が body の終わりです。推測ではなく、protocol が
+そう言っています。
 
-`Transfer-Encoding` のある答えは `Error::UnsupportedEncoding` です。HEAD の答えと
-1xx / 204 / 304 は body を取りません。
+`Content-Length` と `Transfer-Encoding` が両方あれば `Error::ConflictingFraming`
+です。server 側と同じ規則で、同じ decoder が両方向を読みます。
+
+HEAD の答えと 1xx / 204 / 304 は body を取りません。
 
 ## Cookie
 

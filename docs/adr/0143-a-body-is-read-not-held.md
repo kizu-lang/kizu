@@ -38,6 +38,14 @@ head の大きさは protocol の都合で全 endpoint 共通、body の大き�
 `accept` は残します。Go にも Zig にも無い関数ですが、Kizu には closure も GC も
 無いので `accept_head` + 読み loop は 4 行で、便利関数の価値がそのぶん高い。
 
+client も同じ形です。`Connection` が接続と先読み byte を持ち、`receive` が head で
+止まり、body は `read_into` が出します。`ClientResponse.body` が埋まるのは
+`fetch` 族と `read_body` を呼んだときだけ —— server の `accept` と `accept_head`
+と同じ割れ方です。
+
+`Reader` が両側の下にあります。server の `Exchange` と client の `Connection` は
+「message とは何か」で違うだけで、byte の届き方は同じものだったので。
+
 ## Consequences
 
 **畳むのは結果として起きました。** body を保持しなくなると blocking 側の
@@ -61,3 +69,5 @@ framing を持たない request は body ゼロで確定します。以前は「
 | `accept` が caller の String に読む | `accept_head` + 読み loop と同じ行数になり、便利関数である理由が消える |
 | `body` を `Request` に残し、`accept_head` のときだけ空にする | 「入っているか」が呼んだ関数で決まる field を、head だけを表す型に置くことになる。`Exchange` は接続を持つので、body がそこにあるのは読める |
 | `read_into` が待たない版を持たない | poller の loop から body を読む道が無くなる。`advance` が head で止まる以上、body の読みにも待たない版が要る |
+| client は body を持ったままにする | 同じ穴が残る —— 2 GB の download が保持される。そして読み出し口を 2 つ書くことになり、片方だけが直る |
+| client の読み出し口を `ClientResponse` に置く | 先読み byte を持つのは接続の側。`ClientResponse` に持たせるには stream を所有させるか borrow を field に持つかで、後者は Kizu が書けない(`docs/language-gaps.md`)|
