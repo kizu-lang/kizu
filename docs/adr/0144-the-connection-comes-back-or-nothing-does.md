@@ -13,11 +13,9 @@ sweep を手で書きます。`examples/http_evented.kizu` がその全部です
 **書き忘れると穴が開きます。** sweep を書かなければ、繋いで黙る相手を server は
 永遠に抱えます(ADR-0143 の後に足した `expired` は、書けば塞げるところまで)。
 
-Go は `ListenAndServe(addr, handler)` で loop を持ちます。Kizu で同じ形を書くには
-`serve<handler: Function>` が要りますが、**`Function` static parameter は Kizu の
-body から呼べません** —— `worker(x)` は `undefined function` です。SPEC §16.4 の
-「std wrapper が primitive に転送する」がそのまま実装の限界で、`std::meta::construct`
-が worker を呼べるのは compiler が呼び出しを合成しているからです。
+Go は `ListenAndServe(addr, handler)` で loop を持ちます。**Kizu でも書けます** ——
+関数 pointer 型(`fn(...) -> ...`、SPEC §5)があり、top-level function の名前は
+値になります。書けないのは handler の**形**の方です。
 
 ## Decision
 
@@ -57,7 +55,8 @@ current = try turn(handle, allocator, &var server, move current);
 
 | 案 | 却下理由 |
 | --- | --- |
-| `serve<handler: Function>`(Go の形) | `Function` static parameter を Kizu の body から呼べない。言語側(2 実装)の作業が先に要る。そして Zig は関数 pointer を渡せるのに `receiveHead` の pull を選んでいる —— closure も関数 pointer も無い Kizu では、pull は妥協ではなく順当 |
+| `serve(io, allocator, server, handler)`(Go の形) | ADR-0136 が同じ判断を既にしている —— 登録簿から選ばれた handler の呼び出しは呼び出し元の source に無く、それが原理 2 の言う hidden control flow。書けるかどうかの話ではない。Zig も関数 pointer を渡せるのに `receiveHead` の pull を選んでいる。そして B の形は「返し忘れ」を型で禁じられる —— handler の形にはこの性質が無い |
+| 関数 pointer で handler を取る | 今日の関数 pointer 型は borrow を運べない。`fn(Io, Allocator, &var Exchange) -> !void` は宣言できるが、呼ぶときに借用が borrow と認識されない(`docs/language-gaps.md`)。上の理由で採らないが、採ろうとしてもこれが先に当たる |
 | `next_request()` が渡すだけで、`give_back()` が別にある | 返し忘れが新しい footgun になる。忘れられない形にできるなら、忘れられる形を出す理由が無い |
 | `next` が `&var Exchange` を返す | struct field への borrow を返す method を書けない(`docs/language-gaps.md`)。ADR-0138 が `Exchange.stream()` を却下したのと同じ壁 |
 | `stop()` を server の capability にする | 単一 thread で signal も無い今、呼べる場所は loop の中だけで、そこには既に `break` がある。呼べない capability を名乗らない |

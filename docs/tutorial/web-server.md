@@ -39,8 +39,11 @@ try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
 
 Go は `http.HandleFunc` で関数を渡せるから渡します。Zig は関数 pointer を渡せる
 のに渡さず、`receiveHead` の pull にしています —— control flow が source に見えた
-ままになる形だからです(`docs/principles.md` §2)。Kizu には closure も関数 pointer
-も無いので、pull は妥協ではなく順当な選択です。
+ままになる形だからです(`docs/principles.md` §2)。
+
+**Kizu にも関数 pointer はあります**(`fn(i64) -> i64`、`SPEC.md` §5)。pull なのは
+書けないからではなく、Zig と同じ判断をしたからです(ADR-0136)。closure は無いので、
+handler が状態を捕捉することはどのみちできません。
 
 もう 1 つ: **`accept` は 1 接続ずつです。** 2 人目の caller は 1 人目が答え終わる
 まで listen backlog で待ちます。多数を 1 thread で捌くには `first` と `next` を

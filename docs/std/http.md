@@ -19,7 +19,8 @@ try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
 共有する理由がありません。
 
 Go と Zig はどちらも handler を取りますが、それはどちらも handler を**渡せる**
-からです。Kizu の関数値は borrow を運べないので、handler に request を渡せません。
+からです。Kizu にも関数 pointer はありますが borrow を運べないので、handler に
+request を渡せません。
 残るのは pull の loop で、それは control flow が見えたままになる形でもあります
 (`docs/principles.md` §2)。
 
