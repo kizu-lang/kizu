@@ -304,9 +304,7 @@ fn read_response_body(
     method: []u8,
     limits: std::http::Limits
 ) -> std::http::Failure!void {
-    if response.headers.has("Transfer-Encoding") {
-        return std::http::Error::UnsupportedEncoding;
-    }
+    let chunked = try std::http::chunked_framing(&response.headers);
     // A HEAD answer carries the length the body would have had and none of it,
     // and 1xx / 204 / 304 carry no body at all.
     if std::mem::equal_bytes(method, "HEAD") {
@@ -317,6 +315,11 @@ fn read_response_body(
     }
     // The body gets its own deadline, the way the server's does.
     std::http::arm_read(stream, limits.read_body_millis);
+    if chunked {
+        try read_chunked_response(
+            io, allocator, stream, buffer, &var response.body, head_length, limits);
+        return;
+    }
     let declared = try content_length(response);
     if declared |length| {
         if length > limits.max_body_bytes {
@@ -343,6 +346,47 @@ fn read_response_body(
     }
     try copy_response_body(allocator, buffer, response, head_length, buffer.len() - head_length);
     return;
+}
+
+// read_chunked_response decodes until the terminator, refilling from the
+// connection whenever the decoder runs out of whole pieces.
+fn read_chunked_response(
+    io: Io,
+    allocator: Allocator,
+    stream: &var std::net::TcpStream,
+    buffer: &var std::string::String,
+    body: &var std::string::String,
+    head_length: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!void {
+    var chunks = std::http::chunk_state_new(
+        std::mem::Limit::Bytes(limits.max_body_bytes));
+    var at = head_length;
+    while !chunks.is_done() {
+        let take = try take_response_chunks(
+            allocator, &var chunks, buffer, at, limits, body, limits.max_body_bytes);
+        at = take.consumed;
+        if take.need_more {
+            let got = try stream.read_into(io, allocator, buffer, 4096);
+            if got == 0 {
+                return std::http::Error::Incomplete;
+            }
+        }
+    }
+    return;
+}
+
+fn take_response_chunks(
+    allocator: Allocator,
+    chunks: &var std::http::ChunkState,
+    buffer: &std::string::String,
+    at: i64,
+    limits: std::http::Limits,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!std::http::ChunkTake {
+    let source = buffer.as_bytes();
+    return chunks.take(allocator, source, at, limits, out, max);
 }
 
 fn content_length(

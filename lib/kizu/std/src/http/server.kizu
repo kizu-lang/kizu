@@ -84,6 +84,14 @@ fn (self: &var std::http::Server) accept_head(
 // whatever the peer sent next, which on a connection carrying more than one
 // request is the next request.
 fn (self: &var std::http::Exchange) bound_inbound() -> std::http::Failure!void {
+    if try std::http::chunked_framing(&self.request.headers) {
+        // A chunked body has no number in the head; the terminator is what
+        // says it ended, so the decoder is the bound.
+        self.inbound_chunked = true;
+        self.inbound_bounded = false;
+        self.inbound_owed = 0;
+        return;
+    }
     let declared = try self.request.content_length();
     if declared |length| {
         self.inbound_owed = length;
@@ -125,6 +133,8 @@ fn (self: &var std::http::Server) accept_message(
             counting: false,
             inbound_owed: 0,
             inbound_bounded: false,
+            inbound_chunked: false,
+            chunks: std::http::chunk_state_new(std::mem::Limit::Unlimited),
             served: 0,
             persisted: false,
             limits: self.limits,
@@ -173,6 +183,10 @@ pub struct Exchange {
     // whatever follows it.
     inbound_owed: i64,
     inbound_bounded: bool,
+    // Where a chunked request body has got to, when the caller is the one
+    // reading it. `inbound_chunked` says which of the two bounds applies.
+    inbound_chunked: bool,
+    chunks: std::http::ChunkState,
     // How many requests this connection has answered, and whether the last
     // answer left it able to carry another.
     served: i64,
@@ -356,6 +370,9 @@ fn (self: &var std::http::Exchange) next(
     if self.inbound_bounded and self.inbound_owed > 0 {
         return std::http::Error::ExchangeUnfinished;
     }
+    if self.inbound_chunked and !self.chunks.is_done() {
+        return std::http::Error::ExchangeUnfinished;
+    }
     if !self.persisted {
         return false;
     }
@@ -381,6 +398,10 @@ fn (self: &var std::http::Exchange) next(
     self.framing = std::http::Framing::Buffered;
     self.owed = 0;
     self.counting = false;
+    self.inbound_chunked = false;
+    self.inbound_bounded = false;
+    self.inbound_owed = 0;
+    self.chunks = std::http::chunk_state_new(std::mem::Limit::Unlimited);
     try self.read_next_request(io, allocator, &carry);
     return true;
 }
@@ -510,6 +531,10 @@ fn (self: &var std::http::Exchange) read_into(
     if max <= 0 {
         return std::net::Error::InvalidLength;
     }
+    if self.inbound_chunked {
+        let count = try self.read_chunked_into(io, allocator, out, max);
+        return count;
+    }
     var want = max;
     if self.inbound_bounded {
         if self.inbound_owed <= 0 {
@@ -534,6 +559,65 @@ fn (self: &var std::http::Exchange) read_into(
     let count = try self.stream.read_into(io, allocator, out, want);
     self.spend_inbound(count);
     return count;
+}
+
+// read_chunked_into hands out the next decoded bytes of a chunked body,
+// refilling from the connection when the decoder runs out of whole pieces.
+// Zero is the terminator, which is the same answer `read_into` gives for the
+// end of any body.
+fn (self: &var std::http::Exchange) read_chunked_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!i64 {
+    while true {
+        if self.chunks.is_done() {
+            return 0;
+        }
+        let take = try self.take_pending_chunks(allocator, out, max);
+        self.pending_at = take.consumed;
+        self.compact_pending();
+        if take.taken > 0 {
+            return take.taken;
+        }
+        if !take.need_more {
+            continue;
+        }
+        let got = try self.stream.read_into(io, allocator, &var self.pending, 4096);
+        if got == 0 {
+            return std::http::Error::Incomplete;
+        }
+    }
+    return 0;
+}
+
+fn (self: &var std::http::Exchange) take_pending_chunks(
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!std::http::ChunkTake {
+    // The decoder state is plain data, so it comes out by value and goes back
+    // in. Borrowing it and the buffer at once would be two borrows of `self`,
+    // and the state is six numbers -- copying it is cheaper than the shape
+    // that would avoid copying it.
+    let limits = self.limits;
+    let at = self.pending_at;
+    var chunks = self.chunks;
+    let take = try take_chunks(
+        allocator, &var chunks, &self.pending, at, limits, out, max);
+    self.chunks = chunks;
+    return take;
+}
+
+// compact_pending drops what has been handed out once nothing is left, so a
+// body larger than memory is read a buffer at a time rather than accumulated.
+fn (self: &var std::http::Exchange) compact_pending() -> void {
+    if self.pending_at >= self.pending.len() {
+        self.pending.clear();
+        self.pending_at = 0;
+    }
+    return;
 }
 
 fn (self: &var std::http::Exchange) spend_inbound(count: i64) -> void {
@@ -622,17 +706,16 @@ fn read_request_into(
     std::http::arm_read(stream, limits.read_head_millis);
     let head_length = try std::http::read_head(io, allocator, stream, &var buffer, limits);
     try parse_request_at(allocator, &buffer, head_length, limits, request);
-    // Guessing how a body is framed is how two requests become one (request
-    // smuggling), so a framing this server does not speak is refused whether
-    // or not it is the one reading the body.
-    if request.headers.has("Transfer-Encoding") {
-        return std::http::Error::UnsupportedEncoding;
-    }
+    // How the body is framed is decided here for both paths, because a message
+    // that says two things about its own length is what turns one request into
+    // two (request smuggling) whoever ends up reading it.
+    let chunked = try std::http::chunked_framing(&request.headers);
     var consumed = head_length;
     if read_body {
-        let length = try read_request_body(
-            io, allocator, stream, &var buffer, request, head_length, limits);
-        consumed = head_length + length;
+        let used = try read_request_body(
+            io, allocator, stream, &var buffer, request, head_length, limits,
+            chunked);
+        consumed = head_length + used;
     }
     try copy_tail(allocator, &buffer, pending, consumed);
     return;
@@ -667,10 +750,13 @@ fn parse_request_at(
     return;
 }
 
-// read_body reads what Content-Length declared and copies it into the request.
-// A message with no Content-Length has no body: without one there is nothing
-// that says where a body would end, and guessing is how two requests become
-// one (request smuggling).
+// read_request_body reads the body into the request and answers how many bytes
+// of the connection that used -- which is not the body's length when it was
+// chunked, because the sizes and the CRLFs were on the wire too.
+//
+// A message with neither Content-Length nor chunked framing has no body:
+// without one there is nothing that says where a body would end, and guessing
+// is how two requests become one.
 fn read_request_body(
     io: Io,
     allocator: Allocator,
@@ -678,8 +764,15 @@ fn read_request_body(
     buffer: &var std::string::String,
     request: &var std::http::Request,
     head_length: i64,
-    limits: std::http::Limits
+    limits: std::http::Limits,
+    chunked: bool
 ) -> std::http::Failure!i64 {
+    if chunked {
+        std::http::arm_read(stream, limits.read_body_millis);
+        let used = try read_chunked_body(
+            io, allocator, stream, buffer, &var request.body, head_length, limits);
+        return used;
+    }
     let declared = try request.content_length();
     var length = 0;
     if declared |value| {
@@ -703,6 +796,51 @@ fn read_request_body(
     }
     try copy_request_body(allocator, buffer, request, head_length, length);
     return length;
+}
+
+// read_chunked_body decodes until the terminator, refilling the buffer from
+// the connection whenever the decoder runs out of whole pieces to read.
+fn read_chunked_body(
+    io: Io,
+    allocator: Allocator,
+    stream: &var std::net::TcpStream,
+    buffer: &var std::string::String,
+    body: &var std::string::String,
+    head_length: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!i64 {
+    // This body is being read into memory, so the ceiling the caller named is
+    // the one that bounds it.
+    var chunks = std::http::chunk_state_new(
+        std::mem::Limit::Bytes(limits.max_body_bytes));
+    var at = head_length;
+    while !chunks.is_done() {
+        let take = try take_chunks(
+            allocator, &var chunks, buffer, at, limits, body, limits.max_body_bytes);
+        at = take.consumed;
+        if take.need_more {
+            let got = try stream.read_into(io, allocator, buffer, 4096);
+            if got == 0 {
+                return std::http::Error::Incomplete;
+            }
+        }
+    }
+    return at - head_length;
+}
+
+// take_chunks is the decoder called with the buffer as its source. It is a
+// free function because the state and the bytes are two different borrows.
+fn take_chunks(
+    allocator: Allocator,
+    chunks: &var std::http::ChunkState,
+    buffer: &std::string::String,
+    at: i64,
+    limits: std::http::Limits,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!std::http::ChunkTake {
+    let source = buffer.as_bytes();
+    return chunks.take(allocator, source, at, limits, out, max);
 }
 
 fn copy_request_body(
@@ -753,6 +891,8 @@ fn refusal_status(failure: std::http::Failure) -> i64 {
         MalformedRequest => 400,
         Incomplete => 400,
         InvalidHeader => 400,
+        MalformedChunk => 400,
+        ConflictingFraming => 400,
         HeadTooLarge => 431,
         BodyTooLarge => 413,
         UnsupportedVersion => 505,

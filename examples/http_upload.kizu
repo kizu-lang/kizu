@@ -12,6 +12,12 @@
 // `read_into` rather than the socket, because reading a head reads whole
 // packets: the first bytes of the body are usually already in hand, and a
 // read that went straight to the socket would skip past them.
+//
+// The second half sends the same body chunked -- `Transfer-Encoding: chunked`,
+// no Content-Length -- which is what a client that does not know the length in
+// advance sends. `read_into` decodes it, so the loop above it is the same
+// loop. What the caller counts is the body, not the sizes and CRLFs that
+// carried it.
 
 import std::fmt;
 import std::http;
@@ -47,6 +53,53 @@ fn main() -> Failure!void {
 
     try weigh(handle, allocator, &var server);
     try show(handle, allocator, &var client);
+
+    // The same body again, chunked. Nothing above the decoder changes.
+    var chunked_client = try open_client(handle, allocator, port);
+    defer chunked_client.deinit();
+    try chunked_request(handle, allocator, &var chunked_client, body_bytes);
+    try weigh(handle, allocator, &var server);
+    try show(handle, allocator, &var chunked_client);
+    return;
+}
+
+// chunked_request sends the body in pieces with their sizes in front, the way
+// a client that does not know the length in advance has to.
+fn chunked_request(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream,
+    body: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /upload HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let length = mem::len(body);
+    var at = 0;
+    while at < length {
+        var end = at + 1500;
+        if end > length {
+            end = length;
+        }
+        try http::append_hex(allocator, &var wire, end - at);
+        try crlf(allocator, &var wire);
+        try wire.append_bytes(allocator, body[at..end]);
+        try crlf(allocator, &var wire);
+        at = end;
+    }
+    // The zero chunk, and the blank line that ends the trailers there are none
+    // of.
+    try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
     return;
 }
 
@@ -57,23 +110,19 @@ fn weigh(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure
     var held = try server.accept_head(handle, allocator);
     defer held.deinit(allocator);
 
-    let declared = try held.request.content_length();
-    var want = 0;
-    if declared |length| {
-        want = length;
-    }
+    // Read until the body ends. Zero is the end whichever framing carried it:
+    // the declared length running out, or the terminator chunk arriving. That
+    // is why this loop does not have to know which one it was.
     var seen = 0;
     var piece = string::new(allocator);
     defer piece.deinit(allocator);
-    while seen < want {
+    var got = try held.read_into(handle, allocator, &var piece, 4096);
+    while got > 0 {
+        seen = seen + got;
         // The buffer is reused, so what is held at once is one piece and not
         // the upload.
         piece.clear();
-        let got = try held.read_into(handle, allocator, &var piece, 4096);
-        if got == 0 {
-            break;
-        }
-        seen = seen + got;
+        got = try held.read_into(handle, allocator, &var piece, 4096);
     }
 
     var reply = string::new(allocator);
@@ -160,6 +209,12 @@ fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
 // run
 // features: net http io error-union
 // output:
+// HTTP/1.1 200 OK
+// Content-Type: text/plain
+// Content-Length: 12
+// Connection: close
+//
+// counted 5000
 // HTTP/1.1 200 OK
 // Content-Type: text/plain
 // Content-Length: 12

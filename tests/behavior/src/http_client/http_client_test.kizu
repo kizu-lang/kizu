@@ -24,6 +24,8 @@ fn failure_name(failure: http::Failure) -> []u8 {
         UnsupportedVersion => "UnsupportedVersion",
         UnsupportedScheme => "UnsupportedScheme",
         UnsupportedEncoding => "UnsupportedEncoding",
+        ConflictingFraming => "ConflictingFraming",
+        MalformedChunk => "MalformedChunk",
         BodyTooLarge => "BodyTooLarge",
         MalformedRequest => "MalformedRequest",
         ConnectionRefused => "ConnectionRefused",
@@ -305,7 +307,42 @@ test "a status line that is not one is named as such" {
     }
 }
 
-test "a chunked answer is refused rather than misread" {
+test "a chunked answer is decoded" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit();
+    var url = try url_for(allocator, pair.port, "/");
+    defer url.deinit(allocator);
+    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+
+    // Two chunks, a terminator, and a trailer field that is dropped.
+    let reply_text =
+        \\HTTP/1.1 200 OK
+        \\Transfer-Encoding: chunked
+        \\
+        \\5
+        \\hello
+        \\6
+        \\ world
+        \\0
+        \\X-Checksum: 1
+    ;
+    var reply = try wire(allocator, reply_text);
+    defer reply.deinit(allocator);
+    let reply_bytes = reply.as_bytes();
+    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    request.deinit(allocator);
+
+    var response = try http::read_response_from(
+        handle, allocator, &var pair.client, "GET", http::default_limits());
+    defer response.deinit(allocator);
+    testing::expect_equal<i64>(200, response.status);
+    let body = response.body.as_bytes();
+    testing::expect_equal<[]u8>("hello world", body);
+}
+
+test "an encoding this client does not speak is refused" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
@@ -316,6 +353,39 @@ test "a chunked answer is refused rather than misread" {
 
     let reply_text =
         \\HTTP/1.1 200 OK
+        \\Transfer-Encoding: gzip, chunked
+    ;
+    var reply = try wire(allocator, reply_text);
+    defer reply.deinit(allocator);
+    let reply_bytes = reply.as_bytes();
+    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    request.deinit(allocator);
+
+    if http::read_response_from(
+        handle, allocator, &var pair.client, "GET", http::default_limits()
+    ) |response| {
+        response.deinit(allocator);
+        testing::fail("an unknown coding list was accepted");
+    } else |err| {
+        testing::expect_equal<[]u8>("UnsupportedEncoding", failure_name(err));
+    }
+}
+
+test "a message that says two things about its length is refused" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit();
+    var url = try url_for(allocator, pair.port, "/");
+    defer url.deinit(allocator);
+    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+
+    // Content-Length and Transfer-Encoding together. RFC 9112 says the
+    // encoding wins; a proxy that decided otherwise is how one message becomes
+    // two, so this one is not read at all.
+    let reply_text =
+        \\HTTP/1.1 200 OK
+        \\Content-Length: 5
         \\Transfer-Encoding: chunked
     ;
     var reply = try wire(allocator, reply_text);
@@ -328,9 +398,9 @@ test "a chunked answer is refused rather than misread" {
         handle, allocator, &var pair.client, "GET", http::default_limits()
     ) |response| {
         response.deinit(allocator);
-        testing::fail("a chunked answer was accepted");
+        testing::fail("a message with two framings was accepted");
     } else |err| {
-        testing::expect_equal<[]u8>("UnsupportedEncoding", failure_name(err));
+        testing::expect_equal<[]u8>("ConflictingFraming", failure_name(err));
     }
 }
 

@@ -67,6 +67,16 @@ fn drain(
     return;
 }
 
+// chunk writes one chunk: its size in hex, the bytes, and the CRLF that ends
+// it.
+fn chunk(allocator: Allocator, out: &var string::String, bytes: []u8) -> Failure!void {
+    try http::append_hex(allocator, out, mem::len(bytes));
+    try crlf(allocator, out);
+    try out.append_bytes(allocator, bytes);
+    try crlf(allocator, out);
+    return;
+}
+
 fn contains(haystack: []u8, needle: []u8) -> bool {
     let length = mem::len(haystack);
     let needle_length = mem::len(needle);
@@ -637,10 +647,12 @@ test "accept still refuses a body past the ceiling" {
     testing::expect(contains(answer_bytes, "413"));
 }
 
-test "accept_head still refuses a framing this server does not speak" {
+test "accept_head streams a chunked body the same way" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var server = try http::listen(handle, "127.0.0.1:0");
+    var limits = http::default_limits();
+    limits.max_body_bytes = 64;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
     defer server.deinit();
     let port = try server.local_port();
     var address = try loopback(allocator, port);
@@ -656,12 +668,171 @@ test "accept_head still refuses a framing this server does not speak" {
     try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
     try crlf(allocator, &var wire);
     try crlf(allocator, &var wire);
+    try chunk(allocator, &var wire, "hello");
+    try chunk(allocator, &var wire, " there");
+    try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    var held = try server.accept_head(handle, allocator);
+    defer held.deinit(allocator);
+    testing::expect_equal<i64>(0, held.request.body.len());
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    var got = try held.read_into(handle, allocator, &var body, 4096);
+    while got > 0 {
+        got = try held.read_into(handle, allocator, &var body, 4096);
+    }
+    let text = body.as_bytes();
+    testing::expect_equal<[]u8>("hello there", text);
+}
+
+test "accept reads a chunked body whole" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /form HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    // A chunk with an extension, which nothing reads, and a trailer, which
+    // nothing keeps.
+    try wire.append_bytes(allocator, "3;name=value");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "abc");
+    try crlf(allocator, &var wire);
+    try chunk(allocator, &var wire, "def");
+    try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "X-Checksum: 1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    var held = try server.accept(handle, allocator);
+    defer held.deinit(allocator);
+    let body = held.request.body.as_bytes();
+    testing::expect_equal<[]u8>("abcdef", body);
+    testing::expect(!held.request.headers.has("X-Checksum"));
+}
+
+test "a chunked body past the ceiling is refused" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_body_bytes = 4;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /form HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try chunk(allocator, &var wire, "far too long");
+    try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server) {
+        testing::fail("a chunked body past the ceiling was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "413"));
+}
+
+test "a request that says two things about its length is refused" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /smuggle HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Content-Length: 5");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server) {
+        testing::fail("a request with two framings was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "400"));
+}
+
+test "a coding this server does not speak is still refused" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, "127.0.0.1:0");
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /upload HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: gzip, chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
 
     if server.accept_head(handle, allocator) |exchange| {
         exchange.deinit(allocator);
-        testing::fail("a chunked body was accepted");
+        testing::fail("an unknown coding list was accepted");
     } else |err| {
         testing::expect(true);
     }

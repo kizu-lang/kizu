@@ -337,7 +337,8 @@ pub fn main() -> Failure!void {
 | 接続を跨ぐ idle 期限 | 1 接続 1 request なので、押し直す相手がまだいない |
 | `connect` の期限 | `tcp_connect` は黒穴宛てに host の既定(~75s)まで固まる |
 | keep-alive の既定 | 既定は 1 接続 1 request。`limits.max_requests` を上げると `exchange.next` で続けられる |
-| chunked transfer encoding | request に `Transfer-Encoding` があれば `Error::UnsupportedEncoding`。推測して読むのが request smuggling の通り道。長さの分からない response は `Framing::UntilClose` で送る |
+| trailer を読むこと | terminator の後ろの trailer は消費して捨てる |
+| compression | `Content-Encoding` は素通しで decode しない |
 | TLS / HTTPS | `std::http::get` は `https` を `Error::UnsupportedScheme` で拒否する。暗号化を頼まれたものを平文で送らない |
 | HTTP/2 / HTTP/3 | 無い |
 | header folding | RFC 9110 が protocol から外したもので、繋ぐのではなく拒否する |

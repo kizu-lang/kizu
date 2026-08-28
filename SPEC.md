@@ -3019,8 +3019,14 @@ runtime selection の方針は ADR-0039 に従います。
   を書く
 * `limits.max_requests` の既定は 1。並行 API が無い(§15)ので 1 接続ずつしか
   捌けず、2 通目のために接続を保持する peer は他の全員に対して保持している
-* TLS、HTTP/2、HTTP/3 は持たない。request の `Transfer-Encoding` は
-  `Error::UnsupportedEncoding`
+* `Transfer-Encoding: chunked` は request も response も decode する。
+  `Content-Length` と併記されたら `Error::ConflictingFraming`、`chunked` 以外の
+  coding は `Error::UnsupportedEncoding`、size や CRLF が読めなければ
+  `Error::MalformedChunk`。chunk extension は読み飛ばし、trailer は消費して
+  捨てる(上限は `max_head_bytes`)
+* `max_body_bytes` が掛かるのは body を保持する経路(`accept`、client)だけ。
+  `accept_head` は保持しないので掛からない
+* TLS、HTTP/2、HTTP/3 は持たない
 * 並行 API が無い(§15)ので 1 接続ずつ。2 人目は listen backlog で待つ
 
 `std::path`:

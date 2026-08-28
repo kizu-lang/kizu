@@ -324,8 +324,19 @@ fn (self: &var Exchange) read_into(io, allocator, out, max) -> Failure!i64
 `read_into` は `std::net::read_into` と同じ契約(追記した byte 数、0 は終端)で、
 完結を判断する loop は caller が持ちます。
 
-`Transfer-Encoding` は `accept_head` でも拒否します。framing を決めるのが
-1 つの request を 2 つにする道(request smuggling)なので、そこまでは開けません。
+`Transfer-Encoding: chunked` は decode します —— `read_into` が返すのは body で、
+size と CRLF ではありません。**0 は body の終わり**で、それは
+`Content-Length` が尽きたときと chunked の terminator が来たときの両方です。
+だから読む側の loop は framing を知らずに書けます。
+
+```kizu
+var got = try held.read_into(handle, allocator, &var piece, 4096);
+while got > 0 {
+    seen = seen + got;
+    piece.clear();
+    got = try held.read_into(handle, allocator, &var piece, 4096);
+}
+```
 
 ### 接続そのものは渡しません
 
@@ -345,6 +356,38 @@ byte は既に `Exchange` の中にあります。socket を渡すと caller は
 - `accept_head` が read phase の deadline を 1 回置く
 - 1 つの phase より長く生きる caller(101 の後の protocol など)は
   `exchange.set_read_deadline(net::deadline_in_millis(n))` で自分で押し直す
+
+## chunked な request
+
+長さを事前に知らない client は `Content-Length` を書けないので、body を
+`SIZE CRLF DATA CRLF` の列にして最後に size 0 を送ります。`accept` は decode して
+`request.body` に入れ、`accept_head` は `read_into` が decode します。
+
+chunk の extension(`3;name=value`)は読み飛ばします —— framing を変えるものが
+無いので、理解できない値は message を拒否する理由になりません。terminator の
+後ろの trailer は消費して捨てます(RFC 9110 が許す扱い)。trailer は head と
+同じ形なので `max_head_bytes` が上限です。
+
+### smuggling を作らないための規則
+
+ここは HTTP/1 で request smuggling が住んでいる場所なので、規則は「1 つの
+message が 2 つになる」経路を閉じるためのものです。
+
+| 入力 | 答え |
+| --- | --- |
+| `Content-Length` と `Transfer-Encoding` の両方 | `Error::ConflictingFraming` (400) |
+| `Transfer-Encoding` が `chunked` 以外(`gzip, chunked`、`identity`、list) | `Error::UnsupportedEncoding` (501) |
+| size が hex でない / chunk の後ろが CRLF でない | `Error::MalformedChunk` (400) |
+| decode 後の合計が `max_body_bytes` 超え | `Error::BodyTooLarge` (413) |
+
+1 つ目が肝です。RFC 9112 は「encoding が勝つ」と言いますが、**前段の proxy が
+逆に判断したときに 1 つの request が 2 つになります**。自分の長さについて 2 つの
+ことを言う message は、どちらかを選ぶのではなく読みません。
+
+`max_body_bytes` が掛かるのは `accept`(body を保持する)だけです。`accept_head`
+では掛かりません —— 保持していないので、上限を掛ける対象がありません。
+
+送る側の chunked は [`Framing::Chunked`](#chunked) です。
 
 ## keep-alive
 
@@ -628,10 +671,9 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 
 - **pipelining**: 先読みした request は順に処理しますが、答えを重ねて送る
   ことはしません。1 つ答えてから次を読みます
-- **chunked な request**: request に `Transfer-Encoding` があれば
-  `Error::UnsupportedEncoding` です。推測して読むのが request smuggling の
-  通り道なので、拒否します。response 側の chunked は `Framing::Chunked` で
-  送れます
+- **trailer を読むこと**: terminator の後ろの trailer は消費して捨てます。
+  `Trailer` header で予告されたものを request に足す仕組みはありません
+- **compression**: `Content-Encoding` は素通しで、decode しません
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
 - **`Date` header**: std に暦がないので、書けないものを書きません
 - **multipart / form-data**、**compression**
@@ -643,7 +685,12 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 `UnsupportedVersion`、`UnsupportedEncoding`、`Incomplete`、`InvalidStatus`、
 `InvalidHeader`、`InvalidUrl`、`UnsupportedScheme`、`MalformedResponse`、
 `ResponseFinished`、`InvalidEncoding`、`InvalidPattern`、`ResponseOverrun`、
-`ResponseIncomplete`、`ExchangeUnfinished` を持ちます。
+`ResponseIncomplete`、`ExchangeUnfinished`、`ConflictingFraming`、
+`MalformedChunk` を持ちます。
+
+`MalformedChunk` が `MalformedRequest` / `MalformedResponse` と別なのは、
+chunk の framing が**どちら向きにもある**ものだからです。同じ decoder が
+request の body と response の body の両方を読みます。
 
 `BodyTooLarge` と `ResponseOverrun` は似て非なるものです。前者は request 側 ——
 この server が決めた上限を入力が超えたので、入力を拒否して回復します。後者は
