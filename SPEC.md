@@ -2977,7 +2977,9 @@ runtime selection の方針は ADR-0039 に従います。
   `Transfer-Encoding` / `Connection` は message の実体から書き、caller が
   set したものは落とす
 * `std::http::Limits` は request head の byte 数、header の個数、body の
-  byte 数の上限を caller が名指すもの
+  byte 数、および head / body / write の各 phase に許す時間(ミリ秒)を
+  caller が名指すもの。時間は duration であり、各 phase が始まるときに
+  deadline になる。0 はその phase に deadline を置かない
 * `std::http::route(allocator, pattern, method, path, params)` は
   Go 1.22 `ServeMux` 綴りの pattern 1 つを照合して `!bool` を返す。
   routing は登録簿ではなく、呼ぶ側が書く質問

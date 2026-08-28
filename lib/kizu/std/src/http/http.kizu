@@ -72,16 +72,56 @@ pub struct Limits {
     pub max_head_bytes: i64,
     pub max_headers: i64,
     pub max_body_bytes: i64,
+    // How long each phase of one message may take, in milliseconds. Zero means
+    // no deadline, which is a peer that can stop this process by connecting and
+    // saying nothing -- it is a choice, not the default.
+    //
+    // These are durations because that is what a policy is. Each phase turns
+    // its duration into a deadline when the phase starts, so the whole phase
+    // has to finish inside it: a peer sending one byte at a time is spending
+    // one budget, not being handed a new one per read.
+    pub read_head_millis: i64,
+    pub read_body_millis: i64,
+    pub write_millis: i64,
 }
 
 // default_limits is what a server that has not thought about it should use:
-// 8 KiB of request head, 64 header fields, 1 MiB of body.
+// 8 KiB of request head, 64 header fields, 1 MiB of body, and 10s / 30s / 30s
+// for the three phases.
+//
+// Go leaves its timeouts at zero and asks the caller to remember; a server that
+// forgot is one connection away from being stopped, so the default here is a
+// number rather than a promise to think about it later.
 pub fn default_limits() -> std::http::Limits {
     return Limits {
         max_head_bytes: 8192,
         max_headers: 64,
         max_body_bytes: 1048576,
+        read_head_millis: 10000,
+        read_body_millis: 30000,
+        write_millis: 30000,
     };
+}
+
+// arm_read / arm_write turn one phase's duration into the deadline that phase
+// runs under. Zero is the caller saying there is no deadline, which is why it
+// clears rather than asking for a moment that has already gone by.
+fn arm_read(stream: &var std::net::TcpStream, millis: i64) -> void {
+    if millis <= 0 {
+        stream.clear_read_deadline();
+        return;
+    }
+    stream.set_read_deadline(std::net::deadline_in_millis(millis));
+    return;
+}
+
+fn arm_write(stream: &var std::net::TcpStream, millis: i64) -> void {
+    if millis <= 0 {
+        stream.clear_write_deadline();
+        return;
+    }
+    stream.set_write_deadline(std::net::deadline_in_millis(millis));
+    return;
 }
 
 // status_text is the reason phrase RFC 9110 registers for a status. An

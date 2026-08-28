@@ -63,9 +63,10 @@ fn (self: &var std::http::Server) accept(
             request: move owned,
             response: std::http::response_new(allocator),
             answered: false,
+            limits: self.limits,
         };
     } else |failure| {
-        refuse(io, allocator, &var stream, failure);
+        refuse(io, allocator, &var stream, failure, self.limits);
         return failure;
     }
 }
@@ -78,6 +79,10 @@ pub struct Exchange {
     pub request: std::http::Request,
     pub response: std::http::Response,
     answered: bool,
+    // The server's policy, carried so `respond` can make the write deadline
+    // when the write starts. A deadline stamped at accept would already be
+    // spent by whatever the caller did in between.
+    limits: std::http::Limits,
 }
 
 // respond sends the response and marks the exchange answered. It is called
@@ -98,6 +103,8 @@ fn (self: &var std::http::Exchange) respond(
     defer out.deinit(allocator);
     try self.response.encode(allocator, version, head_only, &var out);
     let wire = out.as_bytes();
+    let write_millis = self.limits.write_millis;
+    std::http::arm_write(&var self.stream, write_millis);
     try self.stream.write_all(io, wire);
     self.answered = true;
     return;
@@ -141,6 +148,7 @@ fn read_request(
 ) -> std::http::Failure!std::http::Request {
     var buffer = std::string::new(allocator);
     defer buffer.deinit(allocator);
+    std::http::arm_read(stream, limits.read_head_millis);
     let head_length = try std::http::read_head(io, allocator, stream, &var buffer, limits);
     var request = try parse_request_at(allocator, &buffer, head_length, limits);
     errdefer request.deinit(allocator);
@@ -185,6 +193,9 @@ fn read_request_body(
     if length > limits.max_body_bytes {
         return std::http::Error::BodyTooLarge;
     }
+    // The body gets its own deadline. Sharing the head's would give a large
+    // body whatever the head happened to leave over.
+    std::http::arm_read(stream, limits.read_body_millis);
     while buffer.len() - head_length < length {
         let missing = length - (buffer.len() - head_length);
         let got = try stream.read_into(io, allocator, buffer, missing);
@@ -216,7 +227,8 @@ fn refuse(
     io: Io,
     allocator: Allocator,
     stream: &var std::net::TcpStream,
-    failure: std::http::Failure
+    failure: std::http::Failure,
+    limits: std::http::Limits
 ) -> void {
     let status = refusal_status(failure);
     var out = std::string::new(allocator);
@@ -228,6 +240,7 @@ fn refuse(
     response.write(allocator, std::http::status_text(status)) catch return;
     response.encode(allocator, std::http::Version::Http11, false, &var out) catch return;
     let wire = out.as_bytes();
+    std::http::arm_write(stream, limits.write_millis);
     stream.write_all(io, wire) catch return;
     return;
 }
@@ -244,6 +257,9 @@ fn refusal_status(failure: std::http::Failure) -> i64 {
         BodyTooLarge => 413,
         UnsupportedVersion => 505,
         UnsupportedEncoding => 501,
+        // The deadline this server set ran out. RFC 9110 gives that its own
+        // status: the request was not wrong, it just never finished arriving.
+        TimedOut => 408,
         _ => 500,
     };
 }

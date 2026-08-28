@@ -100,6 +100,7 @@ fn exchange(
     var stream = try std::net::tcp_connect(io, address_bytes);
     defer stream.deinit();
     let wire = request.as_bytes();
+    std::http::arm_write(&var stream, limits.write_millis);
     try stream.write_all(io, wire);
     return read_response(io, allocator, &var stream, method, limits);
 }
@@ -108,6 +109,11 @@ fn exchange(
 // read_response_from reads one answer off one. `fetch` is those two around a
 // connect; splitting them out is what lets something else own the stream --
 // a test that is both ends, and the TLS or proxy layer that is not here yet.
+//
+// `write_request` leaves the stream's write deadline alone: the caller owns
+// the stream, so the deadline on it is the caller's answer already.
+// `read_response_from` arms from the limits it is handed, because those limits
+// are what the caller passed in to bound this read.
 pub fn write_request(
     io: Io,
     allocator: Allocator,
@@ -193,6 +199,7 @@ fn read_response(
 ) -> std::http::Failure!std::http::ClientResponse {
     var buffer = std::string::new(allocator);
     defer buffer.deinit(allocator);
+    std::http::arm_read(stream, limits.read_head_millis);
     let head_length = try std::http::read_head(io, allocator, stream, &var buffer, limits);
     var response = try parse_response_at(allocator, &buffer, head_length, limits);
     errdefer response.deinit(allocator);
@@ -308,6 +315,8 @@ fn read_response_body(
     if !std::http::status_carries_body(response.status) {
         return;
     }
+    // The body gets its own deadline, the way the server's does.
+    std::http::arm_read(stream, limits.read_body_millis);
     let declared = try content_length(response);
     if declared |length| {
         if length > limits.max_body_bytes {

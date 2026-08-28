@@ -270,3 +270,106 @@ test "a HEAD request is answered with the length and no body" {
     testing::expect(contains(wire, "Content-Length: 11"));
     testing::expect(!contains(wire, "HEAD /echo "));
 }
+
+test "a head that stops halfway is answered 408 rather than waited on" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.read_head_millis = 50;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // A request line and then nothing. Without a deadline this read waits for
+    // the rest of the head forever, and one peer doing it stops the service.
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "GET / HTTP/1.1");
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server) {
+        testing::fail("an unfinished head was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "408"));
+}
+
+test "a body that stops halfway is answered 408" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.read_body_millis = 50;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // The head is whole and promises ten bytes; four arrive.
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /echo HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Content-Length: 10");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "four");
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server) {
+        testing::fail("an unfinished body was accepted");
+    } else |err| {
+        testing::expect(true);
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "408"));
+}
+
+test "limits of zero are the caller asking for no deadline" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.read_head_millis = 0;
+    limits.read_body_millis = 0;
+    limits.write_millis = 0;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET / HTTP/1.1", "");
+
+    try answer(handle, allocator, &var server);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "HTTP/1.1 200 OK"));
+    testing::expect(contains(answer_bytes, "GET /"));
+}

@@ -256,7 +256,52 @@ service が同じ上限を欲しがるとは限らず、名指せない上限は
 
 ---
 
-## 8. 本物の loop
+## 8. 時間の上限を決める
+
+byte の上限だけでは、公開して置ける service になりません。
+
+```console
+$ printf 'GET / HTTP/1.1\r\n' | nc 127.0.0.1 8080 &
+$ curl -m 5 http://127.0.0.1:8080/
+$ echo $?
+124
+```
+
+接続して黙るだけです。トラフィックも要らず、脆弱性も要りません。1 接続ずつしか
+捌けないので、その 1 本が返らない限り全員が待ちます。
+
+`Limits` は時間も持ちます。
+
+```kizu
+var limits = http::default_limits();
+limits.read_head_millis = 5000;    // head を読み切るまで
+limits.read_body_millis = 15000;   // body を読み切るまで
+limits.write_millis = 15000;       // 答えを書き切るまで
+```
+
+既定は 10s / 30s / 30s です。3 つに分かれているのは、**それぞれが自分の始まりで
+自分の期限を作る**からです —— body が head の余りしか貰えないのはおかしいし、
+書き始めの期限は `accept` ではなく `respond` から測るべきです。
+
+期限が切れた request には `408 Request Timeout` が返り、server は次の accept へ
+戻ります。
+
+### deadline は budget ではない
+
+ここが読み飛ばせないところです。この期限は**その phase 全体**を覆います。
+1 回の read ごとに配り直されるものではありません。
+
+4 秒ごとに 1 byte 送ってくる相手を考えてください。「read あたり 5 秒」の
+timeout には永久に引っかかりません。read はいつも 4 秒で返るからです。
+head 全体に 5 秒、なら 5 秒で終わります。この違いのために `std::net` は
+deadline を **時点**として持っています(→ [ADR-0137](../adr/0137-a-deadline-is-a-moment-the-socket-owner-holds.md))。
+
+0 は「期限を置かない」です。既に bound している proxy の後ろなら妥当な答えです
+が、忘れた結果として 0 になることは無いようにしてあります。
+
+---
+
+## 9. 本物の loop
 
 サンプルは決まった数の request を回して終わりますが、本物はこうです。
 
@@ -284,11 +329,13 @@ pub fn main() -> Failure!void {
 
 ---
 
-## 9. 今は話さないこと
+## 10. 今は話さないこと
 
 | 無いもの | 何が起きるか |
 | --- | --- |
 | 並行性 | 1 接続ずつ。2 人目は backlog で待つ |
+| 接続を跨ぐ idle 期限 | 1 接続 1 request なので、押し直す相手がまだいない |
+| `connect` の期限 | `tcp_connect` は黒穴宛てに host の既定(~75s)まで固まる |
 | keep-alive | 1 接続 1 request。response は `Connection: close` を送る |
 | chunked transfer encoding | request に `Transfer-Encoding` があれば `Error::UnsupportedEncoding`。推測して読むのが request smuggling の通り道 |
 | TLS / HTTPS | `std::http::get` は `https` を `Error::UnsupportedScheme` で拒否する。暗号化を頼まれたものを平文で送らない |
@@ -313,6 +360,8 @@ pub fn main() -> Failure!void {
   —— `{rest...}` と `std::fs`
 - [`examples/http_client.kizu`](../../examples/http_client.kizu) —— client の 2 つの半分
 - [`examples/http_response.kizu`](../../examples/http_response.kizu) —— response の状態
+- [`examples/http_timeout.kizu`](../../examples/http_timeout.kizu) —— 期限切れの head と 408
+- [`examples/net_deadline.kizu`](../../examples/net_deadline.kizu) —— deadline が budget ではないこと
 
 API 一覧は [`docs/std/http.md`](../std/http.md) と
 [`docs/std/net.md`](../std/net.md) です。

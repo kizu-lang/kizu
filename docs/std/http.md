@@ -140,15 +140,45 @@ server には chunked encoding が要ります。それが入るまで、bufferi
 
 ```kizu
 pub struct Limits {
-    pub max_head_bytes: i64,   // default 8192
-    pub max_headers: i64,      // default 64
-    pub max_body_bytes: i64,   // default 1048576
+    pub max_head_bytes: i64,     // default 8192
+    pub max_headers: i64,        // default 64
+    pub max_body_bytes: i64,     // default 1048576
+    pub read_head_millis: i64,   // default 10000
+    pub read_body_millis: i64,   // default 30000
+    pub write_millis: i64,       // default 30000
 }
 pub fn default_limits() -> std::http::Limits
 ```
 
 上限は caller のものです。proxy の後ろの server と、公開 internet の server が
 同じ上限を欲しがるとは限らず、名指せない上限は誰にも上げられません。
+
+### 時間の上限
+
+`*_millis` は 1 message の各 phase に許す時間です。**duration** であって
+時点ではありません —— policy は「どれだけ許すか」であり、「いつまでか」は
+phase が始まったときに決まるからです(`std::net` の deadline がその時点です)。
+
+phase は 3 つで、それぞれが**自分の deadline を、自分が始まるときに**作ります。
+
+| field | 覆う範囲 |
+| --- | --- |
+| `read_head_millis` | 接続を受けてから、head の空行までを読み切るまで |
+| `read_body_millis` | body の 1 byte 目から、`Content-Length` 分を読み切るまで |
+| `write_millis` | `respond` が response を書き始めてから、書き切るまで |
+
+body に head と別の deadline を与えているのは、共有すると大きな body が
+「head が余らせた分」しか貰えないからです。`write` の deadline を `accept` では
+なく `respond` で作っているのも同じ理由で、その間に caller が何をしていても
+書き始めから測ります。
+
+**0 は「deadline を置かない」**という意味です。相手が黙り込めばその phase は
+待ち続けるので、これは選択であって既定ではありません。Go は timeout の既定が
+0 で、忘れた server は 1 接続で止まります。ここでは既定を数値にしてあります。
+
+phase の deadline は全体を覆うので、4 秒ごとに 1 byte 送る相手も head の
+`read_head_millis` を使い切って落ちます。理屈は
+[net の deadline](net.md#deadline) にあります。
 
 ## 読めなかった request
 
@@ -163,6 +193,7 @@ pub fn default_limits() -> std::http::Limits
 | `BodyTooLarge` | 413 |
 | `UnsupportedVersion` | 505 |
 | `UnsupportedEncoding` | 501 |
+| `net::Error::TimedOut` | 408 |
 | その他 | 500 |
 
 ## URL と percent 符号化
@@ -386,7 +417,8 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 
 ## 今は話さないこと
 
-- **keep-alive**: 1 接続 1 request で、response は `Connection: close` を送ります
+- **keep-alive**: 1 接続 1 request で、response は `Connection: close` を送ります。
+  接続を跨いで生きる idle deadline もまだありません —— 押し直す相手がいないので
 - **chunked transfer encoding**: request に `Transfer-Encoding` があれば
   `Error::UnsupportedEncoding` です。推測して読むのが request smuggling の
   通り道なので、拒否します
