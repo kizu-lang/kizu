@@ -1103,13 +1103,81 @@ fn (self: &var Checker) check_generic_user_type_apply(
     let declared = self.return_type_name(function);
     let result = try self.substitute_with(declared, &subst);
     let restore = try self.bind_generic_call_fields(tree, function, type_arg);
+    let restore_functions = try self.bind_generic_call_functions(function, type_arg);
     if try self.check_generic_instantiation(tree, function, move subst) |failed| {
+        self.function_bindings.restore(restore_functions);
         self.meta_fields.restore(restore);
         return move failed;
     }
+    self.function_bindings.restore(restore_functions);
     self.meta_fields.restore(restore);
     out.* = result;
     return null;
+}
+
+/// Reports whether a declaration names a function among its compile-time
+/// parameters. Such a body is checked once per instantiation, because that is
+/// the only place a call written against the parameter has a callee.
+fn (self: &Checker) has_function_static_param(function: FunctionHandle) -> bool {
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        index = index + 1;
+        if param.is_type {
+            continue;
+        }
+        if self.names.is(param.type_name, "Function") {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Binds the `Function` static arguments of one call under their parameter
+/// names, and answers the handle that unbinds them.
+fn (self: &var Checker) bind_generic_call_functions(
+    function: FunctionHandle,
+    type_arg: Name
+) -> !?arena::Handle<FunctionBinding> {
+    let previous = self.function_bindings.current;
+    let static_count = self.static_param_count(function);
+    let static_args = try self.names.split_generic_args(type_arg) orelse return previous;
+    defer static_args.deinit(self.allocator);
+    if static_args.len() != static_count {
+        return previous;
+    }
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        let arg = static_args.get_or_panic(index);
+        index = index + 1;
+        if param.is_type {
+            continue;
+        }
+        if !self.names.is(param.type_name, "Function") {
+            continue;
+        }
+        try self.bind_one_function(param.name, arg);
+    }
+    return previous;
+}
+
+/// Binds one `Function` argument, reading the argument through the bindings
+/// already in force so a generic that forwards its own parameter names the
+/// function the outer call named.
+fn (self: &var Checker) bind_one_function(name: Name, argument: Name) -> !void {
+    let retained_name = name_text(&self.names, name);
+    let name_bytes = retained_name.as_bytes();
+    let retained_arg = name_text(&self.names, argument);
+    let arg_bytes = retained_arg.as_bytes();
+    var target = string::new(self.allocator);
+    defer target.deinit(self.allocator);
+    let forwarded = try self.function_bindings.copy_target(
+        self.allocator, arg_bytes, &var target);
+    if !forwarded {
+        try target.append_bytes(self.allocator, arg_bytes);
+    }
+    let bytes = target.as_bytes();
+    let _ = try self.function_bindings.bind(name_bytes, bytes);
+    return;
 }
 
 /// Counts the static parameters of a collected function, the Go

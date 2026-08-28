@@ -67,7 +67,14 @@ fn (self: &var Lowerer) lower_call_expr(
 /// `functionCalleeName`; null for a callee that is neither.
 fn (self: &var Lowerer) function_callee_name(tree: &var ast::Ast, callee: ast::Expression) -> !?Name {
     if ownership::ident_expr(tree, callee) |ident| {
-        return try self.text_name(tree, ident.name);
+        let name = try self.text_name(tree, ident.name);
+        // A `Function` static parameter is the name it was instantiated with.
+        // The instance already bound it, so calling through it is reading that
+        // binding rather than a new kind of call.
+        if self.function_static_value(name) |bound| {
+            return bound;
+        }
+        return name;
     }
     let field = ownership::field_expr(tree, callee) orelse return null;
     if !field.namespace {
@@ -1216,6 +1223,16 @@ fn (self: &var Lowerer) std_container_type_name(typ: Name) -> !?Name {
 
 /// Resolves a checked receiver method to its lowered symbol, the Go
 /// `implMethodCalleeName`; null when no declaration has it.
+// function_static_value answers the function name a `Function` static
+// parameter is bound to in the instance being lowered.
+fn (self: &Lowerer) function_static_value(name: Name) -> ?Name {
+    let static = self.static_value(name) orelse return null;
+    if !self.name_is(static.typ, "Function") {
+        return null;
+    }
+    return static.text;
+}
+
 fn (self: &var Lowerer) impl_method_callee_name(receiver: Name, method: Name) -> !?Name {
     let base = try self.deref_type(receiver);
     let name = try self.module.names.joined(base, ".", method);

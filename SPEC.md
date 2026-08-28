@@ -2911,8 +2911,13 @@ std::io::kqueue()    kqueue backend
 runtime selection の方針は ADR-0039 に従います。
 
 多数の descriptor を同時に待つことは `Io` の実装差ではなく、`std::net::Poller`
-という値です(ADR-0141)。`read_into` の途中で中断して再開する形は取りません ——
-coroutine が要り、function coloring が生えるためです。
+という値です(ADR-0141)。
+
+**中断できる実行系は `std::coro` として入りました**(ADR-0145)。coroutine は
+並行性ではありません —— 同時に走るものは無く、`resume` が止まるところまで
+走らせる間は他に何も起きません。増えるのは止まれる場所が呼び出しの途中でよい
+ことで、それが `evented` な `Io` に要るものです。API の形は `docs/std/coro.md`
+にあります。`async fn` / `await` は変わらず実装しません。
 
 ### 15.2 Io を取る標準 API
 

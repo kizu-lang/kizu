@@ -27,7 +27,7 @@ fn (self: &var Checker) check_user_call(
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    let function_handle = self.metadata.functions_by_name.get(name) orelse
+    let function_handle = try self.resolve_called_function(name) orelse
         return try self.undefined_function_error(name);
     let facts = self.callable_facts(function_handle) orelse
         return try self.undefined_function_error(name);
@@ -250,6 +250,21 @@ fn (self: &Checker) borrow_argument_error(reason: BorrowCoercionError) -> !diagn
             "argument expects &var T, got &T"
         ),
     };
+}
+
+// resolve_called_function reads a callee name through the `Function` static
+// arguments in force: a call written against the parameter is a call to what
+// this instantiation bound it to. The lookup stays inside so the borrow of the
+// binding store does not have to leave it.
+fn (self: &Checker) resolve_called_function(name: []u8) -> !?FunctionHandle {
+    var bound = string::new(self.allocator);
+    defer bound.deinit(self.allocator);
+    let forwarded = try self.function_bindings.copy_target(self.allocator, name, &var bound);
+    if forwarded {
+        let bytes = bound.as_bytes();
+        return self.metadata.functions_by_name.get(bytes);
+    }
+    return self.metadata.functions_by_name.get(name);
 }
 
 fn (self: &Checker) undefined_function_error(name: []u8) -> !diagnostic::Diagnostic {

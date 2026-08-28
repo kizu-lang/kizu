@@ -15,6 +15,7 @@
 | module | 内容 |
 | --- | --- |
 | [io](io.md) | explicit stdout / stderr / stdin |
+| [coro](coro.md) | 途中で止まれる呼び出し。並行性ではない |
 | [mem](mem.md) | allocator capability、byte helper、`Box<T>`、`leak`、`Limit` |
 | [arena](arena.md) | handle で参照する owned arena |
 | [string](string.md) | owned byte buffer |

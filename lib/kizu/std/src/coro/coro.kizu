@@ -1,0 +1,73 @@
+// A coroutine is a call that can stop in the middle and be told to go on.
+//
+// It is not concurrency. Nothing here runs at the same time as anything else,
+// and there is one thread: `resume` runs the coroutine until it stops, and
+// nothing else happens while it does. What it adds is that the stop can be
+// somewhere other than the top of the call.
+//
+// That is the thing an evented `Io` needs and does not have. A read that has
+// no bytes yet has to give the thread back without the calls above it having
+// been written to expect it -- so the stack has to be the coroutine's own,
+// kept where it was until someone asks it to go on (ADR-0141).
+//
+// There are no channels, no tasks, and no scheduler here. Those are the API
+// shapes ADR-0025 withdrew, and the order it set is the one being followed:
+// the thing that runs comes first.
+
+pub error Error {
+    OutOfMemory,
+    Finished,
+}
+
+// A Coroutine owns a stack. `deinit` releases it, and is the only way to.
+//
+// A coroutine that has not finished takes whatever its stack still held with
+// it: nothing can run those cleanups, because running them would mean resuming
+// a call nobody asked to go on. So a caller that spawns one is the caller that
+// decides it is over.
+pub struct Coroutine {
+    handle: i64,
+}
+
+// spawn starts nothing. It reserves the stack the coroutine will run on and
+// remembers where to begin; the first `resume` is what runs anything.
+//
+// `arg` is the one thing the entry is told. A function pointer carries no
+// borrow (`docs/language-gaps.md`), so what crosses is a number whose meaning
+// belongs to whoever passed it.
+pub fn spawn(
+    entry: fn(i64) -> void,
+    arg: i64,
+    stack_bytes: i64
+) -> std::coro::Error!std::coro::Coroutine {
+    let handle = std::internal::builtin::coro_new(entry, arg, stack_bytes);
+    if handle == 0 {
+        return std::coro::Error::OutOfMemory;
+    }
+    return Coroutine { handle: handle };
+}
+
+// resume runs it until it suspends or returns, and answers whether there is
+// more to do. A coroutine that has finished answers false however often it is
+// asked, which is what makes a loop over it end.
+fn (self: &var std::coro::Coroutine) resume() -> bool {
+    return std::internal::builtin::coro_resume(self.handle) != 0;
+}
+
+fn (self: &std::coro::Coroutine) finished() -> bool {
+    return std::internal::builtin::coro_finished(self.handle) != 0;
+}
+
+fn (self: std::coro::Coroutine) deinit() -> void {
+    std::internal::builtin::coro_close(self.handle);
+    return;
+}
+
+// suspend stops the running coroutine and goes back to whoever resumed it.
+// Called where no coroutine is running it does nothing: there is nowhere to go
+// back to, and inventing a failure for a call that simply had nothing to do
+// would be a failure nobody can act on.
+pub fn suspend() -> void {
+    std::internal::builtin::coro_suspend();
+    return;
+}

@@ -136,6 +136,79 @@ fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaFieldHandle {
     return null;
 }
 
+// Names one active `Function` static argument. Bindings form a lexical stack
+// the same way the field captures do: restoring the previous handle removes
+// every name an instantiation pushed.
+struct FunctionBinding {
+    parent: ?arena::Handle<FunctionBinding>,
+    name: string::String,
+    target: string::String
+}
+
+struct FunctionBindingStore {
+    allocator: Allocator,
+    bindings: arena::Arena<FunctionBinding>,
+    current: ?arena::Handle<FunctionBinding>
+}
+
+fn new_function_binding_store(allocator: Allocator) -> FunctionBindingStore {
+    return FunctionBindingStore {
+        allocator: allocator,
+        bindings: arena::new<FunctionBinding>(allocator),
+        current: null
+    };
+}
+
+fn (self: &var FunctionBindingStore) bind(
+    name: []u8,
+    target: []u8
+) -> !?arena::Handle<FunctionBinding> {
+    let previous = self.current;
+    var owned_name = try string::from_bytes(self.allocator, name);
+    errdefer owned_name.deinit(self.allocator);
+    let owned_target = try string::from_bytes(self.allocator, target);
+    self.current = try self.bindings.add(self.allocator, FunctionBinding {
+        parent: previous,
+        name: move owned_name,
+        target: move owned_target
+    });
+    return previous;
+}
+
+fn (self: &var FunctionBindingStore) restore(
+    previous: ?arena::Handle<FunctionBinding>
+) -> void {
+    self.current = previous;
+    return;
+}
+
+// copy_target answers whether `name` is bound, copying what it is bound to.
+// A view into the arena would be a borrow of the store, which cannot leave it,
+// so the answer is a copy the caller owns.
+fn (self: &FunctionBindingStore) copy_target(
+    allocator: Allocator,
+    name: []u8,
+    out: &var string::String
+) -> !bool {
+    var current = self.current;
+    while current |handle| {
+        let binding = self.bindings.at(handle);
+        let retained_name = binding.name.as_bytes();
+        if mem::equal_bytes(retained_name, name) {
+            let target = binding.target.as_bytes();
+            try out.append_bytes(allocator, target);
+            return true;
+        }
+        current = binding.parent;
+    }
+    return false;
+}
+
+fn (self: FunctionBindingStore) deinit(allocator: Allocator) -> void {
+    self.bindings.deinit(allocator);
+    return;
+}
+
 // Owns the mutable state local to one function or generic body check. Nested
 // instantiations select another arena record and restore the prior copy handle.
 struct BodyContext {

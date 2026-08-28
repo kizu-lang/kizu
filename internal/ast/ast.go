@@ -199,6 +199,10 @@ func (d *FunctionDecl) String() string {
 type TestDecl struct {
 	Name string
 	Body *BlockStmt
+	// Module is the package module the block was written in, empty for a
+	// loose file. A test body resolves the module's own names the way a
+	// function in it does, and a synthetic name with no module cannot.
+	Module string
 }
 
 // declNode marks TestDecl as a declaration node.

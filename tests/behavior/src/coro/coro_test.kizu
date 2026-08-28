@@ -1,0 +1,93 @@
+import std::coro;
+import std::testing;
+
+// A coroutine's contract as the caller sees it: spawning runs nothing,
+// `resume` runs it until it stops, and the answer says whether there is more.
+// Nothing runs at the same time as anything else -- what is added is where the
+// stop may be.
+//
+// What a coroutine does while it runs is not visible here: its entry takes one
+// number and returns nothing, so it has no way to report. That the turns
+// interleave and the locals survive a stop is what `examples/coro_suspend.kizu`
+// shows, by printing from inside.
+
+error Failure = coro::Error;
+
+fn pauses(times: i64) -> void {
+    var step = 0;
+    while step < times {
+        coro::suspend();
+        step = step + 1;
+    }
+    return;
+}
+
+fn straight_through(times: i64) -> void {
+    var step = 0;
+    while step < times {
+        step = step + 1;
+    }
+    return;
+}
+
+test "spawning runs nothing" {
+    var task = try coro::spawn(pauses, 2, 65536);
+    defer task.deinit();
+    testing::expect(!task.finished());
+}
+
+test "a coroutine stops where it suspends and goes on where it stopped" {
+    var task = try coro::spawn(pauses, 3, 65536);
+    defer task.deinit();
+    // Three stops, then the return. The fourth resume is the one that ends it.
+    testing::expect(task.resume());
+    testing::expect(task.resume());
+    testing::expect(task.resume());
+    testing::expect(!task.resume());
+    testing::expect(task.finished());
+}
+
+test "a coroutine that never suspends finishes on its first resume" {
+    var task = try coro::spawn(straight_through, 1000, 65536);
+    defer task.deinit();
+    testing::expect(!task.resume());
+    testing::expect(task.finished());
+}
+
+test "a finished coroutine answers false however often it is asked" {
+    var task = try coro::spawn(straight_through, 1, 65536);
+    defer task.deinit();
+    testing::expect(!task.resume());
+    testing::expect(!task.resume());
+    testing::expect(!task.resume());
+}
+
+test "each coroutine has a stack of its own" {
+    var first = try coro::spawn(pauses, 1, 65536);
+    defer first.deinit();
+    var second = try coro::spawn(pauses, 3, 65536);
+    defer second.deinit();
+    // Resuming one does not move the other: they stop in different places and
+    // end at different times.
+    testing::expect(first.resume());
+    testing::expect(second.resume());
+    testing::expect(!first.resume());
+    testing::expect(second.resume());
+    testing::expect(second.resume());
+    testing::expect(!second.resume());
+}
+
+test "a stack smaller than the floor is raised to it rather than refused" {
+    // A number too small to run anything on is a caller that did not think
+    // about it, not a caller that meant nothing. The floor is what it gets.
+    var task = try coro::spawn(straight_through, 1, 8);
+    defer task.deinit();
+    testing::expect(!task.resume());
+}
+
+test "suspend outside a coroutine does nothing" {
+    // There is nowhere to go back to, and a failure nobody can act on would be
+    // worse than a call that had nothing to do.
+    coro::suspend();
+    testing::expect(true);
+}

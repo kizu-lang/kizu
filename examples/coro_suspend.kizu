@@ -1,0 +1,62 @@
+// A call that can stop in the middle.
+//
+// Every call so far runs to its end before the caller gets on. A coroutine
+// does not have to: `suspend` gives the thread back where it stands, and
+// `resume` picks it up there, with its locals where it left them.
+//
+// It is not concurrency. Nothing here runs at the same time as anything else:
+// `resume` runs one of them until it stops, and nothing else happens while it
+// does. The caller decides whose turn it is, and that decision is in the
+// source (`docs/principles.md` §2).
+//
+// Two of them here, taking turns. The interleaving is the caller's, so it can
+// be read off the loop rather than guessed at -- which is the difference
+// between this and a scheduler.
+//
+// This is what an evented `Io` needs and does not have (ADR-0141): a read with
+// no bytes yet has to give the thread back without the calls above it having
+// been written to expect it.
+
+import std::coro;
+
+fn counting(start: i64) -> void {
+    var step = 0;
+    while step < 3 {
+        print(start + step);
+        coro::suspend();
+        step = step + 1;
+    }
+    return;
+}
+
+fn main() -> coro::Error!void {
+    // Each gets its own stack, so each keeps its own `step`.
+    var tens = try coro::spawn(counting, 10, 65536);
+    defer tens.deinit();
+    var twenties = try coro::spawn(counting, 20, 65536);
+    defer twenties.deinit();
+
+    var going = true;
+    while going {
+        let first = tens.resume();
+        let second = twenties.resume();
+        going = first or second;
+    }
+    print("both done");
+    print(tens.finished());
+    print(twenties.finished());
+    return;
+}
+
+// run
+// features: coro error-union
+// output:
+// 10
+// 20
+// 11
+// 21
+// 12
+// 22
+// both done
+// true
+// true

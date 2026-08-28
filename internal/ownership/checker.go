@@ -39,6 +39,10 @@ type Checker struct {
 	// `comptime match` builds its arms in.
 	enumOrder  map[string][]string
 	unionOrder map[string][]string
+	// functionArgs binds the `Function` static arguments of the instantiation
+	// being checked, so a call written against the parameter resolves to the
+	// function it was given.
+	functionArgs map[string]string
 	// checkedInstances records the generic instantiations already checked, and
 	// instantiationDepth counts those open above the current one (#1627).
 	checkedInstances   map[string]bool
@@ -205,6 +209,7 @@ func New() *Checker {
 		enumOrder:         map[string][]string{},
 		unionOrder:        map[string][]string{},
 		metaFields:        map[string]metaField{},
+		functionArgs:      map[string]string{},
 		checkedInstances:  map[string]bool{},
 		result:            newResult(),
 	}
@@ -497,6 +502,11 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	if fn.sig.ExternABI != "" {
 		return nil
 	}
+	// A body that calls a `Function` static parameter has no callee until the
+	// parameter is bound, so it is checked once per instantiation instead.
+	if hasFunctionStaticParam(fn.sig) {
+		return nil
+	}
 	env := newScope(nil)
 	if err := c.defineParams(fn, env, nil); err != nil {
 		return err
@@ -589,9 +599,16 @@ func isConsumePrimitive(name string) bool {
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
-	fn := functionInfoFromDecl("test "+strconv.Quote(decl.Name), &ast.FunctionDecl{
+	// The name carries the module so the body reads its own module's names --
+	// a function pointer's value is looked up through the prefix of whatever
+	// is being checked, and a synthetic name without one finds nothing.
+	name := "test " + strconv.Quote(decl.Name)
+	if decl.Module != "" {
+		name = decl.Module + "::" + name
+	}
+	fn := functionInfoFromDecl(name, &ast.FunctionDecl{
 		FunctionSignature: ast.FunctionSignature{
-			Name:       "test " + strconv.Quote(decl.Name),
+			Name:       name,
 			ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 		},
 		Body: decl.Body,
@@ -4254,6 +4271,11 @@ func (c *Checker) checkUserCall(
 	env *scope,
 	sanctioned bool,
 ) (string, error) {
+	if bound, ok := c.functionArgs[name]; ok {
+		// A call written against a `Function` static parameter is a call to
+		// what this instantiation bound it to.
+		name = bound
+	}
 	fn, ok := c.functions[name]
 	if !ok {
 		return "", errorf("move error: undefined function `%s`", name)
@@ -5671,7 +5693,9 @@ func (c *Checker) checkGenericUserTypeApply(
 		}
 	}
 	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
+	restoreFunctions := c.bindFunctionArgs(c.genericCallFunctions(fn, typeArg))
 	err = c.checkGenericInstantiation(fn, subst)
+	restoreFunctions()
 	restore()
 	if err != nil {
 		return "", true, err
@@ -5707,6 +5731,68 @@ func (c *Checker) genericCallSubst(
 		subst[param] = typeArgs[idx]
 	}
 	return subst, nil
+}
+
+// hasFunctionStaticParam reports whether a signature names a function among its
+// compile-time parameters.
+func hasFunctionStaticParam(sig ast.FunctionSignature) bool {
+	for _, param := range sig.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		if typ.Text(param.Type) == "Function" {
+			return true
+		}
+	}
+	return false
+}
+
+// genericCallFunctions reads the `Function` static arguments of one call, so a
+// body that calls one is checked against what it was given.
+func (c *Checker) genericCallFunctions(fn *functionInfo, typeArg string) map[string]string {
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
+		return nil
+	}
+	bound := map[string]string{}
+	for idx, param := range fn.sig.StaticParams {
+		if param.IsType() || typ.Text(param.Type) != "Function" {
+			continue
+		}
+		name := strings.TrimSpace(staticArgs[idx])
+		if outer, ok := c.functionArgs[name]; ok {
+			bound[param.Name] = outer
+			continue
+		}
+		bound[param.Name] = name
+	}
+	if len(bound) == 0 {
+		return nil
+	}
+	return bound
+}
+
+// bindFunctionArgs makes the `Function` arguments of one instantiation readable
+// by the calls written against them, and returns the call that unbinds them.
+func (c *Checker) bindFunctionArgs(bound map[string]string) func() {
+	if len(bound) == 0 {
+		return func() {}
+	}
+	previous := make(map[string]string, len(bound))
+	had := make(map[string]bool, len(bound))
+	for name, target := range bound {
+		previous[name], had[name] = c.functionArgs[name]
+		c.functionArgs[name] = target
+	}
+	return func() {
+		for name := range bound {
+			if had[name] {
+				c.functionArgs[name] = previous[name]
+				continue
+			}
+			delete(c.functionArgs, name)
+		}
+	}
 }
 
 // genericCallFields reads the `Field` static arguments of one call. A field

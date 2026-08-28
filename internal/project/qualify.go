@@ -223,6 +223,7 @@ func (c *graphChecker) qualifyTestDecl(
 	decl *ast.TestDecl,
 ) (*ast.TestDecl, error) {
 	cp := *decl
+	cp.Module = module.name()
 	body, err := c.qualifyBlock(module, decl.Body)
 	cp.Body = body
 	return &cp, err

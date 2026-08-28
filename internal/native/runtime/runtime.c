@@ -1,4 +1,19 @@
 
+/* The ucontext routines are how a coroutine changes stacks. Apple marks them
+   deprecated and hides them behind _XOPEN_SOURCE; they still work, and the
+   alternative is a hand-written switch per architecture. This is the seam to
+   replace when one is written. */
+#if defined(__APPLE__)
+#if !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 600
+#endif
+/* _XOPEN_SOURCE alone hides the Darwin extensions this file already uses
+   (MSG_DONTWAIT among them), so the platform's own set is asked for back. */
+#if !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +31,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -2184,6 +2200,138 @@ void std__internal__builtin__net_poller_close(int64_t handle) {
     }
     free(poller->events);
     free(poller);
+}
+
+/* ---------------------------------------------------------------------------
+ * Coroutines
+ *
+ * A coroutine is a call that can stop in the middle and be told to go on. It
+ * is not concurrency: nothing here runs at the same time as anything else, and
+ * there is one thread. What it adds is that the stop can be somewhere other
+ * than the top of the call -- which is what an I/O implementation needs to
+ * wait for a descriptor without the thread waiting with it.
+ *
+ * The stack is the coroutine's own, allocated when it is spawned, so a
+ * suspended call keeps its locals where they were. That is why this is
+ * stackful: a call deep inside std::net can stop without every frame above it
+ * having been written to expect it (ADR-0141).
+ * ------------------------------------------------------------------------ */
+
+typedef struct KizuCoro {
+    ucontext_t inside;
+    ucontext_t outside;
+    void *stack;
+    size_t stack_size;
+    void (*entry)(int64_t);
+    int64_t arg;
+    int started;
+    int finished;
+} KizuCoro;
+
+/* The coroutine currently running, or NULL in the caller. One thread means one
+   of these; a thread of its own would need one per thread, which is a change
+   to make when threads are. */
+static KizuCoro *kizu_coro_current = NULL;
+
+/* Handed to the trampoline, because makecontext passes int arguments and a
+   pointer is not one. It is read once, immediately, on the first resume. */
+static KizuCoro *kizu_coro_starting = NULL;
+
+static KizuCoro *kizu_coro_from(int64_t handle) {
+    if (handle == 0) {
+        return NULL;
+    }
+    return (KizuCoro *)(intptr_t)handle;
+}
+
+/* The first thing that runs on the new stack. It calls the entry and then
+   marks the coroutine finished, so `resume` can answer that there is no more
+   to do without the entry having to say so. */
+static void kizu_coro_trampoline(void) {
+    KizuCoro *coro = kizu_coro_starting;
+    kizu_coro_starting = NULL;
+    coro->entry(coro->arg);
+    coro->finished = 1;
+    /* uc_link takes it back to whoever resumed it. */
+}
+
+int64_t std__internal__builtin__coro_new(void *entry, int64_t arg, int64_t stack_bytes) {
+    if (!entry) {
+        return 0;
+    }
+    if (stack_bytes < 16384) {
+        stack_bytes = 16384;
+    }
+    if (stack_bytes > 64 * 1024 * 1024) {
+        return 0;
+    }
+    KizuCoro *coro = (KizuCoro *)calloc(1, sizeof *coro);
+    if (!coro) {
+        return 0;
+    }
+    coro->stack = malloc((size_t)stack_bytes);
+    if (!coro->stack) {
+        free(coro);
+        return 0;
+    }
+    coro->stack_size = (size_t)stack_bytes;
+    coro->entry = (void (*)(int64_t))entry;
+    coro->arg = arg;
+    return (int64_t)(intptr_t)coro;
+}
+
+/* Runs the coroutine until it suspends or returns, and answers whether it has
+   more to do. A finished one answers false however often it is asked. */
+int64_t std__internal__builtin__coro_resume(int64_t handle) {
+    KizuCoro *coro = kizu_coro_from(handle);
+    if (!coro || coro->finished) {
+        return 0;
+    }
+    KizuCoro *previous = kizu_coro_current;
+    kizu_coro_current = coro;
+    if (!coro->started) {
+        coro->started = 1;
+        getcontext(&coro->inside);
+        coro->inside.uc_stack.ss_sp = coro->stack;
+        coro->inside.uc_stack.ss_size = coro->stack_size;
+        coro->inside.uc_link = &coro->outside;
+        kizu_coro_starting = coro;
+        makecontext(&coro->inside, kizu_coro_trampoline, 0);
+    }
+    swapcontext(&coro->outside, &coro->inside);
+    kizu_coro_current = previous;
+    return coro->finished ? 0 : 1;
+}
+
+/* Stops the running coroutine and goes back to whoever resumed it. Called
+   outside one it does nothing, because there is nothing to go back to. */
+void std__internal__builtin__coro_suspend(void) {
+    KizuCoro *coro = kizu_coro_current;
+    if (!coro) {
+        return;
+    }
+    swapcontext(&coro->inside, &coro->outside);
+}
+
+int64_t std__internal__builtin__coro_finished(int64_t handle) {
+    KizuCoro *coro = kizu_coro_from(handle);
+    if (!coro) {
+        return 1;
+    }
+    return coro->finished ? 1 : 0;
+}
+
+/* Releases the stack and the record. A coroutine that has not finished leaves
+   whatever its stack held unreleased: nothing here can run its cleanups,
+   because running them would mean resuming it, and it was not asked to go on.
+   The owner's deinit is what decides when this happens. */
+void std__internal__builtin__coro_close(int64_t handle) {
+    KizuCoro *coro = kizu_coro_from(handle);
+    if (!coro) {
+        return;
+    }
+    free(coro->stack);
+    free(coro);
 }
 
 /* The port the kernel picked. Binding port 0 is how a test asks for one that

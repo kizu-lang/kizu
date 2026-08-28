@@ -943,6 +943,14 @@ fn (self: &var Checker) check_function(
     if self.function_is_extern(function) {
         return null;
     }
+    // A body that calls a `Function` static parameter has no types until the
+    // parameter is bound: the parameter names a function, and a function's
+    // signature is not something the declaration says. Such a body is checked
+    // once per instantiation instead, which is the only place the call has a
+    // callee.
+    if self.function_has_function_static_param(function) {
+        return null;
+    }
     let facts = try self.copy_instance_function_facts(function) orelse
         return try self.checker_error_at(
         "type error", ast::zero_span(), "missing function metadata"
@@ -1061,8 +1069,18 @@ fn (self: &var Checker) check_test_decl(
 ) -> !?diagnostic::Diagnostic {
     let retained_name = tree.texts.at(test.name.node);
     let source_name = retained_name.as_bytes();
-    var name = try string::from_bytes(self.allocator, "test ");
+    // The name carries the module so the body reads its own module's names --
+    // a function pointer's value is looked up through the prefix of whatever
+    // is being checked, and a synthetic name without one finds nothing.
+    var name = string::new(self.allocator);
     errdefer name.deinit(self.allocator);
+    let retained_module = tree.texts.at(test.module.node);
+    let module_bytes = retained_module.as_bytes();
+    if mem::len(module_bytes) > 0 {
+        try name.append_bytes(self.allocator, module_bytes);
+        try name.append_bytes(self.allocator, "::");
+    }
+    try name.append_bytes(self.allocator, "test ");
     try fmt::append_bytes_literal(self.allocator, &var name, source_name);
     let return_type = try self.types.intern("!void");
     let signature = FunctionSignatureType {

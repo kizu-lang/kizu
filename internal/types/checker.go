@@ -65,6 +65,10 @@ type Checker struct {
 	// these, which is what separates forwarding a static value from reading a
 	// value that only exists at run time.
 	staticParams map[string]Type
+	// functionArgs binds the `Function` static arguments of the instantiation
+	// being checked, so a call written against the parameter is checked against
+	// the function it was given.
+	functionArgs map[string]string
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// open, by capture name. A capture is not a value, so it lives here rather
 	// than in a scope: the only thing that may read it is a `std::meta` form.
@@ -101,6 +105,7 @@ func New() *Checker {
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
+		functionArgs:     map[string]string{},
 	}
 }
 
@@ -1005,8 +1010,16 @@ func defineStaticValueParams(
 }
 
 // checkFunction validates one function body against its signature.
+//
+// A body that calls a `Function` static parameter has no types until the
+// parameter is bound: the parameter names a function, and a function's
+// signature is not something the declaration says. Such a body is checked once
+// per instantiation instead, which is the only place the call has a callee.
 func (c *Checker) checkFunction(fn *functionType) error {
 	if fn.sig.ExternABI != "" {
+		return nil
+	}
+	if hasFunctionStaticParam(fn.sig) {
 		return nil
 	}
 	if err := checkMainReturnType(fn); err != nil {
@@ -1056,8 +1069,15 @@ func (c *Checker) checkFunction(fn *functionType) error {
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
+	// The name carries the module so the body reads its own module's names --
+	// a function pointer's value is looked up through the prefix of whatever
+	// is being checked, and a synthetic name without one finds nothing.
+	name := "test " + strconv.Quote(decl.Name)
+	if decl.Module != "" {
+		name = decl.Module + "::" + name
+	}
 	fn := &ast.FunctionDecl{
-		FunctionSignature: ast.FunctionSignature{Name: "test " + strconv.Quote(decl.Name)},
+		FunctionSignature: ast.FunctionSignature{Name: name},
 		Body:              decl.Body,
 	}
 	return c.checkFunction(&functionType{
@@ -4909,7 +4929,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, errorf("type error: `%s` expects %d static arguments",
 			name, len(fn.sig.StaticParams))
 	}
-	typeArgsText, fieldArgs, err := c.checkStaticArgs(name, fn, argsText)
+	typeArgsText, fieldArgs, funcArgs, err := c.checkStaticArgs(name, fn, argsText)
 	if err != nil {
 		return "", true, err
 	}
@@ -4932,7 +4952,7 @@ func (c *Checker) checkGenericUserTypeApply(
 			return "", true, err
 		}
 	}
-	if err := c.checkGenericInstantiation(fn, subst, fieldArgs); err != nil {
+	if err := c.checkGenericInstantiation(fn, subst, fieldArgs, funcArgs); err != nil {
 		return "", true, err
 	}
 	// The result the caller sees is the declaration's type with this call's
@@ -4953,9 +4973,10 @@ func (c *Checker) checkStaticArgs(
 	name string,
 	fn *functionType,
 	argsText []string,
-) ([]string, map[string]metaField, error) {
+) ([]string, map[string]metaField, map[string]string, error) {
 	typeArgs := []string{}
 	fieldArgs := map[string]metaField{}
+	funcArgs := map[string]string{}
 	for idx, param := range fn.sig.StaticParams {
 		arg := strings.TrimSpace(argsText[idx])
 		if param.IsType() {
@@ -4965,7 +4986,7 @@ func (c *Checker) checkStaticArgs(
 		if Type(typ.Text(param.Type)) == typeField {
 			field, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if field.name != "" {
 				fieldArgs[param.Name] = field
@@ -4973,10 +4994,49 @@ func (c *Checker) checkStaticArgs(
 			continue
 		}
 		if err := c.checkStaticValueArg(name, param, arg, idx, argsText, fn); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		if Type(typ.Text(param.Type)) == typeFunction {
+			// A `Function` argument may itself be the parameter of the generic
+			// doing the call, in which case the name to record is what that one
+			// was given.
+			funcArgs[param.Name] = c.resolveFunctionArg(arg)
 		}
 	}
-	return typeArgs, fieldArgs, nil
+	return typeArgs, fieldArgs, funcArgs, nil
+}
+
+// resolveFunctionArg reads a `Function` static argument through the bindings in
+// force, so a generic that forwards its own parameter names the function the
+// outer call named rather than its own parameter.
+func (c *Checker) resolveFunctionArg(arg string) string {
+	if bound, ok := c.functionArgs[arg]; ok {
+		return bound
+	}
+	return arg
+}
+
+// bindFunctionArgs makes the `Function` arguments of one instantiation readable
+// by the calls written against them, and returns the call that unbinds them.
+func (c *Checker) bindFunctionArgs(funcArgs map[string]string) func() {
+	if len(funcArgs) == 0 {
+		return func() {}
+	}
+	previous := make(map[string]string, len(funcArgs))
+	had := make(map[string]bool, len(funcArgs))
+	for name, bound := range funcArgs {
+		previous[name], had[name] = c.functionArgs[name]
+		c.functionArgs[name] = bound
+	}
+	return func() {
+		for name := range funcArgs {
+			if had[name] {
+				c.functionArgs[name] = previous[name]
+				continue
+			}
+			delete(c.functionArgs, name)
+		}
+	}
 }
 
 // checkStaticValueArg validates one compile-time value argument. The value is a
@@ -5092,6 +5152,20 @@ func isIdentifierText(text string) bool {
 	return true
 }
 
+// hasFunctionStaticParam reports whether a signature names a function among its
+// compile-time parameters.
+func hasFunctionStaticParam(sig ast.FunctionSignature) bool {
+	for _, param := range sig.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		if Type(typ.Text(param.Type)) == typeFunction {
+			return true
+		}
+	}
+	return false
+}
+
 // checkGenericInstantiation checks a generic function body for one static type
 // set. A `Field` static argument instantiates like a type argument rather than
 // like the other compile-time values: the body reads it through
@@ -5101,13 +5175,15 @@ func (c *Checker) checkGenericInstantiation(
 	fn *functionType,
 	subst map[string]Type,
 	fieldArgs map[string]metaField,
+	funcArgs map[string]string,
 ) error {
-	done, err := c.enterInstantiation(fn, subst, fieldArgs)
+	done, err := c.enterInstantiation(fn, subst, fieldArgs, funcArgs)
 	if err != nil || done {
 		return err
 	}
 	defer func() { c.instantiationDepth-- }()
 	defer c.bindMetaFields(fieldArgs)()
+	defer c.bindFunctionArgs(funcArgs)()
 	env := newScope(nil)
 	staticParams, err := defineStaticValueParams(&c.types, env, fn.sig)
 	if err != nil {
@@ -5211,8 +5287,9 @@ func (c *Checker) enterInstantiation(
 	fn *functionType,
 	subst map[string]Type,
 	fieldArgs map[string]metaField,
+	funcArgs map[string]string,
 ) (bool, error) {
-	key := instanceKey(fn, subst, fieldArgs)
+	key := instanceKey(fn, subst, fieldArgs, funcArgs)
 	if c.checkedInstances[key] {
 		return true, nil
 	}
@@ -5240,7 +5317,12 @@ func elideTypeText(text string) string {
 
 // instanceKey names one instantiation: the body, and what its static
 // parameters were bound to, in declaration order.
-func instanceKey(fn *functionType, subst map[string]Type, fieldArgs map[string]metaField) string {
+func instanceKey(
+	fn *functionType,
+	subst map[string]Type,
+	fieldArgs map[string]metaField,
+	funcArgs map[string]string,
+) string {
 	args := make([]Type, 0, len(subst))
 	for _, param := range fn.sig.TypeParamNames() {
 		args = append(args, subst[param])
@@ -5249,6 +5331,9 @@ func instanceKey(fn *functionType, subst map[string]Type, fieldArgs map[string]m
 	for _, param := range fn.sig.StaticParams {
 		if field, ok := fieldArgs[param.Name]; ok {
 			key += "." + string(field.owner) + "." + field.name
+		}
+		if bound, ok := funcArgs[param.Name]; ok {
+			key += "." + bound
 		}
 	}
 	return key
@@ -5345,6 +5430,11 @@ func (c *Checker) checkUserCall(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	if bound, ok := c.functionArgs[name]; ok {
+		// A call written against a `Function` static parameter is a call to
+		// what this instantiation bound it to.
+		name = bound
+	}
 	fn, ok := c.functions[name]
 	if !ok {
 		return "", errorf("type error: undefined function `%s`", name)
@@ -6540,7 +6630,7 @@ func (c *Checker) checkStdMethodBody(fn *functionType, typeArgs []Type) error {
 	for idx, param := range typeParams {
 		subst[param] = typeArgs[idx]
 	}
-	return c.checkGenericInstantiation(fn, subst, nil)
+	return c.checkGenericInstantiation(fn, subst, nil, nil)
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.

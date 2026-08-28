@@ -19,6 +19,10 @@ const (
 	// from. A String keeps no allocator of its own (ADR-0132), so a primitive
 	// that appends to one is handed the allocator the same way source is.
 	ArgAllocator ArgKind = "Allocator"
+	// ArgCoroEntry is the function a coroutine starts in. A function pointer
+	// carries no borrow (docs/language-gaps.md), so what a coroutine is handed
+	// is a number the caller knows the meaning of.
+	ArgCoroEntry ArgKind = "fn(i64) -> void"
 )
 
 // CoreSignature describes simple std::internal::builtin calls with no ownership transfer.
@@ -135,8 +139,16 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "i64",
 	},
 	"std::internal::builtin::net_poller_close": {Args: []ArgKind{ArgI64}, Return: "void"},
-	"std::internal::builtin::test_fail":        {Args: []ArgKind{ArgBytes}, Return: "void"},
-	"std::internal::builtin::panic":            {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::coro_new": {
+		Args:   []ArgKind{ArgCoroEntry, ArgI64, ArgI64},
+		Return: "i64",
+	},
+	"std::internal::builtin::coro_resume":   {Args: []ArgKind{ArgI64}, Return: "i64"},
+	"std::internal::builtin::coro_suspend":  {Return: "void"},
+	"std::internal::builtin::coro_finished": {Args: []ArgKind{ArgI64}, Return: "i64"},
+	"std::internal::builtin::coro_close":    {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::test_fail":     {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::panic":         {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
 // TypedCoreBuiltins lists typed primitives that require explicit type application.
@@ -220,6 +232,11 @@ var primitives = map[string]bool{
 	"std::internal::builtin::net_listen":                   true,
 	"std::internal::builtin::net_local_port":               true,
 	"std::internal::builtin::net_poller_add":               true,
+	"std::internal::builtin::coro_close":                   true,
+	"std::internal::builtin::coro_finished":                true,
+	"std::internal::builtin::coro_new":                     true,
+	"std::internal::builtin::coro_resume":                  true,
+	"std::internal::builtin::coro_suspend":                 true,
 	"std::internal::builtin::net_poller_close":             true,
 	"std::internal::builtin::net_poller_flags":             true,
 	"std::internal::builtin::net_poller_new":               true,

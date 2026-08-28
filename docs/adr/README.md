@@ -138,3 +138,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0142: 汎用の cleanup は「解放が何を名指すか」を聞く](0142-generic-cleanup-asks-what-release-names.md)
 - [ADR-0143: body は保持するものではなく読むもの](0143-a-body-is-read-not-held.md)
 - [ADR-0144: 接続は返ってくる。返さなければ次は来ない](0144-the-connection-comes-back-or-nothing-does.md)
+- [ADR-0145: 途中で止まれる呼び出しを先に入れる](0145-a-call-that-can-stop-in-the-middle.md)
