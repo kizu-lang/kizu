@@ -3,6 +3,7 @@ import std::http;
 import std::io;
 import std::mem;
 import std::net;
+import std::process;
 import std::string;
 import std::testing;
 
@@ -1373,6 +1374,73 @@ test "a peer that goes away before finishing is closed, not a failure" {
 
 // take_ready loops accept_ready until the connection this test just opened is
 // there. In a server the poller says when; a test can ask again.
+test "a connection that says nothing runs out of time and is told so" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.read_head_millis = 30;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // Connects and says nothing. A poller never reports it, so the only way a
+    // loop can notice is to look.
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+
+    var held = try take_ready(handle, allocator, &var server);
+    errdefer held.deinit(allocator);
+    testing::expect(!held.expired(process::monotonic_millis()));
+    try idle(handle, 60);
+    testing::expect(held.expired(process::monotonic_millis()));
+
+    held.refuse_expired(handle, allocator);
+    held.deinit(allocator);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "408"));
+}
+
+test "a connection that finished its head has the body's time, not the head's" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.read_head_millis = 30;
+    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
+    defer server.deinit();
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /quick HTTP/1.1", "");
+
+    var held = try take_ready(handle, allocator, &var server);
+    defer held.deinit(allocator);
+    testing::expect_equal<[]u8>("request", try settled(handle, allocator, &var held));
+
+    // The head's 30 milliseconds are gone; the body's are what applies now.
+    try idle(handle, 60);
+    testing::expect(!held.expired(process::monotonic_millis()));
+}
+
+// idle spends milliseconds without waiting on anything. A poller with nothing
+// to watch is the clock a program with no sleep has.
+fn idle(handle: Io, millis: i64) -> Failure!void {
+    var poller = try net::poller_new(handle, 1);
+    defer poller.deinit();
+    let _ = try poller.wait(handle, net::deadline_in_millis(millis));
+    return;
+}
+
 fn take_ready(
     handle: Io,
     allocator: Allocator,

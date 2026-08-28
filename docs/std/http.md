@@ -482,6 +482,39 @@ while index < count {
 `examples/http_evented.kizu` が 3 接続を 1 thread で捌いています —— 繋いだ順では
 なく **head を書き終えた順**に答えます。
 
+### 黙っている接続は自分で見つけます
+
+```kizu
+fn (self: &Exchange) expired(now: i64) -> bool
+fn (self: &var Exchange) refuse_expired(io: Io, allocator: Allocator) -> void
+```
+
+poller が報告するのは**喋った接続だけ**です。繋いで何も言わない相手は readable に
+ならないので、`wait` に出てきません。`advance` を呼ぶ機会が来ないので、その接続の
+期限を見る人がいません —— blocking の `accept` が 10 秒で切る相手を、poller の
+loop は永遠に抱えます。
+
+なので loop が見に行きます。
+
+```kizu
+let count = try poller.wait(handle, net::deadline_in_millis(200));
+// ... ready なものを advance する ...
+let now = process::monotonic_millis();
+// ... 自分の表を 1 周して、expired(now) なものを refuse_expired して閉じる ...
+```
+
+`now` を引数に取るのは、**時計を読む回数を loop が決められる**ようにするためです。
+接続 1000 本の sweep で時計を 1000 回読む理由はありません。読む場所が source に
+見えるのも同じ理由です。
+
+`refuse_expired` は 408 を 1 回書いて待ちません。他の refusal と同じ理由です。
+
+`examples/http_sweep.kizu` がこれだけを見せています —— poller は 1 度も ready と
+言わず、sweep だけが動きます。
+
+**書き忘れると穴は開いたままです。** 掃除を書かない loop は、繋いで黙る相手を
+抱え続けます。それを不可能にするには接続を所有する側が掃除を持つ必要があります。
+
 ### 大きな response は `write_some`
 
 `respond_text` / `respond` は書き切るまで返ります。小さい答えなら問題ありませんが、

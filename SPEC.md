@@ -3045,6 +3045,10 @@ coroutine が要り、function coloring が生えるためです。
   分だけ head を進め、`std::http::Progress` —— `NeedMore`(poller に戻る)/
   `Request`(head が揃った)/ `Closed`(揃う前に peer が去った) —— を返す。
   `exchange.watch_read(io, poller, token)` が poller に登録する
+* `exchange.expired(now)` は今いる phase の期限が切れたかを答え、
+  `exchange.refuse_expired(io, allocator)` が 408 を 1 回書く。poller は喋った
+  接続しか報告しないので、黙っている相手に気づく道はこれだけ。`now` は caller が
+  読む —— 接続ごとに時計を読ませない
 * `exchange.next(io, allocator, max)` は同じ接続の次の request を読み、あったかを
   `!bool` で返す。`exchange.next_head(io, allocator)` は head だけを読む。false は接続が終わったこと。まだ答えていない / 自分の body を
   `finish_body` で閉じていない / `accept_head` の request body を読み切って

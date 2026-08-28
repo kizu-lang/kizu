@@ -130,8 +130,6 @@ fn (self: &var std::http::Exchange) take_head(
     while true {
         let progress = try self.step(allocator);
         if !needs_more(progress) {
-            let body_millis = self.limits.read_body_millis;
-            self.arm_read_phase(body_millis);
             return true;
         }
         let got = try self.fill_waiting(io, allocator);
@@ -187,6 +185,7 @@ fn (self: &std::http::Server) opening(
         body: std::string::new(allocator),
         answered: false,
         phase: std::http::Phase::ReadingHead,
+        deadline: phase_deadline(self.limits.read_head_millis),
         framing: std::http::Framing::Buffered,
         body_open: false,
         owed: 0,
@@ -197,8 +196,48 @@ fn (self: &std::http::Server) opening(
     };
 }
 
+// arm_read_phase starts a read phase: the socket gets the deadline a waiting
+// caller stops at, and the exchange gets the same moment for one that does not
+// wait. They are one moment written twice because two different things have to
+// be able to see it.
 fn (self: &var std::http::Exchange) arm_read_phase(millis: i64) -> void {
     self.reader.arm_read(millis);
+    self.deadline = phase_deadline(millis);
+    return;
+}
+
+// phase_deadline turns a duration into the moment it runs out. Zero is no
+// deadline, which is what `Limits` means by it -- not a deadline that has
+// already passed.
+fn phase_deadline(millis: i64) -> i64 {
+    if millis <= 0 {
+        return 0;
+    }
+    return std::net::deadline_in_millis(millis);
+}
+
+// expired answers whether this connection has run out of time for the phase it
+// is in. `now` is the caller's, read once for a whole sweep rather than once
+// per connection -- a loop over a thousand connections should not read the
+// clock a thousand times, and where it does read it is worth seeing.
+fn (self: &std::http::Exchange) expired(now: i64) -> bool {
+    if self.deadline == 0 {
+        return false;
+    }
+    return now >= self.deadline;
+}
+
+// refuse_expired tells the peer its time ran out. It is what the blocking
+// `accept` does for the same peer, said by a loop that had to look rather than
+// be told. Like every refusal here it writes once and does not wait.
+fn (self: &var std::http::Exchange) refuse_expired(
+    io: Io,
+    allocator: Allocator
+) -> void {
+    // 408 is what RFC 9110 gives a request that was not wrong, it just never
+    // finished arriving -- the same status the blocking path maps a read
+    // timeout to.
+    self.refuse_status(io, allocator, 408);
     return;
 }
 
@@ -328,6 +367,12 @@ fn (self: &var std::http::Exchange) begin_body(
         let declared = try self.request.content_length();
         self.reader.bind_length(declared orelse 0);
     }
+    // The body is its own phase, so it gets its own deadline. Sharing the
+    // head's would give a large body whatever the head happened to leave over.
+    // This is where both paths cross from one phase to the other, which is why
+    // it is the one place that says so.
+    let body_millis = self.limits.read_body_millis;
+    self.arm_read_phase(body_millis);
     self.phase = std::http::Phase::Ready;
     return;
 }
@@ -374,6 +419,12 @@ pub struct Exchange {
     // read and a poller loop differ only in how the reader is filled -- what
     // it means is decided in one place (`step`).
     phase: std::http::Phase,
+    // When the phase this connection is in has to be finished by, or 0 for no
+    // deadline. The socket carries the same moment for a caller that waits on
+    // it. This is here for one that does not: a poller reports connections
+    // that spoke, and a peer running out its clock in silence is exactly the
+    // one that never does -- so the only way a loop can notice is to look.
+    deadline: i64,
     // How the head this exchange sent framed its body, and whether that body
     // is still open. `write_all` reads them to know whether to count bytes,
     // wrap them in a chunk, or pass them straight through.
@@ -690,6 +741,7 @@ fn (self: &var std::http::Exchange) reopen(
     self.framing = std::http::Framing::Buffered;
     self.owed = 0;
     self.counting = false;
+    self.deadline = phase_deadline(self.limits.read_head_millis);
     return;
 }
 
@@ -848,7 +900,19 @@ fn (self: &var std::http::Exchange) refuse(
     if !worth_answering(failure) {
         return;
     }
-    let status = refusal_status(failure);
+    self.refuse_status(io, allocator, refusal_status(failure));
+    return;
+}
+
+// refuse_status is the writing half, for a refusal that already knows what it
+// is. It writes once and does not wait: a peer that has stopped reading cannot
+// be told anything, and waiting for one is how a single connection stops a
+// loop that is serving everyone else (ADR-0141).
+fn (self: &var std::http::Exchange) refuse_status(
+    io: Io,
+    allocator: Allocator,
+    status: i64
+) -> void {
     var out = std::string::new(allocator);
     defer out.deinit(allocator);
     var response = std::http::response_new(allocator);
