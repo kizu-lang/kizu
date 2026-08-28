@@ -2903,6 +2903,10 @@ std::io::kqueue()    kqueue backend
 `evented` / `uring` / `kqueue` は実装しません。
 runtime selection の方針は ADR-0039 に従います。
 
+多数の descriptor を同時に待つことは `Io` の実装差ではなく、`std::net::Poller`
+という値です(ADR-0141)。`read_into` の途中で中断して再開する形は取りません ——
+coroutine が要り、function coloring が生えるためです。
+
 ### 15.2 Io を取る標準 API
 
 `std::fs`:
@@ -2954,8 +2958,15 @@ runtime selection の方針は ADR-0039 に従います。
   受け取る。設定した時点は以後のその向きの呼び出し**全体**を覆い、自動では
   更新されない。過ぎた後の呼び出しは待たずに `Error::TimedOut` を返す。
   `clear_*_deadline` で外す
-* `TcpListener` / `TcpStream` は非 copy の owner で、`deinit` は `self` を値で
-  取る。close 後の使用は型 error であり、runtime の報告ではない
+* `std::net::poller_new(io, capacity)` は `!std::net::Poller` を返す。
+  `watch_stream` / `watch_listener` が descriptor と caller の `token` を登録し、
+  `wait(io, at)` が ready の個数を返し、`ready(index)` が
+  `?std::net::Ready { token, readable, writable, closed }` を返す。`token` は
+  caller のもので、std は読まない。`at` は deadline と同じ時点
+* 1 つの descriptor が同じ `wait` で 2 回報告されることがある。kqueue は filter
+  ごと、epoll は bit をまとめるので、host が言った通りを渡す
+* `TcpListener` / `TcpStream` / `Poller` は非 copy の owner で、`deinit` は
+  `self` を値で取る。close 後の使用は型 error であり、runtime の報告ではない
 * `std::net::Address` は `host: []u8` と `port: i64` だけを持つ
 * safe Kizu に file descriptor や socket pointer は出さない
 * I/O failure は `!T` error として返す

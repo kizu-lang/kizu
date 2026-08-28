@@ -25,6 +25,9 @@ pub fn runtime_source() -> []u8 {
         \\#include <unistd.h>
         \\#if defined(__APPLE__)
         \\#include <mach-o/dyld.h>
+        \\#include <sys/event.h>
+        \\#else
+        \\#include <sys/epoll.h>
         \\#endif
         \\
         \\typedef struct {
@@ -1751,6 +1754,307 @@ pub fn runtime_source() -> []u8 {
         \\    int64_t timeout_ms
         \\) {
         \\    *out = kizu_std_builtin_net_write_all_result(io, fd, *bytes, timeout_ms);
+        \\}
+        \\
+        \\/* A poller waits on many descriptors at once, which is the whole of what an
+        \\ * evented server needs that a blocking one cannot do. Everything above it --
+        \\ * which connection is which, what to do when one is ready -- is Kizu source,
+        \\ * because the readiness itself is all the kernel knows.
+        \\ *
+        \\ * The two host mechanisms report the same fact in different shapes. kqueue
+        \\ * gives one event per filter, so a descriptor that is both readable and
+        \\ * writable arrives twice; epoll gives one event with both bits. The Kizu side
+        \\ * sees whatever the host said, because collapsing them here would be inventing
+        \\ * an order the host did not have. */
+        \\
+        \\#define KIZU_POLL_READ INT64_C(1)
+        \\#define KIZU_POLL_WRITE INT64_C(2)
+        \\#define KIZU_POLL_CLOSED INT64_C(4)
+        \\
+        \\typedef struct {
+        \\    int fd;
+        \\    int count;
+        \\    int capacity;
+        \\#if defined(__APPLE__)
+        \\    struct kevent *events;
+        \\#else
+        \\    struct epoll_event *events;
+        \\#endif
+        \\} KizuPoller;
+        \\
+        \\/* The handle a Kizu Poller holds. It is this pointer, which is the one thing
+        \\ * safe Kizu never sees: the owner keeps it private and its consuming deinit is
+        \\ * the only way to release it. */
+        \\static KizuPoller *kizu_poller_from(int64_t handle) {
+        \\    if (handle == 0) {
+        \\        return NULL;
+        \\    }
+        \\    return (KizuPoller *)(intptr_t)handle;
+        \\}
+        \\
+        \\static KizuErrorI64 kizu_std_builtin_net_poller_new_result(void *io, int64_t capacity) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    if (capacity <= 0 || capacity > 65536) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
+        \\    }
+        \\    KizuPoller *poller = (KizuPoller *)calloc(1, sizeof *poller);
+        \\    if (!poller) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+        \\    }
+        \\#if defined(__APPLE__)
+        \\    poller->events = (struct kevent *)calloc((size_t)capacity, sizeof *poller->events);
+        \\#else
+        \\    poller->events = (struct epoll_event *)calloc((size_t)capacity, sizeof *poller->events);
+        \\#endif
+        \\    if (!poller->events) {
+        \\        free(poller);
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+        \\    }
+        \\    poller->capacity = (int)capacity;
+        \\    poller->count = 0;
+        \\#if defined(__APPLE__)
+        \\    poller->fd = kqueue();
+        \\#else
+        \\    poller->fd = epoll_create1(0);
+        \\#endif
+        \\    if (poller->fd < 0) {
+        \\        int64_t failure = kizu_net_errno_failure(errno);
+        \\        free(poller->events);
+        \\        free(poller);
+        \\        return kizu_err_i64(failure);
+        \\    }
+        \\    return kizu_ok_i64((int64_t)(intptr_t)poller);
+        \\}
+        \\
+        \\void std__internal__builtin__net_poller_new(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    int64_t capacity
+        \\) {
+        \\    *out = kizu_std_builtin_net_poller_new_result(io, capacity);
+        \\}
+        \\
+        \\static KizuErrorVoid kizu_std_builtin_net_poller_add_result(
+        \\    void *io,
+        \\    int64_t handle,
+        \\    int64_t fd,
+        \\    int64_t token,
+        \\    int64_t interest
+        \\) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    KizuPoller *poller = kizu_poller_from(handle);
+        \\    if (!poller || fd < 0) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    if ((interest & (KIZU_POLL_READ | KIZU_POLL_WRITE)) == 0) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
+        \\    }
+        \\#if defined(__APPLE__)
+        \\    struct kevent changes[2];
+        \\    int count = 0;
+        \\    if (interest & KIZU_POLL_READ) {
+        \\        EV_SET(&changes[count], (uintptr_t)fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0,
+        \\               (void *)(intptr_t)token);
+        \\        count++;
+        \\    }
+        \\    if (interest & KIZU_POLL_WRITE) {
+        \\        EV_SET(&changes[count], (uintptr_t)fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0,
+        \\               (void *)(intptr_t)token);
+        \\        count++;
+        \\    }
+        \\    if (kevent(poller->fd, changes, count, NULL, 0, NULL) < 0) {
+        \\        return kizu_err_void(kizu_net_errno_failure(errno));
+        \\    }
+        \\#else
+        \\    struct epoll_event event;
+        \\    memset(&event, 0, sizeof event);
+        \\    event.events = 0;
+        \\    if (interest & KIZU_POLL_READ) {
+        \\        event.events |= EPOLLIN;
+        \\    }
+        \\    if (interest & KIZU_POLL_WRITE) {
+        \\        event.events |= EPOLLOUT;
+        \\    }
+        \\    event.data.u64 = (uint64_t)token;
+        \\    if (epoll_ctl(poller->fd, EPOLL_CTL_ADD, (int)fd, &event) < 0) {
+        \\        if (errno != EEXIST) {
+        \\            return kizu_err_void(kizu_net_errno_failure(errno));
+        \\        }
+        \\        if (epoll_ctl(poller->fd, EPOLL_CTL_MOD, (int)fd, &event) < 0) {
+        \\            return kizu_err_void(kizu_net_errno_failure(errno));
+        \\        }
+        \\    }
+        \\#endif
+        \\    return kizu_ok_void();
+        \\}
+        \\
+        \\void std__internal__builtin__net_poller_add(
+        \\    KizuErrorVoid *out,
+        \\    void *io,
+        \\    int64_t handle,
+        \\    int64_t fd,
+        \\    int64_t token,
+        \\    int64_t interest
+        \\) {
+        \\    *out = kizu_std_builtin_net_poller_add_result(io, handle, fd, token, interest);
+        \\}
+        \\
+        \\/* Removing is not the same as closing. A descriptor the process still wants
+        \\ * but no longer wants woken about has to say so; one that is closed leaves on
+        \\ * its own, which is why this is not called from a stream's deinit. */
+        \\static KizuErrorVoid kizu_std_builtin_net_poller_remove_result(
+        \\    void *io,
+        \\    int64_t handle,
+        \\    int64_t fd
+        \\) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    KizuPoller *poller = kizu_poller_from(handle);
+        \\    if (!poller || fd < 0) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\#if defined(__APPLE__)
+        \\    struct kevent changes[2];
+        \\    EV_SET(&changes[0], (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        \\    EV_SET(&changes[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        \\    /* Deleting a filter that was never added is ENOENT, which is the state the
+        \\     * caller asked for rather than a failure. */
+        \\    kevent(poller->fd, changes, 2, NULL, 0, NULL);
+        \\#else
+        \\    if (epoll_ctl(poller->fd, EPOLL_CTL_DEL, (int)fd, NULL) < 0) {
+        \\        if (errno != ENOENT) {
+        \\            return kizu_err_void(kizu_net_errno_failure(errno));
+        \\        }
+        \\    }
+        \\#endif
+        \\    return kizu_ok_void();
+        \\}
+        \\
+        \\void std__internal__builtin__net_poller_remove(
+        \\    KizuErrorVoid *out,
+        \\    void *io,
+        \\    int64_t handle,
+        \\    int64_t fd
+        \\) {
+        \\    *out = kizu_std_builtin_net_poller_remove_result(io, handle, fd);
+        \\}
+        \\
+        \\static KizuErrorI64 kizu_std_builtin_net_poller_wait_result(
+        \\    void *io,
+        \\    int64_t handle,
+        \\    int64_t timeout_ms
+        \\) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    KizuPoller *poller = kizu_poller_from(handle);
+        \\    if (!poller) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    poller->count = 0;
+        \\    int64_t deadline = kizu_net_deadline(timeout_ms);
+        \\    for (;;) {
+        \\        int64_t remaining = kizu_net_remaining(deadline);
+        \\        int ready;
+        \\#if defined(__APPLE__)
+        \\        struct timespec wait;
+        \\        struct timespec *waitp = NULL;
+        \\        if (remaining >= 0) {
+        \\            wait.tv_sec = (time_t)(remaining / 1000);
+        \\            wait.tv_nsec = (long)((remaining % 1000) * 1000000);
+        \\            waitp = &wait;
+        \\        }
+        \\        ready = kevent(poller->fd, NULL, 0, poller->events, poller->capacity, waitp);
+        \\#else
+        \\        int budget = -1;
+        \\        if (remaining >= 0) {
+        \\            budget = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
+        \\        }
+        \\        ready = epoll_wait(poller->fd, poller->events, poller->capacity, budget);
+        \\#endif
+        \\        if (ready >= 0) {
+        \\            poller->count = ready;
+        \\            return kizu_ok_i64((int64_t)ready);
+        \\        }
+        \\        if (errno == EINTR) {
+        \\            continue;
+        \\        }
+        \\        return kizu_err_i64(kizu_net_errno_failure(errno));
+        \\    }
+        \\}
+        \\
+        \\void std__internal__builtin__net_poller_wait(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    int64_t handle,
+        \\    int64_t timeout_ms
+        \\) {
+        \\    *out = kizu_std_builtin_net_poller_wait_result(io, handle, timeout_ms);
+        \\}
+        \\
+        \\/* The token the caller registered with, which is how it finds its own state
+        \\ * again. Nothing here knows what it means. */
+        \\int64_t std__internal__builtin__net_poller_token(int64_t handle, int64_t index) {
+        \\    KizuPoller *poller = kizu_poller_from(handle);
+        \\    if (!poller || index < 0 || index >= poller->count) {
+        \\        return 0;
+        \\    }
+        \\#if defined(__APPLE__)
+        \\    return (int64_t)(intptr_t)poller->events[index].udata;
+        \\#else
+        \\    return (int64_t)poller->events[index].data.u64;
+        \\#endif
+        \\}
+        \\
+        \\int64_t std__internal__builtin__net_poller_flags(int64_t handle, int64_t index) {
+        \\    KizuPoller *poller = kizu_poller_from(handle);
+        \\    if (!poller || index < 0 || index >= poller->count) {
+        \\        return 0;
+        \\    }
+        \\    int64_t flags = 0;
+        \\#if defined(__APPLE__)
+        \\    struct kevent *event = &poller->events[index];
+        \\    if (event->filter == EVFILT_READ) {
+        \\        flags |= KIZU_POLL_READ;
+        \\    }
+        \\    if (event->filter == EVFILT_WRITE) {
+        \\        flags |= KIZU_POLL_WRITE;
+        \\    }
+        \\    if (event->flags & EV_EOF) {
+        \\        flags |= KIZU_POLL_CLOSED;
+        \\    }
+        \\#else
+        \\    uint32_t events = poller->events[index].events;
+        \\    if (events & EPOLLIN) {
+        \\        flags |= KIZU_POLL_READ;
+        \\    }
+        \\    if (events & EPOLLOUT) {
+        \\        flags |= KIZU_POLL_WRITE;
+        \\    }
+        \\    /* EPOLLRDHUP is behind _GNU_SOURCE, and these two say enough: a peer that
+        \\     * hung up is also readable, and the read that follows answers 0. */
+        \\    if (events & (EPOLLHUP | EPOLLERR)) {
+        \\        flags |= KIZU_POLL_CLOSED;
+        \\    }
+        \\#endif
+        \\    return flags;
+        \\}
+        \\
+        \\void std__internal__builtin__net_poller_close(int64_t handle) {
+        \\    KizuPoller *poller = kizu_poller_from(handle);
+        \\    if (!poller) {
+        \\        return;
+        \\    }
+        \\    if (poller->fd >= 0) {
+        \\        close(poller->fd);
+        \\    }
+        \\    free(poller->events);
+        \\    free(poller);
         \\}
         \\
         \\/* The port the kernel picked. Binding port 0 is how a test asks for one that

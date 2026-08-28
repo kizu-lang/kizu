@@ -31,6 +31,18 @@ fn (self: &var TcpStream) set_write_deadline(at: i64) -> void
 fn (self: &var TcpStream) clear_read_deadline() -> void
 fn (self: &var TcpStream) clear_write_deadline() -> void
 fn (self: TcpStream) deinit() -> void
+
+pub fn poller_new(io: Io, capacity: i64) -> std::net::Error!std::net::Poller
+fn (self: &var Poller) watch_stream(
+    io: Io, stream: &TcpStream, token: i64, interest: std::net::Interest,
+) -> std::net::Error!void
+fn (self: &var Poller) watch_listener(
+    io: Io, listener: &TcpListener, token: i64,
+) -> std::net::Error!void
+fn (self: &var Poller) forget(io: Io, stream: &TcpStream) -> std::net::Error!void
+fn (self: &var Poller) wait(io: Io, at: i64) -> std::net::Error!i64
+fn (self: &Poller) ready(index: i64) -> ?std::net::Ready
+fn (self: Poller) deinit() -> void
 ```
 
 ## address
@@ -100,15 +112,72 @@ deadline は自分で更新しません。
 `set_accept_deadline` は `accept` に期限を与えます。定期的な仕事を挟みたい loop は
 期限を設け、`TimedOut` をその合図として受け取り、次の期限を設けます。
 
+## Poller —— 多数を同時に待つ
+
+blocking な read は 1 つの descriptor を待ちます。だから
+`examples/http_server.kizu` の server は 1 接続ずつしか捌けません —— 1 本を
+待っている間、他の声が聞こえないからです。
+
+`Poller` は多数を待ち、**どれが喋ったか**を答えます。
+
+```kizu
+var poller = try net::poller_new(handle, 64);
+defer poller.deinit();
+try poller.watch_stream(handle, &conn, 7, net::Interest::Read);
+
+let count = try poller.wait(handle, net::deadline_in_millis(1000));
+var index = 0;
+while index < count {
+    if poller.ready(index) |event| {
+        // event.token は登録時に渡した値。std::net は中身を見ません
+    }
+    index = index + 1;
+}
+```
+
+`token` は caller のものです。この module は一度も読みません —— 「どの接続か」を
+知っているのは caller だけなので、それを表す値を預かって返すだけです。
+
+`wait` の `at` は **時点**で、[deadline](#deadline) と同じ種類の値です。
+
+### `io::evented()` ではない理由
+
+SPEC §15.1 は `std::io::evented()` を将来の候補として挙げていますが、それは
+「同じ API のまま裏で多重化する」という意味にはなりません。`read_into` の
+**途中で中断して再開する**ことになり、coroutine が要り、function coloring が
+生えます。SPEC §15 はそれを持ちません。
+
+多数を待つことは**書くもの**で、切り替えるものではありません。だから Poller は
+値で、待っていることが source に見えます(原理 2)。
+
+### 1 つの descriptor が 2 回来ることがあります
+
+kqueue は filter ごとに 1 event を返し、epoll は 1 event に両方の bit を立てます。
+read と write の両方が立った descriptor は、host によって 1 回とも 2 回とも来ます。
+**どちらも間違いではない**ので、この module は host が言った通りを渡します。
+渡された flag に従って動く caller はどちらでも正しく動きます。
+
+`capacity` は 1 回の `wait` が報告できる上限です。溢れた分は失われません ——
+まだ ready なので次の `wait` が即座に返します。
+
+### 今これで書けないもの
+
+接続を **collection に持てません**。`Array<T>` / `Arena<T>` は要素が
+`deinit(allocator)` で解放されることを要求し、socket は allocator ではなく
+descriptor を解放するので `deinit()` です(`docs/language-gaps.md`)。
+
+`examples/net_poller.kizu` が接続を 3 つの名前付き変数で持っているのはこのため
+です。汎用の evented server と、この example の間に立っているのはこれだけです。
+
 ## 並行性
 
-現在の Kizu に並行 API はありません(SPEC §15)。したがって
-`listener.accept` は 1 接続ずつしか返せず、その接続を処理し終えるまで次の
-caller は待ちます。listen backlog(128)がその待ち行列です。
+現在の Kizu に thread はありません(SPEC §15)。`Poller` は並行性ではなく
+**多重化**です —— 1 thread が多数の接続を扱えるようにしますが、2 つのことを
+同時にはしません。
 
-これは Zig の `std.http.Server` が今日出荷している形と同じで、並行性は呼ぶ側が
-持ち込みます。Kizu の呼ぶ側はまだ何も持ち込めないので、これは milestone であって
-production server ではありません。
+`std::http` の server は今も 1 接続ずつです。`accept` が request の head を
+blocking で読むので、Poller の上に載せるには head 読みを再開可能にする必要が
+あります。それは別の作業です。
 
 ## エラー
 

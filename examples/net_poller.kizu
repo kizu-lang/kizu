@@ -1,0 +1,149 @@
+// One thread, three connections, waiting on all of them at once.
+//
+// A blocking read waits on one descriptor. That is why the HTTP server in
+// examples/http_server.kizu serves one connection at a time: while it is
+// waiting on one, it cannot hear the others. A poller waits on many and
+// answers with which of them spoke.
+//
+// The loop below serves whoever spoke, not whoever connected first. The three
+// clients here speak in the reverse of the order they connected, and the
+// answers come back in speaking order -- which is the whole difference.
+//
+// There is no `evented` Io that makes an ordinary read do this behind the
+// caller's back. That would be a suspension inside `read_into`, which needs
+// coroutines, which needs function coloring, which SPEC §15 does not have.
+// Waiting on many things is written, not switched on.
+//
+// The three connections are three named variables rather than a collection.
+// A std collection requires its elements to release with an allocator, and a
+// socket releases a descriptor instead (docs/language-gaps.md). That is what
+// stands between this and a general evented server.
+
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // Three callers, connected in this order.
+    var first = try net::tcp_connect(handle, address_bytes);
+    defer first.deinit();
+    var second = try net::tcp_connect(handle, address_bytes);
+    defer second.deinit();
+    var third = try net::tcp_connect(handle, address_bytes);
+    defer third.deinit();
+
+    var one = try listener.accept(handle);
+    defer one.deinit();
+    var two = try listener.accept(handle);
+    defer two.deinit();
+    var three = try listener.accept(handle);
+    defer three.deinit();
+
+    // One poller, three descriptors, one thread.
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+    try poller.watch_stream(handle, &one, 1, net::Interest::Read);
+    try poller.watch_stream(handle, &two, 2, net::Interest::Read);
+    try poller.watch_stream(handle, &three, 3, net::Interest::Read);
+
+    // Nothing has spoken, so the wait ends on its deadline with nothing ready.
+    let quiet = try poller.wait(handle, net::deadline_in_millis(50));
+    print("ready with nobody speaking");
+    print(quiet);
+
+    // They speak in the reverse of the order they connected.
+    try third.write_all(handle, "third");
+    try serve_one(handle, allocator, &var poller, &var one, &var two, &var three);
+    try first.write_all(handle, "first");
+    try serve_one(handle, allocator, &var poller, &var one, &var two, &var three);
+    try second.write_all(handle, "second");
+    try serve_one(handle, allocator, &var poller, &var one, &var two, &var three);
+    return;
+}
+
+// serve_one waits until something is ready and answers whoever it was. The
+// dispatch is an if chain because the three connections are three variables;
+// with a collection it would be an index.
+fn serve_one(
+    handle: Io,
+    allocator: Allocator,
+    poller: &var net::Poller,
+    one: &var net::TcpStream,
+    two: &var net::TcpStream,
+    three: &var net::TcpStream
+) -> Failure!void {
+    let count = try poller.wait(handle, net::deadline_in_millis(1000));
+    var index = 0;
+    while index < count {
+        if poller.ready(index) |event| {
+            if event.readable {
+                if event.token == 1 {
+                    try drain(handle, allocator, one, "one");
+                }
+                if event.token == 2 {
+                    try drain(handle, allocator, two, "two");
+                }
+                if event.token == 3 {
+                    try drain(handle, allocator, three, "three");
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// drain reads what is there. The poller said this descriptor is readable, so
+// this read does not wait -- which is the point: the thread is never parked on
+// a connection that has nothing to say.
+fn drain(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    name: []u8
+) -> Failure!void {
+    var said = string::new(allocator);
+    defer said.deinit(allocator);
+    let count = try stream.read_into(handle, allocator, &var said, 64);
+    let bytes = said.as_bytes();
+    print(name);
+    print(count);
+    print(bytes);
+    return;
+}
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+// run
+// features: net io error-union
+// output:
+// ready with nobody speaking
+// 0
+// three
+// 5
+// third
+// one
+// 5
+// first
+// two
+// 6
+// second

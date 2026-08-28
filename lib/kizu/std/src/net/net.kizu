@@ -65,6 +65,128 @@ pub fn deadline_in_millis(millis: i64) -> i64 {
     return now + millis;
 }
 
+// A Poller waits on many descriptors at once, which is the one thing a
+// blocking server cannot do. It answers with which of them are ready, and
+// nothing else: what a ready descriptor means, and what to do about it, is the
+// caller's -- the same pull loop `accept` is, one level out.
+//
+// There is no `evented` Io that makes an ordinary read wait on many sockets
+// behind the caller's back. That would be a suspension in the middle of
+// `read_into`, which needs coroutines, which needs function coloring -- and
+// SPEC §15 does not have it. Waiting on many things is a thing you write, not
+// a mode you switch on.
+pub struct Poller {
+    handle: i64,
+}
+
+// Interest is what a descriptor is being watched for.
+pub union Interest {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+// Ready is one thing the host said became ready. `token` is what the caller
+// registered with, which is how it finds its own state again -- this module
+// never looks at it.
+//
+// A descriptor that is both readable and writable may arrive as one Ready or
+// as two, because kqueue and epoll disagree about that and neither is wrong.
+// A caller that acts on the flags it was given is right either way.
+pub struct Ready {
+    pub token: i64,
+    pub readable: bool,
+    pub writable: bool,
+    pub closed: bool,
+}
+
+// poller_new opens a poller that can report up to `capacity` ready
+// descriptors per wait. More than that are not lost -- they are reported by
+// the next wait, which returns immediately because they are still ready.
+pub fn poller_new(io: Io, capacity: i64) -> std::net::Error!std::net::Poller {
+    let handle = try std::internal::builtin::net_poller_new(io, capacity);
+    return Poller { handle: handle };
+}
+
+fn (self: &var std::net::Poller) watch_stream(
+    io: Io,
+    stream: &std::net::TcpStream,
+    token: i64,
+    interest: std::net::Interest
+) -> std::net::Error!void {
+    try std::internal::builtin::net_poller_add(
+        io, self.handle, stream.fd, token, interest_bits(interest));
+    return;
+}
+
+// watch_listener is how an evented server hears about a new connection at the
+// same time as it hears about the ones it already has.
+fn (self: &var std::net::Poller) watch_listener(
+    io: Io,
+    listener: &std::net::TcpListener,
+    token: i64
+) -> std::net::Error!void {
+    try std::internal::builtin::net_poller_add(
+        io, self.handle, listener.fd, token, interest_bits(Interest::Read));
+    return;
+}
+
+// forget stops watching a descriptor the process still holds. Closing one
+// removes it on its own, so this is for a connection that is staying open and
+// has nothing to be woken about.
+fn (self: &var std::net::Poller) forget(
+    io: Io,
+    stream: &std::net::TcpStream
+) -> std::net::Error!void {
+    try std::internal::builtin::net_poller_remove(io, self.handle, stream.fd);
+    return;
+}
+
+// wait blocks until something is ready or the deadline passes, and answers how
+// many. `at` is a moment, the same kind `set_read_deadline` takes; a poller
+// with no deadline waits until something happens.
+fn (self: &var std::net::Poller) wait(io: Io, at: i64) -> std::net::Error!i64 {
+    let budget = remaining_millis(at);
+    let count = try std::internal::builtin::net_poller_wait(io, self.handle, budget);
+    return count;
+}
+
+// ready reads one of the last wait's answers. Out of range is null, so a loop
+// over them ends without the caller holding the count.
+fn (self: &std::net::Poller) ready(index: i64) -> ?std::net::Ready {
+    if index < 0 {
+        return null;
+    }
+    let flags = std::internal::builtin::net_poller_flags(self.handle, index);
+    if flags == 0 {
+        return null;
+    }
+    let token = std::internal::builtin::net_poller_token(self.handle, index);
+    return Ready {
+        token: token,
+        readable: has_bit(flags, 1),
+        writable: has_bit(flags, 2),
+        closed: has_bit(flags, 4),
+    };
+}
+
+fn (self: std::net::Poller) deinit() -> void {
+    std::internal::builtin::net_poller_close(self.handle);
+    return;
+}
+
+fn interest_bits(interest: std::net::Interest) -> i64 {
+    return match interest {
+        Read => 1,
+        Write => 2,
+        ReadWrite => 3,
+    };
+}
+
+fn has_bit(flags: i64, bit: i64) -> bool {
+    return (flags / bit) % 2 == 1;
+}
+
 // parse_address splits `host:port`. It reads text and nothing else: a name
 // that has to be looked up is looked up by `tcp_listen` / `tcp_connect`, where
 // the failure has an Io to be attributed to.

@@ -106,8 +106,33 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_close": {Args: []ArgKind{ArgI64}, Return: "void"},
-	"std::internal::builtin::test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
-	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::net_poller_new": {
+		Args:   []ArgKind{ArgIo, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_poller_add": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64, ArgI64, ArgI64},
+		Return: "std::net::Error!void",
+	},
+	"std::internal::builtin::net_poller_remove": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64},
+		Return: "std::net::Error!void",
+	},
+	"std::internal::builtin::net_poller_wait": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_poller_token": {
+		Args:   []ArgKind{ArgI64, ArgI64},
+		Return: "i64",
+	},
+	"std::internal::builtin::net_poller_flags": {
+		Args:   []ArgKind{ArgI64, ArgI64},
+		Return: "i64",
+	},
+	"std::internal::builtin::net_poller_close": {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::test_fail":        {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::panic":            {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
 // TypedCoreBuiltins lists typed primitives that require explicit type application.
@@ -190,6 +215,13 @@ var primitives = map[string]bool{
 	"std::internal::builtin::net_connect":                  true,
 	"std::internal::builtin::net_listen":                   true,
 	"std::internal::builtin::net_local_port":               true,
+	"std::internal::builtin::net_poller_add":               true,
+	"std::internal::builtin::net_poller_close":             true,
+	"std::internal::builtin::net_poller_flags":             true,
+	"std::internal::builtin::net_poller_new":               true,
+	"std::internal::builtin::net_poller_remove":            true,
+	"std::internal::builtin::net_poller_token":             true,
+	"std::internal::builtin::net_poller_wait":              true,
 	"std::internal::builtin::net_read":                     true,
 	"std::internal::builtin::net_write_all":                true,
 	"std::internal::builtin::panic":                        true,
