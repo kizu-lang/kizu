@@ -27,7 +27,8 @@ package doc にあります。
 - `SPEC.md` と矛盾する構文や機能を勝手に追加しない。
 - ユーザー判断で仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
 - `SPEC.md` には今の言語の定義だけを書く。延期・取り下げ・却下した案は
-  `docs/adr/` に書き、SPEC に「〜は延期します」の類を残さない。
+  adr に書き、SPEC に「〜は延期します」の類を残さない。
+- adrを気軽に追加するな。adrの追加を考える前に、コメントやコミットコメントで済む話かどうかを検討する。追加する場合も短く保つ。理想は50行以内。
 - std の API は `docs/std/` に書く。SPEC が std について持つのは compiler が
   知っている契約だけ —— capability としての `Allocator`、storage 型に対する
   borrow / ownership の検査規則、`test` 宣言。境界は「利用者が自分で同じものを
