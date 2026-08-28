@@ -343,10 +343,37 @@ test "write_some offers rather than insists" {
     testing::expect(took > 0);
     testing::expect(took < body.len());
 
-    // Full now, so the next offer is answered with zero -- not an error, and
-    // not the end of anything.
-    let again = try served.write_some(handle, bytes);
+    // Offering again until it is refused. Zero is not an error and not the end
+    // of anything -- it is "nothing fits right now", which is the answer a
+    // poller loop goes back to its wait on.
+    //
+    // It takes more than one offer to get there. The kernel moves what the
+    // first write left with it into the peer's receive buffer while this runs,
+    // and every byte it moves is a byte that fits again. Expecting the second
+    // offer to be refused is expecting that not to happen, which is a race
+    // this test used to lose about one run in ten.
+    let again = try offer_until_full(handle, &var served, bytes);
     testing::expect_equal<i64>(0, again);
+}
+
+// offer_until_full keeps offering until nothing fits. The peer never reads, so
+// both buffers stay full once they are, and this ends. The bound is there so a
+// host that never refuses says so rather than spinning.
+fn offer_until_full(
+    handle: Io,
+    stream: &var net::TcpStream,
+    bytes: []u8
+) -> Failure!i64 {
+    var offered = 0;
+    while offered < 268435456 {
+        let took = try stream.write_some(handle, bytes);
+        if took == 0 {
+            return 0;
+        }
+        offered = offered + took;
+    }
+    testing::fail("the peer's buffers never filled");
+    return 0;
 }
 
 test "write_some of nothing is nothing" {
