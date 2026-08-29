@@ -2250,6 +2250,11 @@ typedef struct KizuCoro {
     struct KizuLoop *loop;
     int started;
     int finished;
+    /* Standing on its own stack right now, somewhere below the caller. A
+       coroutine that awaits another turns the loop from in there, and the loop
+       must not resume what it is standing on: the swap would overwrite the way
+       back out and jump into a context that is already running. */
+    int running;
     int parked;
     int canceled;
 } KizuCoro;
@@ -2326,8 +2331,12 @@ int64_t std__internal__builtin__coro_resume(int64_t handle) {
     if (!coro || coro->finished) {
         return 0;
     }
+    if (coro->running) {
+        return 1;
+    }
     KizuCoro *previous = kizu_coro_current;
     kizu_coro_current = coro;
+    coro->running = 1;
     if (!coro->started) {
         coro->started = 1;
         getcontext(&coro->inside);
@@ -2338,6 +2347,7 @@ int64_t std__internal__builtin__coro_resume(int64_t handle) {
         makecontext(&coro->inside, kizu_coro_trampoline, 0);
     }
     swapcontext(&coro->outside, &coro->inside);
+    coro->running = 0;
     kizu_coro_current = previous;
     return coro->finished ? 0 : 1;
 }
@@ -2527,7 +2537,7 @@ static int kizu_loop_turn(KizuLoop *loop) {
     int ran = 0;
     for (size_t i = 0; i < loop->task_count; i += 1) {
         KizuCoro *task = loop->tasks[i];
-        if (!task || task->finished || task->parked) {
+        if (!task || task->finished || task->parked || task->running) {
             continue;
         }
         ran = 1;
