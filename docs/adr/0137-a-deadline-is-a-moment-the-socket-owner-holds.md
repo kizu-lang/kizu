@@ -16,8 +16,9 @@ $ echo $?
 124
 ```
 
-並行 API が無い(SPEC §15)ので 1 接続ずつしか捌けず、その 1 本が返らない限り
-2 人目は listen backlog で待ち続けます。並行性を待たずに閉じられる穴です。
+この判断時点の server は逐次 `accept` しかなく、その 1 本が返らない限り 2 人目は
+listen backlog で待ち続けました。現在は TaskSet worker へ接続を渡せますが、期限が
+無ければ黙った接続が worker と接続 state を永久に握る穴は残ります。
 
 決めることが 3 つありました。**何で測るか**、**どこに置くか**、**何と名乗るか**。
 
@@ -79,5 +80,5 @@ keep-alive を入れるときは、message と message の間で押し直す必�
 | setter を `set_read_timeout(ms)` にする | `timeout` は「1 回 set して忘れる」ものに聞こえ、keep-alive で 2 本目が期限切れの状態で始まる書き方を誘う。`deadline` は時点なので「押し直さないと切れる」が語に含まれる |
 | setter を `set_read_deadline_in(ms)` にする | 相対と絶対の区別は付くが、`setTimeout` の影で「N ms 後に set する」と読める。値を返す `deadline_in_millis` に `_in` を移せば、返り値は何も schedule しないので誤読が消える |
 | `Limits` を持たず、時間も deadline として受け取る | policy(server が一生許す長さ)と、この 1 回の deadline(いつまでか)は別物(原理 7)。`Limits` を毎回作り直させることになる |
-| timeout の既定を 0(無期限)にする | Go の既定がこれで、忘れた server は 1 接続で止まる。既定は数値にし、0 は「置かない」と明示的に書いた caller にだけ渡す(原理 3) |
+| timeout の既定を 0(無期限)にする | 忘れた server は逐次 path なら全体が止まり、TaskSet path でも接続 state と worker を永久に失う。既定は数値にし、0 は「置かない」と明示的に書いた caller にだけ渡す(原理 3) |
 | head と body で deadline を共有する | 大きな body が「head の余り」しか貰えない。phase ごとに始まりで作る |

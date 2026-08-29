@@ -1,0 +1,75 @@
+// A direct evented HTTP server: accept a connection, hand that owned
+// connection to one worker, and immediately accept the next one. Each worker
+// reads and answers its own request with the same straight-line calls a
+// blocking server uses. Waiting gives the one thread back to the event loop.
+
+import std::array;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+
+error Failure = array::Error or http::Error or io::Error or mem::Error or net::Error;
+
+struct App {
+    server: http::Server,
+}
+
+fn (self: App) deinit(allocator: Allocator) -> void {
+    self.server.deinit(allocator);
+    return;
+}
+
+fn serve_connection(
+    handle: Io,
+    allocator: Allocator,
+    exchange: http::Exchange
+) -> void {
+    var current = move exchange;
+    defer current.deinit(allocator);
+
+    let arrived = current.read_head(handle, allocator) catch return;
+    if !arrived {
+        return;
+    }
+    let target = current.request.target.as_bytes();
+    let path = http::path_of(target);
+    current.respond_text(
+        handle, allocator, 200, "text/plain", path) catch return;
+    return;
+}
+
+fn accept_loop(handle: Io, allocator: Allocator, app: &var App) -> void {
+    var tasks = io::task_set_new(handle, allocator) catch return;
+    defer tasks.deinit(allocator);
+
+    while true {
+        let exchange = app.server.accept_connection(handle, allocator) catch return;
+        io::spawn<http::Exchange>(
+            &var tasks,
+            serve_connection,
+            move exchange
+        ) catch return;
+    }
+    return;
+}
+
+fn main() -> Failure!void {
+    let allocator = mem::page_allocator();
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+
+    let server = try http::listen(handle, allocator, "127.0.0.1:8080");
+    var app = App { server: move server };
+    defer app.deinit(allocator);
+
+    var running = try io::async<App>(
+        handle, allocator, accept_loop, &var app);
+    running.await();
+    running.deinit(allocator);
+    return;
+}
+
+// check
+// features: net http io evented task-set ownership error-union

@@ -16,8 +16,8 @@
 // sees the descriptor listen_once was waiting on and goes back to it -- into
 // the middle of a `read_into` that never returned.
 //
-// It is not concurrency. One thing runs at a time (SPEC §15), and where the
-// turns are is where the waits are.
+// This is one-thread concurrency, not parallelism. One thing runs at a time
+// (SPEC §15), and the visible I/O waits are where workers take turns.
 
 import std::fmt;
 import std::io;
@@ -110,17 +110,19 @@ fn main() -> Failure!void {
     defer forwarding.deinit(allocator);
 
     var first = try io::async<Listener>(
-        handle, allocator, listen_once, &var waiting, 262144);
-    defer first.deinit();
+        handle, allocator, listen_once, &var waiting);
+    errdefer first.deinit(allocator);
     var second = try io::async<Relay>(
-        handle, allocator, relay, &var forwarding, 262144);
-    defer second.deinit();
+        handle, allocator, relay, &var forwarding);
+    errdefer second.deinit(allocator);
 
     // Only the talking side has anything to say. The other worker is already
     // parked inside its read by the time this arrives.
     try talking_side.write_all(handle, "hello");
     first.await();
     second.await();
+    second.deinit(allocator);
+    first.deinit(allocator);
     return;
 }
 

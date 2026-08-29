@@ -190,15 +190,13 @@ while index < count {
 
 `wait` の `at` は **時点**で、[deadline](#deadline) と同じ種類の値です。
 
-### `io::evented()` ではない理由
+### Poller と `io::evented()` の違い
 
-SPEC §15.1 は `std::io::evented()` を将来の候補として挙げていますが、それは
-「同じ API のまま裏で多重化する」という意味にはなりません。`read_into` の
-**途中で中断して再開する**ことになり、coroutine が要り、function coloring が
-生えます。SPEC §15 はそれを持ちません。
-
-多数を待つことは**書くもの**で、切り替えるものではありません。だから Poller は
-値で、待っていることが source に見えます(原理 2)。
+Poller は readiness と token を caller に返し、caller が接続表と state machine を
+持ちます。`io::evented()` は普通の `read_into` の途中で worker を park し、TaskSet
+が worker state を持ちます。どちらも 1 thread の多重化で、前者は state machine、
+後者は接続ごとの直線 code を選ぶ API です。待ちと worker の生成はどちらも source
+に見えます(原理 2)。
 
 ### 1 つの descriptor が 2 回来ることがあります
 
@@ -224,13 +222,10 @@ collection の element cleanup は「解放が allocator を名指すか」を c
 
 ## 並行性
 
-現在の Kizu に thread はありません(SPEC §15)。`Poller` は並行性ではなく
-**多重化**です —— 1 thread が多数の接続を扱えるようにしますが、2 つのことを
-同時にはしません。
-
-`std::http` の server は今も 1 接続ずつです。`accept` が request の head を
-blocking で読むので、Poller の上に載せるには head 読みを再開可能にする必要が
-あります。それは別の作業です。
+現在の Kizu に thread はありません(SPEC §15)。Poller と evented worker は
+**1 thread の多重化**です —— 多数の接続を扱えますが、2 つのことを同時には
+実行しません。`std::http` は server-owned な `first` / `next` と worker-owned な
+`accept_connection` + TaskSet の両方を持ちます。
 
 ## エラー
 

@@ -61,12 +61,66 @@ func (e *emitter) emit() error {
 		return err
 	}
 	e.writeHeader()
+	e.writeTaskInvokeThunks()
 	for _, fn := range e.module.Functions {
 		if err := e.writeFunction(fn); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// taskInvokeStateTypes returns the concrete struct types moved into TaskSet
+// workers. The hosted runtime calls every worker through one C-shaped pointer
+// ABI; one small thunk per state type adapts that pointer to Kizu's explicit
+// byval struct ABI.
+func (e *emitter) taskInvokeStateTypes() []string {
+	seen := map[string]bool{}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op != "call.std::internal::builtin::task_set_spawn" ||
+					len(instr.Args) < 5 {
+					continue
+				}
+				seen[instr.Args[4].Type] = true
+			}
+		}
+	}
+	types := make([]string, 0, len(seen))
+	for typeName := range seen {
+		types = append(types, typeName)
+	}
+	sort.Strings(types)
+	return types
+}
+
+// taskInvokeThunkName returns the private LLVM symbol for one state adapter.
+func taskInvokeThunkName(typeName string) string {
+	return "kizu.task.invoke." + llvmNamePart(typeName)
+}
+
+// writeTaskInvokeThunks emits the typed side of the TaskSet callback ABI.
+// Calling a Kizu `fn(Io, Allocator, A)` as a C `void (*)(void *, void *,
+// void *)` is not portable: targets choose aggregate argument registers from
+// A's shape. The thunk keeps the runtime untyped while making that one call
+// with A's declared byval ABI.
+func (e *emitter) writeTaskInvokeThunks() {
+	for _, typeName := range e.taskInvokeStateTypes() {
+		llvmType := e.llvmType(typeName)
+		fmt.Fprintf(&e.out,
+			"define internal void @%s("+
+				"ptr %%kizu.entry, ptr %%kizu.io, ptr %%kizu.allocator, ptr %%kizu.state) {\n",
+			taskInvokeThunkName(typeName),
+		)
+		e.out.WriteString("entry:\n")
+		fmt.Fprintf(&e.out,
+			"  call void %%kizu.entry("+
+				"ptr %%kizu.io, ptr %%kizu.allocator, ptr byval(%s) %%kizu.state)\n",
+			llvmType,
+		)
+		e.out.WriteString("  ret void\n}\n\n")
+	}
 }
 
 // collectFunctionNames records module-local functions before call emission.
@@ -493,7 +547,7 @@ func (e *emitter) externalCallDecls() []string {
 func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
 	if e.usesHostedRuntimeABI(name, instr) {
 		params := []string{"ptr"}
-		params = append(params, e.hostedRuntimeParamTypes(instr.Args)...)
+		params = append(params, e.hostedRuntimeParamTypes(name, instr.Args)...)
 		return fmt.Sprintf(
 			"declare void @%s(%s)",
 			llvmFunctionName(name),
@@ -1536,14 +1590,20 @@ func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
 // hostedRuntimeParamTypes returns the lowered parameter ABI for hosted runtime
 // calls. Aggregates -- slices and module structs -- reach the C runtime behind
 // a pointer, never by value.
-func (e *emitter) hostedRuntimeParamTypes(args []ir.Value) []string {
-	params := make([]string, 0, len(args))
-	for _, arg := range args {
+func (e *emitter) hostedRuntimeParamTypes(name string, args []ir.Value) []string {
+	params := make([]string, 0, len(args)+2)
+	for index, arg := range args {
 		if e.hostedRuntimeIndirectABI(arg.Type) {
 			params = append(params, "ptr")
-			continue
+		} else {
+			params = append(params, e.llvmType(arg.Type))
 		}
-		params = append(params, e.llvmType(arg.Type))
+		if name == "std::internal::builtin::task_set_spawn" && index == 3 {
+			params = append(params, "ptr")
+		}
+		if name == "std::internal::builtin::task_set_spawn" && index == 4 {
+			params = append(params, "i64")
+		}
 	}
 	return params
 }
@@ -1563,9 +1623,15 @@ func (e *emitter) writeHostedRuntimeCall(name string, instr *ir.Instr) error {
 			fmt.Fprintf(&e.out, "  %s = alloca %s\n", argSlot, argType)
 			fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, value.operand, argSlot)
 			args = append(args, "ptr "+argSlot)
-			continue
+		} else {
+			args = append(args, e.llvmType(arg.Type)+" "+value.operand)
 		}
-		args = append(args, e.llvmType(arg.Type)+" "+value.operand)
+		if name == "std::internal::builtin::task_set_spawn" && index == 3 {
+			args = append(args, "ptr @"+taskInvokeThunkName(instr.Args[4].Type))
+		}
+		if name == "std::internal::builtin::task_set_spawn" && index == 4 {
+			args = append(args, "i64 "+e.elementSizeOperand(arg.Type))
+		}
 	}
 	fmt.Fprintf(&e.out, "  call void @%s(%s)\n",
 		llvmFunctionName(name),

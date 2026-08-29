@@ -1305,6 +1305,10 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled.* = true;
         return self.check_task_new(tree, scope, type_arg, args, out);
     }
+    if mem::equal_bytes(name, "std::internal::builtin::task_set_spawn") {
+        handled.* = true;
+        return self.check_task_set_spawn(tree, scope, type_arg, args, out);
+    }
     return self.check_builtin_array_method_type_apply(
         tree,
         scope,
@@ -1360,7 +1364,7 @@ fn (self: &var Checker) check_task_new(
         return move problem;
     }
     if !same_type(got_entry, entry_type) {
-        return try self.task_new_arg_error("entry", entry_type, got_entry);
+        return try self.task_arg_error("std::io::async", "entry", entry_type, got_entry);
     }
     let state_type = try self.types.intern(type_arg);
     let state_arg = args.get_or_panic(tree, 3);
@@ -1369,7 +1373,7 @@ fn (self: &var Checker) check_task_new(
         return move problem;
     }
     if !same_type(got_state, state_type) {
-        return try self.task_new_arg_error("state", state_type, got_state);
+        return try self.task_arg_error("std::io::async", "state", state_type, got_state);
     }
     let stack_arg = args.get_or_panic(tree, 4);
     if try self.check_core_arg(
@@ -1381,14 +1385,94 @@ fn (self: &var Checker) check_task_new(
     return null;
 }
 
-fn (self: &Checker) task_new_arg_error(
+/// Validates `task_set_spawn<T>(set, io, allocator, entry, state, stack)`,
+/// the owned-state counterpart of task_new.
+fn (self: &var Checker) check_task_set_spawn(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 6 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::io::spawn` expects task set, io, allocator, entry, state and stack size"
+        );
+    }
+    if !self.metadata.structs.contains(type_arg) {
+        var message = try string::from_bytes(
+            self.allocator, "`std::io::spawn` state must be a struct, got ");
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, type_arg);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    let set_arg = args.get_or_panic(tree, 0);
+    if try self.check_core_arg(
+        tree, scope, "std::io::spawn", 0, stdprim::ArgKind::I64, set_arg
+    ) |problem| {
+        return move problem;
+    }
+    let io_arg = args.get_or_panic(tree, 1);
+    if try self.check_io_arg(tree, scope, io_arg, "std::io::spawn") |problem| {
+        return move problem;
+    }
+    let allocator_arg = args.get_or_panic(tree, 2);
+    if try self.check_core_arg(
+        tree, scope, "std::io::spawn", 2, stdprim::ArgKind::Allocator, allocator_arg
+    ) |problem| {
+        return move problem;
+    }
+    var entry_want = string::new(self.allocator);
+    defer entry_want.deinit(self.allocator);
+    try entry_want.append_bytes(self.allocator, "fn(Io, Allocator, ");
+    try entry_want.append_bytes(self.allocator, type_arg);
+    try entry_want.append_bytes(self.allocator, ") -> void");
+    let entry_bytes = entry_want.as_bytes();
+    let entry_type = try self.types.intern(entry_bytes);
+    let entry_arg = args.get_or_panic(tree, 3);
+    var got_entry = empty_type();
+    if try self.check_contextual_expr(
+        tree, scope, entry_arg, entry_type, &var got_entry
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(got_entry, entry_type) {
+        return try self.task_arg_error("std::io::spawn", "entry", entry_type, got_entry);
+    }
+    let state_type = try self.types.intern(type_arg);
+    let state_arg = args.get_or_panic(tree, 4);
+    var got_state = empty_type();
+    if try self.check_contextual_expr(
+        tree, scope, state_arg, state_type, &var got_state
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(got_state, state_type) {
+        return try self.task_arg_error("std::io::spawn", "state", state_type, got_state);
+    }
+    let stack_arg = args.get_or_panic(tree, 5);
+    if try self.check_core_arg(
+        tree, scope, "std::io::spawn", 5, stdprim::ArgKind::I64, stack_arg
+    ) |problem| {
+        return move problem;
+    }
+    out.* = try self.types.intern("std::io::Error!void");
+    return null;
+}
+
+fn (self: &Checker) task_arg_error(
+    api: []u8,
     label: []u8,
     want: Type,
     got: Type
 ) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes(self.allocator, "`std::io::async` ");
+    try message.append_bytes(self.allocator, "`");
+    try message.append_bytes(self.allocator, api);
+    try message.append_bytes(self.allocator, "` ");
     try message.append_bytes(self.allocator, label);
     try message.append_bytes(self.allocator, " expects ");
     try self.append_checker_type(&var message, want);

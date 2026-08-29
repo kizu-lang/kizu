@@ -109,6 +109,13 @@ fn (self: std::io::Loop) deinit() -> void {
     return;
 }
 
+// A worker stack is runtime policy, not a frame size its caller can derive.
+// Keeping the number here makes async and spawn name the allocation with their
+// allocator without repeating a backend-dependent guess at every call site.
+fn worker_stack_bytes() -> i64 {
+    return 256 * 1024;
+}
+
 // A Future is one worker that was started and has not been collected. It
 // stands on the state its caller lent it, so it is tied to that state the way
 // a fixed-buffer allocator is tied to its buffer: it cannot leave the frame
@@ -120,6 +127,52 @@ fn (self: std::io::Loop) deinit() -> void {
 pub struct Future {
     handle: i64,
     io: Io,
+}
+
+// A TaskSet owns workers whose state was handed to them. It is the scoped
+// counterpart of `async`: async borrows one value so its caller can read the
+// result later; spawn moves one value into this set and the worker consumes
+// it. The Io and allocator are fixed when the set is made, so every retained
+// capability has the same visible lifetime as the set. Releasing the set
+// cancels every worker still in it before freeing their stacks and state.
+pub struct TaskSet {
+    handle: i64,
+    io: Io,
+    allocator: Allocator,
+}
+
+pub fn task_set_new(
+    io: Io,
+    allocator: Allocator
+) -> std::io::Error!std::io::TaskSet {
+    let handle = try std::internal::builtin::task_set_new(allocator);
+    return TaskSet { handle: handle, io: io, allocator: allocator };
+}
+
+// spawn starts one owned worker. A is a struct with no views or retained Io /
+// Allocator capabilities, so every byte crossing into the task is owned by A.
+// The worker takes A by value and therefore has to consume every owner it
+// contains on every path; the ordinary ownership checker enforces that
+// contract.
+pub fn spawn<A>(
+    tasks: &var std::io::TaskSet,
+    entry: fn(Io, Allocator, A) -> void,
+    state: A
+) -> std::io::Error!void {
+    try std::internal::builtin::task_set_spawn<A>(
+        tasks.handle,
+        tasks.io,
+        tasks.allocator,
+        entry,
+        move state,
+        worker_stack_bytes()
+    );
+    return;
+}
+
+fn (self: std::io::TaskSet) deinit(allocator: Allocator) -> void {
+    std::internal::builtin::task_set_close(self.handle, allocator);
+    return;
 }
 
 // async offers the work. It is not a promise that anything else runs while it
@@ -134,11 +187,10 @@ pub fn async<A>(
     io: Io,
     allocator: Allocator,
     entry: fn(Io, Allocator, &var A) -> void,
-    state: &var A,
-    stack_bytes: i64
+    state: &var A
 ) -> std::io::Error!std::io::Future {
     let handle = std::internal::builtin::task_new<A>(
-        io, allocator, entry, state, stack_bytes);
+        io, allocator, entry, state, worker_stack_bytes());
     if handle == 0 {
         return std::io::Error::OutOfMemory;
     }
@@ -171,8 +223,8 @@ fn (self: &std::io::Future) finished() -> bool {
 // still standing on what it was lent, so freeing its stack without finishing
 // it would drop whatever that stack held -- and would leave the lender's own
 // cleanup running against something still in use.
-fn (self: std::io::Future) deinit() -> void {
+fn (self: std::io::Future) deinit(allocator: Allocator) -> void {
     std::internal::builtin::task_cancel(self.io, self.handle);
-    std::internal::builtin::task_close(self.handle);
+    std::internal::builtin::task_close(self.handle, allocator);
     return;
 }

@@ -1,0 +1,40 @@
+// A Future owns its worker record and stack, so its cleanup names the same
+// allocator that async used. Two tied allocators cannot be interchanged.
+
+import std::io;
+import std::mem;
+
+struct Counter {
+    seen: i64,
+}
+
+fn bump(handle: Io, allocator: Allocator, job: &var Counter) -> void {
+    job.seen = job.seen + 1;
+    return;
+}
+
+fn main() -> !void {
+    var one = [4096]u8{};
+    var two = [4096]u8{};
+    let one_view = one.as_mut_bytes();
+    let two_view = two.as_mut_bytes();
+    let first = mem::fixed_buffer(one_view);
+    let second = mem::fixed_buffer(two_view);
+    var job = Counter { seen: 0 };
+    var future = try io::async<Counter>(
+        io::blocking(), first, bump, &var job);
+    future.deinit(second);
+    return;
+}
+
+// check-fails
+// features: io async allocator fixed-buffer deinit
+// error: `Future.deinit` names allocator `second`, but `future` was built from another
+
+// check
+// load:
+// struct Counter { seen: i64 }
+// fn bump(handle: Io, allocator: Allocator, job: &var Counter) -> void { job.seen = (job.seen + 1); return; }
+// fn main() -> !void { var one = [4096]u8{}; var two = [4096]u8{}; let one_view = one.as_mut_bytes(); let two_view = two.as_mut_bytes(); let first = std::mem::fixed_buffer(one_view); let second = std::mem::fixed_buffer(two_view); var job = Counter { seen: 0 }; var future = try std::io::async<Counter>(std::io::blocking(), first, bump, (&varjob)); future.deinit(second); return; }
+// check:
+// - move error: `Future.deinit` names allocator `second`, but `future` was built from another

@@ -22,10 +22,10 @@ try request.respond("hello", .{});
 Go は登録簿に handler を入れ、runtime が選んで呼びます。Zig は
 `receiveHead()` が request を返し、呼ぶ側が答えます。
 
-**Kizu は Go の形を書けません。** 関数値(`fn(...) -> T`)は borrow parameter を
-運べず、call site で `&x` が `x` として型検査されます。`Function` static
-parameter(SPEC §13)は型検査だけあって lowering を持たず、呼べません。
-つまり handler に `&Request` を渡す綴りが言語にありません。
+**Kizu は Go の登録簿の形を書けません。** 関数値(`fn(...) -> T`)は borrow parameter
+をまだ運べません。`Function` static parameter は呼べるようになりましたが、1
+instantiation に 1 function を固定するもので、runtime の handler 登録簿では
+ありません。
 
 書けたとしても、原理 2 が同じ答えを指します。**hidden control flow とは
 「呼び出しが source に見えないこと」**で、登録簿から選ばれた handler の呼び出しは
@@ -50,12 +50,18 @@ pattern 1 つを照合して答えるだけで、handler は保持しません�
 `{rest...}`)を借ります —— 答えの形は違っても、問いの綴りは既に良いものが
 あるからです。
 
-### response は組み立ててから送る
+### 多数を扱うときも接続の手渡しを見せる
 
-socket に何も届かないのは `encode` が走るまでです。それによって status line が
-body の実際の長さを持つ `Content-Length` を運べます。代償は「response は body の
-分だけ大きい」ことですが、代わりに chunked transfer encoding が要りません ——
-それは今の実装が話せない framing です。
+接続ごとの直線 code は、`accept_connection` が request をまだ読んでいない
+`Exchange` を返し、caller がそれを TaskSet worker へ move します。worker は
+`read_head` と `respond` を普通に呼びます。accept と spawn の両方が source にあり、
+handler registry は増えません。server が接続表を持つ `first` / `next` も残します。
+
+### response の framing は caller が選ぶ
+
+小さな response は組み立ててから送り、実測した `Content-Length` を書きます。
+stream する caller は `respond_head` で `Length` / `Chunked` / `UntilClose` / `Raw`
+を明示し、その後の `write_all` と `finish_body` も source に書きます。
 
 `Content-Length` / `Transfer-Encoding` / `Connection` は message の実体から
 書き、caller が set したものは落とします。矛盾する 2 つを並べて送れないためです。
@@ -103,11 +109,8 @@ request に対して status を送れません。
 | 案 | 却下理由 |
 | --- | --- |
 | Go 型の handler 登録簿(`HandleFunc` + `ListenAndServe`) | 言語が書けない(関数値が borrow を運べない)。書けたとしても、選ばれた handler の呼び出しが呼び出し元の source に無い(原理 2) |
-| handler を `comptime Function` static parameter で取る(#1079 の当初案) | `Function` は型検査だけで lowering が無く、呼べない。入れるなら instantiation まで作る言語作業で、std の作業ではない。しかも 1 server = 1 handler になり、routing は結局 handler の中の `match` になる |
+| handler を `comptime Function` static parameter で取る(#1079 の当初案) | 現在は呼べるが 1 server instantiation = 1 handler で、routing は結局 handler 内の `match`。accept / spawn / handler call が直接書けるので wrapper に隠す情報が無い |
 | `Router` に handler を登録する | 同じ理由。`array::new<fn(...) -> T>` は parser が static 引数として `fn` を受け付けず、struct field の `fn` は非 copy 扱いで `r.handler(x)` が method 呼び出しに読まれる |
-| response を streaming にし、最初の `write` で head を送る | chunked transfer encoding が要る。それが無いまま streaming にすると、Content-Length を先に宣言させるか、嘘の長さを送るかしかない。buffering は正直な形 |
-| keep-alive を入れる | 1 接続ずつしか捌けないので、1 人の client が idle のまま全員を止める。並行性が先(SPEC §15) |
-| request の chunked を読む | 読むだけなら安全だが、書く側が無いので「受けられるが返せない」形が残る。framing の対称性は 1 つの判断として一緒に決める |
 | `path_of` が percent 復号する | segment の中の `%2F` は区切りではない。復号してから分けるのが path traversal の通り道 |
 | connection pool / redirect 追従を client に入れる | どちらも policy(socket をどれだけ保つか、別 host への 301 は同じ request か)で、library が選んだ policy は呼ぶ側から見えない policy |
 | descriptor を `?i64` にして close 後を null にする | 型で閉じられる検査を runtime に落とす(原理 5)。`deinit` が消費すれば、close 後の値は存在しない |
@@ -116,10 +119,9 @@ request に対して status を送れません。
 
 ## Consequences
 
-- server は 1 接続ずつ。2 人目は listen backlog(128)で待つ。これは Zig の
-  `std.http.Server` が今日出荷している形と同じで、並行性は呼ぶ側が持ち込む ——
-  ただし Kizu の呼ぶ側はまだ何も持ち込めない。**milestone であって
-  production server ではない**
+- `accept` は逐次の最小 API のまま。production の 1-thread server は
+  `accept_connection` + TaskSet で connection ownership を worker に渡すか、
+  `first` / `next` で server に接続表を持たせる
 - `docs/tutorial/web-server` が service を 1 つ書き切る。sample は conformance
   の case なので、動かなくなった tutorial はテストが落とす
 - descriptor は safe Kizu に出ない。private field に持つので、socket に届く

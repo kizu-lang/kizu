@@ -388,13 +388,16 @@ fn (self: &var Checker) check_returned_borrow_let_stmt(
     errdefer value.deinit(self.allocator);
     value.mutable = statement.mutable;
     value.decl_span = expression_span(tree, statement.value);
+    value.mut_borrow = mutable;
     if !try self.value_type_needs_consume(self.allocator, elem) {
         value.borrowed_param = true;
         value.local_borrow = true;
-        value.mut_borrow = mutable;
     }
     let handle = try self.store.retain(move value);
     if try self.bind_borrow_sources(tree, handle, sources, mutable) |failed| {
+        return move failed;
+    }
+    if try self.attach_future_capability_provenance(tree, env, handle, statement.value) |failed| {
         return move failed;
     }
     if try self.attach_alloc_provenance(tree, handle) |failed| {
@@ -493,12 +496,13 @@ fn (self: &var Checker) returned_borrow_initializer(
             elem = ret_name;
         } else {
             if self.tied_struct_return(ret_name) {
-                // A Future holds the state it was lent exclusively, and only
-                // that: the Io it also took is a permission, not something the
-                // Future is made out of.
+                // A Future holds the state it was lent exclusively. A TaskSet
+                // owns its worker states and only shares the capabilities it
+                // retains.
                 tied_struct = true;
-                mutable = true;
-                elem = ret_name;
+                mutable = !self.task_set_return(ret_name);
+                allocator_return = self.task_set_return(ret_name);
+                elem = try self.view_carrier_payload(ret_name);
             } else {
                 if self.names.is(ret_name, "[]u8") or try self.view_capture_struct_type(ret_name) {
                     view_return = true;
@@ -531,6 +535,36 @@ fn (self: &var Checker) returned_borrow_initializer(
     returned.mutable = mutable;
     recognized.* = true;
     return null;
+}
+
+/// Records the shared capability half of a Future's ties separately from its
+/// exclusive state borrow. A Future stores both Io and allocator, and neither
+/// becomes exclusive merely because the state is.
+fn (self: &var Checker) attach_future_capability_provenance(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    value: BindingHandle,
+    expression: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    if try_expr(tree, expression) |attempt| {
+        return self.attach_future_capability_provenance(tree, env, value, attempt.value);
+    }
+    let call = call_expr(tree, expression) orelse return null;
+    let called = try self.called_user_function(tree, call.callee) orelse return null;
+    let ret_name = self.return_type_name(called.function);
+    if !self.tied_struct_return(ret_name) or self.task_set_return(ret_name) {
+        return null;
+    }
+    var sources = array::new<BorrowSource>(self.allocator);
+    defer sources.deinit(self.allocator);
+    var index = 0;
+    while arg_at(tree, call.args, index) |arg| {
+        index = index + 1;
+        let capability = self.tied_capability_arg(tree, env, arg) orelse continue;
+        try sources.append(
+            self.allocator, BorrowSource { target: capability, field: empty_name() });
+    }
+    return self.bind_borrow_sources(tree, value, &sources, false);
 }
 
 /// Runs the ordinary call check for a factory whose result is tied, through
@@ -643,11 +677,21 @@ pub fn (self: &Checker) capability_return(name: Name) -> bool {
 }
 
 /// Reports the std struct returns that stay tied to what they were built
-/// from. A Future stands on the state its caller lent it until the worker is
-/// done with it, so it cannot leave that state's frame.
+/// from. A Future stands on borrowed state; a TaskSet retains the Io and
+/// allocator selected when it is made.
 pub fn (self: &Checker) tied_struct_return(name: Name) -> bool {
     return self.names.is(name, "std::io::Future") or
-        self.names.ends_with(name, "!std::io::Future");
+        self.names.is(name, "io::Future") or
+        self.names.ends_with(name, "!std::io::Future") or
+        self.names.ends_with(name, "!io::Future") or
+        self.task_set_return(name);
+}
+
+pub fn (self: &Checker) task_set_return(name: Name) -> bool {
+    return self.names.is(name, "std::io::TaskSet") or
+        self.names.is(name, "io::TaskSet") or
+        self.names.ends_with(name, "!std::io::TaskSet") or
+        self.names.ends_with(name, "!io::TaskSet");
 }
 
 /// Reports whether a call to fn yields a tied allocator, the Go

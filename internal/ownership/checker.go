@@ -492,11 +492,18 @@ func capabilityReturn(name string) bool {
 }
 
 // tiedStructReturn names the std struct returns that stay tied to what they
-// were built from. A Future stands on the state its caller lent it until the
-// worker is done with it, so it cannot leave that state's frame -- the same
-// rule the tied allocator carries, on a value rather than a capability.
+// were built from. A Future stands on borrowed state; a TaskSet retains the
+// Io and allocator selected when it is made.
 func tiedStructReturn(name string) bool {
-	return name == "std::io::Future" || strings.HasSuffix(name, "!std::io::Future")
+	return name == "std::io::Future" || name == "io::Future" ||
+		strings.HasSuffix(name, "!std::io::Future") || strings.HasSuffix(name, "!io::Future") ||
+		taskSetReturn(name)
+}
+
+// taskSetReturn reports a TaskSet with or without its fallible-result wrapper.
+func taskSetReturn(name string) bool {
+	return name == "std::io::TaskSet" || name == "io::TaskSet" ||
+		strings.HasSuffix(name, "!std::io::TaskSet") || strings.HasSuffix(name, "!io::TaskSet")
 }
 
 // tiedReturn reports the return types that are tied when they are built from a
@@ -1097,11 +1104,15 @@ func stmtTerminates(stmt ast.Statement) bool {
 
 // checkDeferredCleanups applies deferred cleanup effects in reverse order.
 func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) error {
+	noLaterUses := map[string]int{}
 	for idx := len(defers) - 1; idx >= 0; idx-- {
 		stmt := &ast.ExprStmt{Expr: defers[idx], Semicolon: true}
 		if err := c.checkExprStmt(stmt, env); err != nil {
 			return err
 		}
+		// A later defer may release a source retained by the value just
+		// consumed. Model runtime's reverse order one cleanup at a time.
+		env.releaseLastUseBorrows(0, noLaterUses)
 	}
 	return nil
 }
@@ -1279,7 +1290,8 @@ func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool
 	if fn == nil || !tiedReturn(returnTypeName(fn)) {
 		return false, nil
 	}
-	sources, err := c.callBorrowReturnSources(name, fn, call, true, true, false, env)
+	mutable := !taskSetReturn(returnTypeName(fn))
+	sources, err := c.callBorrowReturnSources(name, fn, call, mutable, true, false, env)
 	if err != nil {
 		return true, err
 	}
@@ -1615,12 +1627,15 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	value := c.newBinding(stmt.Name, elem)
 	value.mutable = stmt.Mutable
 	value.declSpan = expressionSpan(stmt.Value)
+	value.mutBorrow = mutable
 	if !c.valueTypeNeedsConsume(elem) {
 		value.borrowedParam = true
 		value.localBorrow = true
-		value.mutBorrow = mutable
 	}
 	if err := c.bindBorrowSources(value, sources, mutable); err != nil {
+		return err
+	}
+	if err := c.attachFutureCapabilityProvenance(value, stmt.Value, env); err != nil {
 		return err
 	}
 	if err := c.attachAllocProvenance(value); err != nil {
@@ -1696,12 +1711,12 @@ func (c *Checker) returnedBorrowInitializer(
 			mutable = retName != "Io"
 			elem = retName
 		case tiedStructReturn(retName):
-			// A Future holds the state it was lent exclusively, and only that:
-			// the Io it also took is a permission, not something the Future is
-			// made out of, so re-wrapping does not come into it.
+			// A Future holds the state it was lent exclusively. A TaskSet owns
+			// its worker states and only shares the capabilities it retains.
 			tiedStruct = true
-			mutable = true
-			elem = retName
+			mutable = !taskSetReturn(retName)
+			allocatorReturn = taskSetReturn(retName)
+			elem = viewCarrierPayload(retName)
 		case retName == "[]u8" || c.viewCaptureStructType(retName):
 			viewReturn = true
 			elem = retName
@@ -1725,6 +1740,35 @@ func (c *Checker) returnedBorrowInitializer(
 		return nil, "", false, true, err
 	}
 	return sources, elem, mutable, true, nil
+}
+
+// attachFutureCapabilityProvenance records the shared half of a Future's
+// ties separately from its exclusive state borrow. The Future stores both Io
+// and allocator, so either capability must outlive it without becoming
+// exclusively borrowed merely because the worker state is one.
+func (c *Checker) attachFutureCapabilityProvenance(
+	value *binding,
+	expr ast.Expression,
+	env *scope,
+) error {
+	if attempt, ok := expr.(*ast.TryExpr); ok {
+		return c.attachFutureCapabilityProvenance(value, attempt.Value, env)
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	_, fn := c.calledFunction(call.Callee)
+	if fn == nil || !tiedStructReturn(returnTypeName(fn)) || taskSetReturn(returnTypeName(fn)) {
+		return nil
+	}
+	var sources []borrowSource
+	for _, arg := range call.Args {
+		if capability := c.tiedCapabilityArg(arg, env); capability != nil {
+			sources = append(sources, borrowSource{target: capability})
+		}
+	}
+	return c.bindBorrowSources(value, sources, false)
 }
 
 // checkTiedFactoryCall runs the ordinary call check for a factory whose result
@@ -3785,6 +3829,30 @@ func splitMoveMarker(expr ast.Expression) (*ast.MoveExpr, ast.Expression) {
 	return nil, expr
 }
 
+// checkMovePlaceBinding rejects a named value that cannot be handed off from
+// its current frame before the ordinary owner and borrow checks run.
+func checkMovePlaceBinding(ident *ast.IdentExpr, value *binding, env *scope) error {
+	if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
+		return err
+	}
+	if value.moved {
+		return errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
+	}
+	if value.borrowedParam {
+		return errorAt(ident.Span,
+			"borrow error: borrowed value `%s` cannot escape", ident.Name)
+	}
+	if tiedStructReturn(value.typeName) && len(value.borrowTargets) > 0 {
+		if taskSetReturn(value.typeName) {
+			return errorAt(ident.Span,
+				"borrow error: TaskSet `%s` cannot outlive its Io or allocator", ident.Name)
+		}
+		return errorAt(ident.Span,
+			"borrow error: borrowed value `%s` cannot escape", ident.Name)
+	}
+	return nil
+}
+
 // movePlaceExpr consumes a non-copy identifier when present and reports whether
 // the value was handed off from a named place.
 func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, error) {
@@ -3806,15 +3874,8 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 	if !ok {
 		return c.moveUnboundIdent(ident)
 	}
-	if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
+	if err := checkMovePlaceBinding(ident, value, env); err != nil {
 		return "", false, err
-	}
-	if value.moved {
-		return "", false, errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
-	}
-	if value.borrowedParam {
-		return "", false, errorAt(ident.Span,
-			"borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
 	if value.allocTied() {
 		return "", false, errorAt(ident.Span,
@@ -4528,6 +4589,52 @@ func (c *Checker) viewCarryingType(typeName string) bool {
 	return c.viewCarryingTypeSeen(typeName, map[string]bool{})
 }
 
+// capabilityCarryingType reports whether a retained value can keep an Io or
+// Allocator alive. TaskSet already carries the two capabilities selected at
+// construction; allowing another one inside an owned worker state could
+// launder a frame-tied capability through the byte copy into the task.
+func (c *Checker) capabilityCarryingType(typeName string) bool {
+	return c.capabilityCarryingTypeSeen(typeName, map[string]bool{})
+}
+
+// capabilityCarryingTypeSeen walks recursive aggregate declarations once.
+func (c *Checker) capabilityCarryingTypeSeen(typeName string, seen map[string]bool) bool {
+	typeName = viewCarrierPayload(typeName)
+	if capabilityReturn(typeName) {
+		return true
+	}
+	if seen[typeName] {
+		return false
+	}
+	seen[typeName] = true
+	base := typeName
+	if genericBase, arg, ok := splitGenericType(typeName); ok {
+		base = genericBase
+		if base != "std::arena::Handle" {
+			args, err := typ.SplitArgs(arg)
+			if err != nil {
+				args = []string{arg}
+			}
+			for _, argType := range args {
+				if c.capabilityCarryingTypeSeen(argType, seen) {
+					return true
+				}
+			}
+		}
+	}
+	for _, fieldType := range c.structs[base] {
+		if c.capabilityCarryingTypeSeen(fieldType, seen) {
+			return true
+		}
+	}
+	for _, payload := range c.unions[base] {
+		if payload != "" && c.capabilityCarryingTypeSeen(payload, seen) {
+			return true
+		}
+	}
+	return false
+}
+
 // viewCarrierPayload strips the wrappers a view rides through: the success of
 // `!T` and the payload of `?T` carry their views the same way.
 func viewCarrierPayload(typeName string) string {
@@ -5079,6 +5186,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "std::internal::builtin::task_new" {
 		return c.checkTaskNew(args, env)
 	}
+	if name == "std::internal::builtin::task_set_spawn" {
+		return c.checkTaskSetSpawn(args, env)
+	}
 	return "", errorf("move error: `%s` does not take static arguments", name)
 }
 
@@ -5112,6 +5222,28 @@ func (c *Checker) checkTaskNew(
 		}
 	}
 	return "i64", nil
+}
+
+// checkTaskSetSpawn moves the state into the task set. Every other argument
+// is a capability, handle, function address, or size and is only read. The
+// runtime copies the moved state only after all allocations have succeeded;
+// lowering releases it on the primitive's failure path.
+func (c *Checker) checkTaskSetSpawn(
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	for index, arg := range args {
+		var err error
+		if index == 4 {
+			_, err = c.moveExpr(arg, env)
+		} else {
+			_, err = c.readExpr(arg, env)
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return "std::io::Error!void", nil
 }
 
 // checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
@@ -6005,6 +6137,13 @@ func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) er
 		if _, err := c.checkedMapArgs(strings.Join(typeArgs, ", ")); err != nil {
 			return err
 		}
+	case "std::io::spawn":
+		state := typeArgs[0]
+		if c.viewCarryingType(state) || c.capabilityCarryingType(state) {
+			return errorf(
+				"borrow error: `std::io::spawn` state `%s` must own its data and contain no Io or Allocator",
+				state)
+		}
 	}
 	return nil
 }
@@ -6019,11 +6158,13 @@ func (c *Checker) checkGenericUserArg(
 	env *scope,
 ) error {
 	want := substituteOwnershipType(fn.params[idx].typeName, subst)
-	// `std::mem::box<T>(allocator, value)` takes ownership of its value, and a
-	// consume primitive moves its argument (ADR-0091); every other generic
-	// wrapper argument is read in place.
+	// `std::mem::box<T>(allocator, value)` and `std::io::spawn<T>(..., state, ...)`
+	// take ownership of their values, and a consume primitive moves its argument
+	// (ADR-0091); every other generic wrapper argument is read in place.
 	read := c.readContextualExpr
-	if (name == "std::mem::box" && idx == 1) || (isConsumePrimitive(name) && idx == 0) {
+	if (name == "std::mem::box" && idx == 1) ||
+		(name == "std::io::spawn" && idx == 2) ||
+		(isConsumePrimitive(name) && idx == 0) {
 		read = c.moveContextualExpr
 	}
 	got, err := read(arg, want, env)
@@ -7880,16 +8021,17 @@ func (c *Checker) checkImplMethodCall(
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			method.name, len(method.params)-1, len(args))
 	}
-	if err := c.checkImplMethodArgs(method, value, args, env); err != nil {
+	if err := c.checkImplMethodCallArgs(method, value, name, args, env); err != nil {
 		return "", true, err
 	}
+	cleanup := name == typ.CleanupMethod && returnTypeName(method) == "void"
 	if method.params[0].mutBorrow {
 		// The exclusive receiver borrow is active from here through the call,
 		// so the deinit path below sees the receiver as borrowed.
 		value.activeMutBorrows++
 		defer func() { value.activeMutBorrows-- }()
 	}
-	if name == "deinit" && returnTypeName(method) == "void" {
+	if cleanup {
 		if value.hasAnyBorrow() {
 			return "", true, errorf(
 				"borrow error: value `%s` cannot be moved while borrowed", value.name)
@@ -7905,6 +8047,26 @@ func (c *Checker) checkImplMethodCall(
 		value.moved = true
 	}
 	return returnTypeName(method), true, nil
+}
+
+// checkImplMethodCallArgs applies the ordinary argument effects and the
+// allocator identity carried by a user-defined cleanup. Containers have
+// dedicated method paths; Future.deinit reaches this common impl path.
+func (c *Checker) checkImplMethodCallArgs(
+	method *functionInfo,
+	value *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if err := c.checkImplMethodArgs(method, value, args, env); err != nil {
+		return err
+	}
+	if name != typ.CleanupMethod || returnTypeName(method) != "void" ||
+		len(args) != 1 || method.params[1].typeName != "Allocator" {
+		return nil
+	}
+	return c.checkReleaseTie(releaseLabel(value.typeName), value, args[0], env)
 }
 
 // receiverPlace returns the binding and field the receiver's call-duration
@@ -9059,6 +9221,13 @@ func (s *scope) releaseIfUnused(
 		return
 	}
 	if last, ok := lastUses[name]; ok && last > stmtIndex {
+		return
+	}
+	// A deferred Future or TaskSet cleanup is a use at scope exit: live workers
+	// can still reach their retained state and capabilities. Keep those sources
+	// alive until cleanup actually consumes the task owner.
+	if value.deferCleanup && tiedStructReturn(value.typeName) &&
+		!value.deinitialized && !value.moved {
 		return
 	}
 	if value.hasAnyBorrow() {

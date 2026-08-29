@@ -24,9 +24,9 @@ request を渡せません。
 残るのは pull の loop で、それは control flow が見えたままになる形でもあります
 (`docs/principles.md` §2)。
 
-**`accept` は 1 接続ずつです。** 2 人目の caller は 1 人目が答え終わるまで listen
-backlog で待ちます。多数を 1 thread で捌くには [`first` と `next`](#first-と-next)
-を使います —— 答え方は同じで、その間に誰の声を聞いているかだけが違います。
+**`accept` 自体は 1 接続ずつです。** 多数を 1 thread で捌く道は 2 つあります。
+接続ごとの直線 code なら [`accept_connection` + `TaskSet`](#接続ごとの-worker)、
+接続の表を server に持たせるなら [`first` と `next`](#first-と-next)です。
 
 ## API
 
@@ -40,6 +40,8 @@ fn (self: &Server) local_port() -> std::http::Failure!i64
 fn (self: &var Server) accept(io: Io, allocator: Allocator, max: i64)
     -> std::http::Failure!std::http::Exchange
 fn (self: &var Server) accept_head(io: Io, allocator: Allocator)
+    -> std::http::Failure!std::http::Exchange
+fn (self: &var Server) accept_connection(io: Io, allocator: Allocator)
     -> std::http::Failure!std::http::Exchange
 fn (self: &var Server) accept_ready(io: Io, allocator: Allocator)
     -> std::http::Failure!?std::http::Exchange
@@ -75,6 +77,8 @@ fn (self: &var Exchange) set_read_deadline(at: i64) -> void
 fn (self: &var Exchange) set_write_deadline(at: i64) -> void
 fn (self: &var Exchange) clear_read_deadline() -> void
 fn (self: &var Exchange) clear_write_deadline() -> void
+fn (self: &var Exchange) read_head(io: Io, allocator: Allocator)
+    -> std::http::Failure!bool
 fn (self: &var Exchange) advance(io: Io, allocator: Allocator)
     -> std::http::Failure!std::http::Progress
 fn (self: &Exchange) watch_read(
@@ -458,6 +462,35 @@ message が 2 つになる」経路を閉じるためのものです。
 `accept` は request を読み切ってから返ります。1 接続ずつなら正しい形ですが、
 多数を扱う loop では、1 人が head を書き終えるまで他の誰の声も聞こえません。
 
+## 接続ごとの worker
+
+`accept_connection` は接続が来るまで待ちますが、request head は読みません。返った
+`Exchange` を TaskSet に move すると、accept loop はすぐ次の接続へ戻れます。
+worker 側の `read_head` は普通の待つ read です。evented Io なら、その待ちだけが park
+し、同じ thread 上の accept loop と他の worker が進みます。
+
+```kizu
+fn serve_connection(io: Io, allocator: Allocator, exchange: http::Exchange) -> void {
+    var current = move exchange;
+    defer current.deinit(allocator);
+    let arrived = current.read_head(io, allocator) catch return;
+    if !arrived { return; }
+    current.respond_text(io, allocator, 200, "text/plain", "hello") catch return;
+}
+
+var tasks = io::task_set_new(handle, allocator) catch return;
+defer tasks.deinit(allocator);
+while true {
+    let exchange = server.accept_connection(handle, allocator) catch return;
+    io::spawn<http::Exchange>(
+        &var tasks, serve_connection, move exchange) catch return;
+}
+```
+
+ownership の境界は 2 行に見えます。accept が `Exchange` を返し、spawn がそれを
+worker へ move します。TaskSet の `deinit` は未完了 worker を cancel してから
+解放します。完全な server は `examples/http_tasks.kizu` にあります。
+
 ## `first` と `next`
 
 ```kizu
@@ -615,11 +648,10 @@ while more {
 
 `max_requests` の既定は **1** で、これは HTTP/1.1 の既定ではありません。
 
-理由は protocol ではなくこの server にあります。並行 API が無い(SPEC §15)ので
-1 接続ずつしか捌けません。つまり 2 通目のために接続を開けたままにする peer は、
-**他の全員に対して**開けたままにしています。keep-alive が節約するのは handshake
-1 回、払うのは service 全体です。並行性が入るまでは、これは caller が上げる数値
-であって、黙って継ぐ既定ではありません。
+この既定は TaskSet より前の逐次 server で決めた保守値です。TaskSet なら 1 接続の
+idle は他の接続を止めませんが、接続ごとの memory、idle timeout、公平性を測った
+新しい既定はまだ決めていません。現在の定義は 1 のままで、必要な service が
+caller-owned `Limits` で上げます(`TODO.md` 0c)。
 
 `idle_millis` は request と request の間に許す静けさです。`next` はこれを deadline
 にして次の head を待ちます。
@@ -828,11 +860,11 @@ server 側の `accept` と `accept_head` と**同じ割れ方**です。`receive
 TLS や proxy は `take` で刺さります —— stream を包むのが `TcpStream` か別のものかの
 違いになるだけです。
 
-### 同じプロセスの server には `get` を使えません
+### 同じ逐次 execution path の server には `get` を使えません
 
-`get` は connect して write して **read で待つ**ので、答えるはずの accept が同じ
-thread にあると止まります。これは並行性の欠落(SPEC §15)であって client の欠落
-ではありません。両端を 1 プロセスで持つ test は `Connection` の `send` と
+`get` は connect して write して **read で待つ**ので、答えるはずの逐次 accept が
+同じ execution path の後ろにあると止まります。別の evented worker で server を
+走らせるか、両端を 1 process で持つ逐次 test では `Connection` の `send` と
 `receive` を別々に呼びます。
 
 ### 答えの framing

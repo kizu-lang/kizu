@@ -8,11 +8,10 @@
 // flow visible (docs/principles.md §2). Kizu has function pointers too, and
 // makes the same choice Zig does for the same reason (ADR-0136).
 //
-// `accept` serves one connection at a time: the second caller waits in the
-// listen backlog until the first is answered. `first` and `next` serve many,
-// on the same thread, by holding everyone who is still talking and handing
-// out whichever request finished. Answering is the same either way -- what
-// differs is who else is being listened to meanwhile.
+// `accept` serves one connection at a time. `first` and `next` serve many by
+// keeping their state in Server; `accept_connection` lets a TaskSet worker own
+// each one instead. Answering is the same either way -- what differs is who
+// owns the connections still being listened to.
 
 pub struct Server {
     listener: std::net::TcpListener,
@@ -150,17 +149,42 @@ fn (self: &var std::http::Server) accept_head(
     allocator: Allocator
 ) -> std::http::Failure!std::http::Exchange {
     while true {
-        var stream = try self.listener.accept(io);
-        errdefer stream.deinit();
-        var held = try self.opening(allocator, move stream);
+        var held = try self.accept_connection(io, allocator);
         errdefer held.deinit(allocator);
-        let arrived = try held.take_head_or_refuse(io, allocator);
+        let arrived = try held.read_head(io, allocator);
         if arrived {
             return move held;
         }
         held.deinit(allocator);
     }
     return std::http::Error::Incomplete;
+}
+
+// accept_connection waits for one connection and returns before reading its
+// request. With an evented Io the wait parks only this worker, so the caller
+// can give the exchange to a TaskSet and immediately accept the next one.
+fn (self: &var std::http::Server) accept_connection(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!std::http::Exchange {
+    var stream = try self.listener.accept(io);
+    errdefer stream.deinit();
+    let held = try self.opening(allocator, move stream);
+    return move held;
+}
+
+// read_head fills this exchange until its first head is complete, waiting on
+// the connection when what has arrived is not enough. A malformed request is
+// answered here because the caller never received a parsed request it could
+// answer itself.
+//
+// False means the peer closed before a head arrived. Whatever this server
+// could have said, there is no longer anyone to say it to.
+fn (self: &var std::http::Exchange) read_head(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!bool {
+    return self.take_head_or_refuse(io, allocator);
 }
 
 // take_head fills this exchange until its head is complete, waiting on the

@@ -11,13 +11,13 @@ HTTP server は 1 接続ずつしか捌けませんでした。1 本を待って
 この 1 つの事実の帰結です(ADR-0137、ADR-0139)。
 
 SPEC §15.1 と ADR-0039 は `std::io::evented()` を将来の実装候補として挙げて
-いました。読み方は 2 つあります。
+いました。当時の選択肢は 2 つでした。
 
 1. `Io` の実装を差し替えると、`read_into` が裏で多重化される
 2. 多数を待つための値が別にあり、待っていることが source に見える
 
-1 を選ぶと `read_into` の**途中で中断して再開する**ことになります。coroutine が
-要り、function coloring が生えます。SPEC §15 はどちらも持ちません。
+1 を選ぶと `read_into` の**途中で中断して再開する**ことになります。当時はその
+coroutine runtime が無く、名前だけの mode を先に出すことはできませんでした。
 
 さらに、1 は ADR-0025 が捕まえた形そのものです —— `blocking()` と `threaded()` が
 runtime で同じ値を返し、区別が存在しないまま checker rule だけが 1338 行あった
@@ -25,14 +25,18 @@ runtime で同じ値を返し、区別が存在しないまま checker rule だ�
 
 ## Decision
 
-`std::net::Poller` を値として持ちます。`io::evented()` は**今の `Io` の形では
-作れない**ので作りません。
+`std::net::Poller` を値として持ちます。readiness、token、接続 state を caller が
+扱う道は、`Io` の hidden mode にしません。
 
 ```kizu
 var poller = try net::poller_new(handle, 64);
 try poller.watch_stream(handle, &conn, token, net::Interest::Read);
 let count = try poller.wait(handle, net::deadline_in_millis(1000));
 ```
+
+その後、中断できる runtime を先に入れて `io::evented()` も実装しました
+(ADR-0145、ADR-0146)。こちらは `io::async` / `io::spawn` で worker を作る場所が
+source に見え、普通の read を接続ごとの直線 code のまま書く別の道です。
 
 `token` は caller のものです。std::net は一度も読みません —— 「どの接続か」を
 知っているのは caller だけなので、それを表す値を預かって返すだけです。
@@ -74,9 +78,9 @@ wait に戻ります。0 は「今は書けない」で、error でも終端で�
 `write_all` は残します。送らなければならない message —— 1 度きりの response の
 head —— には、終わるか失敗するかの契約の方が正しいからです。
 
-`std::http` はまだこの上に載っていません。`accept` が head を blocking で読むので、
-載せるには head 読みを再開可能にする必要があります —— `Exchange` が既に `pending`
-を持っているので、状態を置く場所はあります。
+`std::http` は `first` / `next` でこの Poller path に載りました。さらに
+`accept_connection` + TaskSet は、worker が `Exchange` を所有して普通の
+`read_head` を待つ path です。
 
 **接続を collection に持てないことがここで分かりました。** `Array<T>` /
 `Arena<T>` が要素に `deinit(allocator)` を要求していたためで、ADR-0142 が
@@ -86,7 +90,7 @@ head —— には、終わるか失敗するかの契約の方が正しいか�
 
 | 案 | 却下理由 |
 | --- | --- |
-| `std::io::evented()` を今作る —— Io を差し替えると read が多重化される | `read_into` の途中で中断して再開する必要があり、Kizu に中断が無い。今作れば `blocking()` と同じ挙動のものが 2 つでき、差を主張するのは名前だけになる —— ADR-0025 が捕まえた形。中断できる runtime が入れば正当な実装になるので、これは却下ではなく順番 |
+| 中断できる runtime より先に `std::io::evented()` を作る | 当時は `read_into` の途中で再開できず、`blocking()` と同じ挙動の名前だけの mode になる。中断できる runtime が先に入ったため、その順番を満たして現在は実装済み |
 | `async fn` / `await` を入れて poller を隠す | function coloring。SPEC §15 が明示的に実装しないと決めている |
 | `wait` が event の配列を返す | Kizu に shift 演算子が無く、i64 を byte に詰め直す経路になる。`wait` が個数を返し `ready(i)` が 1 つを返す形なら packing が要らない |
 | poller の handle を fd にする | kqueue / epoll の fd だけでは event buffer を持てない。handle は runtime が確保した構造体で、Kizu の owner が private に持ち、consuming deinit が唯一の解放経路 |

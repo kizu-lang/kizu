@@ -1362,6 +1362,32 @@ func (l *lowerer) lowerTaskNew(state string, args []ast.Expression) (Value, erro
 	return l.emit("call.std::internal::builtin::task_new", "i64", values, ""), nil
 }
 
+// lowerTaskSetSpawn lowers an owned worker. The state crosses as a value in
+// IR; the hosted runtime ABI places structs behind a pointer, and the runtime
+// copies those bytes only after every task allocation has succeeded. On
+// failure the generic wrapper still knows A and releases the moved owner.
+func (l *lowerer) lowerTaskSetSpawn(state string, args []ast.Expression) (Value, error) {
+	params := []Param{
+		{Type: "i64"},
+		{Type: "Io"},
+		{Type: "Allocator"},
+		{Type: "fn(Io, Allocator, " + state + ") -> void"},
+		{Type: state},
+		{Type: "i64"},
+	}
+	values, err := l.lowerCallArgsAs(params, args)
+	if err != nil {
+		return Value{}, err
+	}
+	result := l.emit(
+		"call.std::internal::builtin::task_set_spawn",
+		"std::io::Error!void",
+		values,
+		"",
+	)
+	return l.releaseOwnerOnFailure(result, values[4], values[2])
+}
+
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
 // The std storage constructors lower to one instruction each, so their std
 // bodies are never walked. Every other generic call resolves by name.
@@ -1386,6 +1412,8 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerAllocatorFrom(l.resolveType(typeApply.TypeArg), args)
 	case "std::internal::builtin::task_new":
 		return l.lowerTaskNew(l.resolveType(typeApply.TypeArg), args)
+	case "std::internal::builtin::task_set_spawn":
+		return l.lowerTaskSetSpawn(l.resolveType(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,
@@ -2689,7 +2717,11 @@ func (l *lowerer) releaseOwnerOnFailure(
 	if !ast.OwnerType(l.deinitOwners, owner.Type) {
 		return result, nil
 	}
-	cleanup, err := l.cleanupFromMethod(owner, typ.CleanupMethod, []Value{allocator})
+	rest := []Value{}
+	if ast.ReleaseNames(l.releaseAllocators, owner.Type) {
+		rest = append(rest, allocator)
+	}
+	cleanup, err := l.cleanupFromMethod(owner, typ.CleanupMethod, rest)
 	if err != nil {
 		return Value{}, err
 	}

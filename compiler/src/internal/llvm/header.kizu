@@ -110,6 +110,68 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     return self.write_panic_decls(module);
 }
 
+/// Returns the concrete struct types moved into TaskSet workers, the Go
+/// `taskInvokeStateTypes`.
+fn (self: &var Emitter) task_invoke_state_types(
+    module: &ir::Module
+) -> !array::Array<string::String> {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit(self.allocator);
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op != ir::Op::Call or
+                    !module.names.is(node.operand, "std::internal::builtin::task_set_spawn") or
+                    node.args.len() < 5 {
+                    continue;
+                }
+                let state = node.args.get_or_panic(4);
+                let retained = ir::name_text(&module.names, state.type_name);
+                let bytes = retained.as_bytes();
+                try seen.insert(self.allocator, bytes, true);
+            }
+        }
+    }
+    return sorted_keys(self.allocator, &seen);
+}
+
+/// Emits the typed side of the TaskSet callback ABI, the Go
+/// `writeTaskInvokeThunks`. The runtime keeps a C-shaped pointer call while
+/// this thunk calls the worker with Kizu's declared byval struct ABI.
+fn (self: &var Emitter) write_task_invoke_thunks(module: &ir::Module) -> !void {
+    var types = try self.task_invoke_state_types(module);
+    defer types.deinit(self.allocator);
+    var index = 0;
+    while types.at(index) |type_name| {
+        index = index + 1;
+        let bytes = type_name.as_bytes();
+        let invoke = try self.task_invoke_thunk_name_bytes(bytes);
+        let llvm_type = try self.llvm_type(module, bytes);
+        try self.line1(
+            "define internal void @%s(ptr %%kizu.entry, ptr %%kizu.io, ptr %%kizu.allocator, ptr %%kizu.state) {",
+            Arg::Str(invoke)
+        );
+        try self.line("entry:");
+        try self.line1(
+            "  call void %%kizu.entry(ptr %%kizu.io, ptr %%kizu.allocator, ptr byval(%s) %%kizu.state)",
+            Arg::Str(llvm_type)
+        );
+        try self.line("  ret void");
+        try self.line("}");
+        try self.line("");
+    }
+    return;
+}
+
 /// Appends the bytes a quoted IR string literal spells, the Go
 /// `strconv.Unquote` over the form `internal/quote.Bytes` writes: `"` ... `"`
 /// with `\\`, `\"`, `\n`, `\r`, `\t` and `\xNN`. Go drops the result of a
