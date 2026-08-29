@@ -19,7 +19,7 @@ ADR-0141 が置いた順番の 3 つ目です —— 中断できる runtime が
 `Io` に `async` を持たせ、`io::evented` をその実装として入れます。
 
 ```kizu
-var loop = try io::loop_new(16);
+var loop = try io::loop_new();
 defer loop.deinit();
 let handle = io::evented(&var loop);
 

@@ -44,7 +44,7 @@ thread は他の何もできません。`evented` な `Io` は **thread を返�
 
 ```kizu
 pub struct Loop
-pub fn loop_new(capacity: i64) -> std::io::Error!std::io::Loop
+pub fn loop_new() -> std::io::Error!std::io::Loop
 pub fn evented(state: &var std::io::Loop) -> Io
 fn (self: std::io::Loop) deinit() -> void
 ```
@@ -54,7 +54,7 @@ fn (self: std::io::Loop) deinit() -> void
 何かに届く許可なので、届く先より長生きできません。
 
 ```kizu
-var loop = try io::loop_new(16);
+var loop = try io::loop_new();
 defer loop.deinit();
 let handle = io::evented(&var loop);
 ```

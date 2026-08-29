@@ -2606,19 +2606,16 @@ static int kizu_loop_turn(KizuLoop *loop) {
     return woke || waiting > 0;
 }
 
-int64_t std__internal__builtin__io_loop_new(int64_t capacity) {
+/* A loop starts with no room and takes what it turns out to need. The park
+   table doubles, so serving ten thousand connections at once grows it eleven
+   times over the life of the program; a size to start at would be a number
+   nobody could measure the effect of. */
+int64_t std__internal__builtin__io_loop_new(void) {
     KizuLoop *loop = (KizuLoop *)calloc(1, sizeof *loop);
     if (!loop) {
         return 0;
     }
     loop->tag = KIZU_LOOP_TAG;
-    if (capacity > 0 && capacity < 4096) {
-        while (loop->park_cap < (size_t)capacity) {
-            if (!kizu_loop_grow_parks(loop)) {
-                break;
-            }
-        }
-    }
     return (int64_t)(intptr_t)loop;
 }
 

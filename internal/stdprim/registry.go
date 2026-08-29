@@ -147,7 +147,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::coro_suspend":  {Return: "void"},
 	"std::internal::builtin::coro_finished": {Args: []ArgKind{ArgI64}, Return: "i64"},
 	"std::internal::builtin::coro_close":    {Args: []ArgKind{ArgI64}, Return: "void"},
-	"std::internal::builtin::io_loop_new":   {Args: []ArgKind{ArgI64}, Return: "i64"},
+	"std::internal::builtin::io_loop_new":   {Return: "i64"},
 	"std::internal::builtin::io_loop_close": {Args: []ArgKind{ArgI64}, Return: "void"},
 	"std::internal::builtin::io_evented":    {Args: []ArgKind{ArgI64}, Return: "Io"},
 	"std::internal::builtin::task_finished": {Args: []ArgKind{ArgI64}, Return: "i64"},
