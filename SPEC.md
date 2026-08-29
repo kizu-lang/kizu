@@ -2408,6 +2408,7 @@ std::meta::is_array<T>()           -> bool    comptime-only
 std::meta::is_box<T>()             -> bool    comptime-only
 std::meta::is_map<T>()             -> bool    comptime-only
 std::meta::is_owner<T>()           -> bool    comptime-only
+std::meta::release_names_allocator<T>() -> bool comptime-only
 std::meta::has_public_fields<T>()  -> bool    comptime-only
 std::meta::element<T>                         comptime-only、型の位置に書く
 std::meta::public_fields<T>()                 comptime-only list、comptime for 専用
@@ -2446,6 +2447,12 @@ compile error です(値の行き先が無いため)。
 `is_owner<T>()` は、その型の値が deinit 契約を持つかを答えます。`T` を保持する
 generic code が「解放するとは中身も解放することか」を問う唯一の手段で、答えは
 checker が使うものと同じです。
+
+`release_names_allocator<T>()` は、その解放が allocator を名指すか
+—— `deinit` が allocator を取るか —— を答えます(ADR-0132)。memory を解放する
+owner と descriptor を閉じる owner は同じ引数を取らないので、要素を解放する
+container はこれを聞いてから呼びます。宣言された `deinit` の parameter list が
+答えで、宣言していない owner は derived deinit が allocator を渡すので true です。
 
 `unsupported<T>()` は、その型を扱う case が無いことを compile error にします。
 `comptime if` は選ばれた branch だけを検査するので、最後の else に書けば、
@@ -2889,19 +2896,35 @@ fn read_config(io: Io, allocator: Allocator, path: []u8) -> !string::String {
 
 ```text
 std::io::blocking()          simple blocking I/O
+std::io::evented(&var loop)  one thread, many waits (ADR-0146)
 std::testing::failing_io()   deterministic failing I/O for tests
 ```
 
 将来の implementation 候補:
 
 ```text
-std::io::evented()   event-loop or coroutine backed I/O
 std::io::uring()     Linux io_uring backend
 std::io::kqueue()    kqueue backend
 ```
 
-`evented` / `uring` / `kqueue` は実装しません。
-runtime selection の方針は ADR-0039 に従います。
+`uring` / `kqueue` は実装しません。runtime selection の方針は ADR-0039 に
+従います。
+
+多数の descriptor を同時に待つことは `Io` の実装差ではなく、`std::net::Poller`
+という値です(ADR-0141)。
+
+**中断できる実行系は `std::coro` として入りました**(ADR-0145)。coroutine は
+並行性ではありません —— 同時に走るものは無く、`resume` が止まるところまで
+走らせる間は他に何も起きません。増えるのは止まれる場所が呼び出しの途中でよい
+ことで、それが `evented` な `Io` に要るものです。API の形は `docs/std/coro.md`
+にあります。
+
+**待ちを表す `Io` は `std::io::async` として入りました**(ADR-0146)。worker は
+`fn(Io, Allocator, &var A) -> void` の top-level function で、`async` はそれを
+始め、`Future` がそれを引き受けます。`blocking()` の `async` は worker をその場で
+走らせるので、**`async` は並行性の約束ではありません** —— 差が出るのは待つとき
+だけです。`async fn` / `await` という着色は変わらず実装しません。API の形は
+`docs/std/io.md` にあります。
 
 ### 15.2 Io を取る標準 API
 
@@ -2938,7 +2961,9 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::net::tcp_listen(io, address)` は `!std::net::TcpListener` を返す。
   address は `host:port`、IPv6 の host は bracket で囲む(`[::1]:8080`)。
   port 0 は host に空き port を選ばせる
-* `std::net::tcp_connect(io, address)` は `!std::net::TcpStream` を返す
+* `std::net::tcp_connect(io, address)` は `!std::net::TcpStream` を返す。
+  `tcp_connect_before(io, address, at)` は同じものに deadline を与える ——
+  stream がまだ無いので、期限は引数として渡す
 * `std::net::parse_address(address)` は `!std::net::Address` を返す。text を
   分けるだけで、名前解決はしない
 * `listener.accept(io)` は `!std::net::TcpStream` を返す
@@ -2948,14 +2973,24 @@ runtime selection の方針は ADR-0039 に従います。
   `!i64` で返す。**0 は相手が閉じたこと**を意味し、`max <= 0` は
   `Error::InvalidLength`
 * `stream.write_all(io, bytes)` は `!void` を返す。部分書き込みは返さない
+* `stream.write_some(io, bytes)` は今書けた byte 数を `!i64` で返す。**0 は
+  「今は書けない」**で、error でも終端でもない。待たないので write deadline は
+  掛からず、いつ再試行するかは `Poller` が言う
 * deadline は**時点**であって 1 回の呼び出しの budget ではない。
   `std::net::deadline_in_millis(millis)` が今からの距離を時点にし、
   `set_read_deadline` / `set_write_deadline` / `set_accept_deadline` がそれを
   受け取る。設定した時点は以後のその向きの呼び出し**全体**を覆い、自動では
   更新されない。過ぎた後の呼び出しは待たずに `Error::TimedOut` を返す。
   `clear_*_deadline` で外す
-* `TcpListener` / `TcpStream` は非 copy の owner で、`deinit` は `self` を値で
-  取る。close 後の使用は型 error であり、runtime の報告ではない
+* `std::net::poller_new(io, capacity)` は `!std::net::Poller` を返す。
+  `watch_stream` / `watch_listener` が descriptor と caller の `token` を登録し、
+  `wait(io, at)` が ready の個数を返し、`ready(index)` が
+  `?std::net::Ready { token, readable, writable, closed }` を返す。`token` は
+  caller のもので、std は読まない。`at` は deadline と同じ時点
+* 1 つの descriptor が同じ `wait` で 2 回報告されることがある。kqueue は filter
+  ごと、epoll は bit をまとめるので、host が言った通りを渡す
+* `TcpListener` / `TcpStream` / `Poller` は非 copy の owner で、`deinit` は
+  `self` を値で取る。close 後の使用は型 error であり、runtime の報告ではない
 * `std::net::Address` は `host: []u8` と `port: i64` だけを持つ
 * safe Kizu に file descriptor や socket pointer は出さない
 * I/O failure は `!T` error として返す
@@ -2983,33 +3018,59 @@ runtime selection の方針は ADR-0039 に従います。
   terminator を書き、`Length` は数が足りなければ `Error::ResponseIncomplete`。
   2 度目は `Error::ResponseFinished`。呼ばずに `deinit` した場合の残りは
   `exchange.owes()` が答える
+* `server.accept(io, allocator, max)` は head を読み、body を `max` byte まで
+  `exchange.body` に読む。上限が引数なのは body の大きさが endpoint の性質で
+  あって server の policy ではないため
 * `server.accept_head(io, allocator)` は空行で止まり、body を接続に残す。
-  `max_body_bytes` は掛からない。caller は `exchange.read_into(io, allocator,
+  保持しないので上限も無い。caller は `exchange.read_into(io, allocator,
   out, max)` で読む —— `std::net::read_into` と同じ契約で、head 読みで先に
-  届いていた byte から出る。`Transfer-Encoding` はこの経路でも拒否する
+  届いていた byte から出る。待たない版が `exchange.read_ready_into(...)` で、
+  `?i64` の null が「今は何も来ていない」
 * `Exchange` は `TcpStream` を渡さない。`write_all` / `read_into` /
   `set_read_deadline` / `set_write_deadline` / `clear_*` が通り道で、head 読みの
   残り byte を飛ばせないのがその理由
-* `std::http::Request` は method / target / version / headers / body を所有
-  する。path と query は field ではなく、`path_of` / `query_of` が target の
+* `std::http::Request` は method / target / version / headers を所有する。
+  **body は持たない** —— body は接続から読むもので、何 byte 取るかは求める側が
+  名乗る。path と query は field ではなく、`path_of` / `query_of` が target の
   中の run として返す
 * `std::http::Response` は組み立ててから送る。`Content-Length` /
   `Transfer-Encoding` / `Connection` は message の実体から書き、caller が
   set したものは落とす
-* `std::http::Limits` は request head の byte 数、header の個数、body の
-  byte 数、および head / body / write の各 phase に許す時間(ミリ秒)を
-  caller が名指すもの。時間は duration であり、各 phase が始まるときに
+* `std::http::listen(io, allocator, address)` / `listen_with(..., limits)` が
+  server を作り、`server.deinit(allocator)` が閉じる。allocator は多数を捌く
+  ときに接続を持つ `Array` のもの
+* `std::http::Limits` は request head の byte 数、header の個数、および
+  head / body / write の各 phase に許す時間(ミリ秒)を caller が名指すもの。
+  body の byte 数はここに無く、body を読む呼び出しの引数。時間は duration であり、各 phase が始まるときに
   deadline になる。0 はその phase に deadline を置かない
 * `std::http::route(allocator, pattern, method, path, params)` は
   Go 1.22 `ServeMux` 綴りの pattern 1 つを照合して `!bool` を返す。
   routing は登録簿ではなく、呼ぶ側が書く質問
 * `std::http::get` / `post` / `fetch` / `fetch_with` は
-  `!std::http::ClientResponse` を返す。`https` は `Error::UnsupportedScheme`
-  —— TLS を持たないので、暗号化を頼まれたものを平文で送らない
-* `std::http::write_request` / `read_response_from` は client の 2 つの半分。
-  stream を所有するのは呼ぶ側
-* `exchange.next(io, allocator)` は同じ接続の次の request を読み、あったかを
-  `!bool` で返す。false は接続が終わったこと。まだ答えていない / 自分の body を
+  `!std::http::ClientResponse` を返す。body の上限は引数。`https` は
+  `Error::UnsupportedScheme` —— TLS を持たないので、暗号化を頼まれたものを
+  平文で送らない
+* `std::http::Connection` は client 側の接続と、読んで誰も取っていない byte。
+  `connect` が開き、`take` が caller の stream を包む。`send` が request を
+  書き、`receive` が答えの head を読んで止まり、body は `read_into` /
+  `read_ready_into` が出す。`read_body` が上限つきで `response.body` に読む。
+  `ClientResponse` の `body` が埋まるのはその経路だけ
+* `server.first(io, allocator, max)` は完成した request を 1 つ渡し、
+  `server.next(io, allocator, done, max)` は 1 つ受け取って次を渡す。受け取る形
+  なので、借りた接続を返さずに次を得る道が無い。他の接続の accept / 前進 /
+  期限切れの close は `next` の中で起きる。`first_head` / `next_head` は body を
+  接続に残す対。loop は caller のもので、止めるのは `break`
+* `server.accept_ready(io, allocator)` は待たずに接続を取り、`?Exchange` を返す。
+  その exchange に request はまだ無い。`exchange.advance(io, allocator)` が届いた
+  分だけ head を進め、`std::http::Progress` —— `NeedMore`(poller に戻る)/
+  `Request`(head が揃った)/ `Closed`(揃う前に peer が去った) —— を返す。
+  `exchange.watch_read(io, poller, token)` が poller に登録する
+* `exchange.expired(now)` は今いる phase の期限が切れたかを答え、
+  `exchange.refuse_expired(io, allocator)` が 408 を 1 回書く。poller は喋った
+  接続しか報告しないので、黙っている相手に気づく道はこれだけ。`now` は caller が
+  読む —— 接続ごとに時計を読ませない
+* `exchange.next(io, allocator, max)` は同じ接続の次の request を読み、あったかを
+  `!bool` で返す。`exchange.next_head(io, allocator)` は head だけを読む。false は接続が終わったこと。まだ答えていない / 自分の body を
   `finish_body` で閉じていない / `accept_head` の request body を読み切って
   いない場合は `Error::ExchangeUnfinished`
 * 接続が次を運ぶのは 3 つが揃うときだけ —— `served + 1 < limits.max_requests`、
@@ -3024,8 +3085,6 @@ runtime selection の方針は ADR-0039 に従います。
   coding は `Error::UnsupportedEncoding`、size や CRLF が読めなければ
   `Error::MalformedChunk`。chunk extension は読み飛ばし、trailer は消費して
   捨てる(上限は `max_head_bytes`)
-* `max_body_bytes` が掛かるのは body を保持する経路(`accept`、client)だけ。
-  `accept_head` は保持しないので掛からない
 * TLS、HTTP/2、HTTP/3 は持たない
 * 並行 API が無い(§15)ので 1 接続ずつ。2 人目は listen backlog で待つ
 

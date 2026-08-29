@@ -33,8 +33,9 @@ decoder は buffer の上の state machine 1 つで、caller が buffer を詰�
 逆に判断したときに 1 つの request が 2 つになります**。どちらかを選ぶのではなく、
 自分の長さについて 2 つのことを言う message を読みません。
 
-decoder の上限は `std::mem::Limit` です。`accept` は `Bytes(max_body_bytes)`、
-`accept_head` は `Unlimited` —— 保持していないものに上限は掛かりません。
+decoder の上限は `std::mem::Limit` です。body を保持する経路は
+`Bytes(caller が名乗った数)`、保持しない経路は `Unlimited` —— 保持していない
+ものに上限は掛かりません。
 
 ## Consequences
 
@@ -58,6 +59,6 @@ chunk の framing は**どちら向きにもある**もので、同じ decoder �
 | `Transfer-Encoding: gzip, chunked` を受ける | chunked は最後に来る規則なので framing 自体は読めるが、gzip を decode できない以上 body を渡せない。読めない message を受けたことにしない |
 | chunk extension を拒否する | framing を変えるものが無い。理解できない値で message を落とすのは、読める message を読まないこと |
 | trailer を request の header に足す | `Trailer` で予告されたものだけを足す規則が要り、予告なしの trailer を header に混ぜると head を読み終えた後に header が増える。読む側の前提が壊れる |
-| decoder の上限を常に `max_body_bytes` にする | `accept_head` は body を保持しないので、その上限には意味がない。実際 example が 64 byte 上限で 5000 byte の stream を読めなくなった。`mem::Limit` で「保持しない = Unlimited」と書ける |
+| decoder の上限を常に server の policy にする | `accept_head` は body を保持しないので、その上限には意味がない。実際 example が 64 byte 上限で 5000 byte の stream を読めなくなった。`mem::Limit` で「保持しない = Unlimited」と書ける |
 | decoder を 2 つ書く(丸ごと用と streaming 用) | 同じ規則が 2 箇所になり、片方だけ直る。buffer を caller が詰め直す 1 つの state machine で両方が書ける |
 | `ChunkState` を `&var` で借りたまま buffer も借りる | `self` の 2 重借用になって checker が拒否する。state は数値 6 つなので値で出して戻す |

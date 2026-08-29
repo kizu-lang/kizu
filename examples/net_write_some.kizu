@@ -1,0 +1,238 @@
+// A slow reader must not stop the loop.
+//
+// `write_all` finishes or fails. That is the right contract for a message you
+// must send, and the wrong one for an evented loop: a peer that stopped
+// reading holds the calling thread until its deadline, and every other
+// connection waits with it. Measured, one such write parked the loop for the
+// full second its deadline allowed.
+//
+// `write_some` offers instead of insisting. It sends what fits right now and
+// answers with how much that was; what is left stays with the caller, who
+// goes back to the wait. Zero is not an error and not the end -- it is "not
+// right now", and the poller says when to try again.
+//
+// That is the whole difference between one thread serving everyone and one
+// thread serving whoever is slowest.
+
+import std::array;
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = net::Error or mem::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+    var served = array::new<net::TcpStream>(allocator);
+    defer served.deinit(allocator);
+    var poller = try net::poller_new(handle, 16);
+    defer poller.deinit();
+
+    var opened = 0;
+    while opened < 2 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        let accepted = try listener.accept(handle);
+        try served.append(allocator, move accepted);
+        try watch_read(handle, &var poller, &served, opened);
+        opened = opened + 1;
+    }
+
+    // A body far larger than the two socket buffers between here and a peer
+    // that is not reading it.
+    var body = try filler(allocator, 400000);
+    defer body.deinit(allocator);
+
+    // Caller 1 asks, and is waiting right now.
+    try speak(handle, &var callers, 1, "answer me");
+
+    // Connection 0 is offered the whole body. It takes what fits.
+    let took = try offer(handle, &var served, 0, &body, 0);
+    print("the big write took some of the body");
+    print(took > 0);
+    print("and it did not take all of it");
+    print(took < body.len());
+
+    // The thread is back. Caller 1 is answered before the slow one is done.
+    let ready = try poller.wait(handle, net::deadline_in_millis(500));
+    print("callers ready while the slow one still owes bytes");
+    print(ready);
+    try answer(handle, allocator, &var served, &var poller, ready);
+
+    // Now let the slow peer read, and finish what was left the same way: an
+    // offer per round, with the poller saying when there is room.
+    try drain_all(handle, allocator, &var callers, 0);
+    var sent = took;
+    try watch_write(handle, &var poller, &served, 0);
+    while sent < body.len() {
+        let _ = try poller.wait(handle, net::deadline_in_millis(1000));
+        let more = try offer(handle, &var served, 0, &body, sent);
+        sent = sent + more;
+        try drain_all(handle, allocator, &var callers, 0);
+    }
+    print("the slow write finished, an offer at a time");
+    print(sent == body.len());
+    return;
+}
+
+// offer hands over what is left from `from` and answers with how much went.
+// Zero is "not right now", which is the poller's cue rather than a failure.
+fn offer(
+    handle: Io,
+    served: &var array::Array<net::TcpStream>,
+    index: i64,
+    body: &string::String,
+    from: i64
+) -> Failure!i64 {
+    let bytes = body.as_bytes();
+    let length = mem::len(bytes);
+    if served.at_mut(index) |stream| {
+        let wrote = try stream.write_some(handle, bytes[from..length]);
+        return wrote;
+    }
+    return 0;
+}
+
+// answer serves whoever the poller found, which here is the caller that spoke
+// while the big write was still owed bytes.
+fn answer(
+    handle: Io,
+    allocator: Allocator,
+    served: &var array::Array<net::TcpStream>,
+    poller: &var net::Poller,
+    ready: i64
+) -> Failure!void {
+    var index = 0;
+    while index < ready {
+        if poller.ready(index) |event| {
+            if event.readable {
+                try read_one(handle, allocator, served, event.token);
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn read_one(
+    handle: Io,
+    allocator: Allocator,
+    served: &var array::Array<net::TcpStream>,
+    token: i64
+) -> Failure!void {
+    var said = string::new(allocator);
+    defer said.deinit(allocator);
+    if served.at_mut(token) |stream| {
+        let _ = try stream.read_into(handle, allocator, &var said, 64);
+    }
+    let bytes = said.as_bytes();
+    print(bytes);
+    return;
+}
+
+// drain_all empties what the slow peer has been sent, which is what makes it
+// stop being slow.
+fn drain_all(
+    handle: Io,
+    allocator: Allocator,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    var sink = string::new(allocator);
+    defer sink.deinit(allocator);
+    if callers.at_mut(index) |caller| {
+        caller.set_read_deadline(net::deadline_in_millis(20));
+        var got = caller.read_into(handle, allocator, &var sink, 65536) catch 0;
+        while got > 0 {
+            sink.clear();
+            got = caller.read_into(handle, allocator, &var sink, 65536) catch 0;
+        }
+        caller.clear_read_deadline();
+    }
+    return;
+}
+
+fn watch_read(
+    handle: Io,
+    poller: &var net::Poller,
+    served: &array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    if served.at(index) |stream| {
+        try poller.watch_stream(handle, stream, index, net::Interest::Read);
+    }
+    return;
+}
+
+fn watch_write(
+    handle: Io,
+    poller: &var net::Poller,
+    served: &array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    if served.at(index) |stream| {
+        try poller.watch_stream(handle, stream, index, net::Interest::Write);
+    }
+    return;
+}
+
+fn speak(
+    handle: Io,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64,
+    text: []u8
+) -> Failure!void {
+    if callers.at_mut(index) |caller| {
+        try caller.write_all(handle, text);
+    }
+    return;
+}
+
+fn filler(allocator: Allocator, chunks: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    while index < chunks {
+        try out.append_bytes(allocator, "0123456789");
+        index = index + 1;
+    }
+    return move out;
+}
+
+fn connect_to(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+// run
+// features: net io error-union
+// output:
+// the big write took some of the body
+// true
+// and it did not take all of it
+// true
+// callers ready while the slow one still owes bytes
+// 1
+// answer me
+// the slow write finished, an offer at a time
+// true

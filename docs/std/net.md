@@ -10,6 +10,8 @@ field に持つので、socket に届く唯一の道はこの module が返し�
 ```kizu
 pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListener
 pub fn tcp_connect(io: Io, address: []u8) -> std::net::Error!std::net::TcpStream
+pub fn tcp_connect_before(io: Io, address: []u8, at: i64)
+    -> std::net::Error!std::net::TcpStream
 pub fn parse_address(address: []u8) -> std::net::Error!std::net::Address
 pub fn deadline_in_millis(millis: i64) -> i64
 
@@ -26,11 +28,24 @@ fn (self: &var TcpStream) read_into(
     max: i64,
 ) -> std::net::Error!i64
 fn (self: &var TcpStream) write_all(io: Io, bytes: []u8) -> std::net::Error!void
+fn (self: &var TcpStream) write_some(io: Io, bytes: []u8) -> std::net::Error!i64
 fn (self: &var TcpStream) set_read_deadline(at: i64) -> void
 fn (self: &var TcpStream) set_write_deadline(at: i64) -> void
 fn (self: &var TcpStream) clear_read_deadline() -> void
 fn (self: &var TcpStream) clear_write_deadline() -> void
 fn (self: TcpStream) deinit() -> void
+
+pub fn poller_new(io: Io, capacity: i64) -> std::net::Error!std::net::Poller
+fn (self: &var Poller) watch_stream(
+    io: Io, stream: &TcpStream, token: i64, interest: std::net::Interest,
+) -> std::net::Error!void
+fn (self: &var Poller) watch_listener(
+    io: Io, listener: &TcpListener, token: i64,
+) -> std::net::Error!void
+fn (self: &var Poller) forget(io: Io, stream: &TcpStream) -> std::net::Error!void
+fn (self: &var Poller) wait(io: Io, at: i64) -> std::net::Error!i64
+fn (self: &Poller) ready(index: i64) -> ?std::net::Ready
+fn (self: Poller) deinit() -> void
 ```
 
 ## address
@@ -63,8 +78,8 @@ stream が残らないので、**close 後の使用は型 error** です —— 
 buffer 全体の上限ではありません —— 全体の上限は呼ぶ側が積算します
 (`std::http` の request header 上限がその例)。
 
-`write_all` は全 byte を書くか失敗を返すかのどちらかです。部分書き込みは
-caller が扱う結果ではありません。
+`write_all` は全 byte を書くか失敗を返すかのどちらかです。部分書き込みを
+caller が扱いたいときは [`write_some`](#write_all-と-write_some) です。
 
 ## deadline
 
@@ -76,6 +91,16 @@ stream.set_read_deadline(net::deadline_in_millis(5000));
 
 `deadline_in_millis(5000)` が「今から 5000ms 後の時点」を作り、setter がその時点を
 受け取ります。Go の `conn.SetReadDeadline(time.Now().Add(d))` と同じ形です。
+
+deadline は **待つ場所**まで決めます。descriptor は内部で non-blocking にしてあり、
+待つのは syscall の中ではなく `poll` です。blocking な `send` は部分書き込みで
+返らず、渡された分が全部入るまで kernel に留まるので、その中にいる間は deadline を
+誰も読めません —— 読まない peer への大きな write が期限を無視するのはそれが理由
+でした。`MSG_DONTWAIT` は Darwin の stream socket では無視されるので、答えは
+`O_NONBLOCK` です。
+
+**呼ぶ側からは何も変わりません。** deadline が無ければ `poll` が無期限に待ち、
+`WouldBlock` は Kizu に出ません。`write_all` は今も「全部書くか失敗するか」です。
 
 **この 1 つの時点が、以後の read 全体を覆います。** 1 回の read ごとに配り直される
 budget ではありません。この差が全部です —— 4 秒ごとに 1 byte 送る相手は
@@ -95,20 +120,117 @@ deadline は自分で更新しません。
 この host が起動して 5 秒後で、とうに過ぎているので、**最初の read が
 `TimedOut` で落ちます**。静かに無期限になるより気付ける方向に倒してあります。
 
+### connect の deadline
+
+`tcp_connect` は host が待つだけ待ちます —— 何も答えない address に対して 1 分
+前後です。`tcp_connect_before(io, address, at)` がそれを縛ります。
+
+```kizu
+// 203.0.113.1 は TEST-NET-3。どこにも routing されない
+var stream = try net::tcp_connect_before(
+    handle, "203.0.113.1:80", net::deadline_in_millis(300));
+```
+
+実測で 303 ms でした(縛らないと host 既定まで待ちます)。
+
+deadline を stream に設定できないのはこの 1 箇所だけです —— まだ stream が
+無いので、期限は connect の引数として渡すしかありません。
+
 ### listener の deadline
 
 `set_accept_deadline` は `accept` に期限を与えます。定期的な仕事を挟みたい loop は
 期限を設け、`TimedOut` をその合図として受け取り、次の期限を設けます。
 
+## write_all と write_some
+
+```kizu
+fn (self: &var TcpStream) write_all(io, bytes) -> Error!void   // 全部書くか失敗
+fn (self: &var TcpStream) write_some(io, bytes) -> Error!i64   // 今入る分だけ
+```
+
+`write_all` は**終わるまで返りません**。送らなければならない message には正しい
+契約ですが、evented な loop では間違いです —— 読むのをやめた peer が、deadline
+まで呼び出し元の thread を握ります。実測で 1 本の write が loop を 1 秒(deadline
+いっぱい)止めました。
+
+`write_some` は**申し出ます**。今入る分を送り、その数を返します。残りは caller が
+持ったまま wait に戻ります。
+
+**0 は error でも終端でもありません。**「今は書けない」で、いつ再試行するかは
+poller が言います。同じ測定が 1000 ms → **0 ms** になりました。
+
+`write_some` は待たないので、write deadline は掛かりません。待つのは poller の
+仕事で、それを縛るのは `Poller.wait` の deadline です。
+
+## Poller —— 多数を同時に待つ
+
+blocking な read は 1 つの descriptor を待ちます。だから
+`examples/http_server.kizu` の server は 1 接続ずつしか捌けません —— 1 本を
+待っている間、他の声が聞こえないからです。
+
+`Poller` は多数を待ち、**どれが喋ったか**を答えます。
+
+```kizu
+var poller = try net::poller_new(handle, 64);
+defer poller.deinit();
+try poller.watch_stream(handle, &conn, 7, net::Interest::Read);
+
+let count = try poller.wait(handle, net::deadline_in_millis(1000));
+var index = 0;
+while index < count {
+    if poller.ready(index) |event| {
+        // event.token は登録時に渡した値。std::net は中身を見ません
+    }
+    index = index + 1;
+}
+```
+
+`token` は caller のものです。この module は一度も読みません —— 「どの接続か」を
+知っているのは caller だけなので、それを表す値を預かって返すだけです。
+
+`wait` の `at` は **時点**で、[deadline](#deadline) と同じ種類の値です。
+
+### `io::evented()` ではない理由
+
+SPEC §15.1 は `std::io::evented()` を将来の候補として挙げていますが、それは
+「同じ API のまま裏で多重化する」という意味にはなりません。`read_into` の
+**途中で中断して再開する**ことになり、coroutine が要り、function coloring が
+生えます。SPEC §15 はそれを持ちません。
+
+多数を待つことは**書くもの**で、切り替えるものではありません。だから Poller は
+値で、待っていることが source に見えます(原理 2)。
+
+### 1 つの descriptor が 2 回来ることがあります
+
+kqueue は filter ごとに 1 event を返し、epoll は 1 event に両方の bit を立てます。
+read と write の両方が立った descriptor は、host によって 1 回とも 2 回とも来ます。
+**どちらも間違いではない**ので、この module は host が言った通りを渡します。
+渡された flag に従って動く caller はどちらでも正しく動きます。
+
+`capacity` は 1 回の `wait` が報告できる上限です。溢れた分は失われません ——
+まだ ready なので次の `wait` が即座に返します。
+
+### 接続は collection に持てます
+
+```kizu
+var served = array::new<net::TcpStream>(allocator);
+defer served.deinit(allocator);
+// token は index。event から state を引くのは lookup ではなく添字
+try poller.watch_stream(handle, stream, index, net::Interest::Read);
+```
+
+collection の element cleanup は「解放が allocator を名指すか」を comptime で
+聞いてから呼びます(ADR-0142)。socket は descriptor を解放するので名指しません。
+
 ## 並行性
 
-現在の Kizu に並行 API はありません(SPEC §15)。したがって
-`listener.accept` は 1 接続ずつしか返せず、その接続を処理し終えるまで次の
-caller は待ちます。listen backlog(128)がその待ち行列です。
+現在の Kizu に thread はありません(SPEC §15)。`Poller` は並行性ではなく
+**多重化**です —— 1 thread が多数の接続を扱えるようにしますが、2 つのことを
+同時にはしません。
 
-これは Zig の `std.http.Server` が今日出荷している形と同じで、並行性は呼ぶ側が
-持ち込みます。Kizu の呼ぶ側はまだ何も持ち込めないので、これは milestone であって
-production server ではありません。
+`std::http` の server は今も 1 接続ずつです。`accept` が request の head を
+blocking で読むので、Poller の上に載せるには head 読みを再開可能にする必要が
+あります。それは別の作業です。
 
 ## エラー
 

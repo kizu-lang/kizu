@@ -195,8 +195,11 @@ fn (self: &var Checker) check_user_call(
     sanctioned: bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    let function = self.function_named(name) orelse
-        return try self.error1(tree, ast::zero_span(), "move error: undefined function `%s`", Arg::Str(name));
+    // A call written against a `Function` static parameter is a call to what
+    // this instantiation bound it to.
+    let called = try self.resolve_called_function(name);
+    let function = self.function_named(called) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: undefined function `%s`", Arg::Str(called));
     if self.has_type_params(function) {
         return try self.error1(
             tree, ast::zero_span(), "move error: `%s` requires explicit static arguments", Arg::Str(name)
@@ -265,7 +268,7 @@ fn (self: &var Checker) check_user_call_arg(
         return self.read_expr(tree, env, arg, &var ignored);
     }
     if try self.view_arg_lend(tree, env, function, index, arg) or
-        self.allocator_arg_lend(tree, env, function, index, arg) or
+        self.capability_arg_lend(tree, env, function, index, arg) or
         try self.sanctioned_view_lend(tree, env, sanctioned, function, index, arg) {
         return self.read_expr(tree, env, arg, &var ignored);
     }
@@ -295,11 +298,12 @@ fn (self: &var Checker) sanctioned_view_lend(
     return false;
 }
 
-/// Reports whether arg is a tied allocator binding lent to an Allocator
-/// parameter, the Go `allocatorArgLend`. The lend itself is free; what the
+/// Reports whether arg is a tied capability binding lent to a capability
+/// parameter, the Go `capabilityArgLend`. The lend itself is free -- a
+/// capability is copied into every call that takes one -- and what the
 /// callee's result may carry out is covered by pend_tied_allocator_args at
 /// the call site.
-fn (self: &Checker) allocator_arg_lend(
+fn (self: &Checker) capability_arg_lend(
     tree: &ast::Ast,
     env: ScopeHandle,
     function: FunctionHandle,
@@ -307,10 +311,10 @@ fn (self: &Checker) allocator_arg_lend(
     arg: ast::Expression
 ) -> bool {
     let param = self.param_at(function, index) orelse return false;
-    if !self.names.is(param.type_name, "Allocator") {
+    if !self.capability_return(param.type_name) {
         return false;
     }
-    if self.tied_allocator_arg(tree, env, arg) |_| {
+    if self.tied_capability_arg(tree, env, arg) |_| {
         return true;
     }
     return false;
@@ -1000,10 +1004,6 @@ fn (self: &var Checker) check_io_builtin(
         }
         out.* = self.common.io_name;
         return null;
-    }
-    if mem::equal_bytes(name, "std::io::evented") or
-        mem::equal_bytes(name, "std::internal::builtin::io_evented") {
-        return try self.error0(ast::zero_span(), "move error: `std::io::evented` is not implemented");
     }
     handled.* = false;
     return null;

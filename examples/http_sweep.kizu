@@ -1,0 +1,140 @@
+// A poller only reports connections that spoke. The one that connects and
+// then says nothing is never ready, so it is never reported, so a loop that
+// only acts on what the poller hands it will hold that connection forever.
+//
+// One peer doing this costs a blocking server one connection. It costs a
+// poller loop nothing at all -- which is the problem: nothing is what it
+// notices, and it will hold a thousand of them just as happily.
+//
+// So the loop looks. `expired(now)` asks whether a connection has run out of
+// time for the phase it is in, and `now` is read once for the whole sweep
+// rather than once per connection.
+//
+// This example is both ends, so the silent caller is this process too. A real
+// service would have only the loop.
+
+import std::array;
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error or array::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+
+    // 50 milliseconds to send a head. A real service would give a client
+    // longer; this one has to run in a test.
+    var limits = http::default_limits();
+    limits.read_head_millis = 50;
+    var server = try http::listen_with(handle, allocator, "127.0.0.1:0", limits);
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+
+    // A caller that connects and then has nothing to say.
+    var caller = try open_client(handle, allocator, port);
+    defer caller.deinit();
+
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+
+    var held = try take_one(handle, allocator, &var server);
+    defer held.deinit(allocator);
+    try held.watch_read(handle, &var poller, 1);
+
+    // The loop. Nothing is ever ready, so the count is always zero -- and the
+    // sweep is the only thing that ever acts.
+    var reported = 0;
+    var served = false;
+    while !served {
+        reported = reported + try poller.wait(handle, net::deadline_in_millis(20));
+        let now = process::monotonic_millis();
+        if held.expired(now) {
+            held.refuse_expired(handle, allocator);
+            served = true;
+        }
+    }
+    print("times the poller reported it ready");
+    print(reported);
+    print("the silent one ran out");
+
+    // The exchange still holds the connection, so the answer is on the wire
+    // and the close that ends it is this frame's.
+    try show_answer(handle, allocator, &var caller);
+    return;
+}
+
+// take_one waits for the connection to arrive without waiting for a request.
+// `accept_ready` answers null when nothing is there yet, which here happens
+// only in the window between the connect and the host finishing it.
+fn take_one(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server
+) -> Failure!http::Exchange {
+    while true {
+        if try server.accept_ready(handle, allocator) |held| {
+            return move held;
+        }
+    }
+    return http::Error::Incomplete;
+}
+
+fn open_client(
+    handle: Io,
+    allocator: Allocator,
+    port: i64
+) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn show_answer(
+    handle: Io,
+    allocator: Allocator,
+    caller: &var net::TcpStream
+) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    let got = try caller.read_into(handle, allocator, &var reply, 4096);
+    if got == 0 {
+        print("the connection closed with nothing on it");
+        return;
+    }
+    // The status line with the CR left off, so it reads as text here. The
+    // bytes on the wire still end it with CR LF.
+    let wire = reply.as_bytes();
+    let end = first_line_end(wire);
+    print(wire[0..end]);
+    return;
+}
+
+fn first_line_end(wire: []u8) -> i64 {
+    let length = mem::len(wire);
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(13) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return length;
+}
+
+// run
+// features: net http io error-union
+// output:
+// times the poller reported it ready
+// 0
+// the silent one ran out
+// HTTP/1.1 408 Request Timeout

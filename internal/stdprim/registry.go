@@ -19,6 +19,10 @@ const (
 	// from. A String keeps no allocator of its own (ADR-0132), so a primitive
 	// that appends to one is handed the allocator the same way source is.
 	ArgAllocator ArgKind = "Allocator"
+	// ArgCoroEntry is the function a coroutine starts in. A function pointer
+	// carries no borrow (docs/language-gaps.md), so what a coroutine is handed
+	// is a number the caller knows the meaning of.
+	ArgCoroEntry ArgKind = "fn(i64) -> void"
 )
 
 // CoreSignature describes simple std::internal::builtin calls with no ownership transfer.
@@ -86,7 +90,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_connect": {
-		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64},
+		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64, ArgI64},
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_accept": {
@@ -101,13 +105,57 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Args:   []ArgKind{ArgIo, ArgI64, ArgBytes, ArgI64},
 		Return: "std::net::Error!void",
 	},
+	"std::internal::builtin::net_write_some": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgBytes},
+		Return: "std::net::Error!i64",
+	},
 	"std::internal::builtin::net_local_port": {
 		Args:   []ArgKind{ArgI64},
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_close": {Args: []ArgKind{ArgI64}, Return: "void"},
-	"std::internal::builtin::test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
-	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::net_poller_new": {
+		Args:   []ArgKind{ArgIo, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_poller_add": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64, ArgI64, ArgI64},
+		Return: "std::net::Error!void",
+	},
+	"std::internal::builtin::net_poller_remove": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64},
+		Return: "std::net::Error!void",
+	},
+	"std::internal::builtin::net_poller_wait": {
+		Args:   []ArgKind{ArgIo, ArgI64, ArgI64},
+		Return: "std::net::Error!i64",
+	},
+	"std::internal::builtin::net_poller_token": {
+		Args:   []ArgKind{ArgI64, ArgI64},
+		Return: "i64",
+	},
+	"std::internal::builtin::net_poller_flags": {
+		Args:   []ArgKind{ArgI64, ArgI64},
+		Return: "i64",
+	},
+	"std::internal::builtin::net_poller_close": {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::coro_new": {
+		Args:   []ArgKind{ArgCoroEntry, ArgI64, ArgI64},
+		Return: "i64",
+	},
+	"std::internal::builtin::coro_resume":   {Args: []ArgKind{ArgI64}, Return: "i64"},
+	"std::internal::builtin::coro_suspend":  {Return: "void"},
+	"std::internal::builtin::coro_finished": {Args: []ArgKind{ArgI64}, Return: "i64"},
+	"std::internal::builtin::coro_close":    {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::io_loop_new":   {Return: "i64"},
+	"std::internal::builtin::io_loop_close": {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::io_evented":    {Args: []ArgKind{ArgI64}, Return: "Io"},
+	"std::internal::builtin::task_finished": {Args: []ArgKind{ArgI64}, Return: "i64"},
+	"std::internal::builtin::task_await":    {Args: []ArgKind{ArgIo, ArgI64}, Return: "void"},
+	"std::internal::builtin::task_cancel":   {Args: []ArgKind{ArgIo, ArgI64}, Return: "void"},
+	"std::internal::builtin::task_close":    {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::test_fail":     {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::panic":         {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
 // TypedCoreBuiltins lists typed primitives that require explicit type application.
@@ -168,6 +216,8 @@ var primitives = map[string]bool{
 	"std::internal::builtin::io_blocking":                  true,
 	"std::internal::builtin::io_evented":                   true,
 	"std::internal::builtin::io_failing":                   true,
+	"std::internal::builtin::io_loop_close":                true,
+	"std::internal::builtin::io_loop_new":                  true,
 	"std::internal::builtin::io_read_stdin_into":           true,
 	"std::internal::builtin::io_write_stderr":              true,
 	"std::internal::builtin::io_write_stdout":              true,
@@ -190,8 +240,26 @@ var primitives = map[string]bool{
 	"std::internal::builtin::net_connect":                  true,
 	"std::internal::builtin::net_listen":                   true,
 	"std::internal::builtin::net_local_port":               true,
+	"std::internal::builtin::net_poller_add":               true,
+	"std::internal::builtin::coro_close":                   true,
+	"std::internal::builtin::coro_finished":                true,
+	"std::internal::builtin::coro_new":                     true,
+	"std::internal::builtin::coro_resume":                  true,
+	"std::internal::builtin::coro_suspend":                 true,
+	"std::internal::builtin::task_await":                   true,
+	"std::internal::builtin::task_cancel":                  true,
+	"std::internal::builtin::task_close":                   true,
+	"std::internal::builtin::task_finished":                true,
+	"std::internal::builtin::task_new":                     true,
+	"std::internal::builtin::net_poller_close":             true,
+	"std::internal::builtin::net_poller_flags":             true,
+	"std::internal::builtin::net_poller_new":               true,
+	"std::internal::builtin::net_poller_remove":            true,
+	"std::internal::builtin::net_poller_token":             true,
+	"std::internal::builtin::net_poller_wait":              true,
 	"std::internal::builtin::net_read":                     true,
 	"std::internal::builtin::net_write_all":                true,
+	"std::internal::builtin::net_write_some":               true,
 	"std::internal::builtin::panic":                        true,
 	"std::internal::builtin::process_arg":                  true,
 	"std::internal::builtin::process_arg_count":            true,

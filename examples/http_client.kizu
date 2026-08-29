@@ -11,6 +11,7 @@
 // which is what lets this example be both ends. It is also the seam the
 // missing layers plug into: TLS and a proxy own the stream, not the client.
 
+import std::array;
 import std::fmt;
 import std::http;
 import std::io;
@@ -18,7 +19,7 @@ import std::mem;
 import std::net;
 import std::string;
 
-error Failure = http::Error or net::Error or mem::Error;
+error Failure = http::Error or net::Error or mem::Error or array::Error;
 
 fn main() -> Failure!void {
     let handle = io::blocking();
@@ -33,22 +34,25 @@ fn main() -> Failure!void {
     try address.append_bytes(allocator, "127.0.0.1:");
     try fmt::append_i64(allocator, &var address, port);
     let address_bytes = address.as_bytes();
-    var client = try net::tcp_connect(handle, address_bytes);
-    defer client.deinit();
+    let limits = http::default_limits();
+    var client = try http::connect(handle, allocator, address_bytes, limits);
+    defer client.deinit(allocator);
 
     // The client writes. Connecting completed against the listen backlog, so
     // the bytes are on their way before anything accepted them.
     var url = try build_url(allocator, port);
     defer url.deinit(allocator);
-    try http::write_request(
-        handle, allocator, &var client, "POST", &url, "text/plain", "ping");
+    try client.send(
+        handle, allocator, "POST", &url, "text/plain", "ping", limits.write_millis);
 
     try answer(handle, allocator, &var listener);
 
-    // The client reads what came back.
-    var response = try http::read_response_from(
-        handle, allocator, &var client, "POST", http::default_limits());
+    // The client reads the head, then the body. `receive` stops at the blank
+    // line, so an answer too big to hold can be read a piece at a time
+    // instead.
+    var response = try client.receive(handle, allocator, "POST", limits);
     defer response.deinit(allocator);
+    try client.read_body(handle, allocator, &var response, 1048576);
     print(response.status);
     let reason = response.reason.as_bytes();
     print(reason);

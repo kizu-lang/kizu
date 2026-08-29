@@ -40,6 +40,12 @@ const (
 	// means releasing something inside it, and the answer is the same one the
 	// checkers read (ast.OwnerType).
 	IsOwner Form = "std::meta::is_owner"
+	// ReleaseNamesAllocator reports whether releasing its type argument names
+	// an allocator, which is to say whether `deinit` takes one (ADR-0132).
+	// A container releasing owner elements has to call each element's deinit,
+	// and an owner that frees memory and one that closes a descriptor do not
+	// take the same argument -- so generic cleanup asks rather than assumes.
+	ReleaseNamesAllocator Form = "std::meta::release_names_allocator"
 	// HasPublicFields reports whether a struct has any public field. A type
 	// whose state is all private looks like an empty object to a walk, so a
 	// walk that means to carry data asks this before treating one as a
@@ -101,27 +107,28 @@ type Shape struct {
 }
 
 var forms = map[Form]Shape{
-	IsStruct:        {StaticArgs: 1},
-	IsEnum:          {StaticArgs: 1},
-	IsUnion:         {StaticArgs: 1},
-	IsOptional:      {StaticArgs: 1},
-	IsArray:         {StaticArgs: 1},
-	IsBox:           {StaticArgs: 1},
-	IsMap:           {StaticArgs: 1},
-	IsOwner:         {StaticArgs: 1},
-	HasPublicFields: {StaticArgs: 1},
-	Element:         {StaticArgs: 1, Type: true},
-	PublicFields:    {StaticArgs: 1},
-	FieldName:       {StaticArgs: 2, Capture: true},
-	FieldType:       {StaticArgs: 2, Capture: true, Type: true},
-	Field:           {StaticArgs: 2, Capture: true, Args: 1},
-	Variants:        {StaticArgs: 1},
-	VariantName:     {StaticArgs: 2, Capture: true},
-	VariantType:     {StaticArgs: 2, Capture: true, Type: true},
-	HasPayload:      {StaticArgs: 2, Capture: true},
-	Variant:         {StaticArgs: 2, Capture: true, Variadic: true},
-	Construct:       {StaticArgs: 2, Variadic: true, Worker: 2},
-	Unsupported:     {StaticArgs: 1},
+	IsStruct:              {StaticArgs: 1},
+	IsEnum:                {StaticArgs: 1},
+	IsUnion:               {StaticArgs: 1},
+	IsOptional:            {StaticArgs: 1},
+	IsArray:               {StaticArgs: 1},
+	IsBox:                 {StaticArgs: 1},
+	IsMap:                 {StaticArgs: 1},
+	IsOwner:               {StaticArgs: 1},
+	ReleaseNamesAllocator: {StaticArgs: 1},
+	HasPublicFields:       {StaticArgs: 1},
+	Element:               {StaticArgs: 1, Type: true},
+	PublicFields:          {StaticArgs: 1},
+	FieldName:             {StaticArgs: 2, Capture: true},
+	FieldType:             {StaticArgs: 2, Capture: true, Type: true},
+	Field:                 {StaticArgs: 2, Capture: true, Args: 1},
+	Variants:              {StaticArgs: 1},
+	VariantName:           {StaticArgs: 2, Capture: true},
+	VariantType:           {StaticArgs: 2, Capture: true, Type: true},
+	HasPayload:            {StaticArgs: 2, Capture: true},
+	Variant:               {StaticArgs: 2, Capture: true, Variadic: true},
+	Construct:             {StaticArgs: 2, Variadic: true, Worker: 2},
+	Unsupported:           {StaticArgs: 1},
 }
 
 // Lookup reports the shape of a form, and whether name is one at all.
@@ -136,7 +143,7 @@ func Lookup(name string) (Shape, bool) {
 func Predicate(name string) bool {
 	switch Form(name) {
 	case IsStruct, IsEnum, IsUnion, IsOptional, IsArray, IsBox, IsMap, IsOwner,
-		HasPublicFields, HasPayload:
+		ReleaseNamesAllocator, HasPublicFields, HasPayload:
 		return true
 	default:
 		return false

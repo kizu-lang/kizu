@@ -43,6 +43,11 @@ type lowerer struct {
 	nextBlock   int
 	loops       []*loopContext
 	deferFrames [][]Cleanup
+	// currentModule is the package module whose body is being lowered, for the
+	// one body whose symbol does not carry it: a test block's. A function
+	// pointer's value is looked up through the prefix of what is being
+	// lowered, and `test.<name>` has none.
+	currentModule string
 	// typeBindings binds the type parameters in force: those of the generic
 	// function being instantiated. Lowering reads a body once per binding rather
 	// than rewriting its AST, so `T` resolves through here.
@@ -84,6 +89,9 @@ type lowerer struct {
 	// deinitOwners names the types that carry a deinit contract, seeded from
 	// ast.DeinitOwners so lowering reads the same owner-ness the checkers do.
 	deinitOwners map[string]bool
+	// releaseAllocators names the types whose deinit takes an allocator, so a
+	// generic cleanup lowers the call the element actually declares.
+	releaseAllocators map[string]bool
 	// ownership is the preceding phase's output. Keeping it beside the syntax
 	// tree makes the phase boundary explicit and leaves AST nodes immutable.
 	ownership ownership.Result
@@ -151,18 +159,19 @@ func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer
 			ErrorSets: map[string]Enum{},
 			Unions:    map[string]Union{},
 		},
-		signatures:    map[string]Signature{},
-		typeBindings:  map[string]string{},
-		instantiated:  map[string]bool{},
-		staticValues:  map[string]staticValue{},
-		externSymbols: map[string]string{},
-		genericDecls:  generics,
-		structDecls:   structs,
-		enumDecls:     enums,
-		unionDecls:    unions,
-		metaFields:    map[string]metaField{},
-		deinitOwners:  ast.DeinitOwners(program),
-		ownership:     ownershipResult,
+		signatures:        map[string]Signature{},
+		typeBindings:      map[string]string{},
+		instantiated:      map[string]bool{},
+		staticValues:      map[string]staticValue{},
+		externSymbols:     map[string]string{},
+		genericDecls:      generics,
+		structDecls:       structs,
+		enumDecls:         enums,
+		unionDecls:        unions,
+		metaFields:        map[string]metaField{},
+		deinitOwners:      ast.DeinitOwners(program),
+		releaseAllocators: ast.ReleaseNamesAllocator(program),
+		ownership:         ownershipResult,
 	}
 }
 
@@ -486,7 +495,10 @@ func (l *lowerer) lowerTests() error {
 			},
 			Body: test.Body,
 		}
+		previousModule := l.currentModule
+		l.currentModule = test.Module
 		lowered, err := l.lowerFunctionNamed(fn, fn.Name)
+		l.currentModule = previousModule
 		if err != nil {
 			return err
 		}
@@ -1332,6 +1344,24 @@ func (l *lowerer) lowerAllocatorFrom(state string, args []ast.Expression) (Value
 		"call.std::internal::builtin::mem_allocator_from", "Allocator", values, ""), nil
 }
 
+// lowerTaskNew lowers `task_new<T>`. The state stays a borrow: the worker runs
+// on its own stack and writes into the cell the caller moved its value into,
+// so what crosses is the address, not a copy.
+func (l *lowerer) lowerTaskNew(state string, args []ast.Expression) (Value, error) {
+	params := []Param{
+		{Type: "Io"},
+		{Type: "Allocator"},
+		{Type: "fn(Io, Allocator, &var " + state + ") -> void"},
+		{Type: "&var " + state, Passing: PassCallerStorage},
+		{Type: "i64"},
+	}
+	values, err := l.lowerCallArgsAs(params, args)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("call.std::internal::builtin::task_new", "i64", values, ""), nil
+}
+
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
 // The std storage constructors lower to one instruction each, so their std
 // bodies are never walked. Every other generic call resolves by name.
@@ -1354,6 +1384,8 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerPtrIntCast(typeApply.TypeArg, args)
 	case "std::internal::builtin::mem_allocator_from":
 		return l.lowerAllocatorFrom(l.resolveType(typeApply.TypeArg), args)
+	case "std::internal::builtin::task_new":
+		return l.lowerTaskNew(l.resolveType(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,
@@ -1627,11 +1659,15 @@ func (l *lowerer) functionByValueName(name string) (string, Signature, bool) {
 	if l.current == nil {
 		return "", Signature{}, false
 	}
-	prefix := strings.LastIndex(l.current.Name, "::")
-	if prefix < 0 {
+	if prefix := strings.LastIndex(l.current.Name, "::"); prefix >= 0 {
+		qualified := l.current.Name[:prefix+2] + name
+		sig, ok := l.signatures[qualified]
+		return qualified, sig, ok
+	}
+	if l.currentModule == "" {
 		return "", Signature{}, false
 	}
-	qualified := l.current.Name[:prefix+2] + name
+	qualified := l.currentModule + "::" + name
 	sig, ok := l.signatures[qualified]
 	return qualified, sig, ok
 }
@@ -1731,6 +1767,16 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	return Value{}, fmt.Errorf("ir error: unsupported callee `%s`", expr.Callee.String())
 }
 
+// functionStaticValue answers the function name a `Function` static parameter
+// is bound to in the instance being lowered.
+func (l *lowerer) functionStaticValue(name string) (string, bool) {
+	value, ok := l.staticValues[name]
+	if !ok || value.typ != "Function" {
+		return "", false
+	}
+	return value.text, true
+}
+
 // lowerFuncPointerCall lowers a call whose callee is a binding holding a
 // function pointer, and reports whether the callee is one. The pointer is the
 // first argument of `call.indirect`, so the backend reads the callee where it
@@ -1777,6 +1823,12 @@ func funcPointerNode(text string) (*typ.Func, bool) {
 func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 	ident, ok := callee.(*ast.IdentExpr)
 	if ok {
+		// A `Function` static parameter is the name it was instantiated with.
+		// The instance already bound it (genericBindings), so calling through
+		// it is reading that binding rather than a new kind of call.
+		if name, bound := l.functionStaticValue(ident.Name); bound {
+			return name, true
+		}
 		return ident.Name, true
 	}
 	field, ok := callee.(*ast.FieldExpr)

@@ -290,7 +290,7 @@ func (c *Checker) checkMetaForm(
 	case stdmeta.Construct:
 		return c.checkMetaConstruct(staticArgs, args, env, unsafe)
 	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
-		stdmeta.IsOwner, stdmeta.HasPayload:
+		stdmeta.IsOwner, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
 		if _, err := c.metaPredicate(form, staticArgs); err != nil {
 			return "", err
 		}
@@ -524,6 +524,23 @@ func (c *Checker) metaUnsupported(staticArgs []string) error {
 
 // metaPredicate answers a compile-time predicate about a type, or about one
 // variant of one.
+// declaredKindPredicate answers the predicates a declaration decides, and false
+// for a form that reads the type's own spelling instead.
+func (c *Checker) declaredKindPredicate(form stdmeta.Form, subject Type) (bool, bool) {
+	switch form {
+	case stdmeta.IsStruct:
+		_, ok := c.structs[string(subject)]
+		return ok, true
+	case stdmeta.IsEnum:
+		return c.enums[string(subject)] != nil, true
+	case stdmeta.IsUnion:
+		return c.unions[string(subject)] != nil, true
+	default:
+		return false, false
+	}
+}
+
+// metaPredicate answers one `comptime if` condition about a type.
 func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, error) {
 	if form == stdmeta.HasPayload {
 		variant, err := c.metaCapture(form, staticArgs)
@@ -539,14 +556,10 @@ func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, e
 	if err != nil {
 		return false, err
 	}
+	if known, ok := c.declaredKindPredicate(form, subject); ok {
+		return known, nil
+	}
 	switch form {
-	case stdmeta.IsStruct:
-		_, ok := c.structs[string(subject)]
-		return ok, nil
-	case stdmeta.IsEnum:
-		return c.enums[string(subject)] != nil, nil
-	case stdmeta.IsUnion:
-		return c.unions[string(subject)] != nil, nil
 	case stdmeta.IsOptional:
 		_, ok := optionalElem(subject)
 		return ok, nil
@@ -558,6 +571,8 @@ func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, e
 		return metaGenericBase(string(subject)) == "std::map::Map", nil
 	case stdmeta.IsOwner:
 		return c.ownerType(subject), nil
+	case stdmeta.ReleaseNamesAllocator:
+		return c.releaseNamesAllocator(subject), nil
 	case stdmeta.HasPublicFields:
 		fields, err := c.publicFields(string(subject))
 		return err == nil && len(fields) > 0, nil

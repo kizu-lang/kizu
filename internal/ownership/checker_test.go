@@ -182,7 +182,7 @@ fn main(allocator: Allocator) -> !void {
     try values.append(allocator, 1);
     return;
 }`,
-			want: "returns an allocator tied to local state and cannot escape",
+			want: "returns a value tied to local state and cannot escape",
 		},
 		{
 			name: "buffer reborrow while allocator lives",

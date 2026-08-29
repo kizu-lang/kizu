@@ -24,6 +24,9 @@ type Checker struct {
 	nextID       int
 	consumeNeeds map[string]bool
 	deinitOwners map[string]bool
+	// releaseAllocators names the types whose deinit takes an allocator, which
+	// a generic cleanup asks before calling one (ADR-0132).
+	releaseAllocators map[string]bool
 	// declaredDeinits names the types whose cleanup an author wrote. Those hold
 	// an obligation of their own, so their fields cannot be taken one at a time.
 	declaredDeinits map[string]bool
@@ -36,6 +39,10 @@ type Checker struct {
 	// `comptime match` builds its arms in.
 	enumOrder  map[string][]string
 	unionOrder map[string][]string
+	// functionArgs binds the `Function` static arguments of the instantiation
+	// being checked, so a call written against the parameter resolves to the
+	// function it was given.
+	functionArgs map[string]string
 	// checkedInstances records the generic instantiations already checked, and
 	// instantiationDepth counts those open above the current one (#1627).
 	checkedInstances   map[string]bool
@@ -202,6 +209,7 @@ func New() *Checker {
 		enumOrder:         map[string][]string{},
 		unionOrder:        map[string][]string{},
 		metaFields:        map[string]metaField{},
+		functionArgs:      map[string]string{},
 		checkedInstances:  map[string]bool{},
 		result:            newResult(),
 	}
@@ -217,6 +225,7 @@ func (c *Checker) Result() Result {
 func (c *Checker) Check(program *ast.Program) error {
 	c.result = newResult()
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
 		return err
@@ -280,6 +289,7 @@ func (c *Checker) MissingMoveMarkers(program *ast.Program) ([]MissingMarker, err
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.result = newResult()
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
 		return []error{err}
@@ -464,13 +474,35 @@ func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
 	// Method calls have no tied-allocator recognizer, so a method that built a
 	// tied allocator from a borrowed buffer would hand it back untracked.
 	// Free functions carry this shape; methods refuse it at the declaration.
-	if returnTypeName(info) == "Allocator" && c.callTiesAllocator(info, nil, nil) {
+	if capabilityReturn(returnTypeName(info)) && c.callTiesAllocator(info, nil, nil) {
 		return errorf(
-			"borrow error: method `%s` cannot return a tied allocator; use a free function",
+			"borrow error: method `%s` cannot return a tied capability; use a free function",
 			decl.Name)
 	}
 	methods[name] = info
 	return nil
+}
+
+// capabilityReturn reports the return types that are tied when they are built
+// from a borrow. A capability is a permission to reach something, so one built
+// out of local state cannot leave the frame that state lives in -- the same
+// rule for the allocator over a local buffer and for the Io over a local loop.
+func capabilityReturn(name string) bool {
+	return name == "Allocator" || name == "Io"
+}
+
+// tiedStructReturn names the std struct returns that stay tied to what they
+// were built from. A Future stands on the state its caller lent it until the
+// worker is done with it, so it cannot leave that state's frame -- the same
+// rule the tied allocator carries, on a value rather than a capability.
+func tiedStructReturn(name string) bool {
+	return name == "std::io::Future" || strings.HasSuffix(name, "!std::io::Future")
+}
+
+// tiedReturn reports the return types that are tied when they are built from a
+// borrow.
+func tiedReturn(name string) bool {
+	return capabilityReturn(name) || tiedStructReturn(name)
 }
 
 // functionInfoFromDecl extracts the ownership-facing signature for a function.
@@ -490,6 +522,11 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 // checkFunction validates one function body.
 func (c *Checker) checkFunction(fn *functionInfo) error {
 	if fn.sig.ExternABI != "" {
+		return nil
+	}
+	// A body that calls a `Function` static parameter has no callee until the
+	// parameter is bound, so it is checked once per instantiation instead.
+	if hasFunctionStaticParam(fn.sig) {
 		return nil
 	}
 	env := newScope(nil)
@@ -584,9 +621,16 @@ func isConsumePrimitive(name string) bool {
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
-	fn := functionInfoFromDecl("test "+strconv.Quote(decl.Name), &ast.FunctionDecl{
+	// The name carries the module so the body reads its own module's names --
+	// a function pointer's value is looked up through the prefix of whatever
+	// is being checked, and a synthetic name without one finds nothing.
+	name := "test " + strconv.Quote(decl.Name)
+	if decl.Module != "" {
+		name = decl.Module + "::" + name
+	}
+	fn := functionInfoFromDecl(name, &ast.FunctionDecl{
 		FunctionSignature: ast.FunctionSignature{
-			Name:       "test " + strconv.Quote(decl.Name),
+			Name:       name,
 			ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 		},
 		Body: decl.Body,
@@ -1232,7 +1276,7 @@ func (c *Checker) checkArenaBorrowReturn(
 // comes back with handled set.
 func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool, error) {
 	name, fn := c.calledFunction(call.Callee)
-	if fn == nil || returnTypeName(fn) != "Allocator" {
+	if fn == nil || !tiedReturn(returnTypeName(fn)) {
 		return false, nil
 	}
 	sources, err := c.callBorrowReturnSources(name, fn, call, true, true, false, env)
@@ -1245,7 +1289,7 @@ func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool
 	for _, source := range sources {
 		if !paramRootedBinding(source.target) {
 			return true, errorf(
-				"borrow error: `%s` returns an allocator tied to local state and cannot escape",
+				"borrow error: `%s` returns a value tied to local state and cannot escape",
 				name)
 		}
 	}
@@ -1617,6 +1661,12 @@ func (c *Checker) returnedBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
 ) ([]borrowSource, string, bool, bool, error) {
+	// A factory that can refuse hands its result back through `try`. The tie
+	// is a property of the value, not of how the failure was spelled, so the
+	// `try` is read through rather than treated as a different expression.
+	if try, ok := expr.(*ast.TryExpr); ok {
+		return c.returnedBorrowInitializer(try.Value, env)
+	}
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return nil, "", false, false, nil
@@ -1629,6 +1679,7 @@ func (c *Checker) returnedBorrowInitializer(
 	_, mutable, elem, ok := explicitOwnershipBorrowType(retName)
 	allocatorReturn := false
 	viewReturn := false
+	tiedStruct := false
 	if !ok {
 		// An Allocator return with tie-capable sources is a tied allocator: it
 		// holds the buffer's writable view exclusively, so it behaves as a
@@ -1637,10 +1688,20 @@ func (c *Checker) returnedBorrowInitializer(
 		// ties the same way when a borrow-class view flows in, and falls through
 		// as a plain value when none does.
 		switch {
-		case retName == "Allocator":
+		case capabilityReturn(retName):
+			// An allocator holds its buffer's writable view exclusively. An Io
+			// is copied into every call that takes one, so it is shared: what
+			// ties it is how long it may live, not who else may hold one.
 			allocatorReturn = true
+			mutable = retName != "Io"
+			elem = retName
+		case tiedStructReturn(retName):
+			// A Future holds the state it was lent exclusively, and only that:
+			// the Io it also took is a permission, not something the Future is
+			// made out of, so re-wrapping does not come into it.
+			tiedStruct = true
 			mutable = true
-			elem = "Allocator"
+			elem = retName
 		case retName == "[]u8" || c.viewCaptureStructType(retName):
 			viewReturn = true
 			elem = retName
@@ -1654,7 +1715,7 @@ func (c *Checker) returnedBorrowInitializer(
 		return nil, "", false, true, err
 	}
 	if len(sources) == 0 {
-		if allocatorReturn || viewReturn {
+		if allocatorReturn || viewReturn || tiedStruct {
 			return nil, "", false, false, nil
 		}
 		return nil, "", false, true,
@@ -1702,7 +1763,7 @@ func (c *Checker) callBorrowReturnSources(
 		}
 		if !fn.params[idx].borrow || (mutable && !fn.params[idx].mutBorrow) {
 			if allocatorReturn {
-				if alloc := c.tiedAllocatorArg(call.Args[idx], env); alloc != nil {
+				if alloc := c.tiedCapabilityArg(call.Args[idx], env); alloc != nil {
 					sources = append(sources, borrowSource{target: alloc})
 				}
 			}
@@ -1731,9 +1792,26 @@ func (c *Checker) callBorrowReturnSources(
 }
 
 // tiedAllocatorArg resolves an argument to a tied allocator binding, or nil.
+// Only an allocator, because this answers "did the callee get its memory from
+// here" -- an Io is a permission to reach the world, and nothing a call made
+// with one is held by it.
 func (c *Checker) tiedAllocatorArg(arg ast.Expression, env *scope) *binding {
 	value, ok := directAssignmentRoot(arg, env)
 	if !ok || value.typeName != "Allocator" {
+		return nil
+	}
+	if !value.borrowedParam || len(value.borrowTargets) == 0 {
+		return nil
+	}
+	return value
+}
+
+// tiedCapabilityArg resolves an argument to a tied capability binding, or nil.
+// This answers the other question: may this be handed over at all. Lending one
+// is free; what is not free is outliving what it reaches.
+func (c *Checker) tiedCapabilityArg(arg ast.Expression, env *scope) *binding {
+	value, ok := directAssignmentRoot(arg, env)
+	if !ok || !capabilityReturn(value.typeName) {
 		return nil
 	}
 	if !value.borrowedParam || len(value.borrowTargets) == 0 {
@@ -1755,7 +1833,7 @@ func (c *Checker) callTiesAllocator(
 		if fn.params[idx].borrow && fn.params[idx].mutBorrow {
 			return true
 		}
-		if idx < len(args) && c.tiedAllocatorArg(args[idx], env) != nil {
+		if idx < len(args) && c.tiedCapabilityArg(args[idx], env) != nil {
 			return true
 		}
 	}
@@ -4249,6 +4327,11 @@ func (c *Checker) checkUserCall(
 	env *scope,
 	sanctioned bool,
 ) (string, error) {
+	if bound, ok := c.functionArgs[name]; ok {
+		// A call written against a `Function` static parameter is a call to
+		// what this instantiation bound it to.
+		name = bound
+	}
 	fn, ok := c.functions[name]
 	if !ok {
 		return "", errorf("move error: undefined function `%s`", name)
@@ -4298,7 +4381,7 @@ func (c *Checker) checkUserCallArg(
 		_, err := c.readExpr(arg, env)
 		return err
 	}
-	if c.viewArgLend(fn, idx, arg, env) || c.allocatorArgLend(fn, idx, arg, env) ||
+	if c.viewArgLend(fn, idx, arg, env) || c.capabilityArgLend(fn, idx, arg, env) ||
 		c.sanctionedViewLend(sanctioned, fn, idx, arg, env) {
 		_, err := c.readExpr(arg, env)
 		return err
@@ -4325,19 +4408,20 @@ func (c *Checker) sanctionedViewLend(
 	return c.borrowClassViewRoot(arg, env) != nil
 }
 
-// allocatorArgLend reports whether arg is a tied allocator binding lent to an
-// Allocator parameter. The lend itself is free; what the callee's result may
-// carry out is covered by pendTiedAllocatorArgs at the call site.
-func (c *Checker) allocatorArgLend(
+// capabilityArgLend reports whether arg is a tied capability binding lent to a
+// capability parameter. The lend itself is free -- a capability is copied into
+// every call that takes one -- and what the callee's result may carry out is
+// covered by pendTiedAllocatorArgs at the call site.
+func (c *Checker) capabilityArgLend(
 	fn *functionInfo,
 	idx int,
 	arg ast.Expression,
 	env *scope,
 ) bool {
-	if fn.params[idx].typeName != "Allocator" {
+	if !capabilityReturn(fn.params[idx].typeName) {
 		return false
 	}
-	return c.tiedAllocatorArg(arg, env) != nil
+	return c.tiedCapabilityArg(arg, env) != nil
 }
 
 // pendTiedAllocatorArgs records the tie obligation of a call that consumed a
@@ -4944,8 +5028,6 @@ func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 			return "", true, err
 		}
 		return "Io", true, nil
-	case "std::io::evented", "std::internal::builtin::io_evented":
-		return "", true, errorf("move error: `std::io::evented` is not implemented")
 	default:
 		return "", false, nil
 	}
@@ -4994,6 +5076,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "std::internal::builtin::mem_allocator_from" {
 		return c.checkAllocatorFrom(args, env)
 	}
+	if name == "std::internal::builtin::task_new" {
+		return c.checkTaskNew(args, env)
+	}
 	return "", errorf("move error: `%s` does not take static arguments", name)
 }
 
@@ -5011,6 +5096,22 @@ func (c *Checker) checkAllocatorFrom(
 		}
 	}
 	return "Allocator", nil
+}
+
+// checkTaskNew walks the arguments of `task_new`. The state is borrowed for as
+// long as the task runs, which the Future's own shape enforces: the cell the
+// borrow points into is owned by the Future, and the only ways to release the
+// Future are the two that finish the task first.
+func (c *Checker) checkTaskNew(
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	for _, arg := range args {
+		if _, err := c.readExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	return "i64", nil
 }
 
 // checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
@@ -5666,7 +5767,9 @@ func (c *Checker) checkGenericUserTypeApply(
 		}
 	}
 	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
+	restoreFunctions := c.bindFunctionArgs(c.genericCallFunctions(fn, typeArg))
 	err = c.checkGenericInstantiation(fn, subst)
+	restoreFunctions()
 	restore()
 	if err != nil {
 		return "", true, err
@@ -5702,6 +5805,68 @@ func (c *Checker) genericCallSubst(
 		subst[param] = typeArgs[idx]
 	}
 	return subst, nil
+}
+
+// hasFunctionStaticParam reports whether a signature names a function among its
+// compile-time parameters.
+func hasFunctionStaticParam(sig ast.FunctionSignature) bool {
+	for _, param := range sig.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		if typ.Text(param.Type) == "Function" {
+			return true
+		}
+	}
+	return false
+}
+
+// genericCallFunctions reads the `Function` static arguments of one call, so a
+// body that calls one is checked against what it was given.
+func (c *Checker) genericCallFunctions(fn *functionInfo, typeArg string) map[string]string {
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
+		return nil
+	}
+	bound := map[string]string{}
+	for idx, param := range fn.sig.StaticParams {
+		if param.IsType() || typ.Text(param.Type) != "Function" {
+			continue
+		}
+		name := strings.TrimSpace(staticArgs[idx])
+		if outer, ok := c.functionArgs[name]; ok {
+			bound[param.Name] = outer
+			continue
+		}
+		bound[param.Name] = name
+	}
+	if len(bound) == 0 {
+		return nil
+	}
+	return bound
+}
+
+// bindFunctionArgs makes the `Function` arguments of one instantiation readable
+// by the calls written against them, and returns the call that unbinds them.
+func (c *Checker) bindFunctionArgs(bound map[string]string) func() {
+	if len(bound) == 0 {
+		return func() {}
+	}
+	previous := make(map[string]string, len(bound))
+	had := make(map[string]bool, len(bound))
+	for name, target := range bound {
+		previous[name], had[name] = c.functionArgs[name]
+		c.functionArgs[name] = target
+	}
+	return func() {
+		for name := range bound {
+			if had[name] {
+				c.functionArgs[name] = previous[name]
+				continue
+			}
+			delete(c.functionArgs, name)
+		}
+	}
 }
 
 // genericCallFields reads the `Field` static arguments of one call. A field
@@ -7813,7 +7978,8 @@ func (c *Checker) checkImplMethodArg(
 		_, err := c.readExpr(arg, env)
 		return err
 	}
-	if c.viewArgLend(method, paramIndex, arg, env) {
+	if c.viewArgLend(method, paramIndex, arg, env) ||
+		c.capabilityArgLend(method, paramIndex, arg, env) {
 		_, err := c.readExpr(arg, env)
 		return err
 	}

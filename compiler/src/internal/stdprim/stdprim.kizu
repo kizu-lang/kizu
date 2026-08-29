@@ -14,6 +14,10 @@ pub enum ArgKind {
     // The allocator a primitive grows a destination buffer from. A String
     // keeps none of its own (ADR-0132).
     Allocator,
+    // The function a coroutine starts in. A function pointer carries no
+    // borrow, so what a coroutine is handed is a number whose meaning belongs
+    // to whoever passed it.
+    CoroEntry,
 }
 
 /// Returns the type spelling represented by kind.
@@ -24,6 +28,7 @@ pub fn arg_kind_spelling(kind: ArgKind) -> []u8 {
         Io => "Io",
         StringOut => "&var std::string::String",
         Allocator => "Allocator",
+        CoroEntry => "fn(i64) -> void",
     };
 }
 
@@ -38,9 +43,15 @@ enum CoreArgs {
     SpawnWait8,
     AllocStringOut,
     IoBytesI64,
+    IoBytesI64I64,
+    IoI64,
+    I64I64,
     IoI64I64,
+    IoI64I64I64I64,
+    IoI64Bytes,
     IoI64BytesI64,
     IoAllocI64StringOutI64I64,
+    CoroEntryI64I64,
 }
 
 /// Describes one simple std::internal::builtin call.
@@ -62,9 +73,15 @@ pub fn (self: &CoreSignature) args_len() -> i64 {
         SpawnWait8 => 9,
         AllocStringOut => 2,
         IoBytesI64 => 3,
+        IoBytesI64I64 => 4,
+        IoI64 => 2,
+        I64I64 => 2,
         IoI64I64 => 3,
+        IoI64I64I64I64 => 5,
+        IoI64Bytes => 3,
         IoI64BytesI64 => 4,
         IoAllocI64StringOutI64I64 => 6,
+        CoroEntryI64I64 => 3,
     };
 }
 
@@ -81,6 +98,18 @@ pub fn (self: &CoreSignature) arg_at(index: i64) -> ?ArgKind {
     }
     if self.args == CoreArgs::I64 {
         if index == 0 {
+            return ArgKind::I64;
+        }
+        return null;
+    }
+    if self.args == CoreArgs::CoroEntryI64I64 {
+        if index == 0 {
+            return ArgKind::CoroEntry;
+        }
+        if index == 1 {
+            return ArgKind::I64;
+        }
+        if index == 2 {
             return ArgKind::I64;
         }
         return null;
@@ -163,12 +192,60 @@ pub fn (self: &CoreSignature) arg_at(index: i64) -> ?ArgKind {
         }
         return null;
     }
+    if self.args == CoreArgs::IoBytesI64I64 {
+        if index == 0 {
+            return ArgKind::Io;
+        }
+        if index == 1 {
+            return ArgKind::Bytes;
+        }
+        if index == 2 or index == 3 {
+            return ArgKind::I64;
+        }
+        return null;
+    }
+    if self.args == CoreArgs::IoI64 {
+        if index == 0 {
+            return ArgKind::Io;
+        }
+        if index == 1 {
+            return ArgKind::I64;
+        }
+        return null;
+    }
+    if self.args == CoreArgs::I64I64 {
+        if index == 0 or index == 1 {
+            return ArgKind::I64;
+        }
+        return null;
+    }
+    if self.args == CoreArgs::IoI64I64I64I64 {
+        if index == 0 {
+            return ArgKind::Io;
+        }
+        if index >= 1 and index <= 4 {
+            return ArgKind::I64;
+        }
+        return null;
+    }
     if self.args == CoreArgs::IoI64I64 {
         if index == 0 {
             return ArgKind::Io;
         }
         if index == 1 or index == 2 {
             return ArgKind::I64;
+        }
+        return null;
+    }
+    if self.args == CoreArgs::IoI64Bytes {
+        if index == 0 {
+            return ArgKind::Io;
+        }
+        if index == 1 {
+            return ArgKind::I64;
+        }
+        if index == 2 {
+            return ArgKind::Bytes;
         }
         return null;
     }
@@ -279,7 +356,7 @@ pub fn simple_core_signature(name: []u8) -> ?CoreSignature {
         return signature(CoreArgs::IoBytesI64, "std::net::Error!i64");
     }
     if mem::equal_bytes(name, "std::internal::builtin::net_connect") {
-        return signature(CoreArgs::IoBytesI64, "std::net::Error!i64");
+        return signature(CoreArgs::IoBytesI64I64, "std::net::Error!i64");
     }
     if mem::equal_bytes(name, "std::internal::builtin::net_accept") {
         return signature(CoreArgs::IoI64I64, "std::net::Error!i64");
@@ -290,8 +367,68 @@ pub fn simple_core_signature(name: []u8) -> ?CoreSignature {
     if mem::equal_bytes(name, "std::internal::builtin::net_write_all") {
         return signature(CoreArgs::IoI64BytesI64, "std::net::Error!void");
     }
+    if mem::equal_bytes(name, "std::internal::builtin::net_write_some") {
+        return signature(CoreArgs::IoI64Bytes, "std::net::Error!i64");
+    }
     if mem::equal_bytes(name, "std::internal::builtin::net_local_port") {
         return signature(CoreArgs::I64, "std::net::Error!i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::net_poller_new") {
+        return signature(CoreArgs::IoI64, "std::net::Error!i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::net_poller_add") {
+        return signature(CoreArgs::IoI64I64I64I64, "std::net::Error!void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::net_poller_remove") {
+        return signature(CoreArgs::IoI64I64, "std::net::Error!void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::net_poller_wait") {
+        return signature(CoreArgs::IoI64I64, "std::net::Error!i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::net_poller_token") {
+        return signature(CoreArgs::I64I64, "i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::net_poller_flags") {
+        return signature(CoreArgs::I64I64, "i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::net_poller_close") {
+        return signature(CoreArgs::I64, "void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::coro_new") {
+        return signature(CoreArgs::CoroEntryI64I64, "i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::coro_resume") {
+        return signature(CoreArgs::I64, "i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::coro_suspend") {
+        return signature(CoreArgs::NoArgs, "void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::coro_finished") {
+        return signature(CoreArgs::I64, "i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::coro_close") {
+        return signature(CoreArgs::I64, "void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::io_loop_new") {
+        return signature(CoreArgs::NoArgs, "i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::io_loop_close") {
+        return signature(CoreArgs::I64, "void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::io_evented") {
+        return signature(CoreArgs::I64, "Io");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::task_finished") {
+        return signature(CoreArgs::I64, "i64");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::task_await") {
+        return signature(CoreArgs::IoI64, "void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::task_cancel") {
+        return signature(CoreArgs::IoI64, "void");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::task_close") {
+        return signature(CoreArgs::I64, "void");
     }
     if mem::equal_bytes(name, "std::internal::builtin::net_close") {
         return signature(CoreArgs::I64, "void");
@@ -443,144 +580,204 @@ fn builtin_name(index: i64) -> ?[]u8 {
         return "std::internal::builtin::box_take";
     }
     if index == 31 {
-        return "std::internal::builtin::fs_create_dir";
+        return "std::internal::builtin::coro_close";
     }
     if index == 32 {
-        return "std::internal::builtin::fs_exists";
+        return "std::internal::builtin::coro_finished";
     }
     if index == 33 {
-        return "std::internal::builtin::fs_metadata";
+        return "std::internal::builtin::coro_new";
     }
     if index == 34 {
-        return "std::internal::builtin::fs_read_dir";
+        return "std::internal::builtin::coro_resume";
     }
     if index == 35 {
-        return "std::internal::builtin::fs_read_file_into";
+        return "std::internal::builtin::coro_suspend";
     }
     if index == 36 {
-        return "std::internal::builtin::fs_real_path_into";
+        return "std::internal::builtin::fs_create_dir";
     }
     if index == 37 {
-        return "std::internal::builtin::fs_remove_dir";
+        return "std::internal::builtin::fs_exists";
     }
     if index == 38 {
-        return "std::internal::builtin::fs_remove_file";
+        return "std::internal::builtin::fs_metadata";
     }
     if index == 39 {
-        return "std::internal::builtin::fs_rename";
+        return "std::internal::builtin::fs_read_dir";
     }
     if index == 40 {
-        return "std::internal::builtin::fs_write_file";
+        return "std::internal::builtin::fs_read_file_into";
     }
     if index == 41 {
-        return "std::internal::builtin::io_blocking";
+        return "std::internal::builtin::fs_real_path_into";
     }
     if index == 42 {
-        return "std::internal::builtin::io_evented";
+        return "std::internal::builtin::fs_remove_dir";
     }
     if index == 43 {
-        return "std::internal::builtin::io_failing";
+        return "std::internal::builtin::fs_remove_file";
     }
     if index == 44 {
-        return "std::internal::builtin::io_read_stdin_into";
+        return "std::internal::builtin::fs_rename";
     }
     if index == 45 {
-        return "std::internal::builtin::io_write_stderr";
+        return "std::internal::builtin::fs_write_file";
     }
     if index == 46 {
-        return "std::internal::builtin::io_write_stdout";
+        return "std::internal::builtin::io_blocking";
     }
     if index == 47 {
-        return "std::internal::builtin::map";
+        return "std::internal::builtin::io_evented";
     }
     if index == 48 {
-        return "std::internal::builtin::map_at";
+        return "std::internal::builtin::io_failing";
     }
     if index == 49 {
-        return "std::internal::builtin::map_at_mut";
+        return "std::internal::builtin::io_loop_close";
     }
     if index == 50 {
-        return "std::internal::builtin::map_contains";
+        return "std::internal::builtin::io_loop_new";
     }
     if index == 51 {
-        return "std::internal::builtin::map_deinit";
+        return "std::internal::builtin::io_read_stdin_into";
     }
     if index == 52 {
-        return "std::internal::builtin::map_get";
+        return "std::internal::builtin::io_write_stderr";
     }
     if index == 53 {
-        return "std::internal::builtin::map_insert";
+        return "std::internal::builtin::io_write_stdout";
     }
     if index == 54 {
-        return "std::internal::builtin::map_key_at";
+        return "std::internal::builtin::map";
     }
     if index == 55 {
-        return "std::internal::builtin::map_len";
+        return "std::internal::builtin::map_at";
     }
     if index == 56 {
-        return "std::internal::builtin::map_take_value_at";
+        return "std::internal::builtin::map_at_mut";
     }
     if index == 57 {
-        return "std::internal::builtin::mem_allocator_from";
+        return "std::internal::builtin::map_contains";
     }
     if index == 58 {
-        return "std::internal::builtin::mem_fixed_buffer";
+        return "std::internal::builtin::map_deinit";
     }
     if index == 59 {
-        return "std::internal::builtin::mem_len";
+        return "std::internal::builtin::map_get";
     }
     if index == 60 {
-        return "std::internal::builtin::mem_page_allocator";
+        return "std::internal::builtin::map_insert";
     }
     if index == 61 {
-        return "std::internal::builtin::net_accept";
+        return "std::internal::builtin::map_key_at";
     }
     if index == 62 {
-        return "std::internal::builtin::net_close";
+        return "std::internal::builtin::map_len";
     }
     if index == 63 {
-        return "std::internal::builtin::net_connect";
+        return "std::internal::builtin::map_take_value_at";
     }
     if index == 64 {
-        return "std::internal::builtin::net_listen";
+        return "std::internal::builtin::mem_allocator_from";
     }
     if index == 65 {
-        return "std::internal::builtin::net_local_port";
+        return "std::internal::builtin::mem_fixed_buffer";
     }
     if index == 66 {
-        return "std::internal::builtin::net_read";
+        return "std::internal::builtin::mem_len";
     }
     if index == 67 {
-        return "std::internal::builtin::net_write_all";
+        return "std::internal::builtin::mem_page_allocator";
     }
     if index == 68 {
-        return "std::internal::builtin::panic";
+        return "std::internal::builtin::net_accept";
     }
     if index == 69 {
-        return "std::internal::builtin::process_arg";
+        return "std::internal::builtin::net_close";
     }
     if index == 70 {
-        return "std::internal::builtin::process_arg_count";
+        return "std::internal::builtin::net_connect";
     }
     if index == 71 {
-        return "std::internal::builtin::process_env";
+        return "std::internal::builtin::net_listen";
     }
     if index == 72 {
-        return "std::internal::builtin::process_executable_path_into";
+        return "std::internal::builtin::net_local_port";
     }
     if index == 73 {
-        return "std::internal::builtin::process_monotonic_millis";
+        return "std::internal::builtin::net_poller_add";
     }
     if index == 74 {
-        return "std::internal::builtin::process_spawn_wait8";
+        return "std::internal::builtin::net_poller_close";
     }
     if index == 75 {
-        return "std::internal::builtin::process_unix_millis";
+        return "std::internal::builtin::net_poller_flags";
     }
     if index == 76 {
-        return "std::internal::builtin::test_fail";
+        return "std::internal::builtin::net_poller_new";
     }
     if index == 77 {
+        return "std::internal::builtin::net_poller_remove";
+    }
+    if index == 78 {
+        return "std::internal::builtin::net_poller_token";
+    }
+    if index == 79 {
+        return "std::internal::builtin::net_poller_wait";
+    }
+    if index == 80 {
+        return "std::internal::builtin::net_read";
+    }
+    if index == 81 {
+        return "std::internal::builtin::net_write_all";
+    }
+    if index == 82 {
+        return "std::internal::builtin::net_write_some";
+    }
+    if index == 83 {
+        return "std::internal::builtin::panic";
+    }
+    if index == 84 {
+        return "std::internal::builtin::process_arg";
+    }
+    if index == 85 {
+        return "std::internal::builtin::process_arg_count";
+    }
+    if index == 86 {
+        return "std::internal::builtin::process_env";
+    }
+    if index == 87 {
+        return "std::internal::builtin::process_executable_path_into";
+    }
+    if index == 88 {
+        return "std::internal::builtin::process_monotonic_millis";
+    }
+    if index == 89 {
+        return "std::internal::builtin::process_spawn_wait8";
+    }
+    if index == 90 {
+        return "std::internal::builtin::process_unix_millis";
+    }
+    if index == 91 {
+        return "std::internal::builtin::task_await";
+    }
+    if index == 92 {
+        return "std::internal::builtin::task_cancel";
+    }
+    if index == 93 {
+        return "std::internal::builtin::task_close";
+    }
+    if index == 94 {
+        return "std::internal::builtin::task_finished";
+    }
+    if index == 95 {
+        return "std::internal::builtin::task_new";
+    }
+    if index == 96 {
+        return "std::internal::builtin::test_fail";
+    }
+    if index == 97 {
         return "std::internal::builtin::test_fail_equal";
     }
     return null;

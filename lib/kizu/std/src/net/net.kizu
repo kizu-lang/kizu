@@ -24,6 +24,10 @@ pub error Error {
     IoFailing,
     OperationFailed,
     Closed,
+    // A call that was waiting when its task was cancelled. It is a failure
+    // rather than an absence: `?T` already means "nothing right now", and a
+    // cancelled wait is not going to have anything later (ADR-0146).
+    Canceled,
 }
 
 // An address is `host:port`, the way every other tool writes one. An IPv6
@@ -65,6 +69,128 @@ pub fn deadline_in_millis(millis: i64) -> i64 {
     return now + millis;
 }
 
+// A Poller waits on many descriptors at once, which is the one thing a
+// blocking server cannot do. It answers with which of them are ready, and
+// nothing else: what a ready descriptor means, and what to do about it, is the
+// caller's -- the same pull loop `accept` is, one level out.
+//
+// There is no `evented` Io that makes an ordinary read wait on many sockets
+// behind the caller's back. That would be a suspension in the middle of
+// `read_into`, which needs coroutines, which needs function coloring -- and
+// SPEC §15 does not have it. Waiting on many things is a thing you write, not
+// a mode you switch on.
+pub struct Poller {
+    handle: i64,
+}
+
+// Interest is what a descriptor is being watched for.
+pub union Interest {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+// Ready is one thing the host said became ready. `token` is what the caller
+// registered with, which is how it finds its own state again -- this module
+// never looks at it.
+//
+// A descriptor that is both readable and writable may arrive as one Ready or
+// as two, because kqueue and epoll disagree about that and neither is wrong.
+// A caller that acts on the flags it was given is right either way.
+pub struct Ready {
+    pub token: i64,
+    pub readable: bool,
+    pub writable: bool,
+    pub closed: bool,
+}
+
+// poller_new opens a poller that can report up to `capacity` ready
+// descriptors per wait. More than that are not lost -- they are reported by
+// the next wait, which returns immediately because they are still ready.
+pub fn poller_new(io: Io, capacity: i64) -> std::net::Error!std::net::Poller {
+    let handle = try std::internal::builtin::net_poller_new(io, capacity);
+    return Poller { handle: handle };
+}
+
+fn (self: &var std::net::Poller) watch_stream(
+    io: Io,
+    stream: &std::net::TcpStream,
+    token: i64,
+    interest: std::net::Interest
+) -> std::net::Error!void {
+    try std::internal::builtin::net_poller_add(
+        io, self.handle, stream.fd, token, interest_bits(interest));
+    return;
+}
+
+// watch_listener is how an evented server hears about a new connection at the
+// same time as it hears about the ones it already has.
+fn (self: &var std::net::Poller) watch_listener(
+    io: Io,
+    listener: &std::net::TcpListener,
+    token: i64
+) -> std::net::Error!void {
+    try std::internal::builtin::net_poller_add(
+        io, self.handle, listener.fd, token, interest_bits(Interest::Read));
+    return;
+}
+
+// forget stops watching a descriptor the process still holds. Closing one
+// removes it on its own, so this is for a connection that is staying open and
+// has nothing to be woken about.
+fn (self: &var std::net::Poller) forget(
+    io: Io,
+    stream: &std::net::TcpStream
+) -> std::net::Error!void {
+    try std::internal::builtin::net_poller_remove(io, self.handle, stream.fd);
+    return;
+}
+
+// wait blocks until something is ready or the deadline passes, and answers how
+// many. `at` is a moment, the same kind `set_read_deadline` takes; a poller
+// with no deadline waits until something happens.
+fn (self: &var std::net::Poller) wait(io: Io, at: i64) -> std::net::Error!i64 {
+    let budget = remaining_millis(at);
+    let count = try std::internal::builtin::net_poller_wait(io, self.handle, budget);
+    return count;
+}
+
+// ready reads one of the last wait's answers. Out of range is null, so a loop
+// over them ends without the caller holding the count.
+fn (self: &std::net::Poller) ready(index: i64) -> ?std::net::Ready {
+    if index < 0 {
+        return null;
+    }
+    let flags = std::internal::builtin::net_poller_flags(self.handle, index);
+    if flags == 0 {
+        return null;
+    }
+    let token = std::internal::builtin::net_poller_token(self.handle, index);
+    return Ready {
+        token: token,
+        readable: has_bit(flags, 1),
+        writable: has_bit(flags, 2),
+        closed: has_bit(flags, 4),
+    };
+}
+
+fn (self: std::net::Poller) deinit() -> void {
+    std::internal::builtin::net_poller_close(self.handle);
+    return;
+}
+
+fn interest_bits(interest: std::net::Interest) -> i64 {
+    return match interest {
+        Read => 1,
+        Write => 2,
+        ReadWrite => 3,
+    };
+}
+
+fn has_bit(flags: i64, bit: i64) -> bool {
+    return (flags / bit) % 2 == 1;
+}
+
 // parse_address splits `host:port`. It reads text and nothing else: a name
 // that has to be looked up is looked up by `tcp_listen` / `tcp_connect`, where
 // the failure has an Io to be attributed to.
@@ -97,10 +223,27 @@ pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListene
     return TcpListener { fd: fd, accept_deadline_ms: 0 };
 }
 
-// tcp_connect opens a stream to a listening peer.
+// tcp_connect opens a stream to a listening peer. It waits as long as the host
+// will, which for an address that answers nothing is on the order of a minute:
+// `tcp_connect_before` is the one that says otherwise.
 pub fn tcp_connect(io: Io, address: []u8) -> std::net::Error!std::net::TcpStream {
+    let stream = try tcp_connect_before(io, address, 0);
+    return move stream;
+}
+
+// tcp_connect_before gives the connect a deadline -- the same kind of moment
+// `set_read_deadline` takes, and 0 for none. An address that is not answering
+// is the case it exists for: nothing else in this module can bound that wait,
+// because there is no stream yet to set a deadline on.
+pub fn tcp_connect_before(
+    io: Io,
+    address: []u8,
+    at: i64
+) -> std::net::Error!std::net::TcpStream {
     let parsed = try parse_address(address);
-    let fd = try std::internal::builtin::net_connect(io, parsed.host, parsed.port);
+    let budget = remaining_millis(at);
+    let fd = try std::internal::builtin::net_connect(
+        io, parsed.host, parsed.port, budget);
     return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
 }
 
@@ -111,6 +254,20 @@ fn (self: &var TcpListener) accept(io: Io) -> std::net::Error!std::net::TcpStrea
     let budget = remaining_millis(self.accept_deadline_ms);
     let fd = try std::internal::builtin::net_accept(io, self.fd, budget);
     return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
+}
+
+// accept_ready takes a connection if one is waiting and answers null if none
+// is. It never waits, which is what a poller loop needs: the loop already
+// asked, and being told "not right now" is an answer it can act on.
+fn (self: &var TcpListener) accept_ready(io: Io) -> std::net::Error!?std::net::TcpStream {
+    if std::internal::builtin::net_accept(io, self.fd, 0) |fd| {
+        return TcpStream { fd: fd, read_deadline_ms: 0, write_deadline_ms: 0 };
+    } else |failure| {
+        if failure == std::net::Error::TimedOut {
+            return null;
+        }
+        return failure;
+    }
 }
 
 // local_port is the port this listener is actually on.
@@ -187,6 +344,44 @@ fn (self: &var TcpStream) clear_read_deadline() -> void {
 fn (self: &var TcpStream) clear_write_deadline() -> void {
     self.write_deadline_ms = 0;
     return;
+}
+
+// read_ready takes what has already arrived and answers null if nothing has.
+// It never waits, which is the read counterpart of `write_some`: a poller loop
+// asked already, and "nothing right now" is an answer it can act on.
+//
+// Zero still means the peer closed. Null and zero are different answers to
+// different questions -- one is "not yet", the other is "not ever".
+fn (self: &var TcpStream) read_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!?i64 {
+    if std::internal::builtin::net_read(io, allocator, self.fd, out, max, 0) |count| {
+        return count;
+    } else |failure| {
+        if failure == std::net::Error::TimedOut {
+            return null;
+        }
+        return failure;
+    }
+}
+
+// write_some sends what fits right now and answers with how many bytes that
+// was. **Zero is not an error and not the end**: it is "not right now", and the
+// caller comes back when a poller says this stream is writable again.
+//
+// This is the half of writing that `write_all` cannot do. `write_all` finishes
+// or fails, so a peer that stopped reading holds the caller until its deadline;
+// a loop over `write_some` keeps what is left and goes back to the wait, which
+// is what lets one thread serve everyone else meanwhile.
+//
+// It never waits, so a write deadline does not apply. The waiting belongs to
+// the poller, and the deadline that bounds it is the one on `Poller.wait`.
+fn (self: &var TcpStream) write_some(io: Io, bytes: []u8) -> std::net::Error!i64 {
+    let count = try std::internal::builtin::net_write_some(io, self.fd, bytes);
+    return count;
 }
 
 // deinit consumes the stream and releases its descriptor.

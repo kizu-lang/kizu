@@ -65,6 +65,10 @@ type Checker struct {
 	// these, which is what separates forwarding a static value from reading a
 	// value that only exists at run time.
 	staticParams map[string]Type
+	// functionArgs binds the `Function` static arguments of the instantiation
+	// being checked, so a call written against the parameter is checked against
+	// the function it was given.
+	functionArgs map[string]string
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// open, by capture name. A capture is not a value, so it lives here rather
 	// than in a scope: the only thing that may read it is a `std::meta` form.
@@ -84,6 +88,9 @@ type Checker struct {
 	// deinitOwners marks the base type names whose values carry a deinit
 	// contract, seeded from ast.DeinitOwners — the one definition of owner-ness.
 	deinitOwners map[string]bool
+	// releaseAllocators marks the base type names whose deinit takes an
+	// allocator, which generic cleanup asks before calling one (ADR-0132).
+	releaseAllocators map[string]bool
 	// captureCondition is set while an if/while capture condition is typed.
 	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
 	// `?&var T` only in this context and refuse everywhere else.
@@ -98,12 +105,14 @@ func New() *Checker {
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
+		functionArgs:     map[string]string{},
 	}
 }
 
 // Check validates the program and returns the first type error.
 func (c *Checker) Check(program *ast.Program) error {
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
@@ -138,6 +147,7 @@ func (c *Checker) Check(program *ast.Program) error {
 // depend on still fail fast, since later errors would be noise without them.
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
@@ -1000,8 +1010,16 @@ func defineStaticValueParams(
 }
 
 // checkFunction validates one function body against its signature.
+//
+// A body that calls a `Function` static parameter has no types until the
+// parameter is bound: the parameter names a function, and a function's
+// signature is not something the declaration says. Such a body is checked once
+// per instantiation instead, which is the only place the call has a callee.
 func (c *Checker) checkFunction(fn *functionType) error {
 	if fn.sig.ExternABI != "" {
+		return nil
+	}
+	if hasFunctionStaticParam(fn.sig) {
 		return nil
 	}
 	if err := checkMainReturnType(fn); err != nil {
@@ -1051,8 +1069,15 @@ func (c *Checker) checkFunction(fn *functionType) error {
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
+	// The name carries the module so the body reads its own module's names --
+	// a function pointer's value is looked up through the prefix of whatever
+	// is being checked, and a synthetic name without one finds nothing.
+	name := "test " + strconv.Quote(decl.Name)
+	if decl.Module != "" {
+		name = decl.Module + "::" + name
+	}
 	fn := &ast.FunctionDecl{
-		FunctionSignature: ast.FunctionSignature{Name: "test " + strconv.Quote(decl.Name)},
+		FunctionSignature: ast.FunctionSignature{Name: name},
 		Body:              decl.Body,
 	}
 	return c.checkFunction(&functionType{
@@ -3731,8 +3756,6 @@ func (c *Checker) checkStdConstructorBuiltin(
 	case "std::internal::builtin::io_blocking", "std::internal::builtin::io_failing":
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
-	case "std::io::evented", "std::internal::builtin::io_evented":
-		return "", true, errorf("type error: `std::io::evented` is not implemented")
 	default:
 		return "", false, nil
 	}
@@ -4224,6 +4247,10 @@ func (c *Checker) checkBuiltinTypeApply(
 		typ, err := c.checkAllocatorFrom(typeArg, args, env, unsafe)
 		return typ, true, err
 	}
+	if name == "std::internal::builtin::task_new" {
+		typ, err := c.checkTaskNew(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
 }
 
@@ -4243,7 +4270,8 @@ func (c *Checker) checkAllocatorFrom(
 	if err := c.requireAllocatorHeaderFirst(typeArg); err != nil {
 		return "", err
 	}
-	if err := c.checkAllocatorStateArg(typeArg, args[0], env, unsafe); err != nil {
+	if err := c.checkBorrowedStateArg(
+		"std::mem::allocator_from", typeArg, args[0], env, unsafe); err != nil {
 		return "", err
 	}
 	wants := []Type{
@@ -4264,8 +4292,51 @@ func (c *Checker) checkAllocatorFrom(
 	return Type("Allocator"), nil
 }
 
-// checkAllocatorStateArg validates the `&var T` an allocator is built from.
-func (c *Checker) checkAllocatorStateArg(
+// checkTaskNew validates `task_new<T>(io, allocator, entry, state, stack)`.
+// The entry is a top-level function the runtime calls on the task's own stack,
+// so what crosses is its address and the address of the state the caller moved
+// in. Neither is a closure and neither carries a borrow of anything else,
+// which is why the worker is told its Io and its allocator rather than
+// capturing them (ADR-0146).
+func (c *Checker) checkTaskNew(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(args) != 5 {
+		return "", errorf(
+			"type error: `std::io::async` expects io, allocator, entry, state and stack size")
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, "std::io::async"); err != nil {
+		return "", err
+	}
+	if err := c.checkCoreArg(
+		"std::io::async", 1, stdprim.ArgAllocator, args[1], env, unsafe); err != nil {
+		return "", err
+	}
+	want := Type("fn(Io, Allocator, &var " + typeArg + ") -> void")
+	got, err := c.checkContextualExpr(args[2], want, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(got, want) {
+		return "", errorf("type error: `std::io::async` entry expects %s, got %s", want, got)
+	}
+	if err := c.checkBorrowedStateArg(
+		"std::io::async", typeArg, args[3], env, unsafe); err != nil {
+		return "", err
+	}
+	if err := c.checkCoreArg(
+		"std::io::async", 4, stdprim.ArgI64, args[4], env, unsafe); err != nil {
+		return "", err
+	}
+	return Type("i64"), nil
+}
+
+// checkBorrowedStateArg validates the `&var T` a primitive writes through.
+func (c *Checker) checkBorrowedStateArg(
+	label string,
 	typeArg string,
 	arg ast.Expression,
 	env *scope,
@@ -4278,8 +4349,8 @@ func (c *Checker) checkAllocatorStateArg(
 		}
 		if !sameType(got, Type(typeArg)) {
 			return errorf(
-				"type error: `std::mem::allocator_from` state expects &var %s, got &var %s",
-				typeArg, got)
+				"type error: `%s` state expects &var %s, got &var %s",
+				label, typeArg, got)
 		}
 		return nil
 	}
@@ -4290,8 +4361,8 @@ func (c *Checker) checkAllocatorStateArg(
 		return err
 	}
 	if !sameType(got, Type(typeArg)) && !sameType(got, Type("&var "+typeArg)) {
-		return errorf("type error: `std::mem::allocator_from` state expects &var %s, got %s",
-			typeArg, got)
+		return errorf("type error: `%s` state expects &var %s, got %s",
+			label, typeArg, got)
 	}
 	return nil
 }
@@ -4904,7 +4975,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, errorf("type error: `%s` expects %d static arguments",
 			name, len(fn.sig.StaticParams))
 	}
-	typeArgsText, fieldArgs, err := c.checkStaticArgs(name, fn, argsText)
+	typeArgsText, fieldArgs, funcArgs, err := c.checkStaticArgs(name, fn, argsText)
 	if err != nil {
 		return "", true, err
 	}
@@ -4927,7 +4998,7 @@ func (c *Checker) checkGenericUserTypeApply(
 			return "", true, err
 		}
 	}
-	if err := c.checkGenericInstantiation(fn, subst, fieldArgs); err != nil {
+	if err := c.checkGenericInstantiation(fn, subst, fieldArgs, funcArgs); err != nil {
 		return "", true, err
 	}
 	// The result the caller sees is the declaration's type with this call's
@@ -4948,9 +5019,10 @@ func (c *Checker) checkStaticArgs(
 	name string,
 	fn *functionType,
 	argsText []string,
-) ([]string, map[string]metaField, error) {
+) ([]string, map[string]metaField, map[string]string, error) {
 	typeArgs := []string{}
 	fieldArgs := map[string]metaField{}
+	funcArgs := map[string]string{}
 	for idx, param := range fn.sig.StaticParams {
 		arg := strings.TrimSpace(argsText[idx])
 		if param.IsType() {
@@ -4960,7 +5032,7 @@ func (c *Checker) checkStaticArgs(
 		if Type(typ.Text(param.Type)) == typeField {
 			field, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if field.name != "" {
 				fieldArgs[param.Name] = field
@@ -4968,10 +5040,49 @@ func (c *Checker) checkStaticArgs(
 			continue
 		}
 		if err := c.checkStaticValueArg(name, param, arg, idx, argsText, fn); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		if Type(typ.Text(param.Type)) == typeFunction {
+			// A `Function` argument may itself be the parameter of the generic
+			// doing the call, in which case the name to record is what that one
+			// was given.
+			funcArgs[param.Name] = c.resolveFunctionArg(arg)
 		}
 	}
-	return typeArgs, fieldArgs, nil
+	return typeArgs, fieldArgs, funcArgs, nil
+}
+
+// resolveFunctionArg reads a `Function` static argument through the bindings in
+// force, so a generic that forwards its own parameter names the function the
+// outer call named rather than its own parameter.
+func (c *Checker) resolveFunctionArg(arg string) string {
+	if bound, ok := c.functionArgs[arg]; ok {
+		return bound
+	}
+	return arg
+}
+
+// bindFunctionArgs makes the `Function` arguments of one instantiation readable
+// by the calls written against them, and returns the call that unbinds them.
+func (c *Checker) bindFunctionArgs(funcArgs map[string]string) func() {
+	if len(funcArgs) == 0 {
+		return func() {}
+	}
+	previous := make(map[string]string, len(funcArgs))
+	had := make(map[string]bool, len(funcArgs))
+	for name, bound := range funcArgs {
+		previous[name], had[name] = c.functionArgs[name]
+		c.functionArgs[name] = bound
+	}
+	return func() {
+		for name := range funcArgs {
+			if had[name] {
+				c.functionArgs[name] = previous[name]
+				continue
+			}
+			delete(c.functionArgs, name)
+		}
+	}
 }
 
 // checkStaticValueArg validates one compile-time value argument. The value is a
@@ -5087,6 +5198,20 @@ func isIdentifierText(text string) bool {
 	return true
 }
 
+// hasFunctionStaticParam reports whether a signature names a function among its
+// compile-time parameters.
+func hasFunctionStaticParam(sig ast.FunctionSignature) bool {
+	for _, param := range sig.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		if Type(typ.Text(param.Type)) == typeFunction {
+			return true
+		}
+	}
+	return false
+}
+
 // checkGenericInstantiation checks a generic function body for one static type
 // set. A `Field` static argument instantiates like a type argument rather than
 // like the other compile-time values: the body reads it through
@@ -5096,13 +5221,15 @@ func (c *Checker) checkGenericInstantiation(
 	fn *functionType,
 	subst map[string]Type,
 	fieldArgs map[string]metaField,
+	funcArgs map[string]string,
 ) error {
-	done, err := c.enterInstantiation(fn, subst, fieldArgs)
+	done, err := c.enterInstantiation(fn, subst, fieldArgs, funcArgs)
 	if err != nil || done {
 		return err
 	}
 	defer func() { c.instantiationDepth-- }()
 	defer c.bindMetaFields(fieldArgs)()
+	defer c.bindFunctionArgs(funcArgs)()
 	env := newScope(nil)
 	staticParams, err := defineStaticValueParams(&c.types, env, fn.sig)
 	if err != nil {
@@ -5206,8 +5333,9 @@ func (c *Checker) enterInstantiation(
 	fn *functionType,
 	subst map[string]Type,
 	fieldArgs map[string]metaField,
+	funcArgs map[string]string,
 ) (bool, error) {
-	key := instanceKey(fn, subst, fieldArgs)
+	key := instanceKey(fn, subst, fieldArgs, funcArgs)
 	if c.checkedInstances[key] {
 		return true, nil
 	}
@@ -5235,7 +5363,12 @@ func elideTypeText(text string) string {
 
 // instanceKey names one instantiation: the body, and what its static
 // parameters were bound to, in declaration order.
-func instanceKey(fn *functionType, subst map[string]Type, fieldArgs map[string]metaField) string {
+func instanceKey(
+	fn *functionType,
+	subst map[string]Type,
+	fieldArgs map[string]metaField,
+	funcArgs map[string]string,
+) string {
 	args := make([]Type, 0, len(subst))
 	for _, param := range fn.sig.TypeParamNames() {
 		args = append(args, subst[param])
@@ -5244,6 +5377,9 @@ func instanceKey(fn *functionType, subst map[string]Type, fieldArgs map[string]m
 	for _, param := range fn.sig.StaticParams {
 		if field, ok := fieldArgs[param.Name]; ok {
 			key += "." + string(field.owner) + "." + field.name
+		}
+		if bound, ok := funcArgs[param.Name]; ok {
+			key += "." + bound
 		}
 	}
 	return key
@@ -5340,6 +5476,11 @@ func (c *Checker) checkUserCall(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	if bound, ok := c.functionArgs[name]; ok {
+		// A call written against a `Function` static parameter is a call to
+		// what this instantiation bound it to.
+		name = bound
+	}
 	fn, ok := c.functions[name]
 	if !ok {
 		return "", errorf("type error: undefined function `%s`", name)
@@ -6535,7 +6676,7 @@ func (c *Checker) checkStdMethodBody(fn *functionType, typeArgs []Type) error {
 	for idx, param := range typeParams {
 		subst[param] = typeArgs[idx]
 	}
-	return c.checkGenericInstantiation(fn, subst, nil)
+	return c.checkGenericInstantiation(fn, subst, nil, nil)
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.
@@ -7251,6 +7392,11 @@ func (c *Checker) checkVolatileWrite(
 // ownerType reports whether values of typ carry a deinit contract (ADR-0091).
 func (c *Checker) ownerType(typ Type) bool {
 	return ast.OwnerType(c.deinitOwners, string(typ))
+}
+
+// releaseNamesAllocator reports whether releasing typ takes an allocator.
+func (c *Checker) releaseNamesAllocator(typ Type) bool {
+	return ast.ReleaseNames(c.releaseAllocators, string(typ))
 }
 
 // isCopyType reports whether values of typ can be duplicated safe code.

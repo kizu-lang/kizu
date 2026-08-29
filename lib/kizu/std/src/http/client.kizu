@@ -1,15 +1,20 @@
-// The client is one call: build the request, open the connection, read the
-// answer whole. It closes the connection when it is done, which is what
-// `Connection: close` on the way out already promised.
+// The client is two shapes over one connection. `get` / `post` / `fetch` are
+// one call: build the request, open the connection, read the answer whole.
+// `Connection` is the same thing taken apart, for an answer too big to hold or
+// a stream that is not a plain socket.
 //
 // There is no connection pool and no redirect following. Both are policy --
 // how long to keep a socket, whether a 301 to another host is the same
 // request -- and policy a library picks is policy the caller cannot see. What
 // this returns is what the server said.
 
-// A ClientResponse is what came back, owned. It is a different type from
-// std::http::Response, because they are different things: one is what a
+// A ClientResponse is the head that came back, owned. It is a different type
+// from std::http::Response, because they are different things: one is what a
 // server is still building, the other is what a client already has.
+//
+// `body` is what `fetch` and its two spellings read, up to the ceiling their
+// caller named. `Connection.receive` leaves it empty and the body on the
+// connection -- the same split `accept` and `accept_head` make on the server.
 pub struct ClientResponse {
     pub status: i64,
     pub version: std::http::Version,
@@ -25,13 +30,249 @@ fn (self: std::http::ClientResponse) deinit(allocator: Allocator) -> void {
     return;
 }
 
-// get asks for a URL and returns what came back.
+// A Connection is a stream and the bytes read off it that nobody has taken
+// yet. It is what `fetch` uses underneath, and what a caller uses directly to
+// stream an answer rather than hold it.
+//
+// The stream is not handed back. Reading a head reads whole packets, so the
+// first bytes of the body are already in here -- a caller reading the socket
+// would skip them. Go's `http.ReadResponse` takes a `*bufio.Reader` for the
+// same reason.
+pub struct Connection {
+    reader: std::http::Reader,
+}
+
+// connect opens one. `take` wraps a stream the caller already has, which is
+// what lets TLS or a proxy go underneath without this module knowing.
+pub fn connect(
+    io: Io,
+    allocator: Allocator,
+    address: []u8,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Connection {
+    var stream = try std::net::tcp_connect(io, address);
+    errdefer stream.deinit();
+    return Connection {
+        reader: std::http::reader_new(allocator, move stream, limits),
+    };
+}
+
+pub fn take(
+    allocator: Allocator,
+    stream: std::net::TcpStream,
+    limits: std::http::Limits
+) -> std::http::Connection {
+    return Connection {
+        reader: std::http::reader_new(allocator, move stream, limits),
+    };
+}
+
+fn (self: std::http::Connection) deinit(allocator: Allocator) -> void {
+    self.reader.deinit(allocator);
+    return;
+}
+
+// send writes one request. The write deadline comes from the limits this
+// connection was opened with, and is set when the write starts.
+fn (self: &var std::http::Connection) send(
+    io: Io,
+    allocator: Allocator,
+    method: []u8,
+    url: &std::http::Url,
+    content_type: []u8,
+    body: []u8,
+    write_millis: i64
+) -> std::http::Failure!void {
+    if !std::http::valid_field_name(method) {
+        return std::http::Error::MalformedRequest;
+    }
+    var request = std::string::new(allocator);
+    defer request.deinit(allocator);
+    try build_request(allocator, url, &var request, method, content_type, body);
+    let wire = request.as_bytes();
+    self.reader.arm_write(write_millis);
+    try self.reader.write_all(io, wire);
+    return;
+}
+
+// receive reads the answer's head and stops there, leaving the body on the
+// connection for `read_into`.
+//
+// `method` is what was asked, because a HEAD answer carries the length its
+// body would have had and none of it -- the framing of an answer depends on
+// the question.
+fn (self: &var std::http::Connection) receive(
+    io: Io,
+    allocator: Allocator,
+    method: []u8,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::ClientResponse {
+    self.reader.arm_read(limits.read_head_millis);
+    let head_length = try self.take_head(io, allocator, limits);
+    var response = try self.parse_head(allocator, head_length, limits);
+    errdefer response.deinit(allocator);
+    self.reader.took(head_length);
+    try self.bind_body(&response, method);
+    self.reader.arm_read(limits.read_body_millis);
+    return move response;
+}
+
+// take_head fills the connection until the head is complete.
+fn (self: &var std::http::Connection) take_head(
+    io: Io,
+    allocator: Allocator,
+    limits: std::http::Limits
+) -> std::http::Failure!i64 {
+    while true {
+        let found = self.reader.find_head();
+        if found |end| {
+            if end > limits.max_head_bytes {
+                return std::http::Error::HeadTooLarge;
+            }
+            return end;
+        }
+        if self.reader.held_len() >= limits.max_head_bytes {
+            return std::http::Error::HeadTooLarge;
+        }
+        let got = try self.reader.fill_waiting(io, allocator);
+        if got == 0 {
+            return std::http::Error::Incomplete;
+        }
+    }
+    return std::http::Error::Incomplete;
+}
+
+fn (self: &var std::http::Connection) parse_head(
+    allocator: Allocator,
+    head_length: i64,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::ClientResponse {
+    var head = std::string::new(allocator);
+    defer head.deinit(allocator);
+    try self.reader.copy_head(allocator, head_length, &var head);
+    let bytes = head.as_bytes();
+    return parse_response_head(allocator, bytes, limits);
+}
+
+// bind_body settles where the answer ends. A Content-Length says how much;
+// chunked says its terminator does; without either, the close is the frame,
+// so reading to the end of the stream is the answer rather than a guess.
+fn (self: &var std::http::Connection) bind_body(
+    response: &std::http::ClientResponse,
+    method: []u8
+) -> std::http::Failure!void {
+    // A HEAD answer carries the length the body would have had and none of it,
+    // and 1xx / 204 / 304 carry no body at all.
+    if std::mem::equal_bytes(method, "HEAD") {
+        self.reader.bind_length(0);
+        return;
+    }
+    if !std::http::status_carries_body(response.status) {
+        self.reader.bind_length(0);
+        return;
+    }
+    // A message that says two things about its own length is what turns one
+    // answer into two, so this is where the refusal comes from rather than a
+    // guess about which framing wins.
+    if try std::http::chunked_framing(&response.headers) {
+        self.reader.bind_chunked(std::mem::Limit::Unlimited);
+        return;
+    }
+    let declared = try content_length(response);
+    if declared |length| {
+        self.reader.bind_length(length);
+        return;
+    }
+    self.reader.bind_until_close();
+    return;
+}
+
+// read_into and read_ready_into hand out the answer's body. Zero is the end
+// whichever framing carried it, so the loop above them does not have to know
+// which one it was.
+fn (self: &var std::http::Connection) read_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!i64 {
+    let count = try self.reader.read_into(io, allocator, out, max);
+    return count;
+}
+
+fn (self: &var std::http::Connection) read_ready_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!?i64 {
+    let count = try self.reader.read_ready_into(io, allocator, out, max);
+    return count;
+}
+
+fn (self: &var std::http::Connection) set_read_deadline(at: i64) -> void {
+    self.reader.set_read_deadline(at);
+    return;
+}
+
+fn (self: &var std::http::Connection) set_write_deadline(at: i64) -> void {
+    self.reader.set_write_deadline(at);
+    return;
+}
+
+fn (self: &var std::http::Connection) clear_read_deadline() -> void {
+    self.reader.clear_read_deadline();
+    return;
+}
+
+fn (self: &var std::http::Connection) clear_write_deadline() -> void {
+    self.reader.clear_write_deadline();
+    return;
+}
+
+// read_body reads the whole answer into `response.body`, under a ceiling the
+// caller named. It is what `fetch` does after `receive`, and is a method
+// rather than a loop written out because holding a whole answer is the common
+// case even though streaming it is the general one.
+fn (self: &var std::http::Connection) read_body(
+    io: Io,
+    allocator: Allocator,
+    response: &var std::http::ClientResponse,
+    max: i64
+) -> std::http::Failure!void {
+    // A declared length past the ceiling is refused before a byte is read. A
+    // chunked answer has no number to check, so it is refused as it grows.
+    if self.reader.owes() > max {
+        return std::http::Error::BodyTooLarge;
+    }
+    var body = std::string::new(allocator);
+    defer body.deinit(allocator);
+    var got = try self.reader.read_into(io, allocator, &var body, 4096);
+    while got > 0 {
+        if body.len() > max {
+            return std::http::Error::BodyTooLarge;
+        }
+        got = try self.reader.read_into(io, allocator, &var body, 4096);
+    }
+    if body.len() > max {
+        return std::http::Error::BodyTooLarge;
+    }
+    let bytes = body.as_bytes();
+    try response.body.append_bytes(allocator, bytes);
+    return;
+}
+
+// get asks for a URL and returns what came back, holding the body up to
+// `max` bytes. The ceiling is an argument because the size of an answer is
+// what the caller asking for it knows, not something this module can name once
+// for every URL there is.
 pub fn get(
     io: Io,
     allocator: Allocator,
-    url: []u8
+    url: []u8,
+    max: i64
 ) -> std::http::Failure!std::http::ClientResponse {
-    return fetch(io, allocator, "GET", url, "", "");
+    return fetch(io, allocator, "GET", url, "", "", max);
 }
 
 // post sends a body under a content type. An empty content type omits the
@@ -41,9 +282,10 @@ pub fn post(
     allocator: Allocator,
     url: []u8,
     content_type: []u8,
-    body: []u8
+    body: []u8,
+    max: i64
 ) -> std::http::Failure!std::http::ClientResponse {
-    return fetch(io, allocator, "POST", url, content_type, body);
+    return fetch(io, allocator, "POST", url, content_type, body, max);
 }
 
 // fetch is get and post without the method baked in, under default limits.
@@ -53,15 +295,17 @@ pub fn fetch(
     method: []u8,
     url: []u8,
     content_type: []u8,
-    body: []u8
+    body: []u8,
+    max: i64
 ) -> std::http::Failure!std::http::ClientResponse {
     return fetch_with(
-        io, allocator, method, url, content_type, body, std::http::default_limits());
+        io, allocator, method, url, content_type, body,
+        std::http::default_limits(), max);
 }
 
-// fetch_with is the whole client. The limits bound what one answer may make
-// this process allocate; a server that is not trusted is exactly the case
-// they exist for.
+// fetch_with is the whole client in one call. The limits bound the head and
+// the time each phase may take; `max` bounds the body this holds. A server
+// that is not trusted is exactly the case they exist for.
 pub fn fetch_with(
     io: Io,
     allocator: Allocator,
@@ -69,8 +313,11 @@ pub fn fetch_with(
     url: []u8,
     content_type: []u8,
     body: []u8,
-    limits: std::http::Limits
+    limits: std::http::Limits,
+    max: i64
 ) -> std::http::Failure!std::http::ClientResponse {
+    // Checked before the connect, so a request this will not send does not
+    // open a socket first.
     if !std::http::valid_field_name(method) {
         return std::http::Error::MalformedRequest;
     }
@@ -79,72 +326,14 @@ pub fn fetch_with(
     var address = std::string::new(allocator);
     defer address.deinit(allocator);
     try parsed.authority(allocator, &var address);
-    var request = std::string::new(allocator);
-    defer request.deinit(allocator);
-    try build_request(allocator, &parsed, &var request, method, content_type, body);
-    return exchange(io, allocator, &address, &request, method, limits);
-}
-
-// exchange opens the connection, writes the request, and reads the answer.
-// The stream lives only here: the answer is owned, so nothing the caller holds
-// points at a socket this closed.
-fn exchange(
-    io: Io,
-    allocator: Allocator,
-    address: &std::string::String,
-    request: &std::string::String,
-    method: []u8,
-    limits: std::http::Limits
-) -> std::http::Failure!std::http::ClientResponse {
     let address_bytes = address.as_bytes();
-    var stream = try std::net::tcp_connect(io, address_bytes);
-    defer stream.deinit();
-    let wire = request.as_bytes();
-    std::http::arm_write(&var stream, limits.write_millis);
-    try stream.write_all(io, wire);
-    return read_response(io, allocator, &var stream, method, limits);
-}
-
-// write_request writes one request onto a stream the caller already has, and
-// read_response_from reads one answer off one. `fetch` is those two around a
-// connect; splitting them out is what lets something else own the stream --
-// a test that is both ends, and the TLS or proxy layer that is not here yet.
-//
-// `write_request` leaves the stream's write deadline alone: the caller owns
-// the stream, so the deadline on it is the caller's answer already.
-// `read_response_from` arms from the limits it is handed, because those limits
-// are what the caller passed in to bound this read.
-pub fn write_request(
-    io: Io,
-    allocator: Allocator,
-    stream: &var std::net::TcpStream,
-    method: []u8,
-    url: &std::http::Url,
-    content_type: []u8,
-    body: []u8
-) -> std::http::Failure!void {
-    if !std::http::valid_field_name(method) {
-        return std::http::Error::MalformedRequest;
-    }
-    var request = std::string::new(allocator);
-    defer request.deinit(allocator);
-    try build_request(allocator, url, &var request, method, content_type, body);
-    let wire = request.as_bytes();
-    try stream.write_all(io, wire);
-    return;
-}
-
-// read_response_from reads one answer off a stream. `method` is what was
-// asked, because a HEAD answer carries the length its body would have had and
-// none of it -- the framing of an answer depends on the question.
-pub fn read_response_from(
-    io: Io,
-    allocator: Allocator,
-    stream: &var std::net::TcpStream,
-    method: []u8,
-    limits: std::http::Limits
-) -> std::http::Failure!std::http::ClientResponse {
-    return read_response(io, allocator, stream, method, limits);
+    var open = try connect(io, allocator, address_bytes, limits);
+    defer open.deinit(allocator);
+    try open.send(io, allocator, method, &parsed, content_type, body, limits.write_millis);
+    var response = try open.receive(io, allocator, method, limits);
+    errdefer response.deinit(allocator);
+    try open.read_body(io, allocator, &var response, max);
+    return move response;
 }
 
 // build_request writes the request line and the head. Host is required by
@@ -188,34 +377,6 @@ fn build_request(
     try std::http::append_crlf(allocator, out);
     try out.append_bytes(allocator, body);
     return;
-}
-
-fn read_response(
-    io: Io,
-    allocator: Allocator,
-    stream: &var std::net::TcpStream,
-    method: []u8,
-    limits: std::http::Limits
-) -> std::http::Failure!std::http::ClientResponse {
-    var buffer = std::string::new(allocator);
-    defer buffer.deinit(allocator);
-    std::http::arm_read(stream, limits.read_head_millis);
-    let head_length = try std::http::read_head(io, allocator, stream, &var buffer, limits);
-    var response = try parse_response_at(allocator, &buffer, head_length, limits);
-    errdefer response.deinit(allocator);
-    try read_response_body(io, allocator, stream, &var buffer, &var response,
-        head_length, method, limits);
-    return move response;
-}
-
-fn parse_response_at(
-    allocator: Allocator,
-    buffer: &std::string::String,
-    head_length: i64,
-    limits: std::http::Limits
-) -> std::http::Failure!std::http::ClientResponse {
-    let bytes = buffer.as_bytes();
-    return parse_response_head(allocator, bytes[0..head_length], limits);
 }
 
 // parse_response_head reads `HTTP/1.x SP STATUS SP REASON CRLF` and the header
@@ -291,104 +452,6 @@ fn parse_response_version(text: []u8) -> std::http::Failure!std::http::Version {
     return std::http::Error::MalformedResponse;
 }
 
-// read_body takes what the answer is framed by. A Content-Length says how
-// much; without one, `Connection: close` means the close is the frame, so
-// reading to end of stream is the answer rather than a guess.
-fn read_response_body(
-    io: Io,
-    allocator: Allocator,
-    stream: &var std::net::TcpStream,
-    buffer: &var std::string::String,
-    response: &var std::http::ClientResponse,
-    head_length: i64,
-    method: []u8,
-    limits: std::http::Limits
-) -> std::http::Failure!void {
-    let chunked = try std::http::chunked_framing(&response.headers);
-    // A HEAD answer carries the length the body would have had and none of it,
-    // and 1xx / 204 / 304 carry no body at all.
-    if std::mem::equal_bytes(method, "HEAD") {
-        return;
-    }
-    if !std::http::status_carries_body(response.status) {
-        return;
-    }
-    // The body gets its own deadline, the way the server's does.
-    std::http::arm_read(stream, limits.read_body_millis);
-    if chunked {
-        try read_chunked_response(
-            io, allocator, stream, buffer, &var response.body, head_length, limits);
-        return;
-    }
-    let declared = try content_length(response);
-    if declared |length| {
-        if length > limits.max_body_bytes {
-            return std::http::Error::BodyTooLarge;
-        }
-        while buffer.len() - head_length < length {
-            let missing = length - (buffer.len() - head_length);
-            let got = try stream.read_into(io, allocator, buffer, missing);
-            if got == 0 {
-                return std::http::Error::Incomplete;
-            }
-        }
-        try copy_response_body(allocator, buffer, response, head_length, length);
-        return;
-    }
-    while true {
-        if buffer.len() - head_length > limits.max_body_bytes {
-            return std::http::Error::BodyTooLarge;
-        }
-        let got = try stream.read_into(io, allocator, buffer, 4096);
-        if got == 0 {
-            break;
-        }
-    }
-    try copy_response_body(allocator, buffer, response, head_length, buffer.len() - head_length);
-    return;
-}
-
-// read_chunked_response decodes until the terminator, refilling from the
-// connection whenever the decoder runs out of whole pieces.
-fn read_chunked_response(
-    io: Io,
-    allocator: Allocator,
-    stream: &var std::net::TcpStream,
-    buffer: &var std::string::String,
-    body: &var std::string::String,
-    head_length: i64,
-    limits: std::http::Limits
-) -> std::http::Failure!void {
-    var chunks = std::http::chunk_state_new(
-        std::mem::Limit::Bytes(limits.max_body_bytes));
-    var at = head_length;
-    while !chunks.is_done() {
-        let take = try take_response_chunks(
-            allocator, &var chunks, buffer, at, limits, body, limits.max_body_bytes);
-        at = take.consumed;
-        if take.need_more {
-            let got = try stream.read_into(io, allocator, buffer, 4096);
-            if got == 0 {
-                return std::http::Error::Incomplete;
-            }
-        }
-    }
-    return;
-}
-
-fn take_response_chunks(
-    allocator: Allocator,
-    chunks: &var std::http::ChunkState,
-    buffer: &std::string::String,
-    at: i64,
-    limits: std::http::Limits,
-    out: &var std::string::String,
-    max: i64
-) -> std::http::Failure!std::http::ChunkTake {
-    let source = buffer.as_bytes();
-    return chunks.take(allocator, source, at, limits, out, max);
-}
-
 fn content_length(
     response: &std::http::ClientResponse
 ) -> std::http::Failure!?i64 {
@@ -399,19 +462,4 @@ fn content_length(
         return value;
     }
     return null;
-}
-
-fn copy_response_body(
-    allocator: Allocator,
-    buffer: &std::string::String,
-    response: &var std::http::ClientResponse,
-    head_length: i64,
-    length: i64
-) -> std::http::Failure!void {
-    if length <= 0 {
-        return;
-    }
-    let bytes = buffer.as_bytes();
-    try response.body.append_bytes(allocator, bytes[head_length..head_length + length]);
-    return;
 }

@@ -261,6 +261,9 @@ pub struct Lowerer {
     // way, which is all markLentMethodArgs looks at.
     storage_self_signature: SignatureHandle,
     tests: array::Array<TestFacts>,
+    /// The module of the test body being lowered, for the one body whose
+    /// symbol does not carry it.
+    current_test_module: Name,
     signature_nodes: arena::Arena<Signature>,
     signatures: map::Map<[]u8, SignatureHandle>,
     // method_signatures groups the signatures by the method name they
@@ -314,6 +317,7 @@ pub struct Lowerer {
     // from ast::deinit_owners so lowering reads the same owner-ness the
     // checkers do.
     deinit_owners: map::Map<[]u8, bool>,
+    release_allocators: map::Map<[]u8, bool>,
     // retired is the preceding phase's output: the errdefer receivers a
     // move retired before each return statement and try expression.
     retired: array::Array<RetiredReceiver>
@@ -323,6 +327,10 @@ pub struct Lowerer {
 /// body.
 pub struct TestFacts {
     pub symbol: Name,
+    /// The package module the block was written in, empty for a loose file.
+    /// A test's symbol does not carry one, and a function pointer's value is
+    /// looked up through the prefix of what is being lowered.
+    pub module: Name,
     pub body: ?ast::Block
 }
 
@@ -338,6 +346,8 @@ pub fn new_lowerer(
     let common = try intern_common(&var module.names);
     let deinit_owners = try ast::deinit_owners(allocator, tree, program);
     errdefer deinit_owners.deinit(allocator);
+    let release_allocators = try ast::release_names_allocator(allocator, tree, program);
+    errdefer release_allocators.deinit(allocator);
     var envs = new_env_store(allocator);
     errdefer envs.deinit(allocator);
     let env = try envs.new_env();
@@ -402,6 +412,7 @@ pub fn new_lowerer(
         scratch_signature: scratch_signature,
         storage_self_signature: storage_self_signature,
         tests: array::new<TestFacts>(allocator),
+        current_test_module: empty_name(),
         signature_nodes: move signature_nodes,
         signatures: map::new<[]u8, SignatureHandle>(allocator),
         method_signatures: map::new<[]u8, array::Array<SignatureHandle>>(allocator),
@@ -428,6 +439,7 @@ pub fn new_lowerer(
         extern_symbols: array::new<Name>(allocator),
         next_error_code: 0,
         deinit_owners: move deinit_owners,
+        release_allocators: move release_allocators,
         retired: array::new<RetiredReceiver>(allocator)
     };
     errdefer lowerer.deinit(allocator);
@@ -473,7 +485,14 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
                 let name_bytes = retained.as_bytes();
                 let symbol = try test_function_name(self.allocator, name_bytes);
                 let symbol_name = try self.module.names.intern_owned(move symbol);
-                try self.tests.append(self.allocator, TestFacts { symbol: symbol_name, body: test.body });
+                let retained_module = tree.texts.at(test.module.node);
+                let module_bytes = retained_module.as_bytes();
+                let module_name = try self.module.names.intern(module_bytes);
+                try self.tests.append(self.allocator, TestFacts {
+                    symbol: symbol_name,
+                    module: module_name,
+                    body: test.body
+                });
             },
             Struct(declared) => {
                 let retained = tree.texts.at(declared.name.node);
@@ -660,6 +679,7 @@ fn (self: &var Lowerer) lower_tests(tree: &var ast::Ast) -> !?diagnostic::Diagno
             requires_unsafe: false,
             body: test.body
         };
+        self.current_test_module = test.module;
         let handle = FactsHandle { node: try self.decl_facts.add(self.allocator, move facts) };
         if try self.lower_function_named(tree, handle, test.symbol) |failed| {
             return move failed;
@@ -1210,10 +1230,17 @@ fn (self: &var Lowerer) append_current_module_prefix(out: &var string::String) -
     let retained = name_text(&self.module.names, node.name);
     let bytes = retained.as_bytes();
     let cut = last_namespace_end(bytes);
-    if cut == 0 {
+    if cut > 0 {
+        try out.append_bytes(self.allocator, bytes[0..cut]);
+        return true;
+    }
+    let retained_module = name_text(&self.module.names, self.current_test_module);
+    let module_bytes = retained_module.as_bytes();
+    if mem::len(module_bytes) == 0 {
         return false;
     }
-    try out.append_bytes(self.allocator, bytes[0..cut]);
+    try out.append_bytes(self.allocator, module_bytes);
+    try out.append_bytes(self.allocator, "::");
     return true;
 }
 

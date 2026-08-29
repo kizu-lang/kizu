@@ -13,6 +13,7 @@
 // Zero means no deadline. That is a thing a caller can ask for -- behind a
 // proxy that already bounds this, say -- but it is an answer, not a default.
 
+import std::array;
 import std::fmt;
 import std::http;
 import std::io;
@@ -20,7 +21,7 @@ import std::mem;
 import std::net;
 import std::string;
 
-error Failure = http::Error or net::Error or mem::Error;
+error Failure = http::Error or net::Error or mem::Error or array::Error;
 
 fn main() -> Failure!void {
     let handle = io::blocking();
@@ -32,8 +33,8 @@ fn main() -> Failure!void {
     var limits = http::default_limits();
     limits.read_head_millis = 50;
     limits.read_body_millis = 50;
-    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
-    defer server.deinit();
+    var server = try http::listen_with(handle, allocator, "127.0.0.1:0", limits);
+    defer server.deinit(allocator);
     let port = try server.local_port();
 
     // First caller: a request line, and then silence.
@@ -64,7 +65,7 @@ fn stalled_caller(
     let bytes = wire.as_bytes();
     try client.write_all(handle, bytes);
 
-    if server.accept(handle, allocator) |exchange| {
+    if server.accept(handle, allocator, 1048576) |exchange| {
         exchange.deinit(allocator);
         print("an unfinished head was accepted");
         return;
@@ -99,7 +100,7 @@ fn whole_caller(
 }
 
 fn serve_one(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure!void {
-    var exchange = try server.accept(handle, allocator);
+    var exchange = try server.accept(handle, allocator, 1048576);
     defer exchange.deinit(allocator);
     try exchange.respond_text(handle, allocator, 200, "text/plain", "on time");
     return;

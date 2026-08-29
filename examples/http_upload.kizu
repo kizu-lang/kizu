@@ -1,13 +1,13 @@
 // Reading a body std::http did not hold.
 //
-// `accept` reads the whole body into the request under `max_body_bytes`. That
-// is the right shape for a form and the wrong one for an upload: the ceiling
-// is there because the body is being held, and a 2 GB file should not be held
-// at all.
+// `accept` reads the whole body into the exchange, up to the ceiling its
+// caller named. That is the right shape for a form and the wrong one for an
+// upload: the ceiling is there because the body is being held, and a 2 GB file
+// should not be held at all.
 //
 // `accept_head` stops at the blank line. The body stays on the connection and
-// `read_into` hands it over a piece at a time, so `max_body_bytes` never
-// applies -- nothing is holding the body for a ceiling to bound.
+// `read_into` hands it over a piece at a time, so no ceiling applies --
+// nothing is holding the body for one to bound.
 //
 // `read_into` rather than the socket, because reading a head reads whole
 // packets: the first bytes of the body are usually already in hand, and a
@@ -19,6 +19,7 @@
 // loop. What the caller counts is the body, not the sizes and CRLFs that
 // carried it.
 
+import std::array;
 import std::fmt;
 import std::http;
 import std::io;
@@ -26,17 +27,14 @@ import std::mem;
 import std::net;
 import std::string;
 
-error Failure = http::Error or net::Error or mem::Error;
+error Failure = http::Error or net::Error or mem::Error or array::Error;
 
 fn main() -> Failure!void {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
 
-    // A ceiling small enough that `accept` would answer 413 to this upload.
-    var limits = http::default_limits();
-    limits.max_body_bytes = 64;
-    var server = try http::listen_with(handle, "127.0.0.1:0", limits);
-    defer server.deinit();
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
     let port = try server.local_port();
 
     var client = try open_client(handle, allocator, port);

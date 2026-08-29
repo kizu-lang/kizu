@@ -227,6 +227,77 @@ fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaField {
     return null;
 }
 
+/// Names one active `Function` static argument. Bindings form a lexical stack
+/// the same way the field captures do.
+struct FunctionBinding {
+    parent: ?arena::Handle<FunctionBinding>,
+    name: string::String,
+    target: string::String
+}
+
+struct FunctionBindingStore {
+    allocator: Allocator,
+    bindings: arena::Arena<FunctionBinding>,
+    current: ?arena::Handle<FunctionBinding>
+}
+
+fn new_function_binding_store(allocator: Allocator) -> FunctionBindingStore {
+    return FunctionBindingStore {
+        allocator: allocator,
+        bindings: arena::new<FunctionBinding>(allocator),
+        current: null
+    };
+}
+
+fn (self: FunctionBindingStore) deinit(allocator: Allocator) -> void {
+    self.bindings.deinit(allocator);
+    return;
+}
+
+fn (self: &var FunctionBindingStore) bind(
+    name: []u8,
+    target: []u8
+) -> !?arena::Handle<FunctionBinding> {
+    let previous = self.current;
+    var owned_name = try string::from_bytes(self.allocator, name);
+    errdefer owned_name.deinit(self.allocator);
+    let owned_target = try string::from_bytes(self.allocator, target);
+    self.current = try self.bindings.add(self.allocator, FunctionBinding {
+        parent: previous,
+        name: move owned_name,
+        target: move owned_target
+    });
+    return previous;
+}
+
+fn (self: &var FunctionBindingStore) restore(
+    previous: ?arena::Handle<FunctionBinding>
+) -> void {
+    self.current = previous;
+    return;
+}
+
+/// Copies what `name` is bound to, if anything. A view into the arena would be
+/// a borrow of the store, which cannot leave it, so the answer is a copy.
+fn (self: &FunctionBindingStore) copy_target(
+    allocator: Allocator,
+    name: []u8,
+    out: &var string::String
+) -> !bool {
+    var current = self.current;
+    while current |handle| {
+        let binding = self.bindings.at(handle);
+        let retained_name = binding.name.as_bytes();
+        if mem::equal_bytes(retained_name, name) {
+            let target = binding.target.as_bytes();
+            try out.append_bytes(allocator, target);
+            return true;
+        }
+        current = binding.parent;
+    }
+    return false;
+}
+
 /// Owns one generic instantiation's type-parameter substitution, the Go
 /// `typeArgValues` / `subst` map: the replacement by parameter name, and the
 /// same pairs as parallel owned texts for the type parser.
@@ -326,6 +397,7 @@ pub struct Checker {
     unions: map::Map<[]u8, UnionInfo>,
     consume_needs: map::Map<[]u8, bool>,
     deinit_owners: map::Map<[]u8, bool>,
+    release_allocators: map::Map<[]u8, bool>,
     // declared_deinits names the types whose cleanup an author wrote. Those
     // hold an obligation of their own, so their fields cannot be taken one
     // at a time.
@@ -337,6 +409,7 @@ pub struct Checker {
     // meta_fields binds the captures of the `comptime for` expansions
     // currently open. A capture is not a value, so it is not a scope binding.
     meta_fields: MetaBindingStore,
+    function_bindings: FunctionBindingStore,
     loop_depth: i64,
     current_function: ?FunctionHandle,
     // collect_missing_markers switches the missing `move` diagnostic from an
@@ -366,6 +439,8 @@ pub struct Checker {
 pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program) -> !Checker {
     let deinit_owners = try ast::deinit_owners(allocator, tree, program);
     errdefer deinit_owners.deinit(allocator);
+    let release_allocators = try ast::release_names_allocator(allocator, tree, program);
+    errdefer release_allocators.deinit(allocator);
     let declared_deinits = try ast::declared_deinits(allocator, tree, program);
     errdefer declared_deinits.deinit(allocator);
     var names = try new_name_table(allocator);
@@ -390,10 +465,12 @@ pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program
         unions: map::new<[]u8, UnionInfo>(allocator),
         consume_needs: map::new<[]u8, bool>(allocator),
         deinit_owners: move deinit_owners,
+        release_allocators: move release_allocators,
         declared_deinits: move declared_deinits,
         checked_instances: map::new<[]u8, bool>(allocator),
         instantiation_depth: 0,
         meta_fields: new_meta_binding_store(allocator),
+        function_bindings: new_function_binding_store(allocator),
         loop_depth: 0,
         current_function: null,
         collect_missing_markers: false,
@@ -421,9 +498,11 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.unions.deinit(allocator);
     self.consume_needs.deinit(allocator);
     self.deinit_owners.deinit(allocator);
+    self.release_allocators.deinit(allocator);
     self.declared_deinits.deinit(allocator);
     self.checked_instances.deinit(allocator);
     self.meta_fields.deinit(allocator);
+    self.function_bindings.deinit(allocator);
     self.missing_markers.deinit(allocator);
     self.type_arg_values.deinit(allocator);
     self.live_err_defers.deinit(allocator);
@@ -594,7 +673,11 @@ fn (self: &var Checker) check_declaration_body(
             return self.check_function(tree, handle);
         },
         Test(test) => {
-            let copied = ast::TestDecl { name: test.name, body: test.body };
+            let copied = ast::TestDecl {
+                name: test.name,
+                body: test.body,
+                module: test.module
+            };
             return self.check_test_decl(tree, &copied);
         },
         _ => return null,
@@ -994,14 +1077,14 @@ fn (self: &var Checker) collect_receiver_method(tree: &ast::Ast, handle: Functio
     if self.impl_method(receiver, method) |_| {
         return try self.error1(tree, ast::zero_span(), "move error: duplicate method `%s`", Arg::Str(name));
     }
-    // Method calls have no tied-allocator recognizer, so a method that built
-    // a tied allocator from a borrowed buffer would hand it back untracked.
+    // Method calls have no tied-capability recognizer, so a method that built
+    // a tied capability from a borrowed buffer would hand it back untracked.
     // Free functions carry this shape; methods refuse it at the declaration.
-    if self.names.is(self.return_type_name(handle), "Allocator") and
+    if self.capability_return(self.return_type_name(handle)) and
         try self.call_ties_allocator(tree, handle, null, null) {
         return try self.error1(
             tree, ast::zero_span(),
-            "borrow error: method `%s` cannot return a tied allocator; use a free function",
+            "borrow error: method `%s` cannot return a tied capability; use a free function",
             Arg::Str(name)
         );
     }
@@ -1070,6 +1153,11 @@ fn (self: &var Checker) function_info_from_decl(
 /// Validates one function body, the Go `checkFunction`.
 fn (self: &var Checker) check_function(tree: &var ast::Ast, handle: FunctionHandle) -> !?diagnostic::Diagnostic {
     if self.functions.at(handle.index).has_extern_abi {
+        return null;
+    }
+    // A body that calls a `Function` static parameter has no callee until the
+    // parameter is bound, so it is checked once per instantiation instead.
+    if self.has_function_static_param(handle) {
         return null;
     }
     let env = try self.store.new_scope(null);
@@ -1271,8 +1359,18 @@ fn (self: &Checker) has_type_params(handle: FunctionHandle) -> bool {
 fn (self: &var Checker) check_test_decl(tree: &var ast::Ast, test: &ast::TestDecl) -> !?diagnostic::Diagnostic {
     let retained_name = tree.texts.at(test.name.node);
     let source_name = retained_name.as_bytes();
-    var name = try string::from_bytes(self.allocator, "test ");
+    // The name carries the module so the body reads its own module's names --
+    // a function pointer's value is looked up through the prefix of whatever
+    // is being checked, and a synthetic name without one finds nothing.
+    var name = string::new(self.allocator);
     errdefer name.deinit(self.allocator);
+    let retained_module = tree.texts.at(test.module.node);
+    let module_bytes = retained_module.as_bytes();
+    if mem::len(module_bytes) > 0 {
+        try name.append_bytes(self.allocator, module_bytes);
+        try name.append_bytes(self.allocator, "::");
+    }
+    try name.append_bytes(self.allocator, "test ");
     try fmt::append_bytes_literal(self.allocator, &var name, source_name);
     let info = FunctionInfo {
         name: try self.names.intern_owned(move name),

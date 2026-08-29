@@ -1,0 +1,419 @@
+import std::array;
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+import std::testing;
+
+// A poller's contract: it waits on many descriptors at once, answers with
+// which of them the host said were ready, and hands back the token the caller
+// registered with. It decides nothing about what a ready descriptor means.
+
+error Failure = net::Error or mem::Error;
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+test "a wait with nothing ready ends on its deadline" {
+    let handle = io::blocking();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+    try poller.watch_listener(handle, &listener, 1);
+
+    let count = try poller.wait(handle, net::deadline_in_millis(50));
+    testing::expect_equal<i64>(0, count);
+    if poller.ready(0) |_| {
+        testing::fail("a wait with nothing ready reported an event");
+    }
+}
+
+test "a listener with a caller waiting is readable" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+    try poller.watch_listener(handle, &listener, 42);
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+
+    let count = try poller.wait(handle, net::deadline_in_millis(1000));
+    testing::expect(count >= 1);
+    if poller.ready(0) |event| {
+        // The token is the caller's, and nothing in std::net reads it.
+        testing::expect_equal<i64>(42, event.token);
+        testing::expect(event.readable);
+    } else {
+        testing::fail("a ready listener produced no event");
+    }
+}
+
+test "the token is how a caller finds which connection spoke" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var first = try net::tcp_connect(handle, address_bytes);
+    defer first.deinit();
+    var second = try net::tcp_connect(handle, address_bytes);
+    defer second.deinit();
+    var one = try listener.accept(handle);
+    defer one.deinit();
+    var two = try listener.accept(handle);
+    defer two.deinit();
+
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+    try poller.watch_stream(handle, &one, 100, net::Interest::Read);
+    try poller.watch_stream(handle, &two, 200, net::Interest::Read);
+
+    // Only the second speaks, so only the second is reported -- the wait does
+    // not have to be told which one to listen to.
+    try second.write_all(handle, "here");
+    let count = try poller.wait(handle, net::deadline_in_millis(1000));
+    testing::expect_equal<i64>(1, count);
+    if poller.ready(0) |event| {
+        testing::expect_equal<i64>(200, event.token);
+        testing::expect(event.readable);
+    } else {
+        testing::fail("a ready stream produced no event");
+    }
+}
+
+test "a connection whose peer closed is reported closed" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    errdefer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+    try poller.watch_stream(handle, &served, 5, net::Interest::Read);
+
+    client.deinit();
+    let count = try poller.wait(handle, net::deadline_in_millis(1000));
+    testing::expect(count >= 1);
+    if poller.ready(0) |event| {
+        testing::expect_equal<i64>(5, event.token);
+        // A closed peer is readable too: the read that follows answers 0,
+        // which is the end of the stream this module already reports.
+        testing::expect(event.readable or event.closed);
+    } else {
+        testing::fail("a closed peer produced no event");
+    }
+}
+
+test "a descriptor that is forgotten is not reported" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+    try poller.watch_stream(handle, &served, 9, net::Interest::Read);
+    try poller.forget(handle, &served);
+
+    try client.write_all(handle, "unheard");
+    let count = try poller.wait(handle, net::deadline_in_millis(50));
+    testing::expect_equal<i64>(0, count);
+}
+
+test "a writable connection is reported writable" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    var poller = try net::poller_new(handle, 8);
+    defer poller.deinit();
+    // A fresh connection has room in its send buffer, so it is writable at
+    // once. That is what makes this the answer for a peer that stopped
+    // reading: the writability goes away rather than the write blocking.
+    try poller.watch_stream(handle, &served, 11, net::Interest::Write);
+    let count = try poller.wait(handle, net::deadline_in_millis(1000));
+    testing::expect(count >= 1);
+    if poller.ready(0) |event| {
+        testing::expect_equal<i64>(11, event.token);
+        testing::expect(event.writable);
+    } else {
+        testing::fail("a writable stream produced no event");
+    }
+}
+
+test "a capacity of zero is refused" {
+    let handle = io::blocking();
+    if net::poller_new(handle, 0) |poller| {
+        poller.deinit();
+        testing::fail("a poller with no room for events was opened");
+    } else |err| {
+        testing::expect(err == net::Error::InvalidLength);
+    }
+}
+
+test "failing io refuses to open a poller" {
+    let handle = testing::failing_io();
+    if net::poller_new(handle, 8) |poller| {
+        poller.deinit();
+        testing::fail("failing io opened a poller");
+    } else |err| {
+        testing::expect(err == net::Error::IoFailing);
+    }
+}
+
+test "a collection can hold connections and release them" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    // The connections live in an Array, whose deinit closes each of them.
+    // A socket releases a descriptor rather than memory, so the element
+    // cleanup has to call the deinit it declares (ADR-0142).
+    var held = array::new<net::TcpStream>(allocator);
+    defer held.deinit(allocator);
+
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+
+    var opened = 0;
+    while opened < 3 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        let served = try listener.accept(handle);
+        try held.append(allocator, move served);
+        opened = opened + 1;
+    }
+    testing::expect_equal<i64>(3, held.len());
+    testing::expect_equal<i64>(3, callers.len());
+}
+
+test "a poller can watch every connection a collection holds" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var held = array::new<net::TcpStream>(allocator);
+    defer held.deinit(allocator);
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+
+    var poller = try net::poller_new(handle, 16);
+    defer poller.deinit();
+
+    var opened = 0;
+    while opened < 4 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        let served = try listener.accept(handle);
+        try held.append(allocator, move served);
+        // The token is the index, which is how a ready event finds its
+        // connection again.
+        try watch_at(handle, &var poller, &held, opened);
+        opened = opened + 1;
+    }
+
+    // Only the third caller speaks.
+    try speak_at(handle, &var callers, 2);
+    let count = try poller.wait(handle, net::deadline_in_millis(1000));
+    testing::expect_equal<i64>(1, count);
+    if poller.ready(0) |event| {
+        testing::expect_equal<i64>(2, event.token);
+    } else {
+        testing::fail("a ready connection produced no event");
+    }
+}
+
+// connect_to binds the address bytes inside its own frame, so the view does
+// not outlive the loop that used it.
+fn connect_to(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn watch_at(
+    handle: Io,
+    poller: &var net::Poller,
+    held: &array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    if held.at(index) |stream| {
+        try poller.watch_stream(handle, stream, index, net::Interest::Read);
+    } else {
+        testing::fail("a connection just appended was not there");
+    }
+    return;
+}
+
+fn speak_at(
+    handle: Io,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    if callers.at_mut(index) |caller| {
+        try caller.write_all(handle, "here");
+    } else {
+        testing::fail("a caller just appended was not there");
+    }
+    return;
+}
+
+test "write_some offers rather than insists" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var client = try connect_to(handle, &address);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    // More than the buffers between here and a peer that never reads.
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    var filled = 0;
+    while filled < 400000 {
+        try body.append_bytes(allocator, "0123456789");
+        filled = filled + 1;
+    }
+    let bytes = body.as_bytes();
+
+    // write_all would hold this thread until its deadline; this returns with
+    // what fit, and the rest stays with the caller.
+    let took = try served.write_some(handle, bytes);
+    testing::expect(took > 0);
+    testing::expect(took < body.len());
+
+    // Offering again until it is refused. Zero is not an error and not the end
+    // of anything -- it is "nothing fits right now", which is the answer a
+    // poller loop goes back to its wait on.
+    //
+    // It takes more than one offer to get there. The kernel moves what the
+    // first write left with it into the peer's receive buffer while this runs,
+    // and every byte it moves is a byte that fits again. Expecting the second
+    // offer to be refused is expecting that not to happen, which is a race
+    // this test used to lose about one run in ten.
+    let again = try offer_until_full(handle, &var served, bytes);
+    testing::expect_equal<i64>(0, again);
+}
+
+// offer_until_full keeps offering until nothing fits. The peer never reads, so
+// both buffers stay full once they are, and this ends. The bound is there so a
+// host that never refuses says so rather than spinning.
+fn offer_until_full(
+    handle: Io,
+    stream: &var net::TcpStream,
+    bytes: []u8
+) -> Failure!i64 {
+    var offered = 0;
+    while offered < 268435456 {
+        let took = try stream.write_some(handle, bytes);
+        if took == 0 {
+            return 0;
+        }
+        offered = offered + took;
+    }
+    testing::fail("the peer's buffers never filled");
+    return 0;
+}
+
+test "write_some of nothing is nothing" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var client = try connect_to(handle, &address);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    let none = try served.write_some(handle, "");
+    testing::expect_equal<i64>(0, none);
+}
+
+test "what write_some took is what the peer receives" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer listener.deinit();
+    let port = try listener.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    var client = try connect_to(handle, &address);
+    defer client.deinit();
+    var served = try listener.accept(handle);
+    defer served.deinit();
+
+    let took = try served.write_some(handle, "a short message");
+    testing::expect_equal<i64>(15, took);
+    var back = string::new(allocator);
+    defer back.deinit(allocator);
+    let read = try client.read_into(handle, allocator, &var back, 64);
+    testing::expect_equal<i64>(15, read);
+    let bytes = back.as_bytes();
+    testing::expect_equal<[]u8>("a short message", bytes);
+}

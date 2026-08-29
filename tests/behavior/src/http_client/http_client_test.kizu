@@ -1,3 +1,4 @@
+import std::array;
 import std::fmt;
 import std::http;
 import std::io;
@@ -6,8 +7,8 @@ import std::net;
 import std::string;
 import std::testing;
 
-// The client is tested through `write_request` and `read_response_from`, over
-// a connected pair this process owns both ends of.
+// The client is tested through `Connection.send` and `Connection.receive`,
+// over a connected pair this process owns both ends of.
 //
 // `http::get` itself cannot be tested against a server in the same process:
 // it connects, writes, and then blocks reading, and the accept that would
@@ -16,7 +17,7 @@ import std::testing;
 
 // Every call here fails the same three ways, and std::http::Failure is
 // already that union, so nothing declares a second one.
-error Failure = http::Error or net::Error or mem::Error;
+error Failure = http::Error or net::Error or mem::Error or array::Error;
 
 fn failure_name(failure: http::Failure) -> []u8 {
     return match failure {
@@ -75,14 +76,30 @@ fn parse_head(allocator: Allocator, text: []u8) -> http::Failure!http::ClientRes
 // A Pair is a connected client end and server end, both in this process.
 struct Pair {
     pub listener: net::TcpListener,
-    pub client: net::TcpStream,
+    pub client: http::Connection,
     pub port: i64,
 }
 
-fn (self: Pair) deinit() -> void {
-    self.client.deinit();
+fn (self: Pair) deinit(allocator: Allocator) -> void {
+    self.client.deinit(allocator);
     self.listener.deinit();
     return;
+}
+
+// answer_of reads the head and then the body, which is what `fetch` does in
+// one call. Splitting them is what lets a caller stream an answer instead.
+fn answer_of(
+    handle: Io,
+    allocator: Allocator,
+    pair: &var Pair,
+    method: []u8,
+    limits: http::Limits,
+    max: i64
+) -> http::Failure!http::ClientResponse {
+    var response = try pair.client.receive(handle, allocator, method, limits);
+    errdefer response.deinit(allocator);
+    try pair.client.read_body(handle, allocator, &var response, max);
+    return move response;
 }
 
 fn open_pair(handle: Io, allocator: Allocator) -> Failure!Pair {
@@ -94,7 +111,7 @@ fn open_pair(handle: Io, allocator: Allocator) -> Failure!Pair {
     try address.append_bytes(allocator, "127.0.0.1:");
     try fmt::append_i64(allocator, &var address, port);
     let bytes = address.as_bytes();
-    var client = try net::tcp_connect(handle, bytes);
+    var client = try http::connect(handle, allocator, bytes, http::default_limits());
     return Pair { listener: move listener, client: move client, port: port };
 }
 
@@ -114,7 +131,8 @@ fn answer(
     handle: Io,
     allocator: Allocator,
     pair: &var Pair,
-    reply: []u8
+    reply: []u8,
+    body: &var string::String
 ) -> Failure!http::Request {
     var served = try pair.listener.accept(handle);
     errdefer served.deinit();
@@ -129,7 +147,7 @@ fn answer(
     // The client wrote the head and the body in one call, so whatever follows
     // the head in the buffer is the body. A server would read to the declared
     // Content-Length; this only has to see what one write delivered.
-    try request.body.append_bytes(allocator, raw[head_length..mem::len(raw)]);
+    try body.append_bytes(allocator, raw[head_length..mem::len(raw)]);
     try served.write_all(handle, reply);
     served.deinit();
     return move request;
@@ -139,16 +157,18 @@ test "a written request carries the method, the target and the Host" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/items?id=7");
     defer url.deinit(allocator);
-    try http::write_request(
-        handle, allocator, &var pair.client, "POST", &url, "text/plain", "hi");
+    try pair.client.send(
+        handle, allocator, "POST", &url, "text/plain", "hi", 30000);
 
     var reply = try wire(allocator, "HTTP/1.1 204 No Content");
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     defer request.deinit(allocator);
 
     let method = request.method.as_bytes();
@@ -168,7 +188,7 @@ test "a written request carries the method, the target and the Host" {
     } else {
         testing::fail("the request carried no Content-Length");
     }
-    let body = request.body.as_bytes();
+    let body = sent.as_bytes();
     testing::expect_equal<[]u8>("hi", body);
 }
 
@@ -176,10 +196,11 @@ test "a response with a Content-Length is read to exactly that length" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/");
     defer url.deinit(allocator);
-    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+    try pair.client.send(
+        handle, allocator, "GET", &url, "", "", 30000);
 
     var reply = string::new(allocator);
     defer reply.deinit(allocator);
@@ -190,11 +211,13 @@ test "a response with a Content-Length is read to exactly that length" {
     try crlf(allocator, &var reply);
     try reply.append_bytes(allocator, "there and more");
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
-    var response = try http::read_response_from(
-        handle, allocator, &var pair.client, "GET", http::default_limits());
+    var response = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
     defer response.deinit(allocator);
     testing::expect_equal<i64>(201, response.status);
     let reason = response.reason.as_bytes();
@@ -207,10 +230,11 @@ test "a response with no Content-Length is framed by the close" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/");
     defer url.deinit(allocator);
-    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+    try pair.client.send(
+        handle, allocator, "GET", &url, "", "", 30000);
 
     var reply = string::new(allocator);
     defer reply.deinit(allocator);
@@ -219,11 +243,13 @@ test "a response with no Content-Length is framed by the close" {
     try crlf(allocator, &var reply);
     try reply.append_bytes(allocator, "everything until the close");
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
-    var response = try http::read_response_from(
-        handle, allocator, &var pair.client, "GET", http::default_limits());
+    var response = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
     defer response.deinit(allocator);
     testing::expect(response.version == http::Version::Http10);
     let body = response.body.as_bytes();
@@ -234,10 +260,11 @@ test "a HEAD answer keeps the length and takes no body" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/");
     defer url.deinit(allocator);
-    try http::write_request(handle, allocator, &var pair.client, "HEAD", &url, "", "");
+    try pair.client.send(
+        handle, allocator, "HEAD", &url, "", "", 30000);
 
     let reply_text =
         \\HTTP/1.1 200 OK
@@ -246,11 +273,13 @@ test "a HEAD answer keeps the length and takes no body" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
-    var response = try http::read_response_from(
-        handle, allocator, &var pair.client, "HEAD", http::default_limits());
+    var response = try answer_of(
+        handle, allocator, &var pair, "HEAD", http::default_limits(), 1048576);
     defer response.deinit(allocator);
     testing::expect_equal<i64>(200, response.status);
     testing::expect_equal<i64>(0, response.body.len());
@@ -311,10 +340,11 @@ test "a chunked answer is decoded" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/");
     defer url.deinit(allocator);
-    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+    try pair.client.send(
+        handle, allocator, "GET", &url, "", "", 30000);
 
     // Two chunks, a terminator, and a trailer field that is dropped.
     let reply_text =
@@ -331,11 +361,13 @@ test "a chunked answer is decoded" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
-    var response = try http::read_response_from(
-        handle, allocator, &var pair.client, "GET", http::default_limits());
+    var response = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
     defer response.deinit(allocator);
     testing::expect_equal<i64>(200, response.status);
     let body = response.body.as_bytes();
@@ -346,10 +378,11 @@ test "an encoding this client does not speak is refused" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/");
     defer url.deinit(allocator);
-    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+    try pair.client.send(
+        handle, allocator, "GET", &url, "", "", 30000);
 
     let reply_text =
         \\HTTP/1.1 200 OK
@@ -358,11 +391,13 @@ test "an encoding this client does not speak is refused" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
-    if http::read_response_from(
-        handle, allocator, &var pair.client, "GET", http::default_limits()
+    if answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576
     ) |response| {
         response.deinit(allocator);
         testing::fail("an unknown coding list was accepted");
@@ -375,10 +410,11 @@ test "a message that says two things about its length is refused" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/");
     defer url.deinit(allocator);
-    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+    try pair.client.send(
+        handle, allocator, "GET", &url, "", "", 30000);
 
     // Content-Length and Transfer-Encoding together. RFC 9112 says the
     // encoding wins; a proxy that decided otherwise is how one message becomes
@@ -391,11 +427,13 @@ test "a message that says two things about its length is refused" {
     var reply = try wire(allocator, reply_text);
     defer reply.deinit(allocator);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
-    if http::read_response_from(
-        handle, allocator, &var pair.client, "GET", http::default_limits()
+    if answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576
     ) |response| {
         response.deinit(allocator);
         testing::fail("a message with two framings was accepted");
@@ -408,10 +446,11 @@ test "a body past the ceiling is refused" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var pair = try open_pair(handle, allocator);
-    defer pair.deinit();
+    defer pair.deinit(allocator);
     var url = try url_for(allocator, pair.port, "/");
     defer url.deinit(allocator);
-    try http::write_request(handle, allocator, &var pair.client, "GET", &url, "", "");
+    try pair.client.send(
+        handle, allocator, "GET", &url, "", "", 30000);
 
     var reply = string::new(allocator);
     defer reply.deinit(allocator);
@@ -421,12 +460,13 @@ test "a body past the ceiling is refused" {
     try crlf(allocator, &var reply);
     try crlf(allocator, &var reply);
     let reply_bytes = reply.as_bytes();
-    var request = try answer(handle, allocator, &var pair, reply_bytes);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
     request.deinit(allocator);
 
-    var limits = http::default_limits();
-    limits.max_body_bytes = 16;
-    if http::read_response_from(handle, allocator, &var pair.client, "GET", limits) |response| {
+    let limits = http::default_limits();
+    if answer_of(handle, allocator, &var pair, "GET", limits, 16) |response| {
         response.deinit(allocator);
         testing::fail("a body past the ceiling was accepted");
     } else |err| {
@@ -437,7 +477,7 @@ test "a body past the ceiling is refused" {
 test "https is refused before anything is sent" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    if http::get(handle, allocator, "https://example.invalid/") |response| {
+    if http::get(handle, allocator, "https://example.invalid/", 1048576) |response| {
         response.deinit(allocator);
         testing::fail("https was accepted");
     } else |err| {
@@ -449,7 +489,7 @@ test "a method that is not a token is refused before anything is sent" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     if http::fetch(
-        handle, allocator, "BAD METHOD", "http://127.0.0.1:1/", "", ""
+        handle, allocator, "BAD METHOD", "http://127.0.0.1:1/", "", "", 1048576
     ) |response| {
         response.deinit(allocator);
         testing::fail("a method with a space in it was accepted");
@@ -473,7 +513,7 @@ test "a port nothing listens on is a refusal from the socket layer" {
     try fmt::append_i64(allocator, &var url, port);
     try url.append_bytes(allocator, "/");
     let bytes = url.as_bytes();
-    if http::get(handle, allocator, bytes) |response| {
+    if http::get(handle, allocator, bytes, 1048576) |response| {
         response.deinit(allocator);
         testing::fail("a closed port answered");
     } else |err| {

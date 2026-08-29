@@ -67,7 +67,14 @@ fn (self: &var Lowerer) lower_call_expr(
 /// `functionCalleeName`; null for a callee that is neither.
 fn (self: &var Lowerer) function_callee_name(tree: &var ast::Ast, callee: ast::Expression) -> !?Name {
     if ownership::ident_expr(tree, callee) |ident| {
-        return try self.text_name(tree, ident.name);
+        let name = try self.text_name(tree, ident.name);
+        // A `Function` static parameter is the name it was instantiated with.
+        // The instance already bound it, so calling through it is reading that
+        // binding rather than a new kind of call.
+        if self.function_static_value(name) |bound| {
+            return bound;
+        }
+        return name;
     }
     let field = ownership::field_expr(tree, callee) orelse return null;
     if !field.namespace {
@@ -136,6 +143,10 @@ fn (self: &var Lowerer) lower_type_apply_call(
     if self.name_is(callee_name, "std::internal::builtin::mem_allocator_from") {
         let resolved = try self.resolve_type_args(type_arg);
         return self.lower_allocator_from(tree, resolved, args, out);
+    }
+    if self.name_is(callee_name, "std::internal::builtin::task_new") {
+        let resolved = try self.resolve_type_args(type_arg);
+        return self.lower_task_new(tree, resolved, args, out);
     }
     var handled = false;
     if try self.lower_meta_apply(tree, callee_name, type_arg, args, out, &var handled) |failed| {
@@ -288,6 +299,36 @@ fn (self: &var Lowerer) lower_allocator_from(
     let allocator = try self.module.names.intern("Allocator");
     let symbol = try self.module.names.intern("std::internal::builtin::mem_allocator_from");
     out.* = try self.emit_with(Op::Call, symbol, allocator, empty_name(), &values);
+    return null;
+}
+
+/// Lowers `task_new<T>`. The state stays a borrow: the worker runs on its own
+/// stack and writes into what the caller lent it, so what crosses is the
+/// address, not a copy.
+fn (self: &var Lowerer) lower_task_new(
+    tree: &var ast::Ast,
+    state: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var values = array::new<Value>(self.allocator);
+    defer values.deinit(self.allocator);
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = empty_name();
+        if index == 3 {
+            want = try self.borrowed_state_name(state);
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try values.append(self.allocator, value);
+    }
+    let result = try self.module.names.intern("i64");
+    let symbol = try self.module.names.intern("std::internal::builtin::task_new");
+    out.* = try self.emit_with(Op::Call, symbol, result, empty_name(), &values);
     return null;
 }
 
@@ -1216,6 +1257,16 @@ fn (self: &var Lowerer) std_container_type_name(typ: Name) -> !?Name {
 
 /// Resolves a checked receiver method to its lowered symbol, the Go
 /// `implMethodCalleeName`; null when no declaration has it.
+// function_static_value answers the function name a `Function` static
+// parameter is bound to in the instance being lowered.
+fn (self: &Lowerer) function_static_value(name: Name) -> ?Name {
+    let static = self.static_value(name) orelse return null;
+    if !self.name_is(static.typ, "Function") {
+        return null;
+    }
+    return static.text;
+}
+
 fn (self: &var Lowerer) impl_method_callee_name(receiver: Name, method: Name) -> !?Name {
     let base = try self.deref_type(receiver);
     let name = try self.module.names.joined(base, ".", method);

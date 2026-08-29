@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::stdprim;
 import compiler::internal::typ;
 import std::array;
 import std::fmt;
@@ -11,7 +12,10 @@ struct CheckedStaticArgs {
     names: array::Array<string::String>,
     type_args: array::Array<Type>,
     substitutions: map::Map<[]u8, Type>,
-    field_args: map::Map<[]u8, MetaFieldHandle>
+    field_args: map::Map<[]u8, MetaFieldHandle>,
+    // What each `Function` static parameter of this call was given. A body
+    // that calls one is checked against the function it names.
+    function_args: map::Map<[]u8, string::String>
 }
 
 struct StaticParamCheck {
@@ -396,7 +400,8 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
         tree,
         handle,
         &checked.substitutions,
-        &checked.field_args
+        &checked.field_args,
+        &checked.function_args
     ) |problem| {
         return move problem;
     }
@@ -412,6 +417,23 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     }
     self.meta_bindings.restore(previous_meta);
     return null;
+}
+
+// function_has_function_static_param reports whether a declaration names a
+// function among its compile-time parameters.
+fn (self: &Checker) function_has_function_static_param(function: FunctionHandle) -> bool {
+    if self.metadata.functions.at(function.index) |value| {
+        var index = 0;
+        while value.signature.static_params.at(index) |parameter| {
+            if !parameter.is_type {
+                if self.types.is_text(parameter.type_name, "Function") {
+                    return true;
+                }
+            }
+            index = index + 1;
+        }
+    }
+    return false;
 }
 
 fn (self: &Checker) function_static_param_count(function: FunctionHandle) -> i64 {
@@ -438,7 +460,8 @@ fn (self: &var Checker) check_static_args(
         names: array::new<string::String>(self.allocator),
         type_args: array::new<Type>(self.allocator),
         substitutions: map::new<[]u8, Type>(self.allocator),
-        field_args: map::new<[]u8, MetaFieldHandle>(self.allocator)
+        field_args: map::new<[]u8, MetaFieldHandle>(self.allocator),
+        function_args: map::new<[]u8, string::String>(self.allocator)
     };
     errdefer checked.deinit(self.allocator);
     var index = 0;
@@ -517,6 +540,19 @@ fn (self: &var Checker) check_static_arg(
                     Problem(problem) => return move problem,
                 }
             } else {
+                if self.types.is_text(parameter_type, "Function") {
+                    // The argument may itself be the `Function` parameter of
+                    // the generic doing the call, in which case the name to
+                    // record is what that one was given.
+                    var target = string::new(allocator);
+                    errdefer target.deinit(allocator);
+                    let forwarded = try self.function_bindings.copy_target(
+                        allocator, argument_bytes, &var target);
+                    if !forwarded {
+                        try target.append_bytes(allocator, argument_bytes);
+                    }
+                    try checked.function_args.insert(allocator, parameter_name, move target);
+                }
                 if try self.check_static_value_arg(
                     function_name,
                     parameter_name,
@@ -1265,6 +1301,10 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled.* = true;
         return self.check_allocator_from(tree, scope, type_arg, args, out);
     }
+    if mem::equal_bytes(name, "std::internal::builtin::task_new") {
+        handled.* = true;
+        return self.check_task_new(tree, scope, type_arg, args, out);
+    }
     return self.check_builtin_array_method_type_apply(
         tree,
         scope,
@@ -1274,6 +1314,87 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled,
         out
     );
+}
+
+/// Validates `task_new<T>(io, allocator, entry, state, stack)`. The entry is a
+/// top-level function the runtime calls on the task's own stack, so what
+/// crosses is its address and the address of the state the caller lent it.
+/// Neither is a closure and neither carries a borrow of anything else, which
+/// is why the worker is told its Io and its allocator (ADR-0146).
+fn (self: &var Checker) check_task_new(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 5 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::io::async` expects io, allocator, entry, state and stack size"
+        );
+    }
+    let io_arg = args.get_or_panic(tree, 0);
+    if try self.check_io_arg(tree, scope, io_arg, "std::io::async") |problem| {
+        return move problem;
+    }
+    let allocator_arg = args.get_or_panic(tree, 1);
+    if try self.check_core_arg(
+        tree, scope, "std::io::async", 1, stdprim::ArgKind::Allocator, allocator_arg
+    ) |problem| {
+        return move problem;
+    }
+    var entry_want = string::new(self.allocator);
+    defer entry_want.deinit(self.allocator);
+    try entry_want.append_bytes(self.allocator, "fn(Io, Allocator, &var ");
+    try entry_want.append_bytes(self.allocator, type_arg);
+    try entry_want.append_bytes(self.allocator, ") -> void");
+    let entry_bytes = entry_want.as_bytes();
+    let entry_type = try self.types.intern(entry_bytes);
+    let entry_arg = args.get_or_panic(tree, 2);
+    var got_entry = empty_type();
+    if try self.check_contextual_expr(
+        tree, scope, entry_arg, entry_type, &var got_entry
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(got_entry, entry_type) {
+        return try self.task_new_arg_error("entry", entry_type, got_entry);
+    }
+    let state_type = try self.types.intern(type_arg);
+    let state_arg = args.get_or_panic(tree, 3);
+    var got_state = empty_type();
+    if try self.check_expr(tree, scope, state_arg, &var got_state) |problem| {
+        return move problem;
+    }
+    if !same_type(got_state, state_type) {
+        return try self.task_new_arg_error("state", state_type, got_state);
+    }
+    let stack_arg = args.get_or_panic(tree, 4);
+    if try self.check_core_arg(
+        tree, scope, "std::io::async", 4, stdprim::ArgKind::I64, stack_arg
+    ) |problem| {
+        return move problem;
+    }
+    out.* = try self.types.intern("i64");
+    return null;
+}
+
+fn (self: &Checker) task_new_arg_error(
+    label: []u8,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "`std::io::async` ");
+    try message.append_bytes(self.allocator, label);
+    try message.append_bytes(self.allocator, " expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(self.allocator, ", got ");
+    try self.append_checker_type(&var message, got);
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 /// Validates `mem_allocator_from<T>(state, alloc, free)`. The header the
@@ -1955,25 +2076,46 @@ fn (self: &var Checker) check_generic_instantiation(
     tree: &var ast::Ast,
     function: FunctionHandle,
     substitutions: &map::Map<[]u8, Type>,
-    fields: &map::Map<[]u8, MetaFieldHandle>
+    fields: &map::Map<[]u8, MetaFieldHandle>,
+    functions: &map::Map<[]u8, string::String>
 ) -> !?diagnostic::Diagnostic {
     var done = false;
-    if try self.enter_instantiation(function, substitutions, fields, &var done) |problem| {
+    if try self.enter_instantiation(function, substitutions, fields, functions, &var done) |problem| {
         return move problem;
     }
     if done {
         return null;
     }
     let previous_meta = self.meta_bindings.current;
+    let previous_functions = self.function_bindings.current;
     try self.bind_static_meta_fields(fields);
+    try self.bind_static_functions(functions);
     if try self.check_generic_instantiation_bound(self.allocator, tree, function, substitutions) |problem| {
+        self.function_bindings.restore(previous_functions);
         self.meta_bindings.restore(previous_meta);
         self.leave_instantiation();
         return move problem;
     }
+    self.function_bindings.restore(previous_functions);
     self.meta_bindings.restore(previous_meta);
     self.leave_instantiation();
     return null;
+}
+
+// bind_static_functions makes the `Function` arguments of one instantiation
+// readable by the calls written against them.
+fn (self: &var Checker) bind_static_functions(
+    functions: &map::Map<[]u8, string::String>
+) -> !void {
+    var index = 0;
+    while functions.key_at(index) |name| {
+        if functions.at(name) |target| {
+            let bytes = target.as_bytes();
+            let _ = try self.function_bindings.bind(name, bytes);
+        }
+        index = index + 1;
+    }
+    return;
 }
 
 fn (self: &var Checker) check_generic_instantiation_bound(
@@ -2175,9 +2317,10 @@ fn (self: &var Checker) enter_instantiation(
     function: FunctionHandle,
     substitutions: &map::Map<[]u8, Type>,
     fields: &map::Map<[]u8, MetaFieldHandle>,
+    functions: &map::Map<[]u8, string::String>,
     done: &var bool
 ) -> !?diagnostic::Diagnostic {
-    let key = try self.instance_key(function, substitutions, fields) orelse
+    let key = try self.instance_key(function, substitutions, fields, functions) orelse
         return try self.checker_error_at(
         "type error", ast::zero_span(), "missing generic function metadata"
     );
@@ -2209,7 +2352,8 @@ fn (self: &var Checker) leave_instantiation() -> void {
 fn (self: &Checker) instance_key(
     function: FunctionHandle,
     substitutions: &map::Map<[]u8, Type>,
-    fields: &map::Map<[]u8, MetaFieldHandle>
+    fields: &map::Map<[]u8, MetaFieldHandle>,
+    functions: &map::Map<[]u8, string::String>
 ) -> !?string::String {
     var key = string::new(self.allocator);
     errdefer key.deinit(self.allocator);
@@ -2235,6 +2379,11 @@ fn (self: &Checker) instance_key(
         index = 0;
         while value.signature.static_params.at(index) |parameter| {
             let parameter_name = parameter.name.as_bytes();
+            if functions.at(parameter_name) |bound| {
+                let bound_bytes = bound.as_bytes();
+                try key.append_byte(self.allocator, cast<u8>(46));
+                try key.append_bytes(self.allocator, bound_bytes);
+            }
             if fields.get(parameter_name) |field| {
                 let entry = self.meta_field_entries.at(field.node);
                 try key.append_byte(self.allocator, cast<u8>(46));

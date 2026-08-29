@@ -1,0 +1,222 @@
+// Many connections, one thread, and a loop you can still read.
+//
+// examples/http_evented.kizu builds this by hand: a poller, a table of open
+// exchanges, a token for each, and a sweep for the ones that ran out of time.
+// It works, and every server would write it again.
+//
+// `first` and `next` are that loop, kept by the server. `first` hands out the
+// request that finished; `next` takes one back and hands out the following
+// one. Everyone else is accepted, watched, advanced and timed out inside,
+// while the caller answers the one it was given.
+//
+// Taking one back is the only way to get another. There is no `next` that does
+// not consume one, so a connection cannot be forgotten -- the loop cannot go
+// round without returning what it borrowed.
+//
+// The callers here are this process too, because Kizu has no concurrency
+// (SPEC §15). A real service would have only the loop.
+
+import std::array;
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error or array::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+
+    // Three callers connect and say nothing. The server holds all three.
+    var callers = array::new<net::TcpStream>(allocator);
+    defer callers.deinit(allocator);
+    var index = 0;
+    while index < 3 {
+        let caller = try connect_to(handle, &address);
+        try callers.append(allocator, move caller);
+        index = index + 1;
+    }
+
+    // They finish in an order of their own. The loop follows the finishing,
+    // not the connecting -- and the two that have not spoken cost it nothing.
+    //
+    // Each turn is its own function because the exchange is owned while it is
+    // answered: a slot that is handed back and re-bound cannot carry an
+    // `errdefer`, so the frame that owns it is the one that answers in it.
+    try ask(handle, allocator, &var callers, 2, "GET /gamma HTTP/1.1");
+    var current = try server.first(handle, allocator, 1048576);
+    current = try turn(
+        handle, allocator, &var server, &var callers, move current,
+        0, "GET /alpha HTTP/1.1");
+    current = try turn(
+        handle, allocator, &var server, &var callers, move current,
+        1, "GET /beta HTTP/1.1");
+    try last(handle, allocator, move current);
+
+    var caller = 0;
+    while caller < 3 {
+        try show(handle, allocator, &var callers, caller);
+        caller = caller + 1;
+    }
+    return;
+}
+
+// turn answers the request it was handed, sets the next caller talking, and
+// hands the connection back for the following one. Handing it back is the only
+// way to get another, so nothing here can forget to.
+fn turn(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    callers: &var array::Array<net::TcpStream>,
+    held: http::Exchange,
+    index: i64,
+    line: []u8
+) -> Failure!http::Exchange {
+    var current = move held;
+    errdefer current.deinit(allocator);
+    try answer(handle, allocator, &var current);
+    try ask(handle, allocator, callers, index, line);
+    let following = try server.next(handle, allocator, move current, 1048576);
+    return move following;
+}
+
+// last answers the final request and closes its connection. Handing it back
+// would be the same thing: this one said `Connection: close`, so the server
+// would close it too.
+fn last(
+    handle: Io,
+    allocator: Allocator,
+    held: http::Exchange
+) -> Failure!void {
+    var current = move held;
+    defer current.deinit(allocator);
+    try answer(handle, allocator, &var current);
+    return;
+}
+
+// answer prints the path it is answering and sends it back as the body, so the
+// order the loop served in is visible next to the order the callers spoke in.
+fn answer(
+    handle: Io,
+    allocator: Allocator,
+    held: &var http::Exchange
+) -> Failure!void {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try copy_path(allocator, held, &var path);
+    let text = path.as_bytes();
+    print(text);
+    try held.respond_text(handle, allocator, 200, "text/plain", text);
+    return;
+}
+
+// copy_path takes the path out before the exchange is used mutably: a view
+// into the request is a borrow of the exchange it lives in.
+fn copy_path(
+    allocator: Allocator,
+    held: &http::Exchange,
+    out: &var string::String
+) -> Failure!void {
+    let target = held.request.target.as_bytes();
+    let path = http::path_of(target);
+    try out.append_bytes(allocator, path);
+    return;
+}
+
+// ask sends one whole request on one of the callers.
+fn ask(
+    handle: Io,
+    allocator: Allocator,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    if callers.at_mut(index) |caller| {
+        try caller.write_all(handle, bytes);
+    }
+    return;
+}
+
+// show reads one caller's answer and prints the body, which is the last line
+// after the blank one.
+fn show(
+    handle: Io,
+    allocator: Allocator,
+    callers: &var array::Array<net::TcpStream>,
+    index: i64
+) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    if callers.at_mut(index) |caller| {
+        var got = try caller.read_into(handle, allocator, &var reply, 4096);
+        while got > 0 {
+            got = try caller.read_into(handle, allocator, &var reply, 4096);
+        }
+    }
+    let wire = reply.as_bytes();
+    let start = body_start(wire);
+    print(wire[start..mem::len(wire)]);
+    return;
+}
+
+// body_start is the byte after the blank line that ends the head.
+fn body_start(wire: []u8) -> i64 {
+    let length = mem::len(wire);
+    var index = 0;
+    while index + 3 < length {
+        if wire[index] == cast<u8>(13) and wire[index + 1] == cast<u8>(10) {
+            if wire[index + 2] == cast<u8>(13) and wire[index + 3] == cast<u8>(10) {
+                return index + 4;
+            }
+        }
+        index = index + 1;
+    }
+    return length;
+}
+
+fn loopback(allocator: Allocator, port: i64) -> Failure!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+fn connect_to(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http io error-union
+// output:
+// /gamma
+// /alpha
+// /beta
+// /alpha
+// /beta
+// /gamma
