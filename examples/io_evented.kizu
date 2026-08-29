@@ -1,0 +1,145 @@
+// Two calls waiting, one thread, and neither of them written for it.
+//
+// `read_into` here is the same `read_into` as everywhere else: it waits until
+// there are bytes. What changed is the Io. A blocking one waits by not coming
+// back, so the second call cannot start until the first is done. An evented
+// one waits by giving the thread back -- the call stops where it stands, on a
+// stack of its own, and the loop returns to it when the descriptor is ready.
+//
+// The two workers below are ordinary functions. Nothing in them says async,
+// nothing in them says await, and neither could tell you which Io it is on.
+// That is the point: the choice is at `io::evented`, in the source, once
+// (ADR-0146).
+//
+// The order they finish in is forced, not lucky. `relay` has bytes waiting;
+// `listen_once` has none, so it is parked. When relay sends onward, the loop
+// sees the descriptor listen_once was waiting on and goes back to it -- into
+// the middle of a `read_into` that never returned.
+//
+// It is not concurrency. One thing runs at a time (SPEC §15), and where the
+// turns are is where the waits are.
+
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = io::Error or net::Error or mem::Error;
+
+struct Listener {
+    conn: net::TcpStream,
+    got: string::String,
+}
+
+fn (self: Listener) deinit(allocator: Allocator) -> void {
+    self.got.deinit(allocator);
+    self.conn.deinit();
+    return;
+}
+
+struct Relay {
+    conn: net::TcpStream,
+    onward: net::TcpStream,
+    got: string::String,
+}
+
+fn (self: Relay) deinit(allocator: Allocator) -> void {
+    self.got.deinit(allocator);
+    self.onward.deinit();
+    self.conn.deinit();
+    return;
+}
+
+// A worker is told its Io and its allocator, and works on the one value its
+// caller lent it. There are no closures in Kizu, so there is nothing else it
+// could have captured -- and nothing it holds outlives the lender.
+//
+// It answers `void` because there is no caller standing under it to `try`
+// into. What it wants to report, it reports into the state it was lent.
+fn listen_once(handle: Io, allocator: Allocator, job: &var Listener) -> void {
+    let got = job.conn.read_into(handle, allocator, &var job.got, 64) catch return;
+    if got == 0 {
+        return;
+    }
+    let text = job.got.as_bytes();
+    print(text);
+    return;
+}
+
+fn relay(handle: Io, allocator: Allocator, job: &var Relay) -> void {
+    let got = job.conn.read_into(handle, allocator, &var job.got, 64) catch return;
+    if got == 0 {
+        return;
+    }
+    let text = job.got.as_bytes();
+    print(text);
+    job.onward.write_all(handle, "from relay") catch return;
+    return;
+}
+
+fn main() -> Failure!void {
+    var loop = try io::loop_new(16);
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+
+    // The four ends of two connections. Each one is moved into the job that
+    // uses it, so the jobs are what release them.
+    var quiet_side = try dial(handle, &address);
+    errdefer quiet_side.deinit();
+    var quiet = try door.accept(handle);
+    errdefer quiet.deinit();
+    var talking_side = try dial(handle, &address);
+    defer talking_side.deinit();
+    var talking = try door.accept(handle);
+    errdefer talking.deinit();
+
+    var waiting = Listener { conn: move quiet, got: string::new(allocator) };
+    defer waiting.deinit(allocator);
+    var forwarding = Relay {
+        conn: move talking,
+        onward: move quiet_side,
+        got: string::new(allocator),
+    };
+    defer forwarding.deinit(allocator);
+
+    var first = try io::async<Listener>(
+        handle, allocator, listen_once, &var waiting, 262144);
+    defer first.deinit();
+    var second = try io::async<Relay>(
+        handle, allocator, relay, &var forwarding, 262144);
+    defer second.deinit();
+
+    // Only the talking side has anything to say. The other worker is already
+    // parked inside its read by the time this arrives.
+    try talking_side.write_all(handle, "hello");
+    first.await();
+    second.await();
+    return;
+}
+
+fn loopback(allocator: Allocator, port: i64) -> Failure!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+fn dial(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+// run
+// features: net io evented async error-union
+// output:
+// hello
+// from relay

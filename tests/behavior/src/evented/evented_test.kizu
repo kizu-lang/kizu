@@ -1,0 +1,197 @@
+import std::fmt;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+import std::testing;
+
+// What an evented Io promises, as the caller sees it. The worker is an
+// ordinary function taking an ordinary Io: whether it can stop in the middle
+// of a read is the Io's business, not its own.
+//
+// That two of them interleave at their waits is what `examples/io_evented.kizu`
+// shows, by printing from inside. What is asserted here is the contract around
+// them: a blocking Io runs the work where it is offered, an evented one runs
+// it on the loop, and a cancel reaches a worker that is standing in a wait.
+
+error Failure = io::Error or net::Error or mem::Error;
+
+struct Counter {
+    seen: i64,
+}
+
+fn bump(handle: Io, allocator: Allocator, job: &var Counter) -> void {
+    job.seen = job.seen + 1;
+    return;
+}
+
+struct Waiter {
+    conn: net::TcpStream,
+    got: string::String,
+    read: i64,
+    stopped: bool,
+}
+
+fn (self: Waiter) deinit(allocator: Allocator) -> void {
+    self.got.deinit(allocator);
+    self.conn.deinit();
+    return;
+}
+
+// A worker answers void: there is no caller standing under it to `try` into,
+// so what it wants to report it writes into the state it was lent.
+fn drink(handle: Io, allocator: Allocator, job: &var Waiter) -> void {
+    // A failure here is what a cancelled wait looks like from inside: the
+    // worker has no caller to `try` into, so it records it and returns.
+    let got = job.conn.read_into(handle, allocator, &var job.got, 64) catch -1;
+    if got < 0 {
+        job.stopped = true;
+        return;
+    }
+    job.read = got;
+    return;
+}
+
+test "a blocking Io runs the work where it is offered" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var job = Counter { seen: 0 };
+    var future = try io::async<Counter>(handle, allocator, bump, &var job, 65536);
+    // Nothing has been awaited and the work is already done: with nothing to
+    // run it beside, offering it is running it.
+    testing::expect(future.finished());
+    future.deinit();
+    testing::expect_equal<i64>(1, job.seen);
+}
+
+test "an evented Io runs the work on the loop" {
+    var loop = try io::loop_new(8);
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+    var job = Counter { seen: 0 };
+    var future = try io::async<Counter>(handle, allocator, bump, &var job, 65536);
+    // The loop has not run, so neither has the worker.
+    testing::expect(!future.finished());
+    future.await();
+    testing::expect(future.finished());
+    future.deinit();
+    testing::expect_equal<i64>(1, job.seen);
+}
+
+test "a worker parked in a read is resumed when the bytes arrive" {
+    var loop = try io::loop_new(8);
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+    var near = try dial(handle, &address);
+    defer near.deinit();
+    var far = try door.accept(handle);
+    errdefer far.deinit();
+
+    var job = Waiter {
+        conn: move far,
+        got: string::new(allocator),
+        read: 0,
+        stopped: false,
+    };
+    defer job.deinit(allocator);
+    var future = try io::async<Waiter>(handle, allocator, drink, &var job, 262144);
+    defer future.deinit();
+
+    // One thread means the send has to be first; that two workers take turns
+    // at their waits is what the example shows. What is asserted here is that
+    // a read reached through the loop reads what a blocking one would.
+    try near.write_all(handle, "hello");
+    future.await();
+
+    testing::expect(future.finished());
+    testing::expect_equal<i64>(5, job.read);
+    testing::expect_equal<i64>(5, job.got.len());
+    testing::expect(!job.stopped);
+}
+
+test "cancel stops a parked worker and lets it unwind" {
+    var loop = try io::loop_new(8);
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+    var near = try dial(handle, &address);
+    defer near.deinit();
+    var far = try door.accept(handle);
+    errdefer far.deinit();
+
+    var job = Waiter {
+        conn: move far,
+        got: string::new(allocator),
+        read: 0,
+        stopped: false,
+    };
+    defer job.deinit(allocator);
+    var future = try io::async<Waiter>(handle, allocator, drink, &var job, 262144);
+    defer future.deinit();
+
+    // Nobody sends anything, so the read parks. The cancel arrives there as a
+    // failure, and the worker returns through the path it already wrote.
+    future.cancel();
+    testing::expect(future.finished());
+    testing::expect(job.stopped);
+    testing::expect_equal<i64>(0, job.read);
+}
+
+test "a parked read still runs out of its deadline" {
+    var loop = try io::loop_new(8);
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+    var near = try dial(handle, &address);
+    defer near.deinit();
+    var far = try door.accept(handle);
+    errdefer far.deinit();
+    far.set_read_deadline(net::deadline_in_millis(50));
+
+    var job = Waiter {
+        conn: move far,
+        got: string::new(allocator),
+        read: 0,
+        stopped: false,
+    };
+    defer job.deinit(allocator);
+    var future = try io::async<Waiter>(handle, allocator, drink, &var job, 262144);
+    defer future.deinit();
+
+    // The deadline is the caller's, and it is the same deadline either way:
+    // the loop is what waits now, so the loop is what stops waiting.
+    future.await();
+    testing::expect(future.finished());
+    testing::expect(job.stopped);
+}
+
+fn loopback(allocator: Allocator, port: i64) -> Failure!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+fn dial(handle: Io, address: &string::String) -> Failure!net::TcpStream {
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}

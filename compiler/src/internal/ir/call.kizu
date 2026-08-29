@@ -144,6 +144,10 @@ fn (self: &var Lowerer) lower_type_apply_call(
         let resolved = try self.resolve_type_args(type_arg);
         return self.lower_allocator_from(tree, resolved, args, out);
     }
+    if self.name_is(callee_name, "std::internal::builtin::task_new") {
+        let resolved = try self.resolve_type_args(type_arg);
+        return self.lower_task_new(tree, resolved, args, out);
+    }
     var handled = false;
     if try self.lower_meta_apply(tree, callee_name, type_arg, args, out, &var handled) |failed| {
         return move failed;
@@ -295,6 +299,36 @@ fn (self: &var Lowerer) lower_allocator_from(
     let allocator = try self.module.names.intern("Allocator");
     let symbol = try self.module.names.intern("std::internal::builtin::mem_allocator_from");
     out.* = try self.emit_with(Op::Call, symbol, allocator, empty_name(), &values);
+    return null;
+}
+
+/// Lowers `task_new<T>`. The state stays a borrow: the worker runs on its own
+/// stack and writes into what the caller lent it, so what crosses is the
+/// address, not a copy.
+fn (self: &var Lowerer) lower_task_new(
+    tree: &var ast::Ast,
+    state: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var values = array::new<Value>(self.allocator);
+    defer values.deinit(self.allocator);
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = empty_name();
+        if index == 3 {
+            want = try self.borrowed_state_name(state);
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try values.append(self.allocator, value);
+    }
+    let result = try self.module.names.intern("i64");
+    let symbol = try self.module.names.intern("std::internal::builtin::task_new");
+    out.* = try self.emit_with(Op::Call, symbol, result, empty_name(), &values);
     return null;
 }
 

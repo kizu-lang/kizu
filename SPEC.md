@@ -2896,19 +2896,19 @@ fn read_config(io: Io, allocator: Allocator, path: []u8) -> !string::String {
 
 ```text
 std::io::blocking()          simple blocking I/O
+std::io::evented(&var loop)  one thread, many waits (ADR-0146)
 std::testing::failing_io()   deterministic failing I/O for tests
 ```
 
 将来の implementation 候補:
 
 ```text
-std::io::evented()   event-loop or coroutine backed I/O
 std::io::uring()     Linux io_uring backend
 std::io::kqueue()    kqueue backend
 ```
 
-`evented` / `uring` / `kqueue` は実装しません。
-runtime selection の方針は ADR-0039 に従います。
+`uring` / `kqueue` は実装しません。runtime selection の方針は ADR-0039 に
+従います。
 
 多数の descriptor を同時に待つことは `Io` の実装差ではなく、`std::net::Poller`
 という値です(ADR-0141)。
@@ -2917,7 +2917,14 @@ runtime selection の方針は ADR-0039 に従います。
 並行性ではありません —— 同時に走るものは無く、`resume` が止まるところまで
 走らせる間は他に何も起きません。増えるのは止まれる場所が呼び出しの途中でよい
 ことで、それが `evented` な `Io` に要るものです。API の形は `docs/std/coro.md`
-にあります。`async fn` / `await` は変わらず実装しません。
+にあります。
+
+**待ちを表す `Io` は `std::io::async` として入りました**(ADR-0146)。worker は
+`fn(Io, Allocator, &var A) -> void` の top-level function で、`async` はそれを
+始め、`Future` がそれを引き受けます。`blocking()` の `async` は worker をその場で
+走らせるので、**`async` は並行性の約束ではありません** —— 差が出るのは待つとき
+だけです。`async fn` / `await` という着色は変わらず実装しません。API の形は
+`docs/std/io.md` にあります。
 
 ### 15.2 Io を取る標準 API
 

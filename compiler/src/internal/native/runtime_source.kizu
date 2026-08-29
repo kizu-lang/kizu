@@ -1479,10 +1479,24 @@ pub fn runtime_source() -> []u8 {
         \\}
         \\
         \\
+        \\/* An evented Io answers this instead of poll: the call gives the thread back
+        \\ * and the loop returns to it when the descriptor is ready. Defined with the
+        \\ * loop below, because it needs the coroutine the call is standing on. */
+        \\static int kizu_loop_park_io(
+        \\    void *io, int fd, short events, int64_t remaining, int64_t *out);
+        \\
         \\/* kizu_net_wait blocks until the descriptor is ready or the budget runs out.
         \\ * With no deadline it does not poll at all -- the blocking call that follows
-        \\ * is the wait -- so a stream without one pays nothing for this. */
-        \\static int64_t kizu_net_wait(int fd, short events, int64_t remaining) {
+        \\ * is the wait -- so a stream without one pays nothing for this.
+        \\ *
+        \\ * `io` is here because the waiting is what an Io implementation differs in.
+        \\ * Everything above this reaches the network through one of the four calls that
+        \\ * wait, so this is the one place an evented Io has to change. */
+        \\static int64_t kizu_net_wait(void *io, int fd, short events, int64_t remaining) {
+        \\    int64_t parked = 0;
+        \\    if (kizu_loop_park_io(io, fd, events, remaining, &parked)) {
+        \\        return parked;
+        \\    }
         \\    int budget = -1;
         \\    if (remaining >= 0) {
         \\        budget = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
@@ -1606,10 +1620,10 @@ pub fn runtime_source() -> []u8 {
         \\ * of SO_ERROR afterwards. That is what gives a connect a deadline: a blocking
         \\ * one waits as long as the host's own retry policy says, which is on the order
         \\ * of a minute for an address that answers nothing. */
-        \\static int64_t kizu_net_finish_connect(int fd, int64_t deadline) {
-        \\    int64_t wait = kizu_net_wait(fd, POLLOUT, kizu_net_remaining(deadline));
+        \\static int64_t kizu_net_finish_connect(void *io, int fd, int64_t deadline) {
+        \\    int64_t wait = kizu_net_wait(io, fd, POLLOUT, kizu_net_remaining(deadline));
         \\    if (wait == KIZU_NET_WAIT_RETRY) {
-        \\        return kizu_net_finish_connect(fd, deadline);
+        \\        return kizu_net_finish_connect(io, fd, deadline);
         \\    }
         \\    if (wait != KIZU_NET_WAIT_READY) {
         \\        return wait;
@@ -1658,7 +1672,7 @@ pub fn runtime_source() -> []u8 {
         \\                close(fd);
         \\                continue;
         \\            }
-        \\            int64_t pending = kizu_net_finish_connect(fd, deadline);
+        \\            int64_t pending = kizu_net_finish_connect(io, fd, deadline);
         \\            if (pending != 0) {
         \\                last = pending;
         \\                close(fd);
@@ -1697,7 +1711,7 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    for (;;) {
-        \\        int64_t wait = kizu_net_wait((int)fd, POLLIN, kizu_net_remaining(deadline));
+        \\        int64_t wait = kizu_net_wait(io, (int)fd, POLLIN, kizu_net_remaining(deadline));
         \\        if (wait == KIZU_NET_WAIT_RETRY) {
         \\            continue;
         \\        }
@@ -1761,7 +1775,7 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    for (;;) {
-        \\        int64_t wait = kizu_net_wait((int)fd, POLLIN, kizu_net_remaining(deadline));
+        \\        int64_t wait = kizu_net_wait(io, (int)fd, POLLIN, kizu_net_remaining(deadline));
         \\        if (wait == KIZU_NET_WAIT_RETRY) {
         \\            continue;
         \\        }
@@ -1813,7 +1827,7 @@ pub fn runtime_source() -> []u8 {
         \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    int64_t sent = 0;
         \\    while (sent < bytes.len) {
-        \\        int64_t wait = kizu_net_wait((int)fd, POLLOUT, kizu_net_remaining(deadline));
+        \\        int64_t wait = kizu_net_wait(io, (int)fd, POLLOUT, kizu_net_remaining(deadline));
         \\        if (wait == KIZU_NET_WAIT_RETRY) {
         \\            continue;
         \\        }
@@ -2224,6 +2238,8 @@ pub fn runtime_source() -> []u8 {
         \\ * having been written to expect it (ADR-0141).
         \\ * ------------------------------------------------------------------------ */
         \\
+        \\struct KizuLoop;
+        \\
         \\typedef struct KizuCoro {
         \\    ucontext_t inside;
         \\    ucontext_t outside;
@@ -2231,8 +2247,18 @@ pub fn runtime_source() -> []u8 {
         \\    size_t stack_size;
         \\    void (*entry)(int64_t);
         \\    int64_t arg;
+        \\    /* A task carries what its worker is told instead of one number: the Io it
+        \\       runs on, the allocator it may grow with, and the address of the state
+        \\       its caller moved in. */
+        \\    void (*task)(void *, void *, void *);
+        \\    void *task_io;
+        \\    void *task_allocator;
+        \\    void *task_state;
+        \\    struct KizuLoop *loop;
         \\    int started;
         \\    int finished;
+        \\    int parked;
+        \\    int canceled;
         \\} KizuCoro;
         \\
         \\/* The coroutine currently running, or NULL in the caller. One thread means one
@@ -2257,7 +2283,11 @@ pub fn runtime_source() -> []u8 {
         \\static void kizu_coro_trampoline(void) {
         \\    KizuCoro *coro = kizu_coro_starting;
         \\    kizu_coro_starting = NULL;
-        \\    coro->entry(coro->arg);
+        \\    if (coro->task) {
+        \\        coro->task(coro->task_io, coro->task_allocator, coro->task_state);
+        \\    } else {
+        \\        coro->entry(coro->arg);
+        \\    }
         \\    coro->finished = 1;
         \\    /* uc_link takes it back to whoever resumed it. */
         \\}
@@ -2349,6 +2379,413 @@ pub fn runtime_source() -> []u8 {
         \\    KizuCoro *coro = kizu_coro_from(handle);
         \\    if (!coro) {
         \\        return;
+        \\    }
+        \\    free(coro->stack);
+        \\    free(coro);
+        \\}
+        \\
+        \\/* ------------------------------------------------------------------ *
+        \\ * An evented Io: one loop, many calls that gave the thread back.
+        \\ *
+        \\ * Every wait in this file goes through kizu_net_wait, and that is the only
+        \\ * thing an evented Io does differently: instead of sitting in poll, the call
+        \\ * writes down what it is waiting for, gives the thread back, and is returned
+        \\ * to when the descriptor is ready. The calls above it are unchanged -- they
+        \\ * are the same blocking source, standing on a stack that can be put down.
+        \\ *
+        \\ * The loop is the Io. An `Io` value is a pointer, and the two blocking ones
+        \\ * are small integers, so a pointer with the tag below is the loop itself and
+        \\ * everything reaches it from the capability it was already being handed.
+        \\ * ------------------------------------------------------------------ */
+        \\
+        \\#define KIZU_LOOP_TAG UINT64_C(0x4b697a754c6f6f70) /* "KizuLoop" */
+        \\
+        \\/* One call that is waiting. `outcome` is written by the loop before it goes
+        \\   back to the coroutine, so what the call returns is decided in one place. */
+        \\typedef struct KizuPark {
+        \\    int fd;
+        \\    short events;
+        \\    int64_t deadline;
+        \\    int64_t outcome;
+        \\    KizuCoro *coro;
+        \\    int live;
+        \\    int done;
+        \\} KizuPark;
+        \\
+        \\typedef struct KizuLoop {
+        \\    uint64_t tag;
+        \\    KizuPark *parks;
+        \\    size_t park_count;
+        \\    size_t park_cap;
+        \\    KizuCoro **tasks;
+        \\    size_t task_count;
+        \\    size_t task_cap;
+        \\    struct pollfd *pfds;
+        \\    size_t *pfd_park;
+        \\    size_t pfd_cap;
+        \\} KizuLoop;
+        \\
+        \\static KizuLoop *kizu_io_loop(void *io) {
+        \\    if (!io || io == KIZU_IO_WORKING || io == KIZU_IO_FAILING) {
+        \\        return NULL;
+        \\    }
+        \\    KizuLoop *loop = (KizuLoop *)io;
+        \\    return loop->tag == KIZU_LOOP_TAG ? loop : NULL;
+        \\}
+        \\
+        \\static int kizu_loop_grow_parks(KizuLoop *loop) {
+        \\    size_t want = loop->park_cap ? loop->park_cap * 2 : 8;
+        \\    KizuPark *parks = (KizuPark *)realloc(loop->parks, want * sizeof *parks);
+        \\    if (!parks) {
+        \\        return 0;
+        \\    }
+        \\    struct pollfd *pfds = (struct pollfd *)realloc(loop->pfds, want * sizeof *pfds);
+        \\    if (!pfds) {
+        \\        loop->parks = parks;
+        \\        loop->park_cap = want;
+        \\        return 0;
+        \\    }
+        \\    size_t *index = (size_t *)realloc(loop->pfd_park, want * sizeof *index);
+        \\    if (!index) {
+        \\        loop->parks = parks;
+        \\        loop->pfds = pfds;
+        \\        loop->park_cap = want;
+        \\        return 0;
+        \\    }
+        \\    loop->parks = parks;
+        \\    loop->pfds = pfds;
+        \\    loop->pfd_park = index;
+        \\    loop->park_cap = want;
+        \\    loop->pfd_cap = want;
+        \\    return 1;
+        \\}
+        \\
+        \\/* A slot to wait in. Finished ones are reused, so a loop that serves a million
+        \\   connections one after another holds as many slots as it ever waited at once,
+        \\   not as many as it ever waited. */
+        \\static int64_t kizu_loop_claim_park(KizuLoop *loop) {
+        \\    for (size_t i = 0; i < loop->park_count; i += 1) {
+        \\        if (!loop->parks[i].live) {
+        \\            return (int64_t)i;
+        \\        }
+        \\    }
+        \\    if (loop->park_count == loop->park_cap && !kizu_loop_grow_parks(loop)) {
+        \\        return -1;
+        \\    }
+        \\    size_t index = loop->park_count;
+        \\    loop->park_count += 1;
+        \\    return (int64_t)index;
+        \\}
+        \\
+        \\/* Waits by giving the thread back. Answers 1 when it handled the wait, so
+        \\   kizu_net_wait can fall through to poll for a blocking Io, and for a plain
+        \\   coroutine that never belonged to a loop. */
+        \\static int kizu_loop_park_io(
+        \\    void *io, int fd, short events, int64_t remaining, int64_t *out) {
+        \\    KizuLoop *loop = kizu_io_loop(io);
+        \\    KizuCoro *coro = kizu_coro_current;
+        \\    if (!loop || !coro || coro->loop != loop) {
+        \\        return 0;
+        \\    }
+        \\    if (coro->canceled) {
+        \\        *out = KIZU_ERR_STD_NET_ERROR_CANCELED;
+        \\        return 1;
+        \\    }
+        \\    int64_t slot = kizu_loop_claim_park(loop);
+        \\    if (slot < 0) {
+        \\        *out = KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY;
+        \\        return 1;
+        \\    }
+        \\    size_t index = (size_t)slot;
+        \\    loop->parks[index].fd = fd;
+        \\    loop->parks[index].events = events;
+        \\    loop->parks[index].deadline =
+        \\        remaining < 0 ? KIZU_NET_NO_DEADLINE : kizu_monotonic_millis() + remaining;
+        \\    loop->parks[index].outcome = KIZU_NET_WAIT_RETRY;
+        \\    loop->parks[index].coro = coro;
+        \\    loop->parks[index].live = 1;
+        \\    loop->parks[index].done = 0;
+        \\    coro->parked = 1;
+        \\    std__internal__builtin__coro_suspend();
+        \\    coro->parked = 0;
+        \\    *out = loop->parks[index].outcome;
+        \\    loop->parks[index].live = 0;
+        \\    if (coro->canceled) {
+        \\        *out = KIZU_ERR_STD_NET_ERROR_CANCELED;
+        \\    }
+        \\    return 1;
+        \\}
+        \\
+        \\/* Wakes one parked call with the answer it should return. */
+        \\static void kizu_loop_settle(KizuLoop *loop, size_t index, int64_t outcome) {
+        \\    if (!loop->parks[index].live || loop->parks[index].done) {
+        \\        return;
+        \\    }
+        \\    loop->parks[index].outcome = outcome;
+        \\    loop->parks[index].done = 1;
+        \\}
+        \\
+        \\/* One turn of the loop. Runnable tasks go first -- a task that suspended
+        \\   without waiting on anything is runnable, and a loop that polled instead
+        \\   would wait for a descriptor nobody is waiting on. Answers whether there was
+        \\   anything to do at all; a loop with neither is stalled, and the caller says
+        \\   so rather than blocking on nothing. */
+        \\static int kizu_loop_turn(KizuLoop *loop) {
+        \\    int ran = 0;
+        \\    for (size_t i = 0; i < loop->task_count; i += 1) {
+        \\        KizuCoro *task = loop->tasks[i];
+        \\        if (!task || task->finished || task->parked) {
+        \\            continue;
+        \\        }
+        \\        ran = 1;
+        \\        std__internal__builtin__coro_resume((int64_t)(intptr_t)task);
+        \\    }
+        \\    if (ran) {
+        \\        return 1;
+        \\    }
+        \\
+        \\    size_t waiting = 0;
+        \\    int64_t earliest = KIZU_NET_NO_DEADLINE;
+        \\    int64_t now = kizu_monotonic_millis();
+        \\    for (size_t i = 0; i < loop->park_count; i += 1) {
+        \\        if (!loop->parks[i].live || loop->parks[i].done) {
+        \\            continue;
+        \\        }
+        \\        if (loop->parks[i].deadline >= 0 && loop->parks[i].deadline <= now) {
+        \\            kizu_loop_settle(loop, i, KIZU_ERR_STD_NET_ERROR_TIMED_OUT);
+        \\            continue;
+        \\        }
+        \\        loop->pfds[waiting].fd = loop->parks[i].fd;
+        \\        loop->pfds[waiting].events = loop->parks[i].events;
+        \\        loop->pfds[waiting].revents = 0;
+        \\        loop->pfd_park[waiting] = i;
+        \\        waiting += 1;
+        \\        if (loop->parks[i].deadline >= 0 &&
+        \\            (earliest < 0 || loop->parks[i].deadline < earliest)) {
+        \\            earliest = loop->parks[i].deadline;
+        \\        }
+        \\    }
+        \\
+        \\    if (waiting > 0) {
+        \\        int budget = -1;
+        \\        if (earliest >= 0) {
+        \\            int64_t left = earliest - kizu_monotonic_millis();
+        \\            if (left < 0) {
+        \\                left = 0;
+        \\            }
+        \\            budget = left > INT32_MAX ? INT32_MAX : (int)left;
+        \\        }
+        \\        int ready = poll(loop->pfds, (nfds_t)waiting, budget);
+        \\        if (ready > 0) {
+        \\            for (size_t i = 0; i < waiting; i += 1) {
+        \\                if (loop->pfds[i].revents != 0) {
+        \\                    kizu_loop_settle(loop, loop->pfd_park[i], KIZU_NET_WAIT_READY);
+        \\                }
+        \\            }
+        \\        } else if (ready < 0 && errno != EINTR) {
+        \\            int64_t failure = kizu_net_errno_failure(errno);
+        \\            for (size_t i = 0; i < waiting; i += 1) {
+        \\                kizu_loop_settle(loop, loop->pfd_park[i], failure);
+        \\            }
+        \\        }
+        \\        now = kizu_monotonic_millis();
+        \\        for (size_t i = 0; i < waiting; i += 1) {
+        \\            size_t index = loop->pfd_park[i];
+        \\            if (loop->parks[index].deadline >= 0 &&
+        \\                loop->parks[index].deadline <= now) {
+        \\                kizu_loop_settle(loop, index, KIZU_ERR_STD_NET_ERROR_TIMED_OUT);
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    /* Resuming can park again, which can move the array, so the coroutine is
+        \\       read out of the slot before anything runs. */
+        \\    int woke = 0;
+        \\    for (size_t i = 0; i < loop->park_count; i += 1) {
+        \\        if (!loop->parks[i].live || !loop->parks[i].done) {
+        \\            continue;
+        \\        }
+        \\        KizuCoro *coro = loop->parks[i].coro;
+        \\        loop->parks[i].done = 0;
+        \\        woke = 1;
+        \\        std__internal__builtin__coro_resume((int64_t)(intptr_t)coro);
+        \\    }
+        \\    return woke || waiting > 0;
+        \\}
+        \\
+        \\int64_t std__internal__builtin__io_loop_new(int64_t capacity) {
+        \\    KizuLoop *loop = (KizuLoop *)calloc(1, sizeof *loop);
+        \\    if (!loop) {
+        \\        return 0;
+        \\    }
+        \\    loop->tag = KIZU_LOOP_TAG;
+        \\    if (capacity > 0 && capacity < 4096) {
+        \\        while (loop->park_cap < (size_t)capacity) {
+        \\            if (!kizu_loop_grow_parks(loop)) {
+        \\                break;
+        \\            }
+        \\        }
+        \\    }
+        \\    return (int64_t)(intptr_t)loop;
+        \\}
+        \\
+        \\static KizuLoop *kizu_loop_from(int64_t handle) {
+        \\    if (handle == 0) {
+        \\        return NULL;
+        \\    }
+        \\    return (KizuLoop *)(intptr_t)handle;
+        \\}
+        \\
+        \\void *std__internal__builtin__io_evented(int64_t handle) {
+        \\    KizuLoop *loop = kizu_loop_from(handle);
+        \\    return loop ? (void *)loop : KIZU_IO_FAILING;
+        \\}
+        \\
+        \\void std__internal__builtin__io_loop_close(int64_t handle) {
+        \\    KizuLoop *loop = kizu_loop_from(handle);
+        \\    if (!loop) {
+        \\        return;
+        \\    }
+        \\    free(loop->parks);
+        \\    free(loop->pfds);
+        \\    free(loop->pfd_park);
+        \\    free(loop->tasks);
+        \\    free(loop);
+        \\}
+        \\
+        \\static int kizu_loop_track(KizuLoop *loop, KizuCoro *coro) {
+        \\    if (loop->task_count == loop->task_cap) {
+        \\        size_t want = loop->task_cap ? loop->task_cap * 2 : 8;
+        \\        KizuCoro **tasks = (KizuCoro **)realloc(loop->tasks, want * sizeof *tasks);
+        \\        if (!tasks) {
+        \\            return 0;
+        \\        }
+        \\        loop->tasks = tasks;
+        \\        loop->task_cap = want;
+        \\    }
+        \\    loop->tasks[loop->task_count] = coro;
+        \\    loop->task_count += 1;
+        \\    return 1;
+        \\}
+        \\
+        \\static void kizu_loop_forget(KizuLoop *loop, KizuCoro *coro) {
+        \\    for (size_t i = 0; i < loop->task_count; i += 1) {
+        \\        if (loop->tasks[i] != coro) {
+        \\            continue;
+        \\        }
+        \\        loop->tasks[i] = loop->tasks[loop->task_count - 1];
+        \\        loop->task_count -= 1;
+        \\        return;
+        \\    }
+        \\}
+        \\
+        \\/* Starts one worker. On a blocking Io there is nothing to run it beside, so it
+        \\   runs here and the caller gets back something already finished -- `async` is
+        \\   where the work is offered, not a promise that anything else happens while it
+        \\   runs (ADR-0146). */
+        \\int64_t std__internal__builtin__task_new(
+        \\    void *io, void *allocator, void *entry, void *state, int64_t stack_bytes) {
+        \\    if (!entry) {
+        \\        return 0;
+        \\    }
+        \\    KizuLoop *loop = kizu_io_loop(io);
+        \\    KizuCoro *coro = (KizuCoro *)calloc(1, sizeof *coro);
+        \\    if (!coro) {
+        \\        return 0;
+        \\    }
+        \\    coro->task = (void (*)(void *, void *, void *))entry;
+        \\    coro->task_io = io;
+        \\    coro->task_allocator = allocator;
+        \\    coro->task_state = state;
+        \\    if (!loop) {
+        \\        coro->started = 1;
+        \\        coro->finished = 1;
+        \\        coro->task(io, allocator, state);
+        \\        return (int64_t)(intptr_t)coro;
+        \\    }
+        \\    if (stack_bytes < 16384) {
+        \\        stack_bytes = 16384;
+        \\    }
+        \\    if (stack_bytes > 64 * 1024 * 1024) {
+        \\        free(coro);
+        \\        return 0;
+        \\    }
+        \\    coro->stack = malloc((size_t)stack_bytes);
+        \\    if (!coro->stack) {
+        \\        free(coro);
+        \\        return 0;
+        \\    }
+        \\    coro->stack_size = (size_t)stack_bytes;
+        \\    coro->loop = loop;
+        \\    if (!kizu_loop_track(loop, coro)) {
+        \\        free(coro->stack);
+        \\        free(coro);
+        \\        return 0;
+        \\    }
+        \\    return (int64_t)(intptr_t)coro;
+        \\}
+        \\
+        \\int64_t std__internal__builtin__task_finished(int64_t handle) {
+        \\    KizuCoro *coro = kizu_coro_from(handle);
+        \\    if (!coro) {
+        \\        return 1;
+        \\    }
+        \\    return coro->finished ? 1 : 0;
+        \\}
+        \\
+        \\/* Runs the loop until this worker is done. Whoever else is on the loop runs
+        \\   too: a turn resumes everything that is ready, not only the one being waited
+        \\   for, which is what makes the wait pay for itself. */
+        \\void std__internal__builtin__task_await(void *io, int64_t handle) {
+        \\    KizuCoro *coro = kizu_coro_from(handle);
+        \\    if (!coro || coro->finished) {
+        \\        return;
+        \\    }
+        \\    KizuLoop *loop = coro->loop;
+        \\    if (!loop) {
+        \\        return;
+        \\    }
+        \\    while (!coro->finished) {
+        \\        if (!kizu_loop_turn(loop)) {
+        \\            return;
+        \\        }
+        \\    }
+        \\}
+        \\
+        \\/* Tells the worker to stop and then waits for it to. The stop arrives as a
+        \\   failure at the next call that would have waited, so the worker unwinds
+        \\   through the cleanups it already wrote; nothing it holds is dropped on the
+        \\   floor. A worker that answers a cancelled wait by asking again is not
+        \\   cancellable, the same way a goroutine that ignores its context is not. */
+        \\void std__internal__builtin__task_cancel(void *io, int64_t handle) {
+        \\    KizuCoro *coro = kizu_coro_from(handle);
+        \\    if (!coro || coro->finished) {
+        \\        return;
+        \\    }
+        \\    coro->canceled = 1;
+        \\    KizuLoop *loop = coro->loop;
+        \\    if (!loop) {
+        \\        return;
+        \\    }
+        \\    for (size_t i = 0; i < loop->park_count; i += 1) {
+        \\        if (loop->parks[i].live && loop->parks[i].coro == coro) {
+        \\            kizu_loop_settle(loop, i, KIZU_ERR_STD_NET_ERROR_CANCELED);
+        \\        }
+        \\    }
+        \\    while (!coro->finished) {
+        \\        if (!kizu_loop_turn(loop)) {
+        \\            return;
+        \\        }
+        \\    }
+        \\}
+        \\
+        \\void std__internal__builtin__task_close(int64_t handle) {
+        \\    KizuCoro *coro = kizu_coro_from(handle);
+        \\    if (!coro) {
+        \\        return;
+        \\    }
+        \\    if (coro->loop) {
+        \\        kizu_loop_forget(coro->loop, coro);
         \\    }
         \\    free(coro->stack);
         \\    free(coro);

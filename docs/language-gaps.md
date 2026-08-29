@@ -77,3 +77,4 @@ language / std の不足と、その場で使った局所解です。証拠の�
 | 1 つの呼び出しで `self` の field を 2 つ(片方は `&var`)借りられない | `std::http` の `step_head` が inbox から `request` へ、`take_body_piece` が接続から `self.body` へ直接写せない | local に staging して 2 回に分ける。head は `max_head_bytes`、body の piece は 4096 byte で上限があるので copy も有界だが、1 回余計 |
 | `Function` static parameter を Kizu の body から呼べない(`worker(x)` は `undefined function`)| `std::http` が Go 型の `serve<handler>` を書けない | loop を caller が書き、`first` / `next` が接続を手渡しする形にした。`std::meta::construct` が worker を呼べるのは compiler が呼び出しを合成しているから |
 | 手渡しで再代入される変数に `errdefer` を付けられない(`errdefer` cleanup receiver cannot be assigned over)| `first` / `next` の loop 本体 | 1 周を関数にして、その frame が `Exchange` を所有する。所有と cleanup が同じ frame に来るので、結果的にこちらの方が正しかった |
+| user 定義の generic struct を構築できない(`Pair<T> { first: value }` が `field `Pair.first` expects T, got i64`。宣言と戻り値型は通る) | `std::io::Future<A>` が状態を所有する形を書けない | Future は状態を**貸してもらう**形にし、貸した値への tie で寿命を縛った。値が caller の手を離れないぶん結果的に正しい |

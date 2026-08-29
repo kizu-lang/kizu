@@ -3756,8 +3756,6 @@ func (c *Checker) checkStdConstructorBuiltin(
 	case "std::internal::builtin::io_blocking", "std::internal::builtin::io_failing":
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
-	case "std::io::evented", "std::internal::builtin::io_evented":
-		return "", true, errorf("type error: `std::io::evented` is not implemented")
 	default:
 		return "", false, nil
 	}
@@ -4249,6 +4247,10 @@ func (c *Checker) checkBuiltinTypeApply(
 		typ, err := c.checkAllocatorFrom(typeArg, args, env, unsafe)
 		return typ, true, err
 	}
+	if name == "std::internal::builtin::task_new" {
+		typ, err := c.checkTaskNew(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
 }
 
@@ -4268,7 +4270,8 @@ func (c *Checker) checkAllocatorFrom(
 	if err := c.requireAllocatorHeaderFirst(typeArg); err != nil {
 		return "", err
 	}
-	if err := c.checkAllocatorStateArg(typeArg, args[0], env, unsafe); err != nil {
+	if err := c.checkBorrowedStateArg(
+		"std::mem::allocator_from", typeArg, args[0], env, unsafe); err != nil {
 		return "", err
 	}
 	wants := []Type{
@@ -4289,8 +4292,51 @@ func (c *Checker) checkAllocatorFrom(
 	return Type("Allocator"), nil
 }
 
-// checkAllocatorStateArg validates the `&var T` an allocator is built from.
-func (c *Checker) checkAllocatorStateArg(
+// checkTaskNew validates `task_new<T>(io, allocator, entry, state, stack)`.
+// The entry is a top-level function the runtime calls on the task's own stack,
+// so what crosses is its address and the address of the state the caller moved
+// in. Neither is a closure and neither carries a borrow of anything else,
+// which is why the worker is told its Io and its allocator rather than
+// capturing them (ADR-0146).
+func (c *Checker) checkTaskNew(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(args) != 5 {
+		return "", errorf(
+			"type error: `std::io::async` expects io, allocator, entry, state and stack size")
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, "std::io::async"); err != nil {
+		return "", err
+	}
+	if err := c.checkCoreArg(
+		"std::io::async", 1, stdprim.ArgAllocator, args[1], env, unsafe); err != nil {
+		return "", err
+	}
+	want := Type("fn(Io, Allocator, &var " + typeArg + ") -> void")
+	got, err := c.checkContextualExpr(args[2], want, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(got, want) {
+		return "", errorf("type error: `std::io::async` entry expects %s, got %s", want, got)
+	}
+	if err := c.checkBorrowedStateArg(
+		"std::io::async", typeArg, args[3], env, unsafe); err != nil {
+		return "", err
+	}
+	if err := c.checkCoreArg(
+		"std::io::async", 4, stdprim.ArgI64, args[4], env, unsafe); err != nil {
+		return "", err
+	}
+	return Type("i64"), nil
+}
+
+// checkBorrowedStateArg validates the `&var T` a primitive writes through.
+func (c *Checker) checkBorrowedStateArg(
+	label string,
 	typeArg string,
 	arg ast.Expression,
 	env *scope,
@@ -4303,8 +4349,8 @@ func (c *Checker) checkAllocatorStateArg(
 		}
 		if !sameType(got, Type(typeArg)) {
 			return errorf(
-				"type error: `std::mem::allocator_from` state expects &var %s, got &var %s",
-				typeArg, got)
+				"type error: `%s` state expects &var %s, got &var %s",
+				label, typeArg, got)
 		}
 		return nil
 	}
@@ -4315,8 +4361,8 @@ func (c *Checker) checkAllocatorStateArg(
 		return err
 	}
 	if !sameType(got, Type(typeArg)) && !sameType(got, Type("&var "+typeArg)) {
-		return errorf("type error: `std::mem::allocator_from` state expects &var %s, got %s",
-			typeArg, got)
+		return errorf("type error: `%s` state expects &var %s, got %s",
+			label, typeArg, got)
 	}
 	return nil
 }

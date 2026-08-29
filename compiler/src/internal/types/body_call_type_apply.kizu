@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::stdprim;
 import compiler::internal::typ;
 import std::array;
 import std::fmt;
@@ -1300,6 +1301,10 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled.* = true;
         return self.check_allocator_from(tree, scope, type_arg, args, out);
     }
+    if mem::equal_bytes(name, "std::internal::builtin::task_new") {
+        handled.* = true;
+        return self.check_task_new(tree, scope, type_arg, args, out);
+    }
     return self.check_builtin_array_method_type_apply(
         tree,
         scope,
@@ -1309,6 +1314,87 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled,
         out
     );
+}
+
+/// Validates `task_new<T>(io, allocator, entry, state, stack)`. The entry is a
+/// top-level function the runtime calls on the task's own stack, so what
+/// crosses is its address and the address of the state the caller lent it.
+/// Neither is a closure and neither carries a borrow of anything else, which
+/// is why the worker is told its Io and its allocator (ADR-0146).
+fn (self: &var Checker) check_task_new(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 5 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::io::async` expects io, allocator, entry, state and stack size"
+        );
+    }
+    let io_arg = args.get_or_panic(tree, 0);
+    if try self.check_io_arg(tree, scope, io_arg, "std::io::async") |problem| {
+        return move problem;
+    }
+    let allocator_arg = args.get_or_panic(tree, 1);
+    if try self.check_core_arg(
+        tree, scope, "std::io::async", 1, stdprim::ArgKind::Allocator, allocator_arg
+    ) |problem| {
+        return move problem;
+    }
+    var entry_want = string::new(self.allocator);
+    defer entry_want.deinit(self.allocator);
+    try entry_want.append_bytes(self.allocator, "fn(Io, Allocator, &var ");
+    try entry_want.append_bytes(self.allocator, type_arg);
+    try entry_want.append_bytes(self.allocator, ") -> void");
+    let entry_bytes = entry_want.as_bytes();
+    let entry_type = try self.types.intern(entry_bytes);
+    let entry_arg = args.get_or_panic(tree, 2);
+    var got_entry = empty_type();
+    if try self.check_contextual_expr(
+        tree, scope, entry_arg, entry_type, &var got_entry
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(got_entry, entry_type) {
+        return try self.task_new_arg_error("entry", entry_type, got_entry);
+    }
+    let state_type = try self.types.intern(type_arg);
+    let state_arg = args.get_or_panic(tree, 3);
+    var got_state = empty_type();
+    if try self.check_expr(tree, scope, state_arg, &var got_state) |problem| {
+        return move problem;
+    }
+    if !same_type(got_state, state_type) {
+        return try self.task_new_arg_error("state", state_type, got_state);
+    }
+    let stack_arg = args.get_or_panic(tree, 4);
+    if try self.check_core_arg(
+        tree, scope, "std::io::async", 4, stdprim::ArgKind::I64, stack_arg
+    ) |problem| {
+        return move problem;
+    }
+    out.* = try self.types.intern("i64");
+    return null;
+}
+
+fn (self: &Checker) task_new_arg_error(
+    label: []u8,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "`std::io::async` ");
+    try message.append_bytes(self.allocator, label);
+    try message.append_bytes(self.allocator, " expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(self.allocator, ", got ");
+    try self.append_checker_type(&var message, got);
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 /// Validates `mem_allocator_from<T>(state, alloc, free)`. The header the

@@ -459,6 +459,13 @@ fn (self: &var Checker) returned_borrow_initializer(
     recognized: &var bool
 ) -> !?diagnostic::Diagnostic {
     recognized.* = false;
+    // A factory that can refuse hands its result back through `try`. The tie
+    // is a property of the value, not of how the failure was spelled, so the
+    // `try` is read through rather than treated as a different expression.
+    if try_expr(tree, expression) |attempt| {
+        return self.returned_borrow_initializer(
+            tree, env, attempt.value, sources, returned, recognized);
+    }
     let call = call_expr(tree, expression) orelse return null;
     let called = try self.called_user_function(tree, call.callee) orelse return null;
     let ret_name = self.return_type_name(called.function);
@@ -466,6 +473,7 @@ fn (self: &var Checker) returned_borrow_initializer(
     var elem = empty_name();
     var allocator_return = false;
     var view_return = false;
+    var tied_struct = false;
     if try self.names.explicit_borrow(ret_name) |parts| {
         mutable = parts.mutable;
         elem = parts.inner;
@@ -476,16 +484,28 @@ fn (self: &var Checker) returned_borrow_initializer(
         // through as a plain copy value). A view or view-capturing struct
         // return ties the same way when a borrow-class view flows in, and
         // falls through as a plain value when none does.
-        if self.names.is(ret_name, "Allocator") {
+        if self.capability_return(ret_name) {
+            // An allocator holds its buffer's writable view exclusively. An
+            // Io is copied into every call that takes one, so it is shared:
+            // what ties it is how long it may live, not who else may hold one.
             allocator_return = true;
-            mutable = true;
-            elem = self.common.allocator_name;
+            mutable = !self.names.is(ret_name, "Io");
+            elem = ret_name;
         } else {
-            if self.names.is(ret_name, "[]u8") or try self.view_capture_struct_type(ret_name) {
-                view_return = true;
+            if self.tied_struct_return(ret_name) {
+                // A Future holds the state it was lent exclusively, and only
+                // that: the Io it also took is a permission, not something the
+                // Future is made out of.
+                tied_struct = true;
+                mutable = true;
                 elem = ret_name;
             } else {
-                return null;
+                if self.names.is(ret_name, "[]u8") or try self.view_capture_struct_type(ret_name) {
+                    view_return = true;
+                    elem = ret_name;
+                } else {
+                    return null;
+                }
             }
         }
     }
@@ -495,7 +515,7 @@ fn (self: &var Checker) returned_borrow_initializer(
         return move failed;
     }
     if sources.len() == 0 {
-        if allocator_return or view_return {
+        if allocator_return or view_return or tied_struct {
             return null;
         }
         return try self.error1(
@@ -552,7 +572,7 @@ fn (self: &var Checker) call_borrow_return_sources(
         let arg = arg_at(tree, call.args, position) orelse continue;
         if !param.borrow or (mutable and !param.mut_borrow) {
             if allocator_return {
-                if self.tied_allocator_arg(tree, env, arg) |alloc| {
+                if self.tied_capability_arg(tree, env, arg) |alloc| {
                     try sources.append(self.allocator, BorrowSource { target: alloc, field: empty_name() });
                 }
             }
@@ -595,6 +615,39 @@ fn (self: &Checker) tied_allocator_arg(tree: &ast::Ast, env: ScopeHandle, arg: a
         return null;
     }
     return value;
+}
+
+/// Resolves an argument to a tied capability binding, or null. This answers
+/// the other question the allocator version does: may this be handed over at
+/// all. Lending one is free; what is not free is outliving what it reaches.
+fn (self: &Checker) tied_capability_arg(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    arg: ast::Expression
+) -> ?BindingHandle {
+    let value = self.direct_assignment_root(tree, env, arg) orelse return null;
+    if !self.capability_return(self.binding(value).type_name) {
+        return null;
+    }
+    if !self.binding(value).borrowed_param or !self.has_borrow_targets(value) {
+        return null;
+    }
+    return value;
+}
+
+/// Reports the return types that are tied when they are built from a borrow.
+/// A capability is a permission to reach something, so one built out of local
+/// state cannot leave the frame that state lives in.
+pub fn (self: &Checker) capability_return(name: Name) -> bool {
+    return self.names.is(name, "Allocator") or self.names.is(name, "Io");
+}
+
+/// Reports the std struct returns that stay tied to what they were built
+/// from. A Future stands on the state its caller lent it until the worker is
+/// done with it, so it cannot leave that state's frame.
+pub fn (self: &Checker) tied_struct_return(name: Name) -> bool {
+    return self.names.is(name, "std::io::Future") or
+        self.names.ends_with(name, "!std::io::Future");
 }
 
 /// Reports whether a call to fn yields a tied allocator, the Go

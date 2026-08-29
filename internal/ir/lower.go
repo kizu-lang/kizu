@@ -1344,6 +1344,24 @@ func (l *lowerer) lowerAllocatorFrom(state string, args []ast.Expression) (Value
 		"call.std::internal::builtin::mem_allocator_from", "Allocator", values, ""), nil
 }
 
+// lowerTaskNew lowers `task_new<T>`. The state stays a borrow: the worker runs
+// on its own stack and writes into the cell the caller moved its value into,
+// so what crosses is the address, not a copy.
+func (l *lowerer) lowerTaskNew(state string, args []ast.Expression) (Value, error) {
+	params := []Param{
+		{Type: "Io"},
+		{Type: "Allocator"},
+		{Type: "fn(Io, Allocator, &var " + state + ") -> void"},
+		{Type: "&var " + state, Passing: PassCallerStorage},
+		{Type: "i64"},
+	}
+	values, err := l.lowerCallArgsAs(params, args)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("call.std::internal::builtin::task_new", "i64", values, ""), nil
+}
+
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
 // The std storage constructors lower to one instruction each, so their std
 // bodies are never walked. Every other generic call resolves by name.
@@ -1366,6 +1384,8 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerPtrIntCast(typeApply.TypeArg, args)
 	case "std::internal::builtin::mem_allocator_from":
 		return l.lowerAllocatorFrom(l.resolveType(typeApply.TypeArg), args)
+	case "std::internal::builtin::task_new":
+		return l.lowerTaskNew(l.resolveType(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,

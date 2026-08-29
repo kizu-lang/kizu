@@ -64,3 +64,112 @@ pub fn read_stdin_into(
         io, allocator, out, std::mem::limit_bytes(std::mem::Limit::Unlimited));
     return;
 }
+
+// ---------------------------------------------------------------------------
+// An evented Io: many calls waiting, one thread, and the source unchanged.
+//
+// `blocking()` is one call at a time because the wait is a call that does not
+// come back. An evented Io waits by giving the thread back: the call writes
+// down what it is waiting for, stops where it stands, and is returned to when
+// the descriptor is ready. Nothing above it is written differently -- the same
+// `read_into`, the same `try` -- because the stack it is standing on is one
+// that can be put down (ADR-0146).
+//
+// It is not threads. One thing runs at a time, and which one is decided at the
+// waits, which are in the source.
+
+// A Loop is what an evented Io is. The capability is a permission to reach it,
+// so `evented` hands out one tied to the loop it names: an Io that outlived
+// its loop would be a permission to reach freed memory, and it cannot leave
+// the frame the loop lives in.
+pub struct Loop {
+    handle: i64,
+}
+
+pub fn loop_new(capacity: i64) -> std::io::Error!std::io::Loop {
+    let handle = std::internal::builtin::io_loop_new(capacity);
+    if handle == 0 {
+        return std::io::Error::OutOfMemory;
+    }
+    return Loop { handle: handle };
+}
+
+// evented is the Io the loop implements. Every std call that waits reaches the
+// loop through this, which is why nothing between here and the socket has to
+// know that it is one.
+pub fn evented(state: &var std::io::Loop) -> Io {
+    return std::internal::builtin::io_evented(state.handle);
+}
+
+fn (self: std::io::Loop) deinit() -> void {
+    std::internal::builtin::io_loop_close(self.handle);
+    return;
+}
+
+// A Future is one worker that was started and has not been collected. It
+// stands on the state its caller lent it, so it is tied to that state the way
+// a fixed-buffer allocator is tied to its buffer: it cannot leave the frame
+// the state lives in, and the state cannot be touched while it is alive.
+//
+// It is an owner, so it cannot be dropped: releasing one finishes the worker
+// first. That is what keeps a task from being forgotten while it is still
+// standing on somebody's socket.
+pub struct Future {
+    handle: i64,
+    io: Io,
+}
+
+// async offers the work. It is not a promise that anything else runs while it
+// does: on a blocking Io the worker runs here and comes back finished, which
+// is the honest answer for an implementation with nothing to run it beside.
+//
+// The worker is a top-level function, told its Io and its allocator rather
+// than capturing them, because Kizu has no closures. What it works on is the
+// one value the caller lent it, and the caller still owns it -- there is
+// nothing to hand back, and nothing to lose.
+pub fn async<A>(
+    io: Io,
+    allocator: Allocator,
+    entry: fn(Io, Allocator, &var A) -> void,
+    state: &var A,
+    stack_bytes: i64
+) -> std::io::Error!std::io::Future {
+    let handle = std::internal::builtin::task_new<A>(
+        io, allocator, entry, state, stack_bytes);
+    if handle == 0 {
+        return std::io::Error::OutOfMemory;
+    }
+    return Future { handle: handle, io: io };
+}
+
+// await runs the loop until this worker is done. Everyone else on the loop
+// runs too: a turn wakes whatever is ready, not only the one being waited for,
+// which is what makes the wait pay for itself.
+fn (self: &var std::io::Future) await() -> void {
+    std::internal::builtin::task_await(self.io, self.handle);
+    return;
+}
+
+// cancel tells the worker to stop and waits for it to. The stop arrives as
+// `Canceled` at the next call that would have waited, so the worker unwinds
+// through the cleanups it already wrote. A worker that answers a cancelled
+// wait by asking again is not cancellable, the way a goroutine that ignores
+// its context is not.
+fn (self: &var std::io::Future) cancel() -> void {
+    std::internal::builtin::task_cancel(self.io, self.handle);
+    return;
+}
+
+fn (self: &std::io::Future) finished() -> bool {
+    return std::internal::builtin::task_finished(self.handle) != 0;
+}
+
+// Releasing a Future cancels it first. A worker that was never awaited is
+// still standing on what it was lent, so freeing its stack without finishing
+// it would drop whatever that stack held -- and would leave the lender's own
+// cleanup running against something still in use.
+fn (self: std::io::Future) deinit() -> void {
+    std::internal::builtin::task_cancel(self.io, self.handle);
+    std::internal::builtin::task_close(self.handle);
+    return;
+}
