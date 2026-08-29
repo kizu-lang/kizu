@@ -28,6 +28,9 @@ while task.resume() { }
 
 stack は coroutine が持ちます(stackful)。だから止まった呼び出しは局所変数を
 そのままの場所に保て、`std::net` の奥の read が上の frame を書き換えずに止まれます。
+固定 stack の直下には読み書き不可の guard page を置き、native Kizu
+関数はページを飛び越さない間隔で stack を probe します。guard を設定
+できない spawn は失敗し、実行中の overflow は process を停止します。
 
 context の切り替えは `ucontext` です。macOS では deprecated ですが動きます。
 
@@ -43,6 +46,9 @@ coroutine に渡るのは数で、意味を知っているのは渡した側だ�
 **終わっていない coroutine の cleanup は走りません。** 走らせることは、誰も続きを
 頼んでいない呼び出しを再開することだからです。spawn した caller が終わりを決めます。
 
+**stack overflow は catch しません。** 尽きた stack 上で cleanup や unwind を始めると
+その実行自体の stack が無いため、guard への access で OS に process を止めさせます。
+
 `test` block の中から関数 pointer を値として使えるようになりました。block の
 合成名が module を持っていなかったので、名前が解決できていませんでした ——
 `std::coro` を test から使おうとして踏みました。
@@ -57,3 +63,4 @@ coroutine に渡るのは数で、意味を知っているのは渡した側だ�
 | stackless(状態機械への変換) | 呼び出しの途中で止まるには全 frame の変換が要り、それが function coloring。`std::http` を手で状態機械にした経験がその形 |
 | `resume` が失敗を返す | 終わった coroutine を resume するのは失敗ではない。false は「もう続きが無い」で、loop はそれで終わる |
 | coroutine の外の `suspend` を失敗にする | 戻る先が無いだけで、caller にできることは何も無い。何もしなかった呼び出しの方が正しい |
+| stack overflow を error として catch / unwind する | その処理を走らせる安全な stack がもう無い。保護違反で process を止める |

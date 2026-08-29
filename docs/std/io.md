@@ -33,7 +33,7 @@ allocator と上限は caller が明示します。`read_stdin_into` は既存�
 追記し、独自の storage を持ちません。
 
 `std::io::Error` は `WriteFailed`、`ReadFailed`、`OutOfMemory`、`IoFailing`、
-`LimitExceeded` を持ちます。
+`LimitExceeded`、`StackProtectionFailed` を持ちます。
 
 ## evented な Io
 
@@ -90,6 +90,12 @@ worker はそれに書き、caller は Future を解放した後にそれを読�
 evented worker の stack は 256 KiB で、`async` が allocator から一度だけ確保します。
 最終的な frame size は backend が決めるため、caller はその実装依存の数字を渡しません。
 stack は worker の実行中には伸びません。
+
+確保する 1 block は usable stack に alignment と guard 用の 2 page を足した
+大きさです。usable stack の直下を読み書き不可にし、native Kizu 関数の
+stack probe で大きな frame もその guard を飛び越さないようにします。guard を
+設定できなければ `async` / `spawn` は `StackProtectionFailed` を返し、
+実行中に overflow すれば cleanup は走らず process が停止します。
 
 `await` は loop を回して worker が終わるまで待ちます。同じ loop に居る他の
 worker も進みます —— 1 回の turn は準備できたものを全て起こすので、待ちが

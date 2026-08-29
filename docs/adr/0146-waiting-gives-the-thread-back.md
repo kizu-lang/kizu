@@ -38,6 +38,11 @@ worker stack は `async` が allocator から一度だけ確保し、実行中�
 caller ごとに同じ推測値を渡させても新しい情報にはなりません。確保する呼び出しと
 allocator は source に残し、byte 数だけを定義側へ畳みます。
 
+stack の直下は読み書き不可の guard page で、native Kizu 関数は guard を
+飛び越さない間隔で stack を probe します。guard の設定失敗は
+`StackProtectionFailed` として `async` / `spawn` から返し、保護なしの fallback は
+持ちません。実行中の overflow は catch せず、OS の保護違反で process を止めます。
+
 runtime 側でこれが要求するのは 1 箇所です。`std::net` の待ちは全て
 `kizu_net_wait` を通るので、evented ならそこで poll の代わりに coroutine を
 park します。
@@ -116,6 +121,7 @@ LLVM の型付き thunk が worker の `fn(Io, Allocator, A)` ABI へ戻しま�
 | `spawn` ごとに Io / allocator を渡す | worker が helper の frame を越えて capability を保持し得る。TaskSet 構築時に固定すれば、set の lifetime へ一度だけ tie できる |
 | `async` / `spawn` ごとに stack byte 数を渡す | backend が決める frame size を caller は導けず、同じ推測値が call site ごとに増える。確保は allocator を取る呼び出しに見えているので、byte 数は std の定義側に畳む |
 | worker stack を実行中に伸ばす | 開始後の見えない再確保と失敗を作り、live な borrow を含む stack の移動には compiler と runtime が共有する stack map も要る。開始時に固定量を確保する |
+| stack overflow を worker の error にする | overflow 後に catch / cleanup を走らせる stack が無い。guard で process を止める |
 | worker に i64 を 1 つ渡す(coroutine と同じ形) | 接続を渡せない。関数 pointer は borrow を運べず、global も無いので、worker は何にも届かない |
 | worker が `E!void` を返す | Future が error set を運ぶ必要があり、error set に generic な型が要る。goroutine と同じく、報告先は貸された状態 |
 | cancel は resume せず stack を捨てる | worker が握っていたものが落ちる。終わらせてから解放する |

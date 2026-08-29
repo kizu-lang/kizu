@@ -1359,7 +1359,12 @@ func (l *lowerer) lowerTaskNew(state string, args []ast.Expression) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("call.std::internal::builtin::task_new", "i64", values, ""), nil
+	return l.emit(
+		"call.std::internal::builtin::task_new",
+		"std::io::Error!i64",
+		values,
+		"",
+	), nil
 }
 
 // lowerTaskSetSpawn lowers an owned worker. The state crosses as a value in

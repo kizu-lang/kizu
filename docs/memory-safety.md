@@ -176,6 +176,13 @@ its worker storage; `deinit(allocator)` cancels before returning that storage. `
 moved, may not carry views or additional Io / Allocator capabilities, and is
 canceled through its own cleanup path before storage is released.
 
+Each native coroutine stack has an inaccessible guard page below its fixed
+usable range. Every emitted native Kizu function probes at intervals no wider
+than 4096 bytes, so a large frame cannot jump over that guard. Failure to
+install the guard is reported by spawn as `StackProtectionFailed`; there is no
+unguarded fallback. Crossing the boundary terminates the process before an
+out-of-range write and does not attempt to unwind on the exhausted stack.
+
 Kizu still has no thread, channel, mutex, or atomic API. The earlier
 `std::thread`, `std::channel`, `std::sync`, `std::atomic`, and
 `std::io::threaded()` APIs were withdrawn by ADR-0025: they carried checker

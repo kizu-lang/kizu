@@ -4335,7 +4335,7 @@ func (c *Checker) checkTaskNew(
 		"std::io::async", 4, stdprim.ArgI64, args[4], env, unsafe); err != nil {
 		return "", err
 	}
-	return Type("i64"), nil
+	return Type("std::io::Error!i64"), nil
 }
 
 // checkTaskSetSpawn validates

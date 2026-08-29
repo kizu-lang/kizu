@@ -141,7 +141,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::net_poller_close": {Args: []ArgKind{ArgI64}, Return: "void"},
 	"std::internal::builtin::coro_new": {
 		Args:   []ArgKind{ArgCoroEntry, ArgI64, ArgI64},
-		Return: "i64",
+		Return: "std::coro::Error!i64",
 	},
 	"std::internal::builtin::coro_resume":   {Args: []ArgKind{ArgI64}, Return: "i64"},
 	"std::internal::builtin::coro_suspend":  {Return: "void"},

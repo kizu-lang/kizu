@@ -2934,6 +2934,12 @@ allocator には shared に tied です。`deinit(allocator)` は worker を can
 storage を同じ allocator へ返します。state、tied Io、tied allocator より長生きする
 ことも、別の tied allocator で解放することもできません。
 
+native coroutine の fixed stack は読み書き不可の guard page で領域外への
+書き込みを止めます。compiler は native Kizu 関数に 4096 byte 以下の間隔の
+stack probe を付け、guard より大きい frame がそれを飛び越すことを許しません。
+guard の設定失敗は spawn から `StackProtectionFailed` を返し、実行中の
+stack overflow は回復可能な error にせず process を停止します。
+
 結果を読み戻さない worker は `std::io::TaskSet` が所有します。TaskSet は構築時の
 `Io` と allocator を保持し、`spawn<A>` は struct `A` を worker へ move します。
 `A` は view / borrow と `Io` / `Allocator` を含められません。TaskSet は保持した

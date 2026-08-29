@@ -5221,7 +5221,7 @@ func (c *Checker) checkTaskNew(
 			return "", err
 		}
 	}
-	return "i64", nil
+	return "std::io::Error!i64", nil
 }
 
 // checkTaskSetSpawn moves the state into the task set. Every other argument

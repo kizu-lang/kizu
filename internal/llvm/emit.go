@@ -110,7 +110,7 @@ func (e *emitter) writeTaskInvokeThunks() {
 		llvmType := e.llvmType(typeName)
 		fmt.Fprintf(&e.out,
 			"define internal void @%s("+
-				"ptr %%kizu.entry, ptr %%kizu.io, ptr %%kizu.allocator, ptr %%kizu.state) {\n",
+				"ptr %%kizu.entry, ptr %%kizu.io, ptr %%kizu.allocator, ptr %%kizu.state) #0 {\n",
 			taskInvokeThunkName(typeName),
 		)
 		e.out.WriteString("entry:\n")
@@ -187,6 +187,12 @@ func (e *emitter) writeHeader() {
 	e.writeTestRuntimeDecls()
 	e.writeExternalCallDecls()
 	e.writePanicDecls()
+	// The shared attribute makes large frames touch each page before they can
+	// cross a coroutine guard. Small frames receive no added instructions.
+	e.out.WriteString(
+		"attributes #0 = { \"probe-stack\"=\"inline-asm\" " +
+			"\"stack-probe-size\"=\"4096\" }\n\n",
+	)
 }
 
 // panicEntry is one runtime failure report: the entry that prints it and the
@@ -841,7 +847,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	}
 	e.registerForwardedValues(fn)
 	fmt.Fprintf(&e.out,
-		"define %s%s @%s(%s) {\n",
+		"define %s%s @%s(%s) #0 {\n",
 		functionLinkage(fn.Name),
 		returnType,
 		llvmFunctionName(fn.Name),
