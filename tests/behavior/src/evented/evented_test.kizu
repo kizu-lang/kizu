@@ -182,6 +182,46 @@ test "a parked read still runs out of its deadline" {
     testing::expect(job.stopped);
 }
 
+// A worker that awaits another worker turns the loop from inside its own
+// stack. The loop must skip whatever it is standing on: resuming that would
+// overwrite the way back out and jump into a context already running.
+struct Nest {
+    outer: i64,
+    inner: Inner,
+}
+
+struct Inner {
+    ran: i64,
+}
+
+fn count_inner(handle: Io, allocator: Allocator, job: &var Inner) -> void {
+    job.ran = job.ran + 1;
+    return;
+}
+
+fn count_outer(handle: Io, allocator: Allocator, job: &var Nest) -> void {
+    job.outer = job.outer + 1;
+    var started = io::async<Inner>(
+        handle, allocator, count_inner, &var job.inner, 262144) catch return;
+    started.await();
+    started.deinit();
+    return;
+}
+
+test "a worker can start a worker and wait for it" {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var job = Nest { outer: 0, inner: Inner { ran: 0 } };
+    var future = try io::async<Nest>(handle, allocator, count_outer, &var job, 262144);
+    future.await();
+    future.deinit();
+    testing::expect_equal<i64>(1, job.outer);
+    testing::expect_equal<i64>(1, job.inner.ran);
+}
+
 fn loopback(allocator: Allocator, port: i64) -> Failure!string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);

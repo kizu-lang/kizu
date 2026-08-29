@@ -1486,8 +1486,9 @@ pub fn runtime_source() -> []u8 {
         \\    void *io, int fd, short events, int64_t remaining, int64_t *out);
         \\
         \\/* kizu_net_wait blocks until the descriptor is ready or the budget runs out.
-        \\ * With no deadline it does not poll at all -- the blocking call that follows
-        \\ * is the wait -- so a stream without one pays nothing for this.
+        \\ * Its callers reach it only after the syscall itself said EAGAIN, so a
+        \\ * connection with bytes already in it never gets here: what a wait would have
+        \\ * told them, the read already did.
         \\ *
         \\ * `io` is here because the waiting is what an Io implementation differs in.
         \\ * Everything above this reaches the network through one of the four calls that
@@ -1775,6 +1776,17 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    for (;;) {
+        \\        ssize_t got = recv((int)fd, array->data + array->len, (size_t)want, 0);
+        \\        if (got >= 0) {
+        \\            array->len += (int64_t)got;
+        \\            return kizu_ok_i64((int64_t)got);
+        \\        }
+        \\        if (errno == EINTR) {
+        \\            continue;
+        \\        }
+        \\        if (!kizu_net_would_block(errno)) {
+        \\            return kizu_err_i64(kizu_net_errno_failure(errno));
+        \\        }
         \\        int64_t wait = kizu_net_wait(io, (int)fd, POLLIN, kizu_net_remaining(deadline));
         \\        if (wait == KIZU_NET_WAIT_RETRY) {
         \\            continue;
@@ -1782,15 +1794,6 @@ pub fn runtime_source() -> []u8 {
         \\        if (wait != KIZU_NET_WAIT_READY) {
         \\            return kizu_err_i64(wait);
         \\        }
-        \\        ssize_t got = recv((int)fd, array->data + array->len, (size_t)want, 0);
-        \\        if (got < 0) {
-        \\            if (errno == EINTR || kizu_net_would_block(errno)) {
-        \\                continue;
-        \\            }
-        \\            return kizu_err_i64(kizu_net_errno_failure(errno));
-        \\        }
-        \\        array->len += (int64_t)got;
-        \\        return kizu_ok_i64((int64_t)got);
         \\    }
         \\}
         \\
@@ -1827,18 +1830,11 @@ pub fn runtime_source() -> []u8 {
         \\    int64_t deadline = kizu_net_deadline(timeout_ms);
         \\    int64_t sent = 0;
         \\    while (sent < bytes.len) {
-        \\        int64_t wait = kizu_net_wait(io, (int)fd, POLLOUT, kizu_net_remaining(deadline));
-        \\        if (wait == KIZU_NET_WAIT_RETRY) {
-        \\            continue;
-        \\        }
-        \\        if (wait != KIZU_NET_WAIT_READY) {
-        \\            return kizu_err_void(wait);
-        \\        }
         \\        /* A chunk at a time, because a blocking send does not come back after a
         \\         * partial write: it blocks until everything it was handed is accepted.
         \\         * Handing it the whole body would put one send in the kernel for as
         \\         * long as a peer that stopped reading cares to leave it there, and the
-        \\         * poll above -- and the deadline with it -- would never be read again.
+        \\         * wait below -- and the deadline with it -- would never be reached.
         \\         *
         \\         * MSG_DONTWAIT asks for only what fits, which is what makes the
         \\         * deadline exact. Darwin ignores it for stream sockets, so the chunk
@@ -1853,8 +1849,15 @@ pub fn runtime_source() -> []u8 {
         \\                continue;
         \\            }
         \\            if (kizu_net_would_block(errno)) {
-        \\                /* The room poll saw is gone. Poll again, which is where the
-        \\                 * deadline is read. */
+        \\                /* No room. This is where the deadline is read. */
+        \\                int64_t wait = kizu_net_wait(
+        \\                    io, (int)fd, POLLOUT, kizu_net_remaining(deadline));
+        \\                if (wait == KIZU_NET_WAIT_RETRY) {
+        \\                    continue;
+        \\                }
+        \\                if (wait != KIZU_NET_WAIT_READY) {
+        \\                    return kizu_err_void(wait);
+        \\                }
         \\                continue;
         \\            }
         \\            return kizu_err_void(kizu_net_errno_failure(errno));
@@ -2257,6 +2260,11 @@ pub fn runtime_source() -> []u8 {
         \\    struct KizuLoop *loop;
         \\    int started;
         \\    int finished;
+        \\    /* Standing on its own stack right now, somewhere below the caller. A
+        \\       coroutine that awaits another turns the loop from in there, and the loop
+        \\       must not resume what it is standing on: the swap would overwrite the way
+        \\       back out and jump into a context that is already running. */
+        \\    int running;
         \\    int parked;
         \\    int canceled;
         \\} KizuCoro;
@@ -2333,8 +2341,12 @@ pub fn runtime_source() -> []u8 {
         \\    if (!coro || coro->finished) {
         \\        return 0;
         \\    }
+        \\    if (coro->running) {
+        \\        return 1;
+        \\    }
         \\    KizuCoro *previous = kizu_coro_current;
         \\    kizu_coro_current = coro;
+        \\    coro->running = 1;
         \\    if (!coro->started) {
         \\        coro->started = 1;
         \\        getcontext(&coro->inside);
@@ -2345,6 +2357,7 @@ pub fn runtime_source() -> []u8 {
         \\        makecontext(&coro->inside, kizu_coro_trampoline, 0);
         \\    }
         \\    swapcontext(&coro->outside, &coro->inside);
+        \\    coro->running = 0;
         \\    kizu_coro_current = previous;
         \\    return coro->finished ? 0 : 1;
         \\}
@@ -2534,7 +2547,7 @@ pub fn runtime_source() -> []u8 {
         \\    int ran = 0;
         \\    for (size_t i = 0; i < loop->task_count; i += 1) {
         \\        KizuCoro *task = loop->tasks[i];
-        \\        if (!task || task->finished || task->parked) {
+        \\        if (!task || task->finished || task->parked || task->running) {
         \\            continue;
         \\        }
         \\        ran = 1;

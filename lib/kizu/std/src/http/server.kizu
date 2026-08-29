@@ -25,10 +25,27 @@ pub struct Server {
     // What the connections in `open` are waited on with. The listener is in
     // here too, so a new caller wakes the same wait a talking one does.
     poller: std::net::Poller,
+    // Where the connection with a given token is in `open`, or -1 for one that
+    // is not in there: handed out to the caller, or gone. A token belongs to a
+    // connection for as long as the connection lasts, so rearranging `open`
+    // moves numbers in here rather than re-registering descriptors.
+    slot_of: std::array::Array<i64>,
+    // Tokens no connection is using. Reusing one keeps `slot_of` as short as
+    // the most connections that were ever open at once.
+    spare: std::array::Array<i64>,
+    // Tokens freed while a batch of events was being read. They become spare
+    // at the top of the next turn, so a token cannot be handed to a new
+    // connection while an event naming its old owner is still unread.
+    retiring: std::array::Array<i64>,
+    // Tokens whose request finished. A head only completes where bytes were
+    // just moved into it, so those are the two places that write here, and
+    // finding the next one to hand out is a pop rather than a walk over
+    // everyone who is still mid-sentence.
+    settled_tokens: std::array::Array<i64>
 }
 
-// The listener's token. A connection's token is its index in `open`, and an
-// index is never negative, so nothing collides with this.
+// The listener's token. A connection's token comes from `claim_token`, which
+// only ever hands out a length, so nothing collides with this.
 fn listener_token() -> i64 {
     return -1;
 }
@@ -63,6 +80,10 @@ pub fn listen_with(
         limits: limits,
         open: std::array::new<std::http::Exchange>(allocator),
         poller: move poller,
+        slot_of: std::array::new<i64>(allocator),
+        spare: std::array::new<i64>(allocator),
+        retiring: std::array::new<i64>(allocator),
+        settled_tokens: std::array::new<i64>(allocator)
     };
 }
 
@@ -74,6 +95,10 @@ fn (self: &std::http::Server) local_port() -> std::http::Failure!i64 {
 }
 
 fn (self: std::http::Server) deinit(allocator: Allocator) -> void {
+    self.slot_of.deinit(allocator);
+    self.spare.deinit(allocator);
+    self.retiring.deinit(allocator);
+    self.settled_tokens.deinit(allocator);
     self.open.deinit(allocator);
     self.poller.deinit();
     self.listener.deinit();
@@ -277,7 +302,11 @@ fn (self: &var std::http::Server) keep(
 ) -> std::http::Failure!void {
     var held = move done;
     if !held.carries_another() {
+        let token = held.token;
         held.deinit(allocator);
+        if token >= 0 {
+            try self.retire(allocator, token);
+        }
         return;
     }
     try self.rejoin(io, allocator, move held);
@@ -285,7 +314,8 @@ fn (self: &var std::http::Server) keep(
 }
 
 // rejoin puts a connection that can carry another request back among the ones
-// being listened to.
+// being listened to. It was never taken out of the poller -- nothing waits
+// while the caller is answering -- so it comes back for no syscall at all.
 fn (self: &var std::http::Server) rejoin(
     io: Io,
     allocator: Allocator,
@@ -294,23 +324,88 @@ fn (self: &var std::http::Server) rejoin(
     var held = move done;
     errdefer held.deinit(allocator);
     try held.reopen(allocator);
-    try self.hold(io, allocator, move held);
+    // An exchange `accept` handed out was never in the table and has no token
+    // yet. Joining for the first time is what `hold` is.
+    if held.token < 0 {
+        try self.hold(io, allocator, move held);
+        return;
+    }
+    try self.restore(allocator, move held);
     return;
 }
 
-// hold puts a connection under the poller and into the table. The token is the
-// index it lands at, so finding it again when it speaks is a lookup rather
-// than a search.
+// hold puts a new connection under the poller and into the table. The token is
+// the connection's for as long as it lasts, so `slot_of` can say where it is
+// now and no descriptor is registered twice.
 fn (self: &var std::http::Server) hold(
     io: Io,
     allocator: Allocator,
     held: std::http::Exchange
 ) -> std::http::Failure!void {
-    let token = self.open.len();
     var taken = move held;
     errdefer taken.deinit(allocator);
+    let token = try self.claim_token(allocator);
+    taken.token = token;
     try taken.watch_read(io, &var self.poller, token);
+    try self.restore(allocator, move taken);
+    return;
+}
+
+// restore puts a connection that already has a token into the table and writes
+// down where it landed. It touches no descriptor.
+fn (self: &var std::http::Server) restore(
+    allocator: Allocator,
+    held: std::http::Exchange
+) -> std::http::Failure!void {
+    var taken = move held;
+    errdefer taken.deinit(allocator);
+    let token = taken.token;
+    let index = self.open.len();
     try self.open.append(allocator, move taken);
+    try self.slot_of.set(token, index);
+    // A connection that pipelined its next request already has it in the
+    // buffer, and no wait will ever mention it.
+    let done = try self.step_at(allocator, index);
+    if done {
+        try self.settled_tokens.append(allocator, token);
+    }
+    return;
+}
+
+// claim_token hands out a token nothing is using. `spare` is what earlier
+// connections gave back; when it is empty the table grows by one, so the
+// numbers stay as small as the most connections that were ever open at once.
+fn (self: &var std::http::Server) claim_token(
+    allocator: Allocator
+) -> std::http::Failure!i64 {
+    if self.spare.pop() |token| {
+        return token;
+    }
+    let token = self.slot_of.len();
+    try self.slot_of.append(allocator, -1);
+    return token;
+}
+
+// retire gives a token back. It is not spare until the next turn: the batch of
+// events being read may still name it, and a new connection holding it would
+// be moved by what its predecessor sent.
+fn (self: &var std::http::Server) retire(
+    allocator: Allocator,
+    token: i64
+) -> std::http::Failure!void {
+    try self.slot_of.set(token, -1);
+    try self.retiring.append(allocator, token);
+    return;
+}
+
+// settle_tokens makes last turn's retired tokens spare. It runs where no event
+// from the batch that retired them is left to read.
+fn (self: &var std::http::Server) settle_tokens(
+    allocator: Allocator
+) -> std::http::Failure!void {
+    while self.retiring.pop() |token| {
+        try self.spare.append(allocator, token);
+    }
     return;
 }
 
@@ -322,10 +417,10 @@ fn (self: &var std::http::Server) wait_for_one(
     allocator: Allocator
 ) -> std::http::Failure!std::http::Exchange {
     while true {
-        // What is already in hand first: a connection that pipelined its next
-        // request has it in its buffer, and no wait will ever mention it.
+        try self.settle_tokens(allocator);
+        // What is already in hand first, since no wait would mention it.
         if try self.settled(allocator) |index| {
-            let held = try self.take_out(io, allocator, index);
+            let held = try self.take_out(allocator, index);
             return move held;
         }
         let at = self.nearest_deadline();
@@ -337,18 +432,24 @@ fn (self: &var std::http::Server) wait_for_one(
 }
 
 // settled answers the index of a connection whose request is complete, using
-// only what has already arrived. It reads no sockets, so calling it every turn
-// costs one parse attempt per connection and no syscalls.
+// only what has already arrived. It reads no sockets.
+//
+// The names come off `settled_tokens`, which is written where a head can
+// finish. A name on it is a claim rather than a fact -- the connection may
+// have been closed since, and its token given to someone else -- so each one
+// is checked before it is believed. Checking is the parse attempt the loop
+// used to make against every open connection, now made against one.
 fn (self: &var std::http::Server) settled(
     allocator: Allocator
 ) -> std::http::Failure!?i64 {
-    var index = 0;
-    while index < self.open.len() {
-        let done = try self.step_at(allocator, index);
-        if done {
-            return index;
+    while self.settled_tokens.pop() |token| {
+        let slot = self.slot_of.get(token) orelse -1;
+        if slot >= 0 {
+            let done = try self.step_at(allocator, slot);
+            if done {
+                return slot;
+            }
         }
-        index = index + 1;
     }
     return null;
 }
@@ -378,7 +479,13 @@ fn (self: &var std::http::Server) hear(
             if ready.token == listener_token() {
                 try self.take_new(io, allocator);
             } else {
-                try self.fill_at(io, allocator, ready.token);
+                // A token whose connection left during this same batch has no
+                // slot any more. The event is about a connection that is gone,
+                // so there is nothing to move.
+                let slot = self.slot_of.get(ready.token) orelse -1;
+                if slot >= 0 {
+                    try self.fill_at(io, allocator, slot);
+                }
             }
         }
         index = index + 1;
@@ -407,11 +514,11 @@ fn (self: &var std::http::Server) take_new(
 fn (self: &var std::http::Server) fill_at(
     io: Io,
     allocator: Allocator,
-    token: i64
+    index: i64
 ) -> std::http::Failure!void {
-    let gone = try self.advance_at(io, allocator, token);
+    let gone = try self.advance_at(io, allocator, index);
     if gone {
-        try self.drop_at(io, allocator, token);
+        try self.drop_at(allocator, index);
     }
     return;
 }
@@ -419,18 +526,36 @@ fn (self: &var std::http::Server) fill_at(
 fn (self: &var std::http::Server) advance_at(
     io: Io,
     allocator: Allocator,
-    token: i64
+    index: i64
 ) -> std::http::Failure!bool {
-    if self.open.at_mut(token) |held| {
+    var gone = false;
+    var finished = false;
+    var token = -1;
+    if self.open.at_mut(index) |held| {
+        token = held.token;
         if held.advance(io, allocator) |progress| {
-            return is_closed(progress);
+            gone = is_closed(progress);
+            finished = is_settled(progress);
         } else |_| {
             // A connection this server could not read has already been told
             // why by `advance`. It has nothing further to say to the loop.
-            return true;
+            gone = true;
         }
     }
-    return false;
+    if finished {
+        try self.settled_tokens.append(allocator, token);
+    }
+    return gone;
+}
+
+// is_settled answers whether this connection now has a whole request waiting
+// to be handed out.
+fn is_settled(progress: std::http::Progress) -> bool {
+    return match progress {
+        Request => true,
+        NeedMore => false,
+        Closed => false,
+    };
 }
 
 fn is_closed(progress: std::http::Progress) -> bool {
@@ -455,7 +580,7 @@ fn (self: &var std::http::Server) sweep(
         let out_of_time = self.expired_at(index, now);
         if out_of_time {
             try self.refuse_at(io, allocator, index);
-            try self.drop_at(io, allocator, index);
+            try self.drop_at(allocator, index);
         }
         index = index - 1;
     }
@@ -505,55 +630,45 @@ fn (self: &std::http::Server) deadline_at(index: i64) -> i64 {
     return 0;
 }
 
-// take_out lifts one connection out of the table and hands it to the caller.
-// The one that was last takes its place, so the token that named it has to be
-// registered again -- a token is an index, and the index changed.
+// take_out lifts one connection out of the table and hands it over. It stays
+// in the poller: the caller is going to answer on it and come back, and no
+// wait happens in between, so unregistering it would be a syscall to undo a
+// syscall. The last connection is swapped into the gap, which moves where it
+// is but not what it is called.
 fn (self: &var std::http::Server) take_out(
-    io: Io,
     allocator: Allocator,
     index: i64
 ) -> std::http::Failure!std::http::Exchange {
-    try self.forget_at(io, index);
     let last = self.open.len() - 1;
     try self.open.swap(index, last);
     var taken = self.open.pop_or_panic();
     errdefer taken.deinit(allocator);
-    try self.rewatch_at(io, index);
+    try self.slot_of.set(taken.token, -1);
+    try self.note_slot(index);
     return move taken;
 }
 
-// drop_at closes one connection and takes it out of the table.
+// note_slot writes down where the connection now at `index` is. Nothing is
+// there when the one taken out was the last.
+fn (self: &var std::http::Server) note_slot(
+    index: i64
+) -> std::http::Failure!void {
+    if self.open.at(index) |held| {
+        try self.slot_of.set(held.token, index);
+    }
+    return;
+}
+
+// drop_at closes one connection and takes it out of the table. Closing the
+// descriptor is what takes it out of the poller.
 fn (self: &var std::http::Server) drop_at(
-    io: Io,
     allocator: Allocator,
     index: i64
 ) -> std::http::Failure!void {
-    let held = try self.take_out(io, allocator, index);
+    let held = try self.take_out(allocator, index);
+    let token = held.token;
     held.deinit(allocator);
-    return;
-}
-
-fn (self: &var std::http::Server) forget_at(
-    io: Io,
-    index: i64
-) -> std::http::Failure!void {
-    if self.open.at_mut(index) |held| {
-        try held.forget_read(io, &var self.poller);
-    }
-    return;
-}
-
-fn (self: &var std::http::Server) rewatch_at(
-    io: Io,
-    index: i64
-) -> std::http::Failure!void {
-    if index >= self.open.len() {
-        return;
-    }
-    if self.open.at_mut(index) |held| {
-        try held.forget_read(io, &var self.poller);
-        try held.watch_read(io, &var self.poller, index);
-    }
+    try self.retire(allocator, token);
     return;
 }
 
@@ -577,6 +692,7 @@ fn (self: &std::http::Server) opening(
         served: 0,
         persisted: false,
         limits: self.limits,
+        token: -1
     };
 }
 
@@ -826,6 +942,11 @@ pub struct Exchange {
     // when the write starts. A deadline stamped at accept would already be
     // spent by whatever the caller did in between.
     limits: std::http::Limits,
+    // What the poller calls this connection. It is the connection's for as
+    // long as the connection lasts, so being handed out and taken back moves
+    // it in the server's table without touching the descriptor. -1 is an
+    // exchange no server is holding, which is what `accept` hands back.
+    token: i64
 }
 
 // respond sends the response and marks the exchange answered. It is called
@@ -1018,17 +1139,6 @@ fn (self: &std::http::Exchange) carries_another() -> bool {
 // server reads it to know how long a wait may last.
 fn (self: &std::http::Exchange) deadline_at() -> i64 {
     return self.deadline;
-}
-
-// forget_read takes this connection back off a poller. Handing the exchange
-// out means the loop no longer waits on it, and closing one means nothing
-// waits on it again.
-fn (self: &std::http::Exchange) forget_read(
-    io: Io,
-    poller: &var std::net::Poller
-) -> std::http::Failure!void {
-    try self.reader.forget(io, poller);
-    return;
 }
 
 // next reads the head of the following request on this connection and answers
