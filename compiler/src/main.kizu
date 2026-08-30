@@ -1765,17 +1765,25 @@ fn native_target(
                         try roots.append(allocator, move main_root);
                         try ir::keep_reachable_functions(allocator, &var lowerer.module, &roots);
                     }
-                    var text = string::new(allocator);
-                    defer text.deinit(allocator);
-                    if try llvm::emit(allocator, &var lowerer.module, &var text) |failed| {
+                    var temps = try native::new_temp_dirs(allocator);
+                    defer temps.deinit(allocator);
+                    var host = string::new(allocator);
+                    defer host.deinit(allocator);
+                    if try native::host_key(io, allocator, &var temps, &var host) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
                     }
-                    var temps = try native::new_temp_dirs(allocator);
-                    defer temps.deinit(allocator);
+                    let darwin = native::target_is_darwin(options, &host);
+                    var text = string::new(allocator);
+                    defer text.deinit(allocator);
+                    if try llvm::emit_native(allocator, &var lowerer.module, &var text, darwin) |failed| {
+                        defer failed.deinit(allocator);
+                        try report(io, allocator, &loader.sources, &failed);
+                        return 1;
+                    }
                     if command == NativeCommand::Build {
-                        if try native::build(io, allocator, &var temps, options, &text, &std_errors.sets) |failed| {
+                        if try native::build(io, allocator, &var temps, options, &host, &text, &std_errors.sets) |failed| {
                             defer failed.deinit(allocator);
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
@@ -1786,7 +1794,7 @@ fn native_target(
                     }
                     var exe = string::new(allocator);
                     defer exe.deinit(allocator);
-                    if try native::executable(io, allocator, &var temps, options, &text, &std_errors.sets, &var exe) |failed| {
+                    if try native::executable(io, allocator, &var temps, options, &host, &text, &std_errors.sets, &var exe) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;

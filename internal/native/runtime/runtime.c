@@ -2321,8 +2321,8 @@ typedef enum {
    room for both the guard and alignment without hiding a second allocation.
 
    A guard alone is not enough for a frame wider than a page: every emitted
-   Kizu function carries LLVM's probe-stack attribute, which touches the stack
-   at most 4096 bytes apart and therefore cannot jump over this page. */
+   Kizu function carries the target's LLVM stack-probe contract, which touches
+   the stack at most 4096 bytes apart and therefore cannot jump over this page. */
 static KizuStackResult kizu_coro_stack_new(
     KizuCoro *coro, void *allocator, int64_t stack_bytes) {
     if (stack_bytes < 16384) {

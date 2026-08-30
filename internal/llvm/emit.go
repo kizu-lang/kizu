@@ -14,11 +14,28 @@ import (
 
 // Emit formats a typed SSA IR module as LLVM IR.
 func Emit(module *ir.Module) (string, error) {
+	return emit(module, "inline-asm")
+}
+
+// EmitNative formats a module for the native target. Darwin's LLVM backend
+// has long exposed stack probing through the system __chkstk_darwin helper;
+// other shipped targets use LLVM's inline probe implementation.
+func EmitNative(module *ir.Module, darwin bool) (string, error) {
+	method := "inline-asm"
+	if darwin {
+		method = "__chkstk_darwin"
+	}
+	return emit(module, method)
+}
+
+// emit formats a module with the stack-probe method selected by its caller.
+func emit(module *ir.Module, stackProbeMethod string) (string, error) {
 	e := &emitter{
-		module:  module,
-		types:   typ.NewTable(),
-		strings: map[string]string{},
-		values:  map[string]valueInfo{},
+		module:           module,
+		types:            typ.NewTable(),
+		strings:          map[string]string{},
+		values:           map[string]valueInfo{},
+		stackProbeMethod: stackProbeMethod,
 	}
 	if err := e.emit(); err != nil {
 		return "", err
@@ -31,21 +48,22 @@ func Emit(module *ir.Module) (string, error) {
 }
 
 type emitter struct {
-	module          *ir.Module
-	types           *typ.Table
-	out             bytes.Buffer
-	strings         map[string]string
-	values          map[string]valueInfo
-	functionNames   map[string]bool
-	functionParams  map[string][]ir.Param
-	currentReturn   string
-	mainReturnsInt  bool
-	nextLabel       int
-	currentBlock    string
-	blockExitLabel  map[string]string
-	niches          map[string]ir.Value
-	entryParamLoads []string
-	wroteParamLoads bool
+	module           *ir.Module
+	types            *typ.Table
+	out              bytes.Buffer
+	strings          map[string]string
+	values           map[string]valueInfo
+	functionNames    map[string]bool
+	functionParams   map[string][]ir.Param
+	currentReturn    string
+	mainReturnsInt   bool
+	nextLabel        int
+	currentBlock     string
+	blockExitLabel   map[string]string
+	niches           map[string]ir.Value
+	entryParamLoads  []string
+	wroteParamLoads  bool
+	stackProbeMethod string
 }
 
 type valueInfo struct {
@@ -189,9 +207,10 @@ func (e *emitter) writeHeader() {
 	e.writePanicDecls()
 	// The shared attribute makes large frames touch each page before they can
 	// cross a coroutine guard. Small frames receive no added instructions.
-	e.out.WriteString(
-		"attributes #0 = { \"probe-stack\"=\"inline-asm\" " +
+	fmt.Fprintf(&e.out,
+		"attributes #0 = { \"probe-stack\"=\"%s\" "+
 			"\"stack-probe-size\"=\"4096\" }\n\n",
+		e.stackProbeMethod,
 	)
 }
 
