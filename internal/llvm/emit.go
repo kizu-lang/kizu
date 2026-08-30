@@ -1471,8 +1471,16 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 	}
 	callee := e.value(instr.Args[0])
 	args := make([]string, 0, len(instr.Args)-1)
-	for _, arg := range instr.Args[1:] {
-		args = append(args, e.llvmType(arg.Type)+" "+e.value(arg).operand)
+	for index, arg := range instr.Args[1:] {
+		param := ir.Param{}
+		if index < len(instr.CallParams) {
+			param = instr.CallParams[index]
+		}
+		callArg, err := e.internalCallArg(arg, param, index)
+		if err != nil {
+			return err
+		}
+		args = append(args, callArg)
 	}
 	call := fmt.Sprintf(
 		"call %s %s(%s)",

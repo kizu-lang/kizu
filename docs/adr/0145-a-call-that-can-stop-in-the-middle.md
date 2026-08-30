@@ -39,9 +39,9 @@ context の切り替えは `ucontext` です。macOS では deprecated ですが
 `std::coro` には channel も task も scheduler もありません。それらは ADR-0025 が
 撤回した API の形で、そこで決めた順番 —— 走るものが先 —— に従っています。
 
-**entry が受け取れるのは数 1 つです。** 関数 pointer は borrow を運べないので、
-coroutine に渡るのは数で、意味を知っているのは渡した側だけ。実際の引数と結果を
-運ぶのは `Io.async` の仕事で、そこで形が変わります。
+**entry が受け取れるのは数 1 つです。** 関数 pointer は borrow を運べますが、
+低レベル coroutine ABI は型付き state の ownership / lifetime adapter を持ちません。
+実際の引数と結果を運ぶのは `Io.async` の仕事で、そこで形が変わります。
 
 **終わっていない coroutine の cleanup は走りません。** 走らせることは、誰も続きを
 頼んでいない呼び出しを再開することだからです。spawn した caller が終わりを決めます。

@@ -133,7 +133,7 @@ fn (self: &var Checker) explicit_returned_borrow_initializer(
 ) -> !?diagnostic::Diagnostic {
     recognized.* = false;
     let call = call_expr(tree, expression) orelse return null;
-    let called = try self.called_user_function(tree, call.callee) orelse return null;
+    let called = try self.called_user_function(tree, env, call.callee) orelse return null;
     if !self.names.is_explicit_borrow(self.return_type_name(called.function)) {
         return null;
     }
@@ -470,7 +470,7 @@ fn (self: &var Checker) returned_borrow_initializer(
             tree, env, attempt.value, sources, returned, recognized);
     }
     let call = call_expr(tree, expression) orelse return null;
-    let called = try self.called_user_function(tree, call.callee) orelse return null;
+    let called = try self.called_user_function(tree, env, call.callee) orelse return null;
     let ret_name = self.return_type_name(called.function);
     var mutable = false;
     var elem = empty_name();
@@ -550,7 +550,7 @@ fn (self: &var Checker) attach_future_capability_provenance(
         return self.attach_future_capability_provenance(tree, env, value, attempt.value);
     }
     let call = call_expr(tree, expression) orelse return null;
-    let called = try self.called_user_function(tree, call.callee) orelse return null;
+    let called = try self.called_user_function(tree, env, call.callee) orelse return null;
     let ret_name = self.return_type_name(called.function);
     if !self.tied_struct_return(ret_name) or self.task_set_return(ret_name) {
         return null;
@@ -578,6 +578,15 @@ fn (self: &var Checker) check_tied_factory_call(
 ) -> !?diagnostic::Diagnostic {
     if type_apply_expr(tree, call.callee) |apply| {
         return self.check_type_apply_call_expr(tree, env, apply, call.args, out);
+    }
+    if ident_text(tree, call.callee) |text| {
+        if self.lookup_text(tree, env, text) |value| {
+            let pointer = self.binding(value).type_name;
+            if self.name_is_function_pointer(pointer) {
+                return self.check_func_pointer_call(
+                    tree, env, name, pointer, call.args, true, out);
+            }
+        }
     }
     return self.check_user_call(tree, env, name, call.args, true, out);
 }
@@ -725,10 +734,24 @@ fn (self: &var Checker) call_ties_allocator(
 
 /// Resolves direct and namespace-qualified source function calls, the Go
 /// `calledFunction`.
-fn (self: &var Checker) called_user_function(tree: &ast::Ast, callee: ast::Expression) -> !?CalledFunction {
+fn (self: &var Checker) called_user_function(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    callee: ast::Expression
+) -> !?CalledFunction {
     if ident_text(tree, callee) |text| {
-        let function = self.function_for_text(tree, text) orelse return null;
         let name = try self.names.intern_text(tree, text);
+        // A binding shadows a declaration here exactly as it does in call
+        // dispatch, so returned-borrow and tied-capability recognizers see
+        // the same indirect call as the ordinary ownership effects.
+        if self.lookup_text(tree, env, text) |value| {
+            let pointer = self.binding(value).type_name;
+            if self.name_is_function_pointer(pointer) {
+                let function = try self.function_pointer_handle(pointer) orelse return null;
+                return CalledFunction { name: name, function: function };
+            }
+        }
+        let function = self.function_for_text(tree, text) orelse return null;
         return CalledFunction { name: name, function: function };
     }
     if field_expr(tree, callee) |_| {
@@ -740,7 +763,7 @@ fn (self: &var Checker) called_user_function(tree: &ast::Ast, callee: ast::Expre
     // instantiate. Reading through to it is what lets the tie recognizer see a
     // generic factory, which ADR-0099 left closed for want of one.
     if type_apply_expr(tree, callee) |apply| {
-        return self.called_user_function(tree, apply.callee);
+        return self.called_user_function(tree, env, apply.callee);
     }
     return null;
 }

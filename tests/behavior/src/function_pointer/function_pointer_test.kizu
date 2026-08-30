@@ -1,0 +1,112 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+pub struct Counter {
+    pub value: i64,
+}
+
+fn read_counter(counter: &Counter) -> i64 {
+    return counter.value;
+}
+
+fn add_one(counter: &var Counter) -> void {
+    counter.value = counter.value + 1;
+}
+
+fn text_length(text: &string::String) -> i64 {
+    return text.len();
+}
+
+fn call_shared(worker: fn(&Counter) -> i64, counter: &Counter) -> i64 {
+    return worker(counter);
+}
+
+fn call_mut(worker: fn(&var Counter) -> void, counter: &var Counter) -> void {
+    worker(counter);
+}
+
+fn release_length(
+    allocator: Allocator,
+    text: string::String
+) -> i64 {
+    let length = text.len();
+    text.deinit(allocator);
+    return length;
+}
+
+fn call_owner(
+    worker: fn(Allocator, string::String) -> i64,
+    allocator: Allocator,
+    text: string::String
+) -> i64 {
+    return worker(allocator, move text);
+}
+
+fn borrow_counter(counter: &Counter) -> &Counter {
+    return counter;
+}
+
+fn call_borrow_return(
+    worker: fn(&Counter) -> &Counter,
+    counter: &Counter
+) -> &Counter {
+    return worker(counter);
+}
+
+fn counter_allocator(counter: &var Counter) -> Allocator {
+    counter.value = counter.value + 1;
+    return mem::page_allocator();
+}
+
+fn call_tied_factory(
+    worker: fn(&var Counter) -> Allocator,
+    counter: &var Counter
+) -> mem::Error!i64 {
+    let allocator = worker(counter);
+    var text = try string::from_bytes(allocator, "ok");
+    defer text.deinit(allocator);
+    return text.len();
+}
+
+test "a function pointer applies shared and mutable borrows" {
+    var counter = Counter { value: 41 };
+    testing::expect_equal<i64>(41, call_shared(read_counter, counter));
+    call_mut(add_one, counter);
+    testing::expect_equal<i64>(42, counter.value);
+}
+
+test "a local function pointer borrows caller storage" {
+    let increment = add_one;
+    var counter = Counter { value: 9 };
+    increment(counter);
+    testing::expect_equal<i64>(10, counter.value);
+
+    let allocator = mem::page_allocator();
+    var text = try string::from_bytes(allocator, "borrowed");
+    defer text.deinit(allocator);
+    let length = text_length;
+    testing::expect_equal<i64>(8, length(text));
+}
+
+test "a function pointer consumes an owner argument" {
+    let allocator = mem::page_allocator();
+    let text = try string::from_bytes(allocator, "alice");
+    testing::expect_equal<i64>(5, call_owner(release_length, allocator, move text));
+}
+
+test "a function pointer return stays tied to its borrow argument" {
+    let counter = Counter { value: 42 };
+    let borrowed = call_borrow_return(borrow_counter, counter);
+    testing::expect_equal<i64>(42, borrowed.value);
+
+    let direct = borrow_counter;
+    let direct_borrowed = direct(counter);
+    testing::expect_equal<i64>(42, direct_borrowed.value);
+}
+
+test "a function pointer tied factory writes through caller storage" {
+    var counter = Counter { value: 0 };
+    testing::expect_equal<i64>(2, try call_tied_factory(counter_allocator, counter));
+    testing::expect_equal<i64>(1, counter.value);
+}

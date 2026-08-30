@@ -34,7 +34,11 @@ pub struct RetiredErrDefers {
 /// the Checker, read only after a check succeeded.
 pub struct Result {
     pub return_retired_err_defers: array::Array<RetiredErrDefers>,
-    pub try_retired_err_defers: array::Array<RetiredTry>
+    pub try_retired_err_defers: array::Array<RetiredTry>,
+    // Argument places an indirect call lends as &var. IR slot analysis cannot
+    // recover a local pointer's type from syntax alone, so ownership carries
+    // that checked fact forward.
+    pub function_pointer_mut_borrows: array::Array<ast::Expression>
 }
 
 /// Is the try expression half of Result.
@@ -46,13 +50,15 @@ pub struct RetiredTry {
 fn new_result(allocator: Allocator) -> Result {
     return Result {
         return_retired_err_defers: array::new<RetiredErrDefers>(allocator),
-        try_retired_err_defers: array::new<RetiredTry>(allocator)
+        try_retired_err_defers: array::new<RetiredTry>(allocator),
+        function_pointer_mut_borrows: array::new<ast::Expression>(allocator)
     };
 }
 
 fn (self: Result) deinit(allocator: Allocator) -> void {
     self.return_retired_err_defers.deinit(allocator);
     self.try_retired_err_defers.deinit(allocator);
+    self.function_pointer_mut_borrows.deinit(allocator);
     return;
 }
 
@@ -390,6 +396,10 @@ pub struct Checker {
     scratch_binding: BindingHandle,
     functions: arena::Arena<FunctionInfo>,
     functions_by_name: map::Map<[]u8, FunctionHandle>,
+    // Concrete pointer signatures retained as ordinary FunctionInfo records,
+    // keyed by their canonical type spelling. This lets every call and
+    // provenance recognizer read one signature shape.
+    function_pointers: map::Map<[]u8, FunctionHandle>,
     impls: map::Map<[]u8, map::Map<[]u8, FunctionHandle>>,
     structs: map::Map<[]u8, StructInfo>,
     enums: map::Map<[]u8, EnumInfo>,
@@ -458,6 +468,7 @@ pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program
         scratch_binding: scratch_binding,
         functions: arena::new<FunctionInfo>(allocator),
         functions_by_name: map::new<[]u8, FunctionHandle>(allocator),
+        function_pointers: map::new<[]u8, FunctionHandle>(allocator),
         impls: map::new<[]u8, map::Map<[]u8, FunctionHandle>>(allocator),
         structs: map::new<[]u8, StructInfo>(allocator),
         enums: map::new<[]u8, EnumInfo>(allocator),
@@ -491,6 +502,7 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.store.deinit(allocator);
     self.functions.deinit(allocator);
     self.functions_by_name.deinit(allocator);
+    self.function_pointers.deinit(allocator);
     self.impls.deinit(allocator);
     self.structs.deinit(allocator);
     self.enums.deinit(allocator);
@@ -622,6 +634,11 @@ pub fn (self: &Checker) retired_try_at(index: i64) -> ?ast::Expression {
         return ast::Expression { node: entry.node };
     }
     return null;
+}
+
+/// Returns the argument place at index among indirect-call &var borrows.
+pub fn (self: &Checker) function_pointer_mut_borrow_at(index: i64) -> ?ast::Expression {
+    return self.result.function_pointer_mut_borrows.get(index);
 }
 
 /// Returns the text of a name `retired_err_defer_for_return` /

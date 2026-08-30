@@ -78,14 +78,55 @@ fn (self: &var Checker) check_func_pointer_call(
     }
     var index = 0;
     while index < arity {
-        let want = try self.types.function_pointer_part(pointer, index);
+        let declared = try self.types.function_pointer_part(pointer, index);
+        var want = declared;
+        var borrow = false;
+        var mutable = false;
+        if try self.types.explicit_borrow_type(declared) |parts| {
+            want = parts.inner;
+            borrow = true;
+            mutable = parts.mutable;
+        }
         let argument = args.get_or_panic(tree, index);
-        var got = empty_type();
-        if try self.check_contextual_expr(tree, scope, argument, want, &var got) |problem| {
+        var checked_argument = argument;
+        if try self.prepare_borrow_argument(
+            tree,
+            scope,
+            argument,
+            borrow,
+            mutable,
+            &var checked_argument
+        ) |problem| {
             return move problem;
         }
+        if mutable {
+            if try self.require_mutable_borrow_arg(
+                tree,
+                scope,
+                checked_argument,
+                want
+            ) |problem| {
+                return move problem;
+            }
+        }
+        var got = empty_type();
+        if try self.check_contextual_expr(
+            tree,
+            scope,
+            checked_argument,
+            want,
+            &var got
+        ) |problem| {
+            return move problem;
+        }
+        match try self.types.coerce_returned_borrow_argument(got, want, borrow, mutable) {
+            Value(value) => {
+                got = value;
+            },
+            Error(reason) => return try self.borrow_argument_error(reason),
+        }
         if !same_type(got, want) {
-            return try self.func_pointer_arg_error(name, index, want, got);
+            return try self.func_pointer_arg_error(name, index, declared, got);
         }
         index = index + 1;
     }

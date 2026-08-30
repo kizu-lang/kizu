@@ -94,9 +94,40 @@ func (v *verifier) instr(instr *Instr) error {
 		return v.unionPayload(instr)
 	case "error.ok":
 		return v.successWrap(instr)
+	case "call.indirect":
+		return v.indirectCall(instr)
 	}
 	if callee, ok := directCallee(instr.Op); ok {
 		return v.call(instr, callee)
+	}
+	return nil
+}
+
+// indirectCall checks the ABI signature lowering retained beside a call whose
+// declaration cannot be named. The backend consumes these same Params, so an
+// argument that did not receive caller storage is rejected before LLVM can
+// silently call through a by-value copy.
+func (v *verifier) indirectCall(instr *Instr) error {
+	if len(instr.Args) == 0 {
+		return fmt.Errorf("%w: %s: call.indirect has no callee in block %s",
+			ErrVerify, v.fn.Name, v.block.Name)
+	}
+	node, ok := funcPointerNode(instr.Args[0].Type)
+	if !ok {
+		return v.fail("call.indirect callee", "function pointer", instr.Args[0].Type)
+	}
+	if len(instr.CallParams) != len(instr.Args)-1 || len(node.Params) != len(instr.CallParams) {
+		return fmt.Errorf(
+			"%w: %s: call.indirect in block %s has %d args, %d ABI params, and %d declared params",
+			ErrVerify, v.fn.Name, v.block.Name, len(instr.Args)-1,
+			len(instr.CallParams), len(node.Params),
+		)
+	}
+	for index, param := range instr.CallParams {
+		got := instr.Args[index+1].Type
+		if !argumentFits(param, got) {
+			return v.fail(fmt.Sprintf("call.indirect argument %d", index), param.Type, got)
+		}
 	}
 	return nil
 }

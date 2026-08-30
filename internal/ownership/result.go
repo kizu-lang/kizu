@@ -8,14 +8,25 @@ import "github.com/kizu-lang/kizu/internal/ast"
 type Result struct {
 	returnRetiredErrDefers map[*ast.ReturnStmt][]string
 	tryRetiredErrDefers    map[*ast.TryExpr][]string
+	// functionPointerMutBorrows marks the argument places an indirect call
+	// lends as &var. IR slot analysis cannot recover a local pointer's type
+	// from syntax alone, so ownership carries that checked fact forward.
+	functionPointerMutBorrows map[ast.Expression]bool
 }
 
 // newResult creates an empty ownership result.
 func newResult() Result {
 	return Result{
-		returnRetiredErrDefers: map[*ast.ReturnStmt][]string{},
-		tryRetiredErrDefers:    map[*ast.TryExpr][]string{},
+		returnRetiredErrDefers:    map[*ast.ReturnStmt][]string{},
+		tryRetiredErrDefers:       map[*ast.TryExpr][]string{},
+		functionPointerMutBorrows: map[ast.Expression]bool{},
 	}
+}
+
+// FunctionPointerMutablyBorrows reports whether expr is an argument place an
+// indirect call hands over as caller storage.
+func (r Result) FunctionPointerMutablyBorrows(expr ast.Expression) bool {
+	return r.functionPointerMutBorrows[expr]
 }
 
 // RetiredErrDefersForReturn lists the active errdefer receivers an error

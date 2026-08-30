@@ -320,7 +320,9 @@ pub struct Lowerer {
     release_allocators: map::Map<[]u8, bool>,
     // retired is the preceding phase's output: the errdefer receivers a
     // move retired before each return statement and try expression.
-    retired: array::Array<RetiredReceiver>
+    retired: array::Array<RetiredReceiver>,
+    // Argument places ownership proved an indirect call lends as &var.
+    function_pointer_mut_borrows: array::Array<ast::Expression>
 }
 
 /// Is one `test "name" { ... }` block: the symbol it lowers under and its
@@ -385,6 +387,7 @@ pub fn new_lowerer(
         node: try signature_nodes.add(allocator, Signature {
             params: array::new<Param>(allocator),
             return_type: empty_name(),
+            pointer_type: empty_name(),
             requires_unsafe: false
         })
     };
@@ -397,6 +400,7 @@ pub fn new_lowerer(
         node: try signature_nodes.add(allocator, Signature {
             params: move storage_self_params,
             return_type: empty_name(),
+            pointer_type: empty_name(),
             requires_unsafe: false
         })
     };
@@ -440,7 +444,8 @@ pub fn new_lowerer(
         next_error_code: 0,
         deinit_owners: move deinit_owners,
         release_allocators: move release_allocators,
-        retired: array::new<RetiredReceiver>(allocator)
+        retired: array::new<RetiredReceiver>(allocator),
+        function_pointer_mut_borrows: array::new<ast::Expression>(allocator)
     };
     errdefer lowerer.deinit(allocator);
     try lowerer.collect_facts(tree, program);
@@ -592,6 +597,11 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
             });
         }
         index = index + 1;
+    }
+    index = 0;
+    while checker.function_pointer_mut_borrow_at(index) |expression| {
+        index = index + 1;
+        try self.function_pointer_mut_borrows.append(self.allocator, expression);
     }
     return;
 }
@@ -1112,12 +1122,56 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     let resolved = try self.resolve_bound_type(declared_return);
     let returned = try self.lower_return_type(resolved);
     let requires_unsafe = self.decl_facts.at(decl.node).requires_unsafe;
+    var pointer_return = resolved;
+    if is_empty(pointer_return) {
+        pointer_return = self.common.void_type;
+    }
+    let pointer = try self.declared_function_pointer_type(decl, pointer_return, requires_unsafe);
     let handle = try self.signature_nodes.add(self.allocator, Signature {
         params: move params,
         return_type: returned,
+        pointer_type: pointer,
         requires_unsafe: requires_unsafe
     });
     return SignatureHandle { node: handle };
+}
+
+/// Spells the source-level callable type of a declaration. Runtime Params
+/// cannot answer this: `x: &i64` and `x: i64` both travel as i64, while only
+/// the former carries a borrow effect.
+fn (self: &var Lowerer) declared_function_pointer_type(
+    decl: FactsHandle,
+    declared_return: Name,
+    requires_unsafe: bool
+) -> !Name {
+    var text = string::new(self.allocator);
+    errdefer text.deinit(self.allocator);
+    if requires_unsafe {
+        try text.append_bytes(self.allocator, "unsafe fn(");
+    } else {
+        try text.append_bytes(self.allocator, "fn(");
+    }
+    let count = self.decl_param_count(decl);
+    var index = 0;
+    while index < count {
+        if index > 0 {
+            try text.append_bytes(self.allocator, ", ");
+        }
+        let facts = self.decl_param(decl, index);
+        index = index + 1;
+        if facts.mut_borrow {
+            try text.append_bytes(self.allocator, "&var ");
+        } else {
+            if facts.borrow {
+                try text.append_byte(self.allocator, cast<u8>(38));
+            }
+        }
+        let resolved = try self.resolve_bound_type(facts.type_name);
+        try self.module.names.append_to(&var text, resolved);
+    }
+    try text.append_bytes(self.allocator, ") -> ");
+    try self.module.names.append_to(&var text, declared_return);
+    return self.module.names.intern_owned(move text);
 }
 
 /// Returns the number of runtime parameters a declaration has.
@@ -1258,39 +1312,8 @@ fn last_namespace_end(bytes: []u8) -> i64 {
 
 /// Spells the function pointer type a signature's name has as a value.
 fn (self: &var Lowerer) function_pointer_type(signature: SignatureHandle) -> !Name {
-    var text = string::new(self.allocator);
-    defer text.deinit(self.allocator);
-    var params = array::new<Name>(self.allocator);
-    defer params.deinit(self.allocator);
     let node = self.signature_nodes.at(signature.node);
-    let unsafe_call = node.requires_unsafe;
-    let result = node.return_type;
-    var index = 0;
-    while node.params.get(index) |param| {
-        try params.append(self.allocator, param.type_name);
-        index = index + 1;
-    }
-    if unsafe_call {
-        try text.append_bytes(self.allocator, "unsafe fn(");
-    } else {
-        try text.append_bytes(self.allocator, "fn(");
-    }
-    index = 0;
-    while params.get(index) |param| {
-        if index > 0 {
-            try text.append_bytes(self.allocator, ", ");
-        }
-        let retained = name_text(&self.module.names, param);
-        let bytes = retained.as_bytes();
-        try text.append_bytes(self.allocator, bytes);
-        index = index + 1;
-    }
-    try text.append_bytes(self.allocator, ") -> ");
-    let retained_result = name_text(&self.module.names, result);
-    let result_bytes = retained_result.as_bytes();
-    try text.append_bytes(self.allocator, result_bytes);
-    let text_bytes = text.as_bytes();
-    return self.module.names.intern(text_bytes);
+    return node.pointer_type;
 }
 
 fn (self: &Lowerer) signature_named(name: Name) -> ?SignatureHandle {

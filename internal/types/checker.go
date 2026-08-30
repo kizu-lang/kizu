@@ -3647,15 +3647,36 @@ func (c *Checker) checkFuncPointerCall(
 			name.Name, len(node.Params), len(args))
 	}
 	for idx, arg := range args {
-		want := Type(node.Params[idx].String())
-		got, err := c.checkContextualExpr(arg, want, env, unsafe)
+		declared := Type(node.Params[idx].String())
+		want := declared
+		wantBorrow := false
+		wantMutable := false
+		if _, mutable, inner, ok := explicitBorrowType(declared); ok {
+			want = inner
+			wantBorrow = true
+			wantMutable = mutable
+		}
+		checkedArg, err := prepareBorrowArgument(arg, wantBorrow, wantMutable, env)
+		if err != nil {
+			return "", err
+		}
+		if wantMutable {
+			if err := requireMutableBorrowArg(checkedArg, want, env); err != nil {
+				return "", err
+			}
+		}
+		got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		got, err = coerceReturnedBorrowArgument(got, want, wantBorrow, wantMutable)
 		if err != nil {
 			return "", err
 		}
 		if !sameType(got, want) {
 			return "", errorf(
 				"type error: `%s` argument %d expects %s, got %s",
-				name.Name, idx+1, want, got)
+				name.Name, idx+1, declared, got)
 		}
 	}
 	return Type(node.Result.String()), nil

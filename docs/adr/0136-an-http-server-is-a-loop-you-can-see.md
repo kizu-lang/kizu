@@ -108,7 +108,7 @@ request に対して status を送れません。
 
 | 案 | 却下理由 |
 | --- | --- |
-| Go 型の handler 登録簿(`HandleFunc` + `ListenAndServe`) | 言語が書けない(関数値が borrow を運べない)。書けたとしても、選ばれた handler の呼び出しが呼び出し元の source に無い(原理 2) |
+| Go 型の handler 登録簿(`HandleFunc` + `ListenAndServe`) | borrow parameter を持つ関数 pointer で書けるが、選ばれた handler の呼び出しが呼び出し元の source に無い(原理 2) |
 | handler を `comptime Function` static parameter で取る(#1079 の当初案) | 現在は呼べるが 1 server instantiation = 1 handler で、routing は結局 handler 内の `match`。accept / spawn / handler call が直接書けるので wrapper に隠す情報が無い |
 | `Router` に handler を登録する | 同じ理由。`array::new<fn(...) -> T>` は parser が static 引数として `fn` を受け付けず、struct field の `fn` は非 copy 扱いで `r.handler(x)` が method 呼び出しに読まれる |
 | `path_of` が percent 復号する | segment の中の `%2F` は区切りではない。復号してから分けるのが path traversal の通り道 |
@@ -129,5 +129,4 @@ request に対して status を送れません。
 - `std::net::Error` と `std::http::Error` を足したので、std が assign する
   error code が後ろの set でずれる。ir / llvm corpus は再生成した
 - std::http を書いたことで見つかった language gap は
-  `docs/language-gaps.md` に記録した(関数 pointer の borrow parameter、
-  `[]u8` の等値比較が LLVM に降りないこと)
+  `docs/language-gaps.md` に記録した(`[]u8` の等値比較が LLVM に降りないこと)
