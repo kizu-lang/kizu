@@ -32,7 +32,13 @@ error Failure = http::Error or net::Error or mem::Error or array::Error;
 fn main() -> Failure!void {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
-    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    // This hand-written table gives each slot one request. A persistent table
+    // would reopen and re-arm the slot, so this example names the one-request
+    // policy matching the state machine it demonstrates.
+    var limits = http::default_limits();
+    limits.max_requests = 1;
+    var server = try http::listen_with(
+        handle, allocator, "127.0.0.1:0", limits);
     defer server.deinit(allocator);
     let port = try server.local_port();
     var address = try loopback(allocator, port);
@@ -79,14 +85,37 @@ fn main() -> Failure!void {
     // They finish in the reverse of the order they connected, and the loop
     // follows the finishing.
     try finish(handle, allocator, &var callers, 2);
-    answered = answered + try serve_ready(handle, allocator, &var poller, &var open);
+    answered = answered + try wait_for_answer(
+        handle, allocator, &var poller, &var open);
     try finish(handle, allocator, &var callers, 0);
-    answered = answered + try serve_ready(handle, allocator, &var poller, &var open);
+    answered = answered + try wait_for_answer(
+        handle, allocator, &var poller, &var open);
     try finish(handle, allocator, &var callers, 1);
-    answered = answered + try serve_ready(handle, allocator, &var poller, &var open);
+    answered = answered + try wait_for_answer(
+        handle, allocator, &var poller, &var open);
     print("answered in total");
     print(answered);
     return;
+}
+
+// A poller turn may report an older ready descriptor before the request that
+// just spoke reaches it. The service loop keeps turning; it does not equate
+// one wait with one completed request.
+fn wait_for_answer(
+    handle: Io,
+    allocator: Allocator,
+    poller: &var net::Poller,
+    open: &var array::Array<http::Exchange>
+) -> Failure!i64 {
+    var attempts = 0;
+    while attempts < 100 {
+        let answered = try serve_ready(handle, allocator, poller, open);
+        if answered > 0 {
+            return answered;
+        }
+        attempts = attempts + 1;
+    }
+    return http::Error::Incomplete;
 }
 
 // serve_ready waits once for all of them, moves whichever spoke, and answers

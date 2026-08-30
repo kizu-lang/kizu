@@ -18,11 +18,11 @@ try exchange.respond_text(handle, allocator, 200, "text/plain", "hello");
 大きさは受け取る endpoint が決めるものだからです —— upload と form が同じ数を
 共有する理由がありません。
 
-Go と Zig はどちらも handler を取りますが、それはどちらも handler を**渡せる**
-からです。Kizu にも関数 pointer はありますが borrow を運べないので、handler に
-request を渡せません。
-残るのは pull の loop で、それは control flow が見えたままになる形でもあります
-(`docs/principles.md` §2)。
+Kizu の関数 pointer は borrow parameter を運べるので、handler に `&var Exchange`
+を渡すこと自体はできます。それでも handler 登録簿を置かないのは、選ばれた
+handler の呼び出しを呼び出し元の source から隠さず、接続を返し忘れられない形を
+保つためです。pull の loop は control flow が見えたままです
+(`docs/principles.md` §2、ADR-0136、ADR-0144)。
 
 **`accept` 自体は 1 接続ずつです。** 多数を 1 thread で捌く道は 2 つあります。
 接続ごとの直線 code なら [`accept_connection` + `TaskSet`](#接続ごとの-worker)、
@@ -202,7 +202,7 @@ pub struct Limits {
     pub read_head_millis: i64,   // default 10000
     pub read_body_millis: i64,   // default 30000
     pub write_millis: i64,       // default 30000
-    pub max_requests: i64,       // default 1
+    pub max_requests: i64,       // default 100
     pub idle_millis: i64,        // default 5000
 }
 pub fn default_limits() -> std::http::Limits
@@ -644,17 +644,20 @@ while more {
 }
 ```
 
-### 既定は 1 request です
+### 既定は最大 100 request です
 
-`max_requests` の既定は **1** で、これは HTTP/1.1 の既定ではありません。
+`max_requests` の既定は有限の **100** です。HTTP/1.1 の無制限な既定を server
+policy にそのまま移した値ではありません。
 
-この既定は TaskSet より前の逐次 server で決めた保守値です。TaskSet なら 1 接続の
-idle は他の接続を止めませんが、接続ごとの memory、idle timeout、公平性を測った
-新しい既定はまだ決めていません。現在の定義は 1 のままで、必要な service が
-caller-owned `Limits` で上げます(`TODO.md` 0c)。
+TaskSet server の実測では keep-alive は毎回接続する場合の 2.95 倍、worker は約
+269 KiB/connection でした。100 request を pipeline した worker と競合する別
+request の遅延は中央値 0.455 ms、最大 0.552 ms です。100 は接続と worker stack の
+再作成を償却しながら、I/O で止まらない 1 worker の連続仕事を有限にします。詳しい
+条件と測定値は ADR-0139 にあります。
 
-`idle_millis` は request と request の間に許す静けさです。`next` はこれを deadline
-にして次の head を待ちます。
+`idle_millis` は request と request の間に許す静けさです。既定は 5 秒で、`next` は
+これを deadline にして次の head を待ちます。数と時間は caller-owned `Limits` で
+別々に下げたり上げたりできます。
 
 ### 接続が続く条件
 

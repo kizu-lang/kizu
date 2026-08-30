@@ -37,6 +37,18 @@ fn send_request(
     line: []u8,
     body: []u8
 ) -> Failure!void {
+    return send_request_with_connection(
+        handle, allocator, stream, line, body, "");
+}
+
+fn send_request_with_connection(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    line: []u8,
+    body: []u8,
+    connection: []u8
+) -> Failure!void {
     var wire = string::new(allocator);
     defer wire.deinit(allocator);
     try wire.append_bytes(allocator, line);
@@ -46,6 +58,11 @@ fn send_request(
     if mem::len(body) > 0 {
         try wire.append_bytes(allocator, "Content-Length: ");
         try fmt::append_i64(allocator, &var wire, mem::len(body));
+        try crlf(allocator, &var wire);
+    }
+    if mem::len(connection) > 0 {
+        try wire.append_bytes(allocator, "Connection: ");
+        try wire.append_bytes(allocator, connection);
         try crlf(allocator, &var wire);
     }
     try crlf(allocator, &var wire);
@@ -146,7 +163,9 @@ test "a request reaches the server and the answer reaches the client" {
 
     var client = try net::tcp_connect(handle, address_bytes);
     defer client.deinit();
-    try send_request(handle, allocator, &var client, "POST /echo?x=1 HTTP/1.1", "hello");
+    try send_request_with_connection(
+        handle, allocator, &var client,
+        "POST /echo?x=1 HTTP/1.1", "hello", "close");
     try answer(handle, allocator, &var server);
 
     var reply = string::new(allocator);
@@ -1115,9 +1134,11 @@ test "a connection can carry more than one request when the limits allow it" {
     testing::expect(contains(wire, "Connection: close"));
 }
 
-test "the default is one request per connection" {
+test "the default carries a finite one hundred requests" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
+    let limits = http::default_limits();
+    testing::expect_equal<i64>(100, limits.max_requests);
     var server = try http::listen(handle, allocator, "127.0.0.1:0");
     defer server.deinit(allocator);
     let port = try server.local_port();
@@ -1127,11 +1148,14 @@ test "the default is one request per connection" {
 
     var client = try net::tcp_connect(handle, address_bytes);
     defer client.deinit();
-    try send_request(handle, allocator, &var client, "GET /once HTTP/1.1", "");
-    try send_request(handle, allocator, &var client, "GET /twice HTTP/1.1", "");
+    var sent = 0;
+    while sent < 100 {
+        try send_request(handle, allocator, &var client, "GET /again HTTP/1.1", "");
+        sent = sent + 1;
+    }
 
     let answered = try serve_connection(handle, allocator, &var server);
-    testing::expect_equal<i64>(1, answered);
+    testing::expect_equal<i64>(100, answered);
 }
 
 test "a request that says close ends the connection whatever the limits allow" {
