@@ -23,6 +23,21 @@ func StdGraph() (Graph, error) {
 	return stdGraph.graph, stdGraph.err
 }
 
+// StdGraphForImports returns the standard-library modules reached by import
+// paths such as `std::mem` or `std`. It uses the same dependency walk as the
+// compiler so editor tooling and compilation see the same source files.
+func StdGraphForImports(imports []string) (Graph, error) {
+	graph, err := StdGraph()
+	if err != nil {
+		return Graph{}, err
+	}
+	modules, _, err := stdModulesFor(graph, imports)
+	if err != nil {
+		return Graph{}, err
+	}
+	return Graph{PackageName: graph.PackageName, Modules: modules}, nil
+}
+
 var stdGraph struct {
 	sync.Once
 	graph Graph

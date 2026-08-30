@@ -32,6 +32,9 @@ func documentSymbolAt(tokens []token.Token, start int) (documentSymbol, int, boo
 			symbol, next := testDocumentSymbol(tokens, start)
 			return symbol, next, true
 		}
+		if isErrorSetDeclStart(tokens, start) {
+			return errorSetDocumentSymbol(tokens, start)
+		}
 	case token.Struct:
 		return structDocumentSymbol(tokens, start)
 	case token.Enum:
@@ -42,6 +45,32 @@ func documentSymbolAt(tokens []token.Token, start int) (documentSymbol, int, boo
 		return namedDocumentSymbol(tokens, start, "contract", symbolKindInterface)
 	}
 	return documentSymbol{}, start, false
+}
+
+// errorSetDocumentSymbol builds an outline item and direct member children.
+func errorSetDocumentSymbol(tokens []token.Token, start int) (documentSymbol, int, bool) {
+	if !isErrorSetDeclStart(tokens, start) {
+		return documentSymbol{}, start, false
+	}
+	nameIndex := start + 1
+	name := tokens[nameIndex].Literal
+	symbol := documentSymbol{
+		Name:           name,
+		Detail:         "error",
+		Kind:           symbolKindEnum,
+		SelectionRange: tokenRange(tokens[nameIndex]),
+	}
+	if tokens[nameIndex+1].Type != token.LBrace {
+		end := skipDeclarationBody(tokens, nameIndex+1)
+		symbol.Range = rangeFromTokenSpan(tokens, start, end)
+		return symbol, end, true
+	}
+	members, end := scanVariantDeclarations(
+		navigationSource{}, tokens, nameIndex+1, name, "error",
+	)
+	symbol.Children = declarationChildren(members)
+	symbol.Range = rangeFromTokenSpan(tokens, start, end)
+	return symbol, end, true
 }
 
 // importDocumentSymbol builds an outline item for an import declaration.
