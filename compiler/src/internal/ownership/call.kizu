@@ -1,7 +1,9 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::stdprim;
+import compiler::internal::typ;
 import std::array;
+import std::fmt;
 import std::map;
 import std::mem;
 import std::string;
@@ -114,12 +116,13 @@ fn (self: &var Checker) dispatch_call_expr(
     }
     let user_name = try self.names.intern_text(tree, name);
     // A binding shadows a declaration: a name bound to a function pointer is
-    // called through the pointer. The pointee owns nothing and borrows nothing
-    // here, so the arguments are checked as ordinary values.
+    // called through the pointer. Its signature carries the same move and
+    // borrow effects as a directly named function.
     if self.lookup_text(tree, env, name) |value| {
         let bound = self.binding(value).type_name;
         if self.name_is_function_pointer(bound) {
-            return self.check_func_pointer_call(tree, env, bound, call.args, out);
+            return self.check_func_pointer_call(
+                tree, env, user_name, bound, call.args, sanctioned, out);
         }
     }
     return self.check_user_call(tree, env, user_name, call.args, sanctioned, out);
@@ -131,57 +134,114 @@ fn (self: &Checker) name_is_function_pointer(value: Name) -> bool {
         self.names.starts_with(value, "unsafe fn(");
 }
 
-/// Walks the arguments of a call made through a function pointer. The pointee
-/// is not a declaration this checker can see, so its parameters carry no
-/// borrow or consume obligation: only the argument expressions are checked.
+/// Applies the move and borrow effects carried by a function pointer's
+/// signature. Indirection changes how code is reached, not what each
+/// parameter receives.
 fn (self: &var Checker) check_func_pointer_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    name: Name,
     pointer: Name,
     args: ast::ExpressionList,
+    sanctioned: bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    let function = try self.function_pointer_handle(pointer) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: invalid function pointer `%s`", Arg::Str(pointer));
     var index = 0;
-    while arg_at(tree, args, index) |argument| {
-        var ignored = try self.names.intern("void");
-        if try self.read_expr(tree, env, argument, &var ignored) |failed| {
-            return move failed;
+    while self.param_at(function, index) |param| {
+        if param.borrow and param.mut_borrow {
+            if arg_at(tree, args, index) |argument| {
+                try self.record_function_pointer_mut_borrow(argument);
+            }
         }
         index = index + 1;
     }
-    out.* = try self.function_pointer_result(pointer);
-    return null;
+    return self.check_callable_call(tree, env, name, function, args, sanctioned, out);
 }
 
-/// Names the byte range a function pointer spelling gives its result: what
-/// follows the last ` -> `. start is 0 when the spelling has none.
-struct ResultBounds {
-    start: i64,
-    end: i64
-}
-
-fn result_arrow_bounds(names: &NameTable, pointer: Name) -> ResultBounds {
-    let retained = name_text(names, pointer);
-    let bytes = retained.as_bytes();
-    let total = mem::len(bytes);
-    var index = total;
-    while index > 4 {
-        index = index - 1;
-        if bytes[index] == cast<u8>(62) and bytes[index - 1] == cast<u8>(45) and
-            bytes[index - 2] == cast<u8>(32) {
-            return ResultBounds { start: index + 2, end: total };
+/// Records one checked indirect-call &var argument once.
+fn (self: &var Checker) record_function_pointer_mut_borrow(argument: ast::Expression) -> !void {
+    var index = 0;
+    while self.result.function_pointer_mut_borrows.get(index) |known| {
+        if known.node == argument.node {
+            return;
         }
+        index = index + 1;
     }
-    return ResultBounds { start: 0, end: total };
+    return self.result.function_pointer_mut_borrows.append(self.allocator, argument);
 }
 
-/// Returns the result a function pointer spelling names.
-fn (self: &var Checker) function_pointer_result(pointer: Name) -> !Name {
-    let bounds = result_arrow_bounds(&self.names, pointer);
-    if bounds.start == 0 {
-        return self.names.intern("void");
+/// Retains a concrete function pointer signature as an ownership-facing
+/// FunctionInfo, or returns its cached handle.
+fn (self: &var Checker) function_pointer_handle(pointer: Name) -> !?FunctionHandle {
+    let copied = try self.names.copy(pointer);
+    defer copied.deinit(self.allocator);
+    let bytes = copied.as_bytes();
+    if self.function_pointers.get(bytes) |known| {
+        return known;
     }
-    return self.names.intern_slice(pointer, bounds.start, bounds.end);
+    let parsed = try self.names.parsed.parse(bytes);
+    var declared = array::new<typ::Type>(self.allocator);
+    defer declared.deinit(self.allocator);
+    var result = parsed;
+    var unsafe_call = false;
+    match typ::root_node(&self.names.parsed, parsed) {
+        Func(node) => {
+            unsafe_call = node.unsafe_call;
+            var index = 0;
+            while node.params.get(index) |param| {
+                index = index + 1;
+                try declared.append(self.allocator, typ::child_type(parsed, param));
+            }
+            result = typ::child_type(parsed, node.result);
+        },
+        _ => return null,
+    }
+    var params = array::new<ParamInfo>(self.allocator);
+    errdefer params.deinit(self.allocator);
+    var index = 0;
+    while declared.get(index) |part| {
+        let position = index + 1;
+        index = index + 1;
+        let rendered = try typ::render(self.allocator, &self.names.parsed, part);
+        let declared_name = try self.names.intern_owned(move rendered);
+        var type_name = declared_name;
+        var borrow = false;
+        var mut_borrow = false;
+        if try self.names.explicit_borrow(declared_name) |parts| {
+            type_name = parts.inner;
+            borrow = true;
+            mut_borrow = parts.mutable;
+        }
+        var label = try string::from_bytes(self.allocator, "argument ");
+        errdefer label.deinit(self.allocator);
+        try fmt::append_i64(self.allocator, &var label, position);
+        try params.append(self.allocator, ParamInfo {
+            name: try self.names.intern_owned(move label),
+            type_name: type_name,
+            borrow: borrow,
+            mut_borrow: mut_borrow
+        });
+    }
+    let rendered_result = try typ::render(self.allocator, &self.names.parsed, result);
+    let return_type = try self.names.intern_owned(move rendered_result);
+    let info = FunctionInfo {
+        name: pointer,
+        receiver: false,
+        has_extern_abi: false,
+        requires_unsafe: unsafe_call,
+        std: false,
+        static_params: array::new<StaticParamInfo>(self.allocator),
+        params: move params,
+        return_type: return_type,
+        body: null
+    };
+    let handle = FunctionHandle { index: try self.functions.add(self.allocator, move info) };
+    let pointer_text = name_text(&self.names, pointer);
+    let pointer_bytes = pointer_text.as_bytes();
+    try self.function_pointers.insert(self.allocator, pointer_bytes, handle);
+    return handle;
 }
 
 /// Validates one declared-function call, the Go `checkUserCall`. sanctioned
@@ -205,6 +265,21 @@ fn (self: &var Checker) check_user_call(
             tree, ast::zero_span(), "move error: `%s` requires explicit static arguments", Arg::Str(name)
         );
     }
+    return self.check_callable_call(tree, env, name, function, args, sanctioned, out);
+}
+
+/// Applies one resolved signature at a call site. Direct and indirect calls
+/// share this path so neither can lose move, borrow, handle, or capability
+/// effects while choosing how the callee is reached.
+fn (self: &var Checker) check_callable_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    function: FunctionHandle,
+    args: ast::ExpressionList,
+    sanctioned: bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
     let info = self.functions.at(function.index);
     let param_count = info.params.len();
     let count = arg_count(tree, args);

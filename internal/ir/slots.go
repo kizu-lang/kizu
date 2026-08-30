@@ -142,6 +142,9 @@ func (l *lowerer) collectMutBorrowsExpr(expr ast.Expression, found map[string]bo
 	if expr == nil {
 		return nil
 	}
+	if l.ownership.FunctionPointerMutablyBorrows(expr) {
+		markIfName(expr, found)
+	}
 	switch e := expr.(type) {
 	case *ast.CallExpr:
 		l.markLentArgs(e, found)

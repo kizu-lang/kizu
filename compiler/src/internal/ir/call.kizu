@@ -416,21 +416,91 @@ fn (self: &var Lowerer) lower_func_pointer_call(
         return null;
     }
     handled.* = true;
+    let signature = try self.lower_function_pointer_signature(callee.type_name);
+    var lowered = array::new<Value>(self.allocator);
+    defer lowered.deinit(self.allocator);
+    if try self.lower_call_args_as(tree, params_of(signature), call.args, &var lowered) |failed| {
+        return move failed;
+    }
     var args = array::new<Value>(self.allocator);
     defer args.deinit(self.allocator);
     try args.append(self.allocator, callee);
     var index = 0;
-    while ownership::arg_at(tree, call.args, index) |argument| {
-        var lowered = self.common.void_value;
-        if try self.lower_expr(tree, argument, &var lowered) |failed| {
-            return move failed;
-        }
-        try args.append(self.allocator, lowered);
+    while lowered.get(index) |argument| {
         index = index + 1;
+        try args.append(self.allocator, argument);
     }
-    let result = try self.function_pointer_result_name(callee.type_name);
+    let result = self.signature_nodes.at(signature.node).return_type;
     out.* = try self.emit_with(Op::CallIndirect, empty_name(), result, empty_name(), &args);
+    if self.last_instr() |instr| {
+        index = 0;
+        while self.signature_param(signature, index) |param| {
+            index = index + 1;
+            try self.module.add_call_param(self.allocator, instr, param);
+        }
+    }
     return null;
+}
+
+/// Turns a source-level function pointer type into the same ABI signature a
+/// directly named declaration receives.
+fn (self: &var Lowerer) lower_function_pointer_signature(pointer: Name) -> !SignatureHandle {
+    let retained = name_text(&self.module.names, pointer);
+    let bytes = retained.as_bytes();
+    let parsed = try self.types.parse(bytes);
+    var declared = array::new<typ::Type>(self.allocator);
+    defer declared.deinit(self.allocator);
+    var result = parsed;
+    var unsafe_call = false;
+    match typ::root_node(&self.types, parsed) {
+        Func(node) => {
+            unsafe_call = node.unsafe_call;
+            var index = 0;
+            while node.params.get(index) |param| {
+                index = index + 1;
+                try declared.append(self.allocator, typ::child_type(parsed, param));
+            }
+            result = typ::child_type(parsed, node.result);
+        },
+        _ => {},
+    }
+    var params = array::new<Param>(self.allocator);
+    errdefer params.deinit(self.allocator);
+    var index = 0;
+    while declared.get(index) |part| {
+        index = index + 1;
+        var type_name = empty_name();
+        var passing = Passing::Value;
+        match typ::root_node(&self.types, part) {
+            Borrow(borrow) => {
+                let elem = typ::child_type(part, borrow.elem);
+                let rendered = try typ::render(self.allocator, &self.types, elem);
+                let named = try self.module.names.intern_owned(move rendered);
+                let resolved = try self.resolve_bound_type(named);
+                type_name = try self.borrow_ir_type(resolved, borrow.mutable);
+                passing = self.borrow_passing(resolved, borrow.mutable);
+            },
+            _ => {
+                let rendered = try typ::render(self.allocator, &self.types, part);
+                let named = try self.module.names.intern_owned(move rendered);
+                type_name = try self.resolve_bound_type(named);
+            },
+        }
+        try params.append(self.allocator, Param {
+            name: empty_name(), type_name: type_name, passing: passing
+        });
+    }
+    let rendered_result = try typ::render(self.allocator, &self.types, result);
+    let named_result = try self.module.names.intern_owned(move rendered_result);
+    let resolved_result = try self.resolve_bound_type(named_result);
+    let returned = try self.lower_return_type(resolved_result);
+    let handle = try self.signature_nodes.add(self.allocator, Signature {
+        params: move params,
+        return_type: returned,
+        pointer_type: pointer,
+        requires_unsafe: unsafe_call
+    });
+    return SignatureHandle { node: handle };
 }
 
 /// Reports whether an interned name starts with text.
@@ -438,36 +508,6 @@ fn (self: &Lowerer) name_starts_with(value: Name, text: []u8) -> bool {
     let retained = name_text(&self.module.names, value);
     let bytes = retained.as_bytes();
     return mem::starts_with(bytes, text);
-}
-
-/// Returns the result a function pointer spelling names: what follows the
-/// last ` -> `.
-fn (self: &var Lowerer) function_pointer_result_name(pointer: Name) -> !Name {
-    let bounds = pointer_result_bounds(&self.module.names, pointer);
-    if bounds.start == 0 {
-        return self.module.names.intern("void");
-    }
-    return self.module.names.intern_slice(pointer, bounds.start, bounds.end);
-}
-
-struct PointerResultBounds {
-    start: i64,
-    end: i64
-}
-
-fn pointer_result_bounds(names: &NameTable, pointer: Name) -> PointerResultBounds {
-    let retained = name_text(names, pointer);
-    let bytes = retained.as_bytes();
-    let total = mem::len(bytes);
-    var index = total;
-    while index > 4 {
-        index = index - 1;
-        if bytes[index] == cast<u8>(62) and bytes[index - 1] == cast<u8>(45) and
-            bytes[index - 2] == cast<u8>(32) {
-            return PointerResultBounds { start: index + 2, end: total };
-        }
-    }
-    return PointerResultBounds { start: 0, end: total };
 }
 
 /// Lowers builtins and resolved function calls, the Go `lowerNamedCallExpr`.

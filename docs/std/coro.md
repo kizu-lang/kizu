@@ -64,8 +64,10 @@ signal handler は持ちません。
 fn entry(arg: i64) -> void
 ```
 
-関数 pointer は borrow を運べません(`docs/language-gaps.md`)。なので coroutine に
-渡るのは**数**で、その意味を知っているのは渡した側だけです。
+関数 pointer 自体は borrow を運べます。ただし `std::coro` の低レベル entry ABI は
+`fn(i64) -> void` に固定しており、borrow や owner を coroutine の lifetime へ結ぶ
+型付き state adapter を持ちません。したがって coroutine に直接渡るのは**数**で、
+その意味を知っているのは渡した側だけです。
 
 これは今の形の限界です。`Io.async` が実際の引数と結果を運べるようにするのが
 次の段で、そこで形が変わります。

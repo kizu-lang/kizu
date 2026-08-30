@@ -93,6 +93,11 @@ type Instr struct {
 	Result Value
 	Op     string
 	Args   []Value
+	// CallParams is the ABI signature carried by an indirect call. A direct
+	// call can read this from the function it names; an indirect call has no
+	// declaration at the use site, so lowering records the same Param facts
+	// beside the call once rather than asking each backend to infer them.
+	CallParams []Param
 	// Immediate is what the instruction carries that no value of its own
 	// spells: the text of a literal, the variant a union instruction selects,
 	// and the kind a cond_fail reports. A type argument is not among them --
@@ -158,6 +163,10 @@ func (t Terminator) Successors() []string {
 type Signature struct {
 	Params []Param
 	Return string
+	// Pointer is the source-level callable type of the declaration. Params and
+	// Return are ABI-lowered, which deliberately erases a shared borrow of a
+	// copy value; a function name used as a value must retain that effect.
+	Pointer string
 	// Unsafe carries the obligation the declaration named, so the type its
 	// name has as a value spells `unsafe fn(...)` the way the checker did.
 	Unsafe bool

@@ -353,7 +353,7 @@ path の accept を待つので、tutorial は `wire` module で「接続する 
 | `accept_connection` + `TaskSet` | この tutorial は 1 接続ずつ。production shape は `examples/http_tasks.kizu` |
 | 接続を跨ぐ idle 期限 | 1 接続 1 request なので、押し直す相手がまだいない |
 | `connect` の期限 | `tcp_connect` は黒穴宛てに host の既定(~75s)まで固まる |
-| keep-alive の既定 | 既定は 1 接続 1 request。`limits.max_requests` を上げると `exchange.next` で続けられる |
+| keep-alive の既定 | 既定は最大 100 request / idle 5 秒。この逐次 tutorial は `exchange.next` を呼ばず、1 request で接続を返す |
 | trailer を読むこと | terminator の後ろの trailer は消費して捨てる |
 | compression | `Content-Encoding` は素通しで decode しない |
 | TLS / HTTPS | `std::http::get` は `https` を `Error::UnsupportedScheme` で拒否する。暗号化を頼まれたものを平文で送らない |

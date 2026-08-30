@@ -748,8 +748,39 @@ func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
 	for _, param := range sig.Params {
 		params = append(params, l.lowerParam(param))
 	}
-	returned := l.lowerReturnType(l.resolveType(typ.Text(sig.ReturnType)))
-	return Signature{Params: params, Return: returned, Unsafe: sig.RequiresUnsafe}
+	declaredReturn := l.resolveType(returnType(typ.Text(sig.ReturnType)))
+	returned := l.lowerReturnType(declaredReturn)
+	return Signature{
+		Params: params, Return: returned,
+		Pointer: l.declaredFunctionPointerType(sig, declaredReturn),
+		Unsafe:  sig.RequiresUnsafe,
+	}
+}
+
+// declaredFunctionPointerType spells the source-level callable type of a
+// declaration. Runtime Params cannot answer this: `x: &i64` is passed as the
+// same i64 value as `x: i64`, while the former still carries a borrow effect.
+func (l *lowerer) declaredFunctionPointerType(
+	sig ast.FunctionSignature,
+	declaredReturn string,
+) string {
+	node := &typ.Func{Unsafe: sig.RequiresUnsafe}
+	for _, param := range sig.Params {
+		parsed, err := typ.Parse(l.resolveType(typ.Text(param.TypeName)))
+		if err != nil {
+			return ""
+		}
+		if param.Borrow || param.MutBorrow {
+			parsed = &typ.Borrow{Elem: parsed, Mut: param.MutBorrow}
+		}
+		node.Params = append(node.Params, parsed)
+	}
+	result, err := typ.Parse(declaredReturn)
+	if err != nil {
+		return ""
+	}
+	node.Result = result
+	return node.String()
 }
 
 // lowerFunction lowers one function into SSA blocks.
@@ -1707,20 +1738,7 @@ func (l *lowerer) functionByValueName(name string) (string, Signature, bool) {
 
 // functionPointerType spells the type a function's name has as a value.
 func functionPointerType(sig Signature) string {
-	node := &typ.Func{Unsafe: sig.Unsafe}
-	for _, param := range sig.Params {
-		parsed, err := typ.Parse(param.Type)
-		if err != nil {
-			return ""
-		}
-		node.Params = append(node.Params, parsed)
-	}
-	result, err := typ.Parse(sig.Return)
-	if err != nil {
-		return ""
-	}
-	node.Result = result
-	return node.String()
+	return sig.Pointer
 }
 
 // lowerCastExpr lowers an explicit cast as a typed conversion instruction.
@@ -1827,15 +1845,39 @@ func (l *lowerer) lowerFuncPointerCall(expr *ast.CallExpr) (Value, bool, error) 
 	if !ok {
 		return Value{}, false, nil
 	}
-	args := []Value{callee}
-	for _, raw := range expr.Args {
-		arg, err := l.lowerExpr(raw)
-		if err != nil {
-			return Value{}, true, err
-		}
-		args = append(args, arg)
+	params, result, err := l.lowerFuncPointerSignature(node)
+	if err != nil {
+		return Value{}, true, err
 	}
-	return l.emit("call.indirect", typ.Text(node.Result), args, ""), true, nil
+	lowered, err := l.lowerCallArgsAs(params, expr.Args)
+	if err != nil {
+		return Value{}, true, err
+	}
+	args := append([]Value{callee}, lowered...)
+	value := l.emit("call.indirect", result, args, "")
+	l.block.Instrs[len(l.block.Instrs)-1].CallParams = params
+	return value, true, nil
+}
+
+// lowerFuncPointerSignature turns a source-level function pointer type into
+// the same ABI Params and result a directly named declaration receives.
+func (l *lowerer) lowerFuncPointerSignature(node *typ.Func) ([]Param, string, error) {
+	params := make([]Param, 0, len(node.Params))
+	for _, declared := range node.Params {
+		param := Param{Passing: PassValue}
+		if borrow, ok := declared.(*typ.Borrow); ok {
+			elem := l.resolveType(typ.Text(borrow.Elem))
+			param.Type, param.Passing = l.borrowIRType(elem, borrow.Mut)
+		} else {
+			param.Type = l.resolveType(typ.Text(declared))
+		}
+		params = append(params, param)
+	}
+	result := l.resolveType(typ.Text(node.Result))
+	if _, err := typ.Parse(result); err != nil {
+		return nil, "", err
+	}
+	return params, l.lowerReturnType(result), nil
 }
 
 // funcPointerNode parses a function pointer spelling, and reports whether the

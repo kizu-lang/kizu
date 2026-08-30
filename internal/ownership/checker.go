@@ -103,6 +103,7 @@ type functionInfo struct {
 }
 
 type paramInfo struct {
+	name      string
 	typeName  string
 	borrow    bool
 	mutBorrow bool
@@ -517,7 +518,8 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 	params := make([]paramInfo, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		params = append(params, paramInfo{
-			typeName: typ.Text(param.TypeName), borrow: param.Borrow, mutBorrow: param.MutBorrow,
+			name: param.Name, typeName: typ.Text(param.TypeName),
+			borrow: param.Borrow, mutBorrow: param.MutBorrow,
 		})
 	}
 	return &functionInfo{
@@ -1286,7 +1288,7 @@ func (c *Checker) checkArenaBorrowReturn(
 // source rooted in local state would dangle and is rejected. Every error
 // comes back with handled set.
 func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool, error) {
-	name, fn := c.calledFunction(call.Callee)
+	name, fn := c.calledFunction(call.Callee, env)
 	if fn == nil || !tiedReturn(returnTypeName(fn)) {
 		return false, nil
 	}
@@ -1431,7 +1433,7 @@ func (c *Checker) explicitReturnedBorrowInitializer(
 	if !ok {
 		return nil, "", false, false, nil
 	}
-	_, fn := c.calledFunction(call.Callee)
+	_, fn := c.calledFunction(call.Callee, env)
 	if fn == nil {
 		return nil, "", false, false, nil
 	}
@@ -1686,7 +1688,7 @@ func (c *Checker) returnedBorrowInitializer(
 	if !ok {
 		return nil, "", false, false, nil
 	}
-	name, fn := c.calledFunction(call.Callee)
+	name, fn := c.calledFunction(call.Callee, env)
 	if fn == nil {
 		return nil, "", false, false, nil
 	}
@@ -1758,7 +1760,7 @@ func (c *Checker) attachFutureCapabilityProvenance(
 	if !ok {
 		return nil
 	}
-	_, fn := c.calledFunction(call.Callee)
+	_, fn := c.calledFunction(call.Callee, env)
 	if fn == nil || !tiedStructReturn(returnTypeName(fn)) || taskSetReturn(returnTypeName(fn)) {
 		return nil
 	}
@@ -1781,6 +1783,14 @@ func (c *Checker) checkTiedFactoryCall(
 	if typeApply, ok := call.Callee.(*ast.TypeApplyExpr); ok {
 		_, err := c.checkTypeApplyCallExpr(typeApply, call.Args, env)
 		return err
+	}
+	if ident, ok := call.Callee.(*ast.IdentExpr); ok {
+		if value, exists := env.lookup(ident.Name); exists {
+			if node, pointer := funcPointerNode(value.typeName); pointer {
+				_, err := c.checkFuncPointerCall(ident.Name, node, call.Args, env, true)
+				return err
+			}
+		}
 	}
 	_, err := c.checkUserCall(name, call.Args, env, true)
 	return err
@@ -1828,7 +1838,7 @@ func (c *Checker) callBorrowReturnSources(
 			// keep alive while the returned view is used.
 			return nil, errorf(
 				"borrow error: `%s` borrow source `%s` must be a local binding or direct field",
-				name, fn.sig.Params[idx].Name)
+				name, fn.params[idx].name)
 		}
 		sources = append(sources, borrowSource{target: target, field: field})
 	}
@@ -1884,10 +1894,22 @@ func (c *Checker) callTiesAllocator(
 	return false
 }
 
-// calledFunction resolves direct and namespace-qualified source function calls.
-func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) {
+// calledFunction resolves direct, namespace-qualified, and indirect source
+// function calls through one ownership-facing signature.
+func (c *Checker) calledFunction(
+	callee ast.Expression,
+	env *scope,
+) (string, *functionInfo) {
 	switch e := callee.(type) {
 	case *ast.IdentExpr:
+		// A binding shadows a declaration here exactly as it does in call
+		// dispatch. Returned-borrow and tied-capability recognizers therefore
+		// see the same indirect call the ordinary ownership effects accepted.
+		if value, ok := env.lookup(e.Name); ok {
+			if node, pointer := funcPointerNode(value.typeName); pointer {
+				return e.Name, functionPointerInfo(node)
+			}
+		}
 		return e.Name, c.functions[e.Name]
 	case *ast.FieldExpr:
 		name, ok := qualifiedName(e)
@@ -1899,10 +1921,28 @@ func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) 
 		// A generic call names the same declaration its static arguments
 		// instantiate. Reading through to it is what lets the tie recognizer
 		// see a generic factory, which ADR-0099 left closed for want of one.
-		return c.calledFunction(e.Callee)
+		return c.calledFunction(e.Callee, env)
 	default:
 		return "", nil
 	}
+}
+
+// functionPointerInfo presents a pointer signature through the same record as
+// a declared function. It has no body or static parameters because a call site
+// needs only its concrete parameter effects and result.
+func functionPointerInfo(node *typ.Func) *functionInfo {
+	fn := &functionInfo{returnType: typ.Text(node.Result)}
+	for index, param := range node.Params {
+		spelling := typ.Text(param)
+		info := paramInfo{name: fmt.Sprintf("argument %d", index+1), typeName: spelling}
+		if _, mutable, inner, ok := explicitOwnershipBorrowType(spelling); ok {
+			info.typeName = inner
+			info.borrow = true
+			info.mutBorrow = mutable
+		}
+		fn.params = append(fn.params, info)
+	}
+	return fn
 }
 
 // checkStringViewLetStmt binds a local byte view and activates the String
@@ -2567,7 +2607,7 @@ func (c *Checker) readCaptureCondition(
 	if capture == "" || !ok {
 		return c.readExpr(expr, env)
 	}
-	_, fn := c.calledFunction(call.Callee)
+	_, fn := c.calledFunction(call.Callee, env)
 	if fn == nil {
 		return c.readExpr(expr, env)
 	}
@@ -3007,7 +3047,7 @@ func (c *Checker) condViewSources(cond ast.Expression, env *scope) ([]borrowSour
 		seen[source] = true
 		sources = append(sources, source)
 	}
-	name, fn := c.calledFunction(call.Callee)
+	name, fn := c.calledFunction(call.Callee, env)
 	if fn != nil {
 		derived, err := c.callBorrowReturnSources(name, fn, call, false, false, true, env)
 		if err != nil {
@@ -3321,7 +3361,7 @@ func (c *Checker) matchScrutineeOwned(value ast.Expression, env *scope) bool {
 	if field, ok := call.Callee.(*ast.FieldExpr); ok && !field.Namespace {
 		return false
 	}
-	if _, fn := c.calledFunction(call.Callee); fn != nil {
+	if _, fn := c.calledFunction(call.Callee, env); fn != nil {
 		// A borrow-typed return is a view of caller state, not a fresh
 		// temporary (ADR-0098: provenance is structural).
 		return !strings.HasPrefix(returnTypeName(fn), "&")
@@ -4268,11 +4308,11 @@ func (c *Checker) dispatchCallExpr(expr *ast.CallExpr, env *scope) (string, erro
 		return result, err
 	}
 	// A binding shadows a declaration: a name bound to a function pointer is
-	// called through the pointer. The pointee owns nothing and borrows
-	// nothing here, so the arguments are checked as ordinary values.
+	// called through the pointer. Its signature carries the same move and
+	// borrow effects as a directly named function.
 	if bound, ok := env.lookup(name.Name); ok {
 		if node, isFunc := funcPointerNode(bound.typeName); isFunc {
-			return c.checkFuncPointerCall(node, expr.Args, env)
+			return c.checkFuncPointerCall(name.Name, node, expr.Args, env, sanctioned)
 		}
 	}
 	return c.checkUserCall(name.Name, expr.Args, env, sanctioned)
@@ -4362,21 +4402,23 @@ func funcPointerNode(text string) (*typ.Func, bool) {
 	return node, ok
 }
 
-// checkFuncPointerCall walks the arguments of a call made through a function
-// pointer. The pointee is not a declaration this checker can see, so its
-// parameters carry no borrow or consume obligation: only the argument
-// expressions themselves are checked.
+// checkFuncPointerCall applies the move and borrow effects carried by a
+// function pointer's signature. Indirection changes how code is reached, not
+// what each parameter receives.
 func (c *Checker) checkFuncPointerCall(
+	name string,
 	node *typ.Func,
 	args []ast.Expression,
 	env *scope,
+	sanctioned bool,
 ) (string, error) {
-	for _, arg := range args {
-		if _, err := c.readExpr(arg, env); err != nil {
-			return "", err
+	fn := functionPointerInfo(node)
+	for index, param := range fn.params {
+		if index < len(args) && param.borrow && param.mutBorrow {
+			c.result.functionPointerMutBorrows[args[index]] = true
 		}
 	}
-	return typ.Text(node.Result), nil
+	return c.checkCallableCall(name, fn, args, env, sanctioned)
 }
 
 // checkUserCall validates one declared-function call. sanctioned marks the
@@ -4400,6 +4442,19 @@ func (c *Checker) checkUserCall(
 	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", errorf("move error: `%s` requires explicit static arguments", name)
 	}
+	return c.checkCallableCall(name, fn, args, env, sanctioned)
+}
+
+// checkCallableCall applies one resolved signature at a call site. Direct and
+// indirect calls share this path so neither can lose move, borrow, handle, or
+// capability effects while choosing how the callee is reached.
+func (c *Checker) checkCallableCall(
+	name string,
+	fn *functionInfo,
+	args []ast.Expression,
+	env *scope,
+	sanctioned bool,
+) (string, error) {
 	if len(args) != len(fn.params) {
 		return "", errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))

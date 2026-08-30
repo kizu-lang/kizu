@@ -122,7 +122,7 @@ LLVM の型付き thunk が worker の `fn(Io, Allocator, A)` ABI へ戻しま�
 | `async` / `spawn` ごとに stack byte 数を渡す | backend が決める frame size を caller は導けず、同じ推測値が call site ごとに増える。確保は allocator を取る呼び出しに見えているので、byte 数は std の定義側に畳む |
 | worker stack を実行中に伸ばす | 開始後の見えない再確保と失敗を作り、live な borrow を含む stack の移動には compiler と runtime が共有する stack map も要る。開始時に固定量を確保する |
 | stack overflow を worker の error にする | overflow 後に catch / cleanup を走らせる stack が無い。guard で process を止める |
-| worker に i64 を 1 つ渡す(coroutine と同じ形) | 接続を渡せない。関数 pointer は borrow を運べず、global も無いので、worker は何にも届かない |
+| worker に i64 を 1 つ渡す(coroutine と同じ形) | 数へ型を消すと state の ownership と provenance を検査できず、global も無いので安全に元の値へ戻れない |
 | worker が `E!void` を返す | Future が error set を運ぶ必要があり、error set に generic な型が要る。goroutine と同じく、報告先は貸された状態 |
 | cancel は resume せず stack を捨てる | worker が握っていたものが落ちる。終わらせてから解放する |
 | cancel を `?T` の null で表す | null は「今は無い」で `read_ready_into` が既に使っている。cancel された待ちは後で来ることも無いので失敗。Go / POSIX / Zig も失敗にしている |

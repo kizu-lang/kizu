@@ -168,10 +168,58 @@ fn (self: &Verifier) verify_instr(module: &Module, types: &var typ::Table, instr
         StructNew => return self.struct_literal(module, node),
         UnionNew => return self.union_payload(module, node),
         ErrorOk => return self.success_wrap(module, types, node),
+        CallIndirect => return self.verify_indirect_call(module, types, node),
         _ => {},
     }
     if direct_callee(node.op, node.operand) |callee| {
         return self.verify_call(module, node, callee);
+    }
+    return null;
+}
+
+/// Checks the ABI signature retained beside a call whose declaration cannot
+/// be named, the Go `indirectCall`.
+fn (self: &Verifier) verify_indirect_call(
+    module: &Module,
+    types: &var typ::Table,
+    node: &InstrNode
+) -> !?diagnostic::Diagnostic {
+    let callee = node.args.get(0) orelse
+        return try self.failure(
+            module, "call.indirect has no callee",
+            VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None,
+            VerifyArg::None, VerifyArg::None, VerifyArg::None);
+    let callee_text = name_text(&module.names, callee.type_name);
+    let callee_bytes = callee_text.as_bytes();
+    let parsed = try types.parse(callee_bytes);
+    var declared_count = -1;
+    match typ::root_node(types, parsed) {
+        Func(function) => {
+            declared_count = function.params.len();
+        },
+        _ => return try self.failure(
+            module, "call.indirect callee has type %s, not a function pointer",
+            VerifyArg::Str(callee.type_name), VerifyArg::None, VerifyArg::None,
+            VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None),
+    }
+    let arg_count = node.args.len() - 1;
+    if node.call_params.len() != arg_count or declared_count != node.call_params.len() {
+        return try self.failure(
+            module, "call.indirect has %d args, %d ABI params, and %d declared params",
+            VerifyArg::Int(arg_count), VerifyArg::Int(node.call_params.len()),
+            VerifyArg::Int(declared_count), VerifyArg::None, VerifyArg::None,
+            VerifyArg::None, VerifyArg::None);
+    }
+    var index = 0;
+    while node.call_params.get(index) |param| {
+        let got = node.args.get_or_panic(index + 1);
+        if !argument_fits(module, param, got.type_name) {
+            var position = try string::from_bytes(self.allocator, "call.indirect argument ");
+            errdefer position.deinit(self.allocator);
+            try fmt::append_i64(self.allocator, &var position, index);
+            return try self.fail(module, move position, param.type_name, got.type_name);
+        }
+        index = index + 1;
     }
     return null;
 }

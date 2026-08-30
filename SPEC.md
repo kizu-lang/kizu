@@ -1059,6 +1059,24 @@ fn main() -> void {
 }
 ```
 
+parameter の `&T` / `&var T`、owner の handoff、borrow を返す結果は、直接
+呼び出しと同じ規則を持ちます。間接呼び出しだから borrow や move が消えることは
+ありません。
+
+```kizu
+fn inspect(value: &i64) -> &i64 {
+    return value;
+}
+
+fn through(f: fn(&i64) -> &i64, value: &i64) -> &i64 {
+    return f(value);
+}
+```
+
+borrow を返す関数 pointer の結果は、signature 上の borrow parameter に構造的に
+結び付きます。`&var` 引数の alias conflict と、owner 引数の `move` 必須も直接
+呼び出しと同じです。
+
 呼び出しは safe です。指す先はプログラムの生存期間ずっとあり、型が signature を
 保証するので、間接であること自体に `unsafe` の対象はありません。指す先が
 `unsafe fn` のときは `unsafe fn(...) -> ...` という別の型になり、その呼び出しに
@@ -3019,8 +3037,8 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::http::listen(io, address)` / `listen_with(io, address, limits)` は
   `!std::http::Server` を返す
 * `server.accept(io, allocator)` は 1 接続を受け、request を 1 つ読み、
-  `!std::http::Exchange` を返す。**handler は取らない** —— 関数値は borrow を
-  運べないので handler に request を渡せず、pull の loop が残る形
+  `!std::http::Exchange` を返す。**handler は取らない** —— 選ばれた handler の
+  呼び出しを登録簿の内側へ隠さず、request を得た caller が pull の loop を書く
 * `exchange.request` / `exchange.response` は public field
 * `exchange.respond(io, allocator)` / `respond_text(io, allocator, status,
   content_type, body)` は `!void` を返し、2 度目は `Error::ResponseFinished`
@@ -3101,8 +3119,9 @@ state と stack を解放します。確保と解放の allocator は source に
   許している(HTTP/1.1 は `Connection: close` が無ければ、HTTP/1.0 は
   `Connection: keep-alive` があれば)。揃わなければ head に `Connection: close`
   を書く
-* `limits.max_requests` の既定は 1。TaskSet 導入前の保守値を維持しており、接続ごとの
-  memory、idle timeout、公平性を測ってから再検討する(`TODO.md` 0c)
+* `limits.max_requests` の既定は有限の 100。接続と worker stack の再作成を償却しつつ、
+  ready な 1 worker が I/O で止まらず進める量を制限する。request 間の静けさは
+  既定 5 秒の `idle_millis` が別に制限する(ADR-0139)
 * `Transfer-Encoding: chunked` は request も response も decode する。
   `Content-Length` と併記されたら `Error::ConflictingFraming`、`chunked` 以外の
   coding は `Error::UnsupportedEncoding`、size や CRLF が読めなければ
