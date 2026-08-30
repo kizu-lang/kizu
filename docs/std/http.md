@@ -682,6 +682,34 @@ caller-owned `Limits` で上げます(`TODO.md` 0c)。
 3 つ目のために、`accept_head` の後の `read_into` は **`Content-Length` を超えて
 読みません**。超えて読むと、それは次の request です。
 
+## 自分で wire を扱うための helper
+
+`Server` / `Exchange` を通さずに byte を自分で読む・組み立てるときの部品です。
+`examples/http_static_file.kizu` や `docs/tutorial/web-server/` が使っています。
+
+```kizu
+pub fn head_end(bytes: []u8, from: i64) -> ?i64
+pub fn parse_request_head(
+    allocator: Allocator, head: []u8, limits: std::http::Limits,
+) -> std::http::Failure!std::http::Request
+pub fn status_text(status: i64) -> []u8
+pub fn equal_ascii_fold(left: []u8, right: []u8) -> bool
+pub fn append_hex(
+    allocator: Allocator, out: &var std::string::String, value: i64,
+) -> std::mem::Error!void
+```
+
+`head_end` は head を閉じる空行の直後の index を返し、まだ届いていなければ
+`null` です。返った index までを `parse_request_head` に渡します —— `Request` を
+組むのはここで、body は呼び出し側の buffer に残ります。
+
+`status_text` は status code の reason phrase です。既知でない code は class ごとの
+`Client Error` / `Server Error` に、class も不明なら `Unknown` に落ちます。
+
+`equal_ascii_fold` は header field 名の比較(ASCII case-insensitive)、
+`append_hex` は chunked の size 行に書く大文字 hex(`255` → `FF`)です。どちらも
+`std::http` が自分の parse と組み立てに使っているものと同じです。
+
 ## URL と percent 符号化
 
 ```kizu
