@@ -48,7 +48,11 @@ pub fn emit(
         strings: map::new<[]u8, DataRef>(allocator),
         data_order: array::new<ir::Name>(allocator),
         values: map::new<[]u8, ValueInfo>(allocator),
+        data_end: 0,
         generation: 0,
+        frame_size: 0,
+        result_slots: map::new<[]u8, FrameSlot>(allocator),
+        local_slots: map::new<[]u8, FrameSlot>(allocator),
         table: array::new<ir::Name>(allocator),
         table_index: map::new<[]u8, i64>(allocator),
         signatures: array::new<string::String>(allocator),
@@ -84,16 +88,13 @@ fn empty_data_ref() -> DataRef {
     return DataRef { offset: 0, length: 0 };
 }
 
-/// Is what the emitter knows about one SSA value, the Go `valueInfo`: its IR
-/// type, the WebAssembly expression that stands for it, and the data length of
-/// a `[]u8` constant. Go writes typ and no writer reads it. Go gives every
-/// function a fresh values map; a Map cannot be emptied, so an entry carries
-/// the generation (the function count) it was written in and one from an
-/// earlier function is not found.
+/// Is what the emitter knows about one SSA value, the Go `valueInfo`: the
+/// WebAssembly expression that stands for it. Go gives every function a fresh
+/// values map; a Map cannot be emptied, so an entry carries the generation
+/// (the function count) it was written in and one from an earlier function is
+/// not found.
 struct ValueInfo {
-    typ: ir::Name,
     expr: ir::Name,
-    length: i64,
     generation: i64
 }
 
@@ -109,7 +110,13 @@ struct Emitter {
     strings: map::Map<[]u8, DataRef>,
     data_order: array::Array<ir::Name>,
     values: map::Map<[]u8, ValueInfo>,
+    // data_end is the first aligned byte after static data. Recursive-safe
+    // function frames begin there and grow through $__stack_alloc.
+    data_end: i64,
     generation: i64,
+    frame_size: i64,
+    result_slots: map::Map<[]u8, FrameSlot>,
+    local_slots: map::Map<[]u8, FrameSlot>,
     // table lists, in call order, the functions whose address is taken. wasm
     // reaches a function pointer through a table index rather than an address,
     // so `func.addr` lowers to the position a name holds here.
@@ -277,9 +284,36 @@ fn (self: &Emitter) fail(format: []u8, a: Arg) -> !diagnostic::Diagnostic {
     return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
 
+/// Builds one failure from a format with two arguments.
+fn (self: &Emitter) fail2(format: []u8, a: Arg, b: Arg) -> !diagnostic::Diagnostic {
+    var out = string::new(self.allocator);
+    defer out.deinit(self.allocator);
+    let names = &self.names;
+    try format_args(self.allocator, &var out, names, format, move a, move b, Arg::None, Arg::None);
+    let text = out.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
 /// Builds one failure from a finished message.
 fn (self: &Emitter) fail0(format: []u8) -> !diagnostic::Diagnostic {
     return self.fail(format, Arg::None);
+}
+
+/// Wraps an inner failure the Go `fmt.Errorf("...: %w", err)` way.
+fn (self: &Emitter) wrap(format: []u8, a: Arg, inner: diagnostic::Diagnostic) -> !diagnostic::Diagnostic {
+    defer inner.deinit(self.allocator);
+    var out = string::new(self.allocator);
+    defer out.deinit(self.allocator);
+    let names = &self.names;
+    try format_args(self.allocator, &var out, names, format, move a, Arg::None, Arg::None, Arg::None);
+    try out.append_bytes(self.allocator, ": ");
+    if inner.category.len() > 0 {
+        try out.append_string(self.allocator, &inner.category);
+        try out.append_bytes(self.allocator, ": ");
+    }
+    try out.append_string(self.allocator, &inner.message);
+    let text = out.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
 
 /// Names the text of a module name in the emitter's table, so it can be
@@ -385,7 +419,10 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     offset = offset + 4;
     try self.record_data("false", offset, 5);
     offset = offset + 5;
-    return self.record_data("newline", offset, 1);
+    try self.record_data("newline", offset, 1);
+    offset = offset + 1;
+    self.data_end = wasm_align_up(offset, 8);
+    return;
 }
 
 /// Files one string constant at an offset and returns the bytes it occupies.
@@ -465,18 +502,24 @@ fn (self: &var Emitter) intern_signature(module: &ir::Module, node: &ir::InstrNo
     errdefer declaration.deinit(self.allocator);
     var key = string::new(self.allocator);
     defer key.deinit(self.allocator);
+    if is_memory_type(module, node.result.type_name) {
+        try declaration.append_bytes(self.allocator, " (param i32)");
+        try key.append_bytes(self.allocator, "i32,");
+    }
     var index = 1;
     while node.args.get(index) |arg| {
         index = index + 1;
-        let wasm = wasm_type(&module.names, arg.type_name);
+        let wasm = wasm_type(module, arg.type_name);
         try declaration.append_bytes(self.allocator, " (param ");
         try declaration.append_bytes(self.allocator, wasm);
         try declaration.append_byte(self.allocator, cast<u8>(41));
         try key.append_bytes(self.allocator, wasm);
         try key.append_byte(self.allocator, cast<u8>(44));
     }
-    if !module.names.is(node.result.type_name, "void") {
-        let wasm = wasm_type(&module.names, node.result.type_name);
+    try key.append_bytes(self.allocator, "->");
+    if !module.names.is(node.result.type_name, "void") and
+        !is_memory_type(module, node.result.type_name) {
+        let wasm = wasm_type(module, node.result.type_name);
         try declaration.append_bytes(self.allocator, " (result ");
         try declaration.append_bytes(self.allocator, wasm);
         try declaration.append_byte(self.allocator, cast<u8>(41));
@@ -533,10 +576,15 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     ;
     try self.line(import_line);
     try self.line("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))");
-    let memory_line =
-        \\  (memory (export "memory") 1)
+    var pages = (self.data_end + 65535) / 65536;
+    if pages < 1 {
+        pages = 1;
+    }
+    let memory_format =
+        \\  (memory (export "memory") %d)
     ;
-    try self.line(memory_line);
+    try self.line1(memory_format, Arg::Int(pages));
+    try self.line1("  (global $__stack_pointer (mut i32) (i32.const %d))", Arg::Int(self.data_end));
     try self.write_function_table(module);
     var index = 0;
     while self.data_order.get(index) |key| {
@@ -576,9 +624,33 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
 
 /// Writes the minimal WASI stdout helpers, the Go `writeRuntime`.
 fn (self: &var Emitter) write_runtime() -> !void {
+    try self.write_stack_alloc_helper();
     try self.write_line_helper();
     try self.write_bool_helper();
     return self.write_int_helper();
+}
+
+/// Reserves one recursive-safe linear-memory frame and grows memory before a
+/// store can cross its current end, the Go `writeStackAllocHelper`.
+fn (self: &var Emitter) write_stack_alloc_helper() -> !void {
+    try self.line("  (func $__stack_alloc (param $size i32) (result i32)");
+    try self.line("    (local $base i32) (local $end i32) (local $pages i32)");
+    try self.line("    (local.set $base (global.get $__stack_pointer))");
+    try self.line("    (local.set $end (i32.add (local.get $base) (local.get $size)))");
+    try self.line("    (if (i32.lt_u (local.get $end) (local.get $base)) (then (unreachable)))");
+    try self.line("    (if (i32.gt_u (local.get $end)");
+    try self.line("        (i32.shl (memory.size) (i32.const 16)))");
+    try self.line("      (then");
+    try self.line("        (local.set $pages");
+    try self.line("          (i32.sub");
+    try self.line("            (i32.shr_u (i32.add (local.get $end) (i32.const 65535)) (i32.const 16))");
+    try self.line("            (memory.size)))");
+    try self.line("        (if (i32.eq (memory.grow (local.get $pages)) (i32.const -1))");
+    try self.line("          (then (unreachable)))))");
+    try self.line("    (global.set $__stack_pointer (local.get $end))");
+    try self.line("    (local.get $base)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes a buffer and a trailing newline to stdout, the Go
@@ -671,17 +743,30 @@ fn (self: &var Emitter) write_function(
 ) -> !?diagnostic::Diagnostic {
     self.generation = self.generation + 1;
     let node = module.function_nodes.at(function.node);
+    let symbol = try self.own(module, node.name);
+    if try self.plan_frame(module, node) |failed| {
+        return try self.wrap("wasm error: function `%s`", Arg::Str(symbol), move failed);
+    }
+    if try self.register_frame_values(module, node) |failed| {
+        return try self.wrap("wasm error: function `%s`", Arg::Str(symbol), move failed);
+    }
     var params = string::new(self.allocator);
     errdefer params.deinit(self.allocator);
     try self.append_function_params(module, node, &var params);
     var result = string::new(self.allocator);
     errdefer result.deinit(self.allocator);
-    try append_function_result(self.allocator, &module.names, &var result, node.return_type);
-    let symbol = try self.own(module, node.name);
+    try self.append_function_result(module, &var result, node.return_type);
     try self.line3("  (func $%s %s%s",
         Arg::Str(symbol), Arg::Owned(move params), Arg::Owned(move result));
     try self.write_locals(module, node);
+    if self.frame_size > 0 {
+        try self.line("    (local $__kizu_frame i32)");
+    }
     try self.line("    (local $pc i32)");
+    if self.frame_size > 0 {
+        try self.line1("    (local.set $__kizu_frame (call $__stack_alloc (i32.const %d)))",
+            Arg::Int(self.frame_size));
+    }
     try self.line("    (block $exit");
     try self.line("      (loop $dispatch");
     var index = map::new<[]u8, DispatchBlock>(self.allocator);
@@ -698,7 +783,11 @@ fn (self: &var Emitter) write_function(
     try self.line("        (br $exit)");
     try self.line("      )");
     try self.line("    )");
-    if !module.names.is(node.return_type, "void") {
+    if self.frame_size > 0 {
+        try self.line("    (global.set $__stack_pointer (local.get $__kizu_frame))");
+    }
+    if !module.names.is(node.return_type, "void") and
+        !is_memory_type(module, node.return_type) {
         try self.line("    (unreachable)");
     }
     try self.line("  )");
@@ -713,33 +802,43 @@ fn (self: &var Emitter) append_function_params(
     node: &ir::FunctionNode,
     out: &var string::String
 ) -> !void {
+    var wrote = false;
+    if is_memory_type(module, node.return_type) {
+        try out.append_bytes(self.allocator, "(param $__kizu_result i32)");
+        wrote = true;
+    }
     var index = 0;
     while node.params.get(index) |param| {
         index = index + 1;
-        if index > 1 {
+        if wrote {
             try out.append_bytes(self.allocator, " ");
         }
+        wrote = true;
         let name_retained = ir::name_text(&module.names, param.name);
         let name_bytes = name_retained.as_bytes();
         try out.append_bytes(self.allocator, "(param ");
         try append_symbol_name(self.allocator, out, name_bytes);
         try out.append_bytes(self.allocator, " ");
-        try out.append_bytes(self.allocator, wasm_type(&module.names, param.type_name));
+        try out.append_bytes(self.allocator, wasm_type(module, param.type_name));
         try out.append_bytes(self.allocator, ")");
         let expr = try self.local_expr(name_bytes);
-        try self.set_value(module, param.value(), expr, 0);
+        try self.set_value(module, param.value(), expr);
     }
     return;
 }
 
 /// Writes the WebAssembly result declaration, the Go `functionResult`.
-fn append_function_result(allocator: Allocator, names: &ir::NameTable, out: &var string::String, typ: ir::Name) -> !void {
-    if names.is(typ, "void") {
+fn (self: &Emitter) append_function_result(
+    module: &ir::Module,
+    out: &var string::String,
+    typ: ir::Name
+) -> !void {
+    if module.names.is(typ, "void") or is_memory_type(module, typ) {
         return;
     }
-    try out.append_bytes(allocator, " (result ");
-    try out.append_bytes(allocator, wasm_type(names, typ));
-    return out.append_bytes(allocator, ")");
+    try out.append_bytes(self.allocator, " (result ");
+    try out.append_bytes(self.allocator, wasm_type(module, typ));
+    return out.append_bytes(self.allocator, ")");
 }
 
 /// Declares SSA locals that must live across blocks, the Go `writeLocals`.
@@ -759,7 +858,7 @@ fn (self: &var Emitter) write_locals(module: &ir::Module, node: &ir::FunctionNod
             let name_bytes = name_retained.as_bytes();
             let symbol = try self.symbol_name_of(name_bytes);
             try self.line2("    (local %s %s)",
-                Arg::Str(symbol), Arg::Lit(wasm_type(&module.names, instr_node.result.type_name)));
+                Arg::Str(symbol), Arg::Lit(wasm_type(module, instr_node.result.type_name)));
         }
     }
     return;
@@ -837,15 +936,12 @@ fn block_named(
 fn (self: &var Emitter) set_value(
     module: &ir::Module,
     result: ir::Value,
-    expr: ir::Name,
-    length: i64
+    expr: ir::Name
 ) -> !void {
     let retained = ir::name_text(&module.names, result.name);
     let bytes = retained.as_bytes();
     return self.values.insert(self.allocator, bytes, ValueInfo {
-        typ: result.type_name,
         expr: expr,
-        length: length,
         generation: self.generation
     });
 }
@@ -868,17 +964,13 @@ fn (self: &var Emitter) value_of(module: &ir::Module, value: ir::Value) -> !Valu
         try out.append_bytes(self.allocator, ")");
         let constant = try self.names.intern_owned(move out);
         return ValueInfo {
-            typ: value.type_name,
             expr: constant,
-            length: 0,
             generation: self.generation
         };
     }
     let local = try self.local_expr(bytes);
     return ValueInfo {
-        typ: value.type_name,
         expr: local,
-        length: 0,
         generation: self.generation
     };
 }

@@ -6,9 +6,9 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-152 examples 中 21 件が native と同じ出力で動く。残り 131 件の最初の失敗は
-`union.tag` が 100 件を占めるため、example ごとの例外を足さず、aggregate と linear
-memory の表現から順に backend の対象を広げる。
+153 examples 中 42 件が native と同じ出力で動く。残り 111 件の最初の失敗は
+`opt.null` が 100 件を占めるため、example ごとの例外を足さず、optional / error union の
+tagged-value 表現から backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
 std API が native と同じ observable behavior を持ち、compiler が browser の読める binary
@@ -18,18 +18,6 @@ std API が native と同じ observable behavior を持ち、compiler が browse
 Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/wasm`) は各段階で
 同時に更新する。検証は内部生成文字列の構造 pin ではなく、`wasmtime` で example の
 宣言出力を実行して行う。
-
-### W1. aggregate と参照の target layout
-
-- wasm32 の pointer、alignment、size を 1 つの target layout として定義する。LLVM の
-  host layout や source の型名・関数名による分岐は再利用しない。
-- `struct.new`、`field.*`、`ref.load`、`ref.store` を linear memory 上の同じ規則へ lower
-  する。
-- enum の tag と `union.new` / `union.tag` / `union.load` を同じ tagged-value layout へ
-  lower する。inactive payload を読めないことは frontend / IR の検査済み条件に従う。
-- scalar local と memory-backed value の受け渡しを direct call / `call_indirect` で揃える。
-- aggregate を使う behavior example が native と同じ出力で動き、matrix の
-  `union.tag` / `struct.new` / `field.*` / `ref.*` failure を消す。
 
 ### W2. optional、error union、match
 

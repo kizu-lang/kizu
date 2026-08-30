@@ -1,0 +1,176 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::string;
+
+// Mechanical port of internal/wasm/memory.go: typed linear-memory loads,
+// stores, address arithmetic, and aggregate copies.
+
+/// Adds a constant byte offset to one linear-memory address expression.
+fn (self: &var Emitter) address_at(base: ir::Name, offset: i64) -> !ir::Name {
+    if offset == 0 {
+        return base;
+    }
+    var out = try string::from_bytes(self.allocator, "(i32.add ");
+    errdefer out.deinit(self.allocator);
+    try self.names.append_to(&var out, base);
+    try out.append_bytes(self.allocator, " (i32.const ");
+    try fmt::append_i64(self.allocator, &var out, offset);
+    try out.append_bytes(self.allocator, "))");
+    return self.names.intern_owned(move out);
+}
+
+/// Stores value at base+offset according to typ's wasm32 layout. Aggregates
+/// are copied byte-for-byte from their addressed value.
+fn (self: &var Emitter) write_store_value(
+    module: &ir::Module,
+    base: ir::Name,
+    offset: i64,
+    typ: ir::Name,
+    value: ValueInfo
+) -> !?diagnostic::Diagnostic {
+    let address = try self.address_at(base, offset);
+    if is_memory_type(module, typ) {
+        let outcome = try self.type_layout(module, typ);
+        match outcome {
+            Error(failed) => return move failed,
+            Layout(layout) => {
+                try self.write_memory_copy(address, value.expr, layout.size);
+                return null;
+            },
+        }
+    }
+    if wasm_store_op(module, typ) |op| {
+        let owned_op = try self.names.intern(op);
+        try self.line3("            (%s %s %s)",
+            Arg::Str(owned_op), Arg::Str(address), Arg::Str(value.expr));
+        return null;
+    }
+    let type_name = try self.own(module, typ);
+    return try self.fail("wasm error: type `%s` cannot be stored in linear memory", Arg::Str(type_name));
+}
+
+/// Loads one result from base+offset, copying an aggregate into its result
+/// slot or assigning a scalar local.
+fn (self: &var Emitter) write_load_value(
+    module: &ir::Module,
+    result: ir::Value,
+    base: ir::Name,
+    offset: i64
+) -> !?diagnostic::Diagnostic {
+    if is_memory_type(module, result.type_name) {
+        if try self.result_slot(module, result) |slot| {
+            let outcome = try self.type_layout(module, result.type_name);
+            match outcome {
+                Error(failed) => return move failed,
+                Layout(layout) => {
+                    let source = try self.address_at(base, offset);
+                    try self.write_memory_copy(slot, source, layout.size);
+                    try self.set_value(module, result, slot);
+                    return null;
+                },
+            }
+        }
+        return try self.fail0("wasm error: no frame slot for aggregate load");
+    }
+    if wasm_load_op(module, result.type_name) |op| {
+        let address = try self.address_at(base, offset);
+        var loaded = try string::from_bytes(self.allocator, "(");
+        errdefer loaded.deinit(self.allocator);
+        try loaded.append_bytes(self.allocator, op);
+        try loaded.append_byte(self.allocator, cast<u8>(32));
+        try self.names.append_to(&var loaded, address);
+        try loaded.append_byte(self.allocator, cast<u8>(41));
+        let expr = try self.names.intern_owned(move loaded);
+        let retained = ir::name_text(&module.names, result.name);
+        let bytes = retained.as_bytes();
+        let symbol = try self.symbol_name_of(bytes);
+        try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(expr));
+        let local = try self.local_expr(bytes);
+        try self.set_value(module, result, local);
+        return null;
+    }
+    let type_name = try self.own(module, result.type_name);
+    return try self.fail("wasm error: type `%s` cannot be loaded from linear memory", Arg::Str(type_name));
+}
+
+/// Copies size bytes from src to dst.
+fn (self: &var Emitter) write_memory_copy(dst: ir::Name, src: ir::Name, size: i64) -> !void {
+    if size == 0 {
+        return;
+    }
+    return self.line3("            (memory.copy %s %s (i32.const %d))",
+        Arg::Str(dst), Arg::Str(src), Arg::Int(size));
+}
+
+fn wasm_store_op(module: &ir::Module, typ: ir::Name) -> ?[]u8 {
+    if is_tag_type(module, typ) {
+        return "i64.store";
+    }
+    if module.names.is(typ, "bool") {
+        return "i32.store8";
+    }
+    if module.names.is(typ, "i8") or module.names.is(typ, "u8") {
+        return "i64.store8";
+    }
+    if module.names.is(typ, "i16") or module.names.is(typ, "u16") {
+        return "i64.store16";
+    }
+    if module.names.is(typ, "i32") or module.names.is(typ, "u32") or
+        module.names.is(typ, "usize") or module.names.is(typ, "isize") {
+        return "i64.store32";
+    }
+    if module.names.is(typ, "i64") or module.names.is(typ, "u64") {
+        return "i64.store";
+    }
+    if module.names.is(typ, "Allocator") or module.names.is(typ, "Io") {
+        return "i32.store";
+    }
+    let retained = ir::name_text(&module.names, typ);
+    let bytes = retained.as_bytes();
+    if is_wasm_reference_type(bytes) or is_wasm_raw_pointer_type(bytes) or
+        is_wasm_function_pointer_type(bytes) {
+        return "i32.store";
+    }
+    return null;
+}
+
+fn wasm_load_op(module: &ir::Module, typ: ir::Name) -> ?[]u8 {
+    if is_tag_type(module, typ) {
+        return "i64.load";
+    }
+    if module.names.is(typ, "bool") {
+        return "i32.load8_u";
+    }
+    if module.names.is(typ, "i8") {
+        return "i64.load8_s";
+    }
+    if module.names.is(typ, "u8") {
+        return "i64.load8_u";
+    }
+    if module.names.is(typ, "i16") {
+        return "i64.load16_s";
+    }
+    if module.names.is(typ, "u16") {
+        return "i64.load16_u";
+    }
+    if module.names.is(typ, "i32") or module.names.is(typ, "isize") {
+        return "i64.load32_s";
+    }
+    if module.names.is(typ, "u32") or module.names.is(typ, "usize") {
+        return "i64.load32_u";
+    }
+    if module.names.is(typ, "i64") or module.names.is(typ, "u64") {
+        return "i64.load";
+    }
+    if module.names.is(typ, "Allocator") or module.names.is(typ, "Io") {
+        return "i32.load";
+    }
+    let retained = ir::name_text(&module.names, typ);
+    let bytes = retained.as_bytes();
+    if is_wasm_reference_type(bytes) or is_wasm_raw_pointer_type(bytes) or
+        is_wasm_function_pointer_type(bytes) {
+        return "i32.load";
+    }
+    return null;
+}

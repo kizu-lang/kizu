@@ -37,9 +37,7 @@ type dataRef struct {
 }
 
 type valueInfo struct {
-	typ    string
-	expr   string
-	length int
+	expr string
 }
 
 type emitter struct {
@@ -47,6 +45,10 @@ type emitter struct {
 	out     bytes.Buffer
 	strings map[string]dataRef
 	values  map[string]valueInfo
+	// dataEnd is the first byte after static data. Function frames start at its
+	// aligned address and grow through the stack allocator.
+	dataEnd int
+	frame   *frameLayout
 	// table lists, in call order, the functions whose address is taken. wasm
 	// reaches a function pointer through a table index rather than an
 	// address, so `func.addr` lowers to the position a name holds here.
@@ -123,11 +125,14 @@ func (e *emitter) collectCallableInstr(instr *ir.Instr) error {
 // returns its index.
 func (e *emitter) internSignature(instr *ir.Instr) int {
 	sig := funcSignature{}
-	for _, arg := range instr.Args[1:] {
-		sig.params = append(sig.params, wasmType(arg.Type))
+	if e.isMemoryType(instr.Result.Type) {
+		sig.params = append(sig.params, "i32")
 	}
-	if instr.Result.Type != "void" {
-		sig.result = wasmType(instr.Result.Type)
+	for _, arg := range instr.Args[1:] {
+		sig.params = append(sig.params, e.wasmType(arg.Type))
+	}
+	if instr.Result.Type != "void" && !e.isMemoryType(instr.Result.Type) {
+		sig.result = e.wasmType(instr.Result.Type)
 	}
 	key := strings.Join(sig.params, ",") + "->" + sig.result
 	if index, seen := e.signatureIndex[key]; seen {
@@ -152,6 +157,8 @@ func (e *emitter) collectStrings() {
 	e.strings["false"] = dataRef{offset: offset, length: 5}
 	offset += 5
 	e.strings["newline"] = dataRef{offset: offset, length: 1}
+	offset++
+	e.dataEnd = alignUp(offset, 8)
 }
 
 // sortedStringLiteralsByDiscovery returns constants in deterministic IR order.
@@ -177,7 +184,12 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("(module\n")
 	e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
 	e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
-	e.out.WriteString("  (memory (export \"memory\") 1)\n")
+	pages := (e.dataEnd + 65535) / 65536
+	if pages < 1 {
+		pages = 1
+	}
+	fmt.Fprintf(&e.out, "  (memory (export \"memory\") %d)\n", pages)
+	fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
 	e.writeFunctionTable()
 	for _, lit := range e.sortedDataLiterals() {
 		ref := e.strings[lit]
@@ -239,9 +251,33 @@ func dataLiteral(key string) string {
 
 // writeRuntime writes the minimal WASI stdout helpers.
 func (e *emitter) writeRuntime() {
+	e.writeStackAllocHelper()
 	e.writeLineHelper()
 	e.writeBoolHelper()
 	e.writeIntHelper()
+}
+
+// writeStackAllocHelper reserves one recursive-safe linear-memory frame,
+// growing memory by whole pages before a store can cross its end.
+func (e *emitter) writeStackAllocHelper() {
+	e.out.WriteString("  (func $__stack_alloc (param $size i32) (result i32)\n")
+	e.out.WriteString("    (local $base i32) (local $end i32) (local $pages i32)\n")
+	e.out.WriteString("    (local.set $base (global.get $__stack_pointer))\n")
+	e.out.WriteString("    (local.set $end (i32.add (local.get $base) (local.get $size)))\n")
+	e.out.WriteString("    (if (i32.lt_u (local.get $end) (local.get $base)) (then (unreachable)))\n")
+	e.out.WriteString("    (if (i32.gt_u (local.get $end)\n")
+	e.out.WriteString("        (i32.shl (memory.size) (i32.const 16)))\n")
+	e.out.WriteString("      (then\n")
+	e.out.WriteString("        (local.set $pages\n")
+	e.out.WriteString("          (i32.sub\n")
+	e.out.WriteString("            (i32.shr_u (i32.add (local.get $end) " +
+		"(i32.const 65535)) (i32.const 16))\n")
+	e.out.WriteString("            (memory.size)))\n")
+	e.out.WriteString("        (if (i32.eq (memory.grow (local.get $pages)) (i32.const -1))\n")
+	e.out.WriteString("          (then (unreachable)))))\n")
+	e.out.WriteString("    (global.set $__stack_pointer (local.get $end))\n")
+	e.out.WriteString("    (local.get $base)\n")
+	e.out.WriteString("  )\n\n")
 }
 
 // writeLineHelper writes a buffer and a trailing newline to stdout.
@@ -316,10 +352,27 @@ func (e *emitter) writeIntLoop() {
 // writeFunction writes one user function with a dispatch loop for blocks.
 func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
+	frame, err := e.planFrame(fn)
+	if err != nil {
+		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
+	}
+	e.frame = frame
 	params := e.functionParams(fn)
-	fmt.Fprintf(&e.out, "  (func $%s %s%s\n", fn.Name, params, functionResult(fn.Return))
+	if err := e.registerFrameValues(fn); err != nil {
+		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
+	}
+	fmt.Fprintf(&e.out, "  (func $%s %s%s\n", fn.Name, params, e.functionResult(fn.Return))
 	e.writeLocals(fn)
+	if frame.size > 0 {
+		e.out.WriteString("    (local $__kizu_frame i32)\n")
+	}
 	e.out.WriteString("    (local $pc i32)\n")
+	if frame.size > 0 {
+		fmt.Fprintf(&e.out,
+			"    (local.set $__kizu_frame (call $__stack_alloc (i32.const %d)))\n",
+			frame.size,
+		)
+	}
 	e.out.WriteString("    (block $exit\n")
 	e.out.WriteString("      (loop $dispatch\n")
 	index := blockIndexes(fn)
@@ -331,30 +384,37 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.out.WriteString("        (br $exit)\n")
 	e.out.WriteString("      )\n")
 	e.out.WriteString("    )\n")
-	if fn.Return != "void" {
+	if frame.size > 0 {
+		e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_frame))\n")
+	}
+	if fn.Return != "void" && !e.isMemoryType(fn.Return) {
 		e.out.WriteString("    (unreachable)\n")
 	}
 	e.out.WriteString("  )\n\n")
+	e.frame = nil
 	return nil
 }
 
 // functionParams writes WebAssembly parameters and records their values.
 func (e *emitter) functionParams(fn *ir.Function) string {
-	params := make([]string, 0, len(fn.Params))
+	params := make([]string, 0, len(fn.Params)+1)
+	if e.isMemoryType(fn.Return) {
+		params = append(params, "(param $__kizu_result i32)")
+	}
 	for _, param := range fn.Params {
 		name := symbolName(param.Name)
-		params = append(params, fmt.Sprintf("(param %s %s)", name, wasmType(param.Type)))
-		e.values[param.Name] = valueInfo{typ: param.Type, expr: fmt.Sprintf("(local.get %s)", name)}
+		params = append(params, fmt.Sprintf("(param %s %s)", name, e.wasmType(param.Type)))
+		e.values[param.Name] = valueInfo{expr: fmt.Sprintf("(local.get %s)", name)}
 	}
 	return strings.Join(params, " ")
 }
 
 // functionResult returns the WebAssembly result declaration.
-func functionResult(typ string) string {
-	if typ == "void" {
+func (e *emitter) functionResult(typ string) string {
+	if typ == "void" || e.isMemoryType(typ) {
 		return ""
 	}
-	return " (result " + wasmType(typ) + ")"
+	return " (result " + e.wasmType(typ) + ")"
 }
 
 // writeLocals declares SSA locals that must live across blocks.
@@ -363,7 +423,7 @@ func (e *emitter) writeLocals(fn *ir.Function) {
 		for _, instr := range block.Instrs {
 			if needsLocal(instr) {
 				fmt.Fprintf(&e.out, "    (local %s %s)\n",
-					symbolName(instr.Result.Name), wasmType(instr.Result.Type))
+					symbolName(instr.Result.Name), e.wasmType(instr.Result.Type))
 			}
 		}
 	}

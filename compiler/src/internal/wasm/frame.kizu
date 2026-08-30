@@ -1,0 +1,164 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/wasm/frame.go. Each invocation receives fixed
+// slots for every memory-backed SSA result and local storage cell. The global
+// stack pointer makes the same plan safe for recursive calls.
+
+/// Is one fixed frame slot and the function generation that owns it.
+struct FrameSlot {
+    offset: i64,
+    generation: i64
+}
+
+/// Plans all fixed frame slots for one function.
+fn (self: &var Emitter) plan_frame(
+    module: &ir::Module,
+    node: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    self.frame_size = 0;
+    let allocator = self.allocator;
+    let generation = self.generation;
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if is_memory_type(module, instr_node.result.type_name) and
+                instr_node.op != ir::Op::Phi {
+                let outcome = try self.type_layout(module, instr_node.result.type_name);
+                match outcome {
+                    Error(failed) => return move failed,
+                    Layout(layout) => {
+                        let retained = ir::name_text(&module.names, instr_node.result.name);
+                        let bytes = retained.as_bytes();
+                        try allocate_frame_slot(
+                            allocator,
+                            generation,
+                            &var self.frame_size,
+                            &var self.result_slots,
+                            bytes,
+                            layout
+                        );
+                    },
+                }
+            }
+            if instr_node.op == ir::Op::LocalSlot {
+                if instr_node.args.get(0) |value| {
+                    let outcome = try self.type_layout(module, value.type_name);
+                    match outcome {
+                        Error(failed) => return move failed,
+                        Layout(layout) => {
+                            let retained = ir::name_text(&module.names, instr_node.result.name);
+                            let bytes = retained.as_bytes();
+                            try allocate_frame_slot(
+                                allocator,
+                                generation,
+                                &var self.frame_size,
+                                &var self.local_slots,
+                                bytes,
+                                layout
+                            );
+                        },
+                    }
+                } else {
+                    return try self.fail0("wasm error: local slot expects 1 arg");
+                }
+            }
+        }
+    }
+    self.frame_size = wasm_align_up(self.frame_size, 8);
+    return null;
+}
+
+/// Registers fixed-address results before blocks are emitted. A merge block
+/// can therefore refer to a predecessor result even when it is printed first.
+fn (self: &var Emitter) register_frame_values(
+    module: &ir::Module,
+    node: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if is_memory_type(module, instr_node.result.type_name) and
+                instr_node.op != ir::Op::Phi {
+                if try self.result_slot(module, instr_node.result) |slot| {
+                    try self.set_value(module, instr_node.result, slot);
+                } else {
+                    return try self.fail0("wasm error: no frame slot for aggregate result");
+                }
+            }
+            if instr_node.op == ir::Op::LocalSlot {
+                if try self.local_slot(module, instr_node.result) |slot| {
+                    try self.set_value(module, instr_node.result, slot);
+                } else {
+                    return try self.fail0("wasm error: no frame slot for local storage");
+                }
+            }
+        }
+    }
+    return null;
+}
+
+fn allocate_frame_slot(
+    allocator: Allocator,
+    generation: i64,
+    frame_size: &var i64,
+    slots: &var map::Map<[]u8, FrameSlot>,
+    name: []u8,
+    layout: WasmLayout
+) -> !void {
+    if slots.get(name) |known| {
+        if known.generation == generation {
+            return;
+        }
+    }
+    let offset = wasm_align_up(frame_size.*, layout.align);
+    try slots.insert(allocator, name, FrameSlot { offset: offset, generation: generation });
+    frame_size.* = offset + wasm_max(layout.size, 1);
+    return;
+}
+
+/// Returns the expression for one memory-backed SSA result slot.
+fn (self: &var Emitter) result_slot(module: &ir::Module, result: ir::Value) -> !?ir::Name {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    let slot = self.result_slots.get(bytes) orelse return null;
+    if slot.generation != self.generation {
+        return null;
+    }
+    return try self.frame_slot_expr(slot.offset);
+}
+
+/// Returns the expression for one local storage cell.
+fn (self: &var Emitter) local_slot(module: &ir::Module, result: ir::Value) -> !?ir::Name {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    let slot = self.local_slots.get(bytes) orelse return null;
+    if slot.generation != self.generation {
+        return null;
+    }
+    return try self.frame_slot_expr(slot.offset);
+}
+
+fn (self: &var Emitter) frame_slot_expr(offset: i64) -> !ir::Name {
+    if offset == 0 {
+        return self.names.intern("(local.get $__kizu_frame)");
+    }
+    var out = try string::from_bytes(self.allocator, "(i32.add (local.get $__kizu_frame) (i32.const ");
+    errdefer out.deinit(self.allocator);
+    try fmt::append_i64(self.allocator, &var out, offset);
+    try out.append_bytes(self.allocator, "))");
+    return self.names.intern_owned(move out);
+}

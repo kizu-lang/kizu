@@ -1,0 +1,331 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/layout.go. WebAssembly locals hold scalar
+// values directly; aggregates are i32 addresses whose pointees use this one
+// deterministic wasm32 layout.
+
+/// Is the byte size and alignment of one Kizu value in wasm32 linear memory.
+struct WasmLayout {
+    size: i64,
+    align: i64
+}
+
+/// Is a declared struct field and its byte offset.
+struct WasmFieldLayout {
+    field: ir::Field,
+    offset: i64
+}
+
+/// Is one deterministic wasm32 layout or the reason it cannot be formed.
+union WasmLayoutResult {
+    Layout(WasmLayout),
+    Error(diagnostic::Diagnostic),
+}
+
+/// Is one declared field layout or the reason it cannot be formed.
+union WasmFieldLayoutResult {
+    Field(WasmFieldLayout),
+    Error(diagnostic::Diagnostic),
+}
+
+/// Is one byte offset or the reason it cannot be formed.
+union WasmOffsetResult {
+    Offset(i64),
+    Error(diagnostic::Diagnostic),
+}
+
+/// Returns the deterministic wasm32 layout of typ or its exact diagnostic.
+fn (self: &var Emitter) type_layout(module: &ir::Module, typ: ir::Name) -> !WasmLayoutResult {
+    let retained = ir::name_text(&module.names, typ);
+    let bytes = retained.as_bytes();
+    var seen = array::new<string::String>(self.allocator);
+    defer seen.deinit(self.allocator);
+    return self.type_layout_visiting(module, bytes, &var seen);
+}
+
+/// Computes a layout while rejecting recursive by-value aggregates. A
+/// recursive shape must cross an explicit pointer.
+fn (self: &var Emitter) type_layout_visiting(
+    module: &ir::Module,
+    typ: []u8,
+    seen: &var array::Array<string::String>
+) -> !WasmLayoutResult {
+    if wasm_primitive_layout(typ) |layout| {
+        return WasmLayoutResult::Layout(layout);
+    }
+    if module.enums.contains(typ) or module.error_sets.contains(typ) {
+        return WasmLayoutResult::Layout(WasmLayout { size: 8, align: 8 });
+    }
+    if module.structs.at(typ) |declared| {
+        if wasm_contains_name(seen, typ) {
+            let shown = try self.names.intern(typ);
+            return WasmLayoutResult::Error(try self.fail(
+                "wasm error: recursive by-value struct `%s` has no finite layout",
+                Arg::Str(shown)
+            ));
+        }
+        let copied = try string::from_bytes(self.allocator, typ);
+        errdefer copied.deinit(self.allocator);
+        try seen.append(self.allocator, move copied);
+        var size = 0;
+        var align = 1;
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            let field_text = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_text.as_bytes();
+            let outcome = try self.type_layout_visiting(module, field_bytes, seen);
+            match outcome {
+                Layout(field_layout) => {
+                    size = wasm_align_up(size, field_layout.align) + field_layout.size;
+                    align = wasm_max(align, field_layout.align);
+                },
+                Error(failed) => {
+                    if seen.pop() |last| {
+                        last.deinit(self.allocator);
+                    }
+                    return WasmLayoutResult::Error(move failed);
+                },
+            }
+        }
+        if seen.pop() |last| {
+            last.deinit(self.allocator);
+        }
+        return WasmLayoutResult::Layout(WasmLayout {
+            size: wasm_align_up(size, align),
+            align: align
+        });
+    }
+    if module.unions.at(typ) |declared| {
+        if wasm_contains_name(seen, typ) {
+            let shown = try self.names.intern(typ);
+            return WasmLayoutResult::Error(try self.fail(
+                "wasm error: recursive by-value union `%s` has no finite layout",
+                Arg::Str(shown)
+            ));
+        }
+        let copied = try string::from_bytes(self.allocator, typ);
+        errdefer copied.deinit(self.allocator);
+        try seen.append(self.allocator, move copied);
+        var payload_size = 0;
+        var payload_align = 1;
+        var index = 0;
+        while declared.variants.key_at(index) |variant_name| {
+            index = index + 1;
+            let variant = declared.variants.get(variant_name) orelse continue;
+            if ir::is_empty(variant.payload) {
+                continue;
+            }
+            let payload_text = ir::name_text(&module.names, variant.payload);
+            let payload_bytes = payload_text.as_bytes();
+            let outcome = try self.type_layout_visiting(module, payload_bytes, seen);
+            match outcome {
+                Layout(layout) => {
+                    payload_size = wasm_max(payload_size, layout.size);
+                    payload_align = wasm_max(payload_align, layout.align);
+                },
+                Error(failed) => {
+                    if seen.pop() |last| {
+                        last.deinit(self.allocator);
+                    }
+                    return WasmLayoutResult::Error(move failed);
+                },
+            }
+        }
+        if seen.pop() |last| {
+            last.deinit(self.allocator);
+        }
+        let align = wasm_max(8, payload_align);
+        let payload_offset = wasm_align_up(8, payload_align);
+        return WasmLayoutResult::Layout(WasmLayout {
+            size: wasm_align_up(payload_offset + payload_size, align),
+            align: align
+        });
+    }
+    let shown = try self.names.intern(typ);
+    return WasmLayoutResult::Error(try self.fail(
+        "wasm error: type `%s` has no wasm32 value layout",
+        Arg::Str(shown)
+    ));
+}
+
+/// Returns scalar, pointer, and byte-view layouts.
+fn wasm_primitive_layout(typ: []u8) -> ?WasmLayout {
+    if mem::equal_bytes(typ, "void") {
+        return WasmLayout { size: 0, align: 1 };
+    }
+    if mem::equal_bytes(typ, "bool") or mem::equal_bytes(typ, "i8") or
+        mem::equal_bytes(typ, "u8") {
+        return WasmLayout { size: 1, align: 1 };
+    }
+    if mem::equal_bytes(typ, "i16") or mem::equal_bytes(typ, "u16") {
+        return WasmLayout { size: 2, align: 2 };
+    }
+    if mem::equal_bytes(typ, "i32") or mem::equal_bytes(typ, "u32") or
+        mem::equal_bytes(typ, "usize") or mem::equal_bytes(typ, "isize") {
+        return WasmLayout { size: 4, align: 4 };
+    }
+    if mem::equal_bytes(typ, "i64") or mem::equal_bytes(typ, "u64") {
+        return WasmLayout { size: 8, align: 8 };
+    }
+    if mem::equal_bytes(typ, "[]u8") {
+        return WasmLayout { size: 8, align: 4 };
+    }
+    if mem::equal_bytes(typ, "Allocator") or mem::equal_bytes(typ, "Io") or
+        is_wasm_reference_type(typ) or is_wasm_raw_pointer_type(typ) or
+        is_wasm_function_pointer_type(typ) {
+        return WasmLayout { size: 4, align: 4 };
+    }
+    return null;
+}
+
+/// Reports whether a wasm local represents typ by an i32 address.
+fn is_memory_type(module: &ir::Module, typ: ir::Name) -> bool {
+    if module.names.is(typ, "[]u8") {
+        return true;
+    }
+    let retained = ir::name_text(&module.names, typ);
+    let bytes = retained.as_bytes();
+    return module.structs.contains(bytes) or module.unions.contains(bytes);
+}
+
+/// Reports whether a tag is represented by an i64 scalar.
+fn is_tag_type(module: &ir::Module, typ: ir::Name) -> bool {
+    let retained = ir::name_text(&module.names, typ);
+    let bytes = retained.as_bytes();
+    return module.enums.contains(bytes) or module.error_sets.contains(bytes);
+}
+
+/// Returns a declared field and its byte offset.
+fn (self: &var Emitter) field_layout(
+    module: &ir::Module,
+    struct_name: []u8,
+    field_name: []u8
+) -> !WasmFieldLayoutResult {
+    if module.structs.at(struct_name) |declared| {
+        var offset = 0;
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            let outcome = try self.type_layout(module, field.type_name);
+            match outcome {
+                Error(failed) => return WasmFieldLayoutResult::Error(move failed),
+                Layout(layout) => {
+                    offset = wasm_align_up(offset, layout.align);
+                    let retained = ir::name_text(&module.names, field.name);
+                    let bytes = retained.as_bytes();
+                    if mem::equal_bytes(bytes, field_name) {
+                        return WasmFieldLayoutResult::Field(WasmFieldLayout {
+                            field: field,
+                            offset: offset
+                        });
+                    }
+                    offset = offset + layout.size;
+                },
+            }
+        }
+        let shown_struct = try self.names.intern(struct_name);
+        let shown_field = try self.names.intern(field_name);
+        return WasmFieldLayoutResult::Error(try self.fail2(
+            "wasm error: unknown struct field `%s.%s`",
+            Arg::Str(shown_struct),
+            Arg::Str(shown_field)
+        ));
+    }
+    let shown = try self.names.intern(struct_name);
+    return WasmFieldLayoutResult::Error(try self.fail(
+        "wasm error: unknown struct type `%s`",
+        Arg::Str(shown)
+    ));
+}
+
+/// Returns the common start of a union's inline payload.
+fn (self: &var Emitter) union_payload_offset(
+    module: &ir::Module,
+    union_name: []u8
+) -> !WasmOffsetResult {
+    if module.unions.at(union_name) |declared| {
+        var align = 1;
+        var index = 0;
+        while declared.variants.key_at(index) |variant_name| {
+            index = index + 1;
+            let variant = declared.variants.get(variant_name) orelse continue;
+            if ir::is_empty(variant.payload) {
+                continue;
+            }
+            let outcome = try self.type_layout(module, variant.payload);
+            match outcome {
+                Error(failed) => return WasmOffsetResult::Error(move failed),
+                Layout(layout) => {
+                    align = wasm_max(align, layout.align);
+                },
+            }
+        }
+        return WasmOffsetResult::Offset(wasm_align_up(8, align));
+    }
+    let shown = try self.names.intern(union_name);
+    return WasmOffsetResult::Error(try self.fail(
+        "wasm error: unknown union type `%s`",
+        Arg::Str(shown)
+    ));
+}
+
+/// Removes one reference or raw-pointer wrapper from a type spelling.
+fn deref_wasm_type(typ: []u8) -> []u8 {
+    if mem::starts_with(typ, "&var ") {
+        return typ[5..mem::len(typ)];
+    }
+    if mem::starts_with(typ, "&") {
+        return typ[1..mem::len(typ)];
+    }
+    if is_wasm_raw_pointer_type(typ) {
+        let elem = typ[4..mem::len(typ) - 1];
+        if mem::starts_with(elem, "const ") {
+            return elem[6..mem::len(elem)];
+        }
+        return elem;
+    }
+    return typ;
+}
+
+fn is_wasm_reference_type(typ: []u8) -> bool {
+    return mem::starts_with(typ, "&");
+}
+
+fn is_wasm_raw_pointer_type(typ: []u8) -> bool {
+    return mem::starts_with(typ, "ptr<") and ir::ends_with_bytes(typ, ">");
+}
+
+fn is_wasm_function_pointer_type(typ: []u8) -> bool {
+    return mem::starts_with(typ, "fn(") or mem::starts_with(typ, "unsafe fn(");
+}
+
+fn wasm_align_up(value: i64, align: i64) -> i64 {
+    if align <= 1 {
+        return value;
+    }
+    return ((value + align - 1) / align) * align;
+}
+
+fn wasm_max(left: i64, right: i64) -> i64 {
+    if left > right {
+        return left;
+    }
+    return right;
+}
+
+fn wasm_contains_name(seen: &array::Array<string::String>, name: []u8) -> bool {
+    var index = 0;
+    while seen.at(index) |candidate| {
+        index = index + 1;
+        let bytes = candidate.as_bytes();
+        if mem::equal_bytes(bytes, name) {
+            return true;
+        }
+    }
+    return false;
+}

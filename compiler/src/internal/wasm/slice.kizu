@@ -1,0 +1,158 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::string;
+
+// Mechanical port of internal/wasm/slice.go. A []u8 value is an addressed
+// `{ i32 pointer, i32 length }` descriptor.
+
+fn (self: &var Emitter) write_slice_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.op == ir::Op::SliceLen {
+        return self.write_slice_len(module, node);
+    }
+    if node.op == ir::Op::SliceIndex {
+        return self.write_slice_index(module, node);
+    }
+    if node.op == ir::Op::SliceStore {
+        return self.write_slice_store(module, node);
+    }
+    if node.op == ir::Op::SliceSlice {
+        return self.write_slice_slice(module, node);
+    }
+    return try self.fail_op(module, node, "wasm error: unsupported slice instruction `%s`");
+}
+
+fn (self: &var Emitter) write_slice_len(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let arg = node.args.get(0) orelse ir::empty_value();
+    if node.args.len() != 1 or !module.names.is(arg.type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("wasm error: slice.len expects []u8 -> i64");
+    }
+    let descriptor = try self.value_of(module, arg);
+    let length_address = try self.address_at(descriptor.expr, 4);
+    var out = try string::from_bytes(self.allocator, "(i64.extend_i32_u (i32.load ");
+    errdefer out.deinit(self.allocator);
+    try self.names.append_to(&var out, length_address);
+    try out.append_bytes(self.allocator, "))");
+    let expr = try self.names.intern_owned(move out);
+    return self.write_scalar_result(module, node.result, expr);
+}
+
+fn (self: &var Emitter) write_slice_index(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let slice = node.args.get(0) orelse ir::empty_value();
+    let at = node.args.get(1) orelse ir::empty_value();
+    if node.args.len() != 2 or !module.names.is(slice.type_name, "[]u8") or
+        !module.names.is(at.type_name, "i64") or
+        !module.names.is(node.result.type_name, "u8") {
+        return try self.fail0("wasm error: slice.index expects []u8, i64 -> u8");
+    }
+    let descriptor = try self.value_of(module, slice);
+    let index = try self.value_of(module, at);
+    var address = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
+    errdefer address.deinit(self.allocator);
+    try self.names.append_to(&var address, descriptor.expr);
+    try address.append_bytes(self.allocator, ") (i32.wrap_i64 ");
+    try self.names.append_to(&var address, index.expr);
+    try address.append_bytes(self.allocator, "))");
+    let address_name = try self.names.intern_owned(move address);
+    var loaded = try string::from_bytes(self.allocator, "(i64.load8_u ");
+    errdefer loaded.deinit(self.allocator);
+    try self.names.append_to(&var loaded, address_name);
+    try loaded.append_byte(self.allocator, cast<u8>(41));
+    let expr = try self.names.intern_owned(move loaded);
+    return self.write_scalar_result(module, node.result, expr);
+}
+
+fn (self: &var Emitter) write_slice_store(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let slice = node.args.get(0) orelse ir::empty_value();
+    let at = node.args.get(1) orelse ir::empty_value();
+    let stored = node.args.get(2) orelse ir::empty_value();
+    if node.args.len() != 3 or !module.names.is(slice.type_name, "[]u8") or
+        !module.names.is(at.type_name, "i64") or
+        !module.names.is(stored.type_name, "u8") or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: slice.store expects []u8, i64, u8 -> void");
+    }
+    let descriptor = try self.value_of(module, slice);
+    let index = try self.value_of(module, at);
+    let value = try self.value_of(module, stored);
+    var address = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
+    errdefer address.deinit(self.allocator);
+    try self.names.append_to(&var address, descriptor.expr);
+    try address.append_bytes(self.allocator, ") (i32.wrap_i64 ");
+    try self.names.append_to(&var address, index.expr);
+    try address.append_bytes(self.allocator, "))");
+    let address_name = try self.names.intern_owned(move address);
+    try self.line2("            (i64.store8 %s %s)",
+        Arg::Str(address_name), Arg::Str(value.expr));
+    return null;
+}
+
+fn (self: &var Emitter) write_slice_slice(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let slice = node.args.get(0) orelse ir::empty_value();
+    let from = node.args.get(1) orelse ir::empty_value();
+    let to = node.args.get(2) orelse ir::empty_value();
+    if node.args.len() != 3 or !module.names.is(slice.type_name, "[]u8") or
+        !module.names.is(from.type_name, "i64") or !module.names.is(to.type_name, "i64") or
+        !module.names.is(node.result.type_name, "[]u8") {
+        return try self.fail0("wasm error: slice.slice expects []u8, i64, i64 -> []u8");
+    }
+    let descriptor = try self.value_of(module, slice);
+    let start = try self.value_of(module, from);
+    let end = try self.value_of(module, to);
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for slice result");
+    var pointer = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
+    errdefer pointer.deinit(self.allocator);
+    try self.names.append_to(&var pointer, descriptor.expr);
+    try pointer.append_bytes(self.allocator, ") (i32.wrap_i64 ");
+    try self.names.append_to(&var pointer, start.expr);
+    try pointer.append_bytes(self.allocator, "))");
+    let pointer_expr = try self.names.intern_owned(move pointer);
+    try self.line2("            (i32.store %s %s)", Arg::Str(slot), Arg::Str(pointer_expr));
+    var length = try string::from_bytes(self.allocator, "(i32.wrap_i64 (i64.sub ");
+    errdefer length.deinit(self.allocator);
+    try self.names.append_to(&var length, end.expr);
+    try length.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var length, start.expr);
+    try length.append_bytes(self.allocator, "))");
+    let length_expr = try self.names.intern_owned(move length);
+    let length_address = try self.address_at(slot, 4);
+    try self.line2("            (i32.store %s %s)",
+        Arg::Str(length_address), Arg::Str(length_expr));
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+/// Assigns one scalar expression to its SSA local.
+fn (self: &var Emitter) write_scalar_result(
+    module: &ir::Module,
+    result: ir::Value,
+    expr: ir::Name
+) -> !?diagnostic::Diagnostic {
+    if is_memory_type(module, result.type_name) {
+        let type_name = try self.own(module, result.type_name);
+        return try self.fail("wasm error: scalar result helper got aggregate `%s`", Arg::Str(type_name));
+    }
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    let symbol = try self.symbol_name_of(bytes);
+    try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(expr));
+    let local = try self.local_expr(bytes);
+    try self.set_value(module, result, local);
+    return null;
+}

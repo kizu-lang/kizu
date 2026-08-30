@@ -42,3 +42,17 @@ run_example "loop_in_called_function" "examples/loop_in_called_function.kizu" "0
 # type declaration, the elem segment, and call_indirect.
 run_example "function_pointer" "examples/function_pointer.kizu" "42
 -21"
+# Aggregates use one wasm32 memory layout across construction, field access,
+# borrows, direct calls, indirect calls, returns, and recursive frames.
+run_example "struct" "examples/struct.kizu" "alice
+30"
+run_example "field_assignment" "examples/field_assignment.kizu" "bob
+31"
+run_example "match" "examples/match.kizu" "blue"
+run_example "union" "examples/union.kizu" "10
+name
+point"
+run_example "mutable_borrow_nested_field" "examples/mutable_borrow_nested_field.kizu" "9
+2"
+run_example "aggregate_calls" "examples/aggregate_calls.kizu" "4
+3"

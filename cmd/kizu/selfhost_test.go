@@ -192,6 +192,17 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		compareSelfhostArgs(t, selfhost, goWASMOutput(loops, false),
 			"build", "--target", "wasm32-wasi", loops)
 	})
+	for _, example := range []string{
+		"../../examples/aggregate_calls.kizu",
+		"../../examples/union.kizu",
+		"../../examples/mutable_borrow_nested_field.kizu",
+	} {
+		name := strings.TrimSuffix(filepath.Base(example), ".kizu")
+		t.Run("wasm/"+name, func(t *testing.T) {
+			compareSelfhostArgs(t, selfhost, goWASMOutput(example, false),
+				"build", "--target", "wasm32-wasi", example)
+		})
+	}
 	for _, fixture := range wasmRepresentativeFixtures() {
 		t.Run("wasm/"+fixture.name, func(t *testing.T) {
 			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
@@ -394,20 +405,11 @@ fn main() {
 }
 
 // wasmRejectionFixtures is one program per rejection message the backend
-// reports: an aggregate and an arena-free container instruction outside the
-// target subset, a constant and a print of a type it does not lower, and a
-// block that ends unreachable.
+// reports: an arena-free container instruction outside the target subset, a
+// constant and a print of a type it does not lower, and a nested value whose
+// wasm32 layout cannot yet be formed.
 func wasmRejectionFixtures() []wasmFixture {
 	return []wasmFixture{
-		{name: "reject_aggregate", source: `struct Point {
-    x: i64,
-}
-
-fn main() {
-    let p = Point { x: 1 };
-    print(p.x);
-}
-`},
 		{name: "reject_instruction", source: `import std;
 
 fn main() {
@@ -428,6 +430,14 @@ fn main() {
 		{name: "reject_print_type", source: `fn main() {
     let x = cast<u32>(5);
     print(x);
+}
+`},
+		{name: "reject_nested_layout", source: `struct Holder {
+    value: ?i64,
+}
+
+fn main() {
+    let holder = Holder { value: null };
 }
 `},
 		{name: "reject_terminator", source: `fn pick(x: i64) -> i64 {
