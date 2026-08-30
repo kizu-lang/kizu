@@ -6,9 +6,9 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-153 examples 中 42 件が native と同じ出力で動く。残り 111 件の最初の失敗は
-`opt.null` が 100 件を占めるため、example ごとの例外を足さず、optional / error union の
-tagged-value 表現から backend の対象を広げる。
+154 examples 中 51 件が native と同じ出力で動く。残り 103 件の最初の失敗は
+`cond_fail` が 100 件で、ほかは enum print、C allocator、coro runtime が各 1 件。
+example ごとの例外を足さず、共通 runtime と portable std の順に backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
 std API が native と同じ observable behavior を持ち、compiler が browser の読める binary
@@ -18,15 +18,6 @@ std API が native と同じ observable behavior を持ち、compiler が browse
 Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/wasm`) は各段階で
 同時に更新する。検証は内部生成文字列の構造 pin ではなく、`wasmtime` で example の
 宣言出力を実行して行う。
-
-### W2. optional、error union、match
-
-- optional と error union の tag / payload を W1 の tagged-value layout で表す。
-- `error.ok` / `error.error` / `error.has` / `error.value` / `error.code` / `error.try` を
-  lower する。
-- `match`、capture、`orelse`、`try`、`errdefer` の IR が native と同じ arm と cleanup を
-  選ぶことを実行結果で検証する。
-- enum / union、optional、error union の matrix 行から backend lowering failure を消す。
 
 ### W3. slice、failure、allocator、cleanup
 

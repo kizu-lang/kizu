@@ -196,6 +196,7 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		"../../examples/aggregate_calls.kizu",
 		"../../examples/union.kizu",
 		"../../examples/mutable_borrow_nested_field.kizu",
+		"../../examples/optional_error_flow.kizu",
 	} {
 		name := strings.TrimSuffix(filepath.Base(example), ".kizu")
 		t.Run("wasm/"+name, func(t *testing.T) {
@@ -203,6 +204,11 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 				"build", "--target", "wasm32-wasi", example)
 		})
 	}
+	tagged := "../../examples/optional_error_flow.kizu"
+	t.Run("wasm/optional_error_flow_opt", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goWASMOutput(tagged, true),
+			"build", "--target", "wasm32-wasi", "--opt", tagged)
+	})
 	for _, fixture := range wasmRepresentativeFixtures() {
 		t.Run("wasm/"+fixture.name, func(t *testing.T) {
 			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
@@ -353,9 +359,9 @@ func wasmRepresentativeFixtures() []wasmFixture {
 
 // wasmEmitFixtures is one program per emitted shape: calls with i64 parameters
 // and a return, the phi copies and dispatch arms of a loop with a bool print,
-// what the optimizer folds away, and the bytes a data segment escapes. The
-// plain data segment and string print are the hello file the command table
-// already crosses.
+// what the optimizer folds away, the bytes a data segment escapes, a tagged
+// field, and branch-local returns. The plain data segment and string print are
+// the hello file the command table already crosses.
 func wasmEmitFixtures() []wasmFixture {
 	return []wasmFixture{
 		{name: "functions", source: `fn add(a: i64, b: i64) -> i64 {
@@ -401,13 +407,32 @@ fn main() {
 			"        \\\\second line\n" +
 			"    );\n" +
 			"}\n"},
+		{name: "tagged_field", source: `struct Holder {
+    value: ?i64,
+}
+
+fn main() {
+    let holder = Holder { value: null };
+}
+`},
+		{name: "branch_returns", source: `fn pick(x: i64) -> i64 {
+    if x > 0 {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+fn main() {
+    print(pick(1));
+}
+`},
 	}
 }
 
 // wasmRejectionFixtures is one program per rejection message the backend
-// reports: an arena-free container instruction outside the target subset, a
-// constant and a print of a type it does not lower, and a nested value whose
-// wasm32 layout cannot yet be formed.
+// reports: an arena-free container instruction outside the target subset and
+// prints of scalar types it does not lower.
 func wasmRejectionFixtures() []wasmFixture {
 	return []wasmFixture{
 		{name: "reject_instruction", source: `import std;
@@ -417,7 +442,7 @@ fn main() {
     print(std::mem::len(s));
 }
 `},
-		{name: "reject_const_type", source: `enum Color {
+		{name: "reject_print_enum", source: `enum Color {
     Red,
     Blue,
 }
@@ -430,26 +455,6 @@ fn main() {
 		{name: "reject_print_type", source: `fn main() {
     let x = cast<u32>(5);
     print(x);
-}
-`},
-		{name: "reject_nested_layout", source: `struct Holder {
-    value: ?i64,
-}
-
-fn main() {
-    let holder = Holder { value: null };
-}
-`},
-		{name: "reject_terminator", source: `fn pick(x: i64) -> i64 {
-    if x > 0 {
-        return 1;
-    } else {
-        return 2;
-    }
-}
-
-fn main() {
-    print(pick(1));
 }
 `},
 	}

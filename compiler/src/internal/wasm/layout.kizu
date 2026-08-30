@@ -1,5 +1,6 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import compiler::internal::typ;
 import std::array;
 import std::mem;
 import std::string;
@@ -42,9 +43,14 @@ union WasmOffsetResult {
 fn (self: &var Emitter) type_layout(module: &ir::Module, typ: ir::Name) -> !WasmLayoutResult {
     let retained = ir::name_text(&module.names, typ);
     let bytes = retained.as_bytes();
+    return self.type_layout_bytes(module, bytes);
+}
+
+/// Returns the deterministic wasm32 layout of one canonical type spelling.
+fn (self: &var Emitter) type_layout_bytes(module: &ir::Module, typ: []u8) -> !WasmLayoutResult {
     var seen = array::new<string::String>(self.allocator);
     defer seen.deinit(self.allocator);
-    return self.type_layout_visiting(module, bytes, &var seen);
+    return self.type_layout_visiting(module, typ, &var seen);
 }
 
 /// Computes a layout while rejecting recursive by-value aggregates. A
@@ -56,6 +62,27 @@ fn (self: &var Emitter) type_layout_visiting(
 ) -> !WasmLayoutResult {
     if wasm_primitive_layout(typ) |layout| {
         return WasmLayoutResult::Layout(layout);
+    }
+    if typ::optional_elem(typ) |elem| {
+        let outcome = try self.type_layout_visiting(module, elem, seen);
+        match outcome {
+            Error(failed) => return WasmLayoutResult::Error(move failed),
+            Layout(payload) => {
+                return WasmLayoutResult::Layout(wasm_tagged_value_layout(payload));
+            },
+        }
+    }
+    if try self.error_union_parts(typ) |parts| {
+        defer parts.deinit(self.allocator);
+        let success = parts.success.as_bytes();
+        let outcome = try self.type_layout_visiting(module, success, seen);
+        match outcome {
+            Error(failed) => return WasmLayoutResult::Error(move failed),
+            Layout(success_layout) => {
+                let payload = wasm_error_union_payload_layout(success_layout);
+                return WasmLayoutResult::Layout(wasm_tagged_value_layout(payload));
+            },
+        }
     }
     if module.enums.contains(typ) or module.error_sets.contains(typ) {
         return WasmLayoutResult::Layout(WasmLayout { size: 8, align: 8 });
@@ -184,12 +211,19 @@ fn wasm_primitive_layout(typ: []u8) -> ?WasmLayout {
 }
 
 /// Reports whether a wasm local represents typ by an i32 address.
-fn is_memory_type(module: &ir::Module, typ: ir::Name) -> bool {
-    if module.names.is(typ, "[]u8") {
+fn (self: &var Emitter) is_memory_type(module: &ir::Module, typ_name: ir::Name) -> !bool {
+    if module.names.is(typ_name, "[]u8") {
         return true;
     }
-    let retained = ir::name_text(&module.names, typ);
+    let retained = ir::name_text(&module.names, typ_name);
     let bytes = retained.as_bytes();
+    if typ::optional_elem(bytes) |_| {
+        return true;
+    }
+    if try self.error_union_parts(bytes) |parts| {
+        parts.deinit(self.allocator);
+        return true;
+    }
     return module.structs.contains(bytes) or module.unions.contains(bytes);
 }
 

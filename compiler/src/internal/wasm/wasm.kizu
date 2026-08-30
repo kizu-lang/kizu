@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import compiler::internal::typ;
 import std::array;
 import std::fmt;
 import std::map;
@@ -43,6 +44,7 @@ pub fn emit(
 ) -> !?diagnostic::Diagnostic {
     var emitter = Emitter {
         allocator: allocator,
+        types: typ::new(allocator),
         names: try ir::new_name_table(allocator),
         out: string::new(allocator),
         strings: map::new<[]u8, DataRef>(allocator),
@@ -50,6 +52,7 @@ pub fn emit(
         values: map::new<[]u8, ValueInfo>(allocator),
         data_end: 0,
         generation: 0,
+        current_return: ir::empty_name(),
         frame_size: 0,
         result_slots: map::new<[]u8, FrameSlot>(allocator),
         local_slots: map::new<[]u8, FrameSlot>(allocator),
@@ -105,6 +108,7 @@ struct ValueInfo {
 /// order Go re-derives by sorting the map.
 struct Emitter {
     allocator: Allocator,
+    types: typ::Table,
     names: ir::NameTable,
     out: string::String,
     strings: map::Map<[]u8, DataRef>,
@@ -114,6 +118,9 @@ struct Emitter {
     // function frames begin there and grow through $__stack_alloc.
     data_end: i64,
     generation: i64,
+    // current_return is the Kizu return type of the function being written.
+    // error.try uses it to rebuild a propagated failure in caller storage.
+    current_return: ir::Name,
     frame_size: i64,
     result_slots: map::Map<[]u8, FrameSlot>,
     local_slots: map::Map<[]u8, FrameSlot>,
@@ -356,13 +363,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
             return move failed;
         }
     }
-    let start =
-        \\  (func $_start (export "_start")
-    ;
-    try self.line(start);
-    try self.line("    (call $main))");
-    try self.line(")");
-    return null;
+    return self.write_start(module);
 }
 
 /// Collects the string constants in deterministic IR order, the Go
@@ -502,7 +503,7 @@ fn (self: &var Emitter) intern_signature(module: &ir::Module, node: &ir::InstrNo
     errdefer declaration.deinit(self.allocator);
     var key = string::new(self.allocator);
     defer key.deinit(self.allocator);
-    if is_memory_type(module, node.result.type_name) {
+    if try self.is_memory_type(module, node.result.type_name) {
         try declaration.append_bytes(self.allocator, " (param i32)");
         try key.append_bytes(self.allocator, "i32,");
     }
@@ -518,7 +519,7 @@ fn (self: &var Emitter) intern_signature(module: &ir::Module, node: &ir::InstrNo
     }
     try key.append_bytes(self.allocator, "->");
     if !module.names.is(node.result.type_name, "void") and
-        !is_memory_type(module, node.result.type_name) {
+        !try self.is_memory_type(module, node.result.type_name) {
         let wasm = wasm_type(module, node.result.type_name);
         try declaration.append_bytes(self.allocator, " (result ");
         try declaration.append_bytes(self.allocator, wasm);
@@ -743,6 +744,7 @@ fn (self: &var Emitter) write_function(
 ) -> !?diagnostic::Diagnostic {
     self.generation = self.generation + 1;
     let node = module.function_nodes.at(function.node);
+    self.current_return = node.return_type;
     let symbol = try self.own(module, node.name);
     if try self.plan_frame(module, node) |failed| {
         return try self.wrap("wasm error: function `%s`", Arg::Str(symbol), move failed);
@@ -787,7 +789,7 @@ fn (self: &var Emitter) write_function(
         try self.line("    (global.set $__stack_pointer (local.get $__kizu_frame))");
     }
     if !module.names.is(node.return_type, "void") and
-        !is_memory_type(module, node.return_type) {
+        !try self.is_memory_type(module, node.return_type) {
         try self.line("    (unreachable)");
     }
     try self.line("  )");
@@ -803,7 +805,7 @@ fn (self: &var Emitter) append_function_params(
     out: &var string::String
 ) -> !void {
     var wrote = false;
-    if is_memory_type(module, node.return_type) {
+    if try self.is_memory_type(module, node.return_type) {
         try out.append_bytes(self.allocator, "(param $__kizu_result i32)");
         wrote = true;
     }
@@ -828,12 +830,12 @@ fn (self: &var Emitter) append_function_params(
 }
 
 /// Writes the WebAssembly result declaration, the Go `functionResult`.
-fn (self: &Emitter) append_function_result(
+fn (self: &var Emitter) append_function_result(
     module: &ir::Module,
     out: &var string::String,
     typ: ir::Name
 ) -> !void {
-    if module.names.is(typ, "void") or is_memory_type(module, typ) {
+    if module.names.is(typ, "void") or try self.is_memory_type(module, typ) {
         return;
     }
     try out.append_bytes(self.allocator, " (result ");

@@ -44,6 +44,14 @@ fn (self: &var Emitter) write_instr(
     instr: ir::Instr
 ) -> !?diagnostic::Diagnostic {
     let node = module.instrs.at(instr.node);
+    return self.write_instr_node(module, node);
+}
+
+/// Writes one instruction record that need not already be retained in module.
+fn (self: &var Emitter) write_instr_node(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
     if node.op == ir::Op::Const {
         return self.write_const(module, node);
     }
@@ -90,6 +98,15 @@ fn (self: &var Emitter) write_instr(
         node.op == ir::Op::SliceStore or node.op == ir::Op::SliceSlice {
         return self.write_slice_instr(module, node);
     }
+    if node.op == ir::Op::OptNull or node.op == ir::Op::OptSome or
+        node.op == ir::Op::OptHas or node.op == ir::Op::OptValue {
+        return self.write_optional_instr(module, node);
+    }
+    if node.op == ir::Op::ErrorOk or node.op == ir::Op::ErrorError or
+        node.op == ir::Op::ErrorTry or node.op == ir::Op::ErrorHas or
+        node.op == ir::Op::ErrorValue or node.op == ir::Op::ErrorCode {
+        return self.write_error_instr(module, node);
+    }
     if is_opaque_op(node.op) {
         return self.write_unsupported_opaque(module, node);
     }
@@ -97,13 +114,10 @@ fn (self: &var Emitter) write_instr(
 }
 
 /// Reports the instructions this backend records as opaque rather than lowers,
-/// the arena and error union arms of the Go `writeInstr`.
+/// the arena arms of the Go `writeInstr`.
 /// Go's arena arm does not name `arena.at_mut`, so that one is reported as an
 /// unsupported instruction instead.
 fn is_opaque_op(op: ir::Op) -> bool {
-    if is_error_union_op(op) {
-        return true;
-    }
     return match op {
         ArenaNew => true,
         ArenaAdd => true,
@@ -111,19 +125,6 @@ fn is_opaque_op(op: ir::Op) -> bool {
         ArenaLen => true,
         ArenaPopOrPanic => true,
         ArenaDeinit => true,
-        _ => false,
-    };
-}
-
-/// Reports the error union instructions this backend records as opaque rather
-/// than lowers, the Go `isErrorUnionOp`.
-fn is_error_union_op(op: ir::Op) -> bool {
-    return match op {
-        ErrorError => true,
-        ErrorTry => true,
-        ErrorHas => true,
-        ErrorValue => true,
-        ErrorCode => true,
         _ => false,
     };
 }
@@ -317,7 +318,7 @@ fn (self: &var Emitter) write_indirect_call(
     let callee_value = node.args.get(0) orelse
         return try self.fail0("wasm error: call.indirect expects a callee");
     var result_slot = ir::empty_name();
-    if is_memory_type(module, node.result.type_name) {
+    if try self.is_memory_type(module, node.result.type_name) {
         result_slot = try self.result_slot(module, node.result) orelse
             return try self.fail0("wasm error: no frame slot for indirect call result");
     }
@@ -342,9 +343,9 @@ fn (self: &var Emitter) write_indirect_call(
     try self.names.append_to(&var call, callee.expr);
     try call.append_byte(self.allocator, cast<u8>(41));
     if module.names.is(node.result.type_name, "void") or
-        is_memory_type(module, node.result.type_name) {
+        try self.is_memory_type(module, node.result.type_name) {
         try self.line1("            %s", Arg::Owned(move call));
-        if is_memory_type(module, node.result.type_name) {
+        if try self.is_memory_type(module, node.result.type_name) {
             try self.set_value(module, node.result, result_slot);
         }
         return null;
@@ -367,7 +368,7 @@ fn (self: &var Emitter) write_call(
         return self.write_print(module, node);
     }
     var result_slot = ir::empty_name();
-    if is_memory_type(module, node.result.type_name) {
+    if try self.is_memory_type(module, node.result.type_name) {
         result_slot = try self.result_slot(module, node.result) orelse
             return try self.fail0("wasm error: no frame slot for call result");
     }
@@ -392,9 +393,9 @@ fn (self: &var Emitter) write_call(
     }
     try call.append_bytes(self.allocator, ")");
     if module.names.is(node.result.type_name, "void") or
-        is_memory_type(module, node.result.type_name) {
+        try self.is_memory_type(module, node.result.type_name) {
         try self.line1("            %s", Arg::Owned(move call));
-        if is_memory_type(module, node.result.type_name) {
+        if try self.is_memory_type(module, node.result.type_name) {
             try self.set_value(module, node.result, result_slot);
         }
         return null;
@@ -507,7 +508,7 @@ fn (self: &var Emitter) write_return(
         return null;
     }
     let info = try self.value_of(module, value);
-    if is_memory_type(module, value.type_name) {
+    if try self.is_memory_type(module, value.type_name) {
         let outcome = try self.type_layout(module, value.type_name);
         match outcome {
             Error(failed) => return move failed,

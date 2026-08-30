@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 const (
@@ -20,6 +21,7 @@ const (
 func Emit(module *ir.Module) (string, error) {
 	e := &emitter{
 		module:         module,
+		types:          typ.NewTable(),
 		strings:        map[string]dataRef{},
 		values:         map[string]valueInfo{},
 		tableIndex:     map[string]int{},
@@ -42,6 +44,7 @@ type valueInfo struct {
 
 type emitter struct {
 	module  *ir.Module
+	types   *typ.Table
 	out     bytes.Buffer
 	strings map[string]dataRef
 	values  map[string]valueInfo
@@ -49,6 +52,9 @@ type emitter struct {
 	// aligned address and grow through the stack allocator.
 	dataEnd int
 	frame   *frameLayout
+	// currentReturn is the Kizu return type of the function being written.
+	// error.try uses it to rebuild a propagated failure in caller storage.
+	currentReturn string
 	// table lists, in call order, the functions whose address is taken. wasm
 	// reaches a function pointer through a table index rather than an
 	// address, so `func.addr` lowers to the position a name holds here.
@@ -79,10 +85,7 @@ func (e *emitter) emit() error {
 			return err
 		}
 	}
-	e.out.WriteString("  (func $_start (export \"_start\")\n")
-	e.out.WriteString("    (call $main))\n")
-	e.out.WriteString(")\n")
-	return nil
+	return e.writeStart()
 }
 
 // collectFunctionTable walks the module for the addresses it takes and the
@@ -352,6 +355,8 @@ func (e *emitter) writeIntLoop() {
 // writeFunction writes one user function with a dispatch loop for blocks.
 func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
+	e.currentReturn = fn.Return
+	defer func() { e.currentReturn = "" }()
 	frame, err := e.planFrame(fn)
 	if err != nil {
 		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)

@@ -64,25 +64,15 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "slice."):
 		return e.writeSliceInstr(instr)
+	case strings.HasPrefix(instr.Op, "opt."), strings.HasPrefix(instr.Op, "error."):
+		return e.writeTaggedInstr(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
 		instr.Op == "arena.at" || instr.Op == "arena.len" ||
 		instr.Op == "arena.pop_or_panic" || instr.Op == "arena.deinit":
 		return e.writeUnsupportedOpaque(instr)
-	case isErrorUnionOp(instr.Op):
-		return e.writeUnsupportedOpaque(instr)
 	default:
 		return fmt.Errorf("wasm error: unsupported instruction `%s`", instr.Op)
 	}
-}
-
-// isErrorUnionOp reports the error union instructions this backend records
-// as opaque rather than lowers.
-func isErrorUnionOp(op string) bool {
-	switch op {
-	case "error.error", "error.try", "error.has", "error.value", "error.code":
-		return true
-	}
-	return false
 }
 
 // writeCast records a no-op value conversion for the Phase 16 low-level subset.

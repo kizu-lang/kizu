@@ -1,0 +1,635 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/tagged.go: optional values, error unions,
+// and the WASI entry result use the same i64-tagged inline payload layout as
+// declared unions.
+
+/// Is the error and success side of one `E!T` / `!T` spelling; err is empty
+/// for `!T`.
+struct ErrorUnionParts {
+    err: string::String,
+    success: string::String
+}
+
+/// Returns the wasm32 layout of an i64 tag followed by an aligned payload.
+fn wasm_tagged_value_layout(payload: WasmLayout) -> WasmLayout {
+    let align = wasm_max(8, payload.align);
+    let payload_offset = wasm_tagged_payload_offset(payload);
+    return WasmLayout {
+        size: wasm_align_up(payload_offset + payload.size, align),
+        align: align
+    };
+}
+
+/// Returns the byte offset where one tagged payload starts.
+fn wasm_tagged_payload_offset(payload: WasmLayout) -> i64 {
+    return wasm_align_up(8, payload.align);
+}
+
+/// Reserves one common payload for either success or the global error code.
+fn wasm_error_union_payload_layout(success: WasmLayout) -> WasmLayout {
+    return WasmLayout {
+        size: wasm_max(8, success.size),
+        align: wasm_max(8, success.align)
+    };
+}
+
+/// Returns Error and T for Error!T, or empty Error and T for !T.
+fn (self: &var Emitter) error_union_parts(name: []u8) -> !?ErrorUnionParts {
+    if mem::len(name) == 0 {
+        return null;
+    }
+    let parsed = try self.types.parse(name);
+    match typ::root_node(&self.types, parsed) {
+        ErrorUnion(node) => {
+            var err = string::new(self.allocator);
+            errdefer err.deinit(self.allocator);
+            if node.err |err_node| {
+                try typ::append_render(
+                    self.allocator,
+                    &var err,
+                    &self.types,
+                    typ::child_type(parsed, err_node)
+                );
+            }
+            var success = string::new(self.allocator);
+            errdefer success.deinit(self.allocator);
+            try typ::append_render(
+                self.allocator,
+                &var success,
+                &self.types,
+                typ::child_type(parsed, node.ok)
+            );
+            return ErrorUnionParts { err: move err, success: move success };
+        },
+        _ => return null,
+    }
+}
+
+/// Returns the tagged offset of payload_type, including error-code capacity
+/// when error_union is true.
+fn (self: &var Emitter) tagged_payload_offset(
+    module: &ir::Module,
+    payload_type: []u8,
+    error_union: bool
+) -> !WasmOffsetResult {
+    let outcome = try self.type_layout_bytes(module, payload_type);
+    match outcome {
+        Error(failed) => return WasmOffsetResult::Error(move failed),
+        Layout(layout) => {
+            if error_union {
+                let payload = wasm_error_union_payload_layout(layout);
+                return WasmOffsetResult::Offset(wasm_tagged_payload_offset(payload));
+            }
+            return WasmOffsetResult::Offset(wasm_tagged_payload_offset(layout));
+        },
+    }
+}
+
+/// Dispatches tagged optional construction and projection.
+fn (self: &var Emitter) write_optional_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    match node.op {
+        OptNull => return self.write_optional_null(module, node),
+        OptSome => return self.write_optional_some(module, node),
+        OptHas => return self.write_tagged_has(module, node),
+        OptValue => return self.write_optional_value(module, node),
+        _ => return try self.fail_op(
+            module,
+            node,
+            "wasm error: unsupported optional instruction `%s`"
+        ),
+    }
+}
+
+/// Builds an absent tagged optional.
+fn (self: &var Emitter) write_optional_null(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if typ::optional_elem(result_type) |_| {
+        if node.args.len() == 0 {
+            return self.write_tagged_result(module, node.result, 0);
+        }
+    }
+    return try self.fail0("wasm error: opt.null expects no args and a `?T` result");
+}
+
+/// Builds a present tagged optional and stores its payload.
+fn (self: &var Emitter) write_optional_some(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if typ::optional_elem(result_type) |elem| {
+        if node.args.len() != 1 {
+            return try self.fail0("wasm error: opt.some expects one payload and a `?T` result");
+        }
+        let value = node.args.get_or_panic(0);
+        if !module.names.is(value.type_name, elem) {
+            let expected = try self.names.intern(elem);
+            let got = try self.own(module, value.type_name);
+            return try self.fail2(
+                "wasm error: opt.some expects %s, got %s",
+                Arg::Str(expected),
+                Arg::Str(got)
+            );
+        }
+        let offset_outcome = try self.tagged_payload_offset(module, elem, false);
+        match offset_outcome {
+            Error(failed) => return move failed,
+            Offset(offset) => {
+                if try self.write_tagged_result(module, node.result, 1) |failed| {
+                    return move failed;
+                }
+                let slot = try self.result_slot(module, node.result) orelse
+                    return try self.fail0("wasm error: no frame slot for tagged result");
+                let info = try self.value_of(module, value);
+                return self.write_store_value(module, slot, offset, value.type_name, info);
+            },
+        }
+    }
+    return try self.fail0("wasm error: expected optional type");
+}
+
+/// Extracts the payload whose presence the IR tests.
+fn (self: &var Emitter) write_optional_value(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: opt.value expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if typ::optional_elem(source_type) |elem| {
+        if !module.names.is(node.result.type_name, elem) {
+            let expected = try self.names.intern(elem);
+            let got = try self.own(module, node.result.type_name);
+            return try self.fail2(
+                "wasm error: opt.value returns %s, got %s",
+                Arg::Str(expected),
+                Arg::Str(got)
+            );
+        }
+        let offset_outcome = try self.tagged_payload_offset(module, elem, false);
+        match offset_outcome {
+            Error(failed) => return move failed,
+            Offset(offset) => {
+                let info = try self.value_of(module, source);
+                return self.write_load_value(module, node.result, info.expr, offset);
+            },
+        }
+    }
+    let shown = try self.own(module, source.type_name);
+    return try self.fail("wasm error: expected optional type, got %s", Arg::Str(shown));
+}
+
+/// Dispatches recoverable-result operations.
+fn (self: &var Emitter) write_error_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    match node.op {
+        ErrorOk => return self.write_error_ok(module, node),
+        ErrorError => return self.write_error_error(module, node),
+        ErrorTry => return self.write_error_try(module, node),
+        ErrorHas => return self.write_tagged_has(module, node),
+        ErrorValue => return self.write_error_value(module, node),
+        ErrorCode => return self.write_error_code(module, node),
+        _ => return try self.fail_op(
+            module,
+            node,
+            "wasm error: unsupported error instruction `%s`"
+        ),
+    }
+}
+
+/// Builds a successful error union.
+fn (self: &var Emitter) write_error_ok(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let result_shown = try self.own(module, node.result.type_name);
+    let parts = try self.error_union_parts(result_type) orelse
+        return try self.fail("wasm error: expected error union, got %s", Arg::Str(result_shown));
+    defer parts.deinit(self.allocator);
+    let success = parts.success.as_bytes();
+    if mem::equal_bytes(success, "void") {
+        if node.args.len() != 0 {
+            return try self.fail0("wasm error: error.ok !void expects 0 args");
+        }
+        return self.write_tagged_result(module, node.result, 1);
+    }
+    if node.args.len() != 1 {
+        let shown = try self.own(module, node.result.type_name);
+        return try self.fail("wasm error: error.ok %s expects 1 arg", Arg::Str(shown));
+    }
+    let value = node.args.get_or_panic(0);
+    if !module.names.is(value.type_name, success) {
+        let expected = try self.names.intern(success);
+        let got = try self.own(module, value.type_name);
+        return try self.fail2(
+            "wasm error: error.ok expects %s, got %s",
+            Arg::Str(expected),
+            Arg::Str(got)
+        );
+    }
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(offset) => {
+            if try self.write_tagged_result(module, node.result, 1) |failed| {
+                return move failed;
+            }
+            let slot = try self.result_slot(module, node.result) orelse
+                return try self.fail0("wasm error: no frame slot for tagged result");
+            let info = try self.value_of(module, value);
+            return self.write_store_value(module, slot, offset, value.type_name, info);
+        },
+    }
+}
+
+/// Builds a failed error union around one global error code.
+fn (self: &var Emitter) write_error_error(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let result_shown = try self.own(module, node.result.type_name);
+    let parts = try self.error_union_parts(result_type) orelse
+        return try self.fail("wasm error: expected error union, got %s", Arg::Str(result_shown));
+    defer parts.deinit(self.allocator);
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: error.error expects one error value");
+    }
+    let value = node.args.get_or_panic(0);
+    let value_text = ir::name_text(&module.names, value.type_name);
+    let value_type = value_text.as_bytes();
+    if !module.error_sets.contains(value_type) {
+        let shown = try self.own(module, value.type_name);
+        return try self.fail(
+            "wasm error: error.error expects an error set member, got %s",
+            Arg::Str(shown)
+        );
+    }
+    let error_type = parts.err.as_bytes();
+    if parts.err.len() > 0 and !module.error_set_fits(value_type, error_type) {
+        let source = try self.own(module, value.type_name);
+        let target = try self.own(module, node.result.type_name);
+        return try self.fail2(
+            "wasm error: error.error cannot put %s into %s",
+            Arg::Str(source),
+            Arg::Str(target)
+        );
+    }
+    let success = parts.success.as_bytes();
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(offset) => {
+            if try self.write_tagged_result(module, node.result, 0) |failed| {
+                return move failed;
+            }
+            let slot = try self.result_slot(module, node.result) orelse
+                return try self.fail0("wasm error: no frame slot for tagged result");
+            let address = try self.address_at(slot, offset);
+            let info = try self.value_of(module, value);
+            try self.line2(
+                "            (i64.store %s %s)",
+                Arg::Str(address),
+                Arg::Str(info.expr)
+            );
+            return null;
+        },
+    }
+}
+
+/// Extracts the success payload after error.has succeeded.
+fn (self: &var Emitter) write_error_value(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: error.value expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    let source_shown = try self.own(module, source.type_name);
+    let parts = try self.error_union_parts(source_type) orelse
+        return try self.fail("wasm error: expected error union, got %s", Arg::Str(source_shown));
+    defer parts.deinit(self.allocator);
+    let success = parts.success.as_bytes();
+    if mem::equal_bytes(success, "void") {
+        let shown = try self.own(module, source.type_name);
+        return try self.fail(
+            "wasm error: error.value expects an `E!T` with a payload, got %s",
+            Arg::Str(shown)
+        );
+    }
+    if !module.names.is(node.result.type_name, success) {
+        let expected = try self.names.intern(success);
+        let got = try self.own(module, node.result.type_name);
+        return try self.fail2(
+            "wasm error: error.value returns %s, got %s",
+            Arg::Str(expected),
+            Arg::Str(got)
+        );
+    }
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(offset) => {
+            let info = try self.value_of(module, source);
+            return self.write_load_value(module, node.result, info.expr, offset);
+        },
+    }
+}
+
+/// Extracts the failed union's global error code.
+fn (self: &var Emitter) write_error_code(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: error.code expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    let source_shown = try self.own(module, source.type_name);
+    let parts = try self.error_union_parts(source_type) orelse
+        return try self.fail("wasm error: expected error union, got %s", Arg::Str(source_shown));
+    defer parts.deinit(self.allocator);
+    if parts.err.len() == 0 {
+        let shown = try self.own(module, source.type_name);
+        return try self.fail("wasm error: error.code expects `E!T`, got %s", Arg::Str(shown));
+    }
+    let error_type = parts.err.as_bytes();
+    if !module.names.is(node.result.type_name, error_type) {
+        let expected = try self.names.intern(error_type);
+        let got = try self.own(module, node.result.type_name);
+        return try self.fail2(
+            "wasm error: error.code returns %s, got %s",
+            Arg::Str(expected),
+            Arg::Str(got)
+        );
+    }
+    let success = parts.success.as_bytes();
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(offset) => {
+            let info = try self.value_of(module, source);
+            return self.write_load_value(module, node.result, info.expr, offset);
+        },
+    }
+}
+
+/// Tests the i64 tag shared by optionals and error unions.
+fn (self: &var Emitter) write_tagged_has(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        if node.op == ir::Op::OptHas {
+            return try self.fail0("wasm error: opt.has expects 1 arg");
+        }
+        return try self.fail0("wasm error: error.has expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if node.op == ir::Op::OptHas {
+        if typ::optional_elem(source_type) |_| {} else {
+            let shown = try self.own(module, source.type_name);
+            return try self.fail("wasm error: opt.has expects `?T`, got %s", Arg::Str(shown));
+        }
+    } else {
+        let source_shown = try self.own(module, source.type_name);
+        let parts = try self.error_union_parts(source_type) orelse
+            return try self.fail(
+            "wasm error: error.has expects !T, got %s",
+            Arg::Str(source_shown)
+        );
+        parts.deinit(self.allocator);
+    }
+    let retained = ir::name_text(&module.names, node.result.name);
+    let bytes = retained.as_bytes();
+    let symbol = try self.symbol_name_of(bytes);
+    let info = try self.value_of(module, source);
+    try self.line2(
+        "            (local.set %s (i64.ne (i64.load %s) (i64.const 0)))",
+        Arg::Str(symbol),
+        Arg::Str(info.expr)
+    );
+    let local = try self.local_expr(bytes);
+    try self.set_value(module, node.result, local);
+    return null;
+}
+
+/// Stores one tag in the result's fixed frame slot.
+fn (self: &var Emitter) write_tagged_result(
+    module: &ir::Module,
+    result: ir::Value,
+    tag: i64
+) -> !?diagnostic::Diagnostic {
+    let slot = try self.result_slot(module, result) orelse
+        return try self.fail0("wasm error: no frame slot for tagged result");
+    try self.line2(
+        "            (i64.store %s (i64.const %d))",
+        Arg::Str(slot),
+        Arg::Int(tag)
+    );
+    try self.set_value(module, result, slot);
+    return null;
+}
+
+/// Unwraps success or returns the error code through current caller storage.
+fn (self: &var Emitter) write_error_try(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: error.try expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    let source_shown = try self.own(module, source.type_name);
+    let parts = try self.error_union_parts(source_type) orelse
+        return try self.fail("wasm error: expected error union, got %s", Arg::Str(source_shown));
+    defer parts.deinit(self.allocator);
+    let success = parts.success.as_bytes();
+    if !module.names.is(node.result.type_name, success) {
+        let expected = try self.names.intern(success);
+        let got = try self.own(module, node.result.type_name);
+        return try self.fail2(
+            "wasm error: error.try returns %s, got %s",
+            Arg::Str(expected),
+            Arg::Str(got)
+        );
+    }
+    let return_text = ir::name_text(&module.names, self.current_return);
+    let return_type = return_text.as_bytes();
+    let target = try self.error_union_parts(return_type) orelse
+        return try self.fail0("wasm error: error.try requires function to return !T");
+    defer target.deinit(self.allocator);
+    let source_error = parts.err.as_bytes();
+    let target_error = target.err.as_bytes();
+    if target.err.len() > 0 and !module.error_set_fits(source_error, target_error) {
+        let source_shown = try self.own(module, source.type_name);
+        let return_shown = try self.own(module, self.current_return);
+        return try self.fail2(
+            "wasm error: error.try cannot propagate %s into %s",
+            Arg::Str(source_shown),
+            Arg::Str(return_shown)
+        );
+    }
+    let source_offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match source_offset_outcome {
+        Error(failed) => return move failed,
+        Offset(source_offset) => {
+            let target_success = target.success.as_bytes();
+            let target_offset_outcome = try self.tagged_payload_offset(module, target_success, true);
+            match target_offset_outcome {
+                Error(failed) => return move failed,
+                Offset(target_offset) => {
+                    let info = try self.value_of(module, source);
+                    try self.line1(
+                        "            (if (i64.eq (i64.load %s) (i64.const 0))",
+                        Arg::Str(info.expr)
+                    );
+                    try self.line("              (then");
+                    var cleanup_index = 0;
+                    while node.cleanups.get(cleanup_index) |cleanup| {
+                        cleanup_index = cleanup_index + 1;
+                        if try self.write_cleanup(module, cleanup) |failed| {
+                            return move failed;
+                        }
+                    }
+                    try self.line(
+                        "                (i64.store (local.get $__kizu_result) (i64.const 0))"
+                    );
+                    let result_expr = try self.names.intern("(local.get $__kizu_result)");
+                    let target_address = try self.address_at(result_expr, target_offset);
+                    let source_address = try self.address_at(info.expr, source_offset);
+                    try self.line2(
+                        "                (i64.store %s (i64.load %s))",
+                        Arg::Str(target_address),
+                        Arg::Str(source_address)
+                    );
+                    try self.restore_frame();
+                    try self.line("                (br $exit)))");
+                    if mem::equal_bytes(success, "void") {
+                        return null;
+                    }
+                    return self.write_load_value(
+                        module,
+                        node.result,
+                        info.expr,
+                        source_offset
+                    );
+                },
+            }
+        },
+    }
+}
+
+/// Emits one deferred void instruction inside error.try's failed arm.
+fn (self: &var Emitter) write_cleanup(
+    module: &ir::Module,
+    cleanup: ir::Cleanup
+) -> !?diagnostic::Diagnostic {
+    let void_name = module.names.lookup("void") orelse
+        return try self.fail0("wasm error: cleanup requires the retained `void` type");
+    var instr = module.blank_instr(
+        ir::Value { name: ir::empty_name(), type_name: void_name },
+        cleanup.op,
+        cleanup.operand,
+        ir::empty_name()
+    );
+    defer instr.deinit(self.allocator);
+    try instr.args.append(self.allocator, cleanup.arg);
+    if !ir::is_empty(cleanup.allocator.name) {
+        try instr.args.append(self.allocator, cleanup.allocator);
+    }
+    return self.write_instr_node(module, &instr);
+}
+
+/// Writes the WASI entry point and main's optional result storage.
+fn (self: &var Emitter) write_start(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if module.names.is(node.name, "main") {
+            return self.write_start_for(module, node);
+        }
+    }
+    try self.line(
+        \\  (func $_start (export "_start")
+    );
+    try self.line("    (call $main))");
+    try self.line(")");
+    return null;
+}
+
+/// Writes _start once main's return type is known.
+fn (self: &var Emitter) write_start_for(
+    module: &ir::Module,
+    main: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    try self.line(
+        \\  (func $_start (export "_start")
+    );
+    if module.names.is(main.return_type, "void") {
+        try self.line("    (call $main))");
+        try self.line(")");
+        return null;
+    }
+    if !try self.is_memory_type(module, main.return_type) {
+        try self.line("    (drop (call $main)))");
+        try self.line(")");
+        return null;
+    }
+    let layout_outcome = try self.type_layout(module, main.return_type);
+    match layout_outcome {
+        Error(failed) => return move failed,
+        Layout(layout) => {
+            try self.line("    (local $__kizu_main_result i32)");
+            try self.line1(
+                "    (local.set $__kizu_main_result (call $__stack_alloc (i32.const %d)))",
+                Arg::Int(layout.size)
+            );
+            try self.line("    (call $main (local.get $__kizu_main_result))");
+            let return_text = ir::name_text(&module.names, main.return_type);
+            let return_type = return_text.as_bytes();
+            if try self.error_union_parts(return_type) |parts| {
+                parts.deinit(self.allocator);
+                try self.line(
+                    "    (if (i64.eq (i64.load (local.get $__kizu_main_result)) (i64.const 0))"
+                );
+                try self.line("      (then (unreachable)))");
+            }
+            try self.line("    (global.set $__stack_pointer (local.get $__kizu_main_result))");
+            try self.line("  )");
+            try self.line(")");
+            return null;
+        },
+    }
+}

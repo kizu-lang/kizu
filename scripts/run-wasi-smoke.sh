@@ -56,3 +56,21 @@ run_example "mutable_borrow_nested_field" "examples/mutable_borrow_nested_field.
 2"
 run_example "aggregate_calls" "examples/aggregate_calls.kizu" "4
 3"
+# Optionals and recoverable errors share the tagged memory ABI across calls,
+# captures, match, orelse, try propagation, and main's success boundary.
+run_example "optional_error_flow" "examples/optional_error_flow.kizu" "7
+-1
+9
+-2
+11
+15
+11
+15
+5
+0
+-2
+9
+41
+1
+42
+-2"

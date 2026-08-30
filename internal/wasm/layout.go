@@ -26,6 +26,9 @@ func (e *emitter) typeLayoutVisiting(typ string, seen map[string]bool) (wasmLayo
 	if layout, ok := primitiveLayout(typ); ok {
 		return layout, nil
 	}
+	if layout, ok, err := e.taggedTypeLayoutVisiting(typ, seen); ok || err != nil {
+		return layout, err
+	}
 	if _, ok := e.module.Enums[typ]; ok {
 		return wasmLayout{size: 8, align: 8}, nil
 	}
@@ -103,6 +106,12 @@ func primitiveLayout(typ string) (wasmLayout, bool) {
 // isMemoryType reports whether a wasm local represents typ by an i32 address.
 func (e *emitter) isMemoryType(typ string) bool {
 	if typ == "[]u8" {
+		return true
+	}
+	if _, ok := optionalElemWasm(typ); ok {
+		return true
+	}
+	if _, _, ok := e.errorUnionParts(typ); ok {
 		return true
 	}
 	if _, ok := e.module.Structs[typ]; ok {
