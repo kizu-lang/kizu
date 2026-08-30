@@ -30,44 +30,72 @@ type featureGroup struct {
 	tags []string
 }
 
-// groups define the README rows in source order.
+// groups define the README rows in source order. Every tag an example
+// declares belongs to exactly one row; an unassigned tag is reported as a
+// warning so a new feature cannot quietly drop out of the table.
 var groups = []featureGroup{
 	{"fn / let / struct / literals", []string{
 		"fn", "let", "var", "print", "i64", "bool", "void", "call", "return", "app",
 		"assignment", "field", "field-access", "struct", "struct-literal",
 		"string-literal", "multiline-string", "contextual-integer-literal",
 		"copy", "block-exit", "edge-case", "error", "diagnostic", "diagnostics",
-		"file-span", "related-span", "trap"}},
+		"file-span", "related-span", "trap", "method", "receiver", "signature",
+		"std"}},
 	{"arithmetic / comparison / logical", []string{
 		"arithmetic", "comparison", "logical", "short-circuit"}},
 	{"while / break / continue / for / label", []string{
 		"while", "break", "continue", "for", "loop", "label"}},
 	{"if / match", []string{
 		"if", "if-expression", "match", "match-expression", "wildcard",
-		"control-flow", "expression"}},
-	{"enum / union", []string{"enum", "union"}},
+		"control-flow", "expression", "branch",
+		"arm-block", "arm-empty", "arm-return"}},
+	{"enum / union", []string{"enum", "union", "recursive-union"}},
 	{"error union `!T` / try / errdefer", []string{
-		"error-union", "error-set", "try", "typed-error", "errdefer"}},
+		"error-union", "error-set", "try", "typed-error", "errdefer",
+		"absorption"}},
+	{"optional `?T` / orelse / capture", []string{
+		"optional", "null", "orelse", "capture", "if-capture", "get",
+		"accessor"}},
 	{"move / borrow", []string{
 		"move", "ownership", "borrow", "mutable-borrow", "borrow-provenance",
-		"field-borrow", "last-use", "escaping", "mutation"}},
-	{"deinit / defer", []string{"deinit", "defer", "cleanup", "resource-element"}},
+		"field-borrow", "field-move", "field-path", "last-use", "escaping",
+		"mutation", "owner", "owner-element", "owner-safe", "shared-borrow",
+		"view", "view-capture", "take", "clone", "in-place"}},
+	{"deinit / defer", []string{
+		"deinit", "defer", "cleanup", "resource-element", "derived",
+		"derived-deinit", "field-cleanup"}},
 	{"arena / handle", []string{"arena", "handle"}},
-	{"comptime", []string{"comptime"}},
-	{"cast / slice / raw pointer / box", []string{
+	{"comptime / reflection", []string{
+		"comptime", "comptime-for", "comptime-match", "reflection", "std-meta",
+		"construct", "structural", "static-params", "field-static-param"}},
+	{"cast / slice / stack buffer / box", []string{
 		"cast", "deref", "slice", "slice-syntax", "index-slice", "[]u8", "box",
-		"capacity", "recursive-ast"}},
+		"capacity", "recursive-ast", "stack-buffer", "mutable-slice-view"}},
+	{"unsafe / raw pointer / extern C", []string{
+		"unsafe", "unsafe-struct", "raw-pointer", "extern-c",
+		"caller-obligation", "linkage"}},
 	{"contract / generics", []string{
-		"contract", "impl", "generics", "type-apply", "static-arguments"}},
-	{"std::array", []string{"std-array", "token-list"}},
-	{"std::string", []string{"std-string"}},
-	{"std::map", []string{"std-map", "symbol-table", "resolver"}},
-	{"std::mem / allocator", []string{"std-mem", "allocator"}},
+		"contract", "impl", "generics", "generic", "type-apply",
+		"static-arguments", "function-pointer"}},
+	{"std::array", []string{"std-array", "array", "token-list"}},
+	{"std::string", []string{
+		"std-string", "string", "strings", "from-bytes", "append-bytes", "join",
+		"trim", "unicode"}},
+	{"std::map", []string{
+		"std-map", "map", "symbol-table", "resolver", "integer-key",
+		"iterator"}},
+	{"std::mem / allocator", []string{
+		"std-mem", "allocator", "user-allocator", "fixed-buffer"}},
+	{"std::json", []string{"std-json", "encode", "decode", "nested"}},
+	{"std::sort", []string{"std-sort"}},
+	{"std::fmt", []string{"std-fmt", "formatting", "artifact"}},
 	{"std::testing", []string{"std-testing"}},
-	{"std::fmt", []string{"std-fmt", "artifact"}},
 	{"std::fs / path / io / process", []string{
 		"std-fs", "std-path", "std-io", "std-process", "fs", "io",
-		"explicit-io", "read-dir", "pure-helper"}},
+		"explicit-io", "read-dir", "pure-helper", "stderr"}},
+	{"std::net / http", []string{
+		"net", "http", "routing", "client", "url"}},
+	{"async / coro", []string{"async", "evented", "coro", "task-set"}},
 }
 
 // routes are the CLI paths each example is put through. `run` builds a native

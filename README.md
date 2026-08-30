@@ -18,7 +18,16 @@ code, and less likely to grow heavy CI and build caches.
 
 ## Status
 
-Kizu is an early prototype implemented in Go.
+Kizu is an early prototype, and it compiles itself. The binary a release ships
+is the Kizu compiler under `compiler/`, written in Kizu; the Go implementation
+(`internal/` + `cmd/kizu`) is the seed that builds it and the oracle both
+implementations are diffed against (ADR-0130). `TestSelfhostBootstrap` requires
+the self-built compiler to reproduce itself byte for byte.
+
+This repository is still experimental. Syntax and implementation details can
+change while the language design is being tested.
+
+### What runs
 
 `kizu run` builds the same native executable `kizu build --target native`
 writes, and then runs it. The only difference between the two commands is
@@ -29,39 +38,47 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 34 | ✅ | ✅ | ✅ | 12/34 |
+| fn / let / struct / literals | 39 | ✅ | ✅ | ✅ | 12/39 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | 9/10 |
-| if / match | 13 | ✅ | ✅ | ✅ | 2/13 |
+| if / match | 14 | ✅ | ✅ | ✅ | 2/14 |
 | enum / union | 15 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 18 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 41 | ✅ | ✅ | ✅ | 2/41 |
-| deinit / defer | 18 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 9 | ✅ | ✅ | ✅ | ❌ |
-| comptime | 8 | ✅ | ✅ | ✅ | 1/8 |
-| cast / slice / raw pointer / box | 8 | ✅ | ✅ | ✅ | 1/8 |
-| contract / generics | 8 | ✅ | ✅ | ✅ | 1/8 |
-| std::array | 14 | ✅ | ✅ | ✅ | ❌ |
-| std::string | 29 | ✅ | ✅ | ✅ | ❌ |
-| std::map | 10 | ✅ | ✅ | ✅ | ❌ |
-| std::mem / allocator | 13 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 40 | ✅ | ✅ | ✅ | ❌ |
+| optional `?T` / orelse / capture | 22 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 51 | ✅ | ✅ | ✅ | 2/51 |
+| deinit / defer | 19 | ✅ | ✅ | ✅ | ❌ |
+| arena / handle | 10 | ✅ | ✅ | ✅ | ❌ |
+| comptime / reflection | 13 | ✅ | ✅ | ✅ | 1/13 |
+| cast / slice / stack buffer / box | 11 | ✅ | ✅ | ✅ | 1/11 |
+| unsafe / raw pointer / extern C | 3 | ✅ | ✅ | ✅ | ❌ |
+| contract / generics | 12 | ✅ | ✅ | ✅ | 2/12 |
+| std::array | 16 | ✅ | ✅ | ✅ | ❌ |
+| std::string | 32 | ✅ | ✅ | ✅ | ❌ |
+| std::map | 12 | ✅ | ✅ | ✅ | ❌ |
+| std::mem / allocator | 16 | ✅ | ✅ | ✅ | ❌ |
+| std::json | 14 | ✅ | ✅ | ✅ | ❌ |
+| std::sort | 1 | ✅ | ✅ | ✅ | ❌ |
+| std::fmt | 6 | ✅ | ✅ | ✅ | ❌ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ❌ |
-| std::fmt | 5 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
+| std::fs / path / io / process | 23 | ✅ | ✅ | ✅ | ❌ |
+| std::net / http | 19 | ✅ | ✅ | ✅ | ❌ |
+| async / coro | 2 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 129 runnable examples, measured on 2026-08-25 with
-`just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
-are judged on the program's output: `run` executes the native build, `wasm`
-loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
-succeeded, because `run` already builds the native target from the same text.
+`❌` means none do. A row counts every example that declares one of its feature
+tags, so an example appears in more than one row. 152 runnable examples,
+measured on 2026-08-30 with `just backend-matrix` -- re-run it after touching a
+backend. `run` and `wasm` are judged on the program's output: `run` executes the
+native build, `wasm` loads the emitted module with `wasmtime`. `llvm` is judged
+on whether lowering succeeded, because `run` already builds the native target
+from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 129/129 |
-| `kizu run` | 129/129 |
-| `kizu build --emit-llvm` | 129/129 |
-| `kizu build --target wasm32-wasi` | 21/129 |
+| `kizu check` | 152/152 |
+| `kizu run` | 152/152 |
+| `kizu build --emit-llvm` | 152/152 |
+| `kizu build --target wasm32-wasi` | 21/152 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 `just backend-matrix` reports both unsupported lowering and output mismatches.
@@ -69,9 +86,9 @@ The native route has no pending runnable example. WASI remains a target subset;
 Tooling around the language core:
 
 - typed SSA IR with an opt-in optimization pipeline
-- bounded local build cache and rebuild explanations
+- bounded local build cache, content-addressed by what an artifact is made of
 - limited C header import for extern function declarations
-- the Kizu standard library in `std/`
+- the Kizu standard library in `lib/kizu/std/`
 - an LSP server (`cmd/kizu-lsp`)
 
 There is no interpreter. `kizu test` builds and runs test blocks the same way
@@ -84,9 +101,6 @@ native build path already had. The emitted LLVM IR uses opaque pointers, so
 freestanding builds are part of the accepted build policy but are not
 implemented.
 
-This repository is still experimental. Syntax and implementation details can
-change while the language design is being tested.
-
 ## Roadmap
 
 The table above measures what runs. This is what is planned, in progress, or
@@ -94,16 +108,16 @@ deliberately excluded, so the two are not confused.
 
 | Feature | State |
 | --- | --- |
-| threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it |
-| wasm backend beyond the current subset | **in progress.** 21 of 129 examples load and run today |
+| threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
+| wasm backend beyond the current subset | **in progress.** 21 of 152 examples load and run today |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
 | type alias | **not started** |
 | `kizu lint` | **not started** |
+| TLS / HTTPS, middleware | **not started.** `std::http` is HTTP/1 over plaintext TCP; middleware waits on closures |
 | full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT (ADR-0066) |
 | `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay (ADR-0025) |
 | Rust `Send` / `Sync` traits | **not adopted.** Whatever replaces them must be one rule users can read, not a hand-written whitelist (ADR-0025) |
-| self-hosting compiler | **porting.** Go remains the only shipping implementation until atomic cutover |
 
 A feature is "implemented" here only when a conformance case runs it and checks
 its output. Rules that only a checker enforces are not counted as features --
@@ -117,13 +131,11 @@ fn main() {
 }
 ```
 
-Build and run it:
-
 ```sh
 go run ./cmd/kizu run examples/hello.kizu
 ```
 
-Run one Kizu test source:
+A test block runs the same way, without `main`:
 
 ```kizu
 test "std testing assertions" {
@@ -133,12 +145,7 @@ test "std testing assertions" {
 
 ```sh
 go run ./cmd/kizu test examples/std_testing.kizu
-```
-
-Pass prototype process arguments with `--`:
-
-```sh
-go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
+go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu   # process args after --
 ```
 
 [`examples/`](examples/README.md) holds one readable program per feature, and
@@ -150,75 +157,59 @@ The safe-code memory-safety contract is documented in
 
 ## Getting a Binary
 
-Development runs the compiler from source (`go run ./cmd/kizu`). Prebuilt
-binaries are attached to [GitHub Releases](https://github.com/kizu-lang/kizu/releases);
-each names its version with `kizu version`, so an old binary identifies itself
-instead of producing confusing parse errors against newer sources. The flake
-builds the same layout locally:
+Prebuilt binaries are attached to
+[GitHub Releases](https://github.com/kizu-lang/kizu/releases); each names its
+version with `kizu version`, so an old binary identifies itself instead of
+producing confusing parse errors against newer sources. The flake builds the
+same layout locally:
 
 ```sh
 nix build   # ./result/bin/kizu with its library tree in ./result/lib/kizu
 ```
 
+Development runs the Go seed from source instead, so a compiler change is one
+`go run` away:
+
+```sh
+go run ./cmd/kizu run examples/hello.kizu
+```
+
 ## Development Environment
 
-The recommended development environment is the Nix flake.
+The recommended development environment is the Nix flake. The shell includes
+Go, golangci-lint, pre-commit, just, and wasmtime.
 
 ```sh
 nix develop
 pre-commit install
 ```
 
-The shell includes Go, golangci-lint, pre-commit, just, and wasmtime.
-
-## Common Commands
+`just --list` shows every recipe. The ones used most:
 
 ```sh
-just --list
-just verify
-just perf
-just perf-cache
-just cache-smoke
-just wasi-smoke
-```
-
-The same commands can be run directly:
-
-```sh
-go test ./...
-golangci-lint run
-pre-commit run --all-files
-
-go run ./cmd/kizu parse examples/hello.kizu
-go run ./cmd/kizu check examples/hello.kizu
-go run ./cmd/kizu fmt examples/hello.kizu
-go run ./cmd/kizu run examples/hello.kizu
-go run ./cmd/kizu test examples/std_testing.kizu
-go run ./cmd/kizu ir examples/hello.kizu
-go run ./cmd/kizu ir --opt examples/hello.kizu
-go run ./cmd/kizu build --emit-llvm examples/hello.kizu
-go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
-go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
-go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
-go run ./cmd/kizu cache status
-go run ./cmd/kizu import-c-header examples/c_abi.h
-go run ./cmd/kizu version
+just verify          # gofmt + go test ./... + golangci-lint
+just check           # pre-commit run --all-files, the commit gate
+just selfhost        # check and test the Kizu compiler under compiler/
+just backend-matrix  # regenerate the table above
+just perf            # build and cache timings
+just wasi-smoke      # run the wasm examples under wasmtime
 ```
 
 ## CLI
 
 - `kizu parse <file>` parses a `.kizu` source file.
-- `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
-- `kizu fmt [--write|-w] <file>` prints or writes canonical token formatter output. `--write` currently rejects files with line comments until comment trivia is preserved.
-- `kizu run <file>` builds a native executable and runs it.
+- `kizu check <file-or-package>` runs type, ownership, move, borrow, and arena checks.
+- `kizu run <file-or-package>` builds a native executable and runs it.
 - `kizu test <file-or-package>` runs checked top-level test blocks without invoking `main`.
+- `kizu fmt [--write|-w] <file>` prints or writes canonical token formatter output. It is not a source-preserving formatter: line comments are kept, but the canonical form puts each on its own line, so a comment trailing code moves to the next line.
+- `kizu init [path]` scaffolds a package.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable.
-- `kizu cache status` prints local build cache status.
-- `kizu cache prune` clears local build cache entries.
+- `kizu cache status` / `kizu cache prune` show and clear the local build cache.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
+- `kizu version` prints what the binary is.
 
 `kizu lint` is not implemented.
 
@@ -226,12 +217,17 @@ go run ./cmd/kizu version
 
 - [docs/architecture.md](docs/architecture.md): architecture overview (in Japanese; start here for onboarding)
 - [SPEC.md](SPEC.md): language specification
+- [docs/principles.md](docs/principles.md): the design principles every decision is checked against
+- [docs/style.md](docs/style.md): how std chooses the shape of an API
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
+- [docs/std/](docs/std/README.md): standard-library API reference
+- [docs/tutorial/](docs/tutorial/README.md): building one whole thing, start to finish
 - [examples](examples/README.md): readable programs per feature, and the refusals in `negative/`
-- [docs/stdlib.md](docs/stdlib.md): standard-library builtin registry and migration plan
 - [docs/adr](docs/adr): architecture decision records
+- [docs/language-gaps.md](docs/language-gaps.md): what could not be written yet, and the workaround used
+- [docs/stdlib.md](docs/stdlib.md): the trusted-builtin boundary and the rules for new std APIs
 - [docs/perf.md](docs/perf.md): build and cache performance policy
-- [AGENTS.md](AGENTS.md): implementation guidance for Codex agents
+- [AGENTS.md](AGENTS.md): implementation rules for contributors and coding agents
 
 ## License
 

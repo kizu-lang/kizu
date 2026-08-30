@@ -27,7 +27,7 @@ safe Kizu の詳細な安全契約と regression coverage は
 将来入るかもしれない機能を範囲表で予告することはしません。
 
 `kizu run` / `kizu check` / `kizu test` は生成した実行ファイルを走らせます。経路は
-1 本で、interpreter はありません(ADR-0083)。実装は Go 一本です。
+1 本で、interpreter はありません(ADR-0083)。
 `check: ok` は「checker を通った」ではなく「`run` / `build` が使う lowering が
 この program を受理する」の約束です: check は同じ `ir.Lower` を通し、module を
 捨てます。
@@ -212,13 +212,12 @@ std::arena::Handle<T>
 
 ## 5. 実装方針
 
-実装は Go 一本です。言語とツールチェインの正は `internal/` と `cmd/kizu` にあり、
-第二実装は持ちません。
+利用者が受け取る実装は 1 つ、`compiler/` の Kizu 製 compiler です。Go 実装
+(`internal/` + `cmd/kizu`)はそれを build する seed であり、両実装の出力を
+突き合わせる oracle でもあります(ADR-0130)。利用者が通る経路を 2 つにはしません。
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。native code は LLVM IR backend が生成します。
-
-Go を選んだ理由は、実装が速く、依存を抑えやすく、CLI を作りやすいことです。
 
 ## 6. 基本文法
 
@@ -3239,8 +3238,8 @@ kizu test
 `--write` / `-w` は file を in-place rewrite します。
 完全な source-preserving formatter ではありません。
 先頭の連続 `import` block は comment を含まない場合に辞書順へ正規化します。
-comment trivia preservation の残りは後続で扱います。
-comment trivia preservation までは、`--write` は full-line ではない line comment を含む file を拒否します。
+line comment は落としませんが、canonical form では 1 つ 1 行になるので、code に
+続けて書いた trailing comment は次の行へ移ります。
 `kizu test` は file または package root 内の top-level `test` block runner です。
 `main` 実行、filesystem-wide discovery、filter は行いません。
 

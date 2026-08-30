@@ -23,7 +23,7 @@ encoder.write_i64_field(name: []u8, value: i64) -> std::mem::Error!void
 encoder.write_bool_field(name: []u8, value: bool) -> std::mem::Error!void
 encoder.write_null_field(name: []u8) -> std::mem::Error!void
 encoder.write_bytes_field(name: []u8, value: []u8) -> std::mem::Error!void
-encoder.finish_into(out: &var std::string::String) -> std::mem::Error!void
+encoder.finish_into(allocator: Allocator, out: &var std::string::String) -> std::mem::Error!void
 encoder.deinit(allocator: Allocator) -> void
 ```
 

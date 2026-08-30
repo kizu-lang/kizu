@@ -43,23 +43,20 @@ The following are not guaranteed by safe Kizu:
 - A moved non-copy value cannot be used again.
 - Copy types can be reused after copy-like operations.
 
-Current copy types include:
+Copy types are derived from structure, not from an annotation (SPEC §8):
 
 ```text
-bool
-void
-Io
-i8 i16 i32 i64
-u8 u16 u32 u64
-usize isize
-f32 f64
-[]u8
-raw pointer types
-tag enum values
+bool  void
+i8 i16 i32 i64  u8 u16 u32 u64  usize isize  f32 f64
+tag enum values, error set values
+[]u8 views, raw pointer types
+Io, and an Allocator with no tie
+std::arena::Handle<T>
+copy aggregate: a struct or union whose fields and payloads are all of the above
 ```
 
-Struct values are non-copy unless the language later adds an explicit copy
-policy.
+A type that declares an explicit `deinit` stays move-only even when every field
+is copy, because that declaration is a cleanup contract.
 
 ### Borrowing
 
@@ -92,12 +89,15 @@ policy.
 ### Arena and Handle
 
 - `std::arena::new<T>(allocator)` requires an explicit `Allocator` capability.
-- Arena construction reads the allocator capability; it does not move it.
-- `std::arena::Arena<T>.add(value)` moves `value` into the arena.
-- `std::arena::Arena<T>.add(value)` returns `std::arena::Handle<T>`.
-- `std::arena::Handle<T>` is an opaque ID, not a raw pointer.
-- `std::arena::Arena<T>.at(std::arena::Handle<T>)` returns a shared borrow `&T`
-  tied to the arena.
+  It reads the capability, does not move it, and allocates nothing: the header
+  is the arena (ADR-0131).
+- `Arena<T>.add(allocator, value)` moves `value` into the arena and buys storage,
+  so it names its allocator (ADR-0132) and reports refusal as
+  `std::mem::Error!std::arena::Handle<T>`.
+- `std::arena::Handle<T>` is an opaque copy ID, not a raw pointer, and it carries
+  the arena instance that produced it (ADR-0134).
+- `Arena<T>.at(handle)` returns a shared borrow `&T` tied to the arena;
+  `at_mut(handle)` returns `?&var T`.
 - A bound `Arena.at` result keeps the arena borrowed until its last use; `add`
   and `deinit` cannot run while that borrow is live.
 - An `Arena.at` borrow can return through a parameter-rooted arena, but cannot
@@ -226,8 +226,9 @@ Runtime failure is acceptable. Silent undefined behavior is not.
 
 The following components are trusted:
 
-- Go implementation of the parser, type checker, and ownership checker
-- built-in functions and std prototype APIs
+- the compiler's parser, type checker, and ownership checker -- the Kizu
+  implementation under `compiler/` and the Go seed it is diffed against
+- `std::internal::builtin::*` primitives and the std APIs over them
 - arena / handle runtime representation
 - backend lowering from checked programs to IR, LLVM, or WASM
 
@@ -294,7 +295,8 @@ Before declaring safe Kizu memory-safe:
 These are known areas to keep conservative:
 
 - Numeric casts and integer-width runtime semantics are incomplete.
-- General std containers beyond `Array` / `Map` / `String` are not implemented.
+- Containers are `Array` / `Map` / `String` / `Arena` / `Box`; a general
+  container contract for user-written ones does not exist yet.
 - Real OS threads and async runtime semantics are not implemented (ADR-0025).
 - Raw pointer runtime operations are not implemented as a safe guarantee.
 

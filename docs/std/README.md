@@ -31,11 +31,11 @@
 | [process](process.md) | 引数・環境変数・時刻・終了 status |
 | [testing](testing.md) | assertion |
 
-実装は `lib/kizu/std/src/` にあります。移行計画と builtin registry は
+実装は `lib/kizu/std/src/` にあります。trusted primitive の境界は
 [docs/stdlib.md](../stdlib.md) です。
 
 ## 新しい API を足すとき
 
-`docs/stdlib.md` の Acceptance Rules に従います。この reference の該当
-module に節を足し、`examples/` に実例を、安全境界があれば
+`docs/stdlib.md` の「新しい std API を足すとき」に従います。この reference の
+該当 module に節を足し、`examples/` に実例を、安全境界があれば
 `examples/negative/` に拒否例を置きます。
