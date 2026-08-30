@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/token"
 )
 
@@ -15,6 +16,9 @@ type navigationSource struct {
 	path   string
 	module string
 	source string
+	// namespaceOnly keeps library declarations out of unqualified lookup while
+	// still making their fully qualified names available to editor requests.
+	namespaceOnly bool
 }
 
 type navigationDeclaration struct {
@@ -36,6 +40,7 @@ type navigationIndex struct {
 	unionVariants map[string]map[string]navigationDeclaration
 	fields        map[string]map[string]navigationDeclaration
 	methods       map[string]map[string]navigationDeclaration
+	qualified     map[string]navigationDeclaration
 }
 
 // DocumentSymbols returns top-level outline symbols for one source file.
@@ -92,6 +97,8 @@ func (s *Server) navigationIndex(uri string, source string) (navigationIndex, []
 	index := newNavigationIndex()
 	for _, src := range sources {
 		index.addModule(src)
+	}
+	for _, src := range sources {
 		index.scan(src)
 	}
 	return index, sources
@@ -107,6 +114,7 @@ func newNavigationIndex() navigationIndex {
 		unionVariants: map[string]map[string]navigationDeclaration{},
 		fields:        map[string]map[string]navigationDeclaration{},
 		methods:       map[string]map[string]navigationDeclaration{},
+		qualified:     map[string]navigationDeclaration{},
 	}
 }
 
@@ -114,17 +122,44 @@ func newNavigationIndex() navigationIndex {
 func (s *Server) navigationSources(uri string, source string) []navigationSource {
 	path, ok := filePathFromURI(uri)
 	if !ok {
-		return []navigationSource{{uri: uri, source: source}}
+		return s.withStandardLibrarySources([]navigationSource{{uri: uri, source: source}})
 	}
 	root, found, err := findPackageRoot(path)
 	if err != nil || !found {
-		return []navigationSource{{uri: uri, path: path, source: source}}
+		return s.withStandardLibrarySources([]navigationSource{{
+			uri: uri, path: path, source: source,
+		}})
 	}
 	graph, err := loadPackageGraph(root)
 	includeTests := project.IsTestFile(path)
 	if err != nil || !graph.ContainsFile(path, includeTests) {
-		return []navigationSource{{uri: uri, path: path, source: source}}
+		return s.withStandardLibrarySources([]navigationSource{{
+			uri: uri, path: path, source: source,
+		}})
 	}
+	packageSources := s.graphNavigationSources(graph, includeTests, false)
+	if len(packageSources) == 0 {
+		return s.withStandardLibrarySources([]navigationSource{{
+			uri: uri, path: path, source: source,
+		}})
+	}
+	return s.withStandardLibrarySources(packageSources)
+}
+
+// withStandardLibrarySources prepends the std modules imported by sources.
+func (s *Server) withStandardLibrarySources(
+	sources []navigationSource,
+) []navigationSource {
+	stdSources := s.standardLibraryNavigationSources(sources)
+	return append(stdSources, sources...)
+}
+
+// graphNavigationSources reads one graph with open-buffer overrides.
+func (s *Server) graphNavigationSources(
+	graph project.Graph,
+	includeTests bool,
+	namespaceOnly bool,
+) []navigationSource {
 	overrides := s.packageSourceOverrides(graph, includeTests)
 	sources := make([]navigationSource, 0, len(graph.SourceFiles(includeTests)))
 	for _, module := range graph.Modules {
@@ -139,17 +174,56 @@ func (s *Server) navigationSources(uri string, source string) []navigationSource
 				text = string(data)
 			}
 			sources = append(sources, navigationSource{
-				uri:    fileURIFromPath(cleanPath),
-				path:   cleanPath,
-				module: module.Path,
-				source: text,
+				uri:           fileURIFromPath(cleanPath),
+				path:          cleanPath,
+				module:        module.Path,
+				source:        text,
+				namespaceOnly: namespaceOnly,
 			})
 		}
 	}
-	if len(sources) == 0 {
-		return []navigationSource{{uri: uri, path: path, source: source}}
-	}
 	return sources
+}
+
+// standardLibraryNavigationSources returns exactly the std modules reached by
+// the package's imports, using the compiler's standard-library dependency walk.
+func (s *Server) standardLibraryNavigationSources(
+	packageSources []navigationSource,
+) []navigationSource {
+	imports := standardLibraryImportPaths(packageSources)
+	if len(imports) == 0 {
+		return nil
+	}
+	graph, err := project.StdGraphForImports(imports)
+	if err != nil {
+		return nil
+	}
+	return s.graphNavigationSources(graph, false, true)
+}
+
+// standardLibraryImportPaths collects explicit std imports in source order.
+func standardLibraryImportPaths(sources []navigationSource) []string {
+	seen := map[string]bool{}
+	imports := []string{}
+	for _, src := range sources {
+		tokens := lexCompletionTokens(src.source)
+		for i := 0; i < len(tokens); i++ {
+			if tokens[i].Type != token.Import {
+				continue
+			}
+			parts, next := readImportPath(tokens, i+1)
+			i = next
+			if len(parts) == 0 || parts[0] != stdlib.Root {
+				continue
+			}
+			path := strings.Join(parts, "::")
+			if !seen[path] {
+				seen[path] = true
+				imports = append(imports, path)
+			}
+		}
+	}
+	return imports
 }
 
 // addModule registers a package module as a navigable target.
@@ -166,6 +240,30 @@ func (idx navigationIndex) addModule(src navigationSource) {
 		uri:    src.uri,
 		rng:    firstTokenRange(src.source),
 		kind:   symbolKindModule,
+	}
+	idx.qualified[src.module] = idx.modules[src.module]
+}
+
+// addQualified stores a declaration under its full module path.
+func (idx navigationIndex) addQualified(
+	src navigationSource,
+	name string,
+	decl navigationDeclaration,
+) {
+	if src.module == "" {
+		return
+	}
+	idx.qualified[src.module+"::"+name] = decl
+}
+
+// addQualifiedVariants stores enum-like members below their declaring type.
+func (idx navigationIndex) addQualifiedVariants(
+	src navigationSource,
+	typeName string,
+	variants map[string]navigationDeclaration,
+) {
+	for name, decl := range variants {
+		idx.addQualified(src, typeName+"::"+name, decl)
 	}
 }
 
@@ -186,10 +284,51 @@ func (idx navigationIndex) scan(src navigationSource) {
 			i = idx.scanUnion(src, tokens, i)
 		case token.Contract:
 			i = idx.scanContract(src, tokens, i)
+		case token.Ident:
+			if isErrorSetDeclStart(tokens, i) {
+				i = idx.scanErrorSet(src, tokens, i)
+			}
 		case token.Impl:
 			// An assertion declares no symbol; the loop steps past it.
 		}
 	}
+}
+
+// scanErrorSet records an error set and the members it declares directly.
+func (idx navigationIndex) scanErrorSet(
+	src navigationSource,
+	tokens []token.Token,
+	start int,
+) int {
+	nameIndex := start + 1
+	if !isErrorSetDeclStart(tokens, start) {
+		return start
+	}
+	name := tokens[nameIndex].Literal
+	decl := navigationDeclaration{
+		name:          name,
+		detail:        "error " + name,
+		documentation: declarationDocumentation(tokens, start),
+		uri:           src.uri,
+		rng:           tokenRange(tokens[nameIndex]),
+		kind:          symbolKindEnum,
+	}
+	idx.addQualified(src, name, decl)
+	if !src.namespaceOnly {
+		idx.types[name] = decl
+	}
+	if tokens[nameIndex+1].Type != token.LBrace {
+		if !src.namespaceOnly {
+			idx.enumVariants[name] = map[string]navigationDeclaration{}
+		}
+		return skipDeclarationBody(tokens, nameIndex+1)
+	}
+	members, end := scanVariantDeclarations(src, tokens, nameIndex+1, name, "error")
+	idx.addQualifiedVariants(src, name, members)
+	if !src.namespaceOnly {
+		idx.enumVariants[name] = members
+	}
+	return end
 }
 
 // scanImport records imported module aliases.
@@ -221,7 +360,7 @@ func (idx navigationIndex) scanFunction(
 	name := tokens[start+1].Literal
 	headerEnd := declarationHeaderEnd(tokens, start)
 	params, _ := readFunctionParams(tokens, start)
-	idx.functions[name] = navigationDeclaration{
+	decl := navigationDeclaration{
 		name:          name,
 		detail:        tokenText(tokens[start:headerEnd]),
 		documentation: declarationDocumentation(tokens, start),
@@ -229,6 +368,10 @@ func (idx navigationIndex) scanFunction(
 		rng:           tokenRange(tokens[start+1]),
 		kind:          symbolKindFunction,
 		params:        parameterLabels(params, false),
+	}
+	idx.addQualified(src, name, decl)
+	if !src.namespaceOnly {
+		idx.functions[name] = decl
 	}
 	return skipDeclarationBody(tokens, headerEnd)
 }
@@ -259,13 +402,17 @@ func (idx navigationIndex) scanStruct(
 		return start
 	}
 	name := tokens[nameIndex].Literal
-	idx.types[name] = navigationDeclaration{
+	decl := navigationDeclaration{
 		name:          name,
 		detail:        "struct " + name,
 		documentation: declarationDocumentation(tokens, start),
 		uri:           src.uri,
 		rng:           tokenRange(tokens[nameIndex]),
 		kind:          symbolKindStruct,
+	}
+	idx.addQualified(src, name, decl)
+	if !src.namespaceOnly {
+		idx.types[name] = decl
 	}
 	brace := findNextToken(tokens, nameIndex+1, token.LBrace)
 	if brace < 0 {
@@ -287,7 +434,7 @@ func (idx navigationIndex) scanEnum(
 		return start
 	}
 	name := tokens[nameIndex].Literal
-	idx.types[name] = navigationDeclaration{
+	decl := navigationDeclaration{
 		name:          name,
 		detail:        "enum " + name,
 		documentation: declarationDocumentation(tokens, start),
@@ -295,8 +442,15 @@ func (idx navigationIndex) scanEnum(
 		rng:           tokenRange(tokens[nameIndex]),
 		kind:          symbolKindEnum,
 	}
+	idx.addQualified(src, name, decl)
+	if !src.namespaceOnly {
+		idx.types[name] = decl
+	}
 	variants, end := scanVariantDeclarations(src, tokens, nameIndex+1, name, "enum")
-	idx.enumVariants[name] = variants
+	idx.addQualifiedVariants(src, name, variants)
+	if !src.namespaceOnly {
+		idx.enumVariants[name] = variants
+	}
 	return end
 }
 
@@ -311,7 +465,7 @@ func (idx navigationIndex) scanUnion(
 		return start
 	}
 	name := tokens[nameIndex].Literal
-	idx.types[name] = navigationDeclaration{
+	decl := navigationDeclaration{
 		name:          name,
 		detail:        "union " + name,
 		documentation: declarationDocumentation(tokens, start),
@@ -319,8 +473,15 @@ func (idx navigationIndex) scanUnion(
 		rng:           tokenRange(tokens[nameIndex]),
 		kind:          symbolKindEnum,
 	}
+	idx.addQualified(src, name, decl)
+	if !src.namespaceOnly {
+		idx.types[name] = decl
+	}
 	variants, end := scanVariantDeclarations(src, tokens, nameIndex+1, name, "union")
-	idx.unionVariants[name] = variants
+	idx.addQualifiedVariants(src, name, variants)
+	if !src.namespaceOnly {
+		idx.unionVariants[name] = variants
+	}
 	return end
 }
 
@@ -335,13 +496,17 @@ func (idx navigationIndex) scanContract(
 		return start
 	}
 	name := tokens[nameIndex].Literal
-	idx.types[name] = navigationDeclaration{
+	decl := navigationDeclaration{
 		name:          name,
 		detail:        "contract " + name,
 		documentation: declarationDocumentation(tokens, start),
 		uri:           src.uri,
 		rng:           tokenRange(tokens[nameIndex]),
 		kind:          symbolKindInterface,
+	}
+	idx.addQualified(src, name, decl)
+	if !src.namespaceOnly {
+		idx.types[name] = decl
 	}
 	return skipDeclarationBody(tokens, start+1)
 }
@@ -477,6 +642,9 @@ func definitionAt(
 	if decl, ok := moduleDefinitionAt(tokens, tokenIndex, index); ok {
 		return decl, true
 	}
+	if decl, ok := qualifiedDefinitionAt(tokens, tokenIndex, index); ok {
+		return decl, true
+	}
 	if decl, ok := memberDefinitionAt(tokens, tokenIndex, source, position, index); ok {
 		return decl, true
 	}
@@ -503,6 +671,9 @@ func hoverAt(
 		return navigationDeclaration{}, false
 	}
 	if decl, ok := moduleDefinitionAt(tokens, tokenIndex, index); ok {
+		return decl, true
+	}
+	if decl, ok := qualifiedDefinitionAt(tokens, tokenIndex, index); ok {
 		return decl, true
 	}
 	if decl, ok := memberDefinitionAt(tokens, tokenIndex, source, position, index); ok {
@@ -533,6 +704,53 @@ func moduleDefinitionAt(
 		return decl, found
 	}
 	return navigationDeclaration{}, false
+}
+
+// qualifiedDefinitionAt resolves a declaration reached through a module path
+// or an imported module alias, such as `std::mem::len` or `mem::len`.
+func qualifiedDefinitionAt(
+	tokens []token.Token,
+	tokenIndex int,
+	index navigationIndex,
+) (navigationDeclaration, bool) {
+	parts := namespacePartsEndingAt(tokens, tokenIndex)
+	if len(parts) < 2 {
+		return navigationDeclaration{}, false
+	}
+	full := strings.Join(parts, "::")
+	if decl, ok := index.qualified[full]; ok {
+		return decl, true
+	}
+	if decl, ok := index.modules[full]; ok {
+		return decl, true
+	}
+	for split := len(parts) - 1; split >= 1; split-- {
+		prefix := strings.Join(parts[:split], "::")
+		module, ok := index.modules[prefix]
+		if !ok {
+			continue
+		}
+		name := module.name + "::" + strings.Join(parts[split:], "::")
+		if decl, ok := index.qualified[name]; ok {
+			return decl, true
+		}
+	}
+	return navigationDeclaration{}, false
+}
+
+// namespacePartsEndingAt reads the `::` chain ending at tokenIndex.
+func namespacePartsEndingAt(tokens []token.Token, tokenIndex int) []string {
+	if tokenIndex < 0 || tokenIndex >= len(tokens) || tokens[tokenIndex].Type != token.Ident {
+		return nil
+	}
+	parts := []string{tokens[tokenIndex].Literal}
+	for i := tokenIndex; i >= 2; i -= 2 {
+		if tokens[i-1].Type != token.DoubleColon || tokens[i-2].Type != token.Ident {
+			break
+		}
+		parts = append([]string{tokens[i-2].Literal}, parts...)
+	}
+	return parts
 }
 
 // memberDefinitionAt resolves field and method accesses.
@@ -830,6 +1048,16 @@ func nextIdentifierIndex(tokens []token.Token, start int) int {
 		}
 	}
 	return -1
+}
+
+// isErrorSetDeclStart recognizes contextual `error Name { ... }` and
+// `error Name = A or B;` declarations. `error` remains an ordinary identifier
+// everywhere else.
+func isErrorSetDeclStart(tokens []token.Token, start int) bool {
+	return start+2 < len(tokens) &&
+		tokens[start].Type == token.Ident && tokens[start].Literal == "error" &&
+		tokens[start+1].Type == token.Ident &&
+		(tokens[start+2].Type == token.LBrace || tokens[start+2].Type == token.Assign)
 }
 
 // addNestedDeclaration stores a declaration under an owner type.

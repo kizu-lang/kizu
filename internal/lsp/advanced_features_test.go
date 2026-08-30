@@ -3,6 +3,8 @@ package lsp
 import (
 	"strings"
 	"testing"
+
+	"github.com/kizu-lang/kizu/internal/token"
 )
 
 // TestReferencesReturnFunctionAndLocalUses checks find-references behavior.
@@ -51,6 +53,16 @@ func TestSemanticTokensReturnClassifiedData(t *testing.T) {
 	}
 	if !semanticDataContains(tokens.Data, semanticEnumMember) {
 		t.Fatalf("semantic tokens = %#v, want enum member token", tokens.Data)
+	}
+}
+
+// TestSemanticTokensRecognizeEveryCurrentMarker checks recently added marker,
+// absence, and fallback syntax is highlighted as language syntax.
+func TestSemanticTokensRecognizeEveryCurrentMarker(t *testing.T) {
+	for _, typ := range []token.Type{token.Move, token.Null, token.Orelse, token.Catch} {
+		if !isKeywordToken(typ) {
+			t.Fatalf("%s is not classified as a semantic keyword", typ)
+		}
 	}
 }
 

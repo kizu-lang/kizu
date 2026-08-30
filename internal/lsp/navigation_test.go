@@ -1,8 +1,12 @@
 package lsp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kizu-lang/kizu/internal/stdlib"
 )
 
 // TestDefinitionReturnsLocalAndDeclarationLocations checks editor navigation basics.
@@ -62,6 +66,40 @@ func TestDocumentSymbolsReturnOutline(t *testing.T) {
 	requireSymbol(t, color.Children, "Green", symbolKindEnumMember)
 }
 
+// TestErrorSetNavigationAndOutline covers the enum-like declaration surface
+// added with typed error sets, including a bodyless composed set.
+func TestErrorSetNavigationAndOutline(t *testing.T) {
+	source := `/// Parse failures.
+error ParseError {
+    /// Input ended early.
+    UnexpectedEnd,
+}
+
+pub error Failure = ParseError;
+
+fn fail() -> Failure!void {
+    return ParseError::UnexpectedEnd;
+}
+`
+	uri := "file:///errors.kizu"
+	server := NewServer(nil, nil)
+	server.documents[uri] = source
+	requireDefinition(t, server.definition(
+		uri, positionIn(source, "return ParseError::UnexpectedEnd", "ParseError"),
+	), uri, source, "error ParseError")
+	requireDefinition(t, server.definition(
+		uri, positionIn(source, "ParseError::UnexpectedEnd", "UnexpectedEnd"),
+	), uri, source, "UnexpectedEnd,")
+	requireHoverContains(t, server.hover(
+		uri, positionIn(source, "ParseError::UnexpectedEnd", "UnexpectedEnd"),
+	), "Input ended early.")
+
+	symbols := DocumentSymbols(source)
+	parseError := requireSymbol(t, symbols, "ParseError", symbolKindEnum)
+	requireSymbol(t, parseError.Children, "UnexpectedEnd", symbolKindEnumMember)
+	requireSymbol(t, symbols, "Failure", symbolKindEnum)
+}
+
 // TestDefinitionUsesPackageModuleGraph checks navigation crosses package files.
 func TestDefinitionUsesPackageModuleGraph(t *testing.T) {
 	root := t.TempDir()
@@ -90,6 +128,56 @@ fn main(value: token::Token) -> void {
 	importDefinition := server.definition(mainURI, importPosition)
 	requireDefinition(t, importDefinition,
 		tokenURI, tokenSource, "pub struct")
+}
+
+// TestDefinitionAndSignatureHelpReachImportedStd keeps editor navigation on
+// the same standard-library source tree the compiler resolves.
+func TestDefinitionAndSignatureHelpReachImportedStd(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	source := `import std::mem;
+
+fn len(bytes: []u8) -> i64 {
+    return 0;
+}
+
+fn main() {
+    print(mem::len("kizu"));
+    print(len("local"));
+}
+`
+	writeLSPPackage(t, root, map[string]string{"src/main.kizu": source})
+	uri := fileURIFromPath(filepath.Join(root, "src", "main.kizu"))
+	server := NewServer(nil, nil)
+	server.documents[uri] = source
+
+	stdRoot, err := stdlib.FindLibFile(stdlib.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memPath := filepath.Join(stdRoot, "src", "mem", "mem.kizu")
+	data, err := os.ReadFile(memPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memSource := string(data)
+	requireDefinition(t, server.definition(
+		uri, positionIn(source, `mem::len("kizu")`, "len"),
+	), fileURIFromPath(memPath), memSource, "pub fn len")
+	requireDefinition(t, server.definition(
+		uri, positionIn(source, `len("local")`, "len"),
+	), uri, source, "fn len")
+	requireHoverContains(t, server.hover(
+		uri, positionIn(source, `mem::len("kizu")`, "len"),
+	), "fn len")
+	requireSignature(t, server.signatureHelp(
+		uri, positionIn(source, `mem::len("kizu")`, `"kizu"`),
+	), "fn len", "bytes: []u8", 0)
+
+	standaloneURI := fileURIFromPath(filepath.Join(t.TempDir(), "standalone.kizu"))
+	server.documents[standaloneURI] = source
+	requireDefinition(t, server.definition(
+		standaloneURI, positionIn(source, `mem::len("kizu")`, "len"),
+	), fileURIFromPath(memPath), memSource, "pub fn len")
 }
 
 // navigationFixture returns source that exercises navigation features together.

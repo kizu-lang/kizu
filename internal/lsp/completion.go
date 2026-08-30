@@ -85,7 +85,99 @@ func (s *Server) completions(uri string, position Position) []completionItem {
 		return staticCompletionItems()
 	}
 	sources, modules := s.completionSources(uri, source)
-	return completionItems(source, position, sources, modules)
+	items := completionItems(source, position, sources, modules)
+	context := completionContextAt(source, position)
+	if context.kind != completionContextNamespace {
+		return items
+	}
+	index, _ := s.navigationIndex(uri, source)
+	builder := newCompletionBuilder()
+	for _, item := range items {
+		builder.add(item)
+	}
+	addQualifiedNamespaceItems(builder, context, index)
+	return builder.sortedItems()
+}
+
+// addQualifiedNamespaceItems adds declarations reached through imported module
+// aliases, including standard-library functions such as `mem::len`.
+func addQualifiedNamespaceItems(
+	builder *completionBuilder,
+	context completionContext,
+	index navigationIndex,
+) {
+	receiver := qualifiedCompletionReceiver(context.receiver, index)
+	prefix := receiver + "::"
+	for path, decl := range index.qualified {
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		name := strings.TrimPrefix(path, prefix)
+		if name == "" || strings.Contains(name, "::") {
+			continue
+		}
+		item, ok := qualifiedDeclarationCompletion(name, decl)
+		if !ok {
+			continue
+		}
+		builder.add(contextualItem(context, item))
+	}
+}
+
+// qualifiedCompletionReceiver expands the first imported alias in a receiver.
+func qualifiedCompletionReceiver(receiver string, index navigationIndex) string {
+	if module, ok := index.modules[receiver]; ok {
+		return module.name
+	}
+	first, rest, hasRest := strings.Cut(receiver, "::")
+	module, ok := index.modules[first]
+	if !ok {
+		return receiver
+	}
+	if !hasRest {
+		return module.name
+	}
+	return module.name + "::" + rest
+}
+
+// qualifiedDeclarationCompletion converts one navigation declaration to a
+// namespace completion without leaking it into unqualified completion.
+func qualifiedDeclarationCompletion(
+	name string,
+	decl navigationDeclaration,
+) (completionItem, bool) {
+	item := completionItem{
+		Label:         name,
+		Detail:        decl.detail,
+		Documentation: markdownDocumentation(decl.documentation),
+	}
+	switch decl.kind {
+	case symbolKindModule:
+		item.Kind = completionItemKindModule
+	case symbolKindFunction:
+		item.Kind = completionItemKindFunction
+		item.InsertText = callSnippet(name, qualifiedCompletionParams(decl.params))
+		item.InsertTextFormat = insertTextFormatSnippet
+	case symbolKindStruct:
+		item.Kind = completionItemKindStruct
+	case symbolKindEnum, symbolKindInterface, symbolKindClass:
+		item.Kind = completionItemKindEnum
+	case symbolKindEnumMember:
+		item.Kind = completionItemKindEnumMember
+	default:
+		return completionItem{}, false
+	}
+	return item, true
+}
+
+// qualifiedCompletionParams reduces signature labels to snippet placeholder names.
+func qualifiedCompletionParams(labels []string) []string {
+	params := make([]string, 0, len(labels))
+	for _, label := range labels {
+		name, _, _ := strings.Cut(label, ":")
+		params = append(params, strings.TrimSpace(name))
+	}
+	return params
 }
 
 // completionSources returns source texts that should inform completions.
@@ -400,10 +492,45 @@ func (idx completionIndex) scan(source string) {
 				}
 			}
 			i = skipDeclarationBody(tokens, i+1)
+		case token.Ident:
+			if isErrorSetDeclStart(tokens, i) {
+				i = idx.scanErrorSet(tokens, i)
+			}
 		case token.Impl:
 			// An assertion declares no symbol; the loop steps past it.
 		}
 	}
+}
+
+// scanErrorSet collects an error set type and its directly declared members.
+func (idx completionIndex) scanErrorSet(tokens []token.Token, start int) int {
+	if !isErrorSetDeclStart(tokens, start) {
+		return start
+	}
+	name := tokens[start+1].Literal
+	idx.types[name] = typeCompletion{
+		kind:          completionItemKindEnum,
+		documentation: declarationDocumentation(tokens, start),
+	}
+	if tokens[start+2].Type != token.LBrace {
+		idx.enums[name] = []enumMemberCompletion{}
+		return skipDeclarationBody(tokens, start+2)
+	}
+	members := []enumMemberCompletion{}
+	for i := start + 3; i < len(tokens) && tokens[i].Type != token.EOF; i++ {
+		if tokens[i].Type == token.RBrace {
+			idx.enums[name] = members
+			return i
+		}
+		if tokens[i].Type == token.Ident {
+			members = append(members, enumMemberCompletion{
+				name:          tokens[i].Literal,
+				documentation: declarationDocumentation(tokens, i),
+			})
+		}
+	}
+	idx.enums[name] = members
+	return start + 2
 }
 
 // scanStruct collects a struct type and its field names.

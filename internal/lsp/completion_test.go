@@ -20,6 +20,28 @@ func TestCompleteReturnsStaticSnippets(t *testing.T) {
 	}
 }
 
+// TestCompleteReturnsCurrentLanguageSurface keeps static editor vocabulary in
+// step with syntax that does not come from declarations in the current file.
+func TestCompleteReturnsCurrentLanguageSurface(t *testing.T) {
+	items := Complete("", Position{})
+	for _, label := range []string{
+		"move", "null", "orelse", "catch",
+		"Io", "Allocator", "Field", "Function",
+	} {
+		requireCompletion(t, items, label)
+	}
+	for _, label := range []string{"fn type", "comptime for", "comptime match", "impl"} {
+		item := requireCompletionKind(t, items, label, completionItemKindSnippet)
+		if item.InsertTextFormat != insertTextFormatSnippet || item.InsertText == "" {
+			t.Fatalf("%s completion = %#v, want non-empty snippet", label, item)
+		}
+	}
+	errorSet := requireCompletionKind(t, items, "error", completionItemKindSnippet)
+	if !strings.HasPrefix(errorSet.InsertText, "error ${1:Name} {") {
+		t.Fatalf("error completion = %#v, want an error set declaration", errorSet)
+	}
+}
+
 // TestCompleteReturnsTestSnippet keeps the test-block LSP template available.
 func TestCompleteReturnsTestSnippet(t *testing.T) {
 	items := Complete("", Position{})
@@ -110,6 +132,35 @@ fn main() {
 	}
 	if item.Documentation == nil || item.Documentation.Value != "Secondary color." {
 		t.Fatalf("documentation = %#v", item.Documentation)
+	}
+}
+
+// TestCompleteReturnsErrorSetsAndMembers keeps error declarations in the same
+// editor index as the enum-like namespace syntax users write for members.
+func TestCompleteReturnsErrorSetsAndMembers(t *testing.T) {
+	source := `/// Parse failures.
+error ParseError {
+    /// Input ended early.
+    UnexpectedEnd,
+}
+
+fn main() -> ParseError!void {
+    let failed = ParseError::
+}
+`
+	items := Complete(source, Position{Line: 7, Character: len("    let failed = ParseError::")})
+	member := requireCompletion(t, items, "UnexpectedEnd")
+	if member.Kind != completionItemKindEnumMember || member.Detail != "ParseError" {
+		t.Fatalf("error member = %#v", member)
+	}
+	if member.Documentation == nil || member.Documentation.Value != "Input ended early." {
+		t.Fatalf("error member documentation = %#v", member.Documentation)
+	}
+
+	general := Complete(source, Position{})
+	errorSet := requireCompletion(t, general, "ParseError")
+	if errorSet.Kind != completionItemKindEnum {
+		t.Fatalf("error set = %#v, want enum-like completion", errorSet)
 	}
 }
 
@@ -250,6 +301,35 @@ func TestServerCompletionReturnsPackageModuleImportPaths(t *testing.T) {
 	item := requireCompletion(t, items, "app::token")
 	if item.TextEdit == nil || item.TextEdit.NewText != "app::token" {
 		t.Fatalf("module item = %#v, want full import text edit", item)
+	}
+}
+
+// TestServerCompletionReturnsImportedStdDeclarations checks namespace
+// completion reads the same std modules as navigation and compilation.
+func TestServerCompletionReturnsImportedStdDeclarations(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	source := `import std::mem;
+
+fn main() {
+    let length = mem::
+}
+`
+	writeLSPPackage(t, root, map[string]string{"src/main.kizu": source})
+	uri := fileURIFromPath(filepath.Join(root, "src", "main.kizu"))
+	server := NewServer(nil, nil)
+	server.documents[uri] = source
+
+	items := server.completions(uri, Position{
+		Line: 3, Character: len("    let length = mem::"),
+	})
+	length := requireCompletion(t, items, "len")
+	if length.Kind != completionItemKindFunction || length.TextEdit == nil ||
+		length.TextEdit.NewText != "len(${1:bytes})" {
+		t.Fatalf("std len completion = %#v", length)
+	}
+	limit := requireCompletion(t, items, "Limit")
+	if limit.Kind != completionItemKindEnum {
+		t.Fatalf("std Limit completion = %#v", limit)
 	}
 }
 

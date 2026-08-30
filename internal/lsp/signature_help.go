@@ -72,6 +72,10 @@ func callDeclarationAt(
 		decl, ok := index.methods[typ][name]
 		return decl, ok
 	}
+	if decl, ok := qualifiedDefinitionAt(tokens, nameIndex, index); ok &&
+		decl.kind == symbolKindFunction {
+		return decl, true
+	}
 	decl, ok := index.functions[name]
 	return decl, ok
 }

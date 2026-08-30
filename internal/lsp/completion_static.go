@@ -26,8 +26,12 @@ var keywordCompletionItems = []completionItem{
 	{Label: "extern", Kind: completionItemKindKeyword},
 	{Label: "comptime", Kind: completionItemKindKeyword},
 	{Label: "try", Kind: completionItemKindKeyword},
+	{Label: "move", Kind: completionItemKindKeyword},
+	{Label: "orelse", Kind: completionItemKindKeyword},
+	{Label: "catch", Kind: completionItemKindKeyword},
 	{Label: "true", Kind: completionItemKindValue},
 	{Label: "false", Kind: completionItemKindValue},
+	{Label: "null", Kind: completionItemKindValue},
 	{Label: "and", Kind: completionItemKindKeyword},
 	{Label: "or", Kind: completionItemKindKeyword},
 }
@@ -48,12 +52,16 @@ var primitiveTypeCompletionItems = []completionItem{
 	{Label: "f32", Kind: completionItemKindStruct, Detail: "primitive type"},
 	{Label: "f64", Kind: completionItemKindStruct, Detail: "primitive type"},
 	{Label: "[]u8", Kind: completionItemKindStruct, Detail: "byte string"},
-	{Label: "Function", Kind: completionItemKindStruct, Detail: "function type"},
+	{Label: "Io", Kind: completionItemKindStruct, Detail: "I/O capability"},
+	{Label: "Allocator", Kind: completionItemKindStruct, Detail: "allocator capability"},
+	{Label: "Field", Kind: completionItemKindStruct, Detail: "compile-time field name"},
+	{Label: "Function", Kind: completionItemKindStruct, Detail: "compile-time function name"},
 	{Label: "type", Kind: completionItemKindStruct, Detail: "compile-time type value"},
 }
 
 var snippetCompletionItems = []completionItem{
 	snippet("fn", "function declaration", "fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}"),
+	snippet("fn type", "function pointer type", "fn(${1:parameters}) -> ${2:void}"),
 	snippet("main", "main function", "fn main() {\n    $0\n}"),
 	snippet("test", "test block", "test \"${1:name}\" {\n    $0\n}"),
 	snippet("struct", "struct declaration", "struct ${1:Name} {\n    ${2:field}: ${3:i64},\n}"),
@@ -99,8 +107,15 @@ var snippetCompletionItems = []completionItem{
 			"unsafe struct ${2:Name} {\n    $0\n}",
 	),
 	snippet("comptime if", "comptime if block", "comptime if ${1:condition} {\n    $0\n}"),
+	snippet("comptime for", "comptime field loop", "comptime for ${1:list} |${2:field}| {\n    $0\n}"),
+	snippet(
+		"comptime match",
+		"comptime variant dispatch",
+		"comptime match ${1:value} |${2:variant}| {\n    $0\n}",
+	),
+	snippet("impl", "contract assertion", "impl ${1:Contract} for ${2:Type};"),
 	snippet("print", "print builtin", "print(${1:value})"),
-	snippet("error", "error builtin", "error(${1:message})"),
+	snippet("error", "error set declaration", "error ${1:Name} {\n    ${2:Member},\n}"),
 	snippet("cast", "cast expression", "cast<${1:T}>(${2:value})"),
 	snippet("type", "type expression", "type<${1:T}>"),
 }
