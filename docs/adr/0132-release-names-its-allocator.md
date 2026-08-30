@@ -111,6 +111,7 @@ tied allocator から作った owner は `move` できず(SPEC §14.3)、要素�
 | allocator を持つ型と持たない型で `deinit` の引数を変える | 同上。field を 1 つ足しただけで signature が変わり、呼び出し側が壊れる |
 | `deinit` を残しつつ `deinit_with(allocator)` を足す | 経路が 2 本になる(原理 #9)。どちらが正しいかを利用者が選ぶことになる |
 | 解放時に allocator を推論する | 推論の材料が値の中にない。持たせれば header に戻る |
+| receiver が `self.allocator` を持つ method は引数を省く | 「この method は確保するのか」が署名から消える(原理 2 / 原理 4)。「引数だと別の allocator を渡せる」という利点は tie 検査が消した |
 
 ## Consequences
 
