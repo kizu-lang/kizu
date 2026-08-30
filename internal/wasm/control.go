@@ -37,6 +37,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "unary."):
 		return e.writeUnary(instr)
+	case instr.Op == "cond_fail":
+		return e.writeCondFail(instr)
 	case strings.HasPrefix(instr.Op, "func.addr."), strings.HasPrefix(instr.Op, "call."):
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":

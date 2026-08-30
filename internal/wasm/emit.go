@@ -24,6 +24,7 @@ func Emit(module *ir.Module) (string, error) {
 		types:          typ.NewTable(),
 		strings:        map[string]dataRef{},
 		values:         map[string]valueInfo{},
+		panicKinds:     map[string]bool{},
 		tableIndex:     map[string]int{},
 		signatureIndex: map[string]int{},
 	}
@@ -48,6 +49,9 @@ type emitter struct {
 	out     bytes.Buffer
 	strings map[string]dataRef
 	values  map[string]valueInfo
+	// panicKinds contains only the checked runtime failures this module uses.
+	// Their data, proc_exit import, and helpers are omitted otherwise.
+	panicKinds map[string]bool
 	// dataEnd is the first byte after static data. Function frames start at its
 	// aligned address and grow through the stack allocator.
 	dataEnd int
@@ -74,6 +78,7 @@ type funcSignature struct {
 
 // emit writes the module, runtime helpers, and user functions.
 func (e *emitter) emit() error {
+	e.collectPanicKinds()
 	e.collectStrings()
 	if err := e.collectFunctionTable(); err != nil {
 		return err
@@ -161,6 +166,10 @@ func (e *emitter) collectStrings() {
 	offset += 5
 	e.strings["newline"] = dataRef{offset: offset, length: 1}
 	offset++
+	for _, data := range e.usedPanicData() {
+		e.strings[data.key] = dataRef{offset: offset, length: len(data.text)}
+		offset += len(data.text)
+	}
 	e.dataEnd = alignUp(offset, 8)
 }
 
@@ -187,6 +196,10 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("(module\n")
 	e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
 	e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
+	if len(e.panicKinds) > 0 {
+		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"proc_exit\"\n")
+		e.out.WriteString("    (func $__wasi_proc_exit (param i32)))\n")
+	}
 	pages := (e.dataEnd + 65535) / 65536
 	if pages < 1 {
 		pages = 1
@@ -241,6 +254,9 @@ func (e *emitter) sortedDataLiterals() []string {
 
 // dataLiteral converts a map key to WAT data text.
 func dataLiteral(key string) string {
+	if text, ok := panicDataText(key); ok {
+		return stringBytes(text)
+	}
 	switch key {
 	case "newline":
 		return "\\0a"
@@ -252,12 +268,17 @@ func dataLiteral(key string) string {
 	}
 }
 
-// writeRuntime writes the minimal WASI stdout helpers.
+// writeRuntime writes the minimal WASI output and checked-failure helpers.
 func (e *emitter) writeRuntime() {
 	e.writeStackAllocHelper()
+	e.writeBytesHelper()
 	e.writeLineHelper()
 	e.writeBoolHelper()
+	e.writeIntValueHelper()
 	e.writeIntHelper()
+	if len(e.panicKinds) > 0 {
+		e.writePanicRuntime()
+	}
 }
 
 // writeStackAllocHelper reserves one recursive-safe linear-memory frame,
@@ -283,21 +304,25 @@ func (e *emitter) writeStackAllocHelper() {
 	e.out.WriteString("  )\n\n")
 }
 
+// writeBytesHelper writes one byte range to a selected WASI descriptor.
+func (e *emitter) writeBytesHelper() {
+	e.out.WriteString("  (func $__write_bytes (param $fd i32) (param $ptr i32) (param $len i32)\n")
+	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $ptr))\n", scratchOffset)
+	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $len))\n", scratchOffset+4)
+	e.out.WriteString("    (drop (call $__wasi_fd_write\n")
+	fmt.Fprintf(&e.out, "      (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))\n",
+		scratchOffset, scratchOffset+16)
+	e.out.WriteString("  )\n\n")
+}
+
 // writeLineHelper writes a buffer and a trailing newline to stdout.
 func (e *emitter) writeLineHelper() {
 	newline := e.strings["newline"]
-	fmt.Fprintf(&e.out, "  (func $__write_line (param $ptr i32) (param $len i32)\n")
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $ptr))\n", scratchOffset)
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $len))\n", scratchOffset+4)
-	fmt.Fprintf(&e.out, "    (drop (call $__wasi_fd_write\n")
-	fmt.Fprintf(&e.out, "      (i32.const 1) (i32.const %d) (i32.const 1) (i32.const %d)))\n",
-		scratchOffset, scratchOffset+16)
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) ", scratchOffset)
-	fmt.Fprintf(&e.out, "(i32.const %d))\n", newline.offset)
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (i32.const 1))\n", scratchOffset+4)
-	fmt.Fprintf(&e.out, "    (drop (call $__wasi_fd_write\n")
-	fmt.Fprintf(&e.out, "      (i32.const 1) (i32.const %d) (i32.const 1) (i32.const %d)))\n",
-		scratchOffset, scratchOffset+16)
+	e.out.WriteString("  (func $__write_line (param $ptr i32) (param $len i32)\n")
+	e.out.WriteString("    (call $__write_bytes (i32.const 1) (local.get $ptr) (local.get $len))\n")
+	fmt.Fprintf(&e.out,
+		"    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))\n",
+		newline.offset)
 	e.out.WriteString("  )\n\n")
 }
 
@@ -314,16 +339,16 @@ func (e *emitter) writeBoolHelper() {
 	e.out.WriteString("  )\n\n")
 }
 
-// writeIntHelper writes signed i64 values as decimal text.
-func (e *emitter) writeIntHelper() {
-	e.out.WriteString("  (func $__print_i64 (param $value i64)\n")
+// writeIntValueHelper writes one signed i64 without a trailing newline.
+func (e *emitter) writeIntValueHelper() {
+	e.out.WriteString("  (func $__write_i64 (param $fd i32) (param $value i64)\n")
 	e.out.WriteString("    (local $n i64) (local $pos i32) (local $negative i32)\n")
 	e.out.WriteString("    (local.set $n (local.get $value))\n")
 	e.out.WriteString("    (local.set $pos (i32.const 192))\n")
 	e.out.WriteString("    (if (i64.eqz (local.get $n))\n")
 	e.out.WriteString("      (then\n")
 	e.out.WriteString("        (i32.store8 (i32.const 191) (i32.const 48))\n")
-	e.out.WriteString("        (call $__write_line (i32.const 191) (i32.const 1))\n")
+	e.out.WriteString("        (call $__write_bytes (local.get $fd) (i32.const 191) (i32.const 1))\n")
 	e.out.WriteString("        (return)))\n")
 	e.out.WriteString("    (if (i64.lt_s (local.get $n) (i64.const 0))\n")
 	e.out.WriteString("      (then\n")
@@ -334,9 +359,20 @@ func (e *emitter) writeIntHelper() {
 	e.out.WriteString("      (then\n")
 	e.out.WriteString("        (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))\n")
 	e.out.WriteString("        (i32.store8 (local.get $pos) (i32.const 45))))\n")
-	fmt.Fprintf(&e.out, "    (call $__write_line (local.get $pos) ")
+	fmt.Fprintf(&e.out, "    (call $__write_bytes (local.get $fd) (local.get $pos) ")
 	fmt.Fprintf(&e.out, "(i32.sub (i32.const %d) ", intBufferEnd)
 	e.out.WriteString("(local.get $pos)))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeIntHelper writes signed i64 values as one stdout line.
+func (e *emitter) writeIntHelper() {
+	newline := e.strings["newline"]
+	e.out.WriteString("  (func $__print_i64 (param $value i64)\n")
+	e.out.WriteString("    (call $__write_i64 (i32.const 1) (local.get $value))\n")
+	fmt.Fprintf(&e.out,
+		"    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))\n",
+		newline.offset)
 	e.out.WriteString("  )\n\n")
 }
 

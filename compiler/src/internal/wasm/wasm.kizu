@@ -49,6 +49,7 @@ pub fn emit(
         out: string::new(allocator),
         strings: map::new<[]u8, DataRef>(allocator),
         data_order: array::new<ir::Name>(allocator),
+        panic_kinds: map::new<[]u8, bool>(allocator),
         values: map::new<[]u8, ValueInfo>(allocator),
         data_end: 0,
         generation: 0,
@@ -113,6 +114,9 @@ struct Emitter {
     out: string::String,
     strings: map::Map<[]u8, DataRef>,
     data_order: array::Array<ir::Name>,
+    // panic_kinds contains only the checked runtime failures this module uses.
+    // Their data, proc_exit import, and helpers are omitted otherwise.
+    panic_kinds: map::Map<[]u8, bool>,
     values: map::Map<[]u8, ValueInfo>,
     // data_end is the first aligned byte after static data. Recursive-safe
     // function frames begin there and grow through $__stack_alloc.
@@ -350,6 +354,7 @@ fn (self: &var Emitter) local_expr(name: []u8) -> !ir::Name {
 
 /// Writes the module, runtime helpers, and user functions, the Go `emit`.
 fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    try self.collect_panic_kinds(module);
     try self.collect_strings(module);
     if try self.collect_function_table(module) |failed| {
         return move failed;
@@ -422,6 +427,7 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     offset = offset + 5;
     try self.record_data("newline", offset, 1);
     offset = offset + 1;
+    offset = try self.record_used_panic_data(offset);
     self.data_end = wasm_align_up(offset, 8);
     return;
 }
@@ -577,6 +583,13 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     ;
     try self.line(import_line);
     try self.line("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))");
+    if self.panic_kinds.len() > 0 {
+        let exit_import =
+            \\  (import "wasi_snapshot_preview1" "proc_exit"
+        ;
+        try self.line(exit_import);
+        try self.line("    (func $__wasi_proc_exit (param i32)))");
+    }
     var pages = (self.data_end + 65535) / 65536;
     if pages < 1 {
         pages = 1;
@@ -615,6 +628,10 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
         try out.append_bytes(self.allocator, bytes);
         return found.offset;
     }
+    if panic_data_text(bytes) |text| {
+        try append_string_bytes(self.allocator, out, text);
+        return found.offset;
+    }
     var unquoted = string::new(self.allocator);
     defer unquoted.deinit(self.allocator);
     try append_unquoted(self.allocator, &var unquoted, bytes);
@@ -623,12 +640,19 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
     return found.offset;
 }
 
-/// Writes the minimal WASI stdout helpers, the Go `writeRuntime`.
+/// Writes the minimal WASI output and checked-failure helpers, the Go
+/// `writeRuntime`.
 fn (self: &var Emitter) write_runtime() -> !void {
     try self.write_stack_alloc_helper();
+    try self.write_bytes_helper();
     try self.write_line_helper();
     try self.write_bool_helper();
-    return self.write_int_helper();
+    try self.write_int_value_helper();
+    try self.write_int_helper();
+    if self.panic_kinds.len() > 0 {
+        try self.write_panic_runtime();
+    }
+    return;
 }
 
 /// Reserves one recursive-safe linear-memory frame and grows memory before a
@@ -654,29 +678,35 @@ fn (self: &var Emitter) write_stack_alloc_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes a buffer and a trailing newline to stdout, the Go
-/// `writeLineHelper`.
-fn (self: &var Emitter) write_line_helper() -> !void {
-    let newline = self.data_ref("newline");
+/// Writes one byte range to a selected WASI descriptor, the Go
+/// `writeBytesHelper`.
+fn (self: &var Emitter) write_bytes_helper() -> !void {
     let scratch = scratch_offset();
-    try self.line("  (func $__write_line (param $ptr i32) (param $len i32)");
+    try self.line("  (func $__write_bytes (param $fd i32) (param $ptr i32) (param $len i32)");
     try self.line1("    (i32.store (i32.const %d) (local.get $ptr))", Arg::Int(scratch));
     try self.line1("    (i32.store (i32.const %d) (local.get $len))", Arg::Int(scratch + 4));
-    try self.write_fd_write(scratch);
-    // Go writes this line with two Fprintf calls, the pointer and the length.
-    try self.line2("    (i32.store (i32.const %d) (i32.const %d))",
-        Arg::Int(scratch), Arg::Int(newline.offset));
-    try self.line1("    (i32.store (i32.const %d) (i32.const 1))", Arg::Int(scratch + 4));
-    try self.write_fd_write(scratch);
+    try self.line("    (drop (call $__wasi_fd_write");
+    try self.line2(
+        "      (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))",
+        Arg::Int(scratch),
+        Arg::Int(scratch + 16)
+    );
     try self.line("  )");
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes one dropped fd_write call over the scratch iovec.
-fn (self: &var Emitter) write_fd_write(scratch: i64) -> !void {
-    try self.line("    (drop (call $__wasi_fd_write");
-    return self.line2("      (i32.const 1) (i32.const %d) (i32.const 1) (i32.const %d)))",
-        Arg::Int(scratch), Arg::Int(scratch + 16));
+/// Writes a buffer and a trailing newline to stdout, the Go
+/// `writeLineHelper`.
+fn (self: &var Emitter) write_line_helper() -> !void {
+    let newline = self.data_ref("newline");
+    try self.line("  (func $__write_line (param $ptr i32) (param $len i32)");
+    try self.line("    (call $__write_bytes (i32.const 1) (local.get $ptr) (local.get $len))");
+    try self.line1(
+        "    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))",
+        Arg::Int(newline.offset)
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
 /// Writes bool values as lowercase text, the Go `writeBoolHelper`.
@@ -693,16 +723,17 @@ fn (self: &var Emitter) write_bool_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes signed i64 values as decimal text, the Go `writeIntHelper`.
-fn (self: &var Emitter) write_int_helper() -> !void {
-    try self.line("  (func $__print_i64 (param $value i64)");
+/// Writes one signed i64 without a trailing newline, the Go
+/// `writeIntValueHelper`.
+fn (self: &var Emitter) write_int_value_helper() -> !void {
+    try self.line("  (func $__write_i64 (param $fd i32) (param $value i64)");
     try self.line("    (local $n i64) (local $pos i32) (local $negative i32)");
     try self.line("    (local.set $n (local.get $value))");
     try self.line("    (local.set $pos (i32.const 192))");
     try self.line("    (if (i64.eqz (local.get $n))");
     try self.line("      (then");
     try self.line("        (i32.store8 (i32.const 191) (i32.const 48))");
-    try self.line("        (call $__write_line (i32.const 191) (i32.const 1))");
+    try self.line("        (call $__write_bytes (local.get $fd) (i32.const 191) (i32.const 1))");
     try self.line("        (return)))");
     try self.line("    (if (i64.lt_s (local.get $n) (i64.const 0))");
     try self.line("      (then");
@@ -715,8 +746,21 @@ fn (self: &var Emitter) write_int_helper() -> !void {
     try self.line("        (i32.store8 (local.get $pos) (i32.const 45))))");
     // Go writes this line with three calls, around the buffer end constant.
     try self.line1(
-        "    (call $__write_line (local.get $pos) (i32.sub (i32.const %d) (local.get $pos)))",
+        "    (call $__write_bytes (local.get $fd) (local.get $pos) (i32.sub (i32.const %d) (local.get $pos)))",
         Arg::Int(int_buffer_end())
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Writes signed i64 values as one stdout line, the Go `writeIntHelper`.
+fn (self: &var Emitter) write_int_helper() -> !void {
+    let newline = self.data_ref("newline");
+    try self.line("  (func $__print_i64 (param $value i64)");
+    try self.line("    (call $__write_i64 (i32.const 1) (local.get $value))");
+    try self.line1(
+        "    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))",
+        Arg::Int(newline.offset)
     );
     try self.line("  )");
     return self.out.append_byte(self.allocator, cast<u8>(10));

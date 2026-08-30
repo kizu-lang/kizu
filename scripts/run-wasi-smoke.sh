@@ -24,8 +24,32 @@ run_example() {
   fi
 }
 
+run_failure() {
+  name="$1"
+  file="$2"
+  want="$3"
+  wat="$tmp/$name.wat"
+  stdout="$tmp/$name.stdout"
+  stderr="$tmp/$name.stderr"
+
+  go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
+  set +e
+  wasmtime "$wat" > "$stdout" 2> "$stderr"
+  status="$?"
+  set -e
+  got="$(cat "$stderr")"
+  if [ "$status" -ne 1 ] || [ -s "$stdout" ] || [ "$got" != "$want" ]; then
+    printf '%s: status=%s, stderr:\n%s\nwant status=1, stderr:\n%s\n' \
+      "$name" "$status" "$got" "$want" >&2
+    exit 1
+  fi
+}
+
 run_example "hello" "examples/hello.kizu" "hello, kizu"
 run_example "functions" "examples/functions.kizu" "3"
+run_example "slice_checked_access" "examples/slice_checked_access.kizu" "98
+98
+99"
 run_example "variables" "examples/variables.kizu" "alice
 31"
 run_example "if" "examples/if.kizu" "adult"
@@ -74,3 +98,14 @@ run_example "optional_error_flow" "examples/optional_error_flow.kizu" "7
 1
 42
 -2"
+
+# Checked access reports the same source position and dynamic values as the
+# native runtime, writes only to stderr, and terminates through WASI proc_exit.
+run_failure "slice_index_out_of_bounds" \
+  "examples/negative/slice_syntax_index_out_of_bounds.kizu" \
+  "runtime error: index out of bounds at 2:21
+note: index is 3, length is 3"
+run_failure "slice_range_out_of_bounds" \
+  "examples/negative/slice_syntax_range_out_of_bounds.kizu" \
+  "runtime error: range out of bounds at 2:22
+note: range is 0..4, length is 3"

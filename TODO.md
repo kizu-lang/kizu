@@ -6,9 +6,10 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-154 examples 中 51 件が native と同じ出力で動く。残り 103 件の最初の失敗は
-`cond_fail` が 100 件で、ほかは enum print、C allocator、coro runtime が各 1 件。
-example ごとの例外を足さず、共通 runtime と portable std の順に backend の対象を広げる。
+155 examples 中 52 件が native と同じ出力で動く。残り 103 件の最初の失敗は Array layout
+が 78 件、arena / handle が 8 件、Map layout が 7 件、page allocator が 3 件、stack buffer と
+`test.fail` が各 2 件、enum print、C allocator、coro runtime が各 1 件。example ごとの例外を
+足さず、共通 runtime と portable std の順に backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
 std API が native と同じ observable behavior を持ち、compiler が browser の読める binary
@@ -23,8 +24,8 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 
 - `[]u8` を定数専用の pointer ではなく pointer + length の runtime value として扱い、
   slice load / store / subslice を lower する。
-- `cond_fail` と panic entry を WASI runtime に実装し、境界外や無効 handle が memory を
-  読む前に native と同じ診断で停止する。
+- `panic.fail` / `test.fail` と testing の失敗 entry を WASI runtime に実装し、native と同じ
+  診断で停止する。
 - explicit `Allocator` の allocate / reallocate / release 契約を linear memory 上に実装し、
   capacity を増やす `memory.grow` の失敗は値として返す。global / default allocator や
   hidden allocation は作らない。
