@@ -433,6 +433,63 @@ fn (self: &var Checker) view_carrying_type(type_name: Name) -> !bool {
     return self.view_carrying_type_seen(type_name, &var seen);
 }
 
+/// Reports whether a retained value can keep an Io or Allocator alive, the Go
+/// `capabilityCarryingType`. TaskSet already carries its selected capabilities;
+/// another one inside state could launder a frame tie through the task copy.
+fn (self: &var Checker) capability_carrying_type(type_name: Name) -> !bool {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit(self.allocator);
+    return self.capability_carrying_type_seen(type_name, &var seen);
+}
+
+fn (self: &var Checker) capability_carrying_type_seen(
+    type_name: Name,
+    seen: &var map::Map<[]u8, bool>
+) -> !bool {
+    let payload = try self.view_carrier_payload(type_name);
+    if self.capability_return(payload) {
+        return true;
+    }
+    if self.seen_contains(seen, payload) {
+        return false;
+    }
+    try self.mark_seen(self.allocator, seen, payload, true);
+    var base = payload;
+    if try self.names.split_generic(payload) |parts| {
+        base = parts.base;
+        if !self.names.is(base, "std::arena::Handle") {
+            let args = try self.names.split_generic_args(parts.args) orelse
+                return self.capability_carrying_type_seen(parts.args, seen);
+            defer args.deinit(self.allocator);
+            var arg_index = 0;
+            while args.get(arg_index) |arg_type| {
+                arg_index = arg_index + 1;
+                if try self.capability_carrying_type_seen(arg_type, seen) {
+                    return true;
+                }
+            }
+        }
+    }
+    var index = 0;
+    while self.struct_field_at(base, index) |field| {
+        index = index + 1;
+        let field_type = self.struct_field_type(base, field) orelse continue;
+        if try self.capability_carrying_type_seen(field_type, seen) {
+            return true;
+        }
+    }
+    index = 0;
+    while self.union_variant_at(base, index) |variant| {
+        index = index + 1;
+        let variant_payload = self.union_variant_payload_name(base, variant) orelse continue;
+        if !is_empty(variant_payload) and
+            try self.capability_carrying_type_seen(variant_payload, seen) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Strips the wrappers a view rides through, the Go `viewCarrierPayload`:
 /// the success of `!T` and the payload of `?T` carry their views the same
 /// way.

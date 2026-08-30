@@ -76,8 +76,8 @@ full stdlib
 kizu lint
 self-hosting compiler
 async fn / await syntax
-並行 API (task / channel / thread / mutex / atomic)
-OS thread / event loop / networking runtime
+thread / channel / mutex / atomic API
+OS thread runtime
 Rust 同等以上の runtime performance guarantee
 ```
 
@@ -2852,12 +2852,15 @@ std::set::Set<T>      後続 phase
 
 ## 15. concurrency / async 方針
 
-Kizu は `async fn` / `await` syntax を実装しません。
+Kizu は `async fn` / `await` syntax を実装しません。thread / channel / mutex /
+atomic API もまだ持ちません。ADR-0025 で撤回した API は checker rule だけで、IR
+lowering も runtime も無かったためです。
 
-並行 API も現在は持ちません。`std::task` / `std::channel` / `std::thread` /
-`std::sync` / `std::atomic` と `std::io::threaded()` は ADR-0025 で撤回しました。
-これらは checker rule だけが存在し、IR lowering も runtime も持たない状態が続いた
-ためです。安全規則が実行によって反証されない構造そのものを取り除きました。
+一方、**1 thread 上で待ちの間に別の worker を進める API は持ちます。**
+`std::io::Future` は caller の state を借りる 1 worker、`std::io::TaskSet` は move
+された state を持つ N worker です。どちらも同時には走らず、切り替わるのは source
+に見える I/O wait だけです(ADR-0146)。ここでいう concurrency と、複数 CPU で
+同時に走る parallelism / thread safety は分けます。
 
 **thread は入れます。** 並列処理は Kizu の目標であり、撤回したのは API の形だけです。
 順番だけを変えます。実行系が先で、安全規則は動く thread の上でだけ書きます。
@@ -2869,7 +2872,7 @@ Kizu は `async fn` / `await` syntax を実装しません。
 * memory race safety は譲りません。Zig は data race を型で防ぎませんが、Kizu は
   防ぎます。safe Kizu で data race を書ける API は採用しません
 
-API の形と個数は未定です。撤回した 8 個の型を一度に戻すことはしません。
+thread API の形と個数は未定です。撤回した 8 個の型を一度に戻すことはしません。
 
 ### 15.1 Io capability
 
@@ -2925,6 +2928,23 @@ std::io::kqueue()    kqueue backend
 走らせるので、**`async` は並行性の約束ではありません** —— 差が出るのは待つとき
 だけです。`async fn` / `await` という着色は変わらず実装しません。API の形は
 `docs/std/io.md` にあります。
+
+`Future` は貸された state を排他的に借り、保持する `Io` と worker storage を取った
+allocator には shared に tied です。`deinit(allocator)` は worker を cancel してから
+storage を同じ allocator へ返します。state、tied Io、tied allocator より長生きする
+ことも、別の tied allocator で解放することもできません。
+
+native coroutine の fixed stack は読み書き不可の guard page で領域外への
+書き込みを止めます。compiler は native Kizu 関数に 4096 byte 以下の間隔の
+stack probe を付け、guard より大きい frame がそれを飛び越すことを許しません。
+guard の設定失敗は spawn から `StackProtectionFailed` を返し、実行中の
+stack overflow は回復可能な error にせず process を停止します。
+
+結果を読み戻さない worker は `std::io::TaskSet` が所有します。TaskSet は構築時の
+`Io` と allocator を保持し、`spawn<A>` は struct `A` を worker へ move します。
+`A` は view / borrow と `Io` / `Allocator` を含められません。TaskSet は保持した
+capability に tied で、`deinit(allocator)` は未完了 worker を cancel してから
+state と stack を解放します。確保と解放の allocator は source に明示します。
 
 ### 15.2 Io を取る標準 API
 
@@ -3026,6 +3046,10 @@ std::io::kqueue()    kqueue backend
   out, max)` で読む —— `std::net::read_into` と同じ契約で、head 読みで先に
   届いていた byte から出る。待たない版が `exchange.read_ready_into(...)` で、
   `?i64` の null が「今は何も来ていない」
+* `server.accept_connection(io, allocator)` は接続が来るまで待つが head は読まず、
+  request がまだ無い `Exchange` を返す。`exchange.read_head(io, allocator)` が
+  普通の待つ read で head を完成させる。evented Io では Exchange を TaskSet の
+  worker へ move し、accept loop がすぐ次の接続へ戻れる
 * `Exchange` は `TcpStream` を渡さない。`write_all` / `read_into` /
   `set_read_deadline` / `set_write_deadline` / `clear_*` が通り道で、head 読みの
   残り byte を飛ばせないのがその理由
@@ -3078,15 +3102,17 @@ std::io::kqueue()    kqueue backend
   許している(HTTP/1.1 は `Connection: close` が無ければ、HTTP/1.0 は
   `Connection: keep-alive` があれば)。揃わなければ head に `Connection: close`
   を書く
-* `limits.max_requests` の既定は 1。並行 API が無い(§15)ので 1 接続ずつしか
-  捌けず、2 通目のために接続を保持する peer は他の全員に対して保持している
+* `limits.max_requests` の既定は 1。TaskSet 導入前の保守値を維持しており、接続ごとの
+  memory、idle timeout、公平性を測ってから再検討する(`TODO.md` 0c)
 * `Transfer-Encoding: chunked` は request も response も decode する。
   `Content-Length` と併記されたら `Error::ConflictingFraming`、`chunked` 以外の
   coding は `Error::UnsupportedEncoding`、size や CRLF が読めなければ
   `Error::MalformedChunk`。chunk extension は読み飛ばし、trailer は消費して
   捨てる(上限は `max_head_bytes`)
 * TLS、HTTP/2、HTTP/3 は持たない
-* 並行 API が無い(§15)ので 1 接続ずつ。2 人目は listen backlog で待つ
+* `accept` / `accept_head` は 1 接続ずつ。1 thread で多数を扱う道は、接続 state を
+  server が持つ `first` / `next` と、接続を worker が持つ
+  `accept_connection` + `TaskSet` の 2 つ
 
 `std::path`:
 
@@ -3101,7 +3127,8 @@ std::io::kqueue()    kqueue backend
 
 `std::io` の具体的な API は `docs/std/io.md` が持ちます。compiler が持つ契約は、
 stdio operation が `Io` capability を必ず要求し、I/O failure を error union で
-返すことです。
+返すこと、TaskSet state が view / capability を保持せず所有権ごと move されること
+です。
 
 `std::process`:
 

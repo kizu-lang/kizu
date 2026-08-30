@@ -217,6 +217,7 @@ fn (self: &var Emitter) uses_hosted_runtime_abi(module: &ir::Module, name: ir::N
 /// reach the C runtime behind a pointer, never by value.
 fn (self: &var Emitter) append_hosted_runtime_param_types(
     module: &ir::Module,
+    name: ir::Name,
     args: &array::Array<ir::Value>,
     params: &var array::Array<string::String>
 ) -> !void {
@@ -227,10 +228,22 @@ fn (self: &var Emitter) append_hosted_runtime_param_types(
         let type_bytes = type_text.as_bytes();
         if hosted_runtime_indirect_abi(module, type_bytes) {
             try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
+                try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+            }
+            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 5 {
+                try params.append(self.allocator, try string::from_bytes(self.allocator, "i64"));
+            }
             continue;
         }
         let arg_type = try self.llvm_type_of(module, arg.type_name);
         try params.append(self.allocator, try self.names.copy(arg_type));
+        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
+            try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+        }
+        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 5 {
+            try params.append(self.allocator, try string::from_bytes(self.allocator, "i64"));
+        }
     }
     return;
 }
@@ -260,10 +273,28 @@ fn (self: &var Emitter) write_hosted_runtime_call(
             try self.line2("  %s = alloca %s", Arg::Str(arg_slot), Arg::Str(arg_type));
             try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(arg_slot));
             try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(arg_slot), Arg::None));
+            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 3 {
+                let state = node.args.get_or_panic(4);
+                let invoke = try self.task_invoke_thunk_name(module, state.type_name);
+                try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(invoke), Arg::None));
+            }
+            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
+                let size = try self.element_size_operand(module, arg.type_name);
+                try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
+            }
             index = index + 1;
             continue;
         }
         try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
+        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 3 {
+            let state = node.args.get_or_panic(4);
+            let invoke = try self.task_invoke_thunk_name(module, state.type_name);
+            try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(invoke), Arg::None));
+        }
+        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
+            let size = try self.element_size_operand(module, arg.type_name);
+            try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
+        }
         index = index + 1;
     }
     let symbol = try self.callee_symbol(module, name);
@@ -274,6 +305,24 @@ fn (self: &var Emitter) write_hosted_runtime_call(
     return null;
 }
 
+/// Names the typed side of the TaskSet callback ABI for one state type, the
+/// Go `taskInvokeThunkName`.
+fn (self: &var Emitter) task_invoke_thunk_name(
+    module: &ir::Module,
+    type_name: ir::Name
+) -> !ir::Name {
+    let retained = ir::name_text(&module.names, type_name);
+    let bytes = retained.as_bytes();
+    return self.task_invoke_thunk_name_bytes(bytes);
+}
+
+fn (self: &var Emitter) task_invoke_thunk_name_bytes(type_name: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "kizu.task.invoke.");
+    errdefer out.deinit(self.allocator);
+    try append_llvm_name_part(self.allocator, &var out, type_name);
+    return self.names.intern_owned(move out);
+}
+
 /// Formats one external call declaration from typed IR operands, the Go
 /// `externalCallDecl`.
 fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !string::String {
@@ -282,7 +331,7 @@ fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, 
     defer params.deinit(self.allocator);
     if try self.uses_hosted_runtime_abi(module, name, node) {
         try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
-        try self.append_hosted_runtime_param_types(module, &node.args, &var params);
+        try self.append_hosted_runtime_param_types(module, name, &node.args, &var params);
         let joined = try string::join(self.allocator, &params, ", ");
         return self.sprint2("declare void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
     }

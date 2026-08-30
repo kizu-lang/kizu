@@ -1161,7 +1161,9 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.1.ptr = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
@@ -1181,13 +1183,15 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define internal i64 @add(i64 %kizu.a, i64 %kizu.b) {
+attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+
+define internal i64 @add(i64 %kizu.a, i64 %kizu.b) #0 {
 entry:
   %kizu.1 = add i64 %kizu.a, %kizu.b
   ret i64 %kizu.1
 }
 
-define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.3 = call i64 @add(i64 1, i64 2)
@@ -1206,7 +1210,9 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.1.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
@@ -1232,7 +1238,9 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.3 = icmp sge i64 20, 20
@@ -1265,7 +1273,9 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   br label %while.header.1
@@ -1291,7 +1301,9 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.2 = insertvalue %kizu.struct.User zeroinitializer, i64 30, 0
@@ -1314,14 +1326,16 @@ declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
-define internal %kizu.error.i64 @read() {
+attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+
+define internal %kizu.error.i64 @read() #0 {
 entry:
   %kizu.2.ok = insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0
   %kizu.2 = insertvalue %kizu.error.i64 %kizu.2.ok, i64 1, 1
   ret %kizu.error.i64 %kizu.2
 }
 
-define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.1 = call %kizu.error.i64 @read()

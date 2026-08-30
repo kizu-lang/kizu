@@ -25,6 +25,27 @@ import std::string;
 /// The module is taken mutably only to name `void` in its table, the type
 /// of the cleanup instructions the emitter builds itself; the walk reads it.
 pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::String) -> !?diagnostic::Diagnostic {
+    return emit_for_native_target(allocator, module, out, false);
+}
+
+/// Formats a module for the native target. Darwin's LLVM backend has long
+/// exposed stack probing through the system __chkstk_darwin helper; other
+/// shipped targets use LLVM's inline probe implementation.
+pub fn emit_native(
+    allocator: Allocator,
+    module: &var ir::Module,
+    out: &var string::String,
+    darwin: bool
+) -> !?diagnostic::Diagnostic {
+    return emit_for_native_target(allocator, module, out, darwin);
+}
+
+fn emit_for_native_target(
+    allocator: Allocator,
+    module: &var ir::Module,
+    out: &var string::String,
+    darwin: bool
+) -> !?diagnostic::Diagnostic {
     let void_name = try module.names.intern("void");
     var emitter = Emitter {
         allocator: allocator,
@@ -48,7 +69,8 @@ pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::Str
         llvm_types: array::new<ir::Name>(allocator),
         entry_param_loads: string::new(allocator),
         wrote_param_loads: false,
-        generation: 0
+        generation: 0,
+        darwin_stack_probe: darwin
     };
     defer emitter.deinit(allocator);
     if try emitter.emit_module(module) |failed| {
@@ -113,7 +135,8 @@ struct Emitter {
     llvm_types: array::Array<ir::Name>,
     entry_param_loads: string::String,
     wrote_param_loads: bool,
-    generation: i64
+    generation: i64,
+    darwin_stack_probe: bool
 }
 
 /// Is what the emitter knows about one SSA value, the Go `valueInfo`: its
@@ -641,6 +664,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
         return move failed;
     }
     try self.write_header(module);
+    try self.write_task_invoke_thunks(module);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -1023,7 +1047,7 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     let linkage = function_linkage(module.names.is(node.name, "main"));
     let joined = try string::join(self.allocator, &params, ", ");
     try self.line4(
-        "define %s%s @%s(%s) {",
+        "define %s%s @%s(%s) #0 {",
         Arg::Lit(linkage),
         Arg::Str(return_type),
         Arg::Str(symbol),

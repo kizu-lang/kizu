@@ -253,6 +253,9 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if self.names.is(name, "std::internal::builtin::task_new") {
         return self.check_task_new(tree, env, args, out);
     }
+    if self.names.is(name, "std::internal::builtin::task_set_spawn") {
+        return self.check_task_set_spawn(tree, env, args, out);
+    }
     return try self.error1(
         tree, ast::zero_span(), "move error: `%s` does not take static arguments", Arg::Str(name)
     );
@@ -297,7 +300,33 @@ fn (self: &var Checker) check_task_new(
         }
         index = index + 1;
     }
-    out.* = try self.names.intern("i64");
+    out.* = try self.names.intern("std::io::Error!i64");
+    return null;
+}
+
+/// Moves the state argument of task_set_spawn; every other argument is read.
+/// Lowering releases that state if the runtime cannot allocate the task.
+fn (self: &var Checker) check_task_set_spawn(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while arg_at(tree, args, index) |argument| {
+        var ignored = empty_name();
+        if index == 4 {
+            if try self.move_expr(tree, env, argument, &var ignored) |failed| {
+                return move failed;
+            }
+        } else {
+            if try self.read_expr(tree, env, argument, &var ignored) |failed| {
+                return move failed;
+            }
+        }
+        index = index + 1;
+    }
+    out.* = try self.names.intern("std::io::Error!void");
     return null;
 }
 
@@ -1482,6 +1511,16 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
             return move failed;
         }
     }
+    if self.names.is(name, "std::io::spawn") {
+        let state = type_args.get_or_panic(0);
+        if try self.view_carrying_type(state) or try self.capability_carrying_type(state) {
+            return try self.error1(
+                tree, ast::zero_span(),
+                "borrow error: `std::io::spawn` state `%s` must own its data and contain no Io or Allocator",
+                Arg::Str(state)
+            );
+        }
+    }
     return null;
 }
 
@@ -1514,11 +1553,13 @@ fn (self: &var Checker) check_generic_user_arg(
 ) -> !?diagnostic::Diagnostic {
     let param = self.param_at(function, index) orelse return null;
     let want = try self.substitute_with(param.type_name, subst);
-    // `std::mem::box<T>(allocator, value)` takes ownership of its value, and a
-    // consume primitive moves its argument (ADR-0091); every other generic
+    // `std::mem::box<T>(allocator, value)` and
+    // `std::io::spawn<T>(..., state, ...)` take ownership of their values, and
+    // a consume primitive moves its argument (ADR-0091); every other generic
     // wrapper argument is read in place.
     var got = empty_name();
     if (self.names.is(name, "std::mem::box") and index == 1) or
+        (self.names.is(name, "std::io::spawn") and index == 2) or
         (self.is_consume_primitive(name) and index == 0) {
         if try self.move_contextual_expr(tree, env, arg, want, &var got) |failed| {
             return move failed;

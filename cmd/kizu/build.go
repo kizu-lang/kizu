@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -23,7 +24,7 @@ func stdErrorSets() (map[string]map[string]int, error) {
 // executable is kept rather than thrown away, so a program that has not changed
 // since it was last run is not linked a second time.
 func linkModule(module *ir.Module) (string, error) {
-	llvmIR, err := llvm.Emit(module)
+	llvmIR, err := llvm.EmitNative(module, runtime.GOOS == "darwin")
 	if err != nil {
 		return "", err
 	}
@@ -137,7 +138,7 @@ func emitNativeFile(args []string) error {
 	if options.Opt {
 		ir.KeepReachableFunctions(module, "main")
 	}
-	llvmIR, err := llvm.Emit(module)
+	llvmIR, err := llvm.EmitNative(module, nativeTargetIsDarwin(options.Triple))
 	if err != nil {
 		return err
 	}
@@ -156,6 +157,17 @@ func emitNativeFile(args []string) error {
 	}
 	_, _ = fmt.Println(options.Output)
 	return nil
+}
+
+// nativeTargetIsDarwin identifies the stack-probe ABI selected by the native
+// target. An omitted triple names the host; explicit Apple Darwin and macOS
+// triples use the same system helper.
+func nativeTargetIsDarwin(triple string) bool {
+	if triple == "" {
+		return runtime.GOOS == "darwin"
+	}
+	lower := strings.ToLower(triple)
+	return strings.Contains(lower, "darwin") || strings.Contains(lower, "macos")
 }
 
 // parseOptFileArgs parses an optional --opt flag followed by one file path.

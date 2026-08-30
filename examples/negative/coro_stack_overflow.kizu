@@ -1,0 +1,27 @@
+// A coroutine stack is fixed. Recursion cannot grow it into the allocation
+// below: the first page past its boundary is inaccessible, and large frames
+// touch each page on their way down so they cannot jump over that guard.
+
+import std::coro;
+
+fn overflow(depth: i64) -> void {
+    var page = [8192]u8{};
+    let bytes = page.as_mut_bytes();
+    bytes[0] = cast<u8>(depth);
+    overflow(depth + 1);
+    // Keep this frame observable after the recursive call, so it cannot become
+    // a tail call in an optimized build.
+    print(bytes[0]);
+    return;
+}
+
+fn main() -> coro::Error!void {
+    var task = try coro::spawn(overflow, 0, 16384);
+    defer task.deinit();
+    let _ = task.resume();
+    return;
+}
+
+// run-fails
+// features: coro memory-safety stack-overflow
+// error: exit status 1

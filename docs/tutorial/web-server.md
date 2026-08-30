@@ -45,13 +45,14 @@ Go は `http.HandleFunc` で関数を渡せるから渡します。Zig は関数
 書けないからではなく、Zig と同じ判断をしたからです(ADR-0136)。closure は無いので、
 handler が状態を捕捉することはどのみちできません。
 
-もう 1 つ: **`accept` は 1 接続ずつです。** 2 人目の caller は 1 人目が答え終わる
-まで listen backlog で待ちます。多数を 1 thread で捌くには `first` と `next` を
-使います(`docs/std/http.md`)—— 答え方は同じで、その間に誰の声を聞いているかだけ
-が違います。
+もう 1 つ: **`accept` は 1 接続ずつです。** この tutorial の逐次 loop では、2 人目の
+caller は 1 人目が答え終わるまで listen backlog で待ちます。多数を 1 thread で
+捌くには、server が state を持つ `first` / `next` か、接続を worker へ渡す
+`accept_connection` + `TaskSet` を使います(`docs/std/http.md`)。
 
-並行性(複数 thread)はまだありません(`SPEC.md` §15)。1 thread で多数を捌くのと
-2 つのことを同時にするのは別の話で、後者はまだ書けません。
+複数 OS thread の parallelism はまだありません(`SPEC.md` §15)。TaskSet は I/O の
+待ちで worker を切り替える 1 thread の concurrency で、同時に 2 本の CPU code を
+走らせるものではありません。
 
 ---
 
@@ -186,9 +187,10 @@ pub struct Visits {
 }
 ```
 
-**1 接続ずつなので、lock は要りません。** これは今の Kizu の制約から出てくる
-性質であって、設計上の主張ではありません。並行性が入ったとき、決定が要るのは
-まさにこの state です —— 指させる場所に置いておくのは、そのためでもあります。
+**この tutorial は 1 接続ずつなので、同期は要りません。** TaskSet server に変える
+なら、決定が要るのはまさにこの state です。worker 間で暗黙に共有せず、誰が所有し
+どこへ結果を返すかを決めます —— 指させる場所に置いておくのは、そのためでも
+あります。
 
 state は `main` が持ち、loop の各周に `&var` で渡します。global はありません。
 
@@ -281,8 +283,9 @@ $ echo $?
 124
 ```
 
-接続して黙るだけです。トラフィックも要らず、脆弱性も要りません。1 接続ずつしか
-捌けないので、その 1 本が返らない限り全員が待ちます。
+接続して黙るだけです。トラフィックも要らず、脆弱性も要りません。この tutorial の
+逐次 loop では、その 1 本が返らない限り全員が待ちます。TaskSet server でも、期限が
+無ければその接続は worker と state を永久に握ります。
 
 `Limits` は時間も持ちます。
 
@@ -336,18 +339,18 @@ pub fn main() -> Failure!void {
 }
 ```
 
-サンプルが client を同じプロセスに持っているのは、Kizu に並行性が無いから
-です。`http::get` は connect して write して **read で待つ**ので、同じ thread
-の accept が答えることはできません。だから tutorial は `wire` module で
-「接続する → 書く → server に 1 回答えさせる → 読む」を順に回しています。
+サンプルが client を同じプロセスに持つのは、外部 process に依存しない決定的な
+example にするためです。逐次 loop で `http::get` を呼ぶと read が同じ execution
+path の accept を待つので、tutorial は `wire` module で「接続する → 書く → server
+に 1 回答えさせる → 読む」を順に回しています。
 
 ---
 
-## 10. 今は話さないこと
+## 10. この tutorial では話さないこと
 
-| 無いもの | 何が起きるか |
+| 採らないもの | 何が起きるか |
 | --- | --- |
-| 並行性 | 1 接続ずつ。2 人目は backlog で待つ |
+| `accept_connection` + `TaskSet` | この tutorial は 1 接続ずつ。production shape は `examples/http_tasks.kizu` |
 | 接続を跨ぐ idle 期限 | 1 接続 1 request なので、押し直す相手がまだいない |
 | `connect` の期限 | `tcp_connect` は黒穴宛てに host の既定(~75s)まで固まる |
 | keep-alive の既定 | 既定は 1 接続 1 request。`limits.max_requests` を上げると `exchange.next` で続けられる |

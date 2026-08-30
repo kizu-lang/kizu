@@ -1030,15 +1030,26 @@ fn (self: &var Checker) check_impl_method_call(
             Arg::Str(method_name), Arg::Int(param_count - 1), Arg::Int(count)
         );
     }
+    let cleanup = self.names.is(method, "deinit") and
+        self.names.is(self.return_type_name(method_fn), "void");
+    let cleanup_uses_allocator = cleanup and count == 1 and
+        self.names.is(info.params.get_or_panic(1).type_name, "Allocator");
     if try self.check_impl_method_args(tree, env, method_fn, value, args) |failed| {
         return move failed;
+    }
+    if cleanup_uses_allocator {
+        let argument = args.get_or_panic(tree, 0);
+        let label = try self.release_label(type_name);
+        if try self.check_release_tie(tree, env, label, value, argument) |failed| {
+            return move failed;
+        }
     }
     if receiver.mut_borrow {
         // The exclusive receiver borrow is active from here through the call,
         // so the deinit path below sees the receiver as borrowed.
         self.adjust_active_mut_borrows(value, 1);
     }
-    if self.names.is(method, "deinit") and self.names.is(self.return_type_name(method_fn), "void") {
+    if cleanup {
         if self.store.has_any_borrow(value) {
             if receiver.mut_borrow {
                 self.adjust_active_mut_borrows(value, -1);

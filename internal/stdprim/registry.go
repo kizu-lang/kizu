@@ -141,7 +141,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::net_poller_close": {Args: []ArgKind{ArgI64}, Return: "void"},
 	"std::internal::builtin::coro_new": {
 		Args:   []ArgKind{ArgCoroEntry, ArgI64, ArgI64},
-		Return: "i64",
+		Return: "std::coro::Error!i64",
 	},
 	"std::internal::builtin::coro_resume":   {Args: []ArgKind{ArgI64}, Return: "i64"},
 	"std::internal::builtin::coro_suspend":  {Return: "void"},
@@ -153,9 +153,17 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::task_finished": {Args: []ArgKind{ArgI64}, Return: "i64"},
 	"std::internal::builtin::task_await":    {Args: []ArgKind{ArgIo, ArgI64}, Return: "void"},
 	"std::internal::builtin::task_cancel":   {Args: []ArgKind{ArgIo, ArgI64}, Return: "void"},
-	"std::internal::builtin::task_close":    {Args: []ArgKind{ArgI64}, Return: "void"},
-	"std::internal::builtin::test_fail":     {Args: []ArgKind{ArgBytes}, Return: "void"},
-	"std::internal::builtin::panic":         {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::task_close": {
+		Args: []ArgKind{ArgI64, ArgAllocator}, Return: "void",
+	},
+	"std::internal::builtin::task_set_new": {
+		Args: []ArgKind{ArgAllocator}, Return: "std::io::Error!i64",
+	},
+	"std::internal::builtin::task_set_close": {
+		Args: []ArgKind{ArgI64, ArgAllocator}, Return: "void",
+	},
+	"std::internal::builtin::test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
 // TypedCoreBuiltins lists typed primitives that require explicit type application.
@@ -251,6 +259,9 @@ var primitives = map[string]bool{
 	"std::internal::builtin::task_close":                   true,
 	"std::internal::builtin::task_finished":                true,
 	"std::internal::builtin::task_new":                     true,
+	"std::internal::builtin::task_set_close":               true,
+	"std::internal::builtin::task_set_new":                 true,
+	"std::internal::builtin::task_set_spawn":               true,
 	"std::internal::builtin::net_poller_close":             true,
 	"std::internal::builtin::net_poller_flags":             true,
 	"std::internal::builtin::net_poller_new":               true,

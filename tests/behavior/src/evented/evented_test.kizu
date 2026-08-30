@@ -32,6 +32,15 @@ struct Waiter {
     stopped: bool,
 }
 
+struct OwnedSender {
+    conn: net::TcpStream,
+}
+
+fn (self: OwnedSender) deinit() -> void {
+    self.conn.deinit();
+    return;
+}
+
 fn (self: Waiter) deinit(allocator: Allocator) -> void {
     self.got.deinit(allocator);
     self.conn.deinit();
@@ -52,15 +61,43 @@ fn drink(handle: Io, allocator: Allocator, job: &var Waiter) -> void {
     return;
 }
 
+fn send_owned(handle: Io, allocator: Allocator, job: OwnedSender) -> void {
+    var held = move job;
+    defer held.deinit();
+    held.conn.write_all(handle, "owned") catch return;
+    return;
+}
+
+fn can_start_counter(handle: Io, allocator: Allocator) -> bool {
+    var job = Counter { seen: 0 };
+    var future = io::async<Counter>(
+        handle, allocator, bump, &var job) catch return false;
+    future.deinit(allocator);
+    return true;
+}
+
+test "a future takes its storage from the named allocator" {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    var storage = [1024]u8{};
+    let scratch = storage.as_mut_bytes();
+    let limited = mem::fixed_buffer(scratch);
+
+    // A worker stack cannot fit. Success here would mean async silently used
+    // the process allocator instead of the allocator at its call site.
+    testing::expect(!can_start_counter(handle, limited));
+}
+
 test "a blocking Io runs the work where it is offered" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     var job = Counter { seen: 0 };
-    var future = try io::async<Counter>(handle, allocator, bump, &var job, 65536);
+    var future = try io::async<Counter>(handle, allocator, bump, &var job);
     // Nothing has been awaited and the work is already done: with nothing to
     // run it beside, offering it is running it.
     testing::expect(future.finished());
-    future.deinit();
+    future.deinit(allocator);
     testing::expect_equal<i64>(1, job.seen);
 }
 
@@ -70,12 +107,12 @@ test "an evented Io runs the work on the loop" {
     let handle = io::evented(&var loop);
     let allocator = mem::page_allocator();
     var job = Counter { seen: 0 };
-    var future = try io::async<Counter>(handle, allocator, bump, &var job, 65536);
+    var future = try io::async<Counter>(handle, allocator, bump, &var job);
     // The loop has not run, so neither has the worker.
     testing::expect(!future.finished());
     future.await();
     testing::expect(future.finished());
-    future.deinit();
+    future.deinit(allocator);
     testing::expect_equal<i64>(1, job.seen);
 }
 
@@ -101,8 +138,8 @@ test "a worker parked in a read is resumed when the bytes arrive" {
         stopped: false,
     };
     defer job.deinit(allocator);
-    var future = try io::async<Waiter>(handle, allocator, drink, &var job, 262144);
-    defer future.deinit();
+    var future = try io::async<Waiter>(handle, allocator, drink, &var job);
+    errdefer future.deinit(allocator);
 
     // One thread means the send has to be first; that two workers take turns
     // at their waits is what the example shows. What is asserted here is that
@@ -111,9 +148,53 @@ test "a worker parked in a read is resumed when the bytes arrive" {
     future.await();
 
     testing::expect(future.finished());
+    future.deinit(allocator);
     testing::expect_equal<i64>(5, job.read);
     testing::expect_equal<i64>(5, job.got.len());
     testing::expect(!job.stopped);
+}
+
+test "a task set owns each worker state" {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+    var near = try dial(handle, &address);
+    errdefer near.deinit();
+    var far = try door.accept(handle);
+    errdefer far.deinit();
+
+    var waiting = Waiter {
+        conn: move near,
+        got: string::new(allocator),
+        read: 0,
+        stopped: false,
+    };
+    defer waiting.deinit(allocator);
+    var future = try io::async<Waiter>(
+        handle, allocator, drink, &var waiting);
+    errdefer future.deinit(allocator);
+
+    var tasks = try io::task_set_new(handle, allocator);
+    defer tasks.deinit(allocator);
+    let sender = OwnedSender { conn: move far };
+    errdefer sender.deinit();
+    try io::spawn<OwnedSender>(
+        &var tasks,
+        send_owned,
+        move sender
+    );
+
+    future.await();
+    future.deinit(allocator);
+    testing::expect_equal<i64>(5, waiting.read);
+    testing::expect_equal<i64>(5, waiting.got.len());
+    testing::expect(!waiting.stopped);
 }
 
 test "cancel stops a parked worker and lets it unwind" {
@@ -138,13 +219,13 @@ test "cancel stops a parked worker and lets it unwind" {
         stopped: false,
     };
     defer job.deinit(allocator);
-    var future = try io::async<Waiter>(handle, allocator, drink, &var job, 262144);
-    defer future.deinit();
+    var future = try io::async<Waiter>(handle, allocator, drink, &var job);
 
     // Nobody sends anything, so the read parks. The cancel arrives there as a
     // failure, and the worker returns through the path it already wrote.
     future.cancel();
     testing::expect(future.finished());
+    future.deinit(allocator);
     testing::expect(job.stopped);
     testing::expect_equal<i64>(0, job.read);
 }
@@ -172,13 +253,13 @@ test "a parked read still runs out of its deadline" {
         stopped: false,
     };
     defer job.deinit(allocator);
-    var future = try io::async<Waiter>(handle, allocator, drink, &var job, 262144);
-    defer future.deinit();
+    var future = try io::async<Waiter>(handle, allocator, drink, &var job);
 
     // The deadline is the caller's, and it is the same deadline either way:
     // the loop is what waits now, so the loop is what stops waiting.
     future.await();
     testing::expect(future.finished());
+    future.deinit(allocator);
     testing::expect(job.stopped);
 }
 
@@ -202,9 +283,9 @@ fn count_inner(handle: Io, allocator: Allocator, job: &var Inner) -> void {
 fn count_outer(handle: Io, allocator: Allocator, job: &var Nest) -> void {
     job.outer = job.outer + 1;
     var started = io::async<Inner>(
-        handle, allocator, count_inner, &var job.inner, 262144) catch return;
+        handle, allocator, count_inner, &var job.inner) catch return;
     started.await();
-    started.deinit();
+    started.deinit(allocator);
     return;
 }
 
@@ -215,9 +296,9 @@ test "a worker can start a worker and wait for it" {
     let allocator = mem::page_allocator();
 
     var job = Nest { outer: 0, inner: Inner { ran: 0 } };
-    var future = try io::async<Nest>(handle, allocator, count_outer, &var job, 262144);
+    var future = try io::async<Nest>(handle, allocator, count_outer, &var job);
     future.await();
-    future.deinit();
+    future.deinit(allocator);
     testing::expect_equal<i64>(1, job.outer);
     testing::expect_equal<i64>(1, job.inner.ran);
 }

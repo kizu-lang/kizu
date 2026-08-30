@@ -30,6 +30,7 @@ pub fn runtime_source() -> []u8 {
         \\#include <errno.h>
         \\#include <fcntl.h>
         \\#include <signal.h>
+        \\#include <sys/mman.h>
         \\#include <sys/socket.h>
         \\#include <sys/stat.h>
         \\#include <sys/wait.h>
@@ -922,24 +923,28 @@ pub fn runtime_source() -> []u8 {
         \\ * path that does not fit is reported rather than truncated. */
         \\static KizuErrorVoid kizu_std_builtin_process_executable_path_into_result(
         \\    void *allocator, KizuString *dst) {
-        \\    char buffer[4096];
+        \\    int64_t start = dst->len;
+        \\    int64_t room = 4096;
+        \\    if (start > INT64_MAX - room ||
+        \\        !kizu_array_reserve_storage(allocator, dst, start + room, 1)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_OUT_OF_MEMORY);
+        \\    }
+        \\    char *buffer = (char *)dst->data + start;
         \\    int64_t length = 0;
         \\#if defined(__APPLE__)
-        \\    uint32_t size = (uint32_t)sizeof(buffer);
+        \\    uint32_t size = (uint32_t)room;
         \\    if (_NSGetExecutablePath(buffer, &size) != 0) {
         \\        return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_EXECUTABLE_PATH_UNKNOWN);
         \\    }
         \\    length = (int64_t)strlen(buffer);
         \\#else
-        \\    ssize_t written = readlink("/proc/self/exe", buffer, sizeof(buffer));
-        \\    if (written <= 0 || (size_t)written >= sizeof(buffer)) {
+        \\    ssize_t written = readlink("/proc/self/exe", buffer, (size_t)room);
+        \\    if (written <= 0 || written >= room) {
         \\        return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_EXECUTABLE_PATH_UNKNOWN);
         \\    }
         \\    length = (int64_t)written;
         \\#endif
-        \\    if (!kizu_string_append_bytes(allocator, dst, buffer, length)) {
-        \\        return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_OUT_OF_MEMORY);
-        \\    }
+        \\    dst->len = start + length;
         \\    return kizu_ok_void();
         \\}
         \\
@@ -2242,21 +2247,38 @@ pub fn runtime_source() -> []u8 {
         \\ * ------------------------------------------------------------------------ */
         \\
         \\struct KizuLoop;
+        \\struct KizuTaskSet;
         \\
         \\typedef struct KizuCoro {
         \\    ucontext_t inside;
         \\    ucontext_t outside;
+        \\    /* stack is the usable run above one inaccessible page. The allocation is
+        \\       wider so that page can be aligned without asking Allocator for a second
+        \\       block; release has to name the original address and size. */
         \\    void *stack;
         \\    size_t stack_size;
+        \\    void *stack_allocation;
+        \\    int64_t stack_allocation_size;
+        \\    void *stack_guard;
+        \\    size_t stack_guard_size;
         \\    void (*entry)(int64_t);
         \\    int64_t arg;
         \\    /* A task carries what its worker is told instead of one number: the Io it
         \\       runs on, the allocator it may grow with, and the address of the state
         \\       its caller moved in. */
         \\    void (*task)(void *, void *, void *);
+        \\    void (*task_invoke)(void *, void *, void *, void *);
         \\    void *task_io;
         \\    void *task_allocator;
         \\    void *task_state;
+        \\    /* A TaskSet task owns a byte-for-byte moved state. A borrowed Future has
+        \\       neither of these: its state stays in its caller's frame. */
+        \\    void *owned_task_state;
+        \\    int64_t owned_task_state_size;
+        \\    /* Future and TaskSet storage is bought from the allocator named where the
+        \\       worker starts. NULL is the explicit page allocator in that common path. */
+        \\    void *storage_allocator;
+        \\    struct KizuTaskSet *task_set;
         \\    struct KizuLoop *loop;
         \\    int started;
         \\    int finished;
@@ -2267,6 +2289,9 @@ pub fn runtime_source() -> []u8 {
         \\    int running;
         \\    int parked;
         \\    int canceled;
+        \\    /* Cancellation turns the loop recursively. Holding reaping keeps the
+        \\       target alive until the caller that asked for cancellation returns. */
+        \\    int hold_reaping;
         \\} KizuCoro;
         \\
         \\/* The coroutine currently running, or NULL in the caller. One thread means one
@@ -2285,13 +2310,97 @@ pub fn runtime_source() -> []u8 {
         \\    return (KizuCoro *)(intptr_t)handle;
         \\}
         \\
+        \\typedef enum {
+        \\    KIZU_STACK_READY = 0,
+        \\    KIZU_STACK_OUT_OF_MEMORY = 1,
+        \\    KIZU_STACK_PROTECTION_FAILED = 2
+        \\} KizuStackResult;
+        \\
+        \\#if !defined(__aarch64__) && !defined(__arm64__) && !defined(__x86_64__)
+        \\#error "Kizu coroutine stacks require a reviewed downward-growing target"
+        \\#endif
+        \\
+        \\#define KIZU_STACK_PROBE_BYTES 4096
+        \\
+        \\/* Reserves one allocator-backed block and makes an aligned page inside it
+        \\   inaccessible. All native targets Kizu ships grow their stacks down, so the
+        \\   usable run begins immediately above that page. Two pages of overhead leave
+        \\   room for both the guard and alignment without hiding a second allocation.
+        \\
+        \\   A guard alone is not enough for a frame wider than a page: every emitted
+        \\   Kizu function carries the target's LLVM stack-probe contract, which touches
+        \\   the stack at most 4096 bytes apart and therefore cannot jump over this page. */
+        \\static KizuStackResult kizu_coro_stack_new(
+        \\    KizuCoro *coro, void *allocator, int64_t stack_bytes) {
+        \\    if (stack_bytes < 16384) {
+        \\        stack_bytes = 16384;
+        \\    }
+        \\    if (stack_bytes > 64 * 1024 * 1024) {
+        \\        return KIZU_STACK_OUT_OF_MEMORY;
+        \\    }
+        \\    long page = sysconf(_SC_PAGESIZE);
+        \\    if (page < KIZU_STACK_PROBE_BYTES ||
+        \\        (uint64_t)page > (uint64_t)INT64_MAX / 2) {
+        \\        return KIZU_STACK_PROTECTION_FAILED;
+        \\    }
+        \\    int64_t page_bytes = (int64_t)page;
+        \\    if (stack_bytes > INT64_MAX - 2 * page_bytes) {
+        \\        return KIZU_STACK_OUT_OF_MEMORY;
+        \\    }
+        \\    int64_t allocation_size = stack_bytes + 2 * page_bytes;
+        \\    unsigned char *allocation =
+        \\        (unsigned char *)kizu_rt_alloc(allocator, allocation_size);
+        \\    if (!allocation) {
+        \\        return KIZU_STACK_OUT_OF_MEMORY;
+        \\    }
+        \\    uintptr_t address = (uintptr_t)allocation;
+        \\    uintptr_t remainder = address % (uintptr_t)page_bytes;
+        \\    size_t padding = remainder == 0 ? 0 : (size_t)((uintptr_t)page_bytes - remainder);
+        \\    void *guard = allocation + padding;
+        \\    if (mprotect(guard, (size_t)page_bytes, PROT_NONE) != 0) {
+        \\        kizu_rt_free(allocator, allocation, allocation_size);
+        \\        return KIZU_STACK_PROTECTION_FAILED;
+        \\    }
+        \\    coro->stack_allocation = allocation;
+        \\    coro->stack_allocation_size = allocation_size;
+        \\    coro->stack_guard = guard;
+        \\    coro->stack_guard_size = (size_t)page_bytes;
+        \\    coro->stack = (unsigned char *)guard + page_bytes;
+        \\    coro->stack_size = (size_t)stack_bytes;
+        \\    return KIZU_STACK_READY;
+        \\}
+        \\
+        \\static void kizu_coro_stack_release(KizuCoro *coro, void *allocator) {
+        \\    if (!coro || !coro->stack_allocation) {
+        \\        return;
+        \\    }
+        \\    if (mprotect(
+        \\            coro->stack_guard,
+        \\            coro->stack_guard_size,
+        \\            PROT_READ | PROT_WRITE) != 0) {
+        \\        /* An allocator may inspect the block it releases. It must never be
+        \\           handed a block that still contains an inaccessible page. */
+        \\        abort();
+        \\    }
+        \\    kizu_rt_free(
+        \\        allocator, coro->stack_allocation, coro->stack_allocation_size);
+        \\    coro->stack = NULL;
+        \\    coro->stack_allocation = NULL;
+        \\}
+        \\
         \\/* The first thing that runs on the new stack. It calls the entry and then
         \\   marks the coroutine finished, so `resume` can answer that there is no more
         \\   to do without the entry having to say so. */
         \\static void kizu_coro_trampoline(void) {
         \\    KizuCoro *coro = kizu_coro_starting;
         \\    kizu_coro_starting = NULL;
-        \\    if (coro->task) {
+        \\    if (coro->task_invoke) {
+        \\        coro->task_invoke(
+        \\            (void *)coro->task,
+        \\            coro->task_io,
+        \\            coro->task_allocator,
+        \\            coro->task_state);
+        \\    } else if (coro->task) {
         \\        coro->task(coro->task_io, coro->task_allocator, coro->task_state);
         \\    } else {
         \\        coro->entry(coro->arg);
@@ -2300,29 +2409,29 @@ pub fn runtime_source() -> []u8 {
         \\    /* uc_link takes it back to whoever resumed it. */
         \\}
         \\
-        \\int64_t std__internal__builtin__coro_new(void *entry, int64_t arg, int64_t stack_bytes) {
+        \\void std__internal__builtin__coro_new(
+        \\    KizuErrorI64 *out, void *entry, int64_t arg, int64_t stack_bytes) {
         \\    if (!entry) {
-        \\        return 0;
-        \\    }
-        \\    if (stack_bytes < 16384) {
-        \\        stack_bytes = 16384;
-        \\    }
-        \\    if (stack_bytes > 64 * 1024 * 1024) {
-        \\        return 0;
+        \\        *out = kizu_err_i64(KIZU_ERR_STD_CORO_ERROR_OUT_OF_MEMORY);
+        \\        return;
         \\    }
         \\    KizuCoro *coro = (KizuCoro *)calloc(1, sizeof *coro);
         \\    if (!coro) {
-        \\        return 0;
+        \\        *out = kizu_err_i64(KIZU_ERR_STD_CORO_ERROR_OUT_OF_MEMORY);
+        \\        return;
         \\    }
-        \\    coro->stack = malloc((size_t)stack_bytes);
-        \\    if (!coro->stack) {
+        \\    KizuStackResult stack = kizu_coro_stack_new(coro, NULL, stack_bytes);
+        \\    if (stack != KIZU_STACK_READY) {
         \\        free(coro);
-        \\        return 0;
+        \\        int64_t failure = stack == KIZU_STACK_PROTECTION_FAILED
+        \\            ? KIZU_ERR_STD_CORO_ERROR_STACK_PROTECTION_FAILED
+        \\            : KIZU_ERR_STD_CORO_ERROR_OUT_OF_MEMORY;
+        \\        *out = kizu_err_i64(failure);
+        \\        return;
         \\    }
-        \\    coro->stack_size = (size_t)stack_bytes;
         \\    coro->entry = (void (*)(int64_t))entry;
         \\    coro->arg = arg;
-        \\    return (int64_t)(intptr_t)coro;
+        \\    *out = kizu_ok_i64((int64_t)(intptr_t)coro);
         \\}
         \\
         \\/* getcontext and friends are deprecated on Darwin and standard on Linux. They
@@ -2393,7 +2502,7 @@ pub fn runtime_source() -> []u8 {
         \\    if (!coro) {
         \\        return;
         \\    }
-        \\    free(coro->stack);
+        \\    kizu_coro_stack_release(coro, NULL);
         \\    free(coro);
         \\}
         \\
@@ -2437,6 +2546,18 @@ pub fn runtime_source() -> []u8 {
         \\    size_t *pfd_park;
         \\    size_t pfd_cap;
         \\} KizuLoop;
+        \\
+        \\#define KIZU_TASK_SET_TAG UINT64_C(0x4b697a755461736b) /* "KizuTask" */
+        \\
+        \\typedef struct KizuTaskSet {
+        \\    uint64_t tag;
+        \\    KizuCoro **tasks;
+        \\    size_t task_count;
+        \\    size_t task_cap;
+        \\} KizuTaskSet;
+        \\
+        \\static void kizu_loop_reap_task_sets(KizuLoop *loop);
+        \\static void kizu_loop_close_tasks(KizuLoop *loop);
         \\
         \\static KizuLoop *kizu_io_loop(void *io) {
         \\    if (!io || io == KIZU_IO_WORKING || io == KIZU_IO_FAILING) {
@@ -2554,6 +2675,7 @@ pub fn runtime_source() -> []u8 {
         \\        std__internal__builtin__coro_resume((int64_t)(intptr_t)task);
         \\    }
         \\    if (ran) {
+        \\        kizu_loop_reap_task_sets(loop);
         \\        return 1;
         \\    }
         \\
@@ -2623,6 +2745,7 @@ pub fn runtime_source() -> []u8 {
         \\        woke = 1;
         \\        std__internal__builtin__coro_resume((int64_t)(intptr_t)coro);
         \\    }
+        \\    kizu_loop_reap_task_sets(loop);
         \\    return woke || waiting > 0;
         \\}
         \\
@@ -2656,6 +2779,7 @@ pub fn runtime_source() -> []u8 {
         \\    if (!loop) {
         \\        return;
         \\    }
+        \\    kizu_loop_close_tasks(loop);
         \\    free(loop->parks);
         \\    free(loop->pfds);
         \\    free(loop->pfd_park);
@@ -2689,20 +2813,151 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\}
         \\
+        \\static KizuTaskSet *kizu_task_set_from(int64_t handle) {
+        \\    if (handle == 0) {
+        \\        return NULL;
+        \\    }
+        \\    KizuTaskSet *tasks = (KizuTaskSet *)(intptr_t)handle;
+        \\    return tasks->tag == KIZU_TASK_SET_TAG ? tasks : NULL;
+        \\}
+        \\
+        \\static int kizu_task_set_reserve_one(KizuTaskSet *tasks, void *allocator) {
+        \\    if (tasks->task_count == tasks->task_cap) {
+        \\        size_t want = tasks->task_cap ? tasks->task_cap * 2 : 8;
+        \\        int64_t old_bytes = (int64_t)(tasks->task_cap * sizeof *tasks->tasks);
+        \\        int64_t new_bytes = (int64_t)(want * sizeof *tasks->tasks);
+        \\        KizuCoro **grown = (KizuCoro **)kizu_rt_realloc(
+        \\            allocator, tasks->tasks, old_bytes, new_bytes);
+        \\        if (!grown) {
+        \\            return 0;
+        \\        }
+        \\        tasks->tasks = grown;
+        \\        tasks->task_cap = want;
+        \\    }
+        \\    return 1;
+        \\}
+        \\
+        \\static void kizu_task_set_track(KizuTaskSet *tasks, KizuCoro *coro) {
+        \\    tasks->tasks[tasks->task_count] = coro;
+        \\    tasks->task_count += 1;
+        \\}
+        \\
+        \\static void kizu_task_set_forget(KizuTaskSet *tasks, KizuCoro *coro) {
+        \\    if (!tasks) {
+        \\        return;
+        \\    }
+        \\    for (size_t i = 0; i < tasks->task_count; i += 1) {
+        \\        if (tasks->tasks[i] != coro) {
+        \\            continue;
+        \\        }
+        \\        tasks->tasks[i] = tasks->tasks[tasks->task_count - 1];
+        \\        tasks->task_count -= 1;
+        \\        return;
+        \\    }
+        \\}
+        \\
+        \\static void kizu_task_release(KizuCoro *coro) {
+        \\    if (!coro) {
+        \\        return;
+        \\    }
+        \\    void *allocator = coro->storage_allocator;
+        \\    kizu_rt_free(
+        \\        allocator, coro->owned_task_state, coro->owned_task_state_size);
+        \\    kizu_coro_stack_release(coro, allocator);
+        \\    kizu_rt_free(allocator, coro, (int64_t)sizeof *coro);
+        \\}
+        \\
+        \\/* Cancels one task without deciding who owns its record. The owner keeps it
+        \\   alive while the recursive loop turn runs and releases or detaches it after
+        \\   this returns. */
+        \\static void kizu_task_cancel_one(KizuCoro *coro) {
+        \\    if (!coro || coro->finished) {
+        \\        return;
+        \\    }
+        \\    coro->canceled = 1;
+        \\    KizuLoop *loop = coro->loop;
+        \\    if (!loop) {
+        \\        return;
+        \\    }
+        \\    for (size_t i = 0; i < loop->park_count; i += 1) {
+        \\        if (loop->parks[i].live && loop->parks[i].coro == coro) {
+        \\            kizu_loop_settle(loop, i, KIZU_ERR_STD_NET_ERROR_CANCELED);
+        \\        }
+        \\    }
+        \\    while (!coro->finished) {
+        \\        if (!kizu_loop_turn(loop)) {
+        \\            return;
+        \\        }
+        \\    }
+        \\}
+        \\
+        \\/* A TaskSet does not expose per-task handles. Once one worker has returned,
+        \\   its owned state has been consumed and the loop can reclaim the raw state,
+        \\   stack, and task record in the same turn. */
+        \\static void kizu_loop_reap_task_sets(KizuLoop *loop) {
+        \\    size_t i = 0;
+        \\    while (i < loop->task_count) {
+        \\        KizuCoro *coro = loop->tasks[i];
+        \\        if (!coro || !coro->task_set || !coro->finished || coro->hold_reaping) {
+        \\            i += 1;
+        \\            continue;
+        \\        }
+        \\        KizuTaskSet *tasks = coro->task_set;
+        \\        kizu_task_set_forget(tasks, coro);
+        \\        loop->tasks[i] = loop->tasks[loop->task_count - 1];
+        \\        loop->task_count -= 1;
+        \\        kizu_task_release(coro);
+        \\    }
+        \\}
+        \\
+        \\/* Closing a Loop first finishes everything that can still reach it. Borrowed
+        \\   Futures keep their finished task record for their own later deinit; a
+        \\   TaskSet owns its records, so those are released here and removed from the
+        \\   still-live set. */
+        \\static void kizu_loop_close_tasks(KizuLoop *loop) {
+        \\    while (loop->task_count > 0) {
+        \\        KizuCoro *coro = loop->tasks[loop->task_count - 1];
+        \\        if (!coro) {
+        \\            loop->task_count -= 1;
+        \\            continue;
+        \\        }
+        \\        coro->hold_reaping = 1;
+        \\        kizu_task_cancel_one(coro);
+        \\        coro->hold_reaping = 0;
+        \\        kizu_loop_forget(loop, coro);
+        \\        coro->loop = NULL;
+        \\        if (coro->task_set) {
+        \\            KizuTaskSet *tasks = coro->task_set;
+        \\            kizu_task_set_forget(tasks, coro);
+        \\            kizu_task_release(coro);
+        \\        }
+        \\    }
+        \\}
+        \\
         \\/* Starts one worker. On a blocking Io there is nothing to run it beside, so it
         \\   runs here and the caller gets back something already finished -- `async` is
         \\   where the work is offered, not a promise that anything else happens while it
         \\   runs (ADR-0146). */
-        \\int64_t std__internal__builtin__task_new(
-        \\    void *io, void *allocator, void *entry, void *state, int64_t stack_bytes) {
+        \\void std__internal__builtin__task_new(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    void *allocator,
+        \\    void *entry,
+        \\    void *state,
+        \\    int64_t stack_bytes
+        \\) {
         \\    if (!entry) {
-        \\        return 0;
+        \\        *out = kizu_err_i64(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
         \\    }
         \\    KizuLoop *loop = kizu_io_loop(io);
-        \\    KizuCoro *coro = (KizuCoro *)calloc(1, sizeof *coro);
+        \\    KizuCoro *coro = (KizuCoro *)kizu_rt_zalloc(
+        \\        allocator, (int64_t)sizeof *coro);
         \\    if (!coro) {
-        \\        return 0;
+        \\        *out = kizu_err_i64(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
         \\    }
+        \\    coro->storage_allocator = allocator;
         \\    coro->task = (void (*)(void *, void *, void *))entry;
         \\    coro->task_io = io;
         \\    coro->task_allocator = allocator;
@@ -2711,28 +2966,116 @@ pub fn runtime_source() -> []u8 {
         \\        coro->started = 1;
         \\        coro->finished = 1;
         \\        coro->task(io, allocator, state);
-        \\        return (int64_t)(intptr_t)coro;
+        \\        *out = kizu_ok_i64((int64_t)(intptr_t)coro);
+        \\        return;
         \\    }
-        \\    if (stack_bytes < 16384) {
-        \\        stack_bytes = 16384;
+        \\    KizuStackResult stack = kizu_coro_stack_new(coro, allocator, stack_bytes);
+        \\    if (stack != KIZU_STACK_READY) {
+        \\        kizu_task_release(coro);
+        \\        int64_t failure = stack == KIZU_STACK_PROTECTION_FAILED
+        \\            ? KIZU_ERR_STD_IO_ERROR_STACK_PROTECTION_FAILED
+        \\            : KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY;
+        \\        *out = kizu_err_i64(failure);
+        \\        return;
         \\    }
-        \\    if (stack_bytes > 64 * 1024 * 1024) {
-        \\        free(coro);
-        \\        return 0;
-        \\    }
-        \\    coro->stack = malloc((size_t)stack_bytes);
-        \\    if (!coro->stack) {
-        \\        free(coro);
-        \\        return 0;
-        \\    }
-        \\    coro->stack_size = (size_t)stack_bytes;
         \\    coro->loop = loop;
         \\    if (!kizu_loop_track(loop, coro)) {
-        \\        free(coro->stack);
-        \\        free(coro);
-        \\        return 0;
+        \\        kizu_task_release(coro);
+        \\        *out = kizu_err_i64(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
         \\    }
-        \\    return (int64_t)(intptr_t)coro;
+        \\    *out = kizu_ok_i64((int64_t)(intptr_t)coro);
+        \\}
+        \\
+        \\void std__internal__builtin__task_set_new(KizuErrorI64 *out, void *allocator) {
+        \\    KizuTaskSet *tasks = (KizuTaskSet *)kizu_rt_zalloc(
+        \\        allocator, (int64_t)sizeof *tasks);
+        \\    if (!tasks) {
+        \\        *out = kizu_err_i64(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
+        \\    }
+        \\    tasks->tag = KIZU_TASK_SET_TAG;
+        \\    *out = kizu_ok_i64((int64_t)(intptr_t)tasks);
+        \\}
+        \\
+        \\/* Starts a worker that owns its state. The typed invoke thunk receives the
+        \\   copied bytes through Kizu's explicit byval-pointer struct ABI. No allocation
+        \\   may fail after the copy: on an earlier failure the generic Kizu wrapper
+        \\   still owns and releases the original value. */
+        \\void std__internal__builtin__task_set_spawn(
+        \\    KizuErrorVoid *out,
+        \\    int64_t task_set_handle,
+        \\    void *io,
+        \\    void *allocator,
+        \\    void *entry,
+        \\    void *invoke,
+        \\    void *state,
+        \\    int64_t state_bytes,
+        \\    int64_t stack_bytes
+        \\) {
+        \\    KizuTaskSet *tasks = kizu_task_set_from(task_set_handle);
+        \\    if (!tasks || !entry || !invoke || !state || state_bytes < 0) {
+        \\        *out = kizu_err_void(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
+        \\    }
+        \\    if (stack_bytes > 64 * 1024 * 1024) {
+        \\        *out = kizu_err_void(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
+        \\    }
+        \\    KizuLoop *loop = kizu_io_loop(io);
+        \\    if (loop && !kizu_task_set_reserve_one(tasks, allocator)) {
+        \\        *out = kizu_err_void(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
+        \\    }
+        \\    KizuCoro *coro = (KizuCoro *)kizu_rt_zalloc(
+        \\        allocator, (int64_t)sizeof *coro);
+        \\    if (!coro) {
+        \\        *out = kizu_err_void(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
+        \\    }
+        \\    int64_t bytes = state_bytes > 0 ? state_bytes : 1;
+        \\    coro->storage_allocator = allocator;
+        \\    coro->owned_task_state_size = bytes;
+        \\    coro->owned_task_state = kizu_rt_alloc(allocator, bytes);
+        \\    if (!coro->owned_task_state) {
+        \\        kizu_task_release(coro);
+        \\        *out = kizu_err_void(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
+        \\    }
+        \\    coro->task = (void (*)(void *, void *, void *))entry;
+        \\    coro->task_invoke =
+        \\        (void (*)(void *, void *, void *, void *))invoke;
+        \\    coro->task_io = io;
+        \\    coro->task_allocator = allocator;
+        \\    coro->task_state = coro->owned_task_state;
+        \\    coro->task_set = tasks;
+        \\    if (!loop) {
+        \\        memcpy(coro->owned_task_state, state, (size_t)state_bytes);
+        \\        coro->started = 1;
+        \\        coro->finished = 1;
+        \\        coro->task_invoke(entry, io, allocator, coro->task_state);
+        \\        kizu_task_release(coro);
+        \\        *out = kizu_ok_void();
+        \\        return;
+        \\    }
+        \\    KizuStackResult stack = kizu_coro_stack_new(coro, allocator, stack_bytes);
+        \\    if (stack != KIZU_STACK_READY) {
+        \\        kizu_task_release(coro);
+        \\        int64_t failure = stack == KIZU_STACK_PROTECTION_FAILED
+        \\            ? KIZU_ERR_STD_IO_ERROR_STACK_PROTECTION_FAILED
+        \\            : KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY;
+        \\        *out = kizu_err_void(failure);
+        \\        return;
+        \\    }
+        \\    coro->loop = loop;
+        \\    if (!kizu_loop_track(loop, coro)) {
+        \\        kizu_task_release(coro);
+        \\        *out = kizu_err_void(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+        \\        return;
+        \\    }
+        \\    kizu_task_set_track(tasks, coro);
+        \\    memcpy(coro->owned_task_state, state, (size_t)state_bytes);
+        \\    *out = kizu_ok_void();
         \\}
         \\
         \\int64_t std__internal__builtin__task_finished(int64_t handle) {
@@ -2769,36 +3112,53 @@ pub fn runtime_source() -> []u8 {
         \\   cancellable, the same way a goroutine that ignores its context is not. */
         \\void std__internal__builtin__task_cancel(void *io, int64_t handle) {
         \\    KizuCoro *coro = kizu_coro_from(handle);
-        \\    if (!coro || coro->finished) {
-        \\        return;
-        \\    }
-        \\    coro->canceled = 1;
-        \\    KizuLoop *loop = coro->loop;
-        \\    if (!loop) {
-        \\        return;
-        \\    }
-        \\    for (size_t i = 0; i < loop->park_count; i += 1) {
-        \\        if (loop->parks[i].live && loop->parks[i].coro == coro) {
-        \\            kizu_loop_settle(loop, i, KIZU_ERR_STD_NET_ERROR_CANCELED);
-        \\        }
-        \\    }
-        \\    while (!coro->finished) {
-        \\        if (!kizu_loop_turn(loop)) {
-        \\            return;
-        \\        }
-        \\    }
+        \\    (void)io;
+        \\    kizu_task_cancel_one(coro);
         \\}
         \\
-        \\void std__internal__builtin__task_close(int64_t handle) {
+        \\void std__internal__builtin__task_close(int64_t handle, void *allocator) {
         \\    KizuCoro *coro = kizu_coro_from(handle);
         \\    if (!coro) {
         \\        return;
         \\    }
+        \\    if (coro->storage_allocator != allocator) {
+        \\        abort();
+        \\    }
         \\    if (coro->loop) {
         \\        kizu_loop_forget(coro->loop, coro);
         \\    }
-        \\    free(coro->stack);
-        \\    free(coro);
+        \\    if (coro->task_set) {
+        \\        kizu_task_set_forget(coro->task_set, coro);
+        \\    }
+        \\    kizu_task_release(coro);
+        \\}
+        \\
+        \\void std__internal__builtin__task_set_close(int64_t handle, void *allocator) {
+        \\    KizuTaskSet *tasks = kizu_task_set_from(handle);
+        \\    if (!tasks) {
+        \\        return;
+        \\    }
+        \\    while (tasks->task_count > 0) {
+        \\        KizuCoro *coro = tasks->tasks[tasks->task_count - 1];
+        \\        if (!coro) {
+        \\            tasks->task_count -= 1;
+        \\            continue;
+        \\        }
+        \\        coro->hold_reaping = 1;
+        \\        kizu_task_cancel_one(coro);
+        \\        coro->hold_reaping = 0;
+        \\        if (coro->loop) {
+        \\            kizu_loop_forget(coro->loop, coro);
+        \\        }
+        \\        kizu_task_set_forget(tasks, coro);
+        \\        kizu_task_release(coro);
+        \\    }
+        \\    tasks->tag = 0;
+        \\    kizu_rt_free(
+        \\        allocator,
+        \\        tasks->tasks,
+        \\        (int64_t)(tasks->task_cap * sizeof *tasks->tasks));
+        \\    kizu_rt_free(allocator, tasks, (int64_t)sizeof *tasks);
         \\}
         \\
         \\/* The port the kernel picked. Binding port 0 is how a test asks for one that

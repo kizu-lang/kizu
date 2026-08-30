@@ -148,6 +148,10 @@ fn (self: &var Lowerer) lower_type_apply_call(
         let resolved = try self.resolve_type_args(type_arg);
         return self.lower_task_new(tree, resolved, args, out);
     }
+    if self.name_is(callee_name, "std::internal::builtin::task_set_spawn") {
+        let resolved = try self.resolve_type_args(type_arg);
+        return self.lower_task_set_spawn(tree, resolved, args, out);
+    }
     var handled = false;
     if try self.lower_meta_apply(tree, callee_name, type_arg, args, out, &var handled) |failed| {
         return move failed;
@@ -326,10 +330,57 @@ fn (self: &var Lowerer) lower_task_new(
         }
         try values.append(self.allocator, value);
     }
-    let result = try self.module.names.intern("i64");
+    let result = try self.module.names.intern("std::io::Error!i64");
     let symbol = try self.module.names.intern("std::internal::builtin::task_new");
     out.* = try self.emit_with(Op::Call, symbol, result, empty_name(), &values);
     return null;
+}
+
+/// Lowers an owned task-set worker. The runtime copies the state only after
+/// all allocations succeed; this generic instance releases it on failure.
+fn (self: &var Lowerer) lower_task_set_spawn(
+    tree: &var ast::Ast,
+    state: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var values = array::new<Value>(self.allocator);
+    defer values.deinit(self.allocator);
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = empty_name();
+        if index == 0 or index == 5 {
+            want = self.common.i64_type;
+        }
+        if index == 1 {
+            want = try self.name("Io");
+        }
+        if index == 2 {
+            want = try self.name("Allocator");
+        }
+        if index == 3 {
+            var entry = try string::from_bytes(self.allocator, "fn(Io, Allocator, ");
+            errdefer entry.deinit(self.allocator);
+            try self.module.names.append_to(&var entry, state);
+            try entry.append_bytes(self.allocator, ") -> void");
+            want = try self.module.names.intern_owned(move entry);
+        }
+        if index == 4 {
+            want = state;
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try values.append(self.allocator, value);
+    }
+    let result = try self.name("std::io::Error!void");
+    let symbol = try self.name("std::internal::builtin::task_set_spawn");
+    let spawned = try self.emit_with(Op::Call, symbol, result, empty_name(), &values);
+    let owner = values.get_or_panic(4);
+    let allocator = values.get_or_panic(2);
+    return self.release_owner_on_failure(tree, spawned, owner, allocator, out);
 }
 
 /// Spells `&var T` for the state an allocator is built from.
@@ -1713,7 +1764,11 @@ fn (self: &var Lowerer) release_owner_on_failure(
     let cleanup_bytes = typ::cleanup_method();
     let method = try self.name(cleanup_bytes);
     var cleanup = empty_cleanup();
-    if try self.cleanup_from_method(tree, owner, method, allocator, &var cleanup) |failed| {
+    var named_allocator = empty_value();
+    if self.release_names_allocator(owner.type_name) {
+        named_allocator = allocator;
+    }
+    if try self.cleanup_from_method(tree, owner, method, named_allocator, &var cleanup) |failed| {
         return move failed;
     }
     cleanup.on_error = true;

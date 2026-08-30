@@ -86,6 +86,7 @@ pub fn build(
     allocator: Allocator,
     temps: &var TempDirs,
     options: &Options,
+    host: &string::String,
     llvm_ir: &string::String,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>
 ) -> !?diagnostic::Diagnostic {
@@ -97,14 +98,9 @@ pub fn build(
     }
     var cache = try buildcache::new(io, allocator);
     defer cache.deinit(allocator);
-    var host = string::new(allocator);
-    defer host.deinit(allocator);
-    if try host_key(io, allocator, temps, &var host) |failed| {
-        return move failed;
-    }
     var runtime_path = string::new(allocator);
     defer runtime_path.deinit(allocator);
-    if try runtime_object(io, allocator, temps, &var cache, options, &host, sets, &var runtime_path) |failed| {
+    if try runtime_object(io, allocator, temps, &var cache, options, host, sets, &var runtime_path) |failed| {
         return move failed;
     }
     let output = options.output.as_bytes();
@@ -135,6 +131,7 @@ pub fn executable(
     allocator: Allocator,
     temps: &var TempDirs,
     options: &Options,
+    host: &string::String,
     llvm_ir: &string::String,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
     out_exe: &var string::String
@@ -144,20 +141,15 @@ pub fn executable(
     }
     var cache = try buildcache::new(io, allocator);
     defer cache.deinit(allocator);
-    var host = string::new(allocator);
-    defer host.deinit(allocator);
-    if try host_key(io, allocator, temps, &var host) |failed| {
-        return move failed;
-    }
     var runtime_path = string::new(allocator);
     defer runtime_path.deinit(allocator);
-    if try runtime_object(io, allocator, temps, &var cache, options, &host, sets, &var runtime_path) |failed| {
+    if try runtime_object(io, allocator, temps, &var cache, options, host, sets, &var runtime_path) |failed| {
         return move failed;
     }
     var target_spelling = string::new(allocator);
     defer target_spelling.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
-    try executable_cache_target(allocator, options, &host, runtime_bytes, &var target_spelling);
+    try executable_cache_target(allocator, options, host, runtime_bytes, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
     let ir_bytes = llvm_ir.as_bytes();
     let plan = try cache.get_or_build_artifact(
@@ -201,7 +193,7 @@ pub fn executable(
 /// std::process has no host name API: the probe runs `uname -sm` through
 /// the shell into a claimed temporary file and maps the answer. A host the
 /// map does not name is an error rather than a guessed key.
-fn host_key(
+pub fn host_key(
     io: Io,
     allocator: Allocator,
     temps: &var TempDirs,
@@ -238,6 +230,44 @@ fn host_key(
         return try fail_parts(allocator, "native error: unsupported host `", trimmed, "`");
     }
     return null;
+}
+
+/// Reports whether the selected native target uses Darwin's stack-probe ABI.
+/// An omitted triple names host; an explicit Darwin or macOS triple names the
+/// same system helper even when clang is cross-compiling.
+pub fn target_is_darwin(options: &Options, host: &string::String) -> bool {
+    if options.triple.len() == 0 {
+        let host_bytes = host.as_bytes();
+        return mem::starts_with(host_bytes, "darwin-");
+    }
+    let triple = options.triple.as_bytes();
+    return contains_ascii_fold(triple, "darwin") or contains_ascii_fold(triple, "macos");
+}
+
+fn contains_ascii_fold(haystack: []u8, needle: []u8) -> bool {
+    if mem::len(needle) == 0 {
+        return true;
+    }
+    var start = 0;
+    while start + mem::len(needle) <= mem::len(haystack) {
+        var index = 0;
+        while index < mem::len(needle) and
+            ascii_lower(haystack[start + index]) == ascii_lower(needle[index]) {
+            index = index + 1;
+        }
+        if index == mem::len(needle) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
+}
+
+fn ascii_lower(byte: u8) -> u8 {
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return byte + cast<u8>(32);
+    }
+    return byte;
 }
 
 /// Maps one `uname -sm` answer to the Go `GOOS-GOARCH` spelling.
@@ -493,6 +523,9 @@ fn require_runtime_error_sets(
     allocator: Allocator,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>
 ) -> !?diagnostic::Diagnostic {
+    if try require_error_set(allocator, sets, "std::coro::Error") |failed| {
+        return move failed;
+    }
     if try require_error_set(allocator, sets, "std::fs::Error") |failed| {
         return move failed;
     }

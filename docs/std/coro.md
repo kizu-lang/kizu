@@ -26,7 +26,7 @@ thread を返せる必要があります(ADR-0141)。
 ## API
 
 ```kizu
-pub error Error { OutOfMemory, Finished }
+pub error Error { OutOfMemory, Finished, StackProtectionFailed }
 
 pub struct Coroutine { }
 
@@ -48,6 +48,15 @@ coroutine は何度聞かれても false を答えるので、それで終わる
 `stack_bytes` は下限(16 KiB)まで引き上げられ、上限(64 MiB)を超えると
 `OutOfMemory` です。何も走らせられない数を渡した caller は、考えていなかった
 だけであって「何も要らない」と言ったわけではありません。
+
+usable stack の直下にはページ境界に揃った読み書き不可の guard page が
+あります。native Kizu 関数は 4096 byte 以下の間隔で stack を触るため、
+大きな frame も guard を飛び越せません。guard を設定できなければ
+`StackProtectionFailed` を返し、保護なしで走らせる fallback はありません。
+
+実行中の stack overflow は回復可能な error ではありません。guard への access で
+OS が process を止めます。壊れた stack 上で catch や cleanup を走らせるための
+signal handler は持ちません。
 
 ## entry が渡せるのは数 1 つです
 

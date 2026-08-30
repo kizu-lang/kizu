@@ -4251,6 +4251,10 @@ func (c *Checker) checkBuiltinTypeApply(
 		typ, err := c.checkTaskNew(typeArg, args, env, unsafe)
 		return typ, true, err
 	}
+	if name == "std::internal::builtin::task_set_spawn" {
+		typ, err := c.checkTaskSetSpawn(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
 }
 
@@ -4331,7 +4335,62 @@ func (c *Checker) checkTaskNew(
 		"std::io::async", 4, stdprim.ArgI64, args[4], env, unsafe); err != nil {
 		return "", err
 	}
-	return Type("i64"), nil
+	return Type("std::io::Error!i64"), nil
+}
+
+// checkTaskSetSpawn validates
+// `task_set_spawn<T>(set, io, allocator, entry, state, stack)`. The runtime
+// stores a byte-for-byte move of one struct and calls entry with that owned
+// value on the task stack. Structs use Kizu's stable indirect parameter ABI;
+// scalars and unions do not all have that same calling convention.
+func (c *Checker) checkTaskSetSpawn(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(args) != 6 {
+		return "", errorf(
+			"type error: `std::io::spawn` expects task set, io, allocator, entry, state and stack size")
+	}
+	if c.structs[typeArg] == nil {
+		return "", errorf(
+			"type error: `std::io::spawn` state must be a struct, got %s", typeArg)
+	}
+	if err := c.checkCoreArg(
+		"std::io::spawn", 0, stdprim.ArgI64, args[0], env, unsafe); err != nil {
+		return "", err
+	}
+	if err := c.checkIoArg(args[1], env, unsafe, "std::io::spawn"); err != nil {
+		return "", err
+	}
+	if err := c.checkCoreArg(
+		"std::io::spawn", 2, stdprim.ArgAllocator, args[2], env, unsafe); err != nil {
+		return "", err
+	}
+	wantEntry := Type("fn(Io, Allocator, " + typeArg + ") -> void")
+	gotEntry, err := c.checkContextualExpr(args[3], wantEntry, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(gotEntry, wantEntry) {
+		return "", errorf(
+			"type error: `std::io::spawn` entry expects %s, got %s", wantEntry, gotEntry)
+	}
+	wantState := Type(typeArg)
+	gotState, err := c.checkContextualExpr(args[4], wantState, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(gotState, wantState) {
+		return "", errorf(
+			"type error: `std::io::spawn` state expects %s, got %s", wantState, gotState)
+	}
+	if err := c.checkCoreArg(
+		"std::io::spawn", 5, stdprim.ArgI64, args[5], env, unsafe); err != nil {
+		return "", err
+	}
+	return Type("std::io::Error!void"), nil
 }
 
 // checkBorrowedStateArg validates the `&var T` a primitive writes through.

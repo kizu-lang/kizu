@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::typ;
 import std::array;
+import std::map;
 
 // Port of the block, statement dispatch, cleanup registration, consume
 // obligation, and return checks of internal/ownership/checker.go.
@@ -579,6 +580,8 @@ fn (self: &var Checker) check_deferred_cleanups(
     env: ScopeHandle,
     defers: &array::Array<ast::Expression>
 ) -> !?diagnostic::Diagnostic {
+    var no_later_uses = map::new<[]u8, i64>(self.allocator);
+    defer no_later_uses.deinit(self.allocator);
     var index = defers.len();
     while index > 0 {
         index = index - 1;
@@ -586,6 +589,9 @@ fn (self: &var Checker) check_deferred_cleanups(
         if try self.check_expr_stmt(tree, env, deferred) |failed| {
             return move failed;
         }
+        // A later defer may release a source retained by the value just
+        // consumed. Model runtime's reverse order one cleanup at a time.
+        try self.release_last_use_borrows(env, 0, &no_later_uses);
     }
     return null;
 }
@@ -827,8 +833,9 @@ fn (self: &var Checker) check_tied_allocator_return(
     var sources = array::new<BorrowSource>(self.allocator);
     defer sources.deinit(self.allocator);
     handled.* = true;
+    let mutable = !self.task_set_return(ret_name);
     if try self.call_borrow_return_sources(
-        tree, env, called.name, called.function, call, true, true, false, &var sources
+        tree, env, called.name, called.function, call, mutable, true, false, &var sources
     ) |failed| {
         return move failed;
     }

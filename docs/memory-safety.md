@@ -168,11 +168,25 @@ policy.
 
 ### Concurrency Boundaries
 
-Kizu currently has no concurrency API. `std::task`, `std::channel`,
-`std::thread`, `std::sync`, `std::atomic`, and `std::io::threaded()` were
-withdrawn by ADR-0025: they carried ~1,900 lines of checker rules with no IR
-lowering and no runtime behind them, so no rule here was ever confirmed by
-execution.
+Kizu has one-thread concurrency through evented `Io`, borrowed `Future`, and
+owned `TaskSet` workers (ADR-0146). Only one worker executes at a time; a
+worker switch occurs when an I/O call visibly waits. A `Future` exclusively
+borrows its state and stays shared-tied to its Io and the allocator that owns
+its worker storage; `deinit(allocator)` cancels before returning that storage. `TaskSet` state is
+moved, may not carry views or additional Io / Allocator capabilities, and is
+canceled through its own cleanup path before storage is released.
+
+Each native coroutine stack has an inaccessible guard page below its fixed
+usable range. Every emitted native Kizu function probes at intervals no wider
+than 4096 bytes, so a large frame cannot jump over that guard. Failure to
+install the guard is reported by spawn as `StackProtectionFailed`; there is no
+unguarded fallback. Crossing the boundary terminates the process before an
+out-of-range write and does not attempt to unwind on the exhausted stack.
+
+Kizu still has no thread, channel, mutex, or atomic API. The earlier
+`std::thread`, `std::channel`, `std::sync`, `std::atomic`, and
+`std::io::threaded()` APIs were withdrawn by ADR-0025: they carried checker
+rules with no IR lowering or runtime behind them.
 
 Threads return, for parallel work. The order changes: the execution path comes
 first, and safety rules are written against threads that actually run. Two
@@ -184,10 +198,9 @@ constraints are already fixed.
   type system; Kizu must. An API that lets safe Kizu write a data race is not
   adopted, however convenient.
 
-What a returning thread API must demonstrate is listed as an acceptance table in
-ADR-0025. It is deliberately kept out of the Regression Coverage table below:
-every row there cites an example file that runs today, and a claim with no
-example is what this section used to be.
+What a returning thread API must demonstrate is listed in ADR-0025. Evented
+workers do not weaken that gate: they provide interleaving, not parallelism or
+a shared-memory race model.
 
 `std::fs`, `std::io`, and `std::process` keep requiring an explicit `Io`
 capability and return I/O failures as `!T` values that propagate through `try`.

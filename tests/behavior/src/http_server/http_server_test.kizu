@@ -12,7 +12,7 @@ import std::testing;
 // its backlog, so a client can write a whole request before anything accepts
 // it, and the exchange then runs in order on one thread.
 
-error Failure = http::Error or net::Error or mem::Error or array::Error;
+error Failure = http::Error or io::Error or net::Error or mem::Error or array::Error;
 
 fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
     var out = string::new(allocator);
@@ -1440,6 +1440,121 @@ fn idle(handle: Io, millis: i64) -> Failure!void {
     defer poller.deinit();
     let _ = try poller.wait(handle, net::deadline_in_millis(millis));
     return;
+}
+
+struct ConcurrentServer {
+    server: http::Server,
+    accepted: i64,
+}
+
+struct ReplyWaiter {
+    conn: net::TcpStream,
+    bytes: string::String,
+}
+
+fn (self: ReplyWaiter) deinit(allocator: Allocator) -> void {
+    self.bytes.deinit(allocator);
+    self.conn.deinit();
+    return;
+}
+
+fn collect_reply(handle: Io, allocator: Allocator, state: &var ReplyWaiter) -> void {
+    drain(handle, allocator, &var state.conn, &var state.bytes) catch return;
+    return;
+}
+
+fn (self: ConcurrentServer) deinit(allocator: Allocator) -> void {
+    self.server.deinit(allocator);
+    return;
+}
+
+fn serve_owned_exchange(
+    handle: Io,
+    allocator: Allocator,
+    exchange: http::Exchange
+) -> void {
+    var current = move exchange;
+    defer current.deinit(allocator);
+    let arrived = current.read_head(handle, allocator) catch return;
+    if !arrived {
+        return;
+    }
+    let target = current.request.target.as_bytes();
+    let path = http::path_of(target);
+    current.respond_text(
+        handle, allocator, 200, "text/plain", path) catch return;
+    return;
+}
+
+fn accept_two_owned(
+    handle: Io,
+    allocator: Allocator,
+    job: &var ConcurrentServer
+) -> void {
+    var tasks = io::task_set_new(handle, allocator) catch return;
+    defer tasks.deinit(allocator);
+    while true {
+        let exchange = job.server.accept_connection(handle, allocator) catch return;
+        io::spawn<http::Exchange>(
+            &var tasks,
+            serve_owned_exchange,
+            move exchange
+        ) catch return;
+        job.accepted = job.accepted + 1;
+    }
+    return;
+}
+
+test "one quiet connection does not hold the next request behind its head" {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    errdefer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var quiet = try net::tcp_connect(handle, address_bytes);
+    defer quiet.deinit();
+    var loud = try net::tcp_connect(handle, address_bytes);
+    errdefer loud.deinit();
+
+    // The first connection has a request line but not the blank line that
+    // finishes its head. The second request is complete.
+    try quiet.write_all(handle, "GET /quiet HTTP/1.1");
+    try crlf_on(handle, allocator, &var quiet);
+    try send_request(handle, allocator, &var loud, "GET /loud HTTP/1.1", "");
+
+    var job = ConcurrentServer {
+        server: move server,
+        accepted: 0,
+    };
+    defer job.deinit(allocator);
+    var accepting = try io::async<ConcurrentServer>(
+        handle, allocator, accept_two_owned, &var job);
+    errdefer accepting.deinit(allocator);
+    var reply = ReplyWaiter {
+        conn: move loud,
+        bytes: string::new(allocator),
+    };
+    defer reply.deinit(allocator);
+    var reading = try io::async<ReplyWaiter>(
+        handle, allocator, collect_reply, &var reply);
+    // Waiting for the loud reply drives the accept loop and both owned
+    // connection workers. The quiet worker remains parked in read_head.
+    reading.await();
+    reading.deinit(allocator);
+    accepting.cancel();
+    accepting.deinit(allocator);
+    testing::expect_equal<i64>(2, job.accepted);
+
+    let wire = reply.bytes.as_bytes();
+    testing::expect(contains(wire, "HTTP/1.1 200 OK"));
+    testing::expect(contains(wire, "/loud"));
 }
 
 test "the server holds the connections it is not answering" {
