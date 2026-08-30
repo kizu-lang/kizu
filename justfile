@@ -100,7 +100,7 @@ native-smoke:
 wasi-smoke:
     scripts/run-wasi-smoke.sh
 
-# Check and test the selfhost compiler port the way pre-commit does.
+# Check and test the Kizu compiler under compiler/ the way pre-commit does.
 selfhost:
     go run ./scripts/gen-selfhost-version
     go run ./cmd/kizu check compiler
