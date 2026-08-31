@@ -27,7 +27,8 @@ func Emit(module *ir.Module) (string, error) {
 		types:            typ.NewTable(),
 		paramsByFunction: paramsByFunction,
 		strings:          map[string]dataRef{},
-		enumTables:       map[string]enumPrintTable{},
+		enumTables:       map[string]nameTable{},
+		errorTable:       nameTable{},
 		values:           map[string]valueInfo{},
 		panicKinds:       map[string]bool{},
 		tableIndex:       map[string]int{},
@@ -59,9 +60,12 @@ type emitter struct {
 	dataOrder []string
 	// enumTables are the linear-memory name tables for enum types this module
 	// prints. enumTableOrder preserves discovery order for deterministic WAT.
-	enumTables     map[string]enumPrintTable
+	enumTables     map[string]nameTable
 	enumTableOrder []string
-	values         map[string]valueInfo
+	// errorTable is the global-code-indexed {pointer, length} table used only
+	// when a fallible main must report its uncaught error at the host boundary.
+	errorTable nameTable
+	values     map[string]valueInfo
 	// panicKinds contains only the checked runtime failures this module uses.
 	// Their data, proc_exit import, and helpers are omitted otherwise.
 	panicKinds map[string]bool
@@ -91,13 +95,18 @@ type funcSignature struct {
 
 // emit writes the module, runtime helpers, and user functions.
 func (e *emitter) emit() error {
+	if err := e.validateProcessTarget(); err != nil {
+		return err
+	}
 	e.collectPanicKinds()
 	e.collectStrings()
 	if err := e.collectFunctionTable(); err != nil {
 		return err
 	}
 	e.writeHeader()
-	e.writeRuntime()
+	if err := e.writeRuntime(); err != nil {
+		return err
+	}
 	for _, fn := range e.module.Functions {
 		if err := e.writeFunction(fn); err != nil {
 			return err
@@ -198,7 +207,9 @@ func (e *emitter) collectStrings() {
 		e.dataOrder = append(e.dataOrder, data.key)
 		offset += len(data.text)
 	}
+	offset = e.collectMainErrorStrings(offset)
 	offset = e.collectEnumPrintData(offset)
+	offset = e.collectMainErrorTable(offset)
 	e.dataEnd = alignUp(offset, 8)
 }
 
@@ -225,10 +236,11 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("(module\n")
 	e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
 	e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
-	if len(e.panicKinds) > 0 {
+	if e.needsProcExit() {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"proc_exit\"\n")
 		e.out.WriteString("    (func $__wasi_proc_exit (param i32)))\n")
 	}
+	e.writeProcessImports()
 	pages := (e.dataEnd + 65535) / 65536
 	if pages < 1 {
 		pages = 1
@@ -243,12 +255,14 @@ func (e *emitter) writeHeader() {
 	if e.usesArenaOriginRuntime() {
 		e.out.WriteString("  (global $__arena_instances (mut i64) (i64.const 0))\n")
 	}
+	e.writeProcessGlobals()
 	e.writeFunctionTable()
 	for _, lit := range e.dataOrder {
 		ref := e.strings[lit]
 		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", ref.offset, dataLiteral(lit))
 	}
 	e.writeEnumPrintTables()
+	e.writeMainErrorTable()
 	e.out.WriteByte('\n')
 }
 
@@ -286,6 +300,9 @@ func dataLiteral(key string) string {
 	if text, ok := strings.CutPrefix(key, enumPrintDataPrefix); ok {
 		return stringBytes(text)
 	}
+	if text, ok := strings.CutPrefix(key, errorNameDataPrefix); ok {
+		return stringBytes(text)
+	}
 	switch key {
 	case "newline":
 		return "\\0a"
@@ -298,7 +315,7 @@ func dataLiteral(key string) string {
 }
 
 // writeRuntime writes the minimal WASI output and checked-failure helpers.
-func (e *emitter) writeRuntime() {
+func (e *emitter) writeRuntime() error {
 	if e.usesAllocatorRuntime() {
 		e.writeAllocatorRuntime()
 	}
@@ -323,6 +340,10 @@ func (e *emitter) writeRuntime() {
 	if len(e.panicKinds) > 0 {
 		e.writePanicRuntime()
 	}
+	if e.needsMainExitBoundary() {
+		e.writeMainErrorRuntime()
+	}
+	return e.writeProcessRuntime()
 }
 
 // writeStackAllocHelper reserves one recursive-safe linear-memory frame,

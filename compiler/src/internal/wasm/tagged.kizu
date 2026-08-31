@@ -592,6 +592,7 @@ fn (self: &var Emitter) write_start(module: &ir::Module) -> !?diagnostic::Diagno
     try self.line(
         \\  (func $_start (export "_start")
     );
+    try self.write_process_start_init(module);
     try self.line("    (call $main))");
     try self.line(")");
     return null;
@@ -606,11 +607,13 @@ fn (self: &var Emitter) write_start_for(
         \\  (func $_start (export "_start")
     );
     if module.names.is(main.return_type, "void") {
+        try self.write_process_start_init(module);
         try self.line("    (call $main))");
         try self.line(")");
         return null;
     }
     if !try self.is_memory_type(module, main.return_type) {
+        try self.write_process_start_init(module);
         try self.line("    (drop (call $main)))");
         try self.line(")");
         return null;
@@ -620,6 +623,7 @@ fn (self: &var Emitter) write_start_for(
         Error(failed) => return move failed,
         Layout(layout) => {
             try self.line("    (local $__kizu_main_result i32)");
+            try self.write_process_start_init(module);
             try self.line1(
                 "    (local.set $__kizu_main_result (call $__stack_alloc (i32.const %d)))",
                 Arg::Int(layout.size)
@@ -629,10 +633,9 @@ fn (self: &var Emitter) write_start_for(
             let return_type = return_text.as_bytes();
             if try self.error_union_parts(return_type) |parts| {
                 parts.deinit(self.allocator);
-                try self.line(
-                    "    (if (i64.eq (i64.load (local.get $__kizu_main_result)) (i64.const 0))"
-                );
-                try self.line("      (then (unreachable)))");
+                if try self.write_main_result_boundary(module, main) |failed| {
+                    return move failed;
+                }
             }
             if self.uses_allocator_runtime(module) {
                 try self.line1(

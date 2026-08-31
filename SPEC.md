@@ -3166,7 +3166,7 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 * `std::process::exit_code(code)` は `i64` を返す
 * `std::process::ExitStatus` は `Success` / `Failure` / `Specific(u8)` の union で、
   `main` の戻り値 `<E>!std::process::ExitStatus` としてだけ compiler が特別に扱う
-  (checker が main の形を検査し、native backend が exit status へ写す)
+  (checker が main の形を検査し、hosted target の entry point が exit status へ写す)
 * `std::process` helper は hidden I/O を持たない
 
 ## 16. contract / impl 方針

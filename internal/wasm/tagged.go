@@ -383,23 +383,19 @@ func (e *emitter) errorSetFits(source string, target string) bool {
 }
 
 // writeStart exports the WASI entry point. A memory-backed main receives one
-// result slot; W4 will replace the explicit trap on an uncaught error with the
-// full WASI error-reporting and exit-status boundary.
+// result slot whose error and ExitStatus variants are mapped at the host
+// boundary before the successful result storage is released.
 func (e *emitter) writeStart() error {
-	var main *ir.Function
-	for _, fn := range e.module.Functions {
-		if fn.Name == "main" {
-			main = fn
-			break
-		}
-	}
+	main := e.mainFunction()
 	e.out.WriteString("  (func $_start (export \"_start\")\n")
 	if main == nil || main.Return == "void" {
+		e.writeProcessStartInit()
 		e.out.WriteString("    (call $main))\n")
 		e.out.WriteString(")\n")
 		return nil
 	}
 	if !e.isMemoryType(main.Return) {
+		e.writeProcessStartInit()
 		e.out.WriteString("    (drop (call $main)))\n")
 		e.out.WriteString(")\n")
 		return nil
@@ -409,13 +405,15 @@ func (e *emitter) writeStart() error {
 		return err
 	}
 	e.out.WriteString("    (local $__kizu_main_result i32)\n")
+	e.writeProcessStartInit()
 	fmt.Fprintf(&e.out,
 		"    (local.set $__kizu_main_result (call $__stack_alloc (i32.const %d)))\n",
 		layout.size)
 	e.out.WriteString("    (call $main (local.get $__kizu_main_result))\n")
 	if _, _, ok := e.errorUnionParts(main.Return); ok {
-		e.out.WriteString("    (if (i64.eq (i64.load (local.get $__kizu_main_result)) (i64.const 0))\n")
-		e.out.WriteString("      (then (unreachable)))\n")
+		if err := e.writeMainResultBoundary(main); err != nil {
+			return err
+		}
 	}
 	if e.usesAllocatorRuntime() {
 		fmt.Fprintf(&e.out,

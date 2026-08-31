@@ -17,7 +17,7 @@ run_example() {
   wat="$tmp/$name.wat"
 
   go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
-  got="$(wasmtime "$wat")"
+  got="$(wasmtime run "$wat")"
   if [ "$got" != "$want" ]; then
     printf '%s: got:\n%s\nwant:\n%s\n' "$name" "$got" "$want" >&2
     exit 1
@@ -35,7 +35,7 @@ run_failure() {
 
   go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
   set +e
-  wasmtime "$wat" > "$stdout" 2> "$stderr"
+  wasmtime run "$wat" > "$stdout" 2> "$stderr"
   status="$?"
   set -e
   got="$(cat "$stderr")"
@@ -43,6 +43,29 @@ run_failure() {
   if [ "$status" -ne 1 ] || [ "$got_stdout" != "$want_stdout" ] || [ "$got" != "$want" ]; then
     printf '%s: status=%s, stdout:\n%s\nstderr:\n%s\nwant status=1, stdout:\n%s\nstderr:\n%s\n' \
       "$name" "$status" "$got_stdout" "$got" "$want_stdout" "$want" >&2
+    exit 1
+  fi
+}
+
+run_status() {
+  name="$1"
+  file="$2"
+  want_code="$3"
+  shift 3
+  wat="$tmp/$name.wat"
+  stdout="$tmp/$name.stdout"
+  stderr="$tmp/$name.stderr"
+
+  go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
+  set +e
+  wasmtime run "$wat" "$@" > "$stdout" 2> "$stderr"
+  actual_code="$?"
+  set -e
+  got_stdout="$(cat "$stdout")"
+  got_stderr="$(cat "$stderr")"
+  if [ "$actual_code" -ne "$want_code" ] || [ -n "$got_stdout" ] || [ -n "$got_stderr" ]; then
+    printf '%s: status=%s, stdout:\n%s\nstderr:\n%s\nwant status=%s and empty output\n' \
+      "$name" "$actual_code" "$got_stdout" "$got_stderr" "$want_code" >&2
     exit 1
   fi
 }
@@ -155,6 +178,11 @@ run_example "std_string_join_trim" "examples/std_string_join_trim.kizu" "first  
 
  last
 0"
+run_example "main_exit_status_success" \
+  "examples/main_exit_status.kizu" \
+  "exiting with success"
+run_status "main_exit_status_failure" "examples/main_exit_status.kizu" 1 failure
+run_status "main_exit_status_specific" "examples/main_exit_status.kizu" 7 specific code
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.
@@ -186,3 +214,6 @@ run_failure "testing_expect_equal_bool" \
 run_failure "testing_expect_equal_bytes" \
   "examples/negative/std_testing_run_expect_equal_bytes.kizu" \
   "runtime error: expected \"token\", got \"lexer\""
+run_failure "std_process_arg_bounds" \
+  "examples/negative/std_process_arg_bounds.kizu" \
+  "runtime error: std::process::Error::ArgIndexOutOfBounds"

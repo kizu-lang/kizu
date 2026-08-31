@@ -39,12 +39,10 @@ pub union ExitStatus {
 }
 ```
 
-hosted native では `Success` は 0、`Failure` は 1、`Specific(code)` はその code に
+hosted target では `Success` は 0、`Failure` は 1、`Specific(code)` はその code に
 写る。plan9 / UEFI のような platform 固有の形は、その target を持つときに
 `Specific` の payload を comptime で切り替える(Zig の switch と同じ)。素の
-`ExitStatus`(error union でない形)は Zig と同じく許さない。wasm backend は
-error union の main を持つ program をまだ表せないので、この写しは native backend
-だけが持つ。
+`ExitStatus`(error union でない形)は Zig と同じく許さない。
 
 error を返した main は、診断を出して exit 1 で終わる。これは Zig / Rust と同じ。
 

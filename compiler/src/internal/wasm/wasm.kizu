@@ -51,6 +51,7 @@ pub fn emit(
         data_order: array::new<ir::Name>(allocator),
         enum_tables: map::new<i64, DataRef>(allocator),
         enum_table_order: array::new<ir::Name>(allocator),
+        error_table: empty_data_ref(),
         panic_kinds: map::new<[]u8, bool>(allocator),
         values: map::new<[]u8, ValueInfo>(allocator),
         data_end: 0,
@@ -128,6 +129,9 @@ struct Emitter {
     // the lookup helper.
     enum_tables: map::Map<i64, DataRef>,
     enum_table_order: array::Array<ir::Name>,
+    // error_table is the global-code-indexed {pointer, length} table used
+    // only when a fallible main reports an uncaught error to the host.
+    error_table: DataRef,
     // panic_kinds contains only the checked runtime failures this module uses.
     // Their data, proc_exit import, and helpers are omitted otherwise.
     panic_kinds: map::Map<[]u8, bool>,
@@ -371,13 +375,18 @@ fn (self: &var Emitter) local_expr(name: []u8) -> !ir::Name {
 
 /// Writes the module, runtime helpers, and user functions, the Go `emit`.
 fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    if try self.validate_process_target(module) |failed| {
+        return move failed;
+    }
     try self.collect_panic_kinds(module);
     try self.collect_strings(module);
     if try self.collect_function_table(module) |failed| {
         return move failed;
     }
     try self.write_header(module);
-    try self.write_runtime(module);
+    if try self.write_runtime(module) |failed| {
+        return move failed;
+    }
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -445,7 +454,9 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     try self.record_data("newline", offset, 1);
     offset = offset + 1;
     offset = try self.record_used_panic_data(offset);
+    offset = try self.collect_main_error_strings(module, offset);
     offset = try self.collect_enum_print_data(module, offset);
+    offset = self.collect_main_error_table(offset);
     self.data_end = wasm_align_up(offset, 8);
     return;
 }
@@ -625,13 +636,14 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     ;
     try self.line(import_line);
     try self.line("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))");
-    if self.panic_kinds.len() > 0 {
+    if try self.needs_proc_exit(module) {
         let exit_import =
             \\  (import "wasi_snapshot_preview1" "proc_exit"
         ;
         try self.line(exit_import);
         try self.line("    (func $__wasi_proc_exit (param i32)))");
     }
+    try self.write_process_imports(module);
     var pages = (self.data_end + 65535) / 65536;
     if pages < 1 {
         pages = 1;
@@ -649,6 +661,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     if self.uses_arena_origin_runtime(module) {
         try self.line("  (global $__arena_instances (mut i64) (i64.const 0))");
     }
+    try self.write_process_globals(module);
     try self.write_function_table(module);
     var index = 0;
     while self.data_order.get(index) |key| {
@@ -662,6 +675,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         try self.line2(format, Arg::Int(offset), Arg::Owned(move text));
     }
     try self.write_enum_print_tables(module);
+    try self.write_main_error_table(module);
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
@@ -692,6 +706,15 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
         );
         return found.offset;
     }
+    if mem::starts_with(bytes, error_name_data_prefix()) {
+        let prefix = mem::len(error_name_data_prefix());
+        try append_string_bytes(
+            self.allocator,
+            out,
+            bytes[prefix..mem::len(bytes)]
+        );
+        return found.offset;
+    }
     var unquoted = string::new(self.allocator);
     defer unquoted.deinit(self.allocator);
     try append_unquoted(self.allocator, &var unquoted, bytes);
@@ -702,7 +725,7 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
 
 /// Writes the minimal WASI output and checked-failure helpers, the Go
 /// `writeRuntime`.
-fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !void {
+fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !?diagnostic::Diagnostic {
     if self.uses_allocator_runtime(module) {
         try self.write_allocator_runtime(module);
     }
@@ -727,7 +750,10 @@ fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !void {
     if self.panic_kinds.len() > 0 {
         try self.write_panic_runtime();
     }
-    return;
+    if try self.needs_main_exit_boundary(module) {
+        try self.write_main_error_runtime();
+    }
+    return self.write_process_runtime(module);
 }
 
 /// Reserves one recursive-safe linear-memory frame and grows memory before a

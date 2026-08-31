@@ -9,9 +9,9 @@ import (
 
 const enumPrintDataPrefix = "enum-print:"
 
-// enumPrintTable is one linear-memory array of {pointer, length} rows in tag
-// order. The spellings themselves are ordinary static byte data.
-type enumPrintTable struct {
+// nameTable is one linear-memory array of {pointer, length} rows. Enum tags
+// and global error codes each use their declaration-owned integer as a row.
+type nameTable struct {
 	offset int
 	rows   []dataRef
 }
@@ -48,7 +48,7 @@ func (e *emitter) collectEnumPrintData(offset int) int {
 		for tag, index := range declared.Tags {
 			spellings[index] = typ + "::" + tag
 		}
-		table := enumPrintTable{rows: make([]dataRef, len(spellings))}
+		table := nameTable{rows: make([]dataRef, len(spellings))}
 		for index, spelling := range spellings {
 			key := enumPrintDataPrefix + spelling
 			ref := dataRef{offset: offset, length: len(spelling)}

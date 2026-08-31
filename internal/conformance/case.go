@@ -21,6 +21,9 @@ type Case struct {
 	MustFail bool
 	// Args are the arguments the directive line passes after the path.
 	Args []string
+	// Env contains explicit NAME=value host bindings. A case owns only the
+	// variables it names; runners must not smuggle process-global test state in.
+	Env []string
 	// Stdout is what the program must print. It is nil when the directive
 	// produces no output, which is not the same as printing nothing.
 	Stdout    *string
@@ -88,6 +91,8 @@ func parse(path string, lines []string) (Case, error) {
 		switch key {
 		case "features":
 			entry.Features = strings.Fields(value)
+		case "env":
+			entry.Env = append(entry.Env, value)
 		case "pending":
 			entry.Pending = value
 		case "error":
@@ -110,6 +115,17 @@ func parse(path string, lines []string) (Case, error) {
 
 // validate rejects a block that does not say enough to be checked.
 func validate(entry Case) error {
+	seenEnv := map[string]bool{}
+	for _, binding := range entry.Env {
+		name, _, ok := strings.Cut(binding, "=")
+		if !ok || name == "" || strings.ContainsRune(binding, '\x00') {
+			return fmt.Errorf("`env:` must be `NAME=value`, got `%s`", binding)
+		}
+		if seenEnv[name] {
+			return fmt.Errorf("`env:` repeats `%s`", name)
+		}
+		seenEnv[name] = true
+	}
 	if len(entry.Features) == 0 {
 		return fmt.Errorf("`features:` must not be empty")
 	}

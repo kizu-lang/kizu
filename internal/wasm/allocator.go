@@ -37,7 +37,7 @@ func (e *emitter) usesUserAllocatorRuntime() bool {
 // owner storage from invalidating one another.
 func (e *emitter) usesAllocatorRuntime() bool {
 	if e.usesArrayRuntime() || e.usesMapRuntime() || e.usesBoxRuntime() || e.usesArenaRuntime() ||
-		e.usesUserAllocatorRuntime() {
+		e.usesUserAllocatorRuntime() || e.usesProcessExecutablePath() {
 		return true
 	}
 	for _, fn := range e.module.Functions {

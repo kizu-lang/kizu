@@ -1,0 +1,536 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+
+// Mechanical port of internal/wasm/process.go: only std::process builtins in
+// main's pruned call graph acquire WASI imports and runtime state.
+
+fn process_tagged_payload_offset() -> i64 {
+    return 8;
+}
+
+fn process_slice_length_offset() -> i64 {
+    return 4;
+}
+
+fn process_array_length_offset() -> i64 {
+    return 8;
+}
+
+fn process_clock_precision_nanos() -> i64 {
+    return 1000000;
+}
+
+fn process_nanos_per_millisecond() -> i64 {
+    return 1000000;
+}
+
+/// Reports whether the pruned module reaches one host builtin.
+fn (self: &Emitter) uses_builtin_call(module: &ir::Module, name: []u8) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op == ir::Op::Call and module.names.is(node.operand, name) {
+                    return true;
+                }
+                var cleanup_index = 0;
+                while node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if cleanup.op == ir::Op::Call and module.names.is(cleanup.operand, name) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn (self: &Emitter) uses_process_arg_count(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::process_arg_count");
+}
+
+fn (self: &Emitter) uses_process_arg(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::process_arg");
+}
+
+fn (self: &Emitter) uses_process_env(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::process_env");
+}
+
+fn (self: &Emitter) uses_process_executable_path(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::process_executable_path_into"
+    );
+}
+
+fn (self: &Emitter) uses_process_monotonic_clock(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::process_monotonic_millis"
+    );
+}
+
+fn (self: &Emitter) uses_process_unix_clock(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::process_unix_millis");
+}
+
+fn (self: &Emitter) uses_process_args_metadata(module: &ir::Module) -> bool {
+    return self.uses_process_arg_count(module) or self.uses_process_arg(module) or
+        self.uses_process_executable_path(module);
+}
+
+fn (self: &Emitter) uses_process_args_data(module: &ir::Module) -> bool {
+    return self.uses_process_arg(module) or self.uses_process_executable_path(module);
+}
+
+fn (self: &Emitter) uses_process_clock(module: &ir::Module) -> bool {
+    return self.uses_process_monotonic_clock(module) or self.uses_process_unix_clock(module);
+}
+
+/// Refuses process operations WASI preview1 cannot host.
+fn (self: &Emitter) validate_process_target(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if self.uses_builtin_call(module, "std::internal::builtin::process_spawn_wait8") {
+        return try self.fail0(
+            "wasm error: target wasm32-wasi does not support std::process::spawn_wait8"
+        );
+    }
+    return null;
+}
+
+/// Declares only the WASI process capabilities reached from main.
+fn (self: &var Emitter) write_process_imports(module: &ir::Module) -> !void {
+    if self.uses_process_args_metadata(module) {
+        let sizes =
+            \\  (import "wasi_snapshot_preview1" "args_sizes_get"
+        ;
+        try self.line(sizes);
+        try self.line("    (func $__wasi_args_sizes_get (param i32 i32) (result i32)))");
+    }
+    if self.uses_process_args_data(module) {
+        let get =
+            \\  (import "wasi_snapshot_preview1" "args_get"
+        ;
+        try self.line(get);
+        try self.line("    (func $__wasi_args_get (param i32 i32) (result i32)))");
+    }
+    if self.uses_process_env(module) {
+        let sizes =
+            \\  (import "wasi_snapshot_preview1" "environ_sizes_get"
+        ;
+        try self.line(sizes);
+        try self.line("    (func $__wasi_environ_sizes_get (param i32 i32) (result i32)))");
+        let get =
+            \\  (import "wasi_snapshot_preview1" "environ_get"
+        ;
+        try self.line(get);
+        try self.line("    (func $__wasi_environ_get (param i32 i32) (result i32)))");
+    }
+    if self.uses_process_clock(module) {
+        let clock =
+            \\  (import "wasi_snapshot_preview1" "clock_time_get"
+        ;
+        try self.line(clock);
+        try self.line(
+            "    (func $__wasi_clock_time_get (param i32 i64 i32) (result i32)))"
+        );
+    }
+    return;
+}
+
+/// Keeps host-provided byte storage alive until _start returns.
+fn (self: &var Emitter) write_process_globals(module: &ir::Module) -> !void {
+    if self.uses_process_args_metadata(module) {
+        try self.line("  (global $__process_argc (mut i32) (i32.const 0))");
+    }
+    if self.uses_process_args_data(module) {
+        try self.line("  (global $__process_argv (mut i32) (i32.const 0))");
+    }
+    if self.uses_process_env(module) {
+        try self.line("  (global $__process_envc (mut i32) (i32.const 0))");
+        try self.line("  (global $__process_envp (mut i32) (i32.const 0))");
+    }
+    return;
+}
+
+/// Emits the reached std::process host boundary.
+fn (self: &var Emitter) write_process_runtime(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if self.uses_process_args_metadata(module) {
+        try self.write_process_args_init(module);
+    }
+    if self.uses_process_args_data(module) or self.uses_process_env(module) {
+        try self.write_process_cstr_len();
+    }
+    if self.uses_process_arg_count(module) {
+        try self.write_process_arg_count();
+    }
+    if self.uses_process_arg(module) {
+        if try self.write_process_arg(module) |failed| {
+            return move failed;
+        }
+    }
+    if self.uses_process_env(module) {
+        try self.write_process_env_init();
+        try self.write_process_env();
+    }
+    if self.uses_process_executable_path(module) {
+        if try self.write_process_executable_path(module) |failed| {
+            return move failed;
+        }
+    }
+    if self.uses_process_monotonic_clock(module) {
+        try self.write_process_clock(
+            "std::internal::builtin::process_monotonic_millis",
+            1
+        );
+    }
+    if self.uses_process_unix_clock(module) {
+        try self.write_process_clock("std::internal::builtin::process_unix_millis", 0);
+    }
+    return null;
+}
+
+/// Snapshots WASI argv into process-owned linear memory.
+fn (self: &var Emitter) write_process_args_init(module: &ir::Module) -> !void {
+    try self.line("  (func $__process_init_args");
+    if self.uses_process_args_data(module) {
+        try self.line("    (local $table_size i32) (local $buffer_size i32)");
+        try self.line("    (local $total i32) (local $base i32)");
+    }
+    try self.line("    (if (call $__wasi_args_sizes_get (i32.const 0) (i32.const 4))");
+    try self.line("      (then (unreachable)))");
+    try self.line("    (global.set $__process_argc (i32.load (i32.const 0)))");
+    if self.uses_process_args_data(module) {
+        try self.line(
+            "    (if (i32.gt_u (global.get $__process_argc) (i32.const 1073741823))"
+        );
+        try self.line("      (then (unreachable)))");
+        try self.line("    (local.set $table_size");
+        try self.line("      (i32.shl (global.get $__process_argc) (i32.const 2)))");
+        try self.line("    (local.set $buffer_size (i32.load (i32.const 4)))");
+        try self.line(
+            "    (local.set $total (i32.add (local.get $table_size) (local.get $buffer_size)))"
+        );
+        try self.line("    (if (i32.lt_u (local.get $total) (local.get $table_size))");
+        try self.line("      (then (unreachable)))");
+        try self.line("    (if (local.get $total)");
+        try self.line("      (then");
+        try self.line("        (local.set $base (call $__stack_alloc (local.get $total)))");
+        try self.line("        (global.set $__process_argv (local.get $base))");
+        try self.line("        (if (call $__wasi_args_get");
+        try self.line("              (local.get $base)");
+        try self.line(
+            "              (i32.add (local.get $base) (local.get $table_size)))"
+        );
+        try self.line("          (then (unreachable)))))");
+    }
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Measures one NUL-terminated string supplied by WASI.
+fn (self: &var Emitter) write_process_cstr_len() -> !void {
+    try self.line("  (func $__process_cstr_len (param $ptr i32) (result i32)");
+    try self.line("    (local $length i32)");
+    try self.line("    (block $done");
+    try self.line("      (loop $bytes");
+    try self.line("        (br_if $done (i32.eqz");
+    try self.line(
+        "          (i32.load8_u (i32.add (local.get $ptr) (local.get $length)))))"
+    );
+    try self.line(
+        "        (local.set $length (i32.add (local.get $length) (i32.const 1)))"
+    );
+    try self.line("        (br $bytes)))");
+    try self.line("    (local.get $length)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_process_arg_count() -> !void {
+    try self.line("  (func $std::internal::builtin::process_arg_count (result i64)");
+    try self.line(
+        "    (if (result i64) (i32.gt_u (global.get $__process_argc) (i32.const 0))"
+    );
+    try self.line("      (then (i64.extend_i32_u");
+    try self.line(
+        "        (i32.sub (global.get $__process_argc) (i32.const 1))))"
+    );
+    try self.line("      (else (i64.const 0)))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_process_arg(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    let code = wasm_error_code(
+        module,
+        "std::process::Error",
+        "ArgIndexOutOfBounds"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::process::Error` has no member `ArgIndexOutOfBounds`"
+    );
+    try self.line(
+        "  (func $std::internal::builtin::process_arg (param $out i32) (param $index i64)"
+    );
+    try self.line("    (local $ptr i32)");
+    try self.line("    (if (i32.or");
+    try self.line(
+        "          (i32.le_u (global.get $__process_argc) (i32.const 1))"
+    );
+    try self.line(
+        "          (i32.or (i64.lt_s (local.get $index) (i64.const 0))"
+    );
+    try self.line("            (i64.ge_u (local.get $index)");
+    try self.line("              (i64.extend_i32_u");
+    try self.line(
+        "                (i32.sub (global.get $__process_argc) (i32.const 1))))))"
+    );
+    try self.line("      (then");
+    try self.line("        (i64.store (local.get $out) (i64.const 0))");
+    try self.line2(
+        "        (i64.store (i32.add (local.get $out) (i32.const %d)) (i64.const %d))",
+        Arg::Int(process_tagged_payload_offset()),
+        Arg::Int(code)
+    );
+    try self.line("        (return)))");
+    try self.line("    (local.set $ptr");
+    try self.line("      (i32.load (i32.add (global.get $__process_argv)");
+    try self.line(
+        "        (i32.shl (i32.wrap_i64 (i64.add (local.get $index) (i64.const 1)))"
+    );
+    try self.line("          (i32.const 2)))))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line1(
+        "    (i32.store (i32.add (local.get $out) (i32.const %d)) (local.get $ptr))",
+        Arg::Int(process_tagged_payload_offset())
+    );
+    try self.line1(
+        "    (i32.store (i32.add (local.get $out) (i32.const %d))",
+        Arg::Int(process_tagged_payload_offset() + process_slice_length_offset())
+    );
+    try self.line("      (call $__process_cstr_len (local.get $ptr)))");
+    try self.line("  )");
+    try self.out.append_byte(self.allocator, cast<u8>(10));
+    return null;
+}
+
+/// Snapshots WASI environ into process-owned linear memory.
+fn (self: &var Emitter) write_process_env_init() -> !void {
+    try self.line("  (func $__process_init_env");
+    try self.line("    (local $table_size i32) (local $buffer_size i32)");
+    try self.line("    (local $total i32) (local $base i32)");
+    try self.line(
+        "    (if (call $__wasi_environ_sizes_get (i32.const 0) (i32.const 4))"
+    );
+    try self.line("      (then (unreachable)))");
+    try self.line("    (global.set $__process_envc (i32.load (i32.const 0)))");
+    try self.line(
+        "    (if (i32.gt_u (global.get $__process_envc) (i32.const 1073741823))"
+    );
+    try self.line("      (then (unreachable)))");
+    try self.line("    (local.set $table_size");
+    try self.line("      (i32.shl (global.get $__process_envc) (i32.const 2)))");
+    try self.line("    (local.set $buffer_size (i32.load (i32.const 4)))");
+    try self.line(
+        "    (local.set $total (i32.add (local.get $table_size) (local.get $buffer_size)))"
+    );
+    try self.line("    (if (i32.lt_u (local.get $total) (local.get $table_size))");
+    try self.line("      (then (unreachable)))");
+    try self.line("    (if (local.get $total)");
+    try self.line("      (then");
+    try self.line("        (local.set $base (call $__stack_alloc (local.get $total)))");
+    try self.line("        (global.set $__process_envp (local.get $base))");
+    try self.line("        (if (call $__wasi_environ_get");
+    try self.line("              (local.get $base)");
+    try self.line("              (i32.add (local.get $base) (local.get $table_size)))");
+    try self.line("          (then (unreachable)))))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Looks up NAME=VALUE without copying host-owned bytes.
+fn (self: &var Emitter) write_process_env() -> !void {
+    try self.line(
+        "  (func $std::internal::builtin::process_env (param $out i32) (param $name i32)"
+    );
+    try self.line(
+        "    (local $index i32) (local $entry i32) (local $offset i32)"
+    );
+    try self.line(
+        "    (local $name_ptr i32) (local $name_len i32) (local $value i32)"
+    );
+    try self.line("    (i64.store (local.get $out) (i64.const 0))");
+    try self.line("    (local.set $name_ptr (i32.load (local.get $name)))");
+    try self.line(
+        "    (local.set $name_len (i32.load (i32.add (local.get $name) (i32.const 4))))"
+    );
+    try self.line("    (block $missing");
+    try self.line("      (loop $entries");
+    try self.line(
+        "        (br_if $missing (i32.ge_u (local.get $index) (global.get $__process_envc)))"
+    );
+    try self.line(
+        "        (local.set $entry (i32.load (i32.add (global.get $__process_envp)"
+    );
+    try self.line("          (i32.shl (local.get $index) (i32.const 2)))))");
+    try self.line("        (local.set $offset (i32.const 0))");
+    try self.line("        (block $different");
+    try self.line("          (loop $name_bytes");
+    try self.line(
+        "            (if (i32.eq (local.get $offset) (local.get $name_len))"
+    );
+    try self.line("              (then");
+    try self.line("                (br_if $different (i32.ne");
+    try self.line(
+        "                  (i32.load8_u (i32.add (local.get $entry) (local.get $offset)))"
+    );
+    try self.line("                  (i32.const 61)))");
+    try self.line("                (local.set $value");
+    try self.line(
+        "                  (i32.add (i32.add (local.get $entry) (local.get $offset)) (i32.const 1)))"
+    );
+    try self.line("                (i64.store (local.get $out) (i64.const 1))");
+    try self.line1(
+        "                (i32.store (i32.add (local.get $out) (i32.const %d)) (local.get $value))",
+        Arg::Int(process_tagged_payload_offset())
+    );
+    try self.line1(
+        "                (i32.store (i32.add (local.get $out) (i32.const %d))",
+        Arg::Int(process_tagged_payload_offset() + process_slice_length_offset())
+    );
+    try self.line("                  (call $__process_cstr_len (local.get $value)))");
+    try self.line("                (return)))");
+    try self.line("            (br_if $different (i32.ne");
+    try self.line(
+        "              (i32.load8_u (i32.add (local.get $name_ptr) (local.get $offset)))"
+    );
+    try self.line(
+        "              (i32.load8_u (i32.add (local.get $entry) (local.get $offset)))))"
+    );
+    try self.line(
+        "            (local.set $offset (i32.add (local.get $offset) (i32.const 1)))"
+    );
+    try self.line("            (br $name_bytes)))");
+    try self.line(
+        "        (local.set $index (i32.add (local.get $index) (i32.const 1)))"
+    );
+    try self.line("        (br $entries)))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_process_executable_path(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    let unknown = wasm_error_code(
+        module,
+        "std::process::Error",
+        "ExecutablePathUnknown"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::process::Error` has no member `ExecutablePathUnknown`"
+    );
+    let out_of_memory = wasm_error_code(
+        module,
+        "std::process::Error",
+        "OutOfMemory"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::process::Error` has no member `OutOfMemory`"
+    );
+    try self.line(
+        "  (func $std::internal::builtin::process_executable_path_into (param $out i32) (param $allocator i32) (param $dst i32)"
+    );
+    try self.line("    (local $ptr i32) (local $length i32) (local $old_len i64)");
+    try self.line("    (local $needed i64)");
+    try self.line("    (if (i32.eqz (global.get $__process_argc))");
+    try self.line("      (then");
+    try self.write_process_error_result(unknown);
+    try self.line("        (return)))");
+    try self.line("    (local.set $ptr (i32.load (global.get $__process_argv)))");
+    try self.line("    (local.set $length (call $__process_cstr_len (local.get $ptr)))");
+    try self.line("    (if (i32.eqz (local.get $length))");
+    try self.line("      (then");
+    try self.write_process_error_result(unknown);
+    try self.line("        (return)))");
+    try self.line1(
+        "    (local.set $old_len (i64.load (i32.add (local.get $dst) (i32.const %d))))",
+        Arg::Int(process_array_length_offset())
+    );
+    try self.line("    (local.set $needed");
+    try self.line(
+        "      (i64.add (local.get $old_len) (i64.extend_i32_u (local.get $length))))"
+    );
+    try self.line("    (if (i32.eqz (call $__array_reserve");
+    try self.line(
+        "          (local.get $allocator) (local.get $dst) (local.get $needed) (i32.const 1)))"
+    );
+    try self.line("      (then");
+    try self.write_process_error_result(out_of_memory);
+    try self.line("        (return)))");
+    try self.line("    (memory.copy");
+    try self.line(
+        "      (i32.add (i32.load (local.get $dst)) (i32.wrap_i64 (local.get $old_len)))"
+    );
+    try self.line("      (local.get $ptr) (local.get $length))");
+    try self.line1(
+        "    (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $needed))",
+        Arg::Int(process_array_length_offset())
+    );
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    try self.out.append_byte(self.allocator, cast<u8>(10));
+    return null;
+}
+
+fn (self: &var Emitter) write_process_error_result(code: i64) -> !void {
+    try self.line("        (i64.store (local.get $out) (i64.const 0))");
+    return self.line2(
+        "        (i64.store (i32.add (local.get $out) (i32.const %d)) (i64.const %d))",
+        Arg::Int(process_tagged_payload_offset()),
+        Arg::Int(code)
+    );
+}
+
+fn (self: &var Emitter) write_process_clock(name: []u8, clock_id: i64) -> !void {
+    try self.line1("  (func $%s (result i64)", Arg::Lit(name));
+    try self.line("    (if (result i64) (i32.eqz (call $__wasi_clock_time_get");
+    try self.line3(
+        "          (i32.const %d) (i64.const %d) (i32.const %d)))",
+        Arg::Int(clock_id),
+        Arg::Int(process_clock_precision_nanos()),
+        Arg::Int(scratch_offset())
+    );
+    try self.line2(
+        "      (then (i64.div_u (i64.load (i32.const %d)) (i64.const %d)))",
+        Arg::Int(scratch_offset()),
+        Arg::Int(process_nanos_per_millisecond())
+    );
+    try self.line("      (else (i64.const 0)))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Obtains host state before any Kizu function can read it.
+fn (self: &var Emitter) write_process_start_init(module: &ir::Module) -> !void {
+    if self.uses_process_args_metadata(module) {
+        try self.line("    (call $__process_init_args)");
+    }
+    if self.uses_process_env(module) {
+        try self.line("    (call $__process_init_env)");
+    }
+    return;
+}
