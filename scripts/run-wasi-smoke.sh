@@ -70,6 +70,46 @@ run_status() {
   fi
 }
 
+run_stderr() {
+  name="$1"
+  file="$2"
+  want="$3"
+  wat="$tmp/$name.wat"
+  stdout="$tmp/$name.stdout"
+  stderr="$tmp/$name.stderr"
+
+  go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
+  wasmtime run "$wat" > "$stdout" 2> "$stderr"
+  got_stdout="$(cat "$stdout")"
+  got_stderr="$(cat "$stderr")"
+  if [ -n "$got_stdout" ] || [ "$got_stderr" != "$want" ]; then
+    printf '%s: stdout:\n%s\nstderr:\n%s\nwant empty stdout and stderr:\n%s\n' \
+      "$name" "$got_stdout" "$got_stderr" "$want" >&2
+    exit 1
+  fi
+}
+
+run_io_process() {
+  wat="$tmp/std_io_process.wat"
+  stdout="$tmp/std_io_process.stdout"
+  stderr="$tmp/std_io_process.stderr"
+  want="stdout:
+1
+input.kizu
+env-ok
+7"
+
+  go run ./cmd/kizu build --target wasm32-wasi examples/std_io_process.kizu > "$wat"
+  wasmtime run --env KIZU_TEST_ENV=env-ok "$wat" input.kizu > "$stdout" 2> "$stderr"
+  got_stdout="$(cat "$stdout")"
+  got_stderr="$(cat "$stderr")"
+  if [ "$got_stdout" != "$want" ] || [ -n "$got_stderr" ]; then
+    printf 'std_io_process: stdout:\n%s\nstderr:\n%s\nwant stdout:\n%s\nand empty stderr\n' \
+      "$got_stdout" "$got_stderr" "$want" >&2
+    exit 1
+  fi
+}
+
 run_example "hello" "examples/hello.kizu" "hello, kizu"
 run_example "functions" "examples/functions.kizu" "3"
 run_example "slice_checked_access" "examples/slice_checked_access.kizu" "98
@@ -183,6 +223,8 @@ run_example "main_exit_status_success" \
   "exiting with success"
 run_status "main_exit_status_failure" "examples/main_exit_status.kizu" 1 failure
 run_status "main_exit_status_specific" "examples/main_exit_status.kizu" 7 specific code
+run_io_process
+run_stderr "std_io_stderr" "examples/std_io_stderr.kizu" "diagnostic"
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.
@@ -217,3 +259,6 @@ run_failure "testing_expect_equal_bytes" \
 run_failure "std_process_arg_bounds" \
   "examples/negative/std_process_arg_bounds.kizu" \
   "runtime error: std::process::Error::ArgIndexOutOfBounds"
+run_failure "std_io_failing_write" \
+  "examples/negative/std_io_failing_write.kizu" \
+  "runtime error: std::io::Error::IoFailing"

@@ -4,10 +4,6 @@ import compiler::internal::ir;
 // Mechanical port of internal/wasm/process.go: only std::process builtins in
 // main's pruned call graph acquire WASI imports and runtime state.
 
-fn process_tagged_payload_offset() -> i64 {
-    return 8;
-}
-
 fn process_slice_length_offset() -> i64 {
     return 4;
 }
@@ -226,6 +222,7 @@ fn (self: &var Emitter) write_process_args_init(module: &ir::Module) -> !void {
         );
         try self.line("    (if (i32.lt_u (local.get $total) (local.get $table_size))");
         try self.line("      (then (unreachable)))");
+        try self.write_process_align_total();
         try self.line("    (if (local.get $total)");
         try self.line("      (then");
         try self.line("        (local.set $base (call $__stack_alloc (local.get $total)))");
@@ -304,7 +301,7 @@ fn (self: &var Emitter) write_process_arg(
     try self.line("        (i64.store (local.get $out) (i64.const 0))");
     try self.line2(
         "        (i64.store (i32.add (local.get $out) (i32.const %d)) (i64.const %d))",
-        Arg::Int(process_tagged_payload_offset()),
+        Arg::Int(void_error_payload_offset()),
         Arg::Int(code)
     );
     try self.line("        (return)))");
@@ -317,11 +314,11 @@ fn (self: &var Emitter) write_process_arg(
     try self.line("    (i64.store (local.get $out) (i64.const 1))");
     try self.line1(
         "    (i32.store (i32.add (local.get $out) (i32.const %d)) (local.get $ptr))",
-        Arg::Int(process_tagged_payload_offset())
+        Arg::Int(void_error_payload_offset())
     );
     try self.line1(
         "    (i32.store (i32.add (local.get $out) (i32.const %d))",
-        Arg::Int(process_tagged_payload_offset() + process_slice_length_offset())
+        Arg::Int(void_error_payload_offset() + process_slice_length_offset())
     );
     try self.line("      (call $__process_cstr_len (local.get $ptr)))");
     try self.line("  )");
@@ -351,6 +348,7 @@ fn (self: &var Emitter) write_process_env_init() -> !void {
     );
     try self.line("    (if (i32.lt_u (local.get $total) (local.get $table_size))");
     try self.line("      (then (unreachable)))");
+    try self.write_process_align_total();
     try self.line("    (if (local.get $total)");
     try self.line("      (then");
     try self.line("        (local.set $base (call $__stack_alloc (local.get $total)))");
@@ -361,6 +359,16 @@ fn (self: &var Emitter) write_process_env_init() -> !void {
     try self.line("          (then (unreachable)))))");
     try self.line("  )");
     return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Rounds host snapshot storage up so the next stack allocation stays aligned.
+fn (self: &var Emitter) write_process_align_total() -> !void {
+    try self.line("    (if (i32.gt_u (local.get $total) (i32.const -8))");
+    try self.line("      (then (unreachable)))");
+    try self.line("    (local.set $total");
+    return self.line(
+        "      (i32.and (i32.add (local.get $total) (i32.const 7)) (i32.const -8)))"
+    );
 }
 
 /// Looks up NAME=VALUE without copying host-owned bytes.
@@ -407,11 +415,11 @@ fn (self: &var Emitter) write_process_env() -> !void {
     try self.line("                (i64.store (local.get $out) (i64.const 1))");
     try self.line1(
         "                (i32.store (i32.add (local.get $out) (i32.const %d)) (local.get $value))",
-        Arg::Int(process_tagged_payload_offset())
+                Arg::Int(void_error_payload_offset())
     );
     try self.line1(
         "                (i32.store (i32.add (local.get $out) (i32.const %d))",
-        Arg::Int(process_tagged_payload_offset() + process_slice_length_offset())
+                Arg::Int(void_error_payload_offset() + process_slice_length_offset())
     );
     try self.line("                  (call $__process_cstr_len (local.get $value)))");
     try self.line("                (return)))");
@@ -458,13 +466,13 @@ fn (self: &var Emitter) write_process_executable_path(
     try self.line("    (local $needed i64)");
     try self.line("    (if (i32.eqz (global.get $__process_argc))");
     try self.line("      (then");
-    try self.write_process_error_result(unknown);
+    try self.write_void_error_result(unknown, "        ");
     try self.line("        (return)))");
     try self.line("    (local.set $ptr (i32.load (global.get $__process_argv)))");
     try self.line("    (local.set $length (call $__process_cstr_len (local.get $ptr)))");
     try self.line("    (if (i32.eqz (local.get $length))");
     try self.line("      (then");
-    try self.write_process_error_result(unknown);
+    try self.write_void_error_result(unknown, "        ");
     try self.line("        (return)))");
     try self.line1(
         "    (local.set $old_len (i64.load (i32.add (local.get $dst) (i32.const %d))))",
@@ -479,7 +487,7 @@ fn (self: &var Emitter) write_process_executable_path(
         "          (local.get $allocator) (local.get $dst) (local.get $needed) (i32.const 1)))"
     );
     try self.line("      (then");
-    try self.write_process_error_result(out_of_memory);
+    try self.write_void_error_result(out_of_memory, "        ");
     try self.line("        (return)))");
     try self.line("    (memory.copy");
     try self.line(
@@ -494,15 +502,6 @@ fn (self: &var Emitter) write_process_executable_path(
     try self.line("  )");
     try self.out.append_byte(self.allocator, cast<u8>(10));
     return null;
-}
-
-fn (self: &var Emitter) write_process_error_result(code: i64) -> !void {
-    try self.line("        (i64.store (local.get $out) (i64.const 0))");
-    return self.line2(
-        "        (i64.store (i32.add (local.get $out) (i32.const %d)) (i64.const %d))",
-        Arg::Int(process_tagged_payload_offset()),
-        Arg::Int(code)
-    );
 }
 
 fn (self: &var Emitter) write_process_clock(name: []u8, clock_id: i64) -> !void {

@@ -1,0 +1,127 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+
+// Mechanical port of internal/wasm/io.go. Blocking Io is a visible capability
+// token, and explicit stream writes surface WASI failures as std::io::Error.
+
+fn (self: &Emitter) uses_io_write(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::io_write_stdout"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::io_write_stderr"
+    );
+}
+
+/// Emits only the explicit stream writers the guest reaches.
+fn (self: &var Emitter) write_io_runtime(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if !self.uses_io_write(module) {
+        return null;
+    }
+    let write_failed = wasm_error_code(
+        module,
+        "std::io::Error",
+        "WriteFailed"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::io::Error` has no member `WriteFailed`"
+    );
+    let io_failing = wasm_error_code(
+        module,
+        "std::io::Error",
+        "IoFailing"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::io::Error` has no member `IoFailing`"
+    );
+    try self.write_io_write_helper(write_failed, io_failing);
+    if self.uses_builtin_call(module, "std::internal::builtin::io_write_stdout") {
+        try self.write_io_write_builtin(
+            "std::internal::builtin::io_write_stdout",
+            1
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::io_write_stderr") {
+        try self.write_io_write_builtin(
+            "std::internal::builtin::io_write_stderr",
+            2
+        );
+    }
+    return null;
+}
+
+/// Writes a whole byte slice, retrying partial WASI writes.
+fn (self: &var Emitter) write_io_write_helper(
+    write_failed: i64,
+    io_failing: i64
+) -> !void {
+    try self.line("  (func $__io_write (param $out i32) (param $io i32)");
+    try self.line("      (param $bytes i32) (param $fd i32)");
+    try self.line("    (local $ptr i32) (local $remaining i32)");
+    try self.line("    (local $written i32) (local $errno i32)");
+    try self.line1(
+        "    (if (i32.eq (local.get $io) (i32.const %d))",
+        Arg::Int(2)
+    );
+    try self.line("      (then");
+    try self.write_void_error_result(io_failing, "        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $ptr (i32.load (local.get $bytes)))");
+    try self.line("    (local.set $remaining");
+    try self.line("      (i32.load (i32.add (local.get $bytes) (i32.const 4))))");
+    try self.line("    (block $done");
+    try self.line("      (loop $write");
+    try self.line("        (br_if $done (i32.eqz (local.get $remaining)))");
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $ptr))",
+        Arg::Int(scratch_offset())
+    );
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $remaining))",
+        Arg::Int(scratch_offset() + 4)
+    );
+    try self.line("        (local.set $errno (call $__wasi_fd_write");
+    try self.line2(
+        "          (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))",
+        Arg::Int(scratch_offset()),
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (local.get $errno)");
+    try self.line("          (then");
+    try self.write_void_error_result(write_failed, "            ");
+    try self.line("            (return)))");
+    try self.line1(
+        "        (local.set $written (i32.load (i32.const %d)))",
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (i32.or (i32.eqz (local.get $written))");
+    try self.line(
+        "            (i32.gt_u (local.get $written) (local.get $remaining)))"
+    );
+    try self.line("          (then");
+    try self.write_void_error_result(write_failed, "            ");
+    try self.line("            (return)))");
+    try self.line("        (local.set $ptr");
+    try self.line("          (i32.add (local.get $ptr) (local.get $written)))");
+    try self.line("        (local.set $remaining");
+    try self.line("          (i32.sub (local.get $remaining) (local.get $written)))");
+    try self.line("        (br $write)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Binds one std primitive to its WASI descriptor.
+fn (self: &var Emitter) write_io_write_builtin(name: []u8, fd: i64) -> !void {
+    try self.line1(
+        "  (func $%s (param $out i32) (param $io i32) (param $bytes i32)",
+        Arg::Lit(name)
+    );
+    try self.line1(
+        "    (call $__io_write (local.get $out) (local.get $io) (local.get $bytes) (i32.const %d))",
+        Arg::Int(fd)
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}

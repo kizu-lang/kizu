@@ -16,7 +16,6 @@ const (
 	processExecutableUnknown   = "ExecutablePathUnknown"
 	processOutOfMemory         = "OutOfMemory"
 	processErrorSet            = "std::process::Error"
-	processTaggedPayloadOffset = 8
 	processSliceLengthOffset   = 4
 	processArrayLengthOffset   = 8
 	processClockRealtime       = 0
@@ -188,6 +187,7 @@ func (e *emitter) writeProcessArgsInit() {
 			"(local.get $buffer_size)))\n")
 		e.out.WriteString("    (if (i32.lt_u (local.get $total) (local.get $table_size))\n")
 		e.out.WriteString("      (then (unreachable)))\n")
+		e.writeProcessAlignTotal()
 		e.out.WriteString("    (if (local.get $total)\n")
 		e.out.WriteString("      (then\n")
 		e.out.WriteString("        (local.set $base (call $__stack_alloc (local.get $total)))\n")
@@ -242,7 +242,7 @@ func (e *emitter) writeProcessArg() error {
 	e.out.WriteString("        (i64.store (local.get $out) (i64.const 0))\n")
 	fmt.Fprintf(&e.out, "        (i64.store (i32.add (local.get $out) "+
 		"(i32.const %d)) (i64.const %d))\n",
-		processTaggedPayloadOffset, code)
+		voidErrorPayloadOffset, code)
 	e.out.WriteString("        (return)))\n")
 	e.out.WriteString("    (local.set $ptr\n")
 	e.out.WriteString("      (i32.load (i32.add (global.get $__process_argv)\n")
@@ -250,9 +250,9 @@ func (e *emitter) writeProcessArg() error {
 	e.out.WriteString("          (i32.const 2)))))\n")
 	e.out.WriteString("    (i64.store (local.get $out) (i64.const 1))\n")
 	fmt.Fprintf(&e.out, "    (i32.store (i32.add (local.get $out) (i32.const %d)) (local.get $ptr))\n",
-		processTaggedPayloadOffset)
+		voidErrorPayloadOffset)
 	fmt.Fprintf(&e.out, "    (i32.store (i32.add (local.get $out) (i32.const %d))\n",
-		processTaggedPayloadOffset+processSliceLengthOffset)
+		voidErrorPayloadOffset+processSliceLengthOffset)
 	e.out.WriteString("      (call $__process_cstr_len (local.get $ptr)))\n")
 	e.out.WriteString("  )\n\n")
 	return nil
@@ -275,6 +275,7 @@ func (e *emitter) writeProcessEnvInit() {
 		"(local.get $buffer_size)))\n")
 	e.out.WriteString("    (if (i32.lt_u (local.get $total) (local.get $table_size))\n")
 	e.out.WriteString("      (then (unreachable)))\n")
+	e.writeProcessAlignTotal()
 	e.out.WriteString("    (if (local.get $total)\n")
 	e.out.WriteString("      (then\n")
 	e.out.WriteString("        (local.set $base (call $__stack_alloc (local.get $total)))\n")
@@ -284,6 +285,15 @@ func (e *emitter) writeProcessEnvInit() {
 	e.out.WriteString("              (i32.add (local.get $base) (local.get $table_size)))\n")
 	e.out.WriteString("          (then (unreachable)))))\n")
 	e.out.WriteString("  )\n\n")
+}
+
+// writeProcessAlignTotal rounds host snapshot storage up so the next stack
+// allocation remains aligned for tables and tagged Kizu values.
+func (e *emitter) writeProcessAlignTotal() {
+	e.out.WriteString("    (if (i32.gt_u (local.get $total) (i32.const -8))\n")
+	e.out.WriteString("      (then (unreachable)))\n")
+	e.out.WriteString("    (local.set $total\n")
+	e.out.WriteString("      (i32.and (i32.add (local.get $total) (i32.const 7)) (i32.const -8)))\n")
 }
 
 // writeProcessEnv looks up NAME=VALUE without copying host-owned bytes.
@@ -316,9 +326,9 @@ func (e *emitter) writeProcessEnv() {
 	e.out.WriteString("                (i64.store (local.get $out) (i64.const 1))\n")
 	fmt.Fprintf(&e.out, "                (i32.store (i32.add (local.get $out) "+
 		"(i32.const %d)) (local.get $value))\n",
-		processTaggedPayloadOffset)
+		voidErrorPayloadOffset)
 	fmt.Fprintf(&e.out, "                (i32.store (i32.add (local.get $out) (i32.const %d))\n",
-		processTaggedPayloadOffset+processSliceLengthOffset)
+		voidErrorPayloadOffset+processSliceLengthOffset)
 	e.out.WriteString("                  (call $__process_cstr_len (local.get $value)))\n")
 	e.out.WriteString("                (return)))\n")
 	e.out.WriteString("            (br_if $different (i32.ne\n")
@@ -349,13 +359,13 @@ func (e *emitter) writeProcessExecutablePath() error {
 	e.out.WriteString("    (local $needed i64)\n")
 	e.out.WriteString("    (if (i32.eqz (global.get $__process_argc))\n")
 	e.out.WriteString("      (then\n")
-	e.writeProcessErrorResult(unknown, "        ")
+	e.writeVoidErrorResult(unknown, "        ")
 	e.out.WriteString("        (return)))\n")
 	e.out.WriteString("    (local.set $ptr (i32.load (global.get $__process_argv)))\n")
 	e.out.WriteString("    (local.set $length (call $__process_cstr_len (local.get $ptr)))\n")
 	e.out.WriteString("    (if (i32.eqz (local.get $length))\n")
 	e.out.WriteString("      (then\n")
-	e.writeProcessErrorResult(unknown, "        ")
+	e.writeVoidErrorResult(unknown, "        ")
 	e.out.WriteString("        (return)))\n")
 	fmt.Fprintf(&e.out, "    (local.set $old_len (i64.load (i32.add (local.get $dst) "+
 		"(i32.const %d))))\n",
@@ -366,7 +376,7 @@ func (e *emitter) writeProcessExecutablePath() error {
 	e.out.WriteString("          (local.get $allocator) (local.get $dst) " +
 		"(local.get $needed) (i32.const 1)))\n")
 	e.out.WriteString("      (then\n")
-	e.writeProcessErrorResult(outOfMemory, "        ")
+	e.writeVoidErrorResult(outOfMemory, "        ")
 	e.out.WriteString("        (return)))\n")
 	e.out.WriteString("    (memory.copy\n")
 	e.out.WriteString("      (i32.add (i32.load (local.get $dst)) " +
@@ -378,13 +388,6 @@ func (e *emitter) writeProcessExecutablePath() error {
 	e.out.WriteString("    (i64.store (local.get $out) (i64.const 1))\n")
 	e.out.WriteString("  )\n\n")
 	return nil
-}
-
-// writeProcessErrorResult stores one failed process error union.
-func (e *emitter) writeProcessErrorResult(code int, indent string) {
-	fmt.Fprintf(&e.out, "%s(i64.store (local.get $out) (i64.const 0))\n", indent)
-	fmt.Fprintf(&e.out, "%s(i64.store (i32.add (local.get $out) (i32.const %d)) (i64.const %d))\n",
-		indent, processTaggedPayloadOffset, code)
 }
 
 // writeProcessClock returns one WASI nanosecond clock converted to milliseconds.

@@ -8,6 +8,8 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
+const voidErrorPayloadOffset = 8
+
 // taggedValueLayout returns the wasm32 layout of an i64 tag followed by one
 // aligned inline payload, and the byte offset where that payload starts.
 // Optional values, error unions, and declared unions share this representation.
@@ -57,6 +59,15 @@ func (e *emitter) wasmErrorCode(errorSet string, member string) (int, error) {
 		return 0, fmt.Errorf("wasm error: error set `%s` has no member `%s`", errorSet, member)
 	}
 	return code, nil
+}
+
+// writeVoidErrorResult stores one failed E!void result in the runtime's out
+// parameter. Every E!void layout has an i64 tag followed by the error code.
+func (e *emitter) writeVoidErrorResult(code int, indent string) {
+	fmt.Fprintf(&e.out, "%s(i64.store (local.get $out) (i64.const 0))\n", indent)
+	fmt.Fprintf(&e.out,
+		"%s(i64.store (i32.add (local.get $out) (i32.const %d)) (i64.const %d))\n",
+		indent, voidErrorPayloadOffset, code)
 }
 
 // taggedTypeLayoutVisiting computes an optional or error-union layout and

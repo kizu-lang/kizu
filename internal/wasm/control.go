@@ -315,11 +315,8 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if handled, err := e.writeAllocatorBuiltinCall(name, instr); handled {
 		return err
 	}
-	if name == "std::internal::builtin::io_failing" {
-		if len(instr.Args) != 0 || instr.Result.Type != "Io" {
-			return fmt.Errorf("wasm error: io_failing expects no args -> Io")
-		}
-		return e.writeScalarResult(instr.Result, "(i32.const 2)")
+	if handled, err := e.writeIOBuiltinCall(name, instr); handled {
+		return err
 	}
 	args := make([]string, 0, len(instr.Args)+1)
 	params := e.paramsByFunction[name]

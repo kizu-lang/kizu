@@ -337,6 +337,9 @@ func (e *emitter) writeRuntime() error {
 	if e.usesByteEqualityRuntime() {
 		e.writeByteEqualityHelper()
 	}
+	if err := e.writeIORuntime(); err != nil {
+		return err
+	}
 	if len(e.panicKinds) > 0 {
 		e.writePanicRuntime()
 	}
