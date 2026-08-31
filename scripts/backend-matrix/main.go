@@ -92,7 +92,7 @@ var groups = []featureGroup{
 	{"std::testing", []string{"std-testing"}},
 	{"std::fs / path / io / process", []string{
 		"std-fs", "std-path", "std-io", "std-process", "fs", "io",
-		"explicit-io", "read-dir", "pure-helper", "stderr"}},
+		"explicit-io", "read-dir", "real-path", "pure-helper", "stderr"}},
 	{"std::net / http", []string{
 		"net", "http", "routing", "client", "url"}},
 	{"async / coro", []string{"async", "evented", "coro", "task-set"}},

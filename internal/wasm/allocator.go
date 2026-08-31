@@ -38,7 +38,8 @@ func (e *emitter) usesUserAllocatorRuntime() bool {
 func (e *emitter) usesAllocatorRuntime() bool {
 	if e.usesArrayRuntime() || e.usesMapRuntime() || e.usesBoxRuntime() || e.usesArenaRuntime() ||
 		e.usesUserAllocatorRuntime() || e.usesProcessExecutablePath() ||
-		e.usesBuiltinCall(fsReadDirBuiltin) {
+		e.usesBuiltinCall(fsReadDirBuiltin) ||
+		e.usesBuiltinCall(fsRealPathIntoBuiltin) {
 		return true
 	}
 	for _, fn := range e.module.Functions {

@@ -4,6 +4,7 @@ import "fmt"
 
 const (
 	fsReadFileIntoBuiltin = "std::internal::builtin::fs_read_file_into"
+	fsRealPathIntoBuiltin = "std::internal::builtin::fs_real_path_into"
 	fsReadDirBuiltin      = "std::internal::builtin::fs_read_dir"
 	fsWriteFileBuiltin    = "std::internal::builtin::fs_write_file"
 	fsExistsBuiltin       = "std::internal::builtin::fs_exists"
@@ -24,6 +25,8 @@ const (
 	fsDirentNameOffset   = 24
 	fsDirentNameLen      = 16
 	fsReaddirBufferSize  = 4096
+	fsReadlinkBufferSize = 256
+	fsMaxSymlinks        = 40
 
 	wasiLookupSymlinkFollow = 1
 	wasiRightFDRead         = 2
@@ -32,6 +35,7 @@ const (
 	wasiOpenDirectory       = 2
 	wasiOpenCreateTruncate  = 9
 	wasiFiletypeDirectory   = 3
+	wasiFiletypeSymlink     = 7
 
 	wasiErrnoAccess       = 2
 	wasiErrnoExist        = 20
@@ -81,6 +85,7 @@ type fsDirLayout struct {
 // primitive implemented by the current WASI boundary.
 func (e *emitter) usesFSRuntime() bool {
 	return e.usesBuiltinCall(fsReadFileIntoBuiltin) ||
+		e.usesBuiltinCall(fsRealPathIntoBuiltin) ||
 		e.usesBuiltinCall(fsReadDirBuiltin) ||
 		e.usesBuiltinCall(fsWriteFileBuiltin) ||
 		e.usesBuiltinCall(fsExistsBuiltin) ||
@@ -102,7 +107,8 @@ func (e *emitter) usesFSOpen() bool {
 func (e *emitter) usesFSStat() bool {
 	return e.usesBuiltinCall(fsExistsBuiltin) ||
 		e.usesBuiltinCall(fsMetadataBuiltin) ||
-		e.usesBuiltinCall(fsReadDirBuiltin)
+		e.usesBuiltinCall(fsReadDirBuiltin) ||
+		e.usesBuiltinCall(fsRealPathIntoBuiltin)
 }
 
 // writeFSImports declares only the WASI filesystem calls the guest reaches.
@@ -133,6 +139,11 @@ func (e *emitter) writeFSImports() {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"path_filestat_get\"\n")
 		e.out.WriteString("    (func $__wasi_path_filestat_get\n")
 		e.out.WriteString("      (param i32 i32 i32 i32 i32) (result i32)))\n")
+	}
+	if e.usesBuiltinCall(fsRealPathIntoBuiltin) {
+		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"path_readlink\"\n")
+		e.out.WriteString("    (func $__wasi_path_readlink\n")
+		e.out.WriteString("      (param i32 i32 i32 i32 i32 i32) (result i32)))\n")
 	}
 	if e.usesBuiltinCall(fsCreateDirBuiltin) {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"path_create_directory\"\n")
@@ -166,6 +177,9 @@ func (e *emitter) writeFSRuntime() error {
 	e.writeFSErrnoHelper(codes)
 	if e.usesBuiltinCall(fsReadFileIntoBuiltin) {
 		e.writeFSReadFileInto(codes)
+	}
+	if e.usesBuiltinCall(fsRealPathIntoBuiltin) {
+		e.writeFSRealPathInto(codes)
 	}
 	if e.usesBuiltinCall(fsReadDirBuiltin) {
 		layout, err := e.loadFSDirLayout()
@@ -475,6 +489,430 @@ func (e *emitter) writeFSReadFailure(code int) {
 		arrayLenOffset)
 	e.out.WriteString("            (drop (call $__wasi_fd_close (local.get $fd)))\n")
 	e.writeErrorResult(code, "            ")
+}
+
+// writeFSRealPathInto resolves one capability-relative path component by
+// component. Symlinks are read explicitly so no host-absolute path or wider
+// directory fallback can enter the result.
+func (e *emitter) writeFSRealPathInto(codes fsErrorCodes) {
+	e.writeFSRealPathPopHelper()
+	e.writeFSRealPathFailHelper()
+	e.writeFSRealPathBuiltin(codes)
+}
+
+// writeFSRealPathPopHelper removes the final resolved component without ever
+// crossing the caller's original String length.
+func (e *emitter) writeFSRealPathPopHelper() {
+	e.out.WriteString("  (func $__fs_real_path_pop " +
+		"(param $dst i32) (param $start i64) (result i32)\n")
+	e.out.WriteString("    (local $length i64) (local $index i64) (local $data i32)\n")
+	fmt.Fprintf(&e.out,
+		"    (local.set $length (i64.load (i32.add "+
+			"(local.get $dst) (i32.const %d))))\n",
+		arrayLenOffset)
+	e.out.WriteString("    (if (i64.le_u (local.get $length) (local.get $start))\n")
+	e.out.WriteString("      (then (return (i32.const 0))))\n")
+	e.out.WriteString("    (local.set $data (i32.load (local.get $dst)))\n")
+	e.out.WriteString("    (local.set $index (local.get $length))\n")
+	e.out.WriteString("    (loop $pop\n")
+	e.out.WriteString("      (if (i64.le_u (local.get $index) (local.get $start))\n")
+	e.out.WriteString("        (then\n")
+	fmt.Fprintf(&e.out,
+		"          (i64.store (i32.add (local.get $dst) (i32.const %d)) "+
+			"(local.get $start))\n",
+		arrayLenOffset)
+	e.out.WriteString("          (return (i32.const 1))))\n")
+	e.out.WriteString("      (local.set $index " +
+		"(i64.sub (local.get $index) (i64.const 1)))\n")
+	e.out.WriteString("      (if (i32.eq (i32.load8_u (i32.add (local.get $data) " +
+		"(i32.wrap_i64 (local.get $index)))) (i32.const 47))\n")
+	e.out.WriteString("        (then\n")
+	fmt.Fprintf(&e.out,
+		"          (i64.store (i32.add (local.get $dst) (i32.const %d)) "+
+			"(local.get $index))\n",
+		arrayLenOffset)
+	e.out.WriteString("          (return (i32.const 1))))\n")
+	e.out.WriteString("      (br $pop))\n")
+	e.out.WriteString("    (unreachable)\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSRealPathFailHelper rolls the destination length back and releases
+// both temporary buffers before publishing the declared error code.
+func (e *emitter) writeFSRealPathFailHelper() {
+	e.out.WriteString("  (func $__fs_real_path_fail\n")
+	e.out.WriteString("      (param $out i32) (param $allocator i32) " +
+		"(param $dst i32) (param $start i64)\n")
+	e.out.WriteString("      (param $pending i32) (param $pending_cap i32) " +
+		"(param $link i32) (param $link_cap i32) (param $code i64)\n")
+	fmt.Fprintf(&e.out,
+		"    (i64.store (i32.add (local.get $dst) (i32.const %d)) "+
+			"(local.get $start))\n",
+		arrayLenOffset)
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator) " +
+		"(local.get $pending) (local.get $pending_cap))\n")
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator) " +
+		"(local.get $link) (local.get $link_cap))\n")
+	e.out.WriteString("    (i64.store (local.get $out) (i64.const 0))\n")
+	fmt.Fprintf(&e.out,
+		"    (i64.store (i32.add (local.get $out) (i32.const %d)) "+
+			"(local.get $code))\n",
+		voidErrorPayloadOffset)
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSRealPathFailure emits one call to the shared rollback path.
+func (e *emitter) writeFSRealPathFailure(code string, indent string) {
+	fmt.Fprintf(&e.out, "%s(call $__fs_real_path_fail\n", indent)
+	fmt.Fprintf(&e.out, "%s  (local.get $out) (local.get $allocator) "+
+		"(local.get $dst) (local.get $start)\n", indent)
+	fmt.Fprintf(&e.out, "%s  (local.get $pending_owned) "+
+		"(local.get $pending_cap) (local.get $link) (local.get $link_cap) %s)\n",
+		indent, code)
+}
+
+// writeFSRealPathBuiltin owns only temporary buffers and appends the completed
+// canonical path to dst after every traversed object has been checked.
+func (e *emitter) writeFSRealPathBuiltin(codes fsErrorCodes) {
+	fmt.Fprintf(&e.out, "  (func $%s\n", fsRealPathIntoBuiltin)
+	e.out.WriteString("      (param $out i32) (param $io i32) (param $allocator i32)\n")
+	e.out.WriteString("      (param $path i32) (param $dst i32)\n")
+	e.out.WriteString("    (local $fd i32) (local $errno i32) (local $start i64)\n")
+	e.out.WriteString("    (local $pending i32) (local $pending_len i32) " +
+		"(local $pending_owned i32) (local $pending_cap i32)\n")
+	e.out.WriteString("    (local $scan i32) (local $component_start i32) " +
+		"(local $component_end i32)\n")
+	e.out.WriteString("    (local $component i32) (local $component_len i32) " +
+		"(local $suffix_len i32)\n")
+	e.out.WriteString("    (local $parent_len i64) (local $resolved_len i64) " +
+		"(local $needed i64)\n")
+	e.out.WriteString("    (local $separator i32) (local $candidate i32) " +
+		"(local $candidate_len i32)\n")
+	e.out.WriteString("    (local $filetype i32) (local $links i32)\n")
+	e.out.WriteString("    (local $link i32) (local $link_cap i32) " +
+		"(local $link_used i32) (local $grown i32)\n")
+	e.out.WriteString("    (local $next_pending i32) (local $next_len i64)\n")
+	fmt.Fprintf(&e.out,
+		"    (local.set $start (i64.load (i32.add "+
+			"(local.get $dst) (i32.const %d))))\n",
+		arrayLenOffset)
+	e.writeFSGuard(codes.ioFailing, codes.permissionDenied)
+	e.out.WriteString("    (local.set $pending (i32.load (local.get $path)))\n")
+	e.out.WriteString("    (local.set $pending_len " +
+		"(i32.load (i32.add (local.get $path) (i32.const 4))))\n")
+	e.writeFSRealPathInitialGuard(codes)
+	e.writeFSRealPathLoop(codes)
+	e.writeFSRealPathFinish(codes)
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSRealPathInitialGuard rejects values that name no object or root the
+// lookup outside the explicit preopen.
+func (e *emitter) writeFSRealPathInitialGuard(codes fsErrorCodes) {
+	e.out.WriteString("    (if (i32.eqz (local.get $pending_len))\n")
+	e.out.WriteString("      (then\n")
+	e.writeFSRealPathFailure(fmt.Sprintf("(i64.const %d)", codes.notFound), "        ")
+	e.out.WriteString("        (return)))\n")
+	e.out.WriteString("    (if (i32.eq (i32.load8_u (local.get $pending)) (i32.const 47))\n")
+	e.out.WriteString("      (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.permissionDenied), "        ")
+	e.out.WriteString("        (return)))\n")
+}
+
+// writeFSRealPathLoop resolves pending components from left to right.
+func (e *emitter) writeFSRealPathLoop(codes fsErrorCodes) {
+	e.out.WriteString("    (block $path_done\n")
+	e.out.WriteString("      (loop $path_resolve\n")
+	e.writeFSRealPathComponent(codes)
+	e.out.WriteString("        (br $path_resolve)))\n")
+}
+
+// writeFSRealPathFinish releases work buffers and materializes root as `.`.
+func (e *emitter) writeFSRealPathFinish(codes fsErrorCodes) {
+	fmt.Fprintf(&e.out,
+		"    (if (i64.eq (i64.load (i32.add (local.get $dst) "+
+			"(i32.const %d))) (local.get $start))\n",
+		arrayLenOffset)
+	e.out.WriteString("      (then\n")
+	e.out.WriteString("        (if (i32.eqz (call $__array_reserve " +
+		"(local.get $allocator) (local.get $dst) " +
+		"(i64.add (local.get $start) (i64.const 1)) (i32.const 1)))\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSRealPathFailure(fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "            ")
+	e.out.WriteString("            (return)))\n")
+	e.out.WriteString("        (i32.store8 (i32.add (i32.load (local.get $dst)) " +
+		"(i32.wrap_i64 (local.get $start))) (i32.const 46))\n")
+	fmt.Fprintf(&e.out,
+		"        (i64.store (i32.add (local.get $dst) (i32.const %d)) "+
+			"(i64.add (local.get $start) (i64.const 1)))))\n",
+		arrayLenOffset)
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator) " +
+		"(local.get $pending_owned) (local.get $pending_cap))\n")
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator) " +
+		"(local.get $link) (local.get $link_cap))\n")
+	e.out.WriteString("    (i64.store (local.get $out) (i64.const 1))\n")
+}
+
+// writeFSRealPathComponent identifies one component, handles traversal names,
+// and asks the host about an ordinary name without following its final link.
+func (e *emitter) writeFSRealPathComponent(codes fsErrorCodes) {
+	e.writeFSRealPathParseComponent()
+	e.writeFSRealPathDotCases(codes)
+	e.writeFSRealPathAppendCandidate(codes)
+	e.writeFSRealPathStatCandidate()
+	e.writeFSRealPathSymlink(codes)
+	e.out.WriteString("        (if (i32.and (local.get $suffix_len) " +
+		"(i32.ne (local.get $filetype) (i32.const 3)))\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSRealPathFailure(fmt.Sprintf("(i64.const %d)", codes.notDirectory), "            ")
+	e.out.WriteString("            (return)))\n")
+}
+
+// writeFSRealPathParseComponent skips separators and retains the suffix from
+// the component end so a symlink can splice its target in front of it.
+func (e *emitter) writeFSRealPathParseComponent() {
+	e.out.WriteString("        (block $slashes_done\n")
+	e.out.WriteString("          (loop $skip_slashes\n")
+	e.out.WriteString("            (br_if $slashes_done " +
+		"(i32.ge_u (local.get $scan) (local.get $pending_len)))\n")
+	e.out.WriteString("            (br_if $slashes_done (i32.ne (i32.load8_u " +
+		"(i32.add (local.get $pending) (local.get $scan))) (i32.const 47)))\n")
+	e.out.WriteString("            (local.set $scan " +
+		"(i32.add (local.get $scan) (i32.const 1)))\n")
+	e.out.WriteString("            (br $skip_slashes)))\n")
+	e.out.WriteString("        (br_if $path_done " +
+		"(i32.ge_u (local.get $scan) (local.get $pending_len)))\n")
+	e.out.WriteString("        (local.set $component_start (local.get $scan))\n")
+	e.out.WriteString("        (block $component_done\n")
+	e.out.WriteString("          (loop $find_component_end\n")
+	e.out.WriteString("            (br_if $component_done " +
+		"(i32.ge_u (local.get $scan) (local.get $pending_len)))\n")
+	e.out.WriteString("            (br_if $component_done (i32.eq (i32.load8_u " +
+		"(i32.add (local.get $pending) (local.get $scan))) (i32.const 47)))\n")
+	e.out.WriteString("            (local.set $scan " +
+		"(i32.add (local.get $scan) (i32.const 1)))\n")
+	e.out.WriteString("            (br $find_component_end)))\n")
+	e.out.WriteString("        (local.set $component_end (local.get $scan))\n")
+	e.out.WriteString("        (local.set $component " +
+		"(i32.add (local.get $pending) (local.get $component_start)))\n")
+	e.out.WriteString("        (local.set $component_len (i32.sub " +
+		"(local.get $component_end) (local.get $component_start)))\n")
+	e.out.WriteString("        (local.set $suffix_len (i32.sub " +
+		"(local.get $pending_len) (local.get $component_end)))\n")
+}
+
+// writeFSRealPathDotCases applies lexical traversal only after the preceding
+// object was verified as a directory.
+func (e *emitter) writeFSRealPathDotCases(codes fsErrorCodes) {
+	e.out.WriteString("        (if (i32.and " +
+		"(i32.eq (local.get $component_len) (i32.const 1))\n")
+	e.out.WriteString("              (i32.eq (i32.load8_u " +
+		"(local.get $component)) (i32.const 46)))\n")
+	e.out.WriteString("          (then (br $path_resolve)))\n")
+	e.out.WriteString("        (if (i32.and " +
+		"(i32.eq (local.get $component_len) (i32.const 2))\n")
+	e.out.WriteString("              (i32.and (i32.eq (i32.load8_u " +
+		"(local.get $component)) (i32.const 46))\n")
+	e.out.WriteString("                (i32.eq (i32.load8_u " +
+		"(i32.add (local.get $component) (i32.const 1))) (i32.const 46))))\n")
+	e.out.WriteString("          (then\n")
+	e.out.WriteString("            (if (i32.eqz (call $__fs_real_path_pop " +
+		"(local.get $dst) (local.get $start)))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.permissionDenied), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (br $path_resolve)))\n")
+}
+
+// writeFSRealPathAppendCandidate extends dst with one candidate component.
+func (e *emitter) writeFSRealPathAppendCandidate(codes fsErrorCodes) {
+	fmt.Fprintf(&e.out,
+		"        (local.set $parent_len (i64.load (i32.add "+
+			"(local.get $dst) (i32.const %d))))\n",
+		arrayLenOffset)
+	e.out.WriteString("        (local.set $resolved_len " +
+		"(i64.sub (local.get $parent_len) (local.get $start)))\n")
+	e.out.WriteString("        (local.set $separator " +
+		"(i64.gt_u (local.get $resolved_len) (i64.const 0)))\n")
+	e.out.WriteString("        (local.set $needed (i64.add (local.get $parent_len)\n")
+	e.out.WriteString("          (i64.add (i64.extend_i32_u (local.get $separator)) " +
+		"(i64.extend_i32_u (local.get $component_len)))))\n")
+	e.out.WriteString("        (if (i32.eqz (call $__array_reserve " +
+		"(local.get $allocator) (local.get $dst) " +
+		"(local.get $needed) (i32.const 1)))\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSRealPathFailure(fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "            ")
+	e.out.WriteString("            (return)))\n")
+	e.out.WriteString("        (if (local.get $separator)\n")
+	e.out.WriteString("          (then (i32.store8 (i32.add " +
+		"(i32.load (local.get $dst)) (i32.wrap_i64 (local.get $parent_len))) " +
+		"(i32.const 47))))\n")
+	e.out.WriteString("        (memory.copy (i32.add (i32.load (local.get $dst))\n")
+	e.out.WriteString("          (i32.wrap_i64 (i64.add (local.get $parent_len) " +
+		"(i64.extend_i32_u (local.get $separator)))))\n")
+	e.out.WriteString("          (local.get $component) (local.get $component_len))\n")
+	fmt.Fprintf(&e.out,
+		"        (i64.store (i32.add (local.get $dst) (i32.const %d)) "+
+			"(local.get $needed))\n",
+		arrayLenOffset)
+	e.out.WriteString("        (local.set $candidate (i32.add " +
+		"(i32.load (local.get $dst)) (i32.wrap_i64 (local.get $start))))\n")
+	e.out.WriteString("        (local.set $candidate_len " +
+		"(i32.wrap_i64 (i64.sub (local.get $needed) (local.get $start))))\n")
+}
+
+// writeFSRealPathStatCandidate inspects the final component without following
+// it; every preceding component is already canonical and non-symlink.
+func (e *emitter) writeFSRealPathStatCandidate() {
+	e.out.WriteString("        (local.set $errno (call $__wasi_path_filestat_get\n")
+	e.out.WriteString("          (local.get $fd) (i32.const 0) (local.get $candidate)\n")
+	e.out.WriteString("          (local.get $candidate_len) " +
+		fmt.Sprintf("(i32.const %d)))\n", fsFilestatOffset))
+	e.out.WriteString("        (if (local.get $errno)\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSRealPathFailure("(call $__fs_error (local.get $errno))", "            ")
+	e.out.WriteString("            (return)))\n")
+	fmt.Fprintf(&e.out,
+		"        (local.set $filetype (i32.load8_u (i32.const %d)))\n",
+		fsFilestatOffset+fsFilestatTypeOffset)
+}
+
+// writeFSRealPathSymlink replaces a link component with its relative target
+// plus the unprocessed suffix. Absolute targets are outside this capability.
+func (e *emitter) writeFSRealPathSymlink(codes fsErrorCodes) {
+	fmt.Fprintf(&e.out,
+		"        (if (i32.eq (local.get $filetype) (i32.const %d))\n",
+		wasiFiletypeSymlink)
+	e.out.WriteString("          (then\n")
+	e.writeFSRealPathLinkLimit(codes)
+	e.writeFSRealPathReadlink(codes)
+	e.writeFSRealPathReplacePending(codes)
+	e.out.WriteString("            (br $path_resolve)))\n")
+}
+
+// writeFSRealPathLinkLimit makes cycles a declared OperationFailed result.
+func (e *emitter) writeFSRealPathLinkLimit(codes fsErrorCodes) {
+	e.out.WriteString("            (local.set $links " +
+		"(i32.add (local.get $links) (i32.const 1)))\n")
+	fmt.Fprintf(&e.out,
+		"            (if (i32.gt_u (local.get $links) (i32.const %d))\n",
+		fsMaxSymlinks)
+	e.out.WriteString("              (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.operationFailed), "                ")
+	e.out.WriteString("                (return)))\n")
+}
+
+// writeFSRealPathReadlink reads an untruncated target into reusable storage.
+func (e *emitter) writeFSRealPathReadlink(codes fsErrorCodes) {
+	e.out.WriteString("            (if (i32.eqz (local.get $link))\n")
+	e.out.WriteString("              (then\n")
+	fmt.Fprintf(&e.out,
+		"                (local.set $link_cap (i32.const %d))\n",
+		fsReadlinkBufferSize)
+	e.out.WriteString("                (local.set $link (call $__allocator_alloc " +
+		"(local.get $allocator) (local.get $link_cap)))\n")
+	e.out.WriteString("                (if (i32.eqz (local.get $link))\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                    ")
+	e.out.WriteString("                    (return)))))\n")
+	e.out.WriteString("            (block $link_done\n")
+	e.out.WriteString("              (loop $read_link\n")
+	e.out.WriteString("                (local.set $errno (call $__wasi_path_readlink\n")
+	e.out.WriteString("                  (local.get $fd) (local.get $candidate) " +
+		"(local.get $candidate_len)\n")
+	fmt.Fprintf(&e.out,
+		"                  (local.get $link) (local.get $link_cap) (i32.const %d)))\n",
+		fsReaddirUsedOffset)
+	e.out.WriteString("                (if (local.get $errno)\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSRealPathFailure("(call $__fs_error (local.get $errno))", "                    ")
+	e.out.WriteString("                    (return)))\n")
+	fmt.Fprintf(&e.out,
+		"                (local.set $link_used (i32.load (i32.const %d)))\n",
+		fsReaddirUsedOffset)
+	e.out.WriteString("                (if (i32.gt_u " +
+		"(local.get $link_used) (local.get $link_cap))\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.readFailed), "                    ")
+	e.out.WriteString("                    (return)))\n")
+	e.out.WriteString("                (br_if $link_done " +
+		"(i32.lt_u (local.get $link_used) (local.get $link_cap)))\n")
+	e.out.WriteString("                (if (i32.gt_u " +
+		"(local.get $link_cap) (i32.const 1073741820))\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                    ")
+	e.out.WriteString("                    (return)))\n")
+	e.out.WriteString("                (local.set $grown (call $__allocator_realloc\n")
+	e.out.WriteString("                  (local.get $allocator) (local.get $link) " +
+		"(local.get $link_cap)\n")
+	e.out.WriteString("                  (i32.mul (local.get $link_cap) (i32.const 2))))\n")
+	e.out.WriteString("                (if (i32.eqz (local.get $grown))\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                    ")
+	e.out.WriteString("                    (return)))\n")
+	e.out.WriteString("                (local.set $link (local.get $grown))\n")
+	e.out.WriteString("                (local.set $link_cap " +
+		"(i32.mul (local.get $link_cap) (i32.const 2)))\n")
+	e.out.WriteString("                (br $read_link)))\n")
+}
+
+// writeFSRealPathReplacePending splices the link bytes before the untouched
+// slash-prefixed suffix, then drops the prior owned pending buffer.
+func (e *emitter) writeFSRealPathReplacePending(codes fsErrorCodes) {
+	e.out.WriteString("            (if (i32.eqz (local.get $link_used))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.operationFailed), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (if (i32.eq " +
+		"(i32.load8_u (local.get $link)) (i32.const 47))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.permissionDenied), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (local.set $next_len " +
+		"(i64.add (i64.extend_i32_u (local.get $link_used)) " +
+		"(i64.extend_i32_u (local.get $suffix_len))))\n")
+	e.out.WriteString("            (if (i64.gt_u " +
+		"(local.get $next_len) (i64.const 2147483640))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (local.set $next_pending (call $__allocator_alloc\n")
+	e.out.WriteString("              (local.get $allocator) " +
+		"(i32.wrap_i64 (local.get $next_len))))\n")
+	e.out.WriteString("            (if (i32.eqz (local.get $next_pending))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSRealPathFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (memory.copy (local.get $next_pending) " +
+		"(local.get $link) (local.get $link_used))\n")
+	e.out.WriteString("            (memory.copy (i32.add " +
+		"(local.get $next_pending) (local.get $link_used))\n")
+	e.out.WriteString("              (i32.add (local.get $pending) " +
+		"(local.get $component_end)) (local.get $suffix_len))\n")
+	fmt.Fprintf(&e.out,
+		"            (i64.store (i32.add (local.get $dst) (i32.const %d)) "+
+			"(local.get $parent_len))\n",
+		arrayLenOffset)
+	e.out.WriteString("            (call $__allocator_free (local.get $allocator) " +
+		"(local.get $pending_owned) (local.get $pending_cap))\n")
+	e.out.WriteString("            (local.set $pending_owned " +
+		"(local.get $next_pending))\n")
+	e.out.WriteString("            (local.set $pending (local.get $next_pending))\n")
+	e.out.WriteString("            (local.set $pending_len " +
+		"(i32.wrap_i64 (local.get $next_len)))\n")
+	e.out.WriteString("            (local.set $pending_cap (local.get $pending_len))\n")
+	e.out.WriteString("            (local.set $scan (i32.const 0))\n")
 }
 
 // writeFSReadDir emits an owned, sorted directory snapshot. The host buffer

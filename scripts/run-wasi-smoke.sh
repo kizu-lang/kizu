@@ -245,6 +245,9 @@ false
 nested
 examples/fixtures/read_dir/nested
 true" "."
+run_example "fs_real_path" "examples/fs_real_path.kizu" "target
+nested.txt
+true" "."
 run_example "std_fs_path" "examples/std_fs_path.kizu" "true
 16
 false
@@ -293,6 +296,9 @@ run_failure "std_io_failing_write" \
 run_failure "fs_read_without_preopen" \
   "examples/fs_read.kizu" \
   "runtime error: std::fs::Error::PermissionDenied"
+run_failure "fs_real_path_without_preopen" \
+  "examples/fs_real_path.kizu" \
+  "runtime error: std::fs::Error::PermissionDenied"
 run_failure "fs_read_limit_exceeded" \
   "examples/negative/fs_read_limit_exceeded.kizu" \
   "runtime error: std::fs::Error::LimitExceeded" \
@@ -306,5 +312,20 @@ run_failure "fs_read_missing" \
 run_failure "fs_failing_io" \
   "examples/negative/fs_failing_io.kizu" \
   "runtime error: std::fs::Error::IoFailing" \
+  "" \
+  "."
+run_failure "fs_real_path_missing" \
+  "examples/negative/fs_real_path_missing.kizu" \
+  "runtime error: std::fs::Error::NotFound" \
+  "" \
+  "."
+run_failure "fs_real_path_not_directory" \
+  "examples/negative/fs_real_path_not_directory.kizu" \
+  "runtime error: std::fs::Error::NotDirectory" \
+  "" \
+  "."
+run_failure "fs_real_path_loop" \
+  "examples/negative/fs_real_path_loop.kizu" \
+  "runtime error: std::fs::Error::OperationFailed" \
   "" \
   "."

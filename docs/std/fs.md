@@ -53,7 +53,8 @@ host の `readdir` が返す順は file system 次第で 2 台の間で食い違
 として解決します。compiler 自身は directory を公開しません。preopen が無い場合や
 その外へ出ようとした場合は `PermissionDenied` です。conformance example は必要な
 repository-relative directory を末尾の `dir:` metadata で宣言し、runner がその
-capability だけを Wasmtime へ渡します。
+capability だけを Wasmtime へ渡します。`real_path` の結果もその capability からの
+相対 path であり、host の絶対 path は guest へ公開しません。
 
 `Metadata` と `DirEntry` の layout は C runtime が `KizuFsMetadata` /
 `KizuFsDirEntry` として写しています(`internal/native/build.go`)。field を変える
