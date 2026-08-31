@@ -109,10 +109,19 @@ pub fn runtime_source() -> []u8 {
         \\} KizuFsMetadata;
         \\
         \\typedef struct {
-        \\    KizuSliceU8 name;
-        \\    KizuSliceU8 path;
+        \\    KizuString name;
+        \\    KizuString path;
         \\    _Bool is_dir;
         \\} KizuFsDirEntry;
+        \\
+        \\_Static_assert(offsetof(KizuFsDirEntry, name) == 0,
+        \\               "KizuFsDirEntry.name leads the value");
+        \\_Static_assert(offsetof(KizuFsDirEntry, path) == 24,
+        \\               "KizuFsDirEntry.path follows the first String");
+        \\_Static_assert(offsetof(KizuFsDirEntry, is_dir) == 48,
+        \\               "KizuFsDirEntry.is_dir follows both Strings");
+        \\_Static_assert(sizeof(KizuFsDirEntry) == 56,
+        \\               "KizuFsDirEntry matches std::fs::DirEntry");
         \\
         \\typedef struct {
         \\    _Bool ok;
@@ -524,42 +533,6 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\    out[value.len] = '\0';
         \\    return out;
-        \\}
-        \\
-        \\static KizuSliceU8 kizu_owned_slice_from_cstr(const char *value) {
-        \\    KizuSliceU8 out;
-        \\    out.len = value ? (int64_t)strlen(value) : 0;
-        \\    out.ptr = NULL;
-        \\    if (out.len == 0) {
-        \\        return out;
-        \\    }
-        \\    out.ptr = (unsigned char *)malloc((size_t)out.len);
-        \\    if (!out.ptr) {
-        \\        out.len = 0;
-        \\        return out;
-        \\    }
-        \\    memcpy(out.ptr, value, (size_t)out.len);
-        \\    return out;
-        \\}
-        \\
-        \\static KizuSliceU8 kizu_join_path_slice(const char *dir, const char *name) {
-        \\    size_t dir_len = strlen(dir);
-        \\    size_t name_len = strlen(name);
-        \\    size_t needs_slash = dir_len > 0 && dir[dir_len - 1] != '/';
-        \\    char *out = (char *)malloc(dir_len + needs_slash + name_len + 1);
-        \\    if (!out) {
-        \\        return kizu_slice_from_cstr("");
-        \\    }
-        \\    memcpy(out, dir, dir_len);
-        \\    if (needs_slash) {
-        \\        out[dir_len] = '/';
-        \\    }
-        \\    memcpy(out + dir_len + needs_slash, name, name_len);
-        \\    out[dir_len + needs_slash + name_len] = '\0';
-        \\    KizuSliceU8 slice;
-        \\    slice.ptr = (unsigned char *)out;
-        \\    slice.len = (int64_t)(dir_len + needs_slash + name_len);
-        \\    return slice;
         \\}
         \\
         \\void kizu_print_string(const unsigned char *s, int64_t len) {
@@ -1270,7 +1243,12 @@ pub fn runtime_source() -> []u8 {
         \\    for (int64_t index = 1; index < array->len; index++) {
         \\        KizuFsDirEntry item = items[index];
         \\        int64_t place = index - 1;
-        \\        while (place >= 0 && kizu_slice_compare(items[place].name, item.name) > 0) {
+        \\        KizuSliceU8 item_name = {item.name.data, item.name.len};
+        \\        while (place >= 0) {
+        \\            KizuSliceU8 previous_name = {items[place].name.data, items[place].name.len};
+        \\            if (kizu_slice_compare(previous_name, item_name) <= 0) {
+        \\                break;
+        \\            }
         \\            items[place + 1] = items[place];
         \\            place--;
         \\        }
@@ -1278,7 +1256,52 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\}
         \\
-        \\static KizuErrorArray kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 path) {
+        \\static void kizu_fs_dir_entry_release(void *allocator, KizuFsDirEntry *entry) {
+        \\    if (!entry) {
+        \\        return;
+        \\    }
+        \\    kizu_rt_free(allocator, entry->name.data, entry->name.cap);
+        \\    kizu_rt_free(allocator, entry->path.data, entry->path.cap);
+        \\    entry->name = kizu_array_empty();
+        \\    entry->path = kizu_array_empty();
+        \\}
+        \\
+        \\static void kizu_fs_dir_entries_release(void *allocator, KizuArray *array) {
+        \\    if (!array) {
+        \\        return;
+        \\    }
+        \\    KizuFsDirEntry *items = (KizuFsDirEntry *)array->data;
+        \\    for (int64_t index = 0; index < array->len; index++) {
+        \\        kizu_fs_dir_entry_release(allocator, &items[index]);
+        \\    }
+        \\    kizu_rt_free(
+        \\        allocator, array->data, array->cap * (int64_t)sizeof(KizuFsDirEntry));
+        \\    *array = kizu_array_empty();
+        \\}
+        \\
+        \\static int kizu_fs_dir_entry_init(
+        \\    void *allocator, const char *dir, const char *name, KizuFsDirEntry *out) {
+        \\    size_t dir_len = strlen(dir);
+        \\    size_t name_len = strlen(name);
+        \\    if (dir_len > (uint64_t)INT64_MAX || name_len > (uint64_t)INT64_MAX) {
+        \\        return 0;
+        \\    }
+        \\    out->name = kizu_array_empty();
+        \\    out->path = kizu_array_empty();
+        \\    out->is_dir = 0;
+        \\    int needs_slash = dir_len > 0 && dir[dir_len - 1] != '/';
+        \\    if (!kizu_string_append_bytes(allocator, &out->name, name, (int64_t)name_len) ||
+        \\        !kizu_string_append_bytes(allocator, &out->path, dir, (int64_t)dir_len) ||
+        \\        (needs_slash && !kizu_string_append_bytes(allocator, &out->path, "/", 1)) ||
+        \\        !kizu_string_append_bytes(allocator, &out->path, name, (int64_t)name_len)) {
+        \\        kizu_fs_dir_entry_release(allocator, out);
+        \\        return 0;
+        \\    }
+        \\    return 1;
+        \\}
+        \\
+        \\static KizuErrorArray kizu_std_builtin_fs_read_dir_result(
+        \\    void *io, void *allocator, KizuSliceU8 path) {
         \\    if (kizu_io_is_failing(io)) {
         \\        return kizu_err_array(KIZU_ERR_STD_FS_ERROR_IO_FAILING);
         \\    }
@@ -1293,35 +1316,58 @@ pub fn runtime_source() -> []u8 {
         \\        return kizu_err_array(kizu_errno_failure(code));
         \\    }
         \\    KizuArray array = kizu_array_empty();
-        \\    struct dirent *entry;
-        \\    while ((entry = readdir(dir)) != NULL) {
+        \\    int64_t failure = 0;
+        \\    for (;;) {
+        \\        errno = 0;
+        \\        struct dirent *entry = readdir(dir);
+        \\        if (!entry) {
+        \\            if (errno != 0) {
+        \\                failure = kizu_errno_failure(errno);
+        \\            }
+        \\            break;
+        \\        }
         \\        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
         \\            continue;
         \\        }
         \\        KizuFsDirEntry item;
-        \\        item.name = kizu_owned_slice_from_cstr(entry->d_name);
-        \\        item.path = kizu_join_path_slice(cpath, entry->d_name);
-        \\        item.is_dir = 0;
-        \\        char *entry_path = kizu_slice_to_cstr(item.path);
-        \\        if (entry_path) {
-        \\            struct stat st;
-        \\            item.is_dir = stat(entry_path, &st) == 0 && S_ISDIR(st.st_mode);
-        \\            free(entry_path);
+        \\        if (!kizu_fs_dir_entry_init(allocator, cpath, entry->d_name, &item)) {
+        \\            failure = KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY;
+        \\            break;
         \\        }
-        \\        if (!kizu_array_append(NULL, &array, &item, (int64_t)sizeof(KizuFsDirEntry))) {
-        \\            closedir(dir);
-        \\            free(cpath);
-        \\            return kizu_err_array(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
+        \\        KizuSliceU8 item_path = {item.path.data, item.path.len};
+        \\        char *entry_path = kizu_slice_to_cstr(item_path);
+        \\        if (!entry_path) {
+        \\            kizu_fs_dir_entry_release(allocator, &item);
+        \\            failure = KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY;
+        \\            break;
+        \\        }
+        \\        struct stat st;
+        \\        item.is_dir = stat(entry_path, &st) == 0 && S_ISDIR(st.st_mode);
+        \\        free(entry_path);
+        \\        if (!kizu_array_append(
+        \\                allocator, &array, &item, (int64_t)sizeof(KizuFsDirEntry))) {
+        \\            kizu_fs_dir_entry_release(allocator, &item);
+        \\            failure = KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY;
+        \\            break;
         \\        }
         \\    }
-        \\    closedir(dir);
+        \\    int close_result = closedir(dir);
+        \\    int close_code = errno;
         \\    free(cpath);
+        \\    if (failure == 0 && close_result != 0) {
+        \\        failure = kizu_errno_failure(close_code);
+        \\    }
+        \\    if (failure != 0) {
+        \\        kizu_fs_dir_entries_release(allocator, &array);
+        \\        return kizu_err_array(failure);
+        \\    }
         \\    kizu_sort_dir_entries(&array);
         \\    return kizu_ok_array(array);
         \\}
         \\
-        \\void std__internal__builtin__fs_read_dir(KizuErrorArray *out, void *io, const KizuSliceU8 *path) {
-        \\    *out = kizu_std_builtin_fs_read_dir_result(io, *path);
+        \\void std__internal__builtin__fs_read_dir(
+        \\    KizuErrorArray *out, void *io, void *allocator, const KizuSliceU8 *path) {
+        \\    *out = kizu_std_builtin_fs_read_dir_result(io, allocator, *path);
         \\}
         \\
         \\static KizuErrorVoid kizu_std_builtin_fs_create_dir_result(void *io, KizuSliceU8 path) {

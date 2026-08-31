@@ -3985,8 +3985,24 @@ func (c *Checker) checkFsReadDir(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
-	_, _, err := c.checkFsPathArgs("std::fs::read_dir", args, env, unsafe)
-	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, err
+	const name = "std::fs::read_dir"
+	if len(args) != 3 {
+		return "", true, errorf("type error: `%s` expects io, allocator, and path", name)
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
+		return "", true, err
+	}
+	if err := c.checkCoreArg(name, 1, stdprim.ArgAllocator, args[1], env, unsafe); err != nil {
+		return "", true, err
+	}
+	path, err := c.checkExpr(args[2], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if !sameType(path, typeByteString) {
+		return "", true, errorf("type error: `%s` expects []u8 path, got %s", name, path)
+	}
+	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, nil
 }
 
 // checkFsPathOnly validates an Io plus path API and returns result.
@@ -5884,7 +5900,7 @@ func checkFsMetadataField(name string) (Type, error) {
 func checkFsDirEntryField(name string) (Type, error) {
 	switch name {
 	case "name", "path":
-		return typeByteString, nil
+		return Type("std::string::String"), nil
 	case "is_dir":
 		return typeBool, nil
 	default:

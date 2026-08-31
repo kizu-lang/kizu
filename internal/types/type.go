@@ -112,7 +112,6 @@ var copyTypes = map[Type]bool{
 	"Io":                true,
 	"Allocator":         true,
 	"std::fs::Metadata": true,
-	"std::fs::DirEntry": true,
 }
 
 var signedNumericTypes = map[Type]bool{

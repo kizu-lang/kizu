@@ -38,10 +38,14 @@ const arrayEmptyGlobal = "@kizu.array.empty"
 
 // writeArrayRuntimeDecls writes declarations for the hosted Array runtime.
 func (e *emitter) writeArrayRuntimeDecls() {
-	if !e.usesArrayRuntime() {
+	if !e.usesArrayHeader() {
 		return
 	}
 	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64 }\n", arrayHeaderType)
+	if !e.usesArrayRuntime() {
+		e.out.WriteByte('\n')
+		return
+	}
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
 		arrayEmptyGlobal, arrayHeaderType)
 	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr, ptr, i64)\n")
@@ -119,9 +123,25 @@ func (e *emitter) arrayCheckedElement(
 	return checked, nil
 }
 
-// usesArrayRuntime reports whether this module uses the array header lowering.
-// An arena is that header, so an arena op needs the same declarations even in
-// a module that names no array.
+// usesArrayHeader reports whether emitted function values need the concrete
+// Array header. An external call can exchange an Array without leaving a local
+// array.* instruction, so the value types must retain the header independently
+// of whether the module calls the hosted Array runtime.
+func (e *emitter) usesArrayHeader() bool {
+	if e.usesArrayRuntime() {
+		return true
+	}
+	for _, fn := range e.module.Functions {
+		if functionHasArrayHeaderType(fn) {
+			return true
+		}
+	}
+	return false
+}
+
+// usesArrayRuntime reports whether this module calls the hosted Array runtime.
+// An arena op also needs these declarations because its storage uses that
+// runtime.
 func (e *emitter) usesArrayRuntime() bool {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
@@ -134,6 +154,65 @@ func (e *emitter) usesArrayRuntime() bool {
 		}
 	}
 	return false
+}
+
+// functionHasArrayHeaderType reports whether a function body or signature
+// carries an Array value, either directly or inside an aggregate wrapper.
+func functionHasArrayHeaderType(fn *ir.Function) bool {
+	if isArrayHeaderType(fn.Return) {
+		return true
+	}
+	for _, param := range fn.Params {
+		if isArrayHeaderType(param.Type) {
+			return true
+		}
+	}
+	for _, block := range fn.Blocks {
+		if blockHasArrayHeaderType(block) {
+			return true
+		}
+	}
+	return false
+}
+
+// blockHasArrayHeaderType reports whether a block carries an Array value.
+func blockHasArrayHeaderType(block *ir.Block) bool {
+	for _, instr := range block.Instrs {
+		if instrHasArrayHeaderType(instr) {
+			return true
+		}
+	}
+	return isArrayHeaderType(block.Terminator.Value.Type) ||
+		isArrayHeaderType(block.Terminator.Cond.Type)
+}
+
+// instrHasArrayHeaderType reports whether one instruction carries an Array
+// value in any of the positions that lowering can read.
+func instrHasArrayHeaderType(instr *ir.Instr) bool {
+	if isArrayHeaderType(instr.Result.Type) {
+		return true
+	}
+	for _, arg := range instr.Args {
+		if isArrayHeaderType(arg.Type) {
+			return true
+		}
+	}
+	for _, field := range instr.Fields {
+		if isArrayHeaderType(field.Value.Type) {
+			return true
+		}
+	}
+	for _, incoming := range instr.Incoming {
+		if isArrayHeaderType(incoming.Value.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// isArrayHeaderType reports whether a lowered IR type embeds an Array value.
+func isArrayHeaderType(name string) bool {
+	return strings.Contains(name, "std::array::Array<")
 }
 
 // writeArrayInstr dispatches the Array operations that act on the container as a

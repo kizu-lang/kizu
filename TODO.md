@@ -22,9 +22,9 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 
 ### W4. WASI host boundary
 
-- filesystem / path を capability ごとの WASI import へ広げる。import は
-  reachable な機能だけを module に宣言し、preopen directory は example の conformance
-  metadata から再現する。
+- filesystem / path の残りは `fd_readdir` による owned `read_dir` と、WASI capability
+  内で symlink / `.` / `..` を解決する `real_path`。import は reachable な機能だけを
+  module に宣言し、preopen directory は example の conformance metadata から再現する。
 - WASI preview1 が持たない child process は成功したふりをせず target 非対応とし、
   `std::process::spawn_wait8` を必要とする program を build 時に分類する。
 - net / HTTP / evented Io / coro は、既存 `wasm32-wasi` host ABI で ownership と待機を

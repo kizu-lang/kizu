@@ -1,30 +1,44 @@
 import std;
 
 test "std fs read dir" {
+    let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
     // read_dir returns a deterministic order, and pinning one is the point of
     // this example. It reads a fixture directory it owns rather than a source
     // tree, so adding a file to the repository cannot break it.
-    var entries = try std::fs::read_dir(io, "examples/fixtures/read_dir");
-    defer entries.deinit(std::mem::page_allocator());
+    var entries = try std::fs::read_dir(io, allocator, "examples/fixtures/read_dir");
+    defer entries.deinit(allocator);
     std::testing::expect(entries.len() == 3);
 
-    let first = entries.get_or_panic(0);
-    std::testing::expect_equal<[]u8>("alpha.txt", first.name);
-    std::testing::expect_equal<[]u8>(
-        "examples/fixtures/read_dir/alpha.txt",
-        first.path
-    );
-    std::testing::expect(!first.is_dir);
+    if entries.at(0) |first| {
+        let first_name = first.name.as_bytes();
+        let first_path = first.path.as_bytes();
+        std::testing::expect_equal<[]u8>("alpha.txt", first_name);
+        std::testing::expect_equal<[]u8>(
+            "examples/fixtures/read_dir/alpha.txt",
+            first_path
+        );
+        std::testing::expect(!first.is_dir);
+    } else {
+        std::testing::fail("missing first directory entry");
+    }
 
-    let second = entries.get_or_panic(1);
-    std::testing::expect_equal<[]u8>("beta.txt", second.name);
-    std::testing::expect(!second.is_dir);
+    if entries.at(1) |second| {
+        let second_name = second.name.as_bytes();
+        std::testing::expect_equal<[]u8>("beta.txt", second_name);
+        std::testing::expect(!second.is_dir);
+    } else {
+        std::testing::fail("missing second directory entry");
+    }
 
     // `nested` sorts after both files and is the corpus's only is_dir entry.
-    let third = entries.get_or_panic(2);
-    std::testing::expect_equal<[]u8>("nested", third.name);
-    std::testing::expect(third.is_dir);
+    if entries.at(2) |third| {
+        let third_name = third.name.as_bytes();
+        std::testing::expect_equal<[]u8>("nested", third_name);
+        std::testing::expect(third.is_dir);
+    } else {
+        std::testing::fail("missing third directory entry");
+    }
 
 }
 
@@ -33,84 +47,152 @@ test "std fs read dir" {
 // lower:
 // fn test.std_fs_read_dir() -> !void {
 // entry:
-//   %1: Io = call.std::io::blocking
-//   %2: []u8 = const "examples/fixtures/read_dir"
-//   %3: std::fs::Error!std::array::Array<std::fs::DirEntry> = call.std::fs::read_dir %1: Io, %2: []u8
-//   %4: std::array::Array<std::fs::DirEntry> = error.try %3: std::fs::Error!std::array::Array<std::fs::DirEntry>
-//   %5: Allocator = call.std::mem::page_allocator
-//   %6: i64 = call.std::array::Array.len.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Io = call.std::io::blocking
+//   %3: []u8 = const "examples/fixtures/read_dir"
+//   %4: std::fs::Error!std::array::Array<std::fs::DirEntry> = call.std::fs::read_dir %2: Io, %1: Allocator, %3: []u8
+//   %5: std::array::Array<std::fs::DirEntry> = error.try %4: std::fs::Error!std::array::Array<std::fs::DirEntry>
+//   %6: i64 = call.std::array::Array.len.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>
 //   %7: i64 = const 3
 //   %8: bool = binary.== %6: i64, %7: i64
 //   call.std::testing::expect %8: bool
 //   %10: i64 = const 0
-//   %11: std::fs::DirEntry = call.std::array::Array.get_or_panic.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>, %10: i64
-//   %12: []u8 = const "alpha.txt"
-//   %13: []u8 = field.name %11: std::fs::DirEntry
-//   test.expect_equal %12: []u8, %13: []u8, []u8
-//   %15: []u8 = const "examples/fixtures/read_dir/alpha.txt"
-//   %16: []u8 = field.path %11: std::fs::DirEntry
-//   test.expect_equal %15: []u8, %16: []u8, []u8
-//   %18: bool = field.is_dir %11: std::fs::DirEntry
-//   %19: bool = unary.! %18: bool
-//   call.std::testing::expect %19: bool
-//   %21: i64 = const 1
-//   %22: std::fs::DirEntry = call.std::array::Array.get_or_panic.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>, %21: i64
-//   %23: []u8 = const "beta.txt"
-//   %24: []u8 = field.name %22: std::fs::DirEntry
-//   test.expect_equal %23: []u8, %24: []u8, []u8
-//   %26: bool = field.is_dir %22: std::fs::DirEntry
-//   %27: bool = unary.! %26: bool
-//   call.std::testing::expect %27: bool
-//   %29: i64 = const 2
-//   %30: std::fs::DirEntry = call.std::array::Array.get_or_panic.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>, %29: i64
-//   %31: []u8 = const "nested"
-//   %32: []u8 = field.name %30: std::fs::DirEntry
-//   test.expect_equal %31: []u8, %32: []u8, []u8
-//   %34: bool = field.is_dir %30: std::fs::DirEntry
-//   call.std::testing::expect %34: bool
-//   array.deinit %4: std::array::Array<std::fs::DirEntry>, %5: Allocator
-//   %37: !void = error.ok
-//   return %37: !void
+//   %11: ?&std::fs::DirEntry = call.std::array::Array.at.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %10: i64
+//   %12: &std::fs::DirEntry = opt.value %11: ?&std::fs::DirEntry
+//   %13: bool = opt.has %11: ?&std::fs::DirEntry
+//   branch %13: bool, if.then.1, if.else.2
+// if.then.1:
+//   %14: std::string::String = field.ref.name %12: &std::fs::DirEntry
+//   %15: []u8 = call.std::string::String.as_bytes %14: std::string::String
+//   %16: std::string::String = field.ref.path %12: &std::fs::DirEntry
+//   %17: []u8 = call.std::string::String.as_bytes %16: std::string::String
+//   %18: []u8 = const "alpha.txt"
+//   test.expect_equal %18: []u8, %15: []u8, []u8
+//   %20: []u8 = const "examples/fixtures/read_dir/alpha.txt"
+//   test.expect_equal %20: []u8, %17: []u8, []u8
+//   %22: bool = field.ref.is_dir %12: &std::fs::DirEntry
+//   %23: bool = unary.! %22: bool
+//   call.std::testing::expect %23: bool
+//   jump if.end.3
+// if.else.2:
+//   %25: []u8 = const "missing first directory entry"
+//   call.std::testing::fail %25: []u8
+//   jump if.end.3
+// if.end.3:
+//   %27: i64 = const 1
+//   %28: ?&std::fs::DirEntry = call.std::array::Array.at.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %27: i64
+//   %29: &std::fs::DirEntry = opt.value %28: ?&std::fs::DirEntry
+//   %30: bool = opt.has %28: ?&std::fs::DirEntry
+//   branch %30: bool, if.then.4, if.else.5
+// if.then.4:
+//   %31: std::string::String = field.ref.name %29: &std::fs::DirEntry
+//   %32: []u8 = call.std::string::String.as_bytes %31: std::string::String
+//   %33: []u8 = const "beta.txt"
+//   test.expect_equal %33: []u8, %32: []u8, []u8
+//   %35: bool = field.ref.is_dir %29: &std::fs::DirEntry
+//   %36: bool = unary.! %35: bool
+//   call.std::testing::expect %36: bool
+//   jump if.end.6
+// if.else.5:
+//   %38: []u8 = const "missing second directory entry"
+//   call.std::testing::fail %38: []u8
+//   jump if.end.6
+// if.end.6:
+//   %40: i64 = const 2
+//   %41: ?&std::fs::DirEntry = call.std::array::Array.at.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %40: i64
+//   %42: &std::fs::DirEntry = opt.value %41: ?&std::fs::DirEntry
+//   %43: bool = opt.has %41: ?&std::fs::DirEntry
+//   branch %43: bool, if.then.7, if.else.8
+// if.then.7:
+//   %44: std::string::String = field.ref.name %42: &std::fs::DirEntry
+//   %45: []u8 = call.std::string::String.as_bytes %44: std::string::String
+//   %46: []u8 = const "nested"
+//   test.expect_equal %46: []u8, %45: []u8, []u8
+//   %48: bool = field.ref.is_dir %42: &std::fs::DirEntry
+//   call.std::testing::expect %48: bool
+//   jump if.end.9
+// if.else.8:
+//   %50: []u8 = const "missing third directory entry"
+//   call.std::testing::fail %50: []u8
+//   jump if.end.9
+// if.end.9:
+//   call.std::array::Array.deinit.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %1: Allocator
+//   %53: !void = error.ok
+//   return %53: !void
 // }
 // opt:
 // fn test.std_fs_read_dir() -> !void {
 // entry:
-//   %1: Io = call.std::io::blocking
-//   %2: []u8 = const "examples/fixtures/read_dir"
-//   %3: std::fs::Error!std::array::Array<std::fs::DirEntry> = call.std::fs::read_dir %1: Io, %2: []u8
-//   %4: std::array::Array<std::fs::DirEntry> = error.try %3: std::fs::Error!std::array::Array<std::fs::DirEntry>
-//   %5: Allocator = call.std::mem::page_allocator
-//   %6: i64 = call.std::array::Array.len.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Io = call.std::io::blocking
+//   %3: []u8 = const "examples/fixtures/read_dir"
+//   %4: std::fs::Error!std::array::Array<std::fs::DirEntry> = call.std::fs::read_dir %2: Io, %1: Allocator, %3: []u8
+//   %5: std::array::Array<std::fs::DirEntry> = error.try %4: std::fs::Error!std::array::Array<std::fs::DirEntry>
+//   %6: i64 = call.std::array::Array.len.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>
 //   %7: i64 = const 3
 //   %8: bool = binary.== %6: i64, %7: i64
 //   call.std::testing::expect %8: bool
 //   %10: i64 = const 0
-//   %11: std::fs::DirEntry = call.std::array::Array.get_or_panic.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>, %10: i64
-//   %12: []u8 = const "alpha.txt"
-//   %13: []u8 = field.name %11: std::fs::DirEntry
-//   test.expect_equal %12: []u8, %13: []u8, []u8
-//   %15: []u8 = const "examples/fixtures/read_dir/alpha.txt"
-//   %16: []u8 = field.path %11: std::fs::DirEntry
-//   test.expect_equal %15: []u8, %16: []u8, []u8
-//   %18: bool = field.is_dir %11: std::fs::DirEntry
-//   %19: bool = unary.! %18: bool
-//   call.std::testing::expect %19: bool
-//   %21: i64 = const 1
-//   %22: std::fs::DirEntry = call.std::array::Array.get_or_panic.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>, %21: i64
-//   %23: []u8 = const "beta.txt"
-//   %24: []u8 = field.name %22: std::fs::DirEntry
-//   test.expect_equal %23: []u8, %24: []u8, []u8
-//   %26: bool = field.is_dir %22: std::fs::DirEntry
-//   %27: bool = unary.! %26: bool
-//   call.std::testing::expect %27: bool
-//   %29: i64 = const 2
-//   %30: std::fs::DirEntry = call.std::array::Array.get_or_panic.std_3a_3afs_3a_3aDirEntry %4: std::array::Array<std::fs::DirEntry>, %29: i64
-//   %31: []u8 = const "nested"
-//   %32: []u8 = field.name %30: std::fs::DirEntry
-//   test.expect_equal %31: []u8, %32: []u8, []u8
-//   %34: bool = field.is_dir %30: std::fs::DirEntry
-//   call.std::testing::expect %34: bool
-//   array.deinit %4: std::array::Array<std::fs::DirEntry>, %5: Allocator
-//   %37: !void = error.ok
-//   return %37: !void
+//   %11: ?&std::fs::DirEntry = call.std::array::Array.at.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %10: i64
+//   %12: &std::fs::DirEntry = opt.value %11: ?&std::fs::DirEntry
+//   %13: bool = opt.has %11: ?&std::fs::DirEntry
+//   branch %13: bool, if.then.1, if.else.2
+// if.then.1:
+//   %14: std::string::String = field.ref.name %12: &std::fs::DirEntry
+//   %15: []u8 = call.std::string::String.as_bytes %14: std::string::String
+//   %16: std::string::String = field.ref.path %12: &std::fs::DirEntry
+//   %17: []u8 = call.std::string::String.as_bytes %16: std::string::String
+//   %18: []u8 = const "alpha.txt"
+//   test.expect_equal %18: []u8, %15: []u8, []u8
+//   %20: []u8 = const "examples/fixtures/read_dir/alpha.txt"
+//   test.expect_equal %20: []u8, %17: []u8, []u8
+//   %22: bool = field.ref.is_dir %12: &std::fs::DirEntry
+//   %23: bool = unary.! %22: bool
+//   call.std::testing::expect %23: bool
+//   jump if.end.3
+// if.else.2:
+//   %25: []u8 = const "missing first directory entry"
+//   call.std::testing::fail %25: []u8
+//   jump if.end.3
+// if.end.3:
+//   %27: i64 = const 1
+//   %28: ?&std::fs::DirEntry = call.std::array::Array.at.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %27: i64
+//   %29: &std::fs::DirEntry = opt.value %28: ?&std::fs::DirEntry
+//   %30: bool = opt.has %28: ?&std::fs::DirEntry
+//   branch %30: bool, if.then.4, if.else.5
+// if.then.4:
+//   %31: std::string::String = field.ref.name %29: &std::fs::DirEntry
+//   %32: []u8 = call.std::string::String.as_bytes %31: std::string::String
+//   %33: []u8 = const "beta.txt"
+//   test.expect_equal %33: []u8, %32: []u8, []u8
+//   %35: bool = field.ref.is_dir %29: &std::fs::DirEntry
+//   %36: bool = unary.! %35: bool
+//   call.std::testing::expect %36: bool
+//   jump if.end.6
+// if.else.5:
+//   %38: []u8 = const "missing second directory entry"
+//   call.std::testing::fail %38: []u8
+//   jump if.end.6
+// if.end.6:
+//   %40: i64 = const 2
+//   %41: ?&std::fs::DirEntry = call.std::array::Array.at.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %40: i64
+//   %42: &std::fs::DirEntry = opt.value %41: ?&std::fs::DirEntry
+//   %43: bool = opt.has %41: ?&std::fs::DirEntry
+//   branch %43: bool, if.then.7, if.else.8
+// if.then.7:
+//   %44: std::string::String = field.ref.name %42: &std::fs::DirEntry
+//   %45: []u8 = call.std::string::String.as_bytes %44: std::string::String
+//   %46: []u8 = const "nested"
+//   test.expect_equal %46: []u8, %45: []u8, []u8
+//   %48: bool = field.ref.is_dir %42: &std::fs::DirEntry
+//   call.std::testing::expect %48: bool
+//   jump if.end.9
+// if.else.8:
+//   %50: []u8 = const "missing third directory entry"
+//   call.std::testing::fail %50: []u8
+//   jump if.end.9
+// if.end.9:
+//   call.std::array::Array.deinit.std_3a_3afs_3a_3aDirEntry %5: std::array::Array<std::fs::DirEntry>, %1: Allocator
+//   %53: !void = error.ok
+//   return %53: !void
 // }

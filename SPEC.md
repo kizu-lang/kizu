@@ -2970,7 +2970,7 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::fs::read_file(io, allocator, path, limit)` は `!std::string::String` を返す。
   `limit: std::mem::Limit` で確保上限を明示する。超過は
   `std::fs::Error::LimitExceeded` で、`OutOfMemory`(確保失敗)とは分ける
-* `std::fs::read_file_into(io, path, out: &var std::string::String)` は `!void` を
+* `std::fs::read_file_into(io, allocator, path, out: &var std::string::String)` は `!void` を
   返し、fs 側では確保しない
 * `std::fs::real_path(io, allocator, path)` は `!std::string::String` を返す。
   symlink と `.` / `..` を実体へ解決するため path が存在する必要がある
@@ -2978,7 +2978,9 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
 * `std::fs::exists(io, path)` は `!bool` を返す
 * `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
-* `std::fs::read_dir(io, path)` は `!std::array::Array<std::fs::DirEntry>` を返す。
+* `std::fs::read_dir(io, allocator, path)` は
+  `!std::array::Array<std::fs::DirEntry>` を返す。Array と各 entry の `name` / `path`
+  は caller が所有し、同じ allocator を渡す `deinit` でまとめて解放する。
   entry は name の byte 順に並ぶ。file system が返す順は host ごとに違うので、
   同じ directory がどこでも同じ listing になるよう並べ替える
 * `std::fs::create_dir(io, path)` は `!void` を返す
@@ -2986,7 +2988,8 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::fs::remove_file(io, path)` は `!void` を返す
 * `std::fs::rename(io, from, to)` は `!void` を返す
 * `std::fs::Metadata` は `size: i64` と `is_dir: bool` だけを持つ
-* `std::fs::DirEntry` は `name: []u8`、`path: []u8`、`is_dir: bool` だけを持つ
+* `std::fs::DirEntry` は `name: std::string::String`、
+  `path: std::string::String`、`is_dir: bool` だけを持つ owner 型
 * `path` と `bytes` は caller 側の `[]u8` を保持しない read-only borrow
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない

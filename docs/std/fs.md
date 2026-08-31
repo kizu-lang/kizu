@@ -4,7 +4,11 @@ file system 操作を明示的な `Io` capability 経由で扱う module です�
 し得るので、すべて `std::fs::Error!T` を返します。
 
 ```kizu
-pub struct DirEntry { pub name: []u8, pub path: []u8, pub is_dir: bool }
+pub struct DirEntry {
+    pub name: std::string::String,
+    pub path: std::string::String,
+    pub is_dir: bool,
+}
 pub struct Metadata { pub size: i64, pub is_dir: bool }
 
 pub fn read_file(
@@ -18,7 +22,7 @@ pub fn write_file(io: Io, path: &[]u8, bytes: &[]u8) -> std::fs::Error!void
 pub fn exists(io: Io, path: &[]u8) -> std::fs::Error!bool
 pub fn metadata(io: Io, path: &[]u8) -> std::fs::Error!std::fs::Metadata
 pub fn real_path(io: Io, allocator: Allocator, path: &[]u8) -> std::fs::Error!std::string::String
-pub fn read_dir(io: Io, path: &[]u8) -> std::fs::Error!std::array::Array<std::fs::DirEntry>
+pub fn read_dir(io: Io, allocator: Allocator, path: &[]u8) -> std::fs::Error!std::array::Array<std::fs::DirEntry>
 pub fn rename(io: Io, from: &[]u8, to: &[]u8) -> std::fs::Error!void
 pub fn create_dir(io: Io, path: &[]u8) -> std::fs::Error!void
 pub fn remove_dir(io: Io, path: &[]u8) -> std::fs::Error!void
@@ -40,7 +44,10 @@ fs は自分の storage を持ちません。
 `read_dir` は entry を **name 順**で並べた `Array<DirEntry>` として返します。
 host の `readdir` が返す順は file system 次第で 2 台の間で食い違うので、順序を
 ここで確定させています。返る Array は caller が所有するので `deinit` が要り、
-`DirEntry` の `name` と `path` はその Array の storage を指す view です。
+各 `DirEntry` の `name` と `path` も owned `String` です。`read_dir` に渡したものと
+同じ allocator で `entries.deinit(allocator)` すると、entry の文字列と Array storage を
+まとめて解放します。読むときは `entries.at(index)` で entry を borrow し、
+`entry.name.as_bytes()` / `entry.path.as_bytes()` で view を得ます。
 
 `wasm32-wasi` では path は host が最初に preopen した directory からの相対 path
 として解決します。compiler 自身は directory を公開しません。preopen が無い場合や

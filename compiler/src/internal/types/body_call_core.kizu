@@ -544,11 +544,7 @@ fn (self: &var Checker) check_fs_builtin(
     }
     if mem::equal_bytes(name, "std::internal::builtin::fs_read_dir") {
         handled.* = true;
-        if try self.check_fs_path_args(tree, scope, "std::fs::read_dir", args) |problem| {
-            return move problem;
-        }
-        out.* = try self.types.intern("std::fs::Error!std::array::Array<std::fs::DirEntry>");
-        return null;
+        return self.check_fs_read_dir(tree, scope, args, out);
     }
     if mem::equal_bytes(name, "std::internal::builtin::fs_create_dir") or
         mem::equal_bytes(name, "std::internal::builtin::fs_remove_dir") or
@@ -749,6 +745,42 @@ fn (self: &var Checker) check_fs_path_args(
     if !self.types.is_text(path, "[]u8") {
         return try self.fs_bytes_arg_error(name, "path", path);
     }
+    return null;
+}
+
+fn (self: &var Checker) check_fs_read_dir(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let name = "std::fs::read_dir";
+    if args.len(tree) != 3 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::fs::read_dir` expects io, allocator, and path"
+        );
+    }
+    let io_arg = args.get_or_panic(tree, 0);
+    if try self.check_io_arg(tree, scope, io_arg, name) |problem| {
+        return move problem;
+    }
+    let allocator_arg = args.get_or_panic(tree, 1);
+    if try self.check_core_arg(
+        tree, scope, name, 1, stdprim::ArgKind::Allocator, allocator_arg
+    ) |problem| {
+        return move problem;
+    }
+    var path = empty_type();
+    let path_arg = args.get_or_panic(tree, 2);
+    if try self.check_expr(tree, scope, path_arg, &var path) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(path, "[]u8") {
+        return try self.fs_bytes_arg_error(name, "path", path);
+    }
+    out.* = try self.types.intern("std::fs::Error!std::array::Array<std::fs::DirEntry>");
     return null;
 }
 

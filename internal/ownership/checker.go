@@ -4957,8 +4957,7 @@ func (c *Checker) checkFsBuiltin(
 	case "std::internal::builtin::fs_metadata":
 		return c.checkFsPathOnly("std::fs::metadata", args, env, "std::fs::Error!std::fs::Metadata")
 	case "std::internal::builtin::fs_read_dir":
-		return c.checkFsPathOnly("std::fs::read_dir", args, env,
-			"std::fs::Error!std::array::Array<std::fs::DirEntry>")
+		return c.checkFsReadDir(args, env)
 	case "std::internal::builtin::fs_create_dir",
 		"std::internal::builtin::fs_remove_dir",
 		"std::internal::builtin::fs_remove_file":
@@ -4968,6 +4967,32 @@ func (c *Checker) checkFsBuiltin(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkFsReadDir validates the explicit allocator and borrowed path without
+// moving either capability into the returned directory entries.
+func (c *Checker) checkFsReadDir(
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	const name = "std::fs::read_dir"
+	if len(args) != 3 {
+		return "", true, errorf("move error: `%s` expects io, allocator, and path", name)
+	}
+	if err := c.checkIoArg(args[0], env, name); err != nil {
+		return "", true, err
+	}
+	if err := c.checkCoreArg(name, 1, stdprim.ArgAllocator, args[1], env); err != nil {
+		return "", true, err
+	}
+	path, err := c.readExpr(args[2], env)
+	if err != nil {
+		return "", true, err
+	}
+	if !sameOwnershipType(path, "[]u8") {
+		return "", true, errorf("move error: `%s` expects []u8 path, got %s", name, path)
+	}
+	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, nil
 }
 
 // checkStringOutArg reads a &var std::string::String destination argument
@@ -6413,7 +6438,7 @@ func readFsMetadataFieldType(field string) (string, bool) {
 func readFsDirEntryFieldType(field string) (string, bool) {
 	switch field {
 	case "name", "path":
-		return "[]u8", true
+		return "std::string::String", true
 	case "is_dir":
 		return "bool", true
 	default:
@@ -8987,7 +9012,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	switch typeName {
-	case "bool", "void", "Io", "Allocator", "std::fs::Metadata", "std::fs::DirEntry",
+	case "bool", "void", "Io", "Allocator", "std::fs::Metadata",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64", "[]u8":
 		return true
