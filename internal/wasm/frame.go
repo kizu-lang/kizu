@@ -20,6 +20,10 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 	frame := &frameLayout{slots: map[string]int{}}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			if mapInstrNeedsTemp(instr.Op) {
+				frame.allocate(mapTempSlotKey(instr.Result.Name),
+					wasmLayout{size: mapTempSize, align: 8})
+			}
 			if e.isMemoryType(instr.Result.Type) && instr.Op != "phi" {
 				layout, err := e.typeLayout(instr.Result.Type)
 				if err != nil {

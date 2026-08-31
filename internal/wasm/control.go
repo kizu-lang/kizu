@@ -82,7 +82,8 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 // isTaggedOwnerOp reports whether an operation uses a generic value runtime.
 func isTaggedOwnerOp(op string) bool {
 	return strings.HasPrefix(op, "opt.") || strings.HasPrefix(op, "error.") ||
-		strings.HasPrefix(op, "array.") || strings.HasPrefix(op, "box.") ||
+		strings.HasPrefix(op, "array.") || strings.HasPrefix(op, "map.") ||
+		strings.HasPrefix(op, "box.") ||
 		strings.HasPrefix(op, "arena.")
 }
 
@@ -90,6 +91,9 @@ func isTaggedOwnerOp(op string) bool {
 func (e *emitter) writeTaggedOwnerInstr(instr *ir.Instr) error {
 	if strings.HasPrefix(instr.Op, "array.") {
 		return e.writeArrayInstr(instr)
+	}
+	if strings.HasPrefix(instr.Op, "map.") {
+		return e.writeMapInstr(instr)
 	}
 	if strings.HasPrefix(instr.Op, "box.") {
 		return e.writeBoxInstr(instr)

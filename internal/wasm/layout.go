@@ -90,6 +90,9 @@ func (e *emitter) directLayout(typ string) (wasmLayout, bool) {
 	if isArrayWasmType(typ) {
 		return wasmLayout{size: arrayHeaderSize, align: 8}, true
 	}
+	if isMapWasmType(typ) {
+		return wasmLayout{size: mapHeaderSize, align: 8}, true
+	}
 	if isArenaWasmType(typ) {
 		return wasmLayout{size: arenaHeaderSize, align: 8}, true
 	}
@@ -135,6 +138,9 @@ func (e *emitter) isMemoryType(typ string) bool {
 		return true
 	}
 	if isArrayWasmType(typ) {
+		return true
+	}
+	if isMapWasmType(typ) {
 		return true
 	}
 	if isArenaWasmType(typ) {

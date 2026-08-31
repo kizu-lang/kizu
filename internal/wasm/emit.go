@@ -286,6 +286,9 @@ func (e *emitter) writeRuntime() {
 	if e.usesAllocatorRuntime() {
 		e.writeAllocatorRuntime()
 	}
+	if e.usesMapRuntime() {
+		e.writeMapRuntime()
+	}
 	if e.usesArenaOriginRuntime() {
 		e.writeArenaRuntime()
 	}

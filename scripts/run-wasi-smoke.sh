@@ -118,6 +118,24 @@ run_example "arena_allocator_refusal" \
   "examples/arena_add_recovers_from_a_full_allocator.kizu" \
   "-1
 the buffer ran out, and the program chose what to do"
+run_example "std_map" "examples/std_map.kizu" "true
+main
+1
+2"
+run_example "std_map_integer_key" "examples/std_map_integer_key.kizu" "101
+3
+205
+2
+377
+1"
+run_example "std_map_owner_value" "examples/std_map_owner_value.kizu" "alice
+first
+last
+smithson"
+run_example "map_allocator_refusal" \
+  "examples/map_insert_recovers_from_a_full_allocator.kizu" \
+  "-1
+the buffer ran out, and the program chose what to do"
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.
@@ -134,6 +152,9 @@ run_failure "arena_handle_from_another_instance" \
   "runtime error: invalid arena handle" \
   "1
 2"
+run_failure "std_map_owner_value_overwrite" \
+  "examples/std_map_owner_value_overwrite.kizu" \
+  "runtime error: std::map::Map: insert would drop the owner value already stored for this key"
 run_failure "testing_fail" \
   "examples/negative/std_testing_run_fail.kizu" \
   "runtime error: custom failure"

@@ -117,6 +117,8 @@ func (e *emitter) collectPanicKinds() {
 					e.panicKinds["bounds"] = true
 				case "array.pop_or_panic":
 					e.panicKinds["array_empty"] = true
+				case "map.take_value_at":
+					e.panicKinds["bounds"] = true
 				case "arena.new":
 					e.panicKinds["arena_instances"] = true
 				case "arena.add":
