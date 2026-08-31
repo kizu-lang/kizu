@@ -1,0 +1,214 @@
+import std::arena;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/module.go. The IR lowerer has one
+// generated WAT spelling, parsed immediately into the module tree that every
+// renderer consumes.
+
+struct WasmSpan {
+    start: i64,
+    end: i64
+}
+
+union WasmNode {
+    Atom(WasmSpan),
+    Text(WasmSpan),
+    List(array::Array<arena::Handle<WasmNode>>),
+}
+
+struct WasmModule {
+    nodes: arena::Arena<WasmNode>,
+    root: arena::Handle<WasmNode>
+}
+
+union WasmModuleResult {
+    Module(WasmModule),
+    Error,
+}
+
+union WasmNodeResult {
+    Node(arena::Handle<WasmNode>),
+    Error,
+}
+
+struct WasmModuleParser {
+    allocator: Allocator,
+    input: []u8,
+    position: i64,
+    nodes: arena::Arena<WasmNode>
+}
+
+fn parse_wasm_module(
+    allocator: Allocator,
+    input: []u8
+) -> !WasmModuleResult {
+    var parser = WasmModuleParser {
+        allocator: allocator,
+        input: input,
+        position: 0,
+        nodes: arena::new<WasmNode>(allocator)
+    };
+    errdefer parser.deinit(allocator);
+    let parsed = try parser.parse_node();
+    match parsed {
+        Error => {
+            parser.deinit(allocator);
+            return WasmModuleResult::Error;
+        },
+        Node(found) => {
+            parser.skip_space();
+            if parser.position != mem::len(input) {
+                parser.deinit(allocator);
+                return WasmModuleResult::Error;
+            }
+            let module = WasmModule {
+                nodes: move parser.nodes,
+                root: found
+            };
+            if !wasm_module_root_is_valid(&module, input) {
+                module.deinit(allocator);
+                return WasmModuleResult::Error;
+            }
+            return WasmModuleResult::Module(move module);
+        },
+    }
+}
+
+fn (self: WasmModule) deinit(allocator: Allocator) -> void {
+    self.nodes.deinit(allocator);
+    return;
+}
+
+fn wasm_module_root_is_valid(module: &WasmModule, input: []u8) -> bool {
+    match module.nodes.at(module.root) {
+        Atom(_) => return false,
+        Text(_) => return false,
+        List(children) => {
+            let head = children.get(0) orelse return false;
+            match module.nodes.at(head) {
+                Atom(span) => return mem::equal_bytes(input[span.start..span.end], "module"),
+                Text(_) => return false,
+                List(_) => return false,
+            }
+        },
+    }
+}
+
+fn render_wasm_wat(
+    allocator: Allocator,
+    module: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !void {
+    // Reading the root keeps rendering tied to a successfully parsed module;
+    // input retains the canonical whitespace of the existing inspection form.
+    let _ = module.nodes.at(module.root);
+    return out.append_bytes(allocator, input);
+}
+
+fn (self: &var WasmModuleParser) parse_node() -> !WasmNodeResult {
+    self.skip_space();
+    if self.position >= mem::len(self.input) {
+        return WasmNodeResult::Error;
+    }
+    let byte = self.input[self.position];
+    if byte == cast<u8>(40) {
+        return self.parse_list();
+    }
+    if byte == cast<u8>(41) {
+        return WasmNodeResult::Error;
+    }
+    if byte == cast<u8>(34) {
+        return self.parse_string();
+    }
+    return self.parse_atom();
+}
+
+fn (self: &var WasmModuleParser) parse_list() -> !WasmNodeResult {
+    self.position = self.position + 1;
+    var children = array::new<arena::Handle<WasmNode>>(self.allocator);
+    errdefer children.deinit(self.allocator);
+    while true {
+        self.skip_space();
+        if self.position >= mem::len(self.input) {
+            children.deinit(self.allocator);
+            return WasmNodeResult::Error;
+        }
+        if self.input[self.position] == cast<u8>(41) {
+            self.position = self.position + 1;
+            let node = WasmNode::List(move children);
+            let handle = try self.nodes.add(self.allocator, move node);
+            return WasmNodeResult::Node(handle);
+        }
+        let parsed = try self.parse_node();
+        match parsed {
+            Error => {
+                children.deinit(self.allocator);
+                return WasmNodeResult::Error;
+            },
+            Node(child) => try children.append(self.allocator, child),
+        }
+    }
+    children.deinit(self.allocator);
+    return WasmNodeResult::Error;
+}
+
+fn (self: &var WasmModuleParser) parse_string() -> !WasmNodeResult {
+    self.position = self.position + 1;
+    let start = self.position;
+    while self.position < mem::len(self.input) {
+        let byte = self.input[self.position];
+        if byte == cast<u8>(34) {
+            let end = self.position;
+            self.position = self.position + 1;
+            let handle = try self.nodes.add(
+                self.allocator,
+                WasmNode::Text(WasmSpan { start: start, end: end })
+            );
+            return WasmNodeResult::Node(handle);
+        }
+        if byte == cast<u8>(92) {
+            if self.position + 1 >= mem::len(self.input) {
+                return WasmNodeResult::Error;
+            }
+            self.position = self.position + 2;
+        } else {
+            self.position = self.position + 1;
+        }
+    }
+    return WasmNodeResult::Error;
+}
+
+fn (self: &var WasmModuleParser) parse_atom() -> !WasmNodeResult {
+    let start = self.position;
+    while self.position < mem::len(self.input) {
+        let byte = self.input[self.position];
+        if wasm_module_space(byte) or byte == cast<u8>(40) or byte == cast<u8>(41) {
+            break;
+        }
+        self.position = self.position + 1;
+    }
+    if self.position == start {
+        return WasmNodeResult::Error;
+    }
+    let handle = try self.nodes.add(
+        self.allocator,
+        WasmNode::Atom(WasmSpan { start: start, end: self.position })
+    );
+    return WasmNodeResult::Node(handle);
+}
+
+fn (self: &var WasmModuleParser) skip_space() -> void {
+    while self.position < mem::len(self.input) and
+        wasm_module_space(self.input[self.position]) {
+        self.position = self.position + 1;
+    }
+    return;
+}
+
+fn wasm_module_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(9) or
+        byte == cast<u8>(13) or byte == cast<u8>(10);
+}

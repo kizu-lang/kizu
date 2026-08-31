@@ -16,8 +16,17 @@ const (
 	dataOffset    = 4096
 )
 
-// Emit formats a typed SSA IR module as WASI-compatible WebAssembly text.
+// Emit lowers a typed SSA IR module once and renders its WASI-compatible WAT.
 func Emit(module *ir.Module) (string, error) {
+	lowered, err := Lower(module)
+	if err != nil {
+		return "", err
+	}
+	return lowered.WAT(), nil
+}
+
+// Lower builds the common WebAssembly module consumed by every renderer.
+func Lower(module *ir.Module) (*Module, error) {
 	paramsByFunction := make(map[string][]ir.Param, len(module.Functions))
 	for _, fn := range module.Functions {
 		paramsByFunction[fn.Name] = fn.Params
@@ -35,9 +44,9 @@ func Emit(module *ir.Module) (string, error) {
 		signatureIndex:   map[string]int{},
 	}
 	if err := e.emit(); err != nil {
-		return "", err
+		return nil, err
 	}
-	return strings.TrimRight(e.out.String(), "\n"), nil
+	return parseModule(strings.TrimRight(e.out.String(), "\n"))
 }
 
 type dataRef struct {

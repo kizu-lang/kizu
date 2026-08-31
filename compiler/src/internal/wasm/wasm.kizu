@@ -34,9 +34,8 @@ fn data_offset() -> i64 {
     return 4096;
 }
 
-/// Formats a typed SSA IR module as WASI-compatible WebAssembly text, the Go
-/// `Emit`: the text goes to out, and a failure comes back as one diagnostic
-/// reading `wasm error: ...`.
+/// Lowers typed SSA IR once and renders its WASI-compatible WAT, the Go
+/// `Emit`: the text goes to out, and a failure comes back as one diagnostic.
 pub fn emit(
     allocator: Allocator,
     module: &ir::Module,
@@ -80,8 +79,15 @@ pub fn emit(
         try emitter.out.truncate(emitter.out.len() - 1);
     }
     let text = emitter.out.as_bytes();
-    try out.append_bytes(allocator, text);
-    return null;
+    let parsed = try parse_wasm_module(allocator, text);
+    match parsed {
+        Error => return try emitter.fail0("wasm error: invalid generated WAT"),
+        Module(lowered) => {
+            defer lowered.deinit(allocator);
+            try render_wasm_wat(allocator, &lowered, text, out);
+            return null;
+        },
+    }
 }
 
 /// Reports whether the last byte of a text is byte, the Go `strings.TrimRight`
