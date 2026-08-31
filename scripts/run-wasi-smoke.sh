@@ -103,6 +103,10 @@ run_example "optional_error_flow" "examples/optional_error_flow.kizu" "7
 1
 42
 -2"
+run_example "std_mem_box_take" "examples/std_mem_box_take.kizu" "payload"
+run_example "std_mem_box_ast" "examples/std_mem_box_ast.kizu" ""
+run_example "std_mem_box_cleanup" "examples/std_mem_box_cleanup.kizu" "42
+7"
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.

@@ -90,6 +90,9 @@ func (e *emitter) directLayout(typ string) (wasmLayout, bool) {
 	if isArrayWasmType(typ) {
 		return wasmLayout{size: arrayHeaderSize, align: 8}, true
 	}
+	if isBoxWasmType(typ) {
+		return wasmLayout{size: 4, align: 4}, true
+	}
 	return wasmLayout{}, false
 }
 

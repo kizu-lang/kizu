@@ -46,6 +46,19 @@ func (e *emitter) errorUnionParts(name string) (string, string, bool) {
 	return typ.Text(errorType), typ.Text(success), ok
 }
 
+// wasmErrorCode returns one declaration-owned global error code.
+func (e *emitter) wasmErrorCode(errorSet string, member string) (int, error) {
+	set, exists := e.module.ErrorSets[errorSet]
+	if !exists {
+		return 0, fmt.Errorf("wasm error: failure needs error set `%s`", errorSet)
+	}
+	code, exists := set.Tags[member]
+	if !exists {
+		return 0, fmt.Errorf("wasm error: error set `%s` has no member `%s`", errorSet, member)
+	}
+	return code, nil
+}
+
 // taggedTypeLayoutVisiting computes an optional or error-union layout and
 // reports false when typ is not one of those tagged values.
 func (e *emitter) taggedTypeLayoutVisiting(

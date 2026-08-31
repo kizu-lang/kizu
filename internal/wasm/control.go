@@ -72,8 +72,8 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "slice."):
 		return e.writeSliceInstr(instr)
-	case isTaggedOrArrayOp(instr.Op):
-		return e.writeTaggedOrArrayInstr(instr)
+	case isTaggedArrayOrBoxOp(instr.Op):
+		return e.writeTaggedArrayOrBoxInstr(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
 		instr.Op == "arena.at" || instr.Op == "arena.len" ||
 		instr.Op == "arena.pop_or_panic" || instr.Op == "arena.deinit":
@@ -83,16 +83,19 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 	}
 }
 
-// isTaggedOrArrayOp reports whether an operation uses a generic value runtime.
-func isTaggedOrArrayOp(op string) bool {
+// isTaggedArrayOrBoxOp reports whether an operation uses a generic value runtime.
+func isTaggedArrayOrBoxOp(op string) bool {
 	return strings.HasPrefix(op, "opt.") || strings.HasPrefix(op, "error.") ||
-		strings.HasPrefix(op, "array.")
+		strings.HasPrefix(op, "array.") || strings.HasPrefix(op, "box.")
 }
 
-// writeTaggedOrArrayInstr selects the tagged-value or Array runtime.
-func (e *emitter) writeTaggedOrArrayInstr(instr *ir.Instr) error {
+// writeTaggedArrayOrBoxInstr selects the tagged-value or owner runtime.
+func (e *emitter) writeTaggedArrayOrBoxInstr(instr *ir.Instr) error {
 	if strings.HasPrefix(instr.Op, "array.") {
 		return e.writeArrayInstr(instr)
+	}
+	if strings.HasPrefix(instr.Op, "box.") {
+		return e.writeBoxInstr(instr)
 	}
 	return e.writeTaggedInstr(instr)
 }

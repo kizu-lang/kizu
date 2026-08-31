@@ -1,0 +1,320 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/box.go. A Box value is the wasm32 address
+// of its payload-only cell; allocation and release use the allocator named by
+// the source operation rather than storing one in the cell.
+
+fn is_box_wasm_type(name: []u8) -> bool {
+    return mem::starts_with(name, "std::mem::Box<") and ir::ends_with_bytes(name, ">");
+}
+
+fn box_element_wasm_type(name: []u8) -> ?[]u8 {
+    if !is_box_wasm_type(name) {
+        return null;
+    }
+    return name[14..mem::len(name) - 1];
+}
+
+fn is_wasm_box_op(op: ir::Op) -> bool {
+    return match op {
+        BoxNew => true,
+        BoxBorrow => true,
+        BoxBorrowMut => true,
+        BoxDeinit => true,
+        BoxTake => true,
+        _ => false,
+    };
+}
+
+fn (self: &Emitter) uses_box_runtime(module: &ir::Module) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if is_wasm_box_op(node.op) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn (self: &var Emitter) write_box_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    match node.op {
+        BoxNew => return self.write_box_new(module, node),
+        BoxBorrow => return self.write_box_borrow(module, node),
+        BoxBorrowMut => return self.write_box_borrow(module, node),
+        BoxDeinit => return self.write_box_deinit(module, node),
+        BoxTake => return self.write_box_take(module, node),
+        _ => return try self.fail_op(
+            module,
+            node,
+            "wasm error: unsupported box instruction `%s`"
+        ),
+    }
+}
+
+fn (self: &var Emitter) box_element_layout(
+    module: &ir::Module,
+    type_name: ir::Name,
+    out: &var string::String
+) -> !WasmLayoutResult {
+    let retained = ir::name_text(&module.names, type_name);
+    let spelling = retained.as_bytes();
+    if box_element_wasm_type(spelling) |elem| {
+        try out.append_bytes(self.allocator, elem);
+        return self.type_layout_bytes(module, elem);
+    }
+    return WasmLayoutResult::Error(try self.fail0("wasm error: expected Box<T>"));
+}
+
+fn (self: &var Emitter) box_expr1(format: []u8, a: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        Arg::None,
+        Arg::None,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) box_expr2(format: []u8, a: Arg, b: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        move b,
+        Arg::None,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) write_box_new(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "Allocator") {
+        return try self.fail0("wasm error: box.new expects allocator, T -> !Box<T>");
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let parts = try self.error_union_parts(result_type) orelse
+        return try self.fail0("wasm error: box.new expects allocator, T -> !Box<T>");
+    defer parts.deinit(self.allocator);
+    let error_set = parts.err.as_bytes();
+    let box_type = parts.success.as_bytes();
+    if !mem::equal_bytes(error_set, "std::mem::Error") {
+        return try self.fail0("wasm error: box.new expects allocator, T -> !Box<T>");
+    }
+    var elem_text = string::new(self.allocator);
+    defer elem_text.deinit(self.allocator);
+    if box_element_wasm_type(box_type) |found| {
+        try elem_text.append_bytes(self.allocator, found);
+    } else {
+        return try self.fail0("wasm error: box.new expects allocator, T -> !Box<T>");
+    }
+    let elem = elem_text.as_bytes();
+    let value = node.args.get_or_panic(1);
+    if !module.names.is(value.type_name, elem) {
+        return try self.fail0("wasm error: box.new expects allocator, T -> !Box<T>");
+    }
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.type_layout_bytes(module, elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    if !module.error_sets.contains(error_set) {
+        let shown = try self.names.intern(error_set);
+        return try self.fail(
+            "wasm error: failure needs error set `%s`",
+            Arg::Str(shown)
+        );
+    }
+    let shown_error_set = try self.names.intern(error_set);
+    let code = wasm_error_code(module, error_set, "OutOfMemory") orelse return try self.fail(
+        "wasm error: error set `%s` has no member `OutOfMemory`",
+        Arg::Str(shown_error_set)
+    );
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, box_type, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for tagged result");
+    let cell = try self.address_at(slot, payload_offset);
+    var allocation = try self.names.intern("(i32.const 0)");
+    if layout.size > 0 {
+        let allocator = try self.value_of(module, node.args.get_or_panic(0));
+        allocation = try self.box_expr2(
+            "(call $__allocator_alloc %s (i32.const %d))",
+            Arg::Str(allocator.expr),
+            Arg::Int(layout.size)
+        );
+    }
+    try self.line2(
+        "            (i32.store %s %s)",
+        Arg::Str(cell),
+        Arg::Str(allocation)
+    );
+    try self.line2(
+        "            (i64.store %s (i64.extend_i32_u (i32.ne (i32.load %s) (i32.const 0))))",
+        Arg::Str(slot),
+        Arg::Str(cell)
+    );
+    try self.line1("            (if (i32.load %s)", Arg::Str(cell));
+    try self.line("              (then");
+    let payload = try self.box_expr1("(i32.load %s)", Arg::Str(cell));
+    let info = try self.value_of(module, value);
+    if try self.write_store_value(module, payload, 0, value.type_name, info) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
+    try self.line2(
+        "              (else (i64.store %s (i64.const %d))))",
+        Arg::Str(cell),
+        Arg::Int(code)
+    );
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+fn (self: &var Emitter) write_box_borrow(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail_op(module, node, "wasm error: %s expects Box<T> -> &T");
+    }
+    let source = node.args.get_or_panic(0);
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    let measured = try self.box_element_layout(module, source.type_name, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(_) => {},
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let elem_bytes = elem.as_bytes();
+    let box = try self.value_of(module, source);
+    if is_wasm_reference_type(result_type) {
+        let direct = deref_wasm_type(result_type);
+        if !mem::equal_bytes(direct, elem_bytes) {
+            return try self.fail_op(module, node, "wasm error: %s expects Box<T> -> &T");
+        }
+        return self.write_scalar_result(module, node.result, box.expr);
+    }
+    if !module.names.is(node.result.type_name, elem_bytes) {
+        return try self.fail_op(module, node, "wasm error: %s expects Box<T> -> &T");
+    }
+    return self.write_load_value(module, node.result, box.expr, 0);
+}
+
+fn (self: &var Emitter) write_box_deinit(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: box.deinit expects Box<T>, Allocator -> void");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.box_element_layout(
+        module,
+        node.args.get_or_panic(0).type_name,
+        &var elem
+    );
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    if layout.size > 0 {
+        let box = try self.value_of(module, node.args.get_or_panic(0));
+        let allocator = try self.value_of(module, node.args.get_or_panic(1));
+        try self.line3(
+            "            (call $__allocator_free %s %s (i32.const %d))",
+            Arg::Str(allocator.expr),
+            Arg::Str(box.expr),
+            Arg::Int(layout.size)
+        );
+    }
+    return null;
+}
+
+fn (self: &var Emitter) write_box_take(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") {
+        return try self.fail0("wasm error: box.take expects Box<T>, Allocator -> T");
+    }
+    let source = node.args.get_or_panic(0);
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.box_element_layout(module, source.type_name, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let elem_bytes = elem.as_bytes();
+    if !module.names.is(node.result.type_name, elem_bytes) {
+        return try self.fail0("wasm error: box.take expects Box<T>, Allocator -> T");
+    }
+    let box = try self.value_of(module, source);
+    if try self.write_load_value(module, node.result, box.expr, 0) |failed| {
+        return move failed;
+    }
+    if layout.size > 0 {
+        let allocator = try self.value_of(module, node.args.get_or_panic(1));
+        try self.line3(
+            "            (call $__allocator_free %s %s (i32.const %d))",
+            Arg::Str(allocator.expr),
+            Arg::Str(box.expr),
+            Arg::Int(layout.size)
+        );
+    }
+    return null;
+}

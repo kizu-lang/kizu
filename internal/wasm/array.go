@@ -560,13 +560,9 @@ func (e *emitter) writeArrayErrorResult(
 	errorSet string,
 	member string,
 ) (string, error) {
-	set, exists := e.module.ErrorSets[errorSet]
-	if !exists {
-		return "", fmt.Errorf("wasm error: failure needs error set `%s`", errorSet)
-	}
-	code, exists := set.Tags[member]
-	if !exists {
-		return "", fmt.Errorf("wasm error: error set `%s` has no member `%s`", errorSet, member)
+	code, err := e.wasmErrorCode(errorSet, member)
+	if err != nil {
+		return "", err
 	}
 	_, success, offset, err := e.errorPayloadOffset(result.Type)
 	if err != nil {

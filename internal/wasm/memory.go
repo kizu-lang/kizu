@@ -100,7 +100,8 @@ func (e *emitter) storeOp(typ string) (string, error) {
 	case "Allocator", "Io":
 		return "i32.store", nil
 	}
-	if isReferenceType(typ) || isRawPointerType(typ) || isFunctionPointerType(typ) {
+	if isReferenceType(typ) || isRawPointerType(typ) || isFunctionPointerType(typ) ||
+		isBoxWasmType(typ) {
 		return "i32.store", nil
 	}
 	return "", fmt.Errorf("wasm error: type `%s` cannot be stored in linear memory", typ)
@@ -131,7 +132,8 @@ func (e *emitter) loadOp(typ string) (string, error) {
 	case "Allocator", "Io":
 		return "i32.load", nil
 	}
-	if isReferenceType(typ) || isRawPointerType(typ) || isFunctionPointerType(typ) {
+	if isReferenceType(typ) || isRawPointerType(typ) || isFunctionPointerType(typ) ||
+		isBoxWasmType(typ) {
 		return "i32.load", nil
 	}
 	return "", fmt.Errorf("wasm error: type `%s` cannot be loaded from linear memory", typ)
