@@ -30,6 +30,9 @@ pub fn remove_file(io: Io, path: &[]u8) -> std::fs::Error!void
 いて、入力の方を断ったからです。`read_file_into` は既存の `String` に追記し、
 fs は自分の storage を持ちません。
 
+`write_file` は file が無ければ作成し、あれば内容を置き換えます。host が write を
+途中までしか受理しない場合は残りを続け、進捗が止まった場合は `WriteFailed` です。
+
 `real_path` は symlink と `.` / `..` を file system に対して解決するので、path が
 存在している必要があります。存在を要求しない純粋な正規化は
 [`std::path::clean`](path.md) です。

@@ -4,10 +4,13 @@ import "fmt"
 
 const (
 	fsReadFileIntoBuiltin = "std::internal::builtin::fs_read_file_into"
+	fsWriteFileBuiltin    = "std::internal::builtin::fs_write_file"
 	fsExistsBuiltin       = "std::internal::builtin::fs_exists"
 	fsMetadataBuiltin     = "std::internal::builtin::fs_metadata"
+	fsRenameBuiltin       = "std::internal::builtin::fs_rename"
 	fsCreateDirBuiltin    = "std::internal::builtin::fs_create_dir"
 	fsRemoveDirBuiltin    = "std::internal::builtin::fs_remove_dir"
+	fsRemoveFileBuiltin   = "std::internal::builtin::fs_remove_file"
 	fsErrorSet            = "std::fs::Error"
 
 	fsPreopenFD          = 3
@@ -18,6 +21,8 @@ const (
 
 	wasiLookupSymlinkFollow = 1
 	wasiRightFDRead         = 2
+	wasiRightFDWrite        = 64
+	wasiOpenCreateTruncate  = 9
 	wasiFiletypeDirectory   = 3
 
 	wasiErrnoAccess       = 2
@@ -46,6 +51,7 @@ type fsErrorCodes struct {
 	noSpaceLeft       int
 	tooManyOpenFiles  int
 	readFailed        int
+	writeFailed       int
 	outOfMemory       int
 	operationFailed   int
 	ioFailing         int
@@ -56,10 +62,18 @@ type fsErrorCodes struct {
 // primitive implemented by the current WASI boundary.
 func (e *emitter) usesFSRuntime() bool {
 	return e.usesBuiltinCall(fsReadFileIntoBuiltin) ||
+		e.usesBuiltinCall(fsWriteFileBuiltin) ||
 		e.usesBuiltinCall(fsExistsBuiltin) ||
 		e.usesBuiltinCall(fsMetadataBuiltin) ||
+		e.usesBuiltinCall(fsRenameBuiltin) ||
 		e.usesBuiltinCall(fsCreateDirBuiltin) ||
-		e.usesBuiltinCall(fsRemoveDirBuiltin)
+		e.usesBuiltinCall(fsRemoveDirBuiltin) ||
+		e.usesBuiltinCall(fsRemoveFileBuiltin)
+}
+
+// usesFSOpen reports whether a reached primitive opens a file descriptor.
+func (e *emitter) usesFSOpen() bool {
+	return e.usesBuiltinCall(fsReadFileIntoBuiltin) || e.usesBuiltinCall(fsWriteFileBuiltin)
 }
 
 // usesFSStat reports whether path metadata is needed by a reached primitive.
@@ -74,12 +88,16 @@ func (e *emitter) writeFSImports() {
 	}
 	e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_prestat_get\"\n")
 	e.out.WriteString("    (func $__wasi_fd_prestat_get (param i32 i32) (result i32)))\n")
-	if e.usesBuiltinCall(fsReadFileIntoBuiltin) {
+	if e.usesFSOpen() {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"path_open\"\n")
 		e.out.WriteString("    (func $__wasi_path_open\n")
 		e.out.WriteString("      (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))\n")
+	}
+	if e.usesBuiltinCall(fsReadFileIntoBuiltin) {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_read\"\n")
 		e.out.WriteString("    (func $__wasi_fd_read (param i32 i32 i32 i32) (result i32)))\n")
+	}
+	if e.usesFSOpen() {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_close\"\n")
 		e.out.WriteString("    (func $__wasi_fd_close (param i32) (result i32)))\n")
 	}
@@ -95,6 +113,15 @@ func (e *emitter) writeFSImports() {
 	if e.usesBuiltinCall(fsRemoveDirBuiltin) {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"path_remove_directory\"\n")
 		e.out.WriteString("    (func $__wasi_path_remove_directory (param i32 i32 i32) (result i32)))\n")
+	}
+	if e.usesBuiltinCall(fsRemoveFileBuiltin) {
+		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"path_unlink_file\"\n")
+		e.out.WriteString("    (func $__wasi_path_unlink_file (param i32 i32 i32) (result i32)))\n")
+	}
+	if e.usesBuiltinCall(fsRenameBuiltin) {
+		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"path_rename\"\n")
+		e.out.WriteString("    (func $__wasi_path_rename\n")
+		e.out.WriteString("      (param i32 i32 i32 i32 i32 i32) (result i32)))\n")
 	}
 }
 
@@ -112,6 +139,9 @@ func (e *emitter) writeFSRuntime() error {
 	if e.usesBuiltinCall(fsReadFileIntoBuiltin) {
 		e.writeFSReadFileInto(codes)
 	}
+	if e.usesBuiltinCall(fsWriteFileBuiltin) {
+		e.writeFSWriteFile(codes)
+	}
 	if e.usesBuiltinCall(fsExistsBuiltin) {
 		e.writeFSExists(codes)
 	}
@@ -125,6 +155,13 @@ func (e *emitter) writeFSRuntime() error {
 	if e.usesBuiltinCall(fsRemoveDirBuiltin) {
 		e.writeFSPathVoidBuiltin(
 			fsRemoveDirBuiltin, "$__wasi_path_remove_directory", codes)
+	}
+	if e.usesBuiltinCall(fsRemoveFileBuiltin) {
+		e.writeFSPathVoidBuiltin(
+			fsRemoveFileBuiltin, "$__wasi_path_unlink_file", codes)
+	}
+	if e.usesBuiltinCall(fsRenameBuiltin) {
+		e.writeFSRename(codes)
 	}
 	return nil
 }
@@ -146,6 +183,7 @@ func (e *emitter) loadFSErrorCodes() (fsErrorCodes, error) {
 		{"NoSpaceLeft", &codes.noSpaceLeft},
 		{"TooManyOpenFiles", &codes.tooManyOpenFiles},
 		{"ReadFailed", &codes.readFailed},
+		{"WriteFailed", &codes.writeFailed},
 		{"OutOfMemory", &codes.outOfMemory},
 		{"OperationFailed", &codes.operationFailed},
 		{"IoFailing", &codes.ioFailing},
@@ -356,6 +394,66 @@ func (e *emitter) writeFSReadFailure(code int) {
 	e.writeErrorResult(code, "            ")
 }
 
+// writeFSWriteFile replaces one preopen-relative file and writes every byte.
+func (e *emitter) writeFSWriteFile(codes fsErrorCodes) {
+	fmt.Fprintf(&e.out, "  (func $%s\n", fsWriteFileBuiltin)
+	e.out.WriteString("      (param $out i32) (param $io i32) (param $path i32) (param $bytes i32)\n")
+	e.out.WriteString("    (local $fd i32) (local $errno i32) (local $ptr i32)\n")
+	e.out.WriteString("    (local $remaining i32) (local $written i32)\n")
+	e.writeFSGuard(codes.ioFailing, codes.permissionDenied)
+	e.out.WriteString("    (local.set $errno (call $__wasi_path_open\n")
+	fmt.Fprintf(&e.out,
+		"      (local.get $fd) (i32.const %d) (i32.load (local.get $path))\n",
+		wasiLookupSymlinkFollow)
+	e.out.WriteString("      (i32.load (i32.add (local.get $path) (i32.const 4)))\n")
+	fmt.Fprintf(&e.out,
+		"      (i32.const %d) (i64.const %d) (i64.const 0) (i32.const 0) (i32.const %d)))\n",
+		wasiOpenCreateTruncate, wasiRightFDWrite, fsOpenedFDOffset)
+	e.out.WriteString("    (if (local.get $errno)\n")
+	e.out.WriteString("      (then\n")
+	e.writeFSStoredErrno("        ")
+	e.out.WriteString("        (return)))\n")
+	fmt.Fprintf(&e.out, "    (local.set $fd (i32.load (i32.const %d)))\n", fsOpenedFDOffset)
+	e.out.WriteString("    (local.set $ptr (i32.load (local.get $bytes)))\n")
+	e.out.WriteString("    (local.set $remaining\n")
+	e.out.WriteString("      (i32.load (i32.add (local.get $bytes) (i32.const 4))))\n")
+	e.out.WriteString("    (block $done\n")
+	e.out.WriteString("      (loop $write\n")
+	e.out.WriteString("        (br_if $done (i32.eqz (local.get $remaining)))\n")
+	fmt.Fprintf(&e.out, "        (i32.store (i32.const %d) (local.get $ptr))\n", scratchOffset)
+	fmt.Fprintf(&e.out, "        (i32.store (i32.const %d) (local.get $remaining))\n",
+		scratchOffset+4)
+	e.out.WriteString("        (local.set $errno (call $__wasi_fd_write\n")
+	fmt.Fprintf(&e.out,
+		"          (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))\n",
+		scratchOffset, scratchOffset+16)
+	e.out.WriteString("        (if (local.get $errno)\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSWriteFailure(codes.writeFailed)
+	e.out.WriteString("            (return)))\n")
+	fmt.Fprintf(&e.out, "        (local.set $written (i32.load (i32.const %d)))\n",
+		scratchOffset+16)
+	e.out.WriteString("        (if (i32.or (i32.eqz (local.get $written))\n")
+	e.out.WriteString("            (i32.gt_u (local.get $written) (local.get $remaining)))\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSWriteFailure(codes.writeFailed)
+	e.out.WriteString("            (return)))\n")
+	e.out.WriteString("        (local.set $ptr\n")
+	e.out.WriteString("          (i32.add (local.get $ptr) (local.get $written)))\n")
+	e.out.WriteString("        (local.set $remaining\n")
+	e.out.WriteString("          (i32.sub (local.get $remaining) (local.get $written)))\n")
+	e.out.WriteString("        (br $write)))\n")
+	e.out.WriteString("    (drop (call $__wasi_fd_close (local.get $fd)))\n")
+	e.out.WriteString("    (i64.store (local.get $out) (i64.const 1))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSWriteFailure closes a partially written file before returning error.
+func (e *emitter) writeFSWriteFailure(code int) {
+	e.out.WriteString("            (drop (call $__wasi_fd_close (local.get $fd)))\n")
+	e.writeErrorResult(code, "            ")
+}
+
 // writeFSExists mirrors access-style existence: path errors become false.
 func (e *emitter) writeFSExists(codes fsErrorCodes) {
 	fmt.Fprintf(&e.out, "  (func $%s (param $out i32) (param $io i32) (param $path i32)\n",
@@ -417,6 +515,26 @@ func (e *emitter) writeFSPathVoidBuiltin(
 	fmt.Fprintf(&e.out, "    (local.set $errno (call %s\n", host)
 	e.out.WriteString("      (local.get $fd) (i32.load (local.get $path))\n")
 	e.out.WriteString("      (i32.load (i32.add (local.get $path) (i32.const 4)))))\n")
+	e.out.WriteString("    (if (local.get $errno)\n")
+	e.out.WriteString("      (then\n")
+	e.writeFSStoredErrno("        ")
+	e.out.WriteString("        (return)))\n")
+	e.out.WriteString("    (i64.store (local.get $out) (i64.const 1))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSRename moves one path within the explicitly granted preopen.
+func (e *emitter) writeFSRename(codes fsErrorCodes) {
+	fmt.Fprintf(&e.out,
+		"  (func $%s (param $out i32) (param $io i32) (param $from i32) (param $to i32)\n",
+		fsRenameBuiltin)
+	e.out.WriteString("    (local $fd i32) (local $errno i32)\n")
+	e.writeFSGuard(codes.ioFailing, codes.permissionDenied)
+	e.out.WriteString("    (local.set $errno (call $__wasi_path_rename\n")
+	e.out.WriteString("      (local.get $fd) (i32.load (local.get $from))\n")
+	e.out.WriteString("      (i32.load (i32.add (local.get $from) (i32.const 4)))\n")
+	e.out.WriteString("      (local.get $fd) (i32.load (local.get $to))\n")
+	e.out.WriteString("      (i32.load (i32.add (local.get $to) (i32.const 4)))))\n")
 	e.out.WriteString("    (if (local.get $errno)\n")
 	e.out.WriteString("      (then\n")
 	e.writeFSStoredErrno("        ")

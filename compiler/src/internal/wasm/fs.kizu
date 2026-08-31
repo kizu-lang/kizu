@@ -15,6 +15,7 @@ struct FSErrorCodes {
     no_space_left: i64,
     too_many_open_files: i64,
     read_failed: i64,
+    write_failed: i64,
     out_of_memory: i64,
     operation_failed: i64,
     io_failing: i64,
@@ -27,16 +28,35 @@ fn (self: &Emitter) uses_fs_runtime(module: &ir::Module) -> bool {
         "std::internal::builtin::fs_read_file_into"
     ) or self.uses_builtin_call(
         module,
+        "std::internal::builtin::fs_write_file"
+    ) or self.uses_builtin_call(
+        module,
         "std::internal::builtin::fs_exists"
     ) or self.uses_builtin_call(
         module,
         "std::internal::builtin::fs_metadata"
     ) or self.uses_builtin_call(
         module,
+        "std::internal::builtin::fs_rename"
+    ) or self.uses_builtin_call(
+        module,
         "std::internal::builtin::fs_create_dir"
     ) or self.uses_builtin_call(
         module,
         "std::internal::builtin::fs_remove_dir"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_remove_file"
+    );
+}
+
+fn (self: &Emitter) uses_fs_open(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_read_file_into"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_write_file"
     );
 }
 
@@ -60,7 +80,7 @@ fn (self: &var Emitter) write_fs_imports(module: &ir::Module) -> !void {
     ;
     try self.line(prestat);
     try self.line("    (func $__wasi_fd_prestat_get (param i32 i32) (result i32)))");
-    if self.uses_builtin_call(module, "std::internal::builtin::fs_read_file_into") {
+    if self.uses_fs_open(module) {
         let path_open =
             \\  (import "wasi_snapshot_preview1" "path_open"
         ;
@@ -69,6 +89,8 @@ fn (self: &var Emitter) write_fs_imports(module: &ir::Module) -> !void {
         try self.line(
             "      (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))"
         );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_read_file_into") {
         let fd_read =
             \\  (import "wasi_snapshot_preview1" "fd_read"
         ;
@@ -76,6 +98,8 @@ fn (self: &var Emitter) write_fs_imports(module: &ir::Module) -> !void {
         try self.line(
             "    (func $__wasi_fd_read (param i32 i32 i32 i32) (result i32)))"
         );
+    }
+    if self.uses_fs_open(module) {
         let fd_close =
             \\  (import "wasi_snapshot_preview1" "fd_close"
         ;
@@ -106,6 +130,25 @@ fn (self: &var Emitter) write_fs_imports(module: &ir::Module) -> !void {
         try self.line(remove_dir);
         try self.line(
             "    (func $__wasi_path_remove_directory (param i32 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_remove_file") {
+        let unlink_file =
+            \\  (import "wasi_snapshot_preview1" "path_unlink_file"
+        ;
+        try self.line(unlink_file);
+        try self.line(
+            "    (func $__wasi_path_unlink_file (param i32 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_rename") {
+        let rename =
+            \\  (import "wasi_snapshot_preview1" "path_rename"
+        ;
+        try self.line(rename);
+        try self.line("    (func $__wasi_path_rename");
+        try self.line(
+            "      (param i32 i32 i32 i32 i32 i32) (result i32)))"
         );
     }
     return;
@@ -188,6 +231,13 @@ fn (self: &var Emitter) write_fs_runtime(
     ) orelse return try self.fail0(
         "wasm error: error set `std::fs::Error` has no member `ReadFailed`"
     );
+    let write_failed = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "WriteFailed"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `WriteFailed`"
+    );
     let out_of_memory = wasm_error_code(
         module,
         "std::fs::Error",
@@ -227,6 +277,7 @@ fn (self: &var Emitter) write_fs_runtime(
         no_space_left: no_space_left,
         too_many_open_files: too_many_open_files,
         read_failed: read_failed,
+        write_failed: write_failed,
         out_of_memory: out_of_memory,
         operation_failed: operation_failed,
         io_failing: io_failing,
@@ -236,6 +287,9 @@ fn (self: &var Emitter) write_fs_runtime(
     try self.write_fs_errno_helper(codes);
     if self.uses_builtin_call(module, "std::internal::builtin::fs_read_file_into") {
         try self.write_fs_read_file_into(codes);
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_write_file") {
+        try self.write_fs_write_file(codes);
     }
     if self.uses_builtin_call(module, "std::internal::builtin::fs_exists") {
         try self.write_fs_exists(codes);
@@ -256,6 +310,16 @@ fn (self: &var Emitter) write_fs_runtime(
             "$__wasi_path_remove_directory",
             codes
         );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_remove_file") {
+        try self.write_fs_path_void_builtin(
+            "std::internal::builtin::fs_remove_file",
+            "$__wasi_path_unlink_file",
+            codes
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_rename") {
+        try self.write_fs_rename(codes);
     }
     return null;
 }
@@ -498,6 +562,86 @@ fn (self: &var Emitter) write_fs_read_failure(code: i64) -> !void {
     return self.write_error_result(code, "            ");
 }
 
+/// Replaces one preopen-relative file and writes every byte.
+fn (self: &var Emitter) write_fs_write_file(codes: FSErrorCodes) -> !void {
+    try self.line("  (func $std::internal::builtin::fs_write_file");
+    try self.line(
+        "      (param $out i32) (param $io i32) (param $path i32) (param $bytes i32)"
+    );
+    try self.line("    (local $fd i32) (local $errno i32) (local $ptr i32)");
+    try self.line("    (local $remaining i32) (local $written i32)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line("    (local.set $errno (call $__wasi_path_open");
+    try self.line(
+        "      (local.get $fd) (i32.const 1) (i32.load (local.get $path))"
+    );
+    try self.line(
+        "      (i32.load (i32.add (local.get $path) (i32.const 4)))"
+    );
+    try self.line3(
+        "      (i32.const %d) (i64.const %d) (i64.const 0) (i32.const 0) (i32.const %d)))",
+        Arg::Int(9),
+        Arg::Int(64),
+        Arg::Int(24)
+    );
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $fd (i32.load (i32.const 24)))");
+    try self.line("    (local.set $ptr (i32.load (local.get $bytes)))");
+    try self.line("    (local.set $remaining");
+    try self.line("      (i32.load (i32.add (local.get $bytes) (i32.const 4))))");
+    try self.line("    (block $done");
+    try self.line("      (loop $write");
+    try self.line("        (br_if $done (i32.eqz (local.get $remaining)))");
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $ptr))",
+        Arg::Int(scratch_offset())
+    );
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $remaining))",
+        Arg::Int(scratch_offset() + 4)
+    );
+    try self.line("        (local.set $errno (call $__wasi_fd_write");
+    try self.line2(
+        "          (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))",
+        Arg::Int(scratch_offset()),
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (local.get $errno)");
+    try self.line("          (then");
+    try self.write_fs_write_failure(codes.write_failed);
+    try self.line("            (return)))");
+    try self.line1(
+        "        (local.set $written (i32.load (i32.const %d)))",
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (i32.or (i32.eqz (local.get $written))");
+    try self.line(
+        "            (i32.gt_u (local.get $written) (local.get $remaining)))"
+    );
+    try self.line("          (then");
+    try self.write_fs_write_failure(codes.write_failed);
+    try self.line("            (return)))");
+    try self.line("        (local.set $ptr");
+    try self.line("          (i32.add (local.get $ptr) (local.get $written)))");
+    try self.line("        (local.set $remaining");
+    try self.line(
+        "          (i32.sub (local.get $remaining) (local.get $written)))"
+    );
+    try self.line("        (br $write)))");
+    try self.line("    (drop (call $__wasi_fd_close (local.get $fd)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_write_failure(code: i64) -> !void {
+    try self.line("            (drop (call $__wasi_fd_close (local.get $fd)))");
+    return self.write_error_result(code, "            ");
+}
+
 fn (self: &var Emitter) write_fs_exists(codes: FSErrorCodes) -> !void {
     try self.line(
         "  (func $std::internal::builtin::fs_exists (param $out i32) (param $io i32) (param $path i32)"
@@ -573,6 +717,31 @@ fn (self: &var Emitter) write_fs_path_void_builtin(
     try self.line("      (local.get $fd) (i32.load (local.get $path))");
     try self.line(
         "      (i32.load (i32.add (local.get $path) (i32.const 4)))))"
+    );
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Moves one path within the explicitly granted preopen.
+fn (self: &var Emitter) write_fs_rename(codes: FSErrorCodes) -> !void {
+    try self.line(
+        "  (func $std::internal::builtin::fs_rename (param $out i32) (param $io i32) (param $from i32) (param $to i32)"
+    );
+    try self.line("    (local $fd i32) (local $errno i32)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line("    (local.set $errno (call $__wasi_path_rename");
+    try self.line("      (local.get $fd) (i32.load (local.get $from))");
+    try self.line(
+        "      (i32.load (i32.add (local.get $from) (i32.const 4)))"
+    );
+    try self.line("      (local.get $fd) (i32.load (local.get $to))");
+    try self.line(
+        "      (i32.load (i32.add (local.get $to) (i32.const 4)))))"
     );
     try self.line("    (if (local.get $errno)");
     try self.line("      (then");

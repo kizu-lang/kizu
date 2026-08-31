@@ -239,7 +239,11 @@ run_example "fs_read" "examples/fs_read.kizu" "kizu fs fixture" "."
 run_example "std_fs_path" "examples/std_fs_path.kizu" "true
 16
 false
-true" "."
+true
+true
+false
+updated
+false" "."
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.
