@@ -3,8 +3,8 @@ package ir
 import "strings"
 
 // KeepReachableFunctions removes module functions that cannot be reached from
-// the supplied roots through direct calls. Calls to symbols outside the module
-// do not add an edge.
+// the supplied roots through direct calls or a function address taken on a
+// reachable path. Calls to symbols outside the module do not add an edge.
 func KeepReachableFunctions(module *Module, roots ...string) {
 	functions := make(map[string]*Function, len(module.Functions))
 	for _, fn := range module.Functions {

@@ -109,6 +109,9 @@ func emitWASMFile(path string, opt bool) error {
 	if err != nil {
 		return err
 	}
+	// A WASI module exports only _start, so functions main cannot reach must
+	// not drag unused host capabilities into its import surface.
+	ir.KeepReachableFunctions(module, "main")
 	output, err := wasm.Emit(module)
 	if err != nil {
 		return err

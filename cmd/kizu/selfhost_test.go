@@ -396,6 +396,7 @@ func goWASMOutput(file string, opt bool) cliOutput {
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
+	ir.KeepReachableFunctions(module, "main")
 	text, err := wasm.Emit(module)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}

@@ -2,20 +2,22 @@ package ir
 
 import "testing"
 
-// TestKeepReachableFunctionsFollowsCallsAndCleanups verifies the executable
-// closure includes ordinary calls and deferred error-path calls.
-func TestKeepReachableFunctionsFollowsCallsAndCleanups(t *testing.T) {
+// TestKeepReachableFunctionsFollowsCallsAddressesAndCleanups verifies the
+// executable closure includes ordinary calls, function-pointer targets, and
+// deferred error-path calls.
+func TestKeepReachableFunctionsFollowsCallsAddressesAndCleanups(t *testing.T) {
 	module := &Module{Functions: []*Function{
-		functionWithOps("main", "call.live"),
+		functionWithOps("main", "call.live", "func.addr.callback"),
 		functionWithOps("live", "array.append"),
 		functionWithOps("cleanup", "call.external"),
+		functionWithOps("callback", "call.external"),
 		functionWithOps("dead", "call.cleanup"),
 	}}
 	module.Functions[1].Blocks[0].Instrs[0].Cleanups = []Cleanup{{Op: "call.cleanup"}}
 
 	KeepReachableFunctions(module, "main")
 
-	want := []string{"main", "live", "cleanup"}
+	want := []string{"main", "live", "cleanup", "callback"}
 	if len(module.Functions) != len(want) {
 		t.Fatalf("reachable function count = %d, want %d", len(module.Functions), len(want))
 	}
