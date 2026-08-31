@@ -23,7 +23,7 @@ func (e *emitter) typeLayout(typ string) (wasmLayout, error) {
 // typeLayoutVisiting rejects recursive by-value aggregates instead of
 // recursing forever. A recursive shape must cross an explicit pointer.
 func (e *emitter) typeLayoutVisiting(typ string, seen map[string]bool) (wasmLayout, error) {
-	if layout, ok := primitiveLayout(typ); ok {
+	if layout, ok := e.directLayout(typ); ok {
 		return layout, nil
 	}
 	if layout, ok, err := e.taggedTypeLayoutVisiting(typ, seen); ok || err != nil {
@@ -79,6 +79,20 @@ func (e *emitter) typeLayoutVisiting(typ string, seen map[string]bool) (wasmLayo
 	return wasmLayout{}, fmt.Errorf("wasm error: type `%s` has no wasm32 value layout", typ)
 }
 
+// directLayout returns layouts that do not recurse through a declaration.
+func (e *emitter) directLayout(typ string) (wasmLayout, bool) {
+	if layout, ok := primitiveLayout(typ); ok {
+		return layout, true
+	}
+	if size, ok := e.bufferSize(typ); ok {
+		return wasmLayout{size: size, align: 1}, true
+	}
+	if isArrayWasmType(typ) {
+		return wasmLayout{size: arrayHeaderSize, align: 8}, true
+	}
+	return wasmLayout{}, false
+}
+
 // primitiveLayout returns scalar, pointer, and byte-view layouts.
 func primitiveLayout(typ string) (wasmLayout, bool) {
 	switch typ {
@@ -106,6 +120,12 @@ func primitiveLayout(typ string) (wasmLayout, bool) {
 // isMemoryType reports whether a wasm local represents typ by an i32 address.
 func (e *emitter) isMemoryType(typ string) bool {
 	if typ == "[]u8" {
+		return true
+	}
+	if _, ok := e.bufferSize(typ); ok {
+		return true
+	}
+	if isArrayWasmType(typ) {
 		return true
 	}
 	if _, ok := optionalElemWasm(typ); ok {

@@ -198,8 +198,13 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		"../../examples/mutable_borrow_nested_field.kizu",
 		"../../examples/optional_error_flow.kizu",
 		"../../examples/slice_checked_access.kizu",
+		"../../examples/std_array.kizu",
+		"../../examples/std_array_append_bytes.kizu",
+		"../../examples/fixed_buffer.kizu",
+		"../../examples/user_allocator_refusal.kizu",
 		"../../examples/negative/slice_syntax_index_out_of_bounds.kizu",
 		"../../examples/negative/slice_syntax_range_out_of_bounds.kizu",
+		"../../examples/negative/std_array_get_or_panic_bounds.kizu",
 	} {
 		name := strings.TrimSuffix(filepath.Base(example), ".kizu")
 		t.Run("wasm/"+name, func(t *testing.T) {

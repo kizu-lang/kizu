@@ -1,0 +1,1153 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/array.go. An Array value is the inline
+// wasm32 `{data, len, cap}` header; its element storage comes from the explicit
+// allocator passed by every operation that may grow or release it.
+
+fn array_header_size() -> i64 {
+    return 24;
+}
+
+fn array_data_offset() -> i64 {
+    return 0;
+}
+
+fn array_len_offset() -> i64 {
+    return 8;
+}
+
+fn array_capacity_offset() -> i64 {
+    return 16;
+}
+
+fn is_array_wasm_type(name: []u8) -> bool {
+    return mem::starts_with(name, "std::array::Array<") and ir::ends_with_bytes(name, ">");
+}
+
+/// Returns T through either direct or borrowed Array<T>.
+fn array_element_wasm_type(name: []u8) -> ?[]u8 {
+    var start = 0;
+    if mem::starts_with(name, "&var ") {
+        start = 5;
+    } else {
+        if mem::starts_with(name, "&") {
+            start = 1;
+        }
+    }
+    let direct = name[start..mem::len(name)];
+    if !is_array_wasm_type(direct) {
+        return null;
+    }
+    return direct[18..mem::len(direct) - 1];
+}
+
+/// Copies the measured element into out and returns its wasm32 layout.
+fn (self: &var Emitter) array_element_layout(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    out: &var string::String
+) -> !WasmLayoutResult {
+    var container = node.result.type_name;
+    if node.op != ir::Op::ArrayNew {
+        let first = node.args.get(0) orelse return WasmLayoutResult::Error(try self.fail_op(
+            module,
+            node,
+            "wasm error: `%s` was handed no Array<T>"
+        ));
+        container = first.type_name;
+    }
+    let retained = ir::name_text(&module.names, container);
+    let spelling = retained.as_bytes();
+    if array_element_wasm_type(spelling) |elem| {
+        try out.append_bytes(self.allocator, elem);
+        let outcome = try self.type_layout_bytes(module, elem);
+        match outcome {
+            Error(failed) => return WasmLayoutResult::Error(move failed),
+            Layout(layout) => {
+                if layout.size <= 0 {
+                    let shown = try self.names.intern(elem);
+                    return WasmLayoutResult::Error(try self.fail(
+                        "wasm error: array element `%s` has zero-sized storage",
+                        Arg::Str(shown)
+                    ));
+                }
+                return WasmLayoutResult::Layout(layout);
+            },
+        }
+    }
+    return WasmLayoutResult::Error(try self.fail_op(
+        module,
+        node,
+        "wasm error: `%s` was handed no Array<T>"
+    ));
+}
+
+fn (self: &var Emitter) array_expr1(format: []u8, a: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        Arg::None,
+        Arg::None,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) array_expr2(format: []u8, a: Arg, b: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        move b,
+        Arg::None,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) array_expr3(format: []u8, a: Arg, b: Arg, c: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        move b,
+        move c,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) array_expr4(
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg
+) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        move b,
+        move c,
+        move d
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) array_field_address(array: ir::Name, offset: i64) -> !ir::Name {
+    return self.address_at(array, offset);
+}
+
+fn (self: &var Emitter) array_element_address(
+    array: ir::Name,
+    index: ir::Name,
+    size: i64
+) -> !ir::Name {
+    let data = try self.array_field_address(array, array_data_offset());
+    return self.array_expr3(
+        "(i32.add (i32.load %s) (i32.wrap_i64 (i64.mul %s (i64.const %d))))",
+        Arg::Str(data),
+        Arg::Str(index),
+        Arg::Int(size)
+    );
+}
+
+fn (self: &var Emitter) write_array_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    match node.op {
+        ArrayNew => return self.write_array_new(module, node),
+        ArrayAppend => return self.write_array_append(module, node),
+        ArrayAppendBytes => return self.write_array_append_bytes(module, node),
+        ArrayLen => return self.write_array_field(module, node, array_len_offset(), "array.len"),
+        ArrayCapacity => return self.write_array_field(
+            module,
+            node,
+            array_capacity_offset(),
+            "array.capacity"
+        ),
+        ArrayReserve => return self.write_array_reserve(module, node),
+        ArrayPop => return self.write_array_pop(module, node),
+        ArrayPopOrPanic => return self.write_array_pop_or_panic(module, node),
+        ArrayGet => return self.write_array_get(module, node),
+        ArrayGetOrPanic => return self.write_array_get_or_panic(module, node),
+        ArrayAt => return self.write_array_at(module, node),
+        ArrayAtMut => return self.write_array_at(module, node),
+        ArraySet => return self.write_array_set(module, node),
+        ArraySwap => return self.write_array_swap(module, node),
+        ArrayTruncate => return self.write_array_truncate(module, node),
+        ArrayClear => return self.write_array_clear(module, node),
+        ArrayAsBytes => return self.write_array_as_bytes(module, node),
+        ArrayDeinit => return self.write_array_deinit(module, node),
+        _ => return try self.fail_op(
+            module,
+            node,
+            "wasm error: unsupported array instruction `%s`"
+        ),
+    }
+}
+
+fn (self: &var Emitter) write_array_new(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if node.args.len() != 1 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "Allocator") or
+        !is_array_wasm_type(result_type) {
+        return try self.fail0("wasm error: array.new expects allocator -> Array<T>");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(_) => {},
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Array result");
+    try self.line2(
+        "            (memory.fill %s (i32.const 0) (i32.const %d))",
+        Arg::Str(slot),
+        Arg::Int(array_header_size())
+    );
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+fn (self: &var Emitter) write_array_field(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    offset: i64,
+    op: []u8
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail("wasm error: %s expects Array<T> -> i64", Arg::Lit(op));
+    }
+    let first = node.args.get_or_panic(0);
+    let retained = ir::name_text(&module.names, first.type_name);
+    let type_name = retained.as_bytes();
+    if array_element_wasm_type(type_name) |_| {} else {
+        return try self.fail("wasm error: %s expects Array<T> -> i64", Arg::Lit(op));
+    }
+    let info = try self.value_of(module, first);
+    let address = try self.array_field_address(info.expr, offset);
+    let loaded = try self.array_expr1("(i64.load %s)", Arg::Str(address));
+    return self.write_scalar_result(module, node.result, loaded);
+}
+
+fn (self: &var Emitter) write_array_append(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0(
+            "wasm error: array.append expects Array<T>, Allocator, T -> std::mem::Error!void"
+        );
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let elem_bytes = elem.as_bytes();
+    let value = node.args.get_or_panic(2);
+    if !module.names.is(value.type_name, elem_bytes) {
+        let expected = try self.names.intern(elem_bytes);
+        let got = try self.own(module, value.type_name);
+        return try self.fail2(
+            "wasm error: array.append expects %s, got %s",
+            Arg::Str(expected),
+            Arg::Str(got)
+        );
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let allocator = try self.value_of(module, node.args.get_or_panic(1));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let needed = try self.array_expr1("(i64.add %s (i64.const 1))", Arg::Str(length));
+    let ok = try self.array_expr4(
+        "(call $__array_reserve %s %s %s (i32.const %d))",
+        Arg::Str(allocator.expr),
+        Arg::Str(array.expr),
+        Arg::Str(needed),
+        Arg::Int(layout.size)
+    );
+    let slot_outcome = try self.write_array_error_result(
+        module,
+        node.result,
+        ok,
+        "std::mem::Error",
+        "OutOfMemory"
+    );
+    var slot = ir::empty_name();
+    match slot_outcome {
+        Error(failed) => return move failed,
+        Name(found) => {
+            slot = found;
+        },
+    }
+    try self.line1(
+        "            (if (i32.wrap_i64 (i64.load %s))",
+        Arg::Str(slot)
+    );
+    try self.line("              (then");
+    let destination = try self.array_element_address(array.expr, length, layout.size);
+    let value_info = try self.value_of(module, value);
+    if try self.write_store_value(
+        module,
+        destination,
+        0,
+        value.type_name,
+        value_info
+    ) |failed| {
+        return move failed;
+    }
+    try self.line2(
+        "                (i64.store %s %s)))",
+        Arg::Str(length_address),
+        Arg::Str(needed)
+    );
+    return null;
+}
+
+fn (self: &var Emitter) write_array_append_bytes(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.args.get_or_panic(2).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0(
+            "wasm error: array.append_bytes expects Array<u8>, Allocator, []u8 -> std::mem::Error!void"
+        );
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(_) => {},
+    }
+    let elem_bytes = elem.as_bytes();
+    if !mem::equal_bytes(elem_bytes, "u8") {
+        return try self.fail0("wasm error: array.append_bytes expects Array<u8>");
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let allocator = try self.value_of(module, node.args.get_or_panic(1));
+    let bytes = try self.value_of(module, node.args.get_or_panic(2));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let byte_length_address = try self.address_at(bytes.expr, 4);
+    let byte_length_32 = try self.array_expr1("(i32.load %s)", Arg::Str(byte_length_address));
+    let byte_length = try self.array_expr1(
+        "(i64.extend_i32_u %s)",
+        Arg::Str(byte_length_32)
+    );
+    let needed = try self.array_expr2(
+        "(i64.add %s %s)",
+        Arg::Str(length),
+        Arg::Str(byte_length)
+    );
+    let ok = try self.array_expr3(
+        "(call $__array_reserve %s %s %s (i32.const 1))",
+        Arg::Str(allocator.expr),
+        Arg::Str(array.expr),
+        Arg::Str(needed)
+    );
+    let slot_outcome = try self.write_array_error_result(
+        module,
+        node.result,
+        ok,
+        "std::mem::Error",
+        "OutOfMemory"
+    );
+    var slot = ir::empty_name();
+    match slot_outcome {
+        Error(failed) => return move failed,
+        Name(found) => {
+            slot = found;
+        },
+    }
+    try self.line1(
+        "            (if (i32.wrap_i64 (i64.load %s))",
+        Arg::Str(slot)
+    );
+    try self.line("              (then");
+    let destination = try self.array_element_address(array.expr, length, 1);
+    try self.line3(
+        "                (memory.copy %s (i32.load %s) %s)",
+        Arg::Str(destination),
+        Arg::Str(bytes.expr),
+        Arg::Str(byte_length_32)
+    );
+    try self.line2(
+        "                (i64.store %s %s)))",
+        Arg::Str(length_address),
+        Arg::Str(needed)
+    );
+    return null;
+}
+
+fn (self: &var Emitter) write_array_reserve(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.args.get_or_panic(2).type_name, "i64") or
+        !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0(
+            "wasm error: array.reserve expects Array<T>, Allocator, i64 -> std::mem::Error!void"
+        );
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let allocator = try self.value_of(module, node.args.get_or_panic(1));
+    let additional = try self.value_of(module, node.args.get_or_panic(2));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let needed = try self.array_expr2(
+        "(i64.add %s %s)",
+        Arg::Str(length),
+        Arg::Str(additional.expr)
+    );
+    let reserve = try self.array_expr4(
+        "(call $__array_reserve %s %s %s (i32.const %d))",
+        Arg::Str(allocator.expr),
+        Arg::Str(array.expr),
+        Arg::Str(needed),
+        Arg::Int(layout.size)
+    );
+    let ok = try self.array_expr2(
+        "(i32.and (i64.ge_s %s (i64.const 0)) %s)",
+        Arg::Str(additional.expr),
+        Arg::Str(reserve)
+    );
+    let outcome = try self.write_array_error_result(
+        module,
+        node.result,
+        ok,
+        "std::mem::Error",
+        "OutOfMemory"
+    );
+    match outcome {
+        Error(failed) => return move failed,
+        Name(_) => return null,
+    }
+}
+
+fn (self: &var Emitter) write_array_pop(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: array.pop expects Array<T> -> ?T");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let elem_bytes = elem.as_bytes();
+    var result_matches = false;
+    if typ::optional_elem(result_type) |want| {
+        result_matches = mem::equal_bytes(want, elem_bytes);
+    }
+    if !result_matches {
+        return try self.fail0("wasm error: array.pop expects Array<T> -> ?T");
+    }
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, elem_bytes, false);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line1(
+        "            (if (i64.gt_s %s (i64.const 0))",
+        Arg::Str(length)
+    );
+    try self.line("              (then");
+    try self.line2(
+        "                (i64.store %s (i64.sub %s (i64.const 1)))",
+        Arg::Str(length_address),
+        Arg::Str(length)
+    );
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for array.pop result");
+    let new_length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let source = try self.array_element_address(array.expr, new_length, layout.size);
+    let destination = try self.address_at(slot, payload_offset);
+    if try self.write_array_copy_value(
+        module,
+        destination,
+        source,
+        node.result.type_name,
+        elem_bytes
+    ) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) write_array_pop_or_panic(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: array.pop_or_panic expects Array<T> -> T");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let elem_bytes = elem.as_bytes();
+    if !module.names.is(node.result.type_name, elem_bytes) {
+        return try self.fail0("wasm error: array.pop_or_panic expects Array<T> -> T");
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line1("            (if (i64.eqz %s)", Arg::Str(length));
+    try self.line2(
+        "              (then (call $__panic_array_empty (i64.const %d) (i64.const %d))))",
+        Arg::Int(node.span.start.line),
+        Arg::Int(node.span.start.column)
+    );
+    try self.line2(
+        "            (i64.store %s (i64.sub %s (i64.const 1)))",
+        Arg::Str(length_address),
+        Arg::Str(length)
+    );
+    let new_length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let source = try self.array_element_address(array.expr, new_length, layout.size);
+    return self.write_load_value(module, node.result, source, 0);
+}
+
+fn (self: &var Emitter) write_array_get(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
+        return try self.fail0("wasm error: array.get expects Array<T>, i64 -> ?T");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let elem_bytes = elem.as_bytes();
+    var result_matches = false;
+    if typ::optional_elem(result_type) |want| {
+        result_matches = mem::equal_bytes(want, elem_bytes);
+    }
+    if !result_matches {
+        return try self.fail0("wasm error: array.get expects Array<T>, i64 -> ?T");
+    }
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, elem_bytes, false);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let index = try self.value_of(module, node.args.get_or_panic(1));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.lt_u %s %s)",
+        Arg::Str(index.expr),
+        Arg::Str(length)
+    );
+    try self.line("              (then");
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for array.get result");
+    let source = try self.array_element_address(array.expr, index.expr, layout.size);
+    let destination = try self.address_at(slot, payload_offset);
+    if try self.write_array_copy_value(
+        module,
+        destination,
+        source,
+        node.result.type_name,
+        elem_bytes
+    ) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) write_array_get_or_panic(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
+        return try self.fail0("wasm error: array.get_or_panic expects Array<T>, i64 -> T");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let elem_bytes = elem.as_bytes();
+    if !module.names.is(node.result.type_name, elem_bytes) {
+        return try self.fail0("wasm error: array.get_or_panic expects Array<T>, i64 -> T");
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let index = try self.value_of(module, node.args.get_or_panic(1));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.ge_u %s %s)",
+        Arg::Str(index.expr),
+        Arg::Str(length)
+    );
+    try self.line4(
+        "              (then (call $__panic_bounds %s %s (i64.const %d) (i64.const %d))))",
+        Arg::Str(index.expr),
+        Arg::Str(length),
+        Arg::Int(node.span.start.line),
+        Arg::Int(node.span.start.column)
+    );
+    let source = try self.array_element_address(array.expr, index.expr, layout.size);
+    return self.write_load_value(module, node.result, source, 0);
+}
+
+fn (self: &var Emitter) write_array_at(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
+        return try self.fail0("wasm error: array.at expects Array<T>, i64 -> ?&T");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    var payload_offset = 0;
+    var is_optional = false;
+    if typ::optional_elem(result_type) |want| {
+        is_optional = true;
+        let offset_outcome = try self.tagged_payload_offset(module, want, false);
+        match offset_outcome {
+            Error(failed) => return move failed,
+            Offset(found) => {
+                payload_offset = found;
+            },
+        }
+    }
+    if !is_optional {
+        return try self.fail0("wasm error: array.at expects Array<T>, i64 -> ?&T");
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let index = try self.value_of(module, node.args.get_or_panic(1));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.lt_u %s %s)",
+        Arg::Str(index.expr),
+        Arg::Str(length)
+    );
+    try self.line("              (then");
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for array.at result");
+    let destination = try self.address_at(slot, payload_offset);
+    let source = try self.array_element_address(array.expr, index.expr, layout.size);
+    try self.line2(
+        "                (i32.store %s %s)",
+        Arg::Str(destination),
+        Arg::Str(source)
+    );
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) write_array_set(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.result.type_name, "std::array::Error!void") {
+        return try self.fail0(
+            "wasm error: array.set expects Array<T>, i64, T -> std::array::Error!void"
+        );
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let value = node.args.get_or_panic(2);
+    let elem_bytes = elem.as_bytes();
+    if !module.names.is(value.type_name, elem_bytes) {
+        let expected = try self.names.intern(elem_bytes);
+        let got = try self.own(module, value.type_name);
+        return try self.fail2(
+            "wasm error: array.set expects %s, got %s",
+            Arg::Str(expected),
+            Arg::Str(got)
+        );
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let index = try self.value_of(module, node.args.get_or_panic(1));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let ok = try self.array_expr2(
+        "(i64.lt_u %s %s)",
+        Arg::Str(index.expr),
+        Arg::Str(length)
+    );
+    let slot_outcome = try self.write_array_error_result(
+        module,
+        node.result,
+        ok,
+        "std::array::Error",
+        "OutOfBounds"
+    );
+    var slot = ir::empty_name();
+    match slot_outcome {
+        Error(failed) => return move failed,
+        Name(found) => {
+            slot = found;
+        },
+    }
+    try self.line1(
+        "            (if (i32.wrap_i64 (i64.load %s))",
+        Arg::Str(slot)
+    );
+    try self.line("              (then");
+    let destination = try self.array_element_address(array.expr, index.expr, layout.size);
+    let value_info = try self.value_of(module, value);
+    if try self.write_store_value(
+        module,
+        destination,
+        0,
+        value.type_name,
+        value_info
+    ) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) write_array_swap(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.args.get_or_panic(2).type_name, "i64") or
+        !module.names.is(node.result.type_name, "std::array::Error!void") {
+        return try self.fail0(
+            "wasm error: array.swap expects Array<T>, i64, i64 -> std::array::Error!void"
+        );
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let left = try self.value_of(module, node.args.get_or_panic(1));
+    let right = try self.value_of(module, node.args.get_or_panic(2));
+    let ok = try self.array_expr4(
+        "(call $__array_swap %s %s %s (i32.const %d))",
+        Arg::Str(array.expr),
+        Arg::Str(left.expr),
+        Arg::Str(right.expr),
+        Arg::Int(layout.size)
+    );
+    let outcome = try self.write_array_error_result(
+        module,
+        node.result,
+        ok,
+        "std::array::Error",
+        "OutOfBounds"
+    );
+    match outcome {
+        Error(failed) => return move failed,
+        Name(_) => return null,
+    }
+}
+
+fn (self: &var Emitter) write_array_truncate(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.result.type_name, "std::array::Error!void") {
+        return try self.fail0(
+            "wasm error: array.truncate expects Array<T>, i64 -> std::array::Error!void"
+        );
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(_) => {},
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let want = try self.value_of(module, node.args.get_or_panic(1));
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let ok = try self.array_expr3(
+        "(i32.and (i64.ge_s %s (i64.const 0)) (i64.le_s %s %s))",
+        Arg::Str(want.expr),
+        Arg::Str(want.expr),
+        Arg::Str(length)
+    );
+    let slot_outcome = try self.write_array_error_result(
+        module,
+        node.result,
+        ok,
+        "std::array::Error",
+        "OutOfBounds"
+    );
+    var slot = ir::empty_name();
+    match slot_outcome {
+        Error(failed) => return move failed,
+        Name(found) => {
+            slot = found;
+        },
+    }
+    try self.line1(
+        "            (if (i32.wrap_i64 (i64.load %s))",
+        Arg::Str(slot)
+    );
+    try self.line2(
+        "              (then (i64.store %s %s)))",
+        Arg::Str(length_address),
+        Arg::Str(want.expr)
+    );
+    return null;
+}
+
+fn (self: &var Emitter) write_array_clear(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: array.clear expects Array<T> -> void");
+    }
+    let array_value = node.args.get_or_panic(0);
+    let retained = ir::name_text(&module.names, array_value.type_name);
+    let type_name = retained.as_bytes();
+    if array_element_wasm_type(type_name) |_| {} else {
+        return try self.fail0("wasm error: array.clear expects Array<T> -> void");
+    }
+    let array = try self.value_of(module, array_value);
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    try self.line1(
+        "            (i64.store %s (i64.const 0))",
+        Arg::Str(length_address)
+    );
+    return null;
+}
+
+fn (self: &var Emitter) write_array_as_bytes(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "[]u8") {
+        return try self.fail0("wasm error: array.as_bytes expects Array<u8> -> []u8");
+    }
+    let array_value = node.args.get_or_panic(0);
+    let retained = ir::name_text(&module.names, array_value.type_name);
+    let type_name = retained.as_bytes();
+    var has_byte_element = false;
+    if array_element_wasm_type(type_name) |elem| {
+        has_byte_element = mem::equal_bytes(elem, "u8");
+    }
+    if !has_byte_element {
+        return try self.fail0("wasm error: array.as_bytes expects Array<u8> -> []u8");
+    }
+    let array = try self.value_of(module, array_value);
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Array byte view");
+    let data = try self.array_field_address(array.expr, array_data_offset());
+    try self.line2(
+        "            (i32.store %s (i32.load %s))",
+        Arg::Str(slot),
+        Arg::Str(data)
+    );
+    let descriptor_length = try self.address_at(slot, 4);
+    let array_length = try self.array_field_address(array.expr, array_len_offset());
+    try self.line2(
+        "            (i32.store %s (i32.wrap_i64 (i64.load %s)))",
+        Arg::Str(descriptor_length),
+        Arg::Str(array_length)
+    );
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+fn (self: &var Emitter) write_array_deinit(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: array.deinit expects Array<T>, Allocator -> void");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.array_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let allocator = try self.value_of(module, node.args.get_or_panic(1));
+    let capacity_address = try self.array_field_address(array.expr, array_capacity_offset());
+    let capacity = try self.array_expr1("(i64.load %s)", Arg::Str(capacity_address));
+    let bytes = try self.array_expr2(
+        "(i32.wrap_i64 (i64.mul %s (i64.const %d)))",
+        Arg::Str(capacity),
+        Arg::Int(layout.size)
+    );
+    let data = try self.array_field_address(array.expr, array_data_offset());
+    try self.line3(
+        "            (call $__allocator_free %s (i32.load %s) %s)",
+        Arg::Str(allocator.expr),
+        Arg::Str(data),
+        Arg::Str(bytes)
+    );
+    return null;
+}
+
+union WasmNameResult {
+    Name(ir::Name),
+    Error(diagnostic::Diagnostic),
+}
+
+fn array_error_code(module: &ir::Module, error_set: []u8, member: []u8) -> ?i64 {
+    if module.error_sets.at(error_set) |set| {
+        return set.tags.get(member);
+    }
+    return null;
+}
+
+/// Stores an E!void tag and the declaration-owned global error code.
+fn (self: &var Emitter) write_array_error_result(
+    module: &ir::Module,
+    result: ir::Value,
+    ok: ir::Name,
+    error_set: []u8,
+    member: []u8
+) -> !WasmNameResult {
+    if !module.error_sets.contains(error_set) {
+        return WasmNameResult::Error(try self.fail(
+            "wasm error: failure needs error set `%s`",
+            Arg::Lit(error_set)
+        ));
+    }
+    let code = array_error_code(module, error_set, member) orelse return WasmNameResult::Error(
+        try self.fail2(
+        "wasm error: error set `%s` has no member `%s`",
+        Arg::Lit(error_set),
+        Arg::Lit(member)
+        )
+    );
+    let result_text = ir::name_text(&module.names, result.type_name);
+    let result_type = result_text.as_bytes();
+    let shown_result = try self.own(module, result.type_name);
+    let parts = try self.error_union_parts(result_type) orelse return WasmNameResult::Error(
+        try self.fail("wasm error: array failure expects !void, got %s", Arg::Str(shown_result))
+    );
+    defer parts.deinit(self.allocator);
+    let success = parts.success.as_bytes();
+    if !mem::equal_bytes(success, "void") {
+        let shown = try self.own(module, result.type_name);
+        return WasmNameResult::Error(try self.fail(
+            "wasm error: array failure expects !void, got %s",
+            Arg::Str(shown)
+        ));
+    }
+    var offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return WasmNameResult::Error(move failed),
+        Offset(found) => {
+            offset = found;
+        },
+    }
+    let slot = try self.result_slot(module, result) orelse return WasmNameResult::Error(
+        try self.fail0("wasm error: no frame slot for array failure result")
+    );
+    try self.line2(
+        "            (i64.store %s (i64.extend_i32_u %s))",
+        Arg::Str(slot),
+        Arg::Str(ok)
+    );
+    let code_address = try self.address_at(slot, offset);
+    try self.line2(
+        "            (i64.store %s (i64.const %d))",
+        Arg::Str(code_address),
+        Arg::Int(code)
+    );
+    try self.set_value(module, result, slot);
+    return WasmNameResult::Name(slot);
+}
+
+/// Copies one element into an already-addressed optional payload.
+fn (self: &var Emitter) write_array_copy_value(
+    module: &ir::Module,
+    destination: ir::Name,
+    source: ir::Name,
+    optional_type: ir::Name,
+    elem: []u8
+) -> !?diagnostic::Diagnostic {
+    let elem_name = try self.names.intern(elem);
+    let shown_optional = try self.own(module, optional_type);
+    let module_elem = module.names.lookup(elem) orelse return try self.fail(
+        "wasm error: unknown array element type in %s",
+        Arg::Str(shown_optional)
+    );
+    if try self.is_memory_type(module, module_elem) {
+        let outcome = try self.type_layout(module, module_elem);
+        match outcome {
+            Error(failed) => return move failed,
+            Layout(layout) => {
+                try self.write_memory_copy(destination, source, layout.size);
+                return null;
+            },
+        }
+    }
+    if wasm_load_op(module, module_elem) |op| {
+        let op_name = try self.names.intern(op);
+        let loaded = try self.array_expr2("(%s %s)", Arg::Str(op_name), Arg::Str(source));
+        let info = ValueInfo { expr: loaded, generation: self.generation };
+        return self.write_store_value(module, destination, 0, module_elem, info);
+    }
+    return try self.fail(
+        "wasm error: type `%s` cannot be loaded from linear memory",
+        Arg::Str(elem_name)
+    );
+}

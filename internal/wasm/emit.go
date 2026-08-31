@@ -119,6 +119,11 @@ func (e *emitter) collectCallableInstr(instr *ir.Instr) error {
 		}
 		return nil
 	}
+	if instr.Op == "call.std::internal::builtin::mem_allocator_from" {
+		e.internFuncSignature(userAllocatorAllocSignature())
+		e.internFuncSignature(userAllocatorReleaseSignature())
+		return nil
+	}
 	if instr.Op != "call.indirect" {
 		return nil
 	}
@@ -142,6 +147,11 @@ func (e *emitter) internSignature(instr *ir.Instr) int {
 	if instr.Result.Type != "void" && !e.isMemoryType(instr.Result.Type) {
 		sig.result = e.wasmType(instr.Result.Type)
 	}
+	return e.internFuncSignature(sig)
+}
+
+// internFuncSignature records one already-lowered wasm function shape.
+func (e *emitter) internFuncSignature(sig funcSignature) int {
 	key := strings.Join(sig.params, ",") + "->" + sig.result
 	if index, seen := e.signatureIndex[key]; seen {
 		return index
@@ -205,7 +215,12 @@ func (e *emitter) writeHeader() {
 		pages = 1
 	}
 	fmt.Fprintf(&e.out, "  (memory (export \"memory\") %d)\n", pages)
-	fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
+	if e.usesAllocatorRuntime() {
+		fmt.Fprintf(&e.out, "  (global $__heap_end (mut i32) (i32.const %d))\n", e.dataEnd)
+		e.out.WriteString("  (global $__free_head (mut i32) (i32.const 0))\n")
+	} else {
+		fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
+	}
 	e.writeFunctionTable()
 	for _, lit := range e.sortedDataLiterals() {
 		ref := e.strings[lit]
@@ -270,6 +285,9 @@ func dataLiteral(key string) string {
 
 // writeRuntime writes the minimal WASI output and checked-failure helpers.
 func (e *emitter) writeRuntime() {
+	if e.usesAllocatorRuntime() {
+		e.writeAllocatorRuntime()
+	}
 	e.writeStackAllocHelper()
 	e.writeBytesHelper()
 	e.writeLineHelper()
@@ -284,6 +302,18 @@ func (e *emitter) writeRuntime() {
 // writeStackAllocHelper reserves one recursive-safe linear-memory frame,
 // growing memory by whole pages before a store can cross its end.
 func (e *emitter) writeStackAllocHelper() {
+	if e.usesAllocatorRuntime() {
+		e.out.WriteString("  (func $__stack_alloc (param $size i32) (result i32)\n")
+		e.out.WriteString("    (local $base i32)\n")
+		e.out.WriteString("    (local.set $base (call $__page_alloc (local.get $size)))\n")
+		e.out.WriteString("    (if (i32.eqz (local.get $base)) (then (unreachable)))\n")
+		e.out.WriteString("    (local.get $base)\n")
+		e.out.WriteString("  )\n\n")
+		e.out.WriteString("  (func $__stack_free (param $base i32) (param $size i32)\n")
+		e.out.WriteString("    (call $__page_free (local.get $base) (local.get $size))\n")
+		e.out.WriteString("  )\n\n")
+		return
+	}
 	e.out.WriteString("  (func $__stack_alloc (param $size i32) (result i32)\n")
 	e.out.WriteString("    (local $base i32) (local $end i32) (local $pages i32)\n")
 	e.out.WriteString("    (local.set $base (global.get $__stack_pointer))\n")
@@ -426,7 +456,9 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.out.WriteString("      )\n")
 	e.out.WriteString("    )\n")
 	if frame.size > 0 {
-		e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_frame))\n")
+		if !e.usesAllocatorRuntime() {
+			e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_frame))\n")
+		}
 	}
 	if fn.Return != "void" && !e.isMemoryType(fn.Return) {
 		e.out.WriteString("    (unreachable)\n")

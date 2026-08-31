@@ -404,7 +404,13 @@ func (e *emitter) writeStart() error {
 		e.out.WriteString("    (if (i64.eq (i64.load (local.get $__kizu_main_result)) (i64.const 0))\n")
 		e.out.WriteString("      (then (unreachable)))\n")
 	}
-	e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_main_result))\n")
+	if e.usesAllocatorRuntime() {
+		fmt.Fprintf(&e.out,
+			"    (call $__stack_free (local.get $__kizu_main_result) (i32.const %d))\n",
+			layout.size)
+	} else {
+		e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_main_result))\n")
+	}
 	e.out.WriteString("  )\n")
 	e.out.WriteString(")\n")
 	return nil

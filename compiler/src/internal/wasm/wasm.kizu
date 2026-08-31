@@ -360,7 +360,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
         return move failed;
     }
     try self.write_header(module);
-    try self.write_runtime();
+    try self.write_runtime(module);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -485,6 +485,20 @@ fn (self: &var Emitter) collect_function_table(module: &ir::Module) -> !?diagnos
                     }
                     let _ = try self.intern_signature(module, instr_node);
                 }
+                if instr_node.op == ir::Op::Call and
+                    module.names.is(
+                        instr_node.operand,
+                        "std::internal::builtin::mem_allocator_from"
+                    ) {
+                    let _ = try self.intern_wasm_signature(
+                        " (param i32) (param i64) (result i32)",
+                        "i32,i64,->i32"
+                    );
+                    let _ = try self.intern_wasm_signature(
+                        " (param i32) (param i32) (param i64)",
+                        "i32,i32,i64,->"
+                    );
+                }
             }
         }
     }
@@ -506,7 +520,7 @@ fn (self: &var Emitter) intern_table_entry(module: &ir::Module, name: ir::Name) 
 /// Records the wasm function type an indirect call names and returns its index.
 fn (self: &var Emitter) intern_signature(module: &ir::Module, node: &ir::InstrNode) -> !i64 {
     var declaration = string::new(self.allocator);
-    errdefer declaration.deinit(self.allocator);
+    defer declaration.deinit(self.allocator);
     var key = string::new(self.allocator);
     defer key.deinit(self.allocator);
     if try self.is_memory_type(module, node.result.type_name) {
@@ -533,13 +547,23 @@ fn (self: &var Emitter) intern_signature(module: &ir::Module, node: &ir::InstrNo
         try key.append_bytes(self.allocator, wasm);
     }
     let key_bytes = key.as_bytes();
-    if self.signature_index.get(key_bytes) |known| {
-        declaration.deinit(self.allocator);
+    let declaration_bytes = declaration.as_bytes();
+    return self.intern_wasm_signature(declaration_bytes, key_bytes);
+}
+
+/// Records one already-lowered wasm function declaration under its ABI key.
+fn (self: &var Emitter) intern_wasm_signature(
+    declaration: []u8,
+    key: []u8
+) -> !i64 {
+    if self.signature_index.get(key) |known| {
         return known;
     }
     let position = self.signatures.len();
-    try self.signature_index.insert(self.allocator, key_bytes, position);
-    try self.signatures.append(self.allocator, move declaration);
+    try self.signature_index.insert(self.allocator, key, position);
+    let copied = try string::from_bytes(self.allocator, declaration);
+    errdefer copied.deinit(self.allocator);
+    try self.signatures.append(self.allocator, move copied);
     return position;
 }
 
@@ -598,7 +622,12 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         \\  (memory (export "memory") %d)
     ;
     try self.line1(memory_format, Arg::Int(pages));
-    try self.line1("  (global $__stack_pointer (mut i32) (i32.const %d))", Arg::Int(self.data_end));
+    if self.uses_allocator_runtime(module) {
+        try self.line1("  (global $__heap_end (mut i32) (i32.const %d))", Arg::Int(self.data_end));
+        try self.line("  (global $__free_head (mut i32) (i32.const 0))");
+    } else {
+        try self.line1("  (global $__stack_pointer (mut i32) (i32.const %d))", Arg::Int(self.data_end));
+    }
     try self.write_function_table(module);
     var index = 0;
     while self.data_order.get(index) |key| {
@@ -642,8 +671,11 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
 
 /// Writes the minimal WASI output and checked-failure helpers, the Go
 /// `writeRuntime`.
-fn (self: &var Emitter) write_runtime() -> !void {
-    try self.write_stack_alloc_helper();
+fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !void {
+    if self.uses_allocator_runtime(module) {
+        try self.write_allocator_runtime(module);
+    }
+    try self.write_stack_alloc_helper(module);
     try self.write_bytes_helper();
     try self.write_line_helper();
     try self.write_bool_helper();
@@ -657,7 +689,20 @@ fn (self: &var Emitter) write_runtime() -> !void {
 
 /// Reserves one recursive-safe linear-memory frame and grows memory before a
 /// store can cross its current end, the Go `writeStackAllocHelper`.
-fn (self: &var Emitter) write_stack_alloc_helper() -> !void {
+fn (self: &var Emitter) write_stack_alloc_helper(module: &ir::Module) -> !void {
+    if self.uses_allocator_runtime(module) {
+        try self.line("  (func $__stack_alloc (param $size i32) (result i32)");
+        try self.line("    (local $base i32)");
+        try self.line("    (local.set $base (call $__page_alloc (local.get $size)))");
+        try self.line("    (if (i32.eqz (local.get $base)) (then (unreachable)))");
+        try self.line("    (local.get $base)");
+        try self.line("  )");
+        try self.out.append_byte(self.allocator, cast<u8>(10));
+        try self.line("  (func $__stack_free (param $base i32) (param $size i32)");
+        try self.line("    (call $__page_free (local.get $base) (local.get $size))");
+        try self.line("  )");
+        return self.out.append_byte(self.allocator, cast<u8>(10));
+    }
     try self.line("  (func $__stack_alloc (param $size i32) (result i32)");
     try self.line("    (local $base i32) (local $end i32) (local $pages i32)");
     try self.line("    (local.set $base (global.get $__stack_pointer))");
@@ -829,7 +874,7 @@ fn (self: &var Emitter) write_function(
     try self.line("        (br $exit)");
     try self.line("      )");
     try self.line("    )");
-    if self.frame_size > 0 {
+    if self.frame_size > 0 and !self.uses_allocator_runtime(module) {
         try self.line("    (global.set $__stack_pointer (local.get $__kizu_frame))");
     }
     if !module.names.is(node.return_type, "void") and

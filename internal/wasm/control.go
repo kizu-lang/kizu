@@ -43,6 +43,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
+	case instr.Op == "buffer.new", instr.Op == "buffer.as_bytes":
+		return e.writeBufferInstr(instr)
 	default:
 		return e.writeMemoryInstr(instr)
 	}
@@ -66,8 +68,8 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "slice."):
 		return e.writeSliceInstr(instr)
-	case strings.HasPrefix(instr.Op, "opt."), strings.HasPrefix(instr.Op, "error."):
-		return e.writeTaggedInstr(instr)
+	case isTaggedOrArrayOp(instr.Op):
+		return e.writeTaggedOrArrayInstr(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
 		instr.Op == "arena.at" || instr.Op == "arena.len" ||
 		instr.Op == "arena.pop_or_panic" || instr.Op == "arena.deinit":
@@ -77,13 +79,36 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeCast records a no-op value conversion for the Phase 16 low-level subset.
+// isTaggedOrArrayOp reports whether an operation uses a generic value runtime.
+func isTaggedOrArrayOp(op string) bool {
+	return strings.HasPrefix(op, "opt.") || strings.HasPrefix(op, "error.") ||
+		strings.HasPrefix(op, "array.")
+}
+
+// writeTaggedOrArrayInstr selects the tagged-value or Array runtime.
+func (e *emitter) writeTaggedOrArrayInstr(instr *ir.Instr) error {
+	if strings.HasPrefix(instr.Op, "array.") {
+		return e.writeArrayInstr(instr)
+	}
+	return e.writeTaggedInstr(instr)
+}
+
+// writeCast preserves integer-width casts in the shared i64 representation and
+// converts when a raw wasm32 pointer crosses the integer boundary.
 func (e *emitter) writeCast(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("wasm error: cast expects 1 arg")
 	}
 	value := e.value(instr.Args[0])
-	e.values[instr.Result.Name] = valueInfo{expr: value.expr}
+	source := e.wasmType(instr.Args[0].Type)
+	target := e.wasmType(instr.Result.Type)
+	expr := value.expr
+	if source == "i64" && target == "i32" {
+		expr = "(i32.wrap_i64 " + expr + ")"
+	} else if source == "i32" && target == "i64" {
+		expr = "(i64.extend_i32_u " + expr + ")"
+	}
+	e.values[instr.Result.Name] = valueInfo{expr: expr}
 	return nil
 }
 
@@ -233,6 +258,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if name == "print" {
 		return e.writePrint(instr.Args)
 	}
+	if handled, err := e.writeAllocatorBuiltinCall(name, instr); handled {
+		return err
+	}
 	args := make([]string, 0, len(instr.Args)+1)
 	var resultSlot string
 	if e.isMemoryType(instr.Result.Type) {
@@ -259,6 +287,34 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		expr: "(local.get " + symbolName(instr.Result.Name) + ")",
 	}
 	return nil
+}
+
+// writeAllocatorBuiltinCall lowers allocator factories before ordinary calls.
+func (e *emitter) writeAllocatorBuiltinCall(name string, instr *ir.Instr) (bool, error) {
+	if name == "std::internal::builtin::mem_page_allocator" {
+		if len(instr.Args) != 0 || instr.Result.Type != "Allocator" {
+			return true, fmt.Errorf("wasm error: mem_page_allocator expects no args -> Allocator")
+		}
+		symbol := symbolName(instr.Result.Name)
+		fmt.Fprintf(&e.out, "            (local.set %s (i32.const 0))\n", symbol)
+		e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+		return true, nil
+	}
+	if name == "std::internal::builtin::mem_fixed_buffer" {
+		if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" ||
+			instr.Result.Type != "Allocator" {
+			return true, fmt.Errorf("wasm error: mem_fixed_buffer expects []u8 -> Allocator")
+		}
+		symbol := symbolName(instr.Result.Name)
+		fmt.Fprintf(&e.out, "            (local.set %s (call $__fixed_buffer %s))\n",
+			symbol, e.value(instr.Args[0]).expr)
+		e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+		return true, nil
+	}
+	if name == "std::internal::builtin::mem_allocator_from" {
+		return true, e.writeAllocatorFromCall(instr)
+	}
+	return false, nil
 }
 
 // writePrint writes calls to WASI stdout helpers.
@@ -328,7 +384,13 @@ func (e *emitter) writeReturn(value ir.Value) error {
 // restoreFrame releases this invocation's fixed frame before any return.
 func (e *emitter) restoreFrame() {
 	if e.frame != nil && e.frame.size > 0 {
-		e.out.WriteString("            (global.set $__stack_pointer (local.get $__kizu_frame))\n")
+		if e.usesAllocatorRuntime() {
+			fmt.Fprintf(&e.out,
+				"            (call $__stack_free (local.get $__kizu_frame) (i32.const %d))\n",
+				e.frame.size)
+		} else {
+			e.out.WriteString("            (global.set $__stack_pointer (local.get $__kizu_frame))\n")
+		}
 	}
 }
 

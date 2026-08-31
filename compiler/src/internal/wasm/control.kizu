@@ -2,6 +2,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::fmt;
 import std::map;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/wasm/control.go: the dispatch arm one IR block
@@ -76,6 +77,9 @@ fn (self: &var Emitter) write_instr_node(
     if node.op == ir::Op::Cast {
         return self.write_cast(module, node);
     }
+    if node.op == ir::Op::BufferNew or node.op == ir::Op::BufferAsBytes {
+        return self.write_buffer_instr(module, node);
+    }
     if node.op == ir::Op::StructNew {
         return self.write_struct_new(module, node);
     }
@@ -109,6 +113,9 @@ fn (self: &var Emitter) write_instr_node(
         node.op == ir::Op::ErrorTry or node.op == ir::Op::ErrorHas or
         node.op == ir::Op::ErrorValue or node.op == ir::Op::ErrorCode {
         return self.write_error_instr(module, node);
+    }
+    if is_wasm_array_op(node.op) {
+        return self.write_array_instr(module, node);
     }
     if is_opaque_op(node.op) {
         return self.write_unsupported_opaque(module, node);
@@ -153,8 +160,8 @@ fn (self: &Emitter) fail_op(
     return self.fail(format, Arg::Owned(move text));
 }
 
-/// Records a no-op value conversion for the Phase 16 low-level subset, the Go
-/// `writeCast`.
+/// Preserves integer-width casts in the shared i64 representation and converts
+/// when a raw wasm32 pointer crosses the integer boundary.
 fn (self: &var Emitter) write_cast(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -162,7 +169,26 @@ fn (self: &var Emitter) write_cast(
     if node.args.len() != 1 {
         return try self.fail0("wasm error: cast expects 1 arg");
     }
-    let expr = try self.arg_expr(module, node, 0);
+    let source_value = node.args.get_or_panic(0);
+    let source = wasm_type(module, source_value.type_name);
+    let target = wasm_type(module, node.result.type_name);
+    let value = try self.arg_expr(module, node, 0);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    if mem::equal_bytes(source, "i64") and mem::equal_bytes(target, "i32") {
+        try expression.append_bytes(self.allocator, "(i32.wrap_i64 ");
+        try self.names.append_to(&var expression, value);
+        try expression.append_bytes(self.allocator, ")");
+    } else {
+        if mem::equal_bytes(source, "i32") and mem::equal_bytes(target, "i64") {
+            try expression.append_bytes(self.allocator, "(i64.extend_i32_u ");
+            try self.names.append_to(&var expression, value);
+            try expression.append_bytes(self.allocator, ")");
+        } else {
+            try self.names.append_to(&var expression, value);
+        }
+    }
+    let expr = try self.names.intern_owned(move expression);
     try self.set_value(module, node.result, expr);
     return null;
 }
@@ -370,6 +396,32 @@ fn (self: &var Emitter) write_call(
     if module.names.is(node.operand, "print") {
         return self.write_print(module, node);
     }
+    if module.names.is(node.operand, "std::internal::builtin::mem_page_allocator") {
+        if node.args.len() != 0 or !module.names.is(node.result.type_name, "Allocator") {
+            return try self.fail0(
+                "wasm error: mem_page_allocator expects no args -> Allocator"
+            );
+        }
+        let expr = try self.names.intern("(i32.const 0)");
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::mem_fixed_buffer") {
+        if node.args.len() != 1 or
+            !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+            !module.names.is(node.result.type_name, "Allocator") {
+            return try self.fail0("wasm error: mem_fixed_buffer expects []u8 -> Allocator");
+        }
+        let view = try self.arg_expr(module, node, 0);
+        var call = try string::from_bytes(self.allocator, "(call $__fixed_buffer ");
+        errdefer call.deinit(self.allocator);
+        try self.names.append_to(&var call, view);
+        try call.append_bytes(self.allocator, ")");
+        let expr = try self.names.intern_owned(move call);
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::mem_allocator_from") {
+        return self.write_allocator_from_call(module, node);
+    }
     var result_slot = ir::empty_name();
     if try self.is_memory_type(module, node.result.type_name) {
         result_slot = try self.result_slot(module, node.result) orelse
@@ -506,7 +558,7 @@ fn (self: &var Emitter) write_return(
     value: ir::Value
 ) -> !?diagnostic::Diagnostic {
     if module.names.is(value.type_name, "void") {
-        try self.restore_frame();
+        try self.restore_frame(module);
         try self.line("            (br $exit)");
         return null;
     }
@@ -518,20 +570,26 @@ fn (self: &var Emitter) write_return(
             Layout(layout) => {
                 let result = try self.names.intern("(local.get $__kizu_result)");
                 try self.write_memory_copy(result, info.expr, layout.size);
-                try self.restore_frame();
+                try self.restore_frame(module);
                 try self.line("            (br $exit)");
                 return null;
             },
         }
     }
-    try self.restore_frame();
+    try self.restore_frame(module);
     try self.line1("            (return %s)", Arg::Str(info.expr));
     return null;
 }
 
 /// Releases this invocation's fixed frame before any return.
-fn (self: &var Emitter) restore_frame() -> !void {
+fn (self: &var Emitter) restore_frame(module: &ir::Module) -> !void {
     if self.frame_size > 0 {
+        if self.uses_allocator_runtime(module) {
+            return self.line1(
+                "            (call $__stack_free (local.get $__kizu_frame) (i32.const %d))",
+                Arg::Int(self.frame_size)
+            );
+        }
         return self.line("            (global.set $__stack_pointer (local.get $__kizu_frame))");
     }
     return;

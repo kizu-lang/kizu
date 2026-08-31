@@ -88,8 +88,13 @@ func (e *emitter) collectPanicKinds() {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if instr.Op == "cond_fail" {
+				switch instr.Op {
+				case "cond_fail":
 					e.panicKinds[instr.Immediate] = true
+				case "array.get_or_panic":
+					e.panicKinds["bounds"] = true
+				case "array.pop_or_panic":
+					e.panicKinds["array_empty"] = true
 				}
 			}
 		}
