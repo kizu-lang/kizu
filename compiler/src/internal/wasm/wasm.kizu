@@ -49,6 +49,8 @@ pub fn emit(
         out: string::new(allocator),
         strings: map::new<[]u8, DataRef>(allocator),
         data_order: array::new<ir::Name>(allocator),
+        enum_tables: map::new<i64, DataRef>(allocator),
+        enum_table_order: array::new<ir::Name>(allocator),
         panic_kinds: map::new<[]u8, bool>(allocator),
         values: map::new<[]u8, ValueInfo>(allocator),
         data_end: 0,
@@ -121,6 +123,11 @@ struct Emitter {
     out: string::String,
     strings: map::Map<[]u8, DataRef>,
     data_order: array::Array<ir::Name>,
+    // Printed enums use linear-memory {pointer, length} rows in deterministic
+    // IR discovery order. A module that prints none carries neither data nor
+    // the lookup helper.
+    enum_tables: map::Map<i64, DataRef>,
+    enum_table_order: array::Array<ir::Name>,
     // panic_kinds contains only the checked runtime failures this module uses.
     // Their data, proc_exit import, and helpers are omitted otherwise.
     panic_kinds: map::Map<[]u8, bool>,
@@ -438,6 +445,7 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     try self.record_data("newline", offset, 1);
     offset = offset + 1;
     offset = try self.record_used_panic_data(offset);
+    offset = try self.collect_enum_print_data(module, offset);
     self.data_end = wasm_align_up(offset, 8);
     return;
 }
@@ -653,6 +661,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         ;
         try self.line2(format, Arg::Int(offset), Arg::Owned(move text));
     }
+    try self.write_enum_print_tables(module);
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
@@ -672,6 +681,15 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
     }
     if panic_data_text(bytes) |text| {
         try append_string_bytes(self.allocator, out, text);
+        return found.offset;
+    }
+    if mem::starts_with(bytes, enum_print_data_prefix()) {
+        let prefix = mem::len(enum_print_data_prefix());
+        try append_string_bytes(
+            self.allocator,
+            out,
+            bytes[prefix..mem::len(bytes)]
+        );
         return found.offset;
     }
     var unquoted = string::new(self.allocator);
@@ -700,6 +718,9 @@ fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !void {
     try self.write_bool_helper();
     try self.write_int_value_helper();
     try self.write_int_helper();
+    if self.enum_table_order.len() > 0 {
+        try self.write_enum_print_helper();
+    }
     if self.uses_byte_equality_runtime(module) {
         try self.write_byte_equality_helper();
     }

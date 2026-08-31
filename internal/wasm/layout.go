@@ -134,9 +134,6 @@ func (e *emitter) isMemoryType(typ string) bool {
 	if typ == "[]u8" {
 		return true
 	}
-	if _, ok := e.bufferSize(typ); ok {
-		return true
-	}
 	if isArrayWasmType(typ) {
 		return true
 	}

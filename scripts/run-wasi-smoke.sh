@@ -141,6 +141,20 @@ bob
 carol
 7
 {\"counts\":{\"alice\":2,\"bob\":1,\"carol\":4},\"total\":7}"
+run_example "enum" "examples/enum.kizu" "Color::Green
+true"
+run_example "std_array_token_list" "examples/std_array_token_list.kizu" "2
+TokenKind::Ident
+TokenKind::Number"
+run_example "std_map_symbol_table" "examples/std_map_symbol_table.kizu" "SymbolKind::Function
+false"
+run_example "bytes_iter" "examples/bytes_iter.kizu" "10
+20
+30"
+run_example "std_string_join_trim" "examples/std_string_join_trim.kizu" "first  text
+
+ last
+0"
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.

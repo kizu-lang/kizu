@@ -46,8 +46,9 @@ fn (self: &var Emitter) plan_frame(
             if try self.plan_call_copy_slots(module, instr_node) |failed| {
                 return move failed;
             }
-            if try self.is_memory_type(module, instr_node.result.type_name) and
-                instr_node.op != ir::Op::Phi {
+            let result_needs_slot = instr_node.op == ir::Op::BufferNew or
+                try self.is_memory_type(module, instr_node.result.type_name);
+            if result_needs_slot and instr_node.op != ir::Op::Phi {
                 let outcome = try self.type_layout(module, instr_node.result.type_name);
                 match outcome {
                     Error(failed) => return move failed,
@@ -67,7 +68,7 @@ fn (self: &var Emitter) plan_frame(
             }
             if instr_node.op == ir::Op::LocalSlot {
                 if instr_node.args.get(0) |value| {
-                    let outcome = try self.type_layout(module, value.type_name);
+                    let outcome = try self.value_slot_layout(module, value.type_name);
                     match outcome {
                         Error(failed) => return move failed,
                         Layout(layout) => {
@@ -91,6 +92,21 @@ fn (self: &var Emitter) plan_frame(
     }
     self.frame_size = wasm_align_up(self.frame_size, 8);
     return null;
+}
+
+/// Returns storage for one wasm value placed in an addressable cell. A stack
+/// buffer value is its storage address (ADR-0097), so the cell holds one i32
+/// pointer rather than a second inline byte buffer.
+fn (self: &var Emitter) value_slot_layout(
+    module: &ir::Module,
+    type_name: ir::Name
+) -> !WasmLayoutResult {
+    let retained = ir::name_text(&module.names, type_name);
+    let bytes = retained.as_bytes();
+    if is_buffer_wasm_type(bytes) {
+        return WasmLayoutResult::Layout(WasmLayout { size: 4, align: 4 });
+    }
+    return self.type_layout(module, type_name);
 }
 
 /// Plans addressed scalar copies required by direct and indirect call ABI
@@ -147,7 +163,7 @@ fn (self: &var Emitter) plan_call_copy_slot(
     }
     let allocator = self.allocator;
     let generation = self.generation;
-    let outcome = try self.type_layout(module, arg.type_name);
+    let outcome = try self.value_slot_layout(module, arg.type_name);
     match outcome {
         Error(failed) => return move failed,
         Layout(layout) => {
@@ -227,8 +243,9 @@ fn (self: &var Emitter) register_frame_values(
         while block_node.instrs.get(instr_index) |instr| {
             instr_index = instr_index + 1;
             let instr_node = module.instrs.at(instr.node);
-            if try self.is_memory_type(module, instr_node.result.type_name) and
-                instr_node.op != ir::Op::Phi {
+            let result_needs_slot = instr_node.op == ir::Op::BufferNew or
+                try self.is_memory_type(module, instr_node.result.type_name);
+            if result_needs_slot and instr_node.op != ir::Op::Phi {
                 if try self.result_slot(module, instr_node.result) |slot| {
                     try self.set_value(module, instr_node.result, slot);
                 } else {

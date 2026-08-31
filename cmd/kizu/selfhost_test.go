@@ -192,39 +192,7 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		compareSelfhostArgs(t, selfhost, goWASMOutput(loops, false),
 			"build", "--target", "wasm32-wasi", loops)
 	})
-	for _, example := range []string{
-		"../../examples/aggregate_calls.kizu",
-		"../../examples/union.kizu",
-		"../../examples/mutable_borrow_nested_field.kizu",
-		"../../examples/optional_error_flow.kizu",
-		"../../examples/slice_checked_access.kizu",
-		"../../examples/std_array.kizu",
-		"../../examples/std_array_append_bytes.kizu",
-		"../../examples/fixed_buffer.kizu",
-		"../../examples/user_allocator_refusal.kizu",
-		"../../examples/std_mem_box_take.kizu",
-		"../../examples/std_mem_box_ast.kizu",
-		"../../examples/std_mem_box_cleanup.kizu",
-		"../../examples/arena.kizu",
-		"../../examples/arena_at_mut.kizu",
-		"../../examples/arena_owner_elements.kizu",
-		"../../examples/arena_add_recovers_from_a_full_allocator.kizu",
-		"../../examples/std_map.kizu",
-		"../../examples/std_map_integer_key.kizu",
-		"../../examples/std_map_owner_value.kizu",
-		"../../examples/map_insert_recovers_from_a_full_allocator.kizu",
-		"../../examples/negative/std_map_owner_value_overwrite.kizu",
-		"../../examples/std_json_decode_map.kizu",
-		"../../examples/std_path_edges.kizu",
-		"../../examples/negative/slice_syntax_index_out_of_bounds.kizu",
-		"../../examples/negative/slice_syntax_range_out_of_bounds.kizu",
-		"../../examples/negative/std_array_get_or_panic_bounds.kizu",
-		"../../examples/negative/arena_handle_from_another_instance.kizu",
-		"../../examples/negative/std_testing_run_fail.kizu",
-		"../../examples/negative/std_testing_run_expect_equal.kizu",
-		"../../examples/negative/std_testing_run_expect_equal_bool.kizu",
-		"../../examples/negative/std_testing_run_expect_equal_bytes.kizu",
-	} {
+	for _, example := range selfhostWASMExamples() {
 		name := strings.TrimSuffix(filepath.Base(example), ".kizu")
 		t.Run("wasm/"+name, func(t *testing.T) {
 			compareSelfhostArgs(t, selfhost, goWASMOutput(example, false),
@@ -252,6 +220,49 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			args = append(args, path)
 			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
 		})
+	}
+}
+
+// selfhostWASMExamples lists observable programs whose seed and shipping WAT
+// must remain identical.
+func selfhostWASMExamples() []string {
+	return []string{
+		"../../examples/aggregate_calls.kizu",
+		"../../examples/union.kizu",
+		"../../examples/enum.kizu",
+		"../../examples/mutable_borrow_nested_field.kizu",
+		"../../examples/optional_error_flow.kizu",
+		"../../examples/slice_checked_access.kizu",
+		"../../examples/std_array.kizu",
+		"../../examples/std_array_append_bytes.kizu",
+		"../../examples/std_array_token_list.kizu",
+		"../../examples/fixed_buffer.kizu",
+		"../../examples/bytes_iter.kizu",
+		"../../examples/std_string_join_trim.kizu",
+		"../../examples/user_allocator_refusal.kizu",
+		"../../examples/std_mem_box_take.kizu",
+		"../../examples/std_mem_box_ast.kizu",
+		"../../examples/std_mem_box_cleanup.kizu",
+		"../../examples/arena.kizu",
+		"../../examples/arena_at_mut.kizu",
+		"../../examples/arena_owner_elements.kizu",
+		"../../examples/arena_add_recovers_from_a_full_allocator.kizu",
+		"../../examples/std_map.kizu",
+		"../../examples/std_map_integer_key.kizu",
+		"../../examples/std_map_symbol_table.kizu",
+		"../../examples/std_map_owner_value.kizu",
+		"../../examples/map_insert_recovers_from_a_full_allocator.kizu",
+		"../../examples/negative/std_map_owner_value_overwrite.kizu",
+		"../../examples/std_json_decode_map.kizu",
+		"../../examples/std_path_edges.kizu",
+		"../../examples/negative/slice_syntax_index_out_of_bounds.kizu",
+		"../../examples/negative/slice_syntax_range_out_of_bounds.kizu",
+		"../../examples/negative/std_array_get_or_panic_bounds.kizu",
+		"../../examples/negative/arena_handle_from_another_instance.kizu",
+		"../../examples/negative/std_testing_run_fail.kizu",
+		"../../examples/negative/std_testing_run_expect_equal.kizu",
+		"../../examples/negative/std_testing_run_expect_equal_bool.kizu",
+		"../../examples/negative/std_testing_run_expect_equal_bytes.kizu",
 	}
 }
 

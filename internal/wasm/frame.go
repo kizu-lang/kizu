@@ -15,8 +15,8 @@ type frameLayout struct {
 	slots map[string]int
 }
 
-// planFrame assigns fixed offsets to every memory-backed result and local
-// storage cell in fn.
+// planFrame assigns fixed offsets to every memory-backed result, stack-buffer
+// storage, and local storage cell in fn.
 func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 	frame := &frameLayout{slots: map[string]int{}}
 	for _, block := range fn.Blocks {
@@ -28,7 +28,8 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 			if err := e.planCallCopySlots(frame, instr); err != nil {
 				return nil, err
 			}
-			if e.isMemoryType(instr.Result.Type) && instr.Op != "phi" {
+			if (e.isMemoryType(instr.Result.Type) || instr.Op == "buffer.new") &&
+				instr.Op != "phi" {
 				layout, err := e.typeLayout(instr.Result.Type)
 				if err != nil {
 					return nil, err
@@ -36,7 +37,7 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 				frame.allocate(resultSlotKey(instr.Result.Name), layout)
 			}
 			if instr.Op == "local.slot" {
-				layout, err := e.typeLayout(derefWasmType(instr.Result.Type))
+				layout, err := e.valueSlotLayout(derefWasmType(instr.Result.Type))
 				if err != nil {
 					return nil, err
 				}
@@ -54,7 +55,8 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 func (e *emitter) registerFrameValues(fn *ir.Function) error {
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			if e.isMemoryType(instr.Result.Type) && instr.Op != "phi" {
+			if (e.isMemoryType(instr.Result.Type) || instr.Op == "buffer.new") &&
+				instr.Op != "phi" {
 				slot, err := e.resultSlot(instr.Result)
 				if err != nil {
 					return err
@@ -71,6 +73,16 @@ func (e *emitter) registerFrameValues(fn *ir.Function) error {
 		}
 	}
 	return nil
+}
+
+// valueSlotLayout returns storage for one wasm value placed in an addressable
+// cell. A stack buffer value is its storage address (ADR-0097), so the cell
+// holds one i32 pointer rather than a second inline byte buffer.
+func (e *emitter) valueSlotLayout(typ string) (wasmLayout, error) {
+	if _, ok := e.bufferSize(typ); ok {
+		return wasmLayout{size: 4, align: 4}, nil
+	}
+	return e.typeLayout(typ)
 }
 
 // allocate reserves an aligned frame slot unless key already has one.
@@ -119,7 +131,7 @@ func (e *emitter) planCallCopySlots(frame *frameLayout, instr *ir.Instr) error {
 		if index >= len(params) || !e.callNeedsCopySlot(params[index], arg) {
 			continue
 		}
-		layout, err := e.typeLayout(arg.Type)
+		layout, err := e.valueSlotLayout(arg.Type)
 		if err != nil {
 			return err
 		}

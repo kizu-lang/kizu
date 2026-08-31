@@ -27,6 +27,7 @@ func Emit(module *ir.Module) (string, error) {
 		types:            typ.NewTable(),
 		paramsByFunction: paramsByFunction,
 		strings:          map[string]dataRef{},
+		enumTables:       map[string]enumPrintTable{},
 		values:           map[string]valueInfo{},
 		panicKinds:       map[string]bool{},
 		tableIndex:       map[string]int{},
@@ -56,7 +57,11 @@ type emitter struct {
 	// dataOrder keeps assignment order when zero-length data shares an offset
 	// with the following segment. Sorting offsets alone cannot order that tie.
 	dataOrder []string
-	values    map[string]valueInfo
+	// enumTables are the linear-memory name tables for enum types this module
+	// prints. enumTableOrder preserves discovery order for deterministic WAT.
+	enumTables     map[string]enumPrintTable
+	enumTableOrder []string
+	values         map[string]valueInfo
 	// panicKinds contains only the checked runtime failures this module uses.
 	// Their data, proc_exit import, and helpers are omitted otherwise.
 	panicKinds map[string]bool
@@ -193,6 +198,7 @@ func (e *emitter) collectStrings() {
 		e.dataOrder = append(e.dataOrder, data.key)
 		offset += len(data.text)
 	}
+	offset = e.collectEnumPrintData(offset)
 	e.dataEnd = alignUp(offset, 8)
 }
 
@@ -242,6 +248,7 @@ func (e *emitter) writeHeader() {
 		ref := e.strings[lit]
 		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", ref.offset, dataLiteral(lit))
 	}
+	e.writeEnumPrintTables()
 	e.out.WriteByte('\n')
 }
 
@@ -276,6 +283,9 @@ func dataLiteral(key string) string {
 	if text, ok := panicDataText(key); ok {
 		return stringBytes(text)
 	}
+	if text, ok := strings.CutPrefix(key, enumPrintDataPrefix); ok {
+		return stringBytes(text)
+	}
 	switch key {
 	case "newline":
 		return "\\0a"
@@ -304,6 +314,9 @@ func (e *emitter) writeRuntime() {
 	e.writeBoolHelper()
 	e.writeIntValueHelper()
 	e.writeIntHelper()
+	if len(e.enumTableOrder) > 0 {
+		e.writeEnumPrintHelper()
+	}
 	if e.usesByteEqualityRuntime() {
 		e.writeByteEqualityHelper()
 	}

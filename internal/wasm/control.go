@@ -401,6 +401,13 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	case "bool":
 		fmt.Fprintf(&e.out, "            (call $__print_bool %s)\n", value.expr)
 	default:
+		if isIntegerType(args[0].Type) {
+			fmt.Fprintf(&e.out, "            (call $__print_i64 %s)\n", value.expr)
+			return nil
+		}
+		if e.writeEnumPrint(args[0].Type, args[0]) {
+			return nil
+		}
 		return fmt.Errorf("wasm error: unsupported print type `%s`", args[0].Type)
 	}
 	return nil
