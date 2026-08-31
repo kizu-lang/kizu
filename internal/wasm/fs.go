@@ -4,6 +4,7 @@ import "fmt"
 
 const (
 	fsReadFileIntoBuiltin = "std::internal::builtin::fs_read_file_into"
+	fsReadDirBuiltin      = "std::internal::builtin::fs_read_dir"
 	fsWriteFileBuiltin    = "std::internal::builtin::fs_write_file"
 	fsExistsBuiltin       = "std::internal::builtin::fs_exists"
 	fsMetadataBuiltin     = "std::internal::builtin::fs_metadata"
@@ -18,10 +19,17 @@ const (
 	fsFilestatOffset     = 64
 	fsFilestatTypeOffset = 16
 	fsFilestatSizeOffset = 32
+	fsReaddirUsedOffset  = 32
+	fsDirentHeaderSize   = 24
+	fsDirentNameOffset   = 24
+	fsDirentNameLen      = 16
+	fsReaddirBufferSize  = 4096
 
 	wasiLookupSymlinkFollow = 1
 	wasiRightFDRead         = 2
 	wasiRightFDWrite        = 64
+	wasiRightFDReaddir      = 16384
+	wasiOpenDirectory       = 2
 	wasiOpenCreateTruncate  = 9
 	wasiFiletypeDirectory   = 3
 
@@ -58,10 +66,22 @@ type fsErrorCodes struct {
 	limitExceeded     int
 }
 
+// fsDirLayout is the declaration-derived wasm32 storage used by read_dir.
+// String's private Array field is included so the runtime does not pin the
+// source-level struct shape.
+type fsDirLayout struct {
+	entrySize    int
+	nameOffset   int
+	pathOffset   int
+	isDirOffset  int
+	resultOffset int
+}
+
 // usesFSRuntime reports whether the pruned guest reaches a filesystem host
 // primitive implemented by the current WASI boundary.
 func (e *emitter) usesFSRuntime() bool {
 	return e.usesBuiltinCall(fsReadFileIntoBuiltin) ||
+		e.usesBuiltinCall(fsReadDirBuiltin) ||
 		e.usesBuiltinCall(fsWriteFileBuiltin) ||
 		e.usesBuiltinCall(fsExistsBuiltin) ||
 		e.usesBuiltinCall(fsMetadataBuiltin) ||
@@ -73,12 +93,16 @@ func (e *emitter) usesFSRuntime() bool {
 
 // usesFSOpen reports whether a reached primitive opens a file descriptor.
 func (e *emitter) usesFSOpen() bool {
-	return e.usesBuiltinCall(fsReadFileIntoBuiltin) || e.usesBuiltinCall(fsWriteFileBuiltin)
+	return e.usesBuiltinCall(fsReadFileIntoBuiltin) ||
+		e.usesBuiltinCall(fsReadDirBuiltin) ||
+		e.usesBuiltinCall(fsWriteFileBuiltin)
 }
 
 // usesFSStat reports whether path metadata is needed by a reached primitive.
 func (e *emitter) usesFSStat() bool {
-	return e.usesBuiltinCall(fsExistsBuiltin) || e.usesBuiltinCall(fsMetadataBuiltin)
+	return e.usesBuiltinCall(fsExistsBuiltin) ||
+		e.usesBuiltinCall(fsMetadataBuiltin) ||
+		e.usesBuiltinCall(fsReadDirBuiltin)
 }
 
 // writeFSImports declares only the WASI filesystem calls the guest reaches.
@@ -96,6 +120,10 @@ func (e *emitter) writeFSImports() {
 	if e.usesBuiltinCall(fsReadFileIntoBuiltin) {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_read\"\n")
 		e.out.WriteString("    (func $__wasi_fd_read (param i32 i32 i32 i32) (result i32)))\n")
+	}
+	if e.usesBuiltinCall(fsReadDirBuiltin) {
+		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_readdir\"\n")
+		e.out.WriteString("    (func $__wasi_fd_readdir (param i32 i32 i32 i64 i32) (result i32)))\n")
 	}
 	if e.usesFSOpen() {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_close\"\n")
@@ -138,6 +166,13 @@ func (e *emitter) writeFSRuntime() error {
 	e.writeFSErrnoHelper(codes)
 	if e.usesBuiltinCall(fsReadFileIntoBuiltin) {
 		e.writeFSReadFileInto(codes)
+	}
+	if e.usesBuiltinCall(fsReadDirBuiltin) {
+		layout, err := e.loadFSDirLayout()
+		if err != nil {
+			return err
+		}
+		e.writeFSReadDir(layout, codes)
 	}
 	if e.usesBuiltinCall(fsWriteFileBuiltin) {
 		e.writeFSWriteFile(codes)
@@ -197,6 +232,54 @@ func (e *emitter) loadFSErrorCodes() (fsErrorCodes, error) {
 		*member.dst = code
 	}
 	return codes, nil
+}
+
+// loadFSDirLayout resolves the public entry fields, String's storage field,
+// and the success payload from declarations. Runtime code may depend on Array's
+// ABI, but not on one source-level aggregate continuing to have fixed offsets.
+func (e *emitter) loadFSDirLayout() (fsDirLayout, error) {
+	const (
+		entryType  = "std::fs::DirEntry"
+		stringType = "std::string::String"
+		arrayType  = "std::array::Array<std::fs::DirEntry>"
+		resultType = "std::fs::Error!std::array::Array<std::fs::DirEntry>"
+	)
+	entry, err := e.typeLayout(entryType)
+	if err != nil {
+		return fsDirLayout{}, err
+	}
+	name, nameOffset, err := e.fieldLayout(entryType, "name")
+	if err != nil {
+		return fsDirLayout{}, err
+	}
+	path, pathOffset, err := e.fieldLayout(entryType, "path")
+	if err != nil {
+		return fsDirLayout{}, err
+	}
+	isDir, isDirOffset, err := e.fieldLayout(entryType, "is_dir")
+	if err != nil {
+		return fsDirLayout{}, err
+	}
+	bytes, bytesOffset, err := e.fieldLayout(stringType, "bytes")
+	if err != nil {
+		return fsDirLayout{}, err
+	}
+	_, success, resultOffset, err := e.errorPayloadOffset(resultType)
+	if err != nil {
+		return fsDirLayout{}, err
+	}
+	if name.Type != stringType || path.Type != stringType || isDir.Type != "bool" ||
+		bytes.Type != "std::array::Array<u8>" || success != arrayType || entry.size <= 0 {
+		return fsDirLayout{}, fmt.Errorf(
+			"wasm error: incompatible `%s` storage for fs_read_dir", entryType)
+	}
+	return fsDirLayout{
+		entrySize:    entry.size,
+		nameOffset:   nameOffset + bytesOffset,
+		pathOffset:   pathOffset + bytesOffset,
+		isDirOffset:  isDirOffset,
+		resultOffset: resultOffset,
+	}, nil
 }
 
 // writeFSPreopenHelper verifies the WASI CLI's first directory capability.
@@ -392,6 +475,495 @@ func (e *emitter) writeFSReadFailure(code int) {
 		arrayLenOffset)
 	e.out.WriteString("            (drop (call $__wasi_fd_close (local.get $fd)))\n")
 	e.writeErrorResult(code, "            ")
+}
+
+// writeFSReadDir emits an owned, sorted directory snapshot. The host buffer
+// is temporary; every returned name and path belongs to the caller allocator.
+func (e *emitter) writeFSReadDir(layout fsDirLayout, codes fsErrorCodes) {
+	e.writeFSDirEntriesFree(layout)
+	e.writeFSDirEntryAfter(layout)
+	e.writeFSSortDirEntries(layout)
+	e.writeFSReadDirFailHelper(layout)
+	e.writeFSReadDirBuiltin(layout, codes)
+}
+
+// writeFSDirEntriesFree releases nested String storage before Array storage.
+func (e *emitter) writeFSDirEntriesFree(layout fsDirLayout) {
+	e.out.WriteString("  (func $__fs_dir_entries_free (param $allocator i32) (param $array i32)\n")
+	e.out.WriteString("    (local $index i64) (local $item i32) (local $capacity i64)\n")
+	e.out.WriteString("    (block $done\n")
+	e.out.WriteString("      (loop $entries\n")
+	fmt.Fprintf(&e.out,
+		"        (br_if $done (i64.ge_u (local.get $index) "+
+			"(i64.load (i32.add (local.get $array) (i32.const %d)))))\n",
+		arrayLenOffset)
+	e.out.WriteString("        (local.set $item\n")
+	e.out.WriteString("          (i32.add (i32.load (local.get $array))\n")
+	fmt.Fprintf(&e.out,
+		"            (i32.wrap_i64 (i64.mul (local.get $index) (i64.const %d)))))\n",
+		layout.entrySize)
+	e.writeFSDirStringFree(layout.nameOffset)
+	e.writeFSDirStringFree(layout.pathOffset)
+	e.out.WriteString("        (local.set $index (i64.add (local.get $index) (i64.const 1)))\n")
+	e.out.WriteString("        (br $entries)))\n")
+	fmt.Fprintf(&e.out,
+		"    (local.set $capacity (i64.load (i32.add (local.get $array) (i32.const %d))))\n",
+		arrayCapacityOffset)
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator) " +
+		"(i32.load (local.get $array))\n")
+	fmt.Fprintf(&e.out,
+		"      (i32.wrap_i64 (i64.mul (local.get $capacity) (i64.const %d))))\n",
+		layout.entrySize)
+	e.out.WriteString("    (i32.store (local.get $array) (i32.const 0))\n")
+	fmt.Fprintf(&e.out,
+		"    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))\n",
+		arrayLenOffset)
+	fmt.Fprintf(&e.out,
+		"    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))\n",
+		arrayCapacityOffset)
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSDirStringFree releases one String's declaration-derived Array field.
+func (e *emitter) writeFSDirStringFree(offset int) {
+	fmt.Fprintf(&e.out,
+		"        (local.set $capacity (i64.load (i32.add (local.get $item) (i32.const %d))))\n",
+		offset+arrayCapacityOffset)
+	e.out.WriteString("        (call $__allocator_free (local.get $allocator)\n")
+	fmt.Fprintf(&e.out,
+		"          (i32.load (i32.add (local.get $item) (i32.const %d)))\n",
+		offset+arrayDataOffset)
+	e.out.WriteString("          (i32.wrap_i64 (local.get $capacity)))\n")
+}
+
+// writeFSDirEntryAfter compares names by unsigned bytes for insertion sort.
+func (e *emitter) writeFSDirEntryAfter(layout fsDirLayout) {
+	e.out.WriteString("  (func $__fs_dir_entry_after " +
+		"(param $left i32) (param $right i32) (result i32)\n")
+	e.out.WriteString("    (local $left_len i64) (local $right_len i64) (local $limit i64)\n")
+	e.out.WriteString("    (local $index i64) (local $left_byte i32) (local $right_byte i32)\n")
+	fmt.Fprintf(&e.out,
+		"    (local.set $left_len (i64.load (i32.add (local.get $left) (i32.const %d))))\n",
+		layout.nameOffset+arrayLenOffset)
+	fmt.Fprintf(&e.out,
+		"    (local.set $right_len (i64.load (i32.add (local.get $right) (i32.const %d))))\n",
+		layout.nameOffset+arrayLenOffset)
+	e.out.WriteString("    (local.set $limit (local.get $left_len))\n")
+	e.out.WriteString("    (if (i64.lt_u (local.get $right_len) (local.get $limit))\n")
+	e.out.WriteString("      (then (local.set $limit (local.get $right_len))))\n")
+	e.out.WriteString("    (block $same_prefix\n")
+	e.out.WriteString("      (loop $bytes\n")
+	e.out.WriteString("        (br_if $same_prefix " +
+		"(i64.ge_u (local.get $index) (local.get $limit)))\n")
+	e.out.WriteString("        (local.set $left_byte\n")
+	fmt.Fprintf(&e.out,
+		"          (i32.load8_u (i32.add (i32.load (i32.add (local.get $left) (i32.const %d)))\n",
+		layout.nameOffset+arrayDataOffset)
+	e.out.WriteString("            (i32.wrap_i64 (local.get $index)))))\n")
+	e.out.WriteString("        (local.set $right_byte\n")
+	fmt.Fprintf(&e.out,
+		"          (i32.load8_u (i32.add (i32.load (i32.add (local.get $right) (i32.const %d)))\n",
+		layout.nameOffset+arrayDataOffset)
+	e.out.WriteString("            (i32.wrap_i64 (local.get $index)))))\n")
+	e.out.WriteString("        (if (i32.ne (local.get $left_byte) (local.get $right_byte))\n")
+	e.out.WriteString("          (then (return (i32.gt_u " +
+		"(local.get $left_byte) (local.get $right_byte)))))\n")
+	e.out.WriteString("        (local.set $index (i64.add (local.get $index) (i64.const 1)))\n")
+	e.out.WriteString("        (br $bytes)))\n")
+	e.out.WriteString("    (i64.gt_u (local.get $left_len) (local.get $right_len))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSSortDirEntries emits a stable in-place insertion sort by name.
+func (e *emitter) writeFSSortDirEntries(layout fsDirLayout) {
+	e.out.WriteString("  (func $__fs_sort_dir_entries (param $array i32)\n")
+	e.out.WriteString("    (local $index i64) (local $current i64) (local $left i64)\n")
+	e.out.WriteString("    (local $left_ptr i32) (local $right_ptr i32)\n")
+	e.out.WriteString("    (local.set $index (i64.const 1))\n")
+	e.out.WriteString("    (block $sorted\n")
+	e.out.WriteString("      (loop $outer\n")
+	fmt.Fprintf(&e.out,
+		"        (br_if $sorted (i64.ge_u (local.get $index) "+
+			"(i64.load (i32.add (local.get $array) (i32.const %d)))))\n",
+		arrayLenOffset)
+	e.out.WriteString("        (local.set $current (local.get $index))\n")
+	e.out.WriteString("        (block $inserted\n")
+	e.out.WriteString("          (loop $inner\n")
+	e.out.WriteString("            (br_if $inserted (i64.eqz (local.get $current)))\n")
+	e.out.WriteString("            (local.set $left (i64.sub (local.get $current) (i64.const 1)))\n")
+	e.out.WriteString("            (local.set $left_ptr (i32.add (i32.load (local.get $array))\n")
+	fmt.Fprintf(&e.out,
+		"              (i32.wrap_i64 (i64.mul (local.get $left) (i64.const %d)))))\n",
+		layout.entrySize)
+	e.out.WriteString("            (local.set $right_ptr (i32.add (i32.load (local.get $array))\n")
+	fmt.Fprintf(&e.out,
+		"              (i32.wrap_i64 (i64.mul (local.get $current) (i64.const %d)))))\n",
+		layout.entrySize)
+	e.out.WriteString("            (br_if $inserted (i32.eqz (call $__fs_dir_entry_after\n")
+	e.out.WriteString("              (local.get $left_ptr) (local.get $right_ptr))))\n")
+	e.out.WriteString("            (drop (call $__array_swap (local.get $array)\n")
+	fmt.Fprintf(&e.out,
+		"              (local.get $left) (local.get $current) (i32.const %d)))\n",
+		layout.entrySize)
+	e.out.WriteString("            (local.set $current (local.get $left))\n")
+	e.out.WriteString("            (br $inner)))\n")
+	e.out.WriteString("        (local.set $index (i64.add (local.get $index) (i64.const 1)))\n")
+	e.out.WriteString("        (br $outer)))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSReadDirFailHelper centralizes cleanup for every post-open failure.
+func (e *emitter) writeFSReadDirFailHelper(layout fsDirLayout) {
+	e.out.WriteString("  (func $__fs_read_dir_fail\n")
+	e.out.WriteString("      (param $out i32) (param $allocator i32) (param $array i32)\n")
+	e.out.WriteString("      (param $buffer i32) (param $capacity i32) " +
+		"(param $fd i32) (param $code i64)\n")
+	e.out.WriteString("    (call $__fs_dir_entries_free (local.get $allocator) (local.get $array))\n")
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator)\n")
+	e.out.WriteString("      (local.get $buffer) (local.get $capacity))\n")
+	e.out.WriteString("    (if (i32.ge_s (local.get $fd) (i32.const 0))\n")
+	e.out.WriteString("      (then (drop (call $__wasi_fd_close (local.get $fd)))))\n")
+	e.out.WriteString("    (i64.store (local.get $out) (i64.const 0))\n")
+	fmt.Fprintf(&e.out,
+		"    (i64.store (i32.add (local.get $out) (i32.const %d)) (local.get $code))\n",
+		layout.resultOffset)
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSReadDirFailure calls the shared cleanup helper from the main loop.
+func (e *emitter) writeFSReadDirFailure(code string, indent string) {
+	fmt.Fprintf(&e.out, "%s(call $__fs_read_dir_fail\n", indent)
+	fmt.Fprintf(&e.out, "%s  (local.get $out) (local.get $allocator) (local.get $array)\n", indent)
+	fmt.Fprintf(&e.out, "%s  (local.get $buffer) (local.get $capacity) (local.get $fd) %s)\n",
+		indent, code)
+}
+
+// writeFSReadDirBuiltin opens one directory, follows opaque readdir cookies,
+// and commits only complete dirent records.
+func (e *emitter) writeFSReadDirBuiltin(layout fsDirLayout, codes fsErrorCodes) {
+	fmt.Fprintf(&e.out, "  (func $%s\n", fsReadDirBuiltin)
+	e.out.WriteString("      (param $out i32) (param $io i32) " +
+		"(param $allocator i32) (param $path i32)\n")
+	e.out.WriteString("    (local $root i32) (local $fd i32) (local $errno i32) (local $array i32)\n")
+	e.out.WriteString("    (local $buffer i32) (local $capacity i32) (local $grown i32)\n")
+	e.out.WriteString("    (local $used i32) (local $pos i32) (local $remaining i32)\n")
+	e.out.WriteString("    (local $header i32) (local $name i32) (local $name_len i32)\n")
+	e.out.WriteString("    (local $record_size i32) (local $cookie i64) (local $next i64)\n")
+	e.out.WriteString("    (local $name_copy i32) (local $path_copy i32) (local $path_len i32)\n")
+	e.out.WriteString("    (local $separator i32) (local $path_size i64) (local $length i64)\n")
+	e.out.WriteString("    (local $item i32) (local $is_dir i32)\n")
+	fmt.Fprintf(&e.out,
+		"    (local.set $array (i32.add (local.get $out) (i32.const %d)))\n",
+		layout.resultOffset)
+	e.out.WriteString("    (i32.store (local.get $array) (i32.const 0))\n")
+	fmt.Fprintf(&e.out,
+		"    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))\n",
+		arrayLenOffset)
+	fmt.Fprintf(&e.out,
+		"    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))\n",
+		arrayCapacityOffset)
+	e.writeFSGuard(codes.ioFailing, codes.permissionDenied)
+	e.out.WriteString("    (local.set $root (local.get $fd))\n")
+	e.out.WriteString("    (local.set $errno (call $__wasi_path_open\n")
+	fmt.Fprintf(&e.out,
+		"      (local.get $root) (i32.const %d) (i32.load (local.get $path))\n",
+		wasiLookupSymlinkFollow)
+	e.out.WriteString("      (i32.load (i32.add (local.get $path) (i32.const 4)))\n")
+	fmt.Fprintf(&e.out,
+		"      (i32.const %d) (i64.const %d) (i64.const 0) (i32.const 0) (i32.const %d)))\n",
+		wasiOpenDirectory, wasiRightFDReaddir, fsOpenedFDOffset)
+	e.out.WriteString("    (if (local.get $errno)\n")
+	e.out.WriteString("      (then\n")
+	e.writeFSStoredErrno("        ")
+	e.out.WriteString("        (return)))\n")
+	fmt.Fprintf(&e.out,
+		"    (local.set $fd (i32.load (i32.const %d)))\n",
+		fsOpenedFDOffset)
+	fmt.Fprintf(&e.out,
+		"    (local.set $capacity (i32.const %d))\n",
+		fsReaddirBufferSize)
+	e.out.WriteString("    (local.set $buffer\n")
+	e.out.WriteString("      (call $__allocator_alloc " +
+		"(local.get $allocator) (local.get $capacity)))\n")
+	e.out.WriteString("    (if (i32.eqz (local.get $buffer))\n")
+	e.out.WriteString("      (then\n")
+	e.writeFSReadDirFailure(fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "        ")
+	e.out.WriteString("        (return)))\n")
+	e.writeFSReadDirLoop(layout, codes)
+	e.out.WriteString("    (local.set $errno (call $__wasi_fd_close (local.get $fd)))\n")
+	e.out.WriteString("    (local.set $fd (i32.const -1))\n")
+	e.out.WriteString("    (if (local.get $errno)\n")
+	e.out.WriteString("      (then\n")
+	e.writeFSReadDirFailure("(call $__fs_error (local.get $errno))", "        ")
+	e.out.WriteString("        (return)))\n")
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator)\n")
+	e.out.WriteString("      (local.get $buffer) (local.get $capacity))\n")
+	e.out.WriteString("    (call $__fs_sort_dir_entries (local.get $array))\n")
+	e.out.WriteString("    (i64.store (local.get $out) (i64.const 1))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeFSReadDirLoop parses packed preview1 dirents and retries truncated
+// records from the last complete opaque cookie.
+func (e *emitter) writeFSReadDirLoop(layout fsDirLayout, codes fsErrorCodes) {
+	e.out.WriteString("    (block $dir_done\n")
+	e.out.WriteString("      (loop $dir_read\n")
+	e.writeFSReadDirHostRead(codes)
+	e.writeFSReadDirParseLoop(layout, codes)
+	e.out.WriteString("        (br $dir_read)))\n")
+}
+
+// writeFSReadDirHostRead fills the temporary buffer and validates bufused.
+func (e *emitter) writeFSReadDirHostRead(codes fsErrorCodes) {
+	e.out.WriteString("        (local.set $errno (call $__wasi_fd_readdir\n")
+	fmt.Fprintf(&e.out,
+		"          (local.get $fd) (local.get $buffer) "+
+			"(local.get $capacity) (local.get $cookie) (i32.const %d)))\n",
+		fsReaddirUsedOffset)
+	e.out.WriteString("        (if (local.get $errno)\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSReadDirFailure(fmt.Sprintf("(i64.const %d)", codes.readFailed), "            ")
+	e.out.WriteString("            (return)))\n")
+	fmt.Fprintf(&e.out,
+		"        (local.set $used (i32.load (i32.const %d)))\n",
+		fsReaddirUsedOffset)
+	e.out.WriteString("        (if (i32.gt_u (local.get $used) (local.get $capacity))\n")
+	e.out.WriteString("          (then\n")
+	e.writeFSReadDirFailure(fmt.Sprintf("(i64.const %d)", codes.readFailed), "            ")
+	e.out.WriteString("            (return)))\n")
+	e.out.WriteString("        (br_if $dir_done (i32.eqz (local.get $used)))\n")
+}
+
+// writeFSReadDirParseLoop walks complete packed entries from one host fill.
+func (e *emitter) writeFSReadDirParseLoop(layout fsDirLayout, codes fsErrorCodes) {
+	e.out.WriteString("        (local.set $pos (i32.const 0))\n")
+	e.out.WriteString("        (block $dir_refill\n")
+	e.out.WriteString("          (loop $dir_parse\n")
+	e.out.WriteString("            (br_if $dir_refill (i32.ge_u " +
+		"(local.get $pos) (local.get $used)))\n")
+	e.writeFSReadDirRecordHeader(codes)
+	e.writeFSReadDirCookie(codes)
+	e.writeFSReadDirEntry(layout, codes)
+	e.out.WriteString("            (local.set $pos (i32.add " +
+		"(local.get $pos) (local.get $record_size)))\n")
+	e.out.WriteString("            (br $dir_parse)))\n")
+}
+
+// writeFSReadDirRecordHeader validates one record and grows for a long name.
+func (e *emitter) writeFSReadDirRecordHeader(codes fsErrorCodes) {
+	e.out.WriteString("            (local.set $remaining (i32.sub " +
+		"(local.get $used) (local.get $pos)))\n")
+	fmt.Fprintf(&e.out,
+		"            (if (i32.lt_u (local.get $remaining) (i32.const %d))\n",
+		fsDirentHeaderSize)
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (if (i32.lt_u (local.get $used) (local.get $capacity))\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.readFailed), "                    ")
+	e.out.WriteString("                    (return)))\n")
+	e.out.WriteString("                (br $dir_refill)))\n")
+	e.out.WriteString("            (local.set $header (i32.add " +
+		"(local.get $buffer) (local.get $pos)))\n")
+	fmt.Fprintf(&e.out,
+		"            (local.set $name_len (i32.load "+
+			"(i32.add (local.get $header) (i32.const %d))))\n",
+		fsDirentNameLen)
+	e.out.WriteString("            (if (i32.gt_u (local.get $name_len) (i32.const 2147483616))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                ")
+	e.out.WriteString("                (return)))\n")
+	fmt.Fprintf(&e.out,
+		"            (local.set $record_size (i32.add "+
+			"(i32.const %d) (local.get $name_len)))\n",
+		fsDirentHeaderSize)
+	e.out.WriteString("            (if (i32.gt_u (local.get $record_size) (local.get $capacity))\n")
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (local.set $grown (call $__allocator_realloc\n")
+	e.out.WriteString("                  (local.get $allocator) (local.get $buffer)\n")
+	e.out.WriteString("                  (local.get $capacity) (local.get $record_size)))\n")
+	e.out.WriteString("                (if (i32.eqz (local.get $grown))\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                    ")
+	e.out.WriteString("                    (return)))\n")
+	e.out.WriteString("                (local.set $buffer (local.get $grown))\n")
+	e.out.WriteString("                (local.set $capacity (local.get $record_size))\n")
+	e.out.WriteString("                (br $dir_refill)))\n")
+	e.out.WriteString("            (if (i32.lt_u (local.get $remaining) (local.get $record_size))\n")
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (if (i32.lt_u (local.get $used) (local.get $capacity))\n")
+	e.out.WriteString("                  (then\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.readFailed), "                    ")
+	e.out.WriteString("                    (return)))\n")
+	e.out.WriteString("                (br $dir_refill)))\n")
+}
+
+// writeFSReadDirCookie commits progress only after a complete record.
+func (e *emitter) writeFSReadDirCookie(codes fsErrorCodes) {
+	e.out.WriteString("            (local.set $next (i64.load (local.get $header)))\n")
+	e.out.WriteString("            (if (i64.eq (local.get $next) (local.get $cookie))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.readFailed), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (local.set $cookie (local.get $next))\n")
+	fmt.Fprintf(&e.out,
+		"            (local.set $name (i32.add (local.get $header) (i32.const %d)))\n",
+		fsDirentNameOffset)
+}
+
+// writeFSReadDirEntry filters dot entries and constructs one owned DirEntry.
+func (e *emitter) writeFSReadDirEntry(layout fsDirLayout, codes fsErrorCodes) {
+	e.writeFSReadDirDotFilter()
+	e.writeFSReadDirNameCopy(codes)
+	e.writeFSReadDirPathCopy(codes)
+	e.writeFSReadDirStat()
+	e.writeFSReadDirCommit(layout, codes)
+}
+
+// writeFSReadDirDotFilter removes the two traversal entries when present.
+func (e *emitter) writeFSReadDirDotFilter() {
+	e.out.WriteString("            (if (i32.or\n")
+	e.out.WriteString("                  (i32.and (i32.eq (local.get $name_len) (i32.const 1))\n")
+	e.out.WriteString("                    (i32.eq (i32.load8_u (local.get $name)) (i32.const 46)))\n")
+	e.out.WriteString("                  (i32.and (i32.eq (local.get $name_len) (i32.const 2))\n")
+	e.out.WriteString("                    (i32.and (i32.eq " +
+		"(i32.load8_u (local.get $name)) (i32.const 46))\n")
+	e.out.WriteString("                      (i32.eq (i32.load8_u " +
+		"(i32.add (local.get $name) (i32.const 1))) (i32.const 46)))))\n")
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (local.set $pos (i32.add " +
+		"(local.get $pos) (local.get $record_size)))\n")
+	e.out.WriteString("                (br $dir_parse)))\n")
+}
+
+// writeFSReadDirNameCopy owns the host-provided name before the next fill.
+func (e *emitter) writeFSReadDirNameCopy(codes fsErrorCodes) {
+	e.out.WriteString("            (local.set $name_copy\n")
+	e.out.WriteString("              (call $__allocator_alloc " +
+		"(local.get $allocator) (local.get $name_len)))\n")
+	e.out.WriteString("            (if (i32.eqz (local.get $name_copy))\n")
+	e.out.WriteString("              (then\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (memory.copy (local.get $name_copy) " +
+		"(local.get $name) (local.get $name_len))\n")
+}
+
+// writeFSReadDirPathCopy joins the requested path and name into owned bytes.
+func (e *emitter) writeFSReadDirPathCopy(codes fsErrorCodes) {
+	e.out.WriteString("            (local.set $path_len\n")
+	e.out.WriteString("              (i32.load (i32.add (local.get $path) (i32.const 4))))\n")
+	e.out.WriteString("            (local.set $separator (i32.const 0))\n")
+	e.out.WriteString("            (if (local.get $path_len)\n")
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (if (i32.ne (i32.load8_u\n")
+	e.out.WriteString("                      (i32.add (i32.load (local.get $path))\n")
+	e.out.WriteString("                        (i32.sub (local.get $path_len) (i32.const 1))))\n")
+	e.out.WriteString("                    (i32.const 47))\n")
+	e.out.WriteString("                  (then (local.set $separator (i32.const 1))))))\n")
+	e.out.WriteString("            (local.set $path_size\n")
+	e.out.WriteString("              (i64.add (i64.extend_i32_u (local.get $path_len))\n")
+	e.out.WriteString("                (i64.add (i64.extend_i32_u (local.get $separator))\n")
+	e.out.WriteString("                  (i64.extend_i32_u (local.get $name_len)))))\n")
+	e.out.WriteString("            (if (i64.gt_u (local.get $path_size) (i64.const 2147483640))\n")
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (call $__allocator_free (local.get $allocator)\n")
+	e.out.WriteString("                  (local.get $name_copy) (local.get $name_len))\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (local.set $path_copy (call $__allocator_alloc\n")
+	e.out.WriteString("              (local.get $allocator) (i32.wrap_i64 (local.get $path_size))))\n")
+	e.out.WriteString("            (if (i32.eqz (local.get $path_copy))\n")
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (call $__allocator_free (local.get $allocator)\n")
+	e.out.WriteString("                  (local.get $name_copy) (local.get $name_len))\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (memory.copy (local.get $path_copy)\n")
+	e.out.WriteString("              (i32.load (local.get $path)) (local.get $path_len))\n")
+	e.out.WriteString("            (if (local.get $separator)\n")
+	e.out.WriteString("              (then (i32.store8 " +
+		"(i32.add (local.get $path_copy) (local.get $path_len))\n")
+	e.out.WriteString("                (i32.const 47))))\n")
+	e.out.WriteString("            (memory.copy\n")
+	e.out.WriteString("              (i32.add (local.get $path_copy)\n")
+	e.out.WriteString("                (i32.add (local.get $path_len) (local.get $separator)))\n")
+	e.out.WriteString("              (local.get $name_copy) (local.get $name_len))\n")
+}
+
+// writeFSReadDirStat follows symlinks within the granted root capability.
+func (e *emitter) writeFSReadDirStat() {
+	e.out.WriteString("            (local.set $errno (call $__wasi_path_filestat_get\n")
+	fmt.Fprintf(&e.out,
+		"              (local.get $root) (i32.const %d) (local.get $path_copy)\n",
+		wasiLookupSymlinkFollow)
+	e.out.WriteString("              (i32.wrap_i64 (local.get $path_size))\n")
+	fmt.Fprintf(&e.out, "              (i32.const %d)))\n", fsFilestatOffset)
+	fmt.Fprintf(&e.out,
+		"            (local.set $is_dir (i32.and "+
+			"(i32.eqz (local.get $errno)) (i32.eq "+
+			"(i32.load8_u (i32.const %d)) (i32.const %d))))\n",
+		fsFilestatOffset+fsFilestatTypeOffset, wasiFiletypeDirectory)
+}
+
+// writeFSReadDirCommit reserves the result slot and transfers both Strings.
+func (e *emitter) writeFSReadDirCommit(layout fsDirLayout, codes fsErrorCodes) {
+	fmt.Fprintf(&e.out,
+		"            (local.set $length (i64.load "+
+			"(i32.add (local.get $array) (i32.const %d))))\n",
+		arrayLenOffset)
+	e.out.WriteString("            (if (i32.eqz (call $__array_reserve\n")
+	fmt.Fprintf(&e.out,
+		"                  (local.get $allocator) (local.get $array) "+
+			"(i64.add (local.get $length) (i64.const 1)) (i32.const %d)))\n",
+		layout.entrySize)
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (call $__allocator_free (local.get $allocator)\n")
+	e.out.WriteString("                  (local.get $name_copy) (local.get $name_len))\n")
+	e.out.WriteString("                (call $__allocator_free (local.get $allocator)\n")
+	e.out.WriteString("                  (local.get $path_copy) " +
+		"(i32.wrap_i64 (local.get $path_size)))\n")
+	e.writeFSReadDirFailure(
+		fmt.Sprintf("(i64.const %d)", codes.outOfMemory), "                ")
+	e.out.WriteString("                (return)))\n")
+	e.out.WriteString("            (local.set $item (i32.add (i32.load (local.get $array))\n")
+	fmt.Fprintf(&e.out,
+		"              (i32.wrap_i64 (i64.mul (local.get $length) (i64.const %d)))))\n",
+		layout.entrySize)
+	fmt.Fprintf(&e.out,
+		"            (i32.store (i32.add (local.get $item) (i32.const %d)) (local.get $name_copy))\n",
+		layout.nameOffset+arrayDataOffset)
+	fmt.Fprintf(&e.out,
+		"            (i64.store (i32.add (local.get $item) (i32.const %d)) "+
+			"(i64.extend_i32_u (local.get $name_len)))\n",
+		layout.nameOffset+arrayLenOffset)
+	fmt.Fprintf(&e.out,
+		"            (i64.store (i32.add (local.get $item) (i32.const %d)) "+
+			"(i64.extend_i32_u (local.get $name_len)))\n",
+		layout.nameOffset+arrayCapacityOffset)
+	fmt.Fprintf(&e.out,
+		"            (i32.store (i32.add (local.get $item) (i32.const %d)) (local.get $path_copy))\n",
+		layout.pathOffset+arrayDataOffset)
+	fmt.Fprintf(&e.out,
+		"            (i64.store (i32.add (local.get $item) (i32.const %d)) (local.get $path_size))\n",
+		layout.pathOffset+arrayLenOffset)
+	fmt.Fprintf(&e.out,
+		"            (i64.store (i32.add (local.get $item) (i32.const %d)) (local.get $path_size))\n",
+		layout.pathOffset+arrayCapacityOffset)
+	fmt.Fprintf(&e.out,
+		"            (i32.store8 (i32.add (local.get $item) (i32.const %d)) (local.get $is_dir))\n",
+		layout.isDirOffset)
+	fmt.Fprintf(&e.out,
+		"            (i64.store (i32.add (local.get $array) (i32.const %d)) "+
+			"(i64.add (local.get $length) (i64.const 1)))\n",
+		arrayLenOffset)
 }
 
 // writeFSWriteFile replaces one preopen-relative file and writes every byte.

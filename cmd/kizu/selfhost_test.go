@@ -260,6 +260,7 @@ func selfhostWASMExamples() []string {
 		"../../examples/std_io_process.kizu",
 		"../../examples/std_io_stderr.kizu",
 		"../../examples/fs_read.kizu",
+		"../../examples/fs_read_dir.kizu",
 		"../../examples/std_fs_path.kizu",
 		"../../examples/negative/std_process_arg_bounds.kizu",
 		"../../examples/negative/std_io_failing_write.kizu",

@@ -236,6 +236,15 @@ run_status "main_exit_status_specific" "examples/main_exit_status.kizu" 7 specif
 run_io_process
 run_stderr "std_io_stderr" "examples/std_io_stderr.kizu" "diagnostic"
 run_example "fs_read" "examples/fs_read.kizu" "kizu fs fixture" "."
+run_example "fs_read_dir" "examples/fs_read_dir.kizu" "alpha.txt
+examples/fixtures/read_dir/alpha.txt
+false
+beta.txt
+examples/fixtures/read_dir/beta.txt
+false
+nested
+examples/fixtures/read_dir/nested
+true" "."
 run_example "std_fs_path" "examples/std_fs_path.kizu" "true
 16
 false
