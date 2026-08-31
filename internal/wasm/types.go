@@ -6,7 +6,7 @@ import "strings"
 // aggregates and references are i32 addresses; named tags share the i64 scalar
 // representation used by integer comparisons.
 func (e *emitter) wasmType(typ string) string {
-	if isIntegerType(typ) || e.isTagType(typ) {
+	if isIntegerType(typ) || e.isNamedI64Type(typ) {
 		return "i64"
 	}
 	return "i32"

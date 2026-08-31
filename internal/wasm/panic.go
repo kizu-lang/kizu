@@ -88,6 +88,14 @@ var wasmPanicSpecs = []wasmPanicSpec{
 		valueCount: 0,
 		summary:    wasmPanicData{key: "panic.arena_full.summary", text: "arena is full"},
 	},
+	{
+		kind:       "arena_instances",
+		helper:     "__panic_arena_instances",
+		valueCount: 0,
+		summary: wasmPanicData{
+			key: "panic.arena_instances.summary", text: "arena instances exhausted",
+		},
+	},
 }
 
 // collectPanicKinds records checked failures before the header and data are
@@ -109,6 +117,14 @@ func (e *emitter) collectPanicKinds() {
 					e.panicKinds["bounds"] = true
 				case "array.pop_or_panic":
 					e.panicKinds["array_empty"] = true
+				case "arena.new":
+					e.panicKinds["arena_instances"] = true
+				case "arena.add":
+					e.panicKinds["arena_full"] = true
+				case "arena.at":
+					e.panicKinds["arena_handle"] = true
+				case "arena.pop_or_panic":
+					e.panicKinds["arena_empty"] = true
 				}
 			}
 		}

@@ -90,6 +90,12 @@ func (e *emitter) directLayout(typ string) (wasmLayout, bool) {
 	if isArrayWasmType(typ) {
 		return wasmLayout{size: arrayHeaderSize, align: 8}, true
 	}
+	if isArenaWasmType(typ) {
+		return wasmLayout{size: arenaHeaderSize, align: 8}, true
+	}
+	if isArenaHandleWasmType(typ) {
+		return wasmLayout{size: 8, align: 8}, true
+	}
 	if isBoxWasmType(typ) {
 		return wasmLayout{size: 4, align: 4}, true
 	}
@@ -131,6 +137,9 @@ func (e *emitter) isMemoryType(typ string) bool {
 	if isArrayWasmType(typ) {
 		return true
 	}
+	if isArenaWasmType(typ) {
+		return true
+	}
 	if _, ok := optionalElemWasm(typ); ok {
 		return true
 	}
@@ -151,6 +160,11 @@ func (e *emitter) isTagType(typ string) bool {
 	}
 	_, ok := e.module.ErrorSets[typ]
 	return ok
+}
+
+// isNamedI64Type reports whether a declared scalar uses one i64 value.
+func (e *emitter) isNamedI64Type(typ string) bool {
+	return e.isTagType(typ) || isArenaHandleWasmType(typ)
 }
 
 // fieldLayout returns a declared field and its byte offset.

@@ -6,8 +6,8 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-157 examples 中 95 件が native と同じ出力で動く。残り 62 件の最初の失敗は Map layout 25 件、
-process args 13 件、arena / handle 10 件、blocking Io 6 件、extern C allocator と enum print が
+157 examples 中 104 件が native と同じ出力で動く。残り 53 件の最初の失敗は Map layout 26 件、
+process args 13 件、blocking Io 6 件、extern C allocator と enum print が
 各 2 件、u8 print、埋め込み NUL の出力差、coro、filesystem が各 1 件。example ごとの例外を
 足さず、共通 runtime と portable std の順に backend の対象を広げる。
 
@@ -22,7 +22,7 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 
 ### W3. owner container と cleanup
 
-- arena / handle、Map を同じ ownership 済み IR から lower し、owner container の
+- Map を同じ ownership 済み IR から lower し、owner container の
   cleanup を実行結果で検証する。
 - Array と allocator を土台に、まだ他の runtime に阻まれている `std::string`、`std::map`、
   `std::sort`、`std::fmt`、`std::json` の portable behavior を順に通す。

@@ -28,6 +28,7 @@ run_failure() {
   name="$1"
   file="$2"
   want="$3"
+  want_stdout="${4-}"
   wat="$tmp/$name.wat"
   stdout="$tmp/$name.stdout"
   stderr="$tmp/$name.stderr"
@@ -38,9 +39,10 @@ run_failure() {
   status="$?"
   set -e
   got="$(cat "$stderr")"
-  if [ "$status" -ne 1 ] || [ -s "$stdout" ] || [ "$got" != "$want" ]; then
-    printf '%s: status=%s, stderr:\n%s\nwant status=1, stderr:\n%s\n' \
-      "$name" "$status" "$got" "$want" >&2
+  got_stdout="$(cat "$stdout")"
+  if [ "$status" -ne 1 ] || [ "$got_stdout" != "$want_stdout" ] || [ "$got" != "$want" ]; then
+    printf '%s: status=%s, stdout:\n%s\nstderr:\n%s\nwant status=1, stdout:\n%s\nstderr:\n%s\n' \
+      "$name" "$status" "$got_stdout" "$got" "$want_stdout" "$want" >&2
     exit 1
   fi
 }
@@ -107,6 +109,15 @@ run_example "std_mem_box_take" "examples/std_mem_box_take.kizu" "payload"
 run_example "std_mem_box_ast" "examples/std_mem_box_ast.kizu" ""
 run_example "std_mem_box_cleanup" "examples/std_mem_box_cleanup.kizu" "42
 7"
+run_example "arena" "examples/arena.kizu" "alice"
+run_example "arena_at_mut" "examples/arena_at_mut.kizu" "1
+30"
+run_example "arena_owner_elements" "examples/arena_owner_elements.kizu" "released
+released"
+run_example "arena_allocator_refusal" \
+  "examples/arena_add_recovers_from_a_full_allocator.kizu" \
+  "-1
+the buffer ran out, and the program chose what to do"
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.
@@ -118,6 +129,11 @@ run_failure "slice_range_out_of_bounds" \
   "examples/negative/slice_syntax_range_out_of_bounds.kizu" \
   "runtime error: range out of bounds at 2:22
 note: range is 0..4, length is 3"
+run_failure "arena_handle_from_another_instance" \
+  "examples/negative/arena_handle_from_another_instance.kizu" \
+  "runtime error: invalid arena handle" \
+  "1
+2"
 run_failure "testing_fail" \
   "examples/negative/std_testing_run_fail.kizu" \
   "runtime error: custom failure"

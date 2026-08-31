@@ -228,6 +228,9 @@ func (e *emitter) writeHeader() {
 	} else {
 		fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
 	}
+	if e.usesArenaOriginRuntime() {
+		e.out.WriteString("  (global $__arena_instances (mut i64) (i64.const 0))\n")
+	}
 	e.writeFunctionTable()
 	for _, lit := range e.dataOrder {
 		ref := e.strings[lit]
@@ -282,6 +285,9 @@ func dataLiteral(key string) string {
 func (e *emitter) writeRuntime() {
 	if e.usesAllocatorRuntime() {
 		e.writeAllocatorRuntime()
+	}
+	if e.usesArenaOriginRuntime() {
+		e.writeArenaRuntime()
 	}
 	e.writeStackAllocHelper()
 	e.writeBytesHelper()

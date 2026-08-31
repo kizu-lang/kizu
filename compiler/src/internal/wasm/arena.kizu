@@ -1,0 +1,651 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/arena.go. An Arena value is an inline
+// wasm32 `{data, len, cap, origin}` header. Handle<T> is an origin-biased i64,
+// so the same unsigned range check rejects both stale and foreign handles.
+
+fn arena_header_size() -> i64 {
+    return 32;
+}
+
+fn arena_origin_offset() -> i64 {
+    return 24;
+}
+
+fn arena_max_len() -> i64 {
+    return 4294967295;
+}
+
+fn arena_max_instances() -> i64 {
+    return 4294967295;
+}
+
+fn is_arena_wasm_type(name: []u8) -> bool {
+    return mem::starts_with(name, "std::arena::Arena<") and ir::ends_with_bytes(name, ">");
+}
+
+/// Returns T through either direct or borrowed Arena<T>.
+fn arena_element_wasm_type(name: []u8) -> ?[]u8 {
+    var start = 0;
+    if mem::starts_with(name, "&var ") {
+        start = 5;
+    } else {
+        if mem::starts_with(name, "&") {
+            start = 1;
+        }
+    }
+    let direct = name[start..mem::len(name)];
+    if !is_arena_wasm_type(direct) {
+        return null;
+    }
+    return direct[18..mem::len(direct) - 1];
+}
+
+fn is_arena_handle_wasm_type(name: []u8) -> bool {
+    return mem::starts_with(name, "std::arena::Handle<") and ir::ends_with_bytes(name, ">");
+}
+
+fn arena_handle_element_wasm_type(name: []u8) -> ?[]u8 {
+    if !is_arena_handle_wasm_type(name) {
+        return null;
+    }
+    return name[19..mem::len(name) - 1];
+}
+
+fn is_wasm_arena_op(op: ir::Op) -> bool {
+    return match op {
+        ArenaNew => true,
+        ArenaAdd => true,
+        ArenaAt => true,
+        ArenaAtMut => true,
+        ArenaLen => true,
+        ArenaPopOrPanic => true,
+        ArenaDeinit => true,
+        _ => false,
+    };
+}
+
+fn (self: &Emitter) uses_arena_runtime(module: &ir::Module) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if is_wasm_arena_op(node.op) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Reports whether this module constructs an Arena and needs origin state.
+fn (self: &Emitter) uses_arena_origin_runtime(module: &ir::Module) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op == ir::Op::ArenaNew {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Emits the monotonic instance counter that hands each Arena a fresh origin.
+fn (self: &var Emitter) write_arena_runtime() -> !void {
+    try self.line("  (func $__arena_origin (result i64)");
+    try self.line1(
+        "    (if (i64.ge_u (global.get $__arena_instances) (i64.const %d))",
+        Arg::Int(arena_max_instances())
+    );
+    try self.line("      (then (call $__panic_arena_instances (i64.const 0) (i64.const 0))))");
+    try self.line("    (global.set $__arena_instances");
+    try self.line("      (i64.add (global.get $__arena_instances) (i64.const 1)))");
+    try self.line("    (i64.add");
+    try self.line("      (i64.shl (global.get $__arena_instances) (i64.const 32))");
+    try self.line("      (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_arena_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    match node.op {
+        ArenaNew => return self.write_arena_new(module, node),
+        ArenaAdd => return self.write_arena_add(module, node),
+        ArenaAt => return self.write_arena_at(module, node),
+        ArenaAtMut => return self.write_arena_at_mut(module, node),
+        ArenaLen => return self.write_arena_len(module, node),
+        ArenaPopOrPanic => return self.write_arena_pop_or_panic(module, node),
+        ArenaDeinit => return self.write_arena_deinit(module, node),
+        _ => return try self.fail_op(
+            module,
+            node,
+            "wasm error: unsupported arena instruction `%s`"
+        ),
+    }
+}
+
+/// Copies the measured element into out and returns its wasm32 layout.
+fn (self: &var Emitter) arena_element_layout(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    out: &var string::String
+) -> !WasmLayoutResult {
+    var container = node.result.type_name;
+    if node.op != ir::Op::ArenaNew {
+        let first = node.args.get(0) orelse return WasmLayoutResult::Error(try self.fail_op(
+            module,
+            node,
+            "wasm error: `%s` was handed no Arena<T>"
+        ));
+        container = first.type_name;
+    }
+    let retained = ir::name_text(&module.names, container);
+    let spelling = retained.as_bytes();
+    if arena_element_wasm_type(spelling) |elem| {
+        try out.append_bytes(self.allocator, elem);
+        let outcome = try self.type_layout_bytes(module, elem);
+        match outcome {
+            Error(failed) => return WasmLayoutResult::Error(move failed),
+            Layout(layout) => {
+                if layout.size <= 0 {
+                    let shown = try self.names.intern(elem);
+                    return WasmLayoutResult::Error(try self.fail(
+                        "wasm error: arena element `%s` has zero-sized storage",
+                        Arg::Str(shown)
+                    ));
+                }
+                return WasmLayoutResult::Layout(layout);
+            },
+        }
+    }
+    return WasmLayoutResult::Error(try self.fail_op(
+        module,
+        node,
+        "wasm error: `%s` was handed no Arena<T>"
+    ));
+}
+
+fn (self: &var Emitter) write_arena_new(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if node.args.len() != 1 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "Allocator") or
+        !is_arena_wasm_type(result_type) {
+        return try self.fail0("wasm error: arena.new expects allocator -> Arena<T>");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    let measured = try self.arena_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(_) => {},
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Arena result");
+    try self.line2(
+        "            (memory.fill %s (i32.const 0) (i32.const %d))",
+        Arg::Str(slot),
+        Arg::Int(arena_header_size())
+    );
+    let origin = try self.address_at(slot, arena_origin_offset());
+    try self.line1(
+        "            (i64.store %s (call $__arena_origin))",
+        Arg::Str(origin)
+    );
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+fn (self: &var Emitter) write_arena_add(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") {
+        return try self.fail0(
+            "wasm error: arena.add expects Arena<T>, Allocator, T -> std::mem::Error!Handle<T>"
+        );
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.arena_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let elem_bytes = elem.as_bytes();
+    let value = node.args.get_or_panic(2);
+    if !module.names.is(value.type_name, elem_bytes) {
+        return try self.fail0(
+            "wasm error: arena.add expects Arena<T>, Allocator, T -> std::mem::Error!Handle<T>"
+        );
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let parts = try self.error_union_parts(result_type) orelse return try self.fail0(
+        "wasm error: arena.add expects Arena<T>, Allocator, T -> std::mem::Error!Handle<T>"
+    );
+    defer parts.deinit(self.allocator);
+    let error_set = parts.err.as_bytes();
+    let success = parts.success.as_bytes();
+    if !mem::equal_bytes(error_set, "std::mem::Error") {
+        return try self.fail0(
+            "wasm error: arena.add expects Arena<T>, Allocator, T -> std::mem::Error!Handle<T>"
+        );
+    }
+    var handle_matches = false;
+    if arena_handle_element_wasm_type(success) |handle_elem| {
+        handle_matches = mem::equal_bytes(handle_elem, elem_bytes);
+    }
+    if !handle_matches {
+        return try self.fail0(
+            "wasm error: arena.add expects Arena<T>, Allocator, T -> std::mem::Error!Handle<T>"
+        );
+    }
+    let shown_error_set = try self.names.intern(error_set);
+    if !module.error_sets.contains(error_set) {
+        return try self.fail(
+            "wasm error: failure needs error set `%s`",
+            Arg::Str(shown_error_set)
+        );
+    }
+    let code = wasm_error_code(module, error_set, "OutOfMemory") orelse return try self.fail(
+        "wasm error: error set `%s` has no member `OutOfMemory`",
+        Arg::Str(shown_error_set)
+    );
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let arena = try self.value_of(module, node.args.get_or_panic(0));
+    let allocator = try self.value_of(module, node.args.get_or_panic(1));
+    let length_address = try self.array_field_address(arena.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.ge_u %s (i64.const %d))",
+        Arg::Str(length),
+        Arg::Int(arena_max_len())
+    );
+    try self.line2(
+        "              (then (call $__panic_arena_full (i64.const %d) (i64.const %d))))",
+        Arg::Int(node.span.start.line),
+        Arg::Int(node.span.start.column)
+    );
+    let needed = try self.array_expr1(
+        "(i64.add %s (i64.const 1))",
+        Arg::Str(length)
+    );
+    let ok = try self.array_expr4(
+        "(call $__array_reserve %s %s %s (i32.const %d))",
+        Arg::Str(allocator.expr),
+        Arg::Str(arena.expr),
+        Arg::Str(needed),
+        Arg::Int(layout.size)
+    );
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for arena.add result");
+    try self.line2(
+        "            (i64.store %s (i64.extend_i32_u %s))",
+        Arg::Str(slot),
+        Arg::Str(ok)
+    );
+    let payload = try self.address_at(slot, payload_offset);
+    try self.line2(
+        "            (i64.store %s (i64.const %d))",
+        Arg::Str(payload),
+        Arg::Int(code)
+    );
+    try self.line1(
+        "            (if (i32.wrap_i64 (i64.load %s))",
+        Arg::Str(slot)
+    );
+    try self.line("              (then");
+    let destination = try self.array_element_address(arena.expr, length, layout.size);
+    let value_info = try self.value_of(module, value);
+    if try self.write_store_value(
+        module,
+        destination,
+        0,
+        value.type_name,
+        value_info
+    ) |failed| {
+        return move failed;
+    }
+    let origin = try self.address_at(arena.expr, arena_origin_offset());
+    try self.line3(
+        "                (i64.store %s (i64.add (i64.load %s) %s))",
+        Arg::Str(payload),
+        Arg::Str(origin),
+        Arg::Str(length)
+    );
+    try self.line2(
+        "                (i64.store %s %s)))",
+        Arg::Str(length_address),
+        Arg::Str(needed)
+    );
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+struct ArenaCheckedIndex {
+    arena: ir::Name,
+    index: ir::Name,
+    layout: WasmLayout
+}
+
+union ArenaCheckedIndexResult {
+    Checked(ArenaCheckedIndex),
+    Error(diagnostic::Diagnostic),
+}
+
+fn (self: &var Emitter) arena_checked_index(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    elem: &var string::String
+) -> !ArenaCheckedIndexResult {
+    if node.args.len() != 2 {
+        return ArenaCheckedIndexResult::Error(try self.fail_op(
+            module,
+            node,
+            "wasm error: %s expects Arena<T>, Handle<T>"
+        ));
+    }
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.arena_element_layout(module, node, elem);
+    match measured {
+        Error(failed) => return ArenaCheckedIndexResult::Error(move failed),
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let handle = node.args.get_or_panic(1);
+    let retained = ir::name_text(&module.names, handle.type_name);
+    let handle_type = retained.as_bytes();
+    let elem_bytes = elem.as_bytes();
+    var handle_matches = false;
+    if arena_handle_element_wasm_type(handle_type) |handle_elem| {
+        handle_matches = mem::equal_bytes(handle_elem, elem_bytes);
+    }
+    if !handle_matches {
+        return ArenaCheckedIndexResult::Error(try self.fail_op(
+            module,
+            node,
+            "wasm error: %s expects Arena<T>, Handle<T>"
+        ));
+    }
+    let arena = try self.value_of(module, node.args.get_or_panic(0));
+    let handle_info = try self.value_of(module, handle);
+    let origin = try self.address_at(arena.expr, arena_origin_offset());
+    let index = try self.array_expr2(
+        "(i64.sub %s (i64.load %s))",
+        Arg::Str(handle_info.expr),
+        Arg::Str(origin)
+    );
+    return ArenaCheckedIndexResult::Checked(ArenaCheckedIndex {
+        arena: arena.expr,
+        index: index,
+        layout: layout
+    });
+}
+
+fn (self: &var Emitter) write_arena_at(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var checked = ArenaCheckedIndex {
+        arena: ir::empty_name(),
+        index: ir::empty_name(),
+        layout: WasmLayout { size: 0, align: 1 }
+    };
+    let outcome = try self.arena_checked_index(module, node, &var elem);
+    match outcome {
+        Error(failed) => return move failed,
+        Checked(found) => {
+            checked = found;
+        },
+    }
+    let elem_bytes = elem.as_bytes();
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let is_reference = is_wasm_reference_type(result_type);
+    let direct_result = deref_wasm_type(result_type);
+    if !module.names.is(node.result.type_name, elem_bytes) and
+        (!is_reference or !mem::equal_bytes(direct_result, elem_bytes)) {
+        return try self.fail0("wasm error: arena.at expects Arena<T>, Handle<T> -> &T");
+    }
+    let length_address = try self.array_field_address(checked.arena, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.ge_u %s %s)",
+        Arg::Str(checked.index),
+        Arg::Str(length)
+    );
+    try self.line2(
+        "              (then (call $__panic_arena_handle (i64.const %d) (i64.const %d))))",
+        Arg::Int(node.span.start.line),
+        Arg::Int(node.span.start.column)
+    );
+    let address = try self.array_element_address(
+        checked.arena,
+        checked.index,
+        checked.layout.size
+    );
+    if is_reference {
+        return self.write_scalar_result(module, node.result, address);
+    }
+    return self.write_load_value(module, node.result, address, 0);
+}
+
+fn (self: &var Emitter) write_arena_at_mut(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var checked = ArenaCheckedIndex {
+        arena: ir::empty_name(),
+        index: ir::empty_name(),
+        layout: WasmLayout { size: 0, align: 1 }
+    };
+    let outcome = try self.arena_checked_index(module, node, &var elem);
+    match outcome {
+        Error(failed) => return move failed,
+        Checked(found) => {
+            checked = found;
+        },
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let elem_bytes = elem.as_bytes();
+    var payload_offset = 0;
+    var result_matches = false;
+    if typ::optional_elem(result_type) |want| {
+        let direct_want = deref_wasm_type(want);
+        if mem::starts_with(want, "&var ") and
+            mem::equal_bytes(direct_want, elem_bytes) {
+            result_matches = true;
+            let offset_outcome = try self.tagged_payload_offset(module, want, false);
+            match offset_outcome {
+                Error(failed) => return move failed,
+                Offset(found) => {
+                    payload_offset = found;
+                },
+            }
+        }
+    }
+    if !result_matches {
+        return try self.fail0(
+            "wasm error: arena.at_mut expects Arena<T>, Handle<T> -> ?&var T"
+        );
+    }
+    let length_address = try self.array_field_address(checked.arena, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.lt_u %s %s)",
+        Arg::Str(checked.index),
+        Arg::Str(length)
+    );
+    try self.line("              (then");
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for arena.at_mut result");
+    let payload = try self.address_at(slot, payload_offset);
+    let address = try self.array_element_address(
+        checked.arena,
+        checked.index,
+        checked.layout.size
+    );
+    try self.line2(
+        "                (i32.store %s %s)",
+        Arg::Str(payload),
+        Arg::Str(address)
+    );
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) write_arena_len(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("wasm error: arena.len expects Arena<T> -> i64");
+    }
+    let first = node.args.get_or_panic(0);
+    let retained = ir::name_text(&module.names, first.type_name);
+    let type_name = retained.as_bytes();
+    if arena_element_wasm_type(type_name) |_| {} else {
+        return try self.fail0("wasm error: arena.len expects Arena<T> -> i64");
+    }
+    let arena = try self.value_of(module, first);
+    let address = try self.array_field_address(arena.expr, array_len_offset());
+    let loaded = try self.array_expr1("(i64.load %s)", Arg::Str(address));
+    return self.write_scalar_result(module, node.result, loaded);
+}
+
+fn (self: &var Emitter) write_arena_pop_or_panic(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: arena.pop_or_panic expects Arena<T> -> T");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.arena_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let elem_bytes = elem.as_bytes();
+    if !module.names.is(node.result.type_name, elem_bytes) {
+        return try self.fail0("wasm error: arena.pop_or_panic expects Arena<T> -> T");
+    }
+    let arena = try self.value_of(module, node.args.get_or_panic(0));
+    let length_address = try self.array_field_address(arena.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line1("            (if (i64.eqz %s)", Arg::Str(length));
+    try self.line2(
+        "              (then (call $__panic_arena_empty (i64.const %d) (i64.const %d))))",
+        Arg::Int(node.span.start.line),
+        Arg::Int(node.span.start.column)
+    );
+    try self.line2(
+        "            (i64.store %s (i64.sub %s (i64.const 1)))",
+        Arg::Str(length_address),
+        Arg::Str(length)
+    );
+    let new_length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let source = try self.array_element_address(arena.expr, new_length, layout.size);
+    return self.write_load_value(module, node.result, source, 0);
+}
+
+fn (self: &var Emitter) write_arena_deinit(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: arena.deinit expects Arena<T>, Allocator -> void");
+    }
+    var elem = string::new(self.allocator);
+    defer elem.deinit(self.allocator);
+    var layout = WasmLayout { size: 0, align: 1 };
+    let measured = try self.arena_element_layout(module, node, &var elem);
+    match measured {
+        Error(failed) => return move failed,
+        Layout(found) => {
+            layout = found;
+        },
+    }
+    let arena = try self.value_of(module, node.args.get_or_panic(0));
+    let allocator = try self.value_of(module, node.args.get_or_panic(1));
+    let capacity_address = try self.array_field_address(
+        arena.expr,
+        array_capacity_offset()
+    );
+    let capacity = try self.array_expr1("(i64.load %s)", Arg::Str(capacity_address));
+    let bytes = try self.array_expr2(
+        "(i32.wrap_i64 (i64.mul %s (i64.const %d)))",
+        Arg::Str(capacity),
+        Arg::Int(layout.size)
+    );
+    let data = try self.array_field_address(arena.expr, array_data_offset());
+    try self.line3(
+        "            (call $__allocator_free %s (i32.load %s) %s)",
+        Arg::Str(allocator.expr),
+        Arg::Str(data),
+        Arg::Str(bytes)
+    );
+    return null;
+}

@@ -205,10 +205,15 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		"../../examples/std_mem_box_take.kizu",
 		"../../examples/std_mem_box_ast.kizu",
 		"../../examples/std_mem_box_cleanup.kizu",
+		"../../examples/arena.kizu",
+		"../../examples/arena_at_mut.kizu",
+		"../../examples/arena_owner_elements.kizu",
+		"../../examples/arena_add_recovers_from_a_full_allocator.kizu",
 		"../../examples/std_path_edges.kizu",
 		"../../examples/negative/slice_syntax_index_out_of_bounds.kizu",
 		"../../examples/negative/slice_syntax_range_out_of_bounds.kizu",
 		"../../examples/negative/std_array_get_or_panic_bounds.kizu",
+		"../../examples/negative/arena_handle_from_another_instance.kizu",
 		"../../examples/negative/std_testing_run_fail.kizu",
 		"../../examples/negative/std_testing_run_expect_equal.kizu",
 		"../../examples/negative/std_testing_run_expect_equal_bool.kizu",
@@ -224,6 +229,11 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 	t.Run("wasm/optional_error_flow_opt", func(t *testing.T) {
 		compareSelfhostArgs(t, selfhost, goWASMOutput(tagged, true),
 			"build", "--target", "wasm32-wasi", "--opt", tagged)
+	})
+	arena := "../../examples/arena_at_mut.kizu"
+	t.Run("wasm/arena_at_mut_opt", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goWASMOutput(arena, true),
+			"build", "--target", "wasm32-wasi", "--opt", arena)
 	})
 	for _, fixture := range wasmRepresentativeFixtures() {
 		t.Run("wasm/"+fixture.name, func(t *testing.T) {
@@ -446,9 +456,8 @@ fn main() {
 	}
 }
 
-// wasmRejectionFixtures is one program per rejection message the backend
-// reports: an arena-free container instruction outside the target subset and
-// prints of scalar types it does not lower.
+// wasmRejectionFixtures keeps one program per rejection message the backend
+// reports for scalar types it does not lower.
 func wasmRejectionFixtures() []wasmFixture {
 	return []wasmFixture{
 		{name: "reject_instruction", source: `import std;

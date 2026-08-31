@@ -43,7 +43,7 @@ func (e *emitter) writeTestExpectEqual(instr *ir.Instr) error {
 			leftPtr, leftLen, rightPtr, rightLen)
 		args = leftPtr + " " + leftLen + " " + rightPtr + " " + rightLen
 	default:
-		if !isIntegerType(typ) && !e.isTagType(typ) {
+		if !isIntegerType(typ) && !e.isNamedI64Type(typ) {
 			return fmt.Errorf("wasm error: unsupported test.expect_equal type `%s`", typ)
 		}
 		helper = "__panic_expect_equal_int"

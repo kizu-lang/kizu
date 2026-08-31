@@ -83,7 +83,7 @@ func (e *emitter) writeMemoryCopy(dst string, src string, size int) {
 
 // storeOp returns the width-correct WebAssembly store for typ.
 func (e *emitter) storeOp(typ string) (string, error) {
-	if e.isTagType(typ) {
+	if e.isNamedI64Type(typ) {
 		return "i64.store", nil
 	}
 	switch typ {
@@ -109,7 +109,7 @@ func (e *emitter) storeOp(typ string) (string, error) {
 
 // loadOp returns the width- and sign-correct WebAssembly load for typ.
 func (e *emitter) loadOp(typ string) (string, error) {
-	if e.isTagType(typ) {
+	if e.isNamedI64Type(typ) {
 		return "i64.load", nil
 	}
 	switch typ {

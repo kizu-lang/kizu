@@ -72,30 +72,30 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "slice."):
 		return e.writeSliceInstr(instr)
-	case isTaggedArrayOrBoxOp(instr.Op):
-		return e.writeTaggedArrayOrBoxInstr(instr)
-	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
-		instr.Op == "arena.at" || instr.Op == "arena.len" ||
-		instr.Op == "arena.pop_or_panic" || instr.Op == "arena.deinit":
-		return e.writeUnsupportedOpaque(instr)
+	case isTaggedOwnerOp(instr.Op):
+		return e.writeTaggedOwnerInstr(instr)
 	default:
 		return fmt.Errorf("wasm error: unsupported instruction `%s`", instr.Op)
 	}
 }
 
-// isTaggedArrayOrBoxOp reports whether an operation uses a generic value runtime.
-func isTaggedArrayOrBoxOp(op string) bool {
+// isTaggedOwnerOp reports whether an operation uses a generic value runtime.
+func isTaggedOwnerOp(op string) bool {
 	return strings.HasPrefix(op, "opt.") || strings.HasPrefix(op, "error.") ||
-		strings.HasPrefix(op, "array.") || strings.HasPrefix(op, "box.")
+		strings.HasPrefix(op, "array.") || strings.HasPrefix(op, "box.") ||
+		strings.HasPrefix(op, "arena.")
 }
 
-// writeTaggedArrayOrBoxInstr selects the tagged-value or owner runtime.
-func (e *emitter) writeTaggedArrayOrBoxInstr(instr *ir.Instr) error {
+// writeTaggedOwnerInstr selects the tagged-value or owner runtime.
+func (e *emitter) writeTaggedOwnerInstr(instr *ir.Instr) error {
 	if strings.HasPrefix(instr.Op, "array.") {
 		return e.writeArrayInstr(instr)
 	}
 	if strings.HasPrefix(instr.Op, "box.") {
 		return e.writeBoxInstr(instr)
+	}
+	if strings.HasPrefix(instr.Op, "arena.") {
+		return e.writeArenaInstr(instr)
 	}
 	return e.writeTaggedInstr(instr)
 }
@@ -121,7 +121,7 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 
 // writeConst records scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
-	if isIntegerType(instr.Result.Type) || e.isTagType(instr.Result.Type) {
+	if isIntegerType(instr.Result.Type) || e.isNamedI64Type(instr.Result.Type) {
 		// Every scalar integer is one wasm i64, so a constant of any width is
 		// written the same way.
 		e.values[instr.Result.Name] = valueInfo{
@@ -359,11 +359,6 @@ func (e *emitter) writePrint(args []ir.Value) error {
 		return fmt.Errorf("wasm error: unsupported print type `%s`", args[0].Type)
 	}
 	return nil
-}
-
-// writeUnsupportedOpaque marks values that are not part of the phase 11 target subset.
-func (e *emitter) writeUnsupportedOpaque(instr *ir.Instr) error {
-	return fmt.Errorf("wasm error: `%s` is outside the phase 11 target subset", instr.Op)
 }
 
 // writeTerminator writes control transfer for one dispatch arm.

@@ -36,7 +36,8 @@ func (e *emitter) usesUserAllocatorRuntime() bool {
 // memory with heap allocations. A shared free-list keeps recursive frames and
 // owner storage from invalidating one another.
 func (e *emitter) usesAllocatorRuntime() bool {
-	if e.usesArrayRuntime() || e.usesBoxRuntime() || e.usesUserAllocatorRuntime() {
+	if e.usesArrayRuntime() || e.usesBoxRuntime() || e.usesArenaRuntime() ||
+		e.usesUserAllocatorRuntime() {
 		return true
 	}
 	for _, fn := range e.module.Functions {

@@ -81,6 +81,14 @@ fn wasm_panic_spec(kind: []u8) -> ?WasmPanicSpec {
             summary_key: "panic.arena_full.summary"
         };
     }
+    if mem::equal_bytes(kind, "arena_instances") {
+        return WasmPanicSpec {
+            kind: "arena_instances",
+            helper: "__panic_arena_instances",
+            value_count: 0,
+            summary_key: "panic.arena_instances.summary"
+        };
+    }
     return null;
 }
 
@@ -136,6 +144,9 @@ fn panic_data_text(key: []u8) -> ?[]u8 {
     if mem::equal_bytes(key, "panic.arena_full.summary") {
         return "arena is full";
     }
+    if mem::equal_bytes(key, "panic.arena_instances.summary") {
+        return "arena instances exhausted";
+    }
     return null;
 }
 
@@ -181,6 +192,18 @@ fn (self: &var Emitter) collect_panic_kinds(module: &ir::Module) -> !void {
                     ArrayPopOrPanic => {
                         try self.panic_kinds.insert(self.allocator, "array_empty", true);
                     },
+                    ArenaNew => {
+                        try self.panic_kinds.insert(self.allocator, "arena_instances", true);
+                    },
+                    ArenaAdd => {
+                        try self.panic_kinds.insert(self.allocator, "arena_full", true);
+                    },
+                    ArenaAt => {
+                        try self.panic_kinds.insert(self.allocator, "arena_handle", true);
+                    },
+                    ArenaPopOrPanic => {
+                        try self.panic_kinds.insert(self.allocator, "arena_empty", true);
+                    },
                     _ => {},
                 }
             }
@@ -221,6 +244,13 @@ fn (self: &var Emitter) record_used_panic_data(offset: i64) -> !i64 {
     }
     if self.panic_kinds.contains("arena_full") {
         next = try self.record_panic_data("panic.arena_full.summary", "arena is full", next);
+    }
+    if self.panic_kinds.contains("arena_instances") {
+        next = try self.record_panic_data(
+            "panic.arena_instances.summary",
+            "arena instances exhausted",
+            next
+        );
     }
     if self.uses_expect_equal_panic() {
         next = try self.record_panic_data("panic.expected", "expected ", next);
@@ -355,6 +385,11 @@ fn (self: &var Emitter) write_panic_runtime() -> !void {
     }
     if self.panic_kinds.contains("arena_full") {
         if wasm_panic_spec("arena_full") |spec| {
+            try self.write_simple_panic_helper(move spec);
+        }
+    }
+    if self.panic_kinds.contains("arena_instances") {
+        if wasm_panic_spec("arena_instances") |spec| {
             try self.write_simple_panic_helper(move spec);
         }
     }
