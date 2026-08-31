@@ -2,6 +2,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::fmt;
 import std::map;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/wasm/frame.go. Each invocation receives fixed
@@ -41,6 +42,9 @@ fn (self: &var Emitter) plan_frame(
                     bytes,
                     WasmLayout { size: map_temp_size(), align: 8 }
                 );
+            }
+            if try self.plan_call_copy_slots(module, instr_node) |failed| {
+                return move failed;
             }
             if try self.is_memory_type(module, instr_node.result.type_name) and
                 instr_node.op != ir::Op::Phi {
@@ -87,6 +91,126 @@ fn (self: &var Emitter) plan_frame(
     }
     self.frame_size = wasm_align_up(self.frame_size, 8);
     return null;
+}
+
+/// Plans addressed scalar copies required by direct and indirect call ABI
+/// parameters. Memory-backed values already are addressed copies.
+fn (self: &var Emitter) plan_call_copy_slots(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.op == ir::Op::Call {
+        let callee = self.functions_by_name.get(ir::name_id(node.operand)) orelse return null;
+        var index = 0;
+        while node.args.get(index) |arg| {
+            if module.function_param(callee, index) |param| {
+                if try self.plan_call_copy_slot(module, node, arg, param, index) |failed| {
+                    return move failed;
+                }
+            }
+            index = index + 1;
+        }
+        return null;
+    }
+    if node.op == ir::Op::CallIndirect {
+        var arg_index = 1;
+        var param_index = 0;
+        while node.args.get(arg_index) |arg| {
+            if node.call_params.get(param_index) |param| {
+                if try self.plan_call_copy_slot(
+                    module,
+                    node,
+                    arg,
+                    param,
+                    param_index
+                ) |failed| {
+                    return move failed;
+                }
+            }
+            arg_index = arg_index + 1;
+            param_index = param_index + 1;
+        }
+    }
+    return null;
+}
+
+/// Plans one scalar cell when a CopyAddress parameter receives a value.
+fn (self: &var Emitter) plan_call_copy_slot(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    arg: ir::Value,
+    param: ir::Param,
+    index: i64
+) -> !?diagnostic::Diagnostic {
+    if !try self.call_needs_copy_slot(module, param, arg) {
+        return null;
+    }
+    let allocator = self.allocator;
+    let generation = self.generation;
+    let outcome = try self.type_layout(module, arg.type_name);
+    match outcome {
+        Error(failed) => return move failed,
+        Layout(layout) => {
+            let retained = ir::name_text(&module.names, node.result.name);
+            let bytes = retained.as_bytes();
+            var key = try call_copy_slot_key(allocator, bytes, index);
+            defer key.deinit(allocator);
+            let key_bytes = key.as_bytes();
+            try allocate_frame_slot(
+                allocator,
+                generation,
+                &var self.frame_size,
+                &var self.local_slots,
+                key_bytes,
+                layout
+            );
+        },
+    }
+    return null;
+}
+
+/// Reports whether wasm must materialize an addressed scalar call copy.
+fn (self: &var Emitter) call_needs_copy_slot(
+    module: &ir::Module,
+    param: ir::Param,
+    arg: ir::Value
+) -> !bool {
+    if !call_takes_copy_address(module, param, arg.type_name) {
+        return false;
+    }
+    return !try self.is_memory_type(module, arg.type_name);
+}
+
+/// Reads Param.TakesAddressOf without interning through the borrowed module.
+fn call_takes_copy_address(
+    module: &ir::Module,
+    param: ir::Param,
+    arg_type: ir::Name
+) -> bool {
+    if param.passing != ir::Passing::CopyAddress or
+        ir::same_name(param.type_name, arg_type) {
+        return false;
+    }
+    let param_text = ir::name_text(&module.names, param.type_name);
+    let param_bytes = param_text.as_bytes();
+    let arg_text = ir::name_text(&module.names, arg_type);
+    let arg_bytes = arg_text.as_bytes();
+    let deref = deref_wasm_type(param_bytes);
+    return mem::equal_bytes(deref, arg_bytes);
+}
+
+/// Builds the stable frame-map key for one addressed call copy.
+fn call_copy_slot_key(
+    allocator: Allocator,
+    result: []u8,
+    index: i64
+) -> !string::String {
+    var out = try string::from_bytes(allocator, "call-copy:");
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, result);
+    try out.append_byte(allocator, cast<u8>(58));
+    try fmt::append_i64(allocator, &var out, index);
+    return move out;
 }
 
 /// Registers fixed-address results before blocks are emitted. A merge block
@@ -158,6 +282,24 @@ fn (self: &var Emitter) local_slot(module: &ir::Module, result: ir::Value) -> !?
     let retained = ir::name_text(&module.names, result.name);
     let bytes = retained.as_bytes();
     let slot = self.local_slots.get(bytes) orelse return null;
+    if slot.generation != self.generation {
+        return null;
+    }
+    return try self.frame_slot_expr(slot.offset);
+}
+
+/// Returns one planned addressed-copy cell for a call argument.
+fn (self: &var Emitter) call_copy_slot(
+    module: &ir::Module,
+    result: ir::Value,
+    index: i64
+) -> !?ir::Name {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    var key = try call_copy_slot_key(self.allocator, bytes, index);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    let slot = self.local_slots.get(key_bytes) orelse return null;
     if slot.generation != self.generation {
         return null;
     }

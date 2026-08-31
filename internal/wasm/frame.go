@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
 )
@@ -23,6 +24,9 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 			if mapInstrNeedsTemp(instr.Op) {
 				frame.allocate(mapTempSlotKey(instr.Result.Name),
 					wasmLayout{size: mapTempSize, align: 8})
+			}
+			if err := e.planCallCopySlots(frame, instr); err != nil {
+				return nil, err
 			}
 			if e.isMemoryType(instr.Result.Type) && instr.Op != "phi" {
 				layout, err := e.typeLayout(instr.Result.Type)
@@ -77,6 +81,61 @@ func (f *frameLayout) allocate(key string, layout wasmLayout) {
 	offset := alignUp(f.size, layout.align)
 	f.slots[key] = offset
 	f.size = offset + maxInt(layout.size, 1)
+}
+
+// callArgsAndParams returns the value arguments and ABI parameters of a
+// module-local direct or indirect call. Unknown external calls have no ABI
+// metadata to adapt.
+func (e *emitter) callArgsAndParams(instr *ir.Instr) ([]ir.Value, []ir.Param) {
+	if instr.Op == "call.indirect" {
+		if len(instr.Args) == 0 {
+			return nil, instr.CallParams
+		}
+		return instr.Args[1:], instr.CallParams
+	}
+	name, ok := strings.CutPrefix(instr.Op, "call.")
+	if !ok {
+		return nil, nil
+	}
+	params, ok := e.paramsByFunction[name]
+	if !ok {
+		return nil, nil
+	}
+	return instr.Args, params
+}
+
+// callNeedsCopySlot reports whether wasm must materialize an addressed copy.
+// Memory-backed values already are addressed copies; scalar owners such as a
+// Box handle need a fixed cell before filling a PassCopyAddress parameter.
+func (e *emitter) callNeedsCopySlot(param ir.Param, arg ir.Value) bool {
+	return param.TakesAddressOf(arg.Type) && !e.isMemoryType(arg.Type)
+}
+
+// planCallCopySlots reserves recursive-safe cells for addressed scalar call
+// arguments before the function body is emitted.
+func (e *emitter) planCallCopySlots(frame *frameLayout, instr *ir.Instr) error {
+	args, params := e.callArgsAndParams(instr)
+	for index, arg := range args {
+		if index >= len(params) || !e.callNeedsCopySlot(params[index], arg) {
+			continue
+		}
+		layout, err := e.typeLayout(arg.Type)
+		if err != nil {
+			return err
+		}
+		frame.allocate(callCopySlotKey(instr.Result.Name, index), layout)
+	}
+	return nil
+}
+
+// callCopySlot returns one planned addressed-copy cell for a call argument.
+func (e *emitter) callCopySlot(result ir.Value, index int) (string, error) {
+	return e.frameSlot(callCopySlotKey(result.Name, index))
+}
+
+// callCopySlotKey separates call copies from result and local storage slots.
+func callCopySlotKey(result string, index int) string {
+	return fmt.Sprintf("call-copy:%s:%d", result, index)
 }
 
 // resultSlot returns the address expression for a memory-backed SSA result.

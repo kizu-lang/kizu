@@ -214,6 +214,7 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		"../../examples/std_map_owner_value.kizu",
 		"../../examples/map_insert_recovers_from_a_full_allocator.kizu",
 		"../../examples/negative/std_map_owner_value_overwrite.kizu",
+		"../../examples/std_json_decode_map.kizu",
 		"../../examples/std_path_edges.kizu",
 		"../../examples/negative/slice_syntax_index_out_of_bounds.kizu",
 		"../../examples/negative/slice_syntax_range_out_of_bounds.kizu",
@@ -240,7 +241,7 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		compareSelfhostArgs(t, selfhost, goWASMOutput(arena, true),
 			"build", "--target", "wasm32-wasi", "--opt", arena)
 	})
-	runSelfhostWASMMapOptCase(t, selfhost)
+	runSelfhostWASMContainerOptCases(t, selfhost)
 	for _, fixture := range wasmRepresentativeFixtures() {
 		t.Run("wasm/"+fixture.name, func(t *testing.T) {
 			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
@@ -254,13 +255,18 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 	}
 }
 
-// runSelfhostWASMMapOptCase compares optimized integer-key Map lowering.
-func runSelfhostWASMMapOptCase(t *testing.T, selfhost string) {
+// runSelfhostWASMContainerOptCases compares optimized owner-container lowering.
+func runSelfhostWASMContainerOptCases(t *testing.T, selfhost string) {
 	t.Helper()
 	mapInteger := "../../examples/std_map_integer_key.kizu"
 	t.Run("wasm/std_map_integer_key_opt", func(t *testing.T) {
 		compareSelfhostArgs(t, selfhost, goWASMOutput(mapInteger, true),
 			"build", "--target", "wasm32-wasi", "--opt", mapInteger)
+	})
+	jsonBox := "../../examples/std_json_decode_map.kizu"
+	t.Run("wasm/std_json_decode_map_opt", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goWASMOutput(jsonBox, true),
+			"build", "--target", "wasm32-wasi", "--opt", jsonBox)
 	})
 }
 

@@ -18,14 +18,19 @@ const (
 
 // Emit formats a typed SSA IR module as WASI-compatible WebAssembly text.
 func Emit(module *ir.Module) (string, error) {
+	paramsByFunction := make(map[string][]ir.Param, len(module.Functions))
+	for _, fn := range module.Functions {
+		paramsByFunction[fn.Name] = fn.Params
+	}
 	e := &emitter{
-		module:         module,
-		types:          typ.NewTable(),
-		strings:        map[string]dataRef{},
-		values:         map[string]valueInfo{},
-		panicKinds:     map[string]bool{},
-		tableIndex:     map[string]int{},
-		signatureIndex: map[string]int{},
+		module:           module,
+		types:            typ.NewTable(),
+		paramsByFunction: paramsByFunction,
+		strings:          map[string]dataRef{},
+		values:           map[string]valueInfo{},
+		panicKinds:       map[string]bool{},
+		tableIndex:       map[string]int{},
+		signatureIndex:   map[string]int{},
 	}
 	if err := e.emit(); err != nil {
 		return "", err
@@ -43,10 +48,11 @@ type valueInfo struct {
 }
 
 type emitter struct {
-	module  *ir.Module
-	types   *typ.Table
-	out     bytes.Buffer
-	strings map[string]dataRef
+	module           *ir.Module
+	types            *typ.Table
+	paramsByFunction map[string][]ir.Param
+	out              bytes.Buffer
+	strings          map[string]dataRef
 	// dataOrder keeps assignment order when zero-length data shares an offset
 	// with the following segment. Sorting offsets alone cannot order that tie.
 	dataOrder []string

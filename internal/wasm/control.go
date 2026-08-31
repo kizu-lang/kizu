@@ -236,6 +236,30 @@ func (e *emitter) writeFuncAddr(name string, instr *ir.Instr) error {
 	return nil
 }
 
+// writeCallArg adapts one IR argument to its declared wasm call ABI. A
+// PassCopyAddress scalar is stored in its planned frame cell and that address
+// is handed to the callee; all already-addressed and by-value arguments pass
+// through unchanged.
+func (e *emitter) writeCallArg(
+	instr *ir.Instr,
+	arg ir.Value,
+	param ir.Param,
+	index int,
+) (string, error) {
+	value := e.value(arg)
+	if !e.callNeedsCopySlot(param, arg) {
+		return value.expr, nil
+	}
+	slot, err := e.callCopySlot(instr.Result, index)
+	if err != nil {
+		return "", err
+	}
+	if err := e.writeStoreValue(slot, 0, arg.Type, value); err != nil {
+		return "", err
+	}
+	return slot, nil
+}
+
 // writeIndirectCall writes a call through a function pointer. The callee is
 // the first operand and reaches wasm as the table index it lowered to, which
 // `call_indirect` takes last.
@@ -253,8 +277,16 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 		}
 		args = append(args, resultSlot)
 	}
-	for _, arg := range instr.Args[1:] {
-		args = append(args, e.value(arg).expr)
+	for index, arg := range instr.Args[1:] {
+		param := ir.Param{}
+		if index < len(instr.CallParams) {
+			param = instr.CallParams[index]
+		}
+		expr, err := e.writeCallArg(instr, arg, param, index)
+		if err != nil {
+			return err
+		}
+		args = append(args, expr)
 	}
 	args = append(args, e.value(instr.Args[0]).expr)
 	call := fmt.Sprintf("(call_indirect (type $sig%d) %s)",
@@ -290,6 +322,7 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		return e.writeScalarResult(instr.Result, "(i32.const 2)")
 	}
 	args := make([]string, 0, len(instr.Args)+1)
+	params := e.paramsByFunction[name]
 	var resultSlot string
 	if e.isMemoryType(instr.Result.Type) {
 		var err error
@@ -299,8 +332,16 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		}
 		args = append(args, resultSlot)
 	}
-	for _, arg := range instr.Args {
-		args = append(args, e.value(arg).expr)
+	for index, arg := range instr.Args {
+		param := ir.Param{}
+		if index < len(params) {
+			param = params[index]
+		}
+		expr, err := e.writeCallArg(instr, arg, param, index)
+		if err != nil {
+			return err
+		}
+		args = append(args, expr)
 	}
 	call := fmt.Sprintf("(call $%s %s)", name, strings.Join(args, " "))
 	if instr.Result.Type == "void" || e.isMemoryType(instr.Result.Type) {

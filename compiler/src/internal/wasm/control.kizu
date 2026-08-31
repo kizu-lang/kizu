@@ -333,6 +333,30 @@ fn (self: &var Emitter) write_func_addr(
     return null;
 }
 
+/// Adapts one IR argument to its declared wasm call ABI. A CopyAddress scalar
+/// is stored in its planned frame cell and that address reaches the callee.
+fn (self: &var Emitter) write_call_arg(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    arg: ir::Value,
+    param: ir::Param,
+    index: i64,
+    out: &var ir::Name
+) -> !?diagnostic::Diagnostic {
+    let info = try self.value_of(module, arg);
+    if !try self.call_needs_copy_slot(module, param, arg) {
+        out.* = info.expr;
+        return null;
+    }
+    let slot = try self.call_copy_slot(module, node.result, index) orelse
+        return try self.fail0("wasm error: no frame slot for addressed call argument");
+    if try self.write_store_value(module, slot, 0, arg.type_name, info) |failed| {
+        return move failed;
+    }
+    out.* = slot;
+    return null;
+}
+
 /// Writes a call through a function pointer. The callee is the first operand
 /// and reaches wasm as the table index it lowered to, which `call_indirect`
 /// takes last.
@@ -357,11 +381,29 @@ fn (self: &var Emitter) write_indirect_call(
         try self.names.append_to(&var call, result_slot);
     }
     var index = 1;
+    var param_index = 0;
     while node.args.get(index) |arg| {
         index = index + 1;
         try call.append_bytes(self.allocator, " ");
-        let info = try self.value_of(module, arg);
-        try self.names.append_to(&var call, info.expr);
+        var expr = ir::empty_name();
+        if node.call_params.get(param_index) |param| {
+            if try self.write_call_arg(
+                module,
+                node,
+                arg,
+                param,
+                param_index,
+                &var expr
+            ) |failed| {
+                call.deinit(self.allocator);
+                return move failed;
+            }
+        } else {
+            let info = try self.value_of(module, arg);
+            expr = info.expr;
+        }
+        param_index = param_index + 1;
+        try self.names.append_to(&var call, expr);
     }
     try call.append_bytes(self.allocator, " ");
     let callee = try self.value_of(module, callee_value);
@@ -439,15 +481,37 @@ fn (self: &var Emitter) write_call(
         try self.names.append_to(&var call, result_slot);
         wrote = true;
     }
+    let callee = self.functions_by_name.get(ir::name_id(node.operand));
     var index = 0;
     while node.args.get(index) |arg| {
         if wrote {
             try call.append_bytes(self.allocator, " ");
         }
         wrote = true;
+        var expr = ir::empty_name();
+        var adapted = false;
+        if callee |function| {
+            if module.function_param(function, index) |param| {
+                if try self.write_call_arg(
+                    module,
+                    node,
+                    arg,
+                    param,
+                    index,
+                    &var expr
+                ) |failed| {
+                    call.deinit(self.allocator);
+                    return move failed;
+                }
+                adapted = true;
+            }
+        }
+        if !adapted {
+            let info = try self.value_of(module, arg);
+            expr = info.expr;
+        }
         index = index + 1;
-        let info = try self.value_of(module, arg);
-        try self.names.append_to(&var call, info.expr);
+        try self.names.append_to(&var call, expr);
     }
     try call.append_bytes(self.allocator, ")");
     if module.names.is(node.result.type_name, "void") or

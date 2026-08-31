@@ -136,6 +136,11 @@ run_example "map_allocator_refusal" \
   "examples/map_insert_recovers_from_a_full_allocator.kizu" \
   "-1
 the buffer ran out, and the program chose what to do"
+run_example "std_json_decode_map" "examples/std_json_decode_map.kizu" "alice
+bob
+carol
+7
+{\"counts\":{\"alice\":2,\"bob\":1,\"carol\":4},\"total\":7}"
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.

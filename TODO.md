@@ -6,10 +6,10 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-158 examples 中 125 件が native と同じ出力で動く。残り 33 件の最初の失敗は process args
+158 examples 中 126 件が native と同じ出力で動く。残り 32 件の最初の失敗は process args
 13 件、blocking Io 6 件、coro runtime 4 件、enum print 3 件、extern C allocator 2 件、
-u8 print、JSON の Box encode、埋め込み NUL の出力差、filesystem、wasmtime host invocation が
-各 1 件。example ごとの例外を足さず、共通 runtime と portable std の順に backend の対象を
+u8 print、埋め込み NUL の出力差、filesystem、wasmtime host invocation が各 1 件。
+example ごとの例外を足さず、共通 runtime と portable std の順に backend の対象を
 広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
@@ -23,8 +23,8 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 
 ### W3. owner container と cleanup
 
-- Array / Map と allocator を土台に、まだ他の runtime に阻まれている `std::string`、
-  `std::json` の portable behavior を順に通す。
+- Array / Map と allocator を土台に、まだ他の runtime に阻まれている `std::string` の
+  portable behavior を通す。
 - enum と byte の print、埋め込み NUL を含む byte slice の出力を native と一致させる。
 
 ### W4. WASI host boundary
