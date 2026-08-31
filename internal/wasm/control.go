@@ -39,6 +39,10 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeUnary(instr)
 	case instr.Op == "cond_fail":
 		return e.writeCondFail(instr)
+	case instr.Op == "panic.fail":
+		return e.writePanicFail(instr)
+	case instr.Op == "test.fail", instr.Op == "test.expect_equal":
+		return e.writeTestInstr(instr)
 	case strings.HasPrefix(instr.Op, "func.addr."), strings.HasPrefix(instr.Op, "call."):
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
@@ -146,12 +150,23 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	if len(instr.Args) != 2 {
 		return fmt.Errorf("wasm error: binary expects 2 args")
 	}
+	op := strings.TrimPrefix(instr.Op, "binary.")
+	if instr.Args[0].Type == "[]u8" {
+		return e.writeByteEquality(instr, op)
+	}
 	left := e.value(instr.Args[0]).expr
 	right := e.value(instr.Args[1]).expr
-	op := strings.TrimPrefix(instr.Op, "binary.")
 	wasmOp := wasmBinaryOp(op)
 	if instr.Result.Type == "bool" {
 		wasmOp = wasmCompareOp(op)
+		if instr.Args[0].Type == "bool" {
+			switch op {
+			case "==":
+				wasmOp = "i32.eq"
+			case "!=":
+				wasmOp = "i32.ne"
+			}
+		}
 	}
 	fmt.Fprintf(&e.out, "            (local.set %s (%s %s %s))\n",
 		symbolName(instr.Result.Name), wasmOp, left, right)
@@ -260,6 +275,12 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	}
 	if handled, err := e.writeAllocatorBuiltinCall(name, instr); handled {
 		return err
+	}
+	if name == "std::internal::builtin::io_failing" {
+		if len(instr.Args) != 0 || instr.Result.Type != "Io" {
+			return fmt.Errorf("wasm error: io_failing expects no args -> Io")
+		}
+		return e.writeScalarResult(instr.Result, "(i32.const 2)")
 	}
 	args := make([]string, 0, len(instr.Args)+1)
 	var resultSlot string

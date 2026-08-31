@@ -8,9 +8,17 @@ import (
 )
 
 const (
-	panicPrefixKey = "panic.prefix"
-	panicAtKey     = "panic.at"
-	panicColonKey  = "panic.colon"
+	panicPrefixKey   = "panic.prefix"
+	panicAtKey       = "panic.at"
+	panicColonKey    = "panic.colon"
+	panicExpectedKey = "panic.expected"
+	panicGotKey      = "panic.got"
+	panicQuoteKey    = "panic.quote"
+
+	panicMessageKind     = "message"
+	panicExpectIntKind   = "expect_equal_int"
+	panicExpectBoolKind  = "expect_equal_bool"
+	panicExpectBytesKind = "expect_equal_bytes"
 )
 
 // wasmPanicData is one runtime-owned diagnostic fragment in linear memory.
@@ -91,6 +99,12 @@ func (e *emitter) collectPanicKinds() {
 				switch instr.Op {
 				case "cond_fail":
 					e.panicKinds[instr.Immediate] = true
+				case "panic.fail", "test.fail":
+					e.panicKinds[panicMessageKind] = true
+				case "test.expect_equal":
+					if len(instr.Args) == 2 {
+						e.panicKinds[panicExpectKind(instr.Args[0].Type)] = true
+					}
 				case "array.get_or_panic":
 					e.panicKinds["bounds"] = true
 				case "array.pop_or_panic":
@@ -114,7 +128,23 @@ func (e *emitter) usedPanicData() []wasmPanicData {
 		data = append(data, spec.summary)
 		data = append(data, spec.extra...)
 	}
+	if e.usesExpectEqualPanic() {
+		data = append(data,
+			wasmPanicData{key: panicExpectedKey, text: "expected "},
+			wasmPanicData{key: panicGotKey, text: ", got "},
+		)
+	}
+	if e.panicKinds[panicExpectBytesKind] {
+		data = append(data, wasmPanicData{key: panicQuoteKey, text: "\""})
+	}
 	return data
+}
+
+// usesExpectEqualPanic reports whether a testing assertion needs shared
+// expected/got diagnostic fragments.
+func (e *emitter) usesExpectEqualPanic() bool {
+	return e.panicKinds[panicExpectIntKind] || e.panicKinds[panicExpectBoolKind] ||
+		e.panicKinds[panicExpectBytesKind]
 }
 
 // panicDataText resolves a runtime data key for the WAT data renderer.
@@ -134,7 +164,28 @@ func panicDataText(key string) (string, bool) {
 			}
 		}
 	}
+	switch key {
+	case panicExpectedKey:
+		return "expected ", true
+	case panicGotKey:
+		return ", got ", true
+	case panicQuoteKey:
+		return "\"", true
+	}
 	return "", false
+}
+
+// panicExpectKind selects the runtime diagnostic representation of a tested
+// value. All integer and enum tags already share one wasm i64.
+func panicExpectKind(typ string) string {
+	switch typ {
+	case "bool":
+		return panicExpectBoolKind
+	case "[]u8":
+		return panicExpectBytesKind
+	default:
+		return panicExpectIntKind
+	}
 }
 
 // wasmPanicSpecFor returns the runtime entry selected by one IR kind.
@@ -173,10 +224,30 @@ func (e *emitter) writeCondFail(instr *ir.Instr) error {
 	return nil
 }
 
+// writePanicFail reports one dynamic []u8 message and stops.
+func (e *emitter) writePanicFail(instr *ir.Instr) error {
+	return e.writeMessageFail(instr, "panic.fail")
+}
+
+// writeMessageFail is the shared instruction boundary for panic.fail and
+// test.fail. Their observable runtime behavior is intentionally identical.
+func (e *emitter) writeMessageFail(instr *ir.Instr, op string) error {
+	if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" || instr.Result.Type != "void" {
+		return fmt.Errorf("wasm error: %s expects one []u8 message", op)
+	}
+	ptr, length := byteSliceParts(e.value(instr.Args[0]).expr)
+	fmt.Fprintf(&e.out,
+		"            (call $__panic_fail %s %s (i64.const %d) (i64.const %d))\n",
+		ptr, length, instr.Span.Start.Line, instr.Span.Start.Column)
+	e.out.WriteString("            (unreachable)\n")
+	return nil
+}
+
 // writePanicRuntime writes only the kind-specific checked failures this module
 // uses, plus their shared stderr, position, integer, and exit boundary.
 func (e *emitter) writePanicRuntime() {
 	e.writePanicExitHelper()
+	e.writePanicAtHelper()
 	e.writePanicSummaryHelper()
 	for _, spec := range wasmPanicSpecs {
 		if !e.panicKinds[spec.kind] {
@@ -191,6 +262,10 @@ func (e *emitter) writePanicRuntime() {
 			e.writeSimplePanicHelper(spec)
 		}
 	}
+	if e.panicKinds[panicMessageKind] {
+		e.writePanicFailHelper()
+	}
+	e.writeTestPanicRuntime()
 }
 
 // writePanicExitHelper ends a checked failure without relying on an engine
@@ -202,17 +277,12 @@ func (e *emitter) writePanicExitHelper() {
 	e.out.WriteString("  )\n\n")
 }
 
-// writePanicSummaryHelper writes `runtime error: summary`, an optional source
-// position, and a newline to stderr.
-func (e *emitter) writePanicSummaryHelper() {
-	prefix := e.strings[panicPrefixKey]
+// writePanicAtHelper appends an optional source position and one newline.
+func (e *emitter) writePanicAtHelper() {
 	at := e.strings[panicAtKey]
 	colon := e.strings[panicColonKey]
 	newline := e.strings["newline"]
-	e.out.WriteString("  (func $__panic_summary (param $ptr i32) (param $len i32)\n")
-	e.out.WriteString("      (param $line i64) (param $column i64)\n")
-	e.writePanicBytes(prefix, "    ")
-	e.out.WriteString("    (call $__write_bytes (i32.const 2) (local.get $ptr) (local.get $len))\n")
+	e.out.WriteString("  (func $__panic_at (param $line i64) (param $column i64)\n")
 	e.out.WriteString("    (if (i64.gt_s (local.get $line) (i64.const 0))\n")
 	e.out.WriteString("      (then\n")
 	e.writePanicBytes(at, "        ")
@@ -220,6 +290,28 @@ func (e *emitter) writePanicSummaryHelper() {
 	e.writePanicBytes(colon, "        ")
 	e.out.WriteString("        (call $__write_i64 (i32.const 2) (local.get $column))))\n")
 	e.writePanicBytes(newline, "    ")
+	e.out.WriteString("  )\n\n")
+}
+
+// writePanicSummaryHelper writes `runtime error: summary`, an optional source
+// position, and a newline to stderr.
+func (e *emitter) writePanicSummaryHelper() {
+	prefix := e.strings[panicPrefixKey]
+	e.out.WriteString("  (func $__panic_summary (param $ptr i32) (param $len i32)\n")
+	e.out.WriteString("      (param $line i64) (param $column i64)\n")
+	e.writePanicBytes(prefix, "    ")
+	e.out.WriteString("    (call $__write_bytes (i32.const 2) (local.get $ptr) (local.get $len))\n")
+	e.out.WriteString("    (call $__panic_at (local.get $line) (local.get $column))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writePanicFailHelper reports a dynamic summary and terminates.
+func (e *emitter) writePanicFailHelper() {
+	e.out.WriteString("  (func $__panic_fail (param $ptr i32) (param $len i32)\n")
+	e.out.WriteString("      (param $line i64) (param $column i64)\n")
+	e.out.WriteString("    (call $__panic_summary (local.get $ptr) (local.get $len)\n")
+	e.out.WriteString("      (local.get $line) (local.get $column))\n")
+	e.out.WriteString("    (call $__panic_exit)\n")
 	e.out.WriteString("  )\n\n")
 }
 

@@ -65,6 +65,12 @@ fn (self: &var Emitter) write_instr_node(
     if node.op == ir::Op::CondFail {
         return self.write_cond_fail(module, node);
     }
+    if node.op == ir::Op::PanicFail {
+        return self.write_panic_fail(module, node);
+    }
+    if node.op == ir::Op::TestFail or node.op == ir::Op::TestExpectEqual {
+        return self.write_test_instr(module, node);
+    }
     if node.op == ir::Op::Call {
         return self.write_call(module, node);
     }
@@ -260,6 +266,9 @@ fn (self: &var Emitter) write_binary(
     if node.args.len() != 2 {
         return try self.fail0("wasm error: binary expects 2 args");
     }
+    if module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+        return self.write_byte_equality(module, node);
+    }
     let left = try self.arg_expr(module, node, 0);
     let right = try self.arg_expr(module, node, 1);
     let result_retained = ir::name_text(&module.names, node.result.name);
@@ -276,6 +285,12 @@ fn (self: &var Emitter) write_binary(
 /// comparison when its result is a bool, the Go `wasmOp` choice.
 fn binary_operation(module: &ir::Module, node: &ir::InstrNode) -> []u8 {
     if module.names.is(node.result.type_name, "bool") {
+        if module.names.is(node.args.get_or_panic(0).type_name, "bool") {
+            if module.names.is(node.operand, "!=") {
+                return "i32.ne";
+            }
+            return "i32.eq";
+        }
         return wasm_compare_op(&module.names, node.operand);
     }
     return wasm_binary_op(&module.names, node.operand);
@@ -421,6 +436,13 @@ fn (self: &var Emitter) write_call(
     }
     if module.names.is(node.operand, "std::internal::builtin::mem_allocator_from") {
         return self.write_allocator_from_call(module, node);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::io_failing") {
+        if node.args.len() != 0 or !module.names.is(node.result.type_name, "Io") {
+            return try self.fail0("wasm error: io_failing expects no args -> Io");
+        }
+        let expr = try self.names.intern("(i32.const 2)");
+        return self.write_scalar_result(module, node.result, expr);
     }
     var result_slot = ir::empty_name();
     if try self.is_memory_type(module, node.result.type_name) {

@@ -80,6 +80,11 @@ run_example "mutable_borrow_nested_field" "examples/mutable_borrow_nested_field.
 2"
 run_example "aggregate_calls" "examples/aggregate_calls.kizu" "4
 3"
+run_example "std_path_edges" "examples/std_path_edges.kizu" ".
+/b
+.
+a/c
+.."
 # Optionals and recoverable errors share the tagged memory ABI across calls,
 # captures, match, orelse, try propagation, and main's success boundary.
 run_example "optional_error_flow" "examples/optional_error_flow.kizu" "7
@@ -109,3 +114,15 @@ run_failure "slice_range_out_of_bounds" \
   "examples/negative/slice_syntax_range_out_of_bounds.kizu" \
   "runtime error: range out of bounds at 2:22
 note: range is 0..4, length is 3"
+run_failure "testing_fail" \
+  "examples/negative/std_testing_run_fail.kizu" \
+  "runtime error: custom failure"
+run_failure "testing_expect_equal_int" \
+  "examples/negative/std_testing_run_expect_equal.kizu" \
+  "runtime error: expected 4, got 3"
+run_failure "testing_expect_equal_bool" \
+  "examples/negative/std_testing_run_expect_equal_bool.kizu" \
+  "runtime error: expected true, got false"
+run_failure "testing_expect_equal_bytes" \
+  "examples/negative/std_testing_run_expect_equal_bytes.kizu" \
+  "runtime error: expected \"token\", got \"lexer\""

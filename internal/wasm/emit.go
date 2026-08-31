@@ -3,7 +3,6 @@ package wasm
 import (
 	"bytes"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -48,7 +47,10 @@ type emitter struct {
 	types   *typ.Table
 	out     bytes.Buffer
 	strings map[string]dataRef
-	values  map[string]valueInfo
+	// dataOrder keeps assignment order when zero-length data shares an offset
+	// with the following segment. Sorting offsets alone cannot order that tie.
+	dataOrder []string
+	values    map[string]valueInfo
 	// panicKinds contains only the checked runtime failures this module uses.
 	// Their data, proc_exit import, and helpers are omitted otherwise.
 	panicKinds map[string]bool
@@ -168,16 +170,21 @@ func (e *emitter) collectStrings() {
 	for _, lit := range e.sortedStringLiteralsByDiscovery() {
 		unquoted, _ := strconv.Unquote(lit)
 		e.strings[lit] = dataRef{offset: offset, length: len(unquoted)}
+		e.dataOrder = append(e.dataOrder, lit)
 		offset += len(unquoted)
 	}
 	e.strings["true"] = dataRef{offset: offset, length: 4}
+	e.dataOrder = append(e.dataOrder, "true")
 	offset += 4
 	e.strings["false"] = dataRef{offset: offset, length: 5}
+	e.dataOrder = append(e.dataOrder, "false")
 	offset += 5
 	e.strings["newline"] = dataRef{offset: offset, length: 1}
+	e.dataOrder = append(e.dataOrder, "newline")
 	offset++
 	for _, data := range e.usedPanicData() {
 		e.strings[data.key] = dataRef{offset: offset, length: len(data.text)}
+		e.dataOrder = append(e.dataOrder, data.key)
 		offset += len(data.text)
 	}
 	e.dataEnd = alignUp(offset, 8)
@@ -222,7 +229,7 @@ func (e *emitter) writeHeader() {
 		fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
 	}
 	e.writeFunctionTable()
-	for _, lit := range e.sortedDataLiterals() {
+	for _, lit := range e.dataOrder {
 		ref := e.strings[lit]
 		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", ref.offset, dataLiteral(lit))
 	}
@@ -255,18 +262,6 @@ func (e *emitter) writeFunctionTable() {
 	e.out.WriteString(")\n")
 }
 
-// sortedDataLiterals returns memory data in ascending offset order.
-func (e *emitter) sortedDataLiterals() []string {
-	literals := make([]string, 0, len(e.strings))
-	for lit := range e.strings {
-		literals = append(literals, lit)
-	}
-	sort.Slice(literals, func(i int, j int) bool {
-		return e.strings[literals[i]].offset < e.strings[literals[j]].offset
-	})
-	return literals
-}
-
 // dataLiteral converts a map key to WAT data text.
 func dataLiteral(key string) string {
 	if text, ok := panicDataText(key); ok {
@@ -294,6 +289,9 @@ func (e *emitter) writeRuntime() {
 	e.writeBoolHelper()
 	e.writeIntValueHelper()
 	e.writeIntHelper()
+	if e.usesByteEqualityRuntime() {
+		e.writeByteEqualityHelper()
+	}
 	if len(e.panicKinds) > 0 {
 		e.writePanicRuntime()
 	}

@@ -1,0 +1,195 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::string;
+
+// Mechanical port of internal/wasm/test.go. Testing failures remain traps:
+// their message payload is written to stderr before WASI proc_exit, and an
+// equality failure formats the values the assertion actually received.
+
+fn (self: &var Emitter) write_test_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    match node.op {
+        TestFail => return self.write_message_fail(module, node, "test.fail"),
+        TestExpectEqual => return self.write_test_expect_equal(module, node),
+        _ => return try self.fail_op(
+            module,
+            node,
+            "wasm error: unsupported test instruction `%s`"
+        ),
+    }
+}
+
+/// Compares two values and reports both only on failure.
+fn (self: &var Emitter) write_test_expect_equal(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") or
+        !ir::same_name(
+        node.args.get_or_panic(0).type_name,
+        node.args.get_or_panic(1).type_name
+    ) {
+        return try self.fail0("wasm error: test.expect_equal expects two matching args");
+    }
+    let left_value = node.args.get_or_panic(0);
+    let right_value = node.args.get_or_panic(1);
+    let left = try self.value_of(module, left_value);
+    let right = try self.value_of(module, right_value);
+    var helper = "__panic_expect_equal_int";
+    var failure = string::new(self.allocator);
+    errdefer failure.deinit(self.allocator);
+    var call_args = string::new(self.allocator);
+    defer call_args.deinit(self.allocator);
+    if module.names.is(left_value.type_name, "bool") {
+        helper = "__panic_expect_equal_bool";
+        try failure.append_bytes(self.allocator, "(i32.ne ");
+        try self.names.append_to(&var failure, left.expr);
+        try failure.append_byte(self.allocator, cast<u8>(32));
+        try self.names.append_to(&var failure, right.expr);
+        try failure.append_byte(self.allocator, cast<u8>(41));
+        try self.names.append_to(&var call_args, left.expr);
+        try call_args.append_byte(self.allocator, cast<u8>(32));
+        try self.names.append_to(&var call_args, right.expr);
+    } else {
+        if module.names.is(left_value.type_name, "[]u8") {
+            helper = "__panic_expect_equal_bytes";
+            let left_parts = try self.byte_slice_parts(left.expr);
+            let right_parts = try self.byte_slice_parts(right.expr);
+            try failure.append_bytes(self.allocator, "(i32.eqz (call $__bytes_equal ");
+            try self.names.append_to(&var failure, left_parts.ptr);
+            try failure.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var failure, left_parts.len);
+            try failure.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var failure, right_parts.ptr);
+            try failure.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var failure, right_parts.len);
+            try failure.append_bytes(self.allocator, "))");
+            try self.names.append_to(&var call_args, left_parts.ptr);
+            try call_args.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call_args, left_parts.len);
+            try call_args.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call_args, right_parts.ptr);
+            try call_args.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call_args, right_parts.len);
+        } else {
+            if !is_integer_type(&module.names, left_value.type_name) and
+                !is_tag_type(module, left_value.type_name) {
+                failure.deinit(self.allocator);
+                let type_name = try self.own(module, left_value.type_name);
+                return try self.fail(
+                    "wasm error: unsupported test.expect_equal type `%s`",
+                    Arg::Str(type_name)
+                );
+            }
+            try failure.append_bytes(self.allocator, "(i64.ne ");
+            try self.names.append_to(&var failure, left.expr);
+            try failure.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var failure, right.expr);
+            try failure.append_byte(self.allocator, cast<u8>(41));
+            try self.names.append_to(&var call_args, left.expr);
+            try call_args.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call_args, right.expr);
+        }
+    }
+    let failure_expr = try self.names.intern_owned(move failure);
+    try self.line1("            (if %s", Arg::Str(failure_expr));
+    try self.line("              (then");
+    var call = try string::from_bytes(self.allocator, "                (call $");
+    errdefer call.deinit(self.allocator);
+    try call.append_bytes(self.allocator, helper);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try call.append_string(self.allocator, &call_args);
+    try call.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, &var call, node.span.start.line);
+    try call.append_bytes(self.allocator, ") (i64.const ");
+    try fmt::append_i64(self.allocator, &var call, node.span.start.column);
+    try call.append_bytes(self.allocator, "))))");
+    try self.line1("%s", Arg::Owned(move call));
+    return null;
+}
+
+/// Writes only the assertion diagnostic entries the module uses.
+fn (self: &var Emitter) write_test_panic_runtime() -> !void {
+    if self.panic_kinds.contains("expect_equal_int") {
+        try self.write_panic_expect_equal_int_helper();
+    }
+    if self.panic_kinds.contains("expect_equal_bool") {
+        try self.write_panic_expect_equal_bool_helper();
+    }
+    if self.panic_kinds.contains("expect_equal_bytes") {
+        try self.write_panic_expect_equal_bytes_helper();
+    }
+    return;
+}
+
+fn (self: &var Emitter) write_panic_expect_prefix() -> !void {
+    try self.write_panic_bytes(self.data_ref("panic.prefix"), "    ");
+    return self.write_panic_bytes(self.data_ref("panic.expected"), "    ");
+}
+
+fn (self: &var Emitter) write_panic_expect_got() -> !void {
+    return self.write_panic_bytes(self.data_ref("panic.got"), "    ");
+}
+
+fn (self: &var Emitter) write_panic_expect_equal_int_helper() -> !void {
+    try self.line("  (func $__panic_expect_equal_int (param $expected i64) (param $actual i64)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.write_panic_expect_prefix();
+    try self.line("    (call $__write_i64 (i32.const 2) (local.get $expected))");
+    try self.write_panic_expect_got();
+    try self.line("    (call $__write_i64 (i32.const 2) (local.get $actual))");
+    return self.write_panic_finish_and_exit();
+}
+
+fn (self: &var Emitter) write_panic_expect_equal_bool_helper() -> !void {
+    try self.line("  (func $__panic_expect_equal_bool (param $expected i32) (param $actual i32)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.write_panic_expect_prefix();
+    try self.write_panic_bool("$expected");
+    try self.write_panic_expect_got();
+    try self.write_panic_bool("$actual");
+    return self.write_panic_finish_and_exit();
+}
+
+/// Writes one bool without the stdout helper's newline.
+fn (self: &var Emitter) write_panic_bool(local: []u8) -> !void {
+    let truth = self.data_ref("true");
+    let falsehood = self.data_ref("false");
+    try self.line1("    (if (local.get %s)", Arg::Lit(local));
+    try self.line2(
+        "      (then (call $__write_bytes (i32.const 2) (i32.const %d) (i32.const %d)))",
+        Arg::Int(truth.offset),
+        Arg::Int(truth.length)
+    );
+    return self.line2(
+        "      (else (call $__write_bytes (i32.const 2) (i32.const %d) (i32.const %d))))",
+        Arg::Int(falsehood.offset),
+        Arg::Int(falsehood.length)
+    );
+}
+
+fn (self: &var Emitter) write_panic_expect_equal_bytes_helper() -> !void {
+    let quote = self.data_ref("panic.quote");
+    try self.line("  (func $__panic_expect_equal_bytes (param $expected i32) (param $expected_len i32)");
+    try self.line("      (param $actual i32) (param $actual_len i32)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.write_panic_expect_prefix();
+    try self.write_panic_bytes(quote, "    ");
+    try self.line("    (call $__write_bytes (i32.const 2) (local.get $expected) (local.get $expected_len))");
+    try self.write_panic_bytes(quote, "    ");
+    try self.write_panic_expect_got();
+    try self.write_panic_bytes(quote, "    ");
+    try self.line("    (call $__write_bytes (i32.const 2) (local.get $actual) (local.get $actual_len))");
+    try self.write_panic_bytes(quote, "    ");
+    return self.write_panic_finish_and_exit();
+}
+
+fn (self: &var Emitter) write_panic_finish_and_exit() -> !void {
+    try self.line("    (call $__panic_at (local.get $line) (local.get $column))");
+    try self.line("    (call $__panic_exit)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}

@@ -6,11 +6,10 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-156 examples 中 87 件が native と同じ出力で動く。残り 69 件の最初の失敗は `panic.fail` 20 件、
-process args 13 件、arena / handle 10 件、Map 8 件、blocking Io 6 件、`test.fail` 3 件、
-extern C allocator と enum print が各 2 件、box、u8 print、埋め込み NUL の出力差、coro、
-filesystem が各 1 件。example ごとの例外を足さず、共通 runtime と portable std の順に
-backend の対象を広げる。
+156 examples 中 92 件が native と同じ出力で動く。残り 64 件の最初の失敗は Map layout 25 件、
+process args 13 件、arena / handle 10 件、blocking Io 6 件、extern C allocator、box、enum print が
+各 2 件、u8 print、埋め込み NUL の出力差、coro、filesystem が各 1 件。example ごとの例外を
+足さず、共通 runtime と portable std の順に backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
 std API が native と同じ observable behavior を持ち、compiler が browser の読める binary
@@ -21,10 +20,8 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 同時に更新する。検証は内部生成文字列の構造 pin ではなく、`wasmtime` で example の
 宣言出力を実行して行う。
 
-### W3. slice、failure、allocator、cleanup
+### W3. owner container と cleanup
 
-- `panic.fail` / `test.fail` と testing の失敗 entry を WASI runtime に実装し、native と同じ
-  診断で停止する。
 - box、arena / handle、Map を同じ ownership 済み IR から lower し、owner container の
   cleanup を実行結果で検証する。
 - Array と allocator を土台に、まだ他の runtime に阻まれている `std::string`、`std::map`、

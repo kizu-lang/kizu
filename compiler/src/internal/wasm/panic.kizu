@@ -15,6 +15,23 @@ struct WasmPanicSpec {
     summary_key: []u8
 }
 
+fn panic_quote_text() -> []u8 {
+    let text =
+        \\"
+    ;
+    return text;
+}
+
+fn panic_expect_kind(module: &ir::Module, typ: ir::Name) -> []u8 {
+    if module.names.is(typ, "bool") {
+        return "expect_equal_bool";
+    }
+    if module.names.is(typ, "[]u8") {
+        return "expect_equal_bytes";
+    }
+    return "expect_equal_int";
+}
+
 fn wasm_panic_spec(kind: []u8) -> ?WasmPanicSpec {
     if mem::equal_bytes(kind, "bounds") {
         return WasmPanicSpec {
@@ -77,6 +94,15 @@ fn panic_data_text(key: []u8) -> ?[]u8 {
     if mem::equal_bytes(key, "panic.colon") {
         return ":";
     }
+    if mem::equal_bytes(key, "panic.expected") {
+        return "expected ";
+    }
+    if mem::equal_bytes(key, "panic.got") {
+        return ", got ";
+    }
+    if mem::equal_bytes(key, "panic.quote") {
+        return panic_quote_text();
+    }
     if mem::equal_bytes(key, "panic.bounds.summary") {
         return "index out of bounds";
     }
@@ -134,6 +160,21 @@ fn (self: &var Emitter) collect_panic_kinds(module: &ir::Module) -> !void {
                         let kind = retained.as_bytes();
                         try self.panic_kinds.insert(self.allocator, kind, true);
                     },
+                    PanicFail => {
+                        try self.panic_kinds.insert(self.allocator, "message", true);
+                    },
+                    TestFail => {
+                        try self.panic_kinds.insert(self.allocator, "message", true);
+                    },
+                    TestExpectEqual => {
+                        if node.args.len() == 2 {
+                            let kind = panic_expect_kind(
+                                module,
+                                node.args.get_or_panic(0).type_name
+                            );
+                            try self.panic_kinds.insert(self.allocator, kind, true);
+                        }
+                    },
                     ArrayGetOrPanic => {
                         try self.panic_kinds.insert(self.allocator, "bounds", true);
                     },
@@ -181,7 +222,20 @@ fn (self: &var Emitter) record_used_panic_data(offset: i64) -> !i64 {
     if self.panic_kinds.contains("arena_full") {
         next = try self.record_panic_data("panic.arena_full.summary", "arena is full", next);
     }
+    if self.uses_expect_equal_panic() {
+        next = try self.record_panic_data("panic.expected", "expected ", next);
+        next = try self.record_panic_data("panic.got", ", got ", next);
+    }
+    if self.panic_kinds.contains("expect_equal_bytes") {
+        next = try self.record_panic_data("panic.quote", panic_quote_text(), next);
+    }
     return next;
+}
+
+fn (self: &Emitter) uses_expect_equal_panic() -> bool {
+    return self.panic_kinds.contains("expect_equal_int") or
+        self.panic_kinds.contains("expect_equal_bool") or
+        self.panic_kinds.contains("expect_equal_bytes");
 }
 
 fn (self: &var Emitter) record_panic_data(key: []u8, text: []u8, offset: i64) -> !i64 {
@@ -233,10 +287,50 @@ fn (self: &var Emitter) write_cond_fail(
     return try self.fail("wasm error: unknown cond_fail kind `%s`", Arg::Str(shown));
 }
 
+/// Reports one dynamic []u8 panic message and stops.
+fn (self: &var Emitter) write_panic_fail(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    return self.write_message_fail(module, node, "panic.fail");
+}
+
+/// Is the shared instruction boundary for panic.fail and test.fail.
+fn (self: &var Emitter) write_message_fail(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    op: []u8
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail(
+            "wasm error: %s expects one []u8 message",
+            Arg::Lit(op)
+        );
+    }
+    let message = try self.value_of(module, node.args.get_or_panic(0));
+    let parts = try self.byte_slice_parts(message.expr);
+    var call = try string::from_bytes(self.allocator, "            (call $__panic_fail ");
+    errdefer call.deinit(self.allocator);
+    try self.names.append_to(&var call, parts.ptr);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, parts.len);
+    try call.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, &var call, node.span.start.line);
+    try call.append_bytes(self.allocator, ") (i64.const ");
+    try fmt::append_i64(self.allocator, &var call, node.span.start.column);
+    try call.append_bytes(self.allocator, "))");
+    try self.line1("%s", Arg::Owned(move call));
+    try self.line("            (unreachable)");
+    return null;
+}
+
 /// Writes only the kind-specific checked failures this module uses, plus the
 /// shared stderr, position, integer, and exit boundary.
 fn (self: &var Emitter) write_panic_runtime() -> !void {
     try self.write_panic_exit_helper();
+    try self.write_panic_at_helper();
     try self.write_panic_summary_helper();
     if self.panic_kinds.contains("bounds") {
         try self.write_panic_bounds_helper();
@@ -264,6 +358,10 @@ fn (self: &var Emitter) write_panic_runtime() -> !void {
             try self.write_simple_panic_helper(move spec);
         }
     }
+    if self.panic_kinds.contains("message") {
+        try self.write_panic_fail_helper();
+    }
+    try self.write_test_panic_runtime();
     return;
 }
 
@@ -276,17 +374,12 @@ fn (self: &var Emitter) write_panic_exit_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes `runtime error: summary`, an optional position, and a newline to
-/// stderr.
-fn (self: &var Emitter) write_panic_summary_helper() -> !void {
-    let prefix = self.data_ref("panic.prefix");
+/// Appends an optional source position and one newline.
+fn (self: &var Emitter) write_panic_at_helper() -> !void {
     let at = self.data_ref("panic.at");
     let colon = self.data_ref("panic.colon");
     let newline = self.data_ref("newline");
-    try self.line("  (func $__panic_summary (param $ptr i32) (param $len i32)");
-    try self.line("      (param $line i64) (param $column i64)");
-    try self.write_panic_bytes(prefix, "    ");
-    try self.line("    (call $__write_bytes (i32.const 2) (local.get $ptr) (local.get $len))");
+    try self.line("  (func $__panic_at (param $line i64) (param $column i64)");
     try self.line("    (if (i64.gt_s (local.get $line) (i64.const 0))");
     try self.line("      (then");
     try self.write_panic_bytes(at, "        ");
@@ -294,6 +387,30 @@ fn (self: &var Emitter) write_panic_summary_helper() -> !void {
     try self.write_panic_bytes(colon, "        ");
     try self.line("        (call $__write_i64 (i32.const 2) (local.get $column))))");
     try self.write_panic_bytes(newline, "    ");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Writes `runtime error: summary`, an optional position, and a newline to
+/// stderr.
+fn (self: &var Emitter) write_panic_summary_helper() -> !void {
+    let prefix = self.data_ref("panic.prefix");
+    try self.line("  (func $__panic_summary (param $ptr i32) (param $len i32)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.write_panic_bytes(prefix, "    ");
+    try self.line("    (call $__write_bytes (i32.const 2) (local.get $ptr) (local.get $len))");
+    try self.line("    (call $__panic_at (local.get $line) (local.get $column))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Reports a dynamic summary and terminates.
+fn (self: &var Emitter) write_panic_fail_helper() -> !void {
+    try self.line("  (func $__panic_fail (param $ptr i32) (param $len i32)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.line("    (call $__panic_summary (local.get $ptr) (local.get $len)");
+    try self.line("      (local.get $line) (local.get $column))");
+    try self.line("    (call $__panic_exit)");
     try self.line("  )");
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
