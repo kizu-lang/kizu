@@ -37,6 +37,7 @@ func TestBlockReadsWhatTheProgramDeclares(t *testing.T) {
 		`// run -- input.kizu`,
 		`// features: fn print void`,
 		`// env: KIZU_TEST_ENV=env-ok`,
+		`// dir: examples/fixtures`,
 		`// output:`,
 		`// hello, kizu`,
 		`//`,
@@ -61,6 +62,9 @@ func TestBlockReadsWhatTheProgramDeclares(t *testing.T) {
 	}
 	if strings.Join(entry.Env, " ") != "KIZU_TEST_ENV=env-ok" {
 		t.Fatalf("got env %q", entry.Env)
+	}
+	if strings.Join(entry.Dirs, " ") != "examples/fixtures" {
+		t.Fatalf("got dirs %q", entry.Dirs)
 	}
 	// A blank line and a line that looks like a key are both output: nothing
 	// follows `output:`, so the program's own text cannot be read as a key.
@@ -95,6 +99,17 @@ func TestBlockRejectsUnsayableCases(t *testing.T) {
 		{"duplicate env", []string{
 			"run", "features: fn", "env: NAME=one", "env: NAME=two", "output:",
 		}, "repeats `NAME`"},
+		{"empty dir", []string{"run", "features: fn", "dir:", "output:"},
+			"must name a repository-relative directory"},
+		{"absolute dir", []string{"run", "features: fn", "dir: /tmp", "output:"},
+			"must name a repository-relative directory"},
+		{"escaping dir", []string{"run", "features: fn", "dir: ../fixtures", "output:"},
+			"must name a repository-relative directory"},
+		{"mapped dir", []string{"run", "features: fn", "dir: host::guest", "output:"},
+			"must name a repository-relative directory"},
+		{"duplicate dir", []string{
+			"run", "features: fn", "dir: fixtures", "dir: fixtures", "output:",
+		}, "repeats `fixtures`"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

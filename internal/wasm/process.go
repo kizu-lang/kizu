@@ -359,13 +359,13 @@ func (e *emitter) writeProcessExecutablePath() error {
 	e.out.WriteString("    (local $needed i64)\n")
 	e.out.WriteString("    (if (i32.eqz (global.get $__process_argc))\n")
 	e.out.WriteString("      (then\n")
-	e.writeVoidErrorResult(unknown, "        ")
+	e.writeErrorResult(unknown, "        ")
 	e.out.WriteString("        (return)))\n")
 	e.out.WriteString("    (local.set $ptr (i32.load (global.get $__process_argv)))\n")
 	e.out.WriteString("    (local.set $length (call $__process_cstr_len (local.get $ptr)))\n")
 	e.out.WriteString("    (if (i32.eqz (local.get $length))\n")
 	e.out.WriteString("      (then\n")
-	e.writeVoidErrorResult(unknown, "        ")
+	e.writeErrorResult(unknown, "        ")
 	e.out.WriteString("        (return)))\n")
 	fmt.Fprintf(&e.out, "    (local.set $old_len (i64.load (i32.add (local.get $dst) "+
 		"(i32.const %d))))\n",
@@ -376,7 +376,7 @@ func (e *emitter) writeProcessExecutablePath() error {
 	e.out.WriteString("          (local.get $allocator) (local.get $dst) " +
 		"(local.get $needed) (i32.const 1)))\n")
 	e.out.WriteString("      (then\n")
-	e.writeVoidErrorResult(outOfMemory, "        ")
+	e.writeErrorResult(outOfMemory, "        ")
 	e.out.WriteString("        (return)))\n")
 	e.out.WriteString("    (memory.copy\n")
 	e.out.WriteString("      (i32.add (i32.load (local.get $dst)) " +

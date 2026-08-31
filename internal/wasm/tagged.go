@@ -61,9 +61,9 @@ func (e *emitter) wasmErrorCode(errorSet string, member string) (int, error) {
 	return code, nil
 }
 
-// writeVoidErrorResult stores one failed E!void result in the runtime's out
-// parameter. Every E!void layout has an i64 tag followed by the error code.
-func (e *emitter) writeVoidErrorResult(code int, indent string) {
+// writeErrorResult stores one failed E!T result in the runtime's out
+// parameter. Every error-union layout starts with an i64 tag and error code.
+func (e *emitter) writeErrorResult(code int, indent string) {
 	fmt.Fprintf(&e.out, "%s(i64.store (local.get $out) (i64.const 0))\n", indent)
 	fmt.Fprintf(&e.out,
 		"%s(i64.store (i32.add (local.get $out) (i32.const %d)) (i64.const %d))\n",

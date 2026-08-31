@@ -6,9 +6,9 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-159 examples 中 137 件が native と同じ出力で動く。残り 22 件の最初の失敗は net poller
-11 件、net listen 4 件、extern C allocator と filesystem read が各 2 件、coro runtime、
-filesystem exists、event loop が各 1 件。example ごとの例外を足さず、共通
+159 examples 中 139 件が native と同じ出力で動く。残り 20 件の最初の失敗は net poller
+12 件、net listen 4 件、extern C allocator 2 件、coro runtime と event loop が各 1 件。
+example ごとの例外を足さず、共通
 runtime と portable std の順に backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と

@@ -19,10 +19,12 @@
 //
 // The rest is `key: value` lines. `features:` lists the tags the README backend
 // table groups by and is required. A repeatable `env: NAME=value` line declares
-// host environment needed by the program. `pending:` names a gap, and a case
-// that carries one is checked for still failing, so the line cannot outlive it.
-// `error:` is the substring a `-fails` case must print. `output:` is what a
-// program prints, and the lines after it are that output, so it goes last.
+// host environment needed by the program. A repeatable `dir:` line declares a
+// repository-relative host directory; Wasm runners expose only those declared
+// preopens. `pending:` names a gap, and a case that carries one is checked for
+// still failing, so the line cannot outlive it. `error:` is the substring a
+// `-fails` case must print. `output:` is what a program prints, and the lines
+// after it are that output, so it goes last.
 // Package cases keep this block in src/main.kizu, or src/main_test.kizu when
 // the package contains tests only.
 package conformance

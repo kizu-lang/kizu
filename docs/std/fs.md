@@ -39,6 +39,12 @@ host の `readdir` が返す順は file system 次第で 2 台の間で食い違
 ここで確定させています。返る Array は caller が所有するので `deinit` が要り、
 `DirEntry` の `name` と `path` はその Array の storage を指す view です。
 
+`wasm32-wasi` では path は host が最初に preopen した directory からの相対 path
+として解決します。compiler 自身は directory を公開しません。preopen が無い場合や
+その外へ出ようとした場合は `PermissionDenied` です。conformance example は必要な
+repository-relative directory を末尾の `dir:` metadata で宣言し、runner がその
+capability だけを Wasmtime へ渡します。
+
 `Metadata` と `DirEntry` の layout は C runtime が `KizuFsMetadata` /
 `KizuFsDirEntry` として写しています(`internal/native/build.go`)。field を変える
 なら両方を変えます。

@@ -241,6 +241,7 @@ func (e *emitter) writeHeader() {
 		e.out.WriteString("    (func $__wasi_proc_exit (param i32)))\n")
 	}
 	e.writeProcessImports()
+	e.writeFSImports()
 	pages := (e.dataEnd + 65535) / 65536
 	if pages < 1 {
 		pages = 1
@@ -338,6 +339,9 @@ func (e *emitter) writeRuntime() error {
 		e.writeByteEqualityHelper()
 	}
 	if err := e.writeIORuntime(); err != nil {
+		return err
+	}
+	if err := e.writeFSRuntime(); err != nil {
 		return err
 	}
 	if len(e.panicKinds) > 0 {

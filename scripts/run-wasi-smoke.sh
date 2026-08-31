@@ -14,10 +14,15 @@ run_example() {
   name="$1"
   file="$2"
   want="$3"
+  preopen="${4-}"
   wat="$tmp/$name.wat"
 
   go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
-  got="$(wasmtime run "$wat")"
+  if [ -n "$preopen" ]; then
+    got="$(wasmtime run --dir "$preopen" "$wat")"
+  else
+    got="$(wasmtime run "$wat")"
+  fi
   if [ "$got" != "$want" ]; then
     printf '%s: got:\n%s\nwant:\n%s\n' "$name" "$got" "$want" >&2
     exit 1
@@ -29,13 +34,18 @@ run_failure() {
   file="$2"
   want="$3"
   want_stdout="${4-}"
+  preopen="${5-}"
   wat="$tmp/$name.wat"
   stdout="$tmp/$name.stdout"
   stderr="$tmp/$name.stderr"
 
   go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
   set +e
-  wasmtime run "$wat" > "$stdout" 2> "$stderr"
+  if [ -n "$preopen" ]; then
+    wasmtime run --dir "$preopen" "$wat" > "$stdout" 2> "$stderr"
+  else
+    wasmtime run "$wat" > "$stdout" 2> "$stderr"
+  fi
   status="$?"
   set -e
   got="$(cat "$stderr")"
@@ -225,6 +235,11 @@ run_status "main_exit_status_failure" "examples/main_exit_status.kizu" 1 failure
 run_status "main_exit_status_specific" "examples/main_exit_status.kizu" 7 specific code
 run_io_process
 run_stderr "std_io_stderr" "examples/std_io_stderr.kizu" "diagnostic"
+run_example "fs_read" "examples/fs_read.kizu" "kizu fs fixture" "."
+run_example "std_fs_path" "examples/std_fs_path.kizu" "true
+16
+false
+true" "."
 
 # Checked access reports the same source position and dynamic values as the
 # native runtime, writes only to stderr, and terminates through WASI proc_exit.
@@ -262,3 +277,21 @@ run_failure "std_process_arg_bounds" \
 run_failure "std_io_failing_write" \
   "examples/negative/std_io_failing_write.kizu" \
   "runtime error: std::io::Error::IoFailing"
+run_failure "fs_read_without_preopen" \
+  "examples/fs_read.kizu" \
+  "runtime error: std::fs::Error::PermissionDenied"
+run_failure "fs_read_limit_exceeded" \
+  "examples/negative/fs_read_limit_exceeded.kizu" \
+  "runtime error: std::fs::Error::LimitExceeded" \
+  "" \
+  "."
+run_failure "fs_read_missing" \
+  "examples/negative/fs_read_missing.kizu" \
+  "runtime error: std::fs::Error::NotFound" \
+  "" \
+  "."
+run_failure "fs_failing_io" \
+  "examples/negative/fs_failing_io.kizu" \
+  "runtime error: std::fs::Error::IoFailing" \
+  "" \
+  "."

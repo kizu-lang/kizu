@@ -215,7 +215,7 @@ func runRoutes(bin string, entry conformance.Case) *result {
 		}
 		got := stdout.String()
 		if route == "wasm" {
-			got, err = runWat(stdout.Bytes(), entry.Args, entry.Env)
+			got, err = runWat(stdout.Bytes(), entry.Args, entry.Env, entry.Dirs)
 			if err != nil {
 				res.ok[route] = false
 				res.err[route] = firstLine(err.Error())
@@ -237,7 +237,7 @@ func runRoutes(bin string, entry conformance.Case) *result {
 // runWat loads emitted WebAssembly text with wasmtime and returns what it
 // printed, so the wasm column reports whether a module runs rather than whether
 // the emitter exited zero.
-func runWat(wat []byte, args []string, env []string) (string, error) {
+func runWat(wat []byte, args []string, env []string, dirs []string) (string, error) {
 	file, err := os.CreateTemp("", "kizu-matrix-*.wat")
 	if err != nil {
 		return "", err
@@ -253,6 +253,9 @@ func runWat(wat []byte, args []string, env []string) (string, error) {
 	wasmtimeArgs := []string{"run"}
 	for _, binding := range env {
 		wasmtimeArgs = append(wasmtimeArgs, "--env", binding)
+	}
+	for _, dir := range dirs {
+		wasmtimeArgs = append(wasmtimeArgs, "--dir", dir)
 	}
 	wasmtimeArgs = append(wasmtimeArgs, file.Name())
 	if len(args) > 0 && args[0] == "--" {
