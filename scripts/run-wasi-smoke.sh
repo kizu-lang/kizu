@@ -234,6 +234,9 @@ run_example "main_exit_status_success" \
 run_status "main_exit_status_failure" "examples/main_exit_status.kizu" 1 failure
 run_status "main_exit_status_specific" "examples/main_exit_status.kizu" 7 specific code
 run_io_process
+run_example "std_process_spawn_unreachable" \
+  "examples/std_process_spawn_unreachable.kizu" \
+  "portable"
 run_stderr "std_io_stderr" "examples/std_io_stderr.kizu" "diagnostic"
 run_example "fs_read" "examples/fs_read.kizu" "kizu fs fixture" "."
 run_example "fs_read_dir" "examples/fs_read_dir.kizu" "alpha.txt

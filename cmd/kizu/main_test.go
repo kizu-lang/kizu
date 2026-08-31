@@ -1312,6 +1312,23 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetWASIRejectsProcessSpawn keeps an unavailable host capability
+// at the target boundary instead of emitting a module that fails when loaded.
+func TestBuildTargetWASIRejectsProcessSpawn(t *testing.T) {
+	cmd := kizuCommand(
+		"build", "--target", "wasm32-wasi", "../../examples/std_process_spawn.kizu",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("command succeeded:\n%s", out)
+	}
+	want := "error: wasm error: target wasm32-wasi does not support " +
+		"std::process::spawn_wait8\n"
+	if got := string(out); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestBuildTargetNativeStdoutWriteFailure checks hosted writes report a closed
 // output pipe through std::io instead of terminating on SIGPIPE or returning ok.
 func TestBuildTargetNativeStdoutWriteFailure(t *testing.T) {

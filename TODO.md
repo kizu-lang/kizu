@@ -6,7 +6,7 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-161 examples 中 141 件が native と同じ出力で動く。残り 20 件の最初の失敗は net poller
+162 examples 中 142 件が native と同じ出力で動く。残り 20 件の最初の失敗は net poller
 12 件、net listen 4 件、extern C allocator 2 件、coro runtime と event loop が各 1 件。
 example ごとの例外を足さず、共通
 runtime と portable std の順に backend の対象を広げる。
@@ -22,8 +22,6 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 
 ### W4. WASI host boundary
 
-- WASI preview1 が持たない child process は成功したふりをせず target 非対応とし、
-  `std::process::spawn_wait8` を必要とする program を build 時に分類する。
 - net / HTTP / evented Io / coro は、既存 `wasm32-wasi` host ABI で ownership と待機を
   隠さず表せるものだけを実装する。表せないものは成功したふりをせず target 非対応にする。
 - unsafe raw pointer と extern C は WASI の安全な import / memory 境界を定義するまで

@@ -257,6 +257,8 @@ func selfhostWASMExamples() []string {
 		"../../examples/std_path_edges.kizu",
 		"../../examples/main_exit_status.kizu",
 		"../../examples/std_process.kizu",
+		"../../examples/std_process_spawn.kizu",
+		"../../examples/std_process_spawn_unreachable.kizu",
 		"../../examples/std_io_process.kizu",
 		"../../examples/std_io_stderr.kizu",
 		"../../examples/fs_read.kizu",
