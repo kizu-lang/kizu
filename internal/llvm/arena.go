@@ -106,16 +106,29 @@ func (e *emitter) writeArenaNew(instr *ir.Instr) error {
 // writeArenaRuntimeDecls declares the arena header and the counter that hands
 // out the number one instance's handles are told apart by.
 func (e *emitter) writeArenaRuntimeDecls() {
-	if !e.usesArenaRuntime() {
+	if !e.usesArenaHeader() {
 		return
 	}
 	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, i64 }\n", arenaHeaderType)
+	if !e.usesArenaRuntime() {
+		e.out.WriteByte('\n')
+		return
+	}
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
 		arenaEmptyGlobal, arenaHeaderType)
 	e.out.WriteString("declare i64 @kizu_arena_origin()\n\n")
 }
 
-// usesArenaRuntime reports whether this module names an arena at all.
+// usesArenaHeader reports whether emitted values or aggregate definitions need
+// the concrete Arena header independently of hosted-runtime calls.
+func (e *emitter) usesArenaHeader() bool {
+	if e.usesArenaRuntime() {
+		return true
+	}
+	return e.moduleHasRuntimeHeaderType("std::arena::Arena<")
+}
+
+// usesArenaRuntime reports whether this module calls the hosted Arena runtime.
 func (e *emitter) usesArenaRuntime() bool {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {

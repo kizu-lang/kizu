@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::stdtarget;
 import std::mem;
 
 // Mechanical port of internal/ir/comptime.go: `comptime if` and the constant
@@ -32,6 +33,9 @@ fn (self: &var Lowerer) const_bool(tree: &var ast::Ast, expression: ast::Express
         return true;
     }
     if ownership::call_expr(tree, expression) |call| {
+        if try self.target_predicate_call(tree, call, out) {
+            return true;
+        }
         return self.meta_predicate_call(tree, call, out);
     }
     if ownership::prefix_expr(tree, expression) |prefix| {
@@ -62,6 +66,24 @@ fn (self: &var Lowerer) const_bool(tree: &var ast::Ast, expression: ast::Express
         }
     }
     return false;
+}
+
+/// Answers a compiler-defined std::target predicate and reports whether the
+/// call was one.
+fn (self: &var Lowerer) target_predicate_call(
+    tree: &ast::Ast,
+    call: ast::CallExpr,
+    out: &var bool
+) -> !bool {
+    let name = try self.expression_name(tree, call.callee);
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    let predicate = stdtarget::identify(name_bytes) orelse return false;
+    if ownership::arg_count(tree, call.args) != 0 {
+        return false;
+    }
+    out.* = stdtarget::evaluate(self.target, predicate);
+    return true;
 }
 
 /// Compares two type-valued expressions, the Go `constTypeEqual`, which is

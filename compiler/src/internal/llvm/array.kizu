@@ -151,10 +151,13 @@ pub fn array_header_size() -> i64 {
 /// Writes declarations for the hosted Array runtime, the Go
 /// `writeArrayRuntimeDecls`.
 fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void {
-    if !self.uses_array_runtime(module) {
+    if !self.uses_array_header(module) {
         return;
     }
     try self.line1("%s = type { ptr, i64, i64 }", Arg::Lit(array_header_type()));
+    if !self.uses_array_runtime(module) {
+        return self.line("");
+    }
     try self.line2(
         "%s = private unnamed_addr global %s zeroinitializer",
         Arg::Lit(array_empty_global()), Arg::Lit(array_header_type())
@@ -306,9 +309,20 @@ fn (self: &var Emitter) write_bounds_failure(
     return self.line1("%s:", Arg::Str(ok_label));
 }
 
-/// Reports whether this module uses the array header lowering, the Go
-/// `usesArrayRuntime`. An arena is that header, so an arena op needs the same
-/// declarations even in a module that names no array.
+/// Reports whether emitted values or aggregate definitions need the concrete
+/// Array header, the Go `usesArrayHeader`. An external call can exchange an
+/// Array without leaving a local array instruction, and reachability can leave
+/// a declared struct after removing every function that used it.
+fn (self: &Emitter) uses_array_header(module: &ir::Module) -> bool {
+    if self.uses_array_runtime(module) {
+        return true;
+    }
+    return module_has_runtime_header_type(module, "std::array::Array<");
+}
+
+/// Reports whether this module calls the hosted Array runtime, the Go
+/// `usesArrayRuntime`. An arena op also needs these declarations because its
+/// storage uses that runtime.
 fn (self: &Emitter) uses_array_runtime(module: &ir::Module) -> bool {
     var index = 0;
     while module.functions.get(index) |function| {

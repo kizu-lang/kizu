@@ -1,0 +1,524 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/panic.go. A cond_fail keeps its dynamic
+// values in SSA and selects one small WASI runtime entry. Only the entries a
+// module uses, their stderr data, and proc_exit are emitted.
+
+struct WasmPanicSpec {
+    kind: []u8,
+    helper: []u8,
+    value_count: i64,
+    summary_key: []u8
+}
+
+fn panic_quote_text() -> []u8 {
+    let text =
+        \\"
+    ;
+    return text;
+}
+
+fn panic_expect_kind(module: &ir::Module, typ: ir::Name) -> []u8 {
+    if module.names.is(typ, "bool") {
+        return "expect_equal_bool";
+    }
+    if module.names.is(typ, "[]u8") {
+        return "expect_equal_bytes";
+    }
+    return "expect_equal_int";
+}
+
+fn wasm_panic_spec(kind: []u8) -> ?WasmPanicSpec {
+    if mem::equal_bytes(kind, "bounds") {
+        return WasmPanicSpec {
+            kind: "bounds",
+            helper: "__panic_bounds",
+            value_count: 2,
+            summary_key: "panic.bounds.summary"
+        };
+    }
+    if mem::equal_bytes(kind, "range") {
+        return WasmPanicSpec {
+            kind: "range",
+            helper: "__panic_range",
+            value_count: 3,
+            summary_key: "panic.range.summary"
+        };
+    }
+    if mem::equal_bytes(kind, "array_empty") {
+        return WasmPanicSpec {
+            kind: "array_empty",
+            helper: "__panic_array_empty",
+            value_count: 0,
+            summary_key: "panic.array_empty.summary"
+        };
+    }
+    if mem::equal_bytes(kind, "arena_empty") {
+        return WasmPanicSpec {
+            kind: "arena_empty",
+            helper: "__panic_arena_empty",
+            value_count: 0,
+            summary_key: "panic.arena_empty.summary"
+        };
+    }
+    if mem::equal_bytes(kind, "arena_handle") {
+        return WasmPanicSpec {
+            kind: "arena_handle",
+            helper: "__panic_arena_handle",
+            value_count: 0,
+            summary_key: "panic.arena_handle.summary"
+        };
+    }
+    if mem::equal_bytes(kind, "arena_full") {
+        return WasmPanicSpec {
+            kind: "arena_full",
+            helper: "__panic_arena_full",
+            value_count: 0,
+            summary_key: "panic.arena_full.summary"
+        };
+    }
+    if mem::equal_bytes(kind, "arena_instances") {
+        return WasmPanicSpec {
+            kind: "arena_instances",
+            helper: "__panic_arena_instances",
+            value_count: 0,
+            summary_key: "panic.arena_instances.summary"
+        };
+    }
+    return null;
+}
+
+fn panic_data_text(key: []u8) -> ?[]u8 {
+    if mem::equal_bytes(key, "panic.prefix") {
+        return "runtime error: ";
+    }
+    if mem::equal_bytes(key, "panic.at") {
+        return " at ";
+    }
+    if mem::equal_bytes(key, "panic.colon") {
+        return ":";
+    }
+    if mem::equal_bytes(key, "panic.expected") {
+        return "expected ";
+    }
+    if mem::equal_bytes(key, "panic.got") {
+        return ", got ";
+    }
+    if mem::equal_bytes(key, "panic.quote") {
+        return panic_quote_text();
+    }
+    if mem::equal_bytes(key, "panic.bounds.summary") {
+        return "index out of bounds";
+    }
+    if mem::equal_bytes(key, "panic.bounds.note") {
+        return "note: index is ";
+    }
+    if mem::equal_bytes(key, "panic.bounds.length") {
+        return ", length is ";
+    }
+    if mem::equal_bytes(key, "panic.range.summary") {
+        return "range out of bounds";
+    }
+    if mem::equal_bytes(key, "panic.range.note") {
+        return "note: range is ";
+    }
+    if mem::equal_bytes(key, "panic.range.dots") {
+        return "..";
+    }
+    if mem::equal_bytes(key, "panic.range.length") {
+        return ", length is ";
+    }
+    if mem::equal_bytes(key, "panic.array_empty.summary") {
+        return "array pop from empty";
+    }
+    if mem::equal_bytes(key, "panic.arena_empty.summary") {
+        return "arena pop from empty";
+    }
+    if mem::equal_bytes(key, "panic.arena_handle.summary") {
+        return "invalid arena handle";
+    }
+    if mem::equal_bytes(key, "panic.arena_full.summary") {
+        return "arena is full";
+    }
+    if mem::equal_bytes(key, "panic.arena_instances.summary") {
+        return "arena instances exhausted";
+    }
+    return null;
+}
+
+/// Records checked failures before the header and data are written, so a
+/// module without one gains neither proc_exit nor panic helpers.
+fn (self: &var Emitter) collect_panic_kinds(module: &ir::Module) -> !void {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                match node.op {
+                    CondFail => {
+                        let retained = ir::name_text(&module.names, node.immediate);
+                        let kind = retained.as_bytes();
+                        try self.panic_kinds.insert(self.allocator, kind, true);
+                    },
+                    PanicFail => {
+                        try self.panic_kinds.insert(self.allocator, "message", true);
+                    },
+                    TestFail => {
+                        try self.panic_kinds.insert(self.allocator, "message", true);
+                    },
+                    TestExpectEqual => {
+                        if node.args.len() == 2 {
+                            let kind = panic_expect_kind(
+                                module,
+                                node.args.get_or_panic(0).type_name
+                            );
+                            try self.panic_kinds.insert(self.allocator, kind, true);
+                        }
+                    },
+                    ArrayGetOrPanic => {
+                        try self.panic_kinds.insert(self.allocator, "bounds", true);
+                    },
+                    ArrayPopOrPanic => {
+                        try self.panic_kinds.insert(self.allocator, "array_empty", true);
+                    },
+                    MapTakeValueAt => {
+                        try self.panic_kinds.insert(self.allocator, "bounds", true);
+                    },
+                    ArenaNew => {
+                        try self.panic_kinds.insert(self.allocator, "arena_instances", true);
+                    },
+                    ArenaAdd => {
+                        try self.panic_kinds.insert(self.allocator, "arena_full", true);
+                    },
+                    ArenaAt => {
+                        try self.panic_kinds.insert(self.allocator, "arena_handle", true);
+                    },
+                    ArenaPopOrPanic => {
+                        try self.panic_kinds.insert(self.allocator, "arena_empty", true);
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Assigns fixed-order linear-memory data for only the checked failures the
+/// module uses, the Go usedPanicData walk.
+fn (self: &var Emitter) record_used_panic_data(offset: i64) -> !i64 {
+    if self.panic_kinds.len() == 0 {
+        return offset;
+    }
+    var next = offset;
+    next = try self.record_panic_data("panic.prefix", "runtime error: ", next);
+    next = try self.record_panic_data("panic.at", " at ", next);
+    next = try self.record_panic_data("panic.colon", ":", next);
+    if self.panic_kinds.contains("bounds") {
+        next = try self.record_panic_data("panic.bounds.summary", "index out of bounds", next);
+        next = try self.record_panic_data("panic.bounds.note", "note: index is ", next);
+        next = try self.record_panic_data("panic.bounds.length", ", length is ", next);
+    }
+    if self.panic_kinds.contains("range") {
+        next = try self.record_panic_data("panic.range.summary", "range out of bounds", next);
+        next = try self.record_panic_data("panic.range.note", "note: range is ", next);
+        next = try self.record_panic_data("panic.range.dots", "..", next);
+        next = try self.record_panic_data("panic.range.length", ", length is ", next);
+    }
+    if self.panic_kinds.contains("array_empty") {
+        next = try self.record_panic_data("panic.array_empty.summary", "array pop from empty", next);
+    }
+    if self.panic_kinds.contains("arena_empty") {
+        next = try self.record_panic_data("panic.arena_empty.summary", "arena pop from empty", next);
+    }
+    if self.panic_kinds.contains("arena_handle") {
+        next = try self.record_panic_data("panic.arena_handle.summary", "invalid arena handle", next);
+    }
+    if self.panic_kinds.contains("arena_full") {
+        next = try self.record_panic_data("panic.arena_full.summary", "arena is full", next);
+    }
+    if self.panic_kinds.contains("arena_instances") {
+        next = try self.record_panic_data(
+            "panic.arena_instances.summary",
+            "arena instances exhausted",
+            next
+        );
+    }
+    if self.uses_expect_equal_panic() {
+        next = try self.record_panic_data("panic.expected", "expected ", next);
+        next = try self.record_panic_data("panic.got", ", got ", next);
+    }
+    if self.panic_kinds.contains("expect_equal_bytes") {
+        next = try self.record_panic_data("panic.quote", panic_quote_text(), next);
+    }
+    return next;
+}
+
+fn (self: &Emitter) uses_expect_equal_panic() -> bool {
+    return self.panic_kinds.contains("expect_equal_int") or
+        self.panic_kinds.contains("expect_equal_bool") or
+        self.panic_kinds.contains("expect_equal_bytes");
+}
+
+fn (self: &var Emitter) record_panic_data(key: []u8, text: []u8, offset: i64) -> !i64 {
+    let length = mem::len(text);
+    try self.record_data(key, offset, length);
+    return offset + length;
+}
+
+/// Calls one runtime failure when its checked condition is true.
+fn (self: &var Emitter) write_cond_fail(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let retained = ir::name_text(&module.names, node.immediate);
+    let kind = retained.as_bytes();
+    if wasm_panic_spec(kind) |spec| {
+        let condition = node.args.get(0) orelse ir::empty_value();
+        if node.args.len() != spec.value_count + 1 or
+            !module.names.is(condition.type_name, "bool") {
+            let shown = try self.own(module, node.immediate);
+            return try self.fail2(
+                "wasm error: cond_fail `%s` expects bool and %d values",
+                Arg::Str(shown),
+                Arg::Int(spec.value_count)
+            );
+        }
+        let cond = try self.value_of(module, condition);
+        try self.line1("            (if %s", Arg::Str(cond.expr));
+        try self.line("              (then");
+        var call = try string::from_bytes(self.allocator, "                (call $");
+        errdefer call.deinit(self.allocator);
+        try call.append_bytes(self.allocator, spec.helper);
+        var index = 1;
+        while node.args.get(index) |arg| {
+            index = index + 1;
+            let value = try self.value_of(module, arg);
+            try call.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call, value.expr);
+        }
+        try call.append_bytes(self.allocator, " (i64.const ");
+        try fmt::append_i64(self.allocator, &var call, node.span.start.line);
+        try call.append_bytes(self.allocator, ") (i64.const ");
+        try fmt::append_i64(self.allocator, &var call, node.span.start.column);
+        try call.append_bytes(self.allocator, "))))");
+        try self.line1("%s", Arg::Owned(move call));
+        return null;
+    }
+    let shown = try self.own(module, node.immediate);
+    return try self.fail("wasm error: unknown cond_fail kind `%s`", Arg::Str(shown));
+}
+
+/// Reports one dynamic []u8 panic message and stops.
+fn (self: &var Emitter) write_panic_fail(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    return self.write_message_fail(module, node, "panic.fail");
+}
+
+/// Is the shared instruction boundary for panic.fail and test.fail.
+fn (self: &var Emitter) write_message_fail(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    op: []u8
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail(
+            "wasm error: %s expects one []u8 message",
+            Arg::Lit(op)
+        );
+    }
+    let message = try self.value_of(module, node.args.get_or_panic(0));
+    let parts = try self.byte_slice_parts(message.expr);
+    var call = try string::from_bytes(self.allocator, "            (call $__panic_fail ");
+    errdefer call.deinit(self.allocator);
+    try self.names.append_to(&var call, parts.ptr);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, parts.len);
+    try call.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, &var call, node.span.start.line);
+    try call.append_bytes(self.allocator, ") (i64.const ");
+    try fmt::append_i64(self.allocator, &var call, node.span.start.column);
+    try call.append_bytes(self.allocator, "))");
+    try self.line1("%s", Arg::Owned(move call));
+    try self.line("            (unreachable)");
+    return null;
+}
+
+/// Writes only the kind-specific checked failures this module uses, plus the
+/// shared stderr, position, integer, and exit boundary.
+fn (self: &var Emitter) write_panic_runtime() -> !void {
+    try self.write_panic_exit_helper();
+    try self.write_panic_at_helper();
+    try self.write_panic_summary_helper();
+    if self.panic_kinds.contains("bounds") {
+        try self.write_panic_bounds_helper();
+    }
+    if self.panic_kinds.contains("range") {
+        try self.write_panic_range_helper();
+    }
+    if self.panic_kinds.contains("array_empty") {
+        if wasm_panic_spec("array_empty") |spec| {
+            try self.write_simple_panic_helper(move spec);
+        }
+    }
+    if self.panic_kinds.contains("arena_empty") {
+        if wasm_panic_spec("arena_empty") |spec| {
+            try self.write_simple_panic_helper(move spec);
+        }
+    }
+    if self.panic_kinds.contains("arena_handle") {
+        if wasm_panic_spec("arena_handle") |spec| {
+            try self.write_simple_panic_helper(move spec);
+        }
+    }
+    if self.panic_kinds.contains("arena_full") {
+        if wasm_panic_spec("arena_full") |spec| {
+            try self.write_simple_panic_helper(move spec);
+        }
+    }
+    if self.panic_kinds.contains("arena_instances") {
+        if wasm_panic_spec("arena_instances") |spec| {
+            try self.write_simple_panic_helper(move spec);
+        }
+    }
+    if self.panic_kinds.contains("message") {
+        try self.write_panic_fail_helper();
+    }
+    try self.write_test_panic_runtime();
+    return;
+}
+
+/// Ends a checked failure without relying on an engine trap message.
+fn (self: &var Emitter) write_panic_exit_helper() -> !void {
+    try self.line("  (func $__panic_exit");
+    if !self.is_browser() {
+        try self.line("    (call $__wasi_proc_exit (i32.const 1))");
+    }
+    try self.line("    (unreachable)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Appends an optional source position and one newline.
+fn (self: &var Emitter) write_panic_at_helper() -> !void {
+    let at = self.data_ref("panic.at");
+    let colon = self.data_ref("panic.colon");
+    let newline = self.data_ref("newline");
+    try self.line("  (func $__panic_at (param $line i64) (param $column i64)");
+    try self.line("    (if (i64.gt_s (local.get $line) (i64.const 0))");
+    try self.line("      (then");
+    try self.write_panic_bytes(at, "        ");
+    try self.line("        (call $__write_i64 (i32.const 2) (local.get $line))");
+    try self.write_panic_bytes(colon, "        ");
+    try self.line("        (call $__write_i64 (i32.const 2) (local.get $column))))");
+    try self.write_panic_bytes(newline, "    ");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Writes `runtime error: summary`, an optional position, and a newline to
+/// stderr.
+fn (self: &var Emitter) write_panic_summary_helper() -> !void {
+    let prefix = self.data_ref("panic.prefix");
+    try self.line("  (func $__panic_summary (param $ptr i32) (param $len i32)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.write_panic_bytes(prefix, "    ");
+    try self.line("    (call $__write_bytes (i32.const 2) (local.get $ptr) (local.get $len))");
+    try self.line("    (call $__panic_at (local.get $line) (local.get $column))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Reports a dynamic summary and terminates.
+fn (self: &var Emitter) write_panic_fail_helper() -> !void {
+    try self.line("  (func $__panic_fail (param $ptr i32) (param $len i32)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.line("    (call $__panic_summary (local.get $ptr) (local.get $len)");
+    try self.line("      (local.get $line) (local.get $column))");
+    try self.line("    (call $__panic_exit)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Writes the context carried by bounds(index, length).
+fn (self: &var Emitter) write_panic_bounds_helper() -> !void {
+    let summary = self.data_ref("panic.bounds.summary");
+    let note = self.data_ref("panic.bounds.note");
+    let length = self.data_ref("panic.bounds.length");
+    let newline = self.data_ref("newline");
+    try self.line("  (func $__panic_bounds (param $index i64) (param $length i64)");
+    try self.line("      (param $line i64) (param $column i64)");
+    try self.write_panic_summary_call(summary);
+    try self.write_panic_bytes(note, "    ");
+    try self.line("    (call $__write_i64 (i32.const 2) (local.get $index))");
+    try self.write_panic_bytes(length, "    ");
+    try self.line("    (call $__write_i64 (i32.const 2) (local.get $length))");
+    try self.write_panic_bytes(newline, "    ");
+    try self.line("    (call $__panic_exit)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Writes the context carried by range(start, end, length).
+fn (self: &var Emitter) write_panic_range_helper() -> !void {
+    let summary = self.data_ref("panic.range.summary");
+    let note = self.data_ref("panic.range.note");
+    let dots = self.data_ref("panic.range.dots");
+    let length = self.data_ref("panic.range.length");
+    let newline = self.data_ref("newline");
+    try self.line("  (func $__panic_range (param $start i64) (param $end i64)");
+    try self.line("      (param $length i64) (param $line i64) (param $column i64)");
+    try self.write_panic_summary_call(summary);
+    try self.write_panic_bytes(note, "    ");
+    try self.line("    (call $__write_i64 (i32.const 2) (local.get $start))");
+    try self.write_panic_bytes(dots, "    ");
+    try self.line("    (call $__write_i64 (i32.const 2) (local.get $end))");
+    try self.write_panic_bytes(length, "    ");
+    try self.line("    (call $__write_i64 (i32.const 2) (local.get $length))");
+    try self.write_panic_bytes(newline, "    ");
+    try self.line("    (call $__panic_exit)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Writes a checked failure with no dynamic context.
+fn (self: &var Emitter) write_simple_panic_helper(spec: WasmPanicSpec) -> !void {
+    let summary = self.data_ref(spec.summary_key);
+    try self.line1("  (func $%s (param $line i64) (param $column i64)", Arg::Lit(spec.helper));
+    try self.write_panic_summary_call(summary);
+    try self.line("    (call $__panic_exit)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_panic_summary_call(summary: DataRef) -> !void {
+    return self.line2(
+        "    (call $__panic_summary (i32.const %d) (i32.const %d) (local.get $line) (local.get $column))",
+        Arg::Int(summary.offset),
+        Arg::Int(summary.length)
+    );
+}
+
+fn (self: &var Emitter) write_panic_bytes(data: DataRef, indent: []u8) -> !void {
+    return self.line3(
+        "%s(call $__write_bytes (i32.const 2) (i32.const %d) (i32.const %d))",
+        Arg::Lit(indent),
+        Arg::Int(data.offset),
+        Arg::Int(data.length)
+    );
+}

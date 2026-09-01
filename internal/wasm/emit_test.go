@@ -1,6 +1,10 @@
 package wasm
 
 import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,6 +50,121 @@ func TestEmitPhase2Subsets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestForeignBoundaryRejectsWrongTarget checks direct and deferred calls use
+// only the ABI their selected Wasm host provides.
+func TestForeignBoundaryRejectsWrongTarget(t *testing.T) {
+	browserImport := lowerSource(t, `extern "browser" fn notify(value: i32) -> void
+fn main() -> void {
+    // SAFETY: notify accepts a plain integer value.
+    unsafe notify(1);
+}`)
+	if _, err := LowerTarget(browserImport, TargetWASI); err == nil ||
+		!strings.Contains(err.Error(), "target wasm32-wasi does not support extern `browser`") {
+		t.Fatalf("unexpected WASI result: %v", err)
+	}
+
+	cImport := lowerSource(t, `extern "c" fn notify(value: i32) -> void
+fn main() -> void {
+    // SAFETY: the declared C function accepts a plain integer value.
+    unsafe notify(1);
+}`)
+	if _, err := LowerTarget(cImport, TargetBrowser); err == nil ||
+		!strings.Contains(err.Error(), "target wasm32-browser does not support extern C") {
+		t.Fatalf("unexpected browser result: %v", err)
+	}
+
+	deferredCImport := &ir.Module{Functions: []*ir.Function{{
+		Name:   "main",
+		Return: "void",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%1", Type: "void"},
+				Op:     "error.try",
+				Cleanups: []ir.Cleanup{{
+					Op:         "call.release",
+					ExternABI:  "c",
+					ExternName: "release",
+				}},
+			}},
+		}},
+	}}}
+	if _, err := LowerTarget(deferredCImport, TargetBrowser); err == nil ||
+		!strings.Contains(err.Error(), "target wasm32-browser does not support extern C") {
+		t.Fatalf("unexpected deferred browser result: %v", err)
+	}
+}
+
+// TestWASITargetRejectsUnavailableRuntimeCapabilities keeps an unsupported
+// host family from reaching either WebAssembly renderer as an unresolved call.
+func TestWASITargetRejectsUnavailableRuntimeCapabilities(t *testing.T) {
+	cases := []struct {
+		name    string
+		builtin string
+		public  string
+	}{
+		{"evented I/O", "std::internal::builtin::io_loop_new", "evented std::io"},
+		{"coroutine", "std::internal::builtin::coro_new", "std::coro"},
+		{"network", "std::internal::builtin::net_poller_new", "std::net"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			module := &ir.Module{Functions: []*ir.Function{{
+				Name:   "main",
+				Return: "void",
+				Blocks: []*ir.Block{{
+					Name: "entry",
+					Instrs: []*ir.Instr{{
+						Result: ir.Value{Type: "void"},
+						Op:     "call." + test.builtin,
+					}},
+				}},
+			}}}
+			_, err := LowerTarget(module, TargetWASI)
+			want := "target wasm32-wasi does not support " + test.public
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("result = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+// TestBinaryRunsHello checks deterministic binary output through a real
+// WebAssembly runtime rather than pinning encoder internals.
+func TestBinaryRunsHello(t *testing.T) {
+	wasmtime, err := exec.LookPath("wasmtime")
+	if err != nil {
+		t.Skip("wasmtime is required for binary execution")
+	}
+	module, err := Lower(lowerSource(t, `fn main() { print("hello, binary"); }`))
+	if err != nil {
+		t.Fatalf("lower wasm failed: %v", err)
+	}
+	first, err := module.Binary()
+	if err != nil {
+		t.Fatalf("encode binary failed: %v", err)
+	}
+	second, err := module.Binary()
+	if err != nil {
+		t.Fatalf("encode binary twice failed: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("binary output changed for the same module")
+	}
+	path := filepath.Join(t.TempDir(), "hello.wasm")
+	if err := os.WriteFile(path, first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(wasmtime, "run", path)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wasmtime failed: %v\n%s", err, output)
+	}
+	if got, want := string(output), "hello, binary\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

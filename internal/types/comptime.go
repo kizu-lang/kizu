@@ -5,6 +5,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -90,15 +91,31 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 	case *ast.BinaryExpr:
 		return c.evalComptimeBinary(e)
 	case *ast.CallExpr:
-		return c.evalComptimeMetaCall(e)
+		return c.evalComptimeCall(e)
 	default:
 		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
 	}
 }
 
-// evalComptimeMetaCall evaluates the `std::meta` predicates. They are the only
-// calls a compile-time expression has: everything else a call could name runs
-// at run time (SPEC §13.1).
+// evalComptimeCall evaluates the compiler-defined std predicates. Everything
+// else a call could name runs at run time (SPEC §13.1).
+func (c *Checker) evalComptimeCall(expr *ast.CallExpr) (comptimeValue, error) {
+	if name, ok := qualifiedName(expr.Callee); ok {
+		if predicate, known := stdtarget.Identify(name); known {
+			if len(expr.Args) != 0 {
+				return comptimeValue{}, errorf(
+					"comptime error: `%s` takes no arguments", name)
+			}
+			return comptimeValue{
+				typ: typeBool,
+				b:   stdtarget.Evaluate(c.target, predicate),
+			}, nil
+		}
+	}
+	return c.evalComptimeMetaCall(expr)
+}
+
+// evalComptimeMetaCall evaluates the type-directed `std::meta` predicates.
 func (c *Checker) evalComptimeMetaCall(expr *ast.CallExpr) (comptimeValue, error) {
 	apply, ok := expr.Callee.(*ast.TypeApplyExpr)
 	if !ok {

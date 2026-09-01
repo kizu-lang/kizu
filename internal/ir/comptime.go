@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 )
 
 // lowerComptimeIfStmt lowers only the branch selected during compilation.
@@ -30,6 +31,9 @@ func (l *lowerer) constBool(expr ast.Expression) (bool, bool) {
 	case *ast.BoolExpr:
 		return e.Value, true
 	case *ast.CallExpr:
+		if value, ok := l.targetPredicateCall(e); ok {
+			return value, true
+		}
 		return l.metaPredicateCall(e)
 	case *ast.PrefixExpr:
 		value, ok := l.constBool(e.Right)
@@ -50,6 +54,16 @@ func (l *lowerer) constBool(expr ast.Expression) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// targetPredicateCall answers a compiler-defined `std::target` predicate and
+// reports whether the call was one.
+func (l *lowerer) targetPredicateCall(expr *ast.CallExpr) (bool, bool) {
+	predicate, ok := stdtarget.Identify(expr.Callee.String())
+	if !ok || len(expr.Args) != 0 {
+		return false, false
+	}
+	return stdtarget.Evaluate(l.target, predicate), true
 }
 
 // constTypeEqual compares two type-valued expressions, which is how a generic

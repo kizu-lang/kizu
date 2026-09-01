@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -67,6 +68,45 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported instruction `unknown.runtime`") {
 		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestExternalCallDeclsIncludeAttachedCleanup keeps a deferred C call declared
+// even while it remains attached to an error path.
+func TestExternalCallDeclsIncludeAttachedCleanup(t *testing.T) {
+	module := &ir.Module{Functions: []*ir.Function{{
+		Name: "main",
+		Blocks: []*ir.Block{{
+			Instrs: []*ir.Instr{{Cleanups: []ir.Cleanup{{
+				Op:         "call.release",
+				Args:       []ir.Value{{Name: "%value", Type: "i64"}},
+				ExternABI:  "c",
+				ExternName: "release",
+			}}}},
+		}},
+	}}}
+	emitter := &emitter{module: module, types: typ.NewTable()}
+	decls := emitter.externalCallDecls()
+	if got, want := strings.Join(decls, "\n"), "declare void @release(i64)"; got != want {
+		t.Fatalf("declarations = %q, want %q", got, want)
+	}
+}
+
+// TestRetainedStructsKeepRuntimeHeaderTypes covers reachability's contract:
+// function pruning retains declarations, and their fields still need every
+// named hosted-runtime header referenced by the emitted struct definitions.
+func TestRetainedStructsKeepRuntimeHeaderTypes(t *testing.T) {
+	module := &ir.Module{Structs: map[string]ir.Struct{
+		"Arrays": {Fields: []ir.Field{{Name: "values", Type: "std::array::Array<i64>"}}},
+		"Maps":   {Fields: []ir.Field{{Name: "values", Type: "std::map::Map<i64, i64>"}}},
+		"Arenas": {Fields: []ir.Field{{Name: "values", Type: "std::arena::Arena<i64>"}}},
+	}}
+	emitter := &emitter{module: module}
+	if !emitter.usesArrayHeader() || !emitter.usesMapHeader() || !emitter.usesArenaHeader() {
+		t.Fatal("retained aggregate declarations lost a hosted-runtime header dependency")
+	}
+	if emitter.usesArrayRuntime() || emitter.usesMapRuntime() || emitter.usesArenaRuntime() {
+		t.Fatal("declaration-only container types should not declare hosted-runtime calls")
 	}
 }
 

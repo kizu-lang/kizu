@@ -1,5 +1,6 @@
 import std::array;
 import std::map;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/ir/reachable.go: dropping the functions no
@@ -8,9 +9,35 @@ import std::string;
 // of the interned Name.
 
 /// Removes module functions that cannot be reached from the supplied roots
-/// through direct calls, the Go `KeepReachableFunctions`. Calls to symbols
-/// outside the module do not add an edge.
+/// through direct calls or a function address taken on a reachable path, the
+/// Go `KeepReachableFunctions`. Calls to symbols outside the module do not add
+/// an edge.
 pub fn keep_reachable_functions(allocator: Allocator, module: &var Module, roots: &array::Array<string::String>) -> !void {
+    return keep_reachable(
+        allocator, module, roots, "", true
+    );
+}
+
+/// Removes functions outside one target's entry closure. Only exports for
+/// export_abi become additional host roots; empty means no explicit exports.
+pub fn keep_target_reachable_functions(
+    allocator: Allocator,
+    module: &var Module,
+    roots: &array::Array<string::String>,
+    export_abi: []u8
+) -> !void {
+    return keep_reachable(
+        allocator, module, roots, export_abi, false
+    );
+}
+
+fn keep_reachable(
+    allocator: Allocator,
+    module: &var Module,
+    roots: &array::Array<string::String>,
+    export_abi: []u8,
+    all_exports: bool
+) -> !void {
     var functions = map::new<[]u8, Function>(allocator);
     defer functions.deinit(allocator);
     var index = 0;
@@ -34,6 +61,27 @@ pub fn keep_reachable_functions(allocator: Allocator, module: &var Module, roots
                 try reachable.insert(allocator, root_bytes, true);
                 try queue.append(allocator, function);
             }
+        }
+    }
+    index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if is_empty(node.export_abi) {
+            continue;
+        }
+        if !all_exports {
+            let retained_abi = name_text(&module.names, node.export_abi);
+            let abi_bytes = retained_abi.as_bytes();
+            if !mem::equal_bytes(abi_bytes, export_abi) {
+                continue;
+            }
+        }
+        let retained = name_text(&module.names, node.name);
+        let bytes = retained.as_bytes();
+        if !reachable.contains(bytes) {
+            try reachable.insert(allocator, bytes, true);
+            try queue.append(allocator, function);
         }
     }
     if queue.len() == 0 {
@@ -106,14 +154,18 @@ fn direct_callees(allocator: Allocator, module: &Module, function: Function) -> 
         while block_node.instrs.get(instr_index) |instr| {
             instr_index = instr_index + 1;
             let instr_node = module.instrs.at(instr.node);
-            if direct_callee(instr_node.op, instr_node.operand) |callee| {
-                try callees.append(allocator, callee);
+            if is_empty(instr_node.extern_abi) {
+                if direct_callee(instr_node.op, instr_node.operand) |callee| {
+                    try callees.append(allocator, callee);
+                }
             }
             var cleanup_index = 0;
             while instr_node.cleanups.get(cleanup_index) |cleanup| {
                 cleanup_index = cleanup_index + 1;
-                if direct_callee(cleanup.op, cleanup.operand) |callee| {
-                    try callees.append(allocator, callee);
+                if is_empty(cleanup.extern_abi) {
+                    if direct_callee(cleanup.op, cleanup.operand) |callee| {
+                        try callees.append(allocator, callee);
+                    }
                 }
             }
         }
@@ -121,11 +173,12 @@ fn direct_callees(allocator: Allocator, module: &Module, function: Function) -> 
     return move callees;
 }
 
-/// Decodes one direct call operation, the Go `directCallee`: the symbol a
-/// `call.<f>` names, null for every other op.
+/// Decodes one operation that makes a function reachable, the Go
+/// `directCallee`: a direct call and taking a function's address both name the
+/// symbol whose body the module must keep.
 fn direct_callee(op: Op, operand: Name) -> ?Name {
-    if op != Op::Call {
-        return null;
+    if op == Op::Call or op == Op::FuncAddr {
+        return operand;
     }
-    return operand;
+    return null;
 }

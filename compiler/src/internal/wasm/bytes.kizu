@@ -1,0 +1,114 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::string;
+
+// Mechanical port of internal/wasm/bytes.go. Byte views compare their
+// contents through one allocation-free runtime loop; descriptor addresses are
+// never observable equality.
+
+struct WasmByteSliceParts {
+    ptr: ir::Name,
+    len: ir::Name
+}
+
+/// Reports whether an instruction compares byte slices.
+fn (self: &Emitter) uses_byte_equality_runtime(module: &ir::Module) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op == ir::Op::TestExpectEqual and node.args.len() == 2 and
+                    module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+                    return true;
+                }
+                if node.op == ir::Op::Binary and node.args.len() == 2 and
+                    module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Loads the pointer and wasm32 length expressions from one []u8 descriptor.
+fn (self: &var Emitter) byte_slice_parts(descriptor: ir::Name) -> !WasmByteSliceParts {
+    var pointer = try string::from_bytes(self.allocator, "(i32.load ");
+    errdefer pointer.deinit(self.allocator);
+    try self.names.append_to(&var pointer, descriptor);
+    try pointer.append_byte(self.allocator, cast<u8>(41));
+    let pointer_name = try self.names.intern_owned(move pointer);
+    let length_address = try self.address_at(descriptor, 4);
+    var length = try string::from_bytes(self.allocator, "(i32.load ");
+    errdefer length.deinit(self.allocator);
+    try self.names.append_to(&var length, length_address);
+    try length.append_byte(self.allocator, cast<u8>(41));
+    let length_name = try self.names.intern_owned(move length);
+    return WasmByteSliceParts { ptr: pointer_name, len: length_name };
+}
+
+/// Lowers []u8 == and != by content.
+fn (self: &var Emitter) write_byte_equality(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let left_value = node.args.get_or_panic(0);
+    let right_value = node.args.get_or_panic(1);
+    if !module.names.is(node.result.type_name, "bool") or
+        !module.names.is(right_value.type_name, "[]u8") or
+        (!module.names.is(node.operand, "==") and !module.names.is(node.operand, "!=")) {
+        return try self.fail0("wasm error: byte slices support only == and !=");
+    }
+    let left = try self.value_of(module, left_value);
+    let right = try self.value_of(module, right_value);
+    let left_parts = try self.byte_slice_parts(left.expr);
+    let right_parts = try self.byte_slice_parts(right.expr);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    if module.names.is(node.operand, "!=") {
+        try expression.append_bytes(self.allocator, "(i32.eqz ");
+    }
+    try expression.append_bytes(self.allocator, "(call $__bytes_equal ");
+    try self.names.append_to(&var expression, left_parts.ptr);
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, left_parts.len);
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, right_parts.ptr);
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, right_parts.len);
+    try expression.append_byte(self.allocator, cast<u8>(41));
+    if module.names.is(node.operand, "!=") {
+        try expression.append_byte(self.allocator, cast<u8>(41));
+    }
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
+}
+
+/// Writes the allocation-free byte comparison runtime loop.
+fn (self: &var Emitter) write_byte_equality_helper() -> !void {
+    try self.line("  (func $__bytes_equal (param $left i32) (param $left_len i32)");
+    try self.line("      (param $right i32) (param $right_len i32) (result i32)");
+    try self.line("    (local $index i32)");
+    try self.line("    (if (i32.ne (local.get $left_len) (local.get $right_len))");
+    try self.line("      (then (return (i32.const 0))))");
+    try self.line("    (loop $bytes");
+    try self.line("      (if (i32.lt_u (local.get $index) (local.get $left_len))");
+    try self.line("        (then");
+    try self.line("          (if (i32.ne");
+    try self.line("              (i32.load8_u (i32.add (local.get $left) (local.get $index)))");
+    try self.line("              (i32.load8_u (i32.add (local.get $right) (local.get $index))))");
+    try self.line("            (then (return (i32.const 0))))");
+    try self.line("          (local.set $index (i32.add (local.get $index) (i32.const 1)))");
+    try self.line("          (br $bytes))))");
+    try self.line("    (i32.const 1)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}

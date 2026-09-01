@@ -157,7 +157,16 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string, rest []Value)
 				sig.Return,
 			)
 		}
-		return Cleanup{Op: "call." + methodName, Args: append([]Value{receiver}, rest...)}, nil
+		cleanup := Cleanup{
+			Op:   "call." + methodName,
+			Args: append([]Value{receiver}, rest...),
+		}
+		if external, ok := l.externDecls[methodName]; ok {
+			cleanup.Op = "call." + external.name
+			cleanup.ExternABI = external.abi
+			cleanup.ExternName = external.name
+		}
+		return cleanup, nil
 	}
 	return Cleanup{}, fmt.Errorf("ir error: unknown cleanup method `%s`", method)
 }
@@ -242,6 +251,11 @@ func (l *lowerer) emitCleanupFrame(frame int) {
 func (l *lowerer) emitCleanups(cleanups []Cleanup) {
 	for _, cleanup := range cleanups {
 		l.emit(cleanup.Op, "void", l.loadCleanupArgs(cleanup.Args), "")
+		if cleanup.ExternABI != "" {
+			instr := l.block.Instrs[len(l.block.Instrs)-1]
+			instr.ExternABI = cleanup.ExternABI
+			instr.ExternName = cleanup.ExternName
+		}
 	}
 }
 

@@ -1,0 +1,335 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/frame.go. Each invocation receives fixed
+// slots for every memory-backed SSA result and local storage cell. The global
+// stack pointer makes the same plan safe for recursive calls.
+
+/// Is one fixed frame slot and the function generation that owns it.
+struct FrameSlot {
+    offset: i64,
+    generation: i64
+}
+
+/// Plans all fixed frame slots for one function.
+fn (self: &var Emitter) plan_frame(
+    module: &ir::Module,
+    node: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    self.frame_size = 0;
+    let allocator = self.allocator;
+    let generation = self.generation;
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if is_wasm_map_temp_op(instr_node.op) {
+                let retained = ir::name_text(&module.names, instr_node.result.name);
+                let bytes = retained.as_bytes();
+                try allocate_frame_slot(
+                    allocator,
+                    generation,
+                    &var self.frame_size,
+                    &var self.local_slots,
+                    bytes,
+                    WasmLayout { size: map_temp_size(), align: 8 }
+                );
+            }
+            if try self.plan_call_copy_slots(module, instr_node) |failed| {
+                return move failed;
+            }
+            let result_needs_slot = instr_node.op == ir::Op::BufferNew or
+                try self.is_memory_type(module, instr_node.result.type_name);
+            if result_needs_slot and instr_node.op != ir::Op::Phi {
+                let outcome = try self.type_layout(module, instr_node.result.type_name);
+                match outcome {
+                    Error(failed) => return move failed,
+                    Layout(layout) => {
+                        let retained = ir::name_text(&module.names, instr_node.result.name);
+                        let bytes = retained.as_bytes();
+                        try allocate_frame_slot(
+                            allocator,
+                            generation,
+                            &var self.frame_size,
+                            &var self.result_slots,
+                            bytes,
+                            layout
+                        );
+                    },
+                }
+            }
+            if instr_node.op == ir::Op::LocalSlot {
+                if instr_node.args.get(0) |value| {
+                    let outcome = try self.value_slot_layout(module, value.type_name);
+                    match outcome {
+                        Error(failed) => return move failed,
+                        Layout(layout) => {
+                            let retained = ir::name_text(&module.names, instr_node.result.name);
+                            let bytes = retained.as_bytes();
+                            try allocate_frame_slot(
+                                allocator,
+                                generation,
+                                &var self.frame_size,
+                                &var self.local_slots,
+                                bytes,
+                                layout
+                            );
+                        },
+                    }
+                } else {
+                    return try self.fail0("wasm error: local slot expects 1 arg");
+                }
+            }
+        }
+    }
+    self.frame_size = wasm_align_up(self.frame_size, 8);
+    return null;
+}
+
+/// Returns storage for one wasm value placed in an addressable cell. A stack
+/// buffer value is its storage address (ADR-0097), so the cell holds one i32
+/// pointer rather than a second inline byte buffer.
+fn (self: &var Emitter) value_slot_layout(
+    module: &ir::Module,
+    type_name: ir::Name
+) -> !WasmLayoutResult {
+    let retained = ir::name_text(&module.names, type_name);
+    let bytes = retained.as_bytes();
+    if is_buffer_wasm_type(bytes) {
+        return WasmLayoutResult::Layout(WasmLayout { size: 4, align: 4 });
+    }
+    return self.type_layout(module, type_name);
+}
+
+/// Plans addressed scalar copies required by direct and indirect call ABI
+/// parameters. Memory-backed values already are addressed copies.
+fn (self: &var Emitter) plan_call_copy_slots(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.op == ir::Op::Call {
+        let callee = self.functions_by_name.get(ir::name_id(node.operand)) orelse return null;
+        var index = 0;
+        while node.args.get(index) |arg| {
+            if module.function_param(callee, index) |param| {
+                if try self.plan_call_copy_slot(module, node, arg, param, index) |failed| {
+                    return move failed;
+                }
+            }
+            index = index + 1;
+        }
+        return null;
+    }
+    if node.op == ir::Op::CallIndirect {
+        var arg_index = 1;
+        var param_index = 0;
+        while node.args.get(arg_index) |arg| {
+            if node.call_params.get(param_index) |param| {
+                if try self.plan_call_copy_slot(
+                    module,
+                    node,
+                    arg,
+                    param,
+                    param_index
+                ) |failed| {
+                    return move failed;
+                }
+            }
+            arg_index = arg_index + 1;
+            param_index = param_index + 1;
+        }
+    }
+    return null;
+}
+
+/// Plans one scalar cell when a CopyAddress parameter receives a value.
+fn (self: &var Emitter) plan_call_copy_slot(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    arg: ir::Value,
+    param: ir::Param,
+    index: i64
+) -> !?diagnostic::Diagnostic {
+    if !try self.call_needs_copy_slot(module, param, arg) {
+        return null;
+    }
+    let allocator = self.allocator;
+    let generation = self.generation;
+    let outcome = try self.value_slot_layout(module, arg.type_name);
+    match outcome {
+        Error(failed) => return move failed,
+        Layout(layout) => {
+            let retained = ir::name_text(&module.names, node.result.name);
+            let bytes = retained.as_bytes();
+            var key = try call_copy_slot_key(allocator, bytes, index);
+            defer key.deinit(allocator);
+            let key_bytes = key.as_bytes();
+            try allocate_frame_slot(
+                allocator,
+                generation,
+                &var self.frame_size,
+                &var self.local_slots,
+                key_bytes,
+                layout
+            );
+        },
+    }
+    return null;
+}
+
+/// Reports whether wasm must materialize an addressed scalar call copy.
+fn (self: &var Emitter) call_needs_copy_slot(
+    module: &ir::Module,
+    param: ir::Param,
+    arg: ir::Value
+) -> !bool {
+    if !call_takes_copy_address(module, param, arg.type_name) {
+        return false;
+    }
+    return !try self.is_memory_type(module, arg.type_name);
+}
+
+/// Reads Param.TakesAddressOf without interning through the borrowed module.
+fn call_takes_copy_address(
+    module: &ir::Module,
+    param: ir::Param,
+    arg_type: ir::Name
+) -> bool {
+    if param.passing != ir::Passing::CopyAddress or
+        ir::same_name(param.type_name, arg_type) {
+        return false;
+    }
+    let param_text = ir::name_text(&module.names, param.type_name);
+    let param_bytes = param_text.as_bytes();
+    let arg_text = ir::name_text(&module.names, arg_type);
+    let arg_bytes = arg_text.as_bytes();
+    let deref = deref_wasm_type(param_bytes);
+    return mem::equal_bytes(deref, arg_bytes);
+}
+
+/// Builds the stable frame-map key for one addressed call copy.
+fn call_copy_slot_key(
+    allocator: Allocator,
+    result: []u8,
+    index: i64
+) -> !string::String {
+    var out = try string::from_bytes(allocator, "call-copy:");
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, result);
+    try out.append_byte(allocator, cast<u8>(58));
+    try fmt::append_i64(allocator, &var out, index);
+    return move out;
+}
+
+/// Registers fixed-address results before blocks are emitted. A merge block
+/// can therefore refer to a predecessor result even when it is printed first.
+fn (self: &var Emitter) register_frame_values(
+    module: &ir::Module,
+    node: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            let result_needs_slot = instr_node.op == ir::Op::BufferNew or
+                try self.is_memory_type(module, instr_node.result.type_name);
+            if result_needs_slot and instr_node.op != ir::Op::Phi {
+                if try self.result_slot(module, instr_node.result) |slot| {
+                    try self.set_value(module, instr_node.result, slot);
+                } else {
+                    return try self.fail0("wasm error: no frame slot for aggregate result");
+                }
+            }
+            if instr_node.op == ir::Op::LocalSlot {
+                if try self.local_slot(module, instr_node.result) |slot| {
+                    try self.set_value(module, instr_node.result, slot);
+                } else {
+                    return try self.fail0("wasm error: no frame slot for local storage");
+                }
+            }
+        }
+    }
+    return null;
+}
+
+fn allocate_frame_slot(
+    allocator: Allocator,
+    generation: i64,
+    frame_size: &var i64,
+    slots: &var map::Map<[]u8, FrameSlot>,
+    name: []u8,
+    layout: WasmLayout
+) -> !void {
+    if slots.get(name) |known| {
+        if known.generation == generation {
+            return;
+        }
+    }
+    let offset = wasm_align_up(frame_size.*, layout.align);
+    try slots.insert(allocator, name, FrameSlot { offset: offset, generation: generation });
+    frame_size.* = offset + wasm_max(layout.size, 1);
+    return;
+}
+
+/// Returns the expression for one memory-backed SSA result slot.
+fn (self: &var Emitter) result_slot(module: &ir::Module, result: ir::Value) -> !?ir::Name {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    let slot = self.result_slots.get(bytes) orelse return null;
+    if slot.generation != self.generation {
+        return null;
+    }
+    return try self.frame_slot_expr(slot.offset);
+}
+
+/// Returns the expression for one local storage cell.
+fn (self: &var Emitter) local_slot(module: &ir::Module, result: ir::Value) -> !?ir::Name {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    let slot = self.local_slots.get(bytes) orelse return null;
+    if slot.generation != self.generation {
+        return null;
+    }
+    return try self.frame_slot_expr(slot.offset);
+}
+
+/// Returns one planned addressed-copy cell for a call argument.
+fn (self: &var Emitter) call_copy_slot(
+    module: &ir::Module,
+    result: ir::Value,
+    index: i64
+) -> !?ir::Name {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    var key = try call_copy_slot_key(self.allocator, bytes, index);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    let slot = self.local_slots.get(key_bytes) orelse return null;
+    if slot.generation != self.generation {
+        return null;
+    }
+    return try self.frame_slot_expr(slot.offset);
+}
+
+fn (self: &var Emitter) frame_slot_expr(offset: i64) -> !ir::Name {
+    if offset == 0 {
+        return self.names.intern("(local.get $__kizu_frame)");
+    }
+    var out = try string::from_bytes(self.allocator, "(i32.add (local.get $__kizu_frame) (i32.const ");
+    errdefer out.deinit(self.allocator);
+    try fmt::append_i64(self.allocator, &var out, offset);
+    try out.append_bytes(self.allocator, "))");
+    return self.names.intern_owned(move out);
+}

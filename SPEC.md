@@ -234,7 +234,8 @@ fn main() -> void {
 ためです(ADR-0085)。`std::process::ExitStatus` は compiler が知る std 契約で、
 `Success` は 0、`Failure` は 1、`Specific(code)` はその code で終了します。素の
 `ExitStatus`(error union でない形)は書けません。error を返した `main` は診断を
-出して非ゼロで終了します。
+出して非ゼロで終了します。process を持たない browser target では entry が同じ status を
+host に返し、page を終了しません。panic は status に畳まず trap のままです。
 
 ### 6.2 変数
 
@@ -1948,7 +1949,7 @@ member でもあるので、`CacheError!T` の関数は `FsError!T` の呼び出
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、runtime helper を実装しない
 
-## 12. unsafe / C ABI
+## 12. unsafe / host ABI
 
 `unsafe` は、コンパイラが memory safety を証明しない操作を式単位で明示する
 マーカーです。`try` / `comptime` と同じく式の前に置きます。
@@ -2036,7 +2037,8 @@ unsafe fn raw_write(p: ptr<u8>, value: u8) -> void {
 unsafe ptr_write(dst, unsafe ptr_read(src));
 ```
 
-C ABI declaration は `extern "c" fn` で書きます。
+外部 host の関数宣言は `extern "<abi>" fn` で書きます。C ABI は
+`extern "c" fn` です。
 
 ```kizu
 extern "c" fn puts(s: ptr<const u8>) -> i32
@@ -2049,7 +2051,7 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
   内側の `unsafe` が唯一の操作を覆っている場合、外側のマーカーは未使用になる
 * マーカーの単位は式である。`unsafe p.* = value` はマーカーが代入先を覆う。
   代入する値は別の式なので、それ自体が未証明ならそちらにもマーカーが要る
-* `extern "c" fn` の呼び出しには `unsafe` が要る
+* `extern "..." fn` の呼び出しには `unsafe` が要る
 * `unsafe fn` の呼び出しには `unsafe` が要る
 * `unsafe fn` の本体は暗黙に覆われない
 * `fn(...) -> T` を通した呼び出しに `unsafe` は要らない
@@ -2097,7 +2099,7 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_deref` | `p.*` / `p.* = value` / `p.*.field` |
 | `ptr_cast` | raw pointer 間の `cast<ptr<...>>(value)` |
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
-| `extern_call` | `extern "c" fn` call |
+| `extern_call` | `extern "..." fn` call |
 | `unsafe_call` | `unsafe fn` call |
 | `struct_invariant` | `unsafe struct` の構築 / field write |
 | `volatile` | volatile read/write primitive |
@@ -2105,7 +2107,7 @@ fn update(node: ptr<Node>) -> void {
 この表の名前はソースには書きません。マーカーは `unsafe` の 1 語で、種類は
 式の綴りが名乗ります(`ptr_read(p)`、`p.*`、`cast<ptr<u8>>(p)`)。綴りから
 読めない `extern_call` / `unsafe_call` / `struct_invariant` は、呼び先や書き込み先の
-宣言(`extern "c" fn` / `unsafe fn` / `unsafe struct`)と module path が名乗ります。名前が残るのは診断メッセージの中だけで、
+宣言(`extern "..." fn` / `unsafe fn` / `unsafe struct`)と module path が名乗ります。名前が残るのは診断メッセージの中だけで、
 マーカーが無いときにどの種類の操作だったかを伝えます。
 
 `atomic`、`unchecked_index` は採用しません。
@@ -2136,7 +2138,63 @@ ptr<const T> const T*
 ?ptr<T>    nullable T*
 ```
 
-### 12.1 C header import
+### 12.1 browser host ABI
+
+`wasm32-browser` では JavaScript host への同期 import を
+`extern "browser" fn`、JavaScript から明示的に再入できる callback を
+`export "browser" fn` で宣言します。
+
+```kizu
+extern "browser" fn set_title(text: []u8) -> void
+extern "browser" fn begin(handle: u32, request: []u8) -> void
+
+export "browser" fn completed(handle: u32, status: i32) -> void {
+    // status と handle を Kizu 側の状態・error に明示的に写す
+}
+```
+
+`extern "browser"` の呼び出しも外部 code と guest memory の契約を compiler が
+証明できないため `unsafe` が要ります。import は WebAssembly の `host` module から、
+export は WebAssembly instance から、どちらも宣言した関数の末尾の source identifier
+(`app::ui::set_title` なら `set_title`)で公開されます。同じ host 名を複数 module が
+宣言した場合、signature が同じなら 1 import を共有し、異なれば build error です。
+
+境界を通せる型は次だけです。
+
+| Kizu 型 | WebAssembly 型 | 向き |
+| --- | --- | --- |
+| `i8` / `i16` / `i32` / `u8` / `u16` / `u32` | `i32` | import / export |
+| `usize` / `isize` | `i32` | import / export |
+| `i64` / `u64` | `i64` | import / export |
+| `bool` | `i32` (`0` / `1`) | import / export |
+| `ptr<T>` / `ptr<const T>` / nullable raw pointer | `i32` address | import / export |
+| `[]u8` | `i32` pointer + `i32` length | import parameter only |
+| `void` | result なし | return only |
+
+小さい整数は宣言した幅に正規化します。たとえば host が `i8` に `255` の bit pattern を
+返せば Kizu 値は `-1`、`u8` に返せば `255` です。`usize` / `isize` と pointer は
+browser target が wasm32 なので 32 bit です。
+
+receiver、static parameter、`&T` / `&var T` parameter、aggregate、owner、通常の optional、
+error union は通せません。`extern "browser"` だけは `[]u8` parameter を受け取れます。
+これは import call の間だけ有効な guest memory の view で、host が後で使うなら call 中に
+copy します。書き込み可能な storage として使う宣言では、caller の `unsafe` comment が
+その範囲と lifetime の契約を持ちます。`export "browser"` の parameter は scalar だけです。
+browser import は host wrapper を介するため、`extern "browser" fn` の名前を function pointer
+値として取り出すこともできません。
+
+import は同期関数です。JavaScript の `Promise` を返して guest の stack を暗黙に suspend
+しません。非同期 browser API は、Kizu が数値 handle を渡して開始し、import が一度返り、
+完了時に JavaScript が source にある `export "browser" fn` を handle / status とともに
+呼びます。bytes が必要なら callback 内で guest-owned storage を用意し、別の同期 import で
+読みます。失敗を error union の payload ABI に暗黙変換せず、status を callback body が
+Kizu の error に明示的に写します。
+
+`export "browser" fn` は browser build の到達可能性 root です。`main`、`memory`、
+`kizu_start` は target の entry/runtime が使うため export 名にできません。他の target は
+browser import / export を build 時に拒否し、`extern "c"` は browser target が拒否します。
+
+### 12.2 C header import
 
 Kizu は C header の完全互換 parser は持ちません。
 Phase 14 の header import は、限定された C function prototype を `extern "c" fn` に変換する補助機能です。
@@ -2356,6 +2414,7 @@ comptime if 1 + 1 == 2 {
 
 `comptime` expression は、整数、真偽値、文字列、compile-time type value、
 単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
+`comptime if` の条件は、これに加えて §13.3 の `std::target` 述語を評価します。
 `type<i64>` のような `type<T>` literal と、instantiated generic body 内の
 static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
@@ -2568,6 +2627,46 @@ comptime match color |v| {
 `std::meta::variant<T, v>(payload)` は `T::<v の名前>(payload)` と同じもので、
 payload を持たない variant では `T::<v の名前>` です。walk が値を**作る**側で
 arm を名指しする唯一の手段で、arm は呼び出し側が型として書けないためです。
+
+### 13.3 target selection
+
+1 つの package に portable core と target 別 host adapter を置くときは、
+`comptime if` から compiler-defined `std::target` 述語を問います。
+
+```kizu
+comptime if std::target::is_native() {
+    try file_adapter::run();
+} else {
+    comptime if std::target::is_wasi() {
+        try wasi_adapter::run();
+    } else {
+        comptime if std::target::is_browser() {
+            browser_adapter::run();
+        }
+    }
+}
+```
+
+```text
+std::target::is_native()  -> bool    comptime-if-only
+std::target::is_wasi()    -> bool    comptime-if-only
+std::target::is_browser() -> bool    comptime-if-only
+```
+
+3 つは引数も static 引数も取らず、1 回の build ではちょうど 1 つだけが true です。
+`build --target native`、`run`、`check`、`test`、`ir`、`build --emit-llvm` は native、
+`build --target wasm32-wasi` は WASI、`build --target wasm32-browser` は browser を
+選びます。`fmt` の semantic validation も native を使い、`parse` は target を
+選びません。
+
+述語に runtime の値はありません。`std::target` という source module を import する
+形でもなく、利用者が同じ述語を定義することもできません。選ばれた branch だけを
+type / ownership / IR の各 phase が検査・lowering します。
+
+backend へ渡す executable module は `main` と、その target が認める明示 export から
+到達できる関数だけで閉じます。browser の `export "browser"` は browser build だけの
+root です。したがって、選ばれなかった filesystem adapter や browser host adapter は
+反対 target の capability として誤って拒否されません。
 
 ## 14. std とのインターフェース
 
@@ -2970,7 +3069,7 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::fs::read_file(io, allocator, path, limit)` は `!std::string::String` を返す。
   `limit: std::mem::Limit` で確保上限を明示する。超過は
   `std::fs::Error::LimitExceeded` で、`OutOfMemory`(確保失敗)とは分ける
-* `std::fs::read_file_into(io, path, out: &var std::string::String)` は `!void` を
+* `std::fs::read_file_into(io, allocator, path, out: &var std::string::String)` は `!void` を
   返し、fs 側では確保しない
 * `std::fs::real_path(io, allocator, path)` は `!std::string::String` を返す。
   symlink と `.` / `..` を実体へ解決するため path が存在する必要がある
@@ -2978,7 +3077,9 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
 * `std::fs::exists(io, path)` は `!bool` を返す
 * `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
-* `std::fs::read_dir(io, path)` は `!std::array::Array<std::fs::DirEntry>` を返す。
+* `std::fs::read_dir(io, allocator, path)` は
+  `!std::array::Array<std::fs::DirEntry>` を返す。Array と各 entry の `name` / `path`
+  は caller が所有し、同じ allocator を渡す `deinit` でまとめて解放する。
   entry は name の byte 順に並ぶ。file system が返す順は host ごとに違うので、
   同じ directory がどこでも同じ listing になるよう並べ替える
 * `std::fs::create_dir(io, path)` は `!void` を返す
@@ -2986,7 +3087,8 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::fs::remove_file(io, path)` は `!void` を返す
 * `std::fs::rename(io, from, to)` は `!void` を返す
 * `std::fs::Metadata` は `size: i64` と `is_dir: bool` だけを持つ
-* `std::fs::DirEntry` は `name: []u8`、`path: []u8`、`is_dir: bool` だけを持つ
+* `std::fs::DirEntry` は `name: std::string::String`、
+  `path: std::string::String`、`is_dir: bool` だけを持つ owner 型
 * `path` と `bytes` は caller 側の `[]u8` を保持しない read-only borrow
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない
@@ -3166,7 +3268,8 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 * `std::process::exit_code(code)` は `i64` を返す
 * `std::process::ExitStatus` は `Success` / `Failure` / `Specific(u8)` の union で、
   `main` の戻り値 `<E>!std::process::ExitStatus` としてだけ compiler が特別に扱う
-  (checker が main の形を検査し、native backend が exit status へ写す)
+  (checker が main の形を検査し、entry point が native / WASI の process status、または
+  browser host へ返す status に写す)
 * `std::process` helper は hidden I/O を持たない
 
 ## 16. contract / impl 方針

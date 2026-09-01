@@ -19,6 +19,10 @@ while task.resume() { }
 coroutine を止まるところまで走らせ、その間は他に何も起きません。増えるのは
 **止まれる場所**です —— 呼び出しの先頭ではなく、途中で。
 
+現在の runtime は native target だけが提供します。`wasm32-wasi` と `wasm32-browser` は
+stack を切り替えて再開する host boundary を持たないため、`std::coro` に到達する program を
+build 時に target 非対応として拒否します。
+
 止まる場所が呼び出しの途中でよいことが、evented な `Io` に要るものです。byte が
 まだ来ていない read は、**上に積まれた呼び出しがそれを予期して書かれていなくても**
 thread を返せる必要があります(ADR-0141)。

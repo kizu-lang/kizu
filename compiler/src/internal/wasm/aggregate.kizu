@@ -1,0 +1,447 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/aggregate.go: struct values, field
+// projections and updates, references, local storage, and tagged unions.
+
+fn (self: &var Emitter) write_struct_new(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let type_text = ir::name_text(&module.names, node.result.type_name);
+    let type_bytes = type_text.as_bytes();
+    if module.structs.at(type_bytes) |declared| {
+        var values = map::new<[]u8, ir::Value>(self.allocator);
+        defer values.deinit(self.allocator);
+        var field_index = 0;
+        while node.fields.get(field_index) |field| {
+            field_index = field_index + 1;
+            let retained = ir::name_text(&module.names, field.name);
+            let bytes = retained.as_bytes();
+            if values.contains(bytes) {
+                let name = try self.own(module, field.name);
+                return try self.fail("wasm error: duplicate struct field `%s`", Arg::Str(name));
+            }
+            try values.insert(self.allocator, bytes, field.value);
+        }
+        let slot = try self.result_slot(module, node.result) orelse
+            return try self.fail0("wasm error: no frame slot for struct result");
+        field_index = 0;
+        while declared.fields.get(field_index) |field| {
+            field_index = field_index + 1;
+            let retained = ir::name_text(&module.names, field.name);
+            let bytes = retained.as_bytes();
+            if values.get(bytes) |value| {
+                if !ir::same_name(value.type_name, field.type_name) {
+                    let name = try self.own(module, field.name);
+                    return try self.fail("wasm error: struct field `%s` has mismatched type", Arg::Str(name));
+                }
+                let outcome = try self.field_layout(module, type_bytes, bytes);
+                match outcome {
+                    Error(failed) => return move failed,
+                    Field(layout) => {
+                        let info = try self.value_of(module, value);
+                        if try self.write_store_value(
+                            module,
+                            slot,
+                            layout.offset,
+                            field.type_name,
+                            info
+                        ) |failed| {
+                            return move failed;
+                        }
+                    },
+                }
+            } else {
+                let name = try self.own(module, field.name);
+                return try self.fail("wasm error: missing struct field `%s`", Arg::Str(name));
+            }
+        }
+        try self.set_value(module, node.result, slot);
+        return null;
+    }
+    let type_name = try self.own(module, node.result.type_name);
+    return try self.fail("wasm error: unknown struct type `%s`", Arg::Str(type_name));
+}
+
+fn (self: &var Emitter) write_field_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.op == ir::Op::FieldRefSet {
+        return self.write_field_ref_set(module, node);
+    }
+    if node.op == ir::Op::FieldRef {
+        return self.write_field_read(module, node, true);
+    }
+    if node.op == ir::Op::FieldAddr {
+        return self.write_field_addr(module, node);
+    }
+    if node.op == ir::Op::FieldSet {
+        return self.write_field_set(module, node);
+    }
+    return self.write_field_read(module, node, false);
+}
+
+fn (self: &var Emitter) write_field_read(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    borrowed: bool
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: field read expects 1 arg");
+    }
+    let receiver = node.args.get(0) orelse ir::empty_value();
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let struct_name = field_receiver_wasm_type(receiver_bytes, borrowed);
+    let field_text = ir::name_text(&module.names, node.operand);
+    let field_name = field_text.as_bytes();
+    let outcome = try self.field_layout(module, struct_name, field_name);
+    match outcome {
+        Error(failed) => return move failed,
+        Field(layout) => {
+            if !ir::same_name(node.result.type_name, layout.field.type_name) {
+                return try self.fail0("wasm error: field read has mismatched result type");
+            }
+            let info = try self.value_of(module, receiver);
+            return self.write_load_value(module, node.result, info.expr, layout.offset);
+        },
+    }
+}
+
+fn field_receiver_wasm_type(typ: []u8, borrowed: bool) -> []u8 {
+    if borrowed {
+        return deref_wasm_type(typ);
+    }
+    return typ;
+}
+
+fn (self: &var Emitter) write_field_addr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: field address expects 1 arg");
+    }
+    let receiver = node.args.get(0) orelse ir::empty_value();
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let struct_name = deref_wasm_type(receiver_bytes);
+    let field_text = ir::name_text(&module.names, node.operand);
+    let field_name = field_text.as_bytes();
+    let outcome = try self.field_layout(module, struct_name, field_name);
+    match outcome {
+        Error(failed) => return move failed,
+        Field(layout) => {
+            let result_text = ir::name_text(&module.names, node.result.type_name);
+            let result_type_bytes = result_text.as_bytes();
+            let result_elem = deref_wasm_type(result_type_bytes);
+            let field_type = ir::name_text(&module.names, layout.field.type_name);
+            let field_type_bytes = field_type.as_bytes();
+            if !mem::equal_bytes(result_elem, field_type_bytes) {
+                return try self.fail0("wasm error: field address has mismatched result type");
+            }
+            let receiver_info = try self.value_of(module, receiver);
+            let expr = try self.address_at(receiver_info.expr, layout.offset);
+            let result_name = ir::name_text(&module.names, node.result.name);
+            let result_bytes = result_name.as_bytes();
+            let symbol = try self.symbol_name_of(result_bytes);
+            try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(expr));
+            let local = try self.local_expr(result_bytes);
+            try self.set_value(module, node.result, local);
+            return null;
+        },
+    }
+}
+
+fn (self: &var Emitter) write_field_set(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("wasm error: field write expects 2 args");
+    }
+    let receiver = node.args.get(0) orelse ir::empty_value();
+    let stored = node.args.get(1) orelse ir::empty_value();
+    let struct_text = ir::name_text(&module.names, receiver.type_name);
+    let struct_name = struct_text.as_bytes();
+    let field_text = ir::name_text(&module.names, node.operand);
+    let field_name = field_text.as_bytes();
+    let field_outcome = try self.field_layout(module, struct_name, field_name);
+    match field_outcome {
+        Error(failed) => return move failed,
+        Field(field) => {
+            if !ir::same_name(stored.type_name, field.field.type_name) or
+                !ir::same_name(node.result.type_name, receiver.type_name) {
+                return try self.fail0("wasm error: field update has mismatched types");
+            }
+            let slot = try self.result_slot(module, node.result) orelse
+                return try self.fail0("wasm error: no frame slot for field update");
+            let layout_outcome = try self.type_layout(module, receiver.type_name);
+            match layout_outcome {
+                Error(failed) => return move failed,
+                Layout(layout) => {
+                    let receiver_info = try self.value_of(module, receiver);
+                    try self.write_memory_copy(slot, receiver_info.expr, layout.size);
+                    let stored_info = try self.value_of(module, stored);
+                    if try self.write_store_value(
+                        module,
+                        slot,
+                        field.offset,
+                        field.field.type_name,
+                        stored_info
+                    ) |failed| {
+                        return move failed;
+                    }
+                    try self.set_value(module, node.result, slot);
+                    return null;
+                },
+            }
+        },
+    }
+}
+
+fn (self: &var Emitter) write_field_ref_set(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: borrowed field write expects 2 args and void result");
+    }
+    let receiver = node.args.get(0) orelse ir::empty_value();
+    let stored = node.args.get(1) orelse ir::empty_value();
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let struct_name = deref_wasm_type(receiver_bytes);
+    let field_text = ir::name_text(&module.names, node.operand);
+    let field_name = field_text.as_bytes();
+    let outcome = try self.field_layout(module, struct_name, field_name);
+    match outcome {
+        Error(failed) => return move failed,
+        Field(field) => {
+            if !ir::same_name(stored.type_name, field.field.type_name) {
+                return try self.fail0("wasm error: borrowed field write has mismatched type");
+            }
+            let receiver_info = try self.value_of(module, receiver);
+            let stored_info = try self.value_of(module, stored);
+            return self.write_store_value(
+                module,
+                receiver_info.expr,
+                field.offset,
+                field.field.type_name,
+                stored_info
+            );
+        },
+    }
+}
+
+fn (self: &var Emitter) write_local_slot(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: local slot expects 1 arg");
+    }
+    let value = node.args.get(0) orelse ir::empty_value();
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let want = deref_wasm_type(result_bytes);
+    let value_text = ir::name_text(&module.names, value.type_name);
+    let value_bytes = value_text.as_bytes();
+    if !mem::equal_bytes(want, value_bytes) {
+        return try self.fail0("wasm error: local slot has mismatched type");
+    }
+    let slot = try self.local_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for local storage");
+    let info = try self.value_of(module, value);
+    if try self.write_store_value(module, slot, 0, value.type_name, info) |failed| {
+        return move failed;
+    }
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+fn (self: &var Emitter) write_ref_store(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: dereference write expects 2 args and void result");
+    }
+    let reference = node.args.get(0) orelse ir::empty_value();
+    let value = node.args.get(1) orelse ir::empty_value();
+    let reference_text = ir::name_text(&module.names, reference.type_name);
+    let reference_bytes = reference_text.as_bytes();
+    let want = deref_wasm_type(reference_bytes);
+    let value_text = ir::name_text(&module.names, value.type_name);
+    let value_bytes = value_text.as_bytes();
+    if !mem::equal_bytes(want, value_bytes) {
+        return try self.fail0("wasm error: dereference write has mismatched type");
+    }
+    let reference_info = try self.value_of(module, reference);
+    let value_info = try self.value_of(module, value);
+    return self.write_store_value(module, reference_info.expr, 0, value.type_name, value_info);
+}
+
+fn (self: &var Emitter) write_ref_load(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: borrow read expects 1 arg");
+    }
+    let reference = node.args.get(0) orelse ir::empty_value();
+    let reference_text = ir::name_text(&module.names, reference.type_name);
+    let reference_bytes = reference_text.as_bytes();
+    let want = deref_wasm_type(reference_bytes);
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    if !mem::equal_bytes(want, result_bytes) {
+        return try self.fail0("wasm error: borrow read has mismatched type");
+    }
+    let info = try self.value_of(module, reference);
+    return self.write_load_value(module, node.result, info.expr, 0);
+}
+
+fn (self: &var Emitter) write_union_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.op == ir::Op::UnionNew {
+        return self.write_union_new(module, node);
+    }
+    if node.op == ir::Op::UnionLoad {
+        return self.write_union_load(module, node);
+    }
+    if node.op == ir::Op::UnionTag {
+        return self.write_union_tag(module, node);
+    }
+    if node.op == ir::Op::UnionPayload {
+        return self.write_union_payload(module, node);
+    }
+    return try self.fail_op(module, node, "wasm error: unsupported union instruction `%s`");
+}
+
+fn (self: &var Emitter) write_union_new(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let type_text = ir::name_text(&module.names, node.result.type_name);
+    let type_bytes = type_text.as_bytes();
+    if module.unions.at(type_bytes) |declared| {
+        let variant_text = ir::name_text(&module.names, node.immediate);
+        let variant_bytes = variant_text.as_bytes();
+        let variant = declared.variants.get(variant_bytes) orelse
+            return try self.fail0("wasm error: unknown union variant");
+        let has_payload = !ir::is_empty(variant.payload);
+        if node.args.len() > 1 or (!has_payload and node.args.len() != 0) or
+            (has_payload and node.args.len() != 1) {
+            return try self.fail0("wasm error: union variant has the wrong payload count");
+        }
+        let slot = try self.result_slot(module, node.result) orelse
+            return try self.fail0("wasm error: no frame slot for union result");
+        var tag = try string::from_bytes(self.allocator, "(i64.const ");
+        errdefer tag.deinit(self.allocator);
+        try fmt::append_i64(self.allocator, &var tag, variant.index);
+        try tag.append_byte(self.allocator, cast<u8>(41));
+        let tag_expr = try self.names.intern_owned(move tag);
+        try self.line2("            (i64.store %s %s)", Arg::Str(slot), Arg::Str(tag_expr));
+        if has_payload {
+            let payload = node.args.get(0) orelse ir::empty_value();
+            if !ir::same_name(payload.type_name, variant.payload) {
+                return try self.fail0("wasm error: union payload has mismatched type");
+            }
+            let outcome = try self.union_payload_offset(module, type_bytes);
+            match outcome {
+                Error(failed) => return move failed,
+                Offset(offset) => {
+                    let info = try self.value_of(module, payload);
+                    if try self.write_store_value(
+                        module,
+                        slot,
+                        offset,
+                        variant.payload,
+                        info
+                    ) |failed| {
+                        return move failed;
+                    }
+                },
+            }
+        }
+        try self.set_value(module, node.result, slot);
+        return null;
+    }
+    let type_name = try self.own(module, node.result.type_name);
+    return try self.fail("wasm error: unknown union type `%s`", Arg::Str(type_name));
+}
+
+fn (self: &var Emitter) write_union_load(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let arg = node.args.get(0) orelse ir::empty_value();
+    let arg_text = ir::name_text(&module.names, arg.type_name);
+    let arg_bytes = arg_text.as_bytes();
+    let arg_elem = deref_wasm_type(arg_bytes);
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    if node.args.len() != 1 or
+        !mem::equal_bytes(arg_elem, result_bytes) {
+        return try self.fail0("wasm error: union.load expects one borrowed union argument");
+    }
+    let info = try self.value_of(module, arg);
+    return self.write_load_value(module, node.result, info.expr, 0);
+}
+
+fn (self: &var Emitter) write_union_tag(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let arg = node.args.get(0) orelse ir::empty_value();
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("wasm error: union.tag expects union -> i64");
+    }
+    let type_text = ir::name_text(&module.names, arg.type_name);
+    let type_bytes = type_text.as_bytes();
+    if !module.unions.contains(type_bytes) {
+        return try self.fail0("wasm error: union.tag expects union");
+    }
+    let info = try self.value_of(module, arg);
+    return self.write_load_value(module, node.result, info.expr, 0);
+}
+
+fn (self: &var Emitter) write_union_payload(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: union.payload expects one union argument");
+    }
+    let arg = node.args.get(0) orelse ir::empty_value();
+    let type_text = ir::name_text(&module.names, arg.type_name);
+    let type_bytes = type_text.as_bytes();
+    if module.unions.at(type_bytes) |declared| {
+        let variant_text = ir::name_text(&module.names, node.immediate);
+        let variant_bytes = variant_text.as_bytes();
+        let variant = declared.variants.get(variant_bytes) orelse
+            return try self.fail0("wasm error: unknown union payload");
+        if ir::is_empty(variant.payload) or
+            !ir::same_name(variant.payload, node.result.type_name) {
+            return try self.fail0("wasm error: unknown union payload");
+        }
+        let outcome = try self.union_payload_offset(module, type_bytes);
+        match outcome {
+            Error(failed) => return move failed,
+            Offset(offset) => {
+                let info = try self.value_of(module, arg);
+                return self.write_load_value(module, node.result, info.expr, offset);
+            },
+        }
+    }
+    return try self.fail0("wasm error: unknown union type");
+}

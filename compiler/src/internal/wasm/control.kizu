@@ -2,6 +2,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::fmt;
 import std::map;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/wasm/control.go: the dispatch arm one IR block
@@ -44,11 +45,31 @@ fn (self: &var Emitter) write_instr(
     instr: ir::Instr
 ) -> !?diagnostic::Diagnostic {
     let node = module.instrs.at(instr.node);
+    return self.write_instr_node(module, node);
+}
+
+/// Writes one instruction record that need not already be retained in module.
+fn (self: &var Emitter) write_instr_node(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
     if node.op == ir::Op::Const {
         return self.write_const(module, node);
     }
     if node.op == ir::Op::Binary {
         return self.write_binary(module, node);
+    }
+    if node.op == ir::Op::Unary {
+        return self.write_unary(module, node);
+    }
+    if node.op == ir::Op::CondFail {
+        return self.write_cond_fail(module, node);
+    }
+    if node.op == ir::Op::PanicFail {
+        return self.write_panic_fail(module, node);
+    }
+    if node.op == ir::Op::TestFail or node.op == ir::Op::TestExpectEqual {
+        return self.write_test_instr(module, node);
     }
     if node.op == ir::Op::Call {
         return self.write_call(module, node);
@@ -62,58 +83,56 @@ fn (self: &var Emitter) write_instr(
     if node.op == ir::Op::Cast {
         return self.write_cast(module, node);
     }
-    if is_opaque_op(node.op) {
-        return self.write_unsupported_opaque(module, node);
+    if node.op == ir::Op::BufferNew or node.op == ir::Op::BufferAsBytes {
+        return self.write_buffer_instr(module, node);
+    }
+    if node.op == ir::Op::StructNew {
+        return self.write_struct_new(module, node);
+    }
+    if node.op == ir::Op::Field or node.op == ir::Op::FieldRef or
+        node.op == ir::Op::FieldSet or node.op == ir::Op::FieldRefSet or
+        node.op == ir::Op::FieldAddr {
+        return self.write_field_instr(module, node);
+    }
+    if node.op == ir::Op::LocalSlot {
+        return self.write_local_slot(module, node);
+    }
+    if node.op == ir::Op::RefStore {
+        return self.write_ref_store(module, node);
+    }
+    if node.op == ir::Op::RefLoad {
+        return self.write_ref_load(module, node);
+    }
+    if node.op == ir::Op::UnionNew or node.op == ir::Op::UnionLoad or
+        node.op == ir::Op::UnionTag or node.op == ir::Op::UnionPayload {
+        return self.write_union_instr(module, node);
+    }
+    if node.op == ir::Op::SliceLen or node.op == ir::Op::SliceIndex or
+        node.op == ir::Op::SliceStore or node.op == ir::Op::SliceSlice {
+        return self.write_slice_instr(module, node);
+    }
+    if node.op == ir::Op::OptNull or node.op == ir::Op::OptSome or
+        node.op == ir::Op::OptHas or node.op == ir::Op::OptValue {
+        return self.write_optional_instr(module, node);
+    }
+    if node.op == ir::Op::ErrorOk or node.op == ir::Op::ErrorError or
+        node.op == ir::Op::ErrorTry or node.op == ir::Op::ErrorHas or
+        node.op == ir::Op::ErrorValue or node.op == ir::Op::ErrorCode {
+        return self.write_error_instr(module, node);
+    }
+    if is_wasm_array_op(node.op) {
+        return self.write_array_instr(module, node);
+    }
+    if is_wasm_map_op(node.op) {
+        return self.write_map_instr(module, node);
+    }
+    if is_wasm_box_op(node.op) {
+        return self.write_box_instr(module, node);
+    }
+    if is_wasm_arena_op(node.op) {
+        return self.write_arena_instr(module, node);
     }
     return try self.fail_op(module, node, "wasm error: unsupported instruction `%s`");
-}
-
-/// Reports the instructions this backend records as opaque rather than lowers,
-/// the aggregate, memory, arena and error union arms of the Go `writeInstr`.
-/// Go's arena arm does not name `arena.at_mut`, so that one is reported as an
-/// unsupported instruction instead.
-fn is_opaque_op(op: ir::Op) -> bool {
-    if is_error_union_op(op) {
-        return true;
-    }
-    return match op {
-        StructNew => true,
-        Field => true,
-        FieldRef => true,
-        FieldSet => true,
-        FieldRefSet => true,
-        FieldAddr => true,
-        RefStore => true,
-        ArenaNew => true,
-        ArenaAdd => true,
-        ArenaAt => true,
-        ArenaLen => true,
-        ArenaPopOrPanic => true,
-        ArenaDeinit => true,
-        _ => false,
-    };
-}
-
-/// Reports the error union instructions this backend records as opaque rather
-/// than lowers, the Go `isErrorUnionOp`.
-fn is_error_union_op(op: ir::Op) -> bool {
-    return match op {
-        ErrorError => true,
-        ErrorTry => true,
-        ErrorHas => true,
-        ErrorValue => true,
-        ErrorCode => true,
-        _ => false,
-    };
-}
-
-/// Marks values that are not part of the phase 11 target subset, the Go
-/// `writeUnsupportedOpaque`.
-fn (self: &Emitter) write_unsupported_opaque(
-    module: &ir::Module,
-    node: &ir::InstrNode
-) -> !?diagnostic::Diagnostic {
-    return try self.fail_op(module, node, "wasm error: `%s` is outside the phase 11 target subset");
 }
 
 /// Builds one failure naming the operation the way Go spells `instr.Op`.
@@ -128,8 +147,8 @@ fn (self: &Emitter) fail_op(
     return self.fail(format, Arg::Owned(move text));
 }
 
-/// Records a no-op value conversion for the Phase 16 low-level subset, the Go
-/// `writeCast`.
+/// Preserves integer-width casts in the shared i64 representation and converts
+/// when a raw wasm32 pointer crosses the integer boundary.
 fn (self: &var Emitter) write_cast(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -137,8 +156,27 @@ fn (self: &var Emitter) write_cast(
     if node.args.len() != 1 {
         return try self.fail0("wasm error: cast expects 1 arg");
     }
-    let expr = try self.arg_expr(module, node, 0);
-    try self.set_value(module, node.result, expr, 0);
+    let source_value = node.args.get_or_panic(0);
+    let source = wasm_type(module, source_value.type_name);
+    let target = wasm_type(module, node.result.type_name);
+    let value = try self.arg_expr(module, node, 0);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    if mem::equal_bytes(source, "i64") and mem::equal_bytes(target, "i32") {
+        try expression.append_bytes(self.allocator, "(i32.wrap_i64 ");
+        try self.names.append_to(&var expression, value);
+        try expression.append_bytes(self.allocator, ")");
+    } else {
+        if mem::equal_bytes(source, "i32") and mem::equal_bytes(target, "i64") {
+            try expression.append_bytes(self.allocator, "(i64.extend_i32_u ");
+            try self.names.append_to(&var expression, value);
+            try expression.append_bytes(self.allocator, ")");
+        } else {
+            try self.names.append_to(&var expression, value);
+        }
+    }
+    let expr = try self.names.intern_owned(move expression);
+    try self.set_value(module, node.result, expr);
     return null;
 }
 
@@ -147,24 +185,32 @@ fn (self: &var Emitter) write_const(
     module: &ir::Module,
     node: &ir::InstrNode
 ) -> !?diagnostic::Diagnostic {
-    if is_integer_type(&module.names, node.result.type_name) {
+    if is_integer_type(&module.names, node.result.type_name) or
+        is_named_i64_type(module, node.result.type_name) {
         // Every scalar integer is one wasm i64, so a constant of any width is
         // written the same way.
         let expr = try self.constant_expr(module, node, "(i64.const ");
-        try self.set_value(module, node.result, expr, 0);
+        try self.set_value(module, node.result, expr);
         return null;
     }
     if module.names.is(node.result.type_name, "bool") {
         let expr = try self.names.intern(wasm_bool(&module.names, node.immediate));
-        try self.set_value(module, node.result, expr, 0);
+        try self.set_value(module, node.result, expr);
         return null;
     }
     if module.names.is(node.result.type_name, "[]u8") {
         let immediate = ir::name_text(&module.names, node.immediate);
         let immediate_bytes = immediate.as_bytes();
         let found = self.data_ref(immediate_bytes);
-        let expr = try self.offset_expr(found.offset);
-        try self.set_value(module, node.result, expr, found.length);
+        let slot = try self.result_slot(module, node.result) orelse
+            return try self.fail0("wasm error: no frame slot for string constant");
+        let pointer = try self.offset_expr(found.offset);
+        try self.line2("            (i32.store %s %s)", Arg::Str(slot), Arg::Str(pointer));
+        let length_address = try self.address_at(slot, 4);
+        let length = try self.offset_expr(found.length);
+        try self.line2("            (i32.store %s %s)",
+            Arg::Str(length_address), Arg::Str(length));
+        try self.set_value(module, node.result, slot);
         return null;
     }
     let type_name = try self.own(module, node.result.type_name);
@@ -201,6 +247,9 @@ fn (self: &var Emitter) write_binary(
     if node.args.len() != 2 {
         return try self.fail0("wasm error: binary expects 2 args");
     }
+    if module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+        return self.write_byte_equality(module, node);
+    }
     let left = try self.arg_expr(module, node, 0);
     let right = try self.arg_expr(module, node, 1);
     let result_retained = ir::name_text(&module.names, node.result.name);
@@ -209,7 +258,7 @@ fn (self: &var Emitter) write_binary(
     try self.line4("            (local.set %s (%s %s %s))", Arg::Str(symbol),
         Arg::Lit(binary_operation(module, node)), Arg::Str(left), Arg::Str(right));
     let expr = try self.local_expr(result_bytes);
-    try self.set_value(module, node.result, expr, 0);
+    try self.set_value(module, node.result, expr);
     return null;
 }
 
@@ -217,9 +266,52 @@ fn (self: &var Emitter) write_binary(
 /// comparison when its result is a bool, the Go `wasmOp` choice.
 fn binary_operation(module: &ir::Module, node: &ir::InstrNode) -> []u8 {
     if module.names.is(node.result.type_name, "bool") {
+        if module.names.is(node.args.get_or_panic(0).type_name, "bool") {
+            if module.names.is(node.operand, "!=") {
+                return "i32.ne";
+            }
+            return "i32.eq";
+        }
         return wasm_compare_op(&module.names, node.operand);
     }
     return wasm_binary_op(&module.names, node.operand);
+}
+
+/// Writes boolean negation and integer arithmetic negation, the Go
+/// `writeUnary`.
+fn (self: &var Emitter) write_unary(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: unary expects 1 arg");
+    }
+    let value = try self.arg_expr(module, node, 0);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    if module.names.is(node.operand, "!") {
+        if !module.names.is(node.result.type_name, "bool") {
+            expression.deinit(self.allocator);
+            return try self.fail0("wasm error: unary ! expects bool");
+        }
+        try expression.append_bytes(self.allocator, "(i32.eqz ");
+        try self.names.append_to(&var expression, value);
+        try expression.append_byte(self.allocator, cast<u8>(41));
+    } else {
+        if !module.names.is(node.operand, "-") {
+            expression.deinit(self.allocator);
+            return try self.fail_op(module, node, "wasm error: unsupported unary `%s`");
+        }
+        if !is_integer_type(&module.names, node.result.type_name) {
+            expression.deinit(self.allocator);
+            return try self.fail0("wasm error: unary - expects integer");
+        }
+        try expression.append_bytes(self.allocator, "(i64.sub (i64.const 0) ");
+        try self.names.append_to(&var expression, value);
+        try expression.append_byte(self.allocator, cast<u8>(41));
+    }
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
 }
 
 /// Writes the table index a function name holds. wasm has no address for a
@@ -237,7 +329,31 @@ fn (self: &var Emitter) write_func_addr(
     try fmt::append_i64(self.allocator, &var text, position);
     try text.append_byte(self.allocator, cast<u8>(41));
     let expr = try self.names.intern_owned(move text);
-    try self.set_value(module, node.result, expr, 0);
+    try self.set_value(module, node.result, expr);
+    return null;
+}
+
+/// Adapts one IR argument to its declared wasm call ABI. A CopyAddress scalar
+/// is stored in its planned frame cell and that address reaches the callee.
+fn (self: &var Emitter) write_call_arg(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    arg: ir::Value,
+    param: ir::Param,
+    index: i64,
+    out: &var ir::Name
+) -> !?diagnostic::Diagnostic {
+    let info = try self.value_of(module, arg);
+    if !try self.call_needs_copy_slot(module, param, arg) {
+        out.* = info.expr;
+        return null;
+    }
+    let slot = try self.call_copy_slot(module, node.result, index) orelse
+        return try self.fail0("wasm error: no frame slot for addressed call argument");
+    if try self.write_store_value(module, slot, 0, arg.type_name, info) |failed| {
+        return move failed;
+    }
+    out.* = slot;
     return null;
 }
 
@@ -250,24 +366,55 @@ fn (self: &var Emitter) write_indirect_call(
 ) -> !?diagnostic::Diagnostic {
     let callee_value = node.args.get(0) orelse
         return try self.fail0("wasm error: call.indirect expects a callee");
+    var result_slot = ir::empty_name();
+    if try self.is_memory_type(module, node.result.type_name) {
+        result_slot = try self.result_slot(module, node.result) orelse
+            return try self.fail0("wasm error: no frame slot for indirect call result");
+    }
     let signature = try self.intern_signature(module, node);
     var call = try string::from_bytes(self.allocator, "(call_indirect (type $sig");
     errdefer call.deinit(self.allocator);
     try fmt::append_i64(self.allocator, &var call, signature);
     try call.append_bytes(self.allocator, ")");
+    if !ir::is_empty(result_slot) {
+        try call.append_byte(self.allocator, cast<u8>(32));
+        try self.names.append_to(&var call, result_slot);
+    }
     var index = 1;
+    var param_index = 0;
     while node.args.get(index) |arg| {
         index = index + 1;
         try call.append_bytes(self.allocator, " ");
-        let info = try self.value_of(module, arg);
-        try self.names.append_to(&var call, info.expr);
+        var expr = ir::empty_name();
+        if node.call_params.get(param_index) |param| {
+            if try self.write_call_arg(
+                module,
+                node,
+                arg,
+                param,
+                param_index,
+                &var expr
+            ) |failed| {
+                call.deinit(self.allocator);
+                return move failed;
+            }
+        } else {
+            let info = try self.value_of(module, arg);
+            expr = info.expr;
+        }
+        param_index = param_index + 1;
+        try self.names.append_to(&var call, expr);
     }
     try call.append_bytes(self.allocator, " ");
     let callee = try self.value_of(module, callee_value);
     try self.names.append_to(&var call, callee.expr);
     try call.append_byte(self.allocator, cast<u8>(41));
-    if module.names.is(node.result.type_name, "void") {
+    if module.names.is(node.result.type_name, "void") or
+        try self.is_memory_type(module, node.result.type_name) {
         try self.line1("            %s", Arg::Owned(move call));
+        if try self.is_memory_type(module, node.result.type_name) {
+            try self.set_value(module, node.result, result_slot);
+        }
         return null;
     }
     let result_retained = ir::name_text(&module.names, node.result.name);
@@ -275,7 +422,7 @@ fn (self: &var Emitter) write_indirect_call(
     let symbol = try self.symbol_name_of(result_bytes);
     try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Owned(move call));
     let expr = try self.local_expr(result_bytes);
-    try self.set_value(module, node.result, expr, 0);
+    try self.set_value(module, node.result, expr);
     return null;
 }
 
@@ -284,25 +431,117 @@ fn (self: &var Emitter) write_call(
     module: &ir::Module,
     node: &ir::InstrNode
 ) -> !?diagnostic::Diagnostic {
+    if !ir::is_empty(node.extern_abi) {
+        if self.is_browser() and module.names.is(node.extern_abi, "browser") {
+            return self.write_browser_host_call(module, node);
+        }
+        let abi = try self.own(module, node.extern_abi);
+        var target = "wasm32-wasi";
+        if self.is_browser() {
+            target = "wasm32-browser";
+        }
+        return try self.fail2(
+            "wasm error: target %s does not support extern `%s`",
+            Arg::Lit(target),
+            Arg::Str(abi)
+        );
+    }
     if module.names.is(node.operand, "print") {
         return self.write_print(module, node);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::mem_page_allocator") {
+        if node.args.len() != 0 or !module.names.is(node.result.type_name, "Allocator") {
+            return try self.fail0(
+                "wasm error: mem_page_allocator expects no args -> Allocator"
+            );
+        }
+        let expr = try self.names.intern("(i32.const 0)");
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::mem_fixed_buffer") {
+        if node.args.len() != 1 or
+            !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+            !module.names.is(node.result.type_name, "Allocator") {
+            return try self.fail0("wasm error: mem_fixed_buffer expects []u8 -> Allocator");
+        }
+        let view = try self.arg_expr(module, node, 0);
+        var call = try string::from_bytes(self.allocator, "(call $__fixed_buffer ");
+        errdefer call.deinit(self.allocator);
+        try self.names.append_to(&var call, view);
+        try call.append_bytes(self.allocator, ")");
+        let expr = try self.names.intern_owned(move call);
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::mem_allocator_from") {
+        return self.write_allocator_from_call(module, node);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::io_blocking") {
+        if node.args.len() != 0 or !module.names.is(node.result.type_name, "Io") {
+            return try self.fail0("wasm error: io_blocking expects no args -> Io");
+        }
+        let expr = try self.names.intern("(i32.const 1)");
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    if module.names.is(node.operand, "std::internal::builtin::io_failing") {
+        if node.args.len() != 0 or !module.names.is(node.result.type_name, "Io") {
+            return try self.fail0("wasm error: io_failing expects no args -> Io");
+        }
+        let expr = try self.names.intern("(i32.const 2)");
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    var result_slot = ir::empty_name();
+    if try self.is_memory_type(module, node.result.type_name) {
+        result_slot = try self.result_slot(module, node.result) orelse
+            return try self.fail0("wasm error: no frame slot for call result");
     }
     var call = try string::from_bytes(self.allocator, "(call $");
     errdefer call.deinit(self.allocator);
     try module.names.append_to(&var call, node.operand);
     try call.append_bytes(self.allocator, " ");
+    var wrote = false;
+    if !ir::is_empty(result_slot) {
+        try self.names.append_to(&var call, result_slot);
+        wrote = true;
+    }
+    let callee = self.functions_by_name.get(ir::name_id(node.operand));
     var index = 0;
     while node.args.get(index) |arg| {
-        if index > 0 {
+        if wrote {
             try call.append_bytes(self.allocator, " ");
         }
+        wrote = true;
+        var expr = ir::empty_name();
+        var adapted = false;
+        if callee |function| {
+            if module.function_param(function, index) |param| {
+                if try self.write_call_arg(
+                    module,
+                    node,
+                    arg,
+                    param,
+                    index,
+                    &var expr
+                ) |failed| {
+                    call.deinit(self.allocator);
+                    return move failed;
+                }
+                adapted = true;
+            }
+        }
+        if !adapted {
+            let info = try self.value_of(module, arg);
+            expr = info.expr;
+        }
         index = index + 1;
-        let info = try self.value_of(module, arg);
-        try self.names.append_to(&var call, info.expr);
+        try self.names.append_to(&var call, expr);
     }
     try call.append_bytes(self.allocator, ")");
-    if module.names.is(node.result.type_name, "void") {
+    if module.names.is(node.result.type_name, "void") or
+        try self.is_memory_type(module, node.result.type_name) {
         try self.line1("            %s", Arg::Owned(move call));
+        if try self.is_memory_type(module, node.result.type_name) {
+            try self.set_value(module, node.result, result_slot);
+        }
         return null;
     }
     let result_retained = ir::name_text(&module.names, node.result.name);
@@ -310,11 +549,11 @@ fn (self: &var Emitter) write_call(
     let symbol = try self.symbol_name_of(result_bytes);
     try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Owned(move call));
     let expr = try self.local_expr(result_bytes);
-    try self.set_value(module, node.result, expr, 0);
+    try self.set_value(module, node.result, expr);
     return null;
 }
 
-/// Writes calls to WASI stdout helpers, the Go `writePrint`.
+/// Writes calls to the selected target's stdout helper, the Go `writePrint`.
 fn (self: &var Emitter) write_print(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -325,8 +564,19 @@ fn (self: &var Emitter) write_print(
     let arg = node.args.get(0) orelse ir::empty_value();
     let info = try self.value_of(module, arg);
     if module.names.is(arg.type_name, "[]u8") {
-        try self.line2("            (call $__write_line %s (i32.const %d))",
-            Arg::Str(info.expr), Arg::Int(info.length));
+        let length_address = try self.address_at(info.expr, 4);
+        var pointer = try string::from_bytes(self.allocator, "(i32.load ");
+        errdefer pointer.deinit(self.allocator);
+        try self.names.append_to(&var pointer, info.expr);
+        try pointer.append_byte(self.allocator, cast<u8>(41));
+        let pointer_expr = try self.names.intern_owned(move pointer);
+        var length = try string::from_bytes(self.allocator, "(i32.load ");
+        errdefer length.deinit(self.allocator);
+        try self.names.append_to(&var length, length_address);
+        try length.append_byte(self.allocator, cast<u8>(41));
+        let length_expr = try self.names.intern_owned(move length);
+        try self.line2("            (call $__write_line %s %s)",
+            Arg::Str(pointer_expr), Arg::Str(length_expr));
         return null;
     }
     if module.names.is(arg.type_name, "i64") {
@@ -335,6 +585,13 @@ fn (self: &var Emitter) write_print(
     }
     if module.names.is(arg.type_name, "bool") {
         try self.line1("            (call $__print_bool %s)", Arg::Str(info.expr));
+        return null;
+    }
+    if is_integer_type(&module.names, arg.type_name) {
+        try self.line1("            (call $__print_i64 %s)", Arg::Str(info.expr));
+        return null;
+    }
+    if try self.write_enum_print(module, arg.type_name, info.expr) {
         return null;
     }
     let type_name = try self.own(module, arg.type_name);
@@ -371,6 +628,10 @@ fn (self: &var Emitter) write_terminator(
         try self.write_branch(module, block, index);
         return null;
     }
+    if term.op == ir::TermOp::Unreachable {
+        try self.line("            (unreachable)");
+        return null;
+    }
     let spelling = term_op_spelling(term.op);
     return try self.fail("wasm error: unsupported terminator `%s`", Arg::Lit(spelling));
 }
@@ -393,12 +654,41 @@ fn (self: &var Emitter) write_return(
     value: ir::Value
 ) -> !?diagnostic::Diagnostic {
     if module.names.is(value.type_name, "void") {
+        try self.restore_frame(module);
         try self.line("            (br $exit)");
         return null;
     }
     let info = try self.value_of(module, value);
+    if try self.is_memory_type(module, value.type_name) {
+        let outcome = try self.type_layout(module, value.type_name);
+        match outcome {
+            Error(failed) => return move failed,
+            Layout(layout) => {
+                let result = try self.names.intern("(local.get $__kizu_result)");
+                try self.write_memory_copy(result, info.expr, layout.size);
+                try self.restore_frame(module);
+                try self.line("            (br $exit)");
+                return null;
+            },
+        }
+    }
+    try self.restore_frame(module);
     try self.line1("            (return %s)", Arg::Str(info.expr));
     return null;
+}
+
+/// Releases this invocation's fixed frame before any return.
+fn (self: &var Emitter) restore_frame(module: &ir::Module) -> !void {
+    if self.frame_size > 0 {
+        if self.uses_allocator_runtime(module) {
+            return self.line1(
+                "            (call $__stack_free (local.get $__kizu_frame) (i32.const %d))",
+                Arg::Int(self.frame_size)
+            );
+        }
+        return self.line("            (global.set $__stack_pointer (local.get $__kizu_frame))");
+    }
+    return;
 }
 
 /// Writes an unconditional dispatch jump, the Go `writeJump`.
@@ -480,7 +770,7 @@ fn (self: &var Emitter) write_local_copy(
     let symbol = try self.symbol_name_of(dst_bytes);
     try self.line3("%s(local.set %s %s)", Arg::Lit(indent), Arg::Str(symbol), Arg::Str(info.expr));
     let expr = try self.local_expr(dst_bytes);
-    return self.set_value(module, dst, expr, 0);
+    return self.set_value(module, dst, expr);
 }
 
 /// Maps bool constants to WebAssembly i32 constants, the Go `wasmBool`.

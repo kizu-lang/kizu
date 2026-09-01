@@ -5,7 +5,8 @@
 
 `SPEC.md` は言語の定義で、std のうち **compiler が知っている契約** —— capability
 としての `Allocator`、storage 型に対する borrow / ownership の検査規則、`test`
-宣言 —— だけを持ちます。ここに書くのはその上の API です。
+宣言、`std::meta` / `std::target` の compiler-defined form —— だけを持ちます。
+ここに書くのはその上の API です。
 
 境界は 1 問で決まります: **利用者が自分で同じものを書けるか**。書けるなら
 ここ、書けないなら SPEC です。`std::json` は `String` と `std::meta` の上の

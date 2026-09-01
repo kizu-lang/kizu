@@ -2,20 +2,22 @@ package ir
 
 import "testing"
 
-// TestKeepReachableFunctionsFollowsCallsAndCleanups verifies the executable
-// closure includes ordinary calls and deferred error-path calls.
-func TestKeepReachableFunctionsFollowsCallsAndCleanups(t *testing.T) {
+// TestKeepReachableFunctionsFollowsCallsAddressesAndCleanups verifies the
+// executable closure includes ordinary calls, function-pointer targets, and
+// deferred error-path calls.
+func TestKeepReachableFunctionsFollowsCallsAddressesAndCleanups(t *testing.T) {
 	module := &Module{Functions: []*Function{
-		functionWithOps("main", "call.live"),
+		functionWithOps("main", "call.live", "func.addr.callback"),
 		functionWithOps("live", "array.append"),
 		functionWithOps("cleanup", "call.external"),
+		functionWithOps("callback", "call.external"),
 		functionWithOps("dead", "call.cleanup"),
 	}}
 	module.Functions[1].Blocks[0].Instrs[0].Cleanups = []Cleanup{{Op: "call.cleanup"}}
 
 	KeepReachableFunctions(module, "main")
 
-	want := []string{"main", "live", "cleanup"}
+	want := []string{"main", "live", "cleanup", "callback"}
 	if len(module.Functions) != len(want) {
 		t.Fatalf("reachable function count = %d, want %d", len(module.Functions), len(want))
 	}
@@ -35,6 +37,60 @@ func TestKeepReachableFunctionsKeepsModuleWithoutRoot(t *testing.T) {
 
 	if len(module.Functions) != 1 || module.Functions[0].Name != "library" {
 		t.Fatalf("module without requested root changed: %#v", module.Functions)
+	}
+}
+
+// TestKeepReachableFunctionsRootsExplicitExports preserves callbacks the host
+// can enter even when main never calls them.
+func TestKeepReachableFunctionsRootsExplicitExports(t *testing.T) {
+	exported := functionWithOps("callback", "call.helper")
+	exported.ExportABI = "browser"
+	exported.ExportName = "callback"
+	module := &Module{Functions: []*Function{
+		functionWithOps("main"),
+		exported,
+		functionWithOps("helper"),
+		functionWithOps("dead"),
+	}}
+
+	KeepReachableFunctions(module, "main")
+
+	want := []string{"main", "callback", "helper"}
+	if len(module.Functions) != len(want) {
+		t.Fatalf("reachable function count = %d, want %d", len(module.Functions), len(want))
+	}
+	for index, name := range want {
+		if module.Functions[index].Name != name {
+			t.Fatalf("function %d = %q, want %q", index, module.Functions[index].Name, name)
+		}
+	}
+}
+
+// TestKeepTargetReachableFunctionsRootsOnlyMatchingExports prevents one
+// target's host adapter from entering another target's backend.
+func TestKeepTargetReachableFunctionsRootsOnlyMatchingExports(t *testing.T) {
+	browser := functionWithOps("browser_callback", "call.browser_helper")
+	browser.ExportABI = "browser"
+	other := functionWithOps("other_callback", "call.other_helper")
+	other.ExportABI = "other"
+	module := &Module{Functions: []*Function{
+		functionWithOps("main"),
+		browser,
+		functionWithOps("browser_helper"),
+		other,
+		functionWithOps("other_helper"),
+	}}
+
+	KeepTargetReachableFunctions(module, "browser", "main")
+
+	want := []string{"main", "browser_callback", "browser_helper"}
+	if len(module.Functions) != len(want) {
+		t.Fatalf("reachable function count = %d, want %d", len(module.Functions), len(want))
+	}
+	for index, name := range want {
+		if module.Functions[index].Name != name {
+			t.Fatalf("function %d = %q, want %q", index, module.Functions[index].Name, name)
+		}
 	}
 }
 

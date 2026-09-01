@@ -1,0 +1,47 @@
+// A user allocator may refuse a request without trapping. The callback is a
+// function-pointer call through the Allocator header; Array turns null into a
+// recoverable OutOfMemory value.
+
+import std::array;
+import std::mem;
+
+/// header is the runtime-owned prefix; attempts counts allocation callbacks.
+unsafe struct Refusing {
+    header: mem::AllocatorHeader,
+    attempts: i64,
+}
+
+/// No address is returned, so no writable range is promised.
+unsafe fn refuse_alloc(self: &var Refusing, size: i64) -> ?ptr<u8> {
+    // SAFETY: attempts is only an observation counter.
+    unsafe self.attempts = self.attempts + 1;
+    // SAFETY: address zero is the null pointer that reports refusal.
+    return unsafe ptr_from_int<ptr<u8>>(0);
+}
+
+/// A null-returning allocator never hands a pointer to this callback.
+unsafe fn refuse_free(self: &var Refusing, p: ptr<u8>, size: i64) -> void {
+    return;
+}
+
+fn main() -> !void {
+    // SAFETY: the empty header and zero counter establish Refusing's state.
+    var state = unsafe Refusing { header: mem::allocator_header(), attempts: 0 };
+    let allocator = mem::allocator_from<Refusing>(&var state, refuse_alloc, refuse_free);
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+
+    if values.append(allocator, 7) {
+        print(false);
+    } else |failure| {
+        print(failure == mem::Error::OutOfMemory);
+    }
+    print(state.attempts);
+    return;
+}
+
+// run
+// features: allocator user-allocator function-pointer unsafe raw-pointer error-union array
+// output:
+// true
+// 1

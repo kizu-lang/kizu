@@ -956,7 +956,7 @@ func canFollowSliceMarker(t token.Token) bool {
 // isTopLevelDeclStart reports whether t begins a top-level declaration.
 func isTopLevelDeclStart(t token.Token) bool {
 	switch t.Type {
-	case token.Import, token.Public, token.Extern,
+	case token.Import, token.Public, token.Extern, token.Export,
 		token.Function, token.Struct, token.Enum, token.Union, token.Contract, token.Impl:
 		return true
 	case token.Ident:

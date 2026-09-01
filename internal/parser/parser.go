@@ -75,6 +75,9 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Extern:
 			program.Decls = append(program.Decls, p.parseExternDecl())
 			p.nextToken()
+		case token.Export:
+			program.Decls = append(program.Decls, p.parseExportDecl())
+			p.nextToken()
 		case token.Struct:
 			program.Decls = append(program.Decls, p.parseStructDecl())
 			p.nextToken()
@@ -134,6 +137,8 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 		return p.parseUnsafeDecl(docs)
 	case token.Extern:
 		return p.parseExternDeclWithDoc(docs)
+	case token.Export:
+		return p.parseExportDeclWithDoc(docs)
 	case token.Struct:
 		return p.parseStructDeclWithDoc(docs)
 	case token.Enum:
@@ -221,6 +226,24 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	}
 	p.parseFunctionSignatureAfterFn(fn)
 	return fn
+}
+
+// parseExportDecl parses export "abi" function definitions.
+func (p *Parser) parseExportDecl() ast.Decl {
+	return p.parseExportDeclWithDoc(commentText(p.cur.DocComments))
+}
+
+// parseExportDeclWithDoc parses an explicitly host-visible function body.
+func (p *Parser) parseExportDeclWithDoc(docs string) ast.Decl {
+	fn := functionStub(false, docs)
+	if !p.expectPeek(token.String) {
+		return fn
+	}
+	fn.ExportABI = p.cur.Literal
+	if !p.expectPeek(token.Function) {
+		return fn
+	}
+	return p.parseFunctionAfterFn(fn)
 }
 
 // parseFunctionDecl parses a top-level function declaration.
@@ -2122,7 +2145,7 @@ func (p *Parser) errorf(format string, args ...any) {
 // errorExpectedDeclaration reports the accepted top-level declaration starts.
 func (p *Parser) errorExpectedDeclaration() {
 	p.errorf("expected declaration (%s), got %s",
-		"fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe",
+		"fn, test, import, struct, enum, union, contract, impl, extern, export, pub, or unsafe",
 		tokenDescription(p.cur),
 	)
 }

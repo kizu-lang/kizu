@@ -3,11 +3,11 @@ package wasm
 import (
 	"bytes"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 const (
@@ -16,19 +16,45 @@ const (
 	dataOffset    = 4096
 )
 
-// Emit formats a typed SSA IR module as WASI-compatible WebAssembly text.
+// Emit lowers a typed SSA IR module once and renders its WASI-compatible WAT.
 func Emit(module *ir.Module) (string, error) {
-	e := &emitter{
-		module:         module,
-		strings:        map[string]dataRef{},
-		values:         map[string]valueInfo{},
-		tableIndex:     map[string]int{},
-		signatureIndex: map[string]int{},
-	}
-	if err := e.emit(); err != nil {
+	lowered, err := Lower(module)
+	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(e.out.String(), "\n"), nil
+	return lowered.WAT(), nil
+}
+
+// Lower builds a WASI module for the existing default target.
+func Lower(module *ir.Module) (*Module, error) {
+	return LowerTarget(module, TargetWASI)
+}
+
+// LowerTarget builds the common WebAssembly module for one explicit host
+// boundary. Every renderer consumes this same lowered representation.
+func LowerTarget(module *ir.Module, target Target) (*Module, error) {
+	paramsByFunction := make(map[string][]ir.Param, len(module.Functions))
+	for _, fn := range module.Functions {
+		paramsByFunction[fn.Name] = fn.Params
+	}
+	e := &emitter{
+		module:             module,
+		target:             target,
+		types:              typ.NewTable(),
+		paramsByFunction:   paramsByFunction,
+		strings:            map[string]dataRef{},
+		enumTables:         map[string]nameTable{},
+		errorTable:         nameTable{},
+		values:             map[string]valueInfo{},
+		panicKinds:         map[string]bool{},
+		tableIndex:         map[string]int{},
+		signatureIndex:     map[string]int{},
+		browserImportIndex: map[string]int{},
+	}
+	if err := e.emit(); err != nil {
+		return nil, err
+	}
+	return parseModule(strings.TrimRight(e.out.String(), "\n"))
 }
 
 type dataRef struct {
@@ -37,16 +63,37 @@ type dataRef struct {
 }
 
 type valueInfo struct {
-	typ    string
-	expr   string
-	length int
+	expr string
 }
 
 type emitter struct {
-	module  *ir.Module
-	out     bytes.Buffer
-	strings map[string]dataRef
-	values  map[string]valueInfo
+	module           *ir.Module
+	target           Target
+	types            *typ.Table
+	paramsByFunction map[string][]ir.Param
+	out              bytes.Buffer
+	strings          map[string]dataRef
+	// dataOrder keeps assignment order when zero-length data shares an offset
+	// with the following segment. Sorting offsets alone cannot order that tie.
+	dataOrder []string
+	// enumTables are the linear-memory name tables for enum types this module
+	// prints. enumTableOrder preserves discovery order for deterministic WAT.
+	enumTables     map[string]nameTable
+	enumTableOrder []string
+	// errorTable is the global-code-indexed {pointer, length} table used only
+	// when a fallible main must report its uncaught error at the host boundary.
+	errorTable nameTable
+	values     map[string]valueInfo
+	// panicKinds contains only the checked runtime failures this module uses.
+	// Their data, proc_exit import, and helpers are omitted otherwise.
+	panicKinds map[string]bool
+	// dataEnd is the first byte after static data. Function frames start at its
+	// aligned address and grow through the stack allocator.
+	dataEnd int
+	frame   *frameLayout
+	// currentReturn is the Kizu return type of the function being written.
+	// error.try uses it to rebuild a propagated failure in caller storage.
+	currentReturn string
 	// table lists, in call order, the functions whose address is taken. wasm
 	// reaches a function pointer through a table index rather than an
 	// address, so `func.addr` lowers to the position a name holds here.
@@ -56,6 +103,10 @@ type emitter struct {
 	// in the order they were first needed.
 	signatures     []funcSignature
 	signatureIndex map[string]int
+	// browserImports are the reached explicit extern "browser" declarations,
+	// retained once per host name in deterministic IR discovery order.
+	browserImports     []*ir.Instr
+	browserImportIndex map[string]int
 }
 
 // funcSignature is one wasm function type a `call_indirect` names.
@@ -66,21 +117,30 @@ type funcSignature struct {
 
 // emit writes the module, runtime helpers, and user functions.
 func (e *emitter) emit() error {
+	if err := e.validateTarget(); err != nil {
+		return err
+	}
+	if err := e.collectBrowserImports(); err != nil {
+		return err
+	}
+	e.collectPanicKinds()
 	e.collectStrings()
 	if err := e.collectFunctionTable(); err != nil {
 		return err
 	}
 	e.writeHeader()
-	e.writeRuntime()
+	if err := e.writeRuntime(); err != nil {
+		return err
+	}
 	for _, fn := range e.module.Functions {
 		if err := e.writeFunction(fn); err != nil {
 			return err
 		}
 	}
-	e.out.WriteString("  (func $_start (export \"_start\")\n")
-	e.out.WriteString("    (call $main))\n")
-	e.out.WriteString(")\n")
-	return nil
+	if err := e.writeBrowserExports(); err != nil {
+		return err
+	}
+	return e.writeStart()
 }
 
 // collectFunctionTable walks the module for the addresses it takes and the
@@ -109,6 +169,11 @@ func (e *emitter) collectCallableInstr(instr *ir.Instr) error {
 		}
 		return nil
 	}
+	if instr.Op == "call.std::internal::builtin::mem_allocator_from" {
+		e.internFuncSignature(userAllocatorAllocSignature())
+		e.internFuncSignature(userAllocatorReleaseSignature())
+		return nil
+	}
 	if instr.Op != "call.indirect" {
 		return nil
 	}
@@ -123,12 +188,20 @@ func (e *emitter) collectCallableInstr(instr *ir.Instr) error {
 // returns its index.
 func (e *emitter) internSignature(instr *ir.Instr) int {
 	sig := funcSignature{}
+	if e.isMemoryType(instr.Result.Type) {
+		sig.params = append(sig.params, "i32")
+	}
 	for _, arg := range instr.Args[1:] {
-		sig.params = append(sig.params, wasmType(arg.Type))
+		sig.params = append(sig.params, e.wasmType(arg.Type))
 	}
-	if instr.Result.Type != "void" {
-		sig.result = wasmType(instr.Result.Type)
+	if instr.Result.Type != "void" && !e.isMemoryType(instr.Result.Type) {
+		sig.result = e.wasmType(instr.Result.Type)
 	}
+	return e.internFuncSignature(sig)
+}
+
+// internFuncSignature records one already-lowered wasm function shape.
+func (e *emitter) internFuncSignature(sig funcSignature) int {
 	key := strings.Join(sig.params, ",") + "->" + sig.result
 	if index, seen := e.signatureIndex[key]; seen {
 		return index
@@ -145,13 +218,27 @@ func (e *emitter) collectStrings() {
 	for _, lit := range e.sortedStringLiteralsByDiscovery() {
 		unquoted, _ := strconv.Unquote(lit)
 		e.strings[lit] = dataRef{offset: offset, length: len(unquoted)}
+		e.dataOrder = append(e.dataOrder, lit)
 		offset += len(unquoted)
 	}
 	e.strings["true"] = dataRef{offset: offset, length: 4}
+	e.dataOrder = append(e.dataOrder, "true")
 	offset += 4
 	e.strings["false"] = dataRef{offset: offset, length: 5}
+	e.dataOrder = append(e.dataOrder, "false")
 	offset += 5
 	e.strings["newline"] = dataRef{offset: offset, length: 1}
+	e.dataOrder = append(e.dataOrder, "newline")
+	offset++
+	for _, data := range e.usedPanicData() {
+		e.strings[data.key] = dataRef{offset: offset, length: len(data.text)}
+		e.dataOrder = append(e.dataOrder, data.key)
+		offset += len(data.text)
+	}
+	offset = e.collectMainErrorStrings(offset)
+	offset = e.collectEnumPrintData(offset)
+	offset = e.collectMainErrorTable(offset)
+	e.dataEnd = alignUp(offset, 8)
 }
 
 // sortedStringLiteralsByDiscovery returns constants in deterministic IR order.
@@ -175,14 +262,44 @@ func (e *emitter) sortedStringLiteralsByDiscovery() []string {
 // writeHeader writes imports, memory, and data segments.
 func (e *emitter) writeHeader() {
 	e.out.WriteString("(module\n")
-	e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
-	e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
-	e.out.WriteString("  (memory (export \"memory\") 1)\n")
+	if e.target.isBrowser() {
+		e.out.WriteString("  (import \"kizu\" \"write\"\n")
+		e.out.WriteString("    (func $__kizu_write (param i32 i32 i32) (result i32)))\n")
+		e.writeBrowserImports()
+	} else {
+		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
+		e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
+		if e.needsProcExit() {
+			e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"proc_exit\"\n")
+			e.out.WriteString("    (func $__wasi_proc_exit (param i32)))\n")
+		}
+		e.writeProcessImports()
+		e.writeFSImports()
+	}
+	pages := (e.dataEnd + 65535) / 65536
+	if pages < 1 {
+		pages = 1
+	}
+	fmt.Fprintf(&e.out, "  (memory (export \"memory\") %d)\n", pages)
+	if e.usesAllocatorRuntime() {
+		fmt.Fprintf(&e.out, "  (global $__heap_end (mut i32) (i32.const %d))\n", e.dataEnd)
+		e.out.WriteString("  (global $__free_head (mut i32) (i32.const 0))\n")
+	} else {
+		fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
+	}
+	if e.usesArenaOriginRuntime() {
+		e.out.WriteString("  (global $__arena_instances (mut i64) (i64.const 0))\n")
+	}
+	if !e.target.isBrowser() {
+		e.writeProcessGlobals()
+	}
 	e.writeFunctionTable()
-	for _, lit := range e.sortedDataLiterals() {
+	for _, lit := range e.dataOrder {
 		ref := e.strings[lit]
 		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", ref.offset, dataLiteral(lit))
 	}
+	e.writeEnumPrintTables()
+	e.writeMainErrorTable()
 	e.out.WriteByte('\n')
 }
 
@@ -212,20 +329,17 @@ func (e *emitter) writeFunctionTable() {
 	e.out.WriteString(")\n")
 }
 
-// sortedDataLiterals returns memory data in ascending offset order.
-func (e *emitter) sortedDataLiterals() []string {
-	literals := make([]string, 0, len(e.strings))
-	for lit := range e.strings {
-		literals = append(literals, lit)
-	}
-	sort.Slice(literals, func(i int, j int) bool {
-		return e.strings[literals[i]].offset < e.strings[literals[j]].offset
-	})
-	return literals
-}
-
 // dataLiteral converts a map key to WAT data text.
 func dataLiteral(key string) string {
+	if text, ok := panicDataText(key); ok {
+		return stringBytes(text)
+	}
+	if text, ok := strings.CutPrefix(key, enumPrintDataPrefix); ok {
+		return stringBytes(text)
+	}
+	if text, ok := strings.CutPrefix(key, errorNameDataPrefix); ok {
+		return stringBytes(text)
+	}
 	switch key {
 	case "newline":
 		return "\\0a"
@@ -237,28 +351,105 @@ func dataLiteral(key string) string {
 	}
 }
 
-// writeRuntime writes the minimal WASI stdout helpers.
-func (e *emitter) writeRuntime() {
+// writeRuntime writes target output and the checked-failure helpers the module
+// reaches.
+func (e *emitter) writeRuntime() error {
+	if e.usesAllocatorRuntime() {
+		e.writeAllocatorRuntime()
+	}
+	if e.usesMapRuntime() {
+		e.writeMapRuntime()
+	}
+	if e.usesArenaOriginRuntime() {
+		e.writeArenaRuntime()
+	}
+	e.writeStackAllocHelper()
+	e.writeBytesHelper()
 	e.writeLineHelper()
 	e.writeBoolHelper()
+	e.writeIntValueHelper()
 	e.writeIntHelper()
+	if len(e.enumTableOrder) > 0 {
+		e.writeEnumPrintHelper()
+	}
+	if e.usesByteEqualityRuntime() {
+		e.writeByteEqualityHelper()
+	}
+	if err := e.writeIORuntime(); err != nil {
+		return err
+	}
+	if err := e.writeFSRuntime(); err != nil {
+		return err
+	}
+	if len(e.panicKinds) > 0 {
+		e.writePanicRuntime()
+	}
+	if e.needsMainExitBoundary() {
+		e.writeMainErrorRuntime()
+	}
+	return e.writeProcessRuntime()
+}
+
+// writeStackAllocHelper reserves one recursive-safe linear-memory frame,
+// growing memory by whole pages before a store can cross its end.
+func (e *emitter) writeStackAllocHelper() {
+	if e.usesAllocatorRuntime() {
+		e.out.WriteString("  (func $__stack_alloc (param $size i32) (result i32)\n")
+		e.out.WriteString("    (local $base i32)\n")
+		e.out.WriteString("    (local.set $base (call $__page_alloc (local.get $size)))\n")
+		e.out.WriteString("    (if (i32.eqz (local.get $base)) (then (unreachable)))\n")
+		e.out.WriteString("    (local.get $base)\n")
+		e.out.WriteString("  )\n\n")
+		e.out.WriteString("  (func $__stack_free (param $base i32) (param $size i32)\n")
+		e.out.WriteString("    (call $__page_free (local.get $base) (local.get $size))\n")
+		e.out.WriteString("  )\n\n")
+		return
+	}
+	e.out.WriteString("  (func $__stack_alloc (param $size i32) (result i32)\n")
+	e.out.WriteString("    (local $base i32) (local $end i32) (local $pages i32)\n")
+	e.out.WriteString("    (local.set $base (global.get $__stack_pointer))\n")
+	e.out.WriteString("    (local.set $end (i32.add (local.get $base) (local.get $size)))\n")
+	e.out.WriteString("    (if (i32.lt_u (local.get $end) (local.get $base)) (then (unreachable)))\n")
+	e.out.WriteString("    (if (i32.gt_u (local.get $end)\n")
+	e.out.WriteString("        (i32.shl (memory.size) (i32.const 16)))\n")
+	e.out.WriteString("      (then\n")
+	e.out.WriteString("        (local.set $pages\n")
+	e.out.WriteString("          (i32.sub\n")
+	e.out.WriteString("            (i32.shr_u (i32.add (local.get $end) " +
+		"(i32.const 65535)) (i32.const 16))\n")
+	e.out.WriteString("            (memory.size)))\n")
+	e.out.WriteString("        (if (i32.eq (memory.grow (local.get $pages)) (i32.const -1))\n")
+	e.out.WriteString("          (then (unreachable)))))\n")
+	e.out.WriteString("    (global.set $__stack_pointer (local.get $end))\n")
+	e.out.WriteString("    (local.get $base)\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeBytesHelper writes one byte range to a selected target stream.
+func (e *emitter) writeBytesHelper() {
+	e.out.WriteString("  (func $__write_bytes (param $fd i32) (param $ptr i32) (param $len i32)\n")
+	if e.target.isBrowser() {
+		e.out.WriteString("    (drop (call $__kizu_write\n")
+		e.out.WriteString("      (local.get $fd) (local.get $ptr) (local.get $len)))\n")
+		e.out.WriteString("  )\n\n")
+		return
+	}
+	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $ptr))\n", scratchOffset)
+	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $len))\n", scratchOffset+4)
+	e.out.WriteString("    (drop (call $__wasi_fd_write\n")
+	fmt.Fprintf(&e.out, "      (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))\n",
+		scratchOffset, scratchOffset+16)
+	e.out.WriteString("  )\n\n")
 }
 
 // writeLineHelper writes a buffer and a trailing newline to stdout.
 func (e *emitter) writeLineHelper() {
 	newline := e.strings["newline"]
-	fmt.Fprintf(&e.out, "  (func $__write_line (param $ptr i32) (param $len i32)\n")
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $ptr))\n", scratchOffset)
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $len))\n", scratchOffset+4)
-	fmt.Fprintf(&e.out, "    (drop (call $__wasi_fd_write\n")
-	fmt.Fprintf(&e.out, "      (i32.const 1) (i32.const %d) (i32.const 1) (i32.const %d)))\n",
-		scratchOffset, scratchOffset+16)
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) ", scratchOffset)
-	fmt.Fprintf(&e.out, "(i32.const %d))\n", newline.offset)
-	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (i32.const 1))\n", scratchOffset+4)
-	fmt.Fprintf(&e.out, "    (drop (call $__wasi_fd_write\n")
-	fmt.Fprintf(&e.out, "      (i32.const 1) (i32.const %d) (i32.const 1) (i32.const %d)))\n",
-		scratchOffset, scratchOffset+16)
+	e.out.WriteString("  (func $__write_line (param $ptr i32) (param $len i32)\n")
+	e.out.WriteString("    (call $__write_bytes (i32.const 1) (local.get $ptr) (local.get $len))\n")
+	fmt.Fprintf(&e.out,
+		"    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))\n",
+		newline.offset)
 	e.out.WriteString("  )\n\n")
 }
 
@@ -275,16 +466,16 @@ func (e *emitter) writeBoolHelper() {
 	e.out.WriteString("  )\n\n")
 }
 
-// writeIntHelper writes signed i64 values as decimal text.
-func (e *emitter) writeIntHelper() {
-	e.out.WriteString("  (func $__print_i64 (param $value i64)\n")
+// writeIntValueHelper writes one signed i64 without a trailing newline.
+func (e *emitter) writeIntValueHelper() {
+	e.out.WriteString("  (func $__write_i64 (param $fd i32) (param $value i64)\n")
 	e.out.WriteString("    (local $n i64) (local $pos i32) (local $negative i32)\n")
 	e.out.WriteString("    (local.set $n (local.get $value))\n")
 	e.out.WriteString("    (local.set $pos (i32.const 192))\n")
 	e.out.WriteString("    (if (i64.eqz (local.get $n))\n")
 	e.out.WriteString("      (then\n")
 	e.out.WriteString("        (i32.store8 (i32.const 191) (i32.const 48))\n")
-	e.out.WriteString("        (call $__write_line (i32.const 191) (i32.const 1))\n")
+	e.out.WriteString("        (call $__write_bytes (local.get $fd) (i32.const 191) (i32.const 1))\n")
 	e.out.WriteString("        (return)))\n")
 	e.out.WriteString("    (if (i64.lt_s (local.get $n) (i64.const 0))\n")
 	e.out.WriteString("      (then\n")
@@ -295,9 +486,20 @@ func (e *emitter) writeIntHelper() {
 	e.out.WriteString("      (then\n")
 	e.out.WriteString("        (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))\n")
 	e.out.WriteString("        (i32.store8 (local.get $pos) (i32.const 45))))\n")
-	fmt.Fprintf(&e.out, "    (call $__write_line (local.get $pos) ")
+	fmt.Fprintf(&e.out, "    (call $__write_bytes (local.get $fd) (local.get $pos) ")
 	fmt.Fprintf(&e.out, "(i32.sub (i32.const %d) ", intBufferEnd)
 	e.out.WriteString("(local.get $pos)))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeIntHelper writes signed i64 values as one stdout line.
+func (e *emitter) writeIntHelper() {
+	newline := e.strings["newline"]
+	e.out.WriteString("  (func $__print_i64 (param $value i64)\n")
+	e.out.WriteString("    (call $__write_i64 (i32.const 1) (local.get $value))\n")
+	fmt.Fprintf(&e.out,
+		"    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))\n",
+		newline.offset)
 	e.out.WriteString("  )\n\n")
 }
 
@@ -316,10 +518,29 @@ func (e *emitter) writeIntLoop() {
 // writeFunction writes one user function with a dispatch loop for blocks.
 func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
+	e.currentReturn = fn.Return
+	defer func() { e.currentReturn = "" }()
+	frame, err := e.planFrame(fn)
+	if err != nil {
+		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
+	}
+	e.frame = frame
 	params := e.functionParams(fn)
-	fmt.Fprintf(&e.out, "  (func $%s %s%s\n", fn.Name, params, functionResult(fn.Return))
+	if err := e.registerFrameValues(fn); err != nil {
+		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
+	}
+	fmt.Fprintf(&e.out, "  (func $%s %s%s\n", fn.Name, params, e.functionResult(fn.Return))
 	e.writeLocals(fn)
+	if frame.size > 0 {
+		e.out.WriteString("    (local $__kizu_frame i32)\n")
+	}
 	e.out.WriteString("    (local $pc i32)\n")
+	if frame.size > 0 {
+		fmt.Fprintf(&e.out,
+			"    (local.set $__kizu_frame (call $__stack_alloc (i32.const %d)))\n",
+			frame.size,
+		)
+	}
 	e.out.WriteString("    (block $exit\n")
 	e.out.WriteString("      (loop $dispatch\n")
 	index := blockIndexes(fn)
@@ -331,30 +552,39 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.out.WriteString("        (br $exit)\n")
 	e.out.WriteString("      )\n")
 	e.out.WriteString("    )\n")
-	if fn.Return != "void" {
+	if frame.size > 0 {
+		if !e.usesAllocatorRuntime() {
+			e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_frame))\n")
+		}
+	}
+	if fn.Return != "void" && !e.isMemoryType(fn.Return) {
 		e.out.WriteString("    (unreachable)\n")
 	}
 	e.out.WriteString("  )\n\n")
+	e.frame = nil
 	return nil
 }
 
 // functionParams writes WebAssembly parameters and records their values.
 func (e *emitter) functionParams(fn *ir.Function) string {
-	params := make([]string, 0, len(fn.Params))
+	params := make([]string, 0, len(fn.Params)+1)
+	if e.isMemoryType(fn.Return) {
+		params = append(params, "(param $__kizu_result i32)")
+	}
 	for _, param := range fn.Params {
 		name := symbolName(param.Name)
-		params = append(params, fmt.Sprintf("(param %s %s)", name, wasmType(param.Type)))
-		e.values[param.Name] = valueInfo{typ: param.Type, expr: fmt.Sprintf("(local.get %s)", name)}
+		params = append(params, fmt.Sprintf("(param %s %s)", name, e.wasmType(param.Type)))
+		e.values[param.Name] = valueInfo{expr: fmt.Sprintf("(local.get %s)", name)}
 	}
 	return strings.Join(params, " ")
 }
 
 // functionResult returns the WebAssembly result declaration.
-func functionResult(typ string) string {
-	if typ == "void" {
+func (e *emitter) functionResult(typ string) string {
+	if typ == "void" || e.isMemoryType(typ) {
 		return ""
 	}
-	return " (result " + wasmType(typ) + ")"
+	return " (result " + e.wasmType(typ) + ")"
 }
 
 // writeLocals declares SSA locals that must live across blocks.
@@ -363,7 +593,7 @@ func (e *emitter) writeLocals(fn *ir.Function) {
 		for _, instr := range block.Instrs {
 			if needsLocal(instr) {
 				fmt.Fprintf(&e.out, "    (local %s %s)\n",
-					symbolName(instr.Result.Name), wasmType(instr.Result.Type))
+					symbolName(instr.Result.Name), e.wasmType(instr.Result.Type))
 			}
 		}
 	}

@@ -113,10 +113,13 @@ fn (self: &var Emitter) write_arena_new(module: &ir::Module, node: &ir::InstrNod
 /// Declares the arena header and the counter that hands out the number one
 /// instance's handles are told apart by, the Go `writeArenaRuntimeDecls`.
 fn (self: &var Emitter) write_arena_runtime_decls(module: &ir::Module) -> !void {
-    if !self.uses_arena_runtime(module) {
+    if !self.uses_arena_header(module) {
         return;
     }
     try self.line1("%s = type { ptr, i64, i64, i64 }", Arg::Lit(arena_header_type()));
+    if !self.uses_arena_runtime(module) {
+        return self.line("");
+    }
     try self.line2(
         "%s = private unnamed_addr global %s zeroinitializer",
         Arg::Lit(arena_empty_global()), Arg::Lit(arena_header_type())
@@ -125,7 +128,17 @@ fn (self: &var Emitter) write_arena_runtime_decls(module: &ir::Module) -> !void 
     return self.line("");
 }
 
-/// Reports whether this module names an arena at all, the Go
+/// Reports whether emitted values or aggregate definitions need the concrete
+/// Arena header independently of hosted-runtime calls, the Go
+/// `usesArenaHeader`.
+fn (self: &Emitter) uses_arena_header(module: &ir::Module) -> bool {
+    if self.uses_arena_runtime(module) {
+        return true;
+    }
+    return module_has_runtime_header_type(module, "std::arena::Arena<");
+}
+
+/// Reports whether this module calls the hosted Arena runtime, the Go
 /// `usesArenaRuntime`.
 fn (self: &Emitter) uses_arena_runtime(module: &ir::Module) -> bool {
     var index = 0;
@@ -412,4 +425,3 @@ fn (self: &var Emitter) write_arena_deinit(module: &ir::Module, node: &ir::Instr
     }
     return self.write_container_storage_release(module, node, "arena.deinit");
 }
-

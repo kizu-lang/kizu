@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -21,6 +22,12 @@ type Case struct {
 	MustFail bool
 	// Args are the arguments the directive line passes after the path.
 	Args []string
+	// Env contains explicit NAME=value host bindings. A case owns only the
+	// variables it names; runners must not smuggle process-global test state in.
+	Env []string
+	// Dirs contains repository-relative host directories the program needs.
+	// Wasm runners expose only these declared preopens to the guest.
+	Dirs []string
 	// Stdout is what the program must print. It is nil when the directive
 	// produces no output, which is not the same as printing nothing.
 	Stdout    *string
@@ -88,6 +95,10 @@ func parse(path string, lines []string) (Case, error) {
 		switch key {
 		case "features":
 			entry.Features = strings.Fields(value)
+		case "env":
+			entry.Env = append(entry.Env, value)
+		case "dir":
+			entry.Dirs = append(entry.Dirs, value)
 		case "pending":
 			entry.Pending = value
 		case "error":
@@ -110,6 +121,54 @@ func parse(path string, lines []string) (Case, error) {
 
 // validate rejects a block that does not say enough to be checked.
 func validate(entry Case) error {
+	if err := validateEnv(entry.Env); err != nil {
+		return err
+	}
+	if err := validateDirs(entry.Dirs); err != nil {
+		return err
+	}
+	return validatePromise(entry)
+}
+
+// validateEnv checks repeatable environment bindings independently from the
+// command's output promise.
+func validateEnv(bindings []string) error {
+	seenEnv := map[string]bool{}
+	for _, binding := range bindings {
+		name, _, ok := strings.Cut(binding, "=")
+		if !ok || name == "" || strings.ContainsRune(binding, '\x00') {
+			return fmt.Errorf("`env:` must be `NAME=value`, got `%s`", binding)
+		}
+		if seenEnv[name] {
+			return fmt.Errorf("`env:` repeats `%s`", name)
+		}
+		seenEnv[name] = true
+	}
+	return nil
+}
+
+// validateDirs keeps filesystem capabilities reproducible and inside the
+// repository instead of accepting Wasmtime-specific guest mappings.
+func validateDirs(dirs []string) error {
+	seenDirs := map[string]bool{}
+	for _, dir := range dirs {
+		clean := filepath.Clean(dir)
+		if dir == "" || strings.ContainsRune(dir, '\x00') || filepath.IsAbs(dir) ||
+			clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) ||
+			strings.Contains(dir, "::") {
+			return fmt.Errorf("`dir:` must name a repository-relative directory")
+		}
+		if seenDirs[dir] {
+			return fmt.Errorf("`dir:` repeats `%s`", dir)
+		}
+		seenDirs[dir] = true
+	}
+	return nil
+}
+
+// validatePromise checks directive-specific features, failure text, and
+// observable output after host capability metadata has been validated.
+func validatePromise(entry Case) error {
 	if len(entry.Features) == 0 {
 		return fmt.Errorf("`features:` must not be empty")
 	}

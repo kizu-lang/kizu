@@ -35,6 +35,15 @@ allocator と上限は caller が明示します。`read_stdin_into` は既存�
 `std::io::Error` は `WriteFailed`、`ReadFailed`、`OutOfMemory`、`IoFailing`、
 `LimitExceeded`、`StackProtectionFailed` を持ちます。
 
+`wasm32-browser` では `blocking()` と stdout / stderr write を JavaScript host callback が
+提供します。callback が拒否すれば `WriteFailed` です。stdin と evented `Io` は host が
+提供しないため build 時に target 非対応として拒否します。byte ownership と adapter は
+[`docs/wasm-browser.md`](../wasm-browser.md) にあります。
+
+`wasm32-wasi` では blocking stdin / stdout / stderr を WASI Preview1 が提供します。
+evented `Io` と、その待機に必要な coroutine runtime は提供しないため、到達する program は
+build 時に target 非対応として拒否します。
+
 ## evented な Io
 
 `blocking()` は「戻ってこないこと」で待ちます。1 本の read が終わるまで、その

@@ -56,7 +56,7 @@ func TestSelfhostBehavior(t *testing.T) {
 	selfhost := sharedSelfhost(t)
 	runConformanceCases(t, selected, func(t *testing.T, tt conformance.Case) (string, error) {
 		result := runNativeCLIAtEnv(
-			t, root, []string{"KIZU_TEST_ENV=env-ok"}, selfhost, caseArgs(tt)...,
+			t, root, tt.Env, selfhost, caseArgs(tt)...,
 		)
 		result.output.stderr = selfhostNativeStderr(result.output.stderr)
 		out := result.output.stdout + result.output.stderr
@@ -168,7 +168,7 @@ func runShippingConformanceCommand(_ *testing.T, tt conformance.Case) (string, e
 	case "parse":
 		return runReferenceParse(tt.Path)
 	default:
-		return runKizu(caseArgs(tt)...)
+		return runKizuEnv(tt.Env, caseArgs(tt)...)
 	}
 }
 
@@ -182,7 +182,7 @@ func runReferenceCheck(path string) (string, error) {
 	conformanceProcessMu.Lock()
 	defer conformanceProcessMu.Unlock()
 
-	return runWithCapture(func() error {
+	return runWithCapture(nil, func() error {
 		return checkFile(path)
 	})
 }
@@ -192,38 +192,38 @@ func runReferenceParse(path string) (string, error) {
 	conformanceProcessMu.Lock()
 	defer conformanceProcessMu.Unlock()
 
-	return runWithCapture(func() error {
+	return runWithCapture(nil, func() error {
 		return parseFile(path)
 	})
 }
 
-// runKizu runs the Kizu CLI from the repository root.
-func runKizu(args ...string) (string, error) {
+// runKizuEnv runs the Kizu CLI with the host bindings the case declares.
+func runKizuEnv(env []string, args ...string) (string, error) {
 	conformanceProcessMu.Lock()
 	defer conformanceProcessMu.Unlock()
 
 	if len(args) == 0 {
-		return runDispatchWithCapture("", nil)
+		return runDispatchWithCapture(env, "", nil)
 	}
-	return runDispatchWithCapture(args[0], args[1:])
+	return runDispatchWithCapture(env, args[0], args[1:])
 }
 
 // runDispatchWithCapture runs dispatch while capturing process-global output.
-func runDispatchWithCapture(command string, args []string) (string, error) {
-	return runWithCapture(func() error {
+func runDispatchWithCapture(env []string, command string, args []string) (string, error) {
+	return runWithCapture(env, func() error {
 		return dispatch(command, args)
 	})
 }
 
 // runWithCapture runs one in-process command while capturing process-global output.
-func runWithCapture(run func() error) (string, error) {
+func runWithCapture(env []string, run func() error) (string, error) {
 	oldStdout := os.Stdout
 	oldStderr := os.Stderr
 	oldWd, wdErr := os.Getwd()
 	if wdErr != nil {
 		return "", wdErr
 	}
-	envValue, envWasSet := os.LookupEnv("KIZU_TEST_ENV")
+	restore := applyConformanceEnv(env)
 
 	reader, writer, pipeErr := os.Pipe()
 	if pipeErr != nil {
@@ -239,7 +239,6 @@ func runWithCapture(run func() error) (string, error) {
 
 	os.Stdout = writer
 	os.Stderr = writer
-	_ = os.Setenv("KIZU_TEST_ENV", "env-ok")
 	chdirErr := os.Chdir(repoRoot)
 
 	var err error
@@ -255,9 +254,31 @@ func runWithCapture(run func() error) (string, error) {
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
 	_ = os.Chdir(oldWd)
-	restoreEnv("KIZU_TEST_ENV", envValue, envWasSet)
+	restore()
 	_ = writer.Close()
 	return <-output, err
+}
+
+// applyConformanceEnv applies explicit case bindings and returns their restore.
+func applyConformanceEnv(env []string) func() {
+	type previous struct {
+		name   string
+		value  string
+		wasSet bool
+	}
+	values := make([]previous, 0, len(env))
+	for _, binding := range env {
+		name, value, _ := strings.Cut(binding, "=")
+		old, wasSet := os.LookupEnv(name)
+		values = append(values, previous{name: name, value: old, wasSet: wasSet})
+		_ = os.Setenv(name, value)
+	}
+	return func() {
+		for index := len(values) - 1; index >= 0; index-- {
+			value := values[index]
+			restoreEnv(value.name, value.value, value.wasSet)
+		}
+	}
 }
 
 // restoreEnv restores an environment variable after an in-process CLI run.

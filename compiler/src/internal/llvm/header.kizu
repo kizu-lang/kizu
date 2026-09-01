@@ -741,6 +741,54 @@ fn (self: &var Emitter) external_call_decls(allocator: Allocator, module: &ir::M
             while block_node.instrs.get(instr_index) |instr| {
                 instr_index = instr_index + 1;
                 let instr_node = module.instrs.at(instr.node);
+                var cleanup_index = 0;
+                while instr_node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if !module.names.is(cleanup.extern_abi, "c") {
+                        continue;
+                    }
+                    var cleanup_instr = module.blank_instr(
+                        ir::Value {
+                            name: ir::empty_name(),
+                            type_name: self.void_name
+                        },
+                        cleanup.op,
+                        cleanup.operand,
+                        ir::empty_name()
+                    );
+                    defer cleanup_instr.deinit(self.allocator);
+                    cleanup_instr.extern_abi = cleanup.extern_abi;
+                    cleanup_instr.extern_name = cleanup.extern_name;
+                    try cleanup_instr.args.append(self.allocator, cleanup.arg);
+                    if !ir::is_empty(cleanup.allocator.name) {
+                        try cleanup_instr.args.append(
+                            self.allocator, cleanup.allocator
+                        );
+                    }
+                    let decl = try self.external_call_decl(
+                        module, cleanup.extern_name, &cleanup_instr
+                    );
+                    let decl_name = try self.names.intern_owned(move decl);
+                    let callee_text = ir::name_text(
+                        &module.names, cleanup.extern_name
+                    );
+                    let callee_bytes = callee_text.as_bytes();
+                    try seen.insert(allocator, callee_bytes, decl_name);
+                }
+                if !ir::is_empty(instr_node.extern_abi) {
+                    if module.names.is(instr_node.extern_abi, "c") {
+                        let decl = try self.external_call_decl(
+                            module, instr_node.extern_name, instr_node
+                        );
+                        let decl_name = try self.names.intern_owned(move decl);
+                        let callee_text = ir::name_text(
+                            &module.names, instr_node.extern_name
+                        );
+                        let callee_bytes = callee_text.as_bytes();
+                        try seen.insert(allocator, callee_bytes, decl_name);
+                    }
+                    continue;
+                }
                 if instr_node.op != ir::Op::Call {
                     continue;
                 }

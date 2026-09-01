@@ -1,0 +1,186 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+
+// Mechanical port of internal/wasm/target.go: host capabilities are selected
+// before the common module is written, and unsupported host APIs fail at build
+// time instead of leaking an unresolved call into emitted WebAssembly.
+
+fn (self: &Emitter) is_browser() -> bool {
+    return self.target == WasmTarget::Browser;
+}
+
+fn (self: &var Emitter) validate_target(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if try self.validate_foreign_boundary(module) |failed| {
+        return move failed;
+    }
+    if self.is_browser() and self.uses_fs_runtime(module) {
+        return try self.target_capability_failure("std::fs");
+    }
+    if try self.validate_runtime_capabilities(module) |failed| {
+        return move failed;
+    }
+    if !self.is_browser() {
+        return self.validate_process_target(module);
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::io_read_stdin_into") {
+        return try self.target_capability_failure("std::io::read_stdin");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_arg_count") {
+        return try self.target_capability_failure("std::process::arg_count");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_arg") {
+        return try self.target_capability_failure("std::process::arg");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_env") {
+        return try self.target_capability_failure("std::process::env");
+    }
+    if self.uses_builtin_call(
+        module,
+        "std::internal::builtin::process_executable_path_into"
+    ) {
+        return try self.target_capability_failure("std::process::executable_path");
+    }
+    if self.uses_builtin_call(
+        module,
+        "std::internal::builtin::process_monotonic_millis"
+    ) {
+        return try self.target_capability_failure("std::process::monotonic_millis");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_unix_millis") {
+        return try self.target_capability_failure("std::process::unix_millis");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_spawn_wait8") {
+        return try self.target_capability_failure("std::process::spawn_wait8");
+    }
+    return null;
+}
+
+fn (self: &var Emitter) validate_runtime_capabilities(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if self.uses_evented_io(module) {
+        return try self.target_capability_failure("evented std::io");
+    }
+    if self.uses_coro(module) {
+        return try self.target_capability_failure("std::coro");
+    }
+    if self.uses_net(module) {
+        return try self.target_capability_failure("std::net");
+    }
+    return null;
+}
+
+fn (self: &var Emitter) validate_foreign_boundary(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        if !ir::is_empty(function_node.export_abi) and
+            (!self.is_browser() or !module.names.is(function_node.export_abi, "browser")) {
+            let abi = try self.own(module, function_node.export_abi);
+            return try self.fail2(
+                "wasm error: target %s does not support export `%s`",
+                Arg::Lit(self.target_name()), Arg::Str(abi)
+            );
+        }
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if try self.validate_extern_abi(module, node.extern_abi) |failed| {
+                    return move failed;
+                }
+                var cleanup_index = 0;
+                while node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if try self.validate_extern_abi(module, cleanup.extern_abi) |failed| {
+                        return move failed;
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
+fn (self: &var Emitter) validate_extern_abi(
+    module: &ir::Module,
+    abi: ir::Name
+) -> !?diagnostic::Diagnostic {
+    if ir::is_empty(abi) or
+        (self.is_browser() and module.names.is(abi, "browser")) {
+        return null;
+    }
+    if self.is_browser() and module.names.is(abi, "c") {
+        return try self.target_capability_failure("extern C");
+    }
+    let shown = try self.own(module, abi);
+    return try self.fail2(
+        "wasm error: target %s does not support extern `%s`",
+        Arg::Lit(self.target_name()), Arg::Str(shown)
+    );
+}
+
+fn (self: &Emitter) target_name() -> []u8 {
+    if self.is_browser() {
+        return "wasm32-browser";
+    }
+    return "wasm32-wasi";
+}
+
+fn (self: &var Emitter) target_capability_failure(
+    name: []u8
+) -> !diagnostic::Diagnostic {
+    return self.fail2(
+        "wasm error: target %s does not support %s",
+        Arg::Lit(self.target_name()), Arg::Lit(name)
+    );
+}
+
+fn (self: &Emitter) uses_evented_io(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::io_loop_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::io_loop_close") or
+        self.uses_builtin_call(module, "std::internal::builtin::io_evented") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_finished") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_await") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_cancel") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_close") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_set_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_set_spawn") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_set_close");
+}
+
+fn (self: &Emitter) uses_coro(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::coro_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_resume") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_suspend") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_finished") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_close");
+}
+
+fn (self: &Emitter) uses_net(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::net_listen") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_connect") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_accept") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_read") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_write_all") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_write_some") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_local_port") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_close") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_add") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_remove") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_wait") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_token") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_flags") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_close");
+}

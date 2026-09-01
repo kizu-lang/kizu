@@ -38,10 +38,14 @@ const arrayEmptyGlobal = "@kizu.array.empty"
 
 // writeArrayRuntimeDecls writes declarations for the hosted Array runtime.
 func (e *emitter) writeArrayRuntimeDecls() {
-	if !e.usesArrayRuntime() {
+	if !e.usesArrayHeader() {
 		return
 	}
 	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64 }\n", arrayHeaderType)
+	if !e.usesArrayRuntime() {
+		e.out.WriteByte('\n')
+		return
+	}
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
 		arrayEmptyGlobal, arrayHeaderType)
 	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr, ptr, i64)\n")
@@ -119,9 +123,20 @@ func (e *emitter) arrayCheckedElement(
 	return checked, nil
 }
 
-// usesArrayRuntime reports whether this module uses the array header lowering.
-// An arena is that header, so an arena op needs the same declarations even in
-// a module that names no array.
+// usesArrayHeader reports whether emitted values or aggregate definitions need
+// the concrete Array header. An external call can exchange an Array without
+// leaving a local array.* instruction, and reachability can leave a declared
+// struct after removing every function that used it.
+func (e *emitter) usesArrayHeader() bool {
+	if e.usesArrayRuntime() {
+		return true
+	}
+	return e.moduleHasRuntimeHeaderType("std::array::Array<")
+}
+
+// usesArrayRuntime reports whether this module calls the hosted Array runtime.
+// An arena op also needs these declarations because its storage uses that
+// runtime.
 func (e *emitter) usesArrayRuntime() bool {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {

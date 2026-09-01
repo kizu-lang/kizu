@@ -108,6 +108,7 @@ type FunctionSignature struct {
 	ReturnType     typ.Type
 	RequiresUnsafe bool
 	ExternABI      string
+	ExportABI      string
 	Public         bool
 	Std            bool
 }
@@ -186,6 +187,9 @@ func (d *FunctionDecl) String() string {
 	if d.ExternABI != "" {
 		return fmt.Sprintf("%sextern %s fn %s%s%s(%s)%s",
 			prefix, quote.Bytes(d.ExternABI), receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
+	}
+	if d.ExportABI != "" {
+		prefix += "export " + quote.Bytes(d.ExportABI) + " "
 	}
 	if d.Body == nil {
 		return fmt.Sprintf("%sfn %s%s%s(%s)%s;",

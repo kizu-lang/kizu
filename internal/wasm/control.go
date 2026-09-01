@@ -35,63 +35,117 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeConst(instr)
 	case strings.HasPrefix(instr.Op, "binary."):
 		return e.writeBinary(instr)
+	case strings.HasPrefix(instr.Op, "unary."):
+		return e.writeUnary(instr)
+	case instr.Op == "cond_fail":
+		return e.writeCondFail(instr)
+	case instr.Op == "panic.fail":
+		return e.writePanicFail(instr)
+	case instr.Op == "test.fail", instr.Op == "test.expect_equal":
+		return e.writeTestInstr(instr)
 	case strings.HasPrefix(instr.Op, "func.addr."), strings.HasPrefix(instr.Op, "call."):
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
-	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."),
-		instr.Op == "ref.store":
-		return e.writeUnsupportedOpaque(instr)
-	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
-		instr.Op == "arena.at" || instr.Op == "arena.len" ||
-		instr.Op == "arena.pop_or_panic" || instr.Op == "arena.deinit":
-		return e.writeUnsupportedOpaque(instr)
-	case isErrorUnionOp(instr.Op):
-		return e.writeUnsupportedOpaque(instr)
+	case instr.Op == "buffer.new", instr.Op == "buffer.as_bytes":
+		return e.writeBufferInstr(instr)
+	default:
+		return e.writeMemoryInstr(instr)
+	}
+}
+
+// writeMemoryInstr writes memory-backed values and the opaque operations that
+// remain outside the target subset.
+func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
+	switch {
+	case instr.Op == "struct.new":
+		return e.writeStructNew(instr)
+	case strings.HasPrefix(instr.Op, "field."):
+		return e.writeFieldInstr(instr)
+	case instr.Op == "local.slot":
+		return e.writeLocalSlot(instr)
+	case instr.Op == "ref.store":
+		return e.writeRefStore(instr)
+	case instr.Op == "ref.load":
+		return e.writeRefLoad(instr)
+	case strings.HasPrefix(instr.Op, "union."):
+		return e.writeUnionInstr(instr)
+	case strings.HasPrefix(instr.Op, "slice."):
+		return e.writeSliceInstr(instr)
+	case isTaggedOwnerOp(instr.Op):
+		return e.writeTaggedOwnerInstr(instr)
 	default:
 		return fmt.Errorf("wasm error: unsupported instruction `%s`", instr.Op)
 	}
 }
 
-// isErrorUnionOp reports the error union instructions this backend records
-// as opaque rather than lowers.
-func isErrorUnionOp(op string) bool {
-	switch op {
-	case "error.error", "error.try", "error.has", "error.value", "error.code":
-		return true
-	}
-	return false
+// isTaggedOwnerOp reports whether an operation uses a generic value runtime.
+func isTaggedOwnerOp(op string) bool {
+	return strings.HasPrefix(op, "opt.") || strings.HasPrefix(op, "error.") ||
+		strings.HasPrefix(op, "array.") || strings.HasPrefix(op, "map.") ||
+		strings.HasPrefix(op, "box.") ||
+		strings.HasPrefix(op, "arena.")
 }
 
-// writeCast records a no-op value conversion for the Phase 16 low-level subset.
+// writeTaggedOwnerInstr selects the tagged-value or owner runtime.
+func (e *emitter) writeTaggedOwnerInstr(instr *ir.Instr) error {
+	if strings.HasPrefix(instr.Op, "array.") {
+		return e.writeArrayInstr(instr)
+	}
+	if strings.HasPrefix(instr.Op, "map.") {
+		return e.writeMapInstr(instr)
+	}
+	if strings.HasPrefix(instr.Op, "box.") {
+		return e.writeBoxInstr(instr)
+	}
+	if strings.HasPrefix(instr.Op, "arena.") {
+		return e.writeArenaInstr(instr)
+	}
+	return e.writeTaggedInstr(instr)
+}
+
+// writeCast preserves integer-width casts in the shared i64 representation and
+// converts when a raw wasm32 pointer crosses the integer boundary.
 func (e *emitter) writeCast(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("wasm error: cast expects 1 arg")
 	}
 	value := e.value(instr.Args[0])
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, expr: value.expr}
+	source := e.wasmType(instr.Args[0].Type)
+	target := e.wasmType(instr.Result.Type)
+	expr := value.expr
+	if source == "i64" && target == "i32" {
+		expr = "(i32.wrap_i64 " + expr + ")"
+	} else if source == "i32" && target == "i64" {
+		expr = "(i64.extend_i32_u " + expr + ")"
+	}
+	e.values[instr.Result.Name] = valueInfo{expr: expr}
 	return nil
 }
 
 // writeConst records scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
-	if isIntegerType(instr.Result.Type) {
+	if isIntegerType(instr.Result.Type) || e.isNamedI64Type(instr.Result.Type) {
 		// Every scalar integer is one wasm i64, so a constant of any width is
 		// written the same way.
 		e.values[instr.Result.Name] = valueInfo{
-			typ:  instr.Result.Type,
 			expr: "(i64.const " + instr.Immediate + ")",
 		}
 		return nil
 	}
 	switch instr.Result.Type {
 	case "bool":
-		e.values[instr.Result.Name] = valueInfo{typ: "bool", expr: wasmBool(instr.Immediate)}
+		e.values[instr.Result.Name] = valueInfo{expr: wasmBool(instr.Immediate)}
 	case "[]u8":
 		ref := e.strings[instr.Immediate]
-		e.values[instr.Result.Name] = valueInfo{
-			typ: "[]u8", expr: fmt.Sprintf("(i32.const %d)", ref.offset), length: ref.length,
+		slot, err := e.resultSlot(instr.Result)
+		if err != nil {
+			return err
 		}
+		fmt.Fprintf(&e.out, "            (i32.store %s (i32.const %d))\n", slot, ref.offset)
+		fmt.Fprintf(&e.out, "            (i32.store %s (i32.const %d))\n",
+			addressAt(slot, 4), ref.length)
+		e.values[instr.Result.Name] = valueInfo{expr: slot}
 	default:
 		return fmt.Errorf("wasm error: unsupported const type `%s`", instr.Result.Type)
 	}
@@ -103,18 +157,56 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	if len(instr.Args) != 2 {
 		return fmt.Errorf("wasm error: binary expects 2 args")
 	}
+	op := strings.TrimPrefix(instr.Op, "binary.")
+	if instr.Args[0].Type == "[]u8" {
+		return e.writeByteEquality(instr, op)
+	}
 	left := e.value(instr.Args[0]).expr
 	right := e.value(instr.Args[1]).expr
-	op := strings.TrimPrefix(instr.Op, "binary.")
 	wasmOp := wasmBinaryOp(op)
 	if instr.Result.Type == "bool" {
 		wasmOp = wasmCompareOp(op)
+		if instr.Args[0].Type == "bool" {
+			switch op {
+			case "==":
+				wasmOp = "i32.eq"
+			case "!=":
+				wasmOp = "i32.ne"
+			}
+		}
 	}
 	fmt.Fprintf(&e.out, "            (local.set %s (%s %s %s))\n",
 		symbolName(instr.Result.Name), wasmOp, left, right)
 	e.values[instr.Result.Name] = valueInfo{
-		typ: instr.Result.Type, expr: "(local.get " + symbolName(instr.Result.Name) + ")",
+		expr: "(local.get " + symbolName(instr.Result.Name) + ")",
 	}
+	return nil
+}
+
+// writeUnary writes boolean negation and integer arithmetic negation.
+func (e *emitter) writeUnary(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("wasm error: unary expects 1 arg")
+	}
+	value := e.value(instr.Args[0]).expr
+	var expr string
+	switch strings.TrimPrefix(instr.Op, "unary.") {
+	case "!":
+		if instr.Result.Type != "bool" {
+			return fmt.Errorf("wasm error: unary ! expects bool")
+		}
+		expr = "(i32.eqz " + value + ")"
+	case "-":
+		if !isIntegerType(instr.Result.Type) {
+			return fmt.Errorf("wasm error: unary - expects integer")
+		}
+		expr = "(i64.sub (i64.const 0) " + value + ")"
+	default:
+		return fmt.Errorf("wasm error: unsupported unary `%s`", instr.Op)
+	}
+	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
 	return nil
 }
 
@@ -139,10 +231,33 @@ func (e *emitter) writeFuncAddr(name string, instr *ir.Instr) error {
 		return fmt.Errorf("wasm error: `%s` has no table entry", name)
 	}
 	e.values[instr.Result.Name] = valueInfo{
-		typ:  instr.Result.Type,
 		expr: fmt.Sprintf("(i32.const %d)", index),
 	}
 	return nil
+}
+
+// writeCallArg adapts one IR argument to its declared wasm call ABI. A
+// PassCopyAddress scalar is stored in its planned frame cell and that address
+// is handed to the callee; all already-addressed and by-value arguments pass
+// through unchanged.
+func (e *emitter) writeCallArg(
+	instr *ir.Instr,
+	arg ir.Value,
+	param ir.Param,
+	index int,
+) (string, error) {
+	value := e.value(arg)
+	if !e.callNeedsCopySlot(param, arg) {
+		return value.expr, nil
+	}
+	slot, err := e.callCopySlot(instr.Result, index)
+	if err != nil {
+		return "", err
+	}
+	if err := e.writeStoreValue(slot, 0, arg.Type, value); err != nil {
+		return "", err
+	}
+	return slot, nil
 }
 
 // writeIndirectCall writes a call through a function pointer. The callee is
@@ -152,48 +267,132 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 	if len(instr.Args) == 0 {
 		return fmt.Errorf("wasm error: call.indirect expects a callee")
 	}
-	args := make([]string, 0, len(instr.Args))
-	for _, arg := range instr.Args[1:] {
-		args = append(args, e.value(arg).expr)
+	args := make([]string, 0, len(instr.Args)+1)
+	var resultSlot string
+	if e.isMemoryType(instr.Result.Type) {
+		var err error
+		resultSlot, err = e.resultSlot(instr.Result)
+		if err != nil {
+			return err
+		}
+		args = append(args, resultSlot)
+	}
+	for index, arg := range instr.Args[1:] {
+		param := ir.Param{}
+		if index < len(instr.CallParams) {
+			param = instr.CallParams[index]
+		}
+		expr, err := e.writeCallArg(instr, arg, param, index)
+		if err != nil {
+			return err
+		}
+		args = append(args, expr)
 	}
 	args = append(args, e.value(instr.Args[0]).expr)
 	call := fmt.Sprintf("(call_indirect (type $sig%d) %s)",
 		e.internSignature(instr), strings.Join(args, " "))
-	if instr.Result.Type == "void" {
+	if instr.Result.Type == "void" || e.isMemoryType(instr.Result.Type) {
 		fmt.Fprintf(&e.out, "            %s\n", call)
+		if e.isMemoryType(instr.Result.Type) {
+			e.values[instr.Result.Name] = valueInfo{expr: resultSlot}
+		}
 		return nil
 	}
 	fmt.Fprintf(&e.out, "            (local.set %s %s)\n",
 		symbolName(instr.Result.Name), call)
 	e.values[instr.Result.Name] = valueInfo{
-		typ: instr.Result.Type, expr: "(local.get " + symbolName(instr.Result.Name) + ")",
+		expr: "(local.get " + symbolName(instr.Result.Name) + ")",
 	}
 	return nil
 }
 
 // writeCall writes builtin print and user function calls.
 func (e *emitter) writeCall(instr *ir.Instr) error {
+	if instr.ExternABI != "" {
+		if e.target.isBrowser() && instr.ExternABI == "browser" {
+			return e.writeBrowserHostCall(instr)
+		}
+		return fmt.Errorf(
+			"wasm error: target %s does not support extern `%s`",
+			e.target.name(), instr.ExternABI,
+		)
+	}
 	name := strings.TrimPrefix(instr.Op, "call.")
 	if name == "print" {
 		return e.writePrint(instr.Args)
 	}
-	args := make([]string, 0, len(instr.Args))
-	for _, arg := range instr.Args {
-		args = append(args, e.value(arg).expr)
+	if handled, err := e.writeAllocatorBuiltinCall(name, instr); handled {
+		return err
+	}
+	if handled, err := e.writeIOBuiltinCall(name, instr); handled {
+		return err
+	}
+	args := make([]string, 0, len(instr.Args)+1)
+	params := e.paramsByFunction[name]
+	var resultSlot string
+	if e.isMemoryType(instr.Result.Type) {
+		var err error
+		resultSlot, err = e.resultSlot(instr.Result)
+		if err != nil {
+			return err
+		}
+		args = append(args, resultSlot)
+	}
+	for index, arg := range instr.Args {
+		param := ir.Param{}
+		if index < len(params) {
+			param = params[index]
+		}
+		expr, err := e.writeCallArg(instr, arg, param, index)
+		if err != nil {
+			return err
+		}
+		args = append(args, expr)
 	}
 	call := fmt.Sprintf("(call $%s %s)", name, strings.Join(args, " "))
-	if instr.Result.Type == "void" {
+	if instr.Result.Type == "void" || e.isMemoryType(instr.Result.Type) {
 		fmt.Fprintf(&e.out, "            %s\n", call)
+		if e.isMemoryType(instr.Result.Type) {
+			e.values[instr.Result.Name] = valueInfo{expr: resultSlot}
+		}
 		return nil
 	}
 	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbolName(instr.Result.Name), call)
 	e.values[instr.Result.Name] = valueInfo{
-		typ: instr.Result.Type, expr: "(local.get " + symbolName(instr.Result.Name) + ")",
+		expr: "(local.get " + symbolName(instr.Result.Name) + ")",
 	}
 	return nil
 }
 
-// writePrint writes calls to WASI stdout helpers.
+// writeAllocatorBuiltinCall lowers allocator factories before ordinary calls.
+func (e *emitter) writeAllocatorBuiltinCall(name string, instr *ir.Instr) (bool, error) {
+	if name == "std::internal::builtin::mem_page_allocator" {
+		if len(instr.Args) != 0 || instr.Result.Type != "Allocator" {
+			return true, fmt.Errorf("wasm error: mem_page_allocator expects no args -> Allocator")
+		}
+		symbol := symbolName(instr.Result.Name)
+		fmt.Fprintf(&e.out, "            (local.set %s (i32.const 0))\n", symbol)
+		e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+		return true, nil
+	}
+	if name == "std::internal::builtin::mem_fixed_buffer" {
+		if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" ||
+			instr.Result.Type != "Allocator" {
+			return true, fmt.Errorf("wasm error: mem_fixed_buffer expects []u8 -> Allocator")
+		}
+		symbol := symbolName(instr.Result.Name)
+		fmt.Fprintf(&e.out, "            (local.set %s (call $__fixed_buffer %s))\n",
+			symbol, e.value(instr.Args[0]).expr)
+		e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+		return true, nil
+	}
+	if name == "std::internal::builtin::mem_allocator_from" {
+		return true, e.writeAllocatorFromCall(instr)
+	}
+	return false, nil
+}
+
+// writePrint writes calls to the selected target's stdout helper.
 func (e *emitter) writePrint(args []ir.Value) error {
 	if len(args) != 1 {
 		return fmt.Errorf("wasm error: print expects 1 arg")
@@ -201,21 +400,23 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	value := e.value(args[0])
 	switch args[0].Type {
 	case "[]u8":
-		fmt.Fprintf(&e.out, "            (call $__write_line %s (i32.const %d))\n",
-			value.expr, value.length)
+		fmt.Fprintf(&e.out, "            (call $__write_line (i32.load %s) (i32.load %s))\n",
+			value.expr, addressAt(value.expr, 4))
 	case "i64":
 		fmt.Fprintf(&e.out, "            (call $__print_i64 %s)\n", value.expr)
 	case "bool":
 		fmt.Fprintf(&e.out, "            (call $__print_bool %s)\n", value.expr)
 	default:
+		if isIntegerType(args[0].Type) {
+			fmt.Fprintf(&e.out, "            (call $__print_i64 %s)\n", value.expr)
+			return nil
+		}
+		if e.writeEnumPrint(args[0].Type, args[0]) {
+			return nil
+		}
 		return fmt.Errorf("wasm error: unsupported print type `%s`", args[0].Type)
 	}
 	return nil
-}
-
-// writeUnsupportedOpaque marks values that are not part of the phase 11 target subset.
-func (e *emitter) writeUnsupportedOpaque(instr *ir.Instr) error {
-	return fmt.Errorf("wasm error: `%s` is outside the phase 11 target subset", instr.Op)
 }
 
 // writeTerminator writes control transfer for one dispatch arm.
@@ -227,6 +428,8 @@ func (e *emitter) writeTerminator(block *ir.Block, index map[string]dispatchBloc
 		e.writeJump(block, block.Terminator.Target, index)
 	case "branch":
 		e.writeBranch(block, index)
+	case "unreachable":
+		e.out.WriteString("            (unreachable)\n")
 	default:
 		return fmt.Errorf("wasm error: unsupported terminator `%s`", block.Terminator.Op)
 	}
@@ -236,11 +439,36 @@ func (e *emitter) writeTerminator(block *ir.Block, index map[string]dispatchBloc
 // writeReturn writes a function return or exits a void function.
 func (e *emitter) writeReturn(value ir.Value) error {
 	if value.Type == "void" {
+		e.restoreFrame()
 		e.out.WriteString("            (br $exit)\n")
 		return nil
 	}
+	if e.isMemoryType(value.Type) {
+		layout, err := e.typeLayout(value.Type)
+		if err != nil {
+			return err
+		}
+		e.writeMemoryCopy("(local.get $__kizu_result)", e.value(value).expr, layout.size)
+		e.restoreFrame()
+		e.out.WriteString("            (br $exit)\n")
+		return nil
+	}
+	e.restoreFrame()
 	fmt.Fprintf(&e.out, "            (return %s)\n", e.value(value).expr)
 	return nil
+}
+
+// restoreFrame releases this invocation's fixed frame before any return.
+func (e *emitter) restoreFrame() {
+	if e.frame != nil && e.frame.size > 0 {
+		if e.usesAllocatorRuntime() {
+			fmt.Fprintf(&e.out,
+				"            (call $__stack_free (local.get $__kizu_frame) (i32.const %d))\n",
+				e.frame.size)
+		} else {
+			e.out.WriteString("            (global.set $__stack_pointer (local.get $__kizu_frame))\n")
+		}
+	}
 }
 
 // writeJump writes an unconditional dispatch jump.
@@ -287,7 +515,7 @@ func (e *emitter) writePhiCopies(source string, target string, index map[string]
 func (e *emitter) writeLocalCopy(dst ir.Value, src ir.Value, indent string) {
 	value := e.value(src)
 	fmt.Fprintf(&e.out, "%s(local.set %s %s)\n", indent, symbolName(dst.Name), value.expr)
-	e.values[dst.Name] = valueInfo{typ: dst.Type, expr: "(local.get " + symbolName(dst.Name) + ")"}
+	e.values[dst.Name] = valueInfo{expr: "(local.get " + symbolName(dst.Name) + ")"}
 }
 
 // value resolves a typed IR value to a WebAssembly expression.
@@ -296,9 +524,9 @@ func (e *emitter) value(value ir.Value) valueInfo {
 		return found
 	}
 	if _, err := strconv.Atoi(value.Name); err == nil {
-		return valueInfo{typ: value.Type, expr: "(i64.const " + value.Name + ")"}
+		return valueInfo{expr: "(i64.const " + value.Name + ")"}
 	}
-	return valueInfo{typ: value.Type, expr: "(local.get " + symbolName(value.Name) + ")"}
+	return valueInfo{expr: "(local.get " + symbolName(value.Name) + ")"}
 }
 
 // wasmBool maps bool constants to WebAssembly i32 constants.

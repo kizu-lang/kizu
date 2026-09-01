@@ -1,0 +1,202 @@
+import compiler::internal::ir;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/print.go. Enum spellings and a table of
+// their pointer/length rows live in static linear memory; the runtime indexes
+// that table, so adding a source tag does not add a lowering branch.
+
+fn enum_print_data_prefix() -> []u8 {
+    return "enum-print:";
+}
+
+/// Records the enum types used by print in deterministic IR discovery order.
+fn (self: &var Emitter) collect_printed_enums(module: &ir::Module) -> !void {
+    var seen = map::new<i64, bool>(self.allocator);
+    defer seen.deinit(self.allocator);
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op != ir::Op::Call or
+                    !module.names.is(node.operand, "print") or
+                    node.args.len() != 1 {
+                    continue;
+                }
+                let arg = node.args.get_or_panic(0);
+                let retained = ir::name_text(&module.names, arg.type_name);
+                let type_name = retained.as_bytes();
+                let id = ir::name_id(arg.type_name);
+                if !module.enums.contains(type_name) or seen.contains(id) {
+                    continue;
+                }
+                try seen.insert(self.allocator, id, true);
+                try self.enum_table_order.append(self.allocator, arg.type_name);
+            }
+        }
+    }
+    return;
+}
+
+/// Returns the tag whose declared integer is row.
+fn enum_tag_at(declared: &ir::Enum, row: i64) -> ?[]u8 {
+    var index = 0;
+    while declared.tags.key_at(index) |tag| {
+        index = index + 1;
+        let value = declared.tags.get(tag) orelse continue;
+        if value == row {
+            return tag;
+        }
+    }
+    return null;
+}
+
+/// Builds the internal data key whose suffix is the visible Enum::Tag text.
+fn enum_print_data_key(
+    allocator: Allocator,
+    type_name: []u8,
+    tag: []u8
+) -> !string::String {
+    var key = try string::from_bytes(allocator, enum_print_data_prefix());
+    errdefer key.deinit(allocator);
+    try key.append_bytes(allocator, type_name);
+    try key.append_bytes(allocator, "::");
+    try key.append_bytes(allocator, tag);
+    return move key;
+}
+
+/// Assigns static offsets to printed spellings and their table rows.
+fn (self: &var Emitter) collect_enum_print_data(
+    module: &ir::Module,
+    start: i64
+) -> !i64 {
+    try self.collect_printed_enums(module);
+    var offset = start;
+    var enum_index = 0;
+    while self.enum_table_order.get(enum_index) |type_name| {
+        enum_index = enum_index + 1;
+        let retained = ir::name_text(&module.names, type_name);
+        let type_bytes = retained.as_bytes();
+        if module.enums.at(type_bytes) |declared| {
+            var row = 0;
+            while row < declared.tags.len() {
+                if enum_tag_at(declared, row) |tag| {
+                    var key = try enum_print_data_key(self.allocator, type_bytes, tag);
+                    defer key.deinit(self.allocator);
+                    let key_bytes = key.as_bytes();
+                    let length = mem::len(type_bytes) + 2 + mem::len(tag);
+                    try self.record_data(key_bytes, offset, length);
+                    offset = offset + length;
+                }
+                row = row + 1;
+            }
+        }
+    }
+    offset = wasm_align_up(offset, 4);
+    enum_index = 0;
+    while self.enum_table_order.get(enum_index) |type_name| {
+        enum_index = enum_index + 1;
+        let retained = ir::name_text(&module.names, type_name);
+        let type_bytes = retained.as_bytes();
+        var rows = 0;
+        if module.enums.at(type_bytes) |declared| {
+            rows = declared.tags.len();
+        }
+        try self.enum_tables.insert(
+            self.allocator,
+            ir::name_id(type_name),
+            DataRef { offset: offset, length: rows }
+        );
+        offset = offset + rows * 8;
+    }
+    return offset;
+}
+
+/// Appends one nonnegative i32 as four little-endian bytes.
+fn append_table_i32(allocator: Allocator, out: &var string::String, value: i64) -> !void {
+    try out.append_byte(allocator, cast<u8>(value % 256));
+    try out.append_byte(allocator, cast<u8>((value / 256) % 256));
+    try out.append_byte(allocator, cast<u8>((value / 65536) % 256));
+    return out.append_byte(allocator, cast<u8>((value / 16777216) % 256));
+}
+
+/// Writes i32 pointer/length pairs in wasm little-endian memory order.
+fn (self: &var Emitter) write_enum_print_tables(module: &ir::Module) -> !void {
+    var enum_index = 0;
+    while self.enum_table_order.get(enum_index) |type_name| {
+        enum_index = enum_index + 1;
+        let table = self.enum_tables.get(ir::name_id(type_name)) orelse continue;
+        let retained = ir::name_text(&module.names, type_name);
+        let type_bytes = retained.as_bytes();
+        var raw = string::new(self.allocator);
+        defer raw.deinit(self.allocator);
+        if module.enums.at(type_bytes) |declared| {
+            var row = 0;
+            while row < declared.tags.len() {
+                if enum_tag_at(declared, row) |tag| {
+                    var key = try enum_print_data_key(self.allocator, type_bytes, tag);
+                    defer key.deinit(self.allocator);
+                    let key_bytes = key.as_bytes();
+                    let spelling = self.strings.get(key_bytes) orelse empty_data_ref();
+                    try append_table_i32(self.allocator, &var raw, spelling.offset);
+                    try append_table_i32(self.allocator, &var raw, spelling.length);
+                }
+                row = row + 1;
+            }
+        }
+        var escaped = string::new(self.allocator);
+        errdefer escaped.deinit(self.allocator);
+        let raw_bytes = raw.as_bytes();
+        try append_string_bytes(self.allocator, &var escaped, raw_bytes);
+        let format =
+            \\  (data (i32.const %d) "%s")
+        ;
+        try self.line2(format, Arg::Int(table.offset), Arg::Owned(move escaped));
+    }
+    return;
+}
+
+/// Writes the checked table-indexing helper shared by every printed enum.
+fn (self: &var Emitter) write_enum_print_helper() -> !void {
+    try self.line("  (func $__print_enum (param $names i32) (param $count i64) (param $tag i64)");
+    try self.line("    (local $row i32)");
+    try self.line("    (if (i32.or (i64.lt_s (local.get $tag) (i64.const 0))");
+    try self.line("        (i64.ge_s (local.get $tag) (local.get $count)))");
+    try self.line("      (then (unreachable)))");
+    try self.line("    (local.set $row (i32.add (local.get $names)");
+    try self.line("      (i32.shl (i32.wrap_i64 (local.get $tag)) (i32.const 3))))");
+    try self.line("    (call $__write_line (i32.load (local.get $row))");
+    try self.line("      (i32.load (i32.add (local.get $row) (i32.const 4))))");
+    try self.line("  )");
+    return self.line("");
+}
+
+/// Emits a table lookup when type_name names one printed enum.
+fn (self: &var Emitter) write_enum_print(
+    module: &ir::Module,
+    type_name: ir::Name,
+    value: ir::Name
+) -> !bool {
+    let retained = ir::name_text(&module.names, type_name);
+    let type_bytes = retained.as_bytes();
+    if !module.enums.contains(type_bytes) {
+        return false;
+    }
+    let table = self.enum_tables.get(ir::name_id(type_name)) orelse return false;
+    try self.line3(
+        "            (call $__print_enum (i32.const %d) (i64.const %d) %s)",
+        Arg::Int(table.offset),
+        Arg::Int(table.length),
+        Arg::Str(value)
+    );
+    return true;
+}

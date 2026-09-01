@@ -24,6 +24,7 @@ var keywordCompletionItems = []completionItem{
 	{Label: "impl", Kind: completionItemKindKeyword},
 	{Label: "unsafe", Kind: completionItemKindKeyword},
 	{Label: "extern", Kind: completionItemKindKeyword},
+	{Label: "export", Kind: completionItemKindKeyword},
 	{Label: "comptime", Kind: completionItemKindKeyword},
 	{Label: "try", Kind: completionItemKindKeyword},
 	{Label: "move", Kind: completionItemKindKeyword},

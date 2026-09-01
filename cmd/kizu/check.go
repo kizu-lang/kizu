@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/llvm"
 )
 
@@ -20,6 +21,7 @@ func checkFile(path string) error {
 	if err != nil {
 		return err
 	}
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	if _, err := llvm.Emit(module); err != nil {
 		return err
 	}

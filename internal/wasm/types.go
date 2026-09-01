@@ -2,9 +2,11 @@ package wasm
 
 import "strings"
 
-// wasmType maps Kizu IR types to WebAssembly value types.
-func wasmType(typ string) string {
-	if isIntegerType(typ) {
+// wasmType maps Kizu IR types to WebAssembly value types. Memory-backed
+// aggregates and references are i32 addresses; named tags share the i64 scalar
+// representation used by integer comparisons.
+func (e *emitter) wasmType(typ string) string {
+	if isIntegerType(typ) || e.isNamedI64Type(typ) {
 		return "i64"
 	}
 	return "i32"

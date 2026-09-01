@@ -1,0 +1,400 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/main.go. Fallible main returns use the
+// same global error-code spelling table and ExitStatus mapping as the seed.
+
+fn error_name_data_prefix() -> []u8 {
+    return "error-name:";
+}
+
+fn exit_status_type() -> []u8 {
+    return "std::process::ExitStatus";
+}
+
+/// Returns main's retained return type, if the module has an entry point.
+fn main_return_type(module: &ir::Module) -> ?ir::Name {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if module.names.is(node.name, "main") {
+            return node.return_type;
+        }
+    }
+    return null;
+}
+
+/// Reports whether main returns an error union whose result reaches the host.
+fn (self: &var Emitter) needs_main_exit_boundary(module: &ir::Module) -> !bool {
+    let return_name = main_return_type(module) orelse return false;
+    let retained = ir::name_text(&module.names, return_name);
+    let return_type = retained.as_bytes();
+    if try self.error_union_parts(return_type) |parts| {
+        parts.deinit(self.allocator);
+        return true;
+    }
+    return false;
+}
+
+/// Keeps proc_exit conditional on a checked failure or fallible main.
+fn (self: &var Emitter) needs_proc_exit(module: &ir::Module) -> !bool {
+    if self.is_browser() {
+        return false;
+    }
+    if self.panic_kinds.len() > 0 {
+        return true;
+    }
+    return self.needs_main_exit_boundary(module);
+}
+
+/// Returns the greatest declaration-owned global error code.
+fn max_error_code(module: &ir::Module) -> i64 {
+    var maximum = 0;
+    var set_index = 0;
+    while module.error_sets.key_at(set_index) |set_name| {
+        set_index = set_index + 1;
+        if module.error_sets.at(set_name) |declared| {
+            var member_index = 0;
+            while declared.tags.key_at(member_index) |member| {
+                member_index = member_index + 1;
+                let code = declared.tags.get(member) orelse continue;
+                if code > maximum {
+                    maximum = code;
+                }
+            }
+        }
+    }
+    return maximum;
+}
+
+/// Builds `error-name:Set::Member` for the declaration owning code.
+fn error_name_data_key_at(
+    allocator: Allocator,
+    module: &ir::Module,
+    wanted: i64
+) -> !?string::String {
+    var set_index = 0;
+    while module.error_sets.key_at(set_index) |set_name| {
+        set_index = set_index + 1;
+        if module.error_sets.at(set_name) |declared| {
+            var member_index = 0;
+            while declared.tags.key_at(member_index) |member| {
+                member_index = member_index + 1;
+                let code = declared.tags.get(member) orelse continue;
+                if code != wanted {
+                    continue;
+                }
+                var key = try string::from_bytes(allocator, error_name_data_prefix());
+                errdefer key.deinit(allocator);
+                let retained = ir::name_text(&module.names, declared.name);
+                let set_bytes = retained.as_bytes();
+                try key.append_bytes(allocator, set_bytes);
+                try key.append_bytes(allocator, "::");
+                try key.append_bytes(allocator, member);
+                return move key;
+            }
+        }
+    }
+    return null;
+}
+
+/// Assigns static storage to global error spellings used by fallible main.
+fn (self: &var Emitter) collect_main_error_strings(
+    module: &ir::Module,
+    start: i64
+) -> !i64 {
+    if !try self.needs_main_exit_boundary(module) {
+        return start;
+    }
+    var offset = start;
+    if !self.strings.contains("panic.prefix") {
+        try self.record_data("panic.prefix", offset, 15);
+        offset = offset + 15;
+    }
+    let rows = max_error_code(module) + 1;
+    var code = 1;
+    while code < rows {
+        if try error_name_data_key_at(self.allocator, module, code) |key| {
+            defer key.deinit(self.allocator);
+            let key_bytes = key.as_bytes();
+            let length = mem::len(key_bytes) - mem::len(error_name_data_prefix());
+            try self.record_data(key_bytes, offset, length);
+            offset = offset + length;
+        }
+        code = code + 1;
+    }
+    self.error_table.length = rows;
+    return offset;
+}
+
+/// Reserves the dense table after ordinary strings and enum tables.
+fn (self: &var Emitter) collect_main_error_table(start: i64) -> i64 {
+    if self.error_table.length == 0 {
+        return start;
+    }
+    let offset = wasm_align_up(start, 4);
+    self.error_table.offset = offset;
+    return offset + self.error_table.length * 8;
+}
+
+/// Writes i32 pointer/length pairs indexed by global error code.
+fn (self: &var Emitter) write_main_error_table(module: &ir::Module) -> !void {
+    if self.error_table.length == 0 {
+        return;
+    }
+    var raw = string::new(self.allocator);
+    defer raw.deinit(self.allocator);
+    var code = 0;
+    while code < self.error_table.length {
+        var row = empty_data_ref();
+        if try error_name_data_key_at(self.allocator, module, code) |key| {
+            defer key.deinit(self.allocator);
+            let key_bytes = key.as_bytes();
+            row = self.data_ref(key_bytes);
+        }
+        try append_table_i32(self.allocator, &var raw, row.offset);
+        try append_table_i32(self.allocator, &var raw, row.length);
+        code = code + 1;
+    }
+    var escaped = string::new(self.allocator);
+    errdefer escaped.deinit(self.allocator);
+    let raw_bytes = raw.as_bytes();
+    try append_string_bytes(self.allocator, &var escaped, raw_bytes);
+    let table_format =
+        \\  (data (i32.const %d) "%s")
+    ;
+    return self.line2(
+        table_format,
+        Arg::Int(self.error_table.offset),
+        Arg::Owned(move escaped)
+    );
+}
+
+/// Reports one uncaught error. WASI exits; browser start returns status 1.
+fn (self: &var Emitter) write_main_error_runtime() -> !void {
+    let prefix = self.data_ref("panic.prefix");
+    let newline = self.data_ref("newline");
+    try self.line("  (func $__main_error (param $code i64)");
+    try self.line("    (local $row i32)");
+    try self.line("    (if (i32.or (i64.le_s (local.get $code) (i64.const 0))");
+    try self.line1(
+        "        (i64.ge_u (local.get $code) (i64.const %d)))",
+        Arg::Int(self.error_table.length)
+    );
+    try self.line("      (then (unreachable)))");
+    try self.line1(
+        "    (local.set $row (i32.add (i32.const %d)",
+        Arg::Int(self.error_table.offset)
+    );
+    try self.line("      (i32.shl (i32.wrap_i64 (local.get $code)) (i32.const 3))))");
+    try self.line2(
+        "    (call $__write_bytes (i32.const 2) (i32.const %d) (i32.const %d))",
+        Arg::Int(prefix.offset),
+        Arg::Int(prefix.length)
+    );
+    try self.line("    (call $__write_bytes (i32.const 2) (i32.load (local.get $row))");
+    try self.line("      (i32.load (i32.add (local.get $row) (i32.const 4))))");
+    try self.line1(
+        "    (call $__write_bytes (i32.const 2) (i32.const %d) (i32.const 1))",
+        Arg::Int(newline.offset)
+    );
+    if !self.is_browser() {
+        try self.line("    (call $__wasi_proc_exit (i32.const 1))");
+        try self.line("    (unreachable)");
+    }
+    try self.line("  )");
+    return self.line("");
+}
+
+/// Maps main's failed union and successful ExitStatus at the WASI boundary.
+fn (self: &var Emitter) write_main_result_boundary(
+    module: &ir::Module,
+    main: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    let retained = ir::name_text(&module.names, main.return_type);
+    let return_type = retained.as_bytes();
+    let parts = try self.error_union_parts(return_type) orelse
+        return try self.fail0("wasm error: main result boundary expects an error union");
+    defer parts.deinit(self.allocator);
+    let success = parts.success.as_bytes();
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(offset) => {
+            let result = try self.names.intern("(local.get $__kizu_main_result)");
+            let code_address = try self.address_at(result, offset);
+            try self.line1(
+                "    (if (i64.eq (i64.load %s) (i64.const 0))",
+                Arg::Str(result)
+            );
+            try self.line("      (then");
+            try self.line1(
+                "        (call $__main_error (i64.load %s))",
+                Arg::Str(code_address)
+            );
+            try self.line("        (unreachable)))");
+            if mem::equal_bytes(success, exit_status_type()) {
+                return self.write_main_exit_status(module, result, offset);
+            }
+            return null;
+        },
+    }
+}
+
+/// Reports an uncaught browser error and records the status returned by
+/// kizu_start without terminating the embedding page.
+fn (self: &var Emitter) write_browser_main_result_boundary(
+    module: &ir::Module,
+    main: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    let retained = ir::name_text(&module.names, main.return_type);
+    let return_type = retained.as_bytes();
+    let parts = try self.error_union_parts(return_type) orelse
+        return try self.fail0("wasm error: main result boundary expects an error union");
+    defer parts.deinit(self.allocator);
+    let success = parts.success.as_bytes();
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(offset) => {
+            let result = try self.names.intern("(local.get $__kizu_main_result)");
+            let code_address = try self.address_at(result, offset);
+            try self.line1(
+                "    (if (i64.eq (i64.load %s) (i64.const 0))",
+                Arg::Str(result)
+            );
+            try self.line("      (then");
+            try self.line1(
+                "        (call $__main_error (i64.load %s))",
+                Arg::Str(code_address)
+            );
+            try self.line("        (local.set $__kizu_status (i32.const 1))))");
+            if !mem::equal_bytes(success, exit_status_type()) {
+                return null;
+            }
+            try self.line1(
+                "    (if (i64.ne (i64.load %s) (i64.const 0))",
+                Arg::Str(result)
+            );
+            try self.line("      (then");
+            if try self.write_browser_main_exit_status(module, result, offset) |failed| {
+                return move failed;
+            }
+            try self.line("      ))");
+            return null;
+        },
+    }
+}
+
+/// Maps ExitStatus to the integer returned by kizu_start.
+fn (self: &var Emitter) write_browser_main_exit_status(
+    module: &ir::Module,
+    result: ir::Name,
+    error_payload_offset: i64
+) -> !?diagnostic::Diagnostic {
+    let shown = try self.names.intern(exit_status_type());
+    let success = module.union_variant_named(exit_status_type(), "Success") orelse
+        return try self.fail("wasm error: unknown union variant `%s::Success`", Arg::Str(shown));
+    let failure = module.union_variant_named(exit_status_type(), "Failure") orelse
+        return try self.fail("wasm error: unknown union variant `%s::Failure`", Arg::Str(shown));
+    let specific = module.union_variant_named(exit_status_type(), "Specific") orelse
+        return try self.fail("wasm error: unknown union payload `%s::Specific`", Arg::Str(shown));
+    if ir::is_empty(specific.payload) or !module.names.is(specific.payload, "u8") {
+        return try self.fail("wasm error: unknown union payload `%s::Specific`", Arg::Str(shown));
+    }
+    let offset_outcome = try self.union_payload_offset(module, exit_status_type());
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(union_offset) => {
+            let status = try self.address_at(result, error_payload_offset);
+            let payload = try self.address_at(status, union_offset);
+            try self.line2(
+                "        (if (i64.eq (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(specific.index)
+            );
+            try self.line1(
+                "          (then (local.set $__kizu_status (i32.load8_u %s))))",
+                Arg::Str(payload)
+            );
+            try self.line2(
+                "        (if (i64.eq (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(failure.index)
+            );
+            try self.line("          (then (local.set $__kizu_status (i32.const 1))))");
+            try self.line2(
+                "        (if (i32.and (i64.ne (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(success.index)
+            );
+            try self.line2(
+                "            (i32.and (i64.ne (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(failure.index)
+            );
+            try self.line2(
+                "              (i64.ne (i64.load %s) (i64.const %d))))",
+                Arg::Str(status),
+                Arg::Int(specific.index)
+            );
+            try self.line("          (then (unreachable)))");
+            return null;
+        },
+    }
+}
+
+/// Maps declaration-owned ExitStatus variants to WASI process status.
+fn (self: &var Emitter) write_main_exit_status(
+    module: &ir::Module,
+    result: ir::Name,
+    error_payload_offset: i64
+) -> !?diagnostic::Diagnostic {
+    let shown = try self.names.intern(exit_status_type());
+    let success = module.union_variant_named(exit_status_type(), "Success") orelse
+        return try self.fail("wasm error: unknown union variant `%s::Success`", Arg::Str(shown));
+    let failure = module.union_variant_named(exit_status_type(), "Failure") orelse
+        return try self.fail("wasm error: unknown union variant `%s::Failure`", Arg::Str(shown));
+    let specific = module.union_variant_named(exit_status_type(), "Specific") orelse
+        return try self.fail("wasm error: unknown union payload `%s::Specific`", Arg::Str(shown));
+    if ir::is_empty(specific.payload) or !module.names.is(specific.payload, "u8") {
+        return try self.fail("wasm error: unknown union payload `%s::Specific`", Arg::Str(shown));
+    }
+    let offset_outcome = try self.union_payload_offset(module, exit_status_type());
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(union_offset) => {
+            let status = try self.address_at(result, error_payload_offset);
+            let payload = try self.address_at(status, union_offset);
+            try self.line2(
+                "    (if (i64.eq (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(specific.index)
+            );
+            try self.line("      (then");
+            try self.line1(
+                "        (call $__wasi_proc_exit (i32.load8_u %s))",
+                Arg::Str(payload)
+            );
+            try self.line("        (unreachable)))");
+            try self.line2(
+                "    (if (i64.eq (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(failure.index)
+            );
+            try self.line("      (then");
+            try self.line("        (call $__wasi_proc_exit (i32.const 1))");
+            try self.line("        (unreachable)))");
+            try self.line2(
+                "    (if (i64.ne (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(success.index)
+            );
+            try self.line("      (then (unreachable)))");
+            return null;
+        },
+    }
+}

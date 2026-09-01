@@ -75,6 +75,7 @@ const (
 	Mut      Type = "mut"
 	Unsafe   Type = "unsafe"
 	Extern   Type = "extern"
+	Export   Type = "export"
 	Comptime Type = "comptime"
 	Try      Type = "try"
 	Move     Type = "move"
@@ -127,6 +128,7 @@ var keywords = map[string]Type{
 	"mut":      Mut,
 	"unsafe":   Unsafe,
 	"extern":   Extern,
+	"export":   Export,
 	"comptime": Comptime,
 	"try":      Try,
 	"move":     Move,

@@ -36,52 +36,63 @@ and another way under `build` -- there is one lowering, not two (ADR-0083).
 What a program is *supposed* to do is written at the end of the program itself,
 not in any one execution path.
 
-| Feature | Examples | check | run | llvm | wasm |
-| --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 39 | ✅ | ✅ | ✅ | 12/39 |
-| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ |
-| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | 9/10 |
-| if / match | 14 | ✅ | ✅ | ✅ | 2/14 |
-| enum / union | 15 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 40 | ✅ | ✅ | ✅ | ❌ |
-| optional `?T` / orelse / capture | 22 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 51 | ✅ | ✅ | ✅ | 2/51 |
-| deinit / defer | 19 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 10 | ✅ | ✅ | ✅ | ❌ |
-| comptime / reflection | 13 | ✅ | ✅ | ✅ | 1/13 |
-| cast / slice / stack buffer / box | 11 | ✅ | ✅ | ✅ | 1/11 |
-| unsafe / raw pointer / extern C | 3 | ✅ | ✅ | ✅ | ❌ |
-| contract / generics | 12 | ✅ | ✅ | ✅ | 2/12 |
-| std::array | 16 | ✅ | ✅ | ✅ | ❌ |
-| std::string | 32 | ✅ | ✅ | ✅ | ❌ |
-| std::map | 12 | ✅ | ✅ | ✅ | ❌ |
-| std::mem / allocator | 16 | ✅ | ✅ | ✅ | ❌ |
-| std::json | 14 | ✅ | ✅ | ✅ | ❌ |
-| std::sort | 1 | ✅ | ✅ | ✅ | ❌ |
-| std::fmt | 6 | ✅ | ✅ | ✅ | ❌ |
-| std::testing | 1 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 23 | ✅ | ✅ | ✅ | ❌ |
-| std::net / http | 19 | ✅ | ✅ | ✅ | ❌ |
-| async / coro | 2 | ✅ | ✅ | ✅ | ❌ |
+| Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
+| --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| fn / let / struct / literals | 41 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 40/41 |
+| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| if / match | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| enum / union | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
+| error union `!T` / try / errdefer | 45 | ✅ | ✅ | ✅ | 27/45 | 27/45 | 27/45 | 24/45 |
+| optional `?T` / orelse / capture | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 22/24 |
+| move / borrow | 52 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| deinit / defer | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| comptime / reflection | 13 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| cast / slice / stack buffer / box | 13 | ✅ | ✅ | ✅ | 12/13 | 12/13 | 12/13 | 12/13 |
+| unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 | 1/4 |
+| contract / generics | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 | 13/14 | 13/14 |
+| std::array | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::map | 13 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::mem / allocator | 20 | ✅ | ✅ | ✅ | 19/20 | 19/20 | 19/20 | 18/20 |
+| std::json | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fmt | 6 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 | 10/27 | 3/27 |
+| std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 | 2/19 | 2/19 |
+| async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 152 runnable examples,
-measured on 2026-08-30 with `just backend-matrix` -- re-run it after touching a
-backend. `run` and `wasm` are judged on the program's output: `run` executes the
-native build, `wasm` loads the emitted module with `wasmtime`. `llvm` is judged
-on whether lowering succeeded, because `run` already builds the native target
-from the same text.
+tags, so an example appears in more than one row. 162 runnable examples,
+measured on 2026-09-01 with `just backend-matrix` -- re-run it after touching a
+backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
+program's output: `run` executes the native build; `wasm` and `wasm-opt` load
+the default and optimized WAT with `wasmtime`; `wasm-bin` loads the binary
+module there; `browser` loads the browser binary with the JavaScript host
+adapter. `llvm` is judged on whether lowering succeeded, because `run` already
+builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 152/152 |
-| `kizu run` | 152/152 |
-| `kizu build --emit-llvm` | 152/152 |
-| `kizu build --target wasm32-wasi` | 21/152 |
+| `kizu check` | 162/162 |
+| `kizu run` | 162/162 |
+| `kizu build --emit-llvm` | 162/162 |
+| `kizu build --target wasm32-wasi` (WAT) | 142/162 |
+| `kizu build --target wasm32-wasi --opt` (WAT) | 142/162 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 142/162 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 135/162 |
 
 The native route has no pending runnable example. WASI remains a target subset;
-`just backend-matrix` reports both unsupported lowering and output mismatches.
+its remaining 20 examples are explicit target-unsupported capabilities: 16
+`std::net`, two extern C, one evented I/O, and one coroutine example. The
+default WAT, optimized WAT, and binary routes have no remaining lowering
+failure, runtime-only refusal, or output mismatch. The browser route likewise
+has no lowering failure or output mismatch: all remaining 27 are explicit
+target-unsupported capabilities. The browser column is broad JavaScript-engine
+coverage; the real-page fixture is `tests/browser/smoke.html`.
 
 Tooling around the language core:
 
@@ -109,7 +120,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm backend beyond the current subset | **in progress.** 21 of 152 examples load and run today |
+| wasm application path | **in progress.** Portable files and packages run as WASI and browser binaries; compile-time selection between native/WASI/browser host adapters remains |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
 | type alias | **not started** |
@@ -177,7 +188,7 @@ go run ./cmd/kizu run examples/hello.kizu
 ## Development Environment
 
 The recommended development environment is the Nix flake. The shell includes
-Go, golangci-lint, pre-commit, just, and wasmtime.
+Go, golangci-lint, pre-commit, just, wasmtime, and Node.js.
 
 ```sh
 nix develop
@@ -205,7 +216,10 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu init [path]` scaffolds a package.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
-- `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
+- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file|package>` emits WASI-compatible WAT to stdout, or to `-o` when supplied.
+- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` writes a binary `.wasm`; binary output never goes to the terminal implicitly.
+- `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` emits browser-hosted WAT for inspection.
+- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` writes the browser `.wasm`; [`docs/wasm-browser.md`](docs/wasm-browser.md) defines its host adapter and capability boundary.
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable.
 - `kizu cache status` / `kizu cache prune` show and clear the local build cache.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
@@ -216,6 +230,7 @@ just wasi-smoke      # run the wasm examples under wasmtime
 ## Project Documents
 
 - [docs/architecture.md](docs/architecture.md): architecture overview (in Japanese; start here for onboarding)
+- [docs/wasm-browser.md](docs/wasm-browser.md): browser WebAssembly ABI, adapter, and target capabilities
 - [SPEC.md](SPEC.md): language specification
 - [docs/principles.md](docs/principles.md): the design principles every decision is checked against
 - [docs/style.md](docs/style.md): how std chooses the shape of an API

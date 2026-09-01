@@ -5,6 +5,7 @@ import compiler::internal::project;
 import compiler::internal::stdmeta;
 import compiler::internal::stdmethod;
 import compiler::internal::typ;
+import compiler::internal::stdtarget;
 import std::arena;
 import std::array;
 import std::map;
@@ -43,6 +44,7 @@ pub struct FunctionFacts {
     pub params: array::Array<ParamFacts>,
     pub return_type: Name,
     pub extern_abi: Name,
+    pub export_abi: Name,
     pub requires_unsafe: bool,
     pub body: ?ast::Block
 }
@@ -243,6 +245,7 @@ pub struct CommonNames {
 /// place after `lower` succeeds.
 pub struct Lowerer {
     allocator: Allocator,
+    target: stdtarget::Target,
     pub module: Module,
     types: typ::Table,
     common: CommonNames,
@@ -307,9 +310,9 @@ pub struct Lowerer {
     // currently being lowered.
     meta_bindings: arena::Arena<MetaBinding>,
     meta_current: ?arena::Handle<MetaBinding>,
-    // extern_symbols maps a resolved extern "c" function name to its C
-    // symbol.
-    extern_symbols: array::Array<Name>,
+    // extern_decls maps a resolved foreign function name to its explicit ABI
+    // and host symbol.
+    extern_decls: array::Array<ExternDecl>,
     // next_error_code is the next global code for an error set the program
     // declares itself; std members keep the codes std assigns.
     next_error_code: i64,
@@ -323,6 +326,11 @@ pub struct Lowerer {
     retired: array::Array<RetiredReceiver>,
     // Argument places ownership proved an indirect call lends as &var.
     function_pointer_mut_borrows: array::Array<ast::Expression>
+}
+
+pub struct ExternDecl {
+    pub abi: Name,
+    pub name: Name
 }
 
 /// Is one `test "name" { ... }` block: the symbol it lowers under and its
@@ -343,6 +351,23 @@ pub fn new_lowerer(
     program: &ast::Program,
     checker: &ownership::Checker
 ) -> !Lowerer {
+    return new_lowerer_for_target(
+        allocator,
+        tree,
+        program,
+        checker,
+        stdtarget::Target::Native
+    );
+}
+
+/// Prepares lowering for one selected build target.
+pub fn new_lowerer_for_target(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    program: &ast::Program,
+    checker: &ownership::Checker,
+    target: stdtarget::Target
+) -> !Lowerer {
     var module = try new_module(allocator);
     errdefer module.deinit(allocator);
     let common = try intern_common(&var module.names);
@@ -361,7 +386,9 @@ pub fn new_lowerer(
             name: empty_name(),
             params: array::new<Param>(allocator),
             return_type: empty_name(),
-            blocks: array::new<Block>(allocator)
+            blocks: array::new<Block>(allocator),
+            export_abi: empty_name(),
+            export_name: empty_name()
         })
     };
     let scratch_block = try module.add_block(scratch_function, empty_name());
@@ -374,6 +401,7 @@ pub fn new_lowerer(
             params: array::new<ParamFacts>(allocator),
             return_type: empty_name(),
             extern_abi: empty_name(),
+            export_abi: empty_name(),
             requires_unsafe: false,
             body: null
         })
@@ -406,6 +434,7 @@ pub fn new_lowerer(
     };
     var lowerer = Lowerer {
         allocator: allocator,
+        target: target,
         module: move module,
         types: typ::new(allocator),
         common: common,
@@ -440,7 +469,7 @@ pub fn new_lowerer(
         union_decls: map::new<[]u8, ast::Declaration>(allocator),
         meta_bindings: arena::new<MetaBinding>(allocator),
         meta_current: null,
-        extern_symbols: array::new<Name>(allocator),
+        extern_decls: array::new<ExternDecl>(allocator),
         next_error_code: 0,
         deinit_owners: move deinit_owners,
         release_allocators: move release_allocators,
@@ -559,6 +588,7 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
         params: move params,
         return_type: return_type,
         extern_abi: try self.module.names.intern_text(tree, function.signature.extern_abi),
+        export_abi: try self.module.names.intern_text(tree, function.signature.export_abi),
         requires_unsafe: function.signature.requires_unsafe,
         body: function.body
     };
@@ -686,6 +716,7 @@ fn (self: &var Lowerer) lower_tests(tree: &var ast::Ast) -> !?diagnostic::Diagno
             params: array::new<ParamFacts>(self.allocator),
             return_type: try self.module.names.intern("!void"),
             extern_abi: empty_name(),
+            export_abi: empty_name(),
             requires_unsafe: false,
             body: test.body
         };
@@ -732,9 +763,11 @@ fn (self: &var Lowerer) collect_decls(
         let extern_abi = facts.extern_abi;
         let signature = try self.lower_signature(handle);
         try self.record_signature(name, signature);
-        if self.module.names.is(extern_abi, "c") {
-            let symbol = try self.extern_c_symbol(name);
-            try self.record_extern_symbol(name, symbol);
+        if !is_empty(extern_abi) {
+            let symbol = try self.external_symbol(name);
+            try self.record_extern_decl(name, ExternDecl {
+                abi: extern_abi, name: symbol
+            });
         }
     }
     try self.index_method_signatures();
@@ -841,19 +874,20 @@ fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle)
     return self.signatures.insert(self.allocator, name_bytes, signature);
 }
 
-/// Records the C symbol an extern "c" declaration links to.
-fn (self: &var Lowerer) record_extern_symbol(name: Name, symbol: Name) -> !void {
+/// Records the explicit ABI and host symbol a foreign declaration links to.
+fn (self: &var Lowerer) record_extern_decl(name: Name, declared: ExternDecl) -> !void {
     let id = name_id(name);
-    while self.extern_symbols.len() <= id {
-        try self.extern_symbols.append(self.allocator, empty_name());
+    while self.extern_decls.len() <= id {
+        try self.extern_decls.append(self.allocator, ExternDecl {
+            abi: empty_name(), name: empty_name()
+        });
     }
-    return self.extern_symbols.set(id, symbol);
+    return self.extern_decls.set(id, declared);
 }
 
-/// Strips the module qualification a resolver added to an extern "c"
-/// declaration, the Go `externCSymbol`: the C symbol is the identifier the
-/// declaration was written with.
-fn (self: &var Lowerer) extern_c_symbol(name: Name) -> !Name {
+/// Strips the module qualification a resolver added to a foreign declaration.
+/// The host symbol is the identifier the declaration was written with.
+fn (self: &var Lowerer) external_symbol(name: Name) -> !Name {
     let start = self.qualification_end(name);
     if start < 0 {
         return name;
@@ -1358,12 +1392,20 @@ fn (self: &var Lowerer) lower_function_named(
         }
         index = index + 1;
     }
+    let export_abi = self.decl_facts.at(decl.node).export_abi;
+    let declared_name = self.decl_facts.at(decl.node).name;
+    var export_name = empty_name();
+    if !is_empty(export_abi) {
+        export_name = try self.external_symbol(declared_name);
+    }
     self.current = Function {
         node: try self.module.function_nodes.add(self.allocator, FunctionNode {
             name: name,
             params: move params,
             return_type: self.signature_return(signature),
-            blocks: array::new<Block>(self.allocator)
+            blocks: array::new<Block>(self.allocator),
+            export_abi: export_abi,
+            export_name: export_name
         })
     };
     try self.module.functions.append(self.allocator, self.current);

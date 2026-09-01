@@ -159,6 +159,8 @@ fn cleanup_of(op: Op, operand: Name, receiver: Value, allocator: Value) -> Clean
         operand: operand,
         arg: receiver,
         allocator: allocator,
+        extern_abi: empty_name(),
+        extern_name: empty_name(),
         on_error: false,
         receiver: empty_name()
     };
@@ -212,7 +214,13 @@ fn (self: &var Lowerer) cleanup_from_method(
         if !self.name_is(returned, "void") {
             return try self.fail1(tree, "ir error: defer cleanup must return void, got %s", Arg::Str(returned));
         }
-        out.* = cleanup_of(Op::Call, method_name, receiver, allocator);
+        var cleanup = cleanup_of(Op::Call, method_name, receiver, allocator);
+        if self.extern_decl(method_name) |external| {
+            cleanup.operand = external.name;
+            cleanup.extern_abi = external.abi;
+            cleanup.extern_name = external.name;
+        }
+        out.* = cleanup;
         return null;
     }
     return try self.fail1(tree, "ir error: unknown cleanup method `%s`", Arg::Str(method));
@@ -355,6 +363,11 @@ fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void
             let _ = try self.emit_op2(
                 cleanup.op, cleanup.operand, self.common.void_type, arg, cleanup.allocator);
         }
+        if !is_empty(cleanup.extern_abi) {
+            if self.last_instr() |instr| {
+                self.module.set_extern_call(instr, cleanup.extern_abi, cleanup.extern_name);
+            }
+        }
     }
     return;
 }
@@ -377,6 +390,8 @@ fn empty_cleanup() -> Cleanup {
         operand: empty_name(),
         arg: empty_value(),
         allocator: empty_value(),
+        extern_abi: empty_name(),
+        extern_name: empty_name(),
         on_error: false,
         receiver: empty_name()
     };

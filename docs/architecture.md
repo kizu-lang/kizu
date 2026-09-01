@@ -25,7 +25,8 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   types, ownership              型検査・所有権/借用検査
   ir, llvm, wasm, native        typed SSA IR と各 backend
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
-  stdmethod, stdprim, stdmeta   std の method 署名、builtin primitive の一覧、`std::meta` の形
+  stdmethod, stdprim, stdmeta, stdtarget
+                                std の method / primitive と compiler-defined form
   unsafecap                     unsafe が覆う操作の種類と診断文言
   conformance                   example が末尾に宣言する case の読み取り
   version, selfhost             binary の名乗りと、移植先が読めない生成 source
@@ -48,9 +49,13 @@ docs/, docs/adr/     設計ドキュメントと ADR
 source.kizu
   → internal/lexer → internal/parser → internal/ast
   → internal/project が import した std module を合流(std も 1 つの package)
+  → build target を types / ownership / IR の comptime evaluator へ渡す
   → internal/types(型)→ internal/ownership(所有権)
-  → internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
-                           → internal/wasm(wasm32-wasi)
+  → internal/ir(typed SSA)→ target の entry / export から到達可能性を閉じる
+                           → internal/llvm → clang(internal/native)
+                           → internal/wasm → 共通 WebAssembly module
+                                           → WAT / binary `.wasm`
+                                             (wasm32-wasi / wasm32-browser)
 ```
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
@@ -70,8 +75,27 @@ link)、2 回目以降 ~10ms —— 絶対値は host と clang によります�
 `build --target native` は逆に、利用者が名前を指定した成果物とその build 記録を
 書くコマンドなので cache から読まず、毎回 link します。
 
+`internal/wasm` は typed SSA IR を 1 度だけ WebAssembly module へ lower し、その同じ
+module を inspection 用 WAT と deterministic な binary `.wasm` に描画します。Go seed と
+Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせます。WASI は
+`wasmtime`、browser target は JavaScript host adapter で同じ conformance output を検査し、
+target 差は import、entry / export、host capability だけが持ちます。
+
+同じ package に target 別 adapter がある場合、`std::target` を条件にした
+`comptime if` は選ばれた branch だけを type / ownership / IR が扱います。その後、
+native / WASI は `main`、browser は `main` と `export "browser"` から到達できる関数だけを
+backend へ渡します。実行例は
+[`examples/modules/target_adapters`](../examples/modules/target_adapters) です。
+
+`wasm32-wasi` の host boundary は WASI Preview1 です。blocking stdin / stdout / stderr、
+引数・環境・時刻、preopen された filesystem は、その capability を example の metadata
+から Wasmtime へ渡して再現します。子 process、socket / `std::net` と `std::http` の network 経路、evented
+`std::io` / `std::coro`、extern C はこの boundary に無いため、到達する program を module
+描画前に target 非対応として拒否します。browser 側の対応範囲と JavaScript ABI は
+[`docs/wasm-browser.md`](wasm-browser.md) が持ちます。
+
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
-`build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `import-c-header`
+`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
 流れるかは `cmd/kizu/main.go` の `dispatch`(移植側は `compiler/src/main.kizu`)
 が全てです。

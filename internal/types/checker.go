@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -51,7 +52,8 @@ func (c *Checker) underMark(
 // Checker validates type rules for a parsed program.
 type Checker struct {
 	checkerMetadata
-	types typeTable
+	target stdtarget.Target
+	types  typeTable
 	// declaredDeinits names the types whose cleanup an author wrote. They hold
 	// an obligation of their own, so their fields are not taken one at a time.
 	declaredDeinits map[string]bool
@@ -99,8 +101,14 @@ type Checker struct {
 
 // New creates an empty type checker.
 func New() *Checker {
+	return NewForTarget(stdtarget.Native)
+}
+
+// NewForTarget creates a type checker for one selected build target.
+func NewForTarget(target stdtarget.Target) *Checker {
 	return &Checker{
 		checkerMetadata:  newCheckerMetadata(),
+		target:           target,
 		types:            newTypeTable(),
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
@@ -806,12 +814,130 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 					" return; declare a bare `?&T` / `?&var T`", fn.Name)
 		}
 	}
+	if err := validateHostFunctionSignature(fn, paramInfo.params, ret); err != nil {
+		return nil, err
+	}
 	return &functionType{
 		name: fn.Name, sig: fn, params: paramInfo.params,
 		borrowParams:    paramInfo.borrowParams,
 		mutBorrowParams: paramInfo.mutBorrowParams,
 		returnType:      ret,
 	}, nil
+}
+
+// validateHostFunctionSignature keeps foreign ABIs explicit and limits the
+// browser boundary to values with one stable WebAssembly representation.
+func validateHostFunctionSignature(
+	fn ast.FunctionSignature,
+	params []Type,
+	ret Type,
+) error {
+	if err := validateHostFunctionABI(fn); err != nil {
+		return err
+	}
+	if fn.ExternABI != "browser" && fn.ExportABI != "browser" {
+		return nil
+	}
+	if err := validateBrowserHostFunctionShape(fn); err != nil {
+		return err
+	}
+	return validateBrowserHostFunctionTypes(fn, params, ret)
+}
+
+// validateHostFunctionABI accepts only the host boundaries the compiler and
+// its targets implement.
+func validateHostFunctionABI(fn ast.FunctionSignature) error {
+	if fn.ExternABI != "" && fn.ExportABI != "" {
+		return errorf("type error: function `%s` cannot be both extern and export", fn.Name)
+	}
+	if fn.ExternABI != "" && fn.ExternABI != "c" && fn.ExternABI != "browser" {
+		return errorf("type error: unsupported extern ABI %q", fn.ExternABI)
+	}
+	if fn.ExportABI != "" && fn.ExportABI != "browser" {
+		return errorf("type error: unsupported export ABI %q", fn.ExportABI)
+	}
+	return nil
+}
+
+// validateBrowserHostFunctionShape rejects declarations whose callable shape
+// has no stable standalone JavaScript name.
+func validateBrowserHostFunctionShape(fn ast.FunctionSignature) error {
+	if fn.Receiver {
+		return errorf("type error: browser host function `%s` cannot be a method", fn.Name)
+	}
+	if len(fn.StaticParams) > 0 {
+		return errorf("type error: browser host function `%s` cannot have static parameters", fn.Name)
+	}
+	if fn.ExportABI == "browser" {
+		exportName := unqualifiedFunctionName(fn.Name)
+		if exportName == "main" {
+			return errorf("type error: browser export `main` conflicts with the program entry")
+		}
+		if exportName == "memory" || exportName == "kizu_start" {
+			return errorf(
+				"type error: browser export function `%s` conflicts with a reserved browser export",
+				exportName,
+			)
+		}
+	}
+	return nil
+}
+
+// validateBrowserHostFunctionTypes limits each boundary value to the common
+// scalar ABI, plus the browser import's call-scoped byte view.
+func validateBrowserHostFunctionTypes(
+	fn ast.FunctionSignature,
+	params []Type,
+	ret Type,
+) error {
+	for index, param := range params {
+		if fn.Params[index].Borrow || fn.Params[index].MutBorrow {
+			return errorf(
+				"type error: browser host function `%s` cannot borrow parameter %d",
+				fn.Name, index+1,
+			)
+		}
+		if browserHostScalar(param) {
+			continue
+		}
+		if fn.ExternABI == "browser" && param == typeByteString {
+			continue
+		}
+		return errorf(
+			"type error: browser host function `%s` parameter %d has unsupported type %s",
+			fn.Name, index+1, param,
+		)
+	}
+	if ret != typeVoid && !browserHostScalar(ret) {
+		return errorf(
+			"type error: browser host function `%s` has unsupported return type %s",
+			fn.Name, ret,
+		)
+	}
+	return nil
+}
+
+// browserHostScalar reports the values whose ownership and representation do
+// not need a per-function payload ABI at the JavaScript boundary.
+func browserHostScalar(value Type) bool {
+	if value == typeBool || isPointerType(value) {
+		return true
+	}
+	switch value {
+	case "i8", "i16", "i32", "i64", typeU8, "u16", "u32", "u64", "usize", "isize":
+		return true
+	default:
+		return false
+	}
+}
+
+// unqualifiedFunctionName returns the source identifier behind a resolved
+// module name. External link names use the same last-segment rule.
+func unqualifiedFunctionName(name string) string {
+	if index := strings.LastIndex(name, "::"); index >= 0 {
+		return name[index+2:]
+	}
+	return name
 }
 
 // collectFunctionParams validates function parameters and records call-time metadata.
@@ -3258,6 +3384,13 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	if expr.Name == "void" {
 		return "", errorAt(expr.Span, "type error: void is not a value")
 	}
+	if fn, ok := c.lookupFunctionByValueName(expr.Name); ok && fn.sig.ExternABI == "browser" {
+		return "", errorAt(
+			expr.Span,
+			"type error: browser host function `%s` cannot be used as a function pointer",
+			expr.Name,
+		)
+	}
 	// A top-level function name is the one value a function pointer takes.
 	// There is nothing else to build one from: Kizu has no closures, so the
 	// name is checked here rather than through a conversion form.
@@ -3985,8 +4118,24 @@ func (c *Checker) checkFsReadDir(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
-	_, _, err := c.checkFsPathArgs("std::fs::read_dir", args, env, unsafe)
-	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, err
+	const name = "std::fs::read_dir"
+	if len(args) != 3 {
+		return "", true, errorf("type error: `%s` expects io, allocator, and path", name)
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
+		return "", true, err
+	}
+	if err := c.checkCoreArg(name, 1, stdprim.ArgAllocator, args[1], env, unsafe); err != nil {
+		return "", true, err
+	}
+	path, err := c.checkExpr(args[2], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if !sameType(path, typeByteString) {
+		return "", true, errorf("type error: `%s` expects []u8 path, got %s", name, path)
+	}
+	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, nil
 }
 
 // checkFsPathOnly validates an Io plus path API and returns result.
@@ -5884,7 +6033,7 @@ func checkFsMetadataField(name string) (Type, error) {
 func checkFsDirEntryField(name string) (Type, error) {
 	switch name {
 	case "name", "path":
-		return typeByteString, nil
+		return Type("std::string::String"), nil
 	case "is_dir":
 		return typeBool, nil
 	default:

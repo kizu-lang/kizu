@@ -1,0 +1,2095 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+
+// Mechanical port of internal/wasm/fs.go. Filesystem paths are relative to
+// the host's explicit first WASI preopen; the compiler grants no directory.
+
+struct FSErrorCodes {
+    invalid_path: i64,
+    not_found: i64,
+    permission_denied: i64,
+    is_directory: i64,
+    not_directory: i64,
+    already_exists: i64,
+    directory_not_empty: i64,
+    no_space_left: i64,
+    too_many_open_files: i64,
+    read_failed: i64,
+    write_failed: i64,
+    out_of_memory: i64,
+    operation_failed: i64,
+    io_failing: i64,
+    limit_exceeded: i64
+}
+
+/// Is the declaration-derived wasm32 storage used by read_dir.
+struct FSDirLayout {
+    entry_size: i64,
+    name_offset: i64,
+    path_offset: i64,
+    is_dir_offset: i64,
+    result_offset: i64
+}
+
+/// Is one read_dir layout or the reason it cannot be formed.
+union FSDirLayoutResult {
+    Layout(FSDirLayout),
+    Error(diagnostic::Diagnostic),
+}
+
+fn (self: &Emitter) uses_fs_runtime(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_read_file_into"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_real_path_into"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_read_dir"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_write_file"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_exists"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_metadata"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_rename"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_create_dir"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_remove_dir"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_remove_file"
+    );
+}
+
+fn (self: &Emitter) uses_fs_open(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_read_file_into"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_write_file"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_read_dir"
+    );
+}
+
+fn (self: &Emitter) uses_fs_stat(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_exists"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_metadata"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_read_dir"
+    ) or self.uses_builtin_call(
+        module,
+        "std::internal::builtin::fs_real_path_into"
+    );
+}
+
+/// Declares only the WASI filesystem calls the guest reaches.
+fn (self: &var Emitter) write_fs_imports(module: &ir::Module) -> !void {
+    if !self.uses_fs_runtime(module) {
+        return;
+    }
+    let prestat =
+        \\  (import "wasi_snapshot_preview1" "fd_prestat_get"
+    ;
+    try self.line(prestat);
+    try self.line("    (func $__wasi_fd_prestat_get (param i32 i32) (result i32)))");
+    if self.uses_fs_open(module) {
+        let path_open =
+            \\  (import "wasi_snapshot_preview1" "path_open"
+        ;
+        try self.line(path_open);
+        try self.line("    (func $__wasi_path_open");
+        try self.line(
+            "      (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_read_file_into") {
+        let fd_read =
+            \\  (import "wasi_snapshot_preview1" "fd_read"
+        ;
+        try self.line(fd_read);
+        try self.line(
+            "    (func $__wasi_fd_read (param i32 i32 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_read_dir") {
+        let fd_readdir =
+            \\  (import "wasi_snapshot_preview1" "fd_readdir"
+        ;
+        try self.line(fd_readdir);
+        try self.line(
+            "    (func $__wasi_fd_readdir (param i32 i32 i32 i64 i32) (result i32)))"
+        );
+    }
+    if self.uses_fs_open(module) {
+        let fd_close =
+            \\  (import "wasi_snapshot_preview1" "fd_close"
+        ;
+        try self.line(fd_close);
+        try self.line("    (func $__wasi_fd_close (param i32) (result i32)))");
+    }
+    if self.uses_fs_stat(module) {
+        let filestat =
+            \\  (import "wasi_snapshot_preview1" "path_filestat_get"
+        ;
+        try self.line(filestat);
+        try self.line("    (func $__wasi_path_filestat_get");
+        try self.line("      (param i32 i32 i32 i32 i32) (result i32)))");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_real_path_into") {
+        let path_readlink =
+            \\  (import "wasi_snapshot_preview1" "path_readlink"
+        ;
+        try self.line(path_readlink);
+        try self.line("    (func $__wasi_path_readlink");
+        try self.line(
+            "      (param i32 i32 i32 i32 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_create_dir") {
+        let create_dir =
+            \\  (import "wasi_snapshot_preview1" "path_create_directory"
+        ;
+        try self.line(create_dir);
+        try self.line(
+            "    (func $__wasi_path_create_directory (param i32 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_remove_dir") {
+        let remove_dir =
+            \\  (import "wasi_snapshot_preview1" "path_remove_directory"
+        ;
+        try self.line(remove_dir);
+        try self.line(
+            "    (func $__wasi_path_remove_directory (param i32 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_remove_file") {
+        let unlink_file =
+            \\  (import "wasi_snapshot_preview1" "path_unlink_file"
+        ;
+        try self.line(unlink_file);
+        try self.line(
+            "    (func $__wasi_path_unlink_file (param i32 i32 i32) (result i32)))"
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_rename") {
+        let rename =
+            \\  (import "wasi_snapshot_preview1" "path_rename"
+        ;
+        try self.line(rename);
+        try self.line("    (func $__wasi_path_rename");
+        try self.line(
+            "      (param i32 i32 i32 i32 i32 i32) (result i32)))"
+        );
+    }
+    return;
+}
+
+/// Emits the basic preopen-relative filesystem boundary.
+fn (self: &var Emitter) write_fs_runtime(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if !self.uses_fs_runtime(module) {
+        return null;
+    }
+    let invalid_path = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "InvalidPath"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `InvalidPath`"
+    );
+    let not_found = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "NotFound"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `NotFound`"
+    );
+    let permission_denied = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "PermissionDenied"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `PermissionDenied`"
+    );
+    let is_directory = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "IsDirectory"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `IsDirectory`"
+    );
+    let not_directory = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "NotDirectory"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `NotDirectory`"
+    );
+    let already_exists = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "AlreadyExists"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `AlreadyExists`"
+    );
+    let directory_not_empty = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "DirectoryNotEmpty"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `DirectoryNotEmpty`"
+    );
+    let no_space_left = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "NoSpaceLeft"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `NoSpaceLeft`"
+    );
+    let too_many_open_files = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "TooManyOpenFiles"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `TooManyOpenFiles`"
+    );
+    let read_failed = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "ReadFailed"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `ReadFailed`"
+    );
+    let write_failed = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "WriteFailed"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `WriteFailed`"
+    );
+    let out_of_memory = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "OutOfMemory"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `OutOfMemory`"
+    );
+    let operation_failed = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "OperationFailed"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `OperationFailed`"
+    );
+    let io_failing = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "IoFailing"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `IoFailing`"
+    );
+    let limit_exceeded = wasm_error_code(
+        module,
+        "std::fs::Error",
+        "LimitExceeded"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::fs::Error` has no member `LimitExceeded`"
+    );
+    let codes = FSErrorCodes {
+        invalid_path: invalid_path,
+        not_found: not_found,
+        permission_denied: permission_denied,
+        is_directory: is_directory,
+        not_directory: not_directory,
+        already_exists: already_exists,
+        directory_not_empty: directory_not_empty,
+        no_space_left: no_space_left,
+        too_many_open_files: too_many_open_files,
+        read_failed: read_failed,
+        write_failed: write_failed,
+        out_of_memory: out_of_memory,
+        operation_failed: operation_failed,
+        io_failing: io_failing,
+        limit_exceeded: limit_exceeded
+    };
+    try self.write_fs_preopen_helper();
+    try self.write_fs_errno_helper(codes);
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_read_file_into") {
+        try self.write_fs_read_file_into(codes);
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_real_path_into") {
+        try self.write_fs_real_path_into(codes);
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_read_dir") {
+        let layout_outcome = try self.load_fs_dir_layout(module);
+        match layout_outcome {
+            Error(failed) => return move failed,
+            Layout(layout) => try self.write_fs_read_dir(layout, codes),
+        }
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_write_file") {
+        try self.write_fs_write_file(codes);
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_exists") {
+        try self.write_fs_exists(codes);
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_metadata") {
+        try self.write_fs_metadata(codes);
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_create_dir") {
+        try self.write_fs_path_void_builtin(
+            "std::internal::builtin::fs_create_dir",
+            "$__wasi_path_create_directory",
+            codes
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_remove_dir") {
+        try self.write_fs_path_void_builtin(
+            "std::internal::builtin::fs_remove_dir",
+            "$__wasi_path_remove_directory",
+            codes
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_remove_file") {
+        try self.write_fs_path_void_builtin(
+            "std::internal::builtin::fs_remove_file",
+            "$__wasi_path_unlink_file",
+            codes
+        );
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::fs_rename") {
+        try self.write_fs_rename(codes);
+    }
+    return null;
+}
+
+/// Resolves DirEntry, String storage, and the error-union payload from the
+/// declarations instead of pinning their source-level aggregate offsets.
+fn (self: &var Emitter) load_fs_dir_layout(
+    module: &ir::Module
+) -> !FSDirLayoutResult {
+    var entry = WasmLayout { size: 0, align: 1 };
+    let entry_outcome = try self.type_layout_bytes(module, "std::fs::DirEntry");
+    match entry_outcome {
+        Error(failed) => return FSDirLayoutResult::Error(move failed),
+        Layout(found) => {
+            entry = found;
+        },
+    }
+    var name_offset = 0;
+    let name_outcome = try self.field_layout(
+        module,
+        "std::fs::DirEntry",
+        "name"
+    );
+    match name_outcome {
+        Error(failed) => return FSDirLayoutResult::Error(move failed),
+        Field(found) => {
+            if !module.names.is(found.field.type_name, "std::string::String") {
+                return FSDirLayoutResult::Error(try self.fail0(
+                    "wasm error: incompatible `std::fs::DirEntry` storage for fs_read_dir"
+                ));
+            }
+            name_offset = found.offset;
+        },
+    }
+    var path_offset = 0;
+    let path_outcome = try self.field_layout(
+        module,
+        "std::fs::DirEntry",
+        "path"
+    );
+    match path_outcome {
+        Error(failed) => return FSDirLayoutResult::Error(move failed),
+        Field(found) => {
+            if !module.names.is(found.field.type_name, "std::string::String") {
+                return FSDirLayoutResult::Error(try self.fail0(
+                    "wasm error: incompatible `std::fs::DirEntry` storage for fs_read_dir"
+                ));
+            }
+            path_offset = found.offset;
+        },
+    }
+    var is_dir_offset = 0;
+    let is_dir_outcome = try self.field_layout(
+        module,
+        "std::fs::DirEntry",
+        "is_dir"
+    );
+    match is_dir_outcome {
+        Error(failed) => return FSDirLayoutResult::Error(move failed),
+        Field(found) => {
+            if !module.names.is(found.field.type_name, "bool") {
+                return FSDirLayoutResult::Error(try self.fail0(
+                    "wasm error: incompatible `std::fs::DirEntry` storage for fs_read_dir"
+                ));
+            }
+            is_dir_offset = found.offset;
+        },
+    }
+    var bytes_offset = 0;
+    let bytes_outcome = try self.field_layout(
+        module,
+        "std::string::String",
+        "bytes"
+    );
+    match bytes_outcome {
+        Error(failed) => return FSDirLayoutResult::Error(move failed),
+        Field(found) => {
+            if !module.names.is(found.field.type_name, "std::array::Array<u8>") {
+                return FSDirLayoutResult::Error(try self.fail0(
+                    "wasm error: incompatible `std::fs::DirEntry` storage for fs_read_dir"
+                ));
+            }
+            bytes_offset = found.offset;
+        },
+    }
+    if entry.size <= 0 {
+        return FSDirLayoutResult::Error(try self.fail0(
+            "wasm error: incompatible `std::fs::DirEntry` storage for fs_read_dir"
+        ));
+    }
+    var result_offset = 0;
+    let result_outcome = try self.tagged_payload_offset(
+        module,
+        "std::array::Array<std::fs::DirEntry>",
+        true
+    );
+    match result_outcome {
+        Error(failed) => return FSDirLayoutResult::Error(move failed),
+        Offset(found) => {
+            result_offset = found;
+        },
+    }
+    return FSDirLayoutResult::Layout(FSDirLayout {
+        entry_size: entry.size,
+        name_offset: name_offset + bytes_offset,
+        path_offset: path_offset + bytes_offset,
+        is_dir_offset: is_dir_offset,
+        result_offset: result_offset
+    });
+}
+
+fn (self: &var Emitter) write_fs_preopen_helper() -> !void {
+    try self.line("  (func $__fs_preopen (result i32)");
+    try self.line2(
+        "    (if (call $__wasi_fd_prestat_get (i32.const %d) (i32.const %d))",
+        Arg::Int(3),
+        Arg::Int(scratch_offset())
+    );
+    try self.line("      (then (return (i32.const -1))))");
+    try self.line1(
+        "    (if (i32.ne (i32.load8_u (i32.const %d)) (i32.const 0))",
+        Arg::Int(scratch_offset())
+    );
+    try self.line("      (then (return (i32.const -1))))");
+    try self.line("    (i32.const 3)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_errno_helper(codes: FSErrorCodes) -> !void {
+    try self.line("  (func $__fs_error (param $errno i32) (result i64)");
+    try self.write_fs_errno_case(44, codes.not_found);
+    try self.write_fs_errno_triple_case(2, 63, 76, codes.permission_denied);
+    try self.write_fs_errno_case(31, codes.is_directory);
+    try self.write_fs_errno_case(54, codes.not_directory);
+    try self.write_fs_errno_case(20, codes.already_exists);
+    try self.write_fs_errno_case(55, codes.directory_not_empty);
+    try self.write_fs_errno_case(51, codes.no_space_left);
+    try self.write_fs_errno_pair_case(33, 41, codes.too_many_open_files);
+    try self.write_fs_errno_pair_case(28, 37, codes.invalid_path);
+    try self.line1("    (i64.const %d)", Arg::Int(codes.operation_failed));
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_errno_case(errno: i64, code: i64) -> !void {
+    try self.line1(
+        "    (if (i32.eq (local.get $errno) (i32.const %d))",
+        Arg::Int(errno)
+    );
+    return self.line1("      (then (return (i64.const %d))))", Arg::Int(code));
+}
+
+fn (self: &var Emitter) write_fs_errno_pair_case(
+    first: i64,
+    second: i64,
+    code: i64
+) -> !void {
+    try self.line("    (if (i32.or");
+    try self.line1(
+        "          (i32.eq (local.get $errno) (i32.const %d))",
+        Arg::Int(first)
+    );
+    try self.line1(
+        "          (i32.eq (local.get $errno) (i32.const %d)))",
+        Arg::Int(second)
+    );
+    return self.line1("      (then (return (i64.const %d))))", Arg::Int(code));
+}
+
+fn (self: &var Emitter) write_fs_errno_triple_case(
+    first: i64,
+    second: i64,
+    third: i64,
+    code: i64
+) -> !void {
+    try self.line("    (if (i32.or");
+    try self.line1(
+        "          (i32.eq (local.get $errno) (i32.const %d))",
+        Arg::Int(first)
+    );
+    try self.line1(
+        "          (i32.or (i32.eq (local.get $errno) (i32.const %d))",
+        Arg::Int(second)
+    );
+    try self.line1(
+        "            (i32.eq (local.get $errno) (i32.const %d))))",
+        Arg::Int(third)
+    );
+    return self.line1("      (then (return (i64.const %d))))", Arg::Int(code));
+}
+
+fn (self: &var Emitter) write_fs_guard(
+    io_failing: i64,
+    permission_denied: i64
+) -> !void {
+    try self.line("    (if (i32.eq (local.get $io) (i32.const 2))");
+    try self.line("      (then");
+    try self.write_error_result(io_failing, "        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $fd (call $__fs_preopen))");
+    try self.line("    (if (i32.lt_s (local.get $fd) (i32.const 0))");
+    try self.line("      (then");
+    try self.write_error_result(permission_denied, "        ");
+    return self.line("        (return)))");
+}
+
+fn (self: &var Emitter) write_fs_stored_errno(indent: []u8) -> !void {
+    try self.line1(
+        "%s(i64.store (local.get $out) (i64.const 0))",
+        Arg::Lit(indent)
+    );
+    try self.line2(
+        "%s(i64.store (i32.add (local.get $out) (i32.const %d))",
+        Arg::Lit(indent),
+        Arg::Int(void_error_payload_offset())
+    );
+    return self.line1(
+        "%s  (call $__fs_error (local.get $errno)))",
+        Arg::Lit(indent)
+    );
+}
+
+fn (self: &var Emitter) write_fs_read_file_into(codes: FSErrorCodes) -> !void {
+    try self.line("  (func $std::internal::builtin::fs_read_file_into");
+    try self.line(
+        "      (param $out i32) (param $io i32) (param $allocator i32)"
+    );
+    try self.line("      (param $path i32) (param $dst i32) (param $max i64)");
+    try self.line("    (local $fd i32) (local $errno i32) (local $ptr i32)");
+    try self.line("    (local $want i32) (local $read i32)");
+    try self.line("    (local $start i64) (local $total i64)");
+    try self.line("    (local $remaining i64) (local $needed i64)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line("    (local.set $errno (call $__wasi_path_open");
+    try self.line(
+        "      (local.get $fd) (i32.const 1) (i32.load (local.get $path))"
+    );
+    try self.line(
+        "      (i32.load (i32.add (local.get $path) (i32.const 4)))"
+    );
+    try self.line1(
+        "      (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const %d)))",
+        Arg::Int(24)
+    );
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $fd (i32.load (i32.const 24)))");
+    try self.line1(
+        "    (local.set $start (i64.load (i32.add (local.get $dst) (i32.const %d))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("    (block $done");
+    try self.line("      (loop $read");
+    try self.line("        (local.set $want (i32.const 65536))");
+    try self.line("        (if (i64.ge_s (local.get $max) (i64.const 0))");
+    try self.line("          (then");
+    try self.line("            (local.set $remaining");
+    try self.line("              (i64.sub (local.get $max) (local.get $total)))");
+    try self.line(
+        "            (if (i64.lt_u (local.get $remaining) (i64.const 65536))"
+    );
+    try self.line("              (then (local.set $want (i32.wrap_i64");
+    try self.line(
+        "                (i64.add (local.get $remaining) (i64.const 1))))))))"
+    );
+    try self.line("        (local.set $needed");
+    try self.line1(
+        "          (i64.add (i64.load (i32.add (local.get $dst) (i32.const %d)))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("            (i64.extend_i32_u (local.get $want))))");
+    try self.line("        (if (i32.eqz (call $__array_reserve");
+    try self.line("              (local.get $allocator) (local.get $dst)");
+    try self.line("              (local.get $needed) (i32.const 1)))");
+    try self.line("          (then");
+    try self.write_fs_read_failure(codes.out_of_memory);
+    try self.line("            (return)))");
+    try self.line("        (local.set $ptr");
+    try self.line("          (i32.add (i32.load (local.get $dst))");
+    try self.line1(
+        "            (i32.wrap_i64 (i64.load (i32.add (local.get $dst) (i32.const %d))))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $ptr))",
+        Arg::Int(scratch_offset())
+    );
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $want))",
+        Arg::Int(scratch_offset() + 4)
+    );
+    try self.line("        (local.set $errno (call $__wasi_fd_read");
+    try self.line2(
+        "          (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))",
+        Arg::Int(scratch_offset()),
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (local.get $errno)");
+    try self.line("          (then");
+    try self.write_fs_read_failure(codes.read_failed);
+    try self.line("            (return)))");
+    try self.line1(
+        "        (local.set $read (i32.load (i32.const %d)))",
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (i32.gt_u (local.get $read) (local.get $want))");
+    try self.line("          (then");
+    try self.write_fs_read_failure(codes.read_failed);
+    try self.line("            (return)))");
+    try self.line("        (br_if $done (i32.eqz (local.get $read)))");
+    try self.line1(
+        "        (i64.store (i32.add (local.get $dst) (i32.const %d))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line1(
+        "          (i64.add (i64.load (i32.add (local.get $dst) (i32.const %d)))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("            (i64.extend_i32_u (local.get $read))))");
+    try self.line("        (local.set $total");
+    try self.line(
+        "          (i64.add (local.get $total) (i64.extend_i32_u (local.get $read))))"
+    );
+    try self.line(
+        "        (if (i32.and (i64.ge_s (local.get $max) (i64.const 0))"
+    );
+    try self.line("            (i64.gt_u (local.get $total) (local.get $max)))");
+    try self.line("          (then");
+    try self.write_fs_read_failure(codes.limit_exceeded);
+    try self.line("            (return)))");
+    try self.line("        (br $read)))");
+    try self.line("    (drop (call $__wasi_fd_close (local.get $fd)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_read_failure(code: i64) -> !void {
+    try self.line1(
+        "            (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $start))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("            (drop (call $__wasi_fd_close (local.get $fd)))");
+    return self.write_error_result(code, "            ");
+}
+
+/// Resolves one capability-relative path component by component.
+fn (self: &var Emitter) write_fs_real_path_into(
+    codes: FSErrorCodes
+) -> !void {
+    try self.write_fs_real_path_pop_helper();
+    try self.write_fs_real_path_fail_helper();
+    return self.write_fs_real_path_builtin(codes);
+}
+
+fn (self: &var Emitter) write_fs_real_path_pop_helper() -> !void {
+    try self.line(
+        "  (func $__fs_real_path_pop (param $dst i32) (param $start i64) (result i32)"
+    );
+    try self.line(
+        "    (local $length i64) (local $index i64) (local $data i32)"
+    );
+    try self.line1(
+        "    (local.set $length (i64.load (i32.add (local.get $dst) (i32.const %d))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line(
+        "    (if (i64.le_u (local.get $length) (local.get $start))"
+    );
+    try self.line("      (then (return (i32.const 0))))");
+    try self.line("    (local.set $data (i32.load (local.get $dst)))");
+    try self.line("    (local.set $index (local.get $length))");
+    try self.line("    (loop $pop");
+    try self.line(
+        "      (if (i64.le_u (local.get $index) (local.get $start))"
+    );
+    try self.line("        (then");
+    try self.line1(
+        "          (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $start))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("          (return (i32.const 1))))");
+    try self.line(
+        "      (local.set $index (i64.sub (local.get $index) (i64.const 1)))"
+    );
+    try self.line(
+        "      (if (i32.eq (i32.load8_u (i32.add (local.get $data) (i32.wrap_i64 (local.get $index)))) (i32.const 47))"
+    );
+    try self.line("        (then");
+    try self.line1(
+        "          (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $index))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("          (return (i32.const 1))))");
+    try self.line("      (br $pop))");
+    try self.line("    (unreachable)");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_real_path_fail_helper() -> !void {
+    try self.line("  (func $__fs_real_path_fail");
+    try self.line(
+        "      (param $out i32) (param $allocator i32) (param $dst i32) (param $start i64)"
+    );
+    try self.line(
+        "      (param $pending i32) (param $pending_cap i32) (param $link i32) (param $link_cap i32) (param $code i64)"
+    );
+    try self.line1(
+        "    (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $start))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line(
+        "    (call $__allocator_free (local.get $allocator) (local.get $pending) (local.get $pending_cap))"
+    );
+    try self.line(
+        "    (call $__allocator_free (local.get $allocator) (local.get $link) (local.get $link_cap))"
+    );
+    try self.line("    (i64.store (local.get $out) (i64.const 0))");
+    try self.line1(
+        "    (i64.store (i32.add (local.get $out) (i32.const %d)) (local.get $code))",
+        Arg::Int(void_error_payload_offset())
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_real_path_failure(
+    code: i64,
+    indent: []u8
+) -> !void {
+    try self.line1("%s(call $__fs_real_path_fail", Arg::Lit(indent));
+    try self.line1(
+        "%s  (local.get $out) (local.get $allocator) (local.get $dst) (local.get $start)",
+        Arg::Lit(indent)
+    );
+    return self.line2(
+        "%s  (local.get $pending_owned) (local.get $pending_cap) (local.get $link) (local.get $link_cap) (i64.const %d))",
+        Arg::Lit(indent),
+        Arg::Int(code)
+    );
+}
+
+fn (self: &var Emitter) write_fs_real_path_errno_failure(
+    indent: []u8
+) -> !void {
+    try self.line1("%s(call $__fs_real_path_fail", Arg::Lit(indent));
+    try self.line1(
+        "%s  (local.get $out) (local.get $allocator) (local.get $dst) (local.get $start)",
+        Arg::Lit(indent)
+    );
+    return self.line1(
+        "%s  (local.get $pending_owned) (local.get $pending_cap) (local.get $link) (local.get $link_cap) (call $__fs_error (local.get $errno)))",
+        Arg::Lit(indent)
+    );
+}
+
+fn (self: &var Emitter) write_fs_real_path_builtin(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("  (func $std::internal::builtin::fs_real_path_into");
+    try self.line(
+        "      (param $out i32) (param $io i32) (param $allocator i32)"
+    );
+    try self.line("      (param $path i32) (param $dst i32)");
+    try self.line(
+        "    (local $fd i32) (local $errno i32) (local $start i64)"
+    );
+    try self.line(
+        "    (local $pending i32) (local $pending_len i32) (local $pending_owned i32) (local $pending_cap i32)"
+    );
+    try self.line(
+        "    (local $scan i32) (local $component_start i32) (local $component_end i32)"
+    );
+    try self.line(
+        "    (local $component i32) (local $component_len i32) (local $suffix_len i32)"
+    );
+    try self.line(
+        "    (local $parent_len i64) (local $resolved_len i64) (local $needed i64)"
+    );
+    try self.line(
+        "    (local $separator i32) (local $candidate i32) (local $candidate_len i32)"
+    );
+    try self.line("    (local $filetype i32) (local $links i32)");
+    try self.line(
+        "    (local $link i32) (local $link_cap i32) (local $link_used i32) (local $grown i32)"
+    );
+    try self.line(
+        "    (local $next_pending i32) (local $next_len i64)"
+    );
+    try self.line1(
+        "    (local.set $start (i64.load (i32.add (local.get $dst) (i32.const %d))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line("    (local.set $pending (i32.load (local.get $path)))");
+    try self.line(
+        "    (local.set $pending_len (i32.load (i32.add (local.get $path) (i32.const 4))))"
+    );
+    try self.write_fs_real_path_initial_guard(codes);
+    try self.write_fs_real_path_loop(codes);
+    try self.write_fs_real_path_finish(codes);
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_real_path_initial_guard(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("    (if (i32.eqz (local.get $pending_len))");
+    try self.line("      (then");
+    try self.write_fs_real_path_failure(codes.not_found, "        ");
+    try self.line("        (return)))");
+    try self.line(
+        "    (if (i32.eq (i32.load8_u (local.get $pending)) (i32.const 47))"
+    );
+    try self.line("      (then");
+    try self.write_fs_real_path_failure(codes.permission_denied, "        ");
+    return self.line("        (return)))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_loop(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("    (block $path_done");
+    try self.line("      (loop $path_resolve");
+    try self.write_fs_real_path_component(codes);
+    return self.line("        (br $path_resolve)))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_finish(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line1(
+        "    (if (i64.eq (i64.load (i32.add (local.get $dst) (i32.const %d))) (local.get $start))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("      (then");
+    try self.line(
+        "        (if (i32.eqz (call $__array_reserve (local.get $allocator) (local.get $dst) (i64.add (local.get $start) (i64.const 1)) (i32.const 1)))"
+    );
+    try self.line("          (then");
+    try self.write_fs_real_path_failure(codes.out_of_memory, "            ");
+    try self.line("            (return)))");
+    try self.line(
+        "        (i32.store8 (i32.add (i32.load (local.get $dst)) (i32.wrap_i64 (local.get $start))) (i32.const 46))"
+    );
+    try self.line1(
+        "        (i64.store (i32.add (local.get $dst) (i32.const %d)) (i64.add (local.get $start) (i64.const 1)))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line(
+        "    (call $__allocator_free (local.get $allocator) (local.get $pending_owned) (local.get $pending_cap))"
+    );
+    try self.line(
+        "    (call $__allocator_free (local.get $allocator) (local.get $link) (local.get $link_cap))"
+    );
+    return self.line("    (i64.store (local.get $out) (i64.const 1))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_component(
+    codes: FSErrorCodes
+) -> !void {
+    try self.write_fs_real_path_parse_component();
+    try self.write_fs_real_path_dot_cases(codes);
+    try self.write_fs_real_path_append_candidate(codes);
+    try self.write_fs_real_path_stat_candidate();
+    try self.write_fs_real_path_symlink(codes);
+    try self.line(
+        "        (if (i32.and (local.get $suffix_len) (i32.ne (local.get $filetype) (i32.const 3)))"
+    );
+    try self.line("          (then");
+    try self.write_fs_real_path_failure(codes.not_directory, "            ");
+    return self.line("            (return)))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_parse_component() -> !void {
+    try self.line("        (block $slashes_done");
+    try self.line("          (loop $skip_slashes");
+    try self.line(
+        "            (br_if $slashes_done (i32.ge_u (local.get $scan) (local.get $pending_len)))"
+    );
+    try self.line(
+        "            (br_if $slashes_done (i32.ne (i32.load8_u (i32.add (local.get $pending) (local.get $scan))) (i32.const 47)))"
+    );
+    try self.line(
+        "            (local.set $scan (i32.add (local.get $scan) (i32.const 1)))"
+    );
+    try self.line("            (br $skip_slashes)))");
+    try self.line(
+        "        (br_if $path_done (i32.ge_u (local.get $scan) (local.get $pending_len)))"
+    );
+    try self.line("        (local.set $component_start (local.get $scan))");
+    try self.line("        (block $component_done");
+    try self.line("          (loop $find_component_end");
+    try self.line(
+        "            (br_if $component_done (i32.ge_u (local.get $scan) (local.get $pending_len)))"
+    );
+    try self.line(
+        "            (br_if $component_done (i32.eq (i32.load8_u (i32.add (local.get $pending) (local.get $scan))) (i32.const 47)))"
+    );
+    try self.line(
+        "            (local.set $scan (i32.add (local.get $scan) (i32.const 1)))"
+    );
+    try self.line("            (br $find_component_end)))");
+    try self.line("        (local.set $component_end (local.get $scan))");
+    try self.line(
+        "        (local.set $component (i32.add (local.get $pending) (local.get $component_start)))"
+    );
+    try self.line(
+        "        (local.set $component_len (i32.sub (local.get $component_end) (local.get $component_start)))"
+    );
+    return self.line(
+        "        (local.set $suffix_len (i32.sub (local.get $pending_len) (local.get $component_end)))"
+    );
+}
+
+fn (self: &var Emitter) write_fs_real_path_dot_cases(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line(
+        "        (if (i32.and (i32.eq (local.get $component_len) (i32.const 1))"
+    );
+    try self.line(
+        "              (i32.eq (i32.load8_u (local.get $component)) (i32.const 46)))"
+    );
+    try self.line("          (then (br $path_resolve)))");
+    try self.line(
+        "        (if (i32.and (i32.eq (local.get $component_len) (i32.const 2))"
+    );
+    try self.line(
+        "              (i32.and (i32.eq (i32.load8_u (local.get $component)) (i32.const 46))"
+    );
+    try self.line(
+        "                (i32.eq (i32.load8_u (i32.add (local.get $component) (i32.const 1))) (i32.const 46))))"
+    );
+    try self.line("          (then");
+    try self.line(
+        "            (if (i32.eqz (call $__fs_real_path_pop (local.get $dst) (local.get $start)))"
+    );
+    try self.line("              (then");
+    try self.write_fs_real_path_failure(codes.permission_denied, "                ");
+    try self.line("                (return)))");
+    return self.line("            (br $path_resolve)))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_append_candidate(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line1(
+        "        (local.set $parent_len (i64.load (i32.add (local.get $dst) (i32.const %d))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line(
+        "        (local.set $resolved_len (i64.sub (local.get $parent_len) (local.get $start)))"
+    );
+    try self.line(
+        "        (local.set $separator (i64.gt_u (local.get $resolved_len) (i64.const 0)))"
+    );
+    try self.line(
+        "        (local.set $needed (i64.add (local.get $parent_len)"
+    );
+    try self.line(
+        "          (i64.add (i64.extend_i32_u (local.get $separator)) (i64.extend_i32_u (local.get $component_len)))))"
+    );
+    try self.line(
+        "        (if (i32.eqz (call $__array_reserve (local.get $allocator) (local.get $dst) (local.get $needed) (i32.const 1)))"
+    );
+    try self.line("          (then");
+    try self.write_fs_real_path_failure(codes.out_of_memory, "            ");
+    try self.line("            (return)))");
+    try self.line("        (if (local.get $separator)");
+    try self.line(
+        "          (then (i32.store8 (i32.add (i32.load (local.get $dst)) (i32.wrap_i64 (local.get $parent_len))) (i32.const 47))))"
+    );
+    try self.line(
+        "        (memory.copy (i32.add (i32.load (local.get $dst))"
+    );
+    try self.line(
+        "          (i32.wrap_i64 (i64.add (local.get $parent_len) (i64.extend_i32_u (local.get $separator)))))"
+    );
+    try self.line(
+        "          (local.get $component) (local.get $component_len))"
+    );
+    try self.line1(
+        "        (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $needed))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line(
+        "        (local.set $candidate (i32.add (i32.load (local.get $dst)) (i32.wrap_i64 (local.get $start))))"
+    );
+    return self.line(
+        "        (local.set $candidate_len (i32.wrap_i64 (i64.sub (local.get $needed) (local.get $start))))"
+    );
+}
+
+fn (self: &var Emitter) write_fs_real_path_stat_candidate() -> !void {
+    try self.line(
+        "        (local.set $errno (call $__wasi_path_filestat_get"
+    );
+    try self.line(
+        "          (local.get $fd) (i32.const 0) (local.get $candidate)"
+    );
+    try self.line(
+        "          (local.get $candidate_len) (i32.const 64)))"
+    );
+    try self.line("        (if (local.get $errno)");
+    try self.line("          (then");
+    try self.write_fs_real_path_errno_failure("            ");
+    try self.line("            (return)))");
+    return self.line(
+        "        (local.set $filetype (i32.load8_u (i32.const 80)))"
+    );
+}
+
+fn (self: &var Emitter) write_fs_real_path_symlink(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line(
+        "        (if (i32.eq (local.get $filetype) (i32.const 7))"
+    );
+    try self.line("          (then");
+    try self.write_fs_real_path_link_limit(codes);
+    try self.write_fs_real_path_readlink(codes);
+    try self.write_fs_real_path_replace_pending(codes);
+    return self.line("            (br $path_resolve)))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_link_limit(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line(
+        "            (local.set $links (i32.add (local.get $links) (i32.const 1)))"
+    );
+    try self.line(
+        "            (if (i32.gt_u (local.get $links) (i32.const 40))"
+    );
+    try self.line("              (then");
+    try self.write_fs_real_path_failure(codes.operation_failed, "                ");
+    return self.line("                (return)))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_readlink(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("            (if (i32.eqz (local.get $link))");
+    try self.line("              (then");
+    try self.line("                (local.set $link_cap (i32.const 256))");
+    try self.line(
+        "                (local.set $link (call $__allocator_alloc (local.get $allocator) (local.get $link_cap)))"
+    );
+    try self.line("                (if (i32.eqz (local.get $link))");
+    try self.line("                  (then");
+    try self.write_fs_real_path_failure(codes.out_of_memory, "                    ");
+    try self.line("                    (return)))))");
+    try self.line("            (block $link_done");
+    try self.line("              (loop $read_link");
+    try self.line(
+        "                (local.set $errno (call $__wasi_path_readlink"
+    );
+    try self.line(
+        "                  (local.get $fd) (local.get $candidate) (local.get $candidate_len)"
+    );
+    try self.line(
+        "                  (local.get $link) (local.get $link_cap) (i32.const 32)))"
+    );
+    try self.line("                (if (local.get $errno)");
+    try self.line("                  (then");
+    try self.write_fs_real_path_errno_failure("                    ");
+    try self.line("                    (return)))");
+    try self.line(
+        "                (local.set $link_used (i32.load (i32.const 32)))"
+    );
+    try self.line(
+        "                (if (i32.gt_u (local.get $link_used) (local.get $link_cap))"
+    );
+    try self.line("                  (then");
+    try self.write_fs_real_path_failure(codes.read_failed, "                    ");
+    try self.line("                    (return)))");
+    try self.line(
+        "                (br_if $link_done (i32.lt_u (local.get $link_used) (local.get $link_cap)))"
+    );
+    try self.line(
+        "                (if (i32.gt_u (local.get $link_cap) (i32.const 1073741820))"
+    );
+    try self.line("                  (then");
+    try self.write_fs_real_path_failure(codes.out_of_memory, "                    ");
+    try self.line("                    (return)))");
+    try self.line("                (local.set $grown (call $__allocator_realloc");
+    try self.line(
+        "                  (local.get $allocator) (local.get $link) (local.get $link_cap)"
+    );
+    try self.line(
+        "                  (i32.mul (local.get $link_cap) (i32.const 2))))"
+    );
+    try self.line("                (if (i32.eqz (local.get $grown))");
+    try self.line("                  (then");
+    try self.write_fs_real_path_failure(codes.out_of_memory, "                    ");
+    try self.line("                    (return)))");
+    try self.line("                (local.set $link (local.get $grown))");
+    try self.line(
+        "                (local.set $link_cap (i32.mul (local.get $link_cap) (i32.const 2)))"
+    );
+    return self.line("                (br $read_link)))");
+}
+
+fn (self: &var Emitter) write_fs_real_path_replace_pending(
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("            (if (i32.eqz (local.get $link_used))");
+    try self.line("              (then");
+    try self.write_fs_real_path_failure(codes.operation_failed, "                ");
+    try self.line("                (return)))");
+    try self.line(
+        "            (if (i32.eq (i32.load8_u (local.get $link)) (i32.const 47))"
+    );
+    try self.line("              (then");
+    try self.write_fs_real_path_failure(codes.permission_denied, "                ");
+    try self.line("                (return)))");
+    try self.line(
+        "            (local.set $next_len (i64.add (i64.extend_i32_u (local.get $link_used)) (i64.extend_i32_u (local.get $suffix_len))))"
+    );
+    try self.line(
+        "            (if (i64.gt_u (local.get $next_len) (i64.const 2147483640))"
+    );
+    try self.line("              (then");
+    try self.write_fs_real_path_failure(codes.out_of_memory, "                ");
+    try self.line("                (return)))");
+    try self.line(
+        "            (local.set $next_pending (call $__allocator_alloc"
+    );
+    try self.line(
+        "              (local.get $allocator) (i32.wrap_i64 (local.get $next_len))))"
+    );
+    try self.line("            (if (i32.eqz (local.get $next_pending))");
+    try self.line("              (then");
+    try self.write_fs_real_path_failure(codes.out_of_memory, "                ");
+    try self.line("                (return)))");
+    try self.line(
+        "            (memory.copy (local.get $next_pending) (local.get $link) (local.get $link_used))"
+    );
+    try self.line(
+        "            (memory.copy (i32.add (local.get $next_pending) (local.get $link_used))"
+    );
+    try self.line(
+        "              (i32.add (local.get $pending) (local.get $component_end)) (local.get $suffix_len))"
+    );
+    try self.line1(
+        "            (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $parent_len))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line(
+        "            (call $__allocator_free (local.get $allocator) (local.get $pending_owned) (local.get $pending_cap))"
+    );
+    try self.line(
+        "            (local.set $pending_owned (local.get $next_pending))"
+    );
+    try self.line("            (local.set $pending (local.get $next_pending))");
+    try self.line(
+        "            (local.set $pending_len (i32.wrap_i64 (local.get $next_len)))"
+    );
+    try self.line(
+        "            (local.set $pending_cap (local.get $pending_len))"
+    );
+    return self.line("            (local.set $scan (i32.const 0))");
+}
+
+/// Emits an owned, sorted directory snapshot.
+fn (self: &var Emitter) write_fs_read_dir(
+    layout: FSDirLayout,
+    codes: FSErrorCodes
+) -> !void {
+    try self.write_fs_dir_entries_free(layout);
+    try self.write_fs_dir_entry_after(layout);
+    try self.write_fs_sort_dir_entries(layout);
+    try self.write_fs_read_dir_fail_helper(layout);
+    return self.write_fs_read_dir_builtin(layout, codes);
+}
+
+fn (self: &var Emitter) write_fs_dir_entries_free(
+    layout: FSDirLayout
+) -> !void {
+    try self.line(
+        "  (func $__fs_dir_entries_free (param $allocator i32) (param $array i32)"
+    );
+    try self.line(
+        "    (local $index i64) (local $item i32) (local $capacity i64)"
+    );
+    try self.line("    (block $done");
+    try self.line("      (loop $entries");
+    try self.line1(
+        "        (br_if $done (i64.ge_u (local.get $index) (i64.load (i32.add (local.get $array) (i32.const %d)))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("        (local.set $item");
+    try self.line("          (i32.add (i32.load (local.get $array))");
+    try self.line1(
+        "            (i32.wrap_i64 (i64.mul (local.get $index) (i64.const %d)))))",
+        Arg::Int(layout.entry_size)
+    );
+    try self.write_fs_dir_string_free(layout.name_offset);
+    try self.write_fs_dir_string_free(layout.path_offset);
+    try self.line(
+        "        (local.set $index (i64.add (local.get $index) (i64.const 1)))"
+    );
+    try self.line("        (br $entries)))");
+    try self.line1(
+        "    (local.set $capacity (i64.load (i32.add (local.get $array) (i32.const %d))))",
+        Arg::Int(array_capacity_offset())
+    );
+    try self.line(
+        "    (call $__allocator_free (local.get $allocator) (i32.load (local.get $array))"
+    );
+    try self.line1(
+        "      (i32.wrap_i64 (i64.mul (local.get $capacity) (i64.const %d))))",
+        Arg::Int(layout.entry_size)
+    );
+    try self.line("    (i32.store (local.get $array) (i32.const 0))");
+    try self.line1(
+        "    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line1(
+        "    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))",
+        Arg::Int(array_capacity_offset())
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_dir_string_free(offset: i64) -> !void {
+    try self.line1(
+        "        (local.set $capacity (i64.load (i32.add (local.get $item) (i32.const %d))))",
+        Arg::Int(offset + array_capacity_offset())
+    );
+    try self.line("        (call $__allocator_free (local.get $allocator)");
+    try self.line1(
+        "          (i32.load (i32.add (local.get $item) (i32.const %d)))",
+        Arg::Int(offset + array_data_offset())
+    );
+    return self.line("          (i32.wrap_i64 (local.get $capacity)))");
+}
+
+fn (self: &var Emitter) write_fs_dir_entry_after(
+    layout: FSDirLayout
+) -> !void {
+    try self.line(
+        "  (func $__fs_dir_entry_after (param $left i32) (param $right i32) (result i32)"
+    );
+    try self.line(
+        "    (local $left_len i64) (local $right_len i64) (local $limit i64)"
+    );
+    try self.line(
+        "    (local $index i64) (local $left_byte i32) (local $right_byte i32)"
+    );
+    try self.line1(
+        "    (local.set $left_len (i64.load (i32.add (local.get $left) (i32.const %d))))",
+        Arg::Int(layout.name_offset + array_len_offset())
+    );
+    try self.line1(
+        "    (local.set $right_len (i64.load (i32.add (local.get $right) (i32.const %d))))",
+        Arg::Int(layout.name_offset + array_len_offset())
+    );
+    try self.line("    (local.set $limit (local.get $left_len))");
+    try self.line(
+        "    (if (i64.lt_u (local.get $right_len) (local.get $limit))"
+    );
+    try self.line(
+        "      (then (local.set $limit (local.get $right_len))))"
+    );
+    try self.line("    (block $same_prefix");
+    try self.line("      (loop $bytes");
+    try self.line(
+        "        (br_if $same_prefix (i64.ge_u (local.get $index) (local.get $limit)))"
+    );
+    try self.line("        (local.set $left_byte");
+    try self.line1(
+        "          (i32.load8_u (i32.add (i32.load (i32.add (local.get $left) (i32.const %d)))",
+        Arg::Int(layout.name_offset + array_data_offset())
+    );
+    try self.line("            (i32.wrap_i64 (local.get $index)))))");
+    try self.line("        (local.set $right_byte");
+    try self.line1(
+        "          (i32.load8_u (i32.add (i32.load (i32.add (local.get $right) (i32.const %d)))",
+        Arg::Int(layout.name_offset + array_data_offset())
+    );
+    try self.line("            (i32.wrap_i64 (local.get $index)))))");
+    try self.line(
+        "        (if (i32.ne (local.get $left_byte) (local.get $right_byte))"
+    );
+    try self.line(
+        "          (then (return (i32.gt_u (local.get $left_byte) (local.get $right_byte)))))"
+    );
+    try self.line(
+        "        (local.set $index (i64.add (local.get $index) (i64.const 1)))"
+    );
+    try self.line("        (br $bytes)))");
+    try self.line(
+        "    (i64.gt_u (local.get $left_len) (local.get $right_len))"
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_sort_dir_entries(
+    layout: FSDirLayout
+) -> !void {
+    try self.line("  (func $__fs_sort_dir_entries (param $array i32)");
+    try self.line(
+        "    (local $index i64) (local $current i64) (local $left i64)"
+    );
+    try self.line("    (local $left_ptr i32) (local $right_ptr i32)");
+    try self.line("    (local.set $index (i64.const 1))");
+    try self.line("    (block $sorted");
+    try self.line("      (loop $outer");
+    try self.line1(
+        "        (br_if $sorted (i64.ge_u (local.get $index) (i64.load (i32.add (local.get $array) (i32.const %d)))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("        (local.set $current (local.get $index))");
+    try self.line("        (block $inserted");
+    try self.line("          (loop $inner");
+    try self.line(
+        "            (br_if $inserted (i64.eqz (local.get $current)))"
+    );
+    try self.line(
+        "            (local.set $left (i64.sub (local.get $current) (i64.const 1)))"
+    );
+    try self.line(
+        "            (local.set $left_ptr (i32.add (i32.load (local.get $array))"
+    );
+    try self.line1(
+        "              (i32.wrap_i64 (i64.mul (local.get $left) (i64.const %d)))))",
+        Arg::Int(layout.entry_size)
+    );
+    try self.line(
+        "            (local.set $right_ptr (i32.add (i32.load (local.get $array))"
+    );
+    try self.line1(
+        "              (i32.wrap_i64 (i64.mul (local.get $current) (i64.const %d)))))",
+        Arg::Int(layout.entry_size)
+    );
+    try self.line(
+        "            (br_if $inserted (i32.eqz (call $__fs_dir_entry_after"
+    );
+    try self.line(
+        "              (local.get $left_ptr) (local.get $right_ptr))))"
+    );
+    try self.line(
+        "            (drop (call $__array_swap (local.get $array)"
+    );
+    try self.line1(
+        "              (local.get $left) (local.get $current) (i32.const %d)))",
+        Arg::Int(layout.entry_size)
+    );
+    try self.line("            (local.set $current (local.get $left))");
+    try self.line("            (br $inner)))");
+    try self.line(
+        "        (local.set $index (i64.add (local.get $index) (i64.const 1)))"
+    );
+    try self.line("        (br $outer)))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_read_dir_fail_helper(
+    layout: FSDirLayout
+) -> !void {
+    try self.line("  (func $__fs_read_dir_fail");
+    try self.line(
+        "      (param $out i32) (param $allocator i32) (param $array i32)"
+    );
+    try self.line(
+        "      (param $buffer i32) (param $capacity i32) (param $fd i32) (param $code i64)"
+    );
+    try self.line(
+        "    (call $__fs_dir_entries_free (local.get $allocator) (local.get $array))"
+    );
+    try self.line("    (call $__allocator_free (local.get $allocator)");
+    try self.line("      (local.get $buffer) (local.get $capacity))");
+    try self.line(
+        "    (if (i32.ge_s (local.get $fd) (i32.const 0))"
+    );
+    try self.line(
+        "      (then (drop (call $__wasi_fd_close (local.get $fd)))))"
+    );
+    try self.line("    (i64.store (local.get $out) (i64.const 0))");
+    try self.line1(
+        "    (i64.store (i32.add (local.get $out) (i32.const %d)) (local.get $code))",
+        Arg::Int(layout.result_offset)
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_read_dir_failure(
+    code: i64,
+    indent: []u8
+) -> !void {
+    try self.line1("%s(call $__fs_read_dir_fail", Arg::Lit(indent));
+    try self.line1(
+        "%s  (local.get $out) (local.get $allocator) (local.get $array)",
+        Arg::Lit(indent)
+    );
+    return self.line2(
+        "%s  (local.get $buffer) (local.get $capacity) (local.get $fd) (i64.const %d))",
+        Arg::Lit(indent),
+        Arg::Int(code)
+    );
+}
+
+fn (self: &var Emitter) write_fs_read_dir_errno_failure(
+    indent: []u8
+) -> !void {
+    try self.line1("%s(call $__fs_read_dir_fail", Arg::Lit(indent));
+    try self.line1(
+        "%s  (local.get $out) (local.get $allocator) (local.get $array)",
+        Arg::Lit(indent)
+    );
+    return self.line1(
+        "%s  (local.get $buffer) (local.get $capacity) (local.get $fd) (call $__fs_error (local.get $errno)))",
+        Arg::Lit(indent)
+    );
+}
+
+fn (self: &var Emitter) write_fs_read_dir_builtin(
+    layout: FSDirLayout,
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("  (func $std::internal::builtin::fs_read_dir");
+    try self.line(
+        "      (param $out i32) (param $io i32) (param $allocator i32) (param $path i32)"
+    );
+    try self.line(
+        "    (local $root i32) (local $fd i32) (local $errno i32) (local $array i32)"
+    );
+    try self.line(
+        "    (local $buffer i32) (local $capacity i32) (local $grown i32)"
+    );
+    try self.line(
+        "    (local $used i32) (local $pos i32) (local $remaining i32)"
+    );
+    try self.line(
+        "    (local $header i32) (local $name i32) (local $name_len i32)"
+    );
+    try self.line(
+        "    (local $record_size i32) (local $cookie i64) (local $next i64)"
+    );
+    try self.line(
+        "    (local $name_copy i32) (local $path_copy i32) (local $path_len i32)"
+    );
+    try self.line(
+        "    (local $separator i32) (local $path_size i64) (local $length i64)"
+    );
+    try self.line("    (local $item i32) (local $is_dir i32)");
+    try self.line1(
+        "    (local.set $array (i32.add (local.get $out) (i32.const %d)))",
+        Arg::Int(layout.result_offset)
+    );
+    try self.line("    (i32.store (local.get $array) (i32.const 0))");
+    try self.line1(
+        "    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line1(
+        "    (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.const 0))",
+        Arg::Int(array_capacity_offset())
+    );
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line("    (local.set $root (local.get $fd))");
+    try self.line("    (local.set $errno (call $__wasi_path_open");
+    try self.line(
+        "      (local.get $root) (i32.const 1) (i32.load (local.get $path))"
+    );
+    try self.line(
+        "      (i32.load (i32.add (local.get $path) (i32.const 4)))"
+    );
+    try self.line3(
+        "      (i32.const %d) (i64.const %d) (i64.const 0) (i32.const 0) (i32.const %d)))",
+        Arg::Int(2),
+        Arg::Int(16384),
+        Arg::Int(24)
+    );
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $fd (i32.load (i32.const 24)))");
+    try self.line("    (local.set $capacity (i32.const 4096))");
+    try self.line("    (local.set $buffer");
+    try self.line(
+        "      (call $__allocator_alloc (local.get $allocator) (local.get $capacity)))"
+    );
+    try self.line("    (if (i32.eqz (local.get $buffer))");
+    try self.line("      (then");
+    try self.write_fs_read_dir_failure(codes.out_of_memory, "        ");
+    try self.line("        (return)))");
+    try self.write_fs_read_dir_loop(layout, codes);
+    try self.line(
+        "    (local.set $errno (call $__wasi_fd_close (local.get $fd)))"
+    );
+    try self.line("    (local.set $fd (i32.const -1))");
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_read_dir_errno_failure("        ");
+    try self.line("        (return)))");
+    try self.line("    (call $__allocator_free (local.get $allocator)");
+    try self.line("      (local.get $buffer) (local.get $capacity))");
+    try self.line("    (call $__fs_sort_dir_entries (local.get $array))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_read_dir_loop(
+    layout: FSDirLayout,
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("    (block $dir_done");
+    try self.line("      (loop $dir_read");
+    try self.line("        (local.set $errno (call $__wasi_fd_readdir");
+    try self.line1(
+        "          (local.get $fd) (local.get $buffer) (local.get $capacity) (local.get $cookie) (i32.const %d)))",
+        Arg::Int(32)
+    );
+    try self.line("        (if (local.get $errno)");
+    try self.line("          (then");
+    try self.write_fs_read_dir_failure(codes.read_failed, "            ");
+    try self.line("            (return)))");
+    try self.line1(
+        "        (local.set $used (i32.load (i32.const %d)))",
+        Arg::Int(32)
+    );
+    try self.line(
+        "        (if (i32.gt_u (local.get $used) (local.get $capacity))"
+    );
+    try self.line("          (then");
+    try self.write_fs_read_dir_failure(codes.read_failed, "            ");
+    try self.line("            (return)))");
+    try self.line(
+        "        (br_if $dir_done (i32.eqz (local.get $used)))"
+    );
+    try self.line("        (local.set $pos (i32.const 0))");
+    try self.line("        (block $dir_refill");
+    try self.line("          (loop $dir_parse");
+    try self.line(
+        "            (br_if $dir_refill (i32.ge_u (local.get $pos) (local.get $used)))"
+    );
+    try self.line(
+        "            (local.set $remaining (i32.sub (local.get $used) (local.get $pos)))"
+    );
+    try self.line1(
+        "            (if (i32.lt_u (local.get $remaining) (i32.const %d))",
+        Arg::Int(24)
+    );
+    try self.line("              (then");
+    try self.line(
+        "                (if (i32.lt_u (local.get $used) (local.get $capacity))"
+    );
+    try self.line("                  (then");
+    try self.write_fs_read_dir_failure(codes.read_failed, "                    ");
+    try self.line("                    (return)))");
+    try self.line("                (br $dir_refill)))");
+    try self.line(
+        "            (local.set $header (i32.add (local.get $buffer) (local.get $pos)))"
+    );
+    try self.line1(
+        "            (local.set $name_len (i32.load (i32.add (local.get $header) (i32.const %d))))",
+        Arg::Int(16)
+    );
+    try self.line(
+        "            (if (i32.gt_u (local.get $name_len) (i32.const 2147483616))"
+    );
+    try self.line("              (then");
+    try self.write_fs_read_dir_failure(codes.out_of_memory, "                ");
+    try self.line("                (return)))");
+    try self.line1(
+        "            (local.set $record_size (i32.add (i32.const %d) (local.get $name_len)))",
+        Arg::Int(24)
+    );
+    try self.line(
+        "            (if (i32.gt_u (local.get $record_size) (local.get $capacity))"
+    );
+    try self.line("              (then");
+    try self.line(
+        "                (local.set $grown (call $__allocator_realloc"
+    );
+    try self.line(
+        "                  (local.get $allocator) (local.get $buffer)"
+    );
+    try self.line(
+        "                  (local.get $capacity) (local.get $record_size)))"
+    );
+    try self.line("                (if (i32.eqz (local.get $grown))");
+    try self.line("                  (then");
+    try self.write_fs_read_dir_failure(codes.out_of_memory, "                    ");
+    try self.line("                    (return)))");
+    try self.line("                (local.set $buffer (local.get $grown))");
+    try self.line(
+        "                (local.set $capacity (local.get $record_size))"
+    );
+    try self.line("                (br $dir_refill)))");
+    try self.line(
+        "            (if (i32.lt_u (local.get $remaining) (local.get $record_size))"
+    );
+    try self.line("              (then");
+    try self.line(
+        "                (if (i32.lt_u (local.get $used) (local.get $capacity))"
+    );
+    try self.line("                  (then");
+    try self.write_fs_read_dir_failure(codes.read_failed, "                    ");
+    try self.line("                    (return)))");
+    try self.line("                (br $dir_refill)))");
+    try self.line(
+        "            (local.set $next (i64.load (local.get $header)))"
+    );
+    try self.line(
+        "            (if (i64.eq (local.get $next) (local.get $cookie))"
+    );
+    try self.line("              (then");
+    try self.write_fs_read_dir_failure(codes.read_failed, "                ");
+    try self.line("                (return)))");
+    try self.line("            (local.set $cookie (local.get $next))");
+    try self.line1(
+        "            (local.set $name (i32.add (local.get $header) (i32.const %d)))",
+        Arg::Int(24)
+    );
+    try self.write_fs_read_dir_entry(layout, codes);
+    try self.line(
+        "            (local.set $pos (i32.add (local.get $pos) (local.get $record_size)))"
+    );
+    try self.line("            (br $dir_parse)))");
+    return self.line("        (br $dir_read)))");
+}
+
+fn (self: &var Emitter) write_fs_read_dir_entry(
+    layout: FSDirLayout,
+    codes: FSErrorCodes
+) -> !void {
+    try self.line("            (if (i32.or");
+    try self.line(
+        "                  (i32.and (i32.eq (local.get $name_len) (i32.const 1))"
+    );
+    try self.line(
+        "                    (i32.eq (i32.load8_u (local.get $name)) (i32.const 46)))"
+    );
+    try self.line(
+        "                  (i32.and (i32.eq (local.get $name_len) (i32.const 2))"
+    );
+    try self.line(
+        "                    (i32.and (i32.eq (i32.load8_u (local.get $name)) (i32.const 46))"
+    );
+    try self.line(
+        "                      (i32.eq (i32.load8_u (i32.add (local.get $name) (i32.const 1))) (i32.const 46)))))"
+    );
+    try self.line("              (then");
+    try self.line(
+        "                (local.set $pos (i32.add (local.get $pos) (local.get $record_size)))"
+    );
+    try self.line("                (br $dir_parse)))");
+    try self.line("            (local.set $name_copy");
+    try self.line(
+        "              (call $__allocator_alloc (local.get $allocator) (local.get $name_len)))"
+    );
+    try self.line("            (if (i32.eqz (local.get $name_copy))");
+    try self.line("              (then");
+    try self.write_fs_read_dir_failure(codes.out_of_memory, "                ");
+    try self.line("                (return)))");
+    try self.line(
+        "            (memory.copy (local.get $name_copy) (local.get $name) (local.get $name_len))"
+    );
+    try self.line("            (local.set $path_len");
+    try self.line(
+        "              (i32.load (i32.add (local.get $path) (i32.const 4))))"
+    );
+    try self.line("            (local.set $separator (i32.const 0))");
+    try self.line("            (if (local.get $path_len)");
+    try self.line("              (then");
+    try self.line("                (if (i32.ne (i32.load8_u");
+    try self.line(
+        "                      (i32.add (i32.load (local.get $path))"
+    );
+    try self.line(
+        "                        (i32.sub (local.get $path_len) (i32.const 1))))"
+    );
+    try self.line("                    (i32.const 47))");
+    try self.line(
+        "                  (then (local.set $separator (i32.const 1))))))"
+    );
+    try self.line("            (local.set $path_size");
+    try self.line(
+        "              (i64.add (i64.extend_i32_u (local.get $path_len))"
+    );
+    try self.line(
+        "                (i64.add (i64.extend_i32_u (local.get $separator))"
+    );
+    try self.line(
+        "                  (i64.extend_i32_u (local.get $name_len)))))"
+    );
+    try self.line(
+        "            (if (i64.gt_u (local.get $path_size) (i64.const 2147483640))"
+    );
+    try self.line("              (then");
+    try self.line(
+        "                (call $__allocator_free (local.get $allocator)"
+    );
+    try self.line(
+        "                  (local.get $name_copy) (local.get $name_len))"
+    );
+    try self.write_fs_read_dir_failure(codes.out_of_memory, "                ");
+    try self.line("                (return)))");
+    try self.line(
+        "            (local.set $path_copy (call $__allocator_alloc"
+    );
+    try self.line(
+        "              (local.get $allocator) (i32.wrap_i64 (local.get $path_size))))"
+    );
+    try self.line("            (if (i32.eqz (local.get $path_copy))");
+    try self.line("              (then");
+    try self.line(
+        "                (call $__allocator_free (local.get $allocator)"
+    );
+    try self.line(
+        "                  (local.get $name_copy) (local.get $name_len))"
+    );
+    try self.write_fs_read_dir_failure(codes.out_of_memory, "                ");
+    try self.line("                (return)))");
+    try self.line("            (memory.copy (local.get $path_copy)");
+    try self.line(
+        "              (i32.load (local.get $path)) (local.get $path_len))"
+    );
+    try self.line("            (if (local.get $separator)");
+    try self.line(
+        "              (then (i32.store8 (i32.add (local.get $path_copy) (local.get $path_len))"
+    );
+    try self.line("                (i32.const 47))))");
+    try self.line("            (memory.copy");
+    try self.line("              (i32.add (local.get $path_copy)");
+    try self.line(
+        "                (i32.add (local.get $path_len) (local.get $separator)))"
+    );
+    try self.line(
+        "              (local.get $name_copy) (local.get $name_len))"
+    );
+    try self.line(
+        "            (local.set $errno (call $__wasi_path_filestat_get"
+    );
+    try self.line(
+        "              (local.get $root) (i32.const 1) (local.get $path_copy)"
+    );
+    try self.line("              (i32.wrap_i64 (local.get $path_size))");
+    try self.line1("              (i32.const %d)))", Arg::Int(64));
+    try self.line2(
+        "            (local.set $is_dir (i32.and (i32.eqz (local.get $errno)) (i32.eq (i32.load8_u (i32.const %d)) (i32.const %d))))",
+        Arg::Int(80),
+        Arg::Int(3)
+    );
+    try self.line1(
+        "            (local.set $length (i64.load (i32.add (local.get $array) (i32.const %d))))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("            (if (i32.eqz (call $__array_reserve");
+    try self.line1(
+        "                  (local.get $allocator) (local.get $array) (i64.add (local.get $length) (i64.const 1)) (i32.const %d)))",
+        Arg::Int(layout.entry_size)
+    );
+    try self.line("              (then");
+    try self.line(
+        "                (call $__allocator_free (local.get $allocator)"
+    );
+    try self.line(
+        "                  (local.get $name_copy) (local.get $name_len))"
+    );
+    try self.line(
+        "                (call $__allocator_free (local.get $allocator)"
+    );
+    try self.line(
+        "                  (local.get $path_copy) (i32.wrap_i64 (local.get $path_size)))"
+    );
+    try self.write_fs_read_dir_failure(codes.out_of_memory, "                ");
+    try self.line("                (return)))");
+    try self.line(
+        "            (local.set $item (i32.add (i32.load (local.get $array))"
+    );
+    try self.line1(
+        "              (i32.wrap_i64 (i64.mul (local.get $length) (i64.const %d)))))",
+        Arg::Int(layout.entry_size)
+    );
+    try self.line1(
+        "            (i32.store (i32.add (local.get $item) (i32.const %d)) (local.get $name_copy))",
+        Arg::Int(layout.name_offset + array_data_offset())
+    );
+    try self.line1(
+        "            (i64.store (i32.add (local.get $item) (i32.const %d)) (i64.extend_i32_u (local.get $name_len)))",
+        Arg::Int(layout.name_offset + array_len_offset())
+    );
+    try self.line1(
+        "            (i64.store (i32.add (local.get $item) (i32.const %d)) (i64.extend_i32_u (local.get $name_len)))",
+        Arg::Int(layout.name_offset + array_capacity_offset())
+    );
+    try self.line1(
+        "            (i32.store (i32.add (local.get $item) (i32.const %d)) (local.get $path_copy))",
+        Arg::Int(layout.path_offset + array_data_offset())
+    );
+    try self.line1(
+        "            (i64.store (i32.add (local.get $item) (i32.const %d)) (local.get $path_size))",
+        Arg::Int(layout.path_offset + array_len_offset())
+    );
+    try self.line1(
+        "            (i64.store (i32.add (local.get $item) (i32.const %d)) (local.get $path_size))",
+        Arg::Int(layout.path_offset + array_capacity_offset())
+    );
+    try self.line1(
+        "            (i32.store8 (i32.add (local.get $item) (i32.const %d)) (local.get $is_dir))",
+        Arg::Int(layout.is_dir_offset)
+    );
+    return self.line1(
+        "            (i64.store (i32.add (local.get $array) (i32.const %d)) (i64.add (local.get $length) (i64.const 1)))",
+        Arg::Int(array_len_offset())
+    );
+}
+
+/// Replaces one preopen-relative file and writes every byte.
+fn (self: &var Emitter) write_fs_write_file(codes: FSErrorCodes) -> !void {
+    try self.line("  (func $std::internal::builtin::fs_write_file");
+    try self.line(
+        "      (param $out i32) (param $io i32) (param $path i32) (param $bytes i32)"
+    );
+    try self.line("    (local $fd i32) (local $errno i32) (local $ptr i32)");
+    try self.line("    (local $remaining i32) (local $written i32)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line("    (local.set $errno (call $__wasi_path_open");
+    try self.line(
+        "      (local.get $fd) (i32.const 1) (i32.load (local.get $path))"
+    );
+    try self.line(
+        "      (i32.load (i32.add (local.get $path) (i32.const 4)))"
+    );
+    try self.line3(
+        "      (i32.const %d) (i64.const %d) (i64.const 0) (i32.const 0) (i32.const %d)))",
+        Arg::Int(9),
+        Arg::Int(64),
+        Arg::Int(24)
+    );
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $fd (i32.load (i32.const 24)))");
+    try self.line("    (local.set $ptr (i32.load (local.get $bytes)))");
+    try self.line("    (local.set $remaining");
+    try self.line("      (i32.load (i32.add (local.get $bytes) (i32.const 4))))");
+    try self.line("    (block $done");
+    try self.line("      (loop $write");
+    try self.line("        (br_if $done (i32.eqz (local.get $remaining)))");
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $ptr))",
+        Arg::Int(scratch_offset())
+    );
+    try self.line1(
+        "        (i32.store (i32.const %d) (local.get $remaining))",
+        Arg::Int(scratch_offset() + 4)
+    );
+    try self.line("        (local.set $errno (call $__wasi_fd_write");
+    try self.line2(
+        "          (local.get $fd) (i32.const %d) (i32.const 1) (i32.const %d)))",
+        Arg::Int(scratch_offset()),
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (local.get $errno)");
+    try self.line("          (then");
+    try self.write_fs_write_failure(codes.write_failed);
+    try self.line("            (return)))");
+    try self.line1(
+        "        (local.set $written (i32.load (i32.const %d)))",
+        Arg::Int(scratch_offset() + 16)
+    );
+    try self.line("        (if (i32.or (i32.eqz (local.get $written))");
+    try self.line(
+        "            (i32.gt_u (local.get $written) (local.get $remaining)))"
+    );
+    try self.line("          (then");
+    try self.write_fs_write_failure(codes.write_failed);
+    try self.line("            (return)))");
+    try self.line("        (local.set $ptr");
+    try self.line("          (i32.add (local.get $ptr) (local.get $written)))");
+    try self.line("        (local.set $remaining");
+    try self.line(
+        "          (i32.sub (local.get $remaining) (local.get $written)))"
+    );
+    try self.line("        (br $write)))");
+    try self.line("    (drop (call $__wasi_fd_close (local.get $fd)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_write_failure(code: i64) -> !void {
+    try self.line("            (drop (call $__wasi_fd_close (local.get $fd)))");
+    return self.write_error_result(code, "            ");
+}
+
+fn (self: &var Emitter) write_fs_exists(codes: FSErrorCodes) -> !void {
+    try self.line(
+        "  (func $std::internal::builtin::fs_exists (param $out i32) (param $io i32) (param $path i32)"
+    );
+    try self.line("    (local $fd i32) (local $errno i32)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.write_fs_filestat_call();
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line(
+        "    (i32.store8 (i32.add (local.get $out) (i32.const 8))"
+    );
+    try self.line("      (i32.eqz (local.get $errno)))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_metadata(codes: FSErrorCodes) -> !void {
+    try self.line(
+        "  (func $std::internal::builtin::fs_metadata (param $out i32) (param $io i32) (param $path i32)"
+    );
+    try self.line("    (local $fd i32) (local $errno i32)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.write_fs_filestat_call();
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line1(
+        "    (i64.store (i32.add (local.get $out) (i32.const %d))",
+        Arg::Int(void_error_payload_offset())
+    );
+    try self.line1(
+        "      (i64.load (i32.const %d)))",
+        Arg::Int(64 + 32)
+    );
+    try self.line1(
+        "    (i32.store8 (i32.add (local.get $out) (i32.const %d))",
+        Arg::Int(void_error_payload_offset() + 8)
+    );
+    try self.line2(
+        "      (i32.eq (i32.load8_u (i32.const %d)) (i32.const %d)))",
+        Arg::Int(64 + 16),
+        Arg::Int(3)
+    );
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+fn (self: &var Emitter) write_fs_filestat_call() -> !void {
+    try self.line("    (local.set $errno (call $__wasi_path_filestat_get");
+    try self.line(
+        "      (local.get $fd) (i32.const 1) (i32.load (local.get $path))"
+    );
+    try self.line(
+        "      (i32.load (i32.add (local.get $path) (i32.const 4)))"
+    );
+    return self.line("      (i32.const 64)))");
+}
+
+fn (self: &var Emitter) write_fs_path_void_builtin(
+    name: []u8,
+    host: []u8,
+    codes: FSErrorCodes
+) -> !void {
+    try self.line1(
+        "  (func $%s (param $out i32) (param $io i32) (param $path i32)",
+        Arg::Lit(name)
+    );
+    try self.line("    (local $fd i32) (local $errno i32)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line1("    (local.set $errno (call %s", Arg::Lit(host));
+    try self.line("      (local.get $fd) (i32.load (local.get $path))");
+    try self.line(
+        "      (i32.load (i32.add (local.get $path) (i32.const 4)))))"
+    );
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Moves one path within the explicitly granted preopen.
+fn (self: &var Emitter) write_fs_rename(codes: FSErrorCodes) -> !void {
+    try self.line(
+        "  (func $std::internal::builtin::fs_rename (param $out i32) (param $io i32) (param $from i32) (param $to i32)"
+    );
+    try self.line("    (local $fd i32) (local $errno i32)");
+    try self.write_fs_guard(codes.io_failing, codes.permission_denied);
+    try self.line("    (local.set $errno (call $__wasi_path_rename");
+    try self.line("      (local.get $fd) (i32.load (local.get $from))");
+    try self.line(
+        "      (i32.load (i32.add (local.get $from) (i32.const 4)))"
+    );
+    try self.line("      (local.get $fd) (i32.load (local.get $to))");
+    try self.line(
+        "      (i32.load (i32.add (local.get $to) (i32.const 4)))))"
+    );
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_fs_stored_errno("        ");
+    try self.line("        (return)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}

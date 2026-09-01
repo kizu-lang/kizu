@@ -25,10 +25,14 @@ const mapFieldLen = 1
 
 // writeMapRuntimeDecls writes declarations for the hosted Map runtime.
 func (e *emitter) writeMapRuntimeDecls() {
-	if !e.usesMapRuntime() {
+	if !e.usesMapHeader() {
 		return
 	}
 	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, ptr, i64 }\n", mapHeaderType)
+	if !e.usesMapRuntime() {
+		e.out.WriteByte('\n')
+		return
+	}
 	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_map_value_at(ptr, i64)\n")
@@ -36,6 +40,15 @@ func (e *emitter) writeMapRuntimeDecls() {
 	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_map_len(ptr)\n")
 	e.out.WriteString("declare void @kizu_map_deinit(ptr, ptr, i64)\n\n")
+}
+
+// usesMapHeader reports whether emitted values or aggregate definitions need
+// the concrete Map header independently of hosted-runtime calls.
+func (e *emitter) usesMapHeader() bool {
+	if e.usesMapRuntime() {
+		return true
+	}
+	return e.moduleHasRuntimeHeaderType("std::map::Map<")
 }
 
 // usesMapRuntime reports whether this module uses std::map::Map lowering.

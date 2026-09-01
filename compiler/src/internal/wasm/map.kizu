@@ -1,0 +1,1281 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/map.go. A Map value is the inline wasm32
+// header shared with native semantics: insertion-ordered entries plus an
+// open-addressed index. Every key enters the runtime as bytes, and every value
+// enters as an address measured from its wasm32 layout.
+
+fn map_header_size() -> i64 {
+    return 40;
+}
+
+fn map_len_offset() -> i64 {
+    return 8;
+}
+
+fn map_entry_size() -> i64 {
+    return 32;
+}
+
+fn map_entry_key_offset() -> i64 {
+    return 0;
+}
+
+fn map_entry_key_len_offset() -> i64 {
+    return 8;
+}
+
+fn map_entry_value_offset() -> i64 {
+    return 16;
+}
+
+fn map_temp_size() -> i64 {
+    return 16;
+}
+
+fn map_temp_value_offset() -> i64 {
+    return 8;
+}
+
+fn is_map_wasm_type(name: []u8) -> bool {
+    return mem::starts_with(name, "std::map::Map<") and ir::ends_with_bytes(name, ">");
+}
+
+fn is_wasm_map_op(op: ir::Op) -> bool {
+    return match op {
+        MapNew => true,
+        MapAt => true,
+        MapAtMut => true,
+        MapContains => true,
+        MapDeinit => true,
+        MapGet => true,
+        MapInsert => true,
+        MapKeyAt => true,
+        MapLen => true,
+        MapTakeValueAt => true,
+        _ => false,
+    };
+}
+
+/// Reports whether an operation normalizes a key or value into addressed
+/// frame bytes before entering the generic runtime.
+fn is_wasm_map_temp_op(op: ir::Op) -> bool {
+    return match op {
+        MapInsert => true,
+        MapGet => true,
+        MapAt => true,
+        MapAtMut => true,
+        MapContains => true,
+        _ => false,
+    };
+}
+
+fn (self: &Emitter) uses_map_runtime(module: &ir::Module) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if is_wasm_map_op(node.op) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Emits the generic insertion-ordered hash table runtime. This literal is the
+/// same WAT written line-by-line by the Go seed; keeping it type-independent
+/// makes all Map<K, V> instances share one implementation.
+fn (self: &var Emitter) write_map_runtime() -> !void {
+    let text =
+        \\  (func $__map_read_tail (param $key i32) (param $length i64) (result i64)
+        \\    (if (i64.ge_u (local.get $length) (i64.const 4))
+        \\      (then (return
+        \\        (i64.or
+        \\          (i64.shl (i64.extend_i32_u (i32.load (local.get $key))) (i64.const 32))
+        \\          (i64.extend_i32_u
+        \\            (i32.load (i32.add (local.get $key)
+        \\              (i32.wrap_i64 (i64.sub (local.get $length) (i64.const 4))))))))))
+        \\    (if (i64.eqz (local.get $length))
+        \\      (then (return (i64.const 0))))
+        \\    (i64.or
+        \\      (i64.shl (i64.extend_i32_u (i32.load8_u (local.get $key))) (i64.const 16))
+        \\      (i64.or
+        \\        (i64.shl
+        \\          (i64.extend_i32_u (i32.load8_u (i32.add (local.get $key)
+        \\            (i32.wrap_i64 (i64.shr_u (local.get $length) (i64.const 1))))))
+        \\          (i64.const 8))
+        \\        (i64.extend_i32_u (i32.load8_u (i32.add (local.get $key)
+        \\          (i32.wrap_i64 (i64.sub (local.get $length) (i64.const 1))))))))
+        \\  )
+        \\
+        \\  (func $__map_hash (param $key i32) (param $length i64) (result i64)
+        \\    (local $hash i64) (local $offset i64)
+        \\    (local.set $hash (local.get $length))
+        \\    (block $tail
+        \\      (loop $words
+        \\        (br_if $tail (i64.gt_u
+        \\          (i64.add (local.get $offset) (i64.const 8)) (local.get $length)))
+        \\        (local.set $hash
+        \\          (i64.mul
+        \\            (i64.xor (i64.rotl (local.get $hash) (i64.const 5))
+        \\              (i64.load (i32.add (local.get $key) (i32.wrap_i64 (local.get $offset)))))
+        \\            (i64.const 0x517cc1b727220a95)))
+        \\        (local.set $offset (i64.add (local.get $offset) (i64.const 8)))
+        \\        (br $words)))
+        \\    (if (i64.lt_u (local.get $offset) (local.get $length))
+        \\      (then (local.set $hash
+        \\        (i64.mul
+        \\          (i64.xor (i64.rotl (local.get $hash) (i64.const 5))
+        \\            (call $__map_read_tail
+        \\              (i32.add (local.get $key) (i32.wrap_i64 (local.get $offset)))
+        \\              (i64.sub (local.get $length) (local.get $offset))))
+        \\          (i64.const 0x517cc1b727220a95)))))
+        \\    (local.set $hash
+        \\      (i64.xor (local.get $hash) (i64.shr_u (local.get $hash) (i64.const 32))))
+        \\    (local.set $hash
+        \\      (i64.mul (local.get $hash) (i64.const 0xd6e8feb86659fd93)))
+        \\    (i64.xor (local.get $hash) (i64.shr_u (local.get $hash) (i64.const 32)))
+        \\  )
+        \\
+        \\  (func $__map_keys_equal
+        \\      (param $left i32) (param $right i32) (param $length i64) (result i32)
+        \\    (local $offset i64)
+        \\    (block $bytes
+        \\      (loop $words
+        \\        (br_if $bytes (i64.gt_u
+        \\          (i64.add (local.get $offset) (i64.const 8)) (local.get $length)))
+        \\        (if (i64.ne
+        \\              (i64.load (i32.add (local.get $left) (i32.wrap_i64 (local.get $offset))))
+        \\              (i64.load (i32.add (local.get $right) (i32.wrap_i64 (local.get $offset)))))
+        \\          (then (return (i32.const 0))))
+        \\        (local.set $offset (i64.add (local.get $offset) (i64.const 8)))
+        \\        (br $words)))
+        \\    (block $equal
+        \\      (loop $tail
+        \\        (br_if $equal (i64.ge_u (local.get $offset) (local.get $length)))
+        \\        (if (i32.ne
+        \\              (i32.load8_u (i32.add (local.get $left) (i32.wrap_i64 (local.get $offset))))
+        \\              (i32.load8_u (i32.add (local.get $right) (i32.wrap_i64 (local.get $offset)))))
+        \\          (then (return (i32.const 0))))
+        \\        (local.set $offset (i64.add (local.get $offset) (i64.const 1)))
+        \\        (br $tail)))
+        \\    (i32.const 1)
+        \\  )
+        \\
+        \\  (func $__map_slot
+        \\      (param $map i32) (param $key i32) (param $key_length i64)
+        \\      (param $hash i64) (result i64)
+        \\    (local $mask i64) (local $slot i64) (local $entry_index i64)
+        \\    (local $entry i32)
+        \\    (local.set $mask
+        \\      (i64.sub (i64.load (i32.add (local.get $map) (i32.const 32))) (i64.const 1)))
+        \\    (local.set $slot (i64.and (local.get $hash) (local.get $mask)))
+        \\    (loop $probe
+        \\      (local.set $entry_index
+        \\        (i64.load (i32.add
+        \\          (i32.load (i32.add (local.get $map) (i32.const 24)))
+        \\          (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8))))))
+        \\      (if (i64.lt_s (local.get $entry_index) (i64.const 0))
+        \\        (then (return (local.get $slot))))
+        \\      (local.set $entry
+        \\        (i32.add (i32.load (local.get $map))
+        \\          (i32.wrap_i64 (i64.mul (local.get $entry_index) (i64.const 32)))))
+        \\      (if (i32.and
+        \\            (i64.eq (i64.load (i32.add (local.get $entry) (i32.const 24)))
+        \\              (local.get $hash))
+        \\            (i32.and
+        \\              (i64.eq (i64.load (i32.add (local.get $entry) (i32.const 8)))
+        \\                (local.get $key_length))
+        \\              (call $__map_keys_equal (i32.load (local.get $entry))
+        \\                (local.get $key) (local.get $key_length))))
+        \\        (then (return (local.get $slot))))
+        \\      (local.set $slot
+        \\        (i64.and (i64.add (local.get $slot) (i64.const 1)) (local.get $mask)))
+        \\      (br $probe))
+        \\    (unreachable)
+        \\  )
+        \\
+        \\  (func $__map_find
+        \\      (param $map i32) (param $key i32) (param $key_length i64) (result i64)
+        \\    (local $slot i64)
+        \\    (if (i32.or (i32.eqz (local.get $map))
+        \\          (i32.or (i64.lt_s (local.get $key_length) (i64.const 0))
+        \\            (i32.or
+        \\              (i32.and (i32.eqz (local.get $key))
+        \\                (i64.gt_s (local.get $key_length) (i64.const 0)))
+        \\              (i64.eqz (i64.load (i32.add (local.get $map) (i32.const 32)))))))
+        \\      (then (return (i64.const -1))))
+        \\    (local.set $slot (call $__map_slot (local.get $map) (local.get $key)
+        \\      (local.get $key_length) (call $__map_hash (local.get $key) (local.get $key_length))))
+        \\    (i64.load (i32.add
+        \\      (i32.load (i32.add (local.get $map) (i32.const 24)))
+        \\      (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8)))))
+        \\  )
+        \\
+        \\  (func $__map_reindex
+        \\      (param $allocator i32) (param $map i32) (param $needed i64) (result i32)
+        \\    (local $next i64) (local $old_index i32) (local $old_capacity i64)
+        \\    (local $new_index i32) (local $bytes i32) (local $mask i64)
+        \\    (local $entry_index i64) (local $entry i32) (local $slot i64)
+        \\    (if (i32.or (i32.eqz (local.get $map))
+        \\          (i64.lt_s (local.get $needed) (i64.const 0)))
+        \\      (then (return (i32.const 0))))
+        \\    (local.set $old_index (i32.load (i32.add (local.get $map) (i32.const 24))))
+        \\    (local.set $old_capacity
+        \\      (i64.load (i32.add (local.get $map) (i32.const 32))))
+        \\    (local.set $next (local.get $old_capacity))
+        \\    (if (i64.eqz (local.get $next))
+        \\      (then (local.set $next (i64.const 8))))
+        \\    (block $grown
+        \\      (loop $grow
+        \\        (br_if $grown (i64.le_u (local.get $needed)
+        \\          (i64.div_u (i64.mul (local.get $next) (i64.const 3)) (i64.const 4))))
+        \\        (if (i64.gt_u (local.get $next) (i64.const 134217727))
+        \\          (then (return (i32.const 0))))
+        \\        (local.set $next (i64.mul (local.get $next) (i64.const 2)))
+        \\        (br $grow)))
+        \\    (if (i64.eq (local.get $next) (local.get $old_capacity))
+        \\      (then (return (i32.const 1))))
+        \\    (local.set $bytes (i32.wrap_i64 (i64.mul (local.get $next) (i64.const 8))))
+        \\    (local.set $new_index
+        \\      (call $__allocator_alloc (local.get $allocator) (local.get $bytes)))
+        \\    (if (i32.eqz (local.get $new_index)) (then (return (i32.const 0))))
+        \\    (memory.fill (local.get $new_index) (i32.const 255) (local.get $bytes))
+        \\    (local.set $mask (i64.sub (local.get $next) (i64.const 1)))
+        \\    (block $rebuilt
+        \\      (loop $entries
+        \\        (br_if $rebuilt (i64.ge_u (local.get $entry_index)
+        \\          (i64.load (i32.add (local.get $map) (i32.const 8)))))
+        \\        (local.set $entry
+        \\          (i32.add (i32.load (local.get $map))
+        \\            (i32.wrap_i64 (i64.mul (local.get $entry_index) (i64.const 32)))))
+        \\        (local.set $slot
+        \\          (i64.and (i64.load (i32.add (local.get $entry) (i32.const 24)))
+        \\            (local.get $mask)))
+        \\        (block $placed
+        \\          (loop $probe
+        \\            (if (i64.lt_s (i64.load (i32.add (local.get $new_index)
+        \\                  (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8)))))
+        \\                (i64.const 0))
+        \\              (then
+        \\                (i64.store (i32.add (local.get $new_index)
+        \\                  (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8))))
+        \\                  (local.get $entry_index))
+        \\                (br $placed)))
+        \\            (local.set $slot (i64.and
+        \\              (i64.add (local.get $slot) (i64.const 1)) (local.get $mask)))
+        \\            (br $probe)))
+        \\        (local.set $entry_index
+        \\          (i64.add (local.get $entry_index) (i64.const 1)))
+        \\        (br $entries)))
+        \\    (call $__allocator_free (local.get $allocator) (local.get $old_index)
+        \\      (i32.wrap_i64 (i64.mul (local.get $old_capacity) (i64.const 8))))
+        \\    (i32.store (i32.add (local.get $map) (i32.const 24)) (local.get $new_index))
+        \\    (i64.store (i32.add (local.get $map) (i32.const 32)) (local.get $next))
+        \\    (i32.const 1)
+        \\  )
+        \\
+        \\  (func $__map_reserve
+        \\      (param $allocator i32) (param $map i32) (param $needed i64) (result i32)
+        \\    (local $capacity i64) (local $next i64) (local $old_bytes i32)
+        \\    (local $new_bytes i32) (local $entries i32)
+        \\    (if (i32.or (i32.eqz (local.get $map))
+        \\          (i64.lt_s (local.get $needed) (i64.const 0)))
+        \\      (then (return (i32.const 0))))
+        \\    (local.set $capacity
+        \\      (i64.load (i32.add (local.get $map) (i32.const 16))))
+        \\    (if (i64.le_u (local.get $needed) (local.get $capacity))
+        \\      (then (return (i32.const 1))))
+        \\    (if (i64.eqz (local.get $capacity))
+        \\      (then (local.set $next (i64.const 4)))
+        \\      (else
+        \\        (if (i64.gt_u (local.get $capacity) (i64.const 33554431))
+        \\          (then (return (i32.const 0))))
+        \\        (local.set $next (i64.mul (local.get $capacity) (i64.const 2)))))
+        \\    (block $grown
+        \\      (loop $grow
+        \\        (br_if $grown (i64.ge_u (local.get $next) (local.get $needed)))
+        \\        (if (i64.gt_u (local.get $next) (i64.const 33554431))
+        \\          (then (return (i32.const 0))))
+        \\        (local.set $next (i64.mul (local.get $next) (i64.const 2)))
+        \\        (br $grow)))
+        \\    (local.set $old_bytes
+        \\      (i32.wrap_i64 (i64.mul (local.get $capacity) (i64.const 32))))
+        \\    (local.set $new_bytes
+        \\      (i32.wrap_i64 (i64.mul (local.get $next) (i64.const 32))))
+        \\    (local.set $entries
+        \\      (call $__allocator_realloc (local.get $allocator) (i32.load (local.get $map))
+        \\        (local.get $old_bytes) (local.get $new_bytes)))
+        \\    (if (i32.eqz (local.get $entries)) (then (return (i32.const 0))))
+        \\    (memory.fill (i32.add (local.get $entries) (local.get $old_bytes))
+        \\      (i32.const 0) (i32.sub (local.get $new_bytes) (local.get $old_bytes)))
+        \\    (i32.store (local.get $map) (local.get $entries))
+        \\    (i64.store (i32.add (local.get $map) (i32.const 16)) (local.get $next))
+        \\    (i32.const 1)
+        \\  )
+        \\
+        \\  (func $__map_insert
+        \\      (param $allocator i32) (param $map i32) (param $key i32)
+        \\      (param $key_length i64) (param $value i32) (param $value_size i32)
+        \\      (result i32)
+        \\    (local $needed i64) (local $hash i64) (local $slot i64)
+        \\    (local $found i64) (local $key_copy i32) (local $value_copy i32)
+        \\    (local $entry i32)
+        \\    (if (i32.or (i32.eqz (local.get $map))
+        \\          (i32.or (i64.lt_s (local.get $key_length) (i64.const 0))
+        \\            (i32.or
+        \\              (i32.and (i32.eqz (local.get $key))
+        \\                (i64.gt_s (local.get $key_length) (i64.const 0)))
+        \\              (i32.or (i32.eqz (local.get $value))
+        \\                (i32.le_s (local.get $value_size) (i32.const 0))))))
+        \\      (then (return (i32.const 0))))
+        \\    (if (i64.gt_u (local.get $key_length) (i64.const 2147483640))
+        \\      (then (return (i32.const 0))))
+        \\    (local.set $needed
+        \\      (i64.add (i64.load (i32.add (local.get $map) (i32.const 8))) (i64.const 1)))
+        \\    (if (i64.eqz (local.get $needed)) (then (return (i32.const 0))))
+        \\    (if (i32.eqz (call $__map_reindex (local.get $allocator)
+        \\          (local.get $map) (local.get $needed)))
+        \\      (then (return (i32.const 0))))
+        \\    (local.set $hash (call $__map_hash (local.get $key) (local.get $key_length)))
+        \\    (local.set $slot (call $__map_slot (local.get $map) (local.get $key)
+        \\      (local.get $key_length) (local.get $hash)))
+        \\    (local.set $found
+        \\      (i64.load (i32.add
+        \\        (i32.load (i32.add (local.get $map) (i32.const 24)))
+        \\        (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8))))))
+        \\    (if (i64.ge_s (local.get $found) (i64.const 0))
+        \\      (then
+        \\        (local.set $entry (i32.add (i32.load (local.get $map))
+        \\          (i32.wrap_i64 (i64.mul (local.get $found) (i64.const 32)))))
+        \\        (memory.copy (i32.load (i32.add (local.get $entry) (i32.const 16)))
+        \\          (local.get $value) (local.get $value_size))
+        \\        (return (i32.const 1))))
+        \\    (if (i32.eqz (call $__map_reserve (local.get $allocator)
+        \\          (local.get $map) (local.get $needed)))
+        \\      (then (return (i32.const 0))))
+        \\    (if (i64.gt_s (local.get $key_length) (i64.const 0))
+        \\      (then (local.set $key_copy (call $__allocator_alloc (local.get $allocator)
+        \\        (i32.wrap_i64 (local.get $key_length))))))
+        \\    (local.set $value_copy
+        \\      (call $__allocator_alloc (local.get $allocator) (local.get $value_size)))
+        \\    (if (i32.or
+        \\          (i32.and (i64.gt_s (local.get $key_length) (i64.const 0))
+        \\            (i32.eqz (local.get $key_copy)))
+        \\          (i32.eqz (local.get $value_copy)))
+        \\      (then
+        \\        (call $__allocator_free (local.get $allocator) (local.get $key_copy)
+        \\          (i32.wrap_i64 (local.get $key_length)))
+        \\        (call $__allocator_free (local.get $allocator) (local.get $value_copy)
+        \\          (local.get $value_size))
+        \\        (return (i32.const 0))))
+        \\    (if (i64.gt_s (local.get $key_length) (i64.const 0))
+        \\      (then (memory.copy (local.get $key_copy) (local.get $key)
+        \\        (i32.wrap_i64 (local.get $key_length)))))
+        \\    (memory.copy (local.get $value_copy) (local.get $value) (local.get $value_size))
+        \\    (local.set $entry (i32.add (i32.load (local.get $map))
+        \\      (i32.wrap_i64 (i64.mul
+        \\        (i64.load (i32.add (local.get $map) (i32.const 8))) (i64.const 32)))))
+        \\    (i32.store (local.get $entry) (local.get $key_copy))
+        \\    (i64.store (i32.add (local.get $entry) (i32.const 8)) (local.get $key_length))
+        \\    (i32.store (i32.add (local.get $entry) (i32.const 16)) (local.get $value_copy))
+        \\    (i64.store (i32.add (local.get $entry) (i32.const 24)) (local.get $hash))
+        \\    (i64.store (i32.add
+        \\      (i32.load (i32.add (local.get $map) (i32.const 24)))
+        \\      (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8))))
+        \\      (i64.load (i32.add (local.get $map) (i32.const 8))))
+        \\    (i64.store (i32.add (local.get $map) (i32.const 8)) (local.get $needed))
+        \\    (i32.const 1)
+        \\  )
+        \\
+        \\  (func $__map_get
+        \\      (param $map i32) (param $key i32) (param $key_length i64) (result i32)
+        \\    (local $found i64)
+        \\    (local.set $found
+        \\      (call $__map_find (local.get $map) (local.get $key) (local.get $key_length)))
+        \\    (if (i64.lt_s (local.get $found) (i64.const 0))
+        \\      (then (return (i32.const 0))))
+        \\    (i32.load (i32.add
+        \\      (i32.add (i32.load (local.get $map))
+        \\        (i32.wrap_i64 (i64.mul (local.get $found) (i64.const 32))))
+        \\      (i32.const 16)))
+        \\  )
+        \\
+        \\  (func $__map_deinit
+        \\      (param $allocator i32) (param $map i32) (param $value_size i32)
+        \\    (local $index i64) (local $entry i32)
+        \\    (if (i32.eqz (local.get $map)) (then (return)))
+        \\    (block $released
+        \\      (loop $entries
+        \\        (br_if $released (i64.ge_u (local.get $index)
+        \\          (i64.load (i32.add (local.get $map) (i32.const 8)))))
+        \\        (local.set $entry (i32.add (i32.load (local.get $map))
+        \\          (i32.wrap_i64 (i64.mul (local.get $index) (i64.const 32)))))
+        \\        (call $__allocator_free (local.get $allocator) (i32.load (local.get $entry))
+        \\          (i32.wrap_i64 (i64.load (i32.add (local.get $entry) (i32.const 8)))))
+        \\        (call $__allocator_free (local.get $allocator)
+        \\          (i32.load (i32.add (local.get $entry) (i32.const 16)))
+        \\          (local.get $value_size))
+        \\        (local.set $index (i64.add (local.get $index) (i64.const 1)))
+        \\        (br $entries)))
+        \\    (call $__allocator_free (local.get $allocator) (i32.load (local.get $map))
+        \\      (i32.wrap_i64 (i64.mul
+        \\        (i64.load (i32.add (local.get $map) (i32.const 16))) (i64.const 32))))
+        \\    (call $__allocator_free (local.get $allocator)
+        \\      (i32.load (i32.add (local.get $map) (i32.const 24)))
+        \\      (i32.wrap_i64 (i64.mul
+        \\        (i64.load (i32.add (local.get $map) (i32.const 32))) (i64.const 8))))
+        \\  )
+        \\
+        \\
+    ;
+    return self.out.append_bytes(self.allocator, text);
+}
+
+fn (self: &var Emitter) map_expr1(format: []u8, a: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        Arg::None,
+        Arg::None,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) map_expr2(format: []u8, a: Arg, b: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        move b,
+        Arg::None,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) map_expr3(format: []u8, a: Arg, b: Arg, c: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        move b,
+        move c,
+        Arg::None
+    );
+    return self.names.intern_owned(move out);
+}
+
+fn (self: &var Emitter) map_expr4(
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg
+) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try format_args(
+        self.allocator,
+        &var out,
+        &self.names,
+        format,
+        move a,
+        move b,
+        move c,
+        move d
+    );
+    return self.names.intern_owned(move out);
+}
+
+/// Measures K and V through either a direct or borrowed Map<K, V> and copies
+/// their canonical spellings into the caller-owned buffers.
+fn (self: &var Emitter) map_element_layouts(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    key_out: &var string::String,
+    value_out: &var string::String,
+    key_layout_out: &var WasmLayout,
+    value_layout_out: &var WasmLayout
+) -> !?diagnostic::Diagnostic {
+    var container = node.result.type_name;
+    if node.op != ir::Op::MapNew {
+        let first = node.args.get(0) orelse return try self.fail_op(
+            module,
+            node,
+            "wasm error: `%s` was handed no Map<K, V>"
+        );
+        container = first.type_name;
+    }
+    let retained = ir::name_text(&module.names, container);
+    let spelling = retained.as_bytes();
+    var start = 0;
+    if mem::starts_with(spelling, "&var ") {
+        start = 5;
+    } else {
+        if mem::starts_with(spelling, "&") {
+            start = 1;
+        }
+    }
+    let direct = spelling[start..mem::len(spelling)];
+    if !is_map_wasm_type(direct) {
+        return try self.fail_op(
+            module,
+            node,
+            "wasm error: `%s` was handed no Map<K, V>"
+        );
+    }
+    let args_text = direct[14..mem::len(direct) - 1];
+    let parts = try typ::split_args_optional(self.allocator, args_text) orelse
+        return try self.fail_op(
+        module,
+        node,
+        "wasm error: `%s` was handed no Map<K, V>"
+    );
+    defer parts.deinit(self.allocator);
+    if parts.len() != 2 {
+        return try self.fail_op(
+            module,
+            node,
+            "wasm error: `%s` was handed no Map<K, V>"
+        );
+    }
+    if parts.at(0) |key| {
+        let key_bytes = key.as_bytes();
+        if !typ::is_map_key(key_bytes) {
+            return try self.fail_op(
+                module,
+                node,
+                "wasm error: `%s` was handed no Map<K, V>"
+            );
+        }
+        try key_out.append_bytes(self.allocator, key_bytes);
+        let key_outcome = try self.type_layout_bytes(module, key_bytes);
+        match key_outcome {
+            Error(failed) => return move failed,
+            Layout(layout) => {
+                key_layout_out.* = layout;
+            },
+        }
+    } else {
+        return try self.fail_op(
+            module,
+            node,
+            "wasm error: `%s` was handed no Map<K, V>"
+        );
+    }
+    if parts.at(1) |value| {
+        let value_bytes = value.as_bytes();
+        try value_out.append_bytes(self.allocator, value_bytes);
+        let value_outcome = try self.type_layout_bytes(module, value_bytes);
+        match value_outcome {
+            Error(failed) => return move failed,
+            Layout(layout) => {
+                value_layout_out.* = layout;
+            },
+        }
+    } else {
+        return try self.fail_op(
+            module,
+            node,
+            "wasm error: `%s` was handed no Map<K, V>"
+        );
+    }
+    if key_layout_out.size <= 0 or value_layout_out.size <= 0 {
+        return try self.fail0("wasm error: Map key and value need nonzero storage");
+    }
+    return null;
+}
+
+fn (self: &var Emitter) write_map_instr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    match node.op {
+        MapNew => return self.write_map_new(module, node),
+        MapInsert => return self.write_map_insert(module, node),
+        MapGet => return self.write_map_get(module, node),
+        MapAt => return self.write_map_at(module, node),
+        MapAtMut => return self.write_map_at(module, node),
+        MapTakeValueAt => return self.write_map_take_value_at(module, node),
+        MapKeyAt => return self.write_map_key_at(module, node),
+        MapContains => return self.write_map_contains(module, node),
+        MapLen => return self.write_map_len(module, node),
+        MapDeinit => return self.write_map_deinit(module, node),
+        _ => return try self.fail_op(
+            module,
+            node,
+            "wasm error: unsupported map instruction `%s`"
+        ),
+    }
+}
+
+fn (self: &var Emitter) write_map_new(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if node.args.len() != 1 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "Allocator") or
+        !is_map_wasm_type(result_type) {
+        return try self.fail0("wasm error: map.new expects allocator -> Map<K, V>");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Map result");
+    try self.line2(
+        "            (memory.fill %s (i32.const 0) (i32.const %d))",
+        Arg::Str(slot),
+        Arg::Int(map_header_size())
+    );
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+/// Normalizes a byte slice or integer key to the pointer/length ABI consumed
+/// by the shared hash runtime.
+fn (self: &var Emitter) write_map_key_parts(
+    module: &ir::Module,
+    key: ir::Value,
+    temp: ir::Name,
+    key_type: []u8,
+    key_layout: WasmLayout,
+    pointer_out: &var ir::Name,
+    length_out: &var ir::Name
+) -> !?diagnostic::Diagnostic {
+    if !module.names.is(key.type_name, key_type) {
+        let expected = try self.names.intern(key_type);
+        let got = try self.own(module, key.type_name);
+        return try self.fail2(
+            "wasm error: Map expects %s key, got %s",
+            Arg::Str(expected),
+            Arg::Str(got)
+        );
+    }
+    let info = try self.value_of(module, key);
+    if mem::equal_bytes(key_type, "[]u8") {
+        pointer_out.* = try self.map_expr1("(i32.load %s)", Arg::Str(info.expr));
+        let length_address = try self.address_at(info.expr, 4);
+        length_out.* = try self.map_expr1(
+            "(i64.extend_i32_u (i32.load %s))",
+            Arg::Str(length_address)
+        );
+        return null;
+    }
+    if try self.write_store_value(module, temp, 0, key.type_name, info) |failed| {
+        return move failed;
+    }
+    pointer_out.* = temp;
+    length_out.* = try self.map_expr1(
+        "(i64.const %d)",
+        Arg::Int(key_layout.size)
+    );
+    return null;
+}
+
+fn (self: &var Emitter) write_map_insert(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 4 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0(
+            "wasm error: map.insert expects Map, Allocator, K, V -> std::mem::Error!void"
+        );
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let key_bytes = key.as_bytes();
+    let value_bytes = value.as_bytes();
+    if !module.names.is(node.args.get_or_panic(3).type_name, value_bytes) {
+        return try self.fail0(
+            "wasm error: map.insert expects Map, Allocator, K, V -> std::mem::Error!void"
+        );
+    }
+    let temp = try self.local_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Map temporary");
+    var key_pointer = ir::empty_name();
+    var key_length = ir::empty_name();
+    if try self.write_map_key_parts(
+        module,
+        node.args.get_or_panic(2),
+        temp,
+        key_bytes,
+        key_layout,
+        &var key_pointer,
+        &var key_length
+    ) |failed| {
+        return move failed;
+    }
+    let value_arg = node.args.get_or_panic(3);
+    let value_info = try self.value_of(module, value_arg);
+    var value_pointer = value_info.expr;
+    if !try self.is_memory_type(module, value_arg.type_name) {
+        if try self.write_store_value(
+            module,
+            temp,
+            map_temp_value_offset(),
+            value_arg.type_name,
+            value_info
+        ) |failed| {
+            return move failed;
+        }
+        value_pointer = try self.address_at(temp, map_temp_value_offset());
+    }
+    let allocator = try self.arg_expr(module, node, 1);
+    let map_value = try self.arg_expr(module, node, 0);
+    var call = try string::from_bytes(self.allocator, "(call $__map_insert ");
+    errdefer call.deinit(self.allocator);
+    try self.names.append_to(&var call, allocator);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, map_value);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, key_pointer);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, key_length);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, value_pointer);
+    try call.append_bytes(self.allocator, " (i32.const ");
+    try fmt::append_i64(self.allocator, &var call, value_layout.size);
+    try call.append_bytes(self.allocator, "))");
+    let ok = try self.names.intern_owned(move call);
+    let result = try self.write_array_error_result(
+        module,
+        node.result,
+        ok,
+        "std::mem::Error",
+        "OutOfMemory"
+    );
+    match result {
+        Error(failed) => return move failed,
+        Name(_) => return null,
+    }
+}
+
+fn (self: &var Emitter) write_map_get(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("wasm error: map.get expects Map, K -> ?V");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let key_bytes = key.as_bytes();
+    let value_bytes = value.as_bytes();
+    var result_matches = false;
+    if typ::optional_elem(result_type) |want| {
+        result_matches = mem::equal_bytes(want, value_bytes);
+    }
+    if !result_matches {
+        return try self.fail0("wasm error: map.get expects Map, K -> ?V");
+    }
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, value_bytes, false);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let temp = try self.local_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Map temporary");
+    var key_pointer = ir::empty_name();
+    var key_length = ir::empty_name();
+    if try self.write_map_key_parts(
+        module,
+        node.args.get_or_panic(1),
+        temp,
+        key_bytes,
+        key_layout,
+        &var key_pointer,
+        &var key_length
+    ) |failed| {
+        return move failed;
+    }
+    let map_value = try self.arg_expr(module, node, 0);
+    let call = try self.map_expr3(
+        "(call $__map_get %s %s %s)",
+        Arg::Str(map_value),
+        Arg::Str(key_pointer),
+        Arg::Str(key_length)
+    );
+    let retained = ir::name_text(&module.names, node.result.name);
+    let result_bytes = retained.as_bytes();
+    let symbol = try self.symbol_name_of(result_bytes);
+    try self.line2(
+        "            (local.set %s %s)",
+        Arg::Str(symbol),
+        Arg::Str(call)
+    );
+    let local = try self.local_expr(result_bytes);
+    try self.line1("            (if (local.get %s)", Arg::Str(symbol));
+    try self.line("              (then");
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for map.get result");
+    let destination = try self.address_at(slot, payload_offset);
+    if try self.write_array_copy_value(
+        module,
+        destination,
+        local,
+        node.result.type_name,
+        value_bytes
+    ) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) write_map_at(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail_op(module, node, "wasm error: %s expects Map, K -> ?&V");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let key_bytes = key.as_bytes();
+    let value_bytes = value.as_bytes();
+    var borrow_text = string::new(self.allocator);
+    defer borrow_text.deinit(self.allocator);
+    if typ::optional_elem(result_type) |found| {
+        try borrow_text.append_bytes(self.allocator, found);
+    } else {
+        return try self.fail_op(module, node, "wasm error: %s expects Map, K -> ?&V");
+    }
+    let borrow = borrow_text.as_bytes();
+    let borrowed_value = deref_wasm_type(borrow);
+    if !is_wasm_reference_type(borrow) or
+        !mem::equal_bytes(borrowed_value, value_bytes) {
+        return try self.fail_op(module, node, "wasm error: %s expects Map, K -> ?&V");
+    }
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, borrow, false);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let temp = try self.local_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Map temporary");
+    var key_pointer = ir::empty_name();
+    var key_length = ir::empty_name();
+    if try self.write_map_key_parts(
+        module,
+        node.args.get_or_panic(1),
+        temp,
+        key_bytes,
+        key_layout,
+        &var key_pointer,
+        &var key_length
+    ) |failed| {
+        return move failed;
+    }
+    let map_value = try self.arg_expr(module, node, 0);
+    let call = try self.map_expr3(
+        "(call $__map_get %s %s %s)",
+        Arg::Str(map_value),
+        Arg::Str(key_pointer),
+        Arg::Str(key_length)
+    );
+    let retained = ir::name_text(&module.names, node.result.name);
+    let result_bytes = retained.as_bytes();
+    let symbol = try self.symbol_name_of(result_bytes);
+    try self.line2(
+        "            (local.set %s %s)",
+        Arg::Str(symbol),
+        Arg::Str(call)
+    );
+    try self.line1("            (if (local.get %s)", Arg::Str(symbol));
+    try self.line("              (then");
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for map.at result");
+    let destination = try self.address_at(slot, payload_offset);
+    let local = try self.local_expr(result_bytes);
+    try self.line2(
+        "                (i32.store %s %s)",
+        Arg::Str(destination),
+        Arg::Str(local)
+    );
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) map_entry_address(
+    map_value: ir::Name,
+    index: ir::Name
+) -> !ir::Name {
+    return self.map_expr3(
+        "(i32.add (i32.load %s) (i32.wrap_i64 (i64.mul %s (i64.const %d))))",
+        Arg::Str(map_value),
+        Arg::Str(index),
+        Arg::Int(map_entry_size())
+    );
+}
+
+fn (self: &var Emitter) write_map_take_value_at(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
+        return try self.fail0("wasm error: map.take_value_at expects Map, i64 -> V");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let value_bytes = value.as_bytes();
+    if !module.names.is(node.result.type_name, value_bytes) {
+        return try self.fail0("wasm error: map.take_value_at expects Map, i64 -> V");
+    }
+    let map_value = try self.arg_expr(module, node, 0);
+    let index = try self.arg_expr(module, node, 1);
+    let length_address = try self.address_at(map_value, map_len_offset());
+    let length = try self.map_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.ge_u %s %s)",
+        Arg::Str(index),
+        Arg::Str(length)
+    );
+    try self.line4(
+        "              (then (call $__panic_bounds %s %s (i64.const %d) (i64.const %d))))",
+        Arg::Str(index),
+        Arg::Str(length),
+        Arg::Int(node.span.start.line),
+        Arg::Int(node.span.start.column)
+    );
+    let entry = try self.map_entry_address(map_value, index);
+    let value_field = try self.address_at(entry, map_entry_value_offset());
+    let value_pointer = try self.map_expr1("(i32.load %s)", Arg::Str(value_field));
+    return self.write_load_value(module, node.result, value_pointer, 0);
+}
+
+fn (self: &var Emitter) write_map_key_at(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
+        return try self.fail0("wasm error: map.key_at expects Map, i64 -> ?K");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let key_bytes = key.as_bytes();
+    var result_matches = false;
+    if typ::optional_elem(result_type) |want| {
+        result_matches = mem::equal_bytes(want, key_bytes);
+    }
+    if !result_matches {
+        return try self.fail0("wasm error: map.key_at expects Map, i64 -> ?K");
+    }
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, key_bytes, false);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let map_value = try self.arg_expr(module, node, 0);
+    let index = try self.arg_expr(module, node, 1);
+    let length_address = try self.address_at(map_value, map_len_offset());
+    let length = try self.map_expr1("(i64.load %s)", Arg::Str(length_address));
+    try self.line2(
+        "            (if (i64.lt_u %s %s)",
+        Arg::Str(index),
+        Arg::Str(length)
+    );
+    try self.line("              (then");
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for map.key_at result");
+    let destination = try self.address_at(slot, payload_offset);
+    let entry = try self.map_entry_address(map_value, index);
+    let key_field = try self.address_at(entry, map_entry_key_offset());
+    if mem::equal_bytes(key_bytes, "[]u8") {
+        try self.line2(
+            "                (i32.store %s (i32.load %s))",
+            Arg::Str(destination),
+            Arg::Str(key_field)
+        );
+        let destination_length = try self.address_at(destination, 4);
+        let key_length_field = try self.address_at(entry, map_entry_key_len_offset());
+        try self.line2(
+            "                (i32.store %s (i32.wrap_i64 (i64.load %s)))",
+            Arg::Str(destination_length),
+            Arg::Str(key_length_field)
+        );
+    } else {
+        let key_pointer = try self.map_expr1("(i32.load %s)", Arg::Str(key_field));
+        if try self.write_array_copy_value(
+            module,
+            destination,
+            key_pointer,
+            node.result.type_name,
+            key_bytes
+        ) |failed| {
+            return move failed;
+        }
+    }
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+fn (self: &var Emitter) write_map_contains(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "bool") {
+        return try self.fail0("wasm error: map.contains expects Map, K -> bool");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let temp = try self.local_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Map temporary");
+    let key_bytes = key.as_bytes();
+    var key_pointer = ir::empty_name();
+    var key_length = ir::empty_name();
+    if try self.write_map_key_parts(
+        module,
+        node.args.get_or_panic(1),
+        temp,
+        key_bytes,
+        key_layout,
+        &var key_pointer,
+        &var key_length
+    ) |failed| {
+        return move failed;
+    }
+    let map_value = try self.arg_expr(module, node, 0);
+    let expression = try self.map_expr3(
+        "(i64.ge_s (call $__map_find %s %s %s) (i64.const 0))",
+        Arg::Str(map_value),
+        Arg::Str(key_pointer),
+        Arg::Str(key_length)
+    );
+    return self.write_scalar_result(module, node.result, expression);
+}
+
+fn (self: &var Emitter) write_map_len(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("wasm error: map.len expects Map -> i64");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let retained = ir::name_text(&module.names, receiver.type_name);
+    let receiver_type = retained.as_bytes();
+    var start = 0;
+    if mem::starts_with(receiver_type, "&var ") {
+        start = 5;
+    } else {
+        if mem::starts_with(receiver_type, "&") {
+            start = 1;
+        }
+    }
+    if !is_map_wasm_type(receiver_type[start..mem::len(receiver_type)]) {
+        return try self.fail0("wasm error: map.len expects Map -> i64");
+    }
+    let map_value = try self.arg_expr(module, node, 0);
+    let length_address = try self.address_at(map_value, map_len_offset());
+    let expression = try self.map_expr1("(i64.load %s)", Arg::Str(length_address));
+    return self.write_scalar_result(module, node.result, expression);
+}
+
+fn (self: &var Emitter) write_map_deinit(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: map.deinit expects Map, Allocator -> void");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let allocator = try self.arg_expr(module, node, 1);
+    let map_value = try self.arg_expr(module, node, 0);
+    try self.line3(
+        "            (call $__map_deinit %s %s (i32.const %d))",
+        Arg::Str(allocator),
+        Arg::Str(map_value),
+        Arg::Int(value_layout.size)
+    );
+    return null;
+}

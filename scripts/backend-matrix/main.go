@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kizu-lang/kizu/internal/conformance"
 )
@@ -92,7 +94,7 @@ var groups = []featureGroup{
 	{"std::testing", []string{"std-testing"}},
 	{"std::fs / path / io / process", []string{
 		"std-fs", "std-path", "std-io", "std-process", "fs", "io",
-		"explicit-io", "read-dir", "pure-helper", "stderr"}},
+		"explicit-io", "read-dir", "real-path", "pure-helper", "stderr"}},
 	{"std::net / http", []string{
 		"net", "http", "routing", "client", "url"}},
 	{"async / coro", []string{"async", "evented", "coro", "task-set"}},
@@ -102,14 +104,32 @@ var groups = []featureGroup{
 // executable and runs it, so it is judged against the output the example
 // declares rather than against the weaker fact that the command exited zero. `wasm` is judged
 // the same way, by running what it emitted: a module that exits zero while
-// emitting text no runtime can load is not a working backend.
-var routes = []string{"check", "run", "llvm", "wasm"}
+// emitting text no runtime can load is not a working backend. `wasm-opt`
+// applies the same output oracle after the typed-SSA optimizer. `wasm-bin`
+// repeats it through the direct binary renderer, while `browser` attaches the
+// JavaScript host adapter to the browser binary.
+var routes = []string{"check", "run", "llvm", "wasm", "wasm-opt", "wasm-bin", "browser"}
+
+// wasmExecutionTimeout keeps a broken generated loop from stopping the whole
+// coverage run. Examples are intentionally small and normally finish well
+// below this bound even when several Wasmtime processes share a host.
+const wasmExecutionTimeout = 10 * time.Second
+
+type failureKind string
+
+const (
+	failureLowering failureKind = "lowering"
+	failureTarget   failureKind = "target unsupported"
+	failureRuntime  failureKind = "runtime"
+	failureOutput   failureKind = "output mismatch"
+)
 
 // result records one example and whether each route accepted it.
 type result struct {
 	features []string
 	ok       map[string]bool
 	err      map[string]string
+	kind     map[string]failureKind
 }
 
 // main runs every runnable example through every route and prints the table.
@@ -163,7 +183,7 @@ func buildKizu() (string, func(), error) {
 }
 
 // routeArgs returns the CLI arguments for one route and example.
-func routeArgs(route string, entry conformance.Case) []string {
+func routeArgs(route string, entry conformance.Case, artifact string) []string {
 	switch route {
 	case "check":
 		return []string{"check", entry.Path}
@@ -171,6 +191,14 @@ func routeArgs(route string, entry conformance.Case) []string {
 		return append([]string{"run", entry.Path}, entry.Args...)
 	case "llvm":
 		return []string{"build", "--emit-llvm", entry.Path}
+	case "wasm-opt":
+		return []string{"build", "--target", "wasm32-wasi", "--opt", entry.Path}
+	case "wasm-bin":
+		return []string{"build", "--target", "wasm32-wasi", "--emit", "wasm",
+			"-o", artifact, entry.Path}
+	case "browser":
+		return []string{"build", "--target", "wasm32-browser", "--emit", "wasm",
+			"-o", artifact, entry.Path}
 	default:
 		return []string{"build", "--target", "wasm32-wasi", entry.Path}
 	}
@@ -200,44 +228,105 @@ func runAll(bin string, cases map[string]conformance.Case) map[string]*result {
 
 // runRoutes runs one example through every route.
 func runRoutes(bin string, entry conformance.Case) *result {
-	res := &result{features: entry.Features, ok: map[string]bool{}, err: map[string]string{}}
+	res := &result{
+		features: entry.Features,
+		ok:       map[string]bool{},
+		err:      map[string]string{},
+		kind:     map[string]failureKind{},
+	}
 	for _, route := range routes {
-		cmd := exec.Command(bin, routeArgs(route, entry)...)
-		cmd.Env = append(os.Environ(), "KIZU_TEST_ENV=env-ok")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		res.ok[route] = err == nil
-		if err != nil {
-			res.err[route] = firstLine(stderr.String() + stdout.String())
+		got, message, kind := runRoute(bin, route, entry)
+		if message != "" {
+			res.ok[route] = false
+			res.err[route] = message
+			res.kind[route] = kind
 			continue
 		}
-		got := stdout.String()
-		if route == "wasm" {
-			got, err = runWat(stdout.Bytes(), entry.Args)
-			if err != nil {
-				res.ok[route] = false
-				res.err[route] = firstLine(err.Error())
-				continue
-			}
-		}
-		if entry.Stdout == nil || (route != "run" && route != "wasm") {
+		res.ok[route] = true
+		if entry.Stdout == nil || !routeObservesOutput(route) {
 			continue
 		}
 		if got != *entry.Stdout {
 			res.ok[route] = false
 			res.err[route] = fmt.Sprintf("output mismatch: want %q, got %q",
 				truncate(*entry.Stdout), truncate(got))
+			res.kind[route] = failureOutput
 		}
 	}
 	return res
 }
 
+// runRoute builds one route and executes target artifacts when output is its
+// oracle. It returns a classified message rather than mutating shared state.
+func runRoute(bin string, route string, entry conformance.Case) (string, string, failureKind) {
+	artifact, cleanup, err := newRouteArtifact(route)
+	if err != nil {
+		return "", firstLine(err.Error()), failureRuntime
+	}
+	defer cleanup()
+	cmd := exec.Command(bin, routeArgs(route, entry, artifact)...)
+	cmd.Env = append(os.Environ(), entry.Env...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		message := firstLine(stderr.String() + stdout.String())
+		return "", message, classifyBuildFailure(message)
+	}
+	var got string
+	switch route {
+	case "wasm", "wasm-opt":
+		got, err = runWat(stdout.Bytes(), entry.Args, entry.Env, entry.Dirs)
+	case "wasm-bin":
+		got, err = runWasmFile(artifact, entry.Args, entry.Env, entry.Dirs)
+	case "browser":
+		got, err = runBrowserWasmFile(artifact)
+	default:
+		got = stdout.String()
+	}
+	if err != nil {
+		return "", firstLine(err.Error()), failureRuntime
+	}
+	return got, "", ""
+}
+
+// newRouteArtifact reserves a binary path only for routes that write one.
+func newRouteArtifact(route string) (string, func(), error) {
+	if route != "wasm-bin" && route != "browser" {
+		return "", func() {}, nil
+	}
+	file, err := os.CreateTemp("", "kizu-matrix-*.wasm")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", func() {}, err
+	}
+	return path, func() { _ = os.Remove(path) }, nil
+}
+
+// routeObservesOutput reports which route is judged by the program's stdout.
+func routeObservesOutput(route string) bool {
+	return route == "run" || route == "wasm" || route == "wasm-opt" ||
+		route == "wasm-bin" || route == "browser"
+}
+
+// classifyBuildFailure separates a deliberate target boundary from an
+// unimplemented common lowering path.
+func classifyBuildFailure(message string) failureKind {
+	if strings.Contains(message, "wasm error: target ") &&
+		strings.Contains(message, " does not support ") {
+		return failureTarget
+	}
+	return failureLowering
+}
+
 // runWat loads emitted WebAssembly text with wasmtime and returns what it
 // printed, so the wasm column reports whether a module runs rather than whether
 // the emitter exited zero.
-func runWat(wat []byte, args []string) (string, error) {
+func runWat(wat []byte, args []string, env []string, dirs []string) (string, error) {
 	file, err := os.CreateTemp("", "kizu-matrix-*.wat")
 	if err != nil {
 		return "", err
@@ -250,12 +339,48 @@ func runWat(wat []byte, args []string) (string, error) {
 	if err := file.Close(); err != nil {
 		return "", err
 	}
-	cmd := exec.Command("wasmtime", append([]string{file.Name()}, args...)...)
+	return runWasmFile(file.Name(), args, env, dirs)
+}
+
+// runWasmFile runs one text or binary module with its declared host inputs.
+func runWasmFile(path string, args []string, env []string, dirs []string) (string, error) {
+	wasmtimeArgs := []string{"run"}
+	for _, binding := range env {
+		wasmtimeArgs = append(wasmtimeArgs, "--env", binding)
+	}
+	for _, dir := range dirs {
+		wasmtimeArgs = append(wasmtimeArgs, "--dir", dir)
+	}
+	wasmtimeArgs = append(wasmtimeArgs, path)
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	wasmtimeArgs = append(wasmtimeArgs, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), wasmExecutionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "wasmtime", wasmtimeArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("wasmtime: timed out after %s", wasmExecutionTimeout)
+		}
 		return "", fmt.Errorf("wasmtime: %s", firstLine(stderr.String()+err.Error()))
+	}
+	return stdout.String(), nil
+}
+
+// runBrowserWasmFile attaches the same JavaScript adapter used by pages. It is
+// broad engine-level coverage; tests/browser/smoke.html is the real-browser
+// boundary check.
+func runBrowserWasmFile(path string) (string, error) {
+	cmd := exec.Command("node", "scripts/run-browser-wasm.mjs", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("browser host: %s", firstLine(stderr.String()+err.Error()))
 	}
 	return stdout.String(), nil
 }
@@ -345,12 +470,23 @@ func printTable(results map[string]*result) {
 	fmt.Printf("\n%d runnable examples.\n", len(results))
 	for _, route := range routes {
 		count := 0
+		kinds := map[failureKind]int{}
 		for _, res := range results {
 			if res.ok[route] {
 				count++
+			} else if kind := res.kind[route]; kind != "" {
+				kinds[kind]++
 			}
 		}
-		fmt.Printf("- %s: %d/%d\n", route, count, len(results))
+		fmt.Printf("- %s: %d/%d", route, count, len(results))
+		for _, kind := range []failureKind{
+			failureTarget, failureLowering, failureRuntime, failureOutput,
+		} {
+			if kinds[kind] > 0 {
+				fmt.Printf(", %s %d", kind, kinds[kind])
+			}
+		}
+		fmt.Println()
 	}
 }
 
@@ -360,7 +496,11 @@ func printFailures(results map[string]*result) {
 		reasons := map[string]int{}
 		for _, res := range results {
 			if msg := res.err[route]; msg != "" {
-				reasons[msg]++
+				label := msg
+				if kind := res.kind[route]; kind != "" {
+					label = "[" + string(kind) + "] " + msg
+				}
+				reasons[label]++
 			}
 		}
 		if len(reasons) == 0 {
