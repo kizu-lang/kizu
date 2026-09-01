@@ -6,10 +6,11 @@
 ## wasm32-wasi backend
 
 現在の `kizu build --target wasm32-wasi` は既定で WAT、`--emit wasm -o` で binary を
-生成する。`just backend-matrix` では両方とも 162 examples 中 142 件が native と同じ
-出力で動く。残り 20 件は target 非対応として build 時に拒否し、内訳は std::net 16 件、
-extern C allocator 2 件、coro runtime と event loop が各 1 件。example ごとの例外を足さず、
-共通 runtime と portable std の順に backend の対象を広げる。
+生成する。`just backend-matrix` では default / optimized WAT と binary がいずれも
+162 examples 中 142 件で native と同じ出力を持つ。残り 20 件は target 非対応として
+build 時に拒否し、内訳は std::net 16 件、extern C allocator 2 件、coro runtime と
+event loop が各 1 件。example ごとの例外を足さず、共通 runtime と portable std の順に
+backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
 std API が native と同じ observable behavior を持ち、compiler が browser の読める binary
@@ -31,10 +32,6 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 
 - portable example は `kizu run` と wasm の出力を一致させ、WASI-dependent example は
   isolated な host capability 付きで再現可能にする。
-- `--opt` の wasm execution も同じ oracle に含め、`std_string_join_trim.kizu` が
-  `wasmtime` で停止しない既知の optimizer / backend mismatch を直す。
-- `just wasi-smoke`、`just backend-matrix`、`just selfhost`、`go test ./...` を通し、README の
-  matrix と target limitation を実測値へ更新する。
 
 ## std::http / std::net の残り
 

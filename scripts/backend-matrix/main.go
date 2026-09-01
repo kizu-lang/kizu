@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kizu-lang/kizu/internal/conformance"
 )
@@ -102,10 +104,16 @@ var groups = []featureGroup{
 // executable and runs it, so it is judged against the output the example
 // declares rather than against the weaker fact that the command exited zero. `wasm` is judged
 // the same way, by running what it emitted: a module that exits zero while
-// emitting text no runtime can load is not a working backend. `wasm-bin`
-// repeats that oracle through the direct binary renderer, while `browser`
-// attaches the JavaScript host adapter to the browser binary.
-var routes = []string{"check", "run", "llvm", "wasm", "wasm-bin", "browser"}
+// emitting text no runtime can load is not a working backend. `wasm-opt`
+// applies the same output oracle after the typed-SSA optimizer. `wasm-bin`
+// repeats it through the direct binary renderer, while `browser` attaches the
+// JavaScript host adapter to the browser binary.
+var routes = []string{"check", "run", "llvm", "wasm", "wasm-opt", "wasm-bin", "browser"}
+
+// wasmExecutionTimeout keeps a broken generated loop from stopping the whole
+// coverage run. Examples are intentionally small and normally finish well
+// below this bound even when several Wasmtime processes share a host.
+const wasmExecutionTimeout = 10 * time.Second
 
 type failureKind string
 
@@ -183,6 +191,8 @@ func routeArgs(route string, entry conformance.Case, artifact string) []string {
 		return append([]string{"run", entry.Path}, entry.Args...)
 	case "llvm":
 		return []string{"build", "--emit-llvm", entry.Path}
+	case "wasm-opt":
+		return []string{"build", "--target", "wasm32-wasi", "--opt", entry.Path}
 	case "wasm-bin":
 		return []string{"build", "--target", "wasm32-wasi", "--emit", "wasm",
 			"-o", artifact, entry.Path}
@@ -265,7 +275,7 @@ func runRoute(bin string, route string, entry conformance.Case) (string, string,
 	}
 	var got string
 	switch route {
-	case "wasm":
+	case "wasm", "wasm-opt":
 		got, err = runWat(stdout.Bytes(), entry.Args, entry.Env, entry.Dirs)
 	case "wasm-bin":
 		got, err = runWasmFile(artifact, entry.Args, entry.Env, entry.Dirs)
@@ -299,7 +309,8 @@ func newRouteArtifact(route string) (string, func(), error) {
 
 // routeObservesOutput reports which route is judged by the program's stdout.
 func routeObservesOutput(route string) bool {
-	return route == "run" || route == "wasm" || route == "wasm-bin" || route == "browser"
+	return route == "run" || route == "wasm" || route == "wasm-opt" ||
+		route == "wasm-bin" || route == "browser"
 }
 
 // classifyBuildFailure separates a deliberate target boundary from an
@@ -345,11 +356,16 @@ func runWasmFile(path string, args []string, env []string, dirs []string) (strin
 		args = args[1:]
 	}
 	wasmtimeArgs = append(wasmtimeArgs, args...)
-	cmd := exec.Command("wasmtime", wasmtimeArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), wasmExecutionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "wasmtime", wasmtimeArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("wasmtime: timed out after %s", wasmExecutionTimeout)
+		}
 		return "", fmt.Errorf("wasmtime: %s", firstLine(stderr.String()+err.Error()))
 	}
 	return stdout.String(), nil

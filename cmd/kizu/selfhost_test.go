@@ -211,6 +211,11 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 		compareSelfhostArgs(t, selfhost, goWASMOutput(arena, true),
 			"build", "--target", "wasm32-wasi", "--opt", arena)
 	})
+	joinTrim := "../../examples/std_string_join_trim.kizu"
+	t.Run("wasm/std_string_join_trim_opt", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goWASMOutput(joinTrim, true),
+			"build", "--target", "wasm32-wasi", "--opt", joinTrim)
+	})
 	runSelfhostWASMContainerOptCases(t, selfhost)
 	for _, example := range []string{"hello.kizu", "function_pointer.kizu", "map_keys.kizu"} {
 		t.Run("wasm-binary/"+example, func(t *testing.T) {

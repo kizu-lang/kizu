@@ -367,15 +367,19 @@ fn result_used(module: &Module, used: &map::Map<[]u8, bool>, instr: Instr) -> bo
 }
 
 /// Reports whether an instruction must remain even if its result is unused,
-/// the Go `hasEffect`. A volatile load is here because the access itself is
-/// the effect: device registers change state when read.
+/// the Go `hasEffect`. Calls stay until the IR carries an effect summary: a
+/// callee may mutate through a borrow, allocate, trap, or perform host I/O
+/// regardless of its return type. An error.try keeps its failure return and
+/// cleanups even when its success payload is discarded. A volatile load stays
+/// because the access itself is the effect: device registers change state
+/// when read.
 fn has_effect(module: &Module, instr: Instr) -> bool {
     let node = module.instrs.at(instr.node);
-    if node.op == Op::Call and module.names.is(node.operand, "print") {
+    if node.op == Op::Call or node.op == Op::CallIndirect {
         return true;
     }
-    if node.op == Op::ArenaAdd or node.op == Op::ArenaAt or node.op == Op::VolatileLoad or
-        node.op == Op::BoxNew or node.op == Op::BoxTake {
+    if node.op == Op::ErrorTry or node.op == Op::ArenaAdd or node.op == Op::ArenaAt or
+        node.op == Op::VolatileLoad or node.op == Op::BoxNew or node.op == Op::BoxTake {
         return true;
     }
     return module.names.is(node.result.type_name, "void");

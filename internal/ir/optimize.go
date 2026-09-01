@@ -1,6 +1,9 @@
 package ir
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // Optimize applies bounded local cleanup passes to a module. A pass rewrites
 // values in place, so what it produces is verified the same way lowering is.
@@ -172,11 +175,17 @@ func keepLiveInstrs(instrs []*Instr, used map[string]bool) []*Instr {
 }
 
 // hasEffect reports whether an instruction must remain even if its result is
-// unused. A volatile load is here because the access itself is the effect:
-// device registers change state when read.
+// unused. Calls stay until the IR carries an effect summary: a callee may
+// mutate through a borrow, allocate, trap, or perform host I/O regardless of
+// its return type. An error.try keeps its failure return and cleanups even when
+// its success payload is discarded. A volatile load stays because the access
+// itself is the effect: device registers change state when read.
 func hasEffect(instr *Instr) bool {
+	if strings.HasPrefix(instr.Op, "call.") {
+		return true
+	}
 	switch instr.Op {
-	case "call.print", "arena.add", "arena.at", "volatile.load",
+	case "error.try", "arena.add", "arena.at", "volatile.load",
 		"box.new", "box.take":
 		return true
 	default:
