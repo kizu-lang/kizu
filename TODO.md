@@ -3,13 +3,6 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
-## wasm32-browser ESM bundle
-
-`kizu build --target wasm32-browser --emit esm -o <directory>` で、同じdirectoryへ
-`app.wasm` と、それを明示的にinstantiateする `app.mjs` を出す。共通runtimeをreleaseの
-library treeに収録し、Go seed / shipping compilerのbyte一致、installed layout、Node host、
-実browserで検証する。
-
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

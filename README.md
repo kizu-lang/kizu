@@ -128,7 +128,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm application path | **in progress.** Portable files and packages run as WASI and browser binaries; compile-time selection between native/WASI/browser host adapters remains |
+| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 142/162 runnable examples, browser binary runs 135/162, and all remaining cases are classified as target-unsupported capabilities |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
 | type alias | **not started** |
