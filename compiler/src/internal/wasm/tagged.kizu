@@ -597,8 +597,11 @@ fn (self: &var Emitter) write_cleanup(
     return self.write_instr_node(module, &instr);
 }
 
-/// Writes the WASI entry point and main's optional result storage.
+/// Writes the selected host entry point and main's optional result storage.
 fn (self: &var Emitter) write_start(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    if self.is_browser() {
+        return self.write_browser_start(module);
+    }
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -614,6 +617,85 @@ fn (self: &var Emitter) write_start(module: &ir::Module) -> !?diagnostic::Diagno
     try self.line("    (call $main))");
     try self.line(")");
     return null;
+}
+
+/// Writes kizu_start and returns main's status to JavaScript.
+fn (self: &var Emitter) write_browser_start(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if module.names.is(node.name, "main") {
+            return self.write_browser_start_for(module, node);
+        }
+    }
+    try self.line(
+        \\  (func $kizu_start (export "kizu_start") (result i32)
+    );
+    try self.line("    (call $main)");
+    try self.line("    (i32.const 0)");
+    try self.line("  )");
+    try self.line(")");
+    return null;
+}
+
+/// Writes browser start once main's return type is known.
+fn (self: &var Emitter) write_browser_start_for(
+    module: &ir::Module,
+    main: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    try self.line(
+        \\  (func $kizu_start (export "kizu_start") (result i32)
+    );
+    if module.names.is(main.return_type, "void") {
+        try self.line("    (call $main)");
+        try self.line("    (i32.const 0)");
+        try self.line("  )");
+        try self.line(")");
+        return null;
+    }
+    if !try self.is_memory_type(module, main.return_type) {
+        try self.line("    (drop (call $main))");
+        try self.line("    (i32.const 0)");
+        try self.line("  )");
+        try self.line(")");
+        return null;
+    }
+    let layout_outcome = try self.type_layout(module, main.return_type);
+    match layout_outcome {
+        Error(failed) => return move failed,
+        Layout(layout) => {
+            try self.line("    (local $__kizu_main_result i32)");
+            try self.line("    (local $__kizu_status i32)");
+            try self.line1(
+                "    (local.set $__kizu_main_result (call $__stack_alloc (i32.const %d)))",
+                Arg::Int(layout.size)
+            );
+            try self.line("    (call $main (local.get $__kizu_main_result))");
+            let return_text = ir::name_text(&module.names, main.return_type);
+            let return_type = return_text.as_bytes();
+            if try self.error_union_parts(return_type) |parts| {
+                parts.deinit(self.allocator);
+                if try self.write_browser_main_result_boundary(module, main) |failed| {
+                    return move failed;
+                }
+            }
+            if self.uses_allocator_runtime(module) {
+                try self.line1(
+                    "    (call $__stack_free (local.get $__kizu_main_result) (i32.const %d))",
+                    Arg::Int(layout.size)
+                );
+            } else {
+                try self.line("    (global.set $__stack_pointer (local.get $__kizu_main_result))");
+            }
+            try self.line("    (local.get $__kizu_status)");
+            try self.line("  )");
+            try self.line(")");
+            return null;
+        },
+    }
 }
 
 /// Writes _start once main's return type is known.

@@ -36,7 +36,8 @@ func (e *emitter) needsMainExitBoundary() bool {
 // needsProcExit keeps the WASI exit import conditional on a reachable runtime
 // path that can terminate with a nonzero process status.
 func (e *emitter) needsProcExit() bool {
-	return len(e.panicKinds) > 0 || e.needsMainExitBoundary()
+	return !e.target.isBrowser() &&
+		(len(e.panicKinds) > 0 || e.needsMainExitBoundary())
 }
 
 // collectMainErrorStrings assigns static storage to every global error
@@ -127,8 +128,10 @@ func (e *emitter) writeMainErrorRuntime() {
 	fmt.Fprintf(&e.out,
 		"    (call $__write_bytes (i32.const 2) (i32.const %d) (i32.const 1))\n",
 		newline.offset)
-	e.out.WriteString("    (call $__wasi_proc_exit (i32.const 1))\n")
-	e.out.WriteString("    (unreachable)\n")
+	if !e.target.isBrowser() {
+		e.out.WriteString("    (call $__wasi_proc_exit (i32.const 1))\n")
+		e.out.WriteString("    (unreachable)\n")
+	}
 	e.out.WriteString("  )\n\n")
 }
 
@@ -148,6 +151,73 @@ func (e *emitter) writeMainResultBoundary(main *ir.Function) error {
 	if success == exitStatusType {
 		return e.writeMainExitStatus(result, payloadOffset)
 	}
+	return nil
+}
+
+// writeBrowserMainResultBoundary reports an uncaught error and records the
+// status returned by kizu_start. A successful ExitStatus is mapped without
+// terminating the embedding page.
+func (e *emitter) writeBrowserMainResultBoundary(main *ir.Function) error {
+	_, success, payloadOffset, err := e.errorPayloadOffset(main.Return)
+	if err != nil {
+		return err
+	}
+	result := "(local.get $__kizu_main_result)"
+	tag := "(i64.load " + result + ")"
+	e.out.WriteString("    (if (i64.eq " + tag + " (i64.const 0))\n")
+	e.out.WriteString("      (then\n")
+	fmt.Fprintf(&e.out, "        (call $__main_error (i64.load %s))\n",
+		addressAt(result, payloadOffset))
+	e.out.WriteString("        (local.set $__kizu_status (i32.const 1))))\n")
+	if success != exitStatusType {
+		return nil
+	}
+	e.out.WriteString("    (if (i64.ne " + tag + " (i64.const 0))\n")
+	e.out.WriteString("      (then\n")
+	if err := e.writeBrowserMainExitStatus(result, payloadOffset); err != nil {
+		return err
+	}
+	e.out.WriteString("      ))\n")
+	return nil
+}
+
+// writeBrowserMainExitStatus maps declaration-owned variants to the integer
+// returned by kizu_start: Success is 0, Failure is 1, and Specific carries u8.
+func (e *emitter) writeBrowserMainExitStatus(result string, errorPayloadOffset int) error {
+	declared, ok := e.module.Unions[exitStatusType]
+	if !ok {
+		return fmt.Errorf("wasm error: unknown union type `%s`", exitStatusType)
+	}
+	success, ok := declared.Variants["Success"]
+	if !ok {
+		return fmt.Errorf("wasm error: unknown union variant `%s::Success`", exitStatusType)
+	}
+	failure, ok := declared.Variants["Failure"]
+	if !ok {
+		return fmt.Errorf("wasm error: unknown union variant `%s::Failure`", exitStatusType)
+	}
+	specific, ok := declared.Variants["Specific"]
+	if !ok || specific.Payload != "u8" {
+		return fmt.Errorf("wasm error: unknown union payload `%s::Specific`", exitStatusType)
+	}
+	unionOffset, err := e.unionPayloadOffset(exitStatusType)
+	if err != nil {
+		return err
+	}
+	status := addressAt(result, errorPayloadOffset)
+	tag := "(i64.load " + status + ")"
+	fmt.Fprintf(&e.out, "        (if (i64.eq %s (i64.const %d))\n", tag, specific.Index)
+	e.out.WriteString("          (then (local.set $__kizu_status (i32.load8_u ")
+	e.out.WriteString(addressAt(status, unionOffset) + "))))\n")
+	fmt.Fprintf(&e.out, "        (if (i64.eq %s (i64.const %d))\n", tag, failure.Index)
+	e.out.WriteString("          (then (local.set $__kizu_status (i32.const 1))))\n")
+	fmt.Fprintf(&e.out,
+		"        (if (i32.and (i64.ne %s (i64.const %d))\n", tag, success.Index)
+	fmt.Fprintf(&e.out,
+		"            (i32.and (i64.ne %s (i64.const %d))\n", tag, failure.Index)
+	fmt.Fprintf(&e.out,
+		"              (i64.ne %s (i64.const %d))))\n", tag, specific.Index)
+	e.out.WriteString("          (then (unreachable)))\n")
 	return nil
 }
 

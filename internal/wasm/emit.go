@@ -25,14 +25,21 @@ func Emit(module *ir.Module) (string, error) {
 	return lowered.WAT(), nil
 }
 
-// Lower builds the common WebAssembly module consumed by every renderer.
+// Lower builds a WASI module for the existing default target.
 func Lower(module *ir.Module) (*Module, error) {
+	return LowerTarget(module, TargetWASI)
+}
+
+// LowerTarget builds the common WebAssembly module for one explicit host
+// boundary. Every renderer consumes this same lowered representation.
+func LowerTarget(module *ir.Module, target Target) (*Module, error) {
 	paramsByFunction := make(map[string][]ir.Param, len(module.Functions))
 	for _, fn := range module.Functions {
 		paramsByFunction[fn.Name] = fn.Params
 	}
 	e := &emitter{
 		module:           module,
+		target:           target,
 		types:            typ.NewTable(),
 		paramsByFunction: paramsByFunction,
 		strings:          map[string]dataRef{},
@@ -60,6 +67,7 @@ type valueInfo struct {
 
 type emitter struct {
 	module           *ir.Module
+	target           Target
 	types            *typ.Table
 	paramsByFunction map[string][]ir.Param
 	out              bytes.Buffer
@@ -104,7 +112,7 @@ type funcSignature struct {
 
 // emit writes the module, runtime helpers, and user functions.
 func (e *emitter) emit() error {
-	if err := e.validateProcessTarget(); err != nil {
+	if err := e.validateTarget(); err != nil {
 		return err
 	}
 	e.collectPanicKinds()
@@ -243,14 +251,19 @@ func (e *emitter) sortedStringLiteralsByDiscovery() []string {
 // writeHeader writes imports, memory, and data segments.
 func (e *emitter) writeHeader() {
 	e.out.WriteString("(module\n")
-	e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
-	e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
-	if e.needsProcExit() {
-		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"proc_exit\"\n")
-		e.out.WriteString("    (func $__wasi_proc_exit (param i32)))\n")
+	if e.target.isBrowser() {
+		e.out.WriteString("  (import \"kizu\" \"write\"\n")
+		e.out.WriteString("    (func $__kizu_write (param i32 i32 i32) (result i32)))\n")
+	} else {
+		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
+		e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
+		if e.needsProcExit() {
+			e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"proc_exit\"\n")
+			e.out.WriteString("    (func $__wasi_proc_exit (param i32)))\n")
+		}
+		e.writeProcessImports()
+		e.writeFSImports()
 	}
-	e.writeProcessImports()
-	e.writeFSImports()
 	pages := (e.dataEnd + 65535) / 65536
 	if pages < 1 {
 		pages = 1
@@ -265,7 +278,9 @@ func (e *emitter) writeHeader() {
 	if e.usesArenaOriginRuntime() {
 		e.out.WriteString("  (global $__arena_instances (mut i64) (i64.const 0))\n")
 	}
-	e.writeProcessGlobals()
+	if !e.target.isBrowser() {
+		e.writeProcessGlobals()
+	}
 	e.writeFunctionTable()
 	for _, lit := range e.dataOrder {
 		ref := e.strings[lit]
@@ -324,7 +339,8 @@ func dataLiteral(key string) string {
 	}
 }
 
-// writeRuntime writes the minimal WASI output and checked-failure helpers.
+// writeRuntime writes target output and the checked-failure helpers the module
+// reaches.
 func (e *emitter) writeRuntime() error {
 	if e.usesAllocatorRuntime() {
 		e.writeAllocatorRuntime()
@@ -397,9 +413,15 @@ func (e *emitter) writeStackAllocHelper() {
 	e.out.WriteString("  )\n\n")
 }
 
-// writeBytesHelper writes one byte range to a selected WASI descriptor.
+// writeBytesHelper writes one byte range to a selected target stream.
 func (e *emitter) writeBytesHelper() {
 	e.out.WriteString("  (func $__write_bytes (param $fd i32) (param $ptr i32) (param $len i32)\n")
+	if e.target.isBrowser() {
+		e.out.WriteString("    (drop (call $__kizu_write\n")
+		e.out.WriteString("      (local.get $fd) (local.get $ptr) (local.get $len)))\n")
+		e.out.WriteString("  )\n\n")
+		return
+	}
 	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $ptr))\n", scratchOffset)
 	fmt.Fprintf(&e.out, "    (i32.store (i32.const %d) (local.get $len))\n", scratchOffset+4)
 	e.out.WriteString("    (drop (call $__wasi_fd_write\n")

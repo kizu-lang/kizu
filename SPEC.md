@@ -234,7 +234,8 @@ fn main() -> void {
 ためです(ADR-0085)。`std::process::ExitStatus` は compiler が知る std 契約で、
 `Success` は 0、`Failure` は 1、`Specific(code)` はその code で終了します。素の
 `ExitStatus`(error union でない形)は書けません。error を返した `main` は診断を
-出して非ゼロで終了します。
+出して非ゼロで終了します。process を持たない browser target では entry が同じ status を
+host に返し、page を終了しません。panic は status に畳まず trap のままです。
 
 ### 6.2 変数
 
@@ -3169,7 +3170,8 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 * `std::process::exit_code(code)` は `i64` を返す
 * `std::process::ExitStatus` は `Success` / `Failure` / `Specific(u8)` の union で、
   `main` の戻り値 `<E>!std::process::ExitStatus` としてだけ compiler が特別に扱う
-  (checker が main の形を検査し、hosted target の entry point が exit status へ写す)
+  (checker が main の形を検査し、entry point が native / WASI の process status、または
+  browser host へ返す status に写す)
 * `std::process` helper は hidden I/O を持たない
 
 ## 16. contract / impl 方針

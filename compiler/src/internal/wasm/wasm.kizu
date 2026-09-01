@@ -39,6 +39,11 @@ enum WasmFormat {
     Binary,
 }
 
+enum WasmTarget {
+    Wasi,
+    Browser,
+}
+
 /// Lowers typed SSA IR once and renders its WASI-compatible WAT, the Go
 /// `Emit`: the text goes to out, and a failure comes back as one diagnostic.
 pub fn emit(
@@ -46,7 +51,7 @@ pub fn emit(
     module: &ir::Module,
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
-    return emit_format(allocator, module, out, WasmFormat::Text);
+    return emit_format(allocator, module, out, WasmFormat::Text, WasmTarget::Wasi);
 }
 
 /// Lowers typed SSA IR once and renders its executable WebAssembly binary.
@@ -55,17 +60,37 @@ pub fn emit_binary(
     module: &ir::Module,
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
-    return emit_format(allocator, module, out, WasmFormat::Binary);
+    return emit_format(allocator, module, out, WasmFormat::Binary, WasmTarget::Wasi);
+}
+
+/// Lowers typed SSA IR once and renders browser-hosted WAT.
+pub fn emit_browser(
+    allocator: Allocator,
+    module: &ir::Module,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    return emit_format(allocator, module, out, WasmFormat::Text, WasmTarget::Browser);
+}
+
+/// Lowers typed SSA IR once and renders browser-hosted WebAssembly binary.
+pub fn emit_browser_binary(
+    allocator: Allocator,
+    module: &ir::Module,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    return emit_format(allocator, module, out, WasmFormat::Binary, WasmTarget::Browser);
 }
 
 fn emit_format(
     allocator: Allocator,
     module: &ir::Module,
     out: &var string::String,
-    format: WasmFormat
+    format: WasmFormat,
+    target: WasmTarget
 ) -> !?diagnostic::Diagnostic {
     var emitter = Emitter {
         allocator: allocator,
+        target: target,
         types: typ::new(allocator),
         names: try ir::new_name_table(allocator),
         out: string::new(allocator),
@@ -153,6 +178,7 @@ struct ValueInfo {
 /// order Go re-derives by sorting the map.
 struct Emitter {
     allocator: Allocator,
+    target: WasmTarget,
     types: typ::Table,
     names: ir::NameTable,
     out: string::String,
@@ -409,7 +435,7 @@ fn (self: &var Emitter) local_expr(name: []u8) -> !ir::Name {
 
 /// Writes the module, runtime helpers, and user functions, the Go `emit`.
 fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
-    if try self.validate_process_target(module) |failed| {
+    if try self.validate_target(module) |failed| {
         return move failed;
     }
     try self.collect_panic_kinds(module);
@@ -665,20 +691,28 @@ fn (self: &var Emitter) write_function_table(module: &ir::Module) -> !void {
 /// emitters retain assignment order so zero-length segments have a stable tie.
 fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.line("(module");
-    let import_line =
-        \\  (import "wasi_snapshot_preview1" "fd_write"
-    ;
-    try self.line(import_line);
-    try self.line("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))");
-    if try self.needs_proc_exit(module) {
-        let exit_import =
-            \\  (import "wasi_snapshot_preview1" "proc_exit"
+    if self.is_browser() {
+        let import_line =
+            \\  (import "kizu" "write"
         ;
-        try self.line(exit_import);
-        try self.line("    (func $__wasi_proc_exit (param i32)))");
+        try self.line(import_line);
+        try self.line("    (func $__kizu_write (param i32 i32 i32) (result i32)))");
+    } else {
+        let import_line =
+            \\  (import "wasi_snapshot_preview1" "fd_write"
+        ;
+        try self.line(import_line);
+        try self.line("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))");
+        if try self.needs_proc_exit(module) {
+            let exit_import =
+                \\  (import "wasi_snapshot_preview1" "proc_exit"
+            ;
+            try self.line(exit_import);
+            try self.line("    (func $__wasi_proc_exit (param i32)))");
+        }
+        try self.write_process_imports(module);
+        try self.write_fs_imports(module);
     }
-    try self.write_process_imports(module);
-    try self.write_fs_imports(module);
     var pages = (self.data_end + 65535) / 65536;
     if pages < 1 {
         pages = 1;
@@ -696,7 +730,9 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     if self.uses_arena_origin_runtime(module) {
         try self.line("  (global $__arena_instances (mut i64) (i64.const 0))");
     }
-    try self.write_process_globals(module);
+    if !self.is_browser() {
+        try self.write_process_globals(module);
+    }
     try self.write_function_table(module);
     var index = 0;
     while self.data_order.get(index) |key| {
@@ -758,7 +794,7 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
     return found.offset;
 }
 
-/// Writes the minimal WASI output and checked-failure helpers, the Go
+/// Writes target output and checked-failure helpers, the Go
 /// `writeRuntime`.
 fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !?diagnostic::Diagnostic {
     if self.uses_allocator_runtime(module) {
@@ -833,11 +869,17 @@ fn (self: &var Emitter) write_stack_alloc_helper(module: &ir::Module) -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes one byte range to a selected WASI descriptor, the Go
+/// Writes one byte range to the selected host stream, the Go
 /// `writeBytesHelper`.
 fn (self: &var Emitter) write_bytes_helper() -> !void {
-    let scratch = scratch_offset();
     try self.line("  (func $__write_bytes (param $fd i32) (param $ptr i32) (param $len i32)");
+    if self.is_browser() {
+        try self.line("    (drop (call $__kizu_write");
+        try self.line("      (local.get $fd) (local.get $ptr) (local.get $len)))");
+        try self.line("  )");
+        return self.out.append_byte(self.allocator, cast<u8>(10));
+    }
+    let scratch = scratch_offset();
     try self.line1("    (i32.store (i32.const %d) (local.get $ptr))", Arg::Int(scratch));
     try self.line1("    (i32.store (i32.const %d) (local.get $len))", Arg::Int(scratch + 4));
     try self.line("    (drop (call $__wasi_fd_write");

@@ -393,10 +393,17 @@ func (e *emitter) errorSetFits(source string, target string) bool {
 	return true
 }
 
-// writeStart exports the WASI entry point. A memory-backed main receives one
-// result slot whose error and ExitStatus variants are mapped at the host
-// boundary before the successful result storage is released.
+// writeStart exports the selected host entry point.
 func (e *emitter) writeStart() error {
+	if e.target.isBrowser() {
+		return e.writeBrowserStart()
+	}
+	return e.writeWASIStart()
+}
+
+// writeWASIStart maps a memory-backed main to the WASI process boundary before
+// its successful result storage is released.
+func (e *emitter) writeWASIStart() error {
 	main := e.mainFunction()
 	e.out.WriteString("  (func $_start (export \"_start\")\n")
 	if main == nil || main.Return == "void" {
@@ -435,5 +442,50 @@ func (e *emitter) writeStart() error {
 	}
 	e.out.WriteString("  )\n")
 	e.out.WriteString(")\n")
+	return nil
+}
+
+// writeBrowserStart returns the main status to JavaScript instead of
+// pretending the browser has a process to exit. Result storage is released on
+// both success and error so the host may call the entry again.
+func (e *emitter) writeBrowserStart() error {
+	main := e.mainFunction()
+	e.out.WriteString("  (func $kizu_start (export \"kizu_start\") (result i32)\n")
+	if main == nil || main.Return == "void" {
+		e.out.WriteString("    (call $main)\n")
+		e.out.WriteString("    (i32.const 0)\n")
+		e.out.WriteString("  )\n)\n")
+		return nil
+	}
+	if !e.isMemoryType(main.Return) {
+		e.out.WriteString("    (drop (call $main))\n")
+		e.out.WriteString("    (i32.const 0)\n")
+		e.out.WriteString("  )\n)\n")
+		return nil
+	}
+	layout, err := e.typeLayout(main.Return)
+	if err != nil {
+		return err
+	}
+	e.out.WriteString("    (local $__kizu_main_result i32)\n")
+	e.out.WriteString("    (local $__kizu_status i32)\n")
+	fmt.Fprintf(&e.out,
+		"    (local.set $__kizu_main_result (call $__stack_alloc (i32.const %d)))\n",
+		layout.size)
+	e.out.WriteString("    (call $main (local.get $__kizu_main_result))\n")
+	if _, _, ok := e.errorUnionParts(main.Return); ok {
+		if err := e.writeBrowserMainResultBoundary(main); err != nil {
+			return err
+		}
+	}
+	if e.usesAllocatorRuntime() {
+		fmt.Fprintf(&e.out,
+			"    (call $__stack_free (local.get $__kizu_main_result) (i32.const %d))\n",
+			layout.size)
+	} else {
+		e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_main_result))\n")
+	}
+	e.out.WriteString("    (local.get $__kizu_status)\n")
+	e.out.WriteString("  )\n)\n")
 	return nil
 }

@@ -92,7 +92,13 @@ func emitTargetFile(target string, args []string) error {
 	if target == "native" {
 		return emitNativeFile(args)
 	}
-	if target != "wasm32-wasi" {
+	var wasmTarget wasm.Target
+	switch target {
+	case "wasm32-wasi":
+		wasmTarget = wasm.TargetWASI
+	case "wasm32-browser":
+		wasmTarget = wasm.TargetBrowser
+	default:
 		usage()
 		return fmt.Errorf("invalid build target `%s`", target)
 	}
@@ -100,7 +106,7 @@ func emitTargetFile(target string, args []string) error {
 	if err != nil {
 		return err
 	}
-	return emitWASMFile(options)
+	return emitWASMFile(options, wasmTarget)
 }
 
 type wasmBuildOptions struct {
@@ -202,17 +208,17 @@ func (p *wasmBuildParser) finish() (wasmBuildOptions, error) {
 	return p.options, nil
 }
 
-// emitWASMFile lowers a checked source file once and renders its selected WASI
-// WebAssembly artifact fresh like emitLLVMFile (ADR-0126).
-func emitWASMFile(options wasmBuildOptions) error {
+// emitWASMFile lowers a checked source file once and renders its selected
+// WebAssembly host target fresh like emitLLVMFile (ADR-0126).
+func emitWASMFile(options wasmBuildOptions, target wasm.Target) error {
 	module, err := lowerFile(options.Path, options.Opt)
 	if err != nil {
 		return err
 	}
-	// A WASI module exports only _start, so functions main cannot reach must
-	// not drag unused host capabilities into its import surface.
+	// WebAssembly modules expose one target entry, so unreachable functions must
+	// not drag unused host capabilities into their import surface.
 	ir.KeepReachableFunctions(module, "main")
-	lowered, err := wasm.Lower(module)
+	lowered, err := wasm.LowerTarget(module, target)
 	if err != nil {
 		return err
 	}

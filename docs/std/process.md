@@ -60,5 +60,9 @@ pub fn spawn_wait8(
 `spawn_wait8` に到達する program は build 時に target 非対応として拒否します。
 到達しない helper は module から除かれるため、それだけで host capability を要求しません。
 
+`wasm32-browser` は process を持つように偽装しません。`std::process` の API に到達する
+program はすべて build 時に target 非対応として拒否します。browser entry が返す status は
+`std::process` capability ではなく、`main` と host の compiler-defined boundary です。
+
 `std::process::Error` は `InvalidArgumentCount`、`MissingExecutable`、
 `OutOfMemory`、`ArgIndexOutOfBounds`、`ExecutablePathUnknown` を持ちます。

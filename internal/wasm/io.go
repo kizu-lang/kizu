@@ -70,6 +70,10 @@ func (e *emitter) writeIORuntime() error {
 // writeIOWriteHelper writes a whole byte slice, retrying partial WASI writes.
 // A zero-progress success is rejected so the loop cannot hide a stuck host.
 func (e *emitter) writeIOWriteHelper(writeFailed int, ioFailing int) {
+	if e.target.isBrowser() {
+		e.writeBrowserIOWriteHelper(writeFailed, ioFailing)
+		return
+	}
 	e.out.WriteString("  (func $__io_write (param $out i32) (param $io i32)\n")
 	e.out.WriteString("      (param $bytes i32) (param $fd i32)\n")
 	e.out.WriteString("    (local $ptr i32) (local $remaining i32)\n")
@@ -111,7 +115,28 @@ func (e *emitter) writeIOWriteHelper(writeFailed int, ioFailing int) {
 	e.out.WriteString("  )\n\n")
 }
 
-// writeIOWriteBuiltin binds one std primitive to its WASI descriptor.
+// writeBrowserIOWriteHelper maps one whole-buffer browser callback status to
+// std::io::Error. Unlike a descriptor, the callback has no partial-write state.
+func (e *emitter) writeBrowserIOWriteHelper(writeFailed int, ioFailing int) {
+	e.out.WriteString("  (func $__io_write (param $out i32) (param $io i32)\n")
+	e.out.WriteString("      (param $bytes i32) (param $stream i32)\n")
+	e.out.WriteString("    (local $errno i32)\n")
+	fmt.Fprintf(&e.out, "    (if (i32.eq (local.get $io) (i32.const %d))\n", ioFailingToken)
+	e.out.WriteString("      (then\n")
+	e.writeErrorResult(ioFailing, "        ")
+	e.out.WriteString("        (return)))\n")
+	e.out.WriteString("    (local.set $errno (call $__kizu_write (local.get $stream)\n")
+	e.out.WriteString("      (i32.load (local.get $bytes))\n")
+	e.out.WriteString("      (i32.load (i32.add (local.get $bytes) (i32.const 4)))))\n")
+	e.out.WriteString("    (if (local.get $errno)\n")
+	e.out.WriteString("      (then\n")
+	e.writeErrorResult(writeFailed, "        ")
+	e.out.WriteString("        (return)))\n")
+	e.out.WriteString("    (i64.store (local.get $out) (i64.const 1))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeIOWriteBuiltin binds one std primitive to its target stream number.
 func (e *emitter) writeIOWriteBuiltin(name string, fd int) {
 	fmt.Fprintf(&e.out, "  (func $%s (param $out i32) (param $io i32) (param $bytes i32)\n", name)
 	fmt.Fprintf(&e.out,

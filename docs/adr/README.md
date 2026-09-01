@@ -140,3 +140,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0144: 接続は返ってくる。返さなければ次は来ない](0144-the-connection-comes-back-or-nothing-does.md)
 - [ADR-0145: 途中で止まれる呼び出しを先に入れる](0145-a-call-that-can-stop-in-the-middle.md)
 - [ADR-0146: 待つことは thread を返すこと](0146-waiting-gives-the-thread-back.md)
+- [ADR-0147: browser WASM は process を偽装せず byte stream を host 境界にする](0147-browser-wasm-host-boundary.md)

@@ -56,6 +56,9 @@ repository-relative directory を末尾の `dir:` metadata で宣言し、runner
 capability だけを Wasmtime へ渡します。`real_path` の結果もその capability からの
 相対 path であり、host の絶対 path は guest へ公開しません。
 
+`wasm32-browser` は filesystem capability を提供しません。`std::fs` に到達する program は
+JavaScript で filesystem を偽装せず、build 時に target 非対応として拒否します。
+
 `Metadata` と `DirEntry` の layout は C runtime が `KizuFsMetadata` /
 `KizuFsDirEntry` として写しています(`internal/native/build.go`)。field を変える
 なら両方を変えます。

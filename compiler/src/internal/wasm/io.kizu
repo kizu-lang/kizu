@@ -2,7 +2,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 
 // Mechanical port of internal/wasm/io.go. Blocking Io is a visible capability
-// token, and explicit stream writes surface WASI failures as std::io::Error.
+// token, and explicit stream writes surface host failures as std::io::Error.
 
 fn (self: &Emitter) uses_io_write(module: &ir::Module) -> bool {
     return self.uses_builtin_call(
@@ -56,6 +56,9 @@ fn (self: &var Emitter) write_io_write_helper(
     write_failed: i64,
     io_failing: i64
 ) -> !void {
+    if self.is_browser() {
+        return self.write_browser_io_write_helper(write_failed, io_failing);
+    }
     try self.line("  (func $__io_write (param $out i32) (param $io i32)");
     try self.line("      (param $bytes i32) (param $fd i32)");
     try self.line("    (local $ptr i32) (local $remaining i32)");
@@ -112,7 +115,34 @@ fn (self: &var Emitter) write_io_write_helper(
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Binds one std primitive to its WASI descriptor.
+/// Maps one whole-buffer browser callback status to std::io::Error.
+fn (self: &var Emitter) write_browser_io_write_helper(
+    write_failed: i64,
+    io_failing: i64
+) -> !void {
+    try self.line("  (func $__io_write (param $out i32) (param $io i32)");
+    try self.line("      (param $bytes i32) (param $stream i32)");
+    try self.line("    (local $errno i32)");
+    try self.line1(
+        "    (if (i32.eq (local.get $io) (i32.const %d))",
+        Arg::Int(2)
+    );
+    try self.line("      (then");
+    try self.write_error_result(io_failing, "        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $errno (call $__kizu_write (local.get $stream)");
+    try self.line("      (i32.load (local.get $bytes))");
+    try self.line("      (i32.load (i32.add (local.get $bytes) (i32.const 4)))))");
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_error_result(write_failed, "        ");
+    try self.line("        (return)))");
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Binds one std primitive to its target stream number.
 fn (self: &var Emitter) write_io_write_builtin(name: []u8, fd: i64) -> !void {
     try self.line1(
         "  (func $%s (param $out i32) (param $io i32) (param $bytes i32)",

@@ -40,20 +40,6 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 - WASI の portable example について backend lowering failure と未分類の output mismatch を
   0 にする。
 
-### W7. browser target
-
-- browser target の CLI spelling、entry / export、host import、memory ownership、JavaScript との
-  string / buffer 受け渡し ABI を明示する。WASI `_start` / `fd_write` を browser に偽装しない。
-- portable core は `wasm32-wasi` と同じ WebAssembly module lowering を使い、target 差は
-  host import、entry / export、利用可能 capability だけに閉じる。
-- stdout、filesystem、process、socket の無い browser で `Io` と std API のどこまでを host
-  adapter が提供するかを文書化する。未提供 API は compile / build 時に target 非対応とする。
-- generated `.wasm` と必要最小限の JavaScript host adapter を実 browser で読み込み、function
-  call、aggregate、allocation、error、DOM へ渡す byte buffer を conformance output で検証する。
-- `wasm32-wasi` と browser の portable coverage、target 非対応、host-dependent coverage を
-  README の matrix で分けて実測する。両 target に未分類の lowering failure / output mismatch が
-  なくなったら、この章を削除する。
-
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

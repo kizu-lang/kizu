@@ -1,0 +1,171 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::mem;
+
+// Mechanical port of internal/wasm/target.go: host capabilities are selected
+// before the common module is written, and unsupported browser APIs fail at
+// build time instead of leaking a WASI import into the page.
+
+fn (self: &Emitter) is_browser() -> bool {
+    return self.target == WasmTarget::Browser;
+}
+
+fn (self: &var Emitter) validate_target(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if !self.is_browser() {
+        return self.validate_process_target(module);
+    }
+    if self.uses_fs_runtime(module) {
+        return try self.fail0(
+            "wasm error: target wasm32-browser does not support std::fs"
+        );
+    }
+    if self.uses_browser_evented_io(module) {
+        return try self.browser_capability_failure("evented std::io");
+    }
+    if self.uses_browser_coro(module) {
+        return try self.browser_capability_failure("std::coro");
+    }
+    if self.uses_browser_net(module) {
+        return try self.browser_capability_failure("std::net");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::io_read_stdin_into") {
+        return try self.browser_capability_failure("std::io::read_stdin");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_arg_count") {
+        return try self.browser_process_failure("std::process::arg_count");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_arg") {
+        return try self.browser_process_failure("std::process::arg");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_env") {
+        return try self.browser_process_failure("std::process::env");
+    }
+    if self.uses_builtin_call(
+        module,
+        "std::internal::builtin::process_executable_path_into"
+    ) {
+        return try self.browser_process_failure("std::process::executable_path");
+    }
+    if self.uses_builtin_call(
+        module,
+        "std::internal::builtin::process_monotonic_millis"
+    ) {
+        return try self.browser_process_failure("std::process::monotonic_millis");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_unix_millis") {
+        return try self.browser_process_failure("std::process::unix_millis");
+    }
+    if self.uses_builtin_call(module, "std::internal::builtin::process_spawn_wait8") {
+        return try self.browser_process_failure("std::process::spawn_wait8");
+    }
+    if self.uses_external_call(module) {
+        return try self.browser_capability_failure("extern C");
+    }
+    return null;
+}
+
+fn (self: &var Emitter) browser_process_failure(
+    name: []u8
+) -> !diagnostic::Diagnostic {
+    return self.browser_capability_failure(name);
+}
+
+fn (self: &var Emitter) browser_capability_failure(
+    name: []u8
+) -> !diagnostic::Diagnostic {
+    return self.fail(
+        "wasm error: target wasm32-browser does not support %s",
+        Arg::Lit(name)
+    );
+}
+
+fn (self: &Emitter) uses_browser_evented_io(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::io_loop_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::io_loop_close") or
+        self.uses_builtin_call(module, "std::internal::builtin::io_evented") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_finished") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_await") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_cancel") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_close") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_set_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_set_spawn") or
+        self.uses_builtin_call(module, "std::internal::builtin::task_set_close");
+}
+
+fn (self: &Emitter) uses_browser_coro(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::coro_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_resume") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_suspend") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_finished") or
+        self.uses_builtin_call(module, "std::internal::builtin::coro_close");
+}
+
+fn (self: &Emitter) uses_browser_net(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(module, "std::internal::builtin::net_listen") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_connect") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_accept") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_read") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_write_all") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_write_some") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_local_port") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_close") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_new") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_add") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_remove") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_wait") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_token") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_flags") or
+        self.uses_builtin_call(module, "std::internal::builtin::net_poller_close");
+}
+
+fn (self: &Emitter) uses_external_call(module: &ir::Module) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if self.is_external_call(module, node.op, node.operand) {
+                    return true;
+                }
+                var cleanup_index = 0;
+                while node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if self.is_external_call(module, cleanup.op, cleanup.operand) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn (self: &Emitter) is_external_call(
+    module: &ir::Module,
+    op: ir::Op,
+    operand: ir::Name
+) -> bool {
+    if op != ir::Op::Call {
+        return false;
+    }
+    let retained = ir::name_text(&module.names, operand);
+    let name = retained.as_bytes();
+    if mem::equal_bytes(name, "print") or
+        mem::starts_with(name, "std::internal::builtin::") {
+        return false;
+    }
+    if module.function_named(name) |_| {
+        return false;
+    }
+    return true;
+}

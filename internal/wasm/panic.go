@@ -290,7 +290,9 @@ func (e *emitter) writePanicRuntime() {
 // trap message. The unreachable keeps termination explicit if a host returns.
 func (e *emitter) writePanicExitHelper() {
 	e.out.WriteString("  (func $__panic_exit\n")
-	e.out.WriteString("    (call $__wasi_proc_exit (i32.const 1))\n")
+	if !e.target.isBrowser() {
+		e.out.WriteString("    (call $__wasi_proc_exit (i32.const 1))\n")
+	}
 	e.out.WriteString("    (unreachable)\n")
 	e.out.WriteString("  )\n\n")
 }

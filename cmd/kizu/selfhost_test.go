@@ -50,6 +50,8 @@ func TestSelfhostFrontend(t *testing.T) {
 		{"llvm-opt-package", goEmitLLVMOutput(pkg, true), []string{"build", "--emit-llvm", "--opt", pkg}},
 		{"wasm-file", goWASMOutput(file, false),
 			[]string{"build", "--target", "wasm32-wasi", file}},
+		{"wasm-browser-file", goBrowserWASMOutput(file, false),
+			[]string{"build", "--target", "wasm32-browser", file}},
 		// The wasm target lowers one source file whatever the path names, so a
 		// package manifest reaches it as Kizu source and fails to parse.
 		{"wasm-package-manifest", goWASMOutput(pkg+"/kizu.toml", false),
@@ -226,19 +228,86 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
 		})
 	}
+	runSelfhostBrowserWASMCases(t, selfhost)
+}
+
+// runSelfhostBrowserWASMCases compares the browser target's portable output,
+// target refusals, direct binary renderer, and ExitStatus boundary.
+func runSelfhostBrowserWASMCases(t *testing.T, selfhost string) {
+	t.Helper()
+	for _, example := range []string{
+		"hello.kizu",
+		"aggregate_calls.kizu",
+		"arena.kizu",
+		"error_union_try.kizu",
+		"std_io_stderr.kizu",
+	} {
+		t.Run("wasm-browser/"+example, func(t *testing.T) {
+			path := "../../examples/" + example
+			compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
+				"build", "--target", "wasm32-browser", path)
+		})
+	}
+	for _, example := range []string{
+		"fs_read.kizu",
+		"std_process.kizu",
+		"net_round_trip.kizu",
+	} {
+		t.Run("wasm-browser-reject/"+example, func(t *testing.T) {
+			path := "../../examples/" + example
+			compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
+				"build", "--target", "wasm32-browser", path)
+		})
+	}
+	for _, example := range []string{
+		"hello.kizu",
+		"aggregate_calls.kizu",
+		"arena.kizu",
+		"error_union_try.kizu",
+		"error_set_undeclared.kizu",
+		"std_io_stderr.kizu",
+	} {
+		t.Run("wasm-browser-binary/"+example, func(t *testing.T) {
+			compareSelfhostWASMBinaryTarget(
+				t, selfhost, "wasm32-browser", "../../examples/"+example,
+			)
+		})
+	}
+	t.Run("wasm-browser/exit-status", func(t *testing.T) {
+		path := writeTempKizuSource(t, "browser_exit_status.kizu", `import std::process;
+
+fn main() -> !process::ExitStatus {
+    return process::ExitStatus::Specific(7);
+}
+`)
+		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
+			"build", "--target", "wasm32-browser", path)
+		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", path)
+	})
 }
 
 // compareSelfhostWASMBinary checks the seed and shipping compiler write the
 // exact same binary artifact without sending bytes to stdout.
 func compareSelfhostWASMBinary(t *testing.T, selfhost string, source string) {
+	compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-wasi", source)
+}
+
+// compareSelfhostWASMBinaryTarget checks one target's seed and shipping
+// compiler write the exact same binary artifact.
+func compareSelfhostWASMBinaryTarget(
+	t *testing.T,
+	selfhost string,
+	target string,
+	source string,
+) {
 	t.Helper()
 	directory := t.TempDir()
 	seedPath := filepath.Join(directory, "seed.wasm")
 	selfhostPath := filepath.Join(directory, "selfhost.wasm")
 	seed := runNativeCLI(t, kizuBinaryPath,
-		"build", "--target", "wasm32-wasi", "--emit", "wasm", "-o", seedPath, source)
+		"build", "--target", target, "--emit", "wasm", "-o", seedPath, source)
 	shipping := runNativeCLI(t, selfhost,
-		"build", "--target", "wasm32-wasi", "--emit", "wasm", "-o", selfhostPath, source)
+		"build", "--target", target, "--emit", "wasm", "-o", selfhostPath, source)
 	if seed.code != 0 || shipping.code != 0 || seed.output != shipping.output {
 		t.Fatalf("binary CLI differs\nseed: %#v\nshipping: %#v", seed, shipping)
 	}
@@ -455,6 +524,20 @@ func goWASMOutput(file string, opt bool) cliOutput {
 	return cliOutput{stdout: text + "\n"}
 }
 
+// goBrowserWASMOutput renders the browser target through the shipping seed.
+func goBrowserWASMOutput(file string, opt bool) cliOutput {
+	module, err := lowerFile(file, opt)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	ir.KeepReachableFunctions(module, "main")
+	lowered, err := wasm.LowerTarget(module, wasm.TargetBrowser)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	return cliOutput{stdout: lowered.WAT() + "\n"}
+}
+
 // wasmFixture is one program the wasm backend is compared on.
 type wasmFixture struct {
 	name   string
@@ -607,6 +690,13 @@ func cliRepresentativeArguments() []cliArguments {
 		{"wasm_unknown_option", []string{"build", "--target", "wasm32-wasi", "--wat", file}},
 		{"wasm_binary_missing_output", []string{
 			"build", "--target", "wasm32-wasi", "--emit", "wasm", file,
+		}},
+		{"wasm_browser_missing_file", []string{"build", "--target", "wasm32-browser"}},
+		{"wasm_browser_extra_file", []string{
+			"build", "--target", "wasm32-browser", "a.kizu", "b.kizu",
+		}},
+		{"wasm_browser_binary_missing_output", []string{
+			"build", "--target", "wasm32-browser", "--emit", "wasm", file,
 		}},
 		{"target_not_found", []string{"parse", "../../examples/missing.kizu"}},
 		{"target_is_directory", []string{"parse", pkg}},

@@ -41,6 +41,9 @@ fn (self: &var Emitter) needs_main_exit_boundary(module: &ir::Module) -> !bool {
 
 /// Keeps proc_exit conditional on a checked failure or fallible main.
 fn (self: &var Emitter) needs_proc_exit(module: &ir::Module) -> !bool {
+    if self.is_browser() {
+        return false;
+    }
     if self.panic_kinds.len() > 0 {
         return true;
     }
@@ -170,7 +173,7 @@ fn (self: &var Emitter) write_main_error_table(module: &ir::Module) -> !void {
     );
 }
 
-/// Reports one uncaught error and exits with status 1.
+/// Reports one uncaught error. WASI exits; browser start returns status 1.
 fn (self: &var Emitter) write_main_error_runtime() -> !void {
     let prefix = self.data_ref("panic.prefix");
     let newline = self.data_ref("newline");
@@ -198,8 +201,10 @@ fn (self: &var Emitter) write_main_error_runtime() -> !void {
         "    (call $__write_bytes (i32.const 2) (i32.const %d) (i32.const 1))",
         Arg::Int(newline.offset)
     );
-    try self.line("    (call $__wasi_proc_exit (i32.const 1))");
-    try self.line("    (unreachable)");
+    if !self.is_browser() {
+        try self.line("    (call $__wasi_proc_exit (i32.const 1))");
+        try self.line("    (unreachable)");
+    }
     try self.line("  )");
     return self.line("");
 }
@@ -234,6 +239,109 @@ fn (self: &var Emitter) write_main_result_boundary(
             if mem::equal_bytes(success, exit_status_type()) {
                 return self.write_main_exit_status(module, result, offset);
             }
+            return null;
+        },
+    }
+}
+
+/// Reports an uncaught browser error and records the status returned by
+/// kizu_start without terminating the embedding page.
+fn (self: &var Emitter) write_browser_main_result_boundary(
+    module: &ir::Module,
+    main: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    let retained = ir::name_text(&module.names, main.return_type);
+    let return_type = retained.as_bytes();
+    let parts = try self.error_union_parts(return_type) orelse
+        return try self.fail0("wasm error: main result boundary expects an error union");
+    defer parts.deinit(self.allocator);
+    let success = parts.success.as_bytes();
+    let offset_outcome = try self.tagged_payload_offset(module, success, true);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(offset) => {
+            let result = try self.names.intern("(local.get $__kizu_main_result)");
+            let code_address = try self.address_at(result, offset);
+            try self.line1(
+                "    (if (i64.eq (i64.load %s) (i64.const 0))",
+                Arg::Str(result)
+            );
+            try self.line("      (then");
+            try self.line1(
+                "        (call $__main_error (i64.load %s))",
+                Arg::Str(code_address)
+            );
+            try self.line("        (local.set $__kizu_status (i32.const 1))))");
+            if !mem::equal_bytes(success, exit_status_type()) {
+                return null;
+            }
+            try self.line1(
+                "    (if (i64.ne (i64.load %s) (i64.const 0))",
+                Arg::Str(result)
+            );
+            try self.line("      (then");
+            if try self.write_browser_main_exit_status(module, result, offset) |failed| {
+                return move failed;
+            }
+            try self.line("      ))");
+            return null;
+        },
+    }
+}
+
+/// Maps ExitStatus to the integer returned by kizu_start.
+fn (self: &var Emitter) write_browser_main_exit_status(
+    module: &ir::Module,
+    result: ir::Name,
+    error_payload_offset: i64
+) -> !?diagnostic::Diagnostic {
+    let shown = try self.names.intern(exit_status_type());
+    let success = module.union_variant_named(exit_status_type(), "Success") orelse
+        return try self.fail("wasm error: unknown union variant `%s::Success`", Arg::Str(shown));
+    let failure = module.union_variant_named(exit_status_type(), "Failure") orelse
+        return try self.fail("wasm error: unknown union variant `%s::Failure`", Arg::Str(shown));
+    let specific = module.union_variant_named(exit_status_type(), "Specific") orelse
+        return try self.fail("wasm error: unknown union payload `%s::Specific`", Arg::Str(shown));
+    if ir::is_empty(specific.payload) or !module.names.is(specific.payload, "u8") {
+        return try self.fail("wasm error: unknown union payload `%s::Specific`", Arg::Str(shown));
+    }
+    let offset_outcome = try self.union_payload_offset(module, exit_status_type());
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(union_offset) => {
+            let status = try self.address_at(result, error_payload_offset);
+            let payload = try self.address_at(status, union_offset);
+            try self.line2(
+                "        (if (i64.eq (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(specific.index)
+            );
+            try self.line1(
+                "          (then (local.set $__kizu_status (i32.load8_u %s))))",
+                Arg::Str(payload)
+            );
+            try self.line2(
+                "        (if (i64.eq (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(failure.index)
+            );
+            try self.line("          (then (local.set $__kizu_status (i32.const 1))))");
+            try self.line2(
+                "        (if (i32.and (i64.ne (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(success.index)
+            );
+            try self.line2(
+                "            (i32.and (i64.ne (i64.load %s) (i64.const %d))",
+                Arg::Str(status),
+                Arg::Int(failure.index)
+            );
+            try self.line2(
+                "              (i64.ne (i64.load %s) (i64.const %d))))",
+                Arg::Str(status),
+                Arg::Int(specific.index)
+            );
+            try self.line("          (then (unreachable)))");
             return null;
         },
     }

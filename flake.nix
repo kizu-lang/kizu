@@ -40,6 +40,7 @@
             pkgs.go_1_22
             pkgs.golangci-lint
             pkgs.just
+            pkgs.nodejs
             pkgs.pre-commit
             pkgs.wasmtime
           ];

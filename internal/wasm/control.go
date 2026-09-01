@@ -383,7 +383,7 @@ func (e *emitter) writeAllocatorBuiltinCall(name string, instr *ir.Instr) (bool,
 	return false, nil
 }
 
-// writePrint writes calls to WASI stdout helpers.
+// writePrint writes calls to the selected target's stdout helper.
 func (e *emitter) writePrint(args []ir.Value) error {
 	if len(args) != 1 {
 		return fmt.Errorf("wasm error: print expects 1 arg")

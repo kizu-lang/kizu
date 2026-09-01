@@ -32,8 +32,8 @@ import std::string;
 // std modules, type-checks it, and ownership-checks it,
 // `ir` lowers a checked file or package to typed SSA IR and prints it,
 // `build --emit-llvm` prints the LLVM IR the lowered module emits to,
-// `build --target wasm32-wasi` prints the WASI WebAssembly text one source
-// file emits to,
+// `build --target wasm32-wasi` and `build --target wasm32-browser` emit
+// WebAssembly text or binary for one source file,
 // `build --target native` links a program into the executable it names,
 // `run` / `test` build a temporary executable and run it, forwarding
 // the child's exit status through `std::process::ExitStatus` (ADR-0085),
@@ -275,6 +275,8 @@ enum Output {
     Llvm,
     Wasm,
     WasmBinary,
+    WasmBrowser,
+    WasmBrowserBinary,
     Check,
 }
 
@@ -326,7 +328,10 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     }
     let target_kind = try process::arg(next + 2);
     if mem::equal_bytes(target_kind, "wasm32-wasi") {
-        return wasm_build_command(io, allocator, lib_dir, next + 3, count);
+        return wasm_build_command(io, allocator, lib_dir, next + 3, count, false);
+    }
+    if mem::equal_bytes(target_kind, "wasm32-browser") {
+        return wasm_build_command(io, allocator, lib_dir, next + 3, count, true);
     }
     if mem::equal_bytes(target_kind, "native") {
         return build_native_command(io, allocator, lib_dir, next + 3, count);
@@ -376,7 +381,8 @@ fn wasm_build_command(
     allocator: Allocator,
     lib_dir: []u8,
     start: i64,
-    count: i64
+    count: i64,
+    browser: bool
 ) -> !i64 {
     var options = wasm_build_options_new(allocator);
     defer options.deinit(allocator);
@@ -391,8 +397,16 @@ fn wasm_build_command(
     let path = options.path.as_bytes();
     let output_file = options.output.as_bytes();
     var output = Output::Wasm;
-    if options.binary {
-        output = Output::WasmBinary;
+    if browser and options.binary {
+        output = Output::WasmBrowserBinary;
+    } else {
+        if browser {
+            output = Output::WasmBrowser;
+        } else {
+            if options.binary {
+                output = Output::WasmBinary;
+            }
+        }
     }
     return lower_target(
         io,
@@ -516,6 +530,8 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu build --target native [native-options] <file>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi [--emit wat] [--opt] [-o file] <file>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi --emit wasm -o file [--opt] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser [--emit wat] [--opt] [-o file] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser --emit wasm -o file [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu cache <status|prune>");
     try io::write_stderr_line(io, "usage: kizu import-c-header <file>");
     return io::write_stderr_line(io, "usage: kizu version");
@@ -1407,10 +1423,12 @@ fn lower_target(
                             return 1;
                         }
                     }
-                    if output == Output::Wasm or output == Output::WasmBinary {
-                        // A WASI module exports only _start, so functions main
-                        // cannot reach must not drag unused host capabilities
-                        // into its import surface.
+                    if output == Output::Wasm or output == Output::WasmBinary or
+                        output == Output::WasmBrowser or
+                        output == Output::WasmBrowserBinary {
+                        // A wasm module exports only its target entry, so
+                        // functions main cannot reach must not drag unused
+                        // host capabilities into its import surface.
                         var roots = array::new<string::String>(allocator);
                         defer roots.deinit(allocator);
                         let main_root = try string::from_bytes(allocator, "main");
@@ -1422,17 +1440,49 @@ fn lower_target(
                         );
                         var text = string::new(allocator);
                         defer text.deinit(allocator);
-                        if output == Output::WasmBinary {
-                            if try wasm::emit_binary(allocator, &lowerer.module, &var text) |failed| {
+                        if output == Output::WasmBrowserBinary {
+                            if try wasm::emit_browser_binary(
+                                allocator,
+                                &lowerer.module,
+                                &var text
+                            ) |failed| {
                                 defer failed.deinit(allocator);
                                 try report(io, allocator, &loader.sources, &failed);
                                 return 1;
                             }
                         } else {
-                            if try wasm::emit(allocator, &lowerer.module, &var text) |failed| {
-                                defer failed.deinit(allocator);
-                                try report(io, allocator, &loader.sources, &failed);
-                                return 1;
+                            if output == Output::WasmBrowser {
+                                if try wasm::emit_browser(
+                                    allocator,
+                                    &lowerer.module,
+                                    &var text
+                                ) |failed| {
+                                    defer failed.deinit(allocator);
+                                    try report(io, allocator, &loader.sources, &failed);
+                                    return 1;
+                                }
+                            } else {
+                                if output == Output::WasmBinary {
+                                    if try wasm::emit_binary(
+                                        allocator,
+                                        &lowerer.module,
+                                        &var text
+                                    ) |failed| {
+                                        defer failed.deinit(allocator);
+                                        try report(io, allocator, &loader.sources, &failed);
+                                        return 1;
+                                    }
+                                } else {
+                                    if try wasm::emit(
+                                        allocator,
+                                        &lowerer.module,
+                                        &var text
+                                    ) |failed| {
+                                        defer failed.deinit(allocator);
+                                        try report(io, allocator, &loader.sources, &failed);
+                                        return 1;
+                                    }
+                                }
                             }
                         }
                         let text_bytes = text.as_bytes();
@@ -1551,7 +1601,8 @@ fn load_for_output(
     package_name: &var string::String,
     output: Output
 ) -> !project::LoadResult {
-    if output == Output::Wasm or output == Output::WasmBinary {
+    if output == Output::Wasm or output == Output::WasmBinary or
+        output == Output::WasmBrowser or output == Output::WasmBrowserBinary {
         return load_one_file(io, allocator, loader, tree, target);
     }
     return load_target(io, allocator, loader, tree, target, package_name, false);

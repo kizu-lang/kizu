@@ -51,7 +51,8 @@ source.kizu
   → internal/types(型)→ internal/ownership(所有権)
   → internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
                            → internal/wasm → 共通 WebAssembly module
-                                           → WAT / binary `.wasm`(wasm32-wasi)
+                                           → WAT / binary `.wasm`
+                                             (wasm32-wasi / wasm32-browser)
 ```
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
@@ -73,11 +74,12 @@ link)、2 回目以降 ~10ms —— 絶対値は host と clang によります�
 
 `internal/wasm` は typed SSA IR を 1 度だけ WebAssembly module へ lower し、その同じ
 module を inspection 用 WAT と deterministic な binary `.wasm` に描画します。Go seed と
-Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせ、WAT と binary の
-observable behavior は `wasmtime` で同じ conformance case に対して検査します。
+Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせます。WASI は
+`wasmtime`、browser target は JavaScript host adapter で同じ conformance output を検査し、
+target 差は import、entry / export、host capability だけが持ちます。
 
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
-`build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `import-c-header`
+`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
 流れるかは `cmd/kizu/main.go` の `dispatch`(移植側は `compiler/src/main.kizu`)
 が全てです。
