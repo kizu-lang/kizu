@@ -22,6 +22,7 @@ func TestBuildTargetBrowserRunsPortablePrograms(t *testing.T) {
 		{"aggregate_calls.kizu", "4\n3\n"},
 		{"arena.kizu", "alice\n"},
 		{"error_union_try.kizu", "1\n2\n"},
+		{"modules/compiler_phases", "7\n"},
 	}
 	for _, test := range cases {
 		t.Run(test.file, func(t *testing.T) {

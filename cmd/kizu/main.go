@@ -123,16 +123,16 @@ func dispatchTest(args []string) error {
 }
 
 const wasmWATUsage = "usage: kizu build --target wasm32-wasi " +
-	"[--emit wat] [--opt] [-o file] <file>"
+	"[--emit wat] [--opt] [-o file] <file|package>"
 
 const wasmBinaryUsage = "usage: kizu build --target wasm32-wasi " +
-	"--emit wasm -o file [--opt] <file>"
+	"--emit wasm -o file [--opt] <file|package>"
 
 const browserWATUsage = "usage: kizu build --target wasm32-browser " +
-	"[--emit wat] [--opt] [-o file] <file>"
+	"[--emit wat] [--opt] [-o file] <file|package>"
 
 const browserBinaryUsage = "usage: kizu build --target wasm32-browser " +
-	"--emit wasm -o file [--opt] <file>"
+	"--emit wasm -o file [--opt] <file|package>"
 
 // usage prints the supported command line shape.
 func usage() {

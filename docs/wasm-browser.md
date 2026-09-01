@@ -134,7 +134,7 @@ DOM、Fetch、WebSocket、timer などは compiler 組み込みではありま�
 が JavaScript の global API を直接呼ぶのではなく、source に見える typed boundary を JS が
 実装します。
 
-filesystem、`std::process`、stdin、socket / `std::net` / `std::http`、evented `std::io`、
+filesystem、`std::process`、stdin、socket / `std::net` と `std::http` の network 経路、evented `std::io`、
 `std::coro`、extern C は、対応する browser adapter を暗黙に仮定せず build 時に
 `target wasm32-browser does not support ...` として拒否します。`std::http` を browser Fetch
 に自動変換するわけではありません。必要なら今は `extern "browser"` で Fetch capability を

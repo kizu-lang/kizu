@@ -52,10 +52,10 @@ func TestSelfhostFrontend(t *testing.T) {
 			[]string{"build", "--target", "wasm32-wasi", file}},
 		{"wasm-browser-file", goBrowserWASMOutput(file, false),
 			[]string{"build", "--target", "wasm32-browser", file}},
-		// The wasm target lowers one source file whatever the path names, so a
-		// package manifest reaches it as Kizu source and fails to parse.
 		{"wasm-package-manifest", goWASMOutput(pkg+"/kizu.toml", false),
 			[]string{"build", "--target", "wasm32-wasi", pkg + "/kizu.toml"}},
+		{"wasm-browser-package", goBrowserWASMOutput(pkg, false),
+			[]string{"build", "--target", "wasm32-browser", pkg}},
 	}
 	for _, command := range commands {
 		t.Run(command.name, func(t *testing.T) {
@@ -187,6 +187,14 @@ func goFmtOutput(file string) nativeCLIResult {
 // behavior and on each distinct argument error it reports.
 func runSelfhostWASMCases(t *testing.T, selfhost string) {
 	t.Helper()
+	packagePath := "../../examples/modules/compiler_phases"
+	t.Run("wasm/package", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goWASMOutput(packagePath, false),
+			"build", "--target", "wasm32-wasi", packagePath)
+		compareSelfhostArgs(t, selfhost, goWASMOutput(packagePath, true),
+			"build", "--target", "wasm32-wasi", "--opt", packagePath)
+		compareSelfhostWASMBinary(t, selfhost, packagePath)
+	})
 	// A loop in a called function repeats the block names of the caller's loop,
 	// so this crosses phi copies that have to stay inside one function.
 	loops := "../../examples/loop_in_called_function.kizu"
@@ -251,6 +259,14 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 // target refusals, direct binary renderer, and ExitStatus boundary.
 func runSelfhostBrowserWASMCases(t *testing.T, selfhost string) {
 	t.Helper()
+	packagePath := "../../examples/modules/compiler_phases"
+	t.Run("wasm-browser/package", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(packagePath, false),
+			"build", "--target", "wasm32-browser", packagePath)
+		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(packagePath, true),
+			"build", "--target", "wasm32-browser", "--opt", packagePath)
+		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", packagePath)
+	})
 	t.Run("wasm-browser/explicit-host-interface", func(t *testing.T) {
 		path := "../../tests/browser/host_interface.kizu"
 		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
@@ -530,11 +546,9 @@ func runSelfhostArgumentCases(t *testing.T, selfhost string) {
 }
 
 // goWASMOutput renders what `kizu build --target wasm32-wasi` prints for one
-// source file: the WASI WebAssembly text emitted from the lowered module,
-// optimized when opt is set. The command lowers one file whether or not the
-// path names a package root, so the comparison lowers it the same way.
-func goWASMOutput(file string, opt bool) cliOutput {
-	module, err := lowerFile(file, opt)
+// source file or package, optimized when opt is set.
+func goWASMOutput(path string, opt bool) cliOutput {
+	module, err := lowerTarget(path, opt)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
@@ -546,9 +560,9 @@ func goWASMOutput(file string, opt bool) cliOutput {
 	return cliOutput{stdout: text + "\n"}
 }
 
-// goBrowserWASMOutput renders the browser target through the shipping seed.
-func goBrowserWASMOutput(file string, opt bool) cliOutput {
-	module, err := lowerFile(file, opt)
+// goBrowserWASMOutput renders a source file or package through the browser target.
+func goBrowserWASMOutput(path string, opt bool) cliOutput {
+	module, err := lowerTarget(path, opt)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}

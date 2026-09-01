@@ -16,14 +16,14 @@ module の renderer にする。binary は section と index space を determini
 互換な inspection 経路は WAT を stdout に出す。
 
 ```sh
-kizu build --target wasm32-wasi <file>
+kizu build --target wasm32-wasi <file|package>
 ```
 
 `--emit wat` は renderer を明示し、`-o` があれば file に書く。binary は次の形だけを
 受理し、terminal には暗黙出力しない。
 
 ```sh
-kizu build --target wasm32-wasi --emit wasm -o app.wasm <file>
+kizu build --target wasm32-wasi --emit wasm -o app.wasm <file|package>
 ```
 
 Go seed と shipping Kizu compiler は同じ bytes を出し、WAT / binary は同じ example の

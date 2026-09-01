@@ -200,7 +200,7 @@ func (p *wasmBuildParser) parsePath() error {
 // finish validates requirements that depend on more than one argument.
 func (p *wasmBuildParser) finish() (wasmBuildOptions, error) {
 	if p.options.Path == "" {
-		return wasmBuildOptions{}, fmt.Errorf("wasm build needs one source file")
+		return wasmBuildOptions{}, fmt.Errorf("wasm build needs one source or package path")
 	}
 	if p.options.Emit == "wasm" && p.options.Output == "" {
 		return wasmBuildOptions{}, fmt.Errorf("binary wasm output requires -o <path>")
@@ -208,10 +208,10 @@ func (p *wasmBuildParser) finish() (wasmBuildOptions, error) {
 	return p.options, nil
 }
 
-// emitWASMFile lowers a checked source file once and renders its selected
-// WebAssembly host target fresh like emitLLVMFile (ADR-0126).
+// emitWASMFile lowers a checked source file or package once and renders its
+// selected WebAssembly host target fresh like emitLLVMFile (ADR-0126).
 func emitWASMFile(options wasmBuildOptions, target wasm.Target) error {
-	module, err := lowerFile(options.Path, options.Opt)
+	module, err := lowerTarget(options.Path, options.Opt)
 	if err != nil {
 		return err
 	}

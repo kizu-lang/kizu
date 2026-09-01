@@ -3,35 +3,26 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
-## wasm32-wasi backend
+## WebAssembly application path
 
-現在の `kizu build --target wasm32-wasi` は既定で WAT、`--emit wasm -o` で binary を
-生成する。`just backend-matrix` では default / optimized WAT と binary がいずれも
-162 examples 中 142 件で native と同じ出力を持つ。残り 20 件は target 非対応として
-build 時に拒否し、内訳は std::net 16 件、extern C allocator 2 件、coro runtime と
-event loop が各 1 件。example ごとの例外を足さず、共通 runtime と portable std の順に
-backend の対象を広げる。
+WASI default / optimized WAT と binary は 162 examples 中 142 件、browser binary は
+135 件が native と同じ observable behavior を持つ。残りは host boundary が持たない
+capability として build 時に拒否する。backend の portable lowering、binary encoder、WASI
+runtime、browser host ABI、複数 module package の target build は入った。同じ package が
+target 別 host adapter を source 上で選ぶ経路が残っている。
 
-この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
-std API が native と同じ observable behavior を持ち、compiler が browser の読める binary
-`.wasm` を直接生成できること。host が提供しない API は backend の未実装と混ぜず、target
-非対応として明示的に分類する。
+### W7. target-selected adapter
 
-Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/wasm`) は各段階で
-同時に更新する。検証は内部生成文字列の構造 pin ではなく、`wasmtime` で example の
-宣言出力を実行して行う。
+- 既存の `comptime if` から native / WASI / browser を問う compiler-defined
+  `std::target` 述語を追加する。選ばれた branch だけを type / ownership / IR
+  の各 phase が扱う。
+- target に適合する entry / explicit export からだけ到達可能性を閉じ、native-only
+  filesystem adapter や browser-only host adapter を反対 target の backend へ渡さない。
+- native は file I/O、browser は明示 host input を使い、同じ portable core の結果を
+  保つ package example と conformance test を追加する。
 
-### W4. WASI host boundary
-
-- net / HTTP / evented Io / coro は、既存 `wasm32-wasi` host ABI で ownership と待機を
-  隠さず表せるものだけを実装する。表せないものは成功したふりをせず target 非対応にする。
-- unsafe raw pointer と extern C は WASI の安全な import / memory 境界を定義するまで
-  target 非対応にする。
-
-### W5. coverage を閉じる
-
-- portable example は `kizu run` と wasm の出力を一致させ、WASI-dependent example は
-  isolated な host capability 付きで再現可能にする。
+この章は、利用者が 1 package の portable core と target 別 adapter を source 上で
+明示し、native / WASI / browser の artifact をそれぞれ直接 build できたら削除する。
 
 ## std::http / std::net の残り
 

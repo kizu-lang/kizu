@@ -1365,6 +1365,34 @@ func TestBuildTargetWASMBinaryCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetWASIPackageBinary runs a multi-module package through the
+// public build command and its qualified package main in Wasmtime.
+func TestBuildTargetWASIPackageBinary(t *testing.T) {
+	wasmtime, err := exec.LookPath("wasmtime")
+	if err != nil {
+		t.Skip("wasmtime is required for binary execution")
+	}
+	output := filepath.Join(t.TempDir(), "package.wasm")
+	cmd := kizuCommand(
+		"build", "--target", "wasm32-wasi", "--emit", "wasm", "-o", output,
+		"../../examples/modules/compiler_phases",
+	)
+	stdout, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("package build failed: %v\n%s", err, stdout)
+	}
+	if len(stdout) != 0 {
+		t.Fatalf("package build wrote to terminal: %q", stdout)
+	}
+	runOutput, err := exec.Command(wasmtime, "run", output).CombinedOutput()
+	if err != nil {
+		t.Fatalf("wasmtime failed: %v\n%s", err, runOutput)
+	}
+	if got, want := string(runOutput), "7\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestBuildTargetWASMBinaryRequiresOutput keeps raw binary bytes away from
 // stdout when no artifact path was selected.
 func TestBuildTargetWASMBinaryRequiresOutput(t *testing.T) {

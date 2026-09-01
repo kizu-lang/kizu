@@ -120,7 +120,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm backend beyond the current subset | **in progress.** WASI default/optimized WAT and binary run 142/162 and classify the other 20 as target unsupported; browser binary runs 135/162 and classifies the other 27 the same way |
+| wasm application path | **in progress.** Portable files and packages run as WASI and browser binaries; compile-time selection between native/WASI/browser host adapters remains |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
 | type alias | **not started** |
@@ -216,10 +216,10 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu init [path]` scaffolds a package.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
-- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file>` emits WASI-compatible WAT to stdout, or to `-o` when supplied.
-- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file>` writes a binary `.wasm`; binary output never goes to the terminal implicitly.
-- `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file>` emits browser-hosted WAT for inspection.
-- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file>` writes the browser `.wasm`; [`docs/wasm-browser.md`](docs/wasm-browser.md) defines its host adapter and capability boundary.
+- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file|package>` emits WASI-compatible WAT to stdout, or to `-o` when supplied.
+- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` writes a binary `.wasm`; binary output never goes to the terminal implicitly.
+- `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` emits browser-hosted WAT for inspection.
+- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` writes the browser `.wasm`; [`docs/wasm-browser.md`](docs/wasm-browser.md) defines its host adapter and capability boundary.
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable.
 - `kizu cache status` / `kizu cache prune` show and clear the local build cache.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.

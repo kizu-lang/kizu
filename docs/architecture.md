@@ -78,6 +78,13 @@ Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせ
 `wasmtime`、browser target は JavaScript host adapter で同じ conformance output を検査し、
 target 差は import、entry / export、host capability だけが持ちます。
 
+`wasm32-wasi` の host boundary は WASI Preview1 です。blocking stdin / stdout / stderr、
+引数・環境・時刻、preopen された filesystem は、その capability を example の metadata
+から Wasmtime へ渡して再現します。子 process、socket / `std::net` と `std::http` の network 経路、evented
+`std::io` / `std::coro`、extern C はこの boundary に無いため、到達する program を module
+描画前に target 非対応として拒否します。browser 側の対応範囲と JavaScript ABI は
+[`docs/wasm-browser.md`](wasm-browser.md) が持ちます。
+
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ

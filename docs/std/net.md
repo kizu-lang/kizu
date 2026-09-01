@@ -4,9 +4,14 @@
 どちらも owner なので、その descriptor は値が持つ `deinit` が解放します。
 protocol の framing はこの上の層(`std::http`)が Kizu source で書きます。
 
-`wasm32-browser` は socket capability を提供しません。`std::net` と、その上の
-`std::http` に到達する program は build 時に target 非対応として拒否します。
+`wasm32-browser` は socket capability を提供しません。`std::net` の socket operation と
+`std::http` の network 経路に到達する program は build 時に target 非対応として
+拒否します。address、URL、HTTP message の pure な parse / encode は portable です。
 WebSocket や Fetch を TCP に見せる暗黙 adapter はありません。
+
+`wasm32-wasi` の WASI Preview1 boundary にも、この API が要求する listen / connect /
+poller capability はありません。socket descriptor を暗黙に渡したことにはせず、
+これらの network operation に到達する program を同じく build 時に拒否します。
 
 safe Kizu から descriptor は見えません。`TcpListener` と `TcpStream` は private
 field に持つので、socket に届く唯一の道はこの module が返した値です。
