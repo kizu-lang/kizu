@@ -1398,6 +1398,33 @@ func TestBuildTargetWASIRejectsProcessSpawn(t *testing.T) {
 	}
 }
 
+// TestBuildTargetWASIRejectsUnavailableRuntimeCapabilities checks the CLI
+// reports missing host families before producing unloadable WebAssembly.
+func TestBuildTargetWASIRejectsUnavailableRuntimeCapabilities(t *testing.T) {
+	cases := []struct {
+		file string
+		api  string
+	}{
+		{"../../examples/io_evented.kizu", "evented std::io"},
+		{"../../examples/coro_suspend.kizu", "std::coro"},
+		{"../../examples/net_round_trip.kizu", "std::net"},
+	}
+	for _, test := range cases {
+		t.Run(filepath.Base(test.file), func(t *testing.T) {
+			cmd := kizuCommand("build", "--target", "wasm32-wasi", test.file)
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("command succeeded:\n%s", output)
+			}
+			want := "error: wasm error: target wasm32-wasi does not support " +
+				test.api + "\n"
+			if got := string(output); got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // TestBuildTargetNativeStdoutWriteFailure checks hosted writes report a closed
 // output pipe through std::io instead of terminating on SIGPIPE or returning ok.
 func TestBuildTargetNativeStdoutWriteFailure(t *testing.T) {

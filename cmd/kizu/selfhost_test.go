@@ -228,6 +228,17 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
 		})
 	}
+	for _, example := range []string{
+		"io_evented.kizu",
+		"coro_suspend.kizu",
+		"net_round_trip.kizu",
+	} {
+		t.Run("wasm-reject-host/"+example, func(t *testing.T) {
+			path := "../../examples/" + example
+			compareSelfhostArgs(t, selfhost, goWASMOutput(path, false),
+				"build", "--target", "wasm32-wasi", path)
+		})
+	}
 	runSelfhostBrowserWASMCases(t, selfhost)
 }
 

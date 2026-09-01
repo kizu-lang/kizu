@@ -84,9 +84,11 @@ because `run` already builds the native target from the same text.
 | `kizu build --target wasm32-browser --emit wasm -o <out>` | 135/162 |
 
 The native route has no pending runnable example. WASI remains a target subset;
-its remaining 20 examples are still unclassified backend/runtime work. The
-browser route has no lowering failure or output mismatch: all remaining 27 are
-explicit target-unsupported capabilities. The browser column is broad
+its remaining 20 examples are explicit target-unsupported capabilities: 16
+`std::net`, two extern C, one evented I/O, and one coroutine example. Neither
+WASI renderer has a remaining lowering failure or runtime-only refusal. The
+browser route likewise has no lowering failure or output mismatch: all remaining
+27 are explicit target-unsupported capabilities. The browser column is broad
 JavaScript-engine coverage; the real-page fixture is `tests/browser/smoke.html`.
 
 Tooling around the language core:
@@ -115,7 +117,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm backend beyond the current subset | **in progress.** WASI WAT/binary run 142/162; browser binary runs 135/162 and classifies the other 27 as target unsupported |
+| wasm backend beyond the current subset | **in progress.** WASI WAT/binary run 142/162 and classify the other 20 as target unsupported; browser binary runs 135/162 and classifies the other 27 the same way |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
 | type alias | **not started** |

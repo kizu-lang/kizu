@@ -7,8 +7,8 @@
 
 現在の `kizu build --target wasm32-wasi` は既定で WAT、`--emit wasm -o` で binary を
 生成する。`just backend-matrix` では両方とも 162 examples 中 142 件が native と同じ
-出力で動く。残り 20 件の最初の失敗は net poller 12 件、net listen 4 件、extern C
-allocator 2 件、coro runtime と event loop が各 1 件。example ごとの例外を足さず、
+出力で動く。残り 20 件は target 非対応として build 時に拒否し、内訳は std::net 16 件、
+extern C allocator 2 件、coro runtime と event loop が各 1 件。example ごとの例外を足さず、
 共通 runtime と portable std の順に backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
@@ -29,16 +29,12 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 
 ### W5. coverage を閉じる
 
-- `scripts/backend-matrix` が backend lowering failure、output mismatch、target 非対応を
-  分けて報告し、新しい example が分類なしで落ちないようにする。
 - portable example は `kizu run` と wasm の出力を一致させ、WASI-dependent example は
   isolated な host capability 付きで再現可能にする。
 - `--opt` の wasm execution も同じ oracle に含め、`std_string_join_trim.kizu` が
   `wasmtime` で停止しない既知の optimizer / backend mismatch を直す。
 - `just wasi-smoke`、`just backend-matrix`、`just selfhost`、`go test ./...` を通し、README の
   matrix と target limitation を実測値へ更新する。
-- WASI の portable example について backend lowering failure と未分類の output mismatch を
-  0 にする。
 
 ## std::http / std::net の残り
 

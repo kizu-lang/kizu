@@ -98,6 +98,40 @@ fn main() -> void {
 	}
 }
 
+// TestWASITargetRejectsUnavailableRuntimeCapabilities keeps an unsupported
+// host family from reaching either WebAssembly renderer as an unresolved call.
+func TestWASITargetRejectsUnavailableRuntimeCapabilities(t *testing.T) {
+	cases := []struct {
+		name    string
+		builtin string
+		public  string
+	}{
+		{"evented I/O", "std::internal::builtin::io_loop_new", "evented std::io"},
+		{"coroutine", "std::internal::builtin::coro_new", "std::coro"},
+		{"network", "std::internal::builtin::net_poller_new", "std::net"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			module := &ir.Module{Functions: []*ir.Function{{
+				Name:   "main",
+				Return: "void",
+				Blocks: []*ir.Block{{
+					Name: "entry",
+					Instrs: []*ir.Instr{{
+						Result: ir.Value{Type: "void"},
+						Op:     "call." + test.builtin,
+					}},
+				}},
+			}}}
+			_, err := LowerTarget(module, TargetWASI)
+			want := "target wasm32-wasi does not support " + test.public
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("result = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
 // TestBinaryRunsHello checks deterministic binary output through a real
 // WebAssembly runtime rather than pinning encoder internals.
 func TestBinaryRunsHello(t *testing.T) {

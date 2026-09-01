@@ -2,8 +2,8 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 
 // Mechanical port of internal/wasm/target.go: host capabilities are selected
-// before the common module is written, and unsupported browser APIs fail at
-// build time instead of leaking a WASI import into the page.
+// before the common module is written, and unsupported host APIs fail at build
+// time instead of leaking an unresolved call into emitted WebAssembly.
 
 fn (self: &Emitter) is_browser() -> bool {
     return self.target == WasmTarget::Browser;
@@ -15,52 +15,59 @@ fn (self: &var Emitter) validate_target(
     if try self.validate_foreign_boundary(module) |failed| {
         return move failed;
     }
+    if self.is_browser() and self.uses_fs_runtime(module) {
+        return try self.target_capability_failure("std::fs");
+    }
+    if try self.validate_runtime_capabilities(module) |failed| {
+        return move failed;
+    }
     if !self.is_browser() {
         return self.validate_process_target(module);
     }
-    if self.uses_fs_runtime(module) {
-        return try self.fail0(
-            "wasm error: target wasm32-browser does not support std::fs"
-        );
-    }
-    if self.uses_browser_evented_io(module) {
-        return try self.browser_capability_failure("evented std::io");
-    }
-    if self.uses_browser_coro(module) {
-        return try self.browser_capability_failure("std::coro");
-    }
-    if self.uses_browser_net(module) {
-        return try self.browser_capability_failure("std::net");
-    }
     if self.uses_builtin_call(module, "std::internal::builtin::io_read_stdin_into") {
-        return try self.browser_capability_failure("std::io::read_stdin");
+        return try self.target_capability_failure("std::io::read_stdin");
     }
     if self.uses_builtin_call(module, "std::internal::builtin::process_arg_count") {
-        return try self.browser_process_failure("std::process::arg_count");
+        return try self.target_capability_failure("std::process::arg_count");
     }
     if self.uses_builtin_call(module, "std::internal::builtin::process_arg") {
-        return try self.browser_process_failure("std::process::arg");
+        return try self.target_capability_failure("std::process::arg");
     }
     if self.uses_builtin_call(module, "std::internal::builtin::process_env") {
-        return try self.browser_process_failure("std::process::env");
+        return try self.target_capability_failure("std::process::env");
     }
     if self.uses_builtin_call(
         module,
         "std::internal::builtin::process_executable_path_into"
     ) {
-        return try self.browser_process_failure("std::process::executable_path");
+        return try self.target_capability_failure("std::process::executable_path");
     }
     if self.uses_builtin_call(
         module,
         "std::internal::builtin::process_monotonic_millis"
     ) {
-        return try self.browser_process_failure("std::process::monotonic_millis");
+        return try self.target_capability_failure("std::process::monotonic_millis");
     }
     if self.uses_builtin_call(module, "std::internal::builtin::process_unix_millis") {
-        return try self.browser_process_failure("std::process::unix_millis");
+        return try self.target_capability_failure("std::process::unix_millis");
     }
     if self.uses_builtin_call(module, "std::internal::builtin::process_spawn_wait8") {
-        return try self.browser_process_failure("std::process::spawn_wait8");
+        return try self.target_capability_failure("std::process::spawn_wait8");
+    }
+    return null;
+}
+
+fn (self: &var Emitter) validate_runtime_capabilities(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if self.uses_evented_io(module) {
+        return try self.target_capability_failure("evented std::io");
+    }
+    if self.uses_coro(module) {
+        return try self.target_capability_failure("std::coro");
+    }
+    if self.uses_net(module) {
+        return try self.target_capability_failure("std::net");
     }
     return null;
 }
@@ -113,7 +120,7 @@ fn (self: &var Emitter) validate_extern_abi(
         return null;
     }
     if self.is_browser() and module.names.is(abi, "c") {
-        return try self.browser_capability_failure("extern C");
+        return try self.target_capability_failure("extern C");
     }
     let shown = try self.own(module, abi);
     return try self.fail2(
@@ -129,22 +136,16 @@ fn (self: &Emitter) target_name() -> []u8 {
     return "wasm32-wasi";
 }
 
-fn (self: &var Emitter) browser_process_failure(
+fn (self: &var Emitter) target_capability_failure(
     name: []u8
 ) -> !diagnostic::Diagnostic {
-    return self.browser_capability_failure(name);
-}
-
-fn (self: &var Emitter) browser_capability_failure(
-    name: []u8
-) -> !diagnostic::Diagnostic {
-    return self.fail(
-        "wasm error: target wasm32-browser does not support %s",
-        Arg::Lit(name)
+    return self.fail2(
+        "wasm error: target %s does not support %s",
+        Arg::Lit(self.target_name()), Arg::Lit(name)
     );
 }
 
-fn (self: &Emitter) uses_browser_evented_io(module: &ir::Module) -> bool {
+fn (self: &Emitter) uses_evented_io(module: &ir::Module) -> bool {
     return self.uses_builtin_call(module, "std::internal::builtin::io_loop_new") or
         self.uses_builtin_call(module, "std::internal::builtin::io_loop_close") or
         self.uses_builtin_call(module, "std::internal::builtin::io_evented") or
@@ -158,7 +159,7 @@ fn (self: &Emitter) uses_browser_evented_io(module: &ir::Module) -> bool {
         self.uses_builtin_call(module, "std::internal::builtin::task_set_close");
 }
 
-fn (self: &Emitter) uses_browser_coro(module: &ir::Module) -> bool {
+fn (self: &Emitter) uses_coro(module: &ir::Module) -> bool {
     return self.uses_builtin_call(module, "std::internal::builtin::coro_new") or
         self.uses_builtin_call(module, "std::internal::builtin::coro_resume") or
         self.uses_builtin_call(module, "std::internal::builtin::coro_suspend") or
@@ -166,7 +167,7 @@ fn (self: &Emitter) uses_browser_coro(module: &ir::Module) -> bool {
         self.uses_builtin_call(module, "std::internal::builtin::coro_close");
 }
 
-fn (self: &Emitter) uses_browser_net(module: &ir::Module) -> bool {
+fn (self: &Emitter) uses_net(module: &ir::Module) -> bool {
     return self.uses_builtin_call(module, "std::internal::builtin::net_listen") or
         self.uses_builtin_call(module, "std::internal::builtin::net_connect") or
         self.uses_builtin_call(module, "std::internal::builtin::net_accept") or

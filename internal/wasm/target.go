@@ -33,35 +33,17 @@ func (e *emitter) validateTarget() error {
 	if err := e.validateForeignBoundary(); err != nil {
 		return err
 	}
+	if e.target.isBrowser() && e.usesFSRuntime() {
+		return e.unsupportedCapability("std::fs")
+	}
+	if err := e.validateRuntimeCapabilities(); err != nil {
+		return err
+	}
 	if !e.target.isBrowser() {
 		return e.validateProcessTarget()
 	}
-	if e.usesFSRuntime() {
-		return fmt.Errorf("wasm error: target %s does not support std::fs", e.target.name())
-	}
-	if e.usesAnyBuiltin(browserEventedBuiltins...) {
-		return fmt.Errorf(
-			"wasm error: target %s does not support evented std::io",
-			e.target.name(),
-		)
-	}
-	if e.usesAnyBuiltin(browserCoroBuiltins...) {
-		return fmt.Errorf(
-			"wasm error: target %s does not support std::coro",
-			e.target.name(),
-		)
-	}
-	if e.usesAnyBuiltin(browserNetBuiltins...) {
-		return fmt.Errorf(
-			"wasm error: target %s does not support std::net",
-			e.target.name(),
-		)
-	}
 	if e.usesBuiltinCall("std::internal::builtin::io_read_stdin_into") {
-		return fmt.Errorf(
-			"wasm error: target %s does not support std::io::read_stdin",
-			e.target.name(),
-		)
+		return e.unsupportedCapability("std::io::read_stdin")
 	}
 	unsupportedProcess := []struct {
 		builtin string
@@ -77,14 +59,34 @@ func (e *emitter) validateTarget() error {
 	}
 	for _, unsupported := range unsupportedProcess {
 		if e.usesBuiltinCall(unsupported.builtin) {
-			return fmt.Errorf(
-				"wasm error: target %s does not support %s",
-				e.target.name(),
-				unsupported.public,
-			)
+			return e.unsupportedCapability(unsupported.public)
 		}
 	}
 	return nil
+}
+
+// validateRuntimeCapabilities rejects runtime families neither supported Wasm
+// host can currently provide. Keeping this ahead of text or binary emission
+// gives both renderers the same target-boundary failure.
+func (e *emitter) validateRuntimeCapabilities() error {
+	if e.usesAnyBuiltin(eventedBuiltins...) {
+		return e.unsupportedCapability("evented std::io")
+	}
+	if e.usesAnyBuiltin(coroBuiltins...) {
+		return e.unsupportedCapability("std::coro")
+	}
+	if e.usesAnyBuiltin(netBuiltins...) {
+		return e.unsupportedCapability("std::net")
+	}
+	return nil
+}
+
+// unsupportedCapability formats one explicit target-boundary refusal.
+func (e *emitter) unsupportedCapability(name string) error {
+	return fmt.Errorf(
+		"wasm error: target %s does not support %s",
+		e.target.name(), name,
+	)
 }
 
 // validateForeignBoundary checks the ABI facts lowering retained. No backend
@@ -141,7 +143,7 @@ func (e *emitter) usesAnyBuiltin(names ...string) bool {
 	return false
 }
 
-var browserEventedBuiltins = []string{
+var eventedBuiltins = []string{
 	"std::internal::builtin::io_loop_new",
 	"std::internal::builtin::io_loop_close",
 	"std::internal::builtin::io_evented",
@@ -155,7 +157,7 @@ var browserEventedBuiltins = []string{
 	"std::internal::builtin::task_set_close",
 }
 
-var browserCoroBuiltins = []string{
+var coroBuiltins = []string{
 	"std::internal::builtin::coro_new",
 	"std::internal::builtin::coro_resume",
 	"std::internal::builtin::coro_suspend",
@@ -163,7 +165,7 @@ var browserCoroBuiltins = []string{
 	"std::internal::builtin::coro_close",
 }
 
-var browserNetBuiltins = []string{
+var netBuiltins = []string{
 	"std::internal::builtin::net_listen",
 	"std::internal::builtin::net_connect",
 	"std::internal::builtin::net_accept",
