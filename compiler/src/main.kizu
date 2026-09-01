@@ -102,7 +102,7 @@ fn main() -> !process::ExitStatus {
             try io::write_stderr_line(io, "error: check takes one target");
             return process::ExitStatus::Specific(1);
         }
-        let code = try lower_target(io, allocator, lib_dir_bytes, target, false, Output::Check);
+        let code = try lower_target(io, allocator, lib_dir_bytes, target, false, Output::Check, "");
         return exit_of(code);
     }
     if mem::equal_bytes(command, "fmt") {
@@ -274,6 +274,7 @@ enum Output {
     Ir,
     Llvm,
     Wasm,
+    WasmBinary,
     Check,
 }
 
@@ -291,14 +292,14 @@ fn opt_file_command(
     if count - start == 1 {
         let only = try process::arg(start);
         if !mem::equal_bytes(only, "--opt") {
-            return lower_target(io, allocator, lib_dir, only, false, output);
+            return lower_target(io, allocator, lib_dir, only, false, output, "");
         }
     }
     if count - start == 2 {
         let flag = try process::arg(start);
         if mem::equal_bytes(flag, "--opt") {
             let target = try process::arg(start + 1);
-            return lower_target(io, allocator, lib_dir, target, true, output);
+            return lower_target(io, allocator, lib_dir, target, true, output, "");
         }
     }
     try usage(io);
@@ -325,7 +326,7 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     }
     let target_kind = try process::arg(next + 2);
     if mem::equal_bytes(target_kind, "wasm32-wasi") {
-        return opt_file_command(io, allocator, lib_dir, next + 3, count, Output::Wasm);
+        return wasm_build_command(io, allocator, lib_dir, next + 3, count);
     }
     if mem::equal_bytes(target_kind, "native") {
         return build_native_command(io, allocator, lib_dir, next + 3, count);
@@ -338,6 +339,158 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     let message_bytes = message.as_bytes();
     try io::write_stderr_line(io, message_bytes);
     return 1;
+}
+
+struct WasmBuildOptions {
+    path: string::String,
+    output: string::String,
+    issue_detail: string::String,
+    opt: bool,
+    binary: bool
+}
+
+fn wasm_build_options_new(allocator: Allocator) -> WasmBuildOptions {
+    return WasmBuildOptions {
+        path: string::new(allocator),
+        output: string::new(allocator),
+        issue_detail: string::new(allocator),
+        opt: false,
+        binary: false
+    };
+}
+
+enum WasmBuildParseIssue {
+    DuplicateOpt,
+    EmitNeedsFormat,
+    InvalidEmit,
+    InvalidOutput,
+    InvalidArguments,
+    MissingSource,
+}
+
+/// Parses and runs the explicit WAT or binary wasm artifact command. Binary
+/// bytes always require `-o`; the legacy no-option form still writes WAT to
+/// stdout.
+fn wasm_build_command(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    start: i64,
+    count: i64
+) -> !i64 {
+    var options = wasm_build_options_new(allocator);
+    defer options.deinit(allocator);
+    if try parse_wasm_build_options(allocator, start, count, &var options) |issue| {
+        try report_wasm_build_parse_issue(io, issue, &options.issue_detail);
+        return 1;
+    }
+    if options.binary and options.output.len() == 0 {
+        try io::write_stderr_line(io, "error: binary wasm output requires -o <path>");
+        return 1;
+    }
+    let path = options.path.as_bytes();
+    let output_file = options.output.as_bytes();
+    var output = Output::Wasm;
+    if options.binary {
+        output = Output::WasmBinary;
+    }
+    return lower_target(
+        io,
+        allocator,
+        lib_dir,
+        path,
+        options.opt,
+        output,
+        output_file
+    );
+}
+
+fn parse_wasm_build_options(
+    allocator: Allocator,
+    start: i64,
+    count: i64,
+    out: &var WasmBuildOptions
+) -> !?WasmBuildParseIssue {
+    var index = start;
+    var opt_seen = false;
+    var emit_seen = false;
+    while index < count {
+        let argument = try process::arg(index);
+        index = index + 1;
+        if mem::equal_bytes(argument, "--opt") {
+            if opt_seen {
+                return WasmBuildParseIssue::DuplicateOpt;
+            }
+            opt_seen = true;
+            out.opt = true;
+            continue;
+        }
+        if mem::equal_bytes(argument, "--emit") {
+            if emit_seen {
+                return WasmBuildParseIssue::InvalidArguments;
+            }
+            if index >= count {
+                return WasmBuildParseIssue::EmitNeedsFormat;
+            }
+            emit_seen = true;
+            let format = try process::arg(index);
+            index = index + 1;
+            if mem::equal_bytes(format, "wasm") {
+                out.binary = true;
+                continue;
+            }
+            if mem::equal_bytes(format, "wat") {
+                out.binary = false;
+                continue;
+            }
+            try out.issue_detail.append_bytes(allocator, format);
+            return WasmBuildParseIssue::InvalidEmit;
+        }
+        if mem::equal_bytes(argument, "-o") or mem::equal_bytes(argument, "--output") {
+            if out.output.len() > 0 or index >= count {
+                return WasmBuildParseIssue::InvalidOutput;
+            }
+            let path = try process::arg(index);
+            index = index + 1;
+            try out.output.append_bytes(allocator, path);
+            continue;
+        }
+        if mem::len(argument) > 0 and argument[0] == cast<u8>(45) {
+            return WasmBuildParseIssue::InvalidArguments;
+        }
+        if out.path.len() > 0 {
+            return WasmBuildParseIssue::InvalidArguments;
+        }
+        try out.path.append_bytes(allocator, argument);
+    }
+    if out.path.len() == 0 {
+        return WasmBuildParseIssue::MissingSource;
+    }
+    return null;
+}
+
+/// Reports the user-input failure returned by the wasm option parser. Runtime
+/// failures still use `!`; malformed command lines are typed data with the
+/// invalid format retained as payload instead of being collapsed to null.
+fn report_wasm_build_parse_issue(
+    io: Io,
+    issue: WasmBuildParseIssue,
+    detail: &string::String
+) -> !void {
+    match issue {
+        DuplicateOpt => try io::write_stderr_line(io, "error: duplicate --opt"),
+        EmitNeedsFormat => try io::write_stderr_line(io, "error: --emit needs wat or wasm"),
+        InvalidEmit => {
+            try io::write_stderr(io, "error: invalid wasm emit `");
+            let bytes = detail.as_bytes();
+            try io::write_stderr(io, bytes);
+            try io::write_stderr_line(io, "`");
+        },
+        InvalidOutput => try io::write_stderr_line(io, "error: invalid wasm output path"),
+        InvalidArguments => try io::write_stderr_line(io, "error: invalid wasm build arguments"),
+        MissingSource => try io::write_stderr_line(io, "error: wasm build needs one source file"),
+    }
+    return;
 }
 
 /// Runs `version`, the Go `versionCommand`: the binary names itself and takes
@@ -361,7 +514,8 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu build --emit-llvm [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu build --target native [native-options] <file>");
-    try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi [--opt] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi [--emit wat] [--opt] [-o file] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi --emit wasm -o file [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu cache <status|prune>");
     try io::write_stderr_line(io, "usage: kizu import-c-header <file>");
     return io::write_stderr_line(io, "usage: kizu version");
@@ -1174,7 +1328,15 @@ fn parse_source(io: Io, allocator: Allocator, file: []u8, text: string::String) 
 /// `checkFile`: `check: ok` promises the backend accepts the program, not just
 /// the checkers, so a lowering or emitter gap surfaces here rather than at the
 /// first `run`, and the promise cannot drift from what `run` does.
-fn lower_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool, output: Output) -> !i64 {
+fn lower_target(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    target: []u8,
+    opt: bool,
+    output: Output,
+    output_file: []u8
+) -> !i64 {
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, lib_dir);
@@ -1245,7 +1407,7 @@ fn lower_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: 
                             return 1;
                         }
                     }
-                    if output == Output::Wasm {
+                    if output == Output::Wasm or output == Output::WasmBinary {
                         // A WASI module exports only _start, so functions main
                         // cannot reach must not drag unused host capabilities
                         // into its import surface.
@@ -1260,12 +1422,24 @@ fn lower_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: 
                         );
                         var text = string::new(allocator);
                         defer text.deinit(allocator);
-                        if try wasm::emit(allocator, &lowerer.module, &var text) |failed| {
-                            defer failed.deinit(allocator);
-                            try report(io, allocator, &loader.sources, &failed);
-                            return 1;
+                        if output == Output::WasmBinary {
+                            if try wasm::emit_binary(allocator, &lowerer.module, &var text) |failed| {
+                                defer failed.deinit(allocator);
+                                try report(io, allocator, &loader.sources, &failed);
+                                return 1;
+                            }
+                        } else {
+                            if try wasm::emit(allocator, &lowerer.module, &var text) |failed| {
+                                defer failed.deinit(allocator);
+                                try report(io, allocator, &loader.sources, &failed);
+                                return 1;
+                            }
                         }
                         let text_bytes = text.as_bytes();
+                        if mem::len(output_file) > 0 {
+                            try fs::write_file(io, output_file, text_bytes);
+                            return 0;
+                        }
                         try io::write_stdout_line(io, text_bytes);
                         return 0;
                     }
@@ -1377,7 +1551,7 @@ fn load_for_output(
     package_name: &var string::String,
     output: Output
 ) -> !project::LoadResult {
-    if output == Output::Wasm {
+    if output == Output::Wasm or output == Output::WasmBinary {
         return load_one_file(io, allocator, loader, tree, target);
     }
     return load_target(io, allocator, loader, tree, target, package_name, false);

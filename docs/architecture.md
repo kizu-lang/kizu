@@ -50,7 +50,8 @@ source.kizu
   → internal/project が import した std module を合流(std も 1 つの package)
   → internal/types(型)→ internal/ownership(所有権)
   → internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
-                           → internal/wasm(wasm32-wasi)
+                           → internal/wasm → 共通 WebAssembly module
+                                           → WAT / binary `.wasm`(wasm32-wasi)
 ```
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
@@ -69,6 +70,11 @@ toolchain、つまり実行ファイルが**何でできているか**だけで�
 link)、2 回目以降 ~10ms —— 絶対値は host と clang によります。
 `build --target native` は逆に、利用者が名前を指定した成果物とその build 記録を
 書くコマンドなので cache から読まず、毎回 link します。
+
+`internal/wasm` は typed SSA IR を 1 度だけ WebAssembly module へ lower し、その同じ
+module を inspection 用 WAT と deterministic な binary `.wasm` に描画します。Go seed と
+Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせ、WAT と binary の
+observable behavior は `wasmtime` で同じ conformance case に対して検査します。
 
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `import-c-header`

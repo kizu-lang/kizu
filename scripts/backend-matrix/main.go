@@ -102,8 +102,9 @@ var groups = []featureGroup{
 // executable and runs it, so it is judged against the output the example
 // declares rather than against the weaker fact that the command exited zero. `wasm` is judged
 // the same way, by running what it emitted: a module that exits zero while
-// emitting text no runtime can load is not a working backend.
-var routes = []string{"check", "run", "llvm", "wasm"}
+// emitting text no runtime can load is not a working backend. `wasm-bin`
+// repeats that oracle through the direct binary renderer.
+var routes = []string{"check", "run", "llvm", "wasm", "wasm-bin"}
 
 // result records one example and whether each route accepted it.
 type result struct {
@@ -163,7 +164,7 @@ func buildKizu() (string, func(), error) {
 }
 
 // routeArgs returns the CLI arguments for one route and example.
-func routeArgs(route string, entry conformance.Case) []string {
+func routeArgs(route string, entry conformance.Case, artifact string) []string {
 	switch route {
 	case "check":
 		return []string{"check", entry.Path}
@@ -171,6 +172,9 @@ func routeArgs(route string, entry conformance.Case) []string {
 		return append([]string{"run", entry.Path}, entry.Args...)
 	case "llvm":
 		return []string{"build", "--emit-llvm", entry.Path}
+	case "wasm-bin":
+		return []string{"build", "--target", "wasm32-wasi", "--emit", "wasm",
+			"-o", artifact, entry.Path}
 	default:
 		return []string{"build", "--target", "wasm32-wasi", entry.Path}
 	}
@@ -202,7 +206,19 @@ func runAll(bin string, cases map[string]conformance.Case) map[string]*result {
 func runRoutes(bin string, entry conformance.Case) *result {
 	res := &result{features: entry.Features, ok: map[string]bool{}, err: map[string]string{}}
 	for _, route := range routes {
-		cmd := exec.Command(bin, routeArgs(route, entry)...)
+		artifact := ""
+		if route == "wasm-bin" {
+			file, err := os.CreateTemp("", "kizu-matrix-*.wasm")
+			if err != nil {
+				res.ok[route] = false
+				res.err[route] = firstLine(err.Error())
+				continue
+			}
+			artifact = file.Name()
+			_ = file.Close()
+			defer func(path string) { _ = os.Remove(path) }(artifact)
+		}
+		cmd := exec.Command(bin, routeArgs(route, entry, artifact)...)
 		cmd.Env = append(os.Environ(), entry.Env...)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -222,7 +238,15 @@ func runRoutes(bin string, entry conformance.Case) *result {
 				continue
 			}
 		}
-		if entry.Stdout == nil || (route != "run" && route != "wasm") {
+		if route == "wasm-bin" {
+			got, err = runWasmFile(artifact, entry.Args, entry.Env, entry.Dirs)
+			if err != nil {
+				res.ok[route] = false
+				res.err[route] = firstLine(err.Error())
+				continue
+			}
+		}
+		if entry.Stdout == nil || (route != "run" && route != "wasm" && route != "wasm-bin") {
 			continue
 		}
 		if got != *entry.Stdout {
@@ -250,6 +274,11 @@ func runWat(wat []byte, args []string, env []string, dirs []string) (string, err
 	if err := file.Close(); err != nil {
 		return "", err
 	}
+	return runWasmFile(file.Name(), args, env, dirs)
+}
+
+// runWasmFile runs one text or binary module with its declared host inputs.
+func runWasmFile(path string, args []string, env []string, dirs []string) (string, error) {
 	wasmtimeArgs := []string{"run"}
 	for _, binding := range env {
 		wasmtimeArgs = append(wasmtimeArgs, "--env", binding)
@@ -257,7 +286,7 @@ func runWat(wat []byte, args []string, env []string, dirs []string) (string, err
 	for _, dir := range dirs {
 		wasmtimeArgs = append(wasmtimeArgs, "--dir", dir)
 	}
-	wasmtimeArgs = append(wasmtimeArgs, file.Name())
+	wasmtimeArgs = append(wasmtimeArgs, path)
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}

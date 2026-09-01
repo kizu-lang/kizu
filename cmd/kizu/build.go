@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -95,26 +96,136 @@ func emitTargetFile(target string, args []string) error {
 		usage()
 		return fmt.Errorf("invalid build target `%s`", target)
 	}
-	path, opt, err := parseOptFileArgs(args)
+	options, err := parseWASMBuildArgs(args)
 	if err != nil {
 		return err
 	}
-	return emitWASMFile(path, opt)
+	return emitWASMFile(options)
 }
 
-// emitWASMFile lowers a checked source file to WASI WebAssembly text,
-// emitted fresh every time like emitLLVMFile (ADR-0126).
-func emitWASMFile(path string, opt bool) error {
-	module, err := lowerFile(path, opt)
+type wasmBuildOptions struct {
+	Path   string
+	Opt    bool
+	Emit   string
+	Output string
+}
+
+type wasmBuildParser struct {
+	args     []string
+	options  wasmBuildOptions
+	index    int
+	emitSeen bool
+}
+
+// parseWASMBuildArgs accepts an explicit text or binary renderer while keeping
+// the legacy `[--opt] <file>` WAT-to-stdout shape.
+func parseWASMBuildArgs(args []string) (wasmBuildOptions, error) {
+	parser := wasmBuildParser{args: args, options: wasmBuildOptions{Emit: "wat"}}
+	for parser.index < len(parser.args) {
+		if err := parser.parseArgument(); err != nil {
+			return wasmBuildOptions{}, err
+		}
+		parser.index++
+	}
+	return parser.finish()
+}
+
+// parseArgument applies one option or source path to the accumulated command.
+func (p *wasmBuildParser) parseArgument() error {
+	switch p.args[p.index] {
+	case "--opt":
+		return p.parseOpt()
+	case "--emit":
+		return p.parseEmit()
+	case "-o", "--output":
+		return p.parseOutput()
+	default:
+		return p.parsePath()
+	}
+}
+
+// parseOpt accepts the optimization switch once.
+func (p *wasmBuildParser) parseOpt() error {
+	if p.options.Opt {
+		return fmt.Errorf("duplicate --opt")
+	}
+	p.options.Opt = true
+	return nil
+}
+
+// parseEmit selects the WAT or binary renderer once.
+func (p *wasmBuildParser) parseEmit() error {
+	if p.emitSeen {
+		return fmt.Errorf("invalid wasm build arguments")
+	}
+	p.emitSeen = true
+	if p.index+1 >= len(p.args) {
+		return fmt.Errorf("--emit needs wat or wasm")
+	}
+	p.index++
+	format := p.args[p.index]
+	if format != "wat" && format != "wasm" {
+		return fmt.Errorf("invalid wasm emit `%s`", format)
+	}
+	p.options.Emit = format
+	return nil
+}
+
+// parseOutput retains one explicit artifact path.
+func (p *wasmBuildParser) parseOutput() error {
+	if p.index+1 >= len(p.args) || p.options.Output != "" {
+		return fmt.Errorf("invalid wasm output path")
+	}
+	p.index++
+	p.options.Output = p.args[p.index]
+	return nil
+}
+
+// parsePath retains the single non-option source path.
+func (p *wasmBuildParser) parsePath() error {
+	path := p.args[p.index]
+	if strings.HasPrefix(path, "-") || p.options.Path != "" {
+		return fmt.Errorf("invalid wasm build arguments")
+	}
+	p.options.Path = path
+	return nil
+}
+
+// finish validates requirements that depend on more than one argument.
+func (p *wasmBuildParser) finish() (wasmBuildOptions, error) {
+	if p.options.Path == "" {
+		return wasmBuildOptions{}, fmt.Errorf("wasm build needs one source file")
+	}
+	if p.options.Emit == "wasm" && p.options.Output == "" {
+		return wasmBuildOptions{}, fmt.Errorf("binary wasm output requires -o <path>")
+	}
+	return p.options, nil
+}
+
+// emitWASMFile lowers a checked source file once and renders its selected WASI
+// WebAssembly artifact fresh like emitLLVMFile (ADR-0126).
+func emitWASMFile(options wasmBuildOptions) error {
+	module, err := lowerFile(options.Path, options.Opt)
 	if err != nil {
 		return err
 	}
 	// A WASI module exports only _start, so functions main cannot reach must
 	// not drag unused host capabilities into its import surface.
 	ir.KeepReachableFunctions(module, "main")
-	output, err := wasm.Emit(module)
+	lowered, err := wasm.Lower(module)
 	if err != nil {
 		return err
+	}
+	if options.Emit == "wasm" {
+		output, err := lowered.Binary()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(options.Output, output, 0o644)
+	}
+	output := lowered.WAT()
+	if options.Output != "" {
+		return os.WriteFile(options.Output, []byte(output), 0o644)
 	}
 	_, _ = fmt.Println(output)
 	return nil

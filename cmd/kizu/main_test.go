@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -1309,6 +1310,74 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 	want := `(func $_start (export "_start")`
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
+// TestBuildTargetWASMWATOutputFile checks the explicit inspection renderer can
+// write an artifact without also duplicating it on stdout.
+func TestBuildTargetWASMWATOutputFile(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "hello.wat")
+	cmd := kizuCommand(
+		"build", "--target", "wasm32-wasi", "--emit", "wat", "-o", output,
+		"../../examples/hello.kizu",
+	)
+	stdout, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, stdout)
+	}
+	if len(stdout) != 0 {
+		t.Fatalf("WAT artifact build wrote to terminal: %q", stdout)
+	}
+	wat, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(wat, []byte("(module")) {
+		t.Fatalf("artifact is not WAT: %q", wat)
+	}
+}
+
+// TestBuildTargetWASMBinaryCommandSmoke checks binary output is written only
+// to the requested artifact and runs in a real WebAssembly runtime.
+func TestBuildTargetWASMBinaryCommandSmoke(t *testing.T) {
+	wasmtime, err := exec.LookPath("wasmtime")
+	if err != nil {
+		t.Skip("wasmtime is required for binary execution")
+	}
+	output := filepath.Join(t.TempDir(), "hello.wasm")
+	cmd := kizuCommand(
+		"build", "--target", "wasm32-wasi", "--emit", "wasm", "-o", output,
+		"../../examples/hello.kizu",
+	)
+	stdout, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, stdout)
+	}
+	if len(stdout) != 0 {
+		t.Fatalf("binary build wrote to terminal: %q", stdout)
+	}
+	runOutput, err := exec.Command(wasmtime, "run", output).CombinedOutput()
+	if err != nil {
+		t.Fatalf("wasmtime failed: %v\n%s", err, runOutput)
+	}
+	if got, want := string(runOutput), "hello, kizu\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestBuildTargetWASMBinaryRequiresOutput keeps raw binary bytes away from
+// stdout when no artifact path was selected.
+func TestBuildTargetWASMBinaryRequiresOutput(t *testing.T) {
+	cmd := kizuCommand(
+		"build", "--target", "wasm32-wasi", "--emit", "wasm",
+		"../../examples/hello.kizu",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("command succeeded:\n%s", output)
+	}
+	if got, want := string(output), "error: binary wasm output requires -o <path>\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

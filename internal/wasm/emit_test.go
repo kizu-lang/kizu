@@ -1,6 +1,10 @@
 package wasm
 
 import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,6 +50,42 @@ func TestEmitPhase2Subsets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBinaryRunsHello checks deterministic binary output through a real
+// WebAssembly runtime rather than pinning encoder internals.
+func TestBinaryRunsHello(t *testing.T) {
+	wasmtime, err := exec.LookPath("wasmtime")
+	if err != nil {
+		t.Skip("wasmtime is required for binary execution")
+	}
+	module, err := Lower(lowerSource(t, `fn main() { print("hello, binary"); }`))
+	if err != nil {
+		t.Fatalf("lower wasm failed: %v", err)
+	}
+	first, err := module.Binary()
+	if err != nil {
+		t.Fatalf("encode binary failed: %v", err)
+	}
+	second, err := module.Binary()
+	if err != nil {
+		t.Fatalf("encode binary twice failed: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("binary output changed for the same module")
+	}
+	path := filepath.Join(t.TempDir(), "hello.wasm")
+	if err := os.WriteFile(path, first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(wasmtime, "run", path)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wasmtime failed: %v\n%s", err, output)
+	}
+	if got, want := string(output), "hello, binary\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

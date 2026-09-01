@@ -33,48 +33,50 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 原理的に起きません(ADR-0083)。プログラムが「どう動くべきか」を定義するのは
 プログラム自身の末尾に書かれた case であり、特定の実行経路ではありません。
 
-| 機能 | 例の数 | check | run | llvm | wasm |
-| --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 39 | ✅ | ✅ | ✅ | 12/39 |
-| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ |
-| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | 9/10 |
-| if / match | 14 | ✅ | ✅ | ✅ | 2/14 |
-| enum / union | 15 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 40 | ✅ | ✅ | ✅ | ❌ |
-| optional `?T` / orelse / capture | 22 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 51 | ✅ | ✅ | ✅ | 2/51 |
-| deinit / defer | 19 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 10 | ✅ | ✅ | ✅ | ❌ |
-| comptime / reflection | 13 | ✅ | ✅ | ✅ | 1/13 |
-| cast / slice / stack buffer / box | 11 | ✅ | ✅ | ✅ | 1/11 |
-| unsafe / raw pointer / extern C | 3 | ✅ | ✅ | ✅ | ❌ |
-| contract / generics | 12 | ✅ | ✅ | ✅ | 2/12 |
-| std::array | 16 | ✅ | ✅ | ✅ | ❌ |
-| std::string | 32 | ✅ | ✅ | ✅ | ❌ |
-| std::map | 12 | ✅ | ✅ | ✅ | ❌ |
-| std::mem / allocator | 16 | ✅ | ✅ | ✅ | ❌ |
-| std::json | 14 | ✅ | ✅ | ✅ | ❌ |
-| std::sort | 1 | ✅ | ✅ | ✅ | ❌ |
-| std::fmt | 6 | ✅ | ✅ | ✅ | ❌ |
-| std::testing | 1 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 23 | ✅ | ✅ | ✅ | ❌ |
-| std::net / http | 19 | ✅ | ✅ | ✅ | ❌ |
-| async / coro | 2 | ✅ | ✅ | ✅ | ❌ |
+| 機能 | 例の数 | check | run | llvm | wasm | wasm-bin |
+| --- | ---: | :--: | :--: | :--: | :--: | :--: |
+| fn / let / struct / literals | 41 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| if / match | 15 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| enum / union | 15 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| error union `!T` / try / errdefer | 45 | ✅ | ✅ | ✅ | 27/45 | 27/45 |
+| optional `?T` / orelse / capture | 24 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| move / borrow | 52 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| deinit / defer | 20 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| comptime / reflection | 13 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| cast / slice / stack buffer / box | 13 | ✅ | ✅ | ✅ | 12/13 | 12/13 |
+| unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 |
+| contract / generics | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 |
+| std::array | 17 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::map | 13 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::mem / allocator | 20 | ✅ | ✅ | ✅ | 19/20 | 19/20 |
+| std::json | 14 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fmt | 6 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 |
+| std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 |
+| async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。runnable example は 152 件、測定は 2026-08-30 に
+1 つの example は複数の行に現れます。runnable example は 162 件、測定は 2026-09-01 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
-`run` と `wasm` はプログラムの出力で判定します。`run` は native build を実行し、
-`wasm` は出力した module を `wasmtime` で読み込みます。`llvm` は lowering が
-通ったかで判定します —— native target は `run` が同じ text から build するためです。
+`run`、`wasm`、`wasm-bin` はプログラムの出力で判定します。`run` は native build を実行し、
+`wasm` と `wasm-bin` は出力した WAT と binary module を `wasmtime` で読み込みます。
+`llvm` は lowering が通ったかで判定します —— native target は `run` が同じ text から
+build するためです。
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 152/152 |
-| `kizu run` | 152/152 |
-| `kizu build --emit-llvm` | 152/152 |
-| `kizu build --target wasm32-wasi` | 21/152 |
+| `kizu check` | 162/162 |
+| `kizu run` | 162/162 |
+| `kizu build --emit-llvm` | 162/162 |
+| `kizu build --target wasm32-wasi` (WAT) | 142/162 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 142/162 |
 
 native 経路に pending の runnable example はありません。WASI はまだ target subset
 であり、未対応 lowering と出力差分は `just backend-matrix` が報告します。
@@ -103,7 +105,7 @@ no-libc / freestanding build は build policy としては受理済みですが�
 | 機能 | 状態 |
 | --- | --- |
 | 並列処理のための thread | **予定。** 以前の API は checker rule だけを持ち lowering も runtime も無かったため撤回しました。戻すための受け入れ条件は ADR-0025 にあり、その第 1 条件は `kizu run` で実行できることです。coroutine(`std::coro`)と evented な `Io` は入っていますが、これは 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
-| 現在の subset を超える wasm backend | **進行中。** 152 件中 21 件が load して動きます |
+| 現在の subset を超える wasm backend | **進行中。** WAT と binary module はどちらも 162 件中 142 件が load して動きます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | float literal と float 演算 | **未着手。** `f32` / `f64` は型名として存在しますが、`1.5` は 1 つの literal として字句解析されません |
 | type alias | **未着手** |
@@ -197,7 +199,8 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu init [path]` は package の雛形を作ります。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
-- `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
+- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file>` は WASI-compatible WAT を stdout、または指定した `-o` へ出力します。
+- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file>` は binary `.wasm` を書きます。binary を暗黙に terminal へ出力することはありません。
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。
 - `kizu cache status` / `kizu cache prune` はローカルビルドキャッシュの表示と削除です。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。

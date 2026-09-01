@@ -34,12 +34,35 @@ fn data_offset() -> i64 {
     return 4096;
 }
 
+enum WasmFormat {
+    Text,
+    Binary,
+}
+
 /// Lowers typed SSA IR once and renders its WASI-compatible WAT, the Go
 /// `Emit`: the text goes to out, and a failure comes back as one diagnostic.
 pub fn emit(
     allocator: Allocator,
     module: &ir::Module,
     out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    return emit_format(allocator, module, out, WasmFormat::Text);
+}
+
+/// Lowers typed SSA IR once and renders its executable WebAssembly binary.
+pub fn emit_binary(
+    allocator: Allocator,
+    module: &ir::Module,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    return emit_format(allocator, module, out, WasmFormat::Binary);
+}
+
+fn emit_format(
+    allocator: Allocator,
+    module: &ir::Module,
+    out: &var string::String,
+    format: WasmFormat
 ) -> !?diagnostic::Diagnostic {
     var emitter = Emitter {
         allocator: allocator,
@@ -83,8 +106,13 @@ pub fn emit(
     match parsed {
         Error => return try emitter.fail0("wasm error: invalid generated WAT"),
         Module(lowered) => {
-            defer lowered.deinit(allocator);
-            try render_wasm_wat(allocator, &lowered, text, out);
+            if format == WasmFormat::Text {
+                try render_wasm_wat(allocator, move lowered, text, out);
+                return null;
+            }
+            if !try render_wasm_binary(allocator, move lowered, text, out) {
+                return try emitter.fail0("wasm error: invalid generated module");
+            }
             return null;
         },
     }

@@ -43,6 +43,79 @@ func (m *Module) nodeText(index int) string {
 	return m.text[node.start:node.end]
 }
 
+// nodeKind returns the parsed kind of one stable node index.
+func (m *Module) nodeKind(index int) moduleNodeKind {
+	return m.nodes[index].kind
+}
+
+// listHead returns the first atom in one list, or an empty string when the
+// node is not a headed list.
+func (m *Module) listHead(index int) string {
+	if m.nodeKind(index) != moduleList {
+		return ""
+	}
+	children := m.nodes[index].children
+	if len(children) == 0 || m.nodeKind(children[0]) != moduleAtom {
+		return ""
+	}
+	return m.nodeText(children[0])
+}
+
+// stringBytes decodes one generated WAT byte string.
+func (m *Module) stringBytes(index int) ([]byte, error) {
+	if m.nodeKind(index) != moduleString {
+		return nil, fmt.Errorf("wasm error: invalid generated WAT: expected string")
+	}
+	text := m.nodeText(index)
+	out := make([]byte, 0, len(text))
+	for position := 0; position < len(text); position++ {
+		if text[position] != '\\' {
+			out = append(out, text[position])
+			continue
+		}
+		if position+1 >= len(text) {
+			return nil, fmt.Errorf("wasm error: invalid generated WAT: unclosed string escape")
+		}
+		if position+2 < len(text) {
+			high, highOK := hexNibble(text[position+1])
+			low, lowOK := hexNibble(text[position+2])
+			if highOK && lowOK {
+				out = append(out, high<<4|low)
+				position += 2
+				continue
+			}
+		}
+		position++
+		switch text[position] {
+		case 'n':
+			out = append(out, '\n')
+		case 'r':
+			out = append(out, '\r')
+		case 't':
+			out = append(out, '\t')
+		case '\\', '"':
+			out = append(out, text[position])
+		default:
+			return nil, fmt.Errorf("wasm error: invalid generated WAT: invalid string escape")
+		}
+	}
+	return out, nil
+}
+
+// hexNibble decodes one hexadecimal WAT string digit.
+func hexNibble(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
 // parseModule validates and retains the canonical WAT emitted by the IR
 // lowerer. It is deliberately private: user input is Kizu source, not WAT.
 func parseModule(text string) (*Module, error) {

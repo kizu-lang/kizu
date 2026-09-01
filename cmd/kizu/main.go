@@ -122,6 +122,12 @@ func dispatchTest(args []string) error {
 	return testFile(path, programArgs)
 }
 
+const wasmWATUsage = "usage: kizu build --target wasm32-wasi " +
+	"[--emit wat] [--opt] [-o file] <file>"
+
+const wasmBinaryUsage = "usage: kizu build --target wasm32-wasi " +
+	"--emit wasm -o file [--opt] <file>"
+
 // usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test> <file> [-- args...]")
@@ -130,7 +136,8 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [native-options] <file>")
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
+	_, _ = fmt.Fprintln(os.Stderr, wasmWATUsage)
+	_, _ = fmt.Fprintln(os.Stderr, wasmBinaryUsage)
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu version")

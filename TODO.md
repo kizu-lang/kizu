@@ -5,11 +5,11 @@
 
 ## wasm32-wasi backend
 
-現在の `kizu build --target wasm32-wasi` は WAT を生成し、`just backend-matrix` では
-162 examples 中 142 件が native と同じ出力で動く。残り 20 件の最初の失敗は net poller
-12 件、net listen 4 件、extern C allocator 2 件、coro runtime と event loop が各 1 件。
-example ごとの例外を足さず、共通
-runtime と portable std の順に backend の対象を広げる。
+現在の `kizu build --target wasm32-wasi` は既定で WAT、`--emit wasm -o` で binary を
+生成する。`just backend-matrix` では両方とも 162 examples 中 142 件が native と同じ
+出力で動く。残り 20 件の最初の失敗は net poller 12 件、net listen 4 件、extern C
+allocator 2 件、coro runtime と event loop が各 1 件。example ごとの例外を足さず、
+共通 runtime と portable std の順に backend の対象を広げる。
 
 この章の完了は、既存の `wasm32-wasi` target と browser target で portable な言語機能と
 std API が native と同じ observable behavior を持ち、compiler が browser の読める binary
@@ -40,25 +40,12 @@ Go seed (`internal/wasm`) と shipping Kizu compiler (`compiler/src/internal/was
 - WASI の portable example について backend lowering failure と未分類の output mismatch を
   0 にする。
 
-### W6. binary `.wasm` encoding
-
-- WAT writer と binary encoder が別々に Kizu IR を解釈しないよう、type、import、function、
-  table、memory、global、export、element、code、data を 1 つの WebAssembly module 表現へ
-  lower する。WAT と binary はその同じ表現の 2 renderer にする。
-- section ordering、index space、function body、data / element segment、signed / unsigned LEB128
-  を deterministic に encode し、同じ入力から byte-for-byte 同じ `.wasm` を生成する。
-- 現在 WAT を stdout に出す `build --target wasm32-wasi` を残しながら、binary artifact と
-  inspection 用 WAT をどう明示的に選ぶか、CLI の output contract を決める。binary を
-  terminal に暗黙出力しない。
-- encoder の単体構造を pin するだけで完了にせず、生成 binary を `wasmtime` で validate / run
-  し、同じ module の WAT route と observable behavior が一致することを検証する。
-
 ### W7. browser target
 
 - browser target の CLI spelling、entry / export、host import、memory ownership、JavaScript との
   string / buffer 受け渡し ABI を明示する。WASI `_start` / `fd_write` を browser に偽装しない。
-- portable core は W1〜W3 の同じ WebAssembly module lowering を使い、target 差は host import、
-  entry / export、利用可能 capability だけに閉じる。
+- portable core は `wasm32-wasi` と同じ WebAssembly module lowering を使い、target 差は
+  host import、entry / export、利用可能 capability だけに閉じる。
 - stdout、filesystem、process、socket の無い browser で `Io` と std API のどこまでを host
   adapter が提供するかを文書化する。未提供 API は compile / build 時に target 非対応とする。
 - generated `.wasm` と必要最小限の JavaScript host adapter を実 browser で読み込み、function

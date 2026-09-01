@@ -210,6 +210,11 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			"build", "--target", "wasm32-wasi", "--opt", arena)
 	})
 	runSelfhostWASMContainerOptCases(t, selfhost)
+	for _, example := range []string{"hello.kizu", "function_pointer.kizu", "map_keys.kizu"} {
+		t.Run("wasm-binary/"+example, func(t *testing.T) {
+			compareSelfhostWASMBinary(t, selfhost, "../../examples/"+example)
+		})
+	}
 	for _, fixture := range wasmRepresentativeFixtures() {
 		t.Run("wasm/"+fixture.name, func(t *testing.T) {
 			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
@@ -220,6 +225,34 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			args = append(args, path)
 			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
 		})
+	}
+}
+
+// compareSelfhostWASMBinary checks the seed and shipping compiler write the
+// exact same binary artifact without sending bytes to stdout.
+func compareSelfhostWASMBinary(t *testing.T, selfhost string, source string) {
+	t.Helper()
+	directory := t.TempDir()
+	seedPath := filepath.Join(directory, "seed.wasm")
+	selfhostPath := filepath.Join(directory, "selfhost.wasm")
+	seed := runNativeCLI(t, kizuBinaryPath,
+		"build", "--target", "wasm32-wasi", "--emit", "wasm", "-o", seedPath, source)
+	shipping := runNativeCLI(t, selfhost,
+		"build", "--target", "wasm32-wasi", "--emit", "wasm", "-o", selfhostPath, source)
+	if seed.code != 0 || shipping.code != 0 || seed.output != shipping.output {
+		t.Fatalf("binary CLI differs\nseed: %#v\nshipping: %#v", seed, shipping)
+	}
+	seedBytes, err := os.ReadFile(seedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shippingBytes, err := os.ReadFile(selfhostPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(seedBytes, shippingBytes) {
+		t.Fatalf("binary artifacts differ: seed=%d bytes shipping=%d bytes",
+			len(seedBytes), len(shippingBytes))
 	}
 }
 
@@ -561,6 +594,20 @@ func cliRepresentativeArguments() []cliArguments {
 		{"build_unknown_target", []string{"build", "--target", "wasm64"}},
 		{"wasm_missing_file", []string{"build", "--target", "wasm32-wasi"}},
 		{"wasm_extra_file", []string{"build", "--target", "wasm32-wasi", "a.kizu", "b.kizu"}},
+		{"wasm_duplicate_opt", []string{"build", "--target", "wasm32-wasi", "--opt", "--opt", file}},
+		{"wasm_emit_missing_format", []string{"build", "--target", "wasm32-wasi", file, "--emit"}},
+		{"wasm_invalid_emit", []string{"build", "--target", "wasm32-wasi", "--emit", "object", file}},
+		{"wasm_duplicate_emit", []string{
+			"build", "--target", "wasm32-wasi", "--emit", "wat", "--emit", "wasm", file,
+		}},
+		{"wasm_output_missing_path", []string{"build", "--target", "wasm32-wasi", file, "-o"}},
+		{"wasm_duplicate_output", []string{
+			"build", "--target", "wasm32-wasi", "-o", "a.wat", "-o", "b.wat", file,
+		}},
+		{"wasm_unknown_option", []string{"build", "--target", "wasm32-wasi", "--wat", file}},
+		{"wasm_binary_missing_output", []string{
+			"build", "--target", "wasm32-wasi", "--emit", "wasm", file,
+		}},
 		{"target_not_found", []string{"parse", "../../examples/missing.kizu"}},
 		{"target_is_directory", []string{"parse", pkg}},
 		{"target_under_file", []string{"parse", file + "/inner.kizu"}},

@@ -1,0 +1,1122 @@
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/binary.go. The parsed module tree is the
+// only input to both renderers; this file resolves binary index spaces and
+// serializes sections without interpreting Kizu IR a second time.
+
+struct BinaryFuncType {
+    params: array::Array<u8>,
+    results: array::Array<u8>
+}
+
+struct BinaryImport {
+    module_name: arena::Handle<WasmNode>,
+    field_name: arena::Handle<WasmNode>,
+    type_index: i64
+}
+
+struct BinaryNamedType {
+    name: ?arena::Handle<WasmNode>,
+    type_code: u8
+}
+
+struct BinaryFunction {
+    node: arena::Handle<WasmNode>,
+    type_index: i64,
+    params: array::Array<BinaryNamedType>,
+    locals: array::Array<BinaryNamedType>
+}
+
+struct BinaryFunctionShape {
+    signature: BinaryFuncType,
+    params: array::Array<BinaryNamedType>,
+    locals: array::Array<BinaryNamedType>
+}
+
+struct BinaryGlobal {
+    type_code: u8,
+    mutable: bool,
+    init: arena::Handle<WasmNode>
+}
+
+struct BinaryModule {
+    allocator: Allocator,
+    types: array::Array<BinaryFuncType>,
+    type_names: map::Map<[]u8, i64>,
+    imports: array::Array<BinaryImport>,
+    functions: array::Array<BinaryFunction>,
+    function_names: map::Map<[]u8, i64>,
+    globals: array::Array<BinaryGlobal>,
+    global_names: map::Map<[]u8, i64>
+}
+
+fn render_wasm_binary(
+    allocator: Allocator,
+    module: WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    var lowered = BinaryModule {
+        allocator: allocator,
+        types: array::new<BinaryFuncType>(allocator),
+        type_names: map::new<[]u8, i64>(allocator),
+        imports: array::new<BinaryImport>(allocator),
+        functions: array::new<BinaryFunction>(allocator),
+        function_names: map::new<[]u8, i64>(allocator),
+        globals: array::new<BinaryGlobal>(allocator),
+        global_names: map::new<[]u8, i64>(allocator)
+    };
+    defer lowered.deinit(allocator);
+    defer module.deinit(allocator);
+    if !try lowered.lower(&module, input) {
+        return false;
+    }
+    try out.append_byte(allocator, cast<u8>(0));
+    try out.append_bytes(allocator, "asm");
+    try out.append_byte(allocator, cast<u8>(1));
+    try out.append_byte(allocator, cast<u8>(0));
+    try out.append_byte(allocator, cast<u8>(0));
+    try out.append_byte(allocator, cast<u8>(0));
+    return lowered.encode(&module, input, out);
+}
+
+fn (self: &var BinaryModule) lower(
+    syntax: &WasmModule,
+    input: []u8
+) -> !bool {
+    let count = wasm_list_len(syntax, syntax.root) orelse return false;
+    var index = 1;
+    while index < count {
+        let declaration = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, declaration, "type") {
+            if !try self.add_type_declaration(syntax, input, declaration) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    index = 1;
+    while index < count {
+        let declaration = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, declaration, "import") {
+            if !try self.add_import(syntax, input, declaration) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    index = 1;
+    while index < count {
+        let declaration = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, declaration, "func") {
+            if !try self.add_function(syntax, input, declaration) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    index = 1;
+    while index < count {
+        let declaration = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, declaration, "global") {
+            if !try self.add_global(syntax, input, declaration) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn (self: &var BinaryModule) add_type_declaration(
+    syntax: &WasmModule,
+    input: []u8,
+    declaration: arena::Handle<WasmNode>
+) -> !bool {
+    if !wasm_list_has_len(syntax, declaration, 3) {
+        return false;
+    }
+    let name_node = wasm_list_get(syntax, declaration, 1) orelse return false;
+    let function_node = wasm_list_get(syntax, declaration, 2) orelse return false;
+    if !wasm_list_head_is(syntax, input, function_node, "func") {
+        return false;
+    }
+    var shape = binary_function_shape_new(self.allocator);
+    errdefer shape.deinit(self.allocator);
+    if !try self.parse_function_shape(syntax, input, function_node, &var shape) {
+        shape.deinit(self.allocator);
+        return false;
+    }
+    if wasm_node_text(syntax, input, name_node) |name| {
+        if !wasm_symbol(name) or self.type_names.contains(name) {
+            shape.deinit(self.allocator);
+            return false;
+        }
+        let type_index = self.types.len();
+        shape.params.deinit(self.allocator);
+        shape.locals.deinit(self.allocator);
+        try self.types.append(self.allocator, move shape.signature);
+        try self.type_names.insert(self.allocator, name, type_index);
+        return true;
+    }
+    shape.deinit(self.allocator);
+    return false;
+}
+
+fn (self: &var BinaryModule) add_import(
+    syntax: &WasmModule,
+    input: []u8,
+    declaration: arena::Handle<WasmNode>
+) -> !bool {
+    if !wasm_list_has_len(syntax, declaration, 4) {
+        return false;
+    }
+    let module_name = wasm_list_get(syntax, declaration, 1) orelse return false;
+    let field_name = wasm_list_get(syntax, declaration, 2) orelse return false;
+    if !wasm_node_is_text(syntax, module_name) or
+        !wasm_node_is_text(syntax, field_name) {
+        return false;
+    }
+    let function_node = wasm_list_get(syntax, declaration, 3) orelse return false;
+    if !wasm_list_head_is(syntax, input, function_node, "func") {
+        return false;
+    }
+    let name_node = wasm_list_get(syntax, function_node, 1) orelse return false;
+    var shape = binary_function_shape_new(self.allocator);
+    errdefer shape.deinit(self.allocator);
+    if !try self.parse_function_shape(syntax, input, function_node, &var shape) {
+        shape.deinit(self.allocator);
+        return false;
+    }
+    if wasm_node_text(syntax, input, name_node) |name| {
+        if !wasm_symbol(name) or self.function_names.contains(name) {
+            shape.deinit(self.allocator);
+            return false;
+        }
+        let type_index = try self.intern_type(move shape.signature);
+        shape.params.deinit(self.allocator);
+        shape.locals.deinit(self.allocator);
+        let function_index = self.imports.len();
+        try self.imports.append(self.allocator, BinaryImport {
+            module_name: module_name,
+            field_name: field_name,
+            type_index: type_index
+        });
+        try self.function_names.insert(self.allocator, name, function_index);
+        return true;
+    }
+    shape.deinit(self.allocator);
+    return false;
+}
+
+fn (self: &var BinaryModule) add_function(
+    syntax: &WasmModule,
+    input: []u8,
+    declaration: arena::Handle<WasmNode>
+) -> !bool {
+    let name_node = wasm_list_get(syntax, declaration, 1) orelse return false;
+    var shape = binary_function_shape_new(self.allocator);
+    errdefer shape.deinit(self.allocator);
+    if !try self.parse_function_shape(syntax, input, declaration, &var shape) {
+        shape.deinit(self.allocator);
+        return false;
+    }
+    if wasm_node_text(syntax, input, name_node) |name| {
+        if !wasm_symbol(name) or self.function_names.contains(name) {
+            shape.deinit(self.allocator);
+            return false;
+        }
+        let type_index = try self.intern_type(move shape.signature);
+        let function_index = self.imports.len() + self.functions.len();
+        let function = BinaryFunction {
+            node: declaration,
+            type_index: type_index,
+            params: move shape.params,
+            locals: move shape.locals
+        };
+        try self.functions.append(self.allocator, move function);
+        try self.function_names.insert(self.allocator, name, function_index);
+        return true;
+    }
+    shape.deinit(self.allocator);
+    return false;
+}
+
+fn (self: &var BinaryModule) add_global(
+    syntax: &WasmModule,
+    input: []u8,
+    declaration: arena::Handle<WasmNode>
+) -> !bool {
+    if !wasm_list_has_len(syntax, declaration, 4) {
+        return false;
+    }
+    let name_node = wasm_list_get(syntax, declaration, 1) orelse return false;
+    let type_node = wasm_list_get(syntax, declaration, 2) orelse return false;
+    let init = wasm_list_get(syntax, declaration, 3) orelse return false;
+    var actual_type = type_node;
+    var mutable = false;
+    if wasm_list_head_is(syntax, input, type_node, "mut") {
+        if !wasm_list_has_len(syntax, type_node, 2) {
+            return false;
+        }
+        actual_type = wasm_list_get(syntax, type_node, 1) orelse return false;
+        mutable = true;
+    }
+    let type_code = self.value_type(syntax, input, actual_type) orelse return false;
+    if wasm_node_text(syntax, input, name_node) |name| {
+        if !wasm_symbol(name) or self.global_names.contains(name) {
+            return false;
+        }
+        let global_index = self.globals.len();
+        try self.globals.append(self.allocator, BinaryGlobal {
+            type_code: type_code,
+            mutable: mutable,
+            init: init
+        });
+        try self.global_names.insert(self.allocator, name, global_index);
+        return true;
+    }
+    return false;
+}
+
+fn binary_function_shape_new(allocator: Allocator) -> BinaryFunctionShape {
+    return BinaryFunctionShape {
+        signature: BinaryFuncType {
+            params: array::new<u8>(allocator),
+            results: array::new<u8>(allocator)
+        },
+        params: array::new<BinaryNamedType>(allocator),
+        locals: array::new<BinaryNamedType>(allocator)
+    };
+}
+
+fn (self: &BinaryModule) parse_function_shape(
+    syntax: &WasmModule,
+    input: []u8,
+    function_node: arena::Handle<WasmNode>,
+    out: &var BinaryFunctionShape
+) -> !bool {
+    if !wasm_list_head_is(syntax, input, function_node, "func") {
+        return false;
+    }
+    let count = wasm_list_len(syntax, function_node) orelse return false;
+    var index = 1;
+    while index < count {
+        let child = wasm_list_get(syntax, function_node, index) orelse return false;
+        if wasm_list_head_is(syntax, input, child, "param") {
+            if !try self.append_named_types(
+                syntax,
+                input,
+                child,
+                &var out.params,
+                &var out.signature.params,
+                true
+            ) {
+                return false;
+            }
+        } else {
+            if wasm_list_head_is(syntax, input, child, "result") {
+                if !try self.append_result_types(
+                    syntax,
+                    input,
+                    child,
+                    &var out.signature.results
+                ) {
+                    return false;
+                }
+            } else {
+                if wasm_list_head_is(syntax, input, child, "local") {
+                    var ignored = array::new<u8>(self.allocator);
+                    defer ignored.deinit(self.allocator);
+                    if !try self.append_named_types(
+                        syntax,
+                        input,
+                        child,
+                        &var out.locals,
+                        &var ignored,
+                        true
+                    ) {
+                        return false;
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn (self: &BinaryModule) append_named_types(
+    syntax: &WasmModule,
+    input: []u8,
+    declaration: arena::Handle<WasmNode>,
+    names: &var array::Array<BinaryNamedType>,
+    signature: &var array::Array<u8>,
+    allow_name: bool
+) -> !bool {
+    let count = wasm_list_len(syntax, declaration) orelse return false;
+    if count < 2 {
+        return false;
+    }
+    var position = 1;
+    var name = wasm_no_node();
+    let first = wasm_list_get(syntax, declaration, position) orelse return false;
+    if allow_name {
+        if wasm_node_text(syntax, input, first) |text| {
+            if wasm_symbol(text) {
+                if count != 3 {
+                    return false;
+                }
+                name = first;
+                position = position + 1;
+            }
+        }
+    }
+    while position < count {
+        let type_node = wasm_list_get(syntax, declaration, position) orelse return false;
+        let type_code = self.value_type(syntax, input, type_node) orelse return false;
+        try names.append(self.allocator, BinaryNamedType {
+            name: name,
+            type_code: type_code
+        });
+        try signature.append(self.allocator, type_code);
+        position = position + 1;
+    }
+    return true;
+}
+
+fn (self: &BinaryModule) append_result_types(
+    syntax: &WasmModule,
+    input: []u8,
+    declaration: arena::Handle<WasmNode>,
+    results: &var array::Array<u8>
+) -> !bool {
+    let count = wasm_list_len(syntax, declaration) orelse return false;
+    if count < 2 {
+        return false;
+    }
+    var position = 1;
+    while position < count {
+        let type_node = wasm_list_get(syntax, declaration, position) orelse return false;
+        let type_code = self.value_type(syntax, input, type_node) orelse return false;
+        try results.append(self.allocator, type_code);
+        position = position + 1;
+    }
+    return true;
+}
+
+fn (self: &var BinaryModule) intern_type(value: BinaryFuncType) -> !i64 {
+    var index = 0;
+    while self.types.at(index) |existing| {
+        if wasm_byte_arrays_equal(&existing.params, &value.params) and
+            wasm_byte_arrays_equal(&existing.results, &value.results) {
+            value.deinit(self.allocator);
+            return index;
+        }
+        index = index + 1;
+    }
+    try self.types.append(self.allocator, move value);
+    return index;
+}
+
+fn (self: &BinaryModule) value_type(
+    syntax: &WasmModule,
+    input: []u8,
+    node: arena::Handle<WasmNode>
+) -> ?u8 {
+    if wasm_node_text(syntax, input, node) |text| {
+        if mem::equal_bytes(text, "i32") {
+            return cast<u8>(127);
+        }
+        if mem::equal_bytes(text, "i64") {
+            return cast<u8>(126);
+        }
+    }
+    return null;
+}
+
+fn (self: &BinaryModule) encode(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    if !try self.encode_types(out) {
+        return false;
+    }
+    if !try self.encode_imports(syntax, input, out) {
+        return false;
+    }
+    if !try self.encode_function_types(out) {
+        return false;
+    }
+    if !try self.encode_tables(syntax, input, out) {
+        return false;
+    }
+    if !try self.encode_memories(syntax, input, out) {
+        return false;
+    }
+    if !try self.encode_globals(syntax, input, out) {
+        return false;
+    }
+    if !try self.encode_exports(syntax, input, out) {
+        return false;
+    }
+    if !try self.encode_elements(syntax, input, out) {
+        return false;
+    }
+    if !try self.encode_code(syntax, input, out) {
+        return false;
+    }
+    return self.encode_data(syntax, input, out);
+}
+
+fn (self: &BinaryModule) encode_types(out: &var string::String) -> !bool {
+    if self.types.len() == 0 {
+        return true;
+    }
+    var payload = string::new(self.allocator);
+    defer payload.deinit(self.allocator);
+    try wasm_append_u32(self.allocator, &var payload, self.types.len());
+    var index = 0;
+    while self.types.at(index) |value| {
+        try payload.append_byte(self.allocator, cast<u8>(96));
+        try wasm_append_byte_array(self.allocator, &var payload, &value.params);
+        try wasm_append_byte_array(self.allocator, &var payload, &value.results);
+        index = index + 1;
+    }
+    try wasm_append_section(self.allocator, out, 1, &payload);
+    return true;
+}
+
+fn (self: &BinaryModule) encode_imports(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    if self.imports.len() == 0 {
+        return true;
+    }
+    var payload = string::new(self.allocator);
+    defer payload.deinit(self.allocator);
+    try wasm_append_u32(self.allocator, &var payload, self.imports.len());
+    var index = 0;
+    while self.imports.at(index) |imported| {
+        if !try self.append_string_node(syntax, input, &var payload, imported.module_name) {
+            return false;
+        }
+        if !try self.append_string_node(syntax, input, &var payload, imported.field_name) {
+            return false;
+        }
+        try payload.append_byte(self.allocator, cast<u8>(0));
+        try wasm_append_u32(self.allocator, &var payload, imported.type_index);
+        index = index + 1;
+    }
+    try wasm_append_section(self.allocator, out, 2, &payload);
+    return true;
+}
+
+fn (self: &BinaryModule) encode_function_types(out: &var string::String) -> !bool {
+    if self.functions.len() == 0 {
+        return true;
+    }
+    var payload = string::new(self.allocator);
+    defer payload.deinit(self.allocator);
+    try wasm_append_u32(self.allocator, &var payload, self.functions.len());
+    var index = 0;
+    while self.functions.at(index) |function| {
+        try wasm_append_u32(self.allocator, &var payload, function.type_index);
+        index = index + 1;
+    }
+    try wasm_append_section(self.allocator, out, 3, &payload);
+    return true;
+}
+
+fn (self: &BinaryModule) encode_tables(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    var entries = string::new(self.allocator);
+    defer entries.deinit(self.allocator);
+    var count = 0;
+    let declarations = wasm_list_len(syntax, syntax.root) orelse return false;
+    var index = 1;
+    while index < declarations {
+        let node = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, node, "table") {
+            if !wasm_list_has_len(syntax, node, 3) {
+                return false;
+            }
+            let minimum_node = wasm_list_get(syntax, node, 1) orelse return false;
+            let kind_node = wasm_list_get(syntax, node, 2) orelse return false;
+            let minimum = self.unsigned_atom(syntax, input, minimum_node) orelse return false;
+            if !self.atom_is(syntax, input, kind_node, "funcref") {
+                return false;
+            }
+            try entries.append_byte(self.allocator, cast<u8>(112));
+            try entries.append_byte(self.allocator, cast<u8>(0));
+            try wasm_append_u32(self.allocator, &var entries, minimum);
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    if count == 0 {
+        return true;
+    }
+    return self.append_counted_section(out, 4, count, &entries);
+}
+
+fn (self: &BinaryModule) encode_memories(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    var entries = string::new(self.allocator);
+    defer entries.deinit(self.allocator);
+    var count = 0;
+    let declarations = wasm_list_len(syntax, syntax.root) orelse return false;
+    var index = 1;
+    while index < declarations {
+        let node = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, node, "memory") {
+            let child_count = wasm_list_len(syntax, node) orelse return false;
+            var minimum = 0;
+            var found_minimum = false;
+            var child_index = 1;
+            while child_index < child_count {
+                let child = wasm_list_get(syntax, node, child_index) orelse return false;
+                if !wasm_list_head_is(syntax, input, child, "export") {
+                    if found_minimum {
+                        return false;
+                    }
+                    minimum = self.unsigned_atom(syntax, input, child) orelse return false;
+                    found_minimum = true;
+                }
+                child_index = child_index + 1;
+            }
+            if !found_minimum {
+                return false;
+            }
+            try entries.append_byte(self.allocator, cast<u8>(0));
+            try wasm_append_u32(self.allocator, &var entries, minimum);
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    if count == 0 {
+        return true;
+    }
+    return self.append_counted_section(out, 5, count, &entries);
+}
+
+fn (self: &BinaryModule) encode_globals(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    if self.globals.len() == 0 {
+        return true;
+    }
+    var payload = string::new(self.allocator);
+    defer payload.deinit(self.allocator);
+    try wasm_append_u32(self.allocator, &var payload, self.globals.len());
+    var index = 0;
+    while self.globals.at(index) |global| {
+        try payload.append_byte(self.allocator, global.type_code);
+        if global.mutable {
+            try payload.append_byte(self.allocator, cast<u8>(1));
+        } else {
+            try payload.append_byte(self.allocator, cast<u8>(0));
+        }
+        if !try self.append_const_expression(syntax, input, &var payload, global.init) {
+            return false;
+        }
+        index = index + 1;
+    }
+    try wasm_append_section(self.allocator, out, 6, &payload);
+    return true;
+}
+
+fn (self: &BinaryModule) encode_exports(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    var entries = string::new(self.allocator);
+    defer entries.deinit(self.allocator);
+    var count = 0;
+    let declarations = wasm_list_len(syntax, syntax.root) orelse return false;
+    var index = 1;
+    while index < declarations {
+        let node = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, node, "memory") {
+            let child_count = wasm_list_len(syntax, node) orelse return false;
+            var child_index = 1;
+            while child_index < child_count {
+                let child = wasm_list_get(syntax, node, child_index) orelse return false;
+                if wasm_list_head_is(syntax, input, child, "export") {
+                    let name = wasm_list_get(syntax, child, 1) orelse return false;
+                    if !try self.append_string_node(syntax, input, &var entries, name) {
+                        return false;
+                    }
+                    try entries.append_byte(self.allocator, cast<u8>(2));
+                    try wasm_append_u32(self.allocator, &var entries, 0);
+                    count = count + 1;
+                }
+                child_index = child_index + 1;
+            }
+        }
+        if wasm_list_head_is(syntax, input, node, "func") {
+            let name_node = wasm_list_get(syntax, node, 1) orelse return false;
+            let function_index = self.function_index(syntax, input, name_node) orelse return false;
+            let child_count = wasm_list_len(syntax, node) orelse return false;
+            var child_index = 2;
+            while child_index < child_count {
+                let child = wasm_list_get(syntax, node, child_index) orelse return false;
+                if wasm_list_head_is(syntax, input, child, "export") {
+                    let name = wasm_list_get(syntax, child, 1) orelse return false;
+                    if !try self.append_string_node(syntax, input, &var entries, name) {
+                        return false;
+                    }
+                    try entries.append_byte(self.allocator, cast<u8>(0));
+                    try wasm_append_u32(self.allocator, &var entries, function_index);
+                    count = count + 1;
+                }
+                child_index = child_index + 1;
+            }
+        }
+        index = index + 1;
+    }
+    if count == 0 {
+        return true;
+    }
+    return self.append_counted_section(out, 7, count, &entries);
+}
+
+fn (self: &BinaryModule) encode_elements(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    var entries = string::new(self.allocator);
+    defer entries.deinit(self.allocator);
+    var count = 0;
+    let declarations = wasm_list_len(syntax, syntax.root) orelse return false;
+    var index = 1;
+    while index < declarations {
+        let node = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, node, "elem") {
+            let child_count = wasm_list_len(syntax, node) orelse return false;
+            if child_count < 2 {
+                return false;
+            }
+            let offset = wasm_list_get(syntax, node, 1) orelse return false;
+            try entries.append_byte(self.allocator, cast<u8>(0));
+            if !try self.append_const_expression(syntax, input, &var entries, offset) {
+                return false;
+            }
+            try wasm_append_u32(self.allocator, &var entries, child_count - 2);
+            var child_index = 2;
+            while child_index < child_count {
+                let function_node = wasm_list_get(syntax, node, child_index) orelse return false;
+                let function_index = self.function_index(syntax, input, function_node) orelse return false;
+                try wasm_append_u32(self.allocator, &var entries, function_index);
+                child_index = child_index + 1;
+            }
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    if count == 0 {
+        return true;
+    }
+    return self.append_counted_section(out, 9, count, &entries);
+}
+
+fn (self: &BinaryModule) encode_data(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String
+) -> !bool {
+    var entries = string::new(self.allocator);
+    defer entries.deinit(self.allocator);
+    var count = 0;
+    let declarations = wasm_list_len(syntax, syntax.root) orelse return false;
+    var index = 1;
+    while index < declarations {
+        let node = wasm_list_get(syntax, syntax.root, index) orelse return false;
+        if wasm_list_head_is(syntax, input, node, "data") {
+            let child_count = wasm_list_len(syntax, node) orelse return false;
+            if child_count < 3 {
+                return false;
+            }
+            let offset = wasm_list_get(syntax, node, 1) orelse return false;
+            try entries.append_byte(self.allocator, cast<u8>(0));
+            if !try self.append_const_expression(syntax, input, &var entries, offset) {
+                return false;
+            }
+            var bytes = string::new(self.allocator);
+            defer bytes.deinit(self.allocator);
+            var child_index = 2;
+            while child_index < child_count {
+                let text = wasm_list_get(syntax, node, child_index) orelse return false;
+                if !try wasm_decode_string(
+                    self.allocator,
+                    syntax,
+                    input,
+                    text,
+                    &var bytes
+                ) {
+                    return false;
+                }
+                child_index = child_index + 1;
+            }
+            let data_bytes = bytes.as_bytes();
+            try wasm_append_vector(self.allocator, &var entries, data_bytes);
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    if count == 0 {
+        return true;
+    }
+    return self.append_counted_section(out, 11, count, &entries);
+}
+
+fn (self: &BinaryModule) append_counted_section(
+    out: &var string::String,
+    id: i64,
+    count: i64,
+    entries: &string::String
+) -> !bool {
+    var payload = string::new(self.allocator);
+    defer payload.deinit(self.allocator);
+    try wasm_append_u32(self.allocator, &var payload, count);
+    try payload.append_string(self.allocator, entries);
+    try wasm_append_section(self.allocator, out, id, &payload);
+    return true;
+}
+
+fn (self: &BinaryModule) append_string_node(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String,
+    node: arena::Handle<WasmNode>
+) -> !bool {
+    var decoded = string::new(self.allocator);
+    defer decoded.deinit(self.allocator);
+    if !try wasm_decode_string(
+        self.allocator,
+        syntax,
+        input,
+        node,
+        &var decoded
+    ) {
+        return false;
+    }
+    let decoded_bytes = decoded.as_bytes();
+    try wasm_append_vector(self.allocator, out, decoded_bytes);
+    return true;
+}
+
+fn (self: &BinaryModule) append_const_expression(
+    syntax: &WasmModule,
+    input: []u8,
+    out: &var string::String,
+    node: arena::Handle<WasmNode>
+) -> !bool {
+    if !wasm_list_has_len(syntax, node, 2) {
+        return false;
+    }
+    let value_node = wasm_list_get(syntax, node, 1) orelse return false;
+    let value = self.signed_atom(syntax, input, value_node) orelse return false;
+    if wasm_list_head_is(syntax, input, node, "i32.const") {
+        try out.append_byte(self.allocator, cast<u8>(65));
+        try wasm_append_i32(self.allocator, out, value);
+    } else {
+        if wasm_list_head_is(syntax, input, node, "i64.const") {
+            try out.append_byte(self.allocator, cast<u8>(66));
+            try wasm_append_i64(self.allocator, out, value);
+        } else {
+            return false;
+        }
+    }
+    try out.append_byte(self.allocator, cast<u8>(11));
+    return true;
+}
+
+fn (self: &BinaryModule) atom_is(
+    syntax: &WasmModule,
+    input: []u8,
+    node: arena::Handle<WasmNode>,
+    want: []u8
+) -> bool {
+    if wasm_node_text(syntax, input, node) |text| {
+        return mem::equal_bytes(text, want);
+    }
+    return false;
+}
+
+fn (self: &BinaryModule) unsigned_atom(
+    syntax: &WasmModule,
+    input: []u8,
+    node: arena::Handle<WasmNode>
+) -> ?i64 {
+    if wasm_node_text(syntax, input, node) |text| {
+        return wasm_parse_u32(text);
+    }
+    return null;
+}
+
+fn (self: &BinaryModule) signed_atom(
+    syntax: &WasmModule,
+    input: []u8,
+    node: arena::Handle<WasmNode>
+) -> ?i64 {
+    if wasm_node_text(syntax, input, node) |text| {
+        return wasm_parse_i64(text);
+    }
+    return null;
+}
+
+fn (self: &BinaryModule) function_index(
+    syntax: &WasmModule,
+    input: []u8,
+    node: arena::Handle<WasmNode>
+) -> ?i64 {
+    if wasm_node_text(syntax, input, node) |text| {
+        if wasm_symbol(text) {
+            return self.function_names.get(text);
+        }
+        return wasm_parse_u32(text);
+    }
+    return null;
+}
+
+fn (self: &BinaryModule) global_index(
+    syntax: &WasmModule,
+    input: []u8,
+    node: arena::Handle<WasmNode>
+) -> ?i64 {
+    if wasm_node_text(syntax, input, node) |text| {
+        if wasm_symbol(text) {
+            return self.global_names.get(text);
+        }
+        return wasm_parse_u32(text);
+    }
+    return null;
+}
+
+fn (self: &BinaryModule) type_index(
+    syntax: &WasmModule,
+    input: []u8,
+    node: arena::Handle<WasmNode>
+) -> ?i64 {
+    if wasm_node_text(syntax, input, node) |text| {
+        if wasm_symbol(text) {
+            return self.type_names.get(text);
+        }
+        return wasm_parse_u32(text);
+    }
+    return null;
+}
+
+fn wasm_symbol(text: []u8) -> bool {
+    return mem::len(text) > 0 and text[0] == cast<u8>(36);
+}
+
+fn wasm_no_node() -> ?arena::Handle<WasmNode> {
+    return null;
+}
+
+fn wasm_parse_u32(text: []u8) -> ?i64 {
+    if mem::len(text) == 0 {
+        return null;
+    }
+    var value = 0;
+    var index = 0;
+    while index < mem::len(text) {
+        let byte = text[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return null;
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if value > (4294967295 - digit) / 10 {
+            return null;
+        }
+        value = value * 10 + digit;
+        index = index + 1;
+    }
+    return value;
+}
+
+fn wasm_parse_i64(text: []u8) -> ?i64 {
+    let length = mem::len(text);
+    if length >= 3 and text[0] == cast<u8>(48) and
+        (text[1] == cast<u8>(120) or text[1] == cast<u8>(88)) {
+        if length - 2 > 16 {
+            return null;
+        }
+        let first = wasm_hex_nibble(text[2]) orelse return null;
+        var value = first;
+        if length - 2 == 16 and first >= 8 {
+            value = first - 16;
+        }
+        var index = 3;
+        while index < length {
+            let digit = wasm_hex_nibble(text[index]) orelse return null;
+            value = value * 16 + digit;
+            index = index + 1;
+        }
+        return value;
+    }
+    var index = 0;
+    var negative = false;
+    if length > 0 and (text[0] == cast<u8>(45) or text[0] == cast<u8>(43)) {
+        negative = text[0] == cast<u8>(45);
+        index = 1;
+    }
+    if index >= length {
+        return null;
+    }
+    var value = 0;
+    while index < length {
+        let byte = text[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return null;
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if value < (-9223372036854775807 - 1 + digit) / 10 {
+            return null;
+        }
+        value = value * 10 - digit;
+        index = index + 1;
+    }
+    if negative {
+        return value;
+    }
+    if value == -9223372036854775807 - 1 {
+        return null;
+    }
+    return -value;
+}
+
+fn wasm_append_section(
+    allocator: Allocator,
+    out: &var string::String,
+    id: i64,
+    payload: &string::String
+) -> !void {
+    if payload.len() == 0 {
+        return;
+    }
+    try out.append_byte(allocator, cast<u8>(id));
+    try wasm_append_u32(allocator, out, payload.len());
+    return out.append_string(allocator, payload);
+}
+
+fn wasm_append_vector(
+    allocator: Allocator,
+    out: &var string::String,
+    bytes: []u8
+) -> !void {
+    try wasm_append_u32(allocator, out, mem::len(bytes));
+    return out.append_bytes(allocator, bytes);
+}
+
+fn wasm_append_byte_array(
+    allocator: Allocator,
+    out: &var string::String,
+    bytes: &array::Array<u8>
+) -> !void {
+    try wasm_append_u32(allocator, out, bytes.len());
+    var index = 0;
+    while bytes.get(index) |byte| {
+        try out.append_byte(allocator, byte);
+        index = index + 1;
+    }
+    return;
+}
+
+fn wasm_byte_arrays_equal(
+    left: &array::Array<u8>,
+    right: &array::Array<u8>
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    var index = 0;
+    while left.get(index) |byte| {
+        if right.get_or_panic(index) != byte {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn wasm_append_u32(
+    allocator: Allocator,
+    out: &var string::String,
+    input: i64
+) -> !void {
+    var value = input;
+    while true {
+        var current = value % 128;
+        value = value / 128;
+        if value != 0 {
+            current = current + 128;
+        }
+        try out.append_byte(allocator, cast<u8>(current));
+        if value == 0 {
+            return;
+        }
+    }
+    return;
+}
+
+fn wasm_append_i32(
+    allocator: Allocator,
+    out: &var string::String,
+    value: i64
+) -> !void {
+    let low = value % 4294967296;
+    if low > 2147483647 {
+        return wasm_append_i64(allocator, out, low - 4294967296);
+    }
+    if low < -2147483648 {
+        return wasm_append_i64(allocator, out, low + 4294967296);
+    }
+    return wasm_append_i64(allocator, out, low);
+}
+
+fn wasm_append_i64(
+    allocator: Allocator,
+    out: &var string::String,
+    input: i64
+) -> !void {
+    var value = input;
+    while true {
+        var current = value % 128;
+        var remaining = value / 128;
+        if current < 0 {
+            current = current + 128;
+            remaining = remaining - 1;
+        }
+        let done = (remaining == 0 and current < 64) or
+            (remaining == -1 and current >= 64);
+        if !done {
+            current = current + 128;
+        }
+        try out.append_byte(allocator, cast<u8>(current));
+        if done {
+            return;
+        }
+        value = remaining;
+    }
+    return;
+}
