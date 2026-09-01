@@ -1,9 +1,9 @@
-// Package stdlib says where the standard library is and what it is called.
+// Package stdlib locates the installed Kizu library tree and names std.
 //
-// Reading it is somebody else's job: std is a package with a manifest and a
-// source tree, so `internal/project` loads it the same way it loads a program's
-// own package. What is left here is the one thing that cannot come from a
-// manifest -- which directory on this machine the library tree is.
+// Reading the tree is somebody else's job: internal/project loads std from its
+// manifest, while artifact commands read fixed host assets. What is left here
+// is the one thing neither can discover from those files -- which directory on
+// this machine the library tree is.
 package stdlib
 
 import (
@@ -62,7 +62,7 @@ func resolveLibDir() (string, error) {
 	return filepath.Join(filepath.Dir(filepath.Dir(resolved)), "lib", "kizu"), nil
 }
 
-// FindLibFile returns the path of one file inside the library tree.
+// FindLibFile returns the path of one required file inside the library tree.
 func FindLibFile(name string) (string, error) {
 	dir, err := LibDir()
 	if err != nil {

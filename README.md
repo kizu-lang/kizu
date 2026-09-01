@@ -93,13 +93,21 @@ failure, runtime-only refusal, or output mismatch. The browser route likewise
 has no lowering failure or output mismatch: all remaining 27 are explicit
 target-unsupported capabilities. The browser column is broad JavaScript-engine
 coverage; the real-page fixture is `tests/browser/smoke.html`.
+In addition to the standalone binary, one command writes adjacent `app.wasm`
+and `app.mjs` browser artifacts. Importing the module does not start the
+program.
+
+```sh
+kizu build --target wasm32-browser --emit esm -o dist app.kizu
+```
 
 Tooling around the language core:
 
 - typed SSA IR with an opt-in optimization pipeline
 - bounded local build cache, content-addressed by what an artifact is made of
 - limited C header import for extern function declarations
-- the Kizu standard library in `lib/kizu/std/`
+- the Kizu standard library in `lib/kizu/std/` and browser host runtime in
+  `lib/kizu/browser/`
 - an LSP server (`cmd/kizu-lsp`)
 
 There is no interpreter. `kizu test` builds and runs test blocks the same way

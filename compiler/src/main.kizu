@@ -34,7 +34,8 @@ import std::string;
 // `ir` lowers a checked file or package to typed SSA IR and prints it,
 // `build --emit-llvm` prints the LLVM IR the lowered module emits to,
 // `build --target wasm32-wasi` and `build --target wasm32-browser` emit
-// WebAssembly text or binary for one source file,
+// WebAssembly text or binary for one source file, and the browser target can
+// emit the binary beside its JavaScript ESM host,
 // `build --target native` links a program into the executable it names,
 // `run` / `test` build a temporary executable and run it, forwarding
 // the child's exit status through `std::process::ExitStatus` (ADR-0085),
@@ -181,7 +182,7 @@ fn read_source_file(io: Io, allocator: Allocator, path: []u8) -> !SourceRead {
 /// names a failure to open and `read` one to read. The runtime folds every
 /// read-stage errno into ReadFailed, so a directory is recognized by asking
 /// the file system rather than by the error alone.
-fn append_read_failure(allocator: Allocator, 
+fn append_read_failure(allocator: Allocator,
     io: Io,
     out: &var string::String,
     path: []u8,
@@ -268,8 +269,8 @@ fn exit_of(code: i64) -> process::ExitStatus {
     return process::ExitStatus::Specific(cast<u8>(code));
 }
 
-/// Names what a lowered module produces: its IR dump, the LLVM IR emitted
-/// from it, the WASI WebAssembly text emitted from it, or nothing but the
+/// Names what a lowered module produces: its IR dump, LLVM IR, WebAssembly
+/// text or binary, the browser binary beside its ESM host, or nothing but the
 /// promise that emitting succeeded, which is what `check` prints.
 enum Output {
     Ir,
@@ -278,12 +279,14 @@ enum Output {
     WasmBinary,
     WasmBrowser,
     WasmBrowserBinary,
+    WasmBrowserEsm,
     Check,
 }
 
 /// Maps one output family to the target visible during compile-time selection.
 fn output_target(output: Output) -> stdtarget::Target {
-    if output == Output::WasmBrowser or output == Output::WasmBrowserBinary {
+    if output == Output::WasmBrowser or output == Output::WasmBrowserBinary or
+        output == Output::WasmBrowserEsm {
         return stdtarget::Target::WasmBrowser;
     }
     if output == Output::Wasm or output == Output::WasmBinary {
@@ -379,7 +382,8 @@ struct WasmBuildOptions {
     output: string::String,
     issue_detail: string::String,
     opt: bool,
-    binary: bool
+    binary: bool,
+    esm: bool
 }
 
 fn wasm_build_options_new(allocator: Allocator) -> WasmBuildOptions {
@@ -388,7 +392,8 @@ fn wasm_build_options_new(allocator: Allocator) -> WasmBuildOptions {
         output: string::new(allocator),
         issue_detail: string::new(allocator),
         opt: false,
-        binary: false
+        binary: false,
+        esm: false
     };
 }
 
@@ -401,9 +406,9 @@ enum WasmBuildParseIssue {
     MissingSource,
 }
 
-/// Parses and runs the explicit WAT or binary wasm artifact command. Binary
-/// bytes always require `-o`; the legacy no-option form still writes WAT to
-/// stdout.
+/// Parses and runs the explicit WAT, binary wasm, or browser ESM artifact
+/// command. Binary files and ESM directories require `-o`; the legacy
+/// no-option form still writes WAT to stdout.
 fn wasm_build_command(
     io: Io,
     allocator: Allocator,
@@ -414,25 +419,35 @@ fn wasm_build_command(
 ) -> !i64 {
     var options = wasm_build_options_new(allocator);
     defer options.deinit(allocator);
-    if try parse_wasm_build_options(allocator, start, count, &var options) |issue| {
-        try report_wasm_build_parse_issue(io, issue, &options.issue_detail);
+    if try parse_wasm_build_options(
+        allocator, start, count, browser, &var options
+    ) |issue| {
+        try report_wasm_build_parse_issue(io, issue, browser, &options.issue_detail);
         return 1;
     }
     if options.binary and options.output.len() == 0 {
         try io::write_stderr_line(io, "error: binary wasm output requires -o <path>");
         return 1;
     }
+    if options.esm and options.output.len() == 0 {
+        try io::write_stderr_line(io, "error: browser esm output requires -o <directory>");
+        return 1;
+    }
     let path = options.path.as_bytes();
     let output_file = options.output.as_bytes();
     var output = Output::Wasm;
-    if browser and options.binary {
-        output = Output::WasmBrowserBinary;
+    if browser and options.esm {
+        output = Output::WasmBrowserEsm;
     } else {
-        if browser {
-            output = Output::WasmBrowser;
+        if browser and options.binary {
+            output = Output::WasmBrowserBinary;
         } else {
-            if options.binary {
-                output = Output::WasmBinary;
+            if browser {
+                output = Output::WasmBrowser;
+            } else {
+                if options.binary {
+                    output = Output::WasmBinary;
+                }
             }
         }
     }
@@ -451,6 +466,7 @@ fn parse_wasm_build_options(
     allocator: Allocator,
     start: i64,
     count: i64,
+    browser: bool,
     out: &var WasmBuildOptions
 ) -> !?WasmBuildParseIssue {
     var index = start;
@@ -485,6 +501,10 @@ fn parse_wasm_build_options(
                 out.binary = false;
                 continue;
             }
+            if browser and mem::equal_bytes(format, "esm") {
+                out.esm = true;
+                continue;
+            }
             try out.issue_detail.append_bytes(allocator, format);
             return WasmBuildParseIssue::InvalidEmit;
         }
@@ -517,11 +537,18 @@ fn parse_wasm_build_options(
 fn report_wasm_build_parse_issue(
     io: Io,
     issue: WasmBuildParseIssue,
+    browser: bool,
     detail: &string::String
 ) -> !void {
     match issue {
         DuplicateOpt => try io::write_stderr_line(io, "error: duplicate --opt"),
-        EmitNeedsFormat => try io::write_stderr_line(io, "error: --emit needs wat or wasm"),
+        EmitNeedsFormat => {
+            if browser {
+                try io::write_stderr_line(io, "error: --emit needs wat, wasm, or esm");
+            } else {
+                try io::write_stderr_line(io, "error: --emit needs wat or wasm");
+            }
+        },
         InvalidEmit => {
             try io::write_stderr(io, "error: invalid wasm emit `");
             let bytes = detail.as_bytes();
@@ -560,6 +587,7 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi --emit wasm -o file [--opt] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser [--emit wat] [--opt] [-o file] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser --emit wasm -o file [--opt] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser --emit esm -o directory [--opt] <file|package>");
     try io::write_stderr_line(io, "usage: kizu cache <status|prune>");
     try io::write_stderr_line(io, "usage: kizu import-c-header <file>");
     return io::write_stderr_line(io, "usage: kizu version");
@@ -1362,6 +1390,52 @@ fn parse_source(io: Io, allocator: Allocator, file: []u8, text: string::String) 
     return 0;
 }
 
+/// Writes the installed browser runtime beside the binary it loads. The
+/// runtime is read before the output directory is created, so a broken
+/// installation cannot leave a wasm-only directory that looks complete.
+fn write_browser_esm(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    output_dir: []u8,
+    wasm_bytes: []u8
+) -> !bool {
+    let runtime_path = try path::join(allocator, lib_dir, "browser/app.mjs");
+    defer runtime_path.deinit(allocator);
+    let runtime_path_bytes = runtime_path.as_bytes();
+    if !try fs::exists(io, runtime_path_bytes) {
+        var message = try string::from_bytes(allocator, "error: open ");
+        defer message.deinit(allocator);
+        try message.append_bytes(allocator, runtime_path_bytes);
+        try message.append_bytes(allocator, ": no such file or directory");
+        try message.append_byte(allocator, cast<u8>(10));
+        try message.append_bytes(allocator, "help: the library tree is `");
+        try message.append_bytes(allocator, lib_dir);
+        try message.append_bytes(
+            allocator,
+            "`; set KIZU_LIB_DIR or pass --lib-dir to point somewhere else"
+        );
+        let message_bytes = message.as_bytes();
+        try io::write_stderr_line(io, message_bytes);
+        return false;
+    }
+    let runtime = try fs::read_file(
+        io, allocator, runtime_path_bytes, mem::Limit::Unlimited
+    );
+    defer runtime.deinit(allocator);
+    try fsutil::create_dir_all(io, output_dir);
+    let wasm_path = try path::join(allocator, output_dir, "app.wasm");
+    defer wasm_path.deinit(allocator);
+    let wasm_path_bytes = wasm_path.as_bytes();
+    try fs::write_file(io, wasm_path_bytes, wasm_bytes);
+    let module_path = try path::join(allocator, output_dir, "app.mjs");
+    defer module_path.deinit(allocator);
+    let module_path_bytes = module_path.as_bytes();
+    let runtime_bytes = runtime.as_bytes();
+    try fs::write_file(io, module_path_bytes, runtime_bytes);
+    return true;
+}
+
 /// Lowers a checked file or package to typed SSA IR and prints it, the Go
 /// `irCommand` over `lowerFile` / `lowerPackage`, the LLVM IR emitted from it,
 /// the Go `emitLLVMFile`, or the WASI WebAssembly text emitted from it, the Go
@@ -1460,13 +1534,15 @@ fn lower_target(
                     }
                     if output == Output::Wasm or output == Output::WasmBinary or
                         output == Output::WasmBrowser or
-                        output == Output::WasmBrowserBinary {
+                        output == Output::WasmBrowserBinary or
+                        output == Output::WasmBrowserEsm {
                         // A wasm module exposes only target-selected entry /
                         // export roots, so unreachable functions must not drag
                         // unused host capabilities into its imports.
                         var export_abi = "";
                         if output == Output::WasmBrowser or
-                            output == Output::WasmBrowserBinary {
+                            output == Output::WasmBrowserBinary or
+                            output == Output::WasmBrowserEsm {
                             export_abi = "browser";
                         }
                         try keep_target_program(
@@ -1474,7 +1550,8 @@ fn lower_target(
                         );
                         var text = string::new(allocator);
                         defer text.deinit(allocator);
-                        if output == Output::WasmBrowserBinary {
+                        if output == Output::WasmBrowserBinary or
+                            output == Output::WasmBrowserEsm {
                             if try wasm::emit_browser_binary(
                                 allocator,
                                 &lowerer.module,
@@ -1520,6 +1597,14 @@ fn lower_target(
                             }
                         }
                         let text_bytes = text.as_bytes();
+                        if output == Output::WasmBrowserEsm {
+                            if try write_browser_esm(
+                                io, allocator, lib_dir, output_file, text_bytes
+                            ) {
+                                return 0;
+                            }
+                            return 1;
+                        }
                         if mem::len(output_file) > 0 {
                             try fs::write_file(io, output_file, text_bytes);
                             return 0;

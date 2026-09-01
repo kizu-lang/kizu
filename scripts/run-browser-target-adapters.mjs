@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 
-import { instantiateKizu } from "../runtime/browser/kizu.mjs";
+import { instantiateKizu } from "../lib/kizu/browser/app.mjs";
 
 if (process.argv.length !== 3) {
   process.stderr.write(
