@@ -35,7 +35,9 @@ compiler/            shipping する Kizu 製 compiler(Go の seed が build す
   src/main.kizu      CLI 本体。release binary はここから build される
   src/internal/      1 directory = 1 module の、package 外へ公開しない実装
   tests/             両実装の出力を突き合わせる差分 corpus
-lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
+lib/kizu/             release binaryが隣で読むlibrary tree
+  std/src/            Kizuで書かれた標準ライブラリ
+  browser/app.mjs     browser ESM出力へcopyする共通host runtime
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
 tests/behavior/      振る舞いの assert を 1 package に束ねたもの
 tests/fixtures/      module 解決などが使う固定入力
@@ -56,6 +58,8 @@ source.kizu
                            → internal/wasm → 共通 WebAssembly module
                                            → WAT / binary `.wasm`
                                              (wasm32-wasi / wasm32-browser)
+                                           → browser ESM directory
+                                             (`app.wasm` + `app.mjs`)
 ```
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
@@ -80,6 +84,8 @@ module を inspection 用 WAT と deterministic な binary `.wasm` に描画し�
 Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせます。WASI は
 `wasmtime`、browser target は JavaScript host adapter で同じ conformance output を検査し、
 target 差は import、entry / export、host capability だけが持ちます。
+`--emit esm` はそのbrowser binaryと`lib/kizu/browser/app.mjs`を同じdirectoryへ置くだけで、
+backendを増やしません。moduleのimportだけではinstantiateも`main`も始まりません。
 
 同じ package に target 別 adapter がある場合、`std::target` を条件にした
 `comptime if` は選ばれた branch だけを type / ownership / IR が扱います。その後、
@@ -95,7 +101,8 @@ backend へ渡します。実行例は
 [`docs/wasm-browser.md`](wasm-browser.md) が持ちます。
 
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
-`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`)`cache` `import-c-header`
+`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`、browserの
+`--emit esm`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
 流れるかは `cmd/kizu/main.go` の `dispatch`(移植側は `compiler/src/main.kizu`)
 が全てです。

@@ -83,13 +83,19 @@ native 経路に pending の runnable example はありません。WASI はま�
 で、残る 20 件は backend / runtime work です。browser は lowering failure と output
 mismatch が 0、残る 27 件はすべて明示的な target 非対応です。browser 列は JavaScript
 engine の広い検証で、実 page の fixture は `tests/browser/smoke.html` です。
+browser向けにはbinary単体に加え、次のcommandで隣り合う`app.wasm`と`app.mjs`を
+directoryへ出力できます。moduleのimportだけではprogramを開始しません。
+
+```sh
+kizu build --target wasm32-browser --emit esm -o dist app.kizu
+```
 
 language core 周辺の tooling:
 
 - typed SSA IR と opt-in の最適化 pipeline
 - 上限付きローカルビルドキャッシュ(artifact が何でできているかで content-addressed)
 - extern function 宣言向けの限定的な C header import
-- `lib/kizu/std/` の Kizu 標準ライブラリ
+- `lib/kizu/std/` のKizu標準ライブラリと`lib/kizu/browser/`のbrowser host runtime
 - LSP server (`cmd/kizu-lsp`)
 
 interpreter はありません。`kizu test` は `kizu run` が `main` をビルドして実行するのと

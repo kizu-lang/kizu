@@ -134,6 +134,9 @@ const browserWATUsage = "usage: kizu build --target wasm32-browser " +
 const browserBinaryUsage = "usage: kizu build --target wasm32-browser " +
 	"--emit wasm -o file [--opt] <file|package>"
 
+const browserESMUsage = "usage: kizu build --target wasm32-browser " +
+	"--emit esm -o directory [--opt] <file|package>"
+
 // usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test> <file> [-- args...]")
@@ -146,6 +149,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, wasmBinaryUsage)
 	_, _ = fmt.Fprintln(os.Stderr, browserWATUsage)
 	_, _ = fmt.Fprintln(os.Stderr, browserBinaryUsage)
+	_, _ = fmt.Fprintln(os.Stderr, browserESMUsage)
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu version")

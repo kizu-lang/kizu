@@ -1,4 +1,4 @@
-import { instantiateKizu } from "../../runtime/browser/kizu.mjs";
+import { instantiateKizu } from "../../lib/kizu/browser/app.mjs";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();

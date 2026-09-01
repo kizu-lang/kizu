@@ -11,8 +11,15 @@ import (
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/native"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/wasm"
+)
+
+const (
+	browserESMRuntime = "browser/app.mjs"
+	browserESMModule  = "app.mjs"
+	browserESMWASM    = "app.wasm"
 )
 
 // stdErrorSets returns the numbers the runtime names its failures with. The
@@ -114,7 +121,7 @@ func emitTargetFile(target string, args []string) error {
 		usage()
 		return fmt.Errorf("invalid build target `%s`", target)
 	}
-	options, err := parseWASMBuildArgs(args)
+	options, err := parseWASMBuildArgs(args, wasmTarget == wasm.TargetBrowser)
 	if err != nil {
 		return err
 	}
@@ -133,12 +140,15 @@ type wasmBuildParser struct {
 	options  wasmBuildOptions
 	index    int
 	emitSeen bool
+	browser  bool
 }
 
 // parseWASMBuildArgs accepts an explicit text or binary renderer while keeping
 // the legacy `[--opt] <file>` WAT-to-stdout shape.
-func parseWASMBuildArgs(args []string) (wasmBuildOptions, error) {
-	parser := wasmBuildParser{args: args, options: wasmBuildOptions{Emit: "wat"}}
+func parseWASMBuildArgs(args []string, browser bool) (wasmBuildOptions, error) {
+	parser := wasmBuildParser{
+		args: args, options: wasmBuildOptions{Emit: "wat"}, browser: browser,
+	}
 	for parser.index < len(parser.args) {
 		if err := parser.parseArgument(); err != nil {
 			return wasmBuildOptions{}, err
@@ -178,11 +188,14 @@ func (p *wasmBuildParser) parseEmit() error {
 	}
 	p.emitSeen = true
 	if p.index+1 >= len(p.args) {
+		if p.browser {
+			return fmt.Errorf("--emit needs wat, wasm, or esm")
+		}
 		return fmt.Errorf("--emit needs wat or wasm")
 	}
 	p.index++
 	format := p.args[p.index]
-	if format != "wat" && format != "wasm" {
+	if format != "wat" && format != "wasm" && !(p.browser && format == "esm") {
 		return fmt.Errorf("invalid wasm emit `%s`", format)
 	}
 	p.options.Emit = format
@@ -217,6 +230,9 @@ func (p *wasmBuildParser) finish() (wasmBuildOptions, error) {
 	if p.options.Emit == "wasm" && p.options.Output == "" {
 		return wasmBuildOptions{}, fmt.Errorf("binary wasm output requires -o <path>")
 	}
+	if p.options.Emit == "esm" && p.options.Output == "" {
+		return wasmBuildOptions{}, fmt.Errorf("browser esm output requires -o <directory>")
+	}
 	return p.options, nil
 }
 
@@ -238,10 +254,13 @@ func emitWASMFile(options wasmBuildOptions, target wasm.Target) error {
 	if err != nil {
 		return err
 	}
-	if options.Emit == "wasm" {
+	if options.Emit == "wasm" || options.Emit == "esm" {
 		output, err := lowered.Binary()
 		if err != nil {
 			return err
+		}
+		if options.Emit == "esm" {
+			return emitBrowserESM(options.Output, output)
 		}
 		return os.WriteFile(options.Output, output, 0o644)
 	}
@@ -251,6 +270,27 @@ func emitWASMFile(options wasmBuildOptions, target wasm.Target) error {
 	}
 	_, _ = fmt.Println(output)
 	return nil
+}
+
+// emitBrowserESM writes the fixed JavaScript host module beside the binary it
+// loads. The runtime is read before touching the output directory, so a broken
+// installation cannot leave a wasm-only bundle that looks complete.
+func emitBrowserESM(outputDir string, wasmBytes []byte) error {
+	runtimePath, err := stdlib.FindLibFile(browserESMRuntime)
+	if err != nil {
+		return err
+	}
+	runtimeBytes, err := os.ReadFile(runtimePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, browserESMWASM), wasmBytes, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(outputDir, browserESMModule), runtimeBytes, 0o644)
 }
 
 // stdTargetForWASM maps a backend host contract to the compile-time target.

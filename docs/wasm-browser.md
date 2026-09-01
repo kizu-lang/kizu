@@ -7,7 +7,14 @@ WebAssembly target です。WAT は inspection 用、browser が読む artifact 
 ```sh
 kizu build --target wasm32-browser app.kizu
 kizu build --target wasm32-browser --emit wasm -o app.wasm app.kizu
+kizu build --target wasm32-browser --emit esm -o dist app.kizu
 ```
+
+`--emit esm` は `dist/app.wasm` と `dist/app.mjs` を書きます。`app.mjs` は同じ
+directory の `app.wasm` を `import.meta.url` から読み、host optionを受け取る
+`instantiate(options)` をexportします。importしただけではinstantiateも`main`の実行も
+始まりません。HTMLはapplicationが所有するため生成しません。browserのmoduleと
+`fetch`を使うので、成果物は`file:`で直接開かずHTTP(S)でserveします。
 
 ## Guest / host ABI
 
@@ -21,7 +28,7 @@ target が常に持つ境界は次です。
 
 `stream` は 1 が stdout、2 が stderr です。`ptr..ptr+len` は import call の間だけ
 借りられます。host が call 後も bytes を使うなら、その場で copy しなければなりません。
-標準 adapter [`runtime/browser/kizu.mjs`](../runtime/browser/kizu.mjs) は copy した
+標準 adapter [`lib/kizu/browser/app.mjs`](../lib/kizu/browser/app.mjs) は copy した
 `Uint8Array` だけを callback に渡します。callback は同期関数で、`false` を返すと
 `std::io` の書き込みは `WriteFailed` になります。`print` は error を返さない言語組み込み
 なので拒否を観測しません。書き込み失敗を処理する program は明示的な `std::io` を使います。
@@ -74,12 +81,12 @@ error payload 用の関数別 ABI や hidden allocation はありません。
 ## JavaScript adapter
 
 ```js
-import { instantiateKizu } from "./runtime/browser/kizu.mjs";
+import { instantiate } from "./dist/app.mjs";
 
 const decoders = { 1: new TextDecoder(), 2: new TextDecoder() };
 const output = document.querySelector("#output");
 const responses = new Map();
-const program = await instantiateKizu(await fetch("./app.wasm"), {
+const program = await instantiate({
   write(stream, bytes) {
     const text = decoders[stream].decode(bytes, { stream: true });
     output.append(document.createTextNode(text));
@@ -109,10 +116,11 @@ const program = await instantiateKizu(await fetch("./app.wasm"), {
 const status = program.start();
 ```
 
-adapter は `Response`、`WebAssembly.Module`、または
-`WebAssembly.instantiate` が受け取る byte buffer を受理します。戻り値は `instance`、
-`exports`、`memory`、`start()` を持ちます。host function の第 1 引数は次の操作を持つ
-固定 context です。
+`instantiate(options)` は隣の`app.wasm`を読みます。同じmoduleがexportする低水準の
+`instantiateKizu(source, options)` は、`Response`、`WebAssembly.Module`、または
+`WebAssembly.instantiate` が受け取るbyte bufferを受理します。どちらも戻り値は
+`instance`、`exports`、`memory`、`start()`を持ちます。host functionの第1引数は次の
+操作を持つ固定contextです。
 
 | 操作 | 契約 |
 | --- | --- |
@@ -157,10 +165,13 @@ branch は type / ownership / IR に入りません。その後の到達可能�
 kizu build --target native -o app examples/modules/target_adapters
 kizu build --target wasm32-wasi --emit wasm -o app-wasi.wasm examples/modules/target_adapters
 kizu build --target wasm32-browser --emit wasm -o app-browser.wasm examples/modules/target_adapters
+kizu build --target wasm32-browser --emit esm -o dist examples/modules/target_adapters
 ```
 
 `tests/browser/smoke.html` は function call、aggregate、allocation、error と、DOM が
 保持する output bytes が guest memory の上書き後も変わらないことを検査する page です。
 `tests/browser/host_interface.html` は DOM 更新、bounds-checked memory copy、非同期 callback、
 small integer ABI を実 Chrome で検査します。
+`tests/browser/esm_bundle.html` は`--emit esm`の`app.mjs`が隣のbinaryをbrowserから読み、
+明示した`start()`で実行することを検査します。
 広い corpus は `scripts/backend-matrix` の `browser` route が同じ adapter を使って測ります。

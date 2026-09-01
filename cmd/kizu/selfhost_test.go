@@ -281,6 +281,11 @@ func runSelfhostBrowserWASMCases(t *testing.T, selfhost string) {
 		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(packagePath, true),
 			"build", "--target", "wasm32-browser", "--opt", packagePath)
 		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", packagePath)
+		compareSelfhostBrowserESM(t, selfhost, packagePath, false)
+		compareSelfhostBrowserESM(t, selfhost, packagePath, true)
+	})
+	t.Run("wasm-browser/esm-missing-runtime", func(t *testing.T) {
+		compareSelfhostBrowserESMMissingRuntime(t, selfhost)
 	})
 	runSelfhostTargetAdapterBrowserCase(t, selfhost)
 	t.Run("wasm-browser/explicit-host-interface", func(t *testing.T) {
@@ -338,6 +343,79 @@ fn main() -> !process::ExitStatus {
 			"build", "--target", "wasm32-browser", path)
 		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", path)
 	})
+}
+
+// compareSelfhostBrowserESMMissingRuntime checks an incomplete installation
+// fails before creating an output directory and names the missing host asset.
+func compareSelfhostBrowserESMMissingRuntime(t *testing.T, selfhost string) {
+	t.Helper()
+	directory := t.TempDir()
+	libDir := filepath.Join(directory, "lib", "kizu")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyTree(t, "../../lib/kizu/std", filepath.Join(libDir, "std"))
+	seedDir := filepath.Join(directory, "seed")
+	selfhostDir := filepath.Join(directory, "selfhost")
+	command := func(output string) []string {
+		return []string{
+			"--lib-dir", libDir,
+			"build", "--target", "wasm32-browser", "--emit", "esm",
+			"-o", output, "../../examples/hello.kizu",
+		}
+	}
+	seed := runNativeCLI(t, kizuBinaryPath, command(seedDir)...)
+	shipping := runNativeCLI(t, selfhost, command(selfhostDir)...)
+	if seed.code == 0 || shipping != seed {
+		t.Fatalf("missing browser runtime CLI differs\nseed: %#v\nshipping: %#v", seed, shipping)
+	}
+	if !strings.Contains(seed.output.stderr, "browser/app.mjs: no such file or directory") ||
+		!strings.Contains(seed.output.stderr, "set KIZU_LIB_DIR or pass --lib-dir") {
+		t.Fatalf("missing browser runtime diagnostic is not actionable:\n%s", seed.output.stderr)
+	}
+	for _, output := range []string{seedDir, selfhostDir} {
+		if _, err := os.Stat(output); !os.IsNotExist(err) {
+			t.Fatalf("incomplete installation left output %s: %v", output, err)
+		}
+	}
+}
+
+// compareSelfhostBrowserESM checks both compilers write the same relocatable
+// JavaScript host module and browser WebAssembly binary.
+func compareSelfhostBrowserESM(t *testing.T, selfhost string, source string, opt bool) {
+	t.Helper()
+	directory := t.TempDir()
+	seedDir := filepath.Join(directory, "seed")
+	selfhostDir := filepath.Join(directory, "selfhost")
+	seedArgs := []string{
+		"build", "--target", "wasm32-browser", "--emit", "esm", "-o", seedDir,
+	}
+	shippingArgs := []string{
+		"build", "--target", "wasm32-browser", "--emit", "esm", "-o", selfhostDir,
+	}
+	if opt {
+		seedArgs = append(seedArgs, "--opt")
+		shippingArgs = append(shippingArgs, "--opt")
+	}
+	seed := runNativeCLI(t, kizuBinaryPath, append(seedArgs, source)...)
+	shipping := runNativeCLI(t, selfhost, append(shippingArgs, source)...)
+	if seed.code != 0 || shipping.code != 0 || seed.output != shipping.output {
+		t.Fatalf("browser esm CLI differs\nseed: %#v\nshipping: %#v", seed, shipping)
+	}
+	for _, name := range []string{browserESMModule, browserESMWASM} {
+		seedBytes, err := os.ReadFile(filepath.Join(seedDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		shippingBytes, err := os.ReadFile(filepath.Join(selfhostDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(seedBytes, shippingBytes) {
+			t.Fatalf("%s differs: seed=%d bytes shipping=%d bytes",
+				name, len(seedBytes), len(shippingBytes))
+		}
+	}
 }
 
 // runSelfhostTargetAdapterBrowserCase compares browser target selection in WAT and binary output.
@@ -505,12 +583,30 @@ func compareSelfhostInstalledTree(t *testing.T, selfhost string, file string) {
 		if err := os.Symlink(installed, link); err != nil {
 			t.Fatal(err)
 		}
-		for _, entry := range []string{installed, link} {
+		for _, entry := range []struct {
+			name string
+			path string
+		}{{"installed", installed}, {"symlink", link}} {
 			got := runNativeCLIAtEnv(t, elsewhere,
-				[]string{stdlib.LibDirEnv + "="}, entry, "check", source)
+				[]string{stdlib.LibDirEnv + "="}, entry.path, "check", source)
 			if got.code != 0 || got.output.stdout != "check: ok\n" {
 				t.Errorf("%s from an installed tree failed (code=%d)\nstdout:\n%sstderr:\n%s",
-					entry, got.code, got.output.stdout, got.output.stderr)
+					entry.path, got.code, got.output.stdout, got.output.stderr)
+			}
+			bundle := filepath.Join(root, "bundles", binary.name, entry.name)
+			got = runNativeCLIAtEnv(t, elsewhere,
+				[]string{stdlib.LibDirEnv + "="}, entry.path,
+				"build", "--target", "wasm32-browser", "--emit", "esm",
+				"-o", bundle, source)
+			if got.code != 0 || got.output != (cliOutput{}) {
+				t.Errorf("%s browser esm from an installed tree failed (code=%d)\nstdout:\n%sstderr:\n%s",
+					entry.path, got.code, got.output.stdout, got.output.stderr)
+				continue
+			}
+			for _, name := range []string{browserESMModule, browserESMWASM} {
+				if _, err := os.Stat(filepath.Join(bundle, name)); err != nil {
+					t.Errorf("%s: %v", entry.path, err)
+				}
 			}
 		}
 	}
@@ -745,6 +841,9 @@ func cliRepresentativeArguments() []cliArguments {
 		{"wasm_duplicate_opt", []string{"build", "--target", "wasm32-wasi", "--opt", "--opt", file}},
 		{"wasm_emit_missing_format", []string{"build", "--target", "wasm32-wasi", file, "--emit"}},
 		{"wasm_invalid_emit", []string{"build", "--target", "wasm32-wasi", "--emit", "object", file}},
+		{"wasm_esm_invalid_target", []string{
+			"build", "--target", "wasm32-wasi", "--emit", "esm", "-o", "unused", file,
+		}},
 		{"wasm_duplicate_emit", []string{
 			"build", "--target", "wasm32-wasi", "--emit", "wat", "--emit", "wasm", file,
 		}},
@@ -762,6 +861,12 @@ func cliRepresentativeArguments() []cliArguments {
 		}},
 		{"wasm_browser_binary_missing_output", []string{
 			"build", "--target", "wasm32-browser", "--emit", "wasm", file,
+		}},
+		{"wasm_browser_emit_missing_format", []string{
+			"build", "--target", "wasm32-browser", file, "--emit",
+		}},
+		{"wasm_browser_esm_missing_output", []string{
+			"build", "--target", "wasm32-browser", "--emit", "esm", file,
 		}},
 		{"target_not_found", []string{"parse", "../../examples/missing.kizu"}},
 		{"target_is_directory", []string{"parse", pkg}},

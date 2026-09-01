@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -45,6 +47,69 @@ func TestBuildTargetBrowserRunsPortablePrograms(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// TestBuildTargetBrowserEmitsESM writes the browser runtime and the binary as
+// one relocatable directory, then enters it through the emitted module rather
+// than a repository-owned adapter.
+func TestBuildTargetBrowserEmitsESM(t *testing.T) {
+	bundle := filepath.Join(t.TempDir(), "nested", "web")
+	build := kizuCommand(
+		"build", "--target", "wasm32-browser", "--emit", "esm",
+		"-o", bundle, "../../examples/hello.kizu",
+	)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("browser esm build failed: %v\n%s", err, output)
+	} else if len(output) != 0 {
+		t.Fatalf("browser esm build wrote to terminal: %q", output)
+	}
+
+	entries, err := os.ReadDir(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if want := []string{browserESMModule, browserESMWASM}; !slices.Equal(names, want) {
+		t.Fatalf("got bundle entries %v, want %v", names, want)
+	}
+
+	wasmBytes, err := os.ReadFile(filepath.Join(bundle, browserESMWASM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(wasmBytes, []byte{0x00, 'a', 's', 'm'}) {
+		t.Fatalf("app.wasm does not have the WebAssembly magic: % x", wasmBytes[:min(4, len(wasmBytes))])
+	}
+	runtimeBytes, err := os.ReadFile(filepath.Join("../../lib/kizu", browserESMRuntime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emittedRuntime, err := os.ReadFile(filepath.Join(bundle, browserESMModule))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(emittedRuntime, runtimeBytes) {
+		t.Fatal("app.mjs differs from the installed browser runtime")
+	}
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Log("node is not installed; skipping emitted ESM execution")
+		return
+	}
+	run := exec.Command(
+		node, "../../scripts/run-browser-esm.mjs", filepath.Join(bundle, browserESMModule),
+	)
+	output, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emitted browser esm failed: %v\n%s", err, output)
+	}
+	if got, want := string(output), "hello, kizu\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
