@@ -2,7 +2,6 @@ package wasm
 
 import (
 	"fmt"
-	"strings"
 )
 
 // Target names the host boundary attached to a common WebAssembly module.
@@ -31,6 +30,9 @@ func (t Target) isBrowser() bool {
 // validateTarget rejects reached host capabilities the selected boundary does
 // not provide before any module text is written.
 func (e *emitter) validateTarget() error {
+	if err := e.validateForeignBoundary(); err != nil {
+		return err
+	}
 	if !e.target.isBrowser() {
 		return e.validateProcessTarget()
 	}
@@ -82,13 +84,51 @@ func (e *emitter) validateTarget() error {
 			)
 		}
 	}
-	if e.usesExternalCall() {
+	return nil
+}
+
+// validateForeignBoundary checks the ABI facts lowering retained. No backend
+// infers foreignness from a callee name.
+func (e *emitter) validateForeignBoundary() error {
+	for _, function := range e.module.Functions {
+		if function.ExportABI != "" &&
+			(!e.target.isBrowser() || function.ExportABI != "browser") {
+			return fmt.Errorf(
+				"wasm error: target %s does not support export `%s`",
+				e.target.name(), function.ExportABI,
+			)
+		}
+		for _, block := range function.Blocks {
+			for _, instr := range block.Instrs {
+				if err := e.validateExternABI(instr.ExternABI); err != nil {
+					return err
+				}
+				for _, cleanup := range instr.Cleanups {
+					if err := e.validateExternABI(cleanup.ExternABI); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateExternABI applies one target rule to a direct or deferred call.
+func (e *emitter) validateExternABI(abi string) error {
+	if abi == "" || (e.target.isBrowser() && abi == "browser") {
+		return nil
+	}
+	if e.target.isBrowser() && abi == "c" {
 		return fmt.Errorf(
 			"wasm error: target %s does not support extern C",
 			e.target.name(),
 		)
 	}
-	return nil
+	return fmt.Errorf(
+		"wasm error: target %s does not support extern `%s`",
+		e.target.name(), abi,
+	)
 }
 
 // usesAnyBuiltin reports whether one capability group remains reachable.
@@ -99,39 +139,6 @@ func (e *emitter) usesAnyBuiltin(names ...string) bool {
 		}
 	}
 	return false
-}
-
-// usesExternalCall reports whether a reached direct call names an extern C
-// symbol. Module-local and std builtin calls have an ABI owned by the compiler;
-// every other resolved direct call came from an extern declaration.
-func (e *emitter) usesExternalCall() bool {
-	for _, function := range e.module.Functions {
-		for _, block := range function.Blocks {
-			for _, instr := range block.Instrs {
-				if e.isExternalCall(instr.Op) {
-					return true
-				}
-				for _, cleanup := range instr.Cleanups {
-					if e.isExternalCall(cleanup.Op) {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
-}
-
-// isExternalCall classifies one lowered operation without guessing from the
-// external symbol's spelling.
-func (e *emitter) isExternalCall(op string) bool {
-	name, ok := strings.CutPrefix(op, "call.")
-	if !ok || name == "indirect" || name == "print" ||
-		strings.HasPrefix(name, "std::internal::builtin::") {
-		return false
-	}
-	_, local := e.paramsByFunction[name]
-	return !local
 }
 
 var browserEventedBuiltins = []string{

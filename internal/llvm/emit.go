@@ -73,6 +73,9 @@ type valueInfo struct {
 
 // emit writes declarations and function definitions.
 func (e *emitter) emit() error {
+	if err := e.validateForeignBoundary(); err != nil {
+		return err
+	}
 	e.collectFunctionNames()
 	e.collectStrings()
 	if err := e.validateModuleTypes(); err != nil {
@@ -83,6 +86,38 @@ func (e *emitter) emit() error {
 	for _, fn := range e.module.Functions {
 		if err := e.writeFunction(fn); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateForeignBoundary rejects explicit imports and exports the native
+// backend cannot provide, including calls attached to deferred error paths.
+func (e *emitter) validateForeignBoundary() error {
+	for _, function := range e.module.Functions {
+		if function.ExportABI != "" {
+			return fmt.Errorf(
+				"llvm error: target native does not support export `%s`",
+				function.ExportABI,
+			)
+		}
+		for _, block := range function.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.ExternABI != "" && instr.ExternABI != "c" {
+					return fmt.Errorf(
+						"llvm error: target native does not support extern `%s`",
+						instr.ExternABI,
+					)
+				}
+				for _, cleanup := range instr.Cleanups {
+					if cleanup.ExternABI != "" && cleanup.ExternABI != "c" {
+						return fmt.Errorf(
+							"llvm error: target native does not support extern `%s`",
+							cleanup.ExternABI,
+						)
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -544,6 +579,21 @@ func (e *emitter) externalCallDecls() []string {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
+				for _, cleanup := range instr.Cleanups {
+					if cleanup.ExternABI != "c" {
+						continue
+					}
+					cleanupInstr := cleanupInstruction(cleanup)
+					seen[cleanup.ExternName] = e.externalCallDecl(
+						cleanup.ExternName, cleanupInstr,
+					)
+				}
+				if instr.ExternABI != "" {
+					if instr.ExternABI == "c" {
+						seen[instr.ExternName] = e.externalCallDecl(instr.ExternName, instr)
+					}
+					continue
+				}
 				if !strings.HasPrefix(instr.Op, "call.") ||
 					instr.Op == "call.indirect" {
 					continue
@@ -566,6 +616,18 @@ func (e *emitter) externalCallDecls() []string {
 		decls = append(decls, seen[name])
 	}
 	return decls
+}
+
+// cleanupInstruction presents an attached cleanup through the same typed call
+// view used by declaration and call emission.
+func cleanupInstruction(cleanup ir.Cleanup) *ir.Instr {
+	return &ir.Instr{
+		Result:     ir.Value{Type: "void"},
+		Op:         cleanup.Op,
+		Args:       cleanup.Args,
+		ExternABI:  cleanup.ExternABI,
+		ExternName: cleanup.ExternName,
+	}
 }
 
 // externalCallDecl formats one external call declaration from typed IR operands.
@@ -1501,13 +1563,17 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 // writeCall writes runtime print and user function calls.
 func (e *emitter) writeCall(instr *ir.Instr) error {
 	name := strings.TrimPrefix(instr.Op, "call.")
-	if name == "print" {
+	foreignC := instr.ExternABI == "c"
+	if foreignC {
+		name = instr.ExternName
+	}
+	if !foreignC && name == "print" {
 		return e.writePrint(instr.Args)
 	}
-	if e.usesHostedRuntimeABI(name, instr) {
+	if !foreignC && e.usesHostedRuntimeABI(name, instr) {
 		return e.writeHostedRuntimeCall(name, instr)
 	}
-	if e.functionNames[name] {
+	if !foreignC && e.functionNames[name] {
 		return e.writeInternalCall(name, instr)
 	}
 	args := make([]string, 0, len(instr.Args))
@@ -2394,11 +2460,8 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 // Cleanup args arrive as values, never `&var` slots: the lowerer loads
 // slot-backed receivers before attaching cleanups to an instruction.
 func (e *emitter) writeCleanup(cleanup ir.Cleanup) error {
-	instr := &ir.Instr{
-		Result: ir.Value{Name: "%" + e.nextSyntheticValue("cleanup"), Type: "void"},
-		Op:     cleanup.Op,
-		Args:   cleanup.Args,
-	}
+	instr := cleanupInstruction(cleanup)
+	instr.Result.Name = "%" + e.nextSyntheticValue("cleanup")
 	return e.writeInstr(instr)
 }
 

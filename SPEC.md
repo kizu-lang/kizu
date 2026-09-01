@@ -1949,7 +1949,7 @@ member でもあるので、`CacheError!T` の関数は `FsError!T` の呼び出
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、runtime helper を実装しない
 
-## 12. unsafe / C ABI
+## 12. unsafe / host ABI
 
 `unsafe` は、コンパイラが memory safety を証明しない操作を式単位で明示する
 マーカーです。`try` / `comptime` と同じく式の前に置きます。
@@ -2037,7 +2037,8 @@ unsafe fn raw_write(p: ptr<u8>, value: u8) -> void {
 unsafe ptr_write(dst, unsafe ptr_read(src));
 ```
 
-C ABI declaration は `extern "c" fn` で書きます。
+外部 host の関数宣言は `extern "<abi>" fn` で書きます。C ABI は
+`extern "c" fn` です。
 
 ```kizu
 extern "c" fn puts(s: ptr<const u8>) -> i32
@@ -2050,7 +2051,7 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
   内側の `unsafe` が唯一の操作を覆っている場合、外側のマーカーは未使用になる
 * マーカーの単位は式である。`unsafe p.* = value` はマーカーが代入先を覆う。
   代入する値は別の式なので、それ自体が未証明ならそちらにもマーカーが要る
-* `extern "c" fn` の呼び出しには `unsafe` が要る
+* `extern "..." fn` の呼び出しには `unsafe` が要る
 * `unsafe fn` の呼び出しには `unsafe` が要る
 * `unsafe fn` の本体は暗黙に覆われない
 * `fn(...) -> T` を通した呼び出しに `unsafe` は要らない
@@ -2098,7 +2099,7 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_deref` | `p.*` / `p.* = value` / `p.*.field` |
 | `ptr_cast` | raw pointer 間の `cast<ptr<...>>(value)` |
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
-| `extern_call` | `extern "c" fn` call |
+| `extern_call` | `extern "..." fn` call |
 | `unsafe_call` | `unsafe fn` call |
 | `struct_invariant` | `unsafe struct` の構築 / field write |
 | `volatile` | volatile read/write primitive |
@@ -2106,7 +2107,7 @@ fn update(node: ptr<Node>) -> void {
 この表の名前はソースには書きません。マーカーは `unsafe` の 1 語で、種類は
 式の綴りが名乗ります(`ptr_read(p)`、`p.*`、`cast<ptr<u8>>(p)`)。綴りから
 読めない `extern_call` / `unsafe_call` / `struct_invariant` は、呼び先や書き込み先の
-宣言(`extern "c" fn` / `unsafe fn` / `unsafe struct`)と module path が名乗ります。名前が残るのは診断メッセージの中だけで、
+宣言(`extern "..." fn` / `unsafe fn` / `unsafe struct`)と module path が名乗ります。名前が残るのは診断メッセージの中だけで、
 マーカーが無いときにどの種類の操作だったかを伝えます。
 
 `atomic`、`unchecked_index` は採用しません。
@@ -2137,7 +2138,63 @@ ptr<const T> const T*
 ?ptr<T>    nullable T*
 ```
 
-### 12.1 C header import
+### 12.1 browser host ABI
+
+`wasm32-browser` では JavaScript host への同期 import を
+`extern "browser" fn`、JavaScript から明示的に再入できる callback を
+`export "browser" fn` で宣言します。
+
+```kizu
+extern "browser" fn set_title(text: []u8) -> void
+extern "browser" fn begin(handle: u32, request: []u8) -> void
+
+export "browser" fn completed(handle: u32, status: i32) -> void {
+    // status と handle を Kizu 側の状態・error に明示的に写す
+}
+```
+
+`extern "browser"` の呼び出しも外部 code と guest memory の契約を compiler が
+証明できないため `unsafe` が要ります。import は WebAssembly の `host` module から、
+export は WebAssembly instance から、どちらも宣言した関数の末尾の source identifier
+(`app::ui::set_title` なら `set_title`)で公開されます。同じ host 名を複数 module が
+宣言した場合、signature が同じなら 1 import を共有し、異なれば build error です。
+
+境界を通せる型は次だけです。
+
+| Kizu 型 | WebAssembly 型 | 向き |
+| --- | --- | --- |
+| `i8` / `i16` / `i32` / `u8` / `u16` / `u32` | `i32` | import / export |
+| `usize` / `isize` | `i32` | import / export |
+| `i64` / `u64` | `i64` | import / export |
+| `bool` | `i32` (`0` / `1`) | import / export |
+| `ptr<T>` / `ptr<const T>` / nullable raw pointer | `i32` address | import / export |
+| `[]u8` | `i32` pointer + `i32` length | import parameter only |
+| `void` | result なし | return only |
+
+小さい整数は宣言した幅に正規化します。たとえば host が `i8` に `255` の bit pattern を
+返せば Kizu 値は `-1`、`u8` に返せば `255` です。`usize` / `isize` と pointer は
+browser target が wasm32 なので 32 bit です。
+
+receiver、static parameter、`&T` / `&var T` parameter、aggregate、owner、通常の optional、
+error union は通せません。`extern "browser"` だけは `[]u8` parameter を受け取れます。
+これは import call の間だけ有効な guest memory の view で、host が後で使うなら call 中に
+copy します。書き込み可能な storage として使う宣言では、caller の `unsafe` comment が
+その範囲と lifetime の契約を持ちます。`export "browser"` の parameter は scalar だけです。
+browser import は host wrapper を介するため、`extern "browser" fn` の名前を function pointer
+値として取り出すこともできません。
+
+import は同期関数です。JavaScript の `Promise` を返して guest の stack を暗黙に suspend
+しません。非同期 browser API は、Kizu が数値 handle を渡して開始し、import が一度返り、
+完了時に JavaScript が source にある `export "browser" fn` を handle / status とともに
+呼びます。bytes が必要なら callback 内で guest-owned storage を用意し、別の同期 import で
+読みます。失敗を error union の payload ABI に暗黙変換せず、status を callback body が
+Kizu の error に明示的に写します。
+
+`export "browser" fn` は browser build の到達可能性 root です。`main`、`memory`、
+`kizu_start` は target の entry/runtime が使うため export 名にできません。他の target は
+browser import / export を build 時に拒否し、`extern "c"` は browser target が拒否します。
+
+### 12.2 C header import
 
 Kizu は C header の完全互換 parser は持ちません。
 Phase 14 の header import は、限定された C function prototype を `extern "c" fn` に変換する補助機能です。

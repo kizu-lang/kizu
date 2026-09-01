@@ -308,6 +308,15 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 
 // writeCall writes builtin print and user function calls.
 func (e *emitter) writeCall(instr *ir.Instr) error {
+	if instr.ExternABI != "" {
+		if e.target.isBrowser() && instr.ExternABI == "browser" {
+			return e.writeBrowserHostCall(instr)
+		}
+		return fmt.Errorf(
+			"wasm error: target %s does not support extern `%s`",
+			e.target.name(), instr.ExternABI,
+		)
+	}
 	name := strings.TrimPrefix(instr.Op, "call.")
 	if name == "print" {
 		return e.writePrint(instr.Args)

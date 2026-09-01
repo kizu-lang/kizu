@@ -1,6 +1,5 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
-import std::mem;
 
 // Mechanical port of internal/wasm/target.go: host capabilities are selected
 // before the common module is written, and unsupported browser APIs fail at
@@ -13,6 +12,9 @@ fn (self: &Emitter) is_browser() -> bool {
 fn (self: &var Emitter) validate_target(
     module: &ir::Module
 ) -> !?diagnostic::Diagnostic {
+    if try self.validate_foreign_boundary(module) |failed| {
+        return move failed;
+    }
     if !self.is_browser() {
         return self.validate_process_target(module);
     }
@@ -60,10 +62,71 @@ fn (self: &var Emitter) validate_target(
     if self.uses_builtin_call(module, "std::internal::builtin::process_spawn_wait8") {
         return try self.browser_process_failure("std::process::spawn_wait8");
     }
-    if self.uses_external_call(module) {
-        return try self.browser_capability_failure("extern C");
+    return null;
+}
+
+fn (self: &var Emitter) validate_foreign_boundary(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        if !ir::is_empty(function_node.export_abi) and
+            (!self.is_browser() or !module.names.is(function_node.export_abi, "browser")) {
+            let abi = try self.own(module, function_node.export_abi);
+            return try self.fail2(
+                "wasm error: target %s does not support export `%s`",
+                Arg::Lit(self.target_name()), Arg::Str(abi)
+            );
+        }
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if try self.validate_extern_abi(module, node.extern_abi) |failed| {
+                    return move failed;
+                }
+                var cleanup_index = 0;
+                while node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if try self.validate_extern_abi(module, cleanup.extern_abi) |failed| {
+                        return move failed;
+                    }
+                }
+            }
+        }
     }
     return null;
+}
+
+fn (self: &var Emitter) validate_extern_abi(
+    module: &ir::Module,
+    abi: ir::Name
+) -> !?diagnostic::Diagnostic {
+    if ir::is_empty(abi) or
+        (self.is_browser() and module.names.is(abi, "browser")) {
+        return null;
+    }
+    if self.is_browser() and module.names.is(abi, "c") {
+        return try self.browser_capability_failure("extern C");
+    }
+    let shown = try self.own(module, abi);
+    return try self.fail2(
+        "wasm error: target %s does not support extern `%s`",
+        Arg::Lit(self.target_name()), Arg::Str(shown)
+    );
+}
+
+fn (self: &Emitter) target_name() -> []u8 {
+    if self.is_browser() {
+        return "wasm32-browser";
+    }
+    return "wasm32-wasi";
 }
 
 fn (self: &var Emitter) browser_process_failure(
@@ -119,53 +182,4 @@ fn (self: &Emitter) uses_browser_net(module: &ir::Module) -> bool {
         self.uses_builtin_call(module, "std::internal::builtin::net_poller_token") or
         self.uses_builtin_call(module, "std::internal::builtin::net_poller_flags") or
         self.uses_builtin_call(module, "std::internal::builtin::net_poller_close");
-}
-
-fn (self: &Emitter) uses_external_call(module: &ir::Module) -> bool {
-    var function_index = 0;
-    while module.functions.get(function_index) |function| {
-        function_index = function_index + 1;
-        let function_node = module.function_nodes.at(function.node);
-        var block_index = 0;
-        while function_node.blocks.get(block_index) |block| {
-            block_index = block_index + 1;
-            let block_node = module.blocks.at(block.node);
-            var instr_index = 0;
-            while block_node.instrs.get(instr_index) |instr| {
-                instr_index = instr_index + 1;
-                let node = module.instrs.at(instr.node);
-                if self.is_external_call(module, node.op, node.operand) {
-                    return true;
-                }
-                var cleanup_index = 0;
-                while node.cleanups.get(cleanup_index) |cleanup| {
-                    cleanup_index = cleanup_index + 1;
-                    if self.is_external_call(module, cleanup.op, cleanup.operand) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-fn (self: &Emitter) is_external_call(
-    module: &ir::Module,
-    op: ir::Op,
-    operand: ir::Name
-) -> bool {
-    if op != ir::Op::Call {
-        return false;
-    }
-    let retained = ir::name_text(&module.names, operand);
-    let name = retained.as_bytes();
-    if mem::equal_bytes(name, "print") or
-        mem::starts_with(name, "std::internal::builtin::") {
-        return false;
-    }
-    if module.function_named(name) |_| {
-        return false;
-    }
-    return true;
 }

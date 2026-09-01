@@ -1,0 +1,37 @@
+extern "browser" fn set_heading(text: []u8) -> void
+extern "browser" fn begin_message(handle: u32, text: []u8) -> void
+extern "browser" fn read_message(handle: u32, destination: []u8) -> usize
+extern "browser" fn set_result(text: []u8) -> void
+extern "browser" fn flip_byte(value: i8) -> u8
+
+export "browser" fn message_ready(handle: u32, status: i32) -> void {
+    if status != cast<i32>(0) {
+        // SAFETY: set_result borrows this static byte view for the synchronous call only.
+        unsafe set_result("host error");
+        return;
+    }
+
+    var storage = [64]u8{};
+    let writable = storage.as_mut_bytes();
+    // SAFETY: writable names 64 bytes of live guest storage for the duration of the call.
+    let length = unsafe read_message(handle, writable);
+    let end = cast<i64>(length);
+    // SAFETY: read_message returned a length no greater than the declared destination capacity.
+    unsafe set_result(writable[0..end]);
+}
+
+export "browser" fn byte_roundtrip(value: i8) -> u8 {
+    // SAFETY: flip_byte accepts and returns one integer value without retaining guest state.
+    return unsafe flip_byte(value);
+}
+
+export "browser" fn bool_roundtrip(value: bool) -> bool {
+    return value;
+}
+
+fn main() -> void {
+    // SAFETY: set_heading copies the borrowed static bytes during the call.
+    unsafe set_heading("Kizu browser host ready");
+    // SAFETY: begin_message copies the text and retains only the numeric handle.
+    unsafe begin_message(7, "browser callback");
+}

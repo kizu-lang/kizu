@@ -658,6 +658,9 @@ fn (self: &var Emitter) int_name(value: i64) -> !ir::Name {
 
 /// Writes declarations and function definitions, the Go `emit`.
 fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    if try self.validate_foreign_boundary(module) |failed| {
+        return move failed;
+    }
     try self.collect_function_names(module);
     try self.collect_strings(module);
     if try self.validate_module_types(module) |failed| {
@@ -670,6 +673,54 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
         index = index + 1;
         if try self.write_function(module, function) |failed| {
             return move failed;
+        }
+    }
+    return null;
+}
+
+fn (self: &var Emitter) validate_foreign_boundary(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        if !ir::is_empty(function_node.export_abi) {
+            let abi = try self.own(module, function_node.export_abi);
+            return try self.fail1(
+                "llvm error: target native does not support export `%s`",
+                Arg::Str(abi)
+            );
+        }
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if !ir::is_empty(node.extern_abi) and
+                    !module.names.is(node.extern_abi, "c") {
+                    let abi = try self.own(module, node.extern_abi);
+                    return try self.fail1(
+                        "llvm error: target native does not support extern `%s`",
+                        Arg::Str(abi)
+                    );
+                }
+                var cleanup_index = 0;
+                while node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if !ir::is_empty(cleanup.extern_abi) and
+                        !module.names.is(cleanup.extern_abi, "c") {
+                        let abi = try self.own(module, cleanup.extern_abi);
+                        return try self.fail1(
+                            "llvm error: target native does not support extern `%s`",
+                            Arg::Str(abi)
+                        );
+                    }
+                }
+            }
         }
     }
     return null;
@@ -1447,6 +1498,8 @@ fn (self: &var Emitter) write_cleanup(module: &ir::Module, cleanup: ir::Cleanup)
         cleanup.op, cleanup.operand, ir::empty_name()
     );
     defer instr.deinit(self.allocator);
+    instr.extern_abi = cleanup.extern_abi;
+    instr.extern_name = cleanup.extern_name;
     try instr.args.append(self.allocator, cleanup.arg);
     if !ir::is_empty(cleanup.allocator.name) {
         try instr.args.append(self.allocator, cleanup.allocator);

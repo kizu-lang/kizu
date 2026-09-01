@@ -40,6 +40,32 @@ func TestKeepReachableFunctionsKeepsModuleWithoutRoot(t *testing.T) {
 	}
 }
 
+// TestKeepReachableFunctionsRootsExplicitExports preserves callbacks the host
+// can enter even when main never calls them.
+func TestKeepReachableFunctionsRootsExplicitExports(t *testing.T) {
+	exported := functionWithOps("callback", "call.helper")
+	exported.ExportABI = "browser"
+	exported.ExportName = "callback"
+	module := &Module{Functions: []*Function{
+		functionWithOps("main"),
+		exported,
+		functionWithOps("helper"),
+		functionWithOps("dead"),
+	}}
+
+	KeepReachableFunctions(module, "main")
+
+	want := []string{"main", "callback", "helper"}
+	if len(module.Functions) != len(want) {
+		t.Fatalf("reachable function count = %d, want %d", len(module.Functions), len(want))
+	}
+	for index, name := range want {
+		if module.Functions[index].Name != name {
+			t.Fatalf("function %d = %q, want %q", index, module.Functions[index].Name, name)
+		}
+	}
+}
+
 // functionWithOps builds one test function with the requested operations.
 func functionWithOps(name string, ops ...string) *Function {
 	instrs := make([]*Instr, 0, len(ops))

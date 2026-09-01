@@ -79,10 +79,10 @@ type lowerer struct {
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// being lowered.
 	metaFields map[string]metaField
-	// externSymbols maps a resolved extern "c" function name to its C symbol.
-	// Module resolution qualifies every declared name, but the linker knows the
-	// declaration's own identifier, so calls emit that instead.
-	externSymbols map[string]string
+	// externDecls maps a resolved foreign function name to its ABI and host
+	// symbol. Module resolution qualifies declarations; foreign hosts see the
+	// declaration's own identifier.
+	externDecls map[string]externalDecl
 	// nextErrorCode is the next global code for an error set the program
 	// declares itself; std members keep the codes std assigns.
 	nextErrorCode int
@@ -95,6 +95,11 @@ type lowerer struct {
 	// ownership is the preceding phase's output. Keeping it beside the syntax
 	// tree makes the phase boundary explicit and leaves AST nodes immutable.
 	ownership ownership.Result
+}
+
+type externalDecl struct {
+	abi  string
+	name string
 }
 
 // genericInstance is one generic function with its static parameters bound.
@@ -163,7 +168,7 @@ func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer
 		typeBindings:      map[string]string{},
 		instantiated:      map[string]bool{},
 		staticValues:      map[string]staticValue{},
-		externSymbols:     map[string]string{},
+		externDecls:       map[string]externalDecl{},
 		genericDecls:      generics,
 		structDecls:       structs,
 		enumDecls:         enums,
@@ -562,8 +567,10 @@ func (l *lowerer) collectDecls() error {
 	for _, decl := range l.program.Decls {
 		if fn, ok := decl.(*ast.FunctionDecl); ok {
 			l.signatures[fn.Name] = l.lowerSignature(fn.FunctionSignature)
-			if fn.ExternABI == "c" {
-				l.externSymbols[fn.Name] = externCSymbol(fn.Name)
+			if fn.ExternABI != "" {
+				l.externDecls[fn.Name] = externalDecl{
+					abi: fn.ExternABI, name: externalSymbol(fn.Name),
+				}
 			}
 		}
 	}
@@ -599,10 +606,10 @@ func genericMethodName(name string) (string, bool) {
 	return method, ok
 }
 
-// externCSymbol strips the module qualification a resolver added to an extern
-// "c" declaration. The C symbol is the identifier the declaration was written
-// with; the qualified spelling exists only inside this compiler.
-func externCSymbol(name string) string {
+// externalSymbol strips the module qualification a resolver added to a
+// foreign declaration. The host symbol is the source identifier; the
+// qualified spelling exists only inside this compiler.
+func externalSymbol(name string) string {
 	if index := strings.LastIndex(name, "::"); index >= 0 {
 		return name[index+2:]
 	}
@@ -794,7 +801,14 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 // about what it takes is the one thing a call site cannot see.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
 	signature := l.lowerSignature(fn.FunctionSignature)
-	l.current = &Function{Name: name, Params: signature.Params, Return: signature.Return}
+	exportName := ""
+	if fn.ExportABI != "" {
+		exportName = externalSymbol(fn.Name)
+	}
+	l.current = &Function{
+		Name: name, Params: signature.Params, Return: signature.Return,
+		ExportABI: fn.ExportABI, ExportName: exportName,
+	}
 	l.env = newEnv()
 	slots, err := l.mutablyBorrowedLocals(fn)
 	if err != nil {
@@ -1961,10 +1975,17 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 	} else if builtinReturn, ok := runtimeBuiltinReturnType(name); ok {
 		ret = builtinReturn
 	}
-	if symbol, ok := l.externSymbols[name]; ok {
-		name = symbol
+	external, foreign := l.externDecls[name]
+	if foreign {
+		name = external.name
 	}
-	return l.emit("call."+name, ret, args, ""), nil
+	result := l.emit("call."+name, ret, args, "")
+	if foreign {
+		instr := l.block.Instrs[len(l.block.Instrs)-1]
+		instr.ExternABI = external.abi
+		instr.ExternName = external.name
+	}
+	return result, nil
 }
 
 // lowerTypedNamedCallExpr lowers the small typed-call subset with backend support.

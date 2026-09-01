@@ -38,17 +38,18 @@ func LowerTarget(module *ir.Module, target Target) (*Module, error) {
 		paramsByFunction[fn.Name] = fn.Params
 	}
 	e := &emitter{
-		module:           module,
-		target:           target,
-		types:            typ.NewTable(),
-		paramsByFunction: paramsByFunction,
-		strings:          map[string]dataRef{},
-		enumTables:       map[string]nameTable{},
-		errorTable:       nameTable{},
-		values:           map[string]valueInfo{},
-		panicKinds:       map[string]bool{},
-		tableIndex:       map[string]int{},
-		signatureIndex:   map[string]int{},
+		module:             module,
+		target:             target,
+		types:              typ.NewTable(),
+		paramsByFunction:   paramsByFunction,
+		strings:            map[string]dataRef{},
+		enumTables:         map[string]nameTable{},
+		errorTable:         nameTable{},
+		values:             map[string]valueInfo{},
+		panicKinds:         map[string]bool{},
+		tableIndex:         map[string]int{},
+		signatureIndex:     map[string]int{},
+		browserImportIndex: map[string]int{},
 	}
 	if err := e.emit(); err != nil {
 		return nil, err
@@ -102,6 +103,10 @@ type emitter struct {
 	// in the order they were first needed.
 	signatures     []funcSignature
 	signatureIndex map[string]int
+	// browserImports are the reached explicit extern "browser" declarations,
+	// retained once per host name in deterministic IR discovery order.
+	browserImports     []*ir.Instr
+	browserImportIndex map[string]int
 }
 
 // funcSignature is one wasm function type a `call_indirect` names.
@@ -113,6 +118,9 @@ type funcSignature struct {
 // emit writes the module, runtime helpers, and user functions.
 func (e *emitter) emit() error {
 	if err := e.validateTarget(); err != nil {
+		return err
+	}
+	if err := e.collectBrowserImports(); err != nil {
 		return err
 	}
 	e.collectPanicKinds()
@@ -128,6 +136,9 @@ func (e *emitter) emit() error {
 		if err := e.writeFunction(fn); err != nil {
 			return err
 		}
+	}
+	if err := e.writeBrowserExports(); err != nil {
+		return err
 	}
 	return e.writeStart()
 }
@@ -254,6 +265,7 @@ func (e *emitter) writeHeader() {
 	if e.target.isBrowser() {
 		e.out.WriteString("  (import \"kizu\" \"write\"\n")
 		e.out.WriteString("    (func $__kizu_write (param i32 i32 i32) (result i32)))\n")
+		e.writeBrowserImports()
 	} else {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
 		e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")

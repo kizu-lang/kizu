@@ -94,7 +94,9 @@ pub struct FunctionNode {
     pub name: Name,
     pub params: array::Array<Param>,
     pub return_type: Name,
-    pub blocks: array::Array<Block>
+    pub blocks: array::Array<Block>,
+    pub export_abi: Name,
+    pub export_name: Name
 }
 
 /// Identifies one basic block retained by a Module.
@@ -139,6 +141,10 @@ pub struct InstrNode {
     pub op: Op,
     pub operand: Name,
     pub args: array::Array<Value>,
+    // Explicit foreign-call facts consumed by backends. An empty ABI means a
+    // normal Kizu call.
+    pub extern_abi: Name,
+    pub extern_name: Name,
     // The ABI signature carried by an indirect call. A direct call reads
     // this from the function it names; an indirect call has no declaration
     // at the use site, so lowering retains the Param facts beside it.
@@ -171,6 +177,11 @@ pub struct Cleanup {
     // (ADR-0132). A runtime op whose header still holds one carries none, and
     // spells that as the empty value.
     pub allocator: Value,
+    // Explicit foreign-call facts consumed by backends. A cleanup can remain
+    // attached to error.try, so its boundary cannot be recovered from a
+    // standalone instruction later.
+    pub extern_abi: Name,
+    pub extern_name: Name,
     pub on_error: bool,
     pub receiver: Name
 }
@@ -793,6 +804,8 @@ pub fn (self: &Module) blank_instr(result: Value, op: Op, operand: Name, immedia
         op: op,
         operand: operand,
         args: array::new<Value>(allocator),
+        extern_abi: empty_name(),
+        extern_name: empty_name(),
         call_params: array::new<Param>(allocator),
         immediate: immediate,
         fields: array::new<FieldArg>(allocator),
@@ -855,6 +868,15 @@ pub fn (self: &var Module) add_cleanup(allocator: Allocator, instr: Instr, clean
 pub fn (self: &var Module) add_call_param(allocator: Allocator, instr: Instr, param: Param) -> !void {
     if self.instrs.at_mut(instr.node) |node| {
         try node.call_params.append(allocator, param);
+    }
+    return;
+}
+
+/// Marks one direct call as a declared foreign boundary.
+pub fn (self: &var Module) set_extern_call(instr: Instr, abi: Name, name: Name) -> void {
+    if self.instrs.at_mut(instr.node) |node| {
+        node.extern_abi = abi;
+        node.extern_name = name;
     }
     return;
 }

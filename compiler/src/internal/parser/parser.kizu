@@ -159,6 +159,9 @@ fn (self: &var Parser) parse_top_level_declaration(
     if kind == token::Kind::Extern {
         return try self.parse_extern_decl(tree);
     }
+    if kind == token::Kind::Export {
+        return try self.parse_export_decl(tree);
+    }
     if kind == token::Kind::Struct {
         return try self.parse_struct_decl(tree);
     }
@@ -201,6 +204,9 @@ fn (self: &var Parser) parse_top_level_decl_with_doc(
     }
     if kind == token::Kind::Extern {
         return self.parse_extern_decl_with_doc(tree, move docs, true);
+    }
+    if kind == token::Kind::Export {
+        return self.parse_export_decl_with_doc(tree, move docs, true);
     }
     if kind == token::Kind::Struct {
         let declaration = try self.parse_struct_decl_with_doc(tree, move docs, true) orelse
@@ -259,6 +265,7 @@ fn (self: &Parser) function_stub(
     errdefer docs.deinit(self.allocator);
     let name = try tree.add_empty_text();
     let extern_abi = try tree.add_empty_text();
+    let export_abi = try tree.add_empty_text();
     let doc = try tree.add_text(move docs);
     return ast::FunctionDecl {
         signature: ast::FunctionSignature {
@@ -269,6 +276,7 @@ fn (self: &Parser) function_stub(
             return_type: null,
             requires_unsafe: false,
             extern_abi: extern_abi,
+            export_abi: export_abi,
             public: public,
             std: false
         },
@@ -393,6 +401,32 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     }
     let _ = try self.parse_function_signature_after_fn(tree, &var function.signature);
     return add_function_decl(self.allocator, tree, move function);
+}
+
+fn (self: &var Parser) parse_export_decl(
+    tree: &var ast::Ast
+) -> !ast::Declaration {
+    let docs = try self.current_comment_text();
+    return self.parse_export_decl_with_doc(tree, move docs, false);
+}
+
+fn (self: &var Parser) parse_export_decl_with_doc(
+    tree: &var ast::Ast,
+    docs: string::String,
+    public: bool
+) -> !ast::Declaration {
+    var function = try self.function_stub(tree, public, move docs);
+    errdefer function.deinit(self.allocator);
+    if !try self.expect_peek(token::Kind::String) {
+        function.deinit(self.allocator);
+        return try tree.add_recovered_declaration(token_span_at(self));
+    }
+    function.signature.export_abi = try self.retain_current_literal(tree);
+    if !try self.expect_peek(token::Kind::Function) {
+        function.deinit(self.allocator);
+        return try tree.add_recovered_declaration(token_span_at(self));
+    }
+    return self.parse_function_after_fn(tree, move function);
 }
 
 fn add_function_decl(
@@ -3035,7 +3069,7 @@ fn positive_decimal(current: &token::Token) -> ?i64 {
 }
 
 fn (self: &var Parser) error_expected_declaration() -> !void {
-    let prefix = "expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got ";
+    let prefix = "expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, export, pub, or unsafe), got ";
     return self.error_token(prefix, self.current_token());
 }
 

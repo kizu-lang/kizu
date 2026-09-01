@@ -59,10 +59,12 @@ type Field struct {
 // decided for them, so a reader asks how an argument travels instead of
 // inferring it back from the type's spelling.
 type Function struct {
-	Name   string
-	Params []Param
-	Return string
-	Blocks []*Block
+	Name       string
+	Params     []Param
+	Return     string
+	Blocks     []*Block
+	ExportABI  string
+	ExportName string
 }
 
 // Block is a basic block with instructions and one terminator. Its predecessors
@@ -93,6 +95,10 @@ type Instr struct {
 	Result Value
 	Op     string
 	Args   []Value
+	// ExternABI and ExternName identify a declared foreign call. Backends read
+	// these facts instead of guessing from an unresolved call target.
+	ExternABI  string
+	ExternName string
 	// CallParams is the ABI signature carried by an indirect call. A direct
 	// call can read this from the function it names; an indirect call has no
 	// declaration at the use site, so lowering records the same Param facts
@@ -119,10 +125,15 @@ type Instr struct {
 // Receiver names the local the cleanup consumes, so an error exit can drop the
 // cleanups a move has retired (ADR-0114).
 type Cleanup struct {
-	Op       string
-	Args     []Value
-	OnError  bool
-	Receiver string
+	Op   string
+	Args []Value
+	// ExternABI and ExternName carry the same declared foreign-call facts as
+	// Instr. A cleanup can stay attached to error.try instead of becoming an
+	// instruction, so deriving them later from Op would lose the boundary.
+	ExternABI  string
+	ExternName string
+	OnError    bool
+	Receiver   string
 }
 
 // FieldArg connects a struct field name to a value.

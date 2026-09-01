@@ -28,6 +28,10 @@ struct CollectionImplMethodIssue {
     contract_name: ast::Text, type_name: ast::Text, method: FunctionHandle
 }
 
+struct CollectionHostParamIssue {
+    name: ast::Text, index: i64, type_name: Type
+}
+
 struct FunctionParamStorage {
     params: array::Array<Type>,
     borrow_params: array::Array<bool>,
@@ -70,6 +74,16 @@ union TypeCollectionIssue {
     ParamBuffer(ast::Text),
     ParamCompileTimeOnly(CollectionNamedTypeIssue),
     ParamBorrowOptionalValue(ast::Text),
+    FunctionExternAndExport(ast::Text),
+    UnsupportedExternAbi(ast::Text),
+    UnsupportedExportAbi(ast::Text),
+    BrowserHostMethod(ast::Text),
+    BrowserHostStaticParams(ast::Text),
+    BrowserExportMain,
+    BrowserExportReserved(ast::Text),
+    BrowserHostBorrowParam(CollectionHostParamIssue),
+    BrowserHostParam(CollectionHostParamIssue),
+    BrowserHostReturn(CollectionNamedTypeIssue),
 }
 
 union DeclaredFunctionResult {
@@ -532,6 +546,11 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
             return function_storage_issue(self.allocator, move storage, issue);
         }
     }
+    if self.validate_host_function_signature(
+        tree, signature, &storage.params, return_type
+    ) |issue| {
+        return function_storage_issue(self.allocator, move storage, issue);
+    }
     let cached = try self.cache_function_signature(tree, signature);
     errdefer cached.deinit(self.allocator);
     let retained_name = tree.texts.at(signature.name.node);
@@ -549,6 +568,99 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
     let handle = FunctionHandle { index: self.metadata.functions.len() };
     try self.metadata.functions.append(self.allocator, move function_type);
     return DeclaredFunctionResult::Value(handle);
+}
+
+// Keeps foreign ABIs explicit and limits the browser boundary to values with
+// one stable WebAssembly representation.
+fn (self: &Checker) validate_host_function_signature(
+    tree: &ast::Ast,
+    signature: &ast::FunctionSignature,
+    params: &array::Array<Type>,
+    return_type: Type
+) -> ?TypeCollectionIssue {
+    let retained_extern_abi = tree.texts.at(signature.extern_abi.node);
+    let extern_abi = retained_extern_abi.as_bytes();
+    let retained_export_abi = tree.texts.at(signature.export_abi.node);
+    let export_abi = retained_export_abi.as_bytes();
+    if mem::len(extern_abi) > 0 and mem::len(export_abi) > 0 {
+        return TypeCollectionIssue::FunctionExternAndExport(signature.name);
+    }
+    if mem::len(extern_abi) > 0 and
+        !mem::equal_bytes(extern_abi, "c") and
+        !mem::equal_bytes(extern_abi, "browser") {
+        return TypeCollectionIssue::UnsupportedExternAbi(signature.extern_abi);
+    }
+    if mem::len(export_abi) > 0 and !mem::equal_bytes(export_abi, "browser") {
+        return TypeCollectionIssue::UnsupportedExportAbi(signature.export_abi);
+    }
+    let browser_import = mem::equal_bytes(extern_abi, "browser");
+    let browser_export = mem::equal_bytes(export_abi, "browser");
+    if !browser_import and !browser_export {
+        return null;
+    }
+    if signature.receiver {
+        return TypeCollectionIssue::BrowserHostMethod(signature.name);
+    }
+    if signature.static_params.len() > 0 {
+        return TypeCollectionIssue::BrowserHostStaticParams(signature.name);
+    }
+    let retained_name = tree.texts.at(signature.name.node);
+    let name = retained_name.as_bytes();
+    if browser_export {
+        if collection_name_has_leaf(name, "main") {
+            return TypeCollectionIssue::BrowserExportMain;
+        }
+        if collection_name_has_leaf(name, "memory") or
+            collection_name_has_leaf(name, "kizu_start") {
+            return TypeCollectionIssue::BrowserExportReserved(signature.name);
+        }
+    }
+    var index = 0;
+    while params.get(index) |parameter_type| {
+        let issue = CollectionHostParamIssue {
+            name: signature.name, index: index + 1, type_name: parameter_type
+        };
+        if signature.params.at(index) |parameter| {
+            if parameter.borrow or parameter.mut_borrow {
+                return TypeCollectionIssue::BrowserHostBorrowParam(issue);
+            }
+        }
+        if !browser_host_scalar(&self.types, parameter_type) and
+            !(browser_import and self.types.is_text(parameter_type, "[]u8")) {
+            return TypeCollectionIssue::BrowserHostParam(issue);
+        }
+        index = index + 1;
+    }
+    if !self.types.is_text(return_type, "void") and
+        !browser_host_scalar(&self.types, return_type) {
+        let issue = CollectionNamedTypeIssue {
+            name: signature.name, type_name: return_type
+        };
+        return TypeCollectionIssue::BrowserHostReturn(issue);
+    }
+    return null;
+}
+
+fn browser_host_scalar(types: &TypeTable, value: Type) -> bool {
+    if types.is_text(value, "bool") or types.is_pointer_type(value) {
+        return true;
+    }
+    return types.is_text(value, "i8") or types.is_text(value, "i16") or
+        types.is_text(value, "i32") or types.is_text(value, "i64") or
+        types.is_text(value, "u8") or types.is_text(value, "u16") or
+        types.is_text(value, "u32") or types.is_text(value, "u64") or
+        types.is_text(value, "usize") or types.is_text(value, "isize");
+}
+
+fn collection_name_has_leaf(name: []u8, leaf: []u8) -> bool {
+    var index = mem::len(name);
+    while index > 1 {
+        index = index - 1;
+        if name[index] == cast<u8>(58) and name[index - 1] == cast<u8>(58) {
+            return mem::equal_bytes(name[index + 1..], leaf);
+        }
+    }
+    return mem::equal_bytes(name, leaf);
 }
 
 fn function_storage_issue(
@@ -613,8 +725,11 @@ fn (self: &var Checker) reserved_static_parameter(tree: &ast::Ast, signature: &a
 fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::FunctionSignature) -> !FunctionSignatureType {
     let retained_abi = tree.texts.at(source.extern_abi.node);
     let abi = retained_abi.as_bytes();
+    let retained_export_abi = tree.texts.at(source.export_abi.node);
+    let export_abi = retained_export_abi.as_bytes();
     var signature = FunctionSignatureType {
         extern_abi: try string::from_bytes(self.allocator, abi),
+        export_abi: try string::from_bytes(self.allocator, export_abi),
         static_params: array::new<StaticParamType>(self.allocator),
         params: array::new<SignatureParamType>(self.allocator),
         return_type: empty_type(),
@@ -857,6 +972,64 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
         ParamBorrowOptionalValue(name) => {
             try append_parameter_name(self.allocator, &var message, tree, name);
             try message.append_bytes(self.allocator, " cannot borrow an optional yet");
+        },
+        FunctionExternAndExport(name) => {
+            try append_function_name(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator, " cannot be both extern and export");
+        },
+        UnsupportedExternAbi(abi) => {
+            try message.append_bytes(self.allocator, "unsupported extern ABI ");
+            try message.append_byte(self.allocator, cast<u8>(34));
+            try append_collection_text(self.allocator, &var message, tree, abi);
+            try message.append_byte(self.allocator, cast<u8>(34));
+        },
+        UnsupportedExportAbi(abi) => {
+            try message.append_bytes(self.allocator, "unsupported export ABI ");
+            try message.append_byte(self.allocator, cast<u8>(34));
+            try append_collection_text(self.allocator, &var message, tree, abi);
+            try message.append_byte(self.allocator, cast<u8>(34));
+        },
+        BrowserHostMethod(name) => {
+            try message.append_bytes(self.allocator, "browser host ");
+            try append_function_name(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator, " cannot be a method");
+        },
+        BrowserHostStaticParams(name) => {
+            try message.append_bytes(self.allocator, "browser host ");
+            try append_function_name(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator, " cannot have static parameters");
+        },
+        BrowserExportMain => {
+            try message.append_bytes(self.allocator,
+                "browser export `main` conflicts with the program entry"
+            );
+        },
+        BrowserExportReserved(name) => {
+            try message.append_bytes(self.allocator, "browser export ");
+            try append_function_name(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator,
+                " conflicts with a reserved browser export"
+            );
+        },
+        BrowserHostBorrowParam(host_param) => {
+            try message.append_bytes(self.allocator, "browser host ");
+            try append_function_name(self.allocator, &var message, tree, host_param.name);
+            try message.append_bytes(self.allocator, " cannot borrow parameter ");
+            try fmt::append_i64(self.allocator, &var message, host_param.index);
+        },
+        BrowserHostParam(host_param) => {
+            try message.append_bytes(self.allocator, "browser host ");
+            try append_function_name(self.allocator, &var message, tree, host_param.name);
+            try message.append_bytes(self.allocator, " parameter ");
+            try fmt::append_i64(self.allocator, &var message, host_param.index);
+            try message.append_bytes(self.allocator, " has unsupported type ");
+            try self.append_checker_type(&var message, host_param.type_name);
+        },
+        BrowserHostReturn(named) => {
+            try message.append_bytes(self.allocator, "browser host ");
+            try append_function_name(self.allocator, &var message, tree, named.name);
+            try message.append_bytes(self.allocator, " has unsupported return type ");
+            try self.append_checker_type(&var message, named.type_name);
         },
     }
     var value = try new_checker_diagnostic(self.allocator, category, move message);

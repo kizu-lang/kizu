@@ -28,6 +28,13 @@ fn ends_with_newline(out: &string::String) -> bool {
 /// Writes one function dump, the Go `writeFunction`.
 pub fn append_function(allocator: Allocator, out: &var string::String, module: &Module, function: Function) -> !void {
     let node = module.function_nodes.at(function.node);
+    if !is_empty(node.export_abi) {
+        try out.append_bytes(allocator, "export ");
+        try out.append_byte(allocator, cast<u8>(34));
+        try module.names.append_to(out, node.export_abi);
+        try out.append_byte(allocator, cast<u8>(34));
+        try out.append_byte(allocator, cast<u8>(32));
+    }
     try out.append_bytes(allocator, "fn ");
     try module.names.append_to(out, node.name);
     try out.append_byte(allocator, cast<u8>(40));
@@ -125,18 +132,32 @@ fn append_generic_instr(out: &var string::String, module: &Module, node: &InstrN
         try append_cleanups(module.names.allocator, &var args, module, &node.cleanups);
     }
     if module.names.is(node.result.type_name, "void") {
+        if !is_empty(node.extern_abi) {
+            try append_extern_prefix(out, module, node.extern_abi);
+        }
         try append_op(module.names.allocator, out, &module.names, node.op, node.operand);
         try out.append_bytes(module.names.allocator, " ");
         return out.append_string(module.names.allocator, &args);
     }
     try append_value(module.names.allocator, out, module, node.result);
     try out.append_bytes(module.names.allocator, " = ");
+    if !is_empty(node.extern_abi) {
+        try append_extern_prefix(out, module, node.extern_abi);
+    }
     try append_op(module.names.allocator, out, &module.names, node.op, node.operand);
     if args.len() == 0 {
         return;
     }
     try out.append_bytes(module.names.allocator, " ");
     return out.append_string(module.names.allocator, &args);
+}
+
+fn append_extern_prefix(out: &var string::String, module: &Module, abi: Name) -> !void {
+    try out.append_bytes(module.names.allocator, "extern ");
+    try out.append_byte(module.names.allocator, cast<u8>(34));
+    try module.names.append_to(out, abi);
+    try out.append_byte(module.names.allocator, cast<u8>(34));
+    return out.append_byte(module.names.allocator, cast<u8>(32));
 }
 
 /// Formats deferred cleanups attached to a fallible instruction.
@@ -147,6 +168,9 @@ fn append_cleanups(allocator: Allocator, out: &var string::String, module: &Modu
             try out.append_bytes(allocator, "; ");
         }
         index = index + 1;
+        if !is_empty(cleanup.extern_abi) {
+            try append_extern_prefix(out, module, cleanup.extern_abi);
+        }
         try append_op(allocator, out, &module.names, cleanup.op, cleanup.operand);
         try out.append_bytes(allocator, " ");
         try append_value(allocator, out, module, cleanup.arg);

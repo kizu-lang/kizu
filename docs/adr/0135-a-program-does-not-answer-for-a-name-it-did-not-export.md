@@ -33,16 +33,20 @@ stack guard page です。`send()` が Kizu の `@send` を呼び、それが
 
 ## Decision
 
-**`main` 以外のすべての関数定義を internal linkage で出す。**
+**native では `main` 以外のすべての関数定義を internal linkage で出す。**
 
 ```llvm
 define internal i64 @app__math__answer() { ... }
 define i32 @main(i32 %kizu.argc, ptr %kizu.argv) { ... }
 ```
 
-Kizu プログラムは何も export しません。`extern "c" fn` は C の symbol を
-**import** する綴りで、逆向きを綴る方法は言語にありません(SPEC §12)。だから
-外の世界が必要とする名前は `main` 1 つだけです。
+native Kizu program は `main` 以外を export しません。`extern "c" fn` は C の symbol を
+**import** する綴りで、native の逆向きはありません(SPEC §12)。だから native で外の
+世界が必要とする名前は `main` 1 つだけです。
+
+`wasm32-browser` は source に `export "browser" fn` と書いた関数だけ、同名の stable ABI
+wrapper を export します。通常の関数や `pub fn` を暗黙に出さず、実装関数そのものを
+host ABI にしません。これは program が自分で名乗った名前にだけ答える同じ規則です。
 
 internal linkage の symbol は link に参加しません。runtime.o の `send` は
 libc の `send` に解決され、プログラムが自分のために選んだ名前は自分のもので
@@ -72,4 +76,6 @@ declaration であって定義ではないので、この規則の対象外で�
 - 最適化ありの build では、呼ばれない internal 関数が落ちる。
   binary が小さくなる副次効果がある
 - `--emit-llvm` の出力に `internal` が付く。LLVM corpus は再生成した
-- wasm backend は別経路で、export は自分の規則で決める
+- WASI backend は `_start` だけを export する
+- browser backend は `memory` / `kizu_start` と source に明記した
+  `export "browser" fn` wrapper だけを export する

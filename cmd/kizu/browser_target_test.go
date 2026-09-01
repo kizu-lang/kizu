@@ -123,6 +123,35 @@ func TestBuildTargetBrowserMapsExitStatus(t *testing.T) {
 	}
 }
 
+// TestBuildTargetBrowserRunsExplicitHostInterface crosses source-declared host
+// imports, bounded guest-memory copy, a later JavaScript callback, and narrow
+// integer adaptation through the public adapter rather than inspecting WAT.
+func TestBuildTargetBrowserRunsExplicitHostInterface(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required for browser host adapter execution")
+	}
+	artifact := filepath.Join(t.TempDir(), "host-interface.wasm")
+	build := kizuCommand(
+		"build", "--target", "wasm32-browser", "--emit", "wasm",
+		"-o", artifact, "../../tests/browser/host_interface.kizu",
+	)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("browser host interface build failed: %v\n%s", err, output)
+	} else if len(output) != 0 {
+		t.Fatalf("browser host interface build wrote to terminal: %q", output)
+	}
+	run := exec.Command(node, "../../scripts/run-browser-host.mjs", artifact)
+	output, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("explicit browser host interface failed: %v\n%s", err, output)
+	}
+	if got, want := string(output),
+		"Kizu browser host ready\nBROWSER CALLBACK\n-1/255\nbool=1\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestBuildTargetBrowserRejectsMissingCapabilities checks browser absence at
 // build time instead of producing a module whose imports cannot be attached.
 func TestBuildTargetBrowserRejectsMissingCapabilities(t *testing.T) {

@@ -369,9 +369,11 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 // writeCleanup emits one deferred void instruction inside error.try's failed arm.
 func (e *emitter) writeCleanup(cleanup ir.Cleanup) error {
 	return e.writeInstr(&ir.Instr{
-		Result: ir.Value{Type: "void"},
-		Op:     cleanup.Op,
-		Args:   cleanup.Args,
+		Result:     ir.Value{Type: "void"},
+		Op:         cleanup.Op,
+		Args:       cleanup.Args,
+		ExternABI:  cleanup.ExternABI,
+		ExternName: cleanup.ExternName,
 	})
 }
 

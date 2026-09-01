@@ -111,7 +111,9 @@ fn emit_format(
         table: array::new<ir::Name>(allocator),
         table_index: map::new<[]u8, i64>(allocator),
         signatures: array::new<string::String>(allocator),
-        signature_index: map::new<[]u8, i64>(allocator)
+        signature_index: map::new<[]u8, i64>(allocator),
+        browser_imports: array::new<ir::Instr>(allocator),
+        browser_import_index: map::new<[]u8, i64>(allocator)
     };
     defer emitter.deinit(allocator);
     var function_index = 0;
@@ -217,7 +219,9 @@ struct Emitter {
     // signatures lists the `(type ...)` declarations `call_indirect` names,
     // in the order they were first needed.
     signatures: array::Array<string::String>,
-    signature_index: map::Map<[]u8, i64>
+    signature_index: map::Map<[]u8, i64>,
+    browser_imports: array::Array<ir::Instr>,
+    browser_import_index: map::Map<[]u8, i64>
 }
 
 /// Is one value a format interpolates, the argument of a Go `fmt.Fprintf`:
@@ -438,6 +442,9 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
     if try self.validate_target(module) |failed| {
         return move failed;
     }
+    if try self.collect_browser_imports(module) |failed| {
+        return move failed;
+    }
     try self.collect_panic_kinds(module);
     try self.collect_strings(module);
     if try self.collect_function_table(module) |failed| {
@@ -453,6 +460,9 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
         if try self.write_function(module, function) |failed| {
             return move failed;
         }
+    }
+    if try self.write_browser_exports(module) |failed| {
+        return move failed;
     }
     return self.write_start(module);
 }
@@ -697,6 +707,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         ;
         try self.line(import_line);
         try self.line("    (func $__kizu_write (param i32 i32 i32) (result i32)))");
+        try self.write_browser_imports(module);
     } else {
         let import_line =
             \\  (import "wasi_snapshot_preview1" "fd_write"

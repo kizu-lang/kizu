@@ -235,6 +235,12 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 // target refusals, direct binary renderer, and ExitStatus boundary.
 func runSelfhostBrowserWASMCases(t *testing.T, selfhost string) {
 	t.Helper()
+	t.Run("wasm-browser/explicit-host-interface", func(t *testing.T) {
+		path := "../../tests/browser/host_interface.kizu"
+		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
+			"build", "--target", "wasm32-browser", path)
+		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", path)
+	})
 	for _, example := range []string{
 		"hello.kizu",
 		"aggregate_calls.kizu",

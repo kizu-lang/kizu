@@ -19,6 +19,12 @@ func KeepReachableFunctions(module *Module, roots ...string) {
 			queue = append(queue, root)
 		}
 	}
+	for _, fn := range module.Functions {
+		if fn.ExportABI != "" && !reachable[fn.Name] {
+			reachable[fn.Name] = true
+			queue = append(queue, fn.Name)
+		}
+	}
 	if len(queue) == 0 {
 		return
 	}
@@ -50,11 +56,11 @@ func directCallees(fn *Function) []string {
 	callees := []string{}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			if callee, ok := directCallee(instr.Op); ok {
+			if callee, ok := directCallee(instr.Op); ok && instr.ExternABI == "" {
 				callees = append(callees, callee)
 			}
 			for _, cleanup := range instr.Cleanups {
-				if callee, ok := directCallee(cleanup.Op); ok {
+				if callee, ok := directCallee(cleanup.Op); ok && cleanup.ExternABI == "" {
 					callees = append(callees, callee)
 				}
 			}

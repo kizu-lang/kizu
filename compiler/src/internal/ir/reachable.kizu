@@ -37,6 +37,20 @@ pub fn keep_reachable_functions(allocator: Allocator, module: &var Module, roots
             }
         }
     }
+    index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if is_empty(node.export_abi) {
+            continue;
+        }
+        let retained = name_text(&module.names, node.name);
+        let bytes = retained.as_bytes();
+        if !reachable.contains(bytes) {
+            try reachable.insert(allocator, bytes, true);
+            try queue.append(allocator, function);
+        }
+    }
     if queue.len() == 0 {
         return;
     }
@@ -107,14 +121,18 @@ fn direct_callees(allocator: Allocator, module: &Module, function: Function) -> 
         while block_node.instrs.get(instr_index) |instr| {
             instr_index = instr_index + 1;
             let instr_node = module.instrs.at(instr.node);
-            if direct_callee(instr_node.op, instr_node.operand) |callee| {
-                try callees.append(allocator, callee);
+            if is_empty(instr_node.extern_abi) {
+                if direct_callee(instr_node.op, instr_node.operand) |callee| {
+                    try callees.append(allocator, callee);
+                }
             }
             var cleanup_index = 0;
             while instr_node.cleanups.get(cleanup_index) |cleanup| {
                 cleanup_index = cleanup_index + 1;
-                if direct_callee(cleanup.op, cleanup.operand) |callee| {
-                    try callees.append(allocator, callee);
+                if is_empty(cleanup.extern_abi) {
+                    if direct_callee(cleanup.op, cleanup.operand) |callee| {
+                        try callees.append(allocator, callee);
+                    }
                 }
             }
         }

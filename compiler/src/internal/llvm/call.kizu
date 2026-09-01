@@ -13,14 +13,21 @@ import std::string;
 
 /// Writes runtime print and user function calls, the Go `writeCall`.
 fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if module.names.is(node.operand, "print") {
+    var callee_name = node.operand;
+    let foreign_c = module.names.is(node.extern_abi, "c");
+    if foreign_c {
+        callee_name = node.extern_name;
+    }
+    if !foreign_c and module.names.is(node.operand, "print") {
         return self.write_print(module, node);
     }
-    if try self.uses_hosted_runtime_abi(module, node.operand, node) {
+    if !foreign_c and try self.uses_hosted_runtime_abi(module, node.operand, node) {
         return self.write_hosted_runtime_call(module, node.operand, node);
     }
-    if self.function_named(module, node.operand) |callee| {
-        return self.write_internal_call(module, callee, node);
+    if !foreign_c {
+        if self.function_named(module, node.operand) |callee| {
+            return self.write_internal_call(module, callee, node);
+        }
     }
     var args = array::new<string::String>(self.allocator);
     defer args.deinit(self.allocator);
@@ -32,7 +39,7 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
         try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
     }
     let result_type = try self.llvm_type_of(module, node.result.type_name);
-    let symbol = try self.callee_symbol(module, node.operand);
+    let symbol = try self.callee_symbol(module, callee_name);
     let joined = try string::join(self.allocator, &args, ", ");
     let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
     return self.write_call_line(module, node, call);

@@ -21,6 +21,9 @@ func writeFunction(out *bytes.Buffer, fn *Function) {
 	for _, param := range fn.Params {
 		params = append(params, param.Value().String())
 	}
+	if fn.ExportABI != "" {
+		fmt.Fprintf(out, "export %q ", fn.ExportABI)
+	}
 	fmt.Fprintf(out, "fn %s(%s) -> %s {\n", fn.Name, strings.Join(params, ", "), fn.Return)
 	for _, block := range fn.Blocks {
 		writeBlock(out, block)
@@ -58,6 +61,10 @@ func formatInstr(instr *Instr) string {
 
 // formatGenericInstr formats a normal non-special instruction.
 func formatGenericInstr(instr *Instr) string {
+	op := instr.Op
+	if instr.ExternABI != "" {
+		op = fmt.Sprintf("extern %q %s", instr.ExternABI, op)
+	}
 	args := formatValues(instr.Args)
 	if instr.Immediate != "" {
 		if args != "" {
@@ -72,19 +79,23 @@ func formatGenericInstr(instr *Instr) string {
 		args += "cleanup " + formatCleanups(instr.Cleanups)
 	}
 	if instr.Result.Type == "void" {
-		return fmt.Sprintf("%s %s", instr.Op, args)
+		return fmt.Sprintf("%s %s", op, args)
 	}
 	if args == "" {
-		return fmt.Sprintf("%s = %s", instr.Result.String(), instr.Op)
+		return fmt.Sprintf("%s = %s", instr.Result.String(), op)
 	}
-	return fmt.Sprintf("%s = %s %s", instr.Result.String(), instr.Op, args)
+	return fmt.Sprintf("%s = %s %s", instr.Result.String(), op, args)
 }
 
 // formatCleanups formats deferred cleanups attached to a fallible instruction.
 func formatCleanups(cleanups []Cleanup) string {
 	parts := make([]string, 0, len(cleanups))
 	for _, cleanup := range cleanups {
-		parts = append(parts, fmt.Sprintf("%s %s", cleanup.Op, formatValues(cleanup.Args)))
+		op := cleanup.Op
+		if cleanup.ExternABI != "" {
+			op = fmt.Sprintf("extern %q %s", cleanup.ExternABI, op)
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", op, formatValues(cleanup.Args)))
 	}
 	return strings.Join(parts, "; ")
 }

@@ -53,6 +53,51 @@ func TestEmitPhase2Subsets(t *testing.T) {
 	}
 }
 
+// TestForeignBoundaryRejectsWrongTarget checks direct and deferred calls use
+// only the ABI their selected Wasm host provides.
+func TestForeignBoundaryRejectsWrongTarget(t *testing.T) {
+	browserImport := lowerSource(t, `extern "browser" fn notify(value: i32) -> void
+fn main() -> void {
+    // SAFETY: notify accepts a plain integer value.
+    unsafe notify(1);
+}`)
+	if _, err := LowerTarget(browserImport, TargetWASI); err == nil ||
+		!strings.Contains(err.Error(), "target wasm32-wasi does not support extern `browser`") {
+		t.Fatalf("unexpected WASI result: %v", err)
+	}
+
+	cImport := lowerSource(t, `extern "c" fn notify(value: i32) -> void
+fn main() -> void {
+    // SAFETY: the declared C function accepts a plain integer value.
+    unsafe notify(1);
+}`)
+	if _, err := LowerTarget(cImport, TargetBrowser); err == nil ||
+		!strings.Contains(err.Error(), "target wasm32-browser does not support extern C") {
+		t.Fatalf("unexpected browser result: %v", err)
+	}
+
+	deferredCImport := &ir.Module{Functions: []*ir.Function{{
+		Name:   "main",
+		Return: "void",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%1", Type: "void"},
+				Op:     "error.try",
+				Cleanups: []ir.Cleanup{{
+					Op:         "call.release",
+					ExternABI:  "c",
+					ExternName: "release",
+				}},
+			}},
+		}},
+	}}}
+	if _, err := LowerTarget(deferredCImport, TargetBrowser); err == nil ||
+		!strings.Contains(err.Error(), "target wasm32-browser does not support extern C") {
+		t.Fatalf("unexpected deferred browser result: %v", err)
+	}
+}
+
 // TestBinaryRunsHello checks deterministic binary output through a real
 // WebAssembly runtime rather than pinning encoder internals.
 func TestBinaryRunsHello(t *testing.T) {

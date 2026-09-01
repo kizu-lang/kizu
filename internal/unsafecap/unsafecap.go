@@ -12,7 +12,7 @@ type Info struct {
 var capabilities = []Info{
 	{
 		Name:        "extern_call",
-		ShortPermit: "covers calls to `extern \"c\" fn` declarations",
+		ShortPermit: "covers calls to `extern \"<abi>\" fn` declarations",
 	},
 	{
 		Name:        "ptr_cast",

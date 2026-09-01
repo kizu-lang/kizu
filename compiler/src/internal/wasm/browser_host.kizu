@@ -1,0 +1,364 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// The explicit JavaScript boundary. Imports are retained in deterministic IR
+// discovery order; byte slices expand to pointer + length only for the call.
+
+fn (self: &var Emitter) collect_browser_imports(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if !self.is_browser() {
+        return null;
+    }
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if !module.names.is(node.extern_abi, "browser") {
+                    continue;
+                }
+                let retained = ir::name_text(&module.names, node.extern_name);
+                let name = retained.as_bytes();
+                if self.browser_import_index.get(name) |previous_index| {
+                    let previous = self.browser_imports.get_or_panic(previous_index);
+                    let previous_node = module.instrs.at(previous.node);
+                    if !same_browser_signature(previous_node, node) {
+                        let owned = try self.own(module, node.extern_name);
+                        return try self.fail(
+                            "wasm error: browser host import `%s` has conflicting signatures",
+                            Arg::Str(owned)
+                        );
+                    }
+                    continue;
+                }
+                let position = self.browser_imports.len();
+                try self.browser_import_index.insert(self.allocator, name, position);
+                try self.browser_imports.append(self.allocator, instr);
+            }
+        }
+    }
+    return null;
+}
+
+fn same_browser_signature(
+    left: &ir::InstrNode,
+    right: &ir::InstrNode
+) -> bool {
+    if !ir::same_name(left.result.type_name, right.result.type_name) or
+        left.args.len() != right.args.len() {
+        return false;
+    }
+    var index = 0;
+    while left.args.get(index) |left_arg| {
+        let right_arg = right.args.get_or_panic(index);
+        if !ir::same_name(left_arg.type_name, right_arg.type_name) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn (self: &var Emitter) write_browser_imports(module: &ir::Module) -> !void {
+    var index = 0;
+    while self.browser_imports.get(index) |instr| {
+        let node = module.instrs.at(instr.node);
+        var line = try string::from_bytes(self.allocator, "  (import ");
+        errdefer line.deinit(self.allocator);
+        try line.append_byte(self.allocator, cast<u8>(34));
+        try line.append_bytes(self.allocator, "host");
+        try line.append_byte(self.allocator, cast<u8>(34));
+        try line.append_byte(self.allocator, cast<u8>(32));
+        try line.append_byte(self.allocator, cast<u8>(34));
+        try module.names.append_to(&var line, node.extern_name);
+        try line.append_byte(self.allocator, cast<u8>(34));
+        try line.append_bytes(self.allocator, " (func $__kizu_host_");
+        try fmt::append_i64(self.allocator, &var line, index);
+        if node.args.len() > 0 {
+            try line.append_bytes(self.allocator, " (param");
+            var arg_index = 0;
+            while node.args.get(arg_index) |arg| {
+                arg_index = arg_index + 1;
+                if module.names.is(arg.type_name, "[]u8") {
+                    try line.append_bytes(self.allocator, " i32 i32");
+                } else {
+                    try line.append_byte(self.allocator, cast<u8>(32));
+                    try line.append_bytes(
+                        self.allocator,
+                        browser_boundary_type(&module.names, arg.type_name)
+                    );
+                }
+            }
+            try line.append_byte(self.allocator, cast<u8>(41));
+        }
+        if !module.names.is(node.result.type_name, "void") {
+            try line.append_bytes(self.allocator, " (result ");
+            try line.append_bytes(
+                self.allocator,
+                browser_boundary_type(&module.names, node.result.type_name)
+            );
+            try line.append_byte(self.allocator, cast<u8>(41));
+        }
+        try line.append_bytes(self.allocator, "))");
+        try self.line1("%s", Arg::Owned(move line));
+        index = index + 1;
+    }
+    return;
+}
+
+fn browser_boundary_type(names: &ir::NameTable, type_name: ir::Name) -> []u8 {
+    if names.is(type_name, "i64") or names.is(type_name, "u64") {
+        return "i64";
+    }
+    return "i32";
+}
+
+fn (self: &var Emitter) browser_to_host_expr(
+    module: &ir::Module,
+    type_name: ir::Name,
+    expr: ir::Name
+) -> !ir::Name {
+    if mem::equal_bytes(browser_boundary_type(&module.names, type_name), "i32") and
+        is_integer_type(&module.names, type_name) {
+        var text = try string::from_bytes(self.allocator, "(i32.wrap_i64 ");
+        errdefer text.deinit(self.allocator);
+        try self.names.append_to(&var text, expr);
+        try text.append_byte(self.allocator, cast<u8>(41));
+        let wrapped = try self.names.intern_owned(move text);
+        return self.browser_canonical_i32_expr(module, type_name, wrapped);
+    }
+    return expr;
+}
+
+fn (self: &var Emitter) browser_from_host_expr(
+    module: &ir::Module,
+    type_name: ir::Name,
+    expr: ir::Name
+) -> !ir::Name {
+    if module.names.is(type_name, "bool") {
+        var text = try string::from_bytes(self.allocator, "(i32.ne ");
+        errdefer text.deinit(self.allocator);
+        try self.names.append_to(&var text, expr);
+        try text.append_bytes(self.allocator, " (i32.const 0))");
+        return self.names.intern_owned(move text);
+    }
+    if !mem::equal_bytes(browser_boundary_type(&module.names, type_name), "i32") or
+        !is_integer_type(&module.names, type_name) {
+        return expr;
+    }
+    let canonical = try self.browser_canonical_i32_expr(module, type_name, expr);
+    var text = try string::from_bytes(self.allocator, "(i64.extend_i32");
+    errdefer text.deinit(self.allocator);
+    if module.names.is(type_name, "i8") or module.names.is(type_name, "i16") or
+        module.names.is(type_name, "i32") or module.names.is(type_name, "isize") {
+        try text.append_bytes(self.allocator, "_s ");
+    } else {
+        try text.append_bytes(self.allocator, "_u ");
+    }
+    try self.names.append_to(&var text, canonical);
+    try text.append_byte(self.allocator, cast<u8>(41));
+    return self.names.intern_owned(move text);
+}
+
+fn (self: &var Emitter) browser_canonical_i32_expr(
+    module: &ir::Module,
+    type_name: ir::Name,
+    expr: ir::Name
+) -> !ir::Name {
+    var shift = 0;
+    if module.names.is(type_name, "i8") {
+        shift = 24;
+    }
+    if module.names.is(type_name, "i16") {
+        shift = 16;
+    }
+    if shift > 0 {
+        var text = try string::from_bytes(self.allocator, "(i32.shr_s (i32.shl ");
+        errdefer text.deinit(self.allocator);
+        try self.names.append_to(&var text, expr);
+        try text.append_bytes(self.allocator, " (i32.const ");
+        try fmt::append_i64(self.allocator, &var text, shift);
+        try text.append_bytes(self.allocator, ")) (i32.const ");
+        try fmt::append_i64(self.allocator, &var text, shift);
+        try text.append_bytes(self.allocator, "))");
+        return self.names.intern_owned(move text);
+    }
+
+    var mask = 0;
+    if module.names.is(type_name, "u8") {
+        mask = 255;
+    }
+    if module.names.is(type_name, "u16") {
+        mask = 65535;
+    }
+    if mask > 0 {
+        var text = try string::from_bytes(self.allocator, "(i32.and ");
+        errdefer text.deinit(self.allocator);
+        try self.names.append_to(&var text, expr);
+        try text.append_bytes(self.allocator, " (i32.const ");
+        try fmt::append_i64(self.allocator, &var text, mask);
+        try text.append_bytes(self.allocator, "))");
+        return self.names.intern_owned(move text);
+    }
+    return expr;
+}
+
+fn (self: &var Emitter) write_browser_host_call(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let retained = ir::name_text(&module.names, node.extern_name);
+    let name = retained.as_bytes();
+    var import_index = 0;
+    var found_import = false;
+    if self.browser_import_index.get(name) |found| {
+        import_index = found;
+        found_import = true;
+    }
+    if !found_import {
+        let owned = try self.own(module, node.extern_name);
+        return try self.fail(
+            "wasm error: missing browser host import `%s`",
+            Arg::Str(owned)
+        );
+    }
+    var call = try string::from_bytes(self.allocator, "(call $__kizu_host_");
+    errdefer call.deinit(self.allocator);
+    try fmt::append_i64(self.allocator, &var call, import_index);
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let value = try self.value_of(module, arg);
+        if module.names.is(arg.type_name, "[]u8") {
+            let parts = try self.byte_slice_parts(value.expr);
+            try call.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call, parts.ptr);
+            try call.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call, parts.len);
+        } else {
+            let converted = try self.browser_to_host_expr(module, arg.type_name, value.expr);
+            try call.append_byte(self.allocator, cast<u8>(32));
+            try self.names.append_to(&var call, converted);
+        }
+    }
+    try call.append_byte(self.allocator, cast<u8>(41));
+    if module.names.is(node.result.type_name, "void") {
+        try self.line1("            %s", Arg::Owned(move call));
+        return null;
+    }
+    let call_expr = try self.names.intern_owned(move call);
+    let converted = try self.browser_from_host_expr(
+        module, node.result.type_name, call_expr
+    );
+    return self.write_scalar_result(module, node.result, converted);
+}
+
+fn (self: &var Emitter) write_browser_exports(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if !self.is_browser() {
+        return null;
+    }
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit(self.allocator);
+    try seen.insert(self.allocator, "memory", true);
+    try seen.insert(self.allocator, "kizu_start", true);
+    var function_index = 0;
+    var export_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let node = module.function_nodes.at(function.node);
+        if !module.names.is(node.export_abi, "browser") {
+            continue;
+        }
+        let retained = ir::name_text(&module.names, node.export_name);
+        let name = retained.as_bytes();
+        if seen.contains(name) {
+            let owned = try self.own(module, node.export_name);
+            return try self.fail(
+                "wasm error: duplicate browser export `%s`",
+                Arg::Str(owned)
+            );
+        }
+        try seen.insert(self.allocator, name, true);
+        try self.write_browser_export(module, node, export_index);
+        export_index = export_index + 1;
+    }
+    return null;
+}
+
+fn (self: &var Emitter) write_browser_export(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    export_index: i64
+) -> !void {
+    var header = try string::from_bytes(self.allocator, "  (func $__kizu_export_");
+    errdefer header.deinit(self.allocator);
+    try fmt::append_i64(self.allocator, &var header, export_index);
+    try header.append_bytes(self.allocator, " (export ");
+    try header.append_byte(self.allocator, cast<u8>(34));
+    try module.names.append_to(&var header, function.export_name);
+    try header.append_byte(self.allocator, cast<u8>(34));
+    try header.append_byte(self.allocator, cast<u8>(41));
+    var index = 0;
+    while function.params.get(index) |param| {
+        try header.append_bytes(self.allocator, " (param $__kizu_arg_");
+        try fmt::append_i64(self.allocator, &var header, index);
+        try header.append_byte(self.allocator, cast<u8>(32));
+        try header.append_bytes(
+            self.allocator,
+            browser_boundary_type(&module.names, param.type_name)
+        );
+        try header.append_byte(self.allocator, cast<u8>(41));
+        index = index + 1;
+    }
+    if !module.names.is(function.return_type, "void") {
+        try header.append_bytes(self.allocator, " (result ");
+        try header.append_bytes(
+            self.allocator,
+            browser_boundary_type(&module.names, function.return_type)
+        );
+        try header.append_byte(self.allocator, cast<u8>(41));
+    }
+    try self.line1("%s", Arg::Owned(move header));
+
+    var call = try string::from_bytes(self.allocator, "(call $");
+    errdefer call.deinit(self.allocator);
+    try module.names.append_to(&var call, function.name);
+    index = 0;
+    while function.params.get(index) |param| {
+        var local = try string::from_bytes(self.allocator, "(local.get $__kizu_arg_");
+        errdefer local.deinit(self.allocator);
+        try fmt::append_i64(self.allocator, &var local, index);
+        try local.append_byte(self.allocator, cast<u8>(41));
+        let local_name = try self.names.intern_owned(move local);
+        let converted = try self.browser_from_host_expr(
+            module, param.type_name, local_name
+        );
+        try call.append_byte(self.allocator, cast<u8>(32));
+        try self.names.append_to(&var call, converted);
+        index = index + 1;
+    }
+    try call.append_byte(self.allocator, cast<u8>(41));
+    var call_name = try self.names.intern_owned(move call);
+    if !module.names.is(function.return_type, "void") {
+        call_name = try self.browser_to_host_expr(
+            module, function.return_type, call_name
+        );
+    }
+    try self.line1("    %s", Arg::Str(call_name));
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
