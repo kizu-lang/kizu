@@ -18,6 +18,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
 
@@ -195,6 +196,7 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			"build", "--target", "wasm32-wasi", "--opt", packagePath)
 		compareSelfhostWASMBinary(t, selfhost, packagePath)
 	})
+	runSelfhostTargetAdapterWASICase(t, selfhost)
 	// A loop in a called function repeats the block names of the caller's loop,
 	// so this crosses phi copies that have to stay inside one function.
 	loops := "../../examples/loop_in_called_function.kizu"
@@ -255,6 +257,19 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 	runSelfhostBrowserWASMCases(t, selfhost)
 }
 
+// runSelfhostTargetAdapterWASICase compares target selection in WAT and binary output.
+func runSelfhostTargetAdapterWASICase(t *testing.T, selfhost string) {
+	t.Helper()
+	path := "../../examples/modules/target_adapters"
+	t.Run("wasm/target-adapters", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goWASMOutput(path, false),
+			"build", "--target", "wasm32-wasi", path)
+		compareSelfhostArgs(t, selfhost, goWASMOutput(path, true),
+			"build", "--target", "wasm32-wasi", "--opt", path)
+		compareSelfhostWASMBinary(t, selfhost, path)
+	})
+}
+
 // runSelfhostBrowserWASMCases compares the browser target's portable output,
 // target refusals, direct binary renderer, and ExitStatus boundary.
 func runSelfhostBrowserWASMCases(t *testing.T, selfhost string) {
@@ -267,6 +282,7 @@ func runSelfhostBrowserWASMCases(t *testing.T, selfhost string) {
 			"build", "--target", "wasm32-browser", "--opt", packagePath)
 		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", packagePath)
 	})
+	runSelfhostTargetAdapterBrowserCase(t, selfhost)
 	t.Run("wasm-browser/explicit-host-interface", func(t *testing.T) {
 		path := "../../tests/browser/host_interface.kizu"
 		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
@@ -320,6 +336,19 @@ fn main() -> !process::ExitStatus {
 `)
 		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
 			"build", "--target", "wasm32-browser", path)
+		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", path)
+	})
+}
+
+// runSelfhostTargetAdapterBrowserCase compares browser target selection in WAT and binary output.
+func runSelfhostTargetAdapterBrowserCase(t *testing.T, selfhost string) {
+	t.Helper()
+	path := "../../examples/modules/target_adapters"
+	t.Run("wasm-browser/target-adapters", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, false),
+			"build", "--target", "wasm32-browser", path)
+		compareSelfhostArgs(t, selfhost, goBrowserWASMOutput(path, true),
+			"build", "--target", "wasm32-browser", "--opt", path)
 		compareSelfhostWASMBinaryTarget(t, selfhost, "wasm32-browser", path)
 	})
 }
@@ -548,11 +577,11 @@ func runSelfhostArgumentCases(t *testing.T, selfhost string) {
 // goWASMOutput renders what `kizu build --target wasm32-wasi` prints for one
 // source file or package, optimized when opt is set.
 func goWASMOutput(path string, opt bool) cliOutput {
-	module, err := lowerTarget(path, opt)
+	module, err := lowerTargetForTarget(path, opt, stdtarget.WasmWASI)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
-	ir.KeepReachableFunctions(module, "main")
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	text, err := wasm.Emit(module)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
@@ -562,11 +591,11 @@ func goWASMOutput(path string, opt bool) cliOutput {
 
 // goBrowserWASMOutput renders a source file or package through the browser target.
 func goBrowserWASMOutput(path string, opt bool) cliOutput {
-	module, err := lowerTarget(path, opt)
+	module, err := lowerTargetForTarget(path, opt, stdtarget.WasmBrowser)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
-	ir.KeepReachableFunctions(module, "main")
+	ir.KeepTargetReachableFunctions(module, "browser", "main")
 	lowered, err := wasm.LowerTarget(module, wasm.TargetBrowser)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
@@ -989,6 +1018,7 @@ func goCheckOutput(target string) cliOutput {
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	if _, err := llvm.Emit(module); err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
@@ -1014,6 +1044,7 @@ func goEmitLLVMOutput(target string, opt bool) cliOutput {
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	text, err := llvm.Emit(module)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}

@@ -6,25 +6,32 @@ import "strings"
 // the supplied roots through direct calls or a function address taken on a
 // reachable path. Calls to symbols outside the module do not add an edge.
 func KeepReachableFunctions(module *Module, roots ...string) {
+	keepReachableFunctions(module, "", true, roots...)
+}
+
+// KeepTargetReachableFunctions removes functions outside one target's entry
+// closure. Only explicit exports for exportABI become additional host roots;
+// an empty ABI means that the target exposes no source-declared exports.
+func KeepTargetReachableFunctions(module *Module, exportABI string, roots ...string) {
+	keepReachableFunctions(module, exportABI, false, roots...)
+}
+
+// keepReachableFunctions closes direct reachability over requested roots and
+// either every explicit export or the exports accepted by one target.
+func keepReachableFunctions(
+	module *Module,
+	exportABI string,
+	allExports bool,
+	roots ...string,
+) {
 	functions := make(map[string]*Function, len(module.Functions))
 	for _, fn := range module.Functions {
 		functions[fn.Name] = fn
 	}
 
-	reachable := map[string]bool{}
-	queue := make([]string, 0, len(roots))
-	for _, root := range roots {
-		if functions[root] != nil && !reachable[root] {
-			reachable[root] = true
-			queue = append(queue, root)
-		}
-	}
-	for _, fn := range module.Functions {
-		if fn.ExportABI != "" && !reachable[fn.Name] {
-			reachable[fn.Name] = true
-			queue = append(queue, fn.Name)
-		}
-	}
+	reachable, queue := seedReachableFunctions(
+		module, functions, exportABI, allExports, roots,
+	)
 	if len(queue) == 0 {
 		return
 	}
@@ -33,11 +40,7 @@ func KeepReachableFunctions(module *Module, roots ...string) {
 		name := queue[0]
 		queue = queue[1:]
 		for _, callee := range directCallees(functions[name]) {
-			if functions[callee] == nil || reachable[callee] {
-				continue
-			}
-			reachable[callee] = true
-			queue = append(queue, callee)
+			enqueueReachableFunction(functions, reachable, &queue, callee)
 		}
 	}
 
@@ -48,6 +51,42 @@ func KeepReachableFunctions(module *Module, roots ...string) {
 		}
 	}
 	module.Functions = kept
+}
+
+// seedReachableFunctions adds requested entries and matching explicit exports.
+func seedReachableFunctions(
+	module *Module,
+	functions map[string]*Function,
+	exportABI string,
+	allExports bool,
+	roots []string,
+) (map[string]bool, []string) {
+	reachable := map[string]bool{}
+	queue := make([]string, 0, len(roots))
+	for _, root := range roots {
+		enqueueReachableFunction(functions, reachable, &queue, root)
+	}
+	for _, fn := range module.Functions {
+		exported := fn.ExportABI != "" && (allExports || fn.ExportABI == exportABI)
+		if exported {
+			enqueueReachableFunction(functions, reachable, &queue, fn.Name)
+		}
+	}
+	return reachable, queue
+}
+
+// enqueueReachableFunction queues one defined function at most once.
+func enqueueReachableFunction(
+	functions map[string]*Function,
+	reachable map[string]bool,
+	queue *[]string,
+	name string,
+) {
+	if functions[name] == nil || reachable[name] {
+		return
+	}
+	reachable[name] = true
+	*queue = append(*queue, name)
 }
 
 // directCallees returns direct call targets from a function body and its

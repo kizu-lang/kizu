@@ -5,6 +5,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -126,6 +127,9 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 		}
 		return left, nil
 	case *ast.CallExpr:
+		if _, ok := c.targetPredicateCall(e); ok {
+			return "bool", nil
+		}
 		if _, ok := c.metaPredicateCall(e); ok {
 			return "bool", nil
 		}
@@ -133,6 +137,20 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 	default:
 		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
 	}
+}
+
+// targetPredicateCall answers a compiler-defined `std::target` predicate and
+// reports whether the call was one.
+func (c *Checker) targetPredicateCall(expr *ast.CallExpr) (bool, bool) {
+	name, ok := qualifiedName(expr.Callee)
+	if !ok || len(expr.Args) != 0 {
+		return false, false
+	}
+	predicate, ok := stdtarget.Identify(name)
+	if !ok {
+		return false, false
+	}
+	return stdtarget.Evaluate(c.target, predicate), true
 }
 
 // declaredKindPredicate answers the predicates that ask which declaration a
@@ -215,6 +233,9 @@ func (c *Checker) comptimeBool(expr ast.Expression) (bool, bool) {
 	case *ast.BoolExpr:
 		return e.Value, true
 	case *ast.CallExpr:
+		if value, ok := c.targetPredicateCall(e); ok {
+			return value, true
+		}
 		return c.metaPredicateCall(e)
 	case *ast.PrefixExpr:
 		value, ok := c.comptimeBool(e.Right)

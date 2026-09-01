@@ -11,6 +11,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/native"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
 
@@ -25,6 +26,7 @@ func stdErrorSets() (map[string]map[string]int, error) {
 // executable is kept rather than thrown away, so a program that has not changed
 // since it was last run is not linked a second time.
 func linkModule(module *ir.Module) (string, error) {
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	llvmIR, err := llvm.EmitNative(module, runtime.GOOS == "darwin")
 	if err != nil {
 		return "", err
@@ -65,10 +67,19 @@ func buildFile(args []string) error {
 // through here, so `ir` and `build` are asked the same question about the same
 // program instead of one of them refusing a directory.
 func lowerTarget(path string, opt bool) (*ir.Module, error) {
+	return lowerTargetForTarget(path, opt, stdtarget.Native)
+}
+
+// lowerTargetForTarget lowers a file or package for one selected build target.
+func lowerTargetForTarget(
+	path string,
+	opt bool,
+	target stdtarget.Target,
+) (*ir.Module, error) {
 	if isPackageRoot(path) {
-		return lowerPackage(path, opt)
+		return lowerPackageForTarget(path, opt, target)
 	}
-	return lowerFile(path, opt)
+	return lowerFileForTarget(path, opt, target)
 }
 
 // emitLLVMFile lowers a checked source file or package to LLVM IR text.
@@ -79,6 +90,7 @@ func emitLLVMFile(path string, opt bool) error {
 	if err != nil {
 		return err
 	}
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	output, err := llvm.Emit(module)
 	if err != nil {
 		return err
@@ -211,13 +223,17 @@ func (p *wasmBuildParser) finish() (wasmBuildOptions, error) {
 // emitWASMFile lowers a checked source file or package once and renders its
 // selected WebAssembly host target fresh like emitLLVMFile (ADR-0126).
 func emitWASMFile(options wasmBuildOptions, target wasm.Target) error {
-	module, err := lowerTarget(options.Path, options.Opt)
+	module, err := lowerTargetForTarget(
+		options.Path,
+		options.Opt,
+		stdTargetForWASM(target),
+	)
 	if err != nil {
 		return err
 	}
-	// WebAssembly modules expose one target entry, so unreachable functions must
-	// not drag unused host capabilities into their import surface.
-	ir.KeepReachableFunctions(module, "main")
+	// WebAssembly modules expose only target-selected entry/export roots, so
+	// unreachable functions must not drag unused host capabilities into imports.
+	ir.KeepTargetReachableFunctions(module, wasmExportABI(target), "main")
 	lowered, err := wasm.LowerTarget(module, target)
 	if err != nil {
 		return err
@@ -235,6 +251,22 @@ func emitWASMFile(options wasmBuildOptions, target wasm.Target) error {
 	}
 	_, _ = fmt.Println(output)
 	return nil
+}
+
+// stdTargetForWASM maps a backend host contract to the compile-time target.
+func stdTargetForWASM(target wasm.Target) stdtarget.Target {
+	if target == wasm.TargetBrowser {
+		return stdtarget.WasmBrowser
+	}
+	return stdtarget.WasmWASI
+}
+
+// wasmExportABI returns the explicit exports one WebAssembly host can enter.
+func wasmExportABI(target wasm.Target) string {
+	if target == wasm.TargetBrowser {
+		return "browser"
+	}
+	return ""
 }
 
 // emitNativeFile lowers and links a source file into a native executable.
@@ -255,9 +287,7 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
-	if options.Opt {
-		ir.KeepReachableFunctions(module, "main")
-	}
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	llvmIR, err := llvm.EmitNative(module, nativeTargetIsDarwin(options.Triple))
 	if err != nil {
 		return err

@@ -66,6 +66,34 @@ func TestKeepReachableFunctionsRootsExplicitExports(t *testing.T) {
 	}
 }
 
+// TestKeepTargetReachableFunctionsRootsOnlyMatchingExports prevents one
+// target's host adapter from entering another target's backend.
+func TestKeepTargetReachableFunctionsRootsOnlyMatchingExports(t *testing.T) {
+	browser := functionWithOps("browser_callback", "call.browser_helper")
+	browser.ExportABI = "browser"
+	other := functionWithOps("other_callback", "call.other_helper")
+	other.ExportABI = "other"
+	module := &Module{Functions: []*Function{
+		functionWithOps("main"),
+		browser,
+		functionWithOps("browser_helper"),
+		other,
+		functionWithOps("other_helper"),
+	}}
+
+	KeepTargetReachableFunctions(module, "browser", "main")
+
+	want := []string{"main", "browser_callback", "browser_helper"}
+	if len(module.Functions) != len(want) {
+		t.Fatalf("reachable function count = %d, want %d", len(module.Functions), len(want))
+	}
+	for index, name := range want {
+		if module.Functions[index].Name != name {
+			t.Fatalf("function %d = %q, want %q", index, module.Functions[index].Name, name)
+		}
+	}
+}
+
 // functionWithOps builds one test function with the requested operations.
 func functionWithOps(name string, ops ...string) *Function {
 	instrs := make([]*Instr, 0, len(ops))

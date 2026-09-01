@@ -13,6 +13,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -88,15 +89,24 @@ func loadPackageProgramMode(path string, includeTests bool) (project.Graph, *ast
 
 // lowerFile parses, checks, lowers, and optionally optimizes source to typed SSA IR.
 func lowerFile(path string, opt bool) (*ir.Module, error) {
+	return lowerFileForTarget(path, opt, stdtarget.Native)
+}
+
+// lowerFileForTarget lowers one source file with target-aware comptime selection.
+func lowerFileForTarget(
+	path string,
+	opt bool,
+	target stdtarget.Target,
+) (*ir.Module, error) {
 	program, err := loadFileProgram(path)
 	if err != nil {
 		return nil, err
 	}
-	ownershipResult, err := checkProgram(program)
+	ownershipResult, err := checkProgramForTarget(program, target)
 	if err != nil {
 		return nil, err
 	}
-	module, err := ir.Lower(program, ownershipResult)
+	module, err := ir.LowerForTarget(program, ownershipResult, target)
 	if err != nil {
 		return nil, err
 	}
@@ -110,16 +120,30 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 
 // lowerPackage resolves a package graph and lowers its qualified program to typed SSA IR.
 func lowerPackage(path string, opt bool) (*ir.Module, error) {
-	return lowerPackageMode(path, opt, false)
+	return lowerPackageModeForTarget(path, opt, false, stdtarget.Native)
 }
 
 // lowerTestPackage includes package test files before checking and lowering.
 func lowerTestPackage(path string, opt bool) (*ir.Module, error) {
-	return lowerPackageMode(path, opt, true)
+	return lowerPackageModeForTarget(path, opt, true, stdtarget.Native)
 }
 
-// lowerPackageMode lowers the production or test view of a package graph.
-func lowerPackageMode(path string, opt bool, includeTests bool) (*ir.Module, error) {
+// lowerPackageForTarget lowers a production package for one selected target.
+func lowerPackageForTarget(
+	path string,
+	opt bool,
+	target stdtarget.Target,
+) (*ir.Module, error) {
+	return lowerPackageModeForTarget(path, opt, false, target)
+}
+
+// lowerPackageModeForTarget lowers one package view with target-aware comptime selection.
+func lowerPackageModeForTarget(
+	path string,
+	opt bool,
+	includeTests bool,
+	target stdtarget.Target,
+) (*ir.Module, error) {
 	var graph project.Graph
 	var program *ast.Program
 	var err error
@@ -131,11 +155,11 @@ func lowerPackageMode(path string, opt bool, includeTests bool) (*ir.Module, err
 	if err != nil {
 		return nil, err
 	}
-	ownershipResult, err := checkProgram(program)
+	ownershipResult, err := checkProgramForTarget(program, target)
 	if err != nil {
 		return nil, err
 	}
-	module, err := ir.Lower(program, ownershipResult)
+	module, err := ir.LowerForTarget(program, ownershipResult, target)
 	if err != nil {
 		return nil, err
 	}
@@ -191,12 +215,15 @@ func moduleFunction(module *ir.Module, name string) *ir.Function {
 	return nil
 }
 
-// checkProgram runs static checks required before compilation or execution.
-func checkProgram(program *ast.Program) (ownership.Result, error) {
-	if err := types.New().Check(program); err != nil {
+// checkProgramForTarget runs static checks with one selected build target.
+func checkProgramForTarget(
+	program *ast.Program,
+	target stdtarget.Target,
+) (ownership.Result, error) {
+	if err := types.NewForTarget(target).Check(program); err != nil {
 		return ownership.Result{}, err
 	}
-	checker := ownership.New()
+	checker := ownership.NewForTarget(target)
 	if err := checker.Check(program); err != nil {
 		return ownership.Result{}, err
 	}

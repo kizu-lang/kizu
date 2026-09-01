@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::stdmeta;
+import compiler::internal::stdtarget;
 import compiler::internal::typ;
 import std::array;
 import std::mem;
@@ -69,19 +70,38 @@ fn (self: &var Checker) eval_comptime(
         },
         Prefix(value) => return self.eval_comptime_prefix(tree, value, out),
         Binary(value) => return self.eval_comptime_binary(tree, value, out),
-        Call(value) => return self.eval_comptime_meta_call(tree, value, out),
+        Call(value) => return self.eval_comptime_call(tree, value, out),
         _ => {
             return try self.comptime_error("runtime value cannot be used");
         },
     }
 }
 
-// Evaluates std::meta predicates, the only calls available in comptime.
-fn (self: &var Checker) eval_comptime_meta_call(
+// Evaluates the compiler-defined std predicates available in comptime.
+fn (self: &var Checker) eval_comptime_call(
     tree: &ast::Ast,
     expression: &ast::CallExpr,
     out: &var ComptimeValue
 ) -> !?diagnostic::Diagnostic {
+    if try qualified_name(self.allocator, tree, expression.callee) |name| {
+        defer name.deinit(self.allocator);
+        let name_bytes = name.as_bytes();
+        if stdtarget::identify(name_bytes) |predicate| {
+            let arguments = tree.expression_lists.at(expression.args.node);
+            if arguments.len() != 0 {
+                var message = string::new(self.allocator);
+                errdefer message.deinit(self.allocator);
+                try message.append_byte(self.allocator, cast<u8>(96));
+                try message.append_bytes(self.allocator, stdtarget::spelling(predicate));
+                try message.append_bytes(self.allocator, "` takes no arguments");
+                return try self.comptime_message(move message);
+            }
+            out.* = ComptimeValue::Boolean(
+                stdtarget::evaluate(self.target, predicate)
+            );
+            return null;
+        }
+    }
     match tree.expressions.at(expression.callee.node) {
         TypeApply(applied) => {
             if try qualified_name(self.allocator, tree, applied.callee) |name| {

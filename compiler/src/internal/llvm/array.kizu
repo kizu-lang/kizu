@@ -309,22 +309,15 @@ fn (self: &var Emitter) write_bounds_failure(
     return self.line1("%s:", Arg::Str(ok_label));
 }
 
-/// Reports whether emitted function values need the concrete Array header, the
-/// Go `usesArrayHeader`. An external call can exchange an Array without leaving
-/// a local array instruction, so value types retain the header independently
-/// of whether the module calls the hosted Array runtime.
+/// Reports whether emitted values or aggregate definitions need the concrete
+/// Array header, the Go `usesArrayHeader`. An external call can exchange an
+/// Array without leaving a local array instruction, and reachability can leave
+/// a declared struct after removing every function that used it.
 fn (self: &Emitter) uses_array_header(module: &ir::Module) -> bool {
     if self.uses_array_runtime(module) {
         return true;
     }
-    var index = 0;
-    while module.functions.get(index) |function| {
-        index = index + 1;
-        if function_has_array_header_type(module, function) {
-            return true;
-        }
-    }
-    return false;
+    return module_has_runtime_header_type(module, "std::array::Array<");
 }
 
 /// Reports whether this module calls the hosted Array runtime, the Go
@@ -351,84 +344,6 @@ fn (self: &Emitter) uses_array_runtime(module: &ir::Module) -> bool {
         }
     }
     return false;
-}
-
-/// Reports whether a function body or signature carries an Array value, either
-/// directly or inside an aggregate wrapper, the Go
-/// `functionHasArrayHeaderType`.
-fn function_has_array_header_type(module: &ir::Module, function: ir::Function) -> bool {
-    let node = module.function_nodes.at(function.node);
-    if is_array_header_type(module, node.return_type) {
-        return true;
-    }
-    var param_index = 0;
-    while node.params.get(param_index) |param| {
-        param_index = param_index + 1;
-        if is_array_header_type(module, param.type_name) {
-            return true;
-        }
-    }
-    var block_index = 0;
-    while node.blocks.get(block_index) |block| {
-        block_index = block_index + 1;
-        if block_has_array_header_type(module, block) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Reports whether a block carries an Array value, the Go
-/// `blockHasArrayHeaderType`.
-fn block_has_array_header_type(module: &ir::Module, block: ir::Block) -> bool {
-    let node = module.blocks.at(block.node);
-    var index = 0;
-    while node.instrs.get(index) |instr| {
-        index = index + 1;
-        if instr_has_array_header_type(module, module.instrs.at(instr.node)) {
-            return true;
-        }
-    }
-    return is_array_header_type(module, node.terminator.value.type_name) or
-        is_array_header_type(module, node.terminator.cond.type_name);
-}
-
-/// Reports whether one instruction carries an Array value in any position
-/// lowering can read, the Go `instrHasArrayHeaderType`.
-fn instr_has_array_header_type(module: &ir::Module, node: &ir::InstrNode) -> bool {
-    if is_array_header_type(module, node.result.type_name) {
-        return true;
-    }
-    var index = 0;
-    while node.args.get(index) |arg| {
-        index = index + 1;
-        if is_array_header_type(module, arg.type_name) {
-            return true;
-        }
-    }
-    index = 0;
-    while node.fields.get(index) |field| {
-        index = index + 1;
-        if is_array_header_type(module, field.value.type_name) {
-            return true;
-        }
-    }
-    index = 0;
-    while node.incoming.get(index) |incoming| {
-        index = index + 1;
-        if is_array_header_type(module, incoming.value.type_name) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Reports whether a lowered IR type embeds an Array value, the Go
-/// `isArrayHeaderType`.
-fn is_array_header_type(module: &ir::Module, type_name: ir::Name) -> bool {
-    let retained = ir::name_text(&module.names, type_name);
-    let bytes = retained.as_bytes();
-    return contains_bytes(bytes, "std::array::Array<");
 }
 
 /// Dispatches the Array operations that act on the container as a whole --

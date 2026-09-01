@@ -123,20 +123,15 @@ func (e *emitter) arrayCheckedElement(
 	return checked, nil
 }
 
-// usesArrayHeader reports whether emitted function values need the concrete
-// Array header. An external call can exchange an Array without leaving a local
-// array.* instruction, so the value types must retain the header independently
-// of whether the module calls the hosted Array runtime.
+// usesArrayHeader reports whether emitted values or aggregate definitions need
+// the concrete Array header. An external call can exchange an Array without
+// leaving a local array.* instruction, and reachability can leave a declared
+// struct after removing every function that used it.
 func (e *emitter) usesArrayHeader() bool {
 	if e.usesArrayRuntime() {
 		return true
 	}
-	for _, fn := range e.module.Functions {
-		if functionHasArrayHeaderType(fn) {
-			return true
-		}
-	}
-	return false
+	return e.moduleHasRuntimeHeaderType("std::array::Array<")
 }
 
 // usesArrayRuntime reports whether this module calls the hosted Array runtime.
@@ -154,65 +149,6 @@ func (e *emitter) usesArrayRuntime() bool {
 		}
 	}
 	return false
-}
-
-// functionHasArrayHeaderType reports whether a function body or signature
-// carries an Array value, either directly or inside an aggregate wrapper.
-func functionHasArrayHeaderType(fn *ir.Function) bool {
-	if isArrayHeaderType(fn.Return) {
-		return true
-	}
-	for _, param := range fn.Params {
-		if isArrayHeaderType(param.Type) {
-			return true
-		}
-	}
-	for _, block := range fn.Blocks {
-		if blockHasArrayHeaderType(block) {
-			return true
-		}
-	}
-	return false
-}
-
-// blockHasArrayHeaderType reports whether a block carries an Array value.
-func blockHasArrayHeaderType(block *ir.Block) bool {
-	for _, instr := range block.Instrs {
-		if instrHasArrayHeaderType(instr) {
-			return true
-		}
-	}
-	return isArrayHeaderType(block.Terminator.Value.Type) ||
-		isArrayHeaderType(block.Terminator.Cond.Type)
-}
-
-// instrHasArrayHeaderType reports whether one instruction carries an Array
-// value in any of the positions that lowering can read.
-func instrHasArrayHeaderType(instr *ir.Instr) bool {
-	if isArrayHeaderType(instr.Result.Type) {
-		return true
-	}
-	for _, arg := range instr.Args {
-		if isArrayHeaderType(arg.Type) {
-			return true
-		}
-	}
-	for _, field := range instr.Fields {
-		if isArrayHeaderType(field.Value.Type) {
-			return true
-		}
-	}
-	for _, incoming := range instr.Incoming {
-		if isArrayHeaderType(incoming.Value.Type) {
-			return true
-		}
-	}
-	return false
-}
-
-// isArrayHeaderType reports whether a lowered IR type embeds an Array value.
-func isArrayHeaderType(name string) bool {
-	return strings.Contains(name, "std::array::Array<")
 }
 
 // writeArrayInstr dispatches the Array operations that act on the container as a

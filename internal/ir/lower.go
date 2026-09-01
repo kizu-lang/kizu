@@ -11,12 +11,22 @@ import (
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Lower converts a checked Kizu AST into typed SSA IR.
 func Lower(program *ast.Program, ownershipResult ownership.Result) (*Module, error) {
-	l := newLowerer(program, ownershipResult)
+	return LowerForTarget(program, ownershipResult, stdtarget.Native)
+}
+
+// LowerForTarget converts a checked Kizu AST for one build target into typed SSA IR.
+func LowerForTarget(
+	program *ast.Program,
+	ownershipResult ownership.Result,
+	target stdtarget.Target,
+) (*Module, error) {
+	l := newLowererForTarget(program, ownershipResult, target)
 	module, err := l.lower()
 	if err != nil {
 		return nil, err
@@ -29,6 +39,7 @@ func Lower(program *ast.Program, ownershipResult ownership.Result) (*Module, err
 
 type lowerer struct {
 	program    *ast.Program
+	target     stdtarget.Target
 	module     *Module
 	types      *typ.Table
 	signatures map[string]Signature
@@ -138,6 +149,15 @@ type loopPhi struct {
 
 // newLowerer prepares lookup tables used during lowering.
 func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer {
+	return newLowererForTarget(program, ownershipResult, stdtarget.Native)
+}
+
+// newLowererForTarget prepares lookup tables for one selected build target.
+func newLowererForTarget(
+	program *ast.Program,
+	ownershipResult ownership.Result,
+	target stdtarget.Target,
+) *lowerer {
 	generics := map[string]*ast.FunctionDecl{}
 	structs := map[string]*ast.StructDecl{}
 	enums := map[string]*ast.EnumDecl{}
@@ -157,6 +177,7 @@ func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer
 	}
 	return &lowerer{
 		program: program,
+		target:  target,
 		types:   typ.NewTable(),
 		module: &Module{
 			Structs:   map[string]Struct{},

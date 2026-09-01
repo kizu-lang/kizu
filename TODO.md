@@ -3,27 +3,6 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
-## WebAssembly application path
-
-WASI default / optimized WAT と binary は 162 examples 中 142 件、browser binary は
-135 件が native と同じ observable behavior を持つ。残りは host boundary が持たない
-capability として build 時に拒否する。backend の portable lowering、binary encoder、WASI
-runtime、browser host ABI、複数 module package の target build は入った。同じ package が
-target 別 host adapter を source 上で選ぶ経路が残っている。
-
-### W7. target-selected adapter
-
-- 既存の `comptime if` から native / WASI / browser を問う compiler-defined
-  `std::target` 述語を追加する。選ばれた branch だけを type / ownership / IR
-  の各 phase が扱う。
-- target に適合する entry / explicit export からだけ到達可能性を閉じ、native-only
-  filesystem adapter や browser-only host adapter を反対 target の backend へ渡さない。
-- native は file I/O、browser は明示 host input を使い、同じ portable core の結果を
-  保つ package example と conformance test を追加する。
-
-この章は、利用者が 1 package の portable core と target 別 adapter を source 上で
-明示し、native / WASI / browser の artifact をそれぞれ直接 build できたら削除する。
-
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

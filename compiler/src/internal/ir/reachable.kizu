@@ -1,5 +1,6 @@
 import std::array;
 import std::map;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/ir/reachable.go: dropping the functions no
@@ -12,6 +13,31 @@ import std::string;
 /// Go `KeepReachableFunctions`. Calls to symbols outside the module do not add
 /// an edge.
 pub fn keep_reachable_functions(allocator: Allocator, module: &var Module, roots: &array::Array<string::String>) -> !void {
+    return keep_reachable(
+        allocator, module, roots, "", true
+    );
+}
+
+/// Removes functions outside one target's entry closure. Only exports for
+/// export_abi become additional host roots; empty means no explicit exports.
+pub fn keep_target_reachable_functions(
+    allocator: Allocator,
+    module: &var Module,
+    roots: &array::Array<string::String>,
+    export_abi: []u8
+) -> !void {
+    return keep_reachable(
+        allocator, module, roots, export_abi, false
+    );
+}
+
+fn keep_reachable(
+    allocator: Allocator,
+    module: &var Module,
+    roots: &array::Array<string::String>,
+    export_abi: []u8,
+    all_exports: bool
+) -> !void {
     var functions = map::new<[]u8, Function>(allocator);
     defer functions.deinit(allocator);
     var index = 0;
@@ -43,6 +69,13 @@ pub fn keep_reachable_functions(allocator: Allocator, module: &var Module, roots
         let node = module.function_nodes.at(function.node);
         if is_empty(node.export_abi) {
             continue;
+        }
+        if !all_exports {
+            let retained_abi = name_text(&module.names, node.export_abi);
+            let abi_bytes = retained_abi.as_bytes();
+            if !mem::equal_bytes(abi_bytes, export_abi) {
+                continue;
+            }
         }
         let retained = name_text(&module.names, node.name);
         let bytes = retained.as_bytes();

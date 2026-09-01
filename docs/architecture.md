@@ -25,7 +25,8 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   types, ownership              型検査・所有権/借用検査
   ir, llvm, wasm, native        typed SSA IR と各 backend
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
-  stdmethod, stdprim, stdmeta   std の method 署名、builtin primitive の一覧、`std::meta` の形
+  stdmethod, stdprim, stdmeta, stdtarget
+                                std の method / primitive と compiler-defined form
   unsafecap                     unsafe が覆う操作の種類と診断文言
   conformance                   example が末尾に宣言する case の読み取り
   version, selfhost             binary の名乗りと、移植先が読めない生成 source
@@ -48,8 +49,10 @@ docs/, docs/adr/     設計ドキュメントと ADR
 source.kizu
   → internal/lexer → internal/parser → internal/ast
   → internal/project が import した std module を合流(std も 1 つの package)
+  → build target を types / ownership / IR の comptime evaluator へ渡す
   → internal/types(型)→ internal/ownership(所有権)
-  → internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
+  → internal/ir(typed SSA)→ target の entry / export から到達可能性を閉じる
+                           → internal/llvm → clang(internal/native)
                            → internal/wasm → 共通 WebAssembly module
                                            → WAT / binary `.wasm`
                                              (wasm32-wasi / wasm32-browser)
@@ -77,6 +80,12 @@ module を inspection 用 WAT と deterministic な binary `.wasm` に描画し�
 Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせます。WASI は
 `wasmtime`、browser target は JavaScript host adapter で同じ conformance output を検査し、
 target 差は import、entry / export、host capability だけが持ちます。
+
+同じ package に target 別 adapter がある場合、`std::target` を条件にした
+`comptime if` は選ばれた branch だけを type / ownership / IR が扱います。その後、
+native / WASI は `main`、browser は `main` と `export "browser"` から到達できる関数だけを
+backend へ渡します。実行例は
+[`examples/modules/target_adapters`](../examples/modules/target_adapters) です。
 
 `wasm32-wasi` の host boundary は WASI Preview1 です。blocking stdin / stdout / stderr、
 引数・環境・時刻、preopen された filesystem は、その capability を example の metadata

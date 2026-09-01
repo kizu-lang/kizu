@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -51,7 +52,8 @@ func (c *Checker) underMark(
 // Checker validates type rules for a parsed program.
 type Checker struct {
 	checkerMetadata
-	types typeTable
+	target stdtarget.Target
+	types  typeTable
 	// declaredDeinits names the types whose cleanup an author wrote. They hold
 	// an obligation of their own, so their fields are not taken one at a time.
 	declaredDeinits map[string]bool
@@ -99,8 +101,14 @@ type Checker struct {
 
 // New creates an empty type checker.
 func New() *Checker {
+	return NewForTarget(stdtarget.Native)
+}
+
+// NewForTarget creates a type checker for one selected build target.
+func NewForTarget(target stdtarget.Target) *Checker {
 	return &Checker{
 		checkerMetadata:  newCheckerMetadata(),
+		target:           target,
 		types:            newTypeTable(),
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},

@@ -34,7 +34,7 @@ func TestWASMBinaryMatchesText(t *testing.T) {
 			if err != nil {
 				t.Fatalf("lower failed: %v", err)
 			}
-			ir.KeepReachableFunctions(module, "main")
+			ir.KeepTargetReachableFunctions(module, "", "main")
 			lowered, err := wasm.Lower(module)
 			if err != nil {
 				t.Fatalf("lower wasm failed: %v", err)

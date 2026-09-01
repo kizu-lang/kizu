@@ -1,0 +1,128 @@
+import compiler::internal::ir;
+
+// Mechanical port of internal/llvm/runtime_type.go: the module walk that
+// keeps named hosted-runtime container headers closed over every emitted type.
+
+/// Reports whether an emitted aggregate definition or function value refers
+/// to one hosted-runtime container. Reachability removes functions but
+/// deliberately retains declared structs, so both halves decide which named
+/// LLVM header types to declare.
+fn module_has_runtime_header_type(module: &ir::Module, marker: []u8) -> bool {
+    var struct_index = 0;
+    while module.structs.key_at(struct_index) |struct_name| {
+        struct_index = struct_index + 1;
+        if module.structs.at(struct_name) |declared| {
+            var field_index = 0;
+            while declared.fields.get(field_index) |field| {
+                field_index = field_index + 1;
+                if has_runtime_header_type(module, field.type_name, marker) {
+                    return true;
+                }
+            }
+        }
+    }
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        if function_has_runtime_header_type(module, function, marker) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a function body or signature carries one hosted-runtime
+/// container, directly or in an aggregate wrapper.
+fn function_has_runtime_header_type(
+    module: &ir::Module,
+    function: ir::Function,
+    marker: []u8
+) -> bool {
+    let node = module.function_nodes.at(function.node);
+    if has_runtime_header_type(module, node.return_type, marker) {
+        return true;
+    }
+    var param_index = 0;
+    while node.params.get(param_index) |param| {
+        param_index = param_index + 1;
+        if has_runtime_header_type(module, param.type_name, marker) {
+            return true;
+        }
+    }
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        if block_has_runtime_header_type(module, block, marker) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a block carries one hosted-runtime container.
+fn block_has_runtime_header_type(
+    module: &ir::Module,
+    block: ir::Block,
+    marker: []u8
+) -> bool {
+    let node = module.blocks.at(block.node);
+    var index = 0;
+    while node.instrs.get(index) |instr| {
+        index = index + 1;
+        if instr_has_runtime_header_type(module, module.instrs.at(instr.node), marker) {
+            return true;
+        }
+    }
+    return has_runtime_header_type(module, node.terminator.value.type_name, marker) or
+        has_runtime_header_type(module, node.terminator.cond.type_name, marker);
+}
+
+/// Reports whether one instruction carries a hosted-runtime container in any
+/// position lowering can read.
+fn instr_has_runtime_header_type(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    marker: []u8
+) -> bool {
+    if has_runtime_header_type(module, node.result.type_name, marker) {
+        return true;
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        if has_runtime_header_type(module, arg.type_name, marker) {
+            return true;
+        }
+    }
+    index = 0;
+    while node.fields.get(index) |field| {
+        index = index + 1;
+        if has_runtime_header_type(module, field.value.type_name, marker) {
+            return true;
+        }
+    }
+    index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        if has_runtime_header_type(module, incoming.value.type_name, marker) {
+            return true;
+        }
+    }
+    index = 0;
+    while node.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        if has_runtime_header_type(module, cleanup.arg.type_name, marker) or
+            has_runtime_header_type(module, cleanup.allocator.type_name, marker) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a lowered IR type embeds the named hosted-runtime
+/// container.
+fn has_runtime_header_type(module: &ir::Module, type_name: ir::Name, marker: []u8) -> bool {
+    let retained = ir::name_text(&module.names, type_name);
+    let bytes = retained.as_bytes();
+    return contains_bytes(bytes, marker);
+}

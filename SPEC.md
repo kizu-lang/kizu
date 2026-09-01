@@ -2414,6 +2414,7 @@ comptime if 1 + 1 == 2 {
 
 `comptime` expression は、整数、真偽値、文字列、compile-time type value、
 単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
+`comptime if` の条件は、これに加えて §13.3 の `std::target` 述語を評価します。
 `type<i64>` のような `type<T>` literal と、instantiated generic body 内の
 static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
@@ -2626,6 +2627,46 @@ comptime match color |v| {
 `std::meta::variant<T, v>(payload)` は `T::<v の名前>(payload)` と同じもので、
 payload を持たない variant では `T::<v の名前>` です。walk が値を**作る**側で
 arm を名指しする唯一の手段で、arm は呼び出し側が型として書けないためです。
+
+### 13.3 target selection
+
+1 つの package に portable core と target 別 host adapter を置くときは、
+`comptime if` から compiler-defined `std::target` 述語を問います。
+
+```kizu
+comptime if std::target::is_native() {
+    try file_adapter::run();
+} else {
+    comptime if std::target::is_wasi() {
+        try wasi_adapter::run();
+    } else {
+        comptime if std::target::is_browser() {
+            browser_adapter::run();
+        }
+    }
+}
+```
+
+```text
+std::target::is_native()  -> bool    comptime-if-only
+std::target::is_wasi()    -> bool    comptime-if-only
+std::target::is_browser() -> bool    comptime-if-only
+```
+
+3 つは引数も static 引数も取らず、1 回の build ではちょうど 1 つだけが true です。
+`build --target native`、`run`、`check`、`test`、`ir`、`build --emit-llvm` は native、
+`build --target wasm32-wasi` は WASI、`build --target wasm32-browser` は browser を
+選びます。`fmt` の semantic validation も native を使い、`parse` は target を
+選びません。
+
+述語に runtime の値はありません。`std::target` という source module を import する
+形でもなく、利用者が同じ述語を定義することもできません。選ばれた branch だけを
+type / ownership / IR の各 phase が検査・lowering します。
+
+backend へ渡す executable module は `main` と、その target が認める明示 export から
+到達できる関数だけで閉じます。browser の `export "browser"` は browser build だけの
+root です。したがって、選ばれなかった filesystem adapter や browser host adapter は
+反対 target の capability として誤って拒否されません。
 
 ## 14. std とのインターフェース
 

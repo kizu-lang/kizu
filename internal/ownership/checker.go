@@ -9,11 +9,13 @@ import (
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
+	target       stdtarget.Target
 	types        *typ.Table
 	functions    map[string]*functionInfo
 	impls        map[string]map[string]*functionInfo
@@ -195,7 +197,13 @@ type temporaryBorrow struct {
 
 // New creates an empty ownership checker.
 func New() *Checker {
+	return NewForTarget(stdtarget.Native)
+}
+
+// NewForTarget creates an ownership checker for one selected build target.
+func NewForTarget(target stdtarget.Target) *Checker {
 	return &Checker{
+		target:       target,
 		types:        typ.NewTable(),
 		functions:    map[string]*functionInfo{},
 		impls:        map[string]map[string]*functionInfo{},

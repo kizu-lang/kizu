@@ -140,6 +140,25 @@ filesystem、`std::process`、stdin、socket / `std::net` と `std::http` の ne
 に自動変換するわけではありません。必要なら今は `extern "browser"` で Fetch capability を
 明示します。
 
+## 1 package の target adapter
+
+portable core を共有し、native / WASI は file I/O、browser は明示 host input を使う場合、
+root の `main` で `std::target` を条件にした `comptime if` を使います。選ばれなかった
+branch は type / ownership / IR に入りません。その後の到達可能性も target の entry と
+明示 export から閉じるため、browser-only import / export が native や WASI の backend に
+渡ることも、native-only filesystem call が browser backend に渡ることもありません。
+
+動く package は
+[`examples/modules/target_adapters`](../examples/modules/target_adapters)、browser host は
+[`scripts/run-browser-target-adapters.mjs`](../scripts/run-browser-target-adapters.mjs) です。
+同じ package を次のように直接 build できます。
+
+```sh
+kizu build --target native -o app examples/modules/target_adapters
+kizu build --target wasm32-wasi --emit wasm -o app-wasi.wasm examples/modules/target_adapters
+kizu build --target wasm32-browser --emit wasm -o app-browser.wasm examples/modules/target_adapters
+```
+
 `tests/browser/smoke.html` は function call、aggregate、allocation、error と、DOM が
 保持する output bytes が guest memory の上書き後も変わらないことを検査する page です。
 `tests/browser/host_interface.html` は DOM 更新、bounds-checked memory copy、非同期 callback、

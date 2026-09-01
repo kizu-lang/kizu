@@ -15,6 +15,7 @@ import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::source;
 import compiler::internal::stdfmt;
+import compiler::internal::stdtarget;
 import compiler::internal::types;
 import compiler::internal::version;
 import compiler::internal::wasm;
@@ -278,6 +279,33 @@ enum Output {
     WasmBrowser,
     WasmBrowserBinary,
     Check,
+}
+
+/// Maps one output family to the target visible during compile-time selection.
+fn output_target(output: Output) -> stdtarget::Target {
+    if output == Output::WasmBrowser or output == Output::WasmBrowserBinary {
+        return stdtarget::Target::WasmBrowser;
+    }
+    if output == Output::Wasm or output == Output::WasmBinary {
+        return stdtarget::Target::WasmWasi;
+    }
+    return stdtarget::Target::Native;
+}
+
+/// Closes an executable module over its entry and the exports one target can
+/// enter before a backend validates host capabilities.
+fn keep_target_program(
+    allocator: Allocator,
+    module: &var ir::Module,
+    export_abi: []u8
+) -> !void {
+    var roots = array::new<string::String>(allocator);
+    defer roots.deinit(allocator);
+    let main_root = try string::from_bytes(allocator, "main");
+    try roots.append(allocator, move main_root);
+    return ir::keep_target_reachable_functions(
+        allocator, module, &roots, export_abi
+    );
 }
 
 /// Runs one `[--opt] <target>` command, the Go `parseOptFileArgs` and the
@@ -1353,6 +1381,7 @@ fn lower_target(
     output: Output,
     output_file: []u8
 ) -> !i64 {
+    let build_target = output_target(output);
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, lib_dir);
@@ -1376,12 +1405,16 @@ fn lower_target(
         },
         Program(program) => {
             defer program.deinit(allocator);
-            if try types::check(allocator, &var tree, &program) |failed| {
+            if try types::check_for_target(
+                allocator, &var tree, &program, build_target
+            ) |failed| {
                 defer failed.deinit(allocator);
                 try report(io, allocator, &loader.sources, &failed);
                 return 1;
             }
-            var checker = try ownership::new_checker(allocator, &tree, &program);
+            var checker = try ownership::new_checker_for_target(
+                allocator, &tree, &program, build_target
+            );
             defer checker.deinit(allocator);
             if try checker.check_program(&var tree, &program) |failed| {
                 defer failed.deinit(allocator);
@@ -1397,7 +1430,9 @@ fn lower_target(
                 },
                 Codes(std_errors) => {
                     defer std_errors.deinit(allocator);
-                    var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+                    var lowerer = try ir::new_lowerer_for_target(
+                        allocator, &tree, &program, &checker, build_target
+                    );
                     defer lowerer.deinit(allocator);
                     if try lowerer.lower(&var tree, &program, &std_errors) |failed| {
                         defer failed.deinit(allocator);
@@ -1426,17 +1461,16 @@ fn lower_target(
                     if output == Output::Wasm or output == Output::WasmBinary or
                         output == Output::WasmBrowser or
                         output == Output::WasmBrowserBinary {
-                        // A wasm module exports only its target entry, so
-                        // functions main cannot reach must not drag unused
-                        // host capabilities into its import surface.
-                        var roots = array::new<string::String>(allocator);
-                        defer roots.deinit(allocator);
-                        let main_root = try string::from_bytes(allocator, "main");
-                        try roots.append(allocator, move main_root);
-                        try ir::keep_reachable_functions(
-                            allocator,
-                            &var lowerer.module,
-                            &roots
+                        // A wasm module exposes only target-selected entry /
+                        // export roots, so unreachable functions must not drag
+                        // unused host capabilities into its imports.
+                        var export_abi = "";
+                        if output == Output::WasmBrowser or
+                            output == Output::WasmBrowserBinary {
+                            export_abi = "browser";
+                        }
+                        try keep_target_program(
+                            allocator, &var lowerer.module, export_abi
                         );
                         var text = string::new(allocator);
                         defer text.deinit(allocator);
@@ -1494,6 +1528,9 @@ fn lower_target(
                         return 0;
                     }
                     if output == Output::Llvm or output == Output::Check {
+                        try keep_target_program(
+                            allocator, &var lowerer.module, ""
+                        );
                         var text = string::new(allocator);
                         defer text.deinit(allocator);
                         if try llvm::emit(allocator, &var lowerer.module, &var text) |failed| {
@@ -1978,13 +2015,9 @@ fn native_target(
                             return 1;
                         }
                     }
-                    if command == NativeCommand::Build and options.opt {
-                        var roots = array::new<string::String>(allocator);
-                        defer roots.deinit(allocator);
-                        let main_root = try string::from_bytes(allocator, "main");
-                        try roots.append(allocator, move main_root);
-                        try ir::keep_reachable_functions(allocator, &var lowerer.module, &roots);
-                    }
+                    try keep_target_program(
+                        allocator, &var lowerer.module, ""
+                    );
                     var temps = try native::new_temp_dirs(allocator);
                     defer temps.deinit(allocator);
                     var host = string::new(allocator);

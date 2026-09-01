@@ -92,6 +92,24 @@ func TestExternalCallDeclsIncludeAttachedCleanup(t *testing.T) {
 	}
 }
 
+// TestRetainedStructsKeepRuntimeHeaderTypes covers reachability's contract:
+// function pruning retains declarations, and their fields still need every
+// named hosted-runtime header referenced by the emitted struct definitions.
+func TestRetainedStructsKeepRuntimeHeaderTypes(t *testing.T) {
+	module := &ir.Module{Structs: map[string]ir.Struct{
+		"Arrays": {Fields: []ir.Field{{Name: "values", Type: "std::array::Array<i64>"}}},
+		"Maps":   {Fields: []ir.Field{{Name: "values", Type: "std::map::Map<i64, i64>"}}},
+		"Arenas": {Fields: []ir.Field{{Name: "values", Type: "std::arena::Arena<i64>"}}},
+	}}
+	emitter := &emitter{module: module}
+	if !emitter.usesArrayHeader() || !emitter.usesMapHeader() || !emitter.usesArenaHeader() {
+		t.Fatal("retained aggregate declarations lost a hosted-runtime header dependency")
+	}
+	if emitter.usesArrayRuntime() || emitter.usesMapRuntime() || emitter.usesArenaRuntime() {
+		t.Fatal("declaration-only container types should not declare hosted-runtime calls")
+	}
+}
+
 // TestEmitMatchMergeForwardedValues lowers the shapes #1622 reported: a value
 // that never becomes an LLVM instruction (an enum constant, a no-op cast)
 // reaching a match merge phi, which is written before the arms that feed it.

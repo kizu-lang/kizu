@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::stdmeta;
+import compiler::internal::stdtarget;
 
 // Mechanical port of internal/ownership/comptime.go: the compile-time branch
 // selection of `comptime if` and the minimal constant evaluation it needs.
@@ -169,6 +170,10 @@ fn (self: &var Checker) read_comptime_only(
         },
         Call(value) => {
             let copied = value;
+            if try self.target_predicate_call(tree, copied) |_| {
+                out.* = self.common.bool_name;
+                return null;
+            }
             if try self.meta_predicate_call(tree, copied) |_| {
                 out.* = self.common.bool_name;
                 return null;
@@ -181,6 +186,23 @@ fn (self: &var Checker) read_comptime_only(
             ast::zero_span(), "borrow error: runtime value cannot cross comptime boundary"
         ),
     }
+}
+
+/// Answers a compiler-defined std::target predicate; null reports that the
+/// call was not one.
+fn (self: &var Checker) target_predicate_call(
+    tree: &ast::Ast,
+    call: ast::CallExpr
+) -> !?bool {
+    let name = try self.qualified_name(tree, call.callee) orelse return null;
+    let owned = try self.names.copy(name);
+    defer owned.deinit(self.allocator);
+    let name_bytes = owned.as_bytes();
+    let predicate = stdtarget::identify(name_bytes) orelse return null;
+    if arg_count(tree, call.args) != 0 {
+        return null;
+    }
+    return stdtarget::evaluate(self.target, predicate);
 }
 
 /// Answers the predicates that ask which declaration a type came from, the
@@ -262,6 +284,9 @@ fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expressi
         Bool(value) => return value.value,
         Call(value) => {
             let copied = value;
+            if try self.target_predicate_call(tree, copied) |selected| {
+                return selected;
+            }
             return self.meta_predicate_call(tree, copied);
         },
         Prefix(value) => {
