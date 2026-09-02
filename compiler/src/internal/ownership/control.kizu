@@ -194,7 +194,7 @@ fn (self: &var Checker) check_if_stmt(
     if try self.check_block(tree, left_scope, statement.consequence) |failed| {
         return move failed;
     }
-    if try self.check_capture_payload_consumed(tree, statement.capture, consumes_field, left_scope) |failed| {
+    if try self.check_capture_payload_consumed(tree, statement.capture, left_scope) |failed| {
         return move failed;
     }
     var right_live = true;
@@ -402,7 +402,7 @@ fn (self: &var Checker) check_while_stmt(
         return move failed;
     }
     self.loop_depth = self.loop_depth + 1;
-    if try self.check_while_body(tree, env, statement, body, child, consumes_field) |failed| {
+    if try self.check_while_body(tree, env, statement, body, child) |failed| {
         self.loop_depth = self.loop_depth - 1;
         return move failed;
     }
@@ -415,13 +415,12 @@ fn (self: &var Checker) check_while_body(
     env: ScopeHandle,
     statement: ast::WhileStmt,
     body: ScopeHandle,
-    child: ScopeHandle,
-    consumes_field: bool
+    child: ScopeHandle
 ) -> !?diagnostic::Diagnostic {
     if try self.check_block(tree, child, statement.body) |failed| {
         return move failed;
     }
-    if try self.check_capture_payload_consumed(tree, statement.capture, consumes_field, child) |failed| {
+    if try self.check_capture_payload_consumed(tree, statement.capture, child) |failed| {
         return move failed;
     }
     if try self.check_loop_consumes_nothing_outside(tree, env, body) |failed| {
@@ -546,8 +545,8 @@ fn (self: &var Checker) optional_owner_field_capture(
     condition: ast::Expression,
     cond_type: Name
 ) -> !?OptionalOwnerFieldCapture {
-    let elem = try self.names.optional_elem(cond_type) orelse return null;
-    if !try self.value_type_needs_consume(self.allocator, elem) {
+    let wrapped = try self.wrapped_payload_elem(cond_type) orelse return null;
+    if !try self.value_type_needs_consume(self.allocator, wrapped.elem) {
         return null;
     }
     if try self.hands_over_optional_payload(tree, condition) {
@@ -691,17 +690,18 @@ fn (self: &var Checker) define_capture(
     return null;
 }
 
-/// Rejects a capture body that opened an owner field and dropped what it
-/// found, the Go `checkCapturePayloadConsumed`. The field's obligation was
-/// recorded when the capture bound, so leaving the payload here would
-/// discharge the field's cleanup without releasing anything (ADR-0091).
+/// Rejects a capture body that dropped an owner payload it was handed, the
+/// Go `checkCapturePayloadConsumed`. A payload produced by the condition is
+/// the body's to consume (SPEC §7), and one opened out of an owner field
+/// inside that field's deinit discharged the field's cleanup when the
+/// capture bound, so leaving either here would release nothing (ADR-0091).
+/// A borrowed payload owes nothing and passes.
 fn (self: &var Checker) check_capture_payload_consumed(
     tree: &ast::Ast,
     name: ast::Text,
-    consumable: bool,
     scope: ScopeHandle
 ) -> !?diagnostic::Diagnostic {
-    if !consumable or text_empty(tree, name) {
+    if text_empty(tree, name) {
         return null;
     }
     let value = self.lookup_local_text(tree, scope, name) orelse return null;

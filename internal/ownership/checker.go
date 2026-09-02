@@ -1522,21 +1522,44 @@ func (c *Checker) arenaAtBorrowSource(
 	return borrowSource{target: target, field: path}, elem, true, nil
 }
 
-// rejectStoredOptional refuses to store a `?T` whose payload owns memory or
-// carries a view. Inside the optional the payload is invisible to move and
-// borrow tracking, so such a value lives only where it is consumed: a
-// capture, an `orelse`, or a return path.
+// rejectStoredOptional refuses to store a `?T` or `E!T` whose payload owns
+// memory or carries a view. Inside the wrapper the payload is invisible to
+// move and borrow tracking, so such a value lives only where it is consumed:
+// a capture, an `orelse` / `catch` / `try`, or a return path. The two
+// wrappers share the rule because they share the payload (SPEC §11.1).
 func (c *Checker) rejectStoredOptional(typeName string) error {
-	elem, ok := typ.OptionalElem(typeName)
+	elem, wrapper, ok := c.wrappedPayloadElem(typeName)
 	if !ok {
 		return nil
 	}
 	if strings.HasPrefix(elem, "&") || c.viewCarryingType(elem) || c.valueTypeNeedsConsume(elem) {
+		consumer := "capture or orelse"
+		if wrapper == "error union" {
+			consumer = "capture, catch, or try"
+		}
 		return errorf(
-			"move error: optional `%s` must be consumed where it is produced (capture or orelse)",
-			typeName)
+			"move error: %s `%s` must be consumed where it is produced (%s)",
+			wrapper, typeName, consumer)
 	}
 	return nil
+}
+
+// wrappedPayloadElem returns the payload type a `?T` or `E!T` spelling
+// wraps, and which wrapper it is. An error union around an optional
+// (`E!?T`) reports the innermost payload: what its capture binds is the
+// value, and the value is what carries the obligation.
+func (c *Checker) wrappedPayloadElem(typeName string) (string, string, bool) {
+	if elem, ok := typ.OptionalElem(typeName); ok {
+		return elem, "optional", true
+	}
+	success, ok := c.errorUnionElement(typeName)
+	if !ok {
+		return "", "", false
+	}
+	if elem, ok := typ.OptionalElem(success); ok {
+		return elem, "error union", true
+	}
+	return success, "error union", true
 }
 
 // checkCaptureLetStmt runs the let recognizers that tie a binding to
@@ -2594,7 +2617,7 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	right := env.clone()
 	// The tie borrows the branch's clone of each container: the branch body is
 	// checked against that clone, so only its bindings make its mutations wait.
-	consumesField, err := c.defineCapture(
+	_, err := c.defineCapture(
 		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, false, env, leftScope)
 	if err != nil {
 		return err
@@ -2602,7 +2625,7 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	if err := c.checkBlock(stmt.Consequence, leftScope); err != nil {
 		return err
 	}
-	if err := c.checkCapturePayloadConsumed(stmt.Capture, consumesField, leftScope); err != nil {
+	if err := c.checkCapturePayloadConsumed(stmt.Capture, leftScope); err != nil {
 		return err
 	}
 	if stmt.Alternative != nil {
@@ -2774,7 +2797,7 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	}
 	child := body.child()
 	// Borrow the loop's clone of each container, as in checkIfStmt.
-	consumesField, err := c.defineCapture(
+	_, err := c.defineCapture(
 		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, true, env, child)
 	if err != nil {
 		return err
@@ -2784,7 +2807,7 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	if err := c.checkBlock(stmt.Body, child); err != nil {
 		return err
 	}
-	if err := c.checkCapturePayloadConsumed(stmt.Capture, consumesField, child); err != nil {
+	if err := c.checkCapturePayloadConsumed(stmt.Capture, child); err != nil {
 		return err
 	}
 	if err := c.checkLoopConsumesNothingOutside(env, body); err != nil {
@@ -2903,7 +2926,7 @@ func (c *Checker) optionalOwnerFieldCapture(
 	condType string,
 	env *scope,
 ) (*binding, string, bool, bool) {
-	elem, ok := typ.OptionalElem(condType)
+	elem, _, ok := c.wrappedPayloadElem(condType)
 	if !ok || !c.valueTypeNeedsConsume(elem) {
 		return nil, "", false, false
 	}
@@ -3024,12 +3047,14 @@ func (c *Checker) defineCapture(
 	return consumes, nil
 }
 
-// checkCapturePayloadConsumed rejects a capture body that opened an owner field
-// and dropped what it found. The field's obligation was recorded when the
-// capture bound, so leaving the payload here would discharge the field's
-// cleanup without releasing anything (ADR-0091).
-func (c *Checker) checkCapturePayloadConsumed(name string, consumable bool, scope *scope) error {
-	if !consumable || name == "" {
+// checkCapturePayloadConsumed rejects a capture body that dropped an owner
+// payload it was handed. A payload produced by the condition is the body's
+// to consume (SPEC §7), and one opened out of an owner field inside that
+// field's deinit discharged the field's cleanup when the capture bound, so
+// leaving either here would release nothing (ADR-0091). A borrowed payload
+// owes nothing and passes.
+func (c *Checker) checkCapturePayloadConsumed(name string, scope *scope) error {
+	if name == "" {
 		return nil
 	}
 	value, ok := scope.values[name]

@@ -192,14 +192,30 @@ fn (self: &var Checker) arena_at_borrow_source(
     return null;
 }
 
-/// Refuses to store a `?T` whose payload owns memory or carries a view, the
-/// Go `rejectStoredOptional`. Inside the optional the payload is invisible
-/// to move and borrow tracking, so such a value lives only where it is
-/// consumed: a capture, an `orelse`, or a return path.
+/// Is the payload a `?T` or `E!T` spelling wraps, and which wrapper it is.
+pub struct WrappedPayload {
+    pub elem: Name,
+    pub error_union: bool
+}
+
+/// Refuses to store a `?T` or `E!T` whose payload owns memory or carries a
+/// view, the Go `rejectStoredOptional`. Inside the wrapper the payload is
+/// invisible to move and borrow tracking, so such a value lives only where
+/// it is consumed: a capture, an `orelse` / `catch` / `try`, or a return
+/// path. The two wrappers share the rule because they share the payload
+/// (SPEC §11.1).
 fn (self: &var Checker) reject_stored_optional(tree: &ast::Ast, type_name: Name) -> !?diagnostic::Diagnostic {
-    let elem = try self.names.optional_elem(type_name) orelse return null;
+    let wrapped = try self.wrapped_payload_elem(type_name) orelse return null;
+    let elem = wrapped.elem;
     if self.names.starts_with(elem, "&") or try self.view_carrying_type(elem) or
         try self.value_type_needs_consume(self.allocator, elem) {
+        if wrapped.error_union {
+            return try self.error1(
+                tree, ast::zero_span(),
+                "move error: error union `%s` must be consumed where it is produced (capture, catch, or try)",
+                Arg::Str(type_name)
+            );
+        }
         return try self.error1(
             tree, ast::zero_span(),
             "move error: optional `%s` must be consumed where it is produced (capture or orelse)",
@@ -207,6 +223,21 @@ fn (self: &var Checker) reject_stored_optional(tree: &ast::Ast, type_name: Name)
         );
     }
     return null;
+}
+
+/// Returns the payload type a `?T` or `E!T` spelling wraps, the Go
+/// `wrappedPayloadElem`. An error union around an optional (`E!?T`) reports
+/// the innermost payload: what its capture binds is the value, and the value
+/// is what carries the obligation.
+fn (self: &var Checker) wrapped_payload_elem(type_name: Name) -> !?WrappedPayload {
+    if try self.names.optional_elem(type_name) |elem| {
+        return WrappedPayload { elem: elem, error_union: false };
+    }
+    let parts = try self.names.error_union_parts(type_name) orelse return null;
+    if try self.names.optional_elem(parts.success) |elem| {
+        return WrappedPayload { elem: elem, error_union: true };
+    }
+    return WrappedPayload { elem: parts.success, error_union: true };
 }
 
 /// Runs the let recognizers that tie a binding to borrow-class views, the Go
