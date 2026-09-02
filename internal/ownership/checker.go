@@ -8189,9 +8189,15 @@ func (c *Checker) checkImplMethodCall(
 				"borrow error: value `%s` cannot be moved while borrowed", value.name)
 		}
 		// Inside the type's own deinit the fields are what the body consumes,
-		// and consuming them is how it finishes; anywhere else a value missing
-		// a field cannot run a cleanup that reaches for it.
-		if field, ok := partiallyConsumedField(value); ok && !c.insideDeinitOf(value) {
+		// and consuming them is how it finishes: the receiver's own cleanup
+		// is the body being written, so calling it is recursion, and after a
+		// field is gone it would release that field twice.
+		if c.insideDeinitOf(value) {
+			return "", true, errorf(
+				"move error: `deinit` calls itself on `%s`; release the fields instead",
+				value.name)
+		}
+		if field, ok := partiallyConsumedField(value); ok {
 			return "", true, errorf(
 				"move error: field `%s.%s` is already consumed, so `%s.deinit()` "+
 					"would release it twice", value.name, field, value.name)
