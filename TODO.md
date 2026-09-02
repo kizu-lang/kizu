@@ -22,10 +22,6 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 
 ### A. 既存の共通関数を呼ぶだけの修正(小)
 
-- [ ] A2 `while` の条件式を loop region の中で読む(`while_condition_consumes_owner`)
-- [ ] A3 `errdefer` 登録で `deferCleanup` を確認・設定する(`errdefer_after_defer`)
-- [ ] A4 `errdefer` の退役と IR の cleanup を名前でなく binding の identity で照合する
-      (`errdefer_shadowed_binding`)
 - [ ] A5 `E!Owner` の capture / `catch` で scrutinee を consume する。`?Owner` の
       「生まれた場所で消費」と同じ規則(`error_union_owner_opened_twice`,
       `error_union_capture_owner_unconsumed`)

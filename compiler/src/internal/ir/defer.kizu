@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import compiler::internal::typ;
+import std::arena;
 import std::array;
 
 // Mechanical port of internal/ir/defer.go: the lexical cleanup frames, the
@@ -48,7 +49,7 @@ fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Exp
         return move failed;
     }
     cleanup.on_error = on_error;
-    cleanup.receiver = try self.cleanup_receiver_name(tree, expression);
+    cleanup.receiver = cleanup_receiver(tree, expression);
     let frame = self.defer_frames.len() - 1;
     if self.defer_frames.at_mut(frame) |entries| {
         try entries.append(allocator, cleanup);
@@ -56,14 +57,13 @@ fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Exp
     return null;
 }
 
-/// Reads the local a cleanup call consumes, the Go `cleanupReceiverName`.
-/// The shape is the one `cleanup_from_expr` accepts, so anything else has
-/// already failed there.
-fn (self: &var Lowerer) cleanup_receiver_name(tree: &ast::Ast, expression: ast::Expression) -> !Name {
-    let call = ownership::call_expr(tree, expression) orelse return empty_name();
-    let field = ownership::field_expr(tree, call.callee) orelse return empty_name();
-    let ident = ownership::ident_expr(tree, field.receiver) orelse return empty_name();
-    return self.text_name(tree, ident.name);
+/// Reads the receiver expression a cleanup call consumes, the Go
+/// `cleanupReceiver`. The shape is the one `cleanup_from_expr` accepts, so
+/// anything else has already failed there.
+fn cleanup_receiver(tree: &ast::Ast, expression: ast::Expression) -> ?arena::Handle<ast::ExpressionNode> {
+    let call = ownership::call_expr(tree, expression) orelse return null;
+    let field = ownership::field_expr(tree, call.callee) orelse return null;
+    return field.receiver.node;
 }
 
 /// Converts the narrow v0 defer expression into a void cleanup, the Go
@@ -162,7 +162,7 @@ fn cleanup_of(op: Op, operand: Name, receiver: Value, allocator: Value) -> Clean
         extern_abi: empty_name(),
         extern_name: empty_name(),
         on_error: false,
-        receiver: empty_name()
+        receiver: null
     };
 }
 
@@ -299,11 +299,22 @@ union CleanupExit {
 
 /// Reports whether the ownership checker retired the errdefer on receiver
 /// before exit, the Go `moved[cleanup.Receiver]` test.
-fn (self: &Lowerer) retired_before(exit: CleanupExit, receiver: Name) -> bool {
+fn (self: &Lowerer) retired_before(exit: CleanupExit, receiver: arena::Handle<ast::ExpressionNode>) -> bool {
     match exit {
         Return(statement) => return self.retired_for_return(statement, receiver),
         Try(expression) => return self.retired_for_try(expression, receiver),
     }
+}
+
+/// Reports whether one cleanup is an errdefer the checker retired before
+/// exit: only an errdefer retires, and only one written on a local names a
+/// receiver to retire by.
+fn (self: &Lowerer) cleanup_retired(exit: CleanupExit, cleanup: &Cleanup) -> bool {
+    if !cleanup.on_error {
+        return false;
+    }
+    let receiver = cleanup.receiver orelse return false;
+    return self.retired_before(exit, receiver);
 }
 
 /// Drops, in place, the errdefer cleanups whose receiver was moved before
@@ -315,7 +326,7 @@ fn (self: &Lowerer) retire_cleanups(exit: CleanupExit, cleanups: &var array::Arr
     var index = 0;
     while cleanups.get(index) |cleanup| {
         index = index + 1;
-        if cleanup.on_error and !is_empty(cleanup.receiver) and self.retired_before(exit, cleanup.receiver) {
+        if self.cleanup_retired(exit, &cleanup) {
             continue;
         }
         try cleanups.set(kept, cleanup);
@@ -393,6 +404,6 @@ fn empty_cleanup() -> Cleanup {
         extern_abi: empty_name(),
         extern_name: empty_name(),
         on_error: false,
-        receiver: empty_name()
+        receiver: null
     };
 }

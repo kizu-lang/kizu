@@ -84,10 +84,14 @@ type allocTaint struct {
 }
 
 // errDeferEntry records one active errdefer cleanup whose receiver must stay
-// valid on every error-return path that can run it.
+// valid on every error-return path that can run it. The binding is held by
+// id rather than by name: a later `let` of the same name is a different
+// value, and what retires this cleanup is the fate of the one it was written
+// for.
 type errDeferEntry struct {
 	receiver ast.Expression
 	name     string
+	id       int
 }
 
 // A functionInfo is the ownership-facing view of a function: what a caller
@@ -775,10 +779,32 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 	// on the receiver's consume obligation (ADR-0091) is discharged.
 	if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
 		if value, exists := env.lookup(ident.Name); exists {
+			if err := c.checkCleanupNotRegistered(value, field.Receiver); err != nil {
+				return err
+			}
 			value.deferCleanup = true
 		}
 	}
 	return nil
+}
+
+// checkCleanupNotRegistered rejects a second cleanup registration for one
+// value. A `defer` already releases it on every exit and an `errdefer` on
+// every error exit, so another of either would release it twice on the path
+// both run.
+func (c *Checker) checkCleanupNotRegistered(value *binding, receiver ast.Expression) error {
+	keyword := ""
+	switch {
+	case value.deferCleanup:
+		keyword = "defer"
+	case c.errDeferCoversID(value.id):
+		keyword = "errdefer"
+	default:
+		return nil
+	}
+	return errorAt(expressionSpan(receiver),
+		"move error: `%s` already has a registered `%s` cleanup;"+
+			" a second cleanup would release it twice", value.name, keyword)
 }
 
 // checkErrDeferStmt validates an error-path cleanup registration. The receiver
@@ -805,11 +831,16 @@ func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
 	if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
 		return err
 	}
-	name := ""
+	entry := errDeferEntry{receiver: field.Receiver}
 	if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
-		name = ident.Name
+		if value, exists := env.lookup(ident.Name); exists {
+			if err := c.checkCleanupNotRegistered(value, field.Receiver); err != nil {
+				return err
+			}
+			entry.name, entry.id = value.name, value.id
+		}
 	}
-	c.liveErrDefers = append(c.liveErrDefers, errDeferEntry{receiver: field.Receiver, name: name})
+	c.liveErrDefers = append(c.liveErrDefers, entry)
 	return nil
 }
 
@@ -869,18 +900,18 @@ func (c *Checker) restoreErrDefers(mark int) {
 // this frame no longer holds. A borrowed receiver is different: it is still
 // live and cannot be consumed at all, so it stays an error. This runs at every
 // error path that could trigger the cleanup.
-func (c *Checker) validateErrDeferReceivers(env *scope) ([]string, error) {
-	var retired []string
+func (c *Checker) validateErrDeferReceivers(env *scope) ([]ast.Expression, error) {
+	var retired []ast.Expression
 	for _, entry := range c.liveErrDefers {
-		if entry.name == "" {
+		if entry.id == 0 {
 			continue
 		}
-		value, exists := env.lookup(entry.name)
+		value, exists := env.lookupID(entry.id)
 		if !exists {
 			continue
 		}
 		if bindingConsumed(value) {
-			retired = append(retired, entry.name)
+			retired = append(retired, entry.receiver)
 			continue
 		}
 		if value.activeBorrows > 0 || value.activeMutBorrows > 0 {
@@ -1013,7 +1044,7 @@ func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, exit leakExit) er
 		if value.id <= sinceID || !c.bindingNeedsConsume(value) {
 			return
 		}
-		if errorPath && c.errDeferCovers(value.name) {
+		if errorPath && c.errDeferCoversID(value.id) {
 			return
 		}
 		if leaked == nil || value.id > leaked.id {
@@ -1053,7 +1084,7 @@ func (c *Checker) checkCleanupReceiverOverwrite(target *binding, stmt *ast.Assig
 	switch {
 	case target.deferCleanup:
 		keyword = "defer"
-	case c.errDeferCovers(target.name):
+	case c.errDeferCoversID(target.id):
 		keyword = "errdefer"
 	default:
 		return nil
@@ -1063,13 +1094,14 @@ func (c *Checker) checkCleanupReceiverOverwrite(target *binding, stmt *ast.Assig
 			" bind the new value to its own name", keyword, target.name)
 }
 
-// errDeferCovers reports whether an active errdefer cleans up the named owner.
-func (c *Checker) errDeferCovers(name string) bool {
-	if name == "" {
+// errDeferCoversID reports whether an active errdefer cleans up the binding
+// with this id.
+func (c *Checker) errDeferCoversID(id int) bool {
+	if id == 0 {
 		return false
 	}
 	for _, entry := range c.liveErrDefers {
-		if entry.name == name {
+		if entry.id == id {
 			return true
 		}
 	}
@@ -9681,6 +9713,20 @@ func (s *scope) collectBindings(out map[int]*binding) {
 	s.walkBindings(func(value *binding) {
 		out[value.id] = value
 	})
+}
+
+// lookupID finds the binding with this id, innermost scope first. A clone
+// keeps the id of the binding it copied, so this reaches the current state of
+// a value even where a later `let` of the same name hides it from lookup.
+func (s *scope) lookupID(id int) (*binding, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		for _, value := range cur.values {
+			if value.id == id {
+				return value, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // walkBindings visits all bindings in this scope chain.

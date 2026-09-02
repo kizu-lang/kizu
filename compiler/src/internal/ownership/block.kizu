@@ -182,11 +182,41 @@ fn (self: &var Checker) check_defer_stmt(
     // A registered defer runs on every later exit of this block, so from
     // here on the receiver's consume obligation (ADR-0091) is discharged.
     if self.lookup_ident(tree, env, field.receiver) |value| {
+        if try self.check_cleanup_not_registered(tree, value, field.receiver) |failed| {
+            return move failed;
+        }
         if self.store.binding_mut(value) |record| {
             record.defer_cleanup = true;
         }
     }
     return null;
+}
+
+/// Rejects a second cleanup registration for one value, the Go
+/// `checkCleanupNotRegistered`. A `defer` already releases it on every exit
+/// and an `errdefer` on every error exit, so another of either would release
+/// it twice on the path both run.
+fn (self: &var Checker) check_cleanup_not_registered(
+    tree: &var ast::Ast,
+    value: BindingHandle,
+    receiver: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var keyword = "";
+    if self.binding(value).defer_cleanup {
+        keyword = "defer";
+    } else {
+        if self.err_defer_covers_id(self.binding(value).id) {
+            keyword = "errdefer";
+        } else {
+            return null;
+        }
+    }
+    let spelling = try self.names.intern(keyword);
+    return try self.error2(
+        tree, expression_span(tree, receiver),
+        "move error: `%s` already has a registered `%s` cleanup; a second cleanup would release it twice",
+        Arg::Str(self.binding(value).name), Arg::Str(spelling)
+    );
 }
 
 /// Reads the arguments a registered cleanup carries, the Go
@@ -258,11 +288,15 @@ fn (self: &var Checker) check_err_defer_stmt(
     ) |failed| {
         return move failed;
     }
-    var name = empty_name();
-    if ident_text(tree, field.receiver) |text| {
-        name = try self.names.intern_text(tree, text);
+    var entry = ErrDeferEntry { receiver: field.receiver, name: empty_name(), id: 0 };
+    if self.lookup_ident(tree, env, field.receiver) |value| {
+        if try self.check_cleanup_not_registered(tree, value, field.receiver) |failed| {
+            return move failed;
+        }
+        entry.name = self.binding(value).name;
+        entry.id = self.binding(value).id;
     }
-    try self.live_err_defers.append(self.allocator, ErrDeferEntry { receiver: field.receiver, name: name });
+    try self.live_err_defers.append(self.allocator, entry);
     return null;
 }
 
@@ -278,17 +312,17 @@ fn (self: &var Checker) check_err_defer_stmt(
 fn (self: &var Checker) validate_err_defer_receivers(
     tree: &ast::Ast,
     env: ScopeHandle,
-    retired: &var array::Array<Name>
+    retired: &var array::Array<ast::Expression>
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
     while self.live_err_defers.get(index) |entry| {
         index = index + 1;
-        if is_empty(entry.name) {
+        if entry.id == 0 {
             continue;
         }
-        let value = self.lookup_name(env, entry.name) orelse continue;
+        let value = self.store.find_by_id(env, entry.id) orelse continue;
         if self.binding_consumed(value) {
-            try retired.append(self.allocator, entry.name);
+            try retired.append(self.allocator, entry.receiver);
             continue;
         }
         if self.binding(value).active_borrows > 0 or self.binding(value).active_mut_borrows > 0 {
@@ -436,7 +470,7 @@ fn (self: &var Checker) check_owners_consumed(
         if self.binding(value).id <= since_id or !try self.binding_needs_consume(value) {
             continue;
         }
-        if error_path and self.err_defer_covers(self.binding(value).name) {
+        if error_path and self.err_defer_covers_id(self.binding(value).id) {
             continue;
         }
         if leaked |seen| {
@@ -490,7 +524,7 @@ fn (self: &var Checker) check_cleanup_receiver_overwrite(
     if self.binding(target).defer_cleanup {
         keyword = "defer";
     } else {
-        if self.err_defer_covers(name) {
+        if self.err_defer_covers_id(self.binding(target).id) {
             keyword = "errdefer";
         } else {
             return null;
@@ -504,15 +538,15 @@ fn (self: &var Checker) check_cleanup_receiver_overwrite(
     );
 }
 
-/// Reports whether an active errdefer cleans up the named owner, the Go
-/// `errDeferCovers`.
-fn (self: &Checker) err_defer_covers(name: Name) -> bool {
-    if is_empty(name) {
+/// Reports whether an active errdefer cleans up the binding with this id,
+/// the Go `errDeferCoversID`.
+fn (self: &Checker) err_defer_covers_id(id: i64) -> bool {
+    if id == 0 {
         return false;
     }
     var index = 0;
     while self.live_err_defers.get(index) |entry| {
-        if same_name(entry.name, name) {
+        if entry.id == id {
             return true;
         }
         index = index + 1;
@@ -625,14 +659,14 @@ fn (self: &var Checker) check_return_stmt(
     // skips.
     let error_path = try self.return_takes_error_path(tree, env, returned);
     if error_path {
-        var retired = array::new<Name>(self.allocator);
+        var retired = array::new<ast::Expression>(self.allocator);
         errdefer retired.deinit(self.allocator);
         if try self.validate_err_defer_receivers(tree, env, &var retired) |failed| {
             retired.deinit(self.allocator);
             return move failed;
         }
         try self.result.return_retired_err_defers.append(self.allocator, RetiredErrDefers {
-            node: statement.node, names: move retired
+            node: statement.node, receivers: move retired
         });
     }
     let saved = self.borrow_return;

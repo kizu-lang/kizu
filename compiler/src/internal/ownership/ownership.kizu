@@ -19,12 +19,14 @@ import std::string;
 // block / let / control / expression / call / type_apply / access / method /
 // container / provenance / uses, comptime.go and meta.go keep their names.
 
-/// Lists the active errdefer receivers one exit must skip because an earlier
+/// Lists the active errdefer cleanups one exit must skip because an earlier
 /// move retired them; the Go `Result` maps keyed by return statement and
-/// try expression.
+/// try expression. A cleanup is named by the receiver expression its
+/// `errdefer` statement was written with: one node per registration, so two
+/// registrations on one name stay apart.
 pub struct RetiredErrDefers {
     pub node: arena::Handle<ast::StatementNode>,
-    pub names: array::Array<Name>
+    pub receivers: array::Array<ast::Expression>
 }
 
 /// Carries ownership facts consumed by later compiler phases, the Go
@@ -45,7 +47,7 @@ pub struct Result {
 /// Is the try expression half of Result.
 pub struct RetiredTry {
     pub node: arena::Handle<ast::ExpressionNode>,
-    pub names: array::Array<Name>
+    pub receivers: array::Array<ast::Expression>
 }
 
 fn new_result(allocator: Allocator) -> Result {
@@ -64,12 +66,12 @@ fn (self: Result) deinit(allocator: Allocator) -> void {
 }
 
 fn (self: RetiredErrDefers) deinit(allocator: Allocator) -> void {
-    self.names.deinit(allocator);
+    self.receivers.deinit(allocator);
     return;
 }
 
 fn (self: RetiredTry) deinit(allocator: Allocator) -> void {
-    self.names.deinit(allocator);
+    self.receivers.deinit(allocator);
     return;
 }
 
@@ -166,7 +168,11 @@ pub struct AllocTaint {
 /// every error-return path that can run it.
 pub struct ErrDeferEntry {
     pub receiver: ast::Expression,
-    pub name: Name
+    pub name: Name,
+    // The binding is held by id rather than by name: a later `let` of the
+    // same name is a different value, and what retires this cleanup is the
+    // fate of the one it was written for.
+    pub id: i64
 }
 
 /// Is the field or variant a comptime capture names for the length of one
@@ -612,22 +618,24 @@ fn contains_start(markers: &array::Array<ast::Span>, marker: ast::Span) -> bool 
     return false;
 }
 
-/// Names the errdefer receiver at position among the ones recorded for the
-/// return statement at index, null past either end. It reads the entry
-/// `retired_return_at` names, so a caller walking both never searches for it.
-pub fn (self: &Checker) retired_return_name_at(index: i64, position: i64) -> ?Name {
+/// Returns the errdefer receiver expression at position among the ones
+/// recorded for the return statement at index, null past either end. It reads
+/// the entry `retired_return_at` names, so a caller walking both never
+/// searches for it.
+pub fn (self: &Checker) retired_return_receiver_at(index: i64, position: i64) -> ?ast::Expression {
     if self.result.return_retired_err_defers.at(index) |entry| {
-        return entry.names.get(position);
+        return entry.receivers.get(position);
     }
     return null;
 }
 
-/// Names the errdefer receiver at position among the ones recorded for the
-/// try expression at index, null past either end. It reads the entry
-/// `retired_try_at` names, so a caller walking both never searches for it.
-pub fn (self: &Checker) retired_try_name_at(index: i64, position: i64) -> ?Name {
+/// Returns the errdefer receiver expression at position among the ones
+/// recorded for the try expression at index, null past either end. It reads
+/// the entry `retired_try_at` names, so a caller walking both never searches
+/// for it.
+pub fn (self: &Checker) retired_try_receiver_at(index: i64, position: i64) -> ?ast::Expression {
     if self.result.try_retired_err_defers.at(index) |entry| {
-        return entry.names.get(position);
+        return entry.receivers.get(position);
     }
     return null;
 }
@@ -654,12 +662,6 @@ pub fn (self: &Checker) retired_try_at(index: i64) -> ?ast::Expression {
 /// Returns the argument place at index among indirect-call &var borrows.
 pub fn (self: &Checker) function_pointer_mut_borrow_at(index: i64) -> ?ast::Expression {
     return self.result.function_pointer_mut_borrows.get(index);
-}
-
-/// Returns the text of a name `retired_err_defer_for_return` /
-/// `retired_err_defer_for_try` returned; callers bind `as_bytes()` locally.
-pub fn retired_name_text(checker: &Checker, name: Name) -> &string::String {
-    return name_text(&checker.names, name);
 }
 
 /// Runs the setup phases and then every body, stopping at the first error,

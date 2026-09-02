@@ -6,8 +6,11 @@ import "github.com/kizu-lang/kizu/internal/ast"
 // remains syntax owned by parsing; checking records its phase-specific output
 // here instead of mutating syntax nodes.
 type Result struct {
-	returnRetiredErrDefers map[*ast.ReturnStmt][]string
-	tryRetiredErrDefers    map[*ast.TryExpr][]string
+	// Retired errdefer cleanups are named by the receiver expression the
+	// `errdefer` statement was written with: one node per registration, so
+	// two registrations on one name stay apart.
+	returnRetiredErrDefers map[*ast.ReturnStmt][]ast.Expression
+	tryRetiredErrDefers    map[*ast.TryExpr][]ast.Expression
 	// functionPointerMutBorrows marks the argument places an indirect call
 	// lends as &var. IR slot analysis cannot recover a local pointer's type
 	// from syntax alone, so ownership carries that checked fact forward.
@@ -17,8 +20,8 @@ type Result struct {
 // newResult creates an empty ownership result.
 func newResult() Result {
 	return Result{
-		returnRetiredErrDefers:    map[*ast.ReturnStmt][]string{},
-		tryRetiredErrDefers:       map[*ast.TryExpr][]string{},
+		returnRetiredErrDefers:    map[*ast.ReturnStmt][]ast.Expression{},
+		tryRetiredErrDefers:       map[*ast.TryExpr][]ast.Expression{},
 		functionPointerMutBorrows: map[ast.Expression]bool{},
 	}
 }
@@ -29,14 +32,15 @@ func (r Result) FunctionPointerMutablyBorrows(expr ast.Expression) bool {
 	return r.functionPointerMutBorrows[expr]
 }
 
-// RetiredErrDefersForReturn lists the active errdefer receivers an error
-// return must skip because an earlier move retired them.
-func (r Result) RetiredErrDefersForReturn(stmt *ast.ReturnStmt) []string {
+// RetiredErrDefersForReturn lists the receiver expressions of the active
+// errdefer cleanups an error return must skip because an earlier move
+// retired them.
+func (r Result) RetiredErrDefersForReturn(stmt *ast.ReturnStmt) []ast.Expression {
 	return r.returnRetiredErrDefers[stmt]
 }
 
-// RetiredErrDefersForTry lists the active errdefer receivers a try error path
-// must skip because an earlier move retired them.
-func (r Result) RetiredErrDefersForTry(expr *ast.TryExpr) []string {
+// RetiredErrDefersForTry lists the receiver expressions of the active errdefer
+// cleanups a try error path must skip because an earlier move retired them.
+func (r Result) RetiredErrDefersForTry(expr *ast.TryExpr) []ast.Expression {
 	return r.tryRetiredErrDefers[expr]
 }

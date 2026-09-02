@@ -1784,7 +1784,11 @@ func retiredErrDefersOf(
 				continue
 			}
 			if try, ok := expr.Expr.(*ast.TryExpr); ok {
-				retired = append(retired, result.RetiredErrDefersForTry(try))
+				names := []string{}
+				for _, receiver := range result.RetiredErrDefersForTry(try) {
+					names = append(names, receiver.(*ast.IdentExpr).Name)
+				}
+				retired = append(retired, names)
 			}
 		}
 	}

@@ -225,7 +225,8 @@ pub struct MetaMark {
 pub struct RetiredReceiver {
     pub statement: ?arena::Handle<ast::StatementNode>,
     pub expression: ?arena::Handle<ast::ExpressionNode>,
-    pub name: Name
+    // The receiver expression the retired `errdefer` was written with.
+    pub receiver: arena::Handle<ast::ExpressionNode>
 }
 
 /// Holds the names every lowering spells, interned once.
@@ -607,11 +608,10 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     var index = 0;
     while checker.retired_return_at(index) |statement| {
         var position = 0;
-        while checker.retired_return_name_at(index, position) |name| {
+        while checker.retired_return_receiver_at(index, position) |receiver| {
             position = position + 1;
-            let copied = try self.copy_retired_name(checker, name);
             try self.retired.append(self.allocator, RetiredReceiver {
-                statement: statement.node, expression: null, name: copied
+                statement: statement.node, expression: null, receiver: receiver.node
             });
         }
         index = index + 1;
@@ -619,11 +619,10 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     index = 0;
     while checker.retired_try_at(index) |expression| {
         var position = 0;
-        while checker.retired_try_name_at(index, position) |name| {
+        while checker.retired_try_receiver_at(index, position) |receiver| {
             position = position + 1;
-            let copied = try self.copy_retired_name(checker, name);
             try self.retired.append(self.allocator, RetiredReceiver {
-                statement: null, expression: expression.node, name: copied
+                statement: null, expression: expression.node, receiver: receiver.node
             });
         }
         index = index + 1;
@@ -636,22 +635,18 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     return;
 }
 
-/// Spells one retired receiver in the module's own name table.
-fn (self: &var Lowerer) copy_retired_name(checker: &ownership::Checker, name: ownership::Name) -> !Name {
-    let retained = ownership::retired_name_text(checker, name);
-    let bytes = retained.as_bytes();
-    return self.module.names.intern(bytes);
-}
-
 /// Reports whether the ownership checker retired the errdefer on receiver
 /// before this return statement, the Go
 /// `Result.RetiredErrDefersForReturn` membership.
-fn (self: &Lowerer) retired_for_return(statement: ast::Statement, receiver: Name) -> bool {
+fn (self: &Lowerer) retired_for_return(
+    statement: ast::Statement,
+    receiver: arena::Handle<ast::ExpressionNode>
+) -> bool {
     var index = 0;
     while self.retired.get(index) |entry| {
         index = index + 1;
         if entry.statement |node| {
-            if node == statement.node and same_name(entry.name, receiver) {
+            if node == statement.node and entry.receiver == receiver {
                 return true;
             }
         }
@@ -662,12 +657,15 @@ fn (self: &Lowerer) retired_for_return(statement: ast::Statement, receiver: Name
 /// Reports whether the ownership checker retired the errdefer on receiver
 /// before this try expression, the Go `Result.RetiredErrDefersForTry`
 /// membership.
-fn (self: &Lowerer) retired_for_try(expression: ast::Expression, receiver: Name) -> bool {
+fn (self: &Lowerer) retired_for_try(
+    expression: ast::Expression,
+    receiver: arena::Handle<ast::ExpressionNode>
+) -> bool {
     var index = 0;
     while self.retired.get(index) |entry| {
         index = index + 1;
         if entry.expression |node| {
-            if node == expression.node and same_name(entry.name, receiver) {
+            if node == expression.node and entry.receiver == receiver {
                 return true;
             }
         }
