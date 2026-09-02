@@ -5548,6 +5548,7 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 		"std::internal::builtin::array_get", "std::internal::builtin::array_get_or_panic",
 		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut",
 		"std::internal::builtin::array_set", "std::internal::builtin::array_swap",
+		"std::internal::builtin::array_truncate", "std::internal::builtin::array_clear",
 		"std::internal::builtin::array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env)
 	default:
@@ -5763,24 +5764,9 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		}
 		return "?&var " + elem, nil
 	case "get", "get_or_panic":
-		if len(args) != 1 {
-			return "", errorf("array error: `Array.%s` expects 1 arg, got %d",
-				name, len(args))
-		}
-		got, err := c.readExpr(args[0], env)
-		if err != nil {
-			return "", err
-		}
-		if got != "i64" {
-			return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
-		}
-		if !isGenericParamName(elem) && !c.isCopyType(elem) {
-			return "", errorf("array error: `Array.%s` requires copy element", name)
-		}
-		if name == "get" {
-			return "?" + elem, nil
-		}
-		return elem, nil
+		return c.checkArrayPrimitiveGet(elem, name, args, env)
+	case "truncate", "clear":
+		return c.checkArrayPrimitiveShrink(name, args, env)
 	case "deinit":
 		// The raw primitive frees the buffer through the allocator the release
 		// names: the header keeps none of its own (ADR-0132).
@@ -5792,6 +5778,52 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		array := &binding{typeName: fmt.Sprintf("std::array::Array<%s>", elem)}
 		return c.checkArrayMethod(array, elem, name, args, env)
 	}
+}
+
+// checkArrayPrimitiveGet validates the raw copy-only element reads used by
+// their std wrappers.
+func (c *Checker) checkArrayPrimitiveGet(
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
+	}
+	if !isGenericParamName(elem) && !c.isCopyType(elem) {
+		return "", errorf("array error: `Array.%s` requires copy element", name)
+	}
+	if name == "get" {
+		return "?" + elem, nil
+	}
+	return elem, nil
+}
+
+// checkArrayPrimitiveShrink validates the raw storage operations used only by
+// the owner-aware std wrappers.
+func (c *Checker) checkArrayPrimitiveShrink(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if name == "truncate" {
+		if _, err := c.checkOneI64Arg("Array.truncate", args, env); err != nil {
+			return "", err
+		}
+		return "std::array::Error!void", nil
+	}
+	if len(args) != 0 {
+		return "", errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
+	}
+	return "void", nil
 }
 
 // checkBuiltinMapTypeApply validates the std-only Map runtime primitive.
@@ -5884,7 +5916,7 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 		if len(args) != 3 {
 			return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
 		}
-		if err := c.readGrowAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
+		if err := c.readContainerAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
 			return "", err
 		}
 		if got, err := c.readExpr(args[1], env); err != nil {
@@ -7188,8 +7220,8 @@ var containerAccessTables = map[string]containerAccessTable{
 	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
 		"append": accessMutate, "append_bytes": accessMutate, "reserve": accessMutate,
 		"set":  accessMutate,
-		"swap": accessMutate,
-		"pop":  accessMutate, "pop_or_panic": accessMutate,
+		"swap": accessMutate, "remove": accessMutate,
+		"pop": accessMutate, "pop_or_panic": accessMutate,
 		"truncate": accessMutate, "clear": accessMutate,
 		"len": accessRead, "capacity": accessRead,
 		"get": accessRead, "get_or_panic": accessRead, "clone": accessRead,
@@ -7366,7 +7398,7 @@ func (c *Checker) readStringGrowAllocator(
 	if len(args) != 2 {
 		return errorf("string error: `String.%s` expects 2 args, got %d", name, len(args))
 	}
-	return c.readGrowAllocator("string", "String."+name, str, args[0], env)
+	return c.readContainerAllocator("string", "String."+name, str, args[0], env)
 }
 
 // checkStringNoArgs validates no-argument String methods.
@@ -7485,12 +7517,14 @@ func (c *Checker) checkArrayMethod(
 		return "", err
 	}
 	if isStdArrayStorageMethod(name) {
-		return c.checkStdArrayStorageMethod(elem, name, args, env)
+		return c.checkStdArrayStorageMethod(elem, name, args)
 	}
 	if arrayGrowMethod(name) {
 		return c.checkArrayGrowth(array, elem, name, args, env)
 	}
 	switch name {
+	case "clear", "truncate":
+		return c.checkArrayShrink(array, name, args, env)
 	case "pop":
 		return c.checkArrayPop(elem, name, args, true)
 	case "pop_or_panic":
@@ -7501,7 +7535,7 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArrayCopyMethod(elem, name, args, env)
 	case "at", "at_mut":
 		return c.checkArrayAtCondition(array, elem, name, args, env)
-	case "set", "swap":
+	case "set", "swap", "remove":
 		return c.checkArrayIndexedMutation(array, elem, name, args, env)
 	case "deinit":
 		return c.checkArrayDeinit(array, name, args, env)
@@ -7527,7 +7561,41 @@ func (c *Checker) checkArrayDeinit(
 	return "void", nil
 }
 
-// checkArrayIndexedMutation validates set and owner-safe slot exchange.
+// checkArrayShrink validates the allocator an owner-aware clear/truncate may
+// pass to removed elements without consuming the Array itself.
+func (c *Checker) checkArrayShrink(
+	array *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	want := 1
+	if name == "truncate" {
+		want = 2
+	}
+	if len(args) != want {
+		return "", errorf("array error: `Array.%s` expects %d args, got %d", name, want, len(args))
+	}
+	if array.borrowedParam && !array.mutBorrow {
+		return "", errorf("array error: `Array.%s` requires mutable Array receiver", name)
+	}
+	if err := c.readContainerAllocator("array", "Array."+name, array, args[0], env); err != nil {
+		return "", err
+	}
+	if name == "clear" {
+		return "void", nil
+	}
+	got, err := c.readExpr(args[1], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", errorf("array error: `Array.truncate` expects i64, got %s", got)
+	}
+	return "std::array::Error!void", nil
+}
+
+// checkArrayIndexedMutation validates indexed replacement, exchange, and move-out.
 func (c *Checker) checkArrayIndexedMutation(
 	value *binding,
 	elem string,
@@ -7539,9 +7607,32 @@ func (c *Checker) checkArrayIndexedMutation(
 		return c.checkArraySet(elem, args, env)
 	}
 	if value.borrowedParam && !value.mutBorrow {
-		return "", errorf("array error: `Array.swap` requires mutable Array receiver")
+		return "", errorf("array error: `Array.%s` requires mutable Array receiver", name)
+	}
+	if name == "remove" {
+		return c.checkArrayRemove(elem, args, env)
 	}
 	return c.checkArraySwap(args, env)
+}
+
+// checkArrayRemove validates one checked index and returns the element through
+// the error union. Owner elements move to the caller; none are destroyed here.
+func (c *Checker) checkArrayRemove(
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", errorf("array error: `Array.remove` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", errorf("array error: `Array.remove` expects i64 index, got %s", got)
+	}
+	return "std::array::Error!" + elem, nil
 }
 
 // checkArraySwap validates two checked indexes without moving either element.
@@ -7598,27 +7689,16 @@ func (c *Checker) checkArrayClone(
 	return "std::mem::Error!std::array::Array<" + elem + ">", nil
 }
 
-// checkStdArrayStorageMethod validates Array helpers reserved to std source.
+// checkStdArrayStorageMethod validates raw Array views reserved to std source.
 func (c *Checker) checkStdArrayStorageMethod(
 	elem string,
 	name string,
 	args []ast.Expression,
-	env *scope,
 ) (string, error) {
-	switch name {
-	case "truncate":
-		return c.checkArrayCountMutation(name, args, env)
-	case "clear":
-		if len(args) != 0 {
-			return "", errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
-		}
-		return "void", nil
-	default:
-		if elem != "u8" {
-			return "", errorf("array error: `Array.%s` requires Array<u8>", name)
-		}
-		return c.checkArrayReadNoArgs(name, args)
+	if elem != "u8" {
+		return "", errorf("array error: `Array.%s` requires Array<u8>", name)
 	}
+	return c.checkArrayReadNoArgs(name, args)
 }
 
 // checkArrayAppendBytes validates the run copied by Array.append_bytes. Only a
@@ -7645,10 +7725,9 @@ func (c *Checker) checkArrayAppendBytes(
 	return "std::mem::Error!void", nil
 }
 
-// isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
+// isStdArrayStorageMethod reports raw view methods reserved to std source.
 func isStdArrayStorageMethod(name string) bool {
-	return name == "truncate" || name == "clear" ||
-		name == "as_bytes" || name == "as_mut_bytes"
+	return name == "as_bytes" || name == "as_mut_bytes"
 }
 
 // checkArrayCountMutation validates one-count Array mutations.
@@ -7715,7 +7794,7 @@ func (c *Checker) readArrayGrowAllocator(
 	if len(args) != 2 {
 		return errorf("array error: `Array.%s` expects 2 args, got %d", name, len(args))
 	}
-	return c.readGrowAllocator("array", "Array."+name, array, args[0], env)
+	return c.readContainerAllocator("array", "Array."+name, array, args[0], env)
 }
 
 // checkArrayAppend validates append mutation and element move.
@@ -7965,7 +8044,7 @@ func (c *Checker) checkMapInsert(
 	if len(args) != 3 {
 		return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
 	}
-	if err := c.readGrowAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
+	if err := c.readContainerAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
 		return "", err
 	}
 	if got, err := c.readContextualExpr(args[1], keyType, env); err != nil {
@@ -7983,12 +8062,12 @@ func (c *Checker) checkMapInsert(
 	return "std::mem::Error!void", nil
 }
 
-// readGrowAllocator reads the leading Allocator a storage-asking container
+// readContainerAllocator reads an Allocator a storage-affecting container
 // method names, and requires it to be the one the container was built from.
-// The storage a growth buys is released by the container's `deinit`, which
-// names one allocator for all of it: a growth that named another would leave
-// the release freeing bytes it never handed out (ADR-0132).
-func (c *Checker) readGrowAllocator(
+// Growth must release through the allocator that bought its bytes, and owner
+// shrink must release elements through the allocator that built them
+// (ADR-0132).
+func (c *Checker) readContainerAllocator(
 	kind string,
 	what string,
 	receiver *binding,
@@ -8249,7 +8328,7 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 	if !ok || base != "std::arena::Arena" {
 		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
-	if err := c.readGrowAllocator("arena", "Arena.add", arena, args[0], env); err != nil {
+	if err := c.readContainerAllocator("arena", "Arena.add", arena, args[0], env); err != nil {
 		return "", err
 	}
 	got, err := c.moveContextualExpr(args[1], arg, env)

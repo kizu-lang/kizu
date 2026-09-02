@@ -4969,6 +4969,8 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		return Type("?&var " + string(elem)), nil
 	case "get", "get_or_panic":
 		return c.checkArrayPrimitiveGet(elem, name, args, env, unsafe)
+	case "truncate", "clear":
+		return c.checkArrayPrimitiveShrink(name, args, env, unsafe)
 	case "deinit":
 		// The raw primitive frees only the buffer, with no owner-element rule:
 		// it is the one escape `Array.deinit` uses after consuming the
@@ -4980,6 +4982,26 @@ func (c *Checker) checkArrayPrimitiveMethod(
 	default:
 		return c.checkArrayMethod(elem, name, args, env, unsafe)
 	}
+}
+
+// checkArrayPrimitiveShrink validates the raw storage operations used only by
+// the owner-aware std wrappers.
+func (c *Checker) checkArrayPrimitiveShrink(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if name == "truncate" {
+		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "std::array::Error!void", nil
+	}
+	if len(args) != 0 {
+		return "", errorf("type error: `Array.clear` expects 0 args, got %d", len(args))
+	}
+	return typeVoid, nil
 }
 
 // checkArrayPrimitiveGet validates the copy-only element reads behind the get
@@ -6693,16 +6715,27 @@ func (c *Checker) checkArrayReceiverMethod(
 	return c.checkArrayMethod(elem, field.Name, args, env, unsafe)
 }
 
-// checkArrayReceiverBorrow rejects slot exchange through a shared Array borrow.
+// checkArrayReceiverBorrow rejects mutations through a shared Array borrow.
 func checkArrayReceiverBorrow(field *ast.FieldExpr, env *scope) error {
 	ident, ok := field.Receiver.(*ast.IdentExpr)
-	if !ok || field.Name != "swap" || !env.isBorrowed(ident.Name) {
+	if !ok || !arrayMethodRequiresMutableReceiver(field.Name) || !env.isBorrowed(ident.Name) {
 		return nil
 	}
 	if !env.isMutBorrowed(ident.Name) {
 		return errorf("type error: `Array.%s` requires mutable Array receiver", field.Name)
 	}
 	return nil
+}
+
+// arrayMethodRequiresMutableReceiver reports the public Array mutations whose
+// receiver cannot be a shared Array parameter.
+func arrayMethodRequiresMutableReceiver(name string) bool {
+	switch name {
+	case "swap", "remove", "truncate", "clear":
+		return true
+	default:
+		return false
+	}
 }
 
 // checkMapReceiverMethod validates receiver-sensitive Map<K, V> methods.
@@ -6769,7 +6802,7 @@ func (c *Checker) checkArrayMethod(
 	unsafe unsafeMark,
 ) (Type, error) {
 	if isStdArrayStorageMethod(name) {
-		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
+		return c.checkStdArrayStorageMethod(elem, name, args)
 	}
 	// Rules the declaration cannot state: `at`/`at_mut` hand out a borrow,
 	// `get` copies out of the array, and owner elements make shallow cleanup a
@@ -6908,37 +6941,21 @@ func (c *Checker) checkStdMethodBody(fn *functionType, typeArgs []Type) error {
 	return c.checkGenericInstantiation(fn, subst, nil, nil)
 }
 
-// checkStdArrayStorageMethod validates Array helpers reserved to std source.
+// checkStdArrayStorageMethod validates raw Array views reserved to std source.
 func (c *Checker) checkStdArrayStorageMethod(
 	elem Type,
 	name string,
 	args []ast.Expression,
-	env *scope,
-	unsafe unsafeMark,
 ) (Type, error) {
 	if !c.currentStd {
 		return "", errorf("type error: Array has no method `%s`", name)
 	}
-	switch name {
-	case "truncate":
-		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
-			return "", err
-		}
-		return "std::array::Error!void", nil
-	case "clear":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.clear` expects 0 args, got %d", len(args))
-		}
-		return typeVoid, nil
-	default:
-		return checkArrayAsBytes(elem, name, args)
-	}
+	return checkArrayAsBytes(elem, name, args)
 }
 
-// isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
+// isStdArrayStorageMethod reports raw view methods reserved to std source.
 func isStdArrayStorageMethod(name string) bool {
-	return name == "truncate" || name == "clear" ||
-		name == "as_bytes" || name == "as_mut_bytes"
+	return name == "as_bytes" || name == "as_mut_bytes"
 }
 
 // checkArrayAsBytes validates Array<u8> to byte-slice view conversion. The

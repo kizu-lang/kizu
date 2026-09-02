@@ -1,0 +1,119 @@
+import std::array;
+import std::mem;
+import std::string;
+
+struct Drop {
+    id: i64,
+}
+
+fn (self: Drop) deinit() -> void {
+    print(self.id);
+    return;
+}
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit(allocator);
+    try name.append_bytes(allocator, text);
+    return move name;
+}
+
+fn clear_all<T>(allocator: Allocator, values: &var array::Array<T>) -> void {
+    values.clear(allocator);
+    return;
+}
+
+fn truncate_refused(
+    allocator: Allocator,
+    values: &var array::Array<i64>
+) -> bool {
+    values.truncate(allocator, values.len() + 1) catch return true;
+    return false;
+}
+
+fn remove_refused(values: &var array::Array<i64>) -> bool {
+    let removed = values.remove(values.len()) catch return true;
+    print(removed);
+    return false;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try values.append(allocator, 10);
+    try values.append(allocator, 20);
+    try values.append(allocator, 30);
+    let capacity = values.capacity();
+
+    // Both checked failures leave length and order untouched.
+    print(truncate_refused(allocator, &var values));
+    print(values.len());
+    print(remove_refused(&var values));
+    print(values.len());
+
+    // truncate keeps the first two elements and retains the backing buffer.
+    try values.truncate(allocator, 2);
+    print(values.len());
+    let first = try values.remove(0);
+    print(first);
+    print(values.get_or_panic(0));
+    // clear removes every element and retains the same backing buffer.
+    clear_all<i64>(allocator, &var values);
+    print(values.len());
+    print(values.capacity() == capacity);
+
+    // Owner cleanup runs from the old tail down and leaves the buffer alive.
+    var drops = array::new<Drop>(allocator);
+    defer drops.deinit(allocator);
+    try drops.append(allocator, Drop { id: 1 });
+    try drops.append(allocator, Drop { id: 2 });
+    try drops.append(allocator, Drop { id: 3 });
+    try drops.truncate(allocator, 1);
+    clear_all<Drop>(allocator, &var drops);
+    print(drops.len());
+
+    // remove transfers one owner to the caller and keeps the remaining order.
+    var names = array::new<string::String>(allocator);
+    defer names.deinit(allocator);
+    try names.append(allocator, try make_name(allocator, "alice"));
+    try names.append(allocator, try make_name(allocator, "bob"));
+    try names.append(allocator, try make_name(allocator, "carol"));
+    let middle = try names.remove(1);
+    defer middle.deinit(allocator);
+    let middle_text = middle.as_bytes();
+    print(middle_text);
+    if names.at(0) |name| {
+        let text = name.as_bytes();
+        print(text);
+    }
+    if names.at(1) |name| {
+        let text = name.as_bytes();
+        print(text);
+    }
+    clear_all<string::String>(allocator, &var names);
+    print(names.len());
+    return;
+}
+
+// run
+// features: std-array allocator ownership cleanup remove truncate clear error-union
+// output:
+// true
+// 3
+// true
+// 3
+// 2
+// 10
+// 20
+// 0
+// true
+// 3
+// 2
+// 1
+// 0
+// bob
+// alice
+// carol
+// 0

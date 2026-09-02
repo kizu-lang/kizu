@@ -1,0 +1,96 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn truncate_fails(
+    allocator: Allocator,
+    values: &var array::Array<i64>,
+    length: i64
+) -> bool {
+    values.truncate(allocator, length) catch return true;
+    return false;
+}
+
+fn remove_fails(values: &var array::Array<i64>, index: i64) -> bool {
+    let removed = values.remove(index) catch return true;
+    let _ = removed;
+    return false;
+}
+
+fn owner_truncate_fails(
+    allocator: Allocator,
+    values: &var array::Array<string::String>,
+    length: i64
+) -> bool {
+    values.truncate(allocator, length) catch return true;
+    return false;
+}
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit(allocator);
+    try name.append_bytes(allocator, text);
+    return move name;
+}
+
+test "array shrink retains storage and checks bounds before mutation" {
+    let allocator = mem::page_allocator();
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try values.append(allocator, 10);
+    try values.append(allocator, 20);
+    try values.append(allocator, 30);
+    let capacity = values.capacity();
+
+    testing::expect(truncate_fails(allocator, &var values, 4));
+    testing::expect_equal<i64>(3, values.len());
+    testing::expect_equal<i64>(30, values.get_or_panic(2));
+    testing::expect(remove_fails(&var values, -1));
+    testing::expect_equal<i64>(3, values.len());
+    testing::expect_equal<i64>(10, values.get_or_panic(0));
+
+    try values.truncate(allocator, 2);
+    let first = try values.remove(0);
+    testing::expect_equal<i64>(10, first);
+    testing::expect_equal<i64>(20, values.get_or_panic(0));
+    values.clear(allocator);
+    testing::expect_equal<i64>(0, values.len());
+    testing::expect_equal<i64>(capacity, values.capacity());
+}
+
+test "array remove moves an owner and preserves the remaining order" {
+    let allocator = mem::page_allocator();
+    var names = array::new<string::String>(allocator);
+    defer names.deinit(allocator);
+    try names.append(allocator, try make_name(allocator, "alice"));
+    try names.append(allocator, try make_name(allocator, "bob"));
+    try names.append(allocator, try make_name(allocator, "carol"));
+    let capacity = names.capacity();
+
+    testing::expect(owner_truncate_fails(allocator, &var names, -1));
+    testing::expect_equal<i64>(3, names.len());
+    if names.at(1) |unchanged| {
+        let text = unchanged.as_bytes();
+        testing::expect_equal<[]u8>("bob", text);
+    }
+
+    let middle = try names.remove(1);
+    defer middle.deinit(allocator);
+    let middle_text = middle.as_bytes();
+    testing::expect_equal<[]u8>("bob", middle_text);
+    if names.at(0) |first| {
+        let text = first.as_bytes();
+        testing::expect_equal<[]u8>("alice", text);
+    }
+    if names.at(1) |second| {
+        let text = second.as_bytes();
+        testing::expect_equal<[]u8>("carol", text);
+    }
+
+    try names.truncate(allocator, 1);
+    testing::expect_equal<i64>(1, names.len());
+    names.clear(allocator);
+    testing::expect_equal<i64>(0, names.len());
+    testing::expect_equal<i64>(capacity, names.capacity());
+}

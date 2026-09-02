@@ -527,7 +527,7 @@ func (e *emitter) writeArrayCheckedStore(
 		okName, storeLabel, skipLabel)
 }
 
-// writeArrayTruncate lowers Array.truncate(length).
+// writeArrayTruncate lowers the raw Array storage truncate primitive.
 func (e *emitter) writeArrayTruncate(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" ||
 		instr.Result.Type != "std::array::Error!void" {
@@ -541,7 +541,7 @@ func (e *emitter) writeArrayTruncate(instr *ir.Instr) error {
 	return e.writeArrayBoolResult(instr.Result, okName, "array_truncate")
 }
 
-// writeArrayClear lowers Array.clear().
+// writeArrayClear lowers the raw Array storage clear primitive.
 func (e *emitter) writeArrayClear(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "void" {
 		return fmt.Errorf("llvm error: array.clear expects Array<T> -> void")
