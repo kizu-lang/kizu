@@ -3150,6 +3150,11 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 	if err := c.checkBlock(stmt.Body, child); err != nil {
 		return err
 	}
+	// The range is fixed, but its length is not known here, so the body is
+	// under the same rule as a while body: it consumes nothing from outside.
+	if err := c.checkLoopConsumesNothingOutside(env, body); err != nil {
+		return err
+	}
 	env.mergeMovedFrom(body)
 	return nil
 }

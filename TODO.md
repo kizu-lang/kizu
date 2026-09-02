@@ -22,10 +22,6 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 
 ### A. 既存の共通関数を呼ぶだけの修正(小)
 
-- [ ] A1 `for` 本体を loop として扱う。`checkForStmt` に `while` と同じ
-      `checkLoopConsumesNothingOutside` と、body 内 borrow の loop 規則を足す
-      (`for_body_consumes_outer_owner`, `for_body_defers_outer_owner`,
-      `field_cleanup_inside_for`)
 - [ ] A2 `while` の条件式を loop region の中で読む(`while_condition_consumes_owner`)
 - [ ] A3 `errdefer` 登録で `deferCleanup` を確認・設定する(`errdefer_after_defer`)
 - [ ] A4 `errdefer` の退役と IR の cleanup を名前でなく binding の identity で照合する
