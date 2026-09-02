@@ -1704,8 +1704,22 @@ fn (self: &var Lowerer) lower_map_method(
             return try self.fail1(tree, "ir error: unknown map method `%s`", Arg::Str(name));
         },
     }
-    out.* = try self.emit_with(op, empty_name(), result_type, empty_name(), args);
-    return null;
+    let value = try self.emit_with(op, empty_name(), result_type, empty_name(), args);
+    match op {
+        MapInsert => {
+            // args are the receiver, the allocator the growth names, the key,
+            // and the value; an insert the allocator refuses releases the
+            // value it could not store, through that same allocator (SPEC §8,
+            // ADR-0132).
+            let owner = args.get_or_panic(3);
+            let allocator = args.get_or_panic(1);
+            return self.release_owner_on_failure(tree, value, owner, allocator, out);
+        },
+        _ => {
+            out.* = value;
+            return null;
+        },
+    }
 }
 
 /// Lowers the runtime primitive one std::array::Array<T> method forwards to,
