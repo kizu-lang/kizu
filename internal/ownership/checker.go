@@ -2723,21 +2723,23 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	var borrowCond containerBorrowCondition
 	isBorrowCond := false
 	var condType string
+	// The condition runs once per turn like the body does, so it is read
+	// against the loop's clone: what it consumes is consumed inside the loop.
+	body := env.clone()
 	if stmt.Capture != "" {
-		match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, env)
+		match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, body)
 		if err != nil {
 			return err
 		}
 		borrowCond, isBorrowCond = match, ok
 	}
 	if !isBorrowCond {
-		read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, env)
+		read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, body)
 		if err != nil {
 			return err
 		}
 		condType = read
 	}
-	body := env.clone()
 	child := body.child()
 	// Borrow the loop's clone of each container, as in checkIfStmt.
 	consumesField, err := c.defineCapture(
