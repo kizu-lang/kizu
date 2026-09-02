@@ -20,16 +20,6 @@ defer/errdefer、ident/slice、非 generic/generic、`?T`/`E!T`、`String.deinit
 diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足して
 `go test ./internal/types -update` で固定する。
 
-### A. 既存の共通関数を呼ぶだけの修正(小)
-
-- [ ] A5 `E!Owner` の capture / `catch` で scrutinee を consume する。`?Owner` の
-      「生まれた場所で消費」と同じ規則(`error_union_owner_opened_twice`,
-      `error_union_capture_owner_unconsumed`)
-- [ ] A6 `deinit` body で field を consume した後の `self.deinit(a)` を拒否する
-      (`deinit_calls_own_deinit`)
-- [ ] A7 loop-local owner の `continue` / `break` / `orelse break` 前の未解放を拒否する
-      (`loop_local_owner_continue_leaks`, `orelse_break_leaks_owner`)
-
 ### B. runtime / lowering の局所修正(小)
 
 - [ ] B1 `defer` / `errdefer` の receiver を登録時の SSA 値でなく exit 時の live 値で

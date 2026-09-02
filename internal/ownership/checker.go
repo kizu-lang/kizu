@@ -51,8 +51,11 @@ type Checker struct {
 	instantiationDepth int
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// open. A capture is not a value, so it is not a scope binding.
-	metaFields      map[string]metaField
-	loopDepth       int
+	metaFields map[string]metaField
+	// loopStarts is the stack of loops the statement being checked sits in,
+	// innermost last: what a `break` or `continue` leaves, and the binding
+	// watermark its body's locals start at.
+	loopStarts      []loopStart
 	currentFunction *functionInfo
 	// collectMissingMarkers switches the missing `move` diagnostic from an
 	// error into a recorded site, so MissingMoveMarkers can report every one.
@@ -555,15 +558,15 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		return err
 	}
 	c.pendingAllocTaints = nil
-	previousLoopDepth := c.loopDepth
+	previousLoopStarts := c.loopStarts
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeArgValues := c.typeArgValues
-	c.loopDepth = 0
+	c.loopStarts = nil
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
 	c.typeArgValues = nil
-	defer func() { c.loopDepth = previousLoopDepth }()
+	defer func() { c.loopStarts = previousLoopStarts }()
 	defer func() { c.currentFunction = previousFunction }()
 	defer func() { c.currentStd = previousStd }()
 	defer func() { c.typeArgValues = previousTypeArgValues }()
@@ -735,9 +738,9 @@ func (c *Checker) checkBodyStmt(stmt ast.Statement, env *scope) error {
 	case *ast.ForStmt:
 		return c.checkForStmt(s, env)
 	case *ast.BreakStmt:
-		return c.checkLoopBranch(s.Label)
+		return c.checkLoopBranch(s.Label, exitBreak, env)
 	case *ast.ContinueStmt:
-		return c.checkLoopBranch(s.Label)
+		return c.checkLoopBranch(s.Label, exitContinue, env)
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env)
 	case *ast.BlockStmt:
@@ -1030,7 +1033,18 @@ const (
 	exitPlain leakExitKind = iota
 	exitTry
 	exitErrorReturn
+	exitBreak
+	exitContinue
 )
+
+// loopStart is one loop the statement being checked sits in: its label, and
+// the binding id its body's locals start after. A `break` or `continue`
+// leaves that body early, so everything declared past the watermark must
+// already be released.
+type loopStart struct {
+	label   string
+	sinceID int
+}
 
 // checkOwnersConsumed rejects an exit that would leak a live owner. sinceID
 // limits the check to bindings declared after that watermark: a function exit
@@ -1038,7 +1052,7 @@ const (
 // block started at and checks only its own declarations. On an error path a
 // registered errdefer cleanup counts as the consume.
 func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, exit leakExit) error {
-	errorPath := exit.kind != exitPlain
+	errorPath := exit.kind == exitTry || exit.kind == exitErrorReturn
 	var leaked *binding
 	env.walkBindings(func(value *binding) {
 		if value.id <= sinceID || !c.bindingNeedsConsume(value) {
@@ -1069,6 +1083,14 @@ func leakError(value *binding, exit leakExit) error {
 		return errorAt(exit.span,
 			"move error: owned value `%s` would leak on this error return;"+
 				" register `defer` or `errdefer` cleanup before it", value.name)
+	case exitBreak:
+		return errorAt(value.declSpan,
+			"move error: owned value `%s` is not released before `break` leaves the loop",
+			value.name)
+	case exitContinue:
+		return errorAt(value.declSpan,
+			"move error: owned value `%s` is not released before `continue` ends the turn",
+			value.name)
 	}
 	return errorAt(value.declSpan, "move error: owned value `%s` is never deinitialized",
 		value.name)
@@ -2795,6 +2817,8 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 		}
 		condType = read
 	}
+	leave := c.enterLoop(stmt.Label)
+	defer leave()
 	child := body.child()
 	// Borrow the loop's clone of each container, as in checkIfStmt.
 	_, err := c.defineCapture(
@@ -2802,8 +2826,6 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	if err != nil {
 		return err
 	}
-	c.loopDepth++
-	defer func() { c.loopDepth-- }()
 	if err := c.checkBlock(stmt.Body, child); err != nil {
 		return err
 	}
@@ -3202,10 +3224,10 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 		return err
 	}
 	body := env.clone()
+	leave := c.enterLoop(stmt.Label)
+	defer leave()
 	child := body.child()
 	child.define(c.newBinding(stmt.Name, "i64"))
-	c.loopDepth++
-	defer func() { c.loopDepth-- }()
 	if err := c.checkBlock(stmt.Body, child); err != nil {
 		return err
 	}
@@ -3218,12 +3240,35 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 	return nil
 }
 
-// checkLoopBranch rejects branch statements outside loops during ownership-only tests.
-func (c *Checker) checkLoopBranch(label string) error {
-	if c.loopDepth == 0 {
+// checkLoopBranch checks a `break` or `continue`: it names a loop the
+// statement sits in, and leaving that loop's body early skips the releases
+// the body has not reached yet, so what the body declared since the loop
+// began must already be consumed.
+func (c *Checker) checkLoopBranch(label string, kind leakExitKind, env *scope) error {
+	start, ok := c.loopStartFor(label)
+	if !ok {
 		return errorf("move error: loop branch `%s` used outside loop", label)
 	}
-	return nil
+	return c.checkOwnersConsumed(env, start.sinceID, leakExit{kind: kind})
+}
+
+// loopStartFor finds the loop a branch names: the innermost one for a bare
+// branch, the one carrying the label otherwise.
+func (c *Checker) loopStartFor(label string) (loopStart, bool) {
+	for index := len(c.loopStarts) - 1; index >= 0; index-- {
+		if label == "" || c.loopStarts[index].label == label {
+			return c.loopStarts[index], true
+		}
+	}
+	return loopStart{}, false
+}
+
+// enterLoop records a loop the body about to be checked sits in, and returns
+// the call that leaves it. The watermark is taken before the loop defines
+// anything, so a capture the condition binds counts as the body's own.
+func (c *Checker) enterLoop(label string) func() {
+	c.loopStarts = append(c.loopStarts, loopStart{label: label, sinceID: c.nextID})
+	return func() { c.loopStarts = c.loopStarts[:len(c.loopStarts)-1] }
 }
 
 // checkMatchStmt merges possible moves from enum or union match arms into the outer scope.
@@ -3686,11 +3731,11 @@ func (c *Checker) readOrelseGuardExpr(expr *ast.OrelseGuardExpr, env *scope) (st
 			return "", err
 		}
 	case *ast.BreakStmt:
-		if err := c.checkLoopBranch(exit.Label); err != nil {
+		if err := c.checkLoopBranch(exit.Label, exitBreak, env); err != nil {
 			return "", err
 		}
 	case *ast.ContinueStmt:
-		if err := c.checkLoopBranch(exit.Label); err != nil {
+		if err := c.checkLoopBranch(exit.Label, exitContinue, env); err != nil {
 			return "", err
 		}
 	}
@@ -3713,11 +3758,11 @@ func (c *Checker) readCatchGuardExpr(expr *ast.CatchGuardExpr, env *scope) (stri
 			return "", err
 		}
 	case *ast.BreakStmt:
-		if err := c.checkLoopBranch(exit.Label); err != nil {
+		if err := c.checkLoopBranch(exit.Label, exitBreak, env); err != nil {
 			return "", err
 		}
 	case *ast.ContinueStmt:
-		if err := c.checkLoopBranch(exit.Label); err != nil {
+		if err := c.checkLoopBranch(exit.Label, exitContinue, env); err != nil {
 			return "", err
 		}
 	}
@@ -6227,16 +6272,16 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 	if err := c.defineParams(fn, env, subst); err != nil {
 		return err
 	}
-	previousLoopDepth := c.loopDepth
+	previousLoopStarts := c.loopStarts
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeArgValues := c.typeArgValues
-	c.loopDepth = 0
+	c.loopStarts = nil
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
 	c.typeArgValues = subst
 	defer func() {
-		c.loopDepth = previousLoopDepth
+		c.loopStarts = previousLoopStarts
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
 		c.typeArgValues = previousTypeArgValues

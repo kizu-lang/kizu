@@ -175,6 +175,15 @@ pub struct ErrDeferEntry {
     pub id: i64
 }
 
+/// Is one loop the statement being checked sits in, the Go `loopStart`:
+/// its label, and the binding id its body's locals start after. A `break`
+/// or `continue` leaves that body early, so everything declared past the
+/// watermark must already be released.
+pub struct LoopStart {
+    pub label: Name,
+    pub since_id: i64
+}
+
 /// Is the field or variant a comptime capture names for the length of one
 /// expansion, the Go `metaField`. A variant without payload has no type.
 pub struct MetaField {
@@ -428,7 +437,12 @@ pub struct Checker {
     // currently open. A capture is not a value, so it is not a scope binding.
     meta_fields: MetaBindingStore,
     function_bindings: FunctionBindingStore,
-    loop_depth: i64,
+    // loop_starts is the stack of loops the statement being checked sits in,
+    // innermost last: what a `break` or `continue` leaves, and the binding
+    // watermark its body's locals start at. loop_base is where the current
+    // function's loops begin on that stack.
+    loop_starts: array::Array<LoopStart>,
+    loop_base: i64,
     current_function: ?FunctionHandle,
     // collect_missing_markers switches the missing `move` diagnostic from an
     // error into a recorded site, so missing_move_markers can report every one.
@@ -503,7 +517,8 @@ pub fn new_checker_for_target(
         instantiation_depth: 0,
         meta_fields: new_meta_binding_store(allocator),
         function_bindings: new_function_binding_store(allocator),
-        loop_depth: 0,
+        loop_starts: array::new<LoopStart>(allocator),
+        loop_base: 0,
         current_function: null,
         collect_missing_markers: false,
         missing_markers: array::new<ast::Span>(allocator),
@@ -539,6 +554,7 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.missing_markers.deinit(allocator);
     self.type_arg_values.deinit(allocator);
     self.live_err_defers.deinit(allocator);
+    self.loop_starts.deinit(allocator);
     self.pending_alloc_taints.deinit(allocator);
     self.result.deinit(allocator);
     return;
@@ -1212,19 +1228,19 @@ fn (self: &var Checker) check_function(tree: &var ast::Ast, handle: FunctionHand
 // `checkFunction` / `checkGenericInstantiation`.
 fn (self: &var Checker) enter_function(handle: FunctionHandle, subst: Subst) -> !FunctionRestore {
     let previous = FunctionRestore {
-        loop_depth: self.loop_depth,
+        loop_base: self.loop_base,
         current_function: self.current_function,
         current_std: self.current_std,
         type_arg_values: try self.type_arg_values.enter(move subst)
     };
-    self.loop_depth = 0;
+    self.loop_base = self.loop_starts.len();
     self.current_function = handle;
     self.current_std = self.functions.at(handle.index).std;
     return previous;
 }
 
 fn (self: &var Checker) restore_function(previous: FunctionRestore) -> void {
-    self.loop_depth = previous.loop_depth;
+    self.loop_base = previous.loop_base;
     self.current_function = previous.current_function;
     self.current_std = previous.current_std;
     self.type_arg_values.restore(previous.type_arg_values);
@@ -1233,7 +1249,7 @@ fn (self: &var Checker) restore_function(previous: FunctionRestore) -> void {
 
 /// Is the per-function state one body check saves and restores.
 struct FunctionRestore {
-    loop_depth: i64,
+    loop_base: i64,
     current_function: ?FunctionHandle,
     current_std: bool,
     type_arg_values: ?arena::Handle<Subst>

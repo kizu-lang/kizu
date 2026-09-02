@@ -393,20 +393,21 @@ fn (self: &var Checker) check_while_stmt(
     if try self.read_capture_head(tree, body, statement.condition, statement.capture, &var head) |failed| {
         return move failed;
     }
+    try self.enter_loop(tree, statement.label);
     let child = try self.store.child(body);
     // Borrow the loop's clone of each container, as in check_if_stmt.
     var consumes_field = false;
     if try self.define_capture(
         tree, statement.capture, statement.condition, &head, true, env, child, &var consumes_field
     ) |failed| {
+        self.leave_loop();
         return move failed;
     }
-    self.loop_depth = self.loop_depth + 1;
     if try self.check_while_body(tree, env, statement, body, child) |failed| {
-        self.loop_depth = self.loop_depth - 1;
+        self.leave_loop();
         return move failed;
     }
-    self.loop_depth = self.loop_depth - 1;
+    self.leave_loop();
     return null;
 }
 
@@ -855,17 +856,17 @@ fn (self: &var Checker) check_for_stmt(
         return move failed;
     }
     let body = try self.store.clone_scope(env);
+    try self.enter_loop(tree, statement.label);
     let child = try self.store.child(body);
     let name = try self.names.intern_text(tree, statement.name);
     let counter = self.store.new_binding(name, self.common.i64_name);
     errdefer counter.deinit(self.allocator);
     let _ = try self.define(child, move counter);
-    self.loop_depth = self.loop_depth + 1;
     if try self.check_block(tree, child, statement.body) |failed| {
-        self.loop_depth = self.loop_depth - 1;
+        self.leave_loop();
         return move failed;
     }
-    self.loop_depth = self.loop_depth - 1;
+    self.leave_loop();
     // The range is fixed, but its length is not known here, so the body is
     // under the same rule as a while body: it consumes nothing from outside.
     if try self.check_loop_consumes_nothing_outside(tree, env, body) |failed| {
@@ -875,12 +876,50 @@ fn (self: &var Checker) check_for_stmt(
     return null;
 }
 
-/// Rejects branch statements outside loops, the Go `checkLoopBranch`.
-fn (self: &var Checker) check_loop_branch_label(tree: &ast::Ast, label: ast::Text) -> !?diagnostic::Diagnostic {
-    if self.loop_depth == 0 {
+/// Checks a `break` or `continue`, the Go `checkLoopBranch`: it names a loop
+/// the statement sits in, and leaving that loop's body early skips the
+/// releases the body has not reached yet, so what the body declared since
+/// the loop began must already be consumed.
+fn (self: &var Checker) check_loop_branch_label(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    kind: LeakExitKind,
+    label: ast::Text
+) -> !?diagnostic::Diagnostic {
+    let start = try self.loop_start_for(tree, label) orelse
         return try self.error1(tree, ast::zero_span(), "move error: loop branch `%s` used outside loop", Arg::Text(label));
+    return self.check_owners_consumed(tree, env, start.since_id, LeakExit { kind: kind, span: ast::zero_span() });
+}
+
+/// Finds the loop a branch names, the Go `loopStartFor`: the innermost one
+/// of this function for a bare branch, the one carrying the label otherwise.
+fn (self: &var Checker) loop_start_for(tree: &ast::Ast, label: ast::Text) -> !?LoopStart {
+    let wanted = try self.names.intern_text(tree, label);
+    let bare = text_empty(tree, label);
+    var index = self.loop_starts.len();
+    while index > self.loop_base {
+        index = index - 1;
+        let start = self.loop_starts.get_or_panic(index);
+        if bare or same_name(start.label, wanted) {
+            return start;
+        }
     }
     return null;
+}
+
+/// Records a loop the body about to be checked sits in, the Go `enterLoop`.
+/// The watermark is taken before the loop defines anything, so a capture the
+/// condition binds counts as the body's own.
+fn (self: &var Checker) enter_loop(tree: &ast::Ast, label: ast::Text) -> !void {
+    let name = try self.names.intern_text(tree, label);
+    try self.loop_starts.append(self.allocator, LoopStart { label: name, since_id: self.store.next_id });
+    return;
+}
+
+/// Leaves the innermost loop, the Go `enterLoop` return.
+fn (self: &var Checker) leave_loop() -> void {
+    let _ = self.loop_starts.pop();
+    return;
 }
 
 /// Merges possible moves from enum or union match arms into the outer

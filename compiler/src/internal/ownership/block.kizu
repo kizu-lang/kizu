@@ -129,10 +129,10 @@ fn (self: &var Checker) check_body_stmt(
         return self.check_for_stmt(tree, env, value);
     }
     if break_stmt(tree, statement) |value| {
-        return self.check_loop_branch_label(tree, value.label);
+        return self.check_loop_branch_label(tree, env, LeakExitKind::Break, value.label);
     }
     if continue_stmt(tree, statement) |value| {
-        return self.check_loop_branch_label(tree, value.label);
+        return self.check_loop_branch_label(tree, env, LeakExitKind::Continue, value.label);
     }
     if is_match_stmt(tree, statement) {
         return self.check_match_stmt(tree, env, statement);
@@ -441,6 +441,8 @@ pub enum LeakExitKind {
     Plain,
     Try,
     ErrorReturn,
+    Break,
+    Continue,
 }
 
 pub struct LeakExit {
@@ -463,7 +465,7 @@ fn (self: &var Checker) check_owners_consumed(
     since_id: i64,
     exit: LeakExit
 ) -> !?diagnostic::Diagnostic {
-    let error_path = exit.kind != LeakExitKind::Plain;
+    let error_path = exit.kind == LeakExitKind::Try or exit.kind == LeakExitKind::ErrorReturn;
     var leaked = none_binding();
     var walker = self.store.walk(env);
     while walker.next(&self.store) |value| {
@@ -500,6 +502,20 @@ fn (self: &Checker) leak_error(tree: &ast::Ast, value: BindingHandle, exit: Leak
         return self.error1(
             tree, exit.span,
             "move error: owned value `%s` would leak on this error return; register `defer` or `errdefer` cleanup before it",
+            Arg::Str(name)
+        );
+    }
+    if exit.kind == LeakExitKind::Break {
+        return self.error1(
+            tree, self.binding(value).decl_span,
+            "move error: owned value `%s` is not released before `break` leaves the loop",
+            Arg::Str(name)
+        );
+    }
+    if exit.kind == LeakExitKind::Continue {
+        return self.error1(
+            tree, self.binding(value).decl_span,
+            "move error: owned value `%s` is not released before `continue` ends the turn",
             Arg::Str(name)
         );
     }
