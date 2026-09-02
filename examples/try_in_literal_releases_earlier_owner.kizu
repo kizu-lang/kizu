@@ -1,0 +1,54 @@
+import std::mem;
+import std::string;
+
+error Failure { Bad }
+
+struct Item {
+    name: string::String,
+    id: i64,
+}
+
+fn (self: Item) deinit(allocator: Allocator) -> void {
+    print(self.id);
+    self.name.deinit(allocator);
+    return;
+}
+
+struct Pair {
+    first: Item,
+    second: Item,
+}
+
+fn make(allocator: Allocator, id: i64) -> Failure!Item {
+    if id > 5 {
+        return Failure::Bad;
+    }
+    let name = string::from_bytes(allocator, "x") catch return Failure::Bad;
+    return Item { name: move name, id: id };
+}
+
+// When the second `try` fails, the first field's value has already been
+// produced and nobody else can release it, so the error exit does.
+fn build(allocator: Allocator) -> Failure!Pair {
+    return Pair {
+        first: try make(allocator, 1),
+        second: try make(allocator, 9),
+    };
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    if build(allocator) |pair| {
+        pair.deinit(allocator);
+    } else |err| {
+        print("caught");
+    }
+    return;
+}
+
+// run
+// features: error-union ownership try struct-literal
+// pending: an owner temporary produced earlier in the same expression leaks when a later try fails
+// output:
+// 1
+// caught

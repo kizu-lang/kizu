@@ -3,6 +3,100 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
+## メモリ安全監査の修正
+
+2026-09 の監査で、`kizu check` が通すのに実行で use-after-free / double free になる
+経路が 11 系統見つかった。各経路は `examples/negative/` と `examples/` に
+`pending:` 付きの case として置いてあり、`grep -rl "^// pending:" examples` が
+残作業の一覧になる。直した change で `pending:` 行を消す(conformance test が
+「passes now」で強制する)。
+
+原因の 9 割は「ある構文の形で実装した規則が、隣の形に無い」こと(while/for、
+defer/errdefer、ident/slice、非 generic/generic、`?T`/`E!T`、`String.deinit`/
+`Array.deinit`)。個別に塞いだ後、checker を形ではなく値の階級と署名で規則を
+持つ構造に畳む(`docs/principles.md` §11)。
+
+手順は上から順。Go を直してから `compiler/` へ機械移植し(ADR-0130)、
+diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足して
+`go test ./internal/types -update` で固定する。
+
+### A. 既存の共通関数を呼ぶだけの修正(小)
+
+- [ ] A1 `for` 本体を loop として扱う。`checkForStmt` に `while` と同じ
+      `checkLoopConsumesNothingOutside` と、body 内 borrow の loop 規則を足す
+      (`for_body_consumes_outer_owner`, `for_body_defers_outer_owner`,
+      `field_cleanup_inside_for`)
+- [ ] A2 `while` の条件式を loop region の中で読む(`while_condition_consumes_owner`)
+- [ ] A3 `errdefer` 登録で `deferCleanup` を確認・設定する(`errdefer_after_defer`)
+- [ ] A4 `errdefer` の退役と IR の cleanup を名前でなく binding の identity で照合する
+      (`errdefer_shadowed_binding`)
+- [ ] A5 `E!Owner` の capture / `catch` で scrutinee を consume する。`?Owner` の
+      「生まれた場所で消費」と同じ規則(`error_union_owner_opened_twice`,
+      `error_union_capture_owner_unconsumed`)
+- [ ] A6 `deinit` body で field を consume した後の `self.deinit(a)` を拒否する
+      (`deinit_calls_own_deinit`)
+- [ ] A7 loop-local owner の `continue` / `break` / `orelse break` 前の未解放を拒否する
+      (`loop_local_owner_continue_leaks`, `orelse_break_leaks_owner`)
+
+### B. runtime / lowering の局所修正(小)
+
+- [ ] B1 `defer` / `errdefer` の receiver を登録時の SSA 値でなく exit 時の live 値で
+      渡す(`internal/ir/defer.go`、`defer_reads_live_receiver`)
+- [ ] B2 `defer m.deinit(a)` が `Map<K, Owner>` の value cleanup を飛ばす。
+      `internal/ir/defer.go` の `containerCleanup` が `"K, V"` の連結綴りで owner 判定
+      している(`std_map_defer_deinit_owner_values`)
+- [ ] B3 `Map.insert` の OOM で move 済み value を解放する(`internal/ir/lower.go`
+      の array.append / arena.add / box と同じ `releaseOwnerOnFailure`、
+      `std_map_insert_oom_releases_value`)
+- [ ] B4 struct field / Array element の `E!Owner` を導出 deinit が解放する
+      (`internal/ast/derive_deinit.go` が `?T` しか unwrap しない、
+      `error_union_owner_field_cleanup`)
+- [ ] B5 同一式内の `try` 失敗で、評価済みの owner temporary を解放する
+      (`try_in_literal_releases_earlier_owner`)
+- [ ] B6 zero-size element の `Array<Empty>` で `realloc(ptr, 0)` を呼ばない
+      (`internal/native/runtime/runtime.c` `kizu_array_reserve_storage`。glibc は
+      解放して NULL を返すので Linux で double free。macOS では再現しないので
+      example は fix 時に `run` case として足す)
+- [ ] B7 `String.append_string(a, &s)` の runtime が realloc 後に旧 buffer を読む。
+      checker 側は C3 で塞ぐが、runtime も reserve 前に source を退避するか
+      self-append を拒否する
+
+### C. SPEC 追記と、共通部品へ畳みながら閉じる修正(中)
+
+- [ ] C1 SPEC §8 に「非 deinit の by-value `self` は body で `&T` と同じ扱い」を書く。
+      call site は変えない(receiver に move marker は書かない原則のまま)
+- [ ] C2 by-value receiver: `defineParams` で非 deinit の receiver を borrow class に
+      する。`allowsOwnerFieldCleanup` / return / move / `deinit` 呼び出しが自動で
+      拒否になる(`receiver_by_value_*`)。std 側は `Array.deinit` / `Box.deinit` /
+      `Box.take` にも owned receiver guard を足す —— ただし method 名の分岐でなく、
+      `internal/stdmethod` の署名属性(receiver 種別)から判定する
+      (`deinit_through_shared_borrow`, `std_array_deinit_through_shared_borrow`,
+      `std_mem_box_take_through_shared_borrow`)
+- [ ] C3 呼び出しを 1 本にする: 直接 / generic / method / fn pointer / std method が
+      「subst 済み署名 + 引数列(receiver は第 0 引数)」を受ける同じ関数を通る。
+      generic の owner 引数の move、`&var`+`&` alias、view の lend、tie 導出、
+      `append_string` の receiver alias がここで閉じる
+      (`generic_call_reads_owner`, `generic_call_move_marker`,
+      `generic_call_aliases_receiver`, `generic_return_carries_view_tie`,
+      `generic_call_lends_view_into_container`, `std_string_append_string_self`)
+- [ ] C4 式の結果を `{型, 階級, tie 集合}` にして全式が伝播する。slice / field 読み /
+      `.*` が special case でなくなる(`slice_view_keeps_tie`, `slice_view_escape`)
+- [ ] C5 loop を `loopRegion(条件式列, body)` 1 本に、cleanup を
+      `registerCleanup(kind, binding)` 1 本に畳む(A1〜A4 をここで消化しても
+      よい)
+- [ ] C6 std method の receiver 種別 / 引数の扱い / 戻り値の tie を
+      `internal/stdmethod` のデータにし、checker の `case "append_string":` 類を消す
+
+### 決めが要るもの
+
+- `let r = f() catch move fallback;` / `orelse move fallback;` の非採用 path で
+  fallback が leak する。named owner を fallback に置けなくするか、非採用 path で
+  解放するかを決める
+- std `Array` の two-phase receiver: `arr.append(a, arr.pop_or_panic())` が通る。
+  ADR-0106 は receiver を借りる引数を拒否する。bounds check のおかげで今は安全
+- `extern "c" fn` が `[]u8` / `&var String` を引数に取れる。SPEC §12.1 は `[]u8` を
+  browser ABI 限定としている
+
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

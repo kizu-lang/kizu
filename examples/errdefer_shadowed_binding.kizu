@@ -1,0 +1,77 @@
+import std::array;
+import std::mem;
+import std::string;
+
+error Failure { Bad }
+error Outcome = Failure or mem::Error;
+
+struct Item {
+    name: string::String,
+    id: i64,
+}
+
+fn (self: Item) deinit(allocator: Allocator) -> void {
+    print(self.id);
+    self.name.deinit(allocator);
+    return;
+}
+
+fn make(allocator: Allocator, id: i64) -> mem::Error!Item {
+    var name = string::new(allocator);
+    errdefer name.deinit(allocator);
+    try name.append_bytes(allocator, "x");
+    return Item { name: move name, id: id };
+}
+
+fn fail(value: i64) -> Failure!i64 {
+    if value > 2 {
+        return Failure::Bad;
+    }
+    return value;
+}
+
+// The outer `item` retires its errdefer when it moves into `items`. The inner
+// `item` is a different binding that happens to share the name: its errdefer
+// covers only itself, and the outer one stays retired on the error path.
+fn run(allocator: Allocator, value: i64) -> Outcome!void {
+    var items = array::new<Item>(allocator);
+    defer items.deinit(allocator);
+    let item = try make(allocator, 1);
+    errdefer item.deinit(allocator);
+    try items.append(allocator, move item);
+    if value > 0 {
+        let item = try make(allocator, 2);
+        errdefer item.deinit(allocator);
+        let _ = try fail(value);
+        item.deinit(allocator);
+    }
+    print("ok");
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    if run(allocator, 5) {
+        print("ok");
+    } else |err| {
+        print("caught");
+    }
+    if run(allocator, 1) {
+        print("ok");
+    } else |err| {
+        print("caught");
+    }
+    return;
+}
+
+// run
+// features: errdefer ownership shadowing std-array
+// pending: errdefer retirement is matched by name, so a shadowing binding revives it
+// output:
+// 2
+// 1
+// caught
+// 2
+// ok
+// 1
+// ok
