@@ -37,6 +37,15 @@ func (l *lowerer) collectMutBorrowsStmt(stmt ast.Statement, found map[string]boo
 	if stmt == nil {
 		return nil
 	}
+	// A cleanup runs on the value its receiver holds when the block exits,
+	// not the one the name held when the `defer` was written (SPEC §6.3.1),
+	// so the receiver is storage: the exit loads it like any slot.
+	switch s := stmt.(type) {
+	case *ast.DeferStmt:
+		markIfName(cleanupReceiver(s.Expr), found)
+	case *ast.ErrDeferStmt:
+		markIfName(cleanupReceiver(s.Expr), found)
+	}
 	exprs, stmts, known := statementChildren(stmt)
 	if !known {
 		return fmt.Errorf("ir error: slot analysis does not know statement `%T`", stmt)
