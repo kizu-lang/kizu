@@ -100,6 +100,11 @@ type containerCleanup struct {
 	name      string
 	shallowOp string
 	typeArg   string
+	// ownerArg is the type argument whose values the container holds and
+	// would have to release: the element for an array, box, or arena, the
+	// value for a map. typeArg spells the whole instantiation, which for a
+	// map is `K, V` and names no type at all.
+	ownerArg string
 	// shallowNamesAllocator is whether the runtime op takes the allocator the
 	// release names. Every container header is now the value, and none of
 	// them keeps an allocator, so every op is handed one; the field is what
@@ -111,16 +116,17 @@ type containerCleanup struct {
 // false for anything else.
 func stdContainerCleanup(receiverType string) (containerCleanup, bool) {
 	if elem, ok := arrayElementType(receiverType); ok {
-		return containerCleanup{arrayTypeName, "array.deinit", elem, true}, true
+		return containerCleanup{arrayTypeName, "array.deinit", elem, elem, true}, true
 	}
-	if args, ok := mapStaticArgs(receiverType); ok {
-		return containerCleanup{mapTypeName, "map.deinit", args, true}, true
+	if _, value, ok := mapTypeArgs(receiverType); ok {
+		args, _ := mapStaticArgs(receiverType)
+		return containerCleanup{mapTypeName, "map.deinit", args, value, true}, true
 	}
 	if elem, ok := boxElementType(receiverType); ok {
-		return containerCleanup{boxTypeName, "box.deinit", elem, true}, true
+		return containerCleanup{boxTypeName, "box.deinit", elem, elem, true}, true
 	}
 	if elem := arenaElementType(receiverType); elem != "unknown" {
-		return containerCleanup{arenaTypeName, "arena.deinit", elem, true}, true
+		return containerCleanup{arenaTypeName, "arena.deinit", elem, elem, true}, true
 	}
 	return containerCleanup{}, false
 }
@@ -133,7 +139,7 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string, rest []Value)
 		// that loop lives in the std wrapper rather than in a runtime op: the
 		// cleanup calls its instance exactly like a direct call would. Plain
 		// contents have no loop to run, so they keep the runtime op.
-		if !ast.OwnerType(l.deinitOwners, container.typeArg) {
+		if !ast.OwnerType(l.deinitOwners, container.ownerArg) {
 			args := []Value{receiver}
 			if container.shallowNamesAllocator {
 				args = append(args, rest...)
