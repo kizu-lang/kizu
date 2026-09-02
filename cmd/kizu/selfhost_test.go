@@ -481,6 +481,7 @@ func selfhostWASMExamples() []string {
 		"../../examples/optional_error_flow.kizu",
 		"../../examples/slice_checked_access.kizu",
 		"../../examples/std_array.kizu",
+		"../../examples/std_array_shrink.kizu",
 		"../../examples/std_array_append_bytes.kizu",
 		"../../examples/std_array_token_list.kizu",
 		"../../examples/fixed_buffer.kizu",

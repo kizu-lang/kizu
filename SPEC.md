@@ -2749,15 +2749,22 @@ allocator binding は move されません。
 `Allocator` 値そのものに user-visible cleanup method はありません。
 allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
 
-**確保も解放も allocator を名指します。** owner の `deinit` は receiver と
-`Allocator` の 2 つを取り、storage を要求し得る method —— `Array.append` /
+**memory の確保も解放も allocator を名指します。** memory を解放する owner の
+`deinit` は receiver と `Allocator` の 2 つを取り、storage を要求し得る method —— `Array.append` /
 `append_bytes` / `reserve`、`String.append_bytes` / `append_byte` /
 `append_string` / `reserve`、`Map.insert`、`Arena.add` —— も同じく allocator を
 receiver の次に取ります(§8、§10、ADR-0132)。値は自分を作った allocator の複製を持たないので、確保にも
 解放にも必要なものは呼び出し側が綴ります —— `sizeof(T)` を compile 時の値として
 渡すのと同じ扱いで、原理 4「hidden allocation を持たない」の表と裏です。
-owner を持つすべての型が `deinit` のこの 1 つの形を取り、導出 `deinit` は
-受け取った allocator を field へそのまま渡します。
+memory-backed owner と導出 `deinit` はこの形を取り、受け取った allocator を
+field へそのまま渡します。descriptor を閉じる owner は allocator を取らない
+`deinit()` を宣言します。
+
+`Array.truncate(allocator, length)` と `Array.clear(allocator)` も allocator を
+明示します。backing buffer 自体は解放しませんが、取り除く owner element が
+memory を解放する場合に、その element の `deinit` へ渡すためです。descriptor を
+解放する owner なら `deinit()` を呼び、non-owner element なら cleanup を生成せず
+raw storage primitive 1 回にします。element type によって method の形は変えません。
 
 ```kizu
 let allocator = mem::page_allocator();
@@ -2774,8 +2781,10 @@ entry 列とその index の 5 word で、allocator も element size も覚え�
 (ADR-0131)。だから構築は失敗しようがなく、`!T` を返しません。storage を買うのは
 最初の `append` / `insert` / `add` で、失敗を言うのもそこです。構築が受け取る
 `Allocator` は compile 時の provenance で、後続の確保・解放が同じものを名指す
-ことを checker が要求します。`truncate` / `clear` / `pop` / `len` / `capacity`
-は確保も解放もしないので allocator を取りません。
+ことを checker が要求します。`Array.truncate` / `clear` は backing allocation を
+保持したまま element を解放し得るので allocator を取り、`pop` / `remove` は
+element の所有権を caller へ渡すので取りません。`len` / `capacity` も allocator を
+取りません。
 
 `defer` / `errdefer` の cleanup が運ぶ引数は、**`defer` が書かれた場所で読み**、
 block を出るときに走るのはその値です(§8)。
@@ -2841,6 +2850,10 @@ length と capacity は変わりません。
 `&var std::string::String` から呼べます。method receiver は by-value の
 parameter として書きますが、consuming transfer ではありません。
 
+`Array` の `swap` / `remove` / `truncate` / `clear` も owned local
+`Array<T>` または `&var std::array::Array<T>` からだけ呼べます。shared borrow
+越しの呼び出しは拒否します。
+
 **element / value copy と container clone.** `Array.get` / `get_or_panic` と
 `Map.get` は copy element / copy value 限定です。`Array.clone(allocator)` も
 copy element 限定で、receiver を consume せず、指定した allocator 上に独立した
@@ -2868,8 +2881,11 @@ local arena からの return は borrow escape として拒否します。
 
 **cleanup の義務.** `Array.deinit` と `Arena.deinit` は残っている initialized element を、
 `Map.deinit` は保持している value を cleanup してから storage を解放します。
-element / value cleanup は `T` の `deinit(self: T) -> void` を呼びます。
-owner はすべてそれを持つので(§8)、場合分けはありません。
+`Array.truncate` / `clear` は取り除く initialized element だけを末尾から cleanup し、
+storage は保持します。element / value cleanup は
+`std::meta::release_names_allocator<T>()` に従い、memory を解放する owner には
+`deinit(allocator)`、descriptor を解放する owner には `deinit()` を呼びます。
+non-owner には cleanup を生成しません。
 
 既にある owner を置き換える操作は、落ちる側の持ち主が他にいないので拒否
 します。`Array.set` は owner element に対して compile error、既存 key への
@@ -2880,6 +2896,10 @@ owner はすべてそれを持つので(§8)、場合分けはありません。
 どちらの owner も copy・replace・cleanup しないため、owner element に使えます。
 receiver は owned local または `&var Array<T>` に限り、shared borrow 越しの
 呼び出しは拒否します。
+
+`Array.remove(index)` も owner element を cleanup せず caller へ move し、残りの
+順序を保って gap を詰めるため owner element に使えます。`remove` と
+`truncate` は bounds を変更前に検査し、失敗時は collection を変更しません。
 
 `String.deinit` / `Box.deinit` / `Map.deinit` / `Arena.deinit` は caller 側の binding を
 無効化する必要があるため、owned local receiver 限定です。値を保持している

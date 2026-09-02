@@ -624,6 +624,8 @@ fn (self: &Checker) is_builtin_array_primitive(name: Name) -> bool {
         self.names.is(name, "std::internal::builtin::array_at_mut") or
         self.names.is(name, "std::internal::builtin::array_set") or
         self.names.is(name, "std::internal::builtin::array_swap") or
+        self.names.is(name, "std::internal::builtin::array_truncate") or
+        self.names.is(name, "std::internal::builtin::array_clear") or
         self.names.is(name, "std::internal::builtin::array_deinit");
 }
 
@@ -838,35 +840,10 @@ fn (self: &var Checker) check_array_primitive_call(
         return null;
     }
     if self.names.is(method, "get") or self.names.is(method, "get_or_panic") {
-        let count = arg_count(tree, args);
-        if count != 1 {
-            return try self.error2(
-                tree, ast::zero_span(), "array error: `Array.%s` expects 1 arg, got %d",
-                Arg::Str(method), Arg::Int(count)
-            );
-        }
-        let first = args.get_or_panic(tree, 0);
-        var got = empty_name();
-        if try self.read_expr(tree, env, first, &var got) |failed| {
-            return move failed;
-        }
-        if !self.names.is(got, "i64") {
-            return try self.error2(
-                tree, ast::zero_span(), "array error: `Array.%s` expects i64 index, got %s",
-                Arg::Str(method), Arg::Str(got)
-            );
-        }
-        if !self.names.is_generic_param_name(elem) and !try self.is_copy_type(elem) {
-            return try self.error1(
-                tree, ast::zero_span(), "array error: `Array.%s` requires copy element", Arg::Str(method)
-            );
-        }
-        if self.names.is(method, "get") {
-            out.* = try self.names.prefixed("?", elem);
-            return null;
-        }
-        out.* = elem;
-        return null;
+        return self.check_array_primitive_get(tree, env, elem, method, args, out);
+    }
+    if self.names.is(method, "truncate") or self.names.is(method, "clear") {
+        return self.check_array_primitive_shrink(tree, env, method, args, out);
     }
     if self.names.is(method, "deinit") {
         // The raw primitive frees the buffer through the allocator the
@@ -882,6 +859,77 @@ fn (self: &var Checker) check_array_primitive_call(
     let blank = self.store.blank_binding(0, empty_name(), array_type);
     let array = try self.store.retain(move blank);
     return self.check_array_method(tree, env, array, elem, method, args, out);
+}
+
+/// Validates the raw copy-only element reads used by their std wrappers, the
+/// Go `checkArrayPrimitiveGet`.
+fn (self: &var Checker) check_array_primitive_get(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects 1 arg, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "i64") {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects i64 index, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    if !self.names.is_generic_param_name(elem) and !try self.is_copy_type(elem) {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.%s` requires copy element",
+            Arg::Str(method)
+        );
+    }
+    if self.names.is(method, "get") {
+        out.* = try self.names.prefixed("?", elem);
+        return null;
+    }
+    out.* = elem;
+    return null;
+}
+
+/// Validates the raw storage operations used only by the owner-aware std
+/// wrappers, the Go `checkArrayPrimitiveShrink`.
+fn (self: &var Checker) check_array_primitive_shrink(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(method, "truncate") {
+        var ignored = empty_name();
+        if try self.check_one_i64_arg(
+            tree, env, "Array.truncate", args, &var ignored) |failed| {
+            return move failed;
+        }
+        out.* = self.common.array_error_void_name;
+        return null;
+    }
+    let count = arg_count(tree, args);
+    if count != 0 {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.clear` expects 0 args, got %d",
+            Arg::Int(count)
+        );
+    }
+    out.* = self.common.void_name;
+    return null;
 }
 
 /// Validates the std-only Map runtime primitive, the Go
@@ -1010,7 +1058,7 @@ fn (self: &var Checker) check_generic_map_primitive_method(
             );
         }
         let allocator_arg = args.get_or_panic(tree, 0);
-        if try self.read_grow_allocator(tree, env, "map", "Map.insert", null, allocator_arg) |failed| {
+        if try self.read_container_allocator(tree, env, "map", "Map.insert", null, allocator_arg) |failed| {
             return move failed;
         }
         let first = args.get_or_panic(tree, 1);

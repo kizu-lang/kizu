@@ -747,6 +747,10 @@ fn (self: &var Checker) check_array_primitive_method(
         }
         return null;
     }
+    if mem::equal_bytes(name, "truncate") or mem::equal_bytes(name, "clear") {
+        return self.check_array_primitive_shrink(
+            tree, scope, name, args, offset, out);
+    }
     if mem::equal_bytes(name, "deinit") {
         // The raw primitive frees the buffer through the allocator the
         // release names: the header keeps none of its own (ADR-0132).
@@ -759,6 +763,32 @@ fn (self: &var Checker) check_array_primitive_method(
         return null;
     }
     return self.check_array_method(tree, scope, element, name, args, offset, out);
+}
+
+// Validates the raw storage operations used only by the owner-aware std
+// wrappers, the Go `checkArrayPrimitiveShrink`.
+fn (self: &var Checker) check_array_primitive_shrink(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    offset: i64,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "truncate") {
+        if try self.check_array_index_arg(tree, scope, name, args, offset) |problem| {
+            return move problem;
+        }
+        let void_type = try self.types.void_type();
+        out.* = try self.intern_declared_error_type("std::array::Error", void_type);
+        return null;
+    }
+    let count = args.len(tree) - offset;
+    if count != 0 {
+        return try self.receiver_arity_error("Array", name, 0, count);
+    }
+    out.* = try self.types.void_type();
+    return null;
 }
 
 fn (self: &var Checker) check_array_receiver_method(
@@ -789,7 +819,7 @@ fn (self: &Checker) check_array_receiver_borrow(
     receiver: ast::Expression,
     name: []u8
 ) -> !?diagnostic::Diagnostic {
-    if !mem::equal_bytes(name, "swap") {
+    if !array_method_requires_mutable_receiver(name) {
         return null;
     }
     match tree.expressions.at(receiver.node) {
@@ -798,15 +828,23 @@ fn (self: &Checker) check_array_receiver_borrow(
             let binding = retained.as_bytes();
             if self.scopes.is_borrowed(scope, binding) and
                 !self.scopes.is_mut_borrowed(scope, binding) {
-                return try self.checker_error_at(
-                    "type error", ast::zero_span(),
-                    "`Array.swap` requires mutable Array receiver"
-                );
+                var message = string::new(self.allocator);
+                errdefer message.deinit(self.allocator);
+                try message.append_bytes(self.allocator, "`Array.");
+                try message.append_bytes(self.allocator, name);
+                try message.append_bytes(self.allocator, "` requires mutable Array receiver");
+                return try self.checker_message_at(
+                    "type error", ast::zero_span(), move message);
             }
         },
         _ => {},
     }
     return null;
+}
+
+fn array_method_requires_mutable_receiver(name: []u8) -> bool {
+    return mem::equal_bytes(name, "swap") or mem::equal_bytes(name, "remove") or
+        mem::equal_bytes(name, "truncate") or mem::equal_bytes(name, "clear");
 }
 
 fn (self: &var Checker) check_array_method(
@@ -819,7 +857,7 @@ fn (self: &var Checker) check_array_method(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if is_std_array_storage_method(name) {
-        return self.check_std_array_storage_method(tree, scope, element, name, args, offset, out);
+        return self.check_std_array_storage_method(tree, element, name, args, offset, out);
     }
     if mem::equal_bytes(name, "at") or
         mem::equal_bytes(name, "at_mut") {
@@ -943,15 +981,12 @@ fn (self: &var Checker) check_array_index_arg(
 }
 
 fn is_std_array_storage_method(name: []u8) -> bool {
-    return mem::equal_bytes(name, "truncate") or
-        mem::equal_bytes(name, "clear") or
-        mem::equal_bytes(name, "as_bytes") or
+    return mem::equal_bytes(name, "as_bytes") or
         mem::equal_bytes(name, "as_mut_bytes");
 }
 
 fn (self: &var Checker) check_std_array_storage_method(
     tree: &var ast::Ast,
-    scope: ScopeHandle,
     element: Type,
     name: []u8,
     args: ast::ExpressionList,
@@ -967,21 +1002,6 @@ fn (self: &var Checker) check_std_array_storage_method(
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     let count = args.len(tree) - offset;
-    if mem::equal_bytes(name, "truncate") {
-        if try self.check_array_index_arg(tree, scope, name, args, offset) |problem| {
-            return move problem;
-        }
-        let void_type = try self.types.void_type();
-        out.* = try self.intern_declared_error_type("std::array::Error", void_type);
-        return null;
-    }
-    if mem::equal_bytes(name, "clear") {
-        if count != 0 {
-            return try self.receiver_arity_error("Array", name, 0, count);
-        }
-        out.* = try self.types.void_type();
-        return null;
-    }
     if !self.types.is_text(element, "u8") {
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);

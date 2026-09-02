@@ -38,6 +38,8 @@ fn (self: std::mem::Box<T>) deinit<T>(allocator: Allocator) -> void
 fn (self: std::array::Array<T>) deinit<T>(allocator: Allocator) -> void
 fn (self: &var std::array::Array<T>) append<T>(allocator: Allocator, value: T) -> !void
 fn (self: &var std::array::Array<T>) reserve<T>(allocator: Allocator, n: i64) -> !void
+fn (self: &var std::array::Array<T>) truncate<T>(allocator: Allocator, n: i64) -> std::array::Error!void
+fn (self: &var std::array::Array<T>) clear<T>(allocator: Allocator) -> void
 fn (self: &var std::map::Map<K, V>) insert<K, V>(allocator: Allocator, key: K, value: V) -> !void
 fn (self: &var std::arena::Arena<T>) add<T>(allocator: Allocator, value: T) -> Handle<T>
 ```
@@ -51,6 +53,11 @@ fn (self: &var std::arena::Arena<T>) add<T>(allocator: Allocator, value: T) -> H
 `std::array::new<T>(allocator)` は引数を保ちますが、何も確保しないので runtime
 には届きません。compile 時の provenance として残り、後続の確保・解放が同じ
 allocator を名指すことを checker が要求します(原理 #5)。
+
+`Array.truncate` / `clear` は backing buffer を解放しませんが、取り除く owner
+element が memory を解放し得ます。その element へ渡す allocator を明示し、
+non-owner element でも同じ signature を保ちます。descriptor を閉じる element の
+cleanup は allocator を名指しません(ADR-0142)。
 
 ### 導出 deinit も allocator を取る
 
@@ -66,9 +73,9 @@ fn (self: Node) deinit(allocator: Allocator) -> void {
 }
 ```
 
-`deinit` を宣言する型も同じ形を書きます。**owner 型の `deinit` は 1 つの形しか
-持ちません**: receiver と allocator。型ごとに引数が違うと、`defer x.deinit(...)`
-の書き方が型を見ないと決まらなくなります。
+memory を解放する `deinit` を宣言する型も同じ形を書きます。descriptor を閉じる
+owner は allocator を取らず、generic cleanup は宣言からどちらかを選びます
+(ADR-0142)。
 
 ### cleanup は引数を運ぶ
 
@@ -87,15 +94,15 @@ fn (self: Node) deinit(allocator: Allocator) -> void {
 `append(scratch, ..)` して `deinit(heap)` すると、解放は自分が配っていない
 byte を `free` に渡すことになります —— 解放側の 3 つの綴りはどれも一致して
 いるのに、実行すると落ちます。だから `append` / `append_bytes` / `reserve` /
-`insert` / `add` も `deinit` と同じ検査を通ります。
+`truncate` / `clear` / `insert` / `add` も `deinit` と同じ検査を通ります。
 
 tie の同一性は binding の id で見ます。branch や loop body は scope の clone に
 対して検査されるので、そこで argument が解決する allocator は owner が記録した
 ものの copy です。id は binding と一緒に copy されるので、両側で同じ宣言を
 名指します。
 
-container の解放は要素の解放に自分の allocator を渡すので、要素と container が
-違う allocator から来ていると取り違えになります。これに別の検査は要りません ——
+container の cleanup は memory を解放する要素に自分の allocator を渡すので、
+要素と container が違う allocator から来ていると取り違えになります。これに別の検査は要りません ——
 tied allocator から作った owner は `move` できず(SPEC §14.3)、要素になれない
 ためです。tie を持たない `page_allocator()` 同士は区別が付かないので、残るのは
 検査できないし検査する必要もない場合だけです。
@@ -123,8 +130,8 @@ tied allocator から作った owner は `move` できず(SPEC §14.3)、要素�
   check する peak RSS は 564MB から 497MB になった
 - 空の `Array<T>` の構築は命令 0 個になった。3 word の zero 値がそれ自体で
   答えなので、`insertvalue` すら要らない
-- **owner を持つすべての型の `deinit` が allocator を取る。** 呼び出し側は
-  `defer x.deinit(allocator)` と書く
+- memory-backed owner と導出 `deinit` は allocator を取る。descriptor owner は
+  `deinit()` を宣言する(ADR-0142)
 - allocator binding は、それが作った owner より長生きしなければならない。
   `defer` は allocator を宣言したあとに書かれるので、通常の scope 規則で
   満たされる

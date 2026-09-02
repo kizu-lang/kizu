@@ -29,7 +29,7 @@ fn (self: &var Checker) check_array_method(
         return move failed;
     }
     if self.is_std_array_storage_method(method) {
-        return self.check_array_storage_method(tree, env, elem, method, args, out);
+        return self.check_array_storage_method(tree, elem, method, args, out);
     }
     // A growth names the allocator its storage comes from first: an Array
     // header keeps none of its own (ADR-0132).
@@ -47,6 +47,9 @@ fn (self: &var Checker) check_array_method(
         }
         return self.check_array_count_mutation(tree, env, method, rest, out);
     }
+    if self.names.is(method, "clear") or self.names.is(method, "truncate") {
+        return self.check_array_shrink(tree, env, array, method, args, out);
+    }
     if self.names.is(method, "pop") {
         return self.check_array_pop(tree, elem, method, args, true, out);
     }
@@ -63,7 +66,8 @@ fn (self: &var Checker) check_array_method(
     if self.names.is(method, "at") or self.names.is(method, "at_mut") {
         return self.check_array_at_condition(tree, env, array, elem, method, args, out);
     }
-    if self.names.is(method, "set") or self.names.is(method, "swap") {
+    if self.names.is(method, "set") or self.names.is(method, "swap") or
+        self.names.is(method, "remove") {
         return self.check_array_indexed_mutation(tree, env, array, elem, method, args, out);
     }
     if self.names.is(method, "deinit") {
@@ -83,7 +87,61 @@ fn (self: &var Checker) check_array_method(
     );
 }
 
-/// Validates set and owner-safe slot exchange, the Go
+/// Validates the allocator an owner-aware clear/truncate may pass to removed
+/// elements without consuming the Array, the Go `checkArrayShrink`.
+fn (self: &var Checker) check_array_shrink(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    array: BindingHandle,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    var want = 1;
+    if self.names.is(method, "truncate") {
+        want = 2;
+    }
+    if count != want {
+        return try self.error3(
+            tree, ast::zero_span(), "array error: `Array.%s` expects %d args, got %d",
+            Arg::Str(method), Arg::Int(want), Arg::Int(count)
+        );
+    }
+    let borrowed_param = self.binding(array).borrowed_param;
+    let mut_borrow = self.binding(array).mut_borrow;
+    if borrowed_param and !mut_borrow {
+        return try self.error1(
+            tree, ast::zero_span(),
+            "array error: `Array.%s` requires mutable Array receiver", Arg::Str(method)
+        );
+    }
+    let what = try self.names.format("Array.%s", method, empty_name(), empty_name());
+    let allocator = args.get_or_panic(tree, 0);
+    if try self.read_container_allocator_named(
+        tree, env, "array", what, array, allocator) |failed| {
+        return move failed;
+    }
+    if self.names.is(method, "clear") {
+        out.* = self.common.void_name;
+        return null;
+    }
+    let length = args.get_or_panic(tree, 1);
+    var got = empty_name();
+    if try self.read_expr(tree, env, length, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "i64") {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.truncate` expects i64, got %s",
+            Arg::Str(got)
+        );
+    }
+    out.* = self.common.array_error_void_name;
+    return null;
+}
+
+/// Validates indexed replacement, exchange, and move-out, the Go
 /// `checkArrayIndexedMutation`.
 fn (self: &var Checker) check_array_indexed_mutation(
     tree: &var ast::Ast,
@@ -100,11 +158,47 @@ fn (self: &var Checker) check_array_indexed_mutation(
     let borrowed_param = self.binding(value).borrowed_param;
     let mut_borrow = self.binding(value).mut_borrow;
     if borrowed_param and !mut_borrow {
-        return try self.error0(
-            ast::zero_span(), "array error: `Array.swap` requires mutable Array receiver"
+        return try self.error1(
+            tree, ast::zero_span(),
+            "array error: `Array.%s` requires mutable Array receiver", Arg::Str(method)
         );
     }
+    if self.names.is(method, "remove") {
+        return self.check_array_remove(tree, env, elem, args, out);
+    }
     return self.check_array_swap(tree, env, args, out);
+}
+
+/// Validates one checked index and returns the element through the error
+/// union, the Go `checkArrayRemove`. Owner elements move to the caller.
+fn (self: &var Checker) check_array_remove(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.remove` expects 1 arg, got %d",
+            Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "i64") {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.remove` expects i64 index, got %s",
+            Arg::Str(got)
+        );
+    }
+    out.* = try self.names.format(
+        "std::array::Error!%s", elem, empty_name(), empty_name());
+    return null;
 }
 
 /// Validates two checked indexes without moving either element, the Go
@@ -194,30 +288,15 @@ fn (self: &var Checker) check_array_clone(
     return null;
 }
 
-/// Validates Array helpers reserved to std source, the Go
+/// Validates raw Array view helpers reserved to std source, the Go
 /// `checkStdArrayStorageMethod`.
 fn (self: &var Checker) check_array_storage_method(
     tree: &var ast::Ast,
-    env: ScopeHandle,
     elem: Name,
     method: Name,
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    if self.names.is(method, "truncate") {
-        return self.check_array_count_mutation(tree, env, method, args, out);
-    }
-    if self.names.is(method, "clear") {
-        let count = arg_count(tree, args);
-        if count != 0 {
-            return try self.error1(
-                tree, ast::zero_span(), "array error: `Array.clear` expects 0 args, got %d",
-                Arg::Int(count)
-            );
-        }
-        out.* = self.common.void_name;
-        return null;
-    }
     if !self.names.is(elem, "u8") {
         return try self.error1(
             tree, ast::zero_span(), "array error: `Array.%s` requires Array<u8>", Arg::Str(method)
@@ -262,11 +341,10 @@ fn (self: &var Checker) check_array_append_bytes(
     return null;
 }
 
-/// Reports methods reserved for std-owned storage wrappers, the Go
+/// Reports raw view methods reserved to std source, the Go
 /// `isStdArrayStorageMethod`.
 fn (self: &Checker) is_std_array_storage_method(method: Name) -> bool {
-    return self.names.is(method, "truncate") or self.names.is(method, "clear") or
-        self.names.is(method, "as_bytes") or self.names.is(method, "as_mut_bytes");
+    return self.names.is(method, "as_bytes") or self.names.is(method, "as_mut_bytes");
 }
 
 /// Validates one-count Array mutations, the Go `checkArrayCountMutation`.
@@ -672,7 +750,7 @@ fn (self: &var Checker) check_owned_map_insert(
         );
     }
     let allocator_arg = args.get_or_panic(tree, 0);
-    if try self.read_grow_allocator(
+    if try self.read_container_allocator(
         tree, env, "map", "Map.insert", map_value, allocator_arg
     ) |failed| {
         return move failed;
@@ -797,7 +875,7 @@ fn (self: &var Checker) read_array_grow_allocator(
     }
     let what = try self.names.format("Array.%s", method, empty_name(), empty_name());
     let first = args.get_or_panic(tree, 0);
-    return self.read_grow_allocator_named(tree, env, "array", what, array, first);
+    return self.read_container_allocator_named(tree, env, "array", what, array, first);
 }
 
 /// Reads the single Allocator a release names. A value keeps no copy of the
@@ -834,11 +912,10 @@ fn (self: &var Checker) read_release_allocator(
 
 /// Reads the leading Allocator a storage-asking container method names, and
 /// requires it to be the one the container was built from, the Go
-/// `readGrowAllocator`. The storage a growth buys is released by the
-/// container's `deinit`, which names one allocator for all of it: a growth
-/// that named another would leave the release freeing bytes it never handed
-/// out (ADR-0132).
-fn (self: &var Checker) read_grow_allocator(
+/// `readContainerAllocator`. Growth must release through the allocator that
+/// bought its bytes, and owner shrink must release elements through the
+/// allocator that built them (ADR-0132).
+fn (self: &var Checker) read_container_allocator(
     tree: &var ast::Ast,
     env: ScopeHandle,
     kind: []u8,
@@ -847,11 +924,11 @@ fn (self: &var Checker) read_grow_allocator(
     arg: ast::Expression
 ) -> !?diagnostic::Diagnostic {
     let label = try self.names.intern(what);
-    return self.read_grow_allocator_named(tree, env, kind, label, receiver, arg);
+    return self.read_container_allocator_named(tree, env, kind, label, receiver, arg);
 }
 
 /// The same, for a caller that already named the method.
-fn (self: &var Checker) read_grow_allocator_named(
+fn (self: &var Checker) read_container_allocator_named(
     tree: &var ast::Ast,
     env: ScopeHandle,
     kind: []u8,
@@ -1257,7 +1334,7 @@ fn (self: &var Checker) check_arena_add(
     let elem = try self.arena_element_type(arena) orelse
         return try self.not_an_arena_error(tree, arena);
     let allocator_arg = args.get_or_panic(tree, 0);
-    if try self.read_grow_allocator(
+    if try self.read_container_allocator(
         tree, env, "arena", "Arena.add", arena, allocator_arg
     ) |failed| {
         return move failed;
