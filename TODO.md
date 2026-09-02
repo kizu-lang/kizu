@@ -22,27 +22,11 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 
 ### B. runtime / lowering の局所修正(小)
 
-- [ ] B1 `defer` / `errdefer` の receiver を登録時の SSA 値でなく exit 時の live 値で
-      渡す(`internal/ir/defer.go`、`defer_reads_live_receiver`)
-- [ ] B2 `defer m.deinit(a)` が `Map<K, Owner>` の value cleanup を飛ばす。
-      `internal/ir/defer.go` の `containerCleanup` が `"K, V"` の連結綴りで owner 判定
-      している(`std_map_defer_deinit_owner_values`)
-- [ ] B3 `Map.insert` の OOM で move 済み value を解放する(`internal/ir/lower.go`
-      の array.append / arena.add / box と同じ `releaseOwnerOnFailure`、
-      `std_map_insert_oom_releases_value`)
 - [ ] B4 struct field / Array element の `E!Owner` を導出 deinit が解放する
       (`internal/ast/derive_deinit.go` が `?T` しか unwrap しない、
       `error_union_owner_field_cleanup`)
 - [ ] B5 同一式内の `try` 失敗で、評価済みの owner temporary を解放する
       (`try_in_literal_releases_earlier_owner`)
-- [ ] B6 zero-size element の `Array<Empty>` で `realloc(ptr, 0)` を呼ばない
-      (`internal/native/runtime/runtime.c` `kizu_array_reserve_storage`。glibc は
-      解放して NULL を返すので Linux で double free。macOS では再現しないので
-      example は fix 時に `run` case として足す)
-- [ ] B7 `String.append_string(a, &s)` の runtime が realloc 後に旧 buffer を読む。
-      checker 側は C3 で塞ぐが、runtime も reserve 前に source を退避するか
-      self-append を拒否する
-
 ### C. SPEC 追記と、共通部品へ畳みながら閉じる修正(中)
 
 - [ ] C1 SPEC §8 に「非 deinit の by-value `self` は body で `&T` と同じ扱い」を書く。
