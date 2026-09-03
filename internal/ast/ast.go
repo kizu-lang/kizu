@@ -111,6 +111,9 @@ type FunctionSignature struct {
 	ExportABI      string
 	Public         bool
 	Std            bool
+	// Span points at the declaration name, so a diagnostic about the
+	// signature can say where it was written.
+	Span Span
 }
 
 // FunctionDecl represents a function declaration.

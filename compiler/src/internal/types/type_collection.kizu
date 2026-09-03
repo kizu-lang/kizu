@@ -17,7 +17,10 @@ struct CollectionMemberIssue {
 }
 
 struct CollectionNamedTypeIssue {
-    name: ast::Text, type_name: Type
+    name: ast::Text, type_name: Type,
+    /// span is where the declaration was written, or zero when the issue
+    /// has no single place.
+    span: ast::Span
 }
 
 struct CollectionMemberTypeIssue {
@@ -30,7 +33,8 @@ struct CollectionImplMethodIssue {
 
 struct CollectionHostParamIssue {
     name: ast::Text, index: i64, type_name: Type,
-    mut_borrow: bool
+    mut_borrow: bool,
+    span: ast::Span
 }
 
 struct FunctionParamStorage {
@@ -524,7 +528,7 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
     }
     if compile_time_only_type(&self.types, return_type) {
         let named = CollectionNamedTypeIssue {
-            name: signature.name, type_name: return_type
+            name: signature.name, type_name: return_type, span: ast::zero_span()
         };
         let issue = TypeCollectionIssue::FunctionReturnCompileTimeOnly(named);
         return function_storage_issue(self.allocator, move storage, issue);
@@ -639,7 +643,7 @@ fn (self: &Checker) validate_host_function_signature(
     if !self.types.is_text(return_type, "void") and
         !browser_host_scalar(&self.types, return_type) {
         let issue = CollectionNamedTypeIssue {
-            name: signature.name, type_name: return_type
+            name: signature.name, type_name: return_type, span: signature.span
         };
         return TypeCollectionIssue::BrowserHostReturn(issue);
     }
@@ -671,7 +675,7 @@ fn (self: &Checker) validate_c_host_function_types(
     }
     if !self.types.is_text(return_type, "void") and !c_host_scalar(&self.types, return_type) {
         let issue = CollectionNamedTypeIssue {
-            name: signature.name, type_name: return_type
+            name: signature.name, type_name: return_type, span: signature.span
         };
         return TypeCollectionIssue::CHostReturn(issue);
     }
@@ -690,7 +694,8 @@ fn (self: &Checker) host_param_issue(
         mut_borrow = parameter.mut_borrow;
     }
     return CollectionHostParamIssue {
-        name: signature.name, index: index + 1, type_name: parameter_type, mut_borrow: mut_borrow
+        name: signature.name, index: index + 1, type_name: parameter_type, mut_borrow: mut_borrow,
+        span: signature.span
     };
 }
 
@@ -749,7 +754,7 @@ fn (self: &var Checker) collect_function_parameter(
     }
     if compile_time_only_type(&self.types, parameter_type) {
         let named = CollectionNamedTypeIssue {
-            name: parameter.name, type_name: parameter_type
+            name: parameter.name, type_name: parameter_type, span: ast::zero_span()
         };
         return TypeCollectionIssue::ParamCompileTimeOnly(named);
     }
@@ -841,6 +846,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
     var category = "type error";
+    var span = ast::zero_span();
     match issue {
         DuplicateType(name) => {
             try message.append_bytes(self.allocator, "duplicate type `");
@@ -1073,12 +1079,14 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             );
         },
         BrowserHostBorrowParam(host_param) => {
+            span = host_param.span;
             try message.append_bytes(self.allocator, "browser host ");
             try append_function_name(self.allocator, &var message, tree, host_param.name);
             try message.append_bytes(self.allocator, " cannot borrow parameter ");
             try fmt::append_i64(self.allocator, &var message, host_param.index);
         },
         BrowserHostParam(host_param) => {
+            span = host_param.span;
             try message.append_bytes(self.allocator, "browser host ");
             try append_function_name(self.allocator, &var message, tree, host_param.name);
             try message.append_bytes(self.allocator, " parameter ");
@@ -1087,12 +1095,14 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try self.append_checker_type(&var message, host_param.type_name);
         },
         BrowserHostReturn(named) => {
+            span = named.span;
             try message.append_bytes(self.allocator, "browser host ");
             try append_function_name(self.allocator, &var message, tree, named.name);
             try message.append_bytes(self.allocator, " has unsupported return type ");
             try self.append_checker_type(&var message, named.type_name);
         },
         CHostBorrowParam(host_param) => {
+            span = host_param.span;
             try message.append_bytes(self.allocator, "C ");
             try append_function_name(self.allocator, &var message, tree, host_param.name);
             try message.append_bytes(self.allocator, " parameter ");
@@ -1102,6 +1112,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, "`), which C cannot receive");
         },
         CHostParam(host_param) => {
+            span = host_param.span;
             try message.append_bytes(self.allocator, "C ");
             try append_function_name(self.allocator, &var message, tree, host_param.name);
             try message.append_bytes(self.allocator, " parameter ");
@@ -1111,6 +1122,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, "`, which C cannot receive");
         },
         CHostReturn(named) => {
+            span = named.span;
             try message.append_bytes(self.allocator, "C ");
             try append_function_name(self.allocator, &var message, tree, named.name);
             try message.append_bytes(self.allocator, " returns `");
@@ -1118,7 +1130,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, "`, which C cannot produce");
         },
     }
-    var value = try new_checker_diagnostic(self.allocator, category, move message);
+    var value = try new_checker_diagnostic_at(self.allocator, category, span, move message);
     errdefer value.deinit(self.allocator);
     match issue {
         StructObligationDoc(_) => try value.with_help(self.allocator,
@@ -1171,11 +1183,21 @@ fn (self: &Checker) append_c_host_param_spelling(
 }
 
 fn new_checker_diagnostic(allocator: Allocator, category: []u8, message: string::String) -> !diagnostic::Diagnostic {
+    return new_checker_diagnostic_at(allocator, category, ast::zero_span(), move message);
+}
+
+/// Builds one collection diagnostic at span, the place the issue names.
+fn new_checker_diagnostic_at(
+    allocator: Allocator,
+    category: []u8,
+    span: ast::Span,
+    message: string::String
+) -> !diagnostic::Diagnostic {
     defer message.deinit(allocator);
     let message_text = message.as_bytes();
     return diagnostic::new(
         allocator, diagnostic::Severity::Error, category,
-        ast::zero_span(), message_text
+        span, message_text
     );
 }
 
