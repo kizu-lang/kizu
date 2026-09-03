@@ -55,6 +55,9 @@ func (c *Checker) checkStdMethodCall(
 		return "", err
 	}
 	if facts.Access == stdmethod.AccessCleanup {
+		if err := c.checkLazyDefaultConsume(receiver.name, "consumed", receiver.declSpan); err != nil {
+			return "", err
+		}
 		// Releasing the value is the last thing done with it, so the binding
 		// is consumed rather than left readable.
 		receiver.moved = true

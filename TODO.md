@@ -46,9 +46,19 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 
 ### 決めが要るもの
 
-- `let r = f() catch move fallback;` / `orelse move fallback;` の非採用 path で
-  fallback が leak する。named owner を fallback に置けなくするか、非採用 path で
-  解放するかを決める
+- [x] `orelse` / `catch` の右辺(既定値)で名前付き owner を消費できないようにする。
+      決めた: 既定値は payload が無いときだけ走るので、右辺での hand-off
+      (`orelse move keep`、`orelse wrap(move keep)`)や消費 receiver
+      (`orelse boxed.take(a)`)は条件付きの消費になり、checker が無条件 move と
+      扱って leak していた(実測 allocs 2 / frees 1)。隠れた解放は入れない
+      (解放は allocator を名指しする、ADR-0132)。右辺でその場に作る owner
+      (`orelse string::new(a)`)は評価されない path で作られないので今まで通り。
+      作業: 右辺評価中の flag で hand-off / 消費 receiver を拒否、negative 3 件
+      (`orelse move` / `catch move` / consuming receiver)、SPEC §6.9.1 に 1 行、
+      Kizu 移植。既存コードの書き換えは 0 件。
+- [ ] (別判断) capture 付き `if` を式として許すか。用意した owner を条件付きで
+      使う形を `let picked = if try maybe(a) |found| { keep.deinit(a); found }
+      else { move keep };` と式で書けるようになる。今は文形だけ。
 - std `Array` の two-phase receiver: `arr.append(a, arr.pop_or_panic())` が通る。
   ADR-0106 は receiver を借りる引数を拒否する。bounds check のおかげで今は安全
 - `extern "c" fn` が `[]u8` / `&var String` を引数に取れる。SPEC §12.1 は `[]u8` を

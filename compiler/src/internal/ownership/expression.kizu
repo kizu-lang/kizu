@@ -573,6 +573,9 @@ fn (self: &var Checker) move_bound_ident(
             Arg::Text(ident.name), Arg::Str(field), Arg::Text(ident.name)
         );
     }
+    if try self.check_lazy_default_consume(tree, self.binding(value).name, "handed off", ident.span) |failed| {
+        return move failed;
+    }
     try self.store.set_moved(value, true);
     try self.release_consumed_borrows(value);
     handed_off.* = true;
@@ -1024,19 +1027,79 @@ fn (self: &var Checker) read_orelse_default(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let elem = try self.names.optional_payload_name(left);
-    var ignored = empty_name();
-    if try self.value_type_needs_consume(self.allocator, elem) {
-        if try self.move_expr(tree, env, right, &var ignored) |failed| {
-            return move failed;
-        }
-        out.* = elem;
-        return null;
-    }
-    if try self.read_expr(tree, env, right, &var ignored) |failed| {
+    let owner = try self.value_type_needs_consume(self.allocator, elem);
+    let keyword = try self.names.intern("orelse");
+    if try self.read_lazy_default(tree, env, keyword, right, owner) |failed| {
         return move failed;
     }
     out.* = elem;
     return null;
+}
+
+/// Reads the default of an `orelse` or `catch`, which runs only when the
+/// payload is absent, the Go `readLazyDefault`. An owner payload makes the
+/// default a competing owner producer, so it is moved rather than aliased;
+/// either way a named owner may not be consumed inside it (lazy_default).
+fn (self: &var Checker) read_lazy_default(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    keyword: Name,
+    right: ast::Expression,
+    owner: bool
+) -> !?diagnostic::Diagnostic {
+    let saved = self.lazy_default;
+    self.lazy_default = keyword;
+    var ignored = empty_name();
+    if owner {
+        if try self.move_expr(tree, env, right, &var ignored) |failed| {
+            self.lazy_default = saved;
+            return move failed;
+        }
+        self.lazy_default = saved;
+        return null;
+    }
+    if try self.read_expr(tree, env, right, &var ignored) |failed| {
+        self.lazy_default = saved;
+        return move failed;
+    }
+    self.lazy_default = saved;
+    return null;
+}
+
+/// Refuses consuming a named owner inside a default, the Go
+/// `checkLazyDefaultConsume`: the default runs only when the payload is
+/// absent, so the value would be consumed on one path and left unreleased
+/// on the other, and the checker cannot tell the paths apart.
+fn (self: &var Checker) check_lazy_default_consume(
+    tree: &ast::Ast,
+    name: Name,
+    verb: []u8,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    if is_empty(self.lazy_default) {
+        return null;
+    }
+    let verb_name = try self.names.intern(verb);
+    var failed = try self.error3(
+        tree, span, "move error: `%s` cannot be %s inside the `%s` default",
+        Arg::Str(name), Arg::Str(verb_name), Arg::Str(self.lazy_default)
+    );
+    errdefer failed.deinit(self.allocator);
+    let note = try self.names.format(
+        "the default runs only when the payload is absent, so `%s` would be %s on one path and left unreleased on the other",
+        name, verb_name, empty_name()
+    );
+    let note_text = name_text(&self.names, note);
+    let note_bytes = note_text.as_bytes();
+    try failed.with_note(self.allocator, note_bytes);
+    let help = try self.names.format(
+        "keep `%s` out of the default and write both paths with `if ... |name| { %s.deinit(...); ... } else { ... }`, or build the default in place",
+        name, name, empty_name()
+    );
+    let help_text = name_text(&self.names, help);
+    let help_bytes = help_text.as_bytes();
+    try failed.with_help(self.allocator, help_bytes);
+    return move failed;
 }
 
 /// Reads the default arm of `catch`, the Go `readCatchDefault`. The default
@@ -1054,15 +1117,9 @@ fn (self: &var Checker) read_catch_default(
     if try self.names.error_union_parts(left) |parts| {
         elem = parts.success;
     }
-    var ignored = empty_name();
-    if try self.value_type_needs_consume(self.allocator, elem) {
-        if try self.move_expr(tree, env, right, &var ignored) |failed| {
-            return move failed;
-        }
-        out.* = elem;
-        return null;
-    }
-    if try self.read_expr(tree, env, right, &var ignored) |failed| {
+    let owner = try self.value_type_needs_consume(self.allocator, elem);
+    let keyword = try self.names.intern("catch");
+    if try self.read_lazy_default(tree, env, keyword, right, owner) |failed| {
         return move failed;
     }
     out.* = elem;

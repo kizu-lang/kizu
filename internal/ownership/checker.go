@@ -2,6 +2,7 @@ package ownership
 
 import (
 	"fmt"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"strconv"
 	"strings"
 
@@ -89,6 +90,11 @@ type Checker struct {
 	captureCondition bool
 	viewCaptureCall  *ast.CallExpr
 	borrowReturn     bool
+	// lazyDefault names the `orelse` or `catch` whose default is being read,
+	// or is empty. A default runs only when the payload is absent, so a named
+	// owner consumed inside it would be consumed on one path and left
+	// unreleased on the other; the consumers refuse it while this is set.
+	lazyDefault string
 	// returnedViews holds the expressions of the return being checked whose
 	// view leaves the frame on its parameter ties: the value itself and the
 	// fields of a struct literal it builds. The escape refusals let these
@@ -4298,6 +4304,9 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 			"move error: field `%s.%s` is already consumed, so `%s` cannot be handed on whole",
 			ident.Name, field, ident.Name)
 	}
+	if err := c.checkLazyDefaultConsume(ident.Name, "handed off", ident.Span); err != nil {
+		return "", false, err
+	}
 	value.moved = true
 	releaseConsumedBorrows(value)
 	return value.typeName, true, nil
@@ -4617,16 +4626,45 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 // is a competing owner producer and must be moved, not aliased.
 func (c *Checker) readOrelseDefault(left string, right ast.Expression, env *scope) (string, error) {
 	elem := optionalPayloadName(left)
-	if c.valueTypeNeedsConsume(elem) {
-		if _, err := c.moveExpr(right, env); err != nil {
-			return "", err
-		}
-		return elem, nil
+	return elem, c.readLazyDefault("orelse", right, c.valueTypeNeedsConsume(elem), env)
+}
+
+// readLazyDefault reads the default of an `orelse` or `catch`, which runs
+// only when the payload is absent. An owner payload makes the default a
+// competing owner producer, so it is moved rather than aliased; either way a
+// named owner may not be consumed inside it (lazyDefault).
+func (c *Checker) readLazyDefault(
+	keyword string,
+	right ast.Expression,
+	owner bool,
+	env *scope,
+) error {
+	saved := c.lazyDefault
+	c.lazyDefault = keyword
+	defer func() { c.lazyDefault = saved }()
+	if owner {
+		_, err := c.moveExpr(right, env)
+		return err
 	}
-	if _, err := c.readExpr(right, env); err != nil {
-		return "", err
+	_, err := c.readExpr(right, env)
+	return err
+}
+
+// checkLazyDefaultConsume refuses consuming a named owner inside a default:
+// the default runs only when the payload is absent, so the value would be
+// consumed on one path and left unreleased on the other, and the checker
+// cannot tell the paths apart.
+func (c *Checker) checkLazyDefaultConsume(name string, verb string, span ast.Span) error {
+	if c.lazyDefault == "" {
+		return nil
 	}
-	return elem, nil
+	return diag.FromText(diag.SeverityError, span,
+		fmt.Sprintf("move error: `%s` cannot be %s inside the `%s` default", name, verb, c.lazyDefault)).
+		WithNote(fmt.Sprintf("the default runs only when the payload is absent, so `%s` would be %s on"+
+			" one path and left unreleased on the other", name, verb)).
+		WithHelp(fmt.Sprintf("keep `%s` out of the default and write both paths with"+
+			" `if ... |name| { %s.deinit(...); ... } else { ... }`, or build the default in place",
+			name, name))
 }
 
 // readCatchDefault reads the default arm of `catch`. The default stands in
@@ -4637,16 +4675,7 @@ func (c *Checker) readCatchDefault(left string, right ast.Expression, env *scope
 	if elem == "" {
 		elem = left
 	}
-	if c.valueTypeNeedsConsume(elem) {
-		if _, err := c.moveExpr(right, env); err != nil {
-			return "", err
-		}
-		return elem, nil
-	}
-	if _, err := c.readExpr(right, env); err != nil {
-		return "", err
-	}
-	return elem, nil
+	return elem, c.readLazyDefault("catch", right, c.valueTypeNeedsConsume(elem), env)
 }
 
 // isBooleanBinaryOperator reports whether a binary operator returns bool.
@@ -7112,6 +7141,9 @@ func (c *Checker) consumeOwnerField(expr *ast.FieldExpr, env *scope) error {
 	if root.moved || root.deinitialized {
 		return errorAt(expr.Span, "move error: moved value `%s` was used", root.name)
 	}
+	if err := c.checkLazyDefaultConsume(root.name+"."+path, "handed off", expr.Span); err != nil {
+		return err
+	}
 	if root.hasAnyBorrow() {
 		return errorAt(expr.Span,
 			"borrow error: field `%s` cannot be moved while `%s` is borrowed",
@@ -7681,6 +7713,9 @@ func (c *Checker) checkImplMethodCall(
 			return "", true, errorf(
 				"move error: field `%s.%s` is already consumed, so `%s.deinit()` "+
 					"would release it twice", value.name, field, value.name)
+		}
+		if err := c.checkLazyDefaultConsume(value.name, "consumed", value.declSpan); err != nil {
+			return "", true, err
 		}
 		value.moved = true
 		releaseConsumedBorrows(value)

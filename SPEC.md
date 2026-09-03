@@ -1125,6 +1125,11 @@ payload の階級は型が運びます: owner payload は capture / `orelse` の
 結果に消費義務が付き、view payload は view の借用規則にそのまま従い
 ます。owner / view を包んだ optional は「生まれた場所で消費」限定で、
 let / var への保存と引数渡しは copy element の optional だけができます。
+`orelse` / `catch` の既定値は payload が無いときだけ評価されるので、その中で
+名前付き owner を消費すること(`orelse move keep`、`orelse boxed.take(a)`)は
+できません: 片方の path でだけ消費されて、もう片方で解放されずに残るためです。
+既定値はその場で作るか(`orelse string::new(a)`)、両 path を capture の
+`if ... |name| { ... } else { ... }` で書きます。
 
 owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
 呼び出しが返す view payload は、さらに capture 限定です: capture は条件式が
