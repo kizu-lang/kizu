@@ -753,6 +753,9 @@ fn (self: &var Checker) tie_view_capture(
         try capture.borrow_targets.append(self.allocator, source);
         index = index + 1;
     }
+    // The condition handed the payload over; a payload that owns something
+    // is the capture's to release even while its views tie it here.
+    capture.owns_tied = try self.value_type_needs_consume(self.allocator, capture.type_name);
     return null;
 }
 
@@ -1331,7 +1334,10 @@ fn (self: &var Checker) classify_match_payload(type_name: Name) -> !MatchPayload
         return MatchPayloadClass::Copies;
     }
     let base = try self.names.generic_base_or_self(type_name);
-    if self.is_struct(base) or self.is_union(base) {
+    // A declared aggregate moves out, and so does any value with a deinit
+    // contract: an owned scrutinee hands its std container payload over the
+    // same way it hands a struct over, and the arm then owes the release.
+    if self.is_struct(base) or self.is_union(base) or try self.value_type_needs_consume(self.allocator, type_name) {
         return MatchPayloadClass::Moves;
     }
     return MatchPayloadClass::Borrows;

@@ -151,8 +151,13 @@ type binding struct {
 	handleArenaID    int
 	deinitialized    bool
 	consumeExempt    bool
-	deferCleanup     bool
-	declSpan         ast.Span
+	// ownsTied marks a capture that was handed its owner payload while the
+	// payload's views keep it tied to the container it came from: the
+	// binding owns the value (its `deinit` is its to call) but cannot move
+	// it out of the frame (SPEC §9).
+	ownsTied     bool
+	deferCleanup bool
+	declSpan     ast.Span
 	// fieldOwner and fieldOwnerName link a direct-field receiver projection
 	// back to the owner binding and its field, so a call-duration receiver
 	// borrow lands where argument borrows of the same place land.
@@ -672,14 +677,36 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		value := c.newBinding(param.Name, typeName)
 		value.borrowedParam = fn.params[idx].borrow
 		value.mutBorrow = fn.params[idx].mutBorrow
+		receiver := fn.sig.Receiver && idx == 0
+		if receiver && !value.borrowedParam && !value.mutBorrow && !functionConsumesReceiver(fn) {
+			// A by-value receiver of a method that does not consume it is the
+			// caller's value read in place (SPEC §8): the body holds it the
+			// way a `&T` parameter is held, so nothing can be taken out of it.
+			value.borrowedParam = true
+		}
 		// A method receiver is written as a by-value param but is not a
 		// consuming transfer (SPEC §14: mutators are callable from owned
 		// locals), and a consume primitive keeps its value by design
 		// (ADR-0091): neither carries a consume obligation.
-		value.consumeExempt = (fn.sig.Receiver && idx == 0) || isConsumePrimitive(fn.name)
+		value.consumeExempt = receiver || isConsumePrimitive(fn.name)
 		env.define(value)
 	}
 	return nil
+}
+
+// functionConsumesReceiver reports whether a method takes its receiver over:
+// `deinit` by contract (SPEC §8), and a std method written with a by-value
+// receiver whose result is not a borrow of it -- `Box.take` hands the payload
+// out and releases the cell -- by its compiler-known signature (SPEC §14.4).
+// Every other by-value receiver is read in place.
+func functionConsumesReceiver(fn *functionInfo) bool {
+	if !fn.sig.Receiver || len(fn.params) == 0 || fn.params[0].borrow || fn.params[0].mutBorrow {
+		return false
+	}
+	if stdmethod.CallName(fn.sig.Name) == typ.CleanupMethod && returnTypeName(fn) == "void" {
+		return true
+	}
+	return fn.sig.Std && !strings.HasPrefix(returnTypeName(fn), "&")
 }
 
 // isConsumePrimitive names the std functions whose whole job is consuming an
@@ -3181,6 +3208,9 @@ func (c *Checker) tieViewCapture(
 		capture.localBorrow = true
 		capture.borrowTargets = append(capture.borrowTargets, source)
 	}
+	// The condition handed the payload over; a payload that owns something
+	// is the capture's to release even while its views tie it here.
+	capture.ownsTied = c.valueTypeNeedsConsume(capture.typeName)
 	return nil
 }
 
@@ -3672,7 +3702,10 @@ func (c *Checker) classifyMatchPayload(typeName string) matchPayloadClass {
 		return payloadCopies
 	}
 	base := strings.Join(name.Path, "::")
-	if c.structs[base] != nil || c.unions[base] != nil {
+	// A declared aggregate moves out, and so does any value with a deinit
+	// contract: an owned scrutinee hands its std container payload over the
+	// same way it hands a struct over, and the arm then owes the release.
+	if c.structs[base] != nil || c.unions[base] != nil || c.valueTypeNeedsConsume(typeName) {
 		return payloadMoves
 	}
 	return payloadBorrows
@@ -7096,6 +7129,9 @@ func (c *Checker) checkMethodCallExpr(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if err := c.checkConsumingReceiverOwned(field, env); err != nil {
+		return "", err
+	}
 	if typ, ok, err := c.checkArenaAtReceiverMethod(field, args, env); ok || err != nil {
 		return typ, err
 	}
@@ -7106,6 +7142,33 @@ func (c *Checker) checkMethodCallExpr(
 		return typ, err
 	}
 	return c.checkLocalReceiverMethod(field, args, env)
+}
+
+// checkConsumingReceiverOwned rejects a method that takes its receiver over
+// when the receiver is a borrow: the lender still holds the value, and the
+// method's own release would run on it. Which methods consume is read from
+// their signatures (functionConsumesReceiver), for user types and std alike.
+func (c *Checker) checkConsumingReceiverOwned(field *ast.FieldExpr, env *scope) error {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	value, exists := env.lookup(ident.Name)
+	if !exists || !(value.borrowedParam || value.localBorrow) || value.ownsTied {
+		return nil
+	}
+	receiverType := value.typeName
+	if base, _, ok := splitGenericType(receiverType); ok {
+		receiverType = base
+	}
+	method := c.implMethod(receiverType, field.Name)
+	if method == nil || !functionConsumesReceiver(method) {
+		return nil
+	}
+	label := strings.TrimSuffix(releaseLabel(value.typeName), "."+typ.CleanupMethod)
+	return errorAt(field.Span,
+		"move error: `%s.%s` requires owned %s receiver; `%s` is a borrow",
+		label, field.Name, label, value.name)
 }
 
 // checkArenaAtReceiverMethod lets an immediate shared Arena.at result receive

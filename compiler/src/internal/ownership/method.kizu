@@ -9,6 +9,33 @@ import compiler::internal::typ;
 
 /// Validates ownership effects of value receiver methods, the Go
 /// `checkMethodCallExpr`.
+/// Rejects a method that takes its receiver over when the receiver is a
+/// borrow, the Go `checkConsumingReceiverOwned`: the lender still holds the
+/// value, and the method's own release would run on it. Which methods
+/// consume is read from their signatures (function_consumes_receiver), for
+/// user types and std alike.
+fn (self: &var Checker) check_consuming_receiver_owned(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr
+) -> !?diagnostic::Diagnostic {
+    let value = self.lookup_ident(tree, env, field.receiver) orelse return null;
+    if !(self.binding(value).borrowed_param or self.binding(value).local_borrow) or self.binding(value).owns_tied {
+        return null;
+    }
+    let receiver_type = try self.names.generic_base_or_self(self.binding(value).type_name);
+    let method = self.impl_method_text(receiver_type, tree, field.name) orelse return null;
+    if !self.function_consumes_receiver(method) {
+        return null;
+    }
+    let label = try self.names.after_last_path_separator(receiver_type);
+    return try self.error4(
+        tree, field.span,
+        "move error: `%s.%s` requires owned %s receiver; `%s` is a borrow",
+        Arg::Str(label), Arg::Text(field.name), Arg::Str(label), Arg::Str(self.binding(value).name)
+    );
+}
+
 fn (self: &var Checker) check_method_call_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -16,6 +43,9 @@ fn (self: &var Checker) check_method_call_expr(
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    if try self.check_consuming_receiver_owned(tree, env, field) |failed| {
+        return move failed;
+    }
     var handled = false;
     if try self.check_arena_at_receiver_method(tree, env, field, args, &var handled, out) |failed| {
         return move failed;

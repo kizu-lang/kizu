@@ -22,15 +22,6 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 
 ### C. SPEC 追記と、共通部品へ畳みながら閉じる修正(中)
 
-- [ ] C1 SPEC §8 に「非 deinit の by-value `self` は body で `&T` と同じ扱い」を書く。
-      call site は変えない(receiver に move marker は書かない原則のまま)
-- [ ] C2 by-value receiver: `defineParams` で非 deinit の receiver を borrow class に
-      する。`allowsOwnerFieldCleanup` / return / move / `deinit` 呼び出しが自動で
-      拒否になる(`receiver_by_value_*`)。std 側は `Array.deinit` / `Box.deinit` /
-      `Box.take` にも owned receiver guard を足す —— ただし method 名の分岐でなく、
-      `internal/stdmethod` の署名属性(receiver 種別)から判定する
-      (`deinit_through_shared_borrow`, `std_array_deinit_through_shared_borrow`,
-      `std_mem_box_take_through_shared_borrow`)
 - [ ] C3 呼び出しを 1 本にする: 直接 / generic / method / fn pointer / std method が
       「subst 済み署名 + 引数列(receiver は第 0 引数)」を受ける同じ関数を通る。
       generic の owner 引数の move、`&var`+`&` alias、view の lend、tie 導出、
