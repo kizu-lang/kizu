@@ -850,7 +850,7 @@ fn (self: &var Checker) check_owned_string_method(
             rest = try self.rest_args(tree, args, 1);
         }
         if self.names.is(method, "append_string") {
-            return self.check_string_source_arg(tree, env, method, rest, out);
+            return self.check_string_source_arg(tree, env, str_value, method, rest, out);
         }
         return self.check_string_append_or_reserve(tree, env, method, rest, out);
     }
@@ -986,10 +986,13 @@ fn (self: &var Checker) check_string_bytes_arg(
 }
 
 /// Validates append_string reading its source String without moving it, the
-/// Go `checkStringSourceArg`.
+/// Go `checkStringSourceArg`. The receiver is the call's `&var` argument and
+/// the source its `&` argument, so the two are activated in that order and
+/// collide exactly as they would on a direct call.
 fn (self: &var Checker) check_string_source_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    str_value: BindingHandle,
     method: Name,
     args: ast::ExpressionList,
     out: &var Name
@@ -1002,10 +1005,32 @@ fn (self: &var Checker) check_string_source_arg(
         );
     }
     let arg = arg_at(tree, args, 0) orelse return null;
-    var got = empty_name();
-    if try self.read_expr(tree, env, arg, &var got) |failed| {
+    if try self.check_borrow_conflict_for_field(tree, str_value, empty_name(), true) |failed| {
         return move failed;
     }
+    try self.activate_borrow(str_value, empty_name(), true);
+    let receiver = TemporaryBorrow { value: str_value, field: empty_name(), mutable: true };
+    var target = self.new_borrow_target();
+    var found = false;
+    if try self.call_borrow_target(tree, env, arg, &var found, &var target) |failed| {
+        errdefer failed.deinit(self.allocator);
+        try self.release_temporary_borrow(receiver);
+        return move failed;
+    }
+    if found {
+        if try self.check_borrow_conflict_for_field(tree, target.value, target.field, false) |failed| {
+            errdefer failed.deinit(self.allocator);
+            try self.release_temporary_borrow(receiver);
+            return move failed;
+        }
+    }
+    var got = empty_name();
+    if try self.read_expr(tree, env, arg, &var got) |failed| {
+        errdefer failed.deinit(self.allocator);
+        try self.release_temporary_borrow(receiver);
+        return move failed;
+    }
+    try self.release_temporary_borrow(receiver);
     if !same_name(got, self.common.string_name) {
         return try self.error2(
             tree, ast::zero_span(), "string error: `String.%s` expects String, got %s",

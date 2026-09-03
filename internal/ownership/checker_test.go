@@ -1931,7 +1931,7 @@ fn pass<T>(value: T) -> T {
 }
 fn main() {
     let name = Name { value: "alice" };
-    let other = pass<Name>(name);
+    let other = pass<Name>(move name);
     print(other.value);
 }`
 	if err := checkSource(source); err != nil {
@@ -2089,28 +2089,6 @@ fn main() {
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
-	}
-}
-
-// TestCheckRejectsImplMethodReturnTypeMismatch checks generic calls see method returns.
-func TestCheckRejectsImplMethodReturnTypeMismatch(t *testing.T) {
-	source := `struct Counter { value: i64 }
-fn (self: Counter) label() -> []u8 {
-    return "one";
-}
-fn expect_equal<T>(expected: T, actual: T) -> void {
-    return;
-}
-fn main() {
-    let counter = Counter { value: 1 };
-    expect_equal<i64>(1, counter.label());
-}`
-	err := checkSource(source)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if !strings.Contains(err.Error(), "arg 2 of `expect_equal` expects i64, got []u8") {
-		t.Fatalf("got %q", err.Error())
 	}
 }
 

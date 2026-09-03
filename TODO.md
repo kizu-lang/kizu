@@ -22,7 +22,7 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 
 ### C. SPEC 追記と、共通部品へ畳みながら閉じる修正(中)
 
-- [ ] C3 呼び出しを 1 本にする: 直接 / generic / method / fn pointer / std method が
+- [x] C3 呼び出しを 1 本にする: 直接 / generic / method / fn pointer / std method が
       「subst 済み署名 + 引数列(receiver は第 0 引数)」を受ける同じ関数を通る。
       generic の owner 引数の move、`&var`+`&` alias、view の lend、tie 導出、
       `append_string` の receiver alias がここで閉じる

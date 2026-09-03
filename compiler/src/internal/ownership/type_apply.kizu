@@ -219,6 +219,7 @@ fn (self: &var Checker) check_type_apply_call_expr(
     env: ScopeHandle,
     apply: ast::TypeApplyExpr,
     args: ast::ExpressionList,
+    sanctioned: bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     var target = empty_type_apply_target();
@@ -237,7 +238,7 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if self.names.is(name, "ptr_from_int") or self.names.is(name, "int_from_ptr") {
         return self.check_pointer_int_cast_builtin(tree, env, type_arg, args, out);
     }
-    if try self.check_generic_user_type_apply(tree, env, name, type_arg, args, &var handled, out) |failed| {
+    if try self.check_generic_user_type_apply(tree, env, name, type_arg, args, sanctioned, &var handled, out) |failed| {
         return move failed;
     }
     if handled {
@@ -1126,6 +1127,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
     name: Name,
     type_arg: Name,
     args: ast::ExpressionList,
+    sanctioned: bool,
     handled: &var bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
@@ -1149,22 +1151,14 @@ fn (self: &var Checker) check_generic_user_type_apply(
         subst.deinit(self.allocator);
         return move failed;
     }
-    if try self.check_call_handle_pairing(tree, env, function, 0, &subst, args) |failed| {
+    // The call site sees the instantiated signature and nothing else: with
+    // `T` spelled out, an owner argument moves, a view lends or is refused,
+    // and two borrows of one value collide, exactly as for a direct call.
+    let instantiated = try self.instantiate_function_info(function, &subst);
+    if try self.check_callable_call(tree, env, name, instantiated, args, sanctioned, out) |failed| {
         subst.deinit(self.allocator);
         return move failed;
     }
-    var index = 0;
-    while arg_at(tree, args, index) |arg| {
-        if try self.check_generic_user_arg(tree, env, name, function, &subst, index, arg) |failed| {
-            subst.deinit(self.allocator);
-            return move failed;
-        }
-        index = index + 1;
-    }
-    // The instantiation takes the substitution with it, so the return type is
-    // instantiated first; substitute_with only reads the substitution.
-    let declared = self.return_type_name(function);
-    let result = try self.substitute_with(declared, &subst);
     let restore = try self.bind_generic_call_fields(tree, function, type_arg);
     let restore_functions = try self.bind_generic_call_functions(function, type_arg);
     if try self.check_generic_instantiation(tree, function, move subst) |failed| {
@@ -1174,8 +1168,49 @@ fn (self: &var Checker) check_generic_user_type_apply(
     }
     self.function_bindings.restore(restore_functions);
     self.meta_fields.restore(restore);
-    out.* = result;
     return null;
+}
+
+/// Is the signature one generic call sees, the Go `instantiateFunctionInfo`:
+/// the declaration's, with every type parameter replaced by the static
+/// argument the call spelled. Only the ownership-facing parts are
+/// substituted; the body and static parameter list stay the declaration's.
+/// The copy joins the function arena, which releases it with the checker.
+fn (self: &var Checker) instantiate_function_info(function: FunctionHandle, subst: &Subst) -> !FunctionHandle {
+    var static_params = array::new<StaticParamInfo>(self.allocator);
+    errdefer static_params.deinit(self.allocator);
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        index = index + 1;
+        try static_params.append(self.allocator, param);
+    }
+    var params = array::new<ParamInfo>(self.allocator);
+    errdefer params.deinit(self.allocator);
+    index = 0;
+    while self.param_at(function, index) |param| {
+        index = index + 1;
+        let type_name = try self.substitute_with(param.type_name, subst);
+        try params.append(self.allocator, ParamInfo {
+            name: param.name,
+            type_name: type_name,
+            borrow: param.borrow,
+            mut_borrow: param.mut_borrow
+        });
+    }
+    let return_type = try self.substitute_with(self.return_type_name(function), subst);
+    let declared = self.functions.at(function.index);
+    let info = FunctionInfo {
+        name: declared.name,
+        receiver: declared.receiver,
+        has_extern_abi: declared.has_extern_abi,
+        requires_unsafe: declared.requires_unsafe,
+        std: declared.std,
+        static_params: move static_params,
+        params: move params,
+        return_type: return_type,
+        body: declared.body
+    };
+    return FunctionHandle { index: try self.functions.add(self.allocator, move info) };
 }
 
 /// Reports whether a declaration names a function among its compile-time
@@ -1550,49 +1585,6 @@ fn (self: &var Checker) join_type_args(type_args: &array::Array<Name>) -> !Name 
     return self.names.intern_owned(move out);
 }
 
-/// Validates an instantiated generic wrapper argument, the Go
-/// `checkGenericUserArg`.
-fn (self: &var Checker) check_generic_user_arg(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    name: Name,
-    function: FunctionHandle,
-    subst: &Subst,
-    index: i64,
-    arg: ast::Expression
-) -> !?diagnostic::Diagnostic {
-    let param = self.param_at(function, index) orelse return null;
-    let want = try self.substitute_with(param.type_name, subst);
-    // `std::mem::box<T>(allocator, value)` and
-    // `std::io::spawn<T>(..., state, ...)` take ownership of their values, and
-    // a consume primitive moves its argument (ADR-0091); every other generic
-    // wrapper argument is read in place.
-    var got = empty_name();
-    if (self.names.is(name, "std::mem::box") and index == 1) or
-        (self.names.is(name, "std::io::spawn") and index == 2) or
-        (self.is_consume_primitive(name) and index == 0) {
-        if try self.move_contextual_expr(tree, env, arg, want, &var got) |failed| {
-            return move failed;
-        }
-    } else {
-        if try self.read_contextual_expr(tree, env, arg, want, &var got) |failed| {
-            return move failed;
-        }
-    }
-    var coerced = empty_name();
-    if try self.coerce_ownership_borrow_argument(
-        got, want, param.borrow, param.mut_borrow, &var coerced
-    ) |failed| {
-        return move failed;
-    }
-    if !same_name(coerced, want) {
-        return try self.error4(
-            tree, ast::zero_span(), "move error: arg %d of `%s` expects %s, got %s",
-            Arg::Int(index + 1), Arg::Str(name), Arg::Str(want), Arg::Str(coerced)
-        );
-    }
-    return null;
-}
 
 /// Names the std functions whose whole job is consuming an owner, the Go
 /// `isConsumePrimitive`: their param carries no obligation and their

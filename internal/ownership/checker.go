@@ -1951,7 +1951,7 @@ func (c *Checker) checkTiedFactoryCall(
 	env *scope,
 ) error {
 	if typeApply, ok := call.Callee.(*ast.TypeApplyExpr); ok {
-		_, err := c.checkTypeApplyCallExpr(typeApply, call.Args, env)
+		_, err := c.checkTypeApplyCallExpr(typeApply, call.Args, env, true)
 		return err
 	}
 	if ident, ok := call.Callee.(*ast.IdentExpr); ok {
@@ -2088,10 +2088,23 @@ func (c *Checker) calledFunction(
 		}
 		return name, c.functions[name]
 	case *ast.TypeApplyExpr:
-		// A generic call names the same declaration its static arguments
-		// instantiate. Reading through to it is what lets the tie recognizer
-		// see a generic factory, which ADR-0099 left closed for want of one.
-		return c.calledFunction(e.Callee, env)
+		// A generic call names the declaration its static arguments
+		// instantiate, and the recognizers read the instantiated signature:
+		// with `T` spelled out, a view or a tied allocator the call hands back
+		// is seen for what it is, as it would be for a direct call.
+		name, typeArg, err := c.typeApplyTarget(e)
+		if err != nil {
+			return "", nil
+		}
+		fn := c.functions[name]
+		if fn == nil || len(fn.sig.TypeParamNames()) == 0 {
+			return name, fn
+		}
+		subst, err := c.genericCallSubst(name, fn, typeArg)
+		if err != nil {
+			return name, fn
+		}
+		return name, instantiateFunctionInfo(fn, subst)
 	default:
 		return "", nil
 	}
@@ -4635,7 +4648,7 @@ func (c *Checker) dispatchCallExpr(expr *ast.CallExpr, env *scope) (string, erro
 		return c.checkFieldCallExpr(field, expr.Args, env, sanctioned)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
-		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env)
+		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env, sanctioned)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
@@ -5582,6 +5595,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	expr *ast.TypeApplyExpr,
 	args []ast.Expression,
 	env *scope,
+	sanctioned bool,
 ) (string, error) {
 	name, typeArg, err := c.typeApplyTarget(expr)
 	if err != nil {
@@ -5593,7 +5607,8 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "ptr_from_int" || name == "int_from_ptr" {
 		return c.checkPointerIntCastBuiltin(name, typeArg, args, env)
 	}
-	if typ, ok, err := c.checkGenericUserTypeApply(name, typeArg, args, env); ok || err != nil {
+	typ, ok, err := c.checkGenericUserTypeApply(name, typeArg, args, env, sanctioned)
+	if ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinMapTypeApply(name, typeArg, args, env); ok || err != nil {
@@ -6301,6 +6316,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
+	sanctioned bool,
 ) (string, bool, error) {
 	fn := c.functions[name]
 	if fn == nil || len(fn.sig.StaticParams) == 0 {
@@ -6314,13 +6330,12 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err != nil {
 		return "", true, err
 	}
-	if err := c.checkCallHandlePairing(fn.params, subst, args, env); err != nil {
+	// The call site sees the instantiated signature and nothing else: with
+	// `T` spelled out, an owner argument moves, a view lends or is refused,
+	// and two borrows of one value collide, exactly as for a direct call.
+	result, err := c.checkCallableCall(name, instantiateFunctionInfo(fn, subst), args, env, sanctioned)
+	if err != nil {
 		return "", true, err
-	}
-	for idx, arg := range args {
-		if err := c.checkGenericUserArg(name, fn, subst, idx, arg, env); err != nil {
-			return "", true, err
-		}
 	}
 	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
 	restoreFunctions := c.bindFunctionArgs(c.genericCallFunctions(fn, typeArg))
@@ -6330,7 +6345,22 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err != nil {
 		return "", true, err
 	}
-	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
+	return result, true, nil
+}
+
+// instantiateFunctionInfo is the signature one generic call sees: the
+// declaration's, with every type parameter replaced by the static argument
+// the call spelled. Only the ownership-facing parts are substituted; the
+// body and static parameter list stay the declaration's.
+func instantiateFunctionInfo(fn *functionInfo, subst map[string]string) *functionInfo {
+	inst := *fn
+	inst.params = make([]paramInfo, len(fn.params))
+	for idx, param := range fn.params {
+		param.typeName = substituteOwnershipType(param.typeName, subst)
+		inst.params[idx] = param
+	}
+	inst.returnType = substituteOwnershipType(returnTypeName(fn), subst)
+	return &inst
 }
 
 // genericCallSubst resolves a generic call's static arguments into the
@@ -6574,42 +6604,6 @@ func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) er
 				"borrow error: `std::io::spawn` state `%s` must own its data and contain no Io or Allocator",
 				state)
 		}
-	}
-	return nil
-}
-
-// checkGenericUserArg validates an instantiated generic wrapper argument.
-func (c *Checker) checkGenericUserArg(
-	name string,
-	fn *functionInfo,
-	subst map[string]string,
-	idx int,
-	arg ast.Expression,
-	env *scope,
-) error {
-	want := substituteOwnershipType(fn.params[idx].typeName, subst)
-	// `std::mem::box<T>(allocator, value)` and `std::io::spawn<T>(..., state, ...)`
-	// take ownership of their values, and a consume primitive moves its argument
-	// (ADR-0091); every other generic wrapper argument is read in place.
-	read := c.readContextualExpr
-	if (name == "std::mem::box" && idx == 1) ||
-		(name == "std::io::spawn" && idx == 2) ||
-		(isConsumePrimitive(name) && idx == 0) {
-		read = c.moveContextualExpr
-	}
-	got, err := read(arg, want, env)
-	if err != nil {
-		return err
-	}
-	got, err = coerceOwnershipBorrowArgument(
-		got, want, fn.params[idx].borrow, fn.params[idx].mutBorrow,
-	)
-	if err != nil {
-		return err
-	}
-	if got != want {
-		return errorf("move error: arg %d of `%s` expects %s, got %s",
-			idx+1, name, want, got)
 	}
 	return nil
 }
@@ -7696,7 +7690,7 @@ func (c *Checker) checkStringMethod(
 		if err := c.readStringGrowAllocator(str, name, args, env); err != nil {
 			return "", err
 		}
-		return c.checkStringSourceArg(name, args[1:], env)
+		return c.checkStringSourceArg(str, name, args[1:], env)
 	case "len", "capacity":
 		if err := checkStringNoArgs(name, args); err != nil {
 			return "", err
@@ -7811,14 +7805,31 @@ func (c *Checker) checkStringBytesArg(
 }
 
 // checkStringSourceArg validates append_string reading its source String
-// without moving it.
+// without moving it. The receiver is the call's `&var` argument and the
+// source its `&` argument, so the two are activated in that order and collide
+// exactly as they would on a direct call.
 func (c *Checker) checkStringSourceArg(
+	str *binding,
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
 		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	if err := checkBorrowConflictForField(str, "", true); err != nil {
+		return "", err
+	}
+	c.activateBorrow(str, "", true)
+	defer releaseTemporaryBorrows([]temporaryBorrow{{value: str, field: "", mutable: true}})
+	source, field, err := c.callBorrowTarget(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if source != nil {
+		if err := checkBorrowConflictForField(source, field, false); err != nil {
+			return "", err
+		}
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
@@ -9530,34 +9541,6 @@ func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
 		return "", false, "", false
 	}
 	return "", mutable, rest, true
-}
-
-// coerceOwnershipBorrowArgument admits an expression already typed as &T only
-// where the callee borrows T. Explicit prefix borrows are transparent to this
-// checker; borrow-return calls need the equivalent conversion here.
-func coerceOwnershipBorrowArgument(
-	got string,
-	want string,
-	wantBorrow bool,
-	wantMutable bool,
-) (string, error) {
-	_, mutable, inner, ok := explicitOwnershipBorrowType(got)
-	if !ok {
-		return got, nil
-	}
-	if !wantBorrow {
-		return "", errorf("move error: borrow argument cannot be passed to owning parameter")
-	}
-	if mutable && !wantMutable {
-		return "", errorf("move error: argument expects &T, got &var")
-	}
-	if !mutable && wantMutable {
-		return "", errorf("move error: argument expects &var T, got &T")
-	}
-	if !sameOwnershipType(inner, want) {
-		return got, nil
-	}
-	return inner, nil
 }
 
 // borrowedOwnershipValueType returns the value visible through an explicit

@@ -608,7 +608,7 @@ fn (self: &var Checker) check_tied_factory_call(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     if type_apply_expr(tree, call.callee) |apply| {
-        return self.check_type_apply_call_expr(tree, env, apply, call.args, out);
+        return self.check_type_apply_call_expr(tree, env, apply, call.args, true, out);
     }
     if ident_text(tree, call.callee) |text| {
         if self.lookup_text(tree, env, text) |value| {
@@ -790,11 +790,28 @@ fn (self: &var Checker) called_user_function(
         let function = self.function_named(name) orelse return null;
         return CalledFunction { name: name, function: function };
     }
-    // A generic call names the same declaration its static arguments
-    // instantiate. Reading through to it is what lets the tie recognizer see a
-    // generic factory, which ADR-0099 left closed for want of one.
+    // A generic call names the declaration its static arguments instantiate,
+    // and the recognizers read the instantiated signature: with `T` spelled
+    // out, a view or a tied allocator the call hands back is seen for what it
+    // is, as it would be for a direct call.
     if type_apply_expr(tree, callee) |apply| {
-        return self.called_user_function(tree, env, apply.callee);
+        var target = empty_type_apply_target();
+        if try self.type_apply_target(tree, apply, &var target) |failed| {
+            failed.deinit(self.allocator);
+            return null;
+        }
+        let function = self.function_named(target.name) orelse return null;
+        if self.static_param_count(function) == 0 {
+            return CalledFunction { name: target.name, function: function };
+        }
+        var subst = self.empty_subst();
+        defer subst.deinit(self.allocator);
+        if try self.generic_call_subst(tree, target.name, function, target.type_arg, &var subst) |failed| {
+            failed.deinit(self.allocator);
+            return CalledFunction { name: target.name, function: function };
+        }
+        let instantiated = try self.instantiate_function_info(function, &subst);
+        return CalledFunction { name: target.name, function: instantiated };
     }
     return null;
 }
