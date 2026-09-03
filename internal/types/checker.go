@@ -2247,34 +2247,8 @@ func (c *Checker) checkIfStmt(
 ) (bool, error) {
 	consequence := env.child()
 	alternative := env.child()
-	handled, err := c.bindContainerBorrowCapture(
-		stmt.Capture, stmt.Condition, consequence, env, unsafe)
-	if err != nil {
+	if err := c.bindIfCaptures(stmt, env, consequence, alternative, unsafe); err != nil {
 		return false, err
-	}
-	if handled && stmt.ErrCapture != "" {
-		return false, errorf(
-			"type error: `else |%s|` requires an error union condition", stmt.ErrCapture)
-	}
-	if !handled {
-		cond, err := c.checkExpr(stmt.Condition, env, unsafe)
-		if err != nil {
-			return false, err
-		}
-		if _, _, ok := c.types.errorUnionParts(cond); ok {
-			if err := c.bindErrorUnionCaptures(stmt, cond, consequence, alternative); err != nil {
-				return false, err
-			}
-		} else {
-			if stmt.ErrCapture != "" {
-				return false, errorf(
-					"type error: `else |%s|` requires an error union condition, got %s",
-					stmt.ErrCapture, cond)
-			}
-			if err := c.bindConditionCapture("if", stmt.Capture, cond, consequence); err != nil {
-				return false, err
-			}
-		}
 	}
 	leftReturns, err := c.checkBlock(stmt.Consequence, consequence, wantReturn, unsafe)
 	if err != nil {
@@ -2288,6 +2262,45 @@ func (c *Checker) checkIfStmt(
 		return false, err
 	}
 	return leftReturns && rightReturns, nil
+}
+
+// bindIfCaptures types an if condition and binds what it captures: a bool
+// condition binds nothing, an optional binds its payload into the
+// consequence, an error union binds its success payload there and its
+// failure member into the alternative, and a container accessor binds the
+// payload borrow. Statement and expression forms share it.
+func (c *Checker) bindIfCaptures(
+	stmt *ast.IfStmt,
+	env *scope,
+	consequence *scope,
+	alternative *scope,
+	unsafe unsafeMark,
+) error {
+	handled, err := c.bindContainerBorrowCapture(
+		stmt.Capture, stmt.Condition, consequence, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if handled && stmt.ErrCapture != "" {
+		return errorf(
+			"type error: `else |%s|` requires an error union condition", stmt.ErrCapture)
+	}
+	if handled {
+		return nil
+	}
+	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if _, _, ok := c.types.errorUnionParts(cond); ok {
+		return c.bindErrorUnionCaptures(stmt, cond, consequence, alternative)
+	}
+	if stmt.ErrCapture != "" {
+		return errorf(
+			"type error: `else |%s|` requires an error union condition, got %s",
+			stmt.ErrCapture, cond)
+	}
+	return c.bindConditionCapture("if", stmt.Capture, cond, consequence)
 }
 
 // bindErrorUnionCaptures types an error union if condition: the success
@@ -2937,30 +2950,19 @@ func (c *Checker) checkOrelseGuardExpr(
 
 // checkIfExpr validates an if expression and returns the common branch type.
 func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeMark) (Type, error) {
-	if stmt.Capture != "" {
-		return "", errorf(
-			"type error: if capture is a statement form; use `orelse` in expressions")
-	}
-	if stmt.ErrCapture != "" {
-		return "", errorf(
-			"type error: `else |%s|` is a statement form; use `catch` in expressions",
-			stmt.ErrCapture)
-	}
-	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
-	if err != nil {
+	consequence := env.child()
+	alternative := env.child()
+	if err := c.bindIfCaptures(stmt, env, consequence, alternative, unsafe); err != nil {
 		return "", err
-	}
-	if cond != typeBool {
-		return "", errorf("type error: if condition must be bool, got %s", cond)
 	}
 	if stmt.Alternative == nil {
 		return "", errorf("type error: if expression requires else branch")
 	}
-	left, err := c.checkBlockValue(stmt.Consequence, env.child(), unsafe)
+	left, err := c.checkBlockValue(stmt.Consequence, consequence, unsafe)
 	if err != nil {
 		return "", err
 	}
-	right, err := c.checkBlockValue(stmt.Alternative, env.child(), unsafe)
+	right, err := c.checkBlockValue(stmt.Alternative, alternative, unsafe)
 	if err != nil {
 		return "", err
 	}

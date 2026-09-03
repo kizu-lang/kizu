@@ -30,7 +30,7 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	// Each capture is scoped to its own branch; the other branch and the
 	// merged environment see whatever the name meant outside.
 	thenResult, err := l.lowerCaptureBranch(
-		thenBlock, stmt.Consequence, mergeBlock.Name, stmt.Capture, payload)
+		thenBlock, stmt.Consequence, mergeBlock.Name, stmt.Capture, payload, false)
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 		elseBody = &ast.BlockStmt{}
 	}
 	elseResult, err := l.lowerCaptureBranch(
-		elseBlock, elseBody, mergeBlock.Name, stmt.ErrCapture, errPayload)
+		elseBlock, elseBody, mergeBlock.Name, stmt.ErrCapture, errPayload, false)
 	if err != nil {
 		return err
 	}
@@ -96,12 +96,14 @@ func (l *lowerer) lowerIfCondition(stmt *ast.IfStmt) (Value, Value, Value, error
 // lowerCaptureBranch lowers one branch of an if with a capture bound for its
 // body only: the binding is put in place before the branch and taken back out
 // after, so the merge never sees it. An empty capture lowers a plain branch.
+// wantValue asks the branch for the value its block ends in.
 func (l *lowerer) lowerCaptureBranch(
 	block *Block,
 	body *ast.BlockStmt,
 	target string,
 	capture string,
 	payload Value,
+	wantValue bool,
 ) (branchResult, error) {
 	var previous Value
 	var hadPrevious bool
@@ -109,7 +111,7 @@ func (l *lowerer) lowerCaptureBranch(
 		previous, hadPrevious = l.env.get(capture)
 		l.bindCapture(capture, payload)
 	}
-	result, err := l.lowerBranchBlock(block, body, target, false)
+	result, err := l.lowerBranchBlock(block, body, target, wantValue)
 	if capture != "" {
 		l.restoreLoopVar(capture, previous, hadPrevious)
 		if err == nil {
@@ -376,7 +378,9 @@ func (l *lowerer) lowerIfExpr(stmt *ast.IfStmt) (Value, error) {
 	if stmt.Alternative == nil {
 		return Value{}, fmt.Errorf("ir error: an if used as a value needs an else branch")
 	}
-	cond, err := l.lowerExpr(stmt.Condition)
+	// A capture binds the payload for its branch as in lowerIfStmt; the
+	// value each branch ends in meets at the phi.
+	cond, payload, errPayload, err := l.lowerIfCondition(stmt)
 	if err != nil {
 		return Value{}, err
 	}
@@ -386,11 +390,13 @@ func (l *lowerer) lowerIfExpr(stmt *ast.IfStmt) (Value, error) {
 	l.block.Terminator = Terminator{
 		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
 	}
-	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name, true)
+	thenResult, err := l.lowerCaptureBranch(
+		thenBlock, stmt.Consequence, mergeBlock.Name, stmt.Capture, payload, true)
 	if err != nil {
 		return Value{}, err
 	}
-	elseResult, err := l.lowerBranchBlock(elseBlock, stmt.Alternative, mergeBlock.Name, true)
+	elseResult, err := l.lowerCaptureBranch(
+		elseBlock, stmt.Alternative, mergeBlock.Name, stmt.ErrCapture, errPayload, true)
 	if err != nil {
 		return Value{}, err
 	}

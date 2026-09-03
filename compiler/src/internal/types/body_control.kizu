@@ -39,49 +39,10 @@ fn (self: &var Checker) check_if_stmt(
     let err_capture = owned_err.as_bytes();
     let consequence = try self.scopes.new_scope(scope);
     let alternative_scope = try self.scopes.new_scope(scope);
-    var handled = false;
-    if try self.bind_container_borrow_capture(
-        tree, scope, capture, condition, consequence, &var handled
+    if try self.bind_if_captures(
+        tree, scope, capture, err_capture, condition, consequence, alternative_scope
     ) |problem| {
         return move problem;
-    }
-    if handled and mem::len(err_capture) > 0 {
-        var message = string::new(self.allocator);
-        errdefer message.deinit(self.allocator);
-        try message.append_bytes(self.allocator, "`else |");
-        try message.append_bytes(self.allocator, err_capture);
-        try message.append_bytes(self.allocator, "|` requires an error union condition");
-        return try self.checker_message_at("type error", ast::zero_span(), move message);
-    }
-    if !handled {
-        var cond = empty_type();
-        if try self.check_expr(tree, scope, condition, &var cond) |problem| {
-            return move problem;
-        }
-        var is_union = false;
-        if try self.types.error_union_parts(cond) |_| {
-            is_union = true;
-        }
-        if is_union {
-            if try self.bind_error_union_captures(
-                capture, err_capture, cond, consequence, alternative_scope
-            ) |problem| {
-                return move problem;
-            }
-        } else {
-            if mem::len(err_capture) > 0 {
-                var message = string::new(self.allocator);
-                errdefer message.deinit(self.allocator);
-                try message.append_bytes(self.allocator, "`else |");
-                try message.append_bytes(self.allocator, err_capture);
-                try message.append_bytes(self.allocator, "|` requires an error union condition, got ");
-                try self.append_checker_type(&var message, cond);
-                return try self.checker_message_at("type error", ast::zero_span(), move message);
-            }
-            if try self.bind_condition_capture("if", capture, cond, consequence) |problem| {
-                return move problem;
-            }
-        }
     }
     var left_returns = false;
     if try self.check_block(
@@ -109,6 +70,63 @@ fn (self: &var Checker) check_if_stmt(
     }
     out.* = false;
     return null;
+}
+
+// Types an if condition and binds what it captures, the Go
+// `bindIfCaptures`: a bool condition binds nothing, an optional binds its
+// payload into the consequence, an error union binds its success payload
+// there and its failure member into the alternative, and a container
+// accessor binds the payload borrow. Statement and expression forms share
+// it.
+fn (self: &var Checker) bind_if_captures(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    capture: []u8,
+    err_capture: []u8,
+    condition: ast::Expression,
+    consequence: ScopeHandle,
+    alternative_scope: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    var handled = false;
+    if try self.bind_container_borrow_capture(
+        tree, scope, capture, condition, consequence, &var handled
+    ) |problem| {
+        return move problem;
+    }
+    if handled and mem::len(err_capture) > 0 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "`else |");
+        try message.append_bytes(self.allocator, err_capture);
+        try message.append_bytes(self.allocator, "|` requires an error union condition");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    if handled {
+        return null;
+    }
+    var cond = empty_type();
+    if try self.check_expr(tree, scope, condition, &var cond) |problem| {
+        return move problem;
+    }
+    var is_union = false;
+    if try self.types.error_union_parts(cond) |_| {
+        is_union = true;
+    }
+    if is_union {
+        return self.bind_error_union_captures(
+            capture, err_capture, cond, consequence, alternative_scope
+        );
+    }
+    if mem::len(err_capture) > 0 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "`else |");
+        try message.append_bytes(self.allocator, err_capture);
+        try message.append_bytes(self.allocator, "|` requires an error union condition, got ");
+        try self.append_checker_type(&var message, cond);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    return self.bind_condition_capture("if", capture, cond, consequence);
 }
 
 // Types an error union if condition: the success payload binds into the
@@ -1327,43 +1345,29 @@ fn (self: &var Checker) check_if_expr(
     let consequence = statement.consequence;
     let alternative = statement.alternative;
     let retained_capture = tree.texts.at(statement.capture.node);
-    let capture = retained_capture.as_bytes();
-    if mem::len(capture) > 0 {
-        return try self.checker_error_at(
-            "type error", ast::zero_span(),
-            "if capture is a statement form; use `orelse` in expressions"
-        );
-    }
+    let source_capture = retained_capture.as_bytes();
+    let owned_capture = try string::from_bytes(self.allocator, source_capture);
+    defer owned_capture.deinit(self.allocator);
+    let capture = owned_capture.as_bytes();
     let retained_err = tree.texts.at(statement.err_capture.node);
-    let err_capture = retained_err.as_bytes();
-    if mem::len(err_capture) > 0 {
-        var message = string::new(self.allocator);
-        errdefer message.deinit(self.allocator);
-        try message.append_bytes(self.allocator, "`else |");
-        try message.append_bytes(self.allocator, err_capture);
-        try message.append_bytes(self.allocator, "|` is a statement form; use `catch` in expressions");
-        return try self.checker_message_at("type error", ast::zero_span(), move message);
-    }
-    var cond = empty_type();
-    if try self.check_expr(tree, scope, condition, &var cond) |problem| {
+    let source_err = retained_err.as_bytes();
+    let owned_err = try string::from_bytes(self.allocator, source_err);
+    defer owned_err.deinit(self.allocator);
+    let err_capture = owned_err.as_bytes();
+    let left_scope = try self.scopes.new_scope(scope);
+    let right_scope = try self.scopes.new_scope(scope);
+    if try self.bind_if_captures(
+        tree, scope, capture, err_capture, condition, left_scope, right_scope
+    ) |problem| {
         return move problem;
-    }
-    if !self.types.is_text(cond, "bool") {
-        var message = string::new(self.allocator);
-        errdefer message.deinit(self.allocator);
-        try message.append_bytes(self.allocator, "if condition must be bool, got ");
-        try self.append_checker_type(&var message, cond);
-        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     let alternative_block = alternative orelse return try self.checker_error_at(
         "type error", ast::zero_span(), "if expression requires else branch"
     );
-    let left_scope = try self.scopes.new_scope(scope);
     var left = empty_type();
     if try self.check_block_value(tree, left_scope, consequence, &var left) |problem| {
         return move problem;
     }
-    let right_scope = try self.scopes.new_scope(scope);
     var right = empty_type();
     if try self.check_block_value(tree, right_scope, alternative_block, &var right) |problem| {
         return move problem;

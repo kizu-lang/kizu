@@ -1,0 +1,67 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+error PickError { Missing }
+
+fn maybe(allocator: Allocator, present: bool) -> !?string::String {
+    if present {
+        return try string::from_bytes(allocator, "present");
+    }
+    return null;
+}
+
+fn fetch(allocator: Allocator, fail: bool) -> PickError!string::String {
+    if fail {
+        return PickError::Missing;
+    }
+    return string::from_bytes(allocator, "fetched") catch return PickError::Missing;
+}
+
+test "an optional capture if yields the payload or the prepared owner" {
+    let allocator = mem::page_allocator();
+    let keep = try string::from_bytes(allocator, "fallback");
+    errdefer keep.deinit(allocator);
+    let picked = if try maybe(allocator, true) |found| {
+        keep.deinit(allocator);
+        move found
+    } else {
+        move keep
+    };
+    defer picked.deinit(allocator);
+    let bytes = picked.as_bytes();
+    testing::expect_equal<[]u8>("present", bytes);
+}
+
+test "the else branch takes the prepared owner when the payload is absent" {
+    let allocator = mem::page_allocator();
+    let keep = try string::from_bytes(allocator, "fallback");
+    errdefer keep.deinit(allocator);
+    let picked = if try maybe(allocator, false) |found| {
+        keep.deinit(allocator);
+        move found
+    } else {
+        move keep
+    };
+    defer picked.deinit(allocator);
+    let bytes = picked.as_bytes();
+    testing::expect_equal<[]u8>("fallback", bytes);
+}
+
+test "an error union capture if sees the failure member in else" {
+    let allocator = mem::page_allocator();
+    let length = if fetch(allocator, true) |text| {
+        defer text.deinit(allocator);
+        text.len()
+    } else |failure| {
+        if failure == PickError::Missing { -1 } else { -2 }
+    };
+    testing::expect_equal<i64>(-1, length);
+    let fetched = if fetch(allocator, false) |text| {
+        defer text.deinit(allocator);
+        text.len()
+    } else |failure| {
+        if failure == PickError::Missing { -1 } else { -2 }
+    };
+    testing::expect_equal<i64>(7, fetched);
+}

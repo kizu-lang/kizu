@@ -32,40 +32,15 @@ fn (self: &Lowerer) blank_branch() -> BranchResult {
 /// With a capture, the condition is an optional: the branch tests presence
 /// and the payload is bound for the consequence only.
 fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStmt) -> !?diagnostic::Diagnostic {
-    var cond = empty_value();
-    if try self.lower_expr(tree, statement.condition, &var cond) |failed| {
+    var head = IfHead { cond: empty_value(), payload: empty_value(), err_payload: empty_value() };
+    if try self.lower_if_condition(tree, statement, &var head) |failed| {
         return move failed;
     }
-    var payload = empty_value();
-    var err_payload = empty_value();
+    let cond = head.cond;
+    let payload = head.payload;
+    let err_payload = head.err_payload;
     let has_capture = !text_empty(tree, statement.capture);
     let has_err_capture = !text_empty(tree, statement.err_capture);
-    if has_err_capture {
-        // An error union condition: the branch tests success, the success
-        // payload is bound for the consequence, and `else |err|` binds the
-        // failure member for the alternative (SPEC §11.1).
-        let parts = try self.error_union_parts(cond.type_name) orelse return try self.fail1(
-            tree, "ir error: `else |err|` needs an `E!T` condition, got %s", Arg::Str(cond.type_name)
-        );
-        if is_empty(parts.err) {
-            return try self.fail1(
-                tree, "ir error: `else |err|` needs an `E!T` condition, got %s",
-                Arg::Str(cond.type_name)
-            );
-        }
-        if has_capture {
-            payload = try self.emit1(Op::ErrorValue, parts.success, cond);
-        }
-        err_payload = try self.emit1(Op::ErrorCode, parts.err, cond);
-        cond = try self.emit1(Op::ErrorHas, self.common.bool_type, cond);
-    }
-    if has_capture and !has_err_capture {
-        let elem = try self.optional_elem_type(cond.type_name) orelse return try self.fail1(
-            tree, "ir error: if capture needs a `?T` condition, got %s", Arg::Str(cond.type_name)
-        );
-        payload = try self.emit1(Op::OptValue, elem, cond);
-        cond = try self.emit1(Op::OptHas, self.common.bool_type, cond);
-    }
     let then_block = try self.new_block_named("if.then");
     let else_block = try self.new_block_named("if.else");
     let merge_block = try self.new_block_named("if.end");
@@ -442,26 +417,115 @@ fn (self: &var Lowerer) lower_branch_block(
 /// Lowers an if used as a value, the Go `lowerIfExpr`. It is the branch
 /// lowering an if statement already does, ended by a phi over the value each
 /// side produced, which is how a match expression reaches its value too.
-fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStmt, out: &var Value) -> !?diagnostic::Diagnostic {
-    let alternative = statement.alternative orelse return try self.fail0(
-        "ir error: an if used as a value needs an else branch"
-    );
+/// Is an if condition lowered for its branch, the values the Go
+/// `lowerIfCondition` returns: the branch test, the success payload a
+/// capture binds, and the failure member `else |err|` binds.
+struct IfHead {
+    cond: Value,
+    payload: Value,
+    err_payload: Value
+}
+
+/// Lowers an if condition into its branch test, with the payloads its
+/// captures bind, the Go `lowerIfCondition`. An error union condition
+/// (`else |err|` present) tests success and binds the success payload and
+/// failure member; an optional condition tests presence and binds the value
+/// (SPEC §6.9, §11.1).
+fn (self: &var Lowerer) lower_if_condition(
+    tree: &var ast::Ast,
+    statement: ast::IfStmt,
+    out: &var IfHead
+) -> !?diagnostic::Diagnostic {
     var cond = empty_value();
     if try self.lower_expr(tree, statement.condition, &var cond) |failed| {
         return move failed;
     }
+    var payload = empty_value();
+    var err_payload = empty_value();
+    let has_capture = !text_empty(tree, statement.capture);
+    let has_err_capture = !text_empty(tree, statement.err_capture);
+    if has_err_capture {
+        // An error union condition: the branch tests success, the success
+        // payload is bound for the consequence, and `else |err|` binds the
+        // failure member for the alternative (SPEC §11.1).
+        let parts = try self.error_union_parts(cond.type_name) orelse return try self.fail1(
+            tree, "ir error: `else |err|` needs an `E!T` condition, got %s", Arg::Str(cond.type_name)
+        );
+        if is_empty(parts.err) {
+            return try self.fail1(
+                tree, "ir error: `else |err|` needs an `E!T` condition, got %s",
+                Arg::Str(cond.type_name)
+            );
+        }
+        if has_capture {
+            payload = try self.emit1(Op::ErrorValue, parts.success, cond);
+        }
+        err_payload = try self.emit1(Op::ErrorCode, parts.err, cond);
+        cond = try self.emit1(Op::ErrorHas, self.common.bool_type, cond);
+    }
+    if has_capture and !has_err_capture {
+        let elem = try self.optional_elem_type(cond.type_name) orelse return try self.fail1(
+            tree, "ir error: if capture needs a `?T` condition, got %s", Arg::Str(cond.type_name)
+        );
+        payload = try self.emit1(Op::OptValue, elem, cond);
+        cond = try self.emit1(Op::OptHas, self.common.bool_type, cond);
+    }
+    out.* = IfHead { cond: cond, payload: payload, err_payload: err_payload };
+    return null;
+}
+
+fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStmt, out: &var Value) -> !?diagnostic::Diagnostic {
+    let alternative = statement.alternative orelse return try self.fail0(
+        "ir error: an if used as a value needs an else branch"
+    );
+    // A capture binds the payload for its branch as in lower_if_stmt; the
+    // value each branch ends in meets at the phi.
+    var head = IfHead { cond: empty_value(), payload: empty_value(), err_payload: empty_value() };
+    if try self.lower_if_condition(tree, statement, &var head) |failed| {
+        return move failed;
+    }
+    let has_capture = !text_empty(tree, statement.capture);
+    let has_err_capture = !text_empty(tree, statement.err_capture);
     let then_block = try self.new_block_named("if.then");
     let else_block = try self.new_block_named("if.else");
     let merge_block = try self.new_block_named("if.end");
     let merge_name = self.module.block_name(merge_block);
-    self.terminate_branch(cond, then_block, else_block);
+    self.terminate_branch(head.cond, then_block, else_block);
+    var saved = ScopedBinding { name: empty_name(), value: empty_value(), bound: false };
+    if has_capture {
+        let capture = try self.text_name(tree, statement.capture);
+        saved = self.saved_binding(capture);
+        try self.bind_capture(capture, head.payload);
+    }
     var then_result = self.blank_branch();
     if try self.lower_branch_block(tree, then_block, statement.consequence, merge_name, true, &var then_result) |failed| {
+        errdefer failed.deinit(self.allocator);
+        if has_capture {
+            try self.restore_loop_var(saved);
+        }
         return move failed;
+    }
+    if has_capture {
+        try self.restore_loop_var(saved);
+        try self.restore_branch_var(then_result.env, saved);
+    }
+    var saved_err = ScopedBinding { name: empty_name(), value: empty_value(), bound: false };
+    if has_err_capture {
+        let err_capture = try self.text_name(tree, statement.err_capture);
+        saved_err = self.saved_binding(err_capture);
+        try self.envs.bind(self.allocator, self.env, err_capture, head.err_payload);
     }
     var else_result = self.blank_branch();
     if try self.lower_branch_block(tree, else_block, alternative, merge_name, true, &var else_result) |failed| {
+        errdefer failed.deinit(self.allocator);
+        if has_err_capture {
+            try self.restore_loop_var(saved_err);
+        }
         return move failed;
+    }
+    if has_err_capture {
+        try self.restore_loop_var(saved_err);
+        try self.restore_branch_var(else_result.env, saved_err);
     }
     self.block = merge_block;
     try self.merge_branch_envs(merge_block, then_result, else_result);
