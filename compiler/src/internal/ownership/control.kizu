@@ -383,62 +383,125 @@ fn (self: &var Checker) check_branch_field_consume_agreement(
     );
 }
 
-/// Treats moves in the body as possible after the loop, the Go
-/// `checkWhileStmt`.
+/// Is the loop form whose turn a region checks: the Go closures
+/// checkWhileStmt and checkForStmt hand checkLoopRegion.
+union LoopTurn {
+    While(ast::WhileStmt),
+    For(ast::ForStmt)
+}
+
+/// Checks a `while` loop, the Go `checkWhileStmt`: the condition runs once
+/// per turn like the body does, so it is read against the loop's clone, and
+/// what it binds is the turn's own.
 fn (self: &var Checker) check_while_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
     statement: ast::WhileStmt
 ) -> !?diagnostic::Diagnostic {
-    // The condition's product is held by the capture, or was a bool: the
-    // body starts with nothing of it pending.
-    let pending = self.pending_owner_temps.len();
-    let places = self.pending_moved_places.len();
-    var head = try self.new_capture_condition();
-    defer head.deinit(self.allocator);
-    // The condition runs once per turn like the body does, so it is read
-    // against the loop's clone: what it consumes is consumed inside the loop.
-    let body = try self.store.clone_scope(env);
-    if try self.read_capture_head(tree, body, statement.condition, statement.capture, &var head) |failed| {
-        return move failed;
-    }
-    try self.enter_loop(tree, statement.label);
-    let child = try self.store.child(body);
-    // Borrow the loop's clone of each container, as in check_if_stmt.
-    var consumes_field = false;
-    if try self.define_capture(
-        tree, statement.capture, statement.condition, &head, true, env, child, &var consumes_field
-    ) |failed| {
-        self.leave_loop();
-        return move failed;
-    }
-    try self.settle_owner_temps(pending, places, self.common.void_name, null);
-    if try self.check_while_body(tree, env, statement, body, child) |failed| {
+    return self.check_loop_region(tree, env, statement.label, statement.body, LoopTurn::While(statement));
+}
+
+/// Checks one loop's body as a region the program enters an unknown number
+/// of times, whatever loop form wrote it, the Go `checkLoopRegion`. The turn
+/// runs against a clone of the scope: entering binds what the turn produces
+/// — a capture, an index — into the body's scope, leaving checks what the
+/// turn must have consumed, and the body as a whole consumes nothing declared
+/// outside it, since zero turns would leave that unreleased and two would
+/// release it twice.
+fn (self: &var Checker) check_loop_region(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    label: ast::Text,
+    body: ast::Block,
+    turn: LoopTurn
+) -> !?diagnostic::Diagnostic {
+    let clone = try self.store.clone_scope(env);
+    try self.enter_loop(tree, label);
+    let child = try self.store.child(clone);
+    if try self.check_loop_turn(tree, env, clone, child, body, turn) |failed| {
         self.leave_loop();
         return move failed;
     }
     self.leave_loop();
+    if try self.check_loop_consumes_nothing_outside(tree, env, clone) |failed| {
+        return move failed;
+    }
+    try self.store.merge_moved_from(env, clone);
     return null;
 }
 
-fn (self: &var Checker) check_while_body(
+/// Checks one turn inside its loop region: what the turn produces is bound,
+/// the body is checked, and what the turn must have consumed is checked —
+/// the enter, body, and leave steps of the Go `checkLoopRegion`.
+fn (self: &var Checker) check_loop_turn(
     tree: &var ast::Ast,
     env: ScopeHandle,
-    statement: ast::WhileStmt,
-    body: ScopeHandle,
-    child: ScopeHandle
+    clone: ScopeHandle,
+    child: ScopeHandle,
+    body: ast::Block,
+    turn: LoopTurn
 ) -> !?diagnostic::Diagnostic {
-    if try self.check_block(tree, child, statement.body) |failed| {
+    if try self.enter_loop_turn(tree, env, clone, child, turn) |failed| {
         return move failed;
     }
-    if try self.check_capture_payload_consumed(tree, statement.capture, child) |failed| {
+    if try self.check_block(tree, child, body) |failed| {
         return move failed;
     }
-    if try self.check_loop_consumes_nothing_outside(tree, env, body) |failed| {
-        return move failed;
+    return self.leave_loop_turn(tree, child, turn);
+}
+
+/// Binds what one turn of the loop produces into the body's scope: the
+/// capture a `while` condition yields, read against the loop's clone, or the
+/// index a `for` counts.
+fn (self: &var Checker) enter_loop_turn(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    clone: ScopeHandle,
+    child: ScopeHandle,
+    turn: LoopTurn
+) -> !?diagnostic::Diagnostic {
+    match turn {
+        While(statement) => {
+            // The condition's product is held by the capture, or was a
+            // bool: the body starts with nothing of it pending.
+            let pending = self.pending_owner_temps.len();
+            let places = self.pending_moved_places.len();
+            var head = try self.new_capture_condition();
+            defer head.deinit(self.allocator);
+            if try self.read_capture_head(tree, clone, statement.condition, statement.capture, &var head) |failed| {
+                return move failed;
+            }
+            // Borrow the loop's clone of each container, as in check_if_stmt.
+            var consumes_field = false;
+            if try self.define_capture(
+                tree, statement.capture, statement.condition, &head, true, env, child, &var consumes_field
+            ) |failed| {
+                return move failed;
+            }
+            try self.settle_owner_temps(pending, places, self.common.void_name, null);
+            return null;
+        },
+        For(statement) => {
+            let name = try self.names.intern_text(tree, statement.name);
+            let counter = self.store.new_binding(name, self.common.i64_name);
+            errdefer counter.deinit(self.allocator);
+            let _ = try self.define(child, move counter);
+            return null;
+        },
     }
-    try self.store.merge_moved_from(env, body);
-    return null;
+}
+
+/// Checks what one turn of the loop must have consumed before it ends: the
+/// payload a `while` capture bound.
+fn (self: &var Checker) leave_loop_turn(
+    tree: &var ast::Ast,
+    child: ScopeHandle,
+    turn: LoopTurn
+) -> !?diagnostic::Diagnostic {
+    match turn {
+        While(statement) => return self.check_capture_payload_consumed(tree, statement.capture, child),
+        _ => return null,
+    }
 }
 
 /// Rejects a loop body that consumes a binding declared outside it, the Go
@@ -854,8 +917,9 @@ fn (self: &var Checker) refuse_container_view_orelse(
     );
 }
 
-/// Treats moves in the body as possible after the loop, the Go
-/// `checkForStmt`.
+/// Checks a `for` loop, the Go `checkForStmt`. The range is fixed, but its
+/// length is not known here, so the body is under the same rule as a while
+/// body.
 fn (self: &var Checker) check_for_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -868,25 +932,7 @@ fn (self: &var Checker) check_for_stmt(
     if try self.read_expr(tree, env, statement.end, &var ignored) |failed| {
         return move failed;
     }
-    let body = try self.store.clone_scope(env);
-    try self.enter_loop(tree, statement.label);
-    let child = try self.store.child(body);
-    let name = try self.names.intern_text(tree, statement.name);
-    let counter = self.store.new_binding(name, self.common.i64_name);
-    errdefer counter.deinit(self.allocator);
-    let _ = try self.define(child, move counter);
-    if try self.check_block(tree, child, statement.body) |failed| {
-        self.leave_loop();
-        return move failed;
-    }
-    self.leave_loop();
-    // The range is fixed, but its length is not known here, so the body is
-    // under the same rule as a while body: it consumes nothing from outside.
-    if try self.check_loop_consumes_nothing_outside(tree, env, body) |failed| {
-        return move failed;
-    }
-    try self.store.merge_moved_from(env, body);
-    return null;
+    return self.check_loop_region(tree, env, statement.label, statement.body, LoopTurn::For(statement));
 }
 
 /// Checks a `break` or `continue`, the Go `checkLoopBranch`: it names a loop

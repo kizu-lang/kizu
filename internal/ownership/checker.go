@@ -847,19 +847,56 @@ func (c *Checker) checkBodyStmt(stmt ast.Statement, env *scope) error {
 	}
 }
 
-// checkDeferStmt validates a deferred cleanup registration without running it.
+// checkDeferStmt registers a cleanup that runs on every later exit of this
+// block.
 func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
-	call, ok := stmt.Expr.(*ast.CallExpr)
+	return c.registerCleanup(cleanupDefer, stmt.Expr, env)
+}
+
+// checkErrDeferStmt registers a cleanup that runs on every later error exit
+// of this block.
+func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
+	return c.registerCleanup(cleanupErrDefer, stmt.Expr, env)
+}
+
+// cleanupKind is the exit set a registered cleanup runs on.
+type cleanupKind int
+
+const (
+	// cleanupDefer runs on every exit of the block.
+	cleanupDefer cleanupKind = iota
+	// cleanupErrDefer runs on every error exit of the block.
+	cleanupErrDefer
+)
+
+// keyword names the statement that registers a cleanup of this kind.
+func (kind cleanupKind) keyword() string {
+	if kind == cleanupErrDefer {
+		return "errdefer"
+	}
+	return "defer"
+}
+
+// registerCleanup validates one cleanup registration and records it. Both
+// kinds name a cleanup method call on a receiver read where the statement is
+// written; the receiver's arguments are read there too (ADR-0132). A value
+// carries one registration at most. What differs is when the cleanup runs: a
+// defer discharges the receiver's consume obligation (ADR-0091) from here on,
+// while an errdefer is not applied at normal block exit, so it never blocks a
+// success-path move and its receiver is re-validated at each error-return
+// path that can run it.
+func (c *Checker) registerCleanup(kind cleanupKind, expr ast.Expression, env *scope) error {
+	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return errorf("move error: defer expects cleanup method call")
+		return errorf("move error: %s expects cleanup method call", kind.keyword())
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok {
-		return errorf("move error: defer expects cleanup method call")
+		return errorf("move error: %s expects cleanup method call", kind.keyword())
 	}
 	if field.Name != typ.CleanupMethod {
-		return errorf("move error: defer cleanup must be `%s`, got `%s`",
-			typ.CleanupMethod, field.Name)
+		return errorf("move error: %s cleanup must be `%s`, got `%s`",
+			kind.keyword(), typ.CleanupMethod, field.Name)
 	}
 	receiverType, err := c.readExpr(field.Receiver, env)
 	if err != nil {
@@ -868,15 +905,26 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 	if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
 		return err
 	}
-	// A registered defer runs on every later exit of this block, so from here
-	// on the receiver's consume obligation (ADR-0091) is discharged.
+	var value *binding
 	if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
-		if value, exists := env.lookup(ident.Name); exists {
-			if err := c.checkCleanupNotRegistered(value, field.Receiver); err != nil {
+		if found, exists := env.lookup(ident.Name); exists {
+			if err := c.checkCleanupNotRegistered(found, field.Receiver); err != nil {
 				return err
 			}
+			value = found
+		}
+	}
+	switch kind {
+	case cleanupDefer:
+		if value != nil {
 			value.deferCleanup = true
 		}
+	case cleanupErrDefer:
+		entry := errDeferEntry{receiver: field.Receiver}
+		if value != nil {
+			entry.name, entry.id = value.name, value.id
+		}
+		c.liveErrDefers = append(c.liveErrDefers, entry)
 	}
 	return nil
 }
@@ -898,43 +946,6 @@ func (c *Checker) checkCleanupNotRegistered(value *binding, receiver ast.Express
 	return errorAt(expressionSpan(receiver),
 		"move error: `%s` already has a registered `%s` cleanup;"+
 			" a second cleanup would release it twice", value.name, keyword)
-}
-
-// checkErrDeferStmt validates an error-path cleanup registration. The receiver
-// must be a readable owned local at registration. Unlike defer, the cleanup is
-// not applied at normal block exit, so it never blocks a success-path move; its
-// receiver is instead re-validated at each error-return path that can run it.
-func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
-	call, ok := stmt.Expr.(*ast.CallExpr)
-	if !ok {
-		return errorf("move error: errdefer expects cleanup method call")
-	}
-	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok {
-		return errorf("move error: errdefer expects cleanup method call")
-	}
-	if field.Name != typ.CleanupMethod {
-		return errorf("move error: errdefer cleanup must be `%s`, got `%s`",
-			typ.CleanupMethod, field.Name)
-	}
-	receiverType, err := c.readExpr(field.Receiver, env)
-	if err != nil {
-		return err
-	}
-	if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
-		return err
-	}
-	entry := errDeferEntry{receiver: field.Receiver}
-	if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
-		if value, exists := env.lookup(ident.Name); exists {
-			if err := c.checkCleanupNotRegistered(value, field.Receiver); err != nil {
-				return err
-			}
-			entry.name, entry.id = value.name, value.id
-		}
-	}
-	c.liveErrDefers = append(c.liveErrDefers, entry)
-	return nil
 }
 
 // checkDeferredReleaseArgs reads the arguments a registered cleanup carries.
@@ -2961,51 +2972,76 @@ func bindingConsumed(value *binding) bool {
 	return value.moved || value.deinitialized
 }
 
-// checkWhileStmt treats moves in the body as possible after the loop.
+// checkWhileStmt checks a `while` loop: the condition runs once per turn like
+// the body does, so it is read against the loop's clone, and what it binds
+// is the turn's own.
 func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	// The condition's product is held by the capture, or was a bool: the
 	// body starts with nothing of it pending.
 	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
-	var borrowCond containerBorrowCondition
-	isBorrowCond := false
-	var condType string
-	// The condition runs once per turn like the body does, so it is read
-	// against the loop's clone: what it consumes is consumed inside the loop.
-	body := env.clone()
-	if stmt.Capture != "" {
-		match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, body)
+	enter := func(clone, child *scope) error {
+		var borrowCond containerBorrowCondition
+		isBorrowCond := false
+		condType := ""
+		if stmt.Capture != "" {
+			match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, clone)
+			if err != nil {
+				return err
+			}
+			borrowCond, isBorrowCond = match, ok
+		}
+		if !isBorrowCond {
+			read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, clone)
+			if err != nil {
+				return err
+			}
+			condType = read
+		}
+		// Borrow the loop's clone of each container, as in checkIfStmt.
+		_, err := c.defineCapture(
+			stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, true, env, child)
 		if err != nil {
 			return err
 		}
-		borrowCond, isBorrowCond = match, ok
+		c.settleOwnerTemps(pending, places, "void", nil)
+		return nil
 	}
-	if !isBorrowCond {
-		read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, body)
-		if err != nil {
-			return err
-		}
-		condType = read
+	leave := func(child *scope) error {
+		return c.checkCapturePayloadConsumed(stmt.Capture, child)
 	}
-	leave := c.enterLoop(stmt.Label)
-	defer leave()
-	child := body.child()
-	// Borrow the loop's clone of each container, as in checkIfStmt.
-	_, err := c.defineCapture(
-		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, true, env, child)
-	if err != nil {
+	return c.checkLoopRegion(stmt.Label, stmt.Body, env, enter, leave)
+}
+
+// checkLoopRegion checks one loop's body as a region the program enters an
+// unknown number of times, whatever loop form wrote it. The turn runs against
+// a clone of the scope: enter binds what the turn produces — a capture, an
+// index — into the body's scope, leave checks what the turn must have
+// consumed, and the body as a whole consumes nothing declared outside it,
+// since zero turns would leave that unreleased and two would release it twice.
+func (c *Checker) checkLoopRegion(
+	label string,
+	body *ast.BlockStmt,
+	env *scope,
+	enter func(clone, child *scope) error,
+	leave func(child *scope) error,
+) error {
+	clone := env.clone()
+	leaveLoop := c.enterLoop(label)
+	defer leaveLoop()
+	child := clone.child()
+	if err := enter(clone, child); err != nil {
 		return err
 	}
-	c.settleOwnerTemps(pending, places, "void", nil)
-	if err := c.checkBlock(stmt.Body, child); err != nil {
+	if err := c.checkBlock(body, child); err != nil {
 		return err
 	}
-	if err := c.checkCapturePayloadConsumed(stmt.Capture, child); err != nil {
+	if err := leave(child); err != nil {
 		return err
 	}
-	if err := c.checkLoopConsumesNothingOutside(env, body); err != nil {
+	if err := c.checkLoopConsumesNothingOutside(env, clone); err != nil {
 		return err
 	}
-	env.mergeMovedFrom(body)
+	env.mergeMovedFrom(clone)
 	return nil
 }
 
@@ -3388,7 +3424,8 @@ func (c *Checker) refuseContainerViewOrelse(
 			" (`if cond |name|` or `while cond |name|`)", condType)
 }
 
-// checkForStmt treats moves in the body as possible after the loop.
+// checkForStmt checks a `for` loop. The range is fixed, but its length is not
+// known here, so the body is under the same rule as a while body.
 func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 	if _, err := c.readExpr(stmt.Start, env); err != nil {
 		return err
@@ -3396,21 +3433,12 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 	if _, err := c.readExpr(stmt.End, env); err != nil {
 		return err
 	}
-	body := env.clone()
-	leave := c.enterLoop(stmt.Label)
-	defer leave()
-	child := body.child()
-	child.define(c.newBinding(stmt.Name, "i64"))
-	if err := c.checkBlock(stmt.Body, child); err != nil {
-		return err
+	enter := func(_, child *scope) error {
+		child.define(c.newBinding(stmt.Name, "i64"))
+		return nil
 	}
-	// The range is fixed, but its length is not known here, so the body is
-	// under the same rule as a while body: it consumes nothing from outside.
-	if err := c.checkLoopConsumesNothingOutside(env, body); err != nil {
-		return err
-	}
-	env.mergeMovedFrom(body)
-	return nil
+	leave := func(*scope) error { return nil }
+	return c.checkLoopRegion(stmt.Label, stmt.Body, env, enter, leave)
 }
 
 // checkLoopBranch checks a `break` or `continue`: it names a loop the

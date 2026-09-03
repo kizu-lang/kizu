@@ -169,21 +169,64 @@ fn (self: &var Checker) check_body_stmt(
     return try self.error0(ast::zero_span(), "move error: unsupported statement *ast.RecoveredStmt");
 }
 
-/// Validates a deferred cleanup registration without running it, the Go
+/// Registers a cleanup that runs on every later exit of this block, the Go
 /// `checkDeferStmt`.
 fn (self: &var Checker) check_defer_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
     statement: ast::DeferStmt
 ) -> !?diagnostic::Diagnostic {
-    let call = call_expr(tree, statement.expr) orelse
-        return try self.error0(ast::zero_span(), "move error: defer expects cleanup method call");
+    return self.register_cleanup(tree, env, CleanupKind::Defer, statement.expr);
+}
+
+/// Registers a cleanup that runs on every later error exit of this block,
+/// the Go `checkErrDeferStmt`.
+fn (self: &var Checker) check_err_defer_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ErrDeferStmt
+) -> !?diagnostic::Diagnostic {
+    return self.register_cleanup(tree, env, CleanupKind::ErrDefer, statement.expr);
+}
+
+/// Is the exit set a registered cleanup runs on, the Go `cleanupKind`.
+enum CleanupKind {
+    Defer,
+    ErrDefer
+}
+
+/// Names the statement that registers a cleanup of this kind, the Go
+/// `cleanupKind.keyword`.
+fn cleanup_keyword(kind: CleanupKind) -> []u8 {
+    match kind {
+        Defer => return "defer",
+        ErrDefer => return "errdefer",
+    }
+}
+
+/// Validates one cleanup registration and records it, the Go
+/// `registerCleanup`. Both kinds name a cleanup method call on a receiver
+/// read where the statement is written; the receiver's arguments are read
+/// there too (ADR-0132). A value carries one registration at most. What
+/// differs is when the cleanup runs: a defer discharges the receiver's
+/// consume obligation (ADR-0091) from here on, while an errdefer is not
+/// applied at normal block exit, so it never blocks a success-path move and
+/// its receiver is re-validated at each error-return path that can run it.
+fn (self: &var Checker) register_cleanup(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    kind: CleanupKind,
+    expression: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let keyword = try self.names.intern(cleanup_keyword(kind));
+    let call = call_expr(tree, expression) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: %s expects cleanup method call", Arg::Str(keyword));
     let field = field_expr(tree, call.callee) orelse
-        return try self.error0(ast::zero_span(), "move error: defer expects cleanup method call");
+        return try self.error1(tree, ast::zero_span(), "move error: %s expects cleanup method call", Arg::Str(keyword));
     if !text_equals(tree, field.name, typ::cleanup_method()) {
-        return try self.error2(
-            tree, ast::zero_span(), "move error: defer cleanup must be `%s`, got `%s`",
-            Arg::Str(self.common.deinit_name), Arg::Text(field.name)
+        return try self.error3(
+            tree, ast::zero_span(), "move error: %s cleanup must be `%s`, got `%s`",
+            Arg::Str(keyword), Arg::Str(self.common.deinit_name), Arg::Text(field.name)
         );
     }
     var receiver_type = empty_name();
@@ -195,17 +238,31 @@ fn (self: &var Checker) check_defer_stmt(
     ) |failed| {
         return move failed;
     }
-    // A registered defer runs on every later exit of this block, so from
-    // here on the receiver's consume obligation (ADR-0091) is discharged.
-    if self.lookup_ident(tree, env, field.receiver) |value| {
-        if try self.check_cleanup_not_registered(tree, value, field.receiver) |failed| {
+    let value = self.lookup_ident(tree, env, field.receiver);
+    if value |found| {
+        if try self.check_cleanup_not_registered(tree, found, field.receiver) |failed| {
             return move failed;
         }
-        if self.store.binding_mut(value) |record| {
-            record.defer_cleanup = true;
-        }
     }
-    return null;
+    match kind {
+        Defer => {
+            if value |found| {
+                if self.store.binding_mut(found) |record| {
+                    record.defer_cleanup = true;
+                }
+            }
+            return null;
+        },
+        ErrDefer => {
+            var entry = ErrDeferEntry { receiver: field.receiver, name: empty_name(), id: 0 };
+            if value |found| {
+                entry.name = self.binding(found).name;
+                entry.id = self.binding(found).id;
+            }
+            try self.live_err_defers.append(self.allocator, entry);
+            return null;
+        },
+    }
 }
 
 /// Rejects a second cleanup registration for one value, the Go
@@ -273,47 +330,6 @@ fn (self: &var Checker) release_label(receiver_type: Name) -> !Name {
     let base = try self.names.generic_base_or_self(owned);
     let tail = try self.names.after_last_path_separator(base);
     return self.names.format("%s.deinit", tail, empty_name(), empty_name());
-}
-
-/// Validates an error-path cleanup registration, the Go `checkErrDeferStmt`.
-/// The receiver must be a readable owned local at registration. Unlike defer,
-/// the cleanup is not applied at normal block exit, so it never blocks a
-/// success-path move; its receiver is instead re-validated at each
-/// error-return path that can run it.
-fn (self: &var Checker) check_err_defer_stmt(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    statement: ast::ErrDeferStmt
-) -> !?diagnostic::Diagnostic {
-    let call = call_expr(tree, statement.expr) orelse
-        return try self.error0(ast::zero_span(), "move error: errdefer expects cleanup method call");
-    let field = field_expr(tree, call.callee) orelse
-        return try self.error0(ast::zero_span(), "move error: errdefer expects cleanup method call");
-    if !text_equals(tree, field.name, typ::cleanup_method()) {
-        return try self.error2(
-            tree, ast::zero_span(), "move error: errdefer cleanup must be `%s`, got `%s`",
-            Arg::Str(self.common.deinit_name), Arg::Text(field.name)
-        );
-    }
-    var receiver_type = empty_name();
-    if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
-        return move failed;
-    }
-    if try self.check_deferred_release_args(
-        tree, env, receiver_type, field, call.args
-    ) |failed| {
-        return move failed;
-    }
-    var entry = ErrDeferEntry { receiver: field.receiver, name: empty_name(), id: 0 };
-    if self.lookup_ident(tree, env, field.receiver) |value| {
-        if try self.check_cleanup_not_registered(tree, value, field.receiver) |failed| {
-            return move failed;
-        }
-        entry.name = self.binding(value).name;
-        entry.id = self.binding(value).id;
-    }
-    try self.live_err_defers.append(self.allocator, entry);
-    return null;
 }
 
 /// Reports the active errdefer cleanups that this error-return path must
