@@ -76,6 +76,19 @@ fn (self: &var Lowerer) remove_slot(name: Name) -> !void {
 /// Walks one statement for names passed as `&var`, the Go
 /// `collectMutBorrowsStmt`.
 fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
+    // A cleanup runs on the value its receiver holds when the block exits,
+    // not the one the name held when the `defer` was written (SPEC §6.3.1),
+    // so the receiver is storage: the exit loads it like any slot.
+    if ownership::defer_stmt(tree, statement) |value| {
+        if cleanup_receiver(tree, value.expr) |receiver| {
+            try self.mark_if_name(tree, ast::Expression { node: receiver });
+        }
+    }
+    if ownership::errdefer_stmt(tree, statement) |value| {
+        if cleanup_receiver(tree, value.expr) |receiver| {
+            try self.mark_if_name(tree, ast::Expression { node: receiver });
+        }
+    }
     var exprs = array::new<ast::Expression>(self.allocator);
     defer exprs.deinit(self.allocator);
     var stmts = array::new<ast::Statement>(self.allocator);

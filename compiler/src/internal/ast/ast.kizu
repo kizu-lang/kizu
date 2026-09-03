@@ -243,6 +243,9 @@ struct ConstructBuilt {
 struct DerivedNames {
     receiver: Text,
     capture: Text,
+    // The error member the `else |err|` of an `E!T` field's open binds. The
+    // body has nothing to do with it: the field held no value.
+    err: Text,
     cleanup: Text,
     allocator: Text,
     empty: Text,
@@ -256,6 +259,7 @@ enum DerivedMemberKind {
     Copy,
     Owner,
     OptionalOwner,
+    ErrorUnionOwner,
 }
 
 /// Is one node that may appear as a statement.
@@ -1944,6 +1948,9 @@ fn type_holds_owner(
     if typ::optional_elem(text) |elem| {
         return owner_type(owners, elem);
     }
+    if typ::error_union_success(text) |success| {
+        return owner_type(owners, success);
+    }
     return owner_type(owners, text);
 }
 
@@ -2246,6 +2253,7 @@ fn new_derived_names(
     );
     let allocator_name = try ast.add_text_from_bytes("allocator");
     let empty = try ast.add_empty_text();
+    let err = try ast.add_text_from_bytes("err");
     let empty_args = try ast.add_expression_list(
         array::new<Expression>(allocator)
     );
@@ -2260,6 +2268,7 @@ fn new_derived_names(
         cleanup: cleanup,
         allocator: allocator_name,
         empty: empty,
+        err: err,
         empty_args: empty_args,
         allocator_args: allocator_args
     };
@@ -2307,6 +2316,31 @@ fn derive_struct_deinit(
                 }
                 )));
             },
+            ErrorUnionOwner => {
+                // An error union opens the same way, and its `if` names the
+                // failure arm too (SPEC §11.1); a failed field holds nothing.
+                let read = try add_derived_field_read(
+                    ast,
+                    names.receiver,
+                    field.name
+                );
+                let held = try add_derived_ident(ast, names.capture);
+                let cleanup = try add_derived_cleanup(ast, names, held);
+                let consequence = try add_derived_block(allocator,
+                    ast,
+                    cleanup
+                );
+                let alternative = try add_derived_empty_block(allocator, ast);
+                try statements.append(allocator, try ast.add_statement(StatementNode::If(
+                    IfStmt {
+                    condition: read,
+                    consequence: consequence,
+                    alternative: alternative,
+                    capture: names.capture,
+                    err_capture: names.err
+                }
+                )));
+            },
             Owner => {
                 let read = add_derived_field_read(
                     ast,
@@ -2344,6 +2378,12 @@ fn derived_member_kind(
     if typ::optional_elem(text) |elem| {
         if owner_type(owners, elem) {
             return DerivedMemberKind::OptionalOwner;
+        }
+        return DerivedMemberKind::Copy;
+    }
+    if typ::error_union_success(text) |success| {
+        if owner_type(owners, success) {
+            return DerivedMemberKind::ErrorUnionOwner;
         }
         return DerivedMemberKind::Copy;
     }

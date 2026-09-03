@@ -324,7 +324,11 @@ func tryCleanupReceivers(module *Module, name string) [][]string {
 				}
 				names := []string{}
 				for _, cleanup := range instr.Cleanups {
-					names = append(names, cleanup.Receiver)
+					name := ""
+					if ident, ok := cleanup.Receiver.(*ast.IdentExpr); ok {
+						name = ident.Name
+					}
+					names = append(names, name)
 				}
 				receivers = append(receivers, names)
 			}

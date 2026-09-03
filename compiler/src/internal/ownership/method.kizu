@@ -9,6 +9,33 @@ import compiler::internal::typ;
 
 /// Validates ownership effects of value receiver methods, the Go
 /// `checkMethodCallExpr`.
+/// Rejects a method that takes its receiver over when the receiver is a
+/// borrow, the Go `checkConsumingReceiverOwned`: the lender still holds the
+/// value, and the method's own release would run on it. Which methods
+/// consume is read from their signatures (function_consumes_receiver), for
+/// user types and std alike.
+fn (self: &var Checker) check_consuming_receiver_owned(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr
+) -> !?diagnostic::Diagnostic {
+    let value = self.lookup_ident(tree, env, field.receiver) orelse return null;
+    if !(self.binding(value).borrowed_param or self.binding(value).local_borrow) or self.binding(value).owns_tied {
+        return null;
+    }
+    let receiver_type = try self.names.generic_base_or_self(self.binding(value).type_name);
+    let method = self.impl_method_text(receiver_type, tree, field.name) orelse return null;
+    if !self.function_consumes_receiver(method) {
+        return null;
+    }
+    let label = try self.names.after_last_path_separator(receiver_type);
+    return try self.error4(
+        tree, field.span,
+        "move error: `%s.%s` requires owned %s receiver; `%s` is a borrow",
+        Arg::Str(label), Arg::Text(field.name), Arg::Str(label), Arg::Str(self.binding(value).name)
+    );
+}
+
 fn (self: &var Checker) check_method_call_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -16,6 +43,9 @@ fn (self: &var Checker) check_method_call_expr(
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    if try self.check_consuming_receiver_owned(tree, env, field) |failed| {
+        return move failed;
+    }
     var handled = false;
     if try self.check_arena_at_receiver_method(tree, env, field, args, &var handled, out) |failed| {
         return move failed;
@@ -101,94 +131,10 @@ fn (self: &var Checker) check_local_receiver_method(
         );
     }
     let method = try self.names.intern_text(tree, field.name);
-    let type_name = self.binding(arena).type_name;
-    if try self.names.split_generic(type_name) |parts| {
-        if self.names.is(parts.base, "std::array::Array") {
-            return self.check_array_method(tree, env, arena, parts.args, method, args, out);
-        }
-        if self.names.is(parts.base, "std::map::Map") {
-            if try self.check_map_receiver_borrow(tree, arena, method) |failed| {
-                return move failed;
-            }
-            return self.check_map_method(tree, env, arena, parts.args, method, args, out);
-        }
-        if self.names.is(parts.base, "std::arena::Arena") {
-            return self.check_local_arena_method(tree, env, arena, method, args, out);
-        }
+    if try self.std_container_base(self.binding(arena).type_name) |base| {
+        return self.check_std_method_call(tree, env, arena, base, method, args, out);
     }
     return self.check_non_arena_method(tree, env, arena, method, args, out);
-}
-
-/// Dispatches methods on a local arena binding, the Go `checkArenaMethod`.
-fn (self: &var Checker) check_local_arena_method(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    arena: BindingHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    let base = try self.names.intern("std::arena::Arena");
-    if try self.check_container_method_access(tree, base, arena, method) |failed| {
-        return move failed;
-    }
-    if self.names.is(method, "add") {
-        return self.check_arena_add(tree, env, arena, args, out);
-    }
-    if self.names.is(method, "at") {
-        return self.check_arena_at(tree, env, arena, args, out);
-    }
-    if self.names.is(method, "at_mut") {
-        return self.check_arena_at_condition(tree, env, arena, args, out);
-    }
-    if self.names.is(method, "deinit") {
-        return self.check_owned_arena_deinit(tree, env, arena, args, out);
-    }
-    // Unreachable while this dispatch and the shared access table agree;
-    // the table refusal above is the user-facing one.
-    return try self.error1(
-        tree, ast::zero_span(), "arena error: method `%s` is classified but unhandled", Arg::Str(method)
-    );
-}
-
-/// Checks at_mut inside a capture condition -- a mutable binding and one
-/// handle whose provenance matches the arena -- and refuses it everywhere
-/// else, the Go `checkArenaAtCondition`. Provenance is the guarantee here: a
-/// handle that passes it can only go absent if the checker itself is wrong,
-/// so the capture's else branch is a residue, not a normal path.
-fn (self: &var Checker) check_arena_at_condition(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    arena: BindingHandle,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    if !self.capture_condition and !self.borrow_return {
-        return try self.error0(
-            ast::zero_span(),
-            "arena error: `Arena.at_mut` must be consumed by a capture (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)"
-        );
-    }
-    if !self.mutable_place(arena) {
-        return try self.error0(ast::zero_span(), "arena error: `Arena.at_mut` requires mutable arena binding");
-    }
-    // The context covers exactly this call: both flags off while the
-    // argument is read -- a nested at/at_mut in argument position refuses as
-    // usual -- and back for the result the call gate reads.
-    let saved_capture = self.capture_condition;
-    let saved_return = self.borrow_return;
-    self.capture_condition = false;
-    self.borrow_return = false;
-    var elem = empty_name();
-    if try self.check_arena_handle_arg(tree, env, arena, args, "Arena.at_mut", &var elem) |failed| {
-        self.capture_condition = saved_capture;
-        self.borrow_return = saved_return;
-        return move failed;
-    }
-    self.capture_condition = saved_capture;
-    self.borrow_return = saved_return;
-    out.* = try self.names.prefixed("?&var ", elem);
-    return null;
 }
 
 /// Validates methods on non-arena owned values, the Go `checkNonArenaMethod`.
@@ -200,18 +146,8 @@ fn (self: &var Checker) check_non_arena_method(
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    let type_name = self.binding(value).type_name;
-    if same_name(type_name, self.common.string_name) {
-        if try self.check_string_receiver_borrow(tree, value, method) |failed| {
-            return move failed;
-        }
-        return self.check_owned_string_method(tree, env, value, method, args, out);
-    }
-    if self.names.generic_base_is(type_name, "std::mem::Box") {
-        return self.check_box_method(tree, env, value, method, args, out);
-    }
-    if try self.check_map_receiver_borrow(tree, value, method) |failed| {
-        return move failed;
+    if try self.std_container_base(self.binding(value).type_name) |base| {
+        return self.check_std_method_call(tree, env, value, base, method, args, out);
     }
     var handled = false;
     if try self.check_impl_method_call(tree, env, value, method, args, &var handled, out) |failed| {
@@ -368,99 +304,7 @@ fn (self: &var Checker) check_direct_field_receiver_by_type(
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    let type_name = self.binding(value).type_name;
-    if same_name(type_name, self.common.string_name) {
-        return self.check_owned_string_method(tree, env, value, method, args, out);
-    }
-    if try self.names.split_generic(type_name) |parts| {
-        if self.names.is(parts.base, "std::array::Array") {
-            return self.check_array_method(tree, env, value, parts.args, method, args, out);
-        }
-        if self.names.is(parts.base, "std::map::Map") {
-            return self.check_map_method(tree, env, value, parts.args, method, args, out);
-        }
-        if self.names.is(parts.base, "std::mem::Box") {
-            return self.check_box_method(tree, env, value, method, args, out);
-        }
-        if self.names.is(parts.base, "std::arena::Arena") {
-            return self.check_field_arena_method(tree, env, value, method, args, out);
-        }
-    }
     return self.check_non_arena_method(tree, env, value, method, args, out);
-}
-
-/// Validates direct field calls on owned arena fields, the Go
-/// `checkFieldArenaMethod`.
-fn (self: &var Checker) check_field_arena_method(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    arena: BindingHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    let base = try self.names.intern("std::arena::Arena");
-    if try self.check_container_method_access(tree, base, arena, method) |failed| {
-        return move failed;
-    }
-    if self.names.is(method, "add") {
-        return self.check_arena_add(tree, env, arena, args, out);
-    }
-    if self.names.is(method, "at") {
-        return self.check_field_arena_at(tree, env, arena, args, out);
-    }
-    if self.names.is(method, "at_mut") {
-        // An owned arena field backs an at_mut capture like a local arena
-        // does; handle provenance stays strict.
-        return self.check_arena_at_condition(tree, env, arena, args, out);
-    }
-    if self.names.is(method, "deinit") {
-        return self.check_owned_arena_deinit(tree, env, arena, args, out);
-    }
-    // Unreachable while this dispatch and the shared access table agree;
-    // the table refusal above is the user-facing one.
-    return try self.error1(
-        tree, ast::zero_span(), "arena error: method `%s` is classified but unhandled", Arg::Str(method)
-    );
-}
-
-/// Permits typed wrapper methods to unwrap their own arena handles, the Go
-/// `checkFieldArenaAt`.
-fn (self: &var Checker) check_field_arena_at(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    arena: BindingHandle,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 1 {
-        return try self.error1(
-            tree, ast::zero_span(), "arena error: `Arena.at` expects 1 arg, got %d", Arg::Int(count)
-        );
-    }
-    let type_name = self.binding(arena).type_name;
-    var is_arena = false;
-    var elem = empty_name();
-    if try self.names.split_generic(type_name) |parts| {
-        is_arena = self.names.is(parts.base, "std::arena::Arena");
-        elem = parts.args;
-    }
-    if !is_arena {
-        return try self.error1(
-            tree, ast::zero_span(), "arena error: `%s` is not an arena", Arg::Str(self.binding(arena).name)
-        );
-    }
-    let handle = arg_at(tree, args, 0) orelse return null;
-    if try self.check_known_handle_provenance(tree, env, arena, handle) |failed| {
-        return move failed;
-    }
-    var ignored = empty_name();
-    if try self.read_expr(tree, env, handle, &var ignored) |failed| {
-        return move failed;
-    }
-    out.* = try self.names.prefixed("&", elem);
-    return null;
 }
 
 /// Validates methods on local Box values and direct Box fields, the Go
@@ -494,562 +338,15 @@ fn (self: &var Checker) check_box_receiver_expr(
             tree, ast::zero_span(), "box error: `Box.%s` requires local Box receiver", Arg::Str(method)
         );
     }
-    return self.check_box_method_for_target(tree, env, target.value, target.field, method, args, out);
+    var receiver = target.value;
+    if !is_empty(target.field) {
+        let path = try self.names.format("%s.%s", self.binding(target.value).name, target.field, empty_name());
+        let projected = DirectFieldReceiver {
+            owner: target.value, field: target.field, type_name: type_name, path: path
+        };
+        receiver = try self.binding_for_direct_field_receiver(projected);
+    }
+    let base = try self.names.intern("std::mem::Box");
+    return self.check_std_method_call(tree, env, receiver, base, method, args, out);
 }
 
-/// Validates Box methods with a tracked borrow root, the Go
-/// `checkBoxMethodForTarget`.
-fn (self: &var Checker) check_box_method_for_target(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    target: BindingHandle,
-    field: Name,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    if self.names.is(method, "borrow") or self.names.is(method, "borrow_mut") {
-        return try self.error2(
-            tree, ast::zero_span(), "box error: `Box.%s` must be bound with `let name = box.%s()`",
-            Arg::Str(method), Arg::Str(method)
-        );
-    }
-    if self.names.is(method, "take") or self.names.is(method, "deinit") {
-        if self.store.has_any_borrow(target) {
-            return try self.error1(
-                tree, ast::zero_span(), "box error: `Box.%s` cannot run while box is borrowed",
-                Arg::Str(method)
-            );
-        }
-        let label = try self.names.format("Box.%s", method, empty_name(), empty_name());
-        if try self.read_release_allocator(tree, env, label, target, args, 0) |failed| {
-            return move failed;
-        }
-        if is_empty(field) {
-            try self.store.set_moved(target, true);
-        }
-        if self.names.is(method, "take") {
-            var elem = empty_name();
-            if try self.names.split_generic(self.binding(target).type_name) |parts| {
-                elem = parts.args;
-            }
-            out.* = elem;
-            return null;
-        }
-        out.* = self.common.void_name;
-        return null;
-    }
-    return try self.error1(tree, ast::zero_span(), "box error: Box has no method `%s`", Arg::Str(method));
-}
-
-/// Validates methods on a local Box binding, the Go `checkBoxMethod`.
-fn (self: &var Checker) check_box_method(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    box: BindingHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    return self.check_box_method_for_target(tree, env, box, empty_name(), method, args, out);
-}
-
-/// Classifies what one container method does to the storage a live borrow
-/// may alias, the Go `containerAccess`: reads wait for mutable borrows,
-/// mutations and cleanup wait for any borrow, capture accessors are consumed
-/// by the capture recognizer, and view producers are guarded where their
-/// binding forms.
-pub enum ContainerAccess {
-    Read,
-    Mutate,
-    Cleanup,
-    Capture,
-    View,
-}
-
-/// Names one container whose methods the shared access table classifies, the
-/// Go `containerAccessTable` key. Box is not here: its borrows are per-field
-/// and its conflicts are checked where the field borrow forms.
-enum ContainerTable {
-    Array,
-    Map,
-    String,
-    Arena,
-}
-
-/// Returns the error prefix of one container table, the Go `table.kind`.
-fn container_kind(table: ContainerTable) -> []u8 {
-    return match table {
-        Array => "array",
-        Map => "map",
-        String => "string",
-        Arena => "arena",
-    };
-}
-
-/// Returns the method spelling of one container table, the Go `table.label`.
-fn container_label(table: ContainerTable) -> []u8 {
-    return match table {
-        Array => "Array",
-        Map => "Map",
-        String => "String",
-        Arena => "Arena",
-    };
-}
-
-/// Selects the access table of a container base, the Go
-/// `containerAccessTables[base]`; null when the base has none.
-fn (self: &Checker) container_table(base: Name) -> ?ContainerTable {
-    if self.names.is(base, "std::array::Array") {
-        return ContainerTable::Array;
-    }
-    if self.names.is(base, "std::map::Map") {
-        return ContainerTable::Map;
-    }
-    if self.names.is(base, "std::string::String") {
-        return ContainerTable::String;
-    }
-    if self.names.is(base, "std::arena::Arena") {
-        return ContainerTable::Arena;
-    }
-    return null;
-}
-
-/// Classifies one container method, the Go `containerAccessTables` lookup:
-/// the one classification the container dispatchers share. A method missing
-/// here is refused at dispatch, so a new method has to name what it does to
-/// storage before any per-method checker sees it. Unknown base or method is
-/// null.
-fn (self: &Checker) container_method_access(base: Name, method: Name) -> ?ContainerAccess {
-    let table = self.container_table(base) orelse return null;
-    return match table {
-        Array => self.array_method_access(method),
-        Map => self.map_method_access(method),
-        String => self.string_method_access(method),
-        Arena => self.arena_method_access(method),
-    };
-}
-
-/// Classifies the std::array::Array methods.
-fn (self: &Checker) array_method_access(method: Name) -> ?ContainerAccess {
-    if self.names.is(method, "append") or self.names.is(method, "append_bytes") or
-        self.names.is(method, "reserve") or
-        self.names.is(method, "set") or self.names.is(method, "swap") or
-        self.names.is(method, "remove") or
-        self.names.is(method, "pop") or self.names.is(method, "pop_or_panic") or
-        self.names.is(method, "truncate") or self.names.is(method, "clear") {
-        return ContainerAccess::Mutate;
-    }
-    // Unlike String's, Array's as_bytes/as_mut_bytes are std-internal calls
-    // guarded here as reads; String's form view bindings and are guarded
-    // where the binding forms.
-    if self.names.is(method, "len") or self.names.is(method, "capacity") or
-        self.names.is(method, "get") or self.names.is(method, "get_or_panic") or
-        self.names.is(method, "clone") or self.names.is(method, "as_bytes") or
-        self.names.is(method, "as_mut_bytes") {
-        return ContainerAccess::Read;
-    }
-    if self.names.is(method, "at") or self.names.is(method, "at_mut") {
-        return ContainerAccess::Capture;
-    }
-    if self.names.is(method, "deinit") {
-        return ContainerAccess::Cleanup;
-    }
-    return null;
-}
-
-/// Classifies the std::map::Map methods.
-fn (self: &Checker) map_method_access(method: Name) -> ?ContainerAccess {
-    if self.names.is(method, "insert") {
-        return ContainerAccess::Mutate;
-    }
-    if self.names.is(method, "get") or self.names.is(method, "key_at") or
-        self.names.is(method, "contains") or self.names.is(method, "len") {
-        return ContainerAccess::Read;
-    }
-    if self.names.is(method, "at") or self.names.is(method, "at_mut") {
-        return ContainerAccess::Capture;
-    }
-    if self.names.is(method, "deinit") {
-        return ContainerAccess::Cleanup;
-    }
-    return null;
-}
-
-/// Classifies the std::string::String methods.
-fn (self: &Checker) string_method_access(method: Name) -> ?ContainerAccess {
-    if self.names.is(method, "append_bytes") or self.names.is(method, "append_byte") or
-        self.names.is(method, "append_string") or self.names.is(method, "reserve") or
-        self.names.is(method, "truncate") or self.names.is(method, "clear") {
-        return ContainerAccess::Mutate;
-    }
-    if self.names.is(method, "len") or self.names.is(method, "capacity") {
-        return ContainerAccess::Read;
-    }
-    if self.names.is(method, "as_bytes") or self.names.is(method, "as_mut_bytes") {
-        return ContainerAccess::View;
-    }
-    if self.names.is(method, "deinit") {
-        return ContainerAccess::Cleanup;
-    }
-    return null;
-}
-
-/// Classifies the std::arena::Arena methods.
-fn (self: &Checker) arena_method_access(method: Name) -> ?ContainerAccess {
-    if self.names.is(method, "add") {
-        return ContainerAccess::Mutate;
-    }
-    if self.names.is(method, "at") {
-        return ContainerAccess::Read;
-    }
-    if self.names.is(method, "at_mut") {
-        return ContainerAccess::Capture;
-    }
-    if self.names.is(method, "deinit") {
-        return ContainerAccess::Cleanup;
-    }
-    return null;
-}
-
-/// Looks a container method up in the shared table and refuses it when a
-/// live borrow conflicts with what it does to storage, the Go
-/// `checkContainerMethodAccess`. An unknown method is refused here: default
-/// deny, not fall-through.
-fn (self: &var Checker) check_container_method_access(
-    tree: &ast::Ast,
-    base: Name,
-    value: BindingHandle,
-    method: Name
-) -> !?diagnostic::Diagnostic {
-    let table = self.container_table(base) orelse
-        return try self.error1(tree, ast::zero_span(), "move error: `%s` has no container access table", Arg::Str(base));
-    let kind = try self.names.intern(container_kind(table));
-    let label = try self.names.intern(container_label(table));
-    var access = ContainerAccess::Read;
-    if self.container_method_access(base, method) |known| {
-        access = known;
-    } else {
-        return try self.error3(
-            tree, ast::zero_span(), "%s error: %s has no method `%s`",
-            Arg::Str(kind), Arg::Str(label), Arg::Str(method)
-        );
-    }
-    if access == ContainerAccess::Read {
-        if self.binding(value).active_mut_borrows > 0 {
-            return try self.error3(
-                tree, ast::zero_span(), "%s error: `%s.%s` cannot read while mutably borrowed",
-                Arg::Str(kind), Arg::Str(label), Arg::Str(method)
-            );
-        }
-    }
-    if access == ContainerAccess::Mutate or access == ContainerAccess::Cleanup {
-        if self.store.has_any_borrow(value) {
-            return try self.error4(
-                tree, ast::zero_span(), "%s error: `%s.%s` cannot run while %s is borrowed",
-                Arg::Str(kind), Arg::Str(label), Arg::Str(method), Arg::Str(kind)
-            );
-        }
-    }
-    return null;
-}
-
-/// Rejects String methods whose receiver cannot be tracked safely, the Go
-/// `checkStringReceiverBorrow`.
-fn (self: &Checker) check_string_receiver_borrow(
-    tree: &ast::Ast,
-    value: BindingHandle,
-    method: Name
-) -> !?diagnostic::Diagnostic {
-    let record = self.binding(value);
-    if self.names.is(method, "deinit") and record.borrowed_param {
-        return try self.error0(ast::zero_span(), "string error: `String.deinit` requires owned String receiver");
-    }
-    if self.is_string_mutating_method(method) and record.borrowed_param and !record.mut_borrow {
-        return try self.error1(
-            tree, ast::zero_span(), "string error: `String.%s` requires mutable String receiver",
-            Arg::Str(method)
-        );
-    }
-    return null;
-}
-
-/// Rejects Map methods whose receiver cannot be tracked safely, the Go
-/// `checkMapReceiverBorrow`.
-fn (self: &Checker) check_map_receiver_borrow(
-    tree: &ast::Ast,
-    value: BindingHandle,
-    method: Name
-) -> !?diagnostic::Diagnostic {
-    let type_name = self.binding(value).type_name;
-    if !self.names.generic_base_is(type_name, "std::map::Map") {
-        return null;
-    }
-    let record = self.binding(value);
-    if self.names.is(method, "deinit") and record.borrowed_param {
-        return try self.error0(ast::zero_span(), "map error: `Map.deinit` requires owned Map receiver");
-    }
-    if self.names.is(method, "insert") and record.borrowed_param and !record.mut_borrow {
-        return try self.error0(ast::zero_span(), "map error: `Map.insert` requires mutable Map receiver");
-    }
-    return null;
-}
-
-/// Validates ownership effects for owned String methods, the Go
-/// `checkStringMethod`.
-fn (self: &var Checker) check_owned_string_method(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    str_value: BindingHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    if try self.check_container_method_access(tree, self.common.string_name, str_value, method) |failed| {
-        return move failed;
-    }
-    // A growth names the allocator its storage comes from first: a String
-    // keeps none of its own (ADR-0132). `truncate` neither grows nor frees.
-    if self.names.is(method, "append_bytes") or self.names.is(method, "append_byte") or
-        self.names.is(method, "reserve") or self.names.is(method, "truncate") or
-        self.names.is(method, "append_string") {
-        var rest = args;
-        if !self.names.is(method, "truncate") {
-            if try self.read_string_grow_allocator(tree, env, str_value, method, args) |failed| {
-                return move failed;
-            }
-            rest = try self.rest_args(tree, args, 1);
-        }
-        if self.names.is(method, "append_string") {
-            return self.check_string_source_arg(tree, env, method, rest, out);
-        }
-        return self.check_string_append_or_reserve(tree, env, method, rest, out);
-    }
-    if self.names.is(method, "len") or self.names.is(method, "capacity") {
-        if try self.check_string_no_args(tree, method, args) |failed| {
-            return move failed;
-        }
-        out.* = self.common.i64_name;
-        return null;
-    }
-    if self.names.is(method, "as_bytes") or self.names.is(method, "as_mut_bytes") {
-        return try self.error2(
-            tree, ast::zero_span(),
-            "string error: `String.%s` must be bound with `let name = string.%s()`",
-            Arg::Str(method), Arg::Str(method)
-        );
-    }
-    if self.names.is(method, "clear") {
-        if try self.check_string_no_args(tree, method, args) |failed| {
-            return move failed;
-        }
-        out.* = self.common.void_name;
-        return null;
-    }
-    if self.names.is(method, "deinit") {
-        let release_label = try self.names.intern("String.deinit");
-        if try self.read_release_allocator(tree, env, release_label, str_value, args, 0) |failed| {
-            return move failed;
-        }
-        try self.store.set_moved(str_value, true);
-        out.* = self.common.void_name;
-        return null;
-    }
-    // Unreachable while this dispatch and the shared access table agree;
-    // the table refusal above is the user-facing one.
-    return try self.error1(
-        tree, ast::zero_span(), "string error: method `%s` is classified but unhandled", Arg::Str(method)
-    );
-}
-
-/// Validates one-argument String mutators, the Go
-/// `checkStringAppendOrReserve`.
-fn (self: &var Checker) check_string_append_or_reserve(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    if self.names.is(method, "append_bytes") {
-        return self.check_string_bytes_arg(tree, env, method, args, out);
-    }
-    if self.names.is(method, "append_byte") {
-        return self.check_string_byte_arg(tree, env, method, args, out);
-    }
-    return self.check_string_reserve_arg(tree, env, method, args, out);
-}
-
-/// Reads the leading Allocator a String growth names.
-fn (self: &var Checker) read_string_grow_allocator(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    str_value: BindingHandle,
-    method: Name,
-    args: ast::ExpressionList
-) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 2 {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects 2 args, got %d",
-            Arg::Str(method), Arg::Int(count)
-        );
-    }
-    let what = try self.names.format("String.%s", method, empty_name(), empty_name());
-    let first = args.get_or_panic(tree, 0);
-    return self.read_container_allocator_named(tree, env, "string", what, str_value, first);
-}
-
-/// Validates no-argument String methods, the Go `checkStringNoArgs`.
-fn (self: &Checker) check_string_no_args(
-    tree: &ast::Ast,
-    method: Name,
-    args: ast::ExpressionList
-) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 0 {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects 0 args, got %d",
-            Arg::Str(method), Arg::Int(count)
-        );
-    }
-    return null;
-}
-
-/// Reports whether a String method can change owned storage, the Go
-/// `isStringMutatingMethod`.
-fn (self: &Checker) is_string_mutating_method(method: Name) -> bool {
-    return self.names.is(method, "append_bytes") or self.names.is(method, "append_byte") or
-        self.names.is(method, "append_string") or self.names.is(method, "reserve") or
-        self.names.is(method, "truncate") or self.names.is(method, "clear") or
-        self.names.is(method, "deinit");
-}
-
-/// Validates append_bytes without moving the source slice, the Go
-/// `checkStringBytesArg`.
-fn (self: &var Checker) check_string_bytes_arg(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 1 {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects 1 arg, got %d",
-            Arg::Str(method), Arg::Int(count)
-        );
-    }
-    let arg = arg_at(tree, args, 0) orelse return null;
-    var got = empty_name();
-    if try self.read_expr(tree, env, arg, &var got) |failed| {
-        return move failed;
-    }
-    if !same_name(got, self.common.bytes_name) {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects []u8, got %s",
-            Arg::Str(method), Arg::Str(got)
-        );
-    }
-    out.* = self.common.mem_error_void_name;
-    return null;
-}
-
-/// Validates append_string reading its source String without moving it, the
-/// Go `checkStringSourceArg`.
-fn (self: &var Checker) check_string_source_arg(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 1 {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects 1 arg, got %d",
-            Arg::Str(method), Arg::Int(count)
-        );
-    }
-    let arg = arg_at(tree, args, 0) orelse return null;
-    var got = empty_name();
-    if try self.read_expr(tree, env, arg, &var got) |failed| {
-        return move failed;
-    }
-    if !same_name(got, self.common.string_name) {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects String, got %s",
-            Arg::Str(method), Arg::Str(got)
-        );
-    }
-    out.* = self.common.mem_error_void_name;
-    return null;
-}
-
-/// Validates reserve without moving the count, the Go `checkStringReserveArg`.
-fn (self: &var Checker) check_string_reserve_arg(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 1 {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects 1 arg, got %d",
-            Arg::Str(method), Arg::Int(count)
-        );
-    }
-    let arg = arg_at(tree, args, 0) orelse return null;
-    var got = empty_name();
-    if try self.read_expr(tree, env, arg, &var got) |failed| {
-        return move failed;
-    }
-    if !same_name(got, self.common.i64_name) {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects i64, got %s",
-            Arg::Str(method), Arg::Str(got)
-        );
-    }
-    // reserve can be refused a size or run out of memory; truncate only
-    // refuses a bad length.
-    if self.names.is(method, "truncate") {
-        out.* = self.common.string_error_void_name;
-    } else {
-        out.* = self.common.string_grow_void_name;
-    }
-    return null;
-}
-
-/// Validates append_byte without moving the source value, the Go
-/// `checkStringByteArg`.
-fn (self: &var Checker) check_string_byte_arg(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    let count = arg_count(tree, args);
-    if count != 1 {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects 1 arg, got %d",
-            Arg::Str(method), Arg::Int(count)
-        );
-    }
-    let arg = arg_at(tree, args, 0) orelse return null;
-    var got = empty_name();
-    if try self.read_contextual_expr(tree, env, arg, self.common.u8_name, &var got) |failed| {
-        return move failed;
-    }
-    if !same_name(got, self.common.u8_name) {
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `String.%s` expects u8, got %s",
-            Arg::Str(method), Arg::Str(got)
-        );
-    }
-    out.* = self.common.mem_error_void_name;
-    return null;
-}

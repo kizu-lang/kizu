@@ -92,6 +92,21 @@ func deriveStructDeinit(owners map[string]bool, decl *StructDecl) *FunctionDecl 
 			})
 			continue
 		}
+		if success, ok := ErrorUnionSuccess(text); ok {
+			if !OwnerType(owners, success) {
+				continue
+			}
+			// An error union opens the same way, and its `if` names the
+			// failure arm too (SPEC §11.1); a failed field holds nothing.
+			statements = append(statements, &IfStmt{
+				Condition:   read,
+				Capture:     deriveCapture,
+				Consequence: block(cleanupCall(&IdentExpr{Name: deriveCapture})),
+				Alternative: &BlockStmt{},
+				ErrCapture:  deriveErrCapture,
+			})
+			continue
+		}
 		if !OwnerType(owners, text) {
 			continue
 		}
@@ -189,6 +204,10 @@ const (
 	// body is closed, so nothing of the author's can collide with them.
 	deriveReceiver = "self"
 	deriveCapture  = "held"
+	// deriveErrCapture names the error member the `else |err|` of an `E!T`
+	// field's open binds. The body has nothing to do with it: the field
+	// held no value, so there is nothing to release.
+	deriveErrCapture = "err"
 	// deriveAllocator names the allocator a release is handed. It is a
 	// parameter of every owner's deinit (ADR-0132), so the derived body has one
 	// to pass on without keeping a copy of it in the value.

@@ -3338,7 +3338,14 @@ static _Bool kizu_array_reserve_storage(
         return 1;
     }
     int64_t next = kizu_array_grow_capacity(needed, elem_size);
-    if (elem_size > 0 && next > INT64_MAX / elem_size) {
+    if (elem_size == 0) {
+        /* Elements of no size occupy no storage, and a realloc to zero bytes
+         * is a free on some allocators: the capacity grows, the buffer stays
+         * what it was, and every release below sees the same pointer. */
+        array->cap = next;
+        return 1;
+    }
+    if (next > INT64_MAX / elem_size) {
         return 0;
     }
     unsigned char *data = (unsigned char *)kizu_rt_realloc(
@@ -3357,7 +3364,9 @@ _Bool kizu_array_append(void *allocator, void *handle, const void *elem, int64_t
         !kizu_array_reserve_storage(allocator, array, array->len + 1, elem_size)) {
         return 0;
     }
-    memcpy(array->data + array->len * elem_size, elem, (size_t)elem_size);
+    if (elem_size > 0) {
+        memcpy(array->data + array->len * elem_size, elem, (size_t)elem_size);
+    }
     array->len += 1;
     return 1;
 }
@@ -3375,10 +3384,22 @@ _Bool kizu_array_append_bytes(
     if (length > INT64_MAX - array->len) {
         return 0;
     }
+    /* The bytes may be a view of this same array -- a string appended to
+     * itself -- and growing the storage moves them. Remember where they sit
+     * relative to the storage and find them again after the growth. */
+    int64_t inside = -1;
+    if (length > 0 && array->data &&
+        (const unsigned char *)bytes >= array->data &&
+        (const unsigned char *)bytes < array->data + array->len) {
+        inside = (const unsigned char *)bytes - array->data;
+    }
     if (!kizu_array_reserve_storage(allocator, array, array->len + length, 1)) {
         return 0;
     }
-    memcpy(array->data + array->len, bytes, (size_t)length);
+    if (inside >= 0) {
+        bytes = array->data + inside;
+    }
+    memmove(array->data + array->len, bytes, (size_t)length);
     array->len += length;
     return 1;
 }

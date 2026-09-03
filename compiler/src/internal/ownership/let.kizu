@@ -192,14 +192,30 @@ fn (self: &var Checker) arena_at_borrow_source(
     return null;
 }
 
-/// Refuses to store a `?T` whose payload owns memory or carries a view, the
-/// Go `rejectStoredOptional`. Inside the optional the payload is invisible
-/// to move and borrow tracking, so such a value lives only where it is
-/// consumed: a capture, an `orelse`, or a return path.
+/// Is the payload a `?T` or `E!T` spelling wraps, and which wrapper it is.
+pub struct WrappedPayload {
+    pub elem: Name,
+    pub error_union: bool
+}
+
+/// Refuses to store a `?T` or `E!T` whose payload owns memory or carries a
+/// view, the Go `rejectStoredOptional`. Inside the wrapper the payload is
+/// invisible to move and borrow tracking, so such a value lives only where
+/// it is consumed: a capture, an `orelse` / `catch` / `try`, or a return
+/// path. The two wrappers share the rule because they share the payload
+/// (SPEC §11.1).
 fn (self: &var Checker) reject_stored_optional(tree: &ast::Ast, type_name: Name) -> !?diagnostic::Diagnostic {
-    let elem = try self.names.optional_elem(type_name) orelse return null;
+    let wrapped = try self.wrapped_payload_elem(type_name) orelse return null;
+    let elem = wrapped.elem;
     if self.names.starts_with(elem, "&") or try self.view_carrying_type(elem) or
         try self.value_type_needs_consume(self.allocator, elem) {
+        if wrapped.error_union {
+            return try self.error1(
+                tree, ast::zero_span(),
+                "move error: error union `%s` must be consumed where it is produced (capture, catch, or try)",
+                Arg::Str(type_name)
+            );
+        }
         return try self.error1(
             tree, ast::zero_span(),
             "move error: optional `%s` must be consumed where it is produced (capture or orelse)",
@@ -207,6 +223,21 @@ fn (self: &var Checker) reject_stored_optional(tree: &ast::Ast, type_name: Name)
         );
     }
     return null;
+}
+
+/// Returns the payload type a `?T` or `E!T` spelling wraps, the Go
+/// `wrappedPayloadElem`. An error union around an optional (`E!?T`) reports
+/// the innermost payload: what its capture binds is the value, and the value
+/// is what carries the obligation.
+fn (self: &var Checker) wrapped_payload_elem(type_name: Name) -> !?WrappedPayload {
+    if try self.names.optional_elem(type_name) |elem| {
+        return WrappedPayload { elem: elem, error_union: false };
+    }
+    let parts = try self.names.error_union_parts(type_name) orelse return null;
+    if try self.names.optional_elem(parts.success) |elem| {
+        return WrappedPayload { elem: elem, error_union: true };
+    }
+    return WrappedPayload { elem: parts.success, error_union: true };
 }
 
 /// Runs the let recognizers that tie a binding to borrow-class views, the Go
@@ -228,13 +259,11 @@ fn (self: &var Checker) check_capture_let_stmt(
     if recognized {
         return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, elem, false);
     }
-    var view_source = self.scratch_binding;
     var found = false;
-    if try self.view_field_borrow_initializer(tree, env, statement.value, &var found, &var view_source) |failed| {
+    if try self.view_initializer(tree, env, statement.value, &var sources, &var found) |failed| {
         return move failed;
     }
     if found {
-        try sources.append(self.allocator, BorrowSource { target: view_source, field: empty_name() });
         return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, self.common.bytes_name, false);
     }
     handled.* = false;
@@ -290,28 +319,35 @@ fn (self: &var Checker) struct_capture_initializer(
     return null;
 }
 
-/// Recognizes reading a `[]u8` field out of a borrow-class value, the Go
-/// `viewFieldBorrowInitializer`: the copy is a view of the same backing, so
-/// the binding stays tied to the value it was read from.
-fn (self: &var Checker) view_field_borrow_initializer(
+/// Recognizes an initializer that yields a view still backed by a
+/// borrow-class binding — a view field read, a slice of a local view, a view
+/// read back through a reference, or a conditional yielding one — and
+/// resolves the bindings that keep it alive, the Go `viewInitializer`. The
+/// new binding ties to them so the view cannot outlive its storage.
+fn (self: &var Checker) view_initializer(
     tree: &var ast::Ast,
     env: ScopeHandle,
     expression: ast::Expression,
-    found: &var bool,
-    out: &var BindingHandle
+    sources: &var array::Array<BorrowSource>,
+    found: &var bool
 ) -> !?diagnostic::Diagnostic {
     found.* = false;
-    let field = field_expr(tree, expression) orelse return null;
-    if field.namespace {
+    var roots = array::new<BindingHandle>(self.allocator);
+    defer roots.deinit(self.allocator);
+    try self.borrow_class_view_roots(tree, env, expression, &var roots);
+    if roots.len() == 0 {
         return null;
     }
-    let root = try self.borrow_class_view_root(tree, env, expression) orelse return null;
     var ignored = empty_name();
     if try self.read_expr(tree, env, expression, &var ignored) |failed| {
         return move failed;
     }
+    var index = 0;
+    while roots.get(index) |root| {
+        index = index + 1;
+        try sources.append(self.allocator, BorrowSource { target: root, field: empty_name() });
+    }
     found.* = true;
-    out.* = root;
     return null;
 }
 
@@ -577,7 +613,7 @@ fn (self: &var Checker) check_tied_factory_call(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     if type_apply_expr(tree, call.callee) |apply| {
-        return self.check_type_apply_call_expr(tree, env, apply, call.args, out);
+        return self.check_type_apply_call_expr(tree, env, apply, call.args, true, out);
     }
     if ident_text(tree, call.callee) |text| {
         if self.lookup_text(tree, env, text) |value| {
@@ -759,11 +795,28 @@ fn (self: &var Checker) called_user_function(
         let function = self.function_named(name) orelse return null;
         return CalledFunction { name: name, function: function };
     }
-    // A generic call names the same declaration its static arguments
-    // instantiate. Reading through to it is what lets the tie recognizer see a
-    // generic factory, which ADR-0099 left closed for want of one.
+    // A generic call names the declaration its static arguments instantiate,
+    // and the recognizers read the instantiated signature: with `T` spelled
+    // out, a view or a tied allocator the call hands back is seen for what it
+    // is, as it would be for a direct call.
     if type_apply_expr(tree, callee) |apply| {
-        return self.called_user_function(tree, env, apply.callee);
+        var target = empty_type_apply_target();
+        if try self.type_apply_target(tree, apply, &var target) |failed| {
+            failed.deinit(self.allocator);
+            return null;
+        }
+        let function = self.function_named(target.name) orelse return null;
+        if self.static_param_count(function) == 0 {
+            return CalledFunction { name: target.name, function: function };
+        }
+        var subst = self.empty_subst();
+        defer subst.deinit(self.allocator);
+        if try self.generic_call_subst(tree, target.name, function, target.type_arg, &var subst) |failed| {
+            failed.deinit(self.allocator);
+            return CalledFunction { name: target.name, function: function };
+        }
+        let instantiated = try self.instantiate_function_info(function, &subst);
+        return CalledFunction { name: target.name, function: instantiated };
     }
     return null;
 }

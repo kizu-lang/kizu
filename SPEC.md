@@ -1125,6 +1125,11 @@ payload の階級は型が運びます: owner payload は capture / `orelse` の
 結果に消費義務が付き、view payload は view の借用規則にそのまま従い
 ます。owner / view を包んだ optional は「生まれた場所で消費」限定で、
 let / var への保存と引数渡しは copy element の optional だけができます。
+`orelse` / `catch` の既定値は payload が無いときだけ評価されるので、その中で
+名前付き owner を消費すること(`orelse move keep`、`orelse boxed.take(a)`)は
+できません: 片方の path でだけ消費されて、もう片方で解放されずに残るためです。
+既定値はその場で作るか(`orelse string::new(a)`)、両 path を capture の
+`if ... |name| { ... } else { ... }` で書きます。
 
 owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
 呼び出しが返す view payload は、さらに capture 限定です: capture は条件式が
@@ -1370,6 +1375,13 @@ marker が付くのは place から値が出る位置だけです。call の結�
 temporary は壊す place を持たないので付けません。method の receiver にも付けません
 —— receiver を consume するのは `deinit` の契約で、その語が既に見えています。
 copy 型の place に書くのは compile error です。手放していないためです。
+
+receiver を値で受ける `fn (self: T) name(...)` は、`deinit` でなければ receiver を
+consume しません。呼び出し側は値を持ち続けるので、body の `self` は `&T` と同じ
+借用です: field を move で取り出すこと、field や `self` を `deinit` すること、
+`move self` で返すことはどれも compile error です。consume する method は
+`deinit` だけで、その body だけが `self` を所有します(§14.4 の std 型は例外で、
+`Box.take` のように契約が SPEC にある method は署名から consume が導出されます)。
 
 marker は義務が place を離れる行を指します。そこは `errdefer` が退役する行でも
 あり(§6.3)、退役が source に現れる唯一の場所です。
@@ -2043,6 +2055,11 @@ unsafe ptr_write(dst, unsafe ptr_read(src));
 ```kizu
 extern "c" fn puts(s: ptr<const u8>) -> i32
 ```
+
+`extern "c" fn` の引数と戻り値は C が名指しできる型だけです: 整数、浮動小数、
+`bool`、`ptr<T>` / `ptr<const T>` / nullable raw pointer、戻り値の `void`。
+`[]u8`、borrow(`&T` / `&var T`)、owner、struct、error union は C 側に表現が
+無いので拒否します。byte 列は `ptr<const u8>` と `usize` の長さで渡します。
 
 ルール:
 

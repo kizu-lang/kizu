@@ -133,7 +133,10 @@ type Cleanup struct {
 	ExternABI  string
 	ExternName string
 	OnError    bool
-	Receiver   string
+	// Receiver is the receiver expression the cleanup statement was written
+	// with, which is how the ownership checker names a retired errdefer: one
+	// node per registration, so two registrations on one name stay apart.
+	Receiver ast.Expression
 }
 
 // FieldArg connects a struct field name to a value.

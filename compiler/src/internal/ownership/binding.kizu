@@ -41,6 +41,12 @@ pub struct Binding {
     pub mut_borrow: bool,
     pub active_borrows: i64,
     pub active_mut_borrows: i64,
+    /// reservations counts the method calls holding this value as their
+    /// `&var` receiver while their arguments are evaluated. Each is one of
+    /// active_borrows, so an argument cannot alias or consume the receiver,
+    /// but not a borrow the frame holds at an error exit inside the
+    /// arguments, where the call has not begun.
+    pub reservations: i64,
     pub field_borrows: map::Map<[]u8, i64>,
     pub field_mut_borrows: map::Map<[]u8, i64>,
     pub field_deinit: map::Map<[]u8, bool>,
@@ -49,6 +55,11 @@ pub struct Binding {
     pub handle_arena_id: i64,
     pub deinitialized: bool,
     pub consume_exempt: bool,
+    // owns_tied marks a capture that was handed its owner payload while the
+    // payload's views keep it tied to the container it came from: the
+    // binding owns the value (its `deinit` is its to call) but cannot move
+    // it out of the frame (SPEC §9).
+    pub owns_tied: bool,
     pub defer_cleanup: bool,
     pub decl_span: ast::Span,
     // field_owner and field_owner_name link a direct-field receiver
@@ -116,6 +127,7 @@ fn (self: &ScopeStore) blank_binding(id: i64, name: Name, type_name: Name) -> Bi
         mut_borrow: false,
         active_borrows: 0,
         active_mut_borrows: 0,
+        reservations: 0,
         field_borrows: map::new<[]u8, i64>(self.allocator),
         field_mut_borrows: map::new<[]u8, i64>(self.allocator),
         field_deinit: map::new<[]u8, bool>(self.allocator),
@@ -124,6 +136,7 @@ fn (self: &ScopeStore) blank_binding(id: i64, name: Name, type_name: Name) -> Bi
         handle_arena_id: 0,
         deinitialized: false,
         consume_exempt: false,
+        owns_tied: false,
         defer_cleanup: false,
         decl_span: ast::zero_span(),
         field_owner: null,
@@ -532,6 +545,17 @@ fn (self: &ScopeStore) scope_key_copy(scope: ScopeHandle, index: i64) -> !string
 
 fn (self: &ScopeStore) clone_binding(handle: BindingHandle) -> !Binding {
     let value = self.at(handle);
+    // Each copy is bound and covered before the next is made: a copy the
+    // allocator refuses must not leave the ones already made unreleased.
+    var borrow_targets = try value.borrow_targets.clone(self.allocator);
+    errdefer borrow_targets.deinit(self.allocator);
+    var field_borrows = try copy_int_map(self.allocator, &value.field_borrows);
+    errdefer field_borrows.deinit(self.allocator);
+    var field_mut_borrows = try copy_int_map(self.allocator, &value.field_mut_borrows);
+    errdefer field_mut_borrows.deinit(self.allocator);
+    var field_deinit = try copy_bool_map(self.allocator, &value.field_deinit);
+    errdefer field_deinit.deinit(self.allocator);
+    let field_arena_ids = try copy_int_map(self.allocator, &value.field_arena_ids);
     return Binding {
         id: value.id,
         name: value.name,
@@ -540,18 +564,20 @@ fn (self: &ScopeStore) clone_binding(handle: BindingHandle) -> !Binding {
         moved: value.moved,
         borrowed_param: value.borrowed_param,
         local_borrow: value.local_borrow,
-        borrow_targets: try value.borrow_targets.clone(self.allocator),
+        borrow_targets: move borrow_targets,
         mut_borrow: value.mut_borrow,
         active_borrows: value.active_borrows,
         active_mut_borrows: value.active_mut_borrows,
-        field_borrows: try copy_int_map(self.allocator, &value.field_borrows),
-        field_mut_borrows: try copy_int_map(self.allocator, &value.field_mut_borrows),
-        field_deinit: try copy_bool_map(self.allocator, &value.field_deinit),
-        field_arena_ids: try copy_int_map(self.allocator, &value.field_arena_ids),
+        reservations: value.reservations,
+        field_borrows: move field_borrows,
+        field_mut_borrows: move field_mut_borrows,
+        field_deinit: move field_deinit,
+        field_arena_ids: move field_arena_ids,
         arena_id: value.arena_id,
         handle_arena_id: value.handle_arena_id,
         deinitialized: value.deinitialized,
         consume_exempt: value.consume_exempt,
+        owns_tied: value.owns_tied,
         defer_cleanup: value.defer_cleanup,
         decl_span: value.decl_span,
         field_owner: value.field_owner,

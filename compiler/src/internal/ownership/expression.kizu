@@ -113,7 +113,7 @@ fn (self: &var Checker) read_control_expr(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     if if_expr(tree, expression) |value| {
-        return self.check_if_expr_value(tree, env, value, false, out);
+        return self.check_if_expr_value(tree, env, expression, value, false, out);
     }
     if is_match_expr(tree, expression) {
         return self.check_match_expr_value(tree, env, expression, false, out);
@@ -147,6 +147,7 @@ fn (self: &var Checker) read_orelse_guard_expr(
     guard: ast::OrelseGuardExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    let pending = self.pending_owner_temps.len();
     var cond_type = empty_name();
     if try self.read_expr(tree, env, guard.condition, &var cond_type) |failed| {
         return move failed;
@@ -154,21 +155,13 @@ fn (self: &var Checker) read_orelse_guard_expr(
     if try self.refuse_container_view_orelse(tree, env, cond_type, guard.condition) |failed| {
         return move failed;
     }
-    if return_stmt(tree, guard.exit) |exit| {
-        let cloned = try self.store.clone_scope(env);
-        if try self.check_return_stmt(tree, cloned, guard.exit, exit) |failed| {
-            return move failed;
-        }
+    if try self.check_no_pending_owner_temps(
+        tree, pending, "orelse", expression_span(tree, guard.condition), guard.condition
+    ) |failed| {
+        return move failed;
     }
-    if break_stmt(tree, guard.exit) |exit| {
-        if try self.check_loop_branch_label(tree, exit.label) |failed| {
-            return move failed;
-        }
-    }
-    if continue_stmt(tree, guard.exit) |exit| {
-        if try self.check_loop_branch_label(tree, exit.label) |failed| {
-            return move failed;
-        }
+    if try self.check_guard_exit(tree, env, guard.exit, pending) |failed| {
+        return move failed;
     }
     out.* = try self.names.optional_payload_name(cond_type);
     return null;
@@ -186,25 +179,18 @@ fn (self: &var Checker) read_catch_guard_expr(
     guard: ast::CatchGuardExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    let pending = self.pending_owner_temps.len();
     var cond_type = empty_name();
     if try self.read_expr(tree, env, guard.condition, &var cond_type) |failed| {
         return move failed;
     }
-    if return_stmt(tree, guard.exit) |exit| {
-        let cloned = try self.store.clone_scope(env);
-        if try self.check_return_stmt(tree, cloned, guard.exit, exit) |failed| {
-            return move failed;
-        }
+    if try self.check_no_pending_owner_temps(
+        tree, pending, "catch", expression_span(tree, guard.condition), guard.condition
+    ) |failed| {
+        return move failed;
     }
-    if break_stmt(tree, guard.exit) |exit| {
-        if try self.check_loop_branch_label(tree, exit.label) |failed| {
-            return move failed;
-        }
-    }
-    if continue_stmt(tree, guard.exit) |exit| {
-        if try self.check_loop_branch_label(tree, exit.label) |failed| {
-            return move failed;
-        }
+    if try self.check_guard_exit(tree, env, guard.exit, pending) |failed| {
+        return move failed;
     }
     if try self.names.error_union_parts(cond_type) |parts| {
         out.* = parts.success;
@@ -420,6 +406,17 @@ fn (self: &var Checker) move_expr(
     if try self.move_place_expr(tree, env, place, &var handed_off, out) |failed| {
         return move failed;
     }
+    if handed_off {
+        // The value has left its place and reached nothing yet: until the
+        // call or literal takes it, only this statement holds it. A whole
+        // binding keeps its storage until then, so an exit can still release
+        // it; a field taken out of a value has no cleanup of its own left.
+        if self.moved_place_binding(tree, env, place) |value| {
+            try self.pending_moved_places.append(self.allocator, value);
+        } else {
+            try self.pending_owner_temps.append(self.allocator, place);
+        }
+    }
     if has_marker and !handed_off {
         if !try self.is_copy_place(tree, env, place) {
             let rendered = try self.names.intern_expression(tree, place);
@@ -499,7 +496,7 @@ fn (self: &var Checker) move_place_expr(
     }
     let ident = ident_expr(tree, expression) orelse return self.move_non_ident_expr(tree, env, expression, out);
     if self.lookup_text(tree, env, ident.name) |value| {
-        return self.move_bound_ident(tree, env, ident, value, handed_off, out);
+        return self.move_bound_ident(tree, env, ident, value, self.returned_view(expression), handed_off, out);
     }
     if text_equals(tree, ident.name, "void") {
         return try self.error0(ident.span, "move error: void is not a value");
@@ -521,6 +518,7 @@ fn (self: &var Checker) move_bound_ident(
     env: ScopeHandle,
     ident: ast::IdentExpr,
     value: BindingHandle,
+    returned: bool,
     handed_off: &var bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
@@ -530,7 +528,7 @@ fn (self: &var Checker) move_bound_ident(
     if self.binding(value).moved {
         return try self.error1(tree, ident.span, "move error: moved value `%s` was used", Arg::Text(ident.name));
     }
-    if self.binding(value).borrowed_param {
+    if self.binding(value).borrowed_param and !returned {
         return try self.error1(tree, ident.span, "borrow error: borrowed value `%s` cannot escape", Arg::Text(ident.name));
     }
     if self.tied_struct_return(self.binding(value).type_name) and self.has_borrow_targets(value) {
@@ -547,6 +545,15 @@ fn (self: &var Checker) move_bound_ident(
             Arg::Text(ident.name)
         );
     }
+    let type_name = self.binding(value).type_name;
+    out.* = type_name;
+    if try self.is_copy_type(type_name) {
+        // A copy leaves nothing behind and carries no memory of its own: a
+        // handle into a tied arena is read like any plain value, and what
+        // cannot leave the frame is the arena it names
+        // (check_return_value_escapes).
+        return null;
+    }
     if self.alloc_tied(value) {
         return try self.error1(
             tree, ident.span,
@@ -554,8 +561,7 @@ fn (self: &var Checker) move_bound_ident(
             Arg::Text(ident.name)
         );
     }
-    let type_name = self.binding(value).type_name;
-    if self.store.has_any_borrow(value) and !try self.is_copy_type(type_name) {
+    if self.store.has_any_borrow(value) {
         return try self.error1(
             tree, ident.span, "borrow error: value `%s` cannot be moved while borrowed", Arg::Text(ident.name)
         );
@@ -567,11 +573,11 @@ fn (self: &var Checker) move_bound_ident(
             Arg::Text(ident.name), Arg::Str(field), Arg::Text(ident.name)
         );
     }
-    out.* = type_name;
-    if try self.is_copy_type(type_name) {
-        return null;
+    if try self.check_lazy_default_consume(tree, self.binding(value).name, "handed off", ident.span) |failed| {
+        return move failed;
     }
     try self.store.set_moved(value, true);
+    try self.release_consumed_borrows(value);
     handed_off.* = true;
     return null;
 }
@@ -584,7 +590,7 @@ fn (self: &var Checker) move_non_ident_expr(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     if deref_expr(tree, expression) |deref| {
-        return self.move_deref_expr(tree, env, deref, out);
+        return self.move_deref_expr(tree, env, expression, deref, out);
     }
     if try self.is_arena_at_expr(tree, env, expression) {
         if try self.read_expr(tree, env, expression, out) |failed| {
@@ -605,12 +611,48 @@ fn (self: &var Checker) move_non_ident_expr(
         return self.move_field_expr(tree, env, field, out);
     }
     if if_expr(tree, expression) |value| {
-        return self.check_if_expr_value(tree, env, value, true, out);
+        return self.check_if_expr_value(tree, env, expression, value, true, out);
     }
     if is_match_expr(tree, expression) {
         return self.check_match_expr_value(tree, env, expression, true, out);
     }
-    return self.read_expr(tree, env, expression, out);
+    if try self.read_expr(tree, env, expression, out) |failed| {
+        return move failed;
+    }
+    return self.refuse_view_escape(tree, env, expression, out.*);
+}
+
+/// Rejects handing a view still backed by a local borrow to a consumer that
+/// may keep it, as moving the borrow binding itself is refused, the Go
+/// `refuseViewEscape`: the storage the view points into ends with the frame.
+fn (self: &var Checker) refuse_view_escape(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    type_name: Name
+) -> !?diagnostic::Diagnostic {
+    if !self.names.is(type_name, "[]u8") or self.returned_view(expression) {
+        return null;
+    }
+    let root = try self.borrow_class_view_root(tree, env, expression) orelse return null;
+    return try self.error1(
+        tree, expression_span(tree, expression),
+        "borrow error: borrowed value `%s` cannot escape",
+        Arg::Str(self.binding(root).name)
+    );
+}
+
+/// Reports whether expression is one the return being checked hands out on
+/// its parameter ties, the Go `c.returnedViews[expr]`.
+fn (self: &Checker) returned_view(expression: ast::Expression) -> bool {
+    var index = 0;
+    while self.returned_views.get(index) |known| {
+        if known.node == expression.node {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 /// Merges possible branch moves from an if expression, the Go
@@ -618,22 +660,29 @@ fn (self: &var Checker) move_non_ident_expr(
 fn (self: &var Checker) check_if_expr_value(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    producer: ?ast::Expression,
     statement: ast::IfStmt,
     move_tail: bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    // One branch runs: what the first produces is not live in the second,
+    // and what the expression as a whole hands on is one value.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var ignored = empty_name();
     if try self.read_expr(tree, env, statement.condition, &var ignored) |failed| {
         return move failed;
     }
     let alternative = statement.alternative orelse
         return try self.error0(ast::zero_span(), "move error: if expression requires else branch");
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     let left = try self.store.clone_scope(env);
     var left_type = empty_name();
     let left_child = try self.store.child(left);
     if try self.check_value_block(tree, left_child, statement.consequence, move_tail, &var left_type) |failed| {
         return move failed;
     }
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     let right = try self.store.clone_scope(env);
     var right_type = empty_name();
     let right_child = try self.store.child(right);
@@ -646,6 +695,7 @@ fn (self: &var Checker) check_if_expr_value(
             Arg::Str(left_type), Arg::Str(right_type)
         );
     }
+    try self.settle_owner_temps(pending, places, left_type, producer);
     try self.store.merge_moved_from(env, left);
     try self.store.merge_moved_from(env, right);
     out.* = left_type;
@@ -662,6 +712,11 @@ fn (self: &var Checker) check_match_expr_value(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let head = match_expr_head(tree, expression) orelse return null;
+    // One arm runs: what the value produced is held by the arm that binds
+    // it, what one arm produces is not live in the next, and what the
+    // expression as a whole hands on is one value.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var value_type = empty_name();
     if try self.read_expr(tree, env, head.value, &var value_type) |failed| {
         return move failed;
@@ -679,6 +734,7 @@ fn (self: &var Checker) check_match_expr_value(
     var result = empty_name();
     var index = 0;
     while arms.get(index) |arm| {
+        try self.settle_owner_temps(pending, places, self.common.void_name, null);
         var got = empty_name();
         if try self.check_match_expr_arm_value(tree, env, arm, tags, owned_match, span, move_tail, &var got) |failed| {
             return move failed;
@@ -695,6 +751,7 @@ fn (self: &var Checker) check_match_expr_value(
         }
         index = index + 1;
     }
+    try self.settle_owner_temps(pending, places, result, expression);
     out.* = result;
     return null;
 }
@@ -767,8 +824,15 @@ fn (self: &var Checker) check_block_value_statements(
     defer defers.deinit(self.allocator);
     let binding_mark = self.store.id_mark();
     let last_index = block_len(tree, block) - 1;
+    // Each statement starts from what the enclosing expression held pending,
+    // as in check_block_statements; the tail value is what the block itself
+    // hands on.
+    let pending_mark = self.pending_owner_temps.len();
+    let places_mark = self.pending_moved_places.len();
     var index = 0;
     while index < last_index {
+        self.truncate_owner_temps(pending_mark);
+        self.truncate_moved_places(places_mark);
         let statement = block_statement_at(tree, block, index) orelse break;
         if defer_stmt(tree, statement) |deferred| {
             if try self.check_defer_stmt(tree, env, deferred) |failed| {
@@ -793,6 +857,8 @@ fn (self: &var Checker) check_block_value_statements(
         try self.release_last_use_borrows(env, index, &last_uses);
         index = index + 1;
     }
+    self.truncate_owner_temps(pending_mark);
+    self.truncate_moved_places(places_mark);
     let last = block_statement_at(tree, block, last_index) orelse return null;
     if try self.check_value_stmt(tree, env, last, move_tail, out) |failed| {
         return move failed;
@@ -822,7 +888,10 @@ fn (self: &var Checker) check_value_stmt(
         return self.read_expr(tree, env, value.expr, out);
     }
     if if_stmt(tree, statement) |value| {
-        return self.check_if_expr_value(tree, env, value, move_tail, out);
+        // A statement-form `if` ending a value block has no expression node
+        // of its own to stand as the producer; its value is what the block
+        // hands on, and the block's reader records that.
+        return self.check_if_expr_value(tree, env, null, value, move_tail, out);
     }
     if is_match_stmt(tree, statement) {
         return self.check_match_expr_value_stmt(tree, env, statement, move_tail, out);
@@ -885,6 +954,7 @@ fn (self: &var Checker) check_match_expr_value_stmt(
 fn (self: &var Checker) move_deref_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    expression: ast::Expression,
     deref: ast::DerefExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
@@ -899,7 +969,7 @@ fn (self: &var Checker) move_deref_expr(
         return move failed;
     }
     if try self.is_copy_type(out.*) {
-        return null;
+        return self.refuse_view_escape(tree, env, expression, out.*);
     }
     let rendered = try self.names.intern_expression(tree, deref.receiver);
     return try self.error1(
@@ -957,19 +1027,79 @@ fn (self: &var Checker) read_orelse_default(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let elem = try self.names.optional_payload_name(left);
-    var ignored = empty_name();
-    if try self.value_type_needs_consume(self.allocator, elem) {
-        if try self.move_expr(tree, env, right, &var ignored) |failed| {
-            return move failed;
-        }
-        out.* = elem;
-        return null;
-    }
-    if try self.read_expr(tree, env, right, &var ignored) |failed| {
+    let owner = try self.value_type_needs_consume(self.allocator, elem);
+    let keyword = try self.names.intern("orelse");
+    if try self.read_lazy_default(tree, env, keyword, right, owner) |failed| {
         return move failed;
     }
     out.* = elem;
     return null;
+}
+
+/// Reads the default of an `orelse` or `catch`, which runs only when the
+/// payload is absent, the Go `readLazyDefault`. An owner payload makes the
+/// default a competing owner producer, so it is moved rather than aliased;
+/// either way a named owner may not be consumed inside it (lazy_default).
+fn (self: &var Checker) read_lazy_default(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    keyword: Name,
+    right: ast::Expression,
+    owner: bool
+) -> !?diagnostic::Diagnostic {
+    let saved = self.lazy_default;
+    self.lazy_default = keyword;
+    var ignored = empty_name();
+    if owner {
+        if try self.move_expr(tree, env, right, &var ignored) |failed| {
+            self.lazy_default = saved;
+            return move failed;
+        }
+        self.lazy_default = saved;
+        return null;
+    }
+    if try self.read_expr(tree, env, right, &var ignored) |failed| {
+        self.lazy_default = saved;
+        return move failed;
+    }
+    self.lazy_default = saved;
+    return null;
+}
+
+/// Refuses consuming a named owner inside a default, the Go
+/// `checkLazyDefaultConsume`: the default runs only when the payload is
+/// absent, so the value would be consumed on one path and left unreleased
+/// on the other, and the checker cannot tell the paths apart.
+fn (self: &var Checker) check_lazy_default_consume(
+    tree: &ast::Ast,
+    name: Name,
+    verb: []u8,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    if is_empty(self.lazy_default) {
+        return null;
+    }
+    let verb_name = try self.names.intern(verb);
+    var failed = try self.error3(
+        tree, span, "move error: `%s` cannot be %s inside the `%s` default",
+        Arg::Str(name), Arg::Str(verb_name), Arg::Str(self.lazy_default)
+    );
+    errdefer failed.deinit(self.allocator);
+    let note = try self.names.format(
+        "the default runs only when the payload is absent, so `%s` would be %s on one path and left unreleased on the other",
+        name, verb_name, empty_name()
+    );
+    let note_text = name_text(&self.names, note);
+    let note_bytes = note_text.as_bytes();
+    try failed.with_note(self.allocator, note_bytes);
+    let help = try self.names.format(
+        "keep `%s` out of the default and write both paths with `if ... |name| { %s.deinit(...); ... } else { ... }`, or build the default in place",
+        name, name, empty_name()
+    );
+    let help_text = name_text(&self.names, help);
+    let help_bytes = help_text.as_bytes();
+    try failed.with_help(self.allocator, help_bytes);
+    return move failed;
 }
 
 /// Reads the default arm of `catch`, the Go `readCatchDefault`. The default
@@ -987,15 +1117,9 @@ fn (self: &var Checker) read_catch_default(
     if try self.names.error_union_parts(left) |parts| {
         elem = parts.success;
     }
-    var ignored = empty_name();
-    if try self.value_type_needs_consume(self.allocator, elem) {
-        if try self.move_expr(tree, env, right, &var ignored) |failed| {
-            return move failed;
-        }
-        out.* = elem;
-        return null;
-    }
-    if try self.read_expr(tree, env, right, &var ignored) |failed| {
+    let owner = try self.value_type_needs_consume(self.allocator, elem);
+    let keyword = try self.names.intern("catch");
+    if try self.read_lazy_default(tree, env, keyword, right, owner) |failed| {
         return move failed;
     }
     out.* = elem;
@@ -1011,6 +1135,169 @@ fn is_boolean_binary_operator(tree: &ast::Ast, operator: ast::Text) -> bool {
 }
 
 /// Reads a !T expression and returns T, the Go `readTryExpr`.
+/// Reports whether a value of this type, held by nothing but the expression
+/// that produced it, is one an early exit would drop, the Go
+/// `producesOwnerTemp`: an owner, bare or inside the `?T` / `E!T` wrapper its
+/// producer returns.
+fn (self: &var Checker) produces_owner_temp(type_name: Name) -> !bool {
+    var elem = type_name;
+    if try self.wrapped_payload_elem(type_name) |wrapped| {
+        elem = wrapped.elem;
+    }
+    return self.value_type_needs_consume(self.allocator, elem);
+}
+
+/// Refuses an exit that can be taken while the enclosing statement still
+/// holds owners nothing has bound, the Go `checkNoPendingOwnerTemps`: the
+/// exit would drop them, and the value's own allocator is not written where
+/// the checker could release them. Binding the value first gives it a name
+/// an `errdefer` can cover. The exit's own operand is what it unwraps and
+/// hands on, not something it drops; it is in the list when the expression
+/// is read more than once.
+fn (self: &var Checker) check_no_pending_owner_temps(
+    tree: &ast::Ast,
+    pending: i64,
+    exit: []u8,
+    span: ast::Span,
+    own: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var index = self.temps_base;
+    while index < pending {
+        let producer = self.pending_owner_temps.get_or_panic(index);
+        index = index + 1;
+        if producer.node == own.node {
+            continue;
+        }
+        let rendered = try self.names.intern_expression(tree, producer);
+        let spelling = try self.names.intern(exit);
+        return try self.error2(
+            tree, span,
+            "move error: the owner `%s` produced earlier in this statement would leak on this `%s` exit; bind it with `let` and register `errdefer` before it",
+            Arg::Str(rendered), Arg::Str(spelling)
+        );
+    }
+    return null;
+}
+
+/// Records that a call or literal took every owner its operands handed it
+/// -- the temporaries and the places moved since it began -- and that its
+/// own result is what stays pending when that result owns something, the Go
+/// `settleOwnerTemps`. A statement form settles with no producer.
+fn (self: &var Checker) settle_owner_temps(
+    pending: i64,
+    places: i64,
+    type_name: Name,
+    producer: ?ast::Expression
+) -> !void {
+    self.truncate_owner_temps(pending);
+    self.truncate_moved_places(places);
+    if producer |node| {
+        if try self.produces_owner_temp(type_name) {
+            try self.pending_owner_temps.append(self.allocator, node);
+        }
+    }
+    return;
+}
+
+/// Drops the pending owner producers past length, the Go slice truncation.
+fn (self: &var Checker) truncate_owner_temps(length: i64) -> void {
+    while self.pending_owner_temps.len() > length {
+        let _ = self.pending_owner_temps.pop();
+    }
+    return;
+}
+
+/// Drops the pending moved places past length, the Go slice truncation.
+fn (self: &var Checker) truncate_moved_places(length: i64) -> void {
+    while self.pending_moved_places.len() > length {
+        let _ = self.pending_moved_places.pop();
+    }
+    return;
+}
+
+/// Returns the binding a hand-off took a whole value out of, the Go
+/// `movedPlaceBinding`. A field path or a temporary is not one: nothing but
+/// the statement holds what left them.
+fn (self: &Checker) moved_place_binding(tree: &ast::Ast, env: ScopeHandle, place: ast::Expression) -> ?BindingHandle {
+    let value = self.lookup_ident(tree, env, place) orelse return null;
+    if !self.binding(value).moved {
+        return null;
+    }
+    return value;
+}
+
+/// Marks the places this statement has moved out of as held (moved false)
+/// or handed off (moved true), the two halves of the Go
+/// `withPendingPlacesLive`. Their storage is untouched until the call or
+/// literal that takes them runs, so an exit before that point leaves the
+/// value where it was: a cleanup covering it releases it, and an uncovered
+/// one is the leak the check reports.
+fn (self: &var Checker) set_pending_places_moved(moved: bool) -> !void {
+    var index = self.places_base;
+    while index < self.pending_moved_places.len() {
+        let value = self.pending_moved_places.get_or_panic(index);
+        index = index + 1;
+        try self.store.set_moved(value, moved);
+    }
+    return;
+}
+
+/// Checks the exit an `orelse` / `catch` guard takes, the Go
+/// `checkGuardExit`: a return, or a branch out of a loop. It is taken in the
+/// middle of a statement, so the places the statement has moved out of are
+/// still held on that path.
+fn (self: &var Checker) check_guard_exit(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    exit: ast::Statement,
+    pending: i64
+) -> !?diagnostic::Diagnostic {
+    // On the exit path the condition produced nothing to keep -- the guard
+    // is taken because it did not -- so what it added is not pending there.
+    // It is once the guard falls through, so it comes back after.
+    var kept = array::new<ast::Expression>(self.allocator);
+    defer kept.deinit(self.allocator);
+    while self.pending_owner_temps.len() > pending {
+        let producer = self.pending_owner_temps.pop() orelse break;
+        try kept.append(self.allocator, producer);
+    }
+    if try self.check_guard_exit_live(tree, env, exit) |failed| {
+        return move failed;
+    }
+    while kept.pop() |producer| {
+        try self.pending_owner_temps.append(self.allocator, producer);
+    }
+    return null;
+}
+
+/// Is the exit check itself, with the statement's moved places counted as
+/// still held for its duration.
+fn (self: &var Checker) check_guard_exit_live(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    exit: ast::Statement
+) -> !?diagnostic::Diagnostic {
+    try self.set_pending_places_moved(false);
+    if return_stmt(tree, exit) |value| {
+        let cloned = try self.store.clone_scope(env);
+        if try self.check_return_stmt(tree, cloned, exit, value) |failed| {
+            return move failed;
+        }
+    }
+    if break_stmt(tree, exit) |value| {
+        if try self.check_loop_branch_label(tree, env, LeakExitKind::Break, value.label) |failed| {
+            return move failed;
+        }
+    }
+    if continue_stmt(tree, exit) |value| {
+        if try self.check_loop_branch_label(tree, env, LeakExitKind::Continue, value.label) |failed| {
+            return move failed;
+        }
+    }
+    try self.set_pending_places_moved(true);
+    return null;
+}
+
 fn (self: &var Checker) read_try_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1018,28 +1305,40 @@ fn (self: &var Checker) read_try_expr(
     tried: ast::TryExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    // What was pending before the operand is what the error exit drops; the
+    // operand's own result is what the try unwraps and hands on.
+    let pending = self.pending_owner_temps.len();
     var got = empty_name();
     if try self.read_expr(tree, env, tried.value, &var got) |failed| {
         return move failed;
     }
     let parts = try self.names.error_union_parts(got) orelse
         return try self.error1(tree, ast::zero_span(), "move error: try expects !T, got %s", Arg::Str(got));
+    if try self.check_no_pending_owner_temps(
+        tree, pending, "try", expression_span(tree, expression), tried.value
+    ) |failed| {
+        return move failed;
+    }
     // A try can return early through the error path, which runs any active
     // errdefer cleanups. Their receivers must still be valid at this point,
     // except the ones a move has retired.
-    var retired = array::new<Name>(self.allocator);
+    // The places this statement has moved out of are still held on that
+    // path (the Go `withPendingPlacesLive`).
+    try self.set_pending_places_moved(false);
+    var retired = array::new<ast::Expression>(self.allocator);
     errdefer retired.deinit(self.allocator);
     if try self.validate_err_defer_receivers(tree, env, &var retired) |failed| {
         retired.deinit(self.allocator);
         return move failed;
     }
-    try self.result.try_retired_err_defers.append(self.allocator, RetiredTry { node: expression.node, names: move retired });
+    try self.result.try_retired_err_defers.append(self.allocator, RetiredTry { node: expression.node, receivers: move retired });
     // The same early exit must not leak a live owner: every owner must be
     // consumed or covered by a defer / errdefer cleanup before the try.
     let exit = LeakExit { kind: LeakExitKind::Try, span: expression_span(tree, expression) };
     if try self.check_owners_consumed(tree, env, 0, exit) |failed| {
         return move failed;
     }
+    try self.set_pending_places_moved(true);
     out.* = parts.success;
     return null;
 }
@@ -1099,6 +1398,8 @@ fn (self: &var Checker) read_struct_literal_expr(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let head = struct_literal_head(tree, expression) orelse return null;
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var ignored = empty_name();
     var index = 0;
     while struct_literal_field_at(tree, expression, index) |field| {
@@ -1108,6 +1409,7 @@ fn (self: &var Checker) read_struct_literal_expr(
         index = index + 1;
     }
     out.* = try self.names.intern_text(tree, head.type_name);
+    try self.settle_owner_temps(pending, places, out.*, expression);
     return null;
 }
 
@@ -1120,6 +1422,8 @@ fn (self: &var Checker) move_struct_literal_expr(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let head = struct_literal_head(tree, expression) orelse return null;
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var ignored = empty_name();
     var index = 0;
     while struct_literal_field_at(tree, expression, index) |field| {
@@ -1129,5 +1433,6 @@ fn (self: &var Checker) move_struct_literal_expr(
         index = index + 1;
     }
     out.* = try self.names.intern_text(tree, head.type_name);
+    try self.settle_owner_temps(pending, places, out.*, expression);
     return null;
 }

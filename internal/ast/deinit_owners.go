@@ -84,12 +84,29 @@ func declaredHolder(owners map[string]bool, decl Decl) (string, bool) {
 }
 
 // holdsOwner reports whether a field or payload type carries an obligation.
-// `?T` carries the element's, conditionally (ADR-0125).
+// `?T` and `E!T` carry the payload's, conditionally (ADR-0125).
 func holdsOwner(owners map[string]bool, text string) bool {
 	if elem, ok := typ.OptionalElem(text); ok {
 		return OwnerType(owners, elem)
 	}
+	if success, ok := ErrorUnionSuccess(text); ok {
+		return OwnerType(owners, success)
+	}
 	return OwnerType(owners, text)
+}
+
+// ErrorUnionSuccess returns the success type an `E!T` or `!T` spelling
+// wraps, and whether the spelling is one.
+func ErrorUnionSuccess(text string) (string, bool) {
+	parsed, err := typ.Parse(text)
+	if err != nil {
+		return "", false
+	}
+	_, success, ok := typ.ErrorUnionParts(parsed)
+	if !ok {
+		return "", false
+	}
+	return typ.Text(success), true
 }
 
 // OwnerType reports whether values of typeName carry a deinit contract under a

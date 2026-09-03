@@ -1,0 +1,33 @@
+import std::mem;
+
+fn maybe(present: bool) -> ?i64 {
+    if present {
+        return 7;
+    }
+    return null;
+}
+
+// `Box.take` consumes its receiver without a `move` marker. The default runs
+// only when `maybe` yields nothing, so `boxed` would be consumed on one path
+// and left unreleased on the other.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let boxed = try mem::box<i64>(allocator, 3);
+    errdefer boxed.deinit(allocator);
+    let picked = maybe(true) orelse boxed.take(allocator);
+    print(picked);
+    return;
+}
+
+// check-fails
+// features: orelse ownership std-box
+// error: `boxed` cannot be consumed inside the `orelse` default
+
+// check
+// load:
+// fn maybe(present: bool) -> ?i64 { if present { return 7; } return null; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let boxed = try std::mem::box<i64>(allocator, 3); errdefer boxed.deinit(allocator); let picked = (maybe(true) orelse boxed.take(allocator)); print(picked); return; }
+// check:
+// 15:21-15:29 move error: `boxed` cannot be consumed inside the `orelse` default
+//   note: the default runs only when the payload is absent, so `boxed` would be consumed on one path and left unreleased on the other
+//   help: keep `boxed` out of the default and write both paths with `if ... |name| { boxed.deinit(...); ... } else { ... }`, or build the default in place

@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"sort"
 	"strconv"
 	"strings"
@@ -835,6 +836,9 @@ func validateHostFunctionSignature(
 	if err := validateHostFunctionABI(fn); err != nil {
 		return err
 	}
+	if fn.ExternABI == "c" {
+		return validateCHostFunctionTypes(fn, params, ret)
+	}
 	if fn.ExternABI != "browser" && fn.ExportABI != "browser" {
 		return nil
 	}
@@ -842,6 +846,57 @@ func validateHostFunctionSignature(
 		return err
 	}
 	return validateBrowserHostFunctionTypes(fn, params, ret)
+}
+
+// validateCHostFunctionTypes limits a C function's boundary to what C can
+// name: integers, floats, bool, and raw pointers. A view, a borrow, an owner,
+// a struct, or an error union has no C representation; passing one hands C
+// the address of something it cannot read, and taking one back hands Kizu a
+// value C never built.
+func validateCHostFunctionTypes(
+	fn ast.FunctionSignature,
+	params []Type,
+	ret Type,
+) error {
+	for index, param := range params {
+		spelled := string(param)
+		if fn.Params[index].MutBorrow {
+			spelled = "&var " + spelled
+		} else if fn.Params[index].Borrow {
+			spelled = "&" + spelled
+		}
+		if fn.Params[index].Borrow || fn.Params[index].MutBorrow {
+			return cHostTypeError(fmt.Sprintf(
+				"C function `%s` parameter %d is a borrow (`%s`), which C cannot receive",
+				fn.Name, index+1, spelled))
+		}
+		if cHostScalar(param) {
+			continue
+		}
+		return cHostTypeError(fmt.Sprintf(
+			"C function `%s` parameter %d has type `%s`, which C cannot receive",
+			fn.Name, index+1, spelled))
+	}
+	if ret != typeVoid && !cHostScalar(ret) {
+		return cHostTypeError(fmt.Sprintf(
+			"C function `%s` returns `%s`, which C cannot produce", fn.Name, ret))
+	}
+	return nil
+}
+
+// cHostTypeError spells a C boundary refusal with what C can carry and how
+// to hand it the value.
+func cHostTypeError(message string) error {
+	return diag.FromText(diag.SeverityError, ast.Span{}, "type error: "+message).
+		WithNote("a C function passes only what C can name: an integer, a float, `bool`," +
+			" `ptr<T>`, `ptr<const T>`, or a nullable pointer").
+		WithHelp("spell the value as C sees it: `ptr<const u8>` with a `usize` length" +
+			" for bytes, `ptr<T>` for a value C reads or writes in place")
+}
+
+// cHostScalar reports whether value has one C representation.
+func cHostScalar(value Type) bool {
+	return browserHostScalar(value) || value == "f32" || value == "f64"
 }
 
 // validateHostFunctionABI accepts only the host boundaries the compiler and

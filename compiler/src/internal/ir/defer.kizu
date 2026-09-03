@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import compiler::internal::typ;
+import std::arena;
 import std::array;
 
 // Mechanical port of internal/ir/defer.go: the lexical cleanup frames, the
@@ -48,7 +49,7 @@ fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Exp
         return move failed;
     }
     cleanup.on_error = on_error;
-    cleanup.receiver = try self.cleanup_receiver_name(tree, expression);
+    cleanup.receiver = cleanup_receiver(tree, expression);
     let frame = self.defer_frames.len() - 1;
     if self.defer_frames.at_mut(frame) |entries| {
         try entries.append(allocator, cleanup);
@@ -56,14 +57,13 @@ fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Exp
     return null;
 }
 
-/// Reads the local a cleanup call consumes, the Go `cleanupReceiverName`.
-/// The shape is the one `cleanup_from_expr` accepts, so anything else has
-/// already failed there.
-fn (self: &var Lowerer) cleanup_receiver_name(tree: &ast::Ast, expression: ast::Expression) -> !Name {
-    let call = ownership::call_expr(tree, expression) orelse return empty_name();
-    let field = ownership::field_expr(tree, call.callee) orelse return empty_name();
-    let ident = ownership::ident_expr(tree, field.receiver) orelse return empty_name();
-    return self.text_name(tree, ident.name);
+/// Reads the receiver expression a cleanup call consumes, the Go
+/// `cleanupReceiver`. The shape is the one `cleanup_from_expr` accepts, so
+/// anything else has already failed there.
+fn cleanup_receiver(tree: &ast::Ast, expression: ast::Expression) -> ?arena::Handle<ast::ExpressionNode> {
+    let call = ownership::call_expr(tree, expression) orelse return null;
+    let field = ownership::field_expr(tree, call.callee) orelse return null;
+    return field.receiver.node;
 }
 
 /// Converts the narrow v0 defer expression into a void cleanup, the Go
@@ -105,6 +105,11 @@ struct ContainerCleanup {
     name: []u8,
     shallow_op: Op,
     type_arg: Name,
+    // The type argument whose values the container holds and would have to
+    // release: the element for an array, box, or arena, the value for a map.
+    // type_arg spells the whole instantiation, which for a map is `K, V` and
+    // names no type at all.
+    owner_arg: Name,
     // Whether the runtime op takes the allocator the release names. Every
     // container header is now the value, and none of them keeps an allocator,
     // so every op is handed one; the field is what says a container's release
@@ -120,14 +125,17 @@ fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?Containe
             name: "std::array::Array",
             shallow_op: Op::ArrayDeinit,
             type_arg: elem,
+            owner_arg: elem,
             shallow_names_allocator: true
         };
     }
-    if try self.map_static_args(receiver_type) |map_args| {
+    var map_key = empty_name();
+    if try self.map_key_value_type(receiver_type, &var map_key) |value| {
         return ContainerCleanup {
             name: "std::map::Map",
             shallow_op: Op::MapDeinit,
-            type_arg: map_args,
+            type_arg: try self.module.names.joined(map_key, ", ", value),
+            owner_arg: value,
             shallow_names_allocator: true
         };
     }
@@ -136,6 +144,7 @@ fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?Containe
             name: "std::mem::Box",
             shallow_op: Op::BoxDeinit,
             type_arg: elem,
+            owner_arg: elem,
             shallow_names_allocator: true
         };
     }
@@ -145,6 +154,7 @@ fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?Containe
             name: "std::arena::Arena",
             shallow_op: Op::ArenaDeinit,
             type_arg: elem,
+            owner_arg: elem,
             shallow_names_allocator: true
         };
     }
@@ -162,7 +172,7 @@ fn cleanup_of(op: Op, operand: Name, receiver: Value, allocator: Value) -> Clean
         extern_abi: empty_name(),
         extern_name: empty_name(),
         on_error: false,
-        receiver: empty_name()
+        receiver: null
     };
 }
 
@@ -189,7 +199,7 @@ fn (self: &var Lowerer) cleanup_from_method(
             // op: the cleanup calls its instance exactly like a direct call
             // would. Plain contents have no loop to run, so they keep the
             // runtime op.
-            if !self.is_owner_type(container.type_arg) {
+            if !self.is_owner_type(container.owner_arg) {
                 var carried = empty_value();
                 if container.shallow_names_allocator {
                     carried = allocator;
@@ -299,11 +309,22 @@ union CleanupExit {
 
 /// Reports whether the ownership checker retired the errdefer on receiver
 /// before exit, the Go `moved[cleanup.Receiver]` test.
-fn (self: &Lowerer) retired_before(exit: CleanupExit, receiver: Name) -> bool {
+fn (self: &Lowerer) retired_before(exit: CleanupExit, receiver: arena::Handle<ast::ExpressionNode>) -> bool {
     match exit {
         Return(statement) => return self.retired_for_return(statement, receiver),
         Try(expression) => return self.retired_for_try(expression, receiver),
     }
+}
+
+/// Reports whether one cleanup is an errdefer the checker retired before
+/// exit: only an errdefer retires, and only one written on a local names a
+/// receiver to retire by.
+fn (self: &Lowerer) cleanup_retired(exit: CleanupExit, cleanup: &Cleanup) -> bool {
+    if !cleanup.on_error {
+        return false;
+    }
+    let receiver = cleanup.receiver orelse return false;
+    return self.retired_before(exit, receiver);
 }
 
 /// Drops, in place, the errdefer cleanups whose receiver was moved before
@@ -315,7 +336,7 @@ fn (self: &Lowerer) retire_cleanups(exit: CleanupExit, cleanups: &var array::Arr
     var index = 0;
     while cleanups.get(index) |cleanup| {
         index = index + 1;
-        if cleanup.on_error and !is_empty(cleanup.receiver) and self.retired_before(exit, cleanup.receiver) {
+        if self.cleanup_retired(exit, &cleanup) {
             continue;
         }
         try cleanups.set(kept, cleanup);
@@ -393,6 +414,6 @@ fn empty_cleanup() -> Cleanup {
         extern_abi: empty_name(),
         extern_name: empty_name(),
         on_error: false,
-        receiver: empty_name()
+        receiver: null
     };
 }

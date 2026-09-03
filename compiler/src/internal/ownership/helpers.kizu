@@ -225,6 +225,27 @@ fn (self: &Checker) current_is_void_deinit(function: FunctionHandle) -> bool {
     return is_empty(info.return_type) or self.names.is(info.return_type, "void");
 }
 
+/// Reports whether a method takes its receiver over, the Go
+/// `functionConsumesReceiver`: `deinit` by contract (SPEC §8), and a std
+/// method written with a by-value receiver whose result is not a borrow of it
+/// -- `Box.take` hands the payload out and releases the cell -- by its
+/// compiler-known signature (SPEC §14.4). Every other by-value receiver is
+/// read in place.
+fn (self: &Checker) function_consumes_receiver(function: FunctionHandle) -> bool {
+    let info = self.functions.at(function.index);
+    if !info.receiver {
+        return false;
+    }
+    let first = self.param_at(function, 0) orelse return false;
+    if first.borrow or first.mut_borrow {
+        return false;
+    }
+    if self.current_is_void_deinit(function) {
+        return true;
+    }
+    return info.std and !self.names.starts_with(info.return_type, "&");
+}
+
 /// Reports whether the name a call spells for a declared function is want,
 /// the Go `stdmethod.CallName(name) == want`: the part after the last `.`,
 /// or the whole name without one.

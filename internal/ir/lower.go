@@ -2707,7 +2707,11 @@ func (l *lowerer) lowerMapMethod(
 ) (Value, error) {
 	switch name {
 	case "insert":
-		return l.emit("map.insert", "std::mem::Error!void", args, ""), nil
+		// args are the receiver, the allocator the growth names, the key, and
+		// the value; an insert the allocator refuses releases the value it
+		// could not store, through that same allocator (SPEC §8, ADR-0132).
+		value := l.emit("map.insert", "std::mem::Error!void", args, "")
+		return l.releaseOwnerOnFailure(value, args[3], args[1])
 	case "get":
 		return l.emit("map.get", "?"+valueType, args, ""), nil
 	case "at":

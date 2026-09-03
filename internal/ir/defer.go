@@ -36,28 +36,25 @@ func (l *lowerer) recordCleanup(expr ast.Expression, onError bool) error {
 		return err
 	}
 	cleanup.OnError = onError
-	cleanup.Receiver = cleanupReceiverName(expr)
+	cleanup.Receiver = cleanupReceiver(expr)
 	frame := len(l.deferFrames) - 1
 	l.deferFrames[frame] = append(l.deferFrames[frame], cleanup)
 	return nil
 }
 
-// cleanupReceiverName reads the local a cleanup call consumes. The shape is the
-// one cleanupFromExpr accepts, so anything else has already failed there.
-func cleanupReceiverName(expr ast.Expression) string {
+// cleanupReceiver reads the receiver expression a cleanup call consumes. The
+// shape is the one cleanupFromExpr accepts, so anything else has already
+// failed there.
+func cleanupReceiver(expr ast.Expression) ast.Expression {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return ""
+		return nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok {
-		return ""
+		return nil
 	}
-	ident, ok := field.Receiver.(*ast.IdentExpr)
-	if !ok {
-		return ""
-	}
-	return ident.Name
+	return field.Receiver
 }
 
 // cleanupFromExpr converts a defer expression into a void cleanup.
@@ -103,6 +100,11 @@ type containerCleanup struct {
 	name      string
 	shallowOp string
 	typeArg   string
+	// ownerArg is the type argument whose values the container holds and
+	// would have to release: the element for an array, box, or arena, the
+	// value for a map. typeArg spells the whole instantiation, which for a
+	// map is `K, V` and names no type at all.
+	ownerArg string
 	// shallowNamesAllocator is whether the runtime op takes the allocator the
 	// release names. Every container header is now the value, and none of
 	// them keeps an allocator, so every op is handed one; the field is what
@@ -114,16 +116,17 @@ type containerCleanup struct {
 // false for anything else.
 func stdContainerCleanup(receiverType string) (containerCleanup, bool) {
 	if elem, ok := arrayElementType(receiverType); ok {
-		return containerCleanup{arrayTypeName, "array.deinit", elem, true}, true
+		return containerCleanup{arrayTypeName, "array.deinit", elem, elem, true}, true
 	}
-	if args, ok := mapStaticArgs(receiverType); ok {
-		return containerCleanup{mapTypeName, "map.deinit", args, true}, true
+	if _, value, ok := mapTypeArgs(receiverType); ok {
+		args, _ := mapStaticArgs(receiverType)
+		return containerCleanup{mapTypeName, "map.deinit", args, value, true}, true
 	}
 	if elem, ok := boxElementType(receiverType); ok {
-		return containerCleanup{boxTypeName, "box.deinit", elem, true}, true
+		return containerCleanup{boxTypeName, "box.deinit", elem, elem, true}, true
 	}
 	if elem := arenaElementType(receiverType); elem != "unknown" {
-		return containerCleanup{arenaTypeName, "arena.deinit", elem, true}, true
+		return containerCleanup{arenaTypeName, "arena.deinit", elem, elem, true}, true
 	}
 	return containerCleanup{}, false
 }
@@ -136,7 +139,7 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string, rest []Value)
 		// that loop lives in the std wrapper rather than in a runtime op: the
 		// cleanup calls its instance exactly like a direct call would. Plain
 		// contents have no loop to run, so they keep the runtime op.
-		if !ast.OwnerType(l.deinitOwners, container.typeArg) {
+		if !ast.OwnerType(l.deinitOwners, container.ownerArg) {
 			args := []Value{receiver}
 			if container.shallowNamesAllocator {
 				args = append(args, rest...)
@@ -206,24 +209,24 @@ func (l *lowerer) emitNormalCleanups() {
 
 // emitErrorCleanups emits error-path cleanups before an error-return exit,
 // minus the ones a move retired before it.
-func (l *lowerer) emitErrorCleanups(retired []string) {
+func (l *lowerer) emitErrorCleanups(retired []ast.Expression) {
 	l.emitCleanups(retireCleanups(l.errorCleanups(), retired))
 }
 
 // retireCleanups drops the errdefer cleanups whose receiver was moved before
 // this error exit. The ownership checker decides which; lowering obeys, so the
 // move rule has one implementation (ADR-0114).
-func retireCleanups(cleanups []Cleanup, retired []string) []Cleanup {
+func retireCleanups(cleanups []Cleanup, retired []ast.Expression) []Cleanup {
 	if len(retired) == 0 {
 		return cleanups
 	}
-	moved := make(map[string]bool, len(retired))
-	for _, name := range retired {
-		moved[name] = true
+	moved := make(map[ast.Expression]bool, len(retired))
+	for _, receiver := range retired {
+		moved[receiver] = true
 	}
 	kept := make([]Cleanup, 0, len(cleanups))
 	for _, cleanup := range cleanups {
-		if cleanup.OnError && cleanup.Receiver != "" && moved[cleanup.Receiver] {
+		if cleanup.OnError && cleanup.Receiver != nil && moved[cleanup.Receiver] {
 			continue
 		}
 		kept = append(kept, cleanup)

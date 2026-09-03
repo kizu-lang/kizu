@@ -29,7 +29,8 @@ struct CollectionImplMethodIssue {
 }
 
 struct CollectionHostParamIssue {
-    name: ast::Text, index: i64, type_name: Type
+    name: ast::Text, index: i64, type_name: Type,
+    mut_borrow: bool
 }
 
 struct FunctionParamStorage {
@@ -84,6 +85,9 @@ union TypeCollectionIssue {
     BrowserHostBorrowParam(CollectionHostParamIssue),
     BrowserHostParam(CollectionHostParamIssue),
     BrowserHostReturn(CollectionNamedTypeIssue),
+    CHostBorrowParam(CollectionHostParamIssue),
+    CHostParam(CollectionHostParamIssue),
+    CHostReturn(CollectionNamedTypeIssue),
 }
 
 union DeclaredFunctionResult {
@@ -593,6 +597,9 @@ fn (self: &Checker) validate_host_function_signature(
     if mem::len(export_abi) > 0 and !mem::equal_bytes(export_abi, "browser") {
         return TypeCollectionIssue::UnsupportedExportAbi(signature.export_abi);
     }
+    if mem::equal_bytes(extern_abi, "c") {
+        return self.validate_c_host_function_types(signature, params, return_type);
+    }
     let browser_import = mem::equal_bytes(extern_abi, "browser");
     let browser_export = mem::equal_bytes(export_abi, "browser");
     if !browser_import and !browser_export {
@@ -617,9 +624,7 @@ fn (self: &Checker) validate_host_function_signature(
     }
     var index = 0;
     while params.get(index) |parameter_type| {
-        let issue = CollectionHostParamIssue {
-            name: signature.name, index: index + 1, type_name: parameter_type
-        };
+        let issue = self.host_param_issue(signature, index, parameter_type);
         if signature.params.at(index) |parameter| {
             if parameter.borrow or parameter.mut_borrow {
                 return TypeCollectionIssue::BrowserHostBorrowParam(issue);
@@ -639,6 +644,60 @@ fn (self: &Checker) validate_host_function_signature(
         return TypeCollectionIssue::BrowserHostReturn(issue);
     }
     return null;
+}
+
+/// Limits a C function's boundary to what C can name, the Go
+/// `validateCHostFunctionTypes`: integers, floats, bool, and raw pointers. A
+/// view, a borrow, an owner, a struct, or an error union has no C
+/// representation; passing one hands C the address of something it cannot
+/// read, and taking one back hands Kizu a value C never built.
+fn (self: &Checker) validate_c_host_function_types(
+    signature: &ast::FunctionSignature,
+    params: &array::Array<Type>,
+    return_type: Type
+) -> ?TypeCollectionIssue {
+    var index = 0;
+    while params.get(index) |parameter_type| {
+        let issue = self.host_param_issue(signature, index, parameter_type);
+        if signature.params.at(index) |parameter| {
+            if parameter.borrow or parameter.mut_borrow {
+                return TypeCollectionIssue::CHostBorrowParam(issue);
+            }
+        }
+        if !c_host_scalar(&self.types, parameter_type) {
+            return TypeCollectionIssue::CHostParam(issue);
+        }
+        index = index + 1;
+    }
+    if !self.types.is_text(return_type, "void") and !c_host_scalar(&self.types, return_type) {
+        let issue = CollectionNamedTypeIssue {
+            name: signature.name, type_name: return_type
+        };
+        return TypeCollectionIssue::CHostReturn(issue);
+    }
+    return null;
+}
+
+/// Describes one host boundary parameter for a diagnostic: its position,
+/// its type, and whether the declaration borrows it mutably.
+fn (self: &Checker) host_param_issue(
+    signature: &ast::FunctionSignature,
+    index: i64,
+    parameter_type: Type
+) -> CollectionHostParamIssue {
+    var mut_borrow = false;
+    if signature.params.at(index) |parameter| {
+        mut_borrow = parameter.mut_borrow;
+    }
+    return CollectionHostParamIssue {
+        name: signature.name, index: index + 1, type_name: parameter_type, mut_borrow: mut_borrow
+    };
+}
+
+/// Reports whether value has one C representation, the Go `cHostScalar`.
+fn c_host_scalar(types: &TypeTable, value: Type) -> bool {
+    return browser_host_scalar(types, value) or
+        types.is_text(value, "f32") or types.is_text(value, "f64");
 }
 
 fn browser_host_scalar(types: &TypeTable, value: Type) -> bool {
@@ -727,8 +786,10 @@ fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::
     let abi = retained_abi.as_bytes();
     let retained_export_abi = tree.texts.at(source.export_abi.node);
     let export_abi = retained_export_abi.as_bytes();
+    var extern_abi_text = try string::from_bytes(self.allocator, abi);
+    errdefer extern_abi_text.deinit(self.allocator);
     var signature = FunctionSignatureType {
-        extern_abi: try string::from_bytes(self.allocator, abi),
+        extern_abi: move extern_abi_text,
         export_abi: try string::from_bytes(self.allocator, export_abi),
         static_params: array::new<StaticParamType>(self.allocator),
         params: array::new<SignatureParamType>(self.allocator),
@@ -1031,6 +1092,31 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, " has unsupported return type ");
             try self.append_checker_type(&var message, named.type_name);
         },
+        CHostBorrowParam(host_param) => {
+            try message.append_bytes(self.allocator, "C ");
+            try append_function_name(self.allocator, &var message, tree, host_param.name);
+            try message.append_bytes(self.allocator, " parameter ");
+            try fmt::append_i64(self.allocator, &var message, host_param.index);
+            try message.append_bytes(self.allocator, " is a borrow (`");
+            try self.append_c_host_param_spelling(&var message, tree, host_param);
+            try message.append_bytes(self.allocator, "`), which C cannot receive");
+        },
+        CHostParam(host_param) => {
+            try message.append_bytes(self.allocator, "C ");
+            try append_function_name(self.allocator, &var message, tree, host_param.name);
+            try message.append_bytes(self.allocator, " parameter ");
+            try fmt::append_i64(self.allocator, &var message, host_param.index);
+            try message.append_bytes(self.allocator, " has type `");
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_bytes(self.allocator, "`, which C cannot receive");
+        },
+        CHostReturn(named) => {
+            try message.append_bytes(self.allocator, "C ");
+            try append_function_name(self.allocator, &var message, tree, named.name);
+            try message.append_bytes(self.allocator, " returns `");
+            try self.append_checker_type(&var message, named.type_name);
+            try message.append_bytes(self.allocator, "`, which C cannot produce");
+        },
     }
     var value = try new_checker_diagnostic(self.allocator, category, move message);
     errdefer value.deinit(self.allocator);
@@ -1050,9 +1136,38 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             let help_text = help.as_bytes();
             try value.with_help(self.allocator, help_text);
         },
+        CHostBorrowParam(_) => try add_c_host_advice(self.allocator, &var value),
+        CHostParam(_) => try add_c_host_advice(self.allocator, &var value),
+        CHostReturn(_) => try add_c_host_advice(self.allocator, &var value),
         _ => {},
     }
     return move value;
+}
+
+/// Adds what C can carry and how to hand it the value, the Go
+/// `cHostTypeError` note and help.
+fn add_c_host_advice(allocator: Allocator, value: &var diagnostic::Diagnostic) -> !void {
+    try value.with_note(allocator,
+        "a C function passes only what C can name: an integer, a float, `bool`, `ptr<T>`, `ptr<const T>`, or a nullable pointer"
+    );
+    return value.with_help(allocator,
+        "spell the value as C sees it: `ptr<const u8>` with a `usize` length for bytes, `ptr<T>` for a value C reads or writes in place"
+    );
+}
+
+/// Spells a borrowed C parameter the way its declaration does, the Go
+/// `"&var " + spelled` / `"&" + spelled`.
+fn (self: &Checker) append_c_host_param_spelling(
+    message: &var string::String,
+    tree: &ast::Ast,
+    host_param: CollectionHostParamIssue
+) -> !void {
+    if host_param.mut_borrow {
+        try message.append_bytes(self.allocator, "&var ");
+    } else {
+        try message.append_bytes(self.allocator, "&");
+    }
+    return self.append_checker_type(message, host_param.type_name);
 }
 
 fn new_checker_diagnostic(allocator: Allocator, category: []u8, message: string::String) -> !diagnostic::Diagnostic {

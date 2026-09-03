@@ -3,7 +3,6 @@ import compiler::internal::diagnostic;
 import std::arena;
 import std::array;
 import std::map;
-import std::mem;
 import std::string;
 
 // Port of the `<...>` type application checks of internal/ownership/
@@ -117,6 +116,16 @@ fn (self: &var Checker) reject_array_storage_type(
     if self.names.is_raw_pointer(type_name) {
         return try self.error0(ast::zero_span(), "array error: Array element cannot be raw pointer");
     }
+    // An owner inside `E!T` is released only by the capture that opens it,
+    // and a container's element cleanup has no `if` to open one with; the
+    // optional form is refused before this by the type checker.
+    if try self.wrapped_payload_elem(type_name) |wrapped| {
+        if wrapped.error_union and try self.value_type_needs_consume(self.allocator, wrapped.elem) {
+            return try self.error0(
+                ast::zero_span(), "array error: Array element cannot be an error union around an owner"
+            );
+        }
+    }
     if try self.names.split_generic(type_name) |parts| {
         if self.names.is(parts.base, "option") {
             if try self.reject_array_storage_type(tree, parts.args, seen) |failed| {
@@ -209,6 +218,7 @@ fn (self: &var Checker) check_type_apply_call_expr(
     env: ScopeHandle,
     apply: ast::TypeApplyExpr,
     args: ast::ExpressionList,
+    sanctioned: bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     var target = empty_type_apply_target();
@@ -227,7 +237,7 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if self.names.is(name, "ptr_from_int") or self.names.is(name, "int_from_ptr") {
         return self.check_pointer_int_cast_builtin(tree, env, type_arg, args, out);
     }
-    if try self.check_generic_user_type_apply(tree, env, name, type_arg, args, &var handled, out) |failed| {
+    if try self.check_generic_user_type_apply(tree, env, name, type_arg, args, sanctioned, &var handled, out) |failed| {
         return move failed;
     }
     if handled {
@@ -858,7 +868,8 @@ fn (self: &var Checker) check_array_primitive_call(
     let array_type = try self.names.format("std::array::Array<%s>", elem, empty_name(), empty_name());
     let blank = self.store.blank_binding(0, empty_name(), array_type);
     let array = try self.store.retain(move blank);
-    return self.check_array_method(tree, env, array, elem, method, args, out);
+    let base = try self.names.intern("std::array::Array");
+    return self.check_std_method_call(tree, env, array, base, method, args, out);
 }
 
 /// Validates the raw copy-only element reads used by their std wrappers, the
@@ -996,7 +1007,7 @@ fn (self: &var Checker) check_map_primitive_method(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     // at/at_mut come first: only the std wrapper body reaches the primitive,
-    // and routing a concrete instantiation to check_map_method would hit the
+    // and routing a concrete instantiation to the std call would hit the
     // user-facing capture-only refusal.
     if self.names.is(method, "at") {
         if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
@@ -1014,93 +1025,15 @@ fn (self: &var Checker) check_map_primitive_method(
     }
     if self.names.is(method, "take_value_at") {
         // Reserved to Map.deinit's cascade, so it is answered here and never
-        // reaches check_map_method: a caller outside std spells no name for it.
+        // reaches the std call: a caller outside std spells no name for it.
         if try self.check_map_index_arg(tree, env, method, args) |failed| {
             return move failed;
         }
         out.* = value_type;
         return null;
     }
-    if !self.names.is_generic_param_name(key_type) and !self.names.is_generic_param_name(value_type) {
-        let args_text = try self.map_args_text(map_value);
-        return self.check_map_method(tree, env, map_value, args_text, method, args, out);
-    }
-    return self.check_generic_map_primitive_method(
-        tree, env, map_value, key_type, value_type, method, args, out
-    );
-}
-
-/// Names the static arguments of a Map binding's type, the Go
-/// `mapValue.typeName[len("std::map::Map<") : len(mapValue.typeName)-1]`.
-fn (self: &var Checker) map_args_text(map_value: BindingHandle) -> !Name {
-    let type_name = self.binding(map_value).type_name;
-    let end = self.names.len(type_name);
-    return self.names.intern_slice(type_name, mem::len("std::map::Map<"), end - 1);
-}
-
-/// Validates Map primitives applied to generic static arguments, which only
-/// a std wrapper body can spell, the Go `checkGenericMapPrimitiveMethod`.
-fn (self: &var Checker) check_generic_map_primitive_method(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    map_value: BindingHandle,
-    key_type: Name,
-    value_type: Name,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    if self.names.is(method, "insert") {
-        let count = arg_count(tree, args);
-        if count != 3 {
-            return try self.error1(
-                tree, ast::zero_span(), "map error: `Map.insert` expects 3 args, got %d", Arg::Int(count)
-            );
-        }
-        let allocator_arg = args.get_or_panic(tree, 0);
-        if try self.read_container_allocator(tree, env, "map", "Map.insert", null, allocator_arg) |failed| {
-            return move failed;
-        }
-        let first = args.get_or_panic(tree, 1);
-        var got = empty_name();
-        if try self.read_expr(tree, env, first, &var got) |failed| {
-            return move failed;
-        }
-        if !same_name(got, key_type) {
-            return try self.error2(
-                tree, ast::zero_span(), "map error: `Map.insert` expects %s key, got %s",
-                Arg::Str(key_type), Arg::Str(got)
-            );
-        }
-        let second = args.get_or_panic(tree, 2);
-        if try self.move_contextual_expr(tree, env, second, value_type, &var got) |failed| {
-            return move failed;
-        }
-        if !same_name(got, value_type) {
-            return try self.error2(
-                tree, ast::zero_span(), "map error: `Map.insert` expects %s value, got %s",
-                Arg::Str(value_type), Arg::Str(got)
-            );
-        }
-        out.* = self.common.mem_error_void_name;
-        return null;
-    }
-    if self.names.is(method, "get") {
-        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
-            return move failed;
-        }
-        out.* = try self.names.prefixed("?", value_type);
-        return null;
-    }
-    if self.names.is(method, "contains") {
-        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
-            return move failed;
-        }
-        out.* = self.common.bool_name;
-        return null;
-    }
-    let args_text = try self.map_args_text(map_value);
-    return self.check_map_method(tree, env, map_value, args_text, method, args, out);
+    let base = try self.names.intern("std::map::Map");
+    return self.check_std_method_call(tree, env, map_value, base, method, args, out);
 }
 
 /// Validates a generic Map wrapper key argument, the Go
@@ -1164,6 +1097,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
     name: Name,
     type_arg: Name,
     args: ast::ExpressionList,
+    sanctioned: bool,
     handled: &var bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
@@ -1187,22 +1121,14 @@ fn (self: &var Checker) check_generic_user_type_apply(
         subst.deinit(self.allocator);
         return move failed;
     }
-    if try self.check_call_handle_pairing(tree, env, function, 0, &subst, args) |failed| {
+    // The call site sees the instantiated signature and nothing else: with
+    // `T` spelled out, an owner argument moves, a view lends or is refused,
+    // and two borrows of one value collide, exactly as for a direct call.
+    let instantiated = try self.instantiate_function_info(function, &subst);
+    if try self.check_callable_call(tree, env, name, instantiated, args, sanctioned, out) |failed| {
         subst.deinit(self.allocator);
         return move failed;
     }
-    var index = 0;
-    while arg_at(tree, args, index) |arg| {
-        if try self.check_generic_user_arg(tree, env, name, function, &subst, index, arg) |failed| {
-            subst.deinit(self.allocator);
-            return move failed;
-        }
-        index = index + 1;
-    }
-    // The instantiation takes the substitution with it, so the return type is
-    // instantiated first; substitute_with only reads the substitution.
-    let declared = self.return_type_name(function);
-    let result = try self.substitute_with(declared, &subst);
     let restore = try self.bind_generic_call_fields(tree, function, type_arg);
     let restore_functions = try self.bind_generic_call_functions(function, type_arg);
     if try self.check_generic_instantiation(tree, function, move subst) |failed| {
@@ -1212,8 +1138,49 @@ fn (self: &var Checker) check_generic_user_type_apply(
     }
     self.function_bindings.restore(restore_functions);
     self.meta_fields.restore(restore);
-    out.* = result;
     return null;
+}
+
+/// Is the signature one generic call sees, the Go `instantiateFunctionInfo`:
+/// the declaration's, with every type parameter replaced by the static
+/// argument the call spelled. Only the ownership-facing parts are
+/// substituted; the body and static parameter list stay the declaration's.
+/// The copy joins the function arena, which releases it with the checker.
+fn (self: &var Checker) instantiate_function_info(function: FunctionHandle, subst: &Subst) -> !FunctionHandle {
+    var static_params = array::new<StaticParamInfo>(self.allocator);
+    errdefer static_params.deinit(self.allocator);
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        index = index + 1;
+        try static_params.append(self.allocator, param);
+    }
+    var params = array::new<ParamInfo>(self.allocator);
+    errdefer params.deinit(self.allocator);
+    index = 0;
+    while self.param_at(function, index) |param| {
+        index = index + 1;
+        let type_name = try self.substitute_with(param.type_name, subst);
+        try params.append(self.allocator, ParamInfo {
+            name: param.name,
+            type_name: type_name,
+            borrow: param.borrow,
+            mut_borrow: param.mut_borrow
+        });
+    }
+    let return_type = try self.substitute_with(self.return_type_name(function), subst);
+    let declared = self.functions.at(function.index);
+    let info = FunctionInfo {
+        name: declared.name,
+        receiver: declared.receiver,
+        has_extern_abi: declared.has_extern_abi,
+        requires_unsafe: declared.requires_unsafe,
+        std: declared.std,
+        static_params: move static_params,
+        params: move params,
+        return_type: return_type,
+        body: declared.body
+    };
+    return FunctionHandle { index: try self.functions.add(self.allocator, move info) };
 }
 
 /// Reports whether a declaration names a function among its compile-time
@@ -1588,49 +1555,6 @@ fn (self: &var Checker) join_type_args(type_args: &array::Array<Name>) -> !Name 
     return self.names.intern_owned(move out);
 }
 
-/// Validates an instantiated generic wrapper argument, the Go
-/// `checkGenericUserArg`.
-fn (self: &var Checker) check_generic_user_arg(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    name: Name,
-    function: FunctionHandle,
-    subst: &Subst,
-    index: i64,
-    arg: ast::Expression
-) -> !?diagnostic::Diagnostic {
-    let param = self.param_at(function, index) orelse return null;
-    let want = try self.substitute_with(param.type_name, subst);
-    // `std::mem::box<T>(allocator, value)` and
-    // `std::io::spawn<T>(..., state, ...)` take ownership of their values, and
-    // a consume primitive moves its argument (ADR-0091); every other generic
-    // wrapper argument is read in place.
-    var got = empty_name();
-    if (self.names.is(name, "std::mem::box") and index == 1) or
-        (self.names.is(name, "std::io::spawn") and index == 2) or
-        (self.is_consume_primitive(name) and index == 0) {
-        if try self.move_contextual_expr(tree, env, arg, want, &var got) |failed| {
-            return move failed;
-        }
-    } else {
-        if try self.read_contextual_expr(tree, env, arg, want, &var got) |failed| {
-            return move failed;
-        }
-    }
-    var coerced = empty_name();
-    if try self.coerce_ownership_borrow_argument(
-        got, want, param.borrow, param.mut_borrow, &var coerced
-    ) |failed| {
-        return move failed;
-    }
-    if !same_name(coerced, want) {
-        return try self.error4(
-            tree, ast::zero_span(), "move error: arg %d of `%s` expects %s, got %s",
-            Arg::Int(index + 1), Arg::Str(name), Arg::Str(want), Arg::Str(coerced)
-        );
-    }
-    return null;
-}
 
 /// Names the std functions whose whole job is consuming an owner, the Go
 /// `isConsumePrimitive`: their param carries no obligation and their

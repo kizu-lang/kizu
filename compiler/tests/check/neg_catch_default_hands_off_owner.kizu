@@ -1,0 +1,38 @@
+import std::mem;
+import std::string;
+
+error Failure { Refused }
+
+fn build(allocator: Allocator, fail: bool) -> Failure!string::String {
+    if fail {
+        return Failure::Refused;
+    }
+    return string::from_bytes(allocator, "built") catch return Failure::Refused;
+}
+
+// The default runs only when `build` fails. When it succeeds, `keep` is
+// neither handed off nor released.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let keep = try string::from_bytes(allocator, "fallback");
+    errdefer keep.deinit(allocator);
+    let picked = build(allocator, false) catch move keep;
+    defer picked.deinit(allocator);
+    let bytes = picked.as_bytes();
+    print(bytes);
+    return;
+}
+
+// check-fails
+// features: catch ownership move std-string error-set
+// error: `keep` cannot be handed off inside the `catch` default
+
+// check
+// load:
+// error Failure { Refused }
+// fn build(allocator: Allocator, fail: bool) -> Failure!std::string::String { if fail { return Failure::Refused; } return (std::string::from_bytes(allocator, "built") catch return Failure::Refused); }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let keep = try std::string::from_bytes(allocator, "fallback"); errdefer keep.deinit(allocator); let picked = (build(allocator, false) catch move keep); defer picked.deinit(allocator); let bytes = picked.as_bytes(); print(bytes); return; }
+// check:
+// 19:53-19:57 move error: `keep` cannot be handed off inside the `catch` default
+//   note: the default runs only when the payload is absent, so `keep` would be handed off on one path and left unreleased on the other
+//   help: keep `keep` out of the default and write both paths with `if ... |name| { keep.deinit(...); ... } else { ... }`, or build the default in place

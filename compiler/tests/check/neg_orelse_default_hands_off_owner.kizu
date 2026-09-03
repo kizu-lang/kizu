@@ -1,0 +1,35 @@
+import std::mem;
+import std::string;
+
+fn maybe(allocator: Allocator, present: bool) -> !?string::String {
+    if present {
+        return try string::from_bytes(allocator, "present");
+    }
+    return null;
+}
+
+// The default runs only when `maybe` yields nothing. When it yields a value,
+// `keep` is neither handed off nor released.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let keep = try string::from_bytes(allocator, "fallback");
+    errdefer keep.deinit(allocator);
+    let picked = try maybe(allocator, true) orelse move keep;
+    defer picked.deinit(allocator);
+    let bytes = picked.as_bytes();
+    print(bytes);
+    return;
+}
+
+// check-fails
+// features: orelse ownership move std-string
+// error: `keep` cannot be handed off inside the `orelse` default
+
+// check
+// load:
+// fn maybe(allocator: Allocator, present: bool) -> !?std::string::String { if present { return try std::string::from_bytes(allocator, "present"); } return null; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let keep = try std::string::from_bytes(allocator, "fallback"); errdefer keep.deinit(allocator); let picked = (try maybe(allocator, true) orelse move keep); defer picked.deinit(allocator); let bytes = picked.as_bytes(); print(bytes); return; }
+// check:
+// 17:57-17:61 move error: `keep` cannot be handed off inside the `orelse` default
+//   note: the default runs only when the payload is absent, so `keep` would be handed off on one path and left unreleased on the other
+//   help: keep `keep` out of the default and write both paths with `if ... |name| { keep.deinit(...); ... } else { ... }`, or build the default in place

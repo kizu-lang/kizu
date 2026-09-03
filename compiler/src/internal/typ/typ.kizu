@@ -557,6 +557,28 @@ pub fn map_key_type_names() -> []u8 {
 }
 
 /// Returns T for the optional value spelling `?T`.
+/// Returns the success type an `E!T` or `!T` spelling wraps, the Go
+/// `ast.ErrorUnionSuccess`: the text after the top-level `!`, the one not
+/// inside a static argument list.
+pub fn error_union_success(text: []u8) -> ?[]u8 {
+    var depth = 0;
+    var index = 0;
+    while index < mem::len(text) {
+        let byte = text[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        }
+        if byte == cast<u8>(62) {
+            depth = depth - 1;
+        }
+        if byte == cast<u8>(33) and depth == 0 {
+            return text[index + 1..];
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
 pub fn optional_elem(text: []u8) -> ?[]u8 {
     if !mem::starts_with(text, "?") or mem::starts_with(text, "?ptr<") {
         return null;
@@ -946,7 +968,11 @@ fn equal_error_union(
 /// Rewrites every name path while preserving the type structure around it.
 pub fn map_names<M>(table: &var Table, value: Type, mapper: &var M) -> !Type {
     var folder = PlainNameTransform {};
-    return transform_names<M, PlainNameTransform>(table, value, table, mapper, &var folder);
+    // The table is read while the tree is rewritten and written only once the
+    // rewrite is complete, so the two borrows never overlap.
+    let allocator = table.allocator;
+    let mapped = try map_tree<M, PlainNameTransform>(allocator, table, value, mapper, &var folder);
+    return try finish_builder(allocator, move mapped.builder, table, mapped.root);
 }
 
 /// Folds whole names post-order from a borrowed graph into a distinct table.
@@ -965,10 +991,22 @@ fn (self: &var PlainNameTransform) fold_name(builder: &var Builder, path: array:
 
 fn transform_names<M, F>(source: &Table, value: Type, destination: &var Table, mapper: &var M, folder: &var F) -> !Type {
     let allocator = destination.allocator;
+    let mapped = try map_tree<M, F>(allocator, source, value, mapper, folder);
+    return try finish_builder(allocator, move mapped.builder, destination, mapped.root);
+}
+
+/// Is a rewritten tree before it joins a table: the builder holding its nodes
+/// and the root among them.
+struct MappedTree {
+    builder: Builder,
+    root: arena::Handle<Node>
+}
+
+fn map_tree<M, F>(allocator: Allocator, source: &Table, value: Type, mapper: &var M, folder: &var F) -> !MappedTree {
     var builder = new_builder(allocator);
     errdefer builder.deinit(allocator);
     let root = try map_names_node<M, F>(allocator, &var builder, source.trees.at(value.tree), value.root, mapper, folder);
-    return try finish_builder(allocator, move builder, destination, root);
+    return MappedTree { builder: move builder, root: root };
 }
 
 fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, handle: arena::Handle<Node>, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
@@ -1008,10 +1046,10 @@ fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, ma
     errdefer params.deinit(builder.allocator);
     var index = 0;
     while node.params.get(index) |param| {
-        try params.append(builder.allocator, try map_names_node<M, F>(builder.allocator, builder, value, param, mapper, folder));
+        try params.append(builder.allocator, try map_names_node<M, F>(allocator, builder, value, param, mapper, folder));
         index = index + 1;
     }
-    let result = try map_names_node<M, F>(builder.allocator, builder, value, node.result, mapper, folder);
+    let result = try map_names_node<M, F>(allocator, builder, value, node.result, mapper, folder);
     return try builder.nodes.add(allocator, Node::Func(Func {
         params: move params,
         result: result,
@@ -1027,7 +1065,7 @@ fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, map
     errdefer args.deinit(builder.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
-        try args.append(builder.allocator, try map_names_node<M, F>(builder.allocator, builder, value, arg, mapper, folder));
+        try args.append(allocator, try map_names_node<M, F>(allocator, builder, value, arg, mapper, folder));
         index = index + 1;
     }
     return folder.fold_name(builder, move path, move args);

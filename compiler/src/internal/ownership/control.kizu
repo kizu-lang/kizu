@@ -169,6 +169,10 @@ fn (self: &var Checker) check_if_stmt(
     env: ScopeHandle,
     statement: ast::IfStmt
 ) -> !?diagnostic::Diagnostic {
+    // The condition's product is held by the capture, or was a bool: the
+    // branches start with nothing of it pending.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var head = try self.new_capture_condition();
     defer head.deinit(self.allocator);
     if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
@@ -191,10 +195,11 @@ fn (self: &var Checker) check_if_stmt(
     ) |failed| {
         return move failed;
     }
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     if try self.check_block(tree, left_scope, statement.consequence) |failed| {
         return move failed;
     }
-    if try self.check_capture_payload_consumed(tree, statement.capture, consumes_field, left_scope) |failed| {
+    if try self.check_capture_payload_consumed(tree, statement.capture, left_scope) |failed| {
         return move failed;
     }
     var right_live = true;
@@ -378,55 +383,125 @@ fn (self: &var Checker) check_branch_field_consume_agreement(
     );
 }
 
-/// Treats moves in the body as possible after the loop, the Go
-/// `checkWhileStmt`.
+/// Is the loop form whose turn a region checks: the Go closures
+/// checkWhileStmt and checkForStmt hand checkLoopRegion.
+union LoopTurn {
+    While(ast::WhileStmt),
+    For(ast::ForStmt)
+}
+
+/// Checks a `while` loop, the Go `checkWhileStmt`: the condition runs once
+/// per turn like the body does, so it is read against the loop's clone, and
+/// what it binds is the turn's own.
 fn (self: &var Checker) check_while_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
     statement: ast::WhileStmt
 ) -> !?diagnostic::Diagnostic {
-    var head = try self.new_capture_condition();
-    defer head.deinit(self.allocator);
-    if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
+    return self.check_loop_region(tree, env, statement.label, statement.body, LoopTurn::While(statement));
+}
+
+/// Checks one loop's body as a region the program enters an unknown number
+/// of times, whatever loop form wrote it, the Go `checkLoopRegion`. The turn
+/// runs against a clone of the scope: entering binds what the turn produces
+/// — a capture, an index — into the body's scope, leaving checks what the
+/// turn must have consumed, and the body as a whole consumes nothing declared
+/// outside it, since zero turns would leave that unreleased and two would
+/// release it twice.
+fn (self: &var Checker) check_loop_region(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    label: ast::Text,
+    body: ast::Block,
+    turn: LoopTurn
+) -> !?diagnostic::Diagnostic {
+    let clone = try self.store.clone_scope(env);
+    try self.enter_loop(tree, label);
+    let child = try self.store.child(clone);
+    if try self.check_loop_turn(tree, env, clone, child, body, turn) |failed| {
+        self.leave_loop();
         return move failed;
     }
-    let body = try self.store.clone_scope(env);
-    let child = try self.store.child(body);
-    // Borrow the loop's clone of each container, as in check_if_stmt.
-    var consumes_field = false;
-    if try self.define_capture(
-        tree, statement.capture, statement.condition, &head, true, env, child, &var consumes_field
-    ) |failed| {
+    self.leave_loop();
+    if try self.check_loop_consumes_nothing_outside(tree, env, clone) |failed| {
         return move failed;
     }
-    self.loop_depth = self.loop_depth + 1;
-    if try self.check_while_body(tree, env, statement, body, child, consumes_field) |failed| {
-        self.loop_depth = self.loop_depth - 1;
-        return move failed;
-    }
-    self.loop_depth = self.loop_depth - 1;
+    try self.store.merge_moved_from(env, clone);
     return null;
 }
 
-fn (self: &var Checker) check_while_body(
+/// Checks one turn inside its loop region: what the turn produces is bound,
+/// the body is checked, and what the turn must have consumed is checked —
+/// the enter, body, and leave steps of the Go `checkLoopRegion`.
+fn (self: &var Checker) check_loop_turn(
     tree: &var ast::Ast,
     env: ScopeHandle,
-    statement: ast::WhileStmt,
-    body: ScopeHandle,
+    clone: ScopeHandle,
     child: ScopeHandle,
-    consumes_field: bool
+    body: ast::Block,
+    turn: LoopTurn
 ) -> !?diagnostic::Diagnostic {
-    if try self.check_block(tree, child, statement.body) |failed| {
+    if try self.enter_loop_turn(tree, env, clone, child, turn) |failed| {
         return move failed;
     }
-    if try self.check_capture_payload_consumed(tree, statement.capture, consumes_field, child) |failed| {
+    if try self.check_block(tree, child, body) |failed| {
         return move failed;
     }
-    if try self.check_loop_consumes_nothing_outside(tree, env, body) |failed| {
-        return move failed;
+    return self.leave_loop_turn(tree, child, turn);
+}
+
+/// Binds what one turn of the loop produces into the body's scope: the
+/// capture a `while` condition yields, read against the loop's clone, or the
+/// index a `for` counts.
+fn (self: &var Checker) enter_loop_turn(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    clone: ScopeHandle,
+    child: ScopeHandle,
+    turn: LoopTurn
+) -> !?diagnostic::Diagnostic {
+    match turn {
+        While(statement) => {
+            // The condition's product is held by the capture, or was a
+            // bool: the body starts with nothing of it pending.
+            let pending = self.pending_owner_temps.len();
+            let places = self.pending_moved_places.len();
+            var head = try self.new_capture_condition();
+            defer head.deinit(self.allocator);
+            if try self.read_capture_head(tree, clone, statement.condition, statement.capture, &var head) |failed| {
+                return move failed;
+            }
+            // Borrow the loop's clone of each container, as in check_if_stmt.
+            var consumes_field = false;
+            if try self.define_capture(
+                tree, statement.capture, statement.condition, &head, true, env, child, &var consumes_field
+            ) |failed| {
+                return move failed;
+            }
+            try self.settle_owner_temps(pending, places, self.common.void_name, null);
+            return null;
+        },
+        For(statement) => {
+            let name = try self.names.intern_text(tree, statement.name);
+            let counter = self.store.new_binding(name, self.common.i64_name);
+            errdefer counter.deinit(self.allocator);
+            let _ = try self.define(child, move counter);
+            return null;
+        },
     }
-    try self.store.merge_moved_from(env, body);
-    return null;
+}
+
+/// Checks what one turn of the loop must have consumed before it ends: the
+/// payload a `while` capture bound.
+fn (self: &var Checker) leave_loop_turn(
+    tree: &var ast::Ast,
+    child: ScopeHandle,
+    turn: LoopTurn
+) -> !?diagnostic::Diagnostic {
+    match turn {
+        While(statement) => return self.check_capture_payload_consumed(tree, statement.capture, child),
+        _ => return null,
+    }
 }
 
 /// Rejects a loop body that consumes a binding declared outside it, the Go
@@ -544,8 +619,8 @@ fn (self: &var Checker) optional_owner_field_capture(
     condition: ast::Expression,
     cond_type: Name
 ) -> !?OptionalOwnerFieldCapture {
-    let elem = try self.names.optional_elem(cond_type) orelse return null;
-    if !try self.value_type_needs_consume(self.allocator, elem) {
+    let wrapped = try self.wrapped_payload_elem(cond_type) orelse return null;
+    if !try self.value_type_needs_consume(self.allocator, wrapped.elem) {
         return null;
     }
     if try self.hands_over_optional_payload(tree, condition) {
@@ -689,17 +764,18 @@ fn (self: &var Checker) define_capture(
     return null;
 }
 
-/// Rejects a capture body that opened an owner field and dropped what it
-/// found, the Go `checkCapturePayloadConsumed`. The field's obligation was
-/// recorded when the capture bound, so leaving the payload here would
-/// discharge the field's cleanup without releasing anything (ADR-0091).
+/// Rejects a capture body that dropped an owner payload it was handed, the
+/// Go `checkCapturePayloadConsumed`. A payload produced by the condition is
+/// the body's to consume (SPEC §7), and one opened out of an owner field
+/// inside that field's deinit discharged the field's cleanup when the
+/// capture bound, so leaving either here would release nothing (ADR-0091).
+/// A borrowed payload owes nothing and passes.
 fn (self: &var Checker) check_capture_payload_consumed(
     tree: &ast::Ast,
     name: ast::Text,
-    consumable: bool,
     scope: ScopeHandle
 ) -> !?diagnostic::Diagnostic {
-    if !consumable or text_empty(tree, name) {
+    if text_empty(tree, name) {
         return null;
     }
     let value = self.lookup_local_text(tree, scope, name) orelse return null;
@@ -740,6 +816,9 @@ fn (self: &var Checker) tie_view_capture(
         try capture.borrow_targets.append(self.allocator, source);
         index = index + 1;
     }
+    // The condition handed the payload over; a payload that owns something
+    // is the capture's to release even while its views tie it here.
+    capture.owns_tied = try self.value_type_needs_consume(self.allocator, capture.type_name);
     return null;
 }
 
@@ -838,8 +917,9 @@ fn (self: &var Checker) refuse_container_view_orelse(
     );
 }
 
-/// Treats moves in the body as possible after the loop, the Go
-/// `checkForStmt`.
+/// Checks a `for` loop, the Go `checkForStmt`. The range is fixed, but its
+/// length is not known here, so the body is under the same rule as a while
+/// body.
 fn (self: &var Checker) check_for_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -852,28 +932,53 @@ fn (self: &var Checker) check_for_stmt(
     if try self.read_expr(tree, env, statement.end, &var ignored) |failed| {
         return move failed;
     }
-    let body = try self.store.clone_scope(env);
-    let child = try self.store.child(body);
-    let name = try self.names.intern_text(tree, statement.name);
-    let counter = self.store.new_binding(name, self.common.i64_name);
-    errdefer counter.deinit(self.allocator);
-    let _ = try self.define(child, move counter);
-    self.loop_depth = self.loop_depth + 1;
-    if try self.check_block(tree, child, statement.body) |failed| {
-        self.loop_depth = self.loop_depth - 1;
-        return move failed;
+    return self.check_loop_region(tree, env, statement.label, statement.body, LoopTurn::For(statement));
+}
+
+/// Checks a `break` or `continue`, the Go `checkLoopBranch`: it names a loop
+/// the statement sits in, and leaving that loop's body early skips the
+/// releases the body has not reached yet, so what the body declared since
+/// the loop began must already be consumed.
+fn (self: &var Checker) check_loop_branch_label(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    kind: LeakExitKind,
+    label: ast::Text
+) -> !?diagnostic::Diagnostic {
+    let start = try self.loop_start_for(tree, label) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: loop branch `%s` used outside loop", Arg::Text(label));
+    return self.check_owners_consumed(tree, env, start.since_id, LeakExit { kind: kind, span: ast::zero_span() });
+}
+
+/// Finds the loop a branch names, the Go `loopStartFor`: the innermost one
+/// of this function for a bare branch, the one carrying the label otherwise.
+fn (self: &var Checker) loop_start_for(tree: &ast::Ast, label: ast::Text) -> !?LoopStart {
+    let wanted = try self.names.intern_text(tree, label);
+    let bare = text_empty(tree, label);
+    var index = self.loop_starts.len();
+    while index > self.loop_base {
+        index = index - 1;
+        let start = self.loop_starts.get_or_panic(index);
+        if bare or same_name(start.label, wanted) {
+            return start;
+        }
     }
-    self.loop_depth = self.loop_depth - 1;
-    try self.store.merge_moved_from(env, body);
     return null;
 }
 
-/// Rejects branch statements outside loops, the Go `checkLoopBranch`.
-fn (self: &var Checker) check_loop_branch_label(tree: &ast::Ast, label: ast::Text) -> !?diagnostic::Diagnostic {
-    if self.loop_depth == 0 {
-        return try self.error1(tree, ast::zero_span(), "move error: loop branch `%s` used outside loop", Arg::Text(label));
-    }
-    return null;
+/// Records a loop the body about to be checked sits in, the Go `enterLoop`.
+/// The watermark is taken before the loop defines anything, so a capture the
+/// condition binds counts as the body's own.
+fn (self: &var Checker) enter_loop(tree: &ast::Ast, label: ast::Text) -> !void {
+    let name = try self.names.intern_text(tree, label);
+    try self.loop_starts.append(self.allocator, LoopStart { label: name, since_id: self.store.next_id });
+    return;
+}
+
+/// Leaves the innermost loop, the Go `enterLoop` return.
+fn (self: &var Checker) leave_loop() -> void {
+    let _ = self.loop_starts.pop();
+    return;
 }
 
 /// Merges possible moves from enum or union match arms into the outer
@@ -884,10 +989,15 @@ fn (self: &var Checker) check_match_stmt(
     statement: ast::Statement
 ) -> !?diagnostic::Diagnostic {
     let head = match_stmt_head(tree, statement) orelse return null;
+    // The value's product is held by the arm that binds it: the arms start
+    // with nothing of it pending.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var value_type = empty_name();
     if try self.read_expr(tree, env, head.value, &var value_type) |failed| {
         return move failed;
     }
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     value_type = try self.names.borrowed_value(value_type);
     let tags = try self.match_tags(value_type) orelse
         return try self.error1(tree, ast::zero_span(), "move error: match expects enum or union, got %s", Arg::Str(value_type));
@@ -960,9 +1070,14 @@ fn (self: &var Checker) check_match_stmt_arms(
     live: &var array::Array<ScopeHandle>
 ) -> !?diagnostic::Diagnostic {
     let base = try self.store.clone_scope(env);
+    // One arm runs: what one arm produces -- a `return f()` is a statement
+    // of its own -- is not live in the next.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var index = 0;
     while arms.get(index) |arm| {
         index = index + 1;
+        try self.settle_owner_temps(pending, places, self.common.void_name, null);
         if arm.is_wildcard(tree) {
             if !text_empty(tree, arm.binding) {
                 return try self.error0(ast::zero_span(), "move error: wildcard match arm cannot bind payload");
@@ -1265,7 +1380,10 @@ fn (self: &var Checker) classify_match_payload(type_name: Name) -> !MatchPayload
         return MatchPayloadClass::Copies;
     }
     let base = try self.names.generic_base_or_self(type_name);
-    if self.is_struct(base) or self.is_union(base) {
+    // A declared aggregate moves out, and so does any value with a deinit
+    // contract: an owned scrutinee hands its std container payload over the
+    // same way it hands a struct over, and the arm then owes the release.
+    if self.is_struct(base) or self.is_union(base) or try self.value_type_needs_consume(self.allocator, type_name) {
         return MatchPayloadClass::Moves;
     }
     return MatchPayloadClass::Borrows;
