@@ -1371,6 +1371,13 @@ temporary は壊す place を持たないので付けません。method の rece
 —— receiver を consume するのは `deinit` の契約で、その語が既に見えています。
 copy 型の place に書くのは compile error です。手放していないためです。
 
+receiver を値で受ける `fn (self: T) name(...)` は、`deinit` でなければ receiver を
+consume しません。呼び出し側は値を持ち続けるので、body の `self` は `&T` と同じ
+借用です: field を move で取り出すこと、field や `self` を `deinit` すること、
+`move self` で返すことはどれも compile error です。consume する method は
+`deinit` だけで、その body だけが `self` を所有します(§14.4 の std 型は例外で、
+`Box.take` のように契約が SPEC にある method は署名から consume が導出されます)。
+
 marker は義務が place を離れる行を指します。そこは `errdefer` が退役する行でも
 あり(§6.3)、退役が source に現れる唯一の場所です。
 
