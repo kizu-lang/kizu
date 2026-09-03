@@ -24,10 +24,11 @@ pub enum Access {
 /// call it.
 pub struct Facts {
     pub access: Access,
-    /// grows marks a call that buys storage: its first argument names the
-    /// allocator, which must be the one the container was built from, since
-    /// the container's cleanup names one allocator for all of it (ADR-0132).
-    pub grows: bool,
+    /// names_allocator marks a call whose first argument names the
+    /// allocator its storage comes from or goes back to; it must be the one
+    /// the container was built from, since the container's cleanup names
+    /// one allocator for all of it (ADR-0132).
+    pub names_allocator: bool,
     /// copy_elem marks a call that duplicates an element by value, which only
     /// a copy element allows; an owner needs per-type deep-copy logic
     /// (ADR-0124).
@@ -122,39 +123,40 @@ pub fn method_facts(container: Container, method: []u8) -> ?Facts {
 
 fn plain(access: Access) -> Facts {
     return Facts {
-        access: access, grows: false, copy_elem: false, lent: 0, std_only: false, deinitializes: false
+        access: access, names_allocator: false, copy_elem: false, lent: 0, std_only: false, deinitializes: false
     };
 }
 
-fn grows(access: Access) -> Facts {
+fn names_allocator(access: Access) -> Facts {
     return Facts {
-        access: access, grows: true, copy_elem: false, lent: 0, std_only: false, deinitializes: false
+        access: access, names_allocator: true, copy_elem: false, lent: 0, std_only: false, deinitializes: false
     };
 }
 
 fn copies(access: Access) -> Facts {
     return Facts {
-        access: access, grows: false, copy_elem: true, lent: 0, std_only: false, deinitializes: false
+        access: access, names_allocator: false, copy_elem: true, lent: 0, std_only: false, deinitializes: false
     };
 }
 
 fn std_only(access: Access) -> Facts {
     return Facts {
-        access: access, grows: false, copy_elem: false, lent: 0, std_only: true, deinitializes: false
+        access: access, names_allocator: false, copy_elem: false, lent: 0, std_only: true, deinitializes: false
     };
 }
 
 fn array_facts(method: []u8) -> ?Facts {
     if mem::equal_bytes(method, "append") or mem::equal_bytes(method, "append_bytes") or
         mem::equal_bytes(method, "reserve") {
-        return grows(Access::Mutate);
+        return names_allocator(Access::Mutate);
     }
     if mem::equal_bytes(method, "set") or mem::equal_bytes(method, "swap") or
+        mem::equal_bytes(method, "remove") or
         mem::equal_bytes(method, "pop") or mem::equal_bytes(method, "pop_or_panic") {
         return plain(Access::Mutate);
     }
     if mem::equal_bytes(method, "truncate") or mem::equal_bytes(method, "clear") {
-        return std_only(Access::Mutate);
+        return names_allocator(Access::Mutate);
     }
     if mem::equal_bytes(method, "len") or mem::equal_bytes(method, "capacity") {
         return plain(Access::Read);
@@ -180,7 +182,7 @@ fn array_facts(method: []u8) -> ?Facts {
 
 fn map_facts(method: []u8) -> ?Facts {
     if mem::equal_bytes(method, "insert") {
-        var facts = grows(Access::Mutate);
+        var facts = names_allocator(Access::Mutate);
         facts.lent = 2;
         return facts;
     }
@@ -211,7 +213,7 @@ fn map_facts(method: []u8) -> ?Facts {
 fn string_facts(method: []u8) -> ?Facts {
     if mem::equal_bytes(method, "append_bytes") or mem::equal_bytes(method, "append_byte") or
         mem::equal_bytes(method, "append_string") or mem::equal_bytes(method, "reserve") {
-        return grows(Access::Mutate);
+        return names_allocator(Access::Mutate);
     }
     if mem::equal_bytes(method, "truncate") or mem::equal_bytes(method, "clear") {
         return plain(Access::Mutate);
@@ -240,7 +242,7 @@ fn box_facts(method: []u8) -> ?Facts {
 
 fn arena_facts(method: []u8) -> ?Facts {
     if mem::equal_bytes(method, "add") {
-        return grows(Access::Mutate);
+        return names_allocator(Access::Mutate);
     }
     if mem::equal_bytes(method, "at") {
         return plain(Access::Read);

@@ -6166,6 +6166,7 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 		"std::internal::builtin::array_get", "std::internal::builtin::array_get_or_panic",
 		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut",
 		"std::internal::builtin::array_set", "std::internal::builtin::array_swap",
+		"std::internal::builtin::array_truncate", "std::internal::builtin::array_clear",
 		"std::internal::builtin::array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env)
 	default:
@@ -6381,24 +6382,9 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		}
 		return "?&var " + elem, nil
 	case "get", "get_or_panic":
-		if len(args) != 1 {
-			return "", errorf("array error: `Array.%s` expects 1 arg, got %d",
-				name, len(args))
-		}
-		got, err := c.readExpr(args[0], env)
-		if err != nil {
-			return "", err
-		}
-		if got != "i64" {
-			return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
-		}
-		if !isGenericParamName(elem) && !c.isCopyType(elem) {
-			return "", errorf("array error: `Array.%s` requires copy element", name)
-		}
-		if name == "get" {
-			return "?" + elem, nil
-		}
-		return elem, nil
+		return c.checkArrayPrimitiveGet(elem, name, args, env)
+	case "truncate", "clear":
+		return c.checkArrayPrimitiveShrink(name, args, env)
 	case "deinit":
 		// The raw primitive frees the buffer through the allocator the release
 		// names: the header keeps none of its own (ADR-0132).
@@ -6410,6 +6396,52 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		array := &binding{typeName: fmt.Sprintf("std::array::Array<%s>", elem)}
 		return c.checkStdMethodCall(array, "std::array::Array", name, args, env)
 	}
+}
+
+// checkArrayPrimitiveGet validates the raw copy-only element reads used by
+// their std wrappers.
+func (c *Checker) checkArrayPrimitiveGet(
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
+	}
+	if !isGenericParamName(elem) && !c.isCopyType(elem) {
+		return "", errorf("array error: `Array.%s` requires copy element", name)
+	}
+	if name == "get" {
+		return "?" + elem, nil
+	}
+	return elem, nil
+}
+
+// checkArrayPrimitiveShrink validates the raw storage operations used only by
+// the owner-aware std wrappers.
+func (c *Checker) checkArrayPrimitiveShrink(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if name == "truncate" {
+		if _, err := c.checkOneI64Arg("Array.truncate", args, env); err != nil {
+			return "", err
+		}
+		return "std::array::Error!void", nil
+	}
+	if len(args) != 0 {
+		return "", errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
+	}
+	return "void", nil
 }
 
 // checkBuiltinMapTypeApply validates the std-only Map runtime primitive.

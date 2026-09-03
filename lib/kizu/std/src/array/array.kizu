@@ -88,6 +88,23 @@ fn (self: &var std::array::Array<T>) swap<T>(left: i64, right: i64) -> std::arra
     return std::internal::builtin::array_swap<T>(self, left, right);
 }
 
+// remove moves one initialized element out and closes the gap without
+// copying or destroying any owner. The initial check is the only recoverable
+// failure; after it succeeds every adjacent swap is in bounds.
+fn (self: &var std::array::Array<T>) remove<T>(index: i64) -> std::array::Error!T {
+    let length = self.len();
+    if index < 0 or index >= length {
+        return std::array::Error::OutOfBounds;
+    }
+    var at = index;
+    while at + 1 < length {
+        self.swap(at, at + 1) catch
+            std::internal::builtin::panic("std::array::Array.remove: checked swap failed");
+        at = at + 1;
+    }
+    return self.pop_or_panic();
+}
+
 // deinit consumes every element, then releases the backing buffer. An element
 // that owns nothing has nothing to consume, so the loop is not generated for
 // it and this is one runtime op; an element that owns something is released
@@ -113,12 +130,53 @@ fn (self: std::array::Array<T>) deinit<T>(allocator: Allocator) -> void {
     std::internal::builtin::array_deinit<T>(self, allocator);
 }
 
-fn (self: &var std::array::Array<T>) truncate<T>(length: i64) -> std::array::Error!void {
-    return std::internal::builtin::array_truncate<T>(self, length);
+// truncate validates before touching the collection, then releases removed
+// owners from the last element down. Plain elements have no cleanup body, so
+// their instance remains one storage primitive.
+fn (self: &var std::array::Array<T>) truncate<T>(
+    allocator: Allocator,
+    length: i64
+) -> std::array::Error!void {
+    comptime if std::meta::is_owner<T>() {
+        if length < 0 or length > self.len() {
+            return std::array::Error::OutOfBounds;
+        }
+        comptime if std::meta::release_names_allocator<T>() {
+            while self.len() > length {
+                let item = self.pop_or_panic();
+                item.deinit(allocator);
+            }
+        } else {
+            while self.len() > length {
+                let item = self.pop_or_panic();
+                item.deinit();
+            }
+        }
+    } else {
+        return std::internal::builtin::array_truncate<T>(self, length);
+    }
+    return;
 }
 
-fn (self: &var std::array::Array<T>) clear<T>() -> void {
-    std::internal::builtin::array_clear<T>(self);
+// clear releases every owner from the last element down while retaining the
+// allocation. Plain elements collapse to the single storage primitive.
+fn (self: &var std::array::Array<T>) clear<T>(allocator: Allocator) -> void {
+    comptime if std::meta::is_owner<T>() {
+        comptime if std::meta::release_names_allocator<T>() {
+            while self.len() > 0 {
+                let item = self.pop_or_panic();
+                item.deinit(allocator);
+            }
+        } else {
+            while self.len() > 0 {
+                let item = self.pop_or_panic();
+                item.deinit();
+            }
+        }
+    } else {
+        std::internal::builtin::array_clear<T>(self);
+    }
+    return;
 }
 
 fn (self: &std::array::Array<T>) as_bytes<T>() -> []u8 {

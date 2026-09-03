@@ -27,10 +27,11 @@ const (
 // an element it hands out by value must be a copy, and who may call it.
 type Facts struct {
 	Access Access
-	// Grows marks a call that buys storage: its first argument names the
-	// allocator, which must be the one the container was built from, since
-	// the container's cleanup names one allocator for all of it (ADR-0132).
-	Grows bool
+	// NamesAllocator marks a call whose first argument names the allocator
+	// its storage comes from or goes back to; it must be the one the
+	// container was built from, since the container's cleanup names one
+	// allocator for all of it (ADR-0132).
+	NamesAllocator bool
 	// CopyElem marks a call that duplicates an element by value, which only a
 	// copy element allows; an owner needs per-type deep-copy logic
 	// (ADR-0124).
@@ -62,15 +63,16 @@ type Container struct {
 // storage before any check sees it.
 var containers = map[string]Container{
 	"std::array::Array": {Kind: "array", Label: "Array", Elem: "element", Methods: map[string]Facts{
-		"append":       {Access: AccessMutate, Grows: true},
-		"append_bytes": {Access: AccessMutate, Grows: true},
-		"reserve":      {Access: AccessMutate, Grows: true},
+		"append":       {Access: AccessMutate, NamesAllocator: true},
+		"append_bytes": {Access: AccessMutate, NamesAllocator: true},
+		"reserve":      {Access: AccessMutate, NamesAllocator: true},
 		"set":          {Access: AccessMutate},
 		"swap":         {Access: AccessMutate},
+		"remove":       {Access: AccessMutate},
 		"pop":          {Access: AccessMutate},
 		"pop_or_panic": {Access: AccessMutate},
-		"truncate":     {Access: AccessMutate, StdOnly: true},
-		"clear":        {Access: AccessMutate, StdOnly: true},
+		"truncate":     {Access: AccessMutate, NamesAllocator: true},
+		"clear":        {Access: AccessMutate, NamesAllocator: true},
 		"len":          {Access: AccessRead},
 		"capacity":     {Access: AccessRead},
 		"get":          {Access: AccessRead, CopyElem: true},
@@ -86,7 +88,7 @@ var containers = map[string]Container{
 		"deinit":       {Access: AccessCleanup},
 	}},
 	"std::map::Map": {Kind: "map", Label: "Map", Elem: "value", Methods: map[string]Facts{
-		"insert":   {Access: AccessMutate, Grows: true, Lent: 2},
+		"insert":   {Access: AccessMutate, NamesAllocator: true, Lent: 2},
 		"get":      {Access: AccessRead, CopyElem: true, Lent: 1},
 		"key_at":   {Access: AccessRead},
 		"contains": {Access: AccessRead, Lent: 1},
@@ -96,10 +98,10 @@ var containers = map[string]Container{
 		"deinit":   {Access: AccessCleanup},
 	}},
 	"std::string::String": {Kind: "string", Label: "String", Elem: "byte", Methods: map[string]Facts{
-		"append_bytes":  {Access: AccessMutate, Grows: true},
-		"append_byte":   {Access: AccessMutate, Grows: true},
-		"append_string": {Access: AccessMutate, Grows: true},
-		"reserve":       {Access: AccessMutate, Grows: true},
+		"append_bytes":  {Access: AccessMutate, NamesAllocator: true},
+		"append_byte":   {Access: AccessMutate, NamesAllocator: true},
+		"append_string": {Access: AccessMutate, NamesAllocator: true},
+		"reserve":       {Access: AccessMutate, NamesAllocator: true},
 		"truncate":      {Access: AccessMutate},
 		"clear":         {Access: AccessMutate},
 		"len":           {Access: AccessRead},
@@ -115,7 +117,7 @@ var containers = map[string]Container{
 		"deinit":     {Access: AccessCleanup},
 	}},
 	"std::arena::Arena": {Kind: "arena", Label: "Arena", Elem: "element", Methods: map[string]Facts{
-		"add":    {Access: AccessMutate, Grows: true},
+		"add":    {Access: AccessMutate, NamesAllocator: true},
 		"at":     {Access: AccessRead},
 		"at_mut": {Access: AccessCapture},
 		"deinit": {Access: AccessCleanup, Deinitializes: true},

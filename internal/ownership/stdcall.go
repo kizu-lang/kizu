@@ -184,7 +184,7 @@ func (c *Checker) checkStdResultContext(
 }
 
 // checkStdMethodArgs applies the signature to the arguments, then what the
-// facts add: a growth's allocator and a cleanup's must be the container's own,
+// facts add: an allocator a call names and a cleanup's must be the container's own,
 // and an arena handle must belong to the arena it is used on. A capture
 // accessor reads its arguments with the capture context off, so a nested
 // accessor in argument position refuses as usual.
@@ -214,7 +214,7 @@ func (c *Checker) checkStdMethodArgs(
 		return err
 	}
 	label := container.Label + "." + name
-	if facts.Grows {
+	if facts.NamesAllocator {
 		if err := c.checkReleaseTie(label, receiver, args[0], env); err != nil {
 			return err
 		}
