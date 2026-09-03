@@ -2056,6 +2056,11 @@ unsafe ptr_write(dst, unsafe ptr_read(src));
 extern "c" fn puts(s: ptr<const u8>) -> i32
 ```
 
+`extern "c" fn` の引数と戻り値は C が名指しできる型だけです: 整数、浮動小数、
+`bool`、`ptr<T>` / `ptr<const T>` / nullable raw pointer、戻り値の `void`。
+`[]u8`、borrow(`&T` / `&var T`)、owner、struct、error union は C 側に表現が
+無いので拒否します。byte 列は `ptr<const u8>` と `usize` の長さで渡します。
+
 ルール:
 
 * 未証明操作は `unsafe` マーカーに覆われていなければ compile error

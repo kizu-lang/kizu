@@ -64,8 +64,11 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
       flag を消す)。`arr.append(a, arr.pop_or_panic())` は
       `Array.pop_or_panic cannot run while array is borrowed`。compiler の
       書き換えは lexer の 1 箇所(`std_array_two_phase_receiver`)。
-- `extern "c" fn` が `[]u8` / `&var String` を引数に取れる。SPEC §12.1 は `[]u8` を
-  browser ABI 限定としている
+- [x] `extern "c" fn` の引数と戻り値を C が名指しできる型に限る(整数 / 浮動小数 /
+      `bool` / raw pointer / `void`)。決めた: `[]u8`、borrow、owner、struct、
+      error union は拒否し、SPEC §12 に規則を書いた。診断は本文 + note(C が
+      受け取れる型)+ help(`ptr<const u8>` と `usize` で渡す)。negative 3 件
+      (`extern_c_view_param` / `extern_c_borrow_param` / `extern_c_view_return`)。
 
 ## std::http / std::net の残り
 
