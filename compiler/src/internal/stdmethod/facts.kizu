@@ -1,0 +1,257 @@
+import std::mem;
+
+// Port of internal/stdmethod/facts.go: what a std container method's
+// signature does not say, as data the ownership checker reads.
+
+/// Classifies what a container method does to the storage a live borrow may
+/// alias, the Go `Access`: reads wait for mutable borrows, mutations and
+/// cleanup wait for any borrow, capture accessors yield a borrow optional that
+/// exists only in a capture condition, and view producers yield a view that
+/// exists only where a `let` binds it.
+pub enum Access {
+    Read,
+    Mutate,
+    Cleanup,
+    Capture,
+    View,
+}
+
+/// Is what a std container method's signature does not say, the Go `Facts`.
+/// The signature carries how the receiver and each argument are handed over
+/// and what comes back; these say how the call touches the storage a borrow
+/// may alias, whether the allocator it names must be the container's own,
+/// whether an element it hands out by value must be a copy, and who may
+/// call it.
+pub struct Facts {
+    pub access: Access,
+    /// grows marks a call that buys storage: its first argument names the
+    /// allocator, which must be the one the container was built from, since
+    /// the container's cleanup names one allocator for all of it (ADR-0132).
+    pub grows: bool,
+    /// copy_elem marks a call that duplicates an element by value, which only
+    /// a copy element allows; an owner needs per-type deep-copy logic
+    /// (ADR-0124).
+    pub copy_elem: bool,
+    /// lent is the position, counted from 1 among the arguments after the
+    /// receiver, of a parameter the container copies or only compares, so a
+    /// view handed to it is lent, not kept: a Map stores its own copy of a
+    /// key and looks one up by comparison. Zero when there is none.
+    pub lent: i64,
+    /// std_only marks a helper reserved to std source.
+    pub std_only: bool,
+    /// deinitializes marks a cleanup after which a use reports the cleanup,
+    /// not a move.
+    pub deinitializes: bool
+}
+
+/// Names one std container, the Go `Container` key.
+pub enum Container {
+    Array,
+    Map,
+    String,
+    Box,
+    Arena,
+}
+
+/// Returns the container filed under base, the Go `Lookup`.
+pub fn container_of(base: []u8) -> ?Container {
+    if mem::equal_bytes(base, "std::array::Array") {
+        return Container::Array;
+    }
+    if mem::equal_bytes(base, "std::map::Map") {
+        return Container::Map;
+    }
+    if mem::equal_bytes(base, "std::string::String") {
+        return Container::String;
+    }
+    if mem::equal_bytes(base, "std::mem::Box") {
+        return Container::Box;
+    }
+    if mem::equal_bytes(base, "std::arena::Arena") {
+        return Container::Arena;
+    }
+    return null;
+}
+
+/// Returns the error prefix and the noun for the storage, the Go
+/// `Container.Kind`.
+pub fn container_kind(container: Container) -> []u8 {
+    return match container {
+        Array => "array",
+        Map => "map",
+        String => "string",
+        Box => "box",
+        Arena => "arena",
+    };
+}
+
+/// Returns the type as a method call spells it, the Go `Container.Label`.
+pub fn container_label(container: Container) -> []u8 {
+    return match container {
+        Array => "Array",
+        Map => "Map",
+        String => "String",
+        Box => "Box",
+        Arena => "Arena",
+    };
+}
+
+/// Returns the noun for what the container holds, the Go `Container.Elem`.
+pub fn container_elem(container: Container) -> []u8 {
+    return match container {
+        Array => "element",
+        Map => "value",
+        String => "byte",
+        Box => "value",
+        Arena => "element",
+    };
+}
+
+/// Returns the facts of one container method, the Go `MethodFacts`. A method
+/// missing here is refused at dispatch, so a new method has to name what it
+/// does to storage before any check sees it.
+pub fn method_facts(container: Container, method: []u8) -> ?Facts {
+    return match container {
+        Array => array_facts(method),
+        Map => map_facts(method),
+        String => string_facts(method),
+        Box => box_facts(method),
+        Arena => arena_facts(method),
+    };
+}
+
+fn plain(access: Access) -> Facts {
+    return Facts {
+        access: access, grows: false, copy_elem: false, lent: 0, std_only: false, deinitializes: false
+    };
+}
+
+fn grows(access: Access) -> Facts {
+    return Facts {
+        access: access, grows: true, copy_elem: false, lent: 0, std_only: false, deinitializes: false
+    };
+}
+
+fn copies(access: Access) -> Facts {
+    return Facts {
+        access: access, grows: false, copy_elem: true, lent: 0, std_only: false, deinitializes: false
+    };
+}
+
+fn std_only(access: Access) -> Facts {
+    return Facts {
+        access: access, grows: false, copy_elem: false, lent: 0, std_only: true, deinitializes: false
+    };
+}
+
+fn array_facts(method: []u8) -> ?Facts {
+    if mem::equal_bytes(method, "append") or mem::equal_bytes(method, "append_bytes") or
+        mem::equal_bytes(method, "reserve") {
+        return grows(Access::Mutate);
+    }
+    if mem::equal_bytes(method, "set") or mem::equal_bytes(method, "swap") or
+        mem::equal_bytes(method, "pop") or mem::equal_bytes(method, "pop_or_panic") {
+        return plain(Access::Mutate);
+    }
+    if mem::equal_bytes(method, "truncate") or mem::equal_bytes(method, "clear") {
+        return std_only(Access::Mutate);
+    }
+    if mem::equal_bytes(method, "len") or mem::equal_bytes(method, "capacity") {
+        return plain(Access::Read);
+    }
+    if mem::equal_bytes(method, "get") or mem::equal_bytes(method, "get_or_panic") or
+        mem::equal_bytes(method, "clone") {
+        return copies(Access::Read);
+    }
+    // Unlike String's, Array's as_bytes/as_mut_bytes are std-internal calls
+    // guarded as reads; String's form view bindings and are guarded where
+    // the binding forms.
+    if mem::equal_bytes(method, "as_bytes") or mem::equal_bytes(method, "as_mut_bytes") {
+        return std_only(Access::Read);
+    }
+    if mem::equal_bytes(method, "at") or mem::equal_bytes(method, "at_mut") {
+        return plain(Access::Capture);
+    }
+    if mem::equal_bytes(method, "deinit") {
+        return plain(Access::Cleanup);
+    }
+    return null;
+}
+
+fn map_facts(method: []u8) -> ?Facts {
+    if mem::equal_bytes(method, "insert") {
+        var facts = grows(Access::Mutate);
+        facts.lent = 2;
+        return facts;
+    }
+    if mem::equal_bytes(method, "get") {
+        var facts = copies(Access::Read);
+        facts.lent = 1;
+        return facts;
+    }
+    if mem::equal_bytes(method, "contains") {
+        var facts = plain(Access::Read);
+        facts.lent = 1;
+        return facts;
+    }
+    if mem::equal_bytes(method, "key_at") or mem::equal_bytes(method, "len") {
+        return plain(Access::Read);
+    }
+    if mem::equal_bytes(method, "at") or mem::equal_bytes(method, "at_mut") {
+        var facts = plain(Access::Capture);
+        facts.lent = 1;
+        return facts;
+    }
+    if mem::equal_bytes(method, "deinit") {
+        return plain(Access::Cleanup);
+    }
+    return null;
+}
+
+fn string_facts(method: []u8) -> ?Facts {
+    if mem::equal_bytes(method, "append_bytes") or mem::equal_bytes(method, "append_byte") or
+        mem::equal_bytes(method, "append_string") or mem::equal_bytes(method, "reserve") {
+        return grows(Access::Mutate);
+    }
+    if mem::equal_bytes(method, "truncate") or mem::equal_bytes(method, "clear") {
+        return plain(Access::Mutate);
+    }
+    if mem::equal_bytes(method, "len") or mem::equal_bytes(method, "capacity") {
+        return plain(Access::Read);
+    }
+    if mem::equal_bytes(method, "as_bytes") or mem::equal_bytes(method, "as_mut_bytes") {
+        return plain(Access::View);
+    }
+    if mem::equal_bytes(method, "deinit") {
+        return plain(Access::Cleanup);
+    }
+    return null;
+}
+
+fn box_facts(method: []u8) -> ?Facts {
+    if mem::equal_bytes(method, "borrow") or mem::equal_bytes(method, "borrow_mut") {
+        return plain(Access::View);
+    }
+    if mem::equal_bytes(method, "take") or mem::equal_bytes(method, "deinit") {
+        return plain(Access::Cleanup);
+    }
+    return null;
+}
+
+fn arena_facts(method: []u8) -> ?Facts {
+    if mem::equal_bytes(method, "add") {
+        return grows(Access::Mutate);
+    }
+    if mem::equal_bytes(method, "at") {
+        return plain(Access::Read);
+    }
+    if mem::equal_bytes(method, "at_mut") {
+        return plain(Access::Capture);
+    }
+    if mem::equal_bytes(method, "deinit") {
+        var facts = plain(Access::Cleanup);
+        facts.deinitializes = true;
+        return facts;
+    }
+    return null;
+}

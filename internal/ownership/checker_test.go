@@ -1052,15 +1052,16 @@ fn (self: &var Registry) add_bound(allocator: Allocator, name: []u8) -> !std::ar
 fn (self: Registry) deinit(allocator: Allocator) -> void {
     self.users.deinit(allocator);
 }
-fn main() {
+fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var registry = Registry { users: std::arena::new<User>(allocator) };
     errdefer registry.deinit(allocator);
-    let alice = registry.add_direct(allocator, "alice");
-    let bob = registry.add_bound(allocator, "bob");
+    let alice = try registry.add_direct(allocator, "alice");
+    let bob = try registry.add_bound(allocator, "bob");
     print(registry.users.at(alice).name);
     print(registry.users.at(bob).name);
     registry.deinit(allocator);
+    return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("unexpected error: %v", err)

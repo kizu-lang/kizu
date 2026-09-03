@@ -148,14 +148,20 @@ type binding struct {
 	mutBorrow        bool
 	activeBorrows    int
 	activeMutBorrows int
-	fieldBorrows     map[string]int
-	fieldMutBorrows  map[string]int
-	fieldDeinit      map[string]bool
-	fieldArenaIDs    map[string]int
-	arenaID          int
-	handleArenaID    int
-	deinitialized    bool
-	consumeExempt    bool
+	// reservations counts the method calls holding this value as their
+	// `&var` receiver while their arguments are evaluated. Each is one of
+	// activeBorrows, so an argument cannot alias or consume the receiver,
+	// but not a borrow the frame holds at an error exit inside the
+	// arguments, where the call has not begun.
+	reservations    int
+	fieldBorrows    map[string]int
+	fieldMutBorrows map[string]int
+	fieldDeinit     map[string]bool
+	fieldArenaIDs   map[string]int
+	arenaID         int
+	handleArenaID   int
+	deinitialized   bool
+	consumeExempt   bool
 	// ownsTied marks a capture that was handed its owner payload while the
 	// payload's views keep it tied to the container it came from: the
 	// binding owns the value (its `deinit` is its to call) but cannot move
@@ -1018,7 +1024,10 @@ func (c *Checker) validateErrDeferReceivers(env *scope) ([]ast.Expression, error
 			retired = append(retired, entry.receiver)
 			continue
 		}
-		if value.activeBorrows > 0 || value.activeMutBorrows > 0 {
+		// A method call's reservation of its receiver is not a borrow the
+		// frame holds at an error exit inside the arguments: the call has
+		// not begun, and the receiver's cleanup may run.
+		if value.activeBorrows-value.reservations > 0 || value.activeMutBorrows > 0 {
 			return nil, errorf(
 				"borrow error: errdefer cleanup receiver `%s` is borrowed on an error path",
 				entry.name)
@@ -2387,7 +2396,7 @@ func (c *Checker) borrowOptionalCallTargets(
 			return nil, false, false
 		}
 		if base, generic := splitGenericBase(typeName); generic &&
-			containerAccessTables[base].methods[callee.Name] == accessCapture {
+			stdCaptureAccessor(base, callee.Name) {
 			return []borrowCaptureTarget{{name: place, field: fieldName}}, true, true
 		}
 		method := c.implMethod(typeName, callee.Name)
@@ -4269,12 +4278,18 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 	if err := checkMovePlaceBinding(ident, value, env, c.returnedViews[ident]); err != nil {
 		return "", false, err
 	}
+	if c.isCopyType(value.typeName) {
+		// A copy leaves nothing behind and carries no memory of its own: a
+		// handle into a tied arena is read like any plain value, and what
+		// cannot leave the frame is the arena it names (checkReturnValueEscapes).
+		return value.typeName, false, nil
+	}
 	if value.allocTied() {
 		return "", false, errorAt(ident.Span,
 			"borrow error: value `%s` is allocated from a tied allocator and cannot escape its frame",
 			ident.Name)
 	}
-	if value.hasAnyBorrow() && !c.isCopyType(value.typeName) {
+	if value.hasAnyBorrow() {
 		return "", false, errorAt(ident.Span,
 			"borrow error: value `%s` cannot be moved while borrowed", ident.Name)
 	}
@@ -4282,9 +4297,6 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 		return "", false, errorAt(ident.Span,
 			"move error: field `%s.%s` is already consumed, so `%s` cannot be handed on whole",
 			ident.Name, field, ident.Name)
-	}
-	if c.isCopyType(value.typeName) {
-		return value.typeName, false, nil
 	}
 	value.moved = true
 	return value.typeName, true, nil
@@ -4958,7 +4970,7 @@ func (c *Checker) checkUserCallArg(
 		_, err := c.readExpr(arg, env)
 		return err
 	}
-	if c.viewArgLend(fn, idx, arg, env) || c.capabilityArgLend(fn, idx, arg, env) ||
+	if c.viewArgLend(fn, idx, arg, env) || capabilityArgLend(fn, idx) ||
 		c.sanctionedViewLend(sanctioned, fn, idx, arg, env) {
 		_, err := c.readExpr(arg, env)
 		return err
@@ -4985,20 +4997,13 @@ func (c *Checker) sanctionedViewLend(
 	return c.borrowClassViewRoot(arg, env) != nil
 }
 
-// capabilityArgLend reports whether arg is a tied capability binding lent to a
-// capability parameter. The lend itself is free -- a capability is copied into
-// every call that takes one -- and what the callee's result may carry out is
-// covered by pendTiedAllocatorArgs at the call site.
-func (c *Checker) capabilityArgLend(
-	fn *functionInfo,
-	idx int,
-	arg ast.Expression,
-	env *scope,
-) bool {
-	if !capabilityReturn(fn.params[idx].typeName) {
-		return false
-	}
-	return c.tiedCapabilityArg(arg, env) != nil
+// capabilityArgLend reports whether arg is lent to a capability parameter,
+// which every capability argument is. The lend itself is free -- a capability
+// is copied into every call that takes one, tied or not -- and what the
+// callee's result may carry out is covered by pendTiedAllocatorArgs at the
+// call site.
+func capabilityArgLend(fn *functionInfo, idx int) bool {
+	return capabilityReturn(fn.params[idx].typeName)
 }
 
 // pendTiedAllocatorArgs records the tie obligation of a call that consumed a
@@ -6360,7 +6365,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		return "void", nil
 	default:
 		array := &binding{typeName: fmt.Sprintf("std::array::Array<%s>", elem)}
-		return c.checkArrayMethod(array, elem, name, args, env)
+		return c.checkStdMethodCall(array, "std::array::Array", name, args, env)
 	}
 }
 
@@ -6432,58 +6437,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 		}
 		return valueType, nil
 	}
-	if !isGenericParamName(keyType) && !isGenericParamName(valueType) {
-		argsText := mapValue.typeName[len("std::map::Map<") : len(mapValue.typeName)-1]
-		return c.checkMapMethod(mapValue, argsText, name, args, env)
-	}
-	return c.checkGenericMapPrimitiveMethod(mapValue, keyType, valueType, name, args, env)
-}
-
-// checkGenericMapPrimitiveMethod validates Map primitives applied to generic
-// static arguments, which only a std wrapper body can spell.
-func (c *Checker) checkGenericMapPrimitiveMethod(
-	mapValue *binding,
-	keyType string,
-	valueType string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	switch name {
-	case "insert":
-		if len(args) != 3 {
-			return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
-		}
-		if err := c.readGrowAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
-			return "", err
-		}
-		if got, err := c.readExpr(args[1], env); err != nil {
-			return "", err
-		} else if got != keyType {
-			return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
-		}
-		got, err := c.moveContextualExpr(args[2], valueType, env)
-		if err != nil {
-			return "", err
-		}
-		if got != valueType {
-			return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
-		}
-		return "std::mem::Error!void", nil
-	case "get":
-		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env); err != nil {
-			return "", err
-		}
-		return "?" + valueType, nil
-	case "contains":
-		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env); err != nil {
-			return "", err
-		}
-		return "bool", nil
-	default:
-		return c.checkMapMethod(mapValue,
-			mapValue.typeName[len("std::map::Map<"):len(mapValue.typeName)-1], name, args, env)
-	}
+	return c.checkStdMethodCall(mapValue, "std::map::Map", name, args, env)
 }
 
 // checkMapPrimitiveKeyArg validates a generic Map wrapper key argument.
@@ -7431,76 +7385,29 @@ func (c *Checker) checkLocalReceiverMethod(
 	if arena.moved {
 		return "", errorAt(receiver.Span, "move error: moved value `%s` was used", receiver.Name)
 	}
-	base, elem, ok := splitGenericType(arena.typeName)
-	if ok && base == "std::array::Array" {
-		return c.checkArrayMethod(arena, elem, field.Name, args, env)
+	if base, ok := stdContainerBase(arena.typeName); ok {
+		return c.checkStdMethodCall(arena, base, field.Name, args, env)
 	}
-	if ok && base == "std::map::Map" {
-		if err := checkMapReceiverBorrow(arena, field.Name); err != nil {
-			return "", err
-		}
-		return c.checkMapMethod(arena, elem, field.Name, args, env)
-	}
-	if !ok || base != "std::arena::Arena" {
-		return c.checkNonArenaMethod(arena, field.Name, args, env)
-	}
-	return c.checkArenaMethod(arena, field.Name, args, env)
+	return c.checkNonArenaMethod(arena, field.Name, args, env)
 }
 
-// checkArenaMethod dispatches methods on a local arena binding.
-func (c *Checker) checkArenaMethod(
-	arena *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if err := checkContainerMethodAccess("std::arena::Arena", arena, name); err != nil {
-		return "", err
-	}
-	switch name {
-	case "add":
-		return c.checkArenaAdd(arena, args, env)
-	case "at":
-		return c.checkArenaAt(arena, args, env)
-	case "at_mut":
-		return c.checkArenaAtCondition(arena, args, env)
-	case "deinit":
-		return c.checkArenaDeinit(arena, args, env)
-	default:
-		// Unreachable while this switch and the shared access table agree;
-		// the table refusal above is the user-facing one.
-		return "", errorf("arena error: method `%s` is classified but unhandled", name)
-	}
+// stdCaptureAccessor reports whether a container method yields a borrow
+// optional a capture consumes.
+func stdCaptureAccessor(base string, name string) bool {
+	facts, ok := stdmethod.MethodFacts(base, name)
+	return ok && facts.Access == stdmethod.AccessCapture
 }
 
-// checkArenaAtCondition checks at_mut inside a capture condition — a mutable
-// binding and one handle whose provenance matches the arena — and refuses it
-// everywhere else. Provenance is the guarantee here: a handle that passes it
-// can only go absent if the checker itself is wrong, so the capture's else
-// branch is a residue, not a normal path.
-func (c *Checker) checkArenaAtCondition(
-	arena *binding,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if !c.captureCondition && !c.borrowReturn {
-		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
-			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+// stdContainerBase names the std container a value's type is, when it is one.
+func stdContainerBase(typeName string) (string, bool) {
+	base := typeName
+	if generic, _, ok := splitGenericType(typeName); ok {
+		base = generic
 	}
-	if !mutablePlace(arena) {
-		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
+	if _, ok := stdmethod.Lookup(base); !ok {
+		return "", false
 	}
-	// The context covers exactly this call: both flags off while the
-	// argument is read — a nested at/at_mut in argument position refuses as
-	// usual — and back for the result the call gate reads.
-	savedCapture, savedReturn := c.captureCondition, c.borrowReturn
-	c.captureCondition, c.borrowReturn = false, false
-	elem, err := c.checkArenaHandleArg(arena, args, env, "Arena.at_mut")
-	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
-	if err != nil {
-		return "", err
-	}
-	return "?&var " + elem, nil
+	return base, true
 }
 
 // checkNonArenaMethod validates methods on non-arena owned values.
@@ -7510,17 +7417,8 @@ func (c *Checker) checkNonArenaMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if value.typeName == "std::string::String" {
-		if err := checkStringReceiverBorrow(value, name); err != nil {
-			return "", err
-		}
-		return c.checkStringMethod(value, name, args, env)
-	}
-	if base, _, ok := splitGenericType(value.typeName); ok && base == "std::mem::Box" {
-		return c.checkBoxMethod(value, name, args, env)
-	}
-	if err := checkMapReceiverBorrow(value, name); err != nil {
-		return "", err
+	if base, ok := stdContainerBase(value.typeName); ok {
+		return c.checkStdMethodCall(value, base, name, args, env)
 	}
 	if typ, ok, err := c.checkImplMethodCall(value, name, args, env); ok || err != nil {
 		return typ, err
@@ -7637,73 +7535,7 @@ func (c *Checker) checkDirectFieldReceiverByType(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if value.typeName == "std::string::String" {
-		return c.checkStringMethod(value, name, args, env)
-	}
-	base, elem, ok := splitGenericType(value.typeName)
-	if ok && base == "std::array::Array" {
-		return c.checkArrayMethod(value, elem, name, args, env)
-	}
-	if ok && base == "std::map::Map" {
-		return c.checkMapMethod(value, elem, name, args, env)
-	}
-	if ok && base == "std::mem::Box" {
-		return c.checkBoxMethod(value, name, args, env)
-	}
-	if ok && base == "std::arena::Arena" {
-		return c.checkFieldArenaMethod(value, name, args, env)
-	}
 	return c.checkNonArenaMethod(value, name, args, env)
-}
-
-// checkFieldArenaMethod validates direct field calls on owned arena fields.
-func (c *Checker) checkFieldArenaMethod(
-	arena *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if err := checkContainerMethodAccess("std::arena::Arena", arena, name); err != nil {
-		return "", err
-	}
-	switch name {
-	case "add":
-		return c.checkArenaAdd(arena, args, env)
-	case "at":
-		return c.checkFieldArenaAt(arena, args, env)
-	case "at_mut":
-		// An owned arena field backs an at_mut capture like a local arena
-		// does; handle provenance stays strict.
-		return c.checkArenaAtCondition(arena, args, env)
-	case "deinit":
-		return c.checkArenaDeinit(arena, args, env)
-	default:
-		// Unreachable while this switch and the shared access table agree;
-		// the table refusal above is the user-facing one.
-		return "", errorf("arena error: method `%s` is classified but unhandled", name)
-	}
-}
-
-// checkFieldArenaAt permits typed wrapper methods to unwrap their own arena handles.
-func (c *Checker) checkFieldArenaAt(
-	arena *binding,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("arena error: `Arena.at` expects 1 arg, got %d", len(args))
-	}
-	base, arg, ok := splitGenericType(arena.typeName)
-	if !ok || base != "std::arena::Arena" {
-		return "", errorf("arena error: `%s` is not an arena", arena.name)
-	}
-	if err := c.checkKnownHandleProvenance(arena, args[0], env); err != nil {
-		return "", err
-	}
-	if _, err := c.readExpr(args[0], env); err != nil {
-		return "", err
-	}
-	return "&" + arg, nil
 }
 
 // checkBoxReceiverExpr validates methods on local Box values and direct Box fields.
@@ -7727,915 +7559,21 @@ func (c *Checker) checkBoxReceiverExpr(
 	if (field.Name == "take" || field.Name == typ.CleanupMethod) && borrowedField != "" {
 		return "", true, errorf("box error: `Box.%s` requires local Box receiver", field.Name)
 	}
-	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args, env)
+	receiver := target
+	if borrowedField != "" {
+		receiver = c.bindingForDirectFieldReceiver(&directFieldReceiver{
+			owner: target, field: borrowedField, typeName: typeName,
+			path: target.name + "." + borrowedField,
+		})
+	}
+	typ, err := c.checkStdMethodCall(receiver, "std::mem::Box", field.Name, args, env)
 	return typ, true, err
-}
-
-// checkBoxMethodForTarget validates Box methods with a tracked borrow root.
-func (c *Checker) checkBoxMethodForTarget(
-	target *binding,
-	field string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	switch name {
-	case "borrow", "borrow_mut":
-		return "", errorf("box error: `Box.%s` must be bound with `let name = box.%s()`",
-			name, name)
-	case "take", "deinit":
-		if target.hasAnyBorrow() {
-			return "", errorf("box error: `Box.%s` cannot run while box is borrowed", name)
-		}
-		if err := c.readReleaseAllocator("Box."+name, target, args, env); err != nil {
-			return "", err
-		}
-		if field == "" {
-			target.moved = true
-		}
-		if name == "take" {
-			_, elem, _ := splitGenericType(target.typeName)
-			return elem, nil
-		}
-		return "void", nil
-	default:
-		return "", errorf("box error: Box has no method `%s`", name)
-	}
-}
-
-// checkBoxMethod validates methods on a local Box binding.
-func (c *Checker) checkBoxMethod(
-	box *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	return c.checkBoxMethodForTarget(box, "", name, args, env)
-}
-
-// containerAccess classifies what one container method does to the storage a
-// live borrow may alias: reads wait for mutable borrows, mutations and
-// cleanup wait for any borrow, capture accessors are consumed by the capture
-// recognizer, and view producers are guarded where their binding forms.
-type containerAccess int
-
-const (
-	accessRead containerAccess = iota
-	accessMutate
-	accessCleanup
-	accessCapture
-	accessView
-)
-
-// containerAccessTable names one container's methods and how each touches
-// storage. kind is the error prefix, label the method spelling.
-type containerAccessTable struct {
-	kind    string
-	label   string
-	methods map[string]containerAccess
-}
-
-// containerAccessTables is the one classification the container dispatchers
-// share. A method missing here is refused at dispatch, so a new method has to
-// name what it does to storage before any per-method checker sees it. Box is
-// not here: its borrows are per-field and its conflicts are checked where the
-// field borrow forms.
-var containerAccessTables = map[string]containerAccessTable{
-	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
-		"append": accessMutate, "append_bytes": accessMutate, "reserve": accessMutate,
-		"set":  accessMutate,
-		"swap": accessMutate,
-		"pop":  accessMutate, "pop_or_panic": accessMutate,
-		"truncate": accessMutate, "clear": accessMutate,
-		"len": accessRead, "capacity": accessRead,
-		"get": accessRead, "get_or_panic": accessRead, "clone": accessRead,
-		// Unlike String's, Array's as_bytes/as_mut_bytes are std-internal
-		// calls guarded here as reads; String's form view bindings and are
-		// guarded where the binding forms.
-		"as_bytes": accessRead, "as_mut_bytes": accessRead,
-		"at": accessCapture, "at_mut": accessCapture,
-		"deinit": accessCleanup,
-	}},
-	"std::map::Map": {kind: "map", label: "Map", methods: map[string]containerAccess{
-		"insert": accessMutate,
-		"get":    accessRead, "key_at": accessRead, "contains": accessRead,
-		"len": accessRead,
-		"at":  accessCapture, "at_mut": accessCapture,
-		"deinit": accessCleanup,
-	}},
-	"std::string::String": {kind: "string", label: "String", methods: map[string]containerAccess{
-		"append_bytes": accessMutate, "append_byte": accessMutate,
-		"append_string": accessMutate,
-		"reserve":       accessMutate, "truncate": accessMutate, "clear": accessMutate,
-		"len": accessRead, "capacity": accessRead,
-		"as_bytes": accessView, "as_mut_bytes": accessView,
-		"deinit": accessCleanup,
-	}},
-	"std::arena::Arena": {kind: "arena", label: "Arena", methods: map[string]containerAccess{
-		"add":    accessMutate,
-		"at":     accessRead,
-		"at_mut": accessCapture,
-		"deinit": accessCleanup,
-	}},
-}
-
-// checkContainerMethodAccess looks a container method up in the shared table
-// and refuses it when a live borrow conflicts with what it does to storage.
-// An unknown method is refused here: default deny, not fall-through.
-func checkContainerMethodAccess(base string, value *binding, name string) error {
-	table, ok := containerAccessTables[base]
-	if !ok {
-		return errorf("move error: `%s` has no container access table", base)
-	}
-	access, known := table.methods[name]
-	if !known {
-		return errorf("%s error: %s has no method `%s`", table.kind, table.label, name)
-	}
-	switch access {
-	case accessRead:
-		if value.activeMutBorrows > 0 {
-			return errorf("%s error: `%s.%s` cannot read while mutably borrowed",
-				table.kind, table.label, name)
-		}
-	case accessMutate, accessCleanup:
-		if value.hasAnyBorrow() {
-			return errorf("%s error: `%s.%s` cannot run while %s is borrowed",
-				table.kind, table.label, name, table.kind)
-		}
-	}
-	return nil
-}
-
-// checkStringReceiverBorrow rejects String methods whose receiver cannot be tracked safely.
-func checkStringReceiverBorrow(value *binding, name string) error {
-	if name == "deinit" && value.borrowedParam {
-		return errorf("string error: `String.deinit` requires owned String receiver")
-	}
-	if isStringMutatingMethod(name) && value.borrowedParam && !value.mutBorrow {
-		return errorf("string error: `String.%s` requires mutable String receiver", name)
-	}
-	return nil
-}
-
-// checkMapReceiverBorrow rejects Map methods whose receiver cannot be tracked safely.
-func checkMapReceiverBorrow(value *binding, name string) error {
-	base, _, ok := splitGenericType(value.typeName)
-	if !ok || base != "std::map::Map" {
-		return nil
-	}
-	if name == "deinit" && value.borrowedParam {
-		return errorf("map error: `Map.deinit` requires owned Map receiver")
-	}
-	if name == "insert" && value.borrowedParam && !value.mutBorrow {
-		return errorf("map error: `Map.insert` requires mutable Map receiver")
-	}
-	return nil
-}
-
-// checkStringMethod validates ownership effects for owned String methods.
-func (c *Checker) checkStringMethod(
-	str *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if err := checkContainerMethodAccess("std::string::String", str, name); err != nil {
-		return "", err
-	}
-	switch name {
-	case "append_bytes", "append_byte", "reserve", "truncate":
-		return c.checkStringAppendOrReserve(str, name, args, env)
-	case "append_string":
-		if err := c.readStringGrowAllocator(str, name, args, env); err != nil {
-			return "", err
-		}
-		return c.checkStringSourceArg(str, name, args[1:], env)
-	case "len", "capacity":
-		if err := checkStringNoArgs(name, args); err != nil {
-			return "", err
-		}
-		return "i64", nil
-	case "as_bytes", "as_mut_bytes":
-		return "", errorf(
-			"string error: `String.%s` must be bound with `let name = string.%s()`", name, name)
-	case "clear":
-		if err := checkStringNoArgs(name, args); err != nil {
-			return "", err
-		}
-		return "void", nil
-	case "deinit":
-		if err := c.readReleaseAllocator("String.deinit", str, args, env); err != nil {
-			return "", err
-		}
-		str.moved = true
-		return "void", nil
-	default:
-		// Unreachable while this switch and the shared access table agree;
-		// the table refusal above is the user-facing one.
-		return "", errorf("string error: method `%s` is classified but unhandled", name)
-	}
-}
-
-// checkStringAppendOrReserve validates the String mutators that take a value.
-// A growth names the allocator its storage comes from first: a String keeps
-// none of its own (ADR-0132). `truncate` neither grows nor frees.
-func (c *Checker) checkStringAppendOrReserve(
-	str *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	rest := args
-	if stringGrowMethod(name) {
-		if err := c.readStringGrowAllocator(str, name, args, env); err != nil {
-			return "", err
-		}
-		rest = args[1:]
-	}
-	switch name {
-	case "append_bytes":
-		return c.checkStringBytesArg(name, rest, env)
-	case "append_byte":
-		return c.checkStringByteArg(name, rest, env)
-	default:
-		return c.checkStringReserveArg(name, rest, env)
-	}
-}
-
-// stringGrowMethod reports the String methods that may ask for storage.
-func stringGrowMethod(name string) bool {
-	switch name {
-	case "append_bytes", "append_byte", "append_string", "reserve":
-		return true
-	default:
-		return false
-	}
-}
-
-// readStringGrowAllocator reads the leading Allocator a growth names.
-func (c *Checker) readStringGrowAllocator(
-	str *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) error {
-	if len(args) != 2 {
-		return errorf("string error: `String.%s` expects 2 args, got %d", name, len(args))
-	}
-	return c.readGrowAllocator("string", "String."+name, str, args[0], env)
-}
-
-// checkStringNoArgs validates no-argument String methods.
-func checkStringNoArgs(name string, args []ast.Expression) error {
-	if len(args) != 0 {
-		return errorf("string error: `String.%s` expects 0 args, got %d", name, len(args))
-	}
-	return nil
-}
-
-// isStringMutatingMethod reports whether a String method can change owned storage.
-func isStringMutatingMethod(name string) bool {
-	switch name {
-	case "append_bytes", "append_byte", "append_string", "reserve", "truncate",
-		"clear", "deinit":
-		return true
-	default:
-		return false
-	}
-}
-
-// checkStringBytesArg validates append_bytes without moving the source slice.
-func (c *Checker) checkStringBytesArg(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if !sameOwnershipType(got, "[]u8") {
-		return "", errorf("string error: `String.%s` expects []u8, got %s", name, got)
-	}
-	return "std::mem::Error!void", nil
-}
-
-// checkStringSourceArg validates append_string reading its source String
-// without moving it. The receiver is the call's `&var` argument and the
-// source its `&` argument, so the two are activated in that order and collide
-// exactly as they would on a direct call.
-func (c *Checker) checkStringSourceArg(
-	str *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
-	}
-	if err := checkBorrowConflictForField(str, "", true); err != nil {
-		return "", err
-	}
-	c.activateBorrow(str, "", true)
-	defer releaseTemporaryBorrows([]temporaryBorrow{{value: str, field: "", mutable: true}})
-	source, field, err := c.callBorrowTarget(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if source != nil {
-		if err := checkBorrowConflictForField(source, field, false); err != nil {
-			return "", err
-		}
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if !sameOwnershipType(got, "std::string::String") {
-		return "", errorf("string error: `String.%s` expects String, got %s", name, got)
-	}
-	return "std::mem::Error!void", nil
-}
-
-// checkStringReserveArg validates reserve without moving the count.
-func (c *Checker) checkStringReserveArg(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if got != "i64" {
-		return "", errorf("string error: `String.%s` expects i64, got %s", name, got)
-	}
-	// reserve can be refused a size or run out of memory; truncate only
-	// refuses a bad length.
-	if name == "truncate" {
-		return "std::string::Error!void", nil
-	}
-	return "std::string::GrowError!void", nil
-}
-
-// checkStringByteArg validates append_byte without moving the source value.
-func (c *Checker) checkStringByteArg(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
-	}
-	got, err := c.readContextualExpr(args[0], "u8", env)
-	if err != nil {
-		return "", err
-	}
-	if got != "u8" {
-		return "", errorf("string error: `String.%s` expects u8, got %s", name, got)
-	}
-	return "std::mem::Error!void", nil
-}
-
-// checkArrayMethod validates ownership effects for owned Array<T> methods.
-func (c *Checker) checkArrayMethod(
-	array *binding,
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if isStdArrayStorageMethod(name) && !c.currentStd {
-		return "", errorf("array error: Array has no method `%s`", name)
-	}
-	if err := checkContainerMethodAccess("std::array::Array", array, name); err != nil {
-		return "", err
-	}
-	if isStdArrayStorageMethod(name) {
-		return c.checkStdArrayStorageMethod(elem, name, args, env)
-	}
-	if arrayGrowMethod(name) {
-		return c.checkArrayGrowth(array, elem, name, args, env)
-	}
-	switch name {
-	case "pop":
-		return c.checkArrayPop(elem, name, args, true)
-	case "pop_or_panic":
-		return c.checkArrayPop(elem, name, args, false)
-	case "len", "capacity":
-		return c.checkArrayReadNoArgs(name, args)
-	case "get", "get_or_panic", "clone":
-		return c.checkArrayCopyMethod(elem, name, args, env)
-	case "at", "at_mut":
-		return c.checkArrayAtCondition(array, elem, name, args, env)
-	case "set", "swap":
-		return c.checkArrayIndexedMutation(array, elem, name, args, env)
-	case "deinit":
-		return c.checkArrayDeinit(array, name, args, env)
-	default:
-		// Unreachable while this switch and the shared access table agree;
-		// the table refusal above is the user-facing one.
-		return "", errorf("array error: method `%s` is classified but unhandled", name)
-	}
-}
-
-// checkArrayDeinit consumes the array: releasing it is the last thing done
-// with it, so the binding is moved rather than left readable.
-func (c *Checker) checkArrayDeinit(
-	array *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if err := c.readReleaseAllocator("Array."+name, array, args, env); err != nil {
-		return "", err
-	}
-	array.moved = true
-	return "void", nil
-}
-
-// checkArrayIndexedMutation validates set and owner-safe slot exchange.
-func (c *Checker) checkArrayIndexedMutation(
-	value *binding,
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if name == "set" {
-		return c.checkArraySet(elem, args, env)
-	}
-	if value.borrowedParam && !value.mutBorrow {
-		return "", errorf("array error: `Array.swap` requires mutable Array receiver")
-	}
-	return c.checkArraySwap(args, env)
-}
-
-// checkArraySwap validates two checked indexes without moving either element.
-func (c *Checker) checkArraySwap(args []ast.Expression, env *scope) (string, error) {
-	if len(args) != 2 {
-		return "", errorf("array error: `Array.swap` expects 2 args, got %d", len(args))
-	}
-	for _, arg := range args {
-		got, err := c.readExpr(arg, env)
-		if err != nil {
-			return "", err
-		}
-		if got != "i64" {
-			return "", errorf("array error: `Array.swap` expects i64 index, got %s", got)
-		}
-	}
-	return "std::array::Error!void", nil
-}
-
-// checkArrayCopyMethod dispatches operations whose result duplicates copy
-// elements without consuming the source Array.
-func (c *Checker) checkArrayCopyMethod(
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if name == "clone" {
-		return c.checkArrayClone(elem, args, env)
-	}
-	return c.checkArrayGet(elem, name, args, env)
-}
-
-// checkArrayClone validates the explicit allocator and limits clone to copy
-// elements. Owner elements need per-type deep-copy logic (ADR-0124).
-func (c *Checker) checkArrayClone(
-	elem string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("array error: `Array.clone` expects 1 arg, got %d", len(args))
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if got != "Allocator" {
-		return "", errorf("array error: `Array.clone` expects Allocator, got %s", got)
-	}
-	if !c.isCopyType(elem) {
-		return "", errorf("array error: `Array.clone` requires copy element")
-	}
-	return "std::mem::Error!std::array::Array<" + elem + ">", nil
-}
-
-// checkStdArrayStorageMethod validates Array helpers reserved to std source.
-func (c *Checker) checkStdArrayStorageMethod(
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	switch name {
-	case "truncate":
-		return c.checkArrayCountMutation(name, args, env)
-	case "clear":
-		if len(args) != 0 {
-			return "", errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
-		}
-		return "void", nil
-	default:
-		if elem != "u8" {
-			return "", errorf("array error: `Array.%s` requires Array<u8>", name)
-		}
-		return c.checkArrayReadNoArgs(name, args)
-	}
-}
-
-// checkArrayAppendBytes validates the run copied by Array.append_bytes. Only a
-// u8 array has elements a byte run spells, and the source is read, not moved:
-// it is a view.
-func (c *Checker) checkArrayAppendBytes(
-	elem string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if elem != "u8" {
-		return "", errorf("array error: `Array.append_bytes` requires Array<u8>")
-	}
-	if len(args) != 1 {
-		return "", errorf("array error: `Array.append_bytes` expects 1 arg, got %d", len(args))
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if got != "[]u8" {
-		return "", errorf("array error: `Array.append_bytes` expects []u8, got %s", got)
-	}
-	return "std::mem::Error!void", nil
-}
-
-// isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
-func isStdArrayStorageMethod(name string) bool {
-	return name == "truncate" || name == "clear" ||
-		name == "as_bytes" || name == "as_mut_bytes"
-}
-
-// checkArrayCountMutation validates one-count Array mutations.
-func (c *Checker) checkArrayCountMutation(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
-	}
-	if got, err := c.readExpr(args[0], env); err != nil {
-		return "", err
-	} else if got != "i64" {
-		return "", errorf("array error: `Array.%s` expects i64, got %s", name, got)
-	}
-	// reserve fails only for memory; truncate refuses a bad length.
-	if name == "truncate" {
-		return "std::array::Error!void", nil
-	}
-	return "std::mem::Error!void", nil
-}
-
-// arrayGrowMethod reports the Array methods that may ask for storage.
-func arrayGrowMethod(name string) bool {
-	switch name {
-	case "append", "append_bytes", "reserve":
-		return true
-	default:
-		return false
-	}
-}
-
-// checkArrayGrowth validates one storage-asking Array method. A growth names
-// the allocator its storage comes from first: an Array header keeps none of
-// its own (ADR-0132).
-func (c *Checker) checkArrayGrowth(
-	array *binding,
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if err := c.readArrayGrowAllocator(array, name, args, env); err != nil {
-		return "", err
-	}
-	switch name {
-	case "append":
-		return c.checkArrayAppend(elem, args[1:], env)
-	case "append_bytes":
-		return c.checkArrayAppendBytes(elem, args[1:], env)
-	default:
-		return c.checkArrayCountMutation(name, args[1:], env)
-	}
-}
-
-// readArrayGrowAllocator reads the leading Allocator a growth names.
-func (c *Checker) readArrayGrowAllocator(
-	array *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) error {
-	if len(args) != 2 {
-		return errorf("array error: `Array.%s` expects 2 args, got %d", name, len(args))
-	}
-	return c.readGrowAllocator("array", "Array."+name, array, args[0], env)
-}
-
-// checkArrayAppend validates append mutation and element move.
-func (c *Checker) checkArrayAppend(
-	elem string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("array error: `Array.append` expects 1 arg, got %d", len(args))
-	}
-	got, err := c.moveContextualExpr(args[0], elem, env)
-	if err != nil {
-		return "", err
-	}
-	if got != elem {
-		return "", errorf("array error: `Array.append` expects %s, got %s", elem, got)
-	}
-	return "std::mem::Error!void", nil
-}
-
-// checkArrayPop validates moving one initialized element out of an Array.
-func (c *Checker) checkArrayPop(
-	elem string,
-	name string,
-	args []ast.Expression,
-	returnsOptional bool,
-) (string, error) {
-	if len(args) != 0 {
-		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
-	}
-	if !returnsOptional {
-		return elem, nil
-	}
-	return "?" + elem, nil
 }
 
 // mutablePlace reports whether a binding is a place a mutable borrow may come
 // from: a `var` local or a `&var` borrow.
 func mutablePlace(value *binding) bool {
 	return value.mutable || value.mutBorrow
-}
-
-// checkArrayAtCondition checks at/at_mut inside a capture condition — a
-// mutable binding for at_mut and one i64 index — and refuses them everywhere
-// else: the borrow optional they produce exists only there.
-func (c *Checker) checkArrayAtCondition(
-	array *binding,
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if !c.captureCondition && !c.borrowReturn {
-		return "", errorf("array error: `Array.%s` must be consumed by a capture"+
-			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
-			name, name, name)
-	}
-	if name == "at_mut" && !mutablePlace(array) {
-		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
-	}
-	if len(args) != 1 {
-		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
-	}
-	// The context covers exactly this call: both flags off while the
-	// argument is read — a nested at/at_mut in argument position refuses as
-	// usual — and back for the result the call gate reads.
-	got, err := c.readOutsideBorrowContext(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if got != "i64" {
-		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
-	}
-	if name == "at_mut" {
-		return "?&var " + elem, nil
-	}
-	return "?&" + elem, nil
-}
-
-// readOutsideBorrowContext reads one expression with the borrow-optional
-// contexts off, so producers nested inside it refuse as usual.
-func (c *Checker) readOutsideBorrowContext(expr ast.Expression, env *scope) (string, error) {
-	savedCapture, savedReturn := c.captureCondition, c.borrowReturn
-	c.captureCondition, c.borrowReturn = false, false
-	result, err := c.readExpr(expr, env)
-	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
-	return result, err
-}
-
-// checkArrayReadNoArgs validates len/capacity reads.
-func (c *Checker) checkArrayReadNoArgs(
-	name string,
-	args []ast.Expression,
-) (string, error) {
-	if len(args) != 0 {
-		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
-	}
-	return "i64", nil
-}
-
-// checkArraySet validates checked element replacement.
-func (c *Checker) checkArraySet(
-	elem string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 2 {
-		return "", errorf("array error: `Array.set` expects 2 args, got %d", len(args))
-	}
-	if got, err := c.readExpr(args[0], env); err != nil {
-		return "", err
-	} else if got != "i64" {
-		return "", errorf("array error: `Array.set` expects i64 index, got %s", got)
-	}
-	got, err := c.moveContextualExpr(args[1], elem, env)
-	if err != nil {
-		return "", err
-	}
-	if got != elem {
-		return "", errorf("array error: `Array.set` expects %s value, got %s", elem, got)
-	}
-	return "std::array::Error!void", nil
-}
-
-// checkArrayGet validates copy-only Array<T> reads in the prototype.
-func (c *Checker) checkArrayGet(
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if got != "i64" {
-		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
-	}
-	if !c.isCopyType(elem) {
-		return "", errorf("array error: `Array.%s` requires copy element", name)
-	}
-	if name == "get" {
-		return "?" + elem, nil
-	}
-	return elem, nil
-}
-
-// checkMapMethod validates ownership effects for owned Map<K, V> methods.
-func (c *Checker) checkMapMethod(
-	mapValue *binding,
-	argsText string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	mapArgs, err := c.checkedMapArgs(argsText)
-	if err != nil {
-		return "", err
-	}
-	keyType, valueType := mapArgs[0], mapArgs[1]
-	if err := checkContainerMethodAccess("std::map::Map", mapValue, name); err != nil {
-		return "", err
-	}
-	switch name {
-	case "insert":
-		return c.checkMapInsert(mapValue, keyType, valueType, args, env)
-	case "get":
-		if err := c.checkMapKeyArg(keyType, name, args, env); err != nil {
-			return "", err
-		}
-		if !c.isCopyType(valueType) {
-			return "", errorf("map error: `Map.get` requires copy value")
-		}
-		return "?" + valueType, nil
-	case "at", "at_mut":
-		return c.checkMapAtCondition(mapValue, keyType, valueType, name, args, env)
-	case "key_at":
-		if err := c.checkMapIndexArg(name, args, env); err != nil {
-			return "", err
-		}
-		return "?" + keyType, nil
-	case "contains":
-		if err := c.checkMapKeyArg(keyType, name, args, env); err != nil {
-			return "", err
-		}
-		return "bool", nil
-	case "len":
-		return c.checkMapReadNoArgs(name, args)
-	case "deinit":
-		return c.checkMapDeinit(mapValue, args, env)
-	default:
-		// Unreachable while this switch and the shared access table agree;
-		// the table refusal above is the user-facing one.
-		return "", errorf("map error: method `%s` is classified but unhandled", name)
-	}
-}
-
-// checkMapAtCondition checks at/at_mut inside a capture condition — a
-// mutable binding for at_mut and one key — and refuses them everywhere
-// else: the borrow optional they produce exists only there.
-func (c *Checker) checkMapAtCondition(
-	mapValue *binding,
-	keyType string,
-	valueType string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if !c.captureCondition && !c.borrowReturn {
-		return "", errorf("map error: `Map.%s` must be consumed by a capture"+
-			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
-			name, name, name)
-	}
-	if name == "at_mut" && !mutablePlace(mapValue) {
-		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
-	}
-	// The context covers exactly this call: both flags off while the
-	// argument is read — a nested at/at_mut in argument position refuses as
-	// usual — and back for the result the call gate reads.
-	savedCapture, savedReturn := c.captureCondition, c.borrowReturn
-	c.captureCondition, c.borrowReturn = false, false
-	err := c.checkMapKeyArg(keyType, name, args, env)
-	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
-	if err != nil {
-		return "", err
-	}
-	if name == "at_mut" {
-		return "?&var " + valueType, nil
-	}
-	return "?&" + valueType, nil
-}
-
-// checkMapInsert validates Map.insert(allocator, key, value). The insert is
-// the call that buys storage, so it names the allocator it buys from, the same
-// way an Array append does: the header keeps none of its own (ADR-0131).
-func (c *Checker) checkMapInsert(
-	mapValue *binding,
-	keyType string,
-	valueType string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 3 {
-		return "", errorf("map error: `Map.insert` expects 3 args, got %d", len(args))
-	}
-	if err := c.readGrowAllocator("map", "Map.insert", mapValue, args[0], env); err != nil {
-		return "", err
-	}
-	if got, err := c.readContextualExpr(args[1], keyType, env); err != nil {
-		return "", err
-	} else if !sameOwnershipType(got, keyType) {
-		return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
-	}
-	got, err := c.moveContextualExpr(args[2], valueType, env)
-	if err != nil {
-		return "", err
-	}
-	if !sameOwnershipType(got, valueType) {
-		return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
-	}
-	return "std::mem::Error!void", nil
-}
-
-// readGrowAllocator reads the leading Allocator a storage-asking container
-// method names, and requires it to be the one the container was built from.
-// The storage a growth buys is released by the container's `deinit`, which
-// names one allocator for all of it: a growth that named another would leave
-// the release freeing bytes it never handed out (ADR-0132).
-func (c *Checker) readGrowAllocator(
-	kind string,
-	what string,
-	receiver *binding,
-	arg ast.Expression,
-	env *scope,
-) error {
-	got, err := c.readExpr(arg, env)
-	if err != nil {
-		return err
-	}
-	if got != "Allocator" {
-		return errorf("%s error: `%s` expects Allocator, got %s", kind, what, got)
-	}
-	return c.checkReleaseTie(what, receiver, arg, env)
 }
 
 // checkMapIndexArg validates one i64 insertion-position argument.
@@ -8655,47 +7593,6 @@ func (c *Checker) checkMapIndexArg(
 		return errorf("map error: `Map.%s` expects i64 index, got %s", name, got)
 	}
 	return nil
-}
-
-// checkMapKeyArg validates one lookup key against the map's key type.
-func (c *Checker) checkMapKeyArg(
-	keyType string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) error {
-	if len(args) != 1 {
-		return errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
-	}
-	got, err := c.readContextualExpr(args[0], keyType, env)
-	if err != nil {
-		return err
-	}
-	if !sameOwnershipType(got, keyType) {
-		return errorf("map error: `Map.%s` expects %s key, got %s", name, keyType, got)
-	}
-	return nil
-}
-
-// checkMapReadNoArgs validates no-argument Map reads.
-func (c *Checker) checkMapReadNoArgs(name string, args []ast.Expression) (string, error) {
-	if len(args) != 0 {
-		return "", errorf("map error: `Map.%s` expects 0 args, got %d", name, len(args))
-	}
-	return "i64", nil
-}
-
-// checkMapDeinit validates owned Map cleanup and marks it moved.
-func (c *Checker) checkMapDeinit(
-	mapValue *binding,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if err := c.readReleaseAllocator("Map.deinit", mapValue, args, env); err != nil {
-		return "", err
-	}
-	mapValue.moved = true
-	return "void", nil
 }
 
 // checkOneI64Arg reads one i64 argument.
@@ -8818,6 +7715,29 @@ func (c *Checker) checkImplMethodArgs(
 	args []ast.Expression,
 	env *scope,
 ) error {
+	return c.checkMethodArgs(method, receiver, args, env, true,
+		func(idx int, arg ast.Expression) error {
+			return c.checkImplMethodArg(method, idx+1, arg, env)
+		})
+}
+
+// checkMethodArgs activates the borrows a method call holds while check
+// applies each argument's own effect, then releases them. It is the argument
+// borrow activation every method call shares, and the receiver two-phase of
+// those that reserve: a `&var` receiver held as a shared borrow while the
+// arguments are evaluated, so an argument cannot alias or consume it, then
+// as the exclusive borrow once every argument has settled. A std container
+// does not reserve — whether `values.append(a, values.pop_or_panic())` is
+// one call or two is still open — so only the exclusive borrow is checked
+// against what the arguments left active.
+func (c *Checker) checkMethodArgs(
+	method *functionInfo,
+	receiver *binding,
+	args []ast.Expression,
+	env *scope,
+	reserve bool,
+	check func(idx int, arg ast.Expression) error,
+) error {
 	call := &functionInfo{
 		name: method.name, sig: method.sig, params: method.params[1:], body: method.body,
 	}
@@ -8826,24 +7746,27 @@ func (c *Checker) checkImplMethodArgs(
 	}
 	receiverMut := method.params[0].mutBorrow
 	target, targetField := receiverPlace(receiver)
-	if receiverMut {
+	reserved := receiverMut && reserve
+	if reserved {
 		c.activateBorrow(target, targetField, false)
+		target.reservations++
 	}
 	borrowed, err := c.activateBorrowArgs(call, args, env)
 	if err == nil {
 		for idx, arg := range args {
-			if err = c.checkImplMethodArg(method, idx+1, arg, env); err != nil {
+			if err = check(idx, arg); err != nil {
 				break
 			}
 		}
 	}
-	if receiverMut {
+	if reserved {
+		target.reservations--
 		releaseTemporaryBorrow(temporaryBorrow{value: target, field: targetField})
-		if err == nil {
-			// Activation: argument borrows still live at the call must not
-			// overlap the receiver's exclusive borrow.
-			err = checkBorrowConflictForField(target, targetField, true)
-		}
+	}
+	if receiverMut && err == nil {
+		// Activation: argument borrows still live at the call must not
+		// overlap the receiver's exclusive borrow.
+		err = checkBorrowConflictForField(target, targetField, true)
 	}
 	releaseTemporaryBorrows(borrowed)
 	return err
@@ -8868,85 +7791,12 @@ func (c *Checker) checkImplMethodArg(
 		return err
 	}
 	if c.viewArgLend(method, paramIndex, arg, env) ||
-		c.capabilityArgLend(method, paramIndex, arg, env) {
+		capabilityArgLend(method, paramIndex) {
 		_, err := c.readExpr(arg, env)
 		return err
 	}
 	_, err := c.moveExpr(arg, env)
 	return err
-}
-
-// checkArenaAdd moves one value into an arena and returns a handle.
-// checkArenaAdd validates Arena.add(allocator, value). The add is the call
-// that buys storage, so it names the allocator it buys from, the same way an
-// Array append does: the header keeps none of its own (ADR-0131).
-func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
-	if len(args) != 2 {
-		return "", errorf("arena error: `Arena.add` expects 2 args, got %d", len(args))
-	}
-	base, arg, ok := splitGenericType(arena.typeName)
-	if !ok || base != "std::arena::Arena" {
-		return "", errorf("arena error: `%s` is not an arena", arena.name)
-	}
-	if err := c.readGrowAllocator("arena", "Arena.add", arena, args[0], env); err != nil {
-		return "", err
-	}
-	got, err := c.moveContextualExpr(args[1], arg, env)
-	if err != nil {
-		return "", err
-	}
-	if got != arg {
-		return "", errorf("arena error: `Arena.add` expects %s, got %s", arg, got)
-	}
-	return fmt.Sprintf("std::mem::Error!std::arena::Handle<%s>", arg), nil
-}
-
-// checkArenaAt reads a handle and returns a shared borrow tied to the arena.
-func (c *Checker) checkArenaAt(arena *binding, args []ast.Expression, env *scope) (string, error) {
-	elem, err := c.checkArenaHandleArg(arena, args, env, "Arena.at")
-	if err != nil {
-		return "", err
-	}
-	return "&" + elem, nil
-}
-
-// checkArenaHandleArg validates the one handle argument an arena accessor
-// takes — count, provenance, and the read itself — and returns the element
-// type behind the handle. label names the accessor in the count error.
-func (c *Checker) checkArenaHandleArg(
-	arena *binding,
-	args []ast.Expression,
-	env *scope,
-	label string,
-) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("arena error: `%s` expects 1 arg, got %d", label, len(args))
-	}
-	base, elem, ok := splitGenericType(arena.typeName)
-	if !ok || base != "std::arena::Arena" {
-		return "", errorf("arena error: `%s` is not an arena", arena.name)
-	}
-	if err := c.checkKnownHandleProvenance(arena, args[0], env); err != nil {
-		return "", err
-	}
-	if _, err := c.readExpr(args[0], env); err != nil {
-		return "", err
-	}
-	return elem, nil
-}
-
-// checkArenaDeinit validates explicit arena cleanup and invalidates the binding.
-func (c *Checker) checkArenaDeinit(
-	arena *binding,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if err := c.readReleaseAllocator("Arena.deinit", arena, args, env); err != nil {
-		return "", err
-	}
-	arena.deinitialized = true
-	arena.moved = true
-	return "void", nil
 }
 
 // checkKnownHandleProvenance rejects handle uses whose provenance is known to

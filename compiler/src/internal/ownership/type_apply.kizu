@@ -3,7 +3,6 @@ import compiler::internal::diagnostic;
 import std::arena;
 import std::array;
 import std::map;
-import std::mem;
 import std::string;
 
 // Port of the `<...>` type application checks of internal/ownership/
@@ -892,7 +891,8 @@ fn (self: &var Checker) check_array_primitive_call(
     let array_type = try self.names.format("std::array::Array<%s>", elem, empty_name(), empty_name());
     let blank = self.store.blank_binding(0, empty_name(), array_type);
     let array = try self.store.retain(move blank);
-    return self.check_array_method(tree, env, array, elem, method, args, out);
+    let base = try self.names.intern("std::array::Array");
+    return self.check_std_method_call(tree, env, array, base, method, args, out);
 }
 
 /// Validates the std-only Map runtime primitive, the Go
@@ -959,7 +959,7 @@ fn (self: &var Checker) check_map_primitive_method(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     // at/at_mut come first: only the std wrapper body reaches the primitive,
-    // and routing a concrete instantiation to check_map_method would hit the
+    // and routing a concrete instantiation to the std call would hit the
     // user-facing capture-only refusal.
     if self.names.is(method, "at") {
         if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
@@ -977,93 +977,15 @@ fn (self: &var Checker) check_map_primitive_method(
     }
     if self.names.is(method, "take_value_at") {
         // Reserved to Map.deinit's cascade, so it is answered here and never
-        // reaches check_map_method: a caller outside std spells no name for it.
+        // reaches the std call: a caller outside std spells no name for it.
         if try self.check_map_index_arg(tree, env, method, args) |failed| {
             return move failed;
         }
         out.* = value_type;
         return null;
     }
-    if !self.names.is_generic_param_name(key_type) and !self.names.is_generic_param_name(value_type) {
-        let args_text = try self.map_args_text(map_value);
-        return self.check_map_method(tree, env, map_value, args_text, method, args, out);
-    }
-    return self.check_generic_map_primitive_method(
-        tree, env, map_value, key_type, value_type, method, args, out
-    );
-}
-
-/// Names the static arguments of a Map binding's type, the Go
-/// `mapValue.typeName[len("std::map::Map<") : len(mapValue.typeName)-1]`.
-fn (self: &var Checker) map_args_text(map_value: BindingHandle) -> !Name {
-    let type_name = self.binding(map_value).type_name;
-    let end = self.names.len(type_name);
-    return self.names.intern_slice(type_name, mem::len("std::map::Map<"), end - 1);
-}
-
-/// Validates Map primitives applied to generic static arguments, which only
-/// a std wrapper body can spell, the Go `checkGenericMapPrimitiveMethod`.
-fn (self: &var Checker) check_generic_map_primitive_method(
-    tree: &var ast::Ast,
-    env: ScopeHandle,
-    map_value: BindingHandle,
-    key_type: Name,
-    value_type: Name,
-    method: Name,
-    args: ast::ExpressionList,
-    out: &var Name
-) -> !?diagnostic::Diagnostic {
-    if self.names.is(method, "insert") {
-        let count = arg_count(tree, args);
-        if count != 3 {
-            return try self.error1(
-                tree, ast::zero_span(), "map error: `Map.insert` expects 3 args, got %d", Arg::Int(count)
-            );
-        }
-        let allocator_arg = args.get_or_panic(tree, 0);
-        if try self.read_grow_allocator(tree, env, "map", "Map.insert", null, allocator_arg) |failed| {
-            return move failed;
-        }
-        let first = args.get_or_panic(tree, 1);
-        var got = empty_name();
-        if try self.read_expr(tree, env, first, &var got) |failed| {
-            return move failed;
-        }
-        if !same_name(got, key_type) {
-            return try self.error2(
-                tree, ast::zero_span(), "map error: `Map.insert` expects %s key, got %s",
-                Arg::Str(key_type), Arg::Str(got)
-            );
-        }
-        let second = args.get_or_panic(tree, 2);
-        if try self.move_contextual_expr(tree, env, second, value_type, &var got) |failed| {
-            return move failed;
-        }
-        if !same_name(got, value_type) {
-            return try self.error2(
-                tree, ast::zero_span(), "map error: `Map.insert` expects %s value, got %s",
-                Arg::Str(value_type), Arg::Str(got)
-            );
-        }
-        out.* = self.common.mem_error_void_name;
-        return null;
-    }
-    if self.names.is(method, "get") {
-        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
-            return move failed;
-        }
-        out.* = try self.names.prefixed("?", value_type);
-        return null;
-    }
-    if self.names.is(method, "contains") {
-        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
-            return move failed;
-        }
-        out.* = self.common.bool_name;
-        return null;
-    }
-    let args_text = try self.map_args_text(map_value);
-    return self.check_map_method(tree, env, map_value, args_text, method, args, out);
+    let base = try self.names.intern("std::map::Map");
+    return self.check_std_method_call(tree, env, map_value, base, method, args, out);
 }
 
 /// Validates a generic Map wrapper key argument, the Go

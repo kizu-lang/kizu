@@ -34,8 +34,17 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 - [x] C5 loop を `loopRegion(条件式列, body)` 1 本に、cleanup を
       `registerCleanup(kind, binding)` 1 本に畳む(A1〜A4 をここで消化しても
       よい)
-- [ ] C6 std method の receiver 種別 / 引数の扱い / 戻り値の tie を
+- [x] C6 std method の receiver 種別 / 引数の扱い / 戻り値の tie を
       `internal/stdmethod` のデータにし、checker の `case "append_string":` 類を消す
+
+### 残った小さいもの
+
+- [ ] `defer` の中の使用が last-use に数えられていない。`let alloc = fixed_buffer(scratch); ...;
+      defer values.deinit(alloc);` で alloc の tie が block 末尾より前に解放される
+      (C6 では Allocator 引数を tie の有無に関わらず貸すことで回避した)。
+      `blockLastUses` が defer の使用を block 末尾に置けば tie が正しく残る。
+- [ ] `std::internal::builtin::*` primitive(std 内部だけが呼ぶ)の `case` 分岐は
+      残っている。利用者が通る method は全て `checkStdMethodCall` を通る。
 
 ### 決めが要るもの
 

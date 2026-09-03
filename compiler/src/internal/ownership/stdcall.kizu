@@ -1,0 +1,349 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmethod;
+
+// Port of internal/ownership/stdcall.go: one call path for every std
+// container method, driven by the method's signature and the facts
+// stdmethod keeps about it.
+
+/// Applies one std container method to its receiver, the Go
+/// `checkStdMethodCall`. The method's signature says how the receiver and
+/// each argument are handed over and what comes back, as it does for a user
+/// method; the method's facts (stdmethod::Facts) say what the signature
+/// cannot — how the call touches the storage a live borrow may alias, whether
+/// the allocator it names must be the container's own, whether an element it
+/// hands out must be a copy, whether its result exists only in a capture or a
+/// `let`. Local receivers, direct field receivers, and the std primitives
+/// behind the wrappers all come here.
+fn (self: &var Checker) check_std_method_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    receiver: BindingHandle,
+    base: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let container = self.std_container(base) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: `%s` has no container access table", Arg::Str(base));
+    let kind = try self.names.intern(stdmethod::container_kind(container));
+    let label = try self.names.intern(stdmethod::container_label(container));
+    let facts = self.std_method_facts(container, method) orelse
+        return try self.error3(
+            tree, ast::zero_span(), "%s error: %s has no method `%s`",
+            Arg::Str(kind), Arg::Str(label), Arg::Str(method)
+        );
+    if facts.std_only and !self.current_std {
+        return try self.error3(
+            tree, ast::zero_span(), "%s error: %s has no method `%s`",
+            Arg::Str(kind), Arg::Str(label), Arg::Str(method)
+        );
+    }
+    if try self.check_container_method_access(tree, base, receiver, method) |failed| {
+        return move failed;
+    }
+    let function = try self.std_method_info(base, self.binding(receiver).type_name, method) orelse
+        return try self.error3(
+            tree, ast::zero_span(), "%s error: %s has no method `%s`",
+            Arg::Str(kind), Arg::Str(label), Arg::Str(method)
+        );
+    if try self.check_std_receiver_kind(tree, kind, label, function, receiver, method) |failed| {
+        return move failed;
+    }
+    if try self.check_std_result_context(tree, kind, label, facts, receiver, method) |failed| {
+        return move failed;
+    }
+    let expected = self.param_count(function) - 1;
+    let count = arg_count(tree, args);
+    if count != expected {
+        let call_label = try self.names.format("%s.%s", label, method, empty_name());
+        return try self.error4(
+            tree, ast::zero_span(), "%s error: `%s` expects %d args, got %d",
+            Arg::Str(kind), Arg::Str(call_label), Arg::Int(expected), Arg::Int(count)
+        );
+    }
+    if try self.check_std_copy_elem(tree, container, kind, label, facts, receiver, method) |failed| {
+        return move failed;
+    }
+    if try self.check_std_method_args(tree, env, label, facts, function, receiver, method, args) |failed| {
+        return move failed;
+    }
+    if facts.access == stdmethod::Access::Cleanup {
+        // Releasing the value is the last thing done with it, so the binding
+        // is consumed rather than left readable.
+        try self.store.set_moved(receiver, true);
+        if facts.deinitializes {
+            if self.store.binding_mut(receiver) |record| {
+                record.deinitialized = true;
+            }
+        }
+    }
+    out.* = self.return_type_name(function);
+    return null;
+}
+
+/// Names the std container a type is, the Go `stdmethod.Lookup` on the
+/// generic base.
+fn (self: &Checker) std_container(base: Name) -> ?stdmethod::Container {
+    let text = name_text(&self.names, base);
+    let bytes = text.as_bytes();
+    return stdmethod::container_of(bytes);
+}
+
+/// Reads the facts of one container method, the Go `container.Methods[name]`.
+fn (self: &Checker) std_method_facts(container: stdmethod::Container, method: Name) -> ?stdmethod::Facts {
+    let text = name_text(&self.names, method);
+    let bytes = text.as_bytes();
+    return stdmethod::method_facts(container, bytes);
+}
+
+/// Names the std container a value's type is, when it is one, the Go
+/// `stdContainerBase`.
+fn (self: &var Checker) std_container_base(type_name: Name) -> !?Name {
+    var base = type_name;
+    if try self.names.split_generic(type_name) |parts| {
+        base = parts.base;
+    }
+    let _ = self.std_container(base) orelse return null;
+    return base;
+}
+
+/// Reports whether a container method yields a borrow optional a capture
+/// consumes, the Go `stdCaptureAccessor`.
+fn (self: &Checker) std_capture_accessor(base: Name, method: Name) -> bool {
+    let container = self.std_container(base) orelse return false;
+    let facts = self.std_method_facts(container, method) orelse return false;
+    return facts.access == stdmethod::Access::Capture;
+}
+
+/// Is the signature one call to a std container method sees, the Go
+/// `stdMethodInfo`: the declaration's, with the container's type arguments
+/// substituted for its type parameters, so `T` reads as the element the
+/// receiver holds.
+fn (self: &var Checker) std_method_info(base: Name, receiver_type: Name, method: Name) -> !?FunctionHandle {
+    let function = self.impl_method(base, method) orelse return null;
+    let static_count = self.static_param_count(function);
+    if static_count == 0 {
+        return function;
+    }
+    let parts = try self.names.split_generic(receiver_type) orelse return function;
+    let type_args = try self.names.split_generic_args(parts.args) orelse return function;
+    defer type_args.deinit(self.allocator);
+    if type_args.len() != static_count {
+        return function;
+    }
+    var subst = self.empty_subst();
+    defer subst.deinit(self.allocator);
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        try self.bind_subst_param(&var subst, param.name, type_args.get_or_panic(index));
+        index = index + 1;
+    }
+    return try self.instantiate_function_info(function, &subst);
+}
+
+/// Is the type a container hands out by value, the Go `containerElemType`:
+/// the element of an Array, Box, or Arena, the value of a Map.
+fn (self: &var Checker) container_elem_type(receiver_type: Name) -> !Name {
+    let parts = try self.names.split_generic(receiver_type) orelse return receiver_type;
+    let type_args = try self.names.split_generic_args(parts.args) orelse return parts.args;
+    defer type_args.deinit(self.allocator);
+    if type_args.len() == 0 {
+        return parts.args;
+    }
+    return type_args.get_or_panic(type_args.len() - 1);
+}
+
+/// Refuses duplicating an owner element by value, the Go `checkStdCopyElem`:
+/// only a copy element can leave the container this way, an owner needs
+/// per-type deep-copy logic (ADR-0124). A type parameter is left to its
+/// instantiation.
+fn (self: &var Checker) check_std_copy_elem(
+    tree: &ast::Ast,
+    container: stdmethod::Container,
+    kind: Name,
+    label: Name,
+    facts: stdmethod::Facts,
+    receiver: BindingHandle,
+    method: Name
+) -> !?diagnostic::Diagnostic {
+    if !facts.copy_elem {
+        return null;
+    }
+    let elem = try self.container_elem_type(self.binding(receiver).type_name);
+    if self.names.is_generic_param_name(elem) or try self.is_copy_type(elem) {
+        return null;
+    }
+    let noun = try self.names.intern(stdmethod::container_elem(container));
+    return try self.error4(
+        tree, ast::zero_span(), "%s error: `%s.%s` requires copy %s",
+        Arg::Str(kind), Arg::Str(label), Arg::Str(method), Arg::Str(noun)
+    );
+}
+
+/// Holds the receiver to what the signature asks of it, the Go
+/// `checkStdReceiverKind`: a `&var self` method needs a receiver that can be
+/// mutated, and a method that takes its receiver over needs one the caller
+/// owns, since a lender would still hold the released value.
+fn (self: &var Checker) check_std_receiver_kind(
+    tree: &ast::Ast,
+    kind: Name,
+    label: Name,
+    function: FunctionHandle,
+    receiver: BindingHandle,
+    method: Name
+) -> !?diagnostic::Diagnostic {
+    let this = self.param_at(function, 0) orelse
+        return try self.error1(
+            tree, ast::zero_span(), "move error: method `%s` must have self parameter",
+            Arg::Str(self.functions.at(function.index).name)
+        );
+    let record = self.binding(receiver);
+    if self.function_consumes_receiver(function) and record.borrowed_param {
+        return try self.error4(
+            tree, ast::zero_span(), "%s error: `%s.%s` requires owned %s receiver",
+            Arg::Str(kind), Arg::Str(label), Arg::Str(method), Arg::Str(label)
+        );
+    }
+    if this.borrow and this.mut_borrow and record.borrowed_param and !record.mut_borrow {
+        return try self.error4(
+            tree, ast::zero_span(), "%s error: `%s.%s` requires mutable %s receiver",
+            Arg::Str(kind), Arg::Str(label), Arg::Str(method), Arg::Str(label)
+        );
+    }
+    return null;
+}
+
+/// Refuses a result that exists only in one place, the Go
+/// `checkStdResultContext`: a borrow optional outside the capture condition
+/// that consumes it, and a view outside the `let` that binds it. A mutable
+/// capture also needs a mutable place to borrow from.
+fn (self: &var Checker) check_std_result_context(
+    tree: &ast::Ast,
+    kind: Name,
+    label: Name,
+    facts: stdmethod::Facts,
+    receiver: BindingHandle,
+    method: Name
+) -> !?diagnostic::Diagnostic {
+    if facts.access == stdmethod::Access::Capture {
+        if !self.capture_condition and !self.borrow_return {
+            let call_label = try self.names.format("%s.%s", label, method, empty_name());
+            return try self.error4(
+                tree, ast::zero_span(),
+                "%s error: `%s` must be consumed by a capture (`if value.%s(...) |name|` or `while value.%s(...) |name|`)",
+                Arg::Str(kind), Arg::Str(call_label), Arg::Str(method), Arg::Str(method)
+            );
+        }
+        if self.names.ends_with(method, "_mut") and !self.mutable_place(receiver) {
+            return try self.error4(
+                tree, ast::zero_span(), "%s error: `%s.%s` requires mutable %s binding",
+                Arg::Str(kind), Arg::Str(label), Arg::Str(method), Arg::Str(kind)
+            );
+        }
+        return null;
+    }
+    if facts.access == stdmethod::Access::View {
+        return try self.error4(
+            tree, ast::zero_span(), "%s error: `%s.%s` must be bound with `let name = value.%s()`",
+            Arg::Str(kind), Arg::Str(label), Arg::Str(method), Arg::Str(method)
+        );
+    }
+    return null;
+}
+
+/// Applies the signature to the arguments, then what the facts add, the Go
+/// `checkStdMethodArgs`: a growth's allocator and a cleanup's must be the
+/// container's own, and an arena handle must belong to the arena it is used
+/// on. A capture accessor reads its arguments with the capture context off,
+/// so a nested accessor in argument position refuses as usual.
+fn (self: &var Checker) check_std_method_args(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    label: Name,
+    facts: stdmethod::Facts,
+    function: FunctionHandle,
+    receiver: BindingHandle,
+    method: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let saved_capture = self.capture_condition;
+    let saved_return = self.borrow_return;
+    if facts.access == stdmethod::Access::Capture {
+        self.capture_condition = false;
+        self.borrow_return = false;
+    }
+    if try self.check_method_args(tree, env, function, receiver, args, false, facts.lent) |failed| {
+        self.capture_condition = saved_capture;
+        self.borrow_return = saved_return;
+        return move failed;
+    }
+    self.capture_condition = saved_capture;
+    self.borrow_return = saved_return;
+    let call_label = try self.names.format("%s.%s", label, method, empty_name());
+    if facts.grows {
+        let first = args.get_or_panic(tree, 0);
+        if try self.check_release_tie(tree, env, call_label, receiver, first) |failed| {
+            return move failed;
+        }
+    }
+    if facts.access == stdmethod::Access::Cleanup and arg_count(tree, args) == 1 {
+        if self.param_at(function, 1) |param| {
+            if self.names.is(param.type_name, "Allocator") {
+                let first = args.get_or_panic(tree, 0);
+                if try self.check_release_tie(tree, env, call_label, receiver, first) |failed| {
+                    return move failed;
+                }
+            }
+        }
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        index = index + 1;
+        let param = self.param_at(function, index) orelse break;
+        if self.names.generic_base_is(param.type_name, "std::arena::Handle") {
+            if try self.check_known_handle_provenance(tree, env, receiver, arg) |failed| {
+                return move failed;
+            }
+        }
+    }
+    return null;
+}
+
+/// Refuses a container method whose access to the storage collides with a
+/// live borrow of it, the Go `checkContainerMethodAccess`: a read waits for
+/// mutable borrows, a mutation or cleanup for any borrow. A method the
+/// container does not have is refused here too.
+fn (self: &var Checker) check_container_method_access(
+    tree: &ast::Ast,
+    base: Name,
+    value: BindingHandle,
+    method: Name
+) -> !?diagnostic::Diagnostic {
+    let container = self.std_container(base) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: `%s` has no container access table", Arg::Str(base));
+    let kind = try self.names.intern(stdmethod::container_kind(container));
+    let label = try self.names.intern(stdmethod::container_label(container));
+    let facts = self.std_method_facts(container, method) orelse
+        return try self.error3(
+            tree, ast::zero_span(), "%s error: %s has no method `%s`",
+            Arg::Str(kind), Arg::Str(label), Arg::Str(method)
+        );
+    if facts.access == stdmethod::Access::Read {
+        if self.binding(value).active_mut_borrows > 0 {
+            return try self.error3(
+                tree, ast::zero_span(), "%s error: `%s.%s` cannot read while mutably borrowed",
+                Arg::Str(kind), Arg::Str(label), Arg::Str(method)
+            );
+        }
+    }
+    if facts.access == stdmethod::Access::Mutate or facts.access == stdmethod::Access::Cleanup {
+        if self.store.has_any_borrow(value) {
+            return try self.error4(
+                tree, ast::zero_span(), "%s error: `%s.%s` cannot run while %s is borrowed",
+                Arg::Str(kind), Arg::Str(label), Arg::Str(method), Arg::Str(kind)
+            );
+        }
+    }
+    return null;
+}
