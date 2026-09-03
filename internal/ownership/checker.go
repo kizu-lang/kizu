@@ -55,8 +55,21 @@ type Checker struct {
 	// loopStarts is the stack of loops the statement being checked sits in,
 	// innermost last: what a `break` or `continue` leaves, and the binding
 	// watermark its body's locals start at.
-	loopStarts      []loopStart
-	currentFunction *functionInfo
+	loopStarts []loopStart
+	// pendingOwnerTemps lists the expressions whose owner result the
+	// statement being checked still holds and has handed nowhere: a call, a
+	// struct literal, a field taken out of a value. An exit taken in the
+	// middle of the statement would drop them, so a `try` or guard that can
+	// leave while any are pending is refused. Entries are the producing
+	// nodes, so a second read of the same expression adds nothing.
+	pendingOwnerTemps []ast.Expression
+	// pendingMovedPlaces are the bindings the statement being checked has
+	// moved out of and no call or literal has taken yet. Their storage still
+	// holds the value until the statement completes, so an exit taken in the
+	// middle sees them as still held: the cleanup that covers them runs, and
+	// one that covers nothing is the leak the exit reports.
+	pendingMovedPlaces []*binding
+	currentFunction    *functionInfo
 	// collectMissingMarkers switches the missing `move` diagnostic from an
 	// error into a recorded site, so MissingMoveMarkers can report every one.
 	collectMissingMarkers bool
@@ -583,14 +596,22 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	}
 	c.pendingAllocTaints = nil
 	previousLoopStarts := c.loopStarts
+	previousPending := c.pendingOwnerTemps
+	previousPlaces := c.pendingMovedPlaces
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeArgValues := c.typeArgValues
 	c.loopStarts = nil
+	c.pendingOwnerTemps = nil
+	c.pendingMovedPlaces = nil
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
 	c.typeArgValues = nil
-	defer func() { c.loopStarts = previousLoopStarts }()
+	defer func() {
+		c.loopStarts = previousLoopStarts
+		c.pendingOwnerTemps = previousPending
+		c.pendingMovedPlaces = previousPlaces
+	}()
 	defer func() { c.currentFunction = previousFunction }()
 	defer func() { c.currentStd = previousStd }()
 	defer func() { c.typeArgValues = previousTypeArgValues }()
@@ -695,7 +716,20 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 	// Bindings declared inside this block carry IDs above the watermark; the
 	// fall-through leak check below is scoped to exactly those.
 	bindingMark := c.nextID
+	// A statement starts with the owners its enclosing expression, if any,
+	// still holds pending; what the statement itself produces is settled by
+	// the time it ends.
+	pendingMark, placesMark := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
+	// The block leaves nothing of its own pending either: a `return` is a
+	// statement too, and a body checked once per expansion starts each time
+	// from what its enclosing statement held.
+	defer func() {
+		c.pendingOwnerTemps = c.pendingOwnerTemps[:pendingMark]
+		c.pendingMovedPlaces = c.pendingMovedPlaces[:placesMark]
+	}()
 	for idx, stmt := range block.Statements {
+		c.pendingOwnerTemps = c.pendingOwnerTemps[:pendingMark]
+		c.pendingMovedPlaces = c.pendingMovedPlaces[:placesMark]
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := c.checkDeferStmt(deferStmt, env); err != nil {
 				return err
@@ -2636,6 +2670,9 @@ func (c *Checker) checkDiscardedOwner(expr ast.Expression, produced string) erro
 
 // checkIfStmt merges possible moves from either branch into the outer scope.
 func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
+	// The condition's product is held by the capture, or was a bool: the
+	// branches start with nothing of it pending.
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	var borrowCond containerBorrowCondition
 	isBorrowCond := false
 	var condType string
@@ -2668,6 +2705,7 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	if err != nil {
 		return err
 	}
+	c.settleOwnerTemps(pending, places, "void", nil)
 	if err := c.checkBlock(stmt.Consequence, leftScope); err != nil {
 		return err
 	}
@@ -2821,6 +2859,9 @@ func bindingConsumed(value *binding) bool {
 
 // checkWhileStmt treats moves in the body as possible after the loop.
 func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
+	// The condition's product is held by the capture, or was a bool: the
+	// body starts with nothing of it pending.
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	var borrowCond containerBorrowCondition
 	isBorrowCond := false
 	var condType string
@@ -2850,6 +2891,7 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	if err != nil {
 		return err
 	}
+	c.settleOwnerTemps(pending, places, "void", nil)
 	if err := c.checkBlock(stmt.Body, child); err != nil {
 		return err
 	}
@@ -3297,10 +3339,14 @@ func (c *Checker) enterLoop(label string) func() {
 
 // checkMatchStmt merges possible moves from enum or union match arms into the outer scope.
 func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
+	// The value's product is held by the arm that binds it: the arms start
+	// with nothing of it pending.
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	valueType, err := c.readExpr(stmt.Value, env)
 	if err != nil {
 		return err
 	}
+	c.settleOwnerTemps(pending, places, "void", nil)
 	valueType = borrowedOwnershipValueType(valueType)
 	tags, unionPayloads, ok := c.matchTags(valueType)
 	if !ok {
@@ -3364,7 +3410,11 @@ func (c *Checker) checkMatchArms(
 ) ([]*scope, error) {
 	base := env.clone()
 	live := make([]*scope, 0, len(stmt.Arms))
+	// One arm runs: what one arm produces -- a `return f()` is a statement
+	// of its own -- is not live in the next.
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	for _, arm := range stmt.Arms {
+		c.settleOwnerTemps(pending, places, "void", nil)
 		if arm.IsWildcard() {
 			if arm.Binding != "" {
 				return nil, errorf("move error: wildcard match arm cannot bind payload")
@@ -3742,6 +3792,7 @@ func (c *Checker) readControlExpr(expr ast.Expression, env *scope) (string, erro
 // in a clone: the fall-through path did not take the exit, so nothing the
 // exit consumes may look moved after the guard.
 func (c *Checker) readOrelseGuardExpr(expr *ast.OrelseGuardExpr, env *scope) (string, error) {
+	pending := len(c.pendingOwnerTemps)
 	condType, err := c.readExpr(expr.Cond, env)
 	if err != nil {
 		return "", err
@@ -3749,21 +3800,38 @@ func (c *Checker) readOrelseGuardExpr(expr *ast.OrelseGuardExpr, env *scope) (st
 	if err := c.refuseContainerViewOrelse(condType, expr.Cond, env); err != nil {
 		return "", err
 	}
-	switch exit := expr.Exit.(type) {
-	case *ast.ReturnStmt:
-		if err := c.checkReturnStmt(exit, env.clone()); err != nil {
-			return "", err
-		}
-	case *ast.BreakStmt:
-		if err := c.checkLoopBranch(exit.Label, exitBreak, env); err != nil {
-			return "", err
-		}
-	case *ast.ContinueStmt:
-		if err := c.checkLoopBranch(exit.Label, exitContinue, env); err != nil {
-			return "", err
-		}
+	err = c.checkNoPendingOwnerTemps(pending, "orelse", expressionSpan(expr.Cond), expr.Cond)
+	if err != nil {
+		return "", err
+	}
+	if err := c.checkGuardExit(expr.Exit, env, pending); err != nil {
+		return "", err
 	}
 	return optionalPayloadName(condType), nil
+}
+
+// checkGuardExit checks the exit an `orelse` / `catch` guard takes: a
+// return, or a branch out of a loop. It is taken in the middle of a
+// statement, so the places the statement has moved out of are still held
+// on that path.
+func (c *Checker) checkGuardExit(exit ast.Statement, env *scope, pending int) error {
+	// On the exit path the condition produced nothing to keep -- the guard
+	// is taken because it did not -- so what it added is not pending there.
+	// It is once the guard falls through, so it comes back after.
+	kept := append([]ast.Expression(nil), c.pendingOwnerTemps[pending:]...)
+	c.pendingOwnerTemps = c.pendingOwnerTemps[:pending]
+	defer func() { c.pendingOwnerTemps = append(c.pendingOwnerTemps, kept...) }()
+	return c.withPendingPlacesLive(func() error {
+		switch exit := exit.(type) {
+		case *ast.ReturnStmt:
+			return c.checkReturnStmt(exit, env.clone())
+		case *ast.BreakStmt:
+			return c.checkLoopBranch(exit.Label, exitBreak, env)
+		case *ast.ContinueStmt:
+			return c.checkLoopBranch(exit.Label, exitContinue, env)
+		}
+		return nil
+	})
 }
 
 // readCatchGuardExpr reads `cond catch return/break/continue`. The failure
@@ -3772,23 +3840,17 @@ func (c *Checker) readOrelseGuardExpr(expr *ast.OrelseGuardExpr, env *scope) (st
 // moved on the fall-through path. The handled failure is not an error return
 // path, so no errdefer obligations attach here.
 func (c *Checker) readCatchGuardExpr(expr *ast.CatchGuardExpr, env *scope) (string, error) {
+	pending := len(c.pendingOwnerTemps)
 	condType, err := c.readExpr(expr.Cond, env)
 	if err != nil {
 		return "", err
 	}
-	switch exit := expr.Exit.(type) {
-	case *ast.ReturnStmt:
-		if err := c.checkReturnStmt(exit, env.clone()); err != nil {
-			return "", err
-		}
-	case *ast.BreakStmt:
-		if err := c.checkLoopBranch(exit.Label, exitBreak, env); err != nil {
-			return "", err
-		}
-	case *ast.ContinueStmt:
-		if err := c.checkLoopBranch(exit.Label, exitContinue, env); err != nil {
-			return "", err
-		}
+	err = c.checkNoPendingOwnerTemps(pending, "catch", expressionSpan(expr.Cond), expr.Cond)
+	if err != nil {
+		return "", err
+	}
+	if err := c.checkGuardExit(expr.Exit, env, pending); err != nil {
+		return "", err
 	}
 	elem, _ := c.errorUnionElement(condType)
 	if elem == "" {
@@ -3954,6 +4016,17 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	typeName, handedOff, err := c.movePlaceExpr(place, env)
 	if err != nil {
 		return "", err
+	}
+	if handedOff {
+		// The value has left its place and reached nothing yet: until the
+		// call or literal takes it, only this statement holds it. A whole
+		// binding keeps its storage until then, so an exit can still release
+		// it; a field taken out of a value has no cleanup of its own left.
+		if value, ok := movedPlaceBinding(place, env); ok {
+			c.pendingMovedPlaces = append(c.pendingMovedPlaces, value)
+		} else {
+			c.pendingOwnerTemps = append(c.pendingOwnerTemps, place)
+		}
 	}
 	if marker != nil && !handedOff {
 		if !c.isCopyPlace(place, env) {
@@ -4125,17 +4198,22 @@ func (c *Checker) moveIfExpr(stmt *ast.IfStmt, env *scope) (string, error) {
 
 // checkIfExprValue merges possible branch moves from an if expression.
 func (c *Checker) checkIfExprValue(stmt *ast.IfStmt, env *scope, moveTail bool) (string, error) {
+	// One branch runs: what the first produces is not live in the second,
+	// and what the expression as a whole hands on is one value.
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	if _, err := c.readExpr(stmt.Condition, env); err != nil {
 		return "", err
 	}
 	if stmt.Alternative == nil {
 		return "", errorf("move error: if expression requires else branch")
 	}
+	c.settleOwnerTemps(pending, places, "void", nil)
 	left := env.clone()
 	leftType, err := c.checkBlockValue(stmt.Consequence, left.child(), moveTail)
 	if err != nil {
 		return "", err
 	}
+	c.settleOwnerTemps(pending, places, "void", nil)
 	right := env.clone()
 	rightType, err := c.checkBlockValue(stmt.Alternative, right.child(), moveTail)
 	if err != nil {
@@ -4145,6 +4223,7 @@ func (c *Checker) checkIfExprValue(stmt *ast.IfStmt, env *scope, moveTail bool) 
 		return "", errorf("move error: if expression branch types differ: %s vs %s",
 			leftType, rightType)
 	}
+	c.settleOwnerTemps(pending, places, leftType, stmt)
 	env.mergeMovedFrom(left)
 	env.mergeMovedFrom(right)
 	return leftType, nil
@@ -4166,6 +4245,10 @@ func (c *Checker) checkMatchExprValue(
 	env *scope,
 	moveTail bool,
 ) (string, error) {
+	// One arm runs: what the value produced is held by the arm that binds
+	// it, what one arm produces is not live in the next, and what the
+	// expression as a whole hands on is one value.
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	valueType, err := c.readExpr(stmt.Value, env)
 	if err != nil {
 		return "", err
@@ -4181,6 +4264,7 @@ func (c *Checker) checkMatchExprValue(
 	}
 	var result string
 	for idx, arm := range stmt.Arms {
+		c.settleOwnerTemps(pending, places, "void", nil)
 		got, err := c.checkMatchExprArmValue(arm, tags, unionPayloads, ownedMatch,
 			expressionSpan(stmt.Value), env, moveTail)
 		if err != nil {
@@ -4192,6 +4276,7 @@ func (c *Checker) checkMatchExprValue(
 			return "", errorf("move error: match arm types differ: %s vs %s", result, got)
 		}
 	}
+	c.settleOwnerTemps(pending, places, result, stmt)
 	return result, nil
 }
 
@@ -4236,8 +4321,13 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
 	bindingMark := c.nextID
+	// Each statement starts from what the enclosing expression held pending,
+	// as in checkBlock; the tail value is what the block itself hands on.
+	pendingMark, placesMark := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	lastIdx := len(block.Statements) - 1
 	for idx, stmt := range block.Statements[:lastIdx] {
+		c.pendingOwnerTemps = c.pendingOwnerTemps[:pendingMark]
+		c.pendingMovedPlaces = c.pendingMovedPlaces[:placesMark]
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := c.checkDeferStmt(deferStmt, env); err != nil {
 				return "", err
@@ -4258,6 +4348,8 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 		}
 		env.releaseLastUseBorrows(idx, lastUses)
 	}
+	c.pendingOwnerTemps = c.pendingOwnerTemps[:pendingMark]
+	c.pendingMovedPlaces = c.pendingMovedPlaces[:placesMark]
 	valueType, err := c.checkStmtValue(block.Statements[lastIdx], env, moveTail)
 	if err != nil {
 		return "", err
@@ -4388,15 +4480,86 @@ func isBooleanBinaryOperator(op string) bool {
 // the funnel every call form passes through, so the tied-allocator taint of
 // the result is recorded here once, and no call path can forget it.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) {
+	// The call consumes what its arguments handed it; what stays pending
+	// after it is its own result, when that result owns something.
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	result, err := c.dispatchCallExpr(expr, env)
 	if err != nil {
 		return result, err
 	}
+	c.settleOwnerTemps(pending, places, result, expr)
 	if err := c.checkBorrowOptionalResult(expr, result, env); err != nil {
 		return "", err
 	}
 	c.pendTiedAllocatorArgs(expr.Args, result, env)
 	return result, nil
+}
+
+// producesOwnerTemp reports whether a value of this type, held by nothing
+// but the expression that produced it, is one an early exit would drop: an
+// owner, bare or inside the `?T` / `E!T` wrapper its producer returns.
+func (c *Checker) producesOwnerTemp(typeName string) bool {
+	if elem, _, ok := c.wrappedPayloadElem(typeName); ok {
+		typeName = elem
+	}
+	return c.valueTypeNeedsConsume(typeName)
+}
+
+// checkNoPendingOwnerTemps refuses an exit that can be taken while the
+// enclosing statement still holds owners nothing has bound: the exit would
+// drop them, and the value's own allocator is not written where the
+// checker could release them. Binding the value first gives it a name an
+// `errdefer` can cover.
+func (c *Checker) checkNoPendingOwnerTemps(
+	pending int,
+	exit string,
+	span ast.Span,
+	own ast.Expression,
+) error {
+	for _, producer := range c.pendingOwnerTemps[:pending] {
+		if producer == own {
+			// The exit's own operand is what it unwraps and hands on, not
+			// something it drops; it is here when the expression is read
+			// more than once.
+			continue
+		}
+		return errorAt(span,
+			"move error: the owner `%s` produced earlier in this statement would leak on this `%s` exit;"+
+				" bind it with `let` and register `errdefer` before it", producer.String(), exit)
+	}
+	return nil
+}
+
+// movedPlaceBinding returns the binding a hand-off took a whole value out
+// of. A field path or a temporary is not one: nothing but the statement
+// holds what left them.
+func movedPlaceBinding(place ast.Expression, env *scope) (*binding, bool) {
+	ident, ok := place.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	value, exists := env.lookup(ident.Name)
+	if !exists || !value.moved {
+		return nil, false
+	}
+	return value, true
+}
+
+// withPendingPlacesLive runs an exit check with the places this statement
+// has moved out of counted as still held. Their storage is untouched until
+// the call or literal that takes them runs, so an exit before that point
+// leaves the value where it was: a cleanup covering it releases it, and an
+// uncovered one is the leak the check reports. The hand-off stands again
+// once the check is done, for the path on which the statement completes.
+func (c *Checker) withPendingPlacesLive(check func() error) error {
+	for _, value := range c.pendingMovedPlaces {
+		value.moved = false
+	}
+	err := check()
+	for _, value := range c.pendingMovedPlaces {
+		value.moved = true
+	}
+	return err
 }
 
 // checkBorrowOptionalResult is the one gate for every call that produces a
@@ -6304,15 +6467,21 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 		return err
 	}
 	previousLoopStarts := c.loopStarts
+	previousPending := c.pendingOwnerTemps
+	previousPlaces := c.pendingMovedPlaces
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeArgValues := c.typeArgValues
 	c.loopStarts = nil
+	c.pendingOwnerTemps = nil
+	c.pendingMovedPlaces = nil
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
 	c.typeArgValues = subst
 	defer func() {
 		c.loopStarts = previousLoopStarts
+		c.pendingOwnerTemps = previousPending
+		c.pendingMovedPlaces = previousPlaces
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
 		c.typeArgValues = previousTypeArgValues
@@ -6434,6 +6603,9 @@ func (c *Checker) checkBuiltinCall(
 
 // readTryExpr reads a !T expression and returns T.
 func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
+	// What was pending before the operand is what the error exit drops; the
+	// operand's own result is what the try unwraps and hands on.
+	pending := len(c.pendingOwnerTemps)
 	got, err := c.readExpr(expr.Value, env)
 	if err != nil {
 		return "", err
@@ -6442,18 +6614,25 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	if !ok {
 		return "", errorf("move error: try expects !T, got %s", got)
 	}
-	// A try can return early through the error path, which runs any active
-	// errdefer cleanups. Their receivers must still be valid at this point,
-	// except the ones a move has retired.
-	retired, err := c.validateErrDeferReceivers(env)
+	err = c.checkNoPendingOwnerTemps(pending, "try", expressionSpan(expr), expr.Value)
 	if err != nil {
 		return "", err
 	}
-	c.result.tryRetiredErrDefers[expr] = retired
-	// The same early exit must not leak a live owner: every owner must be
-	// consumed or covered by a defer / errdefer cleanup before the try.
-	if err := c.checkOwnersConsumed(env, 0,
-		leakExit{kind: exitTry, span: expressionSpan(expr)}); err != nil {
+	// A try can return early through the error path, which runs any active
+	// errdefer cleanups. Their receivers must still be valid at this point,
+	// except the ones a move has retired. The same early exit must not leak
+	// a live owner: every owner must be consumed or covered by a defer /
+	// errdefer cleanup before the try.
+	err = c.withPendingPlacesLive(func() error {
+		retired, err := c.validateErrDeferReceivers(env)
+		if err != nil {
+			return err
+		}
+		c.result.tryRetiredErrDefers[expr] = retired
+		return c.checkOwnersConsumed(env, 0,
+			leakExit{kind: exitTry, span: expressionSpan(expr)})
+	})
+	if err != nil {
 		return "", err
 	}
 	return arg, nil
@@ -6489,22 +6668,43 @@ func (c *Checker) checkPointerIntCastBuiltin(
 
 // readStructLiteralExpr checks a literal without consuming field values.
 func (c *Checker) readStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope) (string, error) {
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	for _, field := range expr.Fields {
 		if _, err := c.readExpr(field.Value, env); err != nil {
 			return "", err
 		}
 	}
+	c.settleOwnerTemps(pending, places, expr.TypeName, expr)
 	return expr.TypeName, nil
 }
 
 // moveStructLiteralExpr moves field values into a new struct value.
 func (c *Checker) moveStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope) (string, error) {
+	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
 	for _, field := range expr.Fields {
 		if _, err := c.moveExpr(field.Value, env); err != nil {
 			return "", err
 		}
 	}
+	c.settleOwnerTemps(pending, places, expr.TypeName, expr)
 	return expr.TypeName, nil
+}
+
+// settleOwnerTemps records that a call or literal took every owner its
+// operands handed it -- the temporaries and the places moved since it
+// began -- and that its own result is what stays pending when that result
+// owns something.
+func (c *Checker) settleOwnerTemps(
+	pending int,
+	places int,
+	typeName string,
+	producer ast.Expression,
+) {
+	c.pendingOwnerTemps = c.pendingOwnerTemps[:pending]
+	c.pendingMovedPlaces = c.pendingMovedPlaces[:places]
+	if producer != nil && c.producesOwnerTemp(typeName) {
+		c.pendingOwnerTemps = append(c.pendingOwnerTemps, producer)
+	}
 }
 
 // readFieldExpr reads a field without moving the receiver.

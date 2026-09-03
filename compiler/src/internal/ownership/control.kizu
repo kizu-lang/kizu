@@ -169,6 +169,10 @@ fn (self: &var Checker) check_if_stmt(
     env: ScopeHandle,
     statement: ast::IfStmt
 ) -> !?diagnostic::Diagnostic {
+    // The condition's product is held by the capture, or was a bool: the
+    // branches start with nothing of it pending.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var head = try self.new_capture_condition();
     defer head.deinit(self.allocator);
     if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
@@ -191,6 +195,7 @@ fn (self: &var Checker) check_if_stmt(
     ) |failed| {
         return move failed;
     }
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     if try self.check_block(tree, left_scope, statement.consequence) |failed| {
         return move failed;
     }
@@ -385,6 +390,10 @@ fn (self: &var Checker) check_while_stmt(
     env: ScopeHandle,
     statement: ast::WhileStmt
 ) -> !?diagnostic::Diagnostic {
+    // The condition's product is held by the capture, or was a bool: the
+    // body starts with nothing of it pending.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var head = try self.new_capture_condition();
     defer head.deinit(self.allocator);
     // The condition runs once per turn like the body does, so it is read
@@ -403,6 +412,7 @@ fn (self: &var Checker) check_while_stmt(
         self.leave_loop();
         return move failed;
     }
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     if try self.check_while_body(tree, env, statement, body, child) |failed| {
         self.leave_loop();
         return move failed;
@@ -930,10 +940,15 @@ fn (self: &var Checker) check_match_stmt(
     statement: ast::Statement
 ) -> !?diagnostic::Diagnostic {
     let head = match_stmt_head(tree, statement) orelse return null;
+    // The value's product is held by the arm that binds it: the arms start
+    // with nothing of it pending.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var value_type = empty_name();
     if try self.read_expr(tree, env, head.value, &var value_type) |failed| {
         return move failed;
     }
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     value_type = try self.names.borrowed_value(value_type);
     let tags = try self.match_tags(value_type) orelse
         return try self.error1(tree, ast::zero_span(), "move error: match expects enum or union, got %s", Arg::Str(value_type));
@@ -1006,9 +1021,14 @@ fn (self: &var Checker) check_match_stmt_arms(
     live: &var array::Array<ScopeHandle>
 ) -> !?diagnostic::Diagnostic {
     let base = try self.store.clone_scope(env);
+    // One arm runs: what one arm produces -- a `return f()` is a statement
+    // of its own -- is not live in the next.
+    let pending = self.pending_owner_temps.len();
+    let places = self.pending_moved_places.len();
     var index = 0;
     while arms.get(index) |arm| {
         index = index + 1;
+        try self.settle_owner_temps(pending, places, self.common.void_name, null);
         if arm.is_wildcard(tree) {
             if !text_empty(tree, arm.binding) {
                 return try self.error0(ast::zero_span(), "move error: wildcard match arm cannot bind payload");

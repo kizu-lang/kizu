@@ -15,11 +15,20 @@ fn (self: &var Checker) check_block(
     block: ast::Block
 ) -> !?diagnostic::Diagnostic {
     let err_defer_mark = self.live_err_defers.len();
+    // The block leaves nothing of its own pending either: a `return` is a
+    // statement too, and a body checked once per expansion starts each time
+    // from what its enclosing statement held.
+    let pending_mark = self.pending_owner_temps.len();
+    let places_mark = self.pending_moved_places.len();
     if try self.check_block_statements(tree, env, block) |failed| {
         self.restore_err_defers(err_defer_mark);
+        self.truncate_owner_temps(pending_mark);
+        self.truncate_moved_places(places_mark);
         return move failed;
     }
     self.restore_err_defers(err_defer_mark);
+    self.truncate_owner_temps(pending_mark);
+    self.truncate_moved_places(places_mark);
     return null;
 }
 
@@ -35,8 +44,15 @@ fn (self: &var Checker) check_block_statements(
     // Bindings declared inside this block carry ids above the watermark; the
     // fall-through leak check below is scoped to exactly those.
     let binding_mark = self.store.id_mark();
+    // A statement starts with the owners its enclosing expression, if any,
+    // still holds pending; what the statement itself produces is settled by
+    // the time it ends.
+    let pending_mark = self.pending_owner_temps.len();
+    let places_mark = self.pending_moved_places.len();
     var index = 0;
     while block_statement_at(tree, block, index) |statement| {
+        self.truncate_owner_temps(pending_mark);
+        self.truncate_moved_places(places_mark);
         if defer_stmt(tree, statement) |deferred| {
             if try self.check_defer_stmt(tree, env, deferred) |failed| {
                 return move failed;

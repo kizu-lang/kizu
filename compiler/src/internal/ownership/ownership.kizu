@@ -443,6 +443,21 @@ pub struct Checker {
     // function's loops begin on that stack.
     loop_starts: array::Array<LoopStart>,
     loop_base: i64,
+    // pending_owner_temps lists the expressions whose owner result the
+    // statement being checked still holds and has handed nowhere: a call, a
+    // struct literal, a field taken out of a value. An exit taken in the
+    // middle of the statement would drop them, so a `try` or guard that can
+    // leave while any are pending is refused. Entries are the producing
+    // nodes, so a second read of the same expression adds nothing.
+    // pending_moved_places are the bindings the statement has moved out of
+    // and no call or literal has taken yet: their storage still holds the
+    // value until the statement completes, so an exit taken in the middle
+    // sees them as still held. temps_base and places_base are where the
+    // current function's entries begin on each list.
+    pending_owner_temps: array::Array<ast::Expression>,
+    pending_moved_places: array::Array<BindingHandle>,
+    temps_base: i64,
+    places_base: i64,
     current_function: ?FunctionHandle,
     // collect_missing_markers switches the missing `move` diagnostic from an
     // error into a recorded site, so missing_move_markers can report every one.
@@ -519,6 +534,10 @@ pub fn new_checker_for_target(
         function_bindings: new_function_binding_store(allocator),
         loop_starts: array::new<LoopStart>(allocator),
         loop_base: 0,
+        pending_owner_temps: array::new<ast::Expression>(allocator),
+        pending_moved_places: array::new<BindingHandle>(allocator),
+        temps_base: 0,
+        places_base: 0,
         current_function: null,
         collect_missing_markers: false,
         missing_markers: array::new<ast::Span>(allocator),
@@ -555,6 +574,8 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.type_arg_values.deinit(allocator);
     self.live_err_defers.deinit(allocator);
     self.loop_starts.deinit(allocator);
+    self.pending_owner_temps.deinit(allocator);
+    self.pending_moved_places.deinit(allocator);
     self.pending_alloc_taints.deinit(allocator);
     self.result.deinit(allocator);
     return;
@@ -1280,11 +1301,15 @@ fn (self: &var Checker) check_function(tree: &var ast::Ast, handle: FunctionHand
 fn (self: &var Checker) enter_function(handle: FunctionHandle, subst: Subst) -> !FunctionRestore {
     let previous = FunctionRestore {
         loop_base: self.loop_base,
+        temps_base: self.temps_base,
+        places_base: self.places_base,
         current_function: self.current_function,
         current_std: self.current_std,
         type_arg_values: try self.type_arg_values.enter(move subst)
     };
     self.loop_base = self.loop_starts.len();
+    self.temps_base = self.pending_owner_temps.len();
+    self.places_base = self.pending_moved_places.len();
     self.current_function = handle;
     self.current_std = self.functions.at(handle.index).std;
     return previous;
@@ -1292,6 +1317,10 @@ fn (self: &var Checker) enter_function(handle: FunctionHandle, subst: Subst) -> 
 
 fn (self: &var Checker) restore_function(previous: FunctionRestore) -> void {
     self.loop_base = previous.loop_base;
+    self.truncate_owner_temps(self.temps_base);
+    self.truncate_moved_places(self.places_base);
+    self.temps_base = previous.temps_base;
+    self.places_base = previous.places_base;
     self.current_function = previous.current_function;
     self.current_std = previous.current_std;
     self.type_arg_values.restore(previous.type_arg_values);
@@ -1301,6 +1330,8 @@ fn (self: &var Checker) restore_function(previous: FunctionRestore) -> void {
 /// Is the per-function state one body check saves and restores.
 struct FunctionRestore {
     loop_base: i64,
+    temps_base: i64,
+    places_base: i64,
     current_function: ?FunctionHandle,
     current_std: bool,
     type_arg_values: ?arena::Handle<Subst>
@@ -1473,6 +1504,7 @@ fn (self: &var Checker) check_test_decl(tree: &var ast::Ast, test: &ast::TestDec
     }
     try name.append_bytes(self.allocator, "test ");
     try fmt::append_bytes_literal(self.allocator, &var name, source_name);
+    let return_type = try self.names.intern("!void");
     let info = FunctionInfo {
         name: try self.names.intern_owned(move name),
         receiver: false,
@@ -1481,7 +1513,7 @@ fn (self: &var Checker) check_test_decl(tree: &var ast::Ast, test: &ast::TestDec
         std: false,
         static_params: array::new<StaticParamInfo>(self.allocator),
         params: array::new<ParamInfo>(self.allocator),
-        return_type: try self.names.intern("!void"),
+        return_type: return_type,
         body: test.body
     };
     let handle = FunctionHandle { index: try self.functions.add(self.allocator, move info) };

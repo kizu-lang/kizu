@@ -20,13 +20,6 @@ defer/errdefer、ident/slice、非 generic/generic、`?T`/`E!T`、`String.deinit
 diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足して
 `go test ./internal/types -update` で固定する。
 
-### B. runtime / lowering の局所修正(小)
-
-- [ ] B4 struct field / Array element の `E!Owner` を導出 deinit が解放する
-      (`internal/ast/derive_deinit.go` が `?T` しか unwrap しない、
-      `error_union_owner_field_cleanup`)
-- [ ] B5 同一式内の `try` 失敗で、評価済みの owner temporary を解放する
-      (`try_in_literal_releases_earlier_owner`)
 ### C. SPEC 追記と、共通部品へ畳みながら閉じる修正(中)
 
 - [ ] C1 SPEC §8 に「非 deinit の by-value `self` は body で `&T` と同じ扱い」を書く。
