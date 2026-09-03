@@ -866,19 +866,19 @@ func validateCHostFunctionTypes(
 			spelled = "&" + spelled
 		}
 		if fn.Params[index].Borrow || fn.Params[index].MutBorrow {
-			return cHostTypeError(fmt.Sprintf(
+			return cHostTypeError(fn.Span, fmt.Sprintf(
 				"C function `%s` parameter %d is a borrow (`%s`), which C cannot receive",
 				fn.Name, index+1, spelled))
 		}
 		if cHostScalar(param) {
 			continue
 		}
-		return cHostTypeError(fmt.Sprintf(
+		return cHostTypeError(fn.Span, fmt.Sprintf(
 			"C function `%s` parameter %d has type `%s`, which C cannot receive",
 			fn.Name, index+1, spelled))
 	}
 	if ret != typeVoid && !cHostScalar(ret) {
-		return cHostTypeError(fmt.Sprintf(
+		return cHostTypeError(fn.Span, fmt.Sprintf(
 			"C function `%s` returns `%s`, which C cannot produce", fn.Name, ret))
 	}
 	return nil
@@ -886,8 +886,8 @@ func validateCHostFunctionTypes(
 
 // cHostTypeError spells a C boundary refusal with what C can carry and how
 // to hand it the value.
-func cHostTypeError(message string) error {
-	return diag.FromText(diag.SeverityError, ast.Span{}, "type error: "+message).
+func cHostTypeError(span ast.Span, message string) error {
+	return diag.FromText(diag.SeverityError, span, "type error: "+message).
 		WithNote("a C function passes only what C can name: an integer, a float, `bool`," +
 			" `ptr<T>`, `ptr<const T>`, or a nullable pointer").
 		WithHelp("spell the value as C sees it: `ptr<const u8>` with a `usize` length" +
@@ -947,7 +947,7 @@ func validateBrowserHostFunctionTypes(
 ) error {
 	for index, param := range params {
 		if fn.Params[index].Borrow || fn.Params[index].MutBorrow {
-			return errorf(
+			return errorAt(fn.Span,
 				"type error: browser host function `%s` cannot borrow parameter %d",
 				fn.Name, index+1,
 			)
@@ -958,13 +958,13 @@ func validateBrowserHostFunctionTypes(
 		if fn.ExternABI == "browser" && param == typeByteString {
 			continue
 		}
-		return errorf(
+		return errorAt(fn.Span,
 			"type error: browser host function `%s` parameter %d has unsupported type %s",
 			fn.Name, index+1, param,
 		)
 	}
 	if ret != typeVoid && !browserHostScalar(ret) {
-		return errorf(
+		return errorAt(fn.Span,
 			"type error: browser host function `%s` has unsupported return type %s",
 			fn.Name, ret,
 		)
@@ -6421,10 +6421,10 @@ func (c *Checker) checkBoxReceiverMethod(
 ) (Type, error) {
 	switch field.Name {
 	case "borrow":
-		return "", errorf(
+		return "", errorAt(field.Span,
 			"type error: `Box.borrow` must be bound with `let name = box.borrow()`")
 	case "borrow_mut":
-		return "", errorf(
+		return "", errorAt(field.Span,
 			"type error: `Box.borrow_mut` must be bound with `let name = box.borrow_mut()`")
 	case "take":
 		if _, ok := field.Receiver.(*ast.IdentExpr); !ok {
@@ -6543,12 +6543,14 @@ func (c *Checker) checkStringReceiverMethod(
 		env.isBorrowed(ident.Name) && !env.isMutBorrowed(ident.Name) {
 		return "", errorf("type error: `String.%s` requires mutable String receiver", field.Name)
 	}
-	return c.checkStringMethod(field.Name, args, env, unsafe)
+	return c.checkStringMethod(field.Name, field.Span, args, env, unsafe)
 }
 
-// checkStringMethod validates owned String prototype methods.
+// checkStringMethod validates owned String prototype methods. span is where
+// the call names the method.
 func (c *Checker) checkStringMethod(
 	name string,
+	span ast.Span,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
@@ -6578,7 +6580,7 @@ func (c *Checker) checkStringMethod(
 		}
 		return typeI64, nil
 	case "as_bytes", "as_mut_bytes":
-		return "", errorf(
+		return "", errorAt(span,
 			"type error: `String.%s` must be bound with `let name = string.%s()`", name, name)
 	case "clear":
 		if len(args) != 0 {

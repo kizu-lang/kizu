@@ -292,6 +292,7 @@ func (p *Parser) parseFunctionSignatureAfterFn(fn *ast.FunctionDecl) bool {
 		return false
 	}
 	fn.Name = p.cur.Literal
+	fn.Span = tokenSpan(p.cur)
 	if p.peek.Type == token.LT {
 		p.nextToken()
 		fn.StaticParams = p.parseStaticParamList()
