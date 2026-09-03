@@ -712,9 +712,11 @@ fn (self: &var Checker) check_return_stmt(
     var ignored = empty_name();
     if try self.move_expr(tree, env, returned, &var ignored) |failed| {
         self.borrow_return = saved;
+        self.clear_returned_views();
         return move failed;
     }
     self.borrow_return = saved;
+    self.clear_returned_views();
     var exit = plain_exit();
     if error_path {
         exit = LeakExit { kind: LeakExitKind::ErrorReturn, span: expression_span(tree, returned) };
@@ -777,9 +779,20 @@ fn (self: &var Checker) check_return_value_escapes(
     done: &var bool
 ) -> !?diagnostic::Diagnostic {
     done.* = true;
+    // A view still backed by a borrow — the binding itself, a view derived
+    // from it, or a struct literal capturing either — leaves with its ties.
+    // Ties to parameters flow on to the caller, which ties the result to what
+    // it lent (ADR-0098), so such a view may go; one tied to local state is
+    // refused where the value is consumed, as any other escape is.
+    var roots = array::new<BindingHandle>(self.allocator);
+    defer roots.deinit(self.allocator);
+    try self.returned_view_roots(tree, env, returned, &var roots);
+    if roots.len() > 0 and self.param_rooted_all(&roots) {
+        try self.record_returned_views(tree, returned);
+    }
     if ident_expr(tree, returned) |ident| {
         if self.lookup_text(tree, env, ident.name) |value| {
-            if self.binding(value).borrowed_param {
+            if self.binding(value).borrowed_param and !self.returned_view(returned) {
                 if try self.borrowed_return_allowed(tree, ident.name, value) {
                     return null;
                 }
@@ -823,6 +836,63 @@ fn (self: &var Checker) check_return_value_escapes(
     }
     done.* = false;
     return null;
+}
+
+/// Forgets the views the checked return handed out, the Go
+/// `c.returnedViews = nil`.
+fn (self: &var Checker) clear_returned_views() -> void {
+    while self.returned_views.pop() |_| {}
+    return;
+}
+
+/// Resolves the borrow-class bindings backing the views a returned
+/// expression carries out — the expression's own, or those of every field of
+/// a struct literal it builds — the Go `returnedViewRoots`.
+fn (self: &var Checker) returned_view_roots(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    out: &var array::Array<BindingHandle>
+) -> !void {
+    let unwrapped = unwrap_expression_markers(tree, expression);
+    if is_struct_literal_expr(tree, unwrapped) {
+        var index = 0;
+        while struct_literal_field_at(tree, unwrapped, index) |field| {
+            index = index + 1;
+            try self.returned_view_roots(tree, env, field.value, out);
+        }
+        return;
+    }
+    return self.borrow_class_view_roots(tree, env, expression, out);
+}
+
+/// Reports whether every binding's provenance ends in parameters, the Go
+/// `paramRootedAll`.
+fn (self: &Checker) param_rooted_all(roots: &array::Array<BindingHandle>) -> bool {
+    var index = 0;
+    while roots.get(index) |root| {
+        if !self.param_rooted_binding(root) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+/// Records the expressions whose view a return hands out — the returned
+/// expression and, through struct literals, their field values — the Go
+/// `returnedViewExprs`.
+fn (self: &var Checker) record_returned_views(tree: &ast::Ast, expression: ast::Expression) -> !void {
+    try self.returned_views.append(self.allocator, expression);
+    let unwrapped = unwrap_expression_markers(tree, expression);
+    if is_struct_literal_expr(tree, unwrapped) {
+        var index = 0;
+        while struct_literal_field_at(tree, unwrapped, index) |field| {
+            index = index + 1;
+            try self.record_returned_views(tree, field.value);
+        }
+    }
+    return;
 }
 
 /// Completes the return path once Arena.at is known to be the returned

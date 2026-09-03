@@ -29,7 +29,7 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
       (`generic_call_reads_owner`, `generic_call_move_marker`,
       `generic_call_aliases_receiver`, `generic_return_carries_view_tie`,
       `generic_call_lends_view_into_container`, `std_string_append_string_self`)
-- [ ] C4 式の結果を `{型, 階級, tie 集合}` にして全式が伝播する。slice / field 読み /
+- [x] C4 式の結果を `{型, 階級, tie 集合}` にして全式が伝播する。slice / field 読み /
       `.*` が special case でなくなる(`slice_view_keeps_tie`, `slice_view_escape`)
 - [ ] C5 loop を `loopRegion(条件式列, body)` 1 本に、cleanup を
       `registerCleanup(kind, binding)` 1 本に畳む(A1〜A4 をここで消化しても

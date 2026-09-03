@@ -259,13 +259,11 @@ fn (self: &var Checker) check_capture_let_stmt(
     if recognized {
         return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, elem, false);
     }
-    var view_source = self.scratch_binding;
     var found = false;
-    if try self.view_field_borrow_initializer(tree, env, statement.value, &var found, &var view_source) |failed| {
+    if try self.view_initializer(tree, env, statement.value, &var sources, &var found) |failed| {
         return move failed;
     }
     if found {
-        try sources.append(self.allocator, BorrowSource { target: view_source, field: empty_name() });
         return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, self.common.bytes_name, false);
     }
     handled.* = false;
@@ -321,28 +319,35 @@ fn (self: &var Checker) struct_capture_initializer(
     return null;
 }
 
-/// Recognizes reading a `[]u8` field out of a borrow-class value, the Go
-/// `viewFieldBorrowInitializer`: the copy is a view of the same backing, so
-/// the binding stays tied to the value it was read from.
-fn (self: &var Checker) view_field_borrow_initializer(
+/// Recognizes an initializer that yields a view still backed by a
+/// borrow-class binding — a view field read, a slice of a local view, a view
+/// read back through a reference, or a conditional yielding one — and
+/// resolves the bindings that keep it alive, the Go `viewInitializer`. The
+/// new binding ties to them so the view cannot outlive its storage.
+fn (self: &var Checker) view_initializer(
     tree: &var ast::Ast,
     env: ScopeHandle,
     expression: ast::Expression,
-    found: &var bool,
-    out: &var BindingHandle
+    sources: &var array::Array<BorrowSource>,
+    found: &var bool
 ) -> !?diagnostic::Diagnostic {
     found.* = false;
-    let field = field_expr(tree, expression) orelse return null;
-    if field.namespace {
+    var roots = array::new<BindingHandle>(self.allocator);
+    defer roots.deinit(self.allocator);
+    try self.borrow_class_view_roots(tree, env, expression, &var roots);
+    if roots.len() == 0 {
         return null;
     }
-    let root = try self.borrow_class_view_root(tree, env, expression) orelse return null;
     var ignored = empty_name();
     if try self.read_expr(tree, env, expression, &var ignored) |failed| {
         return move failed;
     }
+    var index = 0;
+    while roots.get(index) |root| {
+        index = index + 1;
+        try sources.append(self.allocator, BorrowSource { target: root, field: empty_name() });
+    }
     found.* = true;
-    out.* = root;
     return null;
 }
 

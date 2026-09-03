@@ -665,32 +665,168 @@ fn (self: &var Checker) view_capture_struct_type(type_name: Name) -> !bool {
     return self.view_carrying_type(type_name);
 }
 
-/// Resolves expr to the borrow-class binding backing a view read, the Go
-/// `borrowClassViewRoot` — a local view binding, or a view-capturing struct
-/// whose `[]u8` field is read — or null for params, statics, and owned
-/// values, whose views are free: a parameter outlives the frame, so what it
-/// backs cannot dangle here.
+/// Resolves expr to the first borrow-class binding backing the view it
+/// yields, or null when there is none, the Go `borrowClassViewRoot`; see
+/// borrow_class_view_roots.
 fn (self: &var Checker) borrow_class_view_root(
     tree: &ast::Ast,
     env: ScopeHandle,
     expression: ast::Expression
 ) -> !?BindingHandle {
-    let direct = try self.direct_field_root(tree, env, expression) orelse return null;
+    var roots = array::new<BindingHandle>(self.allocator);
+    defer roots.deinit(self.allocator);
+    try self.borrow_class_view_roots(tree, env, expression, &var roots);
+    return roots.get(0);
+}
+
+/// Resolves expr to the borrow-class bindings backing the view it yields, the
+/// Go `borrowClassViewRoots` — a local view binding, or a view-capturing
+/// struct whose `[]u8` field is read — through the forms that derive a view
+/// from a view without leaving its storage: a slice, a read back through
+/// `&[]u8`, an `orelse` / `catch` default, and the tails of an `if` or
+/// `match` expression. Empty for params, statics, and owned values, whose
+/// views are free: a parameter outlives the frame, so what it backs cannot
+/// dangle here.
+fn (self: &var Checker) borrow_class_view_roots(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    out: &var array::Array<BindingHandle>
+) -> !void {
+    let unwrapped = unwrap_expression_markers(tree, expression);
+    if index_expr(tree, unwrapped) |index| {
+        if !index.slice {
+            return;
+        }
+        return self.borrow_class_view_roots(tree, env, index.target, out);
+    }
+    if deref_expr(tree, unwrapped) |deref| {
+        return self.place_view_roots(tree, env, deref.receiver, true, out);
+    }
+    if binary_expr(tree, unwrapped) |binary| {
+        if !text_equals(tree, binary.operator, "orelse") and !text_equals(tree, binary.operator, "catch") {
+            return;
+        }
+        return self.borrow_class_view_roots(tree, env, binary.right, out);
+    }
+    if if_expr(tree, unwrapped) |statement| {
+        try self.block_value_view_roots(tree, env, statement.consequence, out);
+        if statement.alternative |alternative| {
+            try self.block_value_view_roots(tree, env, alternative, out);
+        }
+        return;
+    }
+    if is_match_expr(tree, unwrapped) {
+        var arms = try match_expr_arms(self.allocator, tree, unwrapped);
+        defer arms.deinit(self.allocator);
+        var index = 0;
+        while arms.get(index) |arm| {
+            index = index + 1;
+            try self.stmt_value_view_roots(tree, env, arm.body, out);
+        }
+        return;
+    }
+    return self.place_view_roots(tree, env, expression, false, out);
+}
+
+/// Resolves a named place — a binding or a field path into one — to its
+/// borrow-class root when the place has the view type, or with reference
+/// set also a reference to it, the Go `placeViewRoots`: a `let r = &view`
+/// binding carries the view's own type with the view as its borrow target, a
+/// `&[]u8` parameter the reference type, and a deref reads either back as
+/// the view itself.
+fn (self: &var Checker) place_view_roots(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    reference: bool,
+    out: &var array::Array<BindingHandle>
+) -> !void {
+    let direct = try self.direct_field_root(tree, env, expression) orelse return;
     let root = direct.root;
     if !self.binding(root).local_borrow and !self.has_borrow_targets(root) {
-        return null;
+        return;
     }
-    if is_empty(direct.path) {
-        if !self.names.is(self.binding(root).type_name, "[]u8") {
-            return null;
+    var type_name = self.binding(root).type_name;
+    if !is_empty(direct.path) {
+        type_name = self.field_path_type(self.binding(root).type_name, direct.path) orelse return;
+    }
+    if !self.names.is(type_name, "[]u8") {
+        if !reference {
+            return;
         }
-        return root;
+        let parts = try self.names.explicit_borrow(type_name) orelse return;
+        if !self.names.is(parts.inner, "[]u8") {
+            return;
+        }
     }
-    let field_type = self.field_path_type(self.binding(root).type_name, direct.path) orelse return null;
-    if !self.names.is(field_type, "[]u8") {
-        return null;
+    return merge_view_root(self.allocator, out, root);
+}
+
+/// Resolves the view roots of the value a block yields, the Go
+/// `blockValueViewRoots`.
+fn (self: &var Checker) block_value_view_roots(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    block: ast::Block,
+    out: &var array::Array<BindingHandle>
+) -> !void {
+    let count = block_len(tree, block);
+    if count == 0 {
+        return;
     }
-    return root;
+    let last = block_statement_at(tree, block, count - 1) orelse return;
+    return self.stmt_value_view_roots(tree, env, last, out);
+}
+
+/// Resolves the view roots of the value a tail statement yields — an
+/// expression, or a nested `if`, `match`, or block — the Go
+/// `stmtValueViewRoots`.
+fn (self: &var Checker) stmt_value_view_roots(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    statement: ast::Statement,
+    out: &var array::Array<BindingHandle>
+) -> !void {
+    if expr_stmt(tree, statement) |value| {
+        if value.semicolon {
+            return;
+        }
+        return self.borrow_class_view_roots(tree, env, value.expr, out);
+    }
+    if if_stmt(tree, statement) |value| {
+        try self.block_value_view_roots(tree, env, value.consequence, out);
+        if value.alternative |alternative| {
+            try self.block_value_view_roots(tree, env, alternative, out);
+        }
+        return;
+    }
+    if is_match_stmt(tree, statement) {
+        var arms = try match_stmt_arms(self.allocator, tree, statement);
+        defer arms.deinit(self.allocator);
+        var index = 0;
+        while arms.get(index) |arm| {
+            index = index + 1;
+            try self.stmt_value_view_roots(tree, env, arm.body, out);
+        }
+        return;
+    }
+    if is_block_stmt(tree, statement) {
+        return self.block_value_view_roots(tree, env, ast::Block { node: statement.node }, out);
+    }
+    return;
+}
+
+/// Appends root unless out already holds it, the Go `mergeViewRoots`.
+fn merge_view_root(allocator: Allocator, out: &var array::Array<BindingHandle>, root: BindingHandle) -> !void {
+    var index = 0;
+    while out.get(index) |known| {
+        if known.node == root.node {
+            return;
+        }
+        index = index + 1;
+    }
+    return out.append(allocator, root);
 }
 
 /// Validates calls whose callee is a dotted expression, the Go

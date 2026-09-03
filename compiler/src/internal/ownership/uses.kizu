@@ -199,6 +199,33 @@ fn expr_ident_uses(
             return;
         },
         Comptime(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, force, count),
+        // An `if` or `match` standing as a value reads whatever its branches
+        // read, and a guard's exit reads whatever it returns.
+        If(value) => {
+            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
+            try block_ident_uses(allocator, tree, value.consequence, at, out, force, count);
+            if value.alternative |alternative| {
+                return block_ident_uses(allocator, tree, alternative, at, out, force, count);
+            }
+            return;
+        },
+        Match(value) => {
+            try expr_ident_uses(allocator, tree, value.value, at, out, force, count);
+            var index = 0;
+            while value.arms.get(index) |arm| {
+                try stmt_ident_uses(allocator, tree, arm.body, at, out, force, count);
+                index = index + 1;
+            }
+            return;
+        },
+        OrelseGuard(value) => {
+            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
+            return stmt_ident_uses(allocator, tree, value.exit, at, out, force, count);
+        },
+        CatchGuard(value) => {
+            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
+            return stmt_ident_uses(allocator, tree, value.exit, at, out, force, count);
+        },
         _ => return,
     }
 }

@@ -89,7 +89,12 @@ type Checker struct {
 	captureCondition bool
 	viewCaptureCall  *ast.CallExpr
 	borrowReturn     bool
-	result           Result
+	// returnedViews holds the expressions of the return being checked whose
+	// view leaves the frame on its parameter ties: the value itself and the
+	// fields of a struct literal it builds. The escape refusals let these
+	// through; everything else the return evaluates is refused as usual.
+	returnedViews map[ast.Expression]bool
+	result        Result
 }
 
 // allocTaint is one tied allocator a call consumed while its result has not
@@ -1300,6 +1305,7 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	}
 	_, err := c.moveExpr(stmt.Value, env)
 	c.borrowReturn = saved
+	c.returnedViews = nil
 	if err != nil {
 		return err
 	}
@@ -1354,18 +1360,17 @@ func (c *Checker) returnedTypeName(expr ast.Expression, env *scope) (string, boo
 // return is fully checked here, including any consume checking it needs;
 // every error comes back with done set.
 func (c *Checker) checkReturnValueEscapes(stmt *ast.ReturnStmt, env *scope) (bool, error) {
-	if ident, ok := stmt.Value.(*ast.IdentExpr); ok {
-		value, exists := env.lookup(ident.Name)
-		if exists && value.borrowedParam {
-			if c.borrowedReturnAllowed(ident.Name, value) {
-				return true, nil
-			}
-			return true, errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape",
-				ident.Name)
-		}
-		if exists && value.handleArenaID != 0 && !c.arenaOutlivesFrame(value.handleArenaID, env) {
-			return true, errorAt(ident.Span, "arena error: handle `%s` cannot outlive its arena",
-				ident.Name)
+	// A view still backed by a borrow — the binding itself, a view derived
+	// from it, or a struct literal capturing either — leaves with its ties.
+	// Ties to parameters flow on to the caller, which ties the result to what
+	// it lent (ADR-0098), so such a view may go; one tied to local state is
+	// refused where the value is consumed, as any other escape is.
+	if roots := c.returnedViewRoots(stmt.Value, env); len(roots) > 0 && paramRootedAll(roots) {
+		c.returnedViews = returnedViewExprs(stmt.Value, map[ast.Expression]bool{})
+	}
+	if ident, ok := stmt.Value.(*ast.IdentExpr); ok && !c.returnedViews[ident] {
+		if done, err := c.checkReturnedBindingEscapes(ident, env); done {
+			return true, err
 		}
 	}
 	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 &&
@@ -1382,6 +1387,28 @@ func (c *Checker) checkReturnValueEscapes(stmt *ast.ReturnStmt, env *scope) (boo
 			}
 			return true, c.checkOwnersConsumed(env, 0, leakExit{})
 		}
+	}
+	return false, nil
+}
+
+// checkReturnedBindingEscapes vets a returned binding for frame escapes: a
+// borrow leaves only as the declared borrow return of a parameter, and an
+// arena handle only when its arena outlives the frame.
+func (c *Checker) checkReturnedBindingEscapes(ident *ast.IdentExpr, env *scope) (bool, error) {
+	value, exists := env.lookup(ident.Name)
+	if !exists {
+		return false, nil
+	}
+	if value.borrowedParam {
+		if c.borrowedReturnAllowed(ident.Name, value) {
+			return true, nil
+		}
+		return true, errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape",
+			ident.Name)
+	}
+	if value.handleArenaID != 0 && !c.arenaOutlivesFrame(value.handleArenaID, env) {
+		return true, errorAt(ident.Span, "arena error: handle `%s` cannot outlive its arena",
+			ident.Name)
 	}
 	return false, nil
 }
@@ -1458,6 +1485,42 @@ func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool
 		return true, err
 	}
 	return true, nil
+}
+
+// returnedViewRoots resolves the borrow-class bindings backing the views a
+// returned expression carries out: the expression's own, or those of every
+// field of a struct literal it builds.
+func (c *Checker) returnedViewRoots(expr ast.Expression, env *scope) []*binding {
+	if literal, ok := unwrapExpressionMarkers(expr).(*ast.StructLiteralExpr); ok {
+		var roots []*binding
+		for _, field := range literal.Fields {
+			roots = mergeViewRoots(roots, c.returnedViewRoots(field.Value, env))
+		}
+		return roots
+	}
+	return c.borrowClassViewRoots(expr, env)
+}
+
+// paramRootedAll reports whether every binding's provenance ends in parameters.
+func paramRootedAll(roots []*binding) bool {
+	for _, root := range roots {
+		if !paramRootedBinding(root) {
+			return false
+		}
+	}
+	return true
+}
+
+// returnedViewExprs collects the expressions whose view a return hands out:
+// the returned expression and, through struct literals, their field values.
+func returnedViewExprs(expr ast.Expression, into map[ast.Expression]bool) map[ast.Expression]bool {
+	into[expr] = true
+	if literal, ok := unwrapExpressionMarkers(expr).(*ast.StructLiteralExpr); ok {
+		for _, field := range literal.Fields {
+			returnedViewExprs(field.Value, into)
+		}
+	}
+	return into
 }
 
 // paramRootedBinding reports whether a binding's provenance chain ends only in
@@ -1679,13 +1742,12 @@ func (c *Checker) checkCaptureLetStmt(stmt *ast.LetStmt, env *scope) (bool, erro
 	if ok {
 		return true, c.checkReturnedBorrowLetStmt(stmt, sources, elem, false, env)
 	}
-	source, ok, err := c.viewFieldBorrowInitializer(stmt.Value, env)
+	sources, ok, err = c.viewInitializer(stmt.Value, env)
 	if err != nil {
 		return true, err
 	}
 	if ok {
-		return true, c.checkReturnedBorrowLetStmt(stmt,
-			[]borrowSource{{target: source}}, "[]u8", false, env)
+		return true, c.checkReturnedBorrowLetStmt(stmt, sources, "[]u8", false, env)
 	}
 	return false, nil
 }
@@ -1728,25 +1790,27 @@ func (c *Checker) structCaptureInitializer(
 	return sources, literal.TypeName, true, nil
 }
 
-// viewFieldBorrowInitializer recognizes reading a `[]u8` field out of a
-// borrow-class value: the copy is a view of the same backing, so the binding
-// stays tied to the value it was read from.
-func (c *Checker) viewFieldBorrowInitializer(
+// viewInitializer recognizes an initializer that yields a view still backed
+// by a borrow-class binding — a view field read, a slice of a local view, a
+// view read back through a reference, or a conditional yielding one — and
+// resolves the bindings that keep it alive. The new binding ties to them so
+// the view cannot outlive its storage.
+func (c *Checker) viewInitializer(
 	expr ast.Expression,
 	env *scope,
-) (*binding, bool, error) {
-	field, ok := expr.(*ast.FieldExpr)
-	if !ok || field.Namespace {
-		return nil, false, nil
-	}
-	root := c.borrowClassViewRoot(expr, env)
-	if root == nil {
+) ([]borrowSource, bool, error) {
+	roots := c.borrowClassViewRoots(expr, env)
+	if len(roots) == 0 {
 		return nil, false, nil
 	}
 	if _, err := c.readExpr(expr, env); err != nil {
 		return nil, true, err
 	}
-	return root, true, nil
+	sources := make([]borrowSource, 0, len(roots))
+	for _, root := range roots {
+		sources = append(sources, borrowSource{target: root})
+	}
+	return sources, true, nil
 }
 
 // attachAllocProvenance ties a fresh owner to the tied allocators its
@@ -4131,14 +4195,14 @@ func splitMoveMarker(expr ast.Expression) (*ast.MoveExpr, ast.Expression) {
 
 // checkMovePlaceBinding rejects a named value that cannot be handed off from
 // its current frame before the ordinary owner and borrow checks run.
-func checkMovePlaceBinding(ident *ast.IdentExpr, value *binding, env *scope) error {
+func checkMovePlaceBinding(ident *ast.IdentExpr, value *binding, env *scope, returned bool) error {
 	if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
 		return err
 	}
 	if value.moved {
 		return errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
 	}
-	if value.borrowedParam {
+	if value.borrowedParam && !returned {
 		return errorAt(ident.Span,
 			"borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
@@ -4174,7 +4238,7 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 	if !ok {
 		return c.moveUnboundIdent(ident)
 	}
-	if err := checkMovePlaceBinding(ident, value, env); err != nil {
+	if err := checkMovePlaceBinding(ident, value, env, c.returnedViews[ident]); err != nil {
 		return "", false, err
 	}
 	if value.allocTied() {
@@ -4229,7 +4293,26 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 	if stmt, ok := expr.(*ast.MatchStmt); ok {
 		return c.moveMatchExpr(stmt, env)
 	}
-	return c.readExpr(expr, env)
+	typeName, err := c.readExpr(expr, env)
+	if err != nil {
+		return "", err
+	}
+	return typeName, c.refuseViewEscape(expr, typeName, env)
+}
+
+// refuseViewEscape rejects handing a view still backed by a local borrow to a
+// consumer that may keep it, as moving the borrow binding itself is refused:
+// the storage the view points into ends with the frame.
+func (c *Checker) refuseViewEscape(expr ast.Expression, typeName string, env *scope) error {
+	if !isViewType(typeName) || c.returnedViews[expr] {
+		return nil
+	}
+	root := c.borrowClassViewRoot(expr, env)
+	if root == nil {
+		return nil
+	}
+	return errorAt(expressionSpan(expr),
+		"borrow error: borrowed value `%s` cannot escape", root.name)
 }
 
 // readIfExpr checks ownership effects for an if expression in read context.
@@ -4442,7 +4525,7 @@ func (c *Checker) moveDerefExpr(expr *ast.DerefExpr, env *scope) (string, error)
 		return "", err
 	}
 	if c.isCopyType(typeName) {
-		return typeName, nil
+		return typeName, c.refuseViewEscape(expr, typeName, env)
 	}
 	return "", errorf("borrow error: value `%s` cannot be moved out of borrow",
 		expr.Receiver.String())
@@ -5116,11 +5199,56 @@ func (c *Checker) viewCaptureStructType(typeName string) bool {
 	return c.viewCarryingType(typeName)
 }
 
-// borrowClassViewRoot resolves expr to the borrow-class binding backing a view
-// read — a local view binding, or a view-capturing struct whose `[]u8` field
-// is read — or nil for params, statics, and owned values, whose views are
-// free: a parameter outlives the frame, so what it backs cannot dangle here.
+// borrowClassViewRoot resolves expr to the first borrow-class binding backing
+// the view it yields, or nil when there is none; see borrowClassViewRoots.
 func (c *Checker) borrowClassViewRoot(expr ast.Expression, env *scope) *binding {
+	if roots := c.borrowClassViewRoots(expr, env); len(roots) > 0 {
+		return roots[0]
+	}
+	return nil
+}
+
+// borrowClassViewRoots resolves expr to the borrow-class bindings backing the
+// view it yields — a local view binding, or a view-capturing struct whose
+// `[]u8` field is read — through the forms that derive a view from a view
+// without leaving its storage: a slice, a read back through `&[]u8`, an
+// `orelse` / `catch` default, and the tails of an `if` or `match` expression.
+// Empty for params, statics, and owned values, whose views are free: a
+// parameter outlives the frame, so what it backs cannot dangle here.
+func (c *Checker) borrowClassViewRoots(expr ast.Expression, env *scope) []*binding {
+	switch e := unwrapExpressionMarkers(expr).(type) {
+	case *ast.IndexExpr:
+		if !e.Slice {
+			return nil
+		}
+		return c.borrowClassViewRoots(e.Target, env)
+	case *ast.DerefExpr:
+		return c.placeViewRoots(e.Receiver, isViewOrReferenceType, env)
+	case *ast.BinaryExpr:
+		if e.Operator != "orelse" && e.Operator != "catch" {
+			return nil
+		}
+		return c.borrowClassViewRoots(e.Right, env)
+	case *ast.IfStmt:
+		return mergeViewRoots(c.blockValueViewRoots(e.Consequence, env),
+			c.blockValueViewRoots(e.Alternative, env))
+	case *ast.MatchStmt:
+		var roots []*binding
+		for _, arm := range e.Arms {
+			roots = mergeViewRoots(roots, c.stmtValueViewRoots(arm.Body, env))
+		}
+		return roots
+	}
+	return c.placeViewRoots(expr, isViewType, env)
+}
+
+// placeViewRoots resolves a named place — a binding or a field path into one
+// — to its borrow-class root when the place has the type want accepts.
+func (c *Checker) placeViewRoots(
+	expr ast.Expression,
+	want func(string) bool,
+	env *scope,
+) []*binding {
 	root, field, ok := directFieldRoot(expr, env)
 	if !ok || root == nil {
 		return nil
@@ -5128,16 +5256,79 @@ func (c *Checker) borrowClassViewRoot(expr ast.Expression, env *scope) *binding 
 	if !root.localBorrow && len(root.borrowTargets) == 0 {
 		return nil
 	}
-	if field == "" {
-		if root.typeName != "[]u8" {
+	typeName := root.typeName
+	if field != "" {
+		fieldType, ok := c.fieldPathType(root.typeName, field)
+		if !ok {
 			return nil
 		}
-		return root
+		typeName = fieldType
 	}
-	if fieldType, ok := c.fieldPathType(root.typeName, field); !ok || fieldType != "[]u8" {
+	if !want(typeName) {
 		return nil
 	}
-	return root
+	return []*binding{root}
+}
+
+// blockValueViewRoots resolves the view roots of the value a block yields.
+func (c *Checker) blockValueViewRoots(block *ast.BlockStmt, env *scope) []*binding {
+	if block == nil || len(block.Statements) == 0 {
+		return nil
+	}
+	return c.stmtValueViewRoots(block.Statements[len(block.Statements)-1], env)
+}
+
+// stmtValueViewRoots resolves the view roots of the value a tail statement
+// yields: an expression, or a nested `if`, `match`, or block.
+func (c *Checker) stmtValueViewRoots(stmt ast.Statement, env *scope) []*binding {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		if s.Semicolon {
+			return nil
+		}
+		return c.borrowClassViewRoots(s.Expr, env)
+	case *ast.IfStmt:
+		return c.borrowClassViewRoots(s, env)
+	case *ast.MatchStmt:
+		return c.borrowClassViewRoots(s, env)
+	case *ast.BlockStmt:
+		return c.blockValueViewRoots(s, env)
+	}
+	return nil
+}
+
+// mergeViewRoots appends the roots of more not already in roots.
+func mergeViewRoots(roots, more []*binding) []*binding {
+	for _, root := range more {
+		seen := false
+		for _, known := range roots {
+			if known == root {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+// isViewType reports whether typeName is the byte view.
+func isViewType(typeName string) bool {
+	return typeName == "[]u8"
+}
+
+// isViewOrReferenceType reports whether typeName is the byte view or a
+// reference to one: a `let r = &view` binding carries the view's own type
+// with the view as its borrow target, a `&[]u8` parameter the reference type,
+// and a deref reads either back as the view itself.
+func isViewOrReferenceType(typeName string) bool {
+	if isViewType(typeName) {
+		return true
+	}
+	_, _, inner, ok := explicitOwnershipBorrowType(typeName)
+	return ok && inner == "[]u8"
 }
 
 // checkFieldCallExpr validates calls whose callee is a dotted expression.
@@ -9953,6 +10144,24 @@ func exprIdentUses(expr ast.Expression) []string {
 		return append(uses, exprIdentUses(e.End)...)
 	case *ast.ComptimeExpr:
 		return exprIdentUses(e.Expr)
+	default:
+		return valueStmtIdentUses(expr)
+	}
+}
+
+// valueStmtIdentUses collects identifier reads from the expressions that
+// carry statements: an `if` or `match` standing as a value reads whatever its
+// branches read, and a guard's exit reads whatever it returns.
+func valueStmtIdentUses(expr ast.Expression) []string {
+	switch e := expr.(type) {
+	case *ast.IfStmt:
+		return stmtIdentUses(e)
+	case *ast.MatchStmt:
+		return stmtIdentUses(e)
+	case *ast.OrelseGuardExpr:
+		return append(exprIdentUses(e.Cond), stmtIdentUses(e.Exit)...)
+	case *ast.CatchGuardExpr:
+		return append(exprIdentUses(e.Cond), stmtIdentUses(e.Exit)...)
 	default:
 		return nil
 	}

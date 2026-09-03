@@ -496,7 +496,7 @@ fn (self: &var Checker) move_place_expr(
     }
     let ident = ident_expr(tree, expression) orelse return self.move_non_ident_expr(tree, env, expression, out);
     if self.lookup_text(tree, env, ident.name) |value| {
-        return self.move_bound_ident(tree, env, ident, value, handed_off, out);
+        return self.move_bound_ident(tree, env, ident, value, self.returned_view(expression), handed_off, out);
     }
     if text_equals(tree, ident.name, "void") {
         return try self.error0(ident.span, "move error: void is not a value");
@@ -518,6 +518,7 @@ fn (self: &var Checker) move_bound_ident(
     env: ScopeHandle,
     ident: ast::IdentExpr,
     value: BindingHandle,
+    returned: bool,
     handed_off: &var bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
@@ -527,7 +528,7 @@ fn (self: &var Checker) move_bound_ident(
     if self.binding(value).moved {
         return try self.error1(tree, ident.span, "move error: moved value `%s` was used", Arg::Text(ident.name));
     }
-    if self.binding(value).borrowed_param {
+    if self.binding(value).borrowed_param and !returned {
         return try self.error1(tree, ident.span, "borrow error: borrowed value `%s` cannot escape", Arg::Text(ident.name));
     }
     if self.tied_struct_return(self.binding(value).type_name) and self.has_borrow_targets(value) {
@@ -581,7 +582,7 @@ fn (self: &var Checker) move_non_ident_expr(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     if deref_expr(tree, expression) |deref| {
-        return self.move_deref_expr(tree, env, deref, out);
+        return self.move_deref_expr(tree, env, expression, deref, out);
     }
     if try self.is_arena_at_expr(tree, env, expression) {
         if try self.read_expr(tree, env, expression, out) |failed| {
@@ -607,7 +608,43 @@ fn (self: &var Checker) move_non_ident_expr(
     if is_match_expr(tree, expression) {
         return self.check_match_expr_value(tree, env, expression, true, out);
     }
-    return self.read_expr(tree, env, expression, out);
+    if try self.read_expr(tree, env, expression, out) |failed| {
+        return move failed;
+    }
+    return self.refuse_view_escape(tree, env, expression, out.*);
+}
+
+/// Rejects handing a view still backed by a local borrow to a consumer that
+/// may keep it, as moving the borrow binding itself is refused, the Go
+/// `refuseViewEscape`: the storage the view points into ends with the frame.
+fn (self: &var Checker) refuse_view_escape(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    type_name: Name
+) -> !?diagnostic::Diagnostic {
+    if !self.names.is(type_name, "[]u8") or self.returned_view(expression) {
+        return null;
+    }
+    let root = try self.borrow_class_view_root(tree, env, expression) orelse return null;
+    return try self.error1(
+        tree, expression_span(tree, expression),
+        "borrow error: borrowed value `%s` cannot escape",
+        Arg::Str(self.binding(root).name)
+    );
+}
+
+/// Reports whether expression is one the return being checked hands out on
+/// its parameter ties, the Go `c.returnedViews[expr]`.
+fn (self: &Checker) returned_view(expression: ast::Expression) -> bool {
+    var index = 0;
+    while self.returned_views.get(index) |known| {
+        if known.node == expression.node {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 /// Merges possible branch moves from an if expression, the Go
@@ -909,6 +946,7 @@ fn (self: &var Checker) check_match_expr_value_stmt(
 fn (self: &var Checker) move_deref_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    expression: ast::Expression,
     deref: ast::DerefExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
@@ -923,7 +961,7 @@ fn (self: &var Checker) move_deref_expr(
         return move failed;
     }
     if try self.is_copy_type(out.*) {
-        return null;
+        return self.refuse_view_escape(tree, env, expression, out.*);
     }
     let rendered = try self.names.intern_expression(tree, deref.receiver);
     return try self.error1(
