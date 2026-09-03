@@ -208,7 +208,7 @@ func (c *Checker) checkStdMethodArgs(
 	if facts.Access == stdmethod.AccessCapture {
 		c.captureCondition, c.borrowReturn = false, false
 	}
-	err := c.checkMethodArgs(method, receiver, args, env, false, check)
+	err := c.checkMethodArgs(method, receiver, args, env, check)
 	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
 	if err != nil {
 		return err

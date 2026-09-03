@@ -7765,7 +7765,7 @@ func (c *Checker) checkImplMethodArgs(
 	args []ast.Expression,
 	env *scope,
 ) error {
-	return c.checkMethodArgs(method, receiver, args, env, true,
+	return c.checkMethodArgs(method, receiver, args, env,
 		func(idx int, arg ast.Expression) error {
 			return c.checkImplMethodArg(method, idx+1, arg, env)
 		})
@@ -7774,18 +7774,15 @@ func (c *Checker) checkImplMethodArgs(
 // checkMethodArgs activates the borrows a method call holds while check
 // applies each argument's own effect, then releases them. It is the argument
 // borrow activation every method call shares, and the receiver two-phase of
-// those that reserve: a `&var` receiver held as a shared borrow while the
-// arguments are evaluated, so an argument cannot alias or consume it, then
-// as the exclusive borrow once every argument has settled. A std container
-// does not reserve — whether `values.append(a, values.pop_or_panic())` is
-// one call or two is still open — so only the exclusive borrow is checked
-// against what the arguments left active.
+// ADR-0106: a `&var` receiver is held as a shared borrow while the arguments
+// are evaluated, so an argument can read it but cannot alias, mutate, or
+// consume it, then as the exclusive borrow once every argument has settled.
+// User methods and std containers alike come through here.
 func (c *Checker) checkMethodArgs(
 	method *functionInfo,
 	receiver *binding,
 	args []ast.Expression,
 	env *scope,
-	reserve bool,
 	check func(idx int, arg ast.Expression) error,
 ) error {
 	call := &functionInfo{
@@ -7796,8 +7793,7 @@ func (c *Checker) checkMethodArgs(
 	}
 	receiverMut := method.params[0].mutBorrow
 	target, targetField := receiverPlace(receiver)
-	reserved := receiverMut && reserve
-	if reserved {
+	if receiverMut {
 		c.activateBorrow(target, targetField, false)
 		target.reservations++
 	}
@@ -7809,14 +7805,14 @@ func (c *Checker) checkMethodArgs(
 			}
 		}
 	}
-	if reserved {
+	if receiverMut {
 		target.reservations--
 		releaseTemporaryBorrow(temporaryBorrow{value: target, field: targetField})
-	}
-	if receiverMut && err == nil {
-		// Activation: argument borrows still live at the call must not
-		// overlap the receiver's exclusive borrow.
-		err = checkBorrowConflictForField(target, targetField, true)
+		if err == nil {
+			// Activation: argument borrows still live at the call must not
+			// overlap the receiver's exclusive borrow.
+			err = checkBorrowConflictForField(target, targetField, true)
+		}
 	}
 	releaseTemporaryBorrows(borrowed)
 	return err

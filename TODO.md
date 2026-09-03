@@ -59,8 +59,11 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 - [ ] (別判断) capture 付き `if` を式として許すか。用意した owner を条件付きで
       使う形を `let picked = if try maybe(a) |found| { keep.deinit(a); found }
       else { move keep };` と式で書けるようになる。今は文形だけ。
-- std `Array` の two-phase receiver: `arr.append(a, arr.pop_or_panic())` が通る。
-  ADR-0106 は receiver を借りる引数を拒否する。bounds check のおかげで今は安全
+- [x] std container の method 呼び出しも ADR-0106 の two-phase receiver を通す。
+      決めた: user method と経路を 1 本にする(`checkMethodArgs` の `reserve`
+      flag を消す)。`arr.append(a, arr.pop_or_panic())` は
+      `Array.pop_or_panic cannot run while array is borrowed`。compiler の
+      書き換えは lexer の 1 箇所(`std_array_two_phase_receiver`)。
 - `extern "c" fn` が `[]u8` / `&var String` を引数に取れる。SPEC §12.1 は `[]u8` を
   browser ABI 限定としている
 

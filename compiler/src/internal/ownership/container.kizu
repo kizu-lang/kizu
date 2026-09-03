@@ -325,27 +325,24 @@ fn (self: &var Checker) check_impl_method_args(
     receiver: BindingHandle,
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
-    return self.check_method_args(tree, env, method, receiver, args, true, 0);
+    return self.check_method_args(tree, env, method, receiver, args, 0);
 }
 
 /// Activates the borrows a method call holds while each argument's own
 /// effect is applied, then releases them, the Go `checkMethodArgs`. It is
 /// the argument borrow activation every method call shares, and the receiver
-/// two-phase of those that reserve: a `&var` receiver held as a shared
-/// borrow while the arguments are evaluated, so an argument cannot alias or
-/// consume it, then as the exclusive borrow once every argument has settled.
-/// A std container does not reserve — whether
-/// `values.append(a, values.pop_or_panic())` is one call or two is still
-/// open — so only the exclusive borrow is checked against what the
-/// arguments left active. lent is the position, from 1, of an argument the
-/// callee only reads (the Go check closure), or 0.
+/// two-phase of ADR-0106: a `&var` receiver is held as a shared borrow while
+/// the arguments are evaluated, so an argument can read it but cannot alias,
+/// mutate, or consume it, then as the exclusive borrow once every argument
+/// has settled. User methods and std containers alike come through here.
+/// lent is the position, from 1, of an argument the callee only reads (the
+/// Go check closure), or 0.
 fn (self: &var Checker) check_method_args(
     tree: &var ast::Ast,
     env: ScopeHandle,
     method: FunctionHandle,
     receiver: BindingHandle,
     args: ast::ExpressionList,
-    reserve: bool,
     lent: i64
 ) -> !?diagnostic::Diagnostic {
     let none = self.empty_subst();
@@ -357,8 +354,7 @@ fn (self: &var Checker) check_method_args(
     let first = info.params.get_or_panic(0);
     let receiver_mut = first.mut_borrow;
     let place = self.receiver_place(receiver);
-    let reserved = receiver_mut and reserve;
-    if reserved {
+    if receiver_mut {
         try self.activate_borrow(place.target, place.field, false);
         self.adjust_reservations(place.target, 1);
     }
@@ -366,7 +362,7 @@ fn (self: &var Checker) check_method_args(
     defer borrowed.deinit(self.allocator);
     if try self.activate_borrow_args(tree, env, method, 1, args, &var borrowed) |failed| {
         errdefer failed.deinit(self.allocator);
-        if reserved {
+        if receiver_mut {
             try self.release_reservation(place);
         }
         return move failed;
@@ -377,17 +373,15 @@ fn (self: &var Checker) check_method_args(
         index = index + 1;
         if try self.check_method_arg(tree, env, method, position + 1, arg, lent) |failed| {
             errdefer failed.deinit(self.allocator);
-            if reserved {
+            if receiver_mut {
                 try self.release_reservation(place);
             }
             try self.release_temporary_borrows(&borrowed);
             return move failed;
         }
     }
-    if reserved {
-        try self.release_reservation(place);
-    }
     if receiver_mut {
+        try self.release_reservation(place);
         // Activation: argument borrows still live at the call must not
         // overlap the receiver's exclusive borrow.
         if try self.check_borrow_conflict_for_field(
