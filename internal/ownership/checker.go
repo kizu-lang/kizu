@@ -249,6 +249,9 @@ func (c *Checker) Check(program *ast.Program) error {
 	c.collectEnums(program)
 	c.collectErrorSets(program)
 	c.collectUnions(program)
+	if err := c.checkUnionPayloads(); err != nil {
+		return err
+	}
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
@@ -313,6 +316,9 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.collectEnums(program)
 	c.collectErrorSets(program)
 	c.collectUnions(program)
+	if err := c.checkUnionPayloads(); err != nil {
+		return []error{err}
+	}
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
@@ -423,6 +429,24 @@ func (c *Checker) collectUnions(program *ast.Program) {
 		c.unions[unionDecl.Name] = variants
 		c.unionOrder[unionDecl.Name] = order
 	}
+}
+
+// checkUnionPayloads rejects a union payload that is an error union around an
+// owner. An owner inside `E!T` is released only by the `if` that opens it,
+// and a union's cleanup arm is one direct call (SPEC §6.12): there is no
+// place to open the payload, so the value could never be released.
+func (c *Checker) checkUnionPayloads() error {
+	for name, variants := range c.unions {
+		for _, variant := range c.unionOrder[name] {
+			elem, wrapper, ok := c.wrappedPayloadElem(variants[variant])
+			if ok && wrapper == "error union" && c.valueTypeNeedsConsume(elem) {
+				return errorf(
+					"move error: union payload `%s::%s` cannot store an error union around an owner",
+					name, variant)
+			}
+		}
+	}
+	return nil
 }
 
 // checkStructs rejects struct fields that would store a local borrow.
@@ -5272,6 +5296,13 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 	seen[typeName] = true
 	if isRawPointerType(typeName) {
 		return errorf("array error: Array element cannot be raw pointer")
+	}
+	// An owner inside `E!T` is released only by the capture that opens it,
+	// and a container's element cleanup has no `if` to open one with; the
+	// optional form is refused before this by the type checker.
+	if elem, wrapper, ok := c.wrappedPayloadElem(typeName); ok &&
+		wrapper == "error union" && c.valueTypeNeedsConsume(elem) {
+		return errorf("array error: Array element cannot be an error union around an owner")
 	}
 	if base, arg, ok := splitGenericType(typeName); ok && base == "option" {
 		if err := c.rejectArrayStorageType(arg, seen); err != nil {

@@ -705,6 +705,9 @@ fn (self: &var Checker) check_setup(tree: &ast::Ast, program: &ast::Program) -> 
     try self.collect_enums(tree, program);
     try self.collect_error_sets(self.allocator, tree, program);
     try self.collect_unions(tree, program);
+    if try self.check_union_payloads(tree) |failed| {
+        return move failed;
+    }
     return self.collect_functions(tree, program);
 }
 
@@ -991,6 +994,54 @@ fn (self: &var Checker) resolved_optional_type(tree: &ast::Ast, value: ?typ::Typ
 
 /// Rejects struct fields that would store a local borrow and records every
 /// struct's fields, the Go `checkStructs`.
+/// Rejects a union payload that is an error union around an owner, the Go
+/// `checkUnionPayloads`. An owner inside `E!T` is released only by the `if`
+/// that opens it, and a union's cleanup arm is one direct call (SPEC §6.12):
+/// there is no place to open the payload, so the value could never be
+/// released.
+fn (self: &var Checker) check_union_payloads(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
+    // The payloads are read out first: the union table is borrowed while it
+    // is read, and classifying a payload spells names through the checker.
+    var payloads = array::new<UnionPayload>(self.allocator);
+    defer payloads.deinit(self.allocator);
+    var index = 0;
+    while self.unions.key_at(index) |union_name| {
+        index = index + 1;
+        let owner = try self.names.intern(union_name);
+        if self.unions.at(union_name) |info| {
+            var position = 0;
+            while info.order.get(position) |variant| {
+                position = position + 1;
+                let variant_text = name_text(&self.names, variant);
+                let variant_bytes = variant_text.as_bytes();
+                let payload = info.variants.get(variant_bytes) orelse continue;
+                try payloads.append(self.allocator, UnionPayload { owner: owner, variant: variant, payload: payload });
+            }
+        }
+    }
+    var at = 0;
+    while payloads.get(at) |entry| {
+        at = at + 1;
+        let wrapped = try self.wrapped_payload_elem(entry.payload) orelse continue;
+        if wrapped.error_union and try self.value_type_needs_consume(self.allocator, wrapped.elem) {
+            return try self.error2(
+                tree, ast::zero_span(),
+                "move error: union payload `%s::%s` cannot store an error union around an owner",
+                Arg::Str(entry.owner), Arg::Str(entry.variant)
+            );
+        }
+    }
+    return null;
+}
+
+/// Is one union variant's payload, read out of the union table so the table
+/// is not borrowed while the payload is classified.
+struct UnionPayload {
+    owner: Name,
+    variant: Name,
+    payload: Name
+}
+
 fn (self: &var Checker) check_structs(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
     var index = 0;
     while program.declarations.get(index) |declaration| {
