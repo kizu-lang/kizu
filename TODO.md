@@ -3,16 +3,6 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
-## メモリ安全監査の残り
-
-2026-09 の監査(PR #1717)で見つかった 11 系統は閉じ、checker は値の階級と署名で
-規則を持つ構造に畳んだ(`docs/principles.md` §11)。残っているのは判断 1 件だけ。
-
-- [ ] capture 付き `if` を式として許すか。用意した owner を条件付きで使う形を
-      `let picked = if try maybe(a) |found| { keep.deinit(a); found } else { move keep };`
-      と式で書けるようになる。今は文形だけで、`orelse` の既定値に名前付き owner を
-      置く形は拒否している(SPEC §6.9)。
-
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

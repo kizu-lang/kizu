@@ -2803,22 +2803,9 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	// The condition's product is held by the capture, or was a bool: the
 	// branches start with nothing of it pending.
 	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
-	var borrowCond containerBorrowCondition
-	isBorrowCond := false
-	var condType string
-	if stmt.Capture != "" {
-		match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, env)
-		if err != nil {
-			return err
-		}
-		borrowCond, isBorrowCond = match, ok
-	}
-	if !isBorrowCond {
-		read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, env)
-		if err != nil {
-			return err
-		}
-		condType = read
+	borrowCond, isBorrowCond, condType, err := c.readIfHead(stmt, env)
+	if err != nil {
+		return err
 	}
 	left := env.clone()
 	leftScope := left.child()
@@ -2830,9 +2817,9 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	right := env.clone()
 	// The tie borrows the branch's clone of each container: the branch body is
 	// checked against that clone, so only its bindings make its mutations wait.
-	_, err := c.defineCapture(
-		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, false, env, leftScope)
-	if err != nil {
+	if _, err := c.defineCapture(
+		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, false, env, leftScope,
+	); err != nil {
 		return err
 	}
 	c.settleOwnerTemps(pending, places, "void", nil)
@@ -2844,14 +2831,7 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	}
 	if stmt.Alternative != nil {
 		rightScope := right.child()
-		if stmt.ErrCapture != "" {
-			// `else |err|` binds the failure member: one scalar error code,
-			// a plain copy with no obligations of its own.
-			errName, _, _ := c.errorUnionParts(condType)
-			errBinding := c.newBinding(stmt.ErrCapture, errName)
-			errBinding.declSpan = expressionSpan(stmt.Condition)
-			rightScope.define(errBinding)
-		}
+		c.defineIfErrCapture(stmt, condType, rightScope)
 		if err := c.checkBlock(stmt.Alternative, rightScope); err != nil {
 			return err
 		}
@@ -3058,6 +3038,46 @@ func (c *Checker) checkLoopRegion(
 	}
 	env.mergeMovedFrom(clone)
 	return nil
+}
+
+// readIfHead reads an if condition the way its capture asks: a container
+// accessor condition is matched for the borrow its capture takes, anything
+// else is read as a capture condition (a bool when there is no capture).
+// Statement and expression forms share it.
+func (c *Checker) readIfHead(
+	stmt *ast.IfStmt,
+	env *scope,
+) (containerBorrowCondition, bool, string, error) {
+	var borrowCond containerBorrowCondition
+	isBorrowCond := false
+	condType := ""
+	if stmt.Capture != "" {
+		match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, env)
+		if err != nil {
+			return borrowCond, false, "", err
+		}
+		borrowCond, isBorrowCond = match, ok
+	}
+	if !isBorrowCond {
+		read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, env)
+		if err != nil {
+			return borrowCond, false, "", err
+		}
+		condType = read
+	}
+	return borrowCond, isBorrowCond, condType, nil
+}
+
+// defineIfErrCapture binds `else |err|`: the failure member, one scalar
+// error code, a plain copy with no obligations of its own.
+func (c *Checker) defineIfErrCapture(stmt *ast.IfStmt, condType string, rightScope *scope) {
+	if stmt.ErrCapture == "" {
+		return
+	}
+	errName, _, _ := c.errorUnionParts(condType)
+	errBinding := c.newBinding(stmt.ErrCapture, errName)
+	errBinding.declSpan = expressionSpan(stmt.Condition)
+	rightScope.define(errBinding)
 }
 
 // checkLoopConsumesNothingOutside rejects a loop body that consumes a binding
@@ -4393,21 +4413,35 @@ func (c *Checker) checkIfExprValue(stmt *ast.IfStmt, env *scope, moveTail bool) 
 	// One branch runs: what the first produces is not live in the second,
 	// and what the expression as a whole hands on is one value.
 	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
-	if _, err := c.readExpr(stmt.Condition, env); err != nil {
+	borrowCond, isBorrowCond, condType, err := c.readIfHead(stmt, env)
+	if err != nil {
 		return "", err
 	}
 	if stmt.Alternative == nil {
 		return "", errorf("move error: if expression requires else branch")
 	}
-	c.settleOwnerTemps(pending, places, "void", nil)
+	// Both clones come first, as in checkIfStmt, so what the capture records
+	// about a field lands on the binding the branches were cloned from.
 	left := env.clone()
-	leftType, err := c.checkBlockValue(stmt.Consequence, left.child(), moveTail)
-	if err != nil {
+	leftScope := left.child()
+	right := env.clone()
+	if _, err := c.defineCapture(
+		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, false, env, leftScope,
+	); err != nil {
 		return "", err
 	}
 	c.settleOwnerTemps(pending, places, "void", nil)
-	right := env.clone()
-	rightType, err := c.checkBlockValue(stmt.Alternative, right.child(), moveTail)
+	leftType, err := c.checkBlockValue(stmt.Consequence, leftScope, moveTail)
+	if err != nil {
+		return "", err
+	}
+	if err := c.checkCapturePayloadConsumed(stmt.Capture, leftScope); err != nil {
+		return "", err
+	}
+	c.settleOwnerTemps(pending, places, "void", nil)
+	rightScope := right.child()
+	c.defineIfErrCapture(stmt, condType, rightScope)
+	rightType, err := c.checkBlockValue(stmt.Alternative, rightScope, moveTail)
 	if err != nil {
 		return "", err
 	}

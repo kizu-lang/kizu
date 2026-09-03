@@ -205,19 +205,7 @@ fn (self: &var Checker) check_if_stmt(
     var right_live = true;
     if statement.alternative |alternative| {
         let right_scope = try self.store.child(right);
-        if !text_empty(tree, statement.err_capture) {
-            // `else |err|` binds the failure member: one scalar error code,
-            // a plain copy with no obligations of its own.
-            var err_type = empty_name();
-            if try self.names.error_union_parts(head.cond_type) |parts| {
-                err_type = parts.err;
-            }
-            let err_name = try self.names.intern_text(tree, statement.err_capture);
-            var err_binding = self.store.new_binding(err_name, err_type);
-            errdefer err_binding.deinit(self.allocator);
-            err_binding.decl_span = expression_span(tree, statement.condition);
-            let _ = try self.define(right_scope, move err_binding);
-        }
+        try self.define_if_err_capture(tree, statement, head.cond_type, right_scope);
         if try self.check_block(tree, right_scope, alternative) |failed| {
             return move failed;
         }
@@ -235,6 +223,29 @@ fn (self: &var Checker) check_if_stmt(
         try self.store.merge_moved_from(env, right);
     }
     return null;
+}
+
+/// Binds `else |err|`, the Go `defineIfErrCapture`: the failure member, one
+/// scalar error code, a plain copy with no obligations of its own.
+fn (self: &var Checker) define_if_err_capture(
+    tree: &ast::Ast,
+    statement: ast::IfStmt,
+    cond_type: Name,
+    right_scope: ScopeHandle
+) -> !void {
+    if text_empty(tree, statement.err_capture) {
+        return;
+    }
+    var err_type = empty_name();
+    if try self.names.error_union_parts(cond_type) |parts| {
+        err_type = parts.err;
+    }
+    let err_name = try self.names.intern_text(tree, statement.err_capture);
+    var err_binding = self.store.new_binding(err_name, err_type);
+    errdefer err_binding.deinit(self.allocator);
+    err_binding.decl_span = expression_span(tree, statement.condition);
+    let _ = try self.define(right_scope, move err_binding);
+    return;
 }
 
 fn (self: &Checker) new_capture_condition() -> !CaptureCondition {

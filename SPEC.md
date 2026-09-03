@@ -786,6 +786,21 @@ let label = if age >= 20 {
 };
 ```
 
+capture 付きの `if`(`if cond |name|`、`else |err|`、§6.9 / §11.1)も同じ規則で
+expression になります。payload は then 側でだけ、`else |err|` の error member は
+else 側でだけ見えます。用意した owner を「あればそれ、無ければこれ」で選ぶ形は、
+採用されない側の解放を書ける唯一の形です(`orelse` の既定値に名前付き owner は
+置けません)。
+
+```kizu
+let picked = if try maybe(allocator) |found| {
+    keep.deinit(allocator);
+    move found
+} else {
+    move keep
+};
+```
+
 三項演算子は採用しません。
 
 optional 条件(§7)には payload capture を書けます。capture は statement

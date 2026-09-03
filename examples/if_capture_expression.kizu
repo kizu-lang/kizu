@@ -1,0 +1,67 @@
+import std::mem;
+import std::string;
+
+error LoadError { Refused }
+
+fn maybe(allocator: Allocator, present: bool) -> !?string::String {
+    if present {
+        return try string::from_bytes(allocator, "present");
+    }
+    return null;
+}
+
+fn load(allocator: Allocator, fail: bool) -> LoadError!string::String {
+    if fail {
+        return LoadError::Refused;
+    }
+    return string::from_bytes(allocator, "loaded") catch return LoadError::Refused;
+}
+
+// A capture `if` used as a value: the branch that does not take the prepared
+// owner releases it, and one binding leaves the expression.
+fn pick(allocator: Allocator, present: bool) -> !void {
+    let keep = try string::from_bytes(allocator, "fallback");
+    errdefer keep.deinit(allocator);
+    let picked = if try maybe(allocator, present) |found| {
+        keep.deinit(allocator);
+        move found
+    } else {
+        move keep
+    };
+    defer picked.deinit(allocator);
+    let bytes = picked.as_bytes();
+    print(bytes);
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    try pick(allocator, true);
+    try pick(allocator, false);
+    // `else |err|` sees the failure member on its side.
+    let length = if load(allocator, true) |text| {
+        defer text.deinit(allocator);
+        text.len()
+    } else |failure| {
+        if failure == LoadError::Refused { -1 } else { -2 }
+    };
+    print(length);
+    let doubled = if maybe_count(3) |n| { n * 2 } else { 0 };
+    print(doubled);
+    return;
+}
+
+fn maybe_count(value: i64) -> ?i64 {
+    if value > 0 {
+        return value;
+    }
+    return null;
+}
+
+// run
+// features: if-expression capture optional error-union ownership
+// output:
+// present
+// fallback
+// -1
+// 6

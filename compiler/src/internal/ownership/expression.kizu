@@ -669,23 +669,37 @@ fn (self: &var Checker) check_if_expr_value(
     // and what the expression as a whole hands on is one value.
     let pending = self.pending_owner_temps.len();
     let places = self.pending_moved_places.len();
-    var ignored = empty_name();
-    if try self.read_expr(tree, env, statement.condition, &var ignored) |failed| {
+    var head = try self.new_capture_condition();
+    defer head.deinit(self.allocator);
+    if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
         return move failed;
     }
     let alternative = statement.alternative orelse
         return try self.error0(ast::zero_span(), "move error: if expression requires else branch");
-    try self.settle_owner_temps(pending, places, self.common.void_name, null);
+    // Both clones come first, as in check_if_stmt, so what the capture
+    // records about a field lands on the binding the branches were cloned
+    // from.
     let left = try self.store.clone_scope(env);
-    var left_type = empty_name();
     let left_child = try self.store.child(left);
-    if try self.check_value_block(tree, left_child, statement.consequence, move_tail, &var left_type) |failed| {
+    let right = try self.store.clone_scope(env);
+    var consumes_field = false;
+    if try self.define_capture(
+        tree, statement.capture, statement.condition, &head, false, env, left_child, &var consumes_field
+    ) |failed| {
         return move failed;
     }
     try self.settle_owner_temps(pending, places, self.common.void_name, null);
-    let right = try self.store.clone_scope(env);
-    var right_type = empty_name();
+    var left_type = empty_name();
+    if try self.check_value_block(tree, left_child, statement.consequence, move_tail, &var left_type) |failed| {
+        return move failed;
+    }
+    if try self.check_capture_payload_consumed(tree, statement.capture, left_child) |failed| {
+        return move failed;
+    }
+    try self.settle_owner_temps(pending, places, self.common.void_name, null);
     let right_child = try self.store.child(right);
+    try self.define_if_err_capture(tree, statement, head.cond_type, right_child);
+    var right_type = empty_name();
     if try self.check_value_block(tree, right_child, alternative, move_tail, &var right_type) |failed| {
         return move failed;
     }
