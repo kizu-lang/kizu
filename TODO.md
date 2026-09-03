@@ -39,10 +39,8 @@ diagnostics の parity は `compiler/tests/check` の corpus に `neg_*` を足�
 
 ### 残った小さいもの
 
-- [ ] `defer` の中の使用が last-use に数えられていない。`let alloc = fixed_buffer(scratch); ...;
-      defer values.deinit(alloc);` で alloc の tie が block 末尾より前に解放される
-      (C6 では Allocator 引数を tie の有無に関わらず貸すことで回避した)。
-      `blockLastUses` が defer の使用を block 末尾に置けば tie が正しく残る。
+- [x] `defer` / `errdefer` の中の使用を block 末尾の使用として数える
+      (`defer_keeps_allocator_tie`)。
 - [ ] `std::internal::builtin::*` primitive(std 内部だけが呼ぶ)の `case` 分岐は
       残っている。利用者が通る method は全て `checkStdMethodCall` を通る。
 

@@ -7,8 +7,10 @@ import std::map;
 // local borrows once their binding is no longer used.
 
 /// Returns the last statement index where each identifier appears, the Go
-/// `blockLastUses`. Identifiers used inside loop bodies are kept past the
-/// block's end, since the loop reads them again.
+/// `blockLastUses`. A name a loop body reads is read again on every turn,
+/// so it is kept past the block's end; a name a registered cleanup reads is
+/// read when the block exits, so it is kept until the end whatever else
+/// follows.
 pub fn block_last_uses(allocator: Allocator, tree: &ast::Ast, block: ast::Block) -> !map::Map<[]u8, i64> {
     var last_uses = map::new<[]u8, i64>(allocator);
     errdefer last_uses.deinit(allocator);
@@ -16,10 +18,26 @@ pub fn block_last_uses(allocator: Allocator, tree: &ast::Ast, block: ast::Block)
     var index = 0;
     while block_statement_at(tree, block, index) |statement| {
         try loop_ident_uses(allocator, tree, statement, count + 1, &var last_uses, true);
-        try stmt_ident_uses(allocator, tree, statement, index, &var last_uses, false, count);
+        var at = index;
+        if cleanup_stmt(tree, statement) {
+            at = count;
+        }
+        try stmt_ident_uses(allocator, tree, statement, at, &var last_uses, false, count);
         index = index + 1;
     }
     return move last_uses;
+}
+
+/// Reports whether statement registers a cleanup that runs when the block
+/// exits, the Go `cleanupStmt`.
+fn cleanup_stmt(tree: &ast::Ast, statement: ast::Statement) -> bool {
+    if defer_stmt(tree, statement) |_| {
+        return true;
+    }
+    if errdefer_stmt(tree, statement) |_| {
+        return true;
+    }
+    return false;
 }
 
 /// Records the identifiers used inside loop bodies, the Go `loopIdentUses`.
@@ -41,11 +59,11 @@ fn loop_ident_uses(
 }
 
 /// Records the index at which a name was used: when force is set every
-/// recorded name takes the index; otherwise a name already kept past the
-/// block (above count) keeps that position.
+/// recorded name takes the index; otherwise a name already kept to the
+/// block's end or past it (count or above) keeps that position.
 fn record_use(allocator: Allocator, out: &var map::Map<[]u8, i64>, name: []u8, at: i64, force: bool, count: i64) -> !void {
     if out.at_mut(name) |slot| {
-        if !force and slot.* > count {
+        if !force and slot.* >= count {
             return;
         }
         slot.* = at;
@@ -288,6 +306,22 @@ fn (self: &var Checker) release_if_unused(
         }
     }
     return;
+}
+
+/// Ends the borrows a consumed binding holds, the Go
+/// `releaseConsumedBorrows`. A value handed off or released reads its
+/// sources no more, and the cleanup registered on it retires with it, so
+/// the mentions its name still has — an errdefer that will never run — keep
+/// nothing alive. What the release unblocks is released by the statement's
+/// own last-use pass.
+fn (self: &var Checker) release_consumed_borrows(value: BindingHandle) -> !void {
+    if !self.has_borrow_targets(value) or self.store.has_any_borrow(value) {
+        return;
+    }
+    try self.release_borrow(value);
+    var targets = array::new<BorrowSource>(self.allocator);
+    defer targets.deinit(self.allocator);
+    return self.take_borrow_targets(value, &var targets);
 }
 
 /// Reads the last-use statement index recorded for a binding's name.

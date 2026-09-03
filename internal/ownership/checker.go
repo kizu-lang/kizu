@@ -4299,7 +4299,21 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 			ident.Name, field, ident.Name)
 	}
 	value.moved = true
+	releaseConsumedBorrows(value)
 	return value.typeName, true, nil
+}
+
+// releaseConsumedBorrows ends the borrows a consumed binding holds. A value
+// handed off or released reads its sources no more, and the cleanup
+// registered on it retires with it, so the mentions its name still has —
+// an errdefer that will never run — keep nothing alive. What the release
+// unblocks is released by the statement's own last-use pass.
+func releaseConsumedBorrows(value *binding) {
+	if len(value.borrowTargets) == 0 || value.hasAnyBorrow() {
+		return
+	}
+	releaseBorrow(value)
+	value.borrowTargets = nil
 }
 
 // moveNonIdentExpr handles move contexts for compound expressions.
@@ -7669,6 +7683,7 @@ func (c *Checker) checkImplMethodCall(
 					"would release it twice", value.name, field, value.name)
 		}
 		value.moved = true
+		releaseConsumedBorrows(value)
 	}
 	return returnTypeName(method), true, nil
 }
@@ -8882,21 +8897,39 @@ func (c *Checker) fieldPathType(typeName string, path string) (string, bool) {
 	return current, true
 }
 
-// blockLastUses returns the last statement index where each identifier appears.
+// blockLastUses returns the last statement index where each identifier
+// appears. A name a loop body reads is read again on every turn, so it is
+// kept past the block's end; a name a registered cleanup reads is read when
+// the block exits, so it is kept until the end whatever else follows.
 func blockLastUses(block *ast.BlockStmt) map[string]int {
 	lastUses := map[string]int{}
+	end := len(block.Statements)
 	for idx, stmt := range block.Statements {
 		for _, name := range loopIdentUses(stmt) {
-			lastUses[name] = len(block.Statements) + 1
+			lastUses[name] = end + 1
+		}
+		at := idx
+		if cleanupStmt(stmt) {
+			at = end
 		}
 		for _, name := range stmtIdentUses(stmt) {
-			if lastUses[name] > len(block.Statements) {
+			if lastUses[name] >= end {
 				continue
 			}
-			lastUses[name] = idx
+			lastUses[name] = at
 		}
 	}
 	return lastUses
+}
+
+// cleanupStmt reports whether stmt registers a cleanup that runs when the
+// block exits.
+func cleanupStmt(stmt ast.Statement) bool {
+	switch stmt.(type) {
+	case *ast.DeferStmt, *ast.ErrDeferStmt:
+		return true
+	}
+	return false
 }
 
 // loopIdentUses returns identifiers used inside loop bodies.

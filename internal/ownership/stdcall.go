@@ -58,6 +58,7 @@ func (c *Checker) checkStdMethodCall(
 		// Releasing the value is the last thing done with it, so the binding
 		// is consumed rather than left readable.
 		receiver.moved = true
+		releaseConsumedBorrows(receiver)
 		if facts.Deinitializes {
 			receiver.deinitialized = true
 		}
