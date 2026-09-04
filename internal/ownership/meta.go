@@ -16,6 +16,35 @@ type metaField struct {
 	name    string
 	typ     string
 	variant bool
+	// origin is the error set that declared a member of an error set, and ""
+	// otherwise; the member is built through that set.
+	origin string
+}
+
+// variantOwner names the declaration a variant is built from: the declaring
+// set for an error member, the type itself otherwise.
+func (f metaField) variantOwner() string {
+	if f.origin != "" {
+		return f.origin
+	}
+	return f.owner
+}
+
+// variantKey identifies a variant the way an arm names it, so a combined
+// error set that receives one member name from two sets keeps them apart.
+func (f metaField) variantKey() string {
+	if f.origin != "" {
+		return f.origin + "::" + f.name
+	}
+	return f.name
+}
+
+// matchArmKey identifies the variant an arm covers, paired with variantKey.
+func matchArmKey(arm ast.MatchArm) string {
+	if arm.TagSet != "" {
+		return arm.TagSet + "::" + arm.Tag
+	}
+	return arm.Tag
 }
 
 // checkComptimeForStmt checks ownership effects once per expansion. Each
@@ -87,9 +116,18 @@ func (c *Checker) variants(typeArg string) ([]metaField, error) {
 		}
 		return out, nil
 	}
+	if members, ok := c.errorOrder[owner]; ok {
+		out := make([]metaField, 0, len(members))
+		for _, member := range members {
+			out = append(out, metaField{
+				owner: owner, name: member.name, variant: true, origin: member.origin,
+			})
+		}
+		return out, nil
+	}
 	order, ok := c.unionOrder[owner]
 	if !ok {
-		return nil, errorf("move error: `%s` expects an enum or union, got %s",
+		return nil, errorf("move error: `%s` expects an enum, union, or error set, got %s",
 			stdmeta.Variants, owner)
 	}
 	out := make([]metaField, 0, len(order))
@@ -207,8 +245,10 @@ func (c *Checker) checkMetaApply(
 			return "", true, err
 		}
 		return "[]u8", true, nil
+	case stdmeta.TypeName:
+		return "[]u8", true, nil
 	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
-		stdmeta.IsOwner, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
+		stdmeta.IsOwner, stdmeta.IsError, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
 		return "bool", true, nil
 	case stdmeta.Field:
 		typeName, err := c.checkMetaFieldBorrow(form, staticArgs, args, env)
@@ -291,7 +331,7 @@ func (c *Checker) checkMetaVariant(
 	if err != nil {
 		return "", err
 	}
-	return c.readExpr(ast.VariantExpansion(variant.owner, variant.name, args), env)
+	return c.readExpr(ast.VariantExpansion(variant.variantOwner(), variant.name, args), env)
 }
 
 // checkComptimeMatchStmt applies the ownership effect of the match a
@@ -305,11 +345,14 @@ func (c *Checker) checkComptimeMatchStmt(stmt *ast.ComptimeMatchStmt, env *scope
 	owner := strings.TrimPrefix(strings.TrimPrefix(valueType, "&var "), "&")
 	variants, err := c.variants(owner)
 	if err != nil {
-		return errorf("move error: comptime match expects an enum or union, got %s", valueType)
+		return errorf("move error: comptime match expects an enum, union, or error set, got %s",
+			valueType)
 	}
 	list := make([]ast.MetaVariant, 0, len(variants))
 	for _, variant := range variants {
-		list = append(list, ast.MetaVariant{Name: variant.name, HasPayload: variant.typ != ""})
+		list = append(list, ast.MetaVariant{
+			Name: variant.name, HasPayload: variant.typ != "", Origin: variant.origin,
+		})
 	}
 	return c.checkStmt(ast.ComptimeMatchExpansion(stmt, owner, list), env)
 }
@@ -344,7 +387,7 @@ func (c *Checker) matchArmVariants(stmt *ast.MatchStmt) (map[string]metaField, e
 	}
 	out := make(map[string]metaField, len(variants))
 	for _, variant := range variants {
-		out[variant.name] = variant
+		out[variant.variantKey()] = variant
 	}
 	return out, nil
 }

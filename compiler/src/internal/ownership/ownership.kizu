@@ -190,7 +190,26 @@ pub struct MetaField {
     pub owner: Name,
     pub name: Name,
     pub typ: Name,
-    pub variant: bool
+    pub variant: bool,
+    /// The error set that declared a member of an error set, empty
+    /// otherwise; the member is built through that set.
+    pub origin: Name
+}
+
+/// Names the declaration a variant is built from: the declaring set for an
+/// error member, the type itself otherwise, the Go `variantOwner`.
+pub fn variant_owner(field: MetaField) -> Name {
+    if is_empty(field.origin) {
+        return field.owner;
+    }
+    return field.origin;
+}
+
+/// Is one member of an error set with the set that declared it, the Go
+/// `errorMember`.
+pub struct ErrorMember {
+    pub origin: Name,
+    pub name: Name
 }
 
 /// Names one active compile-time capture. Bindings form a lexical stack:
@@ -421,6 +440,9 @@ pub struct Checker {
     structs: map::Map<[]u8, StructInfo>,
     enums: map::Map<[]u8, EnumInfo>,
     error_sets: map::Map<[]u8, map::Map<[]u8, bool>>,
+    // error_order lists each error set's members as declared, each with the
+    // set that declared it, for the walk a `comptime match` expands into.
+    error_order: map::Map<[]u8, array::Array<ErrorMember>>,
     unions: map::Map<[]u8, UnionInfo>,
     consume_needs: map::Map<[]u8, bool>,
     deinit_owners: map::Map<[]u8, bool>,
@@ -534,6 +556,7 @@ pub fn new_checker_for_target(
         structs: map::new<[]u8, StructInfo>(allocator),
         enums: map::new<[]u8, EnumInfo>(allocator),
         error_sets: map::new<[]u8, map::Map<[]u8, bool>>(allocator),
+        error_order: map::new<[]u8, array::Array<ErrorMember>>(allocator),
         unions: map::new<[]u8, UnionInfo>(allocator),
         consume_needs: map::new<[]u8, bool>(allocator),
         deinit_owners: move deinit_owners,
@@ -575,6 +598,7 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.structs.deinit(allocator);
     self.enums.deinit(allocator);
     self.error_sets.deinit(allocator);
+    self.error_order.deinit(allocator);
     self.unions.deinit(allocator);
     self.consume_needs.deinit(allocator);
     self.deinit_owners.deinit(allocator);
@@ -903,6 +927,8 @@ fn (self: &var Checker) collect_combined_error_set(
     resolved.* = false;
     var members = map::new<[]u8, bool>(self.allocator);
     errdefer members.deinit(self.allocator);
+    var order = array::new<ErrorMember>(self.allocator);
+    errdefer order.deinit(self.allocator);
     match tree.declarations.at(declaration.node) {
         ErrorSet(value) => {
             var index = 0;
@@ -918,18 +944,28 @@ fn (self: &var Checker) collect_combined_error_set(
                     }
                 } else {
                     members.deinit(self.allocator);
+                    order.deinit(self.allocator);
                     return;
+                }
+                if self.error_order.at(bytes) |part_order| {
+                    var position = 0;
+                    while part_order.get(position) |member| {
+                        position = position + 1;
+                        try order.append(self.allocator, member);
+                    }
                 }
             }
             let name_text = tree.texts.at(value.name.node);
             let name_bytes = name_text.as_bytes();
             let allocator = self.allocator;
+            try put_order(allocator, &var self.error_order, name_bytes, move order);
             try put_flags(allocator, &var self.error_sets, name_bytes, move members);
             resolved.* = true;
             return;
         },
         _ => {
             members.deinit(self.allocator);
+            order.deinit(self.allocator);
             return;
         },
     }
@@ -938,16 +974,35 @@ fn (self: &var Checker) collect_combined_error_set(
 fn (self: &var Checker) collect_error_set(allocator: Allocator, tree: &ast::Ast, declaration: &ast::ErrorSetDecl) -> !void {
     var members = map::new<[]u8, bool>(self.allocator);
     errdefer members.deinit(self.allocator);
+    var order = array::new<ErrorMember>(self.allocator);
+    errdefer order.deinit(self.allocator);
+    let origin = try self.names.intern_text(tree, declaration.name);
     var member_index = 0;
     while declaration.members.get(member_index) |member| {
         let retained = tree.texts.at(member.node);
         let bytes = retained.as_bytes();
         try put_flag(self.allocator, &var members, bytes, true);
+        let name = try self.names.intern(bytes);
+        try order.append(self.allocator, ErrorMember { origin: origin, name: name });
         member_index = member_index + 1;
     }
     let name_text = tree.texts.at(declaration.name.node);
     let name_bytes = name_text.as_bytes();
+    try put_order(allocator, &var self.error_order, name_bytes, move order);
     return put_flags(allocator, &var self.error_sets, name_bytes, move members);
+}
+
+fn put_order(
+    allocator: Allocator,
+    values: &var map::Map<[]u8, array::Array<ErrorMember>>,
+    key: []u8,
+    order: array::Array<ErrorMember>
+) -> !void {
+    if values.contains(key) {
+        order.deinit(allocator);
+        return;
+    }
+    return values.insert(allocator, key, move order);
 }
 
 fn put_flags(

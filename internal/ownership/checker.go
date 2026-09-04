@@ -16,13 +16,16 @@ import (
 
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
-	target       stdtarget.Target
-	types        *typ.Table
-	functions    map[string]*functionInfo
-	impls        map[string]map[string]*functionInfo
-	structs      map[string]map[string]string
-	enums        map[string]map[string]bool
-	errorSets    map[string]map[string]bool
+	target    stdtarget.Target
+	types     *typ.Table
+	functions map[string]*functionInfo
+	impls     map[string]map[string]*functionInfo
+	structs   map[string]map[string]string
+	enums     map[string]map[string]bool
+	errorSets map[string]map[string]bool
+	// errorOrder lists each error set's members as declared, each with the
+	// set that declared it, for the walk a `comptime match` expands into.
+	errorOrder   map[string][]errorMember
 	unions       map[string]map[string]string
 	nextID       int
 	consumeNeeds map[string]bool
@@ -252,6 +255,7 @@ func NewForTarget(target stdtarget.Target) *Checker {
 		structs:      map[string]map[string]string{},
 		enums:        map[string]map[string]bool{},
 		errorSets:    map[string]map[string]bool{},
+		errorOrder:   map[string][]errorMember{},
 		unions:       map[string]map[string]string{},
 		consumeNeeds: map[string]bool{},
 		structOrder:  map[string][]string{},
@@ -408,10 +412,13 @@ func (c *Checker) collectErrorSets(program *ast.Program) {
 			continue
 		}
 		members := map[string]bool{}
+		order := make([]errorMember, 0, len(setDecl.Members))
 		for _, member := range setDecl.Members {
 			members[member] = true
+			order = append(order, errorMember{origin: setDecl.Name, name: member})
 		}
 		c.errorSets[setDecl.Name] = members
+		c.errorOrder[setDecl.Name] = order
 	}
 	// A combined set may name a set declared later, or another combined set.
 	// Each pass of a well-typed program resolves at least one declaration, so
@@ -422,6 +429,7 @@ func (c *Checker) collectErrorSets(program *ast.Program) {
 		var remaining []*ast.ErrorSetDecl
 		for _, setDecl := range combined {
 			members := map[string]bool{}
+			var order []errorMember
 			ready := true
 			for _, ref := range setDecl.Combines {
 				part, ok := c.errorSets[ref]
@@ -432,12 +440,14 @@ func (c *Checker) collectErrorSets(program *ast.Program) {
 				for member := range part {
 					members[member] = true
 				}
+				order = append(order, c.errorOrder[ref]...)
 			}
 			if !ready {
 				remaining = append(remaining, setDecl)
 				continue
 			}
 			c.errorSets[setDecl.Name] = members
+			c.errorOrder[setDecl.Name] = order
 			progress = true
 		}
 		combined = remaining
@@ -445,6 +455,12 @@ func (c *Checker) collectErrorSets(program *ast.Program) {
 			return
 		}
 	}
+}
+
+// errorMember is one member of an error set with the set that declared it.
+type errorMember struct {
+	origin string
+	name   string
 }
 
 // collectUnions records tagged union declarations for variant construction and matches.
@@ -3596,7 +3612,7 @@ func (c *Checker) checkMatchArms(
 		child := armEnv.child()
 		c.defineMatchArmPayload(arm, ctx.unionPayloads, ctx.ownerDeinitDispatch,
 			ctx.ownedMatch, child, expressionSpan(stmt.Value))
-		restore := c.bindMetaField(stmt.MetaCapture, ctx.armVariants[arm.Tag])
+		restore := c.bindMetaField(stmt.MetaCapture, ctx.armVariants[matchArmKey(arm)])
 		err := c.checkStmt(arm.Body, child)
 		restore()
 		if err != nil {

@@ -43,12 +43,12 @@ not in any one execution path.
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | enum / union | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
-| error union `!T` / try / errdefer | 50 | ✅ | ✅ | ✅ | 32/50 | 32/50 | 32/50 | 29/50 |
+| error union `!T` / try / errdefer | 51 | ✅ | ✅ | ✅ | 33/51 | 33/51 | 33/51 | 30/51 |
 | optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
 | move / borrow | 60 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| comptime / reflection | 13 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | cast / slice / stack buffer / box | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 | 13/14 | 13/14 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 | 1/4 |
 | contract / generics | 15 | ✅ | ✅ | ✅ | 14/15 | 14/15 | 14/15 | 14/15 |
@@ -68,7 +68,7 @@ not in any one execution path.
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 175 runnable examples,
+tags, so an example appears in more than one row. 176 runnable examples,
 measured on 2026-09-04 with `just backend-matrix` -- re-run it after touching a
 backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
 program's output: `run` executes the native build; `wasm` and `wasm-opt` load
@@ -79,13 +79,13 @@ builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 175/175 |
-| `kizu run` | 175/175 |
-| `kizu build --emit-llvm` | 175/175 |
-| `kizu build --target wasm32-wasi` (WAT) | 155/175 |
-| `kizu build --target wasm32-wasi --opt` (WAT) | 155/175 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 155/175 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 148/175 |
+| `kizu check` | 176/176 |
+| `kizu run` | 176/176 |
+| `kizu build --emit-llvm` | 176/176 |
+| `kizu build --target wasm32-wasi` (WAT) | 156/176 |
+| `kizu build --target wasm32-wasi --opt` (WAT) | 156/176 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 156/176 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 149/176 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 its remaining 20 examples are explicit target-unsupported capabilities: 16

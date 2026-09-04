@@ -83,6 +83,8 @@ fn (self: &var Checker) check_meta_form(
         IsBox => return self.check_meta_predicate_form(tree, form, static_args, out),
         IsMap => return self.check_meta_predicate_form(tree, form, static_args, out),
         IsOwner => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsError => return self.check_meta_predicate_form(tree, form, static_args, out),
+        TypeName => return self.check_meta_type_name(tree, static_args, out),
         ReleaseNamesAllocator =>
             return self.check_meta_predicate_form(tree, form, static_args, out),
         HasPublicFields => return self.check_meta_predicate_form(tree, form, static_args, out),
@@ -94,6 +96,28 @@ fn (self: &var Checker) check_meta_form(
         VariantType => return try self.comptime_type_form_value_error(form),
         Element => return try self.comptime_type_form_value_error(form),
     }
+}
+
+// Types `std::meta::type_name<T>()`: the static `[]u8` spelling of T, once
+// T resolves.
+fn (self: &var Checker) check_meta_type_name(
+    tree: &ast::Ast,
+    arguments: &array::Array<string::String>,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if arguments.at(0) |argument| {
+        let bytes = argument.as_bytes();
+        match try self.resolve_type(tree, bytes) {
+            Value(_) => {
+                out.* = try self.types.byte_string_type();
+                return null;
+            },
+            Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        }
+    }
+    return try self.comptime_arity_error(
+        stdmeta::spelling(stdmeta::Form::TypeName), "static argument", 1, arguments.len()
+    );
 }
 
 fn (self: &var Checker) check_meta_capture_name(
@@ -185,6 +209,10 @@ fn (self: &var Checker) check_meta_variant(
     var payload = empty_type();
     var name = string::new(self.allocator);
     defer name.deinit(self.allocator);
+    // The declaration the variant is built from: the declaring set for an
+    // error member, the type itself otherwise (the Go variantOwner).
+    var origin = string::new(self.allocator);
+    defer origin.deinit(self.allocator);
     match try self.resolve_meta_call_capture(tree, form, static_args) {
         Issue(issue) => return try self.type_resolution_diagnostic(issue),
         Value(handle) => {
@@ -193,6 +221,8 @@ fn (self: &var Checker) check_meta_variant(
             payload = field.type_name;
             let source_name = field.name.as_bytes();
             try name.append_bytes(self.allocator, source_name);
+            let source_origin = field.origin.as_bytes();
+            try origin.append_bytes(self.allocator, source_origin);
         },
     }
     let expected = if same_type(payload, empty_type()) {
@@ -203,8 +233,13 @@ fn (self: &var Checker) check_meta_variant(
     if args.len(tree) != expected {
         return try self.meta_variant_arity_error(form, owner, &name, expected, args.len(tree));
     }
-    let owner_name = try self.types.copy_text(self.allocator, owner);
+    var owner_name = try self.types.copy_text(self.allocator, owner);
     defer owner_name.deinit(self.allocator);
+    if origin.len() > 0 {
+        owner_name.clear();
+        let origin_bytes = origin.as_bytes();
+        try owner_name.append_bytes(self.allocator, origin_bytes);
+    }
     let owner_bytes = owner_name.as_bytes();
     let name_bytes = name.as_bytes();
     let expanded = try ast::variant_expansion(tree, owner_bytes, name_bytes, args);

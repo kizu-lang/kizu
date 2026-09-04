@@ -241,6 +241,9 @@ fn (self: &var Checker) variant_meta_fields(
         }
         return null;
     }
+    if self.metadata.error_sets_by_name.get(owner_bytes) |set_handle| {
+        return self.error_member_meta_fields(owner, set_handle, out);
+    }
     let union_handle = self.metadata.unions_by_name.get(owner_bytes) orelse
         return try self.meta_variants_type_error(owner);
     let count = self.union_variant_count(union_handle);
@@ -253,6 +256,35 @@ fn (self: &var Checker) variant_meta_fields(
             try out.append(self.allocator, handle);
         }
         index = index + 1;
+    }
+    return null;
+}
+
+// Retains one meta field per member of an error set, in declaration order,
+// each with the set that declared it.
+fn (self: &var Checker) error_member_meta_fields(
+    owner: Type,
+    handle: ErrorSetHandle,
+    out: &var array::Array<MetaFieldHandle>
+) -> !?diagnostic::Diagnostic {
+    var keys = array::new<string::String>(self.allocator);
+    defer keys.deinit(self.allocator);
+    if self.metadata.error_sets.at(handle.index) |set| {
+        var index = 0;
+        while set.value_order.at(index) |value| {
+            index = index + 1;
+            let bytes = value.as_bytes();
+            let copied = try string::from_bytes(self.allocator, bytes);
+            try keys.append(self.allocator, move copied);
+        }
+    }
+    var index = 0;
+    while keys.at(index) |key| {
+        index = index + 1;
+        let bytes = key.as_bytes();
+        let at = split_error_value_key(bytes);
+        let field = try self.retain_error_member(owner, bytes[at + 2..mem::len(bytes)], bytes[0..at]);
+        try out.append(self.allocator, field);
     }
     return null;
 }
@@ -288,7 +320,7 @@ fn (self: &Checker) copy_union_variant(handle: UnionHandle, index: i64) -> !?Uni
 fn (self: &Checker) meta_variants_type_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes(self.allocator, "`std::meta::variants` expects an enum or union, got ");
+    try message.append_bytes(self.allocator, "`std::meta::variants` expects an enum, union, or error set, got ");
     try self.append_checker_type(&var message, owner);
     return self.comptime_message(move message);
 }
@@ -351,9 +383,12 @@ fn (self: &Checker) expand_comptime_match(
         let field = self.meta_field_entries.at(handle.node);
         let field_name = field.name.as_bytes();
         let name = try tree.add_text_from_bytes(field_name);
+        let field_origin = field.origin.as_bytes();
+        let origin = try tree.add_text_from_bytes(field_origin);
         try meta_variants.append(self.allocator, ast::MetaVariant {
             name: name,
-            has_payload: !same_type(field.type_name, empty_type())
+            has_payload: !same_type(field.type_name, empty_type()),
+            origin: origin
         });
         index = index + 1;
     }
@@ -370,7 +405,7 @@ fn (self: &Checker) expand_comptime_match(
 fn (self: &Checker) comptime_match_subject_error(value_type: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes(self.allocator, "comptime match expects an enum or union, got ");
+    try message.append_bytes(self.allocator, "comptime match expects an enum, union, or error set, got ");
     try self.append_checker_type(&var message, value_type);
     return self.comptime_message(move message);
 }

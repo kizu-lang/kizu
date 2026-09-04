@@ -1,0 +1,82 @@
+error FsError {
+    NotFound,
+    Denied,
+}
+
+error NetError {
+    NotFound,
+}
+
+// A combined set declares no members of its own: each member keeps the set
+// that declared it, so two sets may contribute the same bare name.
+error LookupError = FsError or NetError;
+
+enum Color {
+    Red,
+    Green,
+}
+
+// name prints what source calls a value. An enum tag is named by its type
+// and then its tag; an error member already carries its declaring set, so
+// its variant_name is the whole spelling.
+fn name<T>(value: T) -> void {
+    comptime if std::meta::is_error<T>() {
+        comptime match value |v| {
+            print(std::meta::variant_name<T, v>());
+        }
+    } else {
+        comptime if std::meta::is_enum<T>() {
+            comptime match value |v| {
+                print(std::meta::type_name<T>());
+                print(std::meta::variant_name<T, v>());
+            }
+        } else {
+            std::meta::unsupported<T>();
+        }
+    }
+    return;
+}
+
+// first builds the first member of any error set, the way a walk that
+// produces values names an arm it cannot spell as a type.
+fn first<T>() -> T {
+    comptime for std::meta::variants<T>() |v| {
+        return std::meta::variant<T, v>();
+    }
+}
+
+fn lookup(remote: bool) -> LookupError!void {
+    if remote {
+        return NetError::NotFound;
+    }
+    return FsError::NotFound;
+}
+
+fn main() -> void {
+    name<FsError>(FsError::Denied);
+    name<Color>(Color::Green);
+    if lookup(false) {
+    } else |err| {
+        name<LookupError>(err);
+    }
+    if lookup(true) {
+    } else |err| {
+        name<LookupError>(err);
+    }
+    name<NetError>(first<NetError>());
+    print(std::meta::is_error<LookupError>());
+    print(std::meta::is_error<Color>());
+    return;
+}
+
+// run
+// features: std-meta error-set comptime-match reflection
+// output:
+// FsError::Denied
+// Color
+// Green
+// FsError::NotFound
+// NetError::NotFound
+// NetError::NotFound
+// true
+// false

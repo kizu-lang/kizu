@@ -40,6 +40,8 @@ const (
 	// means releasing something inside it, and the answer is the same one the
 	// checkers read (ast.OwnerType).
 	IsOwner Form = "std::meta::is_owner"
+	// IsError reports whether its type argument is a declared error set.
+	IsError Form = "std::meta::is_error"
 	// ReleaseNamesAllocator reports whether releasing its type argument names
 	// an allocator, which is to say whether `deinit` takes one (ADR-0132).
 	// A container releasing owner elements has to call each element's deinit,
@@ -88,6 +90,9 @@ const (
 	// in the last else makes the refusal a compile error rather than output
 	// that is silently wrong.
 	Unsupported Form = "std::meta::unsupported"
+	// TypeName is the spelling of its type argument, as a static `[]u8`. It
+	// is what a walk prints or compares when it has to name the type in hand.
+	TypeName Form = "std::meta::type_name"
 )
 
 // Shape is how one form is written: how many static arguments it takes,
@@ -115,6 +120,7 @@ var forms = map[Form]Shape{
 	IsBox:                 {StaticArgs: 1},
 	IsMap:                 {StaticArgs: 1},
 	IsOwner:               {StaticArgs: 1},
+	IsError:               {StaticArgs: 1},
 	ReleaseNamesAllocator: {StaticArgs: 1},
 	HasPublicFields:       {StaticArgs: 1},
 	Element:               {StaticArgs: 1, Type: true},
@@ -129,6 +135,7 @@ var forms = map[Form]Shape{
 	Variant:               {StaticArgs: 2, Capture: true, Variadic: true},
 	Construct:             {StaticArgs: 2, Variadic: true, Worker: 2},
 	Unsupported:           {StaticArgs: 1},
+	TypeName:              {StaticArgs: 1},
 }
 
 // Lookup reports the shape of a form, and whether name is one at all.
@@ -143,7 +150,7 @@ func Lookup(name string) (Shape, bool) {
 func Predicate(name string) bool {
 	switch Form(name) {
 	case IsStruct, IsEnum, IsUnion, IsOptional, IsArray, IsBox, IsMap, IsOwner,
-		ReleaseNamesAllocator, HasPublicFields, HasPayload:
+		IsError, ReleaseNamesAllocator, HasPublicFields, HasPayload:
 		return true
 	default:
 		return false

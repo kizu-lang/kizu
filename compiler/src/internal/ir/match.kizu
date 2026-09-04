@@ -214,7 +214,7 @@ fn (self: &var Lowerer) lower_match_arms(
             return move failed;
         }
         let mark = MetaMark { previous: self.meta_current };
-        let variant = self.arm_variant(tree, &arm_variants, arm.tag);
+        let variant = self.arm_variant(tree, &arm_variants, arm);
         try self.bind_meta_field(capture, variant);
         var result = self.blank_arm_result();
         if try self.lower_match_arm_body(tree, subject, arm, arm_block, end_label, saved, want_value, &var result) |failed| {
@@ -233,12 +233,24 @@ fn (self: &var Lowerer) lower_match_arms(
 /// Returns the variant a `comptime match` arm body is written against, the
 /// Go `armVariants[arm.Tag]`: the blank record when the tag names none,
 /// which is every arm of a match written by hand.
-fn (self: &Lowerer) arm_variant(tree: &ast::Ast, variants: &array::Array<MetaField>, tag: ast::Text) -> MetaField {
+fn (self: &Lowerer) arm_variant(tree: &ast::Ast, variants: &array::Array<MetaField>, arm: ast::MatchArm) -> MetaField {
+    let qualified = !text_empty(tree, arm.tag_set);
     var index = 0;
     while variants.get(index) |variant| {
         index = index + 1;
-        if self.module.names.is_text(variant.name, tree, tag) {
-            return variant;
+        if !self.module.names.is_text(variant.name, tree, arm.tag) {
+            continue;
+        }
+        // An arm that qualifies its set names the member the way a combined
+        // set keeps two same-named members apart (the Go matchArmKey).
+        if qualified {
+            if self.module.names.is_text(variant.origin, tree, arm.tag_set) {
+                return variant;
+            }
+        } else {
+            if is_empty(variant.origin) {
+                return variant;
+            }
         }
     }
     return empty_meta_field();
