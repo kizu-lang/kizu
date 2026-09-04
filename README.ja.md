@@ -35,26 +35,28 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 | 機能 | 例の数 | check | run | llvm | wasm | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 41 | ✅ | ✅ | ✅ | ✅ | ✅ | 40/41 |
-| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| fn / let / struct / literals | 44 | ✅ | ✅ | ✅ | ✅ | ✅ | 43/44 |
+| arithmetic / bitwise / float | 5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| if / match | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| if / match | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | enum / union | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
-| error union `!T` / try / errdefer | 45 | ✅ | ✅ | ✅ | 27/45 | 27/45 | 24/45 |
-| optional `?T` / orelse / capture | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | 22/24 |
-| move / borrow | 52 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| deinit / defer | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| error union `!T` / try / errdefer | 50 | ✅ | ✅ | ✅ | 32/50 | 32/50 | 29/50 |
+| optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
+| move / borrow | 60 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 13 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| cast / slice / stack buffer / box | 13 | ✅ | ✅ | ✅ | 12/13 | 12/13 | 12/13 |
+| cast / slice / stack buffer / box | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 | 13/14 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 |
-| contract / generics | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 | 13/14 |
-| std::array | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| contract / generics | 15 | ✅ | ✅ | ✅ | 14/15 | 14/15 | 14/15 |
+| std::array | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::map | 13 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::mem / allocator | 20 | ✅ | ✅ | ✅ | 19/20 | 19/20 | 18/20 |
+| std::map | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 20/22 |
 | std::json | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 6 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 | 3/27 |
@@ -63,7 +65,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。runnable example は 162 件、測定は 2026-09-01 に
+1 つの example は複数の行に現れます。runnable example は 175 件、測定は 2026-09-04 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run`、`wasm`、`wasm-bin`、`browser` はプログラムの出力で判定します。`run` は native
 build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmtime` で、
@@ -72,15 +74,16 @@ build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmti
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 162/162 |
-| `kizu run` | 162/162 |
-| `kizu build --emit-llvm` | 162/162 |
-| `kizu build --target wasm32-wasi` (WAT) | 142/162 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 142/162 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 135/162 |
+| `kizu check` | 175/175 |
+| `kizu run` | 175/175 |
+| `kizu build --emit-llvm` | 175/175 |
+| `kizu build --target wasm32-wasi` (WAT) | 155/175 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 155/175 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 148/175 |
 
 native 経路に pending の runnable example はありません。WASI はまだ target subset
-で、残る 20 件は backend / runtime work です。browser は lowering failure と output
+で、残る 20 件はすべて明示的な target 非対応(`std::net` 16、extern C 2、
+evented I/O 1、coroutine 1)です。browser は lowering failure と output
 mismatch が 0、残る 27 件はすべて明示的な target 非対応です。browser 列は JavaScript
 engine の広い検証で、実 page の fixture は `tests/browser/smoke.html` です。
 browser向けにはbinary単体に加え、次のcommandで隣り合う`app.wasm`と`app.mjs`を

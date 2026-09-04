@@ -42,9 +42,11 @@ var groups = []featureGroup{
 		"string-literal", "multiline-string", "contextual-integer-literal",
 		"copy", "block-exit", "edge-case", "error", "diagnostic", "diagnostics",
 		"file-span", "related-span", "trap", "method", "receiver", "signature",
-		"std"}},
-	{"arithmetic / comparison / logical", []string{
-		"arithmetic", "comparison", "logical", "short-circuit"}},
+		"std", "field-assignment", "shadowing"}},
+	{"arithmetic / bitwise / float", []string{
+		"arithmetic", "comparison", "logical", "short-circuit", "bitwise",
+		"shift", "wrap", "integer-literal", "float", "f64", "f32", "saturate",
+		"nan"}},
 	{"while / break / continue / for / label", []string{
 		"while", "break", "continue", "for", "loop", "label"}},
 	{"if / match", []string{
@@ -79,7 +81,9 @@ var groups = []featureGroup{
 	{"contract / generics", []string{
 		"contract", "impl", "generics", "generic", "type-apply",
 		"static-arguments", "function-pointer"}},
-	{"std::array", []string{"std-array", "array", "token-list"}},
+	{"std::array", []string{
+		"std-array", "array", "token-list", "clear", "remove", "truncate",
+		"zero-size"}},
 	{"std::string", []string{
 		"std-string", "string", "strings", "from-bytes", "append-bytes", "join",
 		"trim", "unicode"}},
@@ -90,6 +94,8 @@ var groups = []featureGroup{
 		"std-mem", "allocator", "user-allocator", "fixed-buffer"}},
 	{"std::json", []string{"std-json", "encode", "decode", "nested"}},
 	{"std::sort", []string{"std-sort"}},
+	{"std::float", []string{"std-float", "append", "parse", "shortest"}},
+	{"std::rand", []string{"std-rand", "seed", "deterministic"}},
 	{"std::fmt", []string{"std-fmt", "formatting", "artifact"}},
 	{"std::testing", []string{"std-testing"}},
 	{"std::fs / path / io / process", []string{

@@ -38,26 +38,28 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 41 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 40/41 |
-| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| fn / let / struct / literals | 44 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 43/44 |
+| arithmetic / bitwise / float | 5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| if / match | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| if / match | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | enum / union | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
-| error union `!T` / try / errdefer | 45 | ✅ | ✅ | ✅ | 27/45 | 27/45 | 27/45 | 24/45 |
-| optional `?T` / orelse / capture | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 22/24 |
-| move / borrow | 52 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| deinit / defer | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| error union `!T` / try / errdefer | 50 | ✅ | ✅ | ✅ | 32/50 | 32/50 | 32/50 | 29/50 |
+| optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
+| move / borrow | 60 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 13 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| cast / slice / stack buffer / box | 13 | ✅ | ✅ | ✅ | 12/13 | 12/13 | 12/13 | 12/13 |
+| cast / slice / stack buffer / box | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 | 13/14 | 13/14 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 | 1/4 |
-| contract / generics | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 | 13/14 | 13/14 |
-| std::array | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| contract / generics | 15 | ✅ | ✅ | ✅ | 14/15 | 14/15 | 14/15 | 14/15 |
+| std::array | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::map | 13 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::mem / allocator | 20 | ✅ | ✅ | ✅ | 19/20 | 19/20 | 19/20 | 18/20 |
+| std::map | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 21/22 | 20/22 |
 | std::json | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 6 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 | 10/27 | 3/27 |
@@ -66,8 +68,8 @@ not in any one execution path.
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 162 runnable examples,
-measured on 2026-09-01 with `just backend-matrix` -- re-run it after touching a
+tags, so an example appears in more than one row. 175 runnable examples,
+measured on 2026-09-04 with `just backend-matrix` -- re-run it after touching a
 backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
 program's output: `run` executes the native build; `wasm` and `wasm-opt` load
 the default and optimized WAT with `wasmtime`; `wasm-bin` loads the binary
@@ -77,13 +79,13 @@ builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 162/162 |
-| `kizu run` | 162/162 |
-| `kizu build --emit-llvm` | 162/162 |
-| `kizu build --target wasm32-wasi` (WAT) | 142/162 |
-| `kizu build --target wasm32-wasi --opt` (WAT) | 142/162 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 142/162 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 135/162 |
+| `kizu check` | 175/175 |
+| `kizu run` | 175/175 |
+| `kizu build --emit-llvm` | 175/175 |
+| `kizu build --target wasm32-wasi` (WAT) | 155/175 |
+| `kizu build --target wasm32-wasi --opt` (WAT) | 155/175 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 155/175 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 148/175 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 its remaining 20 examples are explicit target-unsupported capabilities: 16
