@@ -503,7 +503,7 @@ func (e *emitter) writeArrayReserveHelper() {
 	e.out.WriteString("    (local $capacity i64) (local $next i64)\n")
 	e.out.WriteString("    (local $old_bytes i64) (local $new_bytes i64) (local $data i32)\n")
 	e.out.WriteString("    (if (i32.or (i32.eqz (local.get $array)) " +
-		"(i32.le_s (local.get $elem_size) (i32.const 0)))\n")
+		"(i32.lt_s (local.get $elem_size) (i32.const 0)))\n")
 	e.out.WriteString("      (then (return (i32.const 0))))\n")
 	e.out.WriteString("    (if (i64.lt_s (local.get $needed) (i64.const 0))\n")
 	e.out.WriteString("      (then (return (i32.const 0))))\n")
@@ -511,18 +511,15 @@ func (e *emitter) writeArrayReserveHelper() {
 	e.out.WriteString("      (i64.load (i32.add (local.get $array) (i32.const 16))))\n")
 	e.out.WriteString("    (if (i64.le_u (local.get $needed) (local.get $capacity))\n")
 	e.out.WriteString("      (then (return (i32.const 1))))\n")
-	e.out.WriteString("    (local.set $next (local.get $needed))\n")
-	e.out.WriteString("    (if (i64.lt_u (local.get $next) (i64.const 4))\n")
-	e.out.WriteString("      (then (local.set $next (i64.const 4))))\n")
-	e.out.WriteString("    (if (i64.gt_u (local.get $capacity) (i64.const 2))\n")
+	e.writeArrayReserveNextCapacity()
+	// Elements of no size occupy no storage, and a resize to zero bytes is a
+	// release on some allocators: the capacity grows, the buffer stays what it
+	// was, and the release at deinit sees the same pointer.
+	e.out.WriteString("    (if (i32.eqz (local.get $elem_size))\n")
 	e.out.WriteString("      (then\n")
-	e.out.WriteString("        (if (i64.gt_u\n")
-	e.out.WriteString("              (i64.add (local.get $capacity)\n")
-	e.out.WriteString("                (i64.div_u (local.get $capacity) (i64.const 2)))\n")
-	e.out.WriteString("              (local.get $next))\n")
-	e.out.WriteString("          (then (local.set $next\n")
-	e.out.WriteString("            (i64.add (local.get $capacity)\n")
-	e.out.WriteString("              (i64.div_u (local.get $capacity) (i64.const 2))))))))\n")
+	e.out.WriteString("        (i64.store (i32.add (local.get $array) (i32.const 16)) " +
+		"(local.get $next))\n")
+	e.out.WriteString("        (return (i32.const 1))))\n")
 	e.out.WriteString("    (local.set $old_bytes\n")
 	e.out.WriteString("      (i64.mul (local.get $capacity) " +
 		"(i64.extend_i32_u (local.get $elem_size))))\n")
@@ -543,6 +540,23 @@ func (e *emitter) writeArrayReserveHelper() {
 		"(local.get $next))\n")
 	e.out.WriteString("    (i32.const 1)\n")
 	e.out.WriteString("  )\n\n")
+}
+
+// writeArrayReserveNextCapacity picks the capacity a growth lands on: what is
+// needed, at least 4, and at least one and a half times the current capacity.
+func (e *emitter) writeArrayReserveNextCapacity() {
+	e.out.WriteString("    (local.set $next (local.get $needed))\n")
+	e.out.WriteString("    (if (i64.lt_u (local.get $next) (i64.const 4))\n")
+	e.out.WriteString("      (then (local.set $next (i64.const 4))))\n")
+	e.out.WriteString("    (if (i64.gt_u (local.get $capacity) (i64.const 2))\n")
+	e.out.WriteString("      (then\n")
+	e.out.WriteString("        (if (i64.gt_u\n")
+	e.out.WriteString("              (i64.add (local.get $capacity)\n")
+	e.out.WriteString("                (i64.div_u (local.get $capacity) (i64.const 2)))\n")
+	e.out.WriteString("              (local.get $next))\n")
+	e.out.WriteString("          (then (local.set $next\n")
+	e.out.WriteString("            (i64.add (local.get $capacity)\n")
+	e.out.WriteString("              (i64.div_u (local.get $capacity) (i64.const 2))))))))\n")
 }
 
 // writeArraySwapHelper emits byte-wise exchange for arbitrary element layouts.

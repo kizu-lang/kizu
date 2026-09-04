@@ -219,6 +219,9 @@ fn (self: &BinaryModule) encode_named_instruction(
     if mem::equal_bytes(op, "memory.copy") or mem::equal_bytes(op, "memory.fill") {
         return self.encode_bulk_memory(syntax, input, state, out, node, op);
     }
+    if saturating_truncation_code(op) |code| {
+        return self.encode_saturating_truncation(syntax, input, state, out, node, code);
+    }
     if mem::equal_bytes(op, "return") {
         if !try self.encode_sequence(syntax, input, state, out, node, 1) {
             return false;
@@ -668,6 +671,39 @@ fn wasm_memory_instruction(op: []u8) -> ?BinaryMemoryInstruction {
     if mem::equal_bytes(op, "i64.store8") {
         return BinaryMemoryInstruction { opcode: 60, alignment: 0 };
     }
+    if mem::equal_bytes(op, "i64.load8_s") {
+        return BinaryMemoryInstruction { opcode: 48, alignment: 0 };
+    }
+    if mem::equal_bytes(op, "i64.load16_s") {
+        return BinaryMemoryInstruction { opcode: 50, alignment: 1 };
+    }
+    if mem::equal_bytes(op, "i64.load16_u") {
+        return BinaryMemoryInstruction { opcode: 51, alignment: 1 };
+    }
+    if mem::equal_bytes(op, "i64.load32_s") {
+        return BinaryMemoryInstruction { opcode: 52, alignment: 2 };
+    }
+    if mem::equal_bytes(op, "i64.load32_u") {
+        return BinaryMemoryInstruction { opcode: 53, alignment: 2 };
+    }
+    if mem::equal_bytes(op, "i64.store16") {
+        return BinaryMemoryInstruction { opcode: 61, alignment: 1 };
+    }
+    if mem::equal_bytes(op, "i64.store32") {
+        return BinaryMemoryInstruction { opcode: 62, alignment: 2 };
+    }
+    if mem::equal_bytes(op, "f32.load") {
+        return BinaryMemoryInstruction { opcode: 42, alignment: 2 };
+    }
+    if mem::equal_bytes(op, "f64.load") {
+        return BinaryMemoryInstruction { opcode: 43, alignment: 3 };
+    }
+    if mem::equal_bytes(op, "f32.store") {
+        return BinaryMemoryInstruction { opcode: 56, alignment: 2 };
+    }
+    if mem::equal_bytes(op, "f64.store") {
+        return BinaryMemoryInstruction { opcode: 57, alignment: 3 };
+    }
     return null;
 }
 
@@ -731,5 +767,74 @@ fn wasm_simple_opcode(op: []u8) -> ?i64 {
     if mem::equal_bytes(op, "i32.wrap_i64") { return 167; }
     if mem::equal_bytes(op, "i64.extend_i32_s") { return 172; }
     if mem::equal_bytes(op, "i64.extend_i32_u") { return 173; }
+    return wasm_float_opcode(op);
+}
+
+/// Maps the f32 and f64 comparisons, arithmetic, negation, and conversions
+/// the emitter writes, the Go `floatOpcode` and `floatConversionOpcode`.
+fn wasm_float_opcode(op: []u8) -> ?i64 {
+    if mem::equal_bytes(op, "f32.eq") { return 91; }
+    if mem::equal_bytes(op, "f32.ne") { return 92; }
+    if mem::equal_bytes(op, "f32.lt") { return 93; }
+    if mem::equal_bytes(op, "f32.gt") { return 94; }
+    if mem::equal_bytes(op, "f32.le") { return 95; }
+    if mem::equal_bytes(op, "f32.ge") { return 96; }
+    if mem::equal_bytes(op, "f64.eq") { return 97; }
+    if mem::equal_bytes(op, "f64.ne") { return 98; }
+    if mem::equal_bytes(op, "f64.lt") { return 99; }
+    if mem::equal_bytes(op, "f64.gt") { return 100; }
+    if mem::equal_bytes(op, "f64.le") { return 101; }
+    if mem::equal_bytes(op, "f64.ge") { return 102; }
+    if mem::equal_bytes(op, "f32.neg") { return 140; }
+    if mem::equal_bytes(op, "f32.add") { return 146; }
+    if mem::equal_bytes(op, "f32.sub") { return 147; }
+    if mem::equal_bytes(op, "f32.mul") { return 148; }
+    if mem::equal_bytes(op, "f32.div") { return 149; }
+    if mem::equal_bytes(op, "f64.neg") { return 154; }
+    if mem::equal_bytes(op, "f64.add") { return 160; }
+    if mem::equal_bytes(op, "f64.sub") { return 161; }
+    if mem::equal_bytes(op, "f64.mul") { return 162; }
+    if mem::equal_bytes(op, "f64.div") { return 163; }
+    if mem::equal_bytes(op, "f32.convert_i64_s") { return 180; }
+    if mem::equal_bytes(op, "f32.convert_i64_u") { return 181; }
+    if mem::equal_bytes(op, "f32.demote_f64") { return 182; }
+    if mem::equal_bytes(op, "f64.convert_i64_s") { return 185; }
+    if mem::equal_bytes(op, "f64.convert_i64_u") { return 186; }
+    if mem::equal_bytes(op, "f64.promote_f32") { return 187; }
+    if mem::equal_bytes(op, "i32.reinterpret_f32") { return 188; }
+    if mem::equal_bytes(op, "i64.reinterpret_f64") { return 189; }
+    if mem::equal_bytes(op, "f32.reinterpret_i32") { return 190; }
+    if mem::equal_bytes(op, "f64.reinterpret_i64") { return 191; }
     return null;
+}
+
+/// Names the second byte of one float-to-integer truncation from the
+/// 0xfc-prefixed group, or null for any other instruction.
+fn saturating_truncation_code(op: []u8) -> ?i64 {
+    if mem::equal_bytes(op, "i64.trunc_sat_f32_s") { return 4; }
+    if mem::equal_bytes(op, "i64.trunc_sat_f32_u") { return 5; }
+    if mem::equal_bytes(op, "i64.trunc_sat_f64_s") { return 6; }
+    if mem::equal_bytes(op, "i64.trunc_sat_f64_u") { return 7; }
+    return null;
+}
+
+/// Emits one saturating truncation: its operand, the 0xfc prefix, and the
+/// code that names the conversion; the Go `encodeSaturatingTruncation`.
+fn (self: &BinaryModule) encode_saturating_truncation(
+    syntax: &WasmModule,
+    input: []u8,
+    state: &var BinaryInstructionState,
+    out: &var string::String,
+    node: arena::Handle<WasmNode>,
+    code: i64
+) -> !bool {
+    if !wasm_list_has_len(syntax, node, 2) {
+        return false;
+    }
+    if !try self.encode_sequence(syntax, input, state, out, node, 1) {
+        return false;
+    }
+    try out.append_byte(self.allocator, cast<u8>(252));
+    try wasm_append_u32(self.allocator, out, code);
+    return true;
 }

@@ -153,8 +153,13 @@ func classifyInstruction(op string) binaryInstructionKind {
 		return binaryReferenceInstruction
 	case "i32.const", "i64.const":
 		return binaryImmediateInstruction
+	case "i64.trunc_sat_f32_s", "i64.trunc_sat_f32_u", "i64.trunc_sat_f64_s", "i64.trunc_sat_f64_u":
+		return binaryImmediateInstruction
 	case "i32.load", "i64.load", "i32.load8_u", "i64.load8_u",
-		"i32.store", "i64.store", "i32.store8", "i64.store8":
+		"i64.load8_s", "i64.load16_s", "i64.load16_u", "i64.load32_s", "i64.load32_u",
+		"f32.load", "f64.load",
+		"i32.store", "i64.store", "i32.store8", "i64.store8",
+		"i64.store16", "i64.store32", "f32.store", "f64.store":
 		return binaryImmediateInstruction
 	case "memory.size", "memory.grow", "memory.copy", "memory.fill":
 		return binaryImmediateInstruction
@@ -215,12 +220,46 @@ func (e *binaryInstructionEncoder) encodeImmediateOperation(
 	case "i32.const", "i64.const":
 		return e.encodeConstant(out, index, op)
 	case "i32.load", "i64.load", "i32.load8_u", "i64.load8_u",
-		"i32.store", "i64.store", "i32.store8", "i64.store8":
+		"i64.load8_s", "i64.load16_s", "i64.load16_u", "i64.load32_s", "i64.load32_u",
+		"f32.load", "f64.load",
+		"i32.store", "i64.store", "i32.store8", "i64.store8",
+		"i64.store16", "i64.store32", "f32.store", "f64.store":
 		return e.encodeMemory(out, index, op)
 	case "memory.size", "memory.grow":
 		return e.encodeMemorySize(out, index, op)
+	case "i64.trunc_sat_f32_s", "i64.trunc_sat_f32_u", "i64.trunc_sat_f64_s", "i64.trunc_sat_f64_u":
+		return e.encodeSaturatingTruncation(out, index, op)
 	default:
 		return e.encodeBulkMemory(out, index, op)
+	}
+}
+
+// encodeSaturatingTruncation emits one float-to-integer truncation from the
+// 0xfc-prefixed group, whose second byte names the conversion.
+func (e *binaryInstructionEncoder) encodeSaturatingTruncation(
+	out []byte,
+	index int,
+	op string,
+) ([]byte, error) {
+	children := e.module.source.nodes[index].children
+	if len(children) != 2 {
+		return nil, e.module.errorf(index, "invalid %s instruction", op)
+	}
+	var err error
+	out, err = e.encodeSequence(out, children[1:])
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, 0xfc)
+	switch op {
+	case "i64.trunc_sat_f32_s":
+		return appendU32(out, 4), nil
+	case "i64.trunc_sat_f32_u":
+		return appendU32(out, 5), nil
+	case "i64.trunc_sat_f64_s":
+		return appendU32(out, 6), nil
+	default:
+		return appendU32(out, 7), nil
 	}
 }
 
@@ -614,23 +653,74 @@ func (e *binaryInstructionEncoder) labelDepth(index int) (uint32, error) {
 // memoryInstruction returns the opcode and natural alignment exponent for a
 // supported memory operation.
 func memoryInstruction(op string) (byte, uint32) {
+	if opcode, alignment, ok := wideMemoryInstruction(op); ok {
+		return opcode, alignment
+	}
+	if opcode, alignment, ok := narrowMemoryInstruction(op); ok {
+		return opcode, alignment
+	}
+	return floatMemoryInstruction(op)
+}
+
+// wideMemoryInstruction maps the whole-word loads and stores and the byte
+// forms the emitter has always written.
+func wideMemoryInstruction(op string) (byte, uint32, bool) {
 	switch op {
 	case "i32.load":
-		return 0x28, 2
+		return 0x28, 2, true
 	case "i64.load":
-		return 0x29, 3
+		return 0x29, 3, true
 	case "i32.load8_u":
-		return 0x2d, 0
+		return 0x2d, 0, true
 	case "i64.load8_u":
-		return 0x31, 0
+		return 0x31, 0, true
 	case "i32.store":
-		return 0x36, 2
+		return 0x36, 2, true
 	case "i64.store":
-		return 0x37, 3
+		return 0x37, 3, true
 	case "i32.store8":
-		return 0x3a, 0
+		return 0x3a, 0, true
 	case "i64.store8":
-		return 0x3c, 0
+		return 0x3c, 0, true
+	default:
+		return 0, 0, false
+	}
+}
+
+// narrowMemoryInstruction maps the loads and stores of the 8-, 16-, and
+// 32-bit integer types held in an i64.
+func narrowMemoryInstruction(op string) (byte, uint32, bool) {
+	switch op {
+	case "i64.load8_s":
+		return 0x30, 0, true
+	case "i64.load16_s":
+		return 0x32, 1, true
+	case "i64.load16_u":
+		return 0x33, 1, true
+	case "i64.load32_s":
+		return 0x34, 2, true
+	case "i64.load32_u":
+		return 0x35, 2, true
+	case "i64.store16":
+		return 0x3d, 1, true
+	case "i64.store32":
+		return 0x3e, 2, true
+	default:
+		return 0, 0, false
+	}
+}
+
+// floatMemoryInstruction maps the f32 and f64 loads and stores.
+func floatMemoryInstruction(op string) (byte, uint32) {
+	switch op {
+	case "f32.load":
+		return 0x2a, 2
+	case "f64.load":
+		return 0x2b, 3
+	case "f32.store":
+		return 0x38, 2
+	case "f64.store":
+		return 0x39, 3
 	default:
 		return 0, 0
 	}
@@ -654,7 +744,113 @@ func simpleInstructionOpcode(op string) (byte, bool) {
 	if opcode, ok := i64NumericOpcode(op); ok {
 		return opcode, true
 	}
+	if opcode, ok := floatOpcode(op); ok {
+		return opcode, true
+	}
 	return conversionOpcode(op)
+}
+
+// floatOpcode maps the f32 and f64 comparisons, arithmetic, negation, and
+// conversions the emitter writes.
+func floatOpcode(op string) (byte, bool) {
+	if opcode, ok := floatComparisonOpcode(op); ok {
+		return opcode, true
+	}
+	if opcode, ok := floatArithmeticOpcode(op); ok {
+		return opcode, true
+	}
+	return floatConversionOpcode(op)
+}
+
+// floatComparisonOpcode maps the float comparisons; the two widths sit 6
+// opcodes apart.
+func floatComparisonOpcode(op string) (byte, bool) {
+	switch op {
+	case "f32.eq":
+		return 0x5b, true
+	case "f32.ne":
+		return 0x5c, true
+	case "f32.lt":
+		return 0x5d, true
+	case "f32.gt":
+		return 0x5e, true
+	case "f32.le":
+		return 0x5f, true
+	case "f32.ge":
+		return 0x60, true
+	case "f64.eq":
+		return 0x61, true
+	case "f64.ne":
+		return 0x62, true
+	case "f64.lt":
+		return 0x63, true
+	case "f64.gt":
+		return 0x64, true
+	case "f64.le":
+		return 0x65, true
+	case "f64.ge":
+		return 0x66, true
+	default:
+		return 0, false
+	}
+}
+
+// floatArithmeticOpcode maps float negation and the four arithmetic
+// operations; the two widths sit 14 opcodes apart.
+func floatArithmeticOpcode(op string) (byte, bool) {
+	switch op {
+	case "f32.neg":
+		return 0x8c, true
+	case "f32.add":
+		return 0x92, true
+	case "f32.sub":
+		return 0x93, true
+	case "f32.mul":
+		return 0x94, true
+	case "f32.div":
+		return 0x95, true
+	case "f64.neg":
+		return 0x9a, true
+	case "f64.add":
+		return 0xa0, true
+	case "f64.sub":
+		return 0xa1, true
+	case "f64.mul":
+		return 0xa2, true
+	case "f64.div":
+		return 0xa3, true
+	default:
+		return 0, false
+	}
+}
+
+// floatConversionOpcode maps the conversions between integers and floats and
+// the reinterpretations of their bits.
+func floatConversionOpcode(op string) (byte, bool) {
+	switch op {
+	case "f32.convert_i64_s":
+		return 0xb4, true
+	case "f32.convert_i64_u":
+		return 0xb5, true
+	case "f32.demote_f64":
+		return 0xb6, true
+	case "f64.convert_i64_s":
+		return 0xb9, true
+	case "f64.convert_i64_u":
+		return 0xba, true
+	case "f64.promote_f32":
+		return 0xbb, true
+	case "i32.reinterpret_f32":
+		return 0xbc, true
+	case "i64.reinterpret_f64":
+		return 0xbd, true
+	case "f32.reinterpret_i32":
+		return 0xbe, true
+	case "f64.reinterpret_i64":
+		return 0xbf, true
+	default:
+		return 0, false
+	}
 }
 
 // basicInstructionOpcode maps control-neutral stack instructions.

@@ -112,10 +112,6 @@ func (e *emitter) arrayElementLayout(instr *ir.Instr) (string, wasmLayout, error
 	if err != nil {
 		return "", wasmLayout{}, err
 	}
-	if layout.size <= 0 {
-		return "", wasmLayout{}, fmt.Errorf(
-			"wasm error: array element `%s` has zero-sized storage", elem)
-	}
 	return elem, layout, nil
 }
 

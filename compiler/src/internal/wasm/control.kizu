@@ -1,5 +1,7 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import compiler::internal::typ;
+import std::float;
 import std::fmt;
 import std::map;
 import std::mem;
@@ -83,6 +85,9 @@ fn (self: &var Emitter) write_instr_node(
     if node.op == ir::Op::Cast {
         return self.write_cast(module, node);
     }
+    if node.op == ir::Op::FloatBits or node.op == ir::Op::FloatFromBits {
+        return self.write_float_bits(module, node);
+    }
     if node.op == ir::Op::BufferNew or node.op == ir::Op::BufferAsBytes {
         return self.write_buffer_instr(module, node);
     }
@@ -157,6 +162,10 @@ fn (self: &var Emitter) write_cast(
         return try self.fail0("wasm error: cast expects 1 arg");
     }
     let source_value = node.args.get_or_panic(0);
+    if is_float_type(&module.names, source_value.type_name) or
+        is_float_type(&module.names, node.result.type_name) {
+        return self.write_float_cast(module, node);
+    }
     let source = wasm_type(module, source_value.type_name);
     let target = wasm_type(module, node.result.type_name);
     let value = try self.arg_expr(module, node, 0);
@@ -195,6 +204,12 @@ fn (self: &var Emitter) write_const(
     }
     if module.names.is(node.result.type_name, "bool") {
         let expr = try self.names.intern(wasm_bool(&module.names, node.immediate));
+        try self.set_value(module, node.result, expr);
+        return null;
+    }
+    if is_float_type(&module.names, node.result.type_name) {
+        let expr = try self.float_const_expr(module, node) orelse
+            return try self.fail_op(module, node, "wasm error: invalid float constant `%s`");
         try self.set_value(module, node.result, expr);
         return null;
     }
@@ -259,7 +274,8 @@ fn (self: &var Emitter) write_binary(
     let result_bytes = result_retained.as_bytes();
     let symbol = try self.symbol_name_of(result_bytes);
     let narrow = wraps_result(&module.names, node.operand) and
-        !module.names.is(node.result.type_name, "bool");
+        !module.names.is(node.result.type_name, "bool") and
+        !is_float_type(&module.names, node.result.type_name);
     var expression = string::new(self.allocator);
     errdefer expression.deinit(self.allocator);
     if narrow {
@@ -285,13 +301,20 @@ fn (self: &var Emitter) write_binary(
 /// comparison when its result is a bool, the Go `wasmOp` choice.
 fn binary_operation(module: &ir::Module, node: &ir::InstrNode) -> []u8 {
     if module.names.is(node.result.type_name, "bool") {
-        if module.names.is(node.args.get_or_panic(0).type_name, "bool") {
+        let left_type = node.args.get_or_panic(0).type_name;
+        if module.names.is(left_type, "bool") {
             if module.names.is(node.operand, "!=") {
                 return "i32.ne";
             }
             return "i32.eq";
         }
+        if is_float_type(&module.names, left_type) {
+            return wasm_float_compare_op(&module.names, node.operand, left_type);
+        }
         return wasm_compare_op(&module.names, node.operand);
+    }
+    if is_float_type(&module.names, node.result.type_name) {
+        return wasm_float_binary_op(&module.names, node.operand, node.result.type_name);
     }
     return wasm_binary_op(&module.names, node.operand, node.result.type_name);
 }
@@ -385,15 +408,23 @@ fn (self: &var Emitter) write_unary(
                 expression.deinit(self.allocator);
                 return try self.fail_op(module, node, "wasm error: unsupported unary `%s`");
             }
-            if !is_integer_type(&module.names, node.result.type_name) {
-                expression.deinit(self.allocator);
-                return try self.fail0("wasm error: unary - expects integer");
+            if is_float_type(&module.names, node.result.type_name) {
+                try expression.append_byte(self.allocator, cast<u8>(40));
+                try expression.append_bytes(self.allocator, wasm_type(module, node.result.type_name));
+                try expression.append_bytes(self.allocator, ".neg ");
+                try self.names.append_to(&var expression, value);
+                try expression.append_byte(self.allocator, cast<u8>(41));
+            } else {
+                if !is_integer_type(&module.names, node.result.type_name) {
+                    expression.deinit(self.allocator);
+                    return try self.fail0("wasm error: unary - expects integer");
+                }
+                try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
+                try expression.append_bytes(self.allocator, "(i64.sub (i64.const 0) ");
+                try self.names.append_to(&var expression, value);
+                try expression.append_byte(self.allocator, cast<u8>(41));
+                try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
             }
-            try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
-            try expression.append_bytes(self.allocator, "(i64.sub (i64.const 0) ");
-            try self.names.append_to(&var expression, value);
-            try expression.append_byte(self.allocator, cast<u8>(41));
-            try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
         }
     }
     let expr = try self.names.intern_owned(move expression);
@@ -865,4 +896,176 @@ fn wasm_bool(names: &ir::NameTable, value: ir::Name) -> []u8 {
         return "(i32.const 1)";
     }
     return "(i32.const 0)";
+}
+
+/// Spells a floating-point constant exactly, the Go `floatConstExpr`: the
+/// bits of the value reinterpreted, since a decimal in the text format would
+/// round again. An f32 is the f64 it widens to, demoted, which is exact.
+fn (self: &var Emitter) float_const_expr(module: &ir::Module, node: &ir::InstrNode) -> !?ir::Name {
+    let literal_text = ir::name_text(&module.names, node.immediate);
+    let literal = literal_text.as_bytes();
+    var value = try typ::parse_float_literal(self.allocator, literal) orelse return null;
+    let narrow = module.names.is(node.result.type_name, "f32");
+    if narrow {
+        value = cast<f64>(cast<f32>(value));
+    }
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    if narrow {
+        try out.append_bytes(self.allocator, "(f32.demote_f64 ");
+    }
+    try out.append_bytes(self.allocator, "(f64.reinterpret_i64 (i64.const ");
+    try fmt::append_i64(self.allocator, &var out, cast<i64>(float::bits(value)));
+    try out.append_bytes(self.allocator, "))");
+    if narrow {
+        try out.append_byte(self.allocator, cast<u8>(41));
+    }
+    return try self.names.intern_owned(move out);
+}
+
+/// Writes a cast with a floating-point side (SPEC §6.9.3), the Go
+/// `floatCastExpr`. An integer widens to a float by rounding; a float narrows
+/// to an integer by truncating toward zero and saturating, with NaN going to
+/// 0, which is what the saturating truncation instructions do; the narrower
+/// integer types are clamped to their own range afterwards. `f32` and `f64`
+/// convert by rounding, and a cast to the same type is the value itself.
+fn (self: &var Emitter) write_float_cast(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let source = node.args.get_or_panic(0).type_name;
+    let target = node.result.type_name;
+    let value = try self.arg_expr(module, node, 0);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    if ir::same_name(source, target) {
+        try self.names.append_to(&var expression, value);
+    } else {
+        if is_float_type(&module.names, source) and is_float_type(&module.names, target) {
+            if module.names.is(target, "f32") {
+                try expression.append_bytes(self.allocator, "(f32.demote_f64 ");
+            } else {
+                try expression.append_bytes(self.allocator, "(f64.promote_f32 ");
+            }
+            try self.names.append_to(&var expression, value);
+            try expression.append_byte(self.allocator, cast<u8>(41));
+        } else {
+            if is_float_type(&module.names, source) {
+                try self.append_float_to_integer(module, &var expression, source, target, value);
+            } else {
+                try expression.append_byte(self.allocator, cast<u8>(40));
+                try expression.append_bytes(self.allocator, wasm_type(module, target));
+                try expression.append_bytes(self.allocator, ".convert_i64");
+                if is_unsigned_integer_type(&module.names, source) {
+                    try expression.append_bytes(self.allocator, "_u ");
+                } else {
+                    try expression.append_bytes(self.allocator, "_s ");
+                }
+                try self.names.append_to(&var expression, value);
+                try expression.append_byte(self.allocator, cast<u8>(41));
+            }
+        }
+    }
+    let expr = try self.names.intern_owned(move expression);
+    try self.set_value(module, node.result, expr);
+    return null;
+}
+
+/// Appends the saturating truncation of a float to an integer type, clamped
+/// to the range of a narrower type, the Go `clampToIntegerRange`.
+fn (self: &var Emitter) append_float_to_integer(
+    module: &ir::Module,
+    out: &var string::String,
+    source: ir::Name,
+    target: ir::Name,
+    value: ir::Name
+) -> !void {
+    var truncated = string::new(self.allocator);
+    defer truncated.deinit(self.allocator);
+    try truncated.append_bytes(self.allocator, "(i64.trunc_sat_");
+    try truncated.append_bytes(self.allocator, wasm_type(module, source));
+    if is_unsigned_integer_type(&module.names, target) {
+        try truncated.append_bytes(self.allocator, "_u ");
+    } else {
+        try truncated.append_bytes(self.allocator, "_s ");
+    }
+    try self.names.append_to(&var truncated, value);
+    try truncated.append_byte(self.allocator, cast<u8>(41));
+    var low = 0;
+    var high = 0;
+    if module.names.is(target, "i8") {
+        low = -128;
+        high = 127;
+    } else {
+        if module.names.is(target, "i16") {
+            low = -32768;
+            high = 32767;
+        } else {
+            if module.names.is(target, "i32") {
+                low = -2147483648;
+                high = 2147483647;
+            } else {
+                if module.names.is(target, "u8") {
+                    high = 255;
+                } else {
+                    if module.names.is(target, "u16") {
+                        high = 65535;
+                    } else {
+                        if module.names.is(target, "u32") {
+                            high = 4294967295;
+                        } else {
+                            return out.append_string(self.allocator, &truncated);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // (select high clamped_low (i64.gt_s clamped_low high)), where
+    // clamped_low is (select low value (i64.lt_s value low)).
+    var clamped_low = string::new(self.allocator);
+    defer clamped_low.deinit(self.allocator);
+    try clamped_low.append_bytes(self.allocator, "(select (i64.const ");
+    try fmt::append_i64(self.allocator, &var clamped_low, low);
+    try clamped_low.append_bytes(self.allocator, ") ");
+    try clamped_low.append_string(self.allocator, &truncated);
+    try clamped_low.append_bytes(self.allocator, " (i64.lt_s ");
+    try clamped_low.append_string(self.allocator, &truncated);
+    try clamped_low.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, &var clamped_low, low);
+    try clamped_low.append_bytes(self.allocator, ")))");
+    try out.append_bytes(self.allocator, "(select (i64.const ");
+    try fmt::append_i64(self.allocator, out, high);
+    try out.append_bytes(self.allocator, ") ");
+    try out.append_string(self.allocator, &clamped_low);
+    try out.append_bytes(self.allocator, " (i64.gt_s ");
+    try out.append_string(self.allocator, &clamped_low);
+    try out.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, out, high);
+    try out.append_bytes(self.allocator, ")))");
+    return;
+}
+
+/// Reinterprets a float as its bits or bits as a float, the
+/// `std::float::bits` and `std::float::from_bits` primitives; the Go
+/// `writeFloatBits`.
+fn (self: &var Emitter) write_float_bits(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail_op(module, node, "wasm error: %s expects 1 arg");
+    }
+    let value = try self.arg_expr(module, node, 0);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    if node.op == ir::Op::FloatBits {
+        try expression.append_bytes(self.allocator, "(i64.reinterpret_f64 ");
+    } else {
+        try expression.append_bytes(self.allocator, "(f64.reinterpret_i64 ");
+    }
+    try self.names.append_to(&var expression, value);
+    try expression.append_byte(self.allocator, cast<u8>(41));
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
 }

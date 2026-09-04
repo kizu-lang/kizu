@@ -1,9 +1,6 @@
 package wasm
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // Target names the host boundary attached to a common WebAssembly module.
 type Target uint8
@@ -79,74 +76,7 @@ func (e *emitter) validateRuntimeCapabilities() error {
 	if e.usesAnyBuiltin(netBuiltins...) {
 		return e.unsupportedCapability("std::net")
 	}
-	if e.usesFloatTypes() {
-		return e.unsupportedCapability("f32 / f64")
-	}
 	return nil
-}
-
-// usesFloatTypes reports whether any function, value, or struct field in the
-// module has a floating-point type. Every integer here lives in an i64
-// local, and a float would need a local of its own kind.
-func (e *emitter) usesFloatTypes() bool {
-	for _, st := range e.module.Structs {
-		for _, field := range st.Fields {
-			if mentionsFloatType(field.Type) {
-				return true
-			}
-		}
-	}
-	for _, fn := range e.module.Functions {
-		if mentionsFloatType(fn.Return) {
-			return true
-		}
-		for _, param := range fn.Params {
-			if mentionsFloatType(param.Type) {
-				return true
-			}
-		}
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if mentionsFloatType(instr.Result.Type) {
-					return true
-				}
-				for _, arg := range instr.Args {
-					if mentionsFloatType(arg.Type) {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
-}
-
-// mentionsFloatType reports whether a type spelling names `f32` or `f64`,
-// on its own or inside a composite such as `?f64` or `std::array::Array<f32>`.
-func mentionsFloatType(typ string) bool {
-	for _, name := range []string{"f32", "f64"} {
-		start := 0
-		for {
-			at := strings.Index(typ[start:], name)
-			if at < 0 {
-				break
-			}
-			at += start
-			end := at + len(name)
-			before := at == 0 || !isTypeNameByte(typ[at-1])
-			after := end == len(typ) || !isTypeNameByte(typ[end])
-			if before && after {
-				return true
-			}
-			start = end
-		}
-	}
-	return false
-}
-
-// isTypeNameByte reports whether b can continue an identifier in a type.
-func isTypeNameByte(b byte) bool {
-	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // unsupportedCapability formats one explicit target-boundary refusal.

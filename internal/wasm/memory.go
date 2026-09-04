@@ -97,6 +97,10 @@ func (e *emitter) storeOp(typ string) (string, error) {
 		return "i64.store32", nil
 	case "i64", "u64":
 		return "i64.store", nil
+	case "f32":
+		return "f32.store", nil
+	case "f64":
+		return "f64.store", nil
 	case "Allocator", "Io":
 		return "i32.store", nil
 	}
@@ -128,6 +132,10 @@ func (e *emitter) loadOp(typ string) (string, error) {
 		return "i64.load32_u", nil
 	case "i64", "u64":
 		return "i64.load", nil
+	case "f32":
+		return "f32.load", nil
+	case "f64":
+		return "f64.load", nil
 	case "Allocator", "Io":
 		return "i32.load", nil
 	}

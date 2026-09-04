@@ -47,6 +47,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
+	case instr.Op == "float.bits", instr.Op == "float.from_bits":
+		return e.writeFloatBits(instr)
 	case instr.Op == "buffer.new", instr.Op == "buffer.as_bytes":
 		return e.writeBufferInstr(instr)
 	default:
@@ -111,6 +113,12 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 		return fmt.Errorf("wasm error: cast expects 1 arg")
 	}
 	value := e.value(instr.Args[0])
+	if isFloatType(instr.Args[0].Type) || isFloatType(instr.Result.Type) {
+		e.values[instr.Result.Name] = valueInfo{
+			expr: floatCastExpr(instr.Args[0].Type, instr.Result.Type, value.expr),
+		}
+		return nil
+	}
 	source := e.wasmType(instr.Args[0].Type)
 	target := e.wasmType(instr.Result.Type)
 	expr := value.expr
@@ -123,6 +131,81 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 	return nil
 }
 
+// floatCastExpr writes a cast with a floating-point side (SPEC §6.9.3). An
+// integer widens to a float by rounding; a float narrows to an integer by
+// truncating toward zero and saturating, with NaN going to 0, which is what
+// the saturating truncation instructions do; the narrower integer types are
+// clamped to their own range afterwards. `f32` and `f64` convert by
+// rounding, and a cast to the same type is the value itself.
+func floatCastExpr(source string, target string, value string) string {
+	switch {
+	case source == target:
+		return value
+	case isFloatType(source) && isFloatType(target):
+		if target == "f32" {
+			return "(f32.demote_f64 " + value + ")"
+		}
+		return "(f64.promote_f32 " + value + ")"
+	case isFloatType(source):
+		sign := "_s"
+		if isUnsignedIntegerType(target) {
+			sign = "_u"
+		}
+		truncated := "(i64.trunc_sat_" + source + sign + " " + value + ")"
+		return clampToIntegerRange(target, truncated)
+	default:
+		sign := "_s"
+		if isUnsignedIntegerType(source) {
+			sign = "_u"
+		}
+		return "(" + target + ".convert_i64" + sign + " " + value + ")"
+	}
+}
+
+// clampToIntegerRange saturates an i64 that has already been truncated from a
+// float into the range of a narrower integer type, so `cast<u8>(300.0)` is
+// 255 the way it is on the native target.
+func clampToIntegerRange(typ string, value string) string {
+	var low, high int64
+	switch typ {
+	case "i8":
+		low, high = -128, 127
+	case "i16":
+		low, high = -32768, 32767
+	case "i32":
+		low, high = -2147483648, 2147483647
+	case "u8":
+		low, high = 0, 255
+	case "u16":
+		low, high = 0, 65535
+	case "u32":
+		low, high = 0, 4294967295
+	default:
+		return value
+	}
+	clampedLow := fmt.Sprintf("(select (i64.const %d) %s (i64.lt_s %s (i64.const %d)))",
+		low, value, value, low)
+	return fmt.Sprintf("(select (i64.const %d) %s (i64.gt_s %s (i64.const %d)))",
+		high, clampedLow, clampedLow, high)
+}
+
+// writeFloatBits reinterprets a float as its bits or bits as a float, the
+// `std::float::bits` and `std::float::from_bits` primitives.
+func (e *emitter) writeFloatBits(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("wasm error: %s expects 1 arg", instr.Op)
+	}
+	value := e.value(instr.Args[0]).expr
+	expr := "(f64.reinterpret_i64 " + value + ")"
+	if instr.Op == "float.bits" {
+		expr = "(i64.reinterpret_f64 " + value + ")"
+	}
+	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+	return nil
+}
+
 // writeConst records scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
 	if isIntegerType(instr.Result.Type) || e.isNamedI64Type(instr.Result.Type) {
@@ -131,6 +214,14 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 		e.values[instr.Result.Name] = valueInfo{
 			expr: "(i64.const " + instr.Immediate + ")",
 		}
+		return nil
+	}
+	if isFloatType(instr.Result.Type) {
+		expr, ok := floatConstExpr(instr.Result.Type, instr.Immediate)
+		if !ok {
+			return fmt.Errorf("wasm error: invalid float constant `%s`", instr.Immediate)
+		}
+		e.values[instr.Result.Name] = valueInfo{expr: expr}
 		return nil
 	}
 	switch instr.Result.Type {
@@ -167,6 +258,9 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 		return e.writeShift(instr, op, left, right)
 	}
 	wasmOp := wasmBinaryOp(op, instr.Result.Type)
+	if isFloatType(instr.Result.Type) {
+		wasmOp = wasmFloatBinaryOp(op, instr.Result.Type)
+	}
 	if instr.Result.Type == "bool" {
 		wasmOp = wasmCompareOp(op)
 		if instr.Args[0].Type == "bool" {
@@ -177,9 +271,12 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 				wasmOp = "i32.ne"
 			}
 		}
+		if isFloatType(instr.Args[0].Type) {
+			wasmOp = wasmFloatCompareOp(op, instr.Args[0].Type)
+		}
 	}
 	expr := "(" + wasmOp + " " + left + " " + right + ")"
-	if wrapsResult(op) {
+	if wrapsResult(op) && !isFloatType(instr.Result.Type) {
 		expr = narrowResult(instr.Result.Type, expr)
 	}
 	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbolName(instr.Result.Name), expr)
@@ -203,6 +300,10 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 		}
 		expr = "(i32.eqz " + value + ")"
 	case "-":
+		if isFloatType(instr.Result.Type) {
+			expr = "(" + instr.Result.Type + ".neg " + value + ")"
+			break
+		}
 		if !isIntegerType(instr.Result.Type) {
 			return fmt.Errorf("wasm error: unary - expects integer")
 		}

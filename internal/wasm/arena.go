@@ -123,10 +123,6 @@ func (e *emitter) arenaElementLayout(instr *ir.Instr) (string, wasmLayout, error
 	if err != nil {
 		return "", wasmLayout{}, err
 	}
-	if layout.size <= 0 {
-		return "", wasmLayout{}, fmt.Errorf(
-			"wasm error: arena element `%s` has zero-sized storage", elem)
-	}
 	return elem, layout, nil
 }
 
