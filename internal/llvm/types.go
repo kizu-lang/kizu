@@ -23,6 +23,10 @@ func llvmPrimitiveType(typ string) string {
 		return "i1"
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		return integerLLVMType(typ)
+	case "f32":
+		return "float"
+	case "f64":
+		return "double"
 	case "[]u8":
 		return "%kizu.slice.u8"
 	default:
@@ -179,6 +183,49 @@ func llvmBinaryOp(op string, typ string) string {
 		return "xor"
 	default:
 		return "add"
+	}
+}
+
+// isFloatType reports whether typ is `f32` or `f64`.
+func isFloatType(typ string) bool {
+	return typ == "f32" || typ == "f64"
+}
+
+// llvmFloatBinaryOp maps a Kizu arithmetic operator on a float type to an
+// LLVM floating-point instruction.
+func llvmFloatBinaryOp(op string) string {
+	switch op {
+	case "+":
+		return "fadd"
+	case "-":
+		return "fsub"
+	case "*":
+		return "fmul"
+	case "/":
+		return "fdiv"
+	default:
+		return "fadd"
+	}
+}
+
+// llvmFloatPredicate maps a Kizu comparison to an ordered LLVM float
+// predicate, except `!=`, which is true for NaN as IEEE 754 says.
+func llvmFloatPredicate(op string) string {
+	switch op {
+	case "==":
+		return "oeq"
+	case "!=":
+		return "une"
+	case "<":
+		return "olt"
+	case "<=":
+		return "ole"
+	case ">":
+		return "ogt"
+	case ">=":
+		return "oge"
+	default:
+		return "oeq"
 	}
 }
 

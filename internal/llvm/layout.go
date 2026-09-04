@@ -76,8 +76,10 @@ func primitiveLayout(typ string) (int, int, bool) {
 		return 0, 1, true
 	case "bool", "i8", "u8":
 		return 1, 1, true
-	case "i64":
+	case "i64", "f64":
 		return 8, 8, true
+	case "f32":
+		return 4, 4, true
 	case "[]u8":
 		return 16, 8, true
 	default:

@@ -141,8 +141,7 @@ func (l *Lexer) scanToken() token.Token {
 			return tok
 		}
 		if isDigit(l.ch) {
-			tok.Type = token.Int
-			tok.Literal = l.readNumber()
+			tok.Literal, tok.Type = l.readNumber()
 			return tok
 		}
 		tok = l.oneCharToken(token.Illegal)
@@ -325,19 +324,69 @@ func (l *Lexer) readIdentifier() string {
 	return string(l.input[position:l.position])
 }
 
-// readNumber reads an integer literal: decimal, or `0x` / `0b` followed by
-// its digits, with `_` allowed between digits. The scanner only finds where
-// the literal ends; the parser decides whether the spelling is a number.
-func (l *Lexer) readNumber() string {
+// readNumber reads a number literal and reports its kind. An integer is
+// decimal, or `0x` / `0b` followed by its digits; a float is decimal digits
+// with a fraction after `.`, an exponent after `e`, or both. `_` is allowed
+// between digits. The scanner only finds where the literal ends; the parser
+// decides whether the spelling is a number. A `.` not followed by a digit
+// is left alone, so `0..n` stays a range.
+func (l *Lexer) readNumber() (string, token.Type) {
 	position := l.position
 	if l.ch == '0' && (l.peekChar() == 'x' || l.peekChar() == 'b') {
 		l.readChar()
 		l.readChar()
+		for isHexDigit(l.ch) || l.ch == '_' {
+			l.readChar()
+		}
+		return string(l.input[position:l.position]), token.Int
 	}
-	for isHexDigit(l.ch) || l.ch == '_' {
+	kind := token.Int
+	l.readDigits()
+	if l.readFraction() {
+		kind = token.Float
+	}
+	if l.readExponent() {
+		kind = token.Float
+	}
+	return string(l.input[position:l.position]), kind
+}
+
+// readDigits consumes decimal digits and the `_` between them.
+func (l *Lexer) readDigits() {
+	for isDigit(l.ch) || l.ch == '_' {
 		l.readChar()
 	}
-	return string(l.input[position:l.position])
+}
+
+// readFraction consumes `.digits` when a digit follows the dot, reporting
+// whether it did.
+func (l *Lexer) readFraction() bool {
+	if l.ch != '.' || !isDigit(l.peekChar()) {
+		return false
+	}
+	l.readChar()
+	l.readDigits()
+	return true
+}
+
+// readExponent consumes `e[+-]digits` when one follows, reporting whether it
+// did. An `e` with no digit after it is left for the next token.
+func (l *Lexer) readExponent() bool {
+	if l.ch != 'e' && l.ch != 'E' {
+		return false
+	}
+	next := l.peekChar()
+	if !isDigit(next) && next != '+' && next != '-' {
+		return false
+	}
+	l.readChar()
+	if l.ch == '+' || l.ch == '-' {
+		l.readChar()
+	}
+	for isDigit(l.ch) {
+		l.readChar()
+	}
+	return true
 }
 
 // isHexDigit reports whether ch can appear in a `0x` literal. Decimal and

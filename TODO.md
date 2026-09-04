@@ -3,6 +3,28 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
+## 浮動小数点の残り
+
+型・演算・cast・literal(PR 1)は入った。残りは 3 つ。
+
+## 9. `print` を std に畳む
+
+`print` は backend に型ごとの分岐(int / bool / bytes / enum 名前表 / error 表)を
+持つ。`std::fmt::print<T>` を `comptime match` と `std::meta` で書き、backend には
+「bytes を stdout に書く」primitive だけを残す。`Io` 無しで書く点は debug 用の例外として
+docs に明記する。前提として `std::meta` が enum の variant 名を取れること。
+
+## 10. float の文字列変換と `print(f64)`
+
+最短往復表現の parse / print を `std` に 1 本書く(bignum 込み)。compiler の literal
+変換もそれに切り替え、`typ::parse_float_literal` の範囲制限(19 桁、10^±22)を外す。
+`std::testing::expect_equal<f64>` もこの後。
+
+## 11. wasm backend の f32 / f64
+
+今は build 時に target 非対応として拒否する。局所変数の型付けが i64 前提なので、
+float の local / param / result を型で持つ変更が backend 全体に及ぶ。
+
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

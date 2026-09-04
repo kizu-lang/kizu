@@ -3,6 +3,7 @@ package llvm
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -240,6 +241,7 @@ func (e *emitter) writeHeader() {
 	e.writeTestRuntimeDecls()
 	e.writeExternalCallDecls()
 	e.writePanicDecls()
+	e.writeFloatCastDecls()
 	// The shared attribute makes large frames touch each page before they can
 	// cross a coroutine guard. Small frames receive no added instructions.
 	fmt.Fprintf(&e.out,
@@ -1142,9 +1144,25 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeErrorInstr(instr)
 	case strings.HasPrefix(instr.Op, "opt."):
 		return e.writeOptInstr(instr)
+	case instr.Op == "float.bits", instr.Op == "float.from_bits":
+		return e.writeFloatBits(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
+}
+
+// writeFloatBits reinterprets a float as its bits or bits as a float, the
+// `std::float::bits` and `std::float::from_bits` primitives.
+func (e *emitter) writeFloatBits(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: %s expects 1 arg", instr.Op)
+	}
+	value := e.value(instr.Args[0])
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = bitcast %s %s to %s\n",
+		name, e.llvmType(instr.Args[0].Type), value.operand, e.llvmType(instr.Result.Type))
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
 }
 
 // writeOptInstr dispatches optional-value operations.
@@ -1415,7 +1433,25 @@ func (e *emitter) scalarConstOperand(instr *ir.Instr) (string, bool) {
 	if typ == "bool" {
 		return llvmBool(instr.Immediate), true
 	}
+	if isFloatType(typ) {
+		return llvmFloatConstant(typ, instr.Immediate)
+	}
 	return "", false
+}
+
+// llvmFloatConstant spells a floating-point literal the way LLVM reads one
+// exactly: the hexadecimal bits of the double, which for an `f32` are the
+// bits of the value widened to double. A decimal spelling would have to be
+// exactly representable, and `0.1` is not.
+func llvmFloatConstant(kind string, literal string) (string, bool) {
+	value, ok := typ.ParseFloatLiteral(literal)
+	if !ok {
+		return "", false
+	}
+	if kind == "f32" {
+		value = float64(float32(value))
+	}
+	return fmt.Sprintf("0x%016X", math.Float64bits(value)), true
 }
 
 // writeConst writes scalar and string constants.
@@ -1461,10 +1497,16 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 				instr.Args[1].Type,
 			)
 		}
-		pred := llvmTypedPredicate(op, instr.Args[0].Type)
 		name := localName(instr.Result.Name)
-		fmt.Fprintf(&e.out, "  %s = icmp %s %s %s, %s\n",
-			name, pred, e.llvmType(instr.Args[0].Type), left.operand, right.operand)
+		if isFloatType(instr.Args[0].Type) {
+			fmt.Fprintf(&e.out, "  %s = fcmp %s %s %s, %s\n",
+				name, llvmFloatPredicate(op), e.llvmType(instr.Args[0].Type),
+				left.operand, right.operand)
+		} else {
+			pred := llvmTypedPredicate(op, instr.Args[0].Type)
+			fmt.Fprintf(&e.out, "  %s = icmp %s %s %s, %s\n",
+				name, pred, e.llvmType(instr.Args[0].Type), left.operand, right.operand)
+		}
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: name}
 		return nil
 	}
@@ -1472,8 +1514,12 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 		return e.writeShift(instr, op, left, right)
 	}
 	name := localName(instr.Result.Name)
+	binaryOp := llvmBinaryOp(op, instr.Result.Type)
+	if isFloatType(instr.Result.Type) {
+		binaryOp = llvmFloatBinaryOp(op)
+	}
 	fmt.Fprintf(&e.out, "  %s = %s %s %s, %s\n",
-		name, llvmBinaryOp(op, instr.Result.Type), e.llvmType(instr.Result.Type),
+		name, binaryOp, e.llvmType(instr.Result.Type),
 		left.operand, right.operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
@@ -1530,6 +1576,11 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 		}
 		fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", name, value.operand)
 	case "-":
+		if isFloatType(instr.Result.Type) {
+			fmt.Fprintf(&e.out, "  %s = fneg %s %s\n",
+				name, e.llvmType(instr.Result.Type), value.operand)
+			break
+		}
 		fmt.Fprintf(&e.out, "  %s = sub %s 0, %s\n",
 			name, e.llvmType(instr.Result.Type), value.operand)
 	case "~":
@@ -1810,6 +1861,9 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
 		return nil
 	}
+	if isFloatType(source.Type) || isFloatType(instr.Result.Type) {
+		return e.writeFloatCast(instr)
+	}
 	if _, ok := integerBitWidth(source.Type); ok {
 		if _, targetOK := integerBitWidth(instr.Result.Type); targetOK {
 			return e.writeIntegerCast(instr)
@@ -1819,12 +1873,98 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 	return e.writePointerIntegerCast(instr, "ptrtoint")
 }
 
+// writeFloatCast writes a cast with a floating-point side. An integer widens
+// to a float by rounding; a float narrows to an integer by truncating toward
+// zero and saturating, with NaN going to 0, through LLVM's saturating
+// intrinsics so no value is poison (SPEC §6.9.3); `f32` and `f64` convert
+// by rounding.
+func (e *emitter) writeFloatCast(instr *ir.Instr) error {
+	source := instr.Args[0]
+	value := e.value(source)
+	name := localName(instr.Result.Name)
+	sourceType := e.llvmType(source.Type)
+	targetType := e.llvmType(instr.Result.Type)
+	switch {
+	case isFloatType(source.Type) && isFloatType(instr.Result.Type):
+		op := "fpext"
+		if source.Type == "f64" {
+			op = "fptrunc"
+		}
+		fmt.Fprintf(&e.out, "  %s = %s %s %s to %s\n", name, op, sourceType, value.operand, targetType)
+	case isFloatType(source.Type):
+		if _, ok := integerBitWidth(instr.Result.Type); !ok {
+			return fmt.Errorf("llvm error: cannot cast %s to %s", source.Type, instr.Result.Type)
+		}
+		fmt.Fprintf(&e.out, "  %s = call %s @%s(%s %s)\n",
+			name, targetType, floatToIntIntrinsic(source.Type, instr.Result.Type),
+			sourceType, value.operand)
+	default:
+		if _, ok := integerBitWidth(source.Type); !ok {
+			return fmt.Errorf("llvm error: cannot cast %s to %s", source.Type, instr.Result.Type)
+		}
+		op := "sitofp"
+		if isUnsignedIntegerType(source.Type) {
+			op = "uitofp"
+		}
+		fmt.Fprintf(&e.out, "  %s = %s %s %s to %s\n", name, op, sourceType, value.operand, targetType)
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// floatToIntIntrinsic names the saturating conversion from one float type to
+// one integer type, as `llvm.fptosi.sat.i64.f64`.
+func floatToIntIntrinsic(source string, target string) string {
+	kind := "fptosi"
+	if isUnsignedIntegerType(target) {
+		kind = "fptoui"
+	}
+	return "llvm." + kind + ".sat." + integerLLVMType(target) + "." + llvmPrimitiveType(source)
+}
+
+// writeFloatCastDecls declares every saturating float-to-integer intrinsic
+// the module calls, sorted, so each is declared once.
+func (e *emitter) writeFloatCastDecls() {
+	seen := map[string]bool{}
+	names := []string{}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op != "cast" || len(instr.Args) != 1 || !isFloatType(instr.Args[0].Type) {
+					continue
+				}
+				if _, ok := integerBitWidth(instr.Result.Type); !ok {
+					continue
+				}
+				decl := fmt.Sprintf("declare %s @%s(%s)",
+					integerLLVMType(instr.Result.Type),
+					floatToIntIntrinsic(instr.Args[0].Type, instr.Result.Type),
+					llvmPrimitiveType(instr.Args[0].Type))
+				if !seen[decl] {
+					seen[decl] = true
+					names = append(names, decl)
+				}
+			}
+		}
+	}
+	sort.Strings(names)
+	for _, decl := range names {
+		e.out.WriteString(decl + "\n")
+	}
+	if len(names) > 0 {
+		e.out.WriteString("\n")
+	}
+}
+
 // castForwardsOperand reports whether a cast only changes the Kizu type — a
 // same-width integer cast, or a cast whose LLVM representation is already the
 // target's — so writeCast forwards the operand instead of emitting anything.
 func castForwardsOperand(instr *ir.Instr) bool {
 	source := instr.Args[0].Type
 	target := instr.Result.Type
+	if isFloatType(source) || isFloatType(target) {
+		return source == target
+	}
 	sourceWidth, sourceInt := integerBitWidth(source)
 	targetWidth, targetInt := integerBitWidth(target)
 	if sourceInt && targetInt {

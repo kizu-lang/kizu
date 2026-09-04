@@ -133,20 +133,47 @@ fn (self: &var Lexer) scan_token() -> !token::Token {
         return self.token_from_bytes(token::lookup_ident(literal), literal, line, column);
     }
     if is_digit(self.ch) {
-        // A literal is decimal, or `0x` / `0b` and its digits, with `_`
-        // allowed between digits. The scanner only finds where it ends; the
-        // parser decides whether the spelling is a number.
+        // A number is decimal, or `0x` / `0b` and its digits; a float adds a
+        // fraction after `.`, an exponent after `e`, or both. `_` is allowed
+        // between digits. The scanner only finds where the literal ends; the
+        // parser decides whether the spelling is a number. A `.` not followed
+        // by a digit is left alone, so `0..n` stays a range.
         let start = self.position;
         if self.ch == cast<u8>(48) and
             (self.peek_char() == cast<u8>(120) or self.peek_char() == cast<u8>(98)) {
             self.read_char();
             self.read_char();
+            while is_hex_digit(self.ch) or self.ch == cast<u8>(95) {
+                self.read_char();
+            }
+            return self.token_from_bytes(token::Kind::Int,
+                self.input[start..self.position], line, column);
         }
-        while is_hex_digit(self.ch) or self.ch == cast<u8>(95) {
+        var kind = token::Kind::Int;
+        while is_digit(self.ch) or self.ch == cast<u8>(95) {
             self.read_char();
         }
-        return self.token_from_bytes(token::Kind::Int,
-            self.input[start..self.position], line, column);
+        if self.ch == cast<u8>(46) and is_digit(self.peek_char()) {
+            kind = token::Kind::Float;
+            self.read_char();
+            while is_digit(self.ch) or self.ch == cast<u8>(95) {
+                self.read_char();
+            }
+        }
+        if self.ch == cast<u8>(101) or self.ch == cast<u8>(69) {
+            let next = self.peek_char();
+            if is_digit(next) or next == cast<u8>(43) or next == cast<u8>(45) {
+                kind = token::Kind::Float;
+                self.read_char();
+                if self.ch == cast<u8>(43) or self.ch == cast<u8>(45) {
+                    self.read_char();
+                }
+                while is_digit(self.ch) {
+                    self.read_char();
+                }
+            }
+        }
+        return self.token_from_bytes(kind, self.input[start..self.position], line, column);
     }
     var out = try self.one_char_token(token::Kind::Illegal);
     self.read_char();

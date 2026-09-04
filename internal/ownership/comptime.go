@@ -97,19 +97,33 @@ func (c *Checker) readComptimeExpr(expr *ast.ComptimeExpr, _ *scope) (string, er
 	return c.readComptimeOnly(expr.Expr)
 }
 
+// comptimeLiteralType names the type of a literal a compile-time expression
+// may hold, reporting false for anything that is not a literal.
+func comptimeLiteralType(expr ast.Expression) (string, bool) {
+	switch expr.(type) {
+	case *ast.IntExpr:
+		return "i64", true
+	case *ast.FloatExpr:
+		return "f64", true
+	case *ast.StringExpr:
+		return "[]u8", true
+	case *ast.BoolExpr:
+		return "bool", true
+	case *ast.TypeExpr:
+		return "type", true
+	default:
+		return "", false
+	}
+}
+
 // readComptimeOnly rejects runtime locals inside compile-time expressions.
 func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
+	if typ, ok := comptimeLiteralType(expr); ok {
+		return typ, nil
+	}
 	switch e := expr.(type) {
 	case *ast.ComptimeExpr:
 		return c.readComptimeOnly(e.Expr)
-	case *ast.IntExpr:
-		return "i64", nil
-	case *ast.StringExpr:
-		return "[]u8", nil
-	case *ast.BoolExpr:
-		return "bool", nil
-	case *ast.TypeExpr:
-		return "type", nil
 	case *ast.IdentExpr:
 		if _, ok := c.typeArgValues[e.Name]; ok {
 			return "type", nil

@@ -108,6 +108,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.write_test_runtime_decls(module);
     try self.write_external_call_decls(module);
     try self.write_panic_decls(module);
+    try self.write_float_cast_decls(module);
     // Large frames touch each page before they can cross a coroutine guard;
     // LLVM emits no added instructions for small frames.
     if self.darwin_stack_probe {
@@ -1186,4 +1187,75 @@ fn (self: &var Emitter) enum_table_name(typ_name: []u8) -> !ir::Name {
     errdefer out.deinit(self.allocator);
     try append_mangled_global_name(self.allocator, &var out, typ_name);
     return self.names.intern_owned(move out);
+}
+
+/// Declares every saturating float-to-integer intrinsic the module calls,
+/// sorted, so each is declared once; the Go `writeFloatCastDecls`.
+fn (self: &var Emitter) write_float_cast_decls(module: &ir::Module) -> !void {
+    var decls = array::new<string::String>(self.allocator);
+    defer decls.deinit(self.allocator);
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op != ir::Op::Cast or node.args.len() != 1 {
+                    continue;
+                }
+                let source = node.args.get_or_panic(0);
+                let source_text = ir::name_text(&module.names, source.type_name);
+                let source_bytes = source_text.as_bytes();
+                let result_text = ir::name_text(&module.names, node.result.type_name);
+                let result_bytes = result_text.as_bytes();
+                if !is_float_type(source_bytes) {
+                    continue;
+                }
+                if integer_bit_width(result_bytes) |_| {
+                    var decl = string::new(self.allocator);
+                    errdefer decl.deinit(self.allocator);
+                    let target_type = integer_llvm_type(result_bytes);
+                    let source_type = llvm_primitive_type(source_bytes);
+                    try decl.append_bytes(self.allocator, "declare ");
+                    try decl.append_bytes(self.allocator, target_type);
+                    try decl.append_bytes(self.allocator, " @");
+                    try append_float_to_int_intrinsic(self.allocator, &var decl, source_bytes, result_bytes);
+                    try decl.append_byte(self.allocator, cast<u8>(40));
+                    try decl.append_bytes(self.allocator, source_type);
+                    try decl.append_byte(self.allocator, cast<u8>(41));
+                    try decls.append(self.allocator, move decl);
+                }
+            }
+        }
+    }
+    try sort::strings(&var decls);
+    var index = 0;
+    var written = 0;
+    while decls.at(index) |decl| {
+        var duplicate = false;
+        if index > 0 {
+            if decls.at(index - 1) |previous| {
+                let previous_bytes = previous.as_bytes();
+                let decl_bytes = decl.as_bytes();
+                duplicate = mem::equal_bytes(previous_bytes, decl_bytes);
+            }
+        }
+        if !duplicate {
+            let bytes = decl.as_bytes();
+            let name = try self.names.intern(bytes);
+            try self.line1("%s", Arg::Str(name));
+            written = written + 1;
+        }
+        index = index + 1;
+    }
+    if written > 0 {
+        try self.line("");
+    }
+    return;
 }

@@ -11,6 +11,7 @@ const (
 
 	Ident  Type = "IDENT"
 	Int    Type = "INT"
+	Float  Type = "FLOAT"
 	String Type = "STRING"
 
 	Assign   Type = "="

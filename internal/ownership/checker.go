@@ -3889,7 +3889,7 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readExpr(inner, env)
 	}
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
+	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return c.readScalarExpr(e)
 	case *ast.BufferLiteralExpr:
 		return e.TypeText(), nil
@@ -4065,6 +4065,8 @@ func readLiteralType(expr ast.Expression) (string, error) {
 	switch expr.(type) {
 	case *ast.IntExpr:
 		return "i64", nil
+	case *ast.FloatExpr:
+		return "f64", nil
 	case *ast.StringExpr:
 		return "[]u8", nil
 	case *ast.BoolExpr:

@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::typ;
 import std::array;
 import std::fmt;
 import std::mem;
@@ -18,6 +19,10 @@ fn (self: &var Checker) check_scalar_expr(
     match tree.expressions.at(expression.node) {
         Int(_) => {
             out.* = try self.types.i64_type();
+            return null;
+        },
+        Float(_) => {
+            out.* = try self.types.intern("f64");
             return null;
         },
         String(_) => {
@@ -223,6 +228,91 @@ fn (self: &var Checker) append_function_pointer_text(
     }
     try out.append_bytes(self.allocator, ") -> ");
     return out.append_string(self.allocator, &result);
+}
+
+// Treats a fit-checked literal as the expected type: an integer literal as
+// any integer type, a floating-point literal as `f32`, the Go
+// `coerceContextualLiteral`.
+fn (self: &Checker) coerce_contextual_literal(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    want: Type,
+    got: Type,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if self.types.is_text(got, "f64") {
+        return self.coerce_contextual_float_literal(tree, expression, want, got, out);
+    }
+    return self.coerce_contextual_integer_literal(tree, expression, want, got, out);
+}
+
+// Treats an `f64` literal written where an `f32` is expected as that `f32`,
+// when its magnitude fits one, the Go `coerceContextualFloatLiteral`.
+fn (self: &Checker) coerce_contextual_float_literal(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    want: Type,
+    got: Type,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if same_type(got, want) or !self.types.is_text(want, "f32") {
+        out.* = got;
+        return null;
+    }
+    if float_literal_value(tree, expression) |value| {
+        let limit = f32_max();
+        if value > limit or value < 0.0 - limit {
+            let rendered = try ast::render_expression(self.allocator, tree, expression);
+            defer rendered.deinit(self.allocator);
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, "float literal `");
+            try message.append_string(self.allocator, &rendered);
+            try message.append_bytes(self.allocator, "` does not fit f32");
+            return try self.checker_message_at("type error", ast::zero_span(), move message);
+        }
+        out.* = want;
+        return null;
+    }
+    out.* = got;
+    return null;
+}
+
+// Returns the largest finite f32, (2 - 2^-23) * 2^127, built by exact steps
+// rather than spelled, since the spelling has more digits than the literal
+// path converts.
+fn f32_max() -> f64 {
+    var value = 2.0 - 1.0 / 8388608.0;
+    var index = 0;
+    while index < 127 {
+        value = value * 2.0;
+        index = index + 1;
+    }
+    return value;
+}
+
+// Returns the value of a floating-point literal, possibly negated, and null
+// for any other expression, the Go `floatLiteralValue`.
+fn float_literal_value(tree: &ast::Ast, expression: ast::Expression) -> ?f64 {
+    match tree.expressions.at(expression.node) {
+        Float(value) => {
+            let retained = tree.texts.at(value.value.node);
+            let bytes = retained.as_bytes();
+            return typ::parse_float_literal(bytes);
+        },
+        Prefix(value) => {
+            let retained = tree.texts.at(value.operator.node);
+            let operator = retained.as_bytes();
+            if !mem::equal_bytes(operator, "-") {
+                return null;
+            }
+            if float_literal_value(tree, value.right) |inner| {
+                return 0.0 - inner;
+            }
+            return null;
+        },
+        _ => return null,
+    }
 }
 
 // Treats a fit-checked integer literal as the expected integer type.
@@ -460,6 +550,30 @@ fn (self: &Checker) coerce_binary_literal(
         if self.types.is_text(left.*, "i64") and self.checker_integer_type(right.*) {
             var coerced = empty_type();
             if try self.coerce_contextual_integer_literal(
+                tree, expression.left, right.*, left.*, &var coerced
+            ) |problem| {
+                return move problem;
+            }
+            left.* = coerced;
+            return null;
+        }
+    }
+    if float_literal_value(tree, expression.right) |_| {
+        if self.types.is_text(right.*, "f64") and self.types.is_text(left.*, "f32") {
+            var coerced = empty_type();
+            if try self.coerce_contextual_float_literal(
+                tree, expression.right, left.*, right.*, &var coerced
+            ) |problem| {
+                return move problem;
+            }
+            right.* = coerced;
+            return null;
+        }
+    }
+    if float_literal_value(tree, expression.left) |_| {
+        if self.types.is_text(left.*, "f64") and self.types.is_text(right.*, "f32") {
+            var coerced = empty_type();
+            if try self.coerce_contextual_float_literal(
                 tree, expression.left, right.*, left.*, &var coerced
             ) |problem| {
                 return move problem;

@@ -47,6 +47,8 @@ const (
 	typeFunction   Type = "Function"
 	typeI64        Type = "i64"
 	typeU8         Type = "u8"
+	typeF32        Type = "f32"
+	typeF64        Type = "f64"
 	typeByteString Type = "[]u8"
 	typeType       Type = "type"
 	typeVoid       Type = "void"
@@ -112,6 +114,11 @@ var copyTypes = map[Type]bool{
 	"Io":                true,
 	"Allocator":         true,
 	"std::fs::Metadata": true,
+}
+
+var floatTypes = map[Type]bool{
+	typeF32: true,
+	typeF64: true,
 }
 
 var signedNumericTypes = map[Type]bool{

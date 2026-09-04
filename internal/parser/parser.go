@@ -1451,6 +1451,8 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return p.parseIdentPrefixExpression()
 	case token.Int:
 		return p.parseIntLiteral()
+	case token.Float:
+		return p.parseFloatLiteral()
 	case token.String:
 		return &ast.StringExpr{Value: p.cur.Literal}
 	case token.True, token.False, token.Null:
@@ -1987,6 +1989,21 @@ func (p *Parser) parseIntLiteral() ast.Expression {
 		return &ast.IntExpr{Value: "0"}
 	}
 	return &ast.IntExpr{Value: strconv.FormatInt(value, 10)}
+}
+
+// parseFloatLiteral keeps the spelling of a floating-point literal without
+// its separators, as `1.5e3`. The value it names is the nearest f64, which
+// this compiler computes exactly only for spellings within
+// typ.ParseFloatLiteral's range; any other spelling is a parse error rather
+// than a value that might be off by one unit.
+func (p *Parser) parseFloatLiteral() ast.Expression {
+	text := typ.CleanFloatLiteral(p.cur.Literal)
+	if _, ok := typ.ParseFloatLiteral(text); !ok {
+		p.errorf("float literal `%s` is outside the range this compiler converts exactly"+
+			" (up to 19 significant digits and an exponent within 10^±22)", p.cur.Literal)
+		return &ast.FloatExpr{Value: "0.0"}
+	}
+	return &ast.FloatExpr{Value: text}
 }
 
 // integerLiteralValue reads a literal: decimal digits, or `0x` / `0b` and

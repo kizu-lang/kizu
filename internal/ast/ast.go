@@ -826,6 +826,20 @@ func (e *IntExpr) String() string {
 	return e.Value
 }
 
+// FloatExpr represents a floating-point literal. Value is the spelling with
+// separators removed and the exponent marker lowercased, as `1.5e3`.
+type FloatExpr struct {
+	Value string
+}
+
+// expressionNode marks FloatExpr as an expression node.
+func (*FloatExpr) expressionNode() {}
+
+// String returns the literal spelling.
+func (e *FloatExpr) String() string {
+	return e.Value
+}
+
 // StringExpr represents a string literal.
 type StringExpr struct {
 	Value string
