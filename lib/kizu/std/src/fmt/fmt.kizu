@@ -23,6 +23,20 @@ pub fn append_i64(allocator: Allocator, out: &var std::string::String, value: i6
     return;
 }
 
+// append_u64 appends a deterministic decimal u64 diagnostic representation.
+pub fn append_u64(allocator: Allocator, out: &var std::string::String, value: u64) -> std::mem::Error!void {
+    var divisor = cast<u64>(1);
+    while divisor <= cast<u64>(1000000000000000000) and value / divisor >= cast<u64>(10) {
+        divisor = divisor * cast<u64>(10);
+    }
+    while divisor > cast<u64>(0) {
+        let digit = cast<i64>((value / divisor) % cast<u64>(10));
+        try out.append_byte(allocator, cast<u8>(48 + digit));
+        divisor = divisor / cast<u64>(10);
+    }
+    return;
+}
+
 // append_bool appends the stable Kizu boolean diagnostic spelling.
 pub fn append_bool(allocator: Allocator, out: &var std::string::String, value: bool) -> std::mem::Error!void {
     if value {
@@ -78,5 +92,119 @@ pub fn append_bytes_literal(allocator: Allocator, out: &var std::string::String,
         index = index + 1;
     }
     try out.append_byte(allocator, cast<u8>(34));
+    return;
+}
+
+// print writes one value and a newline to stdout. It is what the builtin
+// `print(value)` calls, with T bound to the argument's type (SPEC §14.1), so
+// this body is the one list of what prints: a byte string, an integer, a
+// bool, a float, an enum tag, or an error. Anything else is refused here, at
+// the call that reached it. It takes no `Io` and reports no failure -- the
+// diagnostic exception §14.1 grants it; program output goes through std::io.
+pub fn print<T>(value: T) -> void {
+    comptime if T == type<[]u8> {
+        std::internal::builtin::print_line(value);
+    } else {
+        comptime if T == type<bool> {
+            if value {
+                std::internal::builtin::print_line("true");
+            } else {
+                std::internal::builtin::print_line("false");
+            }
+        } else {
+            comptime if T == type<i64> or T == type<i32> or T == type<i16>
+                or T == type<i8> or T == type<isize> {
+                write_i64(cast<i64>(value));
+            } else {
+                comptime if T == type<u64> or T == type<u32> or T == type<u16>
+                    or T == type<u8> or T == type<usize> {
+                    write_u64(cast<u64>(value));
+                } else {
+                    comptime if T == type<f64> {
+                        write_f64(value);
+                    } else {
+                        comptime if T == type<f32> {
+                            write_f64(cast<f64>(value));
+                        } else {
+                            comptime if std::meta::is_enum<T>() or std::meta::is_error<T>() {
+                                write_named<T>(value);
+                            } else {
+                                std::meta::unsupported<T>();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return;
+}
+
+// write_named prints an enum tag as `Type::Tag` and an error as the member
+// its declaring set spells (`FsError::NotFound`), which is how source refers
+// to each. The spelling is assembled in a stack buffer sized for any name a
+// declaration can carry; a name that outgrows it is not printed, the way a
+// write that fails is not (§14.1).
+fn write_named<T>(value: T) -> void {
+    comptime if std::meta::is_enum<T>() {
+        var storage = [1024]u8 {};
+        let bytes = storage.as_mut_bytes();
+        let allocator = std::mem::fixed_buffer(bytes);
+        var out = std::string::new(allocator);
+        defer out.deinit(allocator);
+        comptime match value |v| {
+            out.append_bytes(allocator, std::meta::type_name<T>()) catch return;
+            out.append_bytes(allocator, "::") catch return;
+            out.append_bytes(allocator, std::meta::variant_name<T, v>()) catch return;
+        }
+        let text = out.as_bytes();
+        std::internal::builtin::print_line(text);
+    } else {
+        comptime match value |v| {
+            std::internal::builtin::print_line(std::meta::variant_name<T, v>());
+        }
+    }
+    return;
+}
+
+// write_i64 and write_u64 spell an integer in the stack buffer a decimal
+// needs; write_f64 spells a float the way std::float::append does, with the
+// room its digit generation needs for the widest double on every target (the
+// wasm allocator rounds each block up further than the native one). They are not named
+// print_*: a generic instance `print<i64>` and a function `print_i64` share
+// one symbol once `::` and `.` are mangled away.
+fn write_i64(value: i64) -> void {
+    var storage = [256]u8 {};
+    let bytes = storage.as_mut_bytes();
+    let allocator = std::mem::fixed_buffer(bytes);
+    var out = std::string::new(allocator);
+    defer out.deinit(allocator);
+    append_i64(allocator, &var out, value) catch return;
+    let text = out.as_bytes();
+    std::internal::builtin::print_line(text);
+    return;
+}
+
+fn write_u64(value: u64) -> void {
+    var storage = [256]u8 {};
+    let bytes = storage.as_mut_bytes();
+    let allocator = std::mem::fixed_buffer(bytes);
+    var out = std::string::new(allocator);
+    defer out.deinit(allocator);
+    append_u64(allocator, &var out, value) catch return;
+    let text = out.as_bytes();
+    std::internal::builtin::print_line(text);
+    return;
+}
+
+fn write_f64(value: f64) -> void {
+    var storage = [16384]u8 {};
+    let bytes = storage.as_mut_bytes();
+    let allocator = std::mem::fixed_buffer(bytes);
+    var out = std::string::new(allocator);
+    defer out.deinit(allocator);
+    std::float::append(allocator, &var out, value) catch return;
+    let text = out.as_bytes();
+    std::internal::builtin::print_line(text);
     return;
 }

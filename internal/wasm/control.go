@@ -43,6 +43,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writePanicFail(instr)
 	case instr.Op == "test.fail", instr.Op == "test.expect_equal":
 		return e.writeTestInstr(instr)
+	case instr.Op == "print.line":
+		return e.writePrintLine(instr)
 	case strings.HasPrefix(instr.Op, "func.addr."), strings.HasPrefix(instr.Op, "call."):
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
@@ -262,7 +264,7 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 		wasmOp = wasmFloatBinaryOp(op, instr.Result.Type)
 	}
 	if instr.Result.Type == "bool" {
-		wasmOp = wasmCompareOp(op)
+		wasmOp = wasmCompareOp(op, instr.Args[0].Type)
 		if instr.Args[0].Type == "bool" {
 			switch op {
 			case "==":
@@ -458,9 +460,6 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		)
 	}
 	name := strings.TrimPrefix(instr.Op, "call.")
-	if name == "print" {
-		return e.writePrint(instr.Args)
-	}
 	if handled, err := e.writeAllocatorBuiltinCall(name, instr); handled {
 		return err
 	}
@@ -532,30 +531,15 @@ func (e *emitter) writeAllocatorBuiltinCall(name string, instr *ir.Instr) (bool,
 	return false, nil
 }
 
-// writePrint writes calls to the selected target's stdout helper.
-func (e *emitter) writePrint(args []ir.Value) error {
-	if len(args) != 1 {
-		return fmt.Errorf("wasm error: print expects 1 arg")
+// writePrintLine writes one byte string and a newline to stdout: the one print
+// primitive std::fmt::print is built on (SPEC §14.1).
+func (e *emitter) writePrintLine(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" {
+		return fmt.Errorf("wasm error: print.line expects []u8")
 	}
-	value := e.value(args[0])
-	switch args[0].Type {
-	case "[]u8":
-		fmt.Fprintf(&e.out, "            (call $__write_line (i32.load %s) (i32.load %s))\n",
-			value.expr, addressAt(value.expr, 4))
-	case "i64":
-		fmt.Fprintf(&e.out, "            (call $__print_i64 %s)\n", value.expr)
-	case "bool":
-		fmt.Fprintf(&e.out, "            (call $__print_bool %s)\n", value.expr)
-	default:
-		if isIntegerType(args[0].Type) {
-			fmt.Fprintf(&e.out, "            (call $__print_i64 %s)\n", value.expr)
-			return nil
-		}
-		if e.writeEnumPrint(args[0].Type, args[0]) {
-			return nil
-		}
-		return fmt.Errorf("wasm error: unsupported print type `%s`", args[0].Type)
-	}
+	value := e.value(instr.Args[0])
+	fmt.Fprintf(&e.out, "            (call $__write_line (i32.load %s) (i32.load %s))\n",
+		value.expr, addressAt(value.expr, 4))
 	return nil
 }
 

@@ -97,8 +97,6 @@ fn emit_format(
         out: string::new(allocator),
         strings: map::new<[]u8, DataRef>(allocator),
         data_order: array::new<ir::Name>(allocator),
-        enum_tables: map::new<i64, DataRef>(allocator),
-        enum_table_order: array::new<ir::Name>(allocator),
         error_table: empty_data_ref(),
         panic_kinds: map::new<[]u8, bool>(allocator),
         values: map::new<[]u8, ValueInfo>(allocator),
@@ -187,11 +185,6 @@ struct Emitter {
     out: string::String,
     strings: map::Map<[]u8, DataRef>,
     data_order: array::Array<ir::Name>,
-    // Printed enums use linear-memory {pointer, length} rows in deterministic
-    // IR discovery order. A module that prints none carries neither data nor
-    // the lookup helper.
-    enum_tables: map::Map<i64, DataRef>,
-    enum_table_order: array::Array<ir::Name>,
     // error_table is the global-code-indexed {pointer, length} table used
     // only when a fallible main reports an uncaught error to the host.
     error_table: DataRef,
@@ -526,7 +519,6 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     offset = offset + 1;
     offset = try self.record_used_panic_data(offset);
     offset = try self.collect_main_error_strings(module, offset);
-    offset = try self.collect_enum_print_data(module, offset);
     offset = self.collect_main_error_table(offset);
     self.data_end = wasm_align_up(offset, 8);
     return;
@@ -757,7 +749,6 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         ;
         try self.line2(format, Arg::Int(offset), Arg::Owned(move text));
     }
-    try self.write_enum_print_tables(module);
     try self.write_main_error_table(module);
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
@@ -778,15 +769,6 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
     }
     if panic_data_text(bytes) |text| {
         try append_string_bytes(self.allocator, out, text);
-        return found.offset;
-    }
-    if mem::starts_with(bytes, enum_print_data_prefix()) {
-        let prefix = mem::len(enum_print_data_prefix());
-        try append_string_bytes(
-            self.allocator,
-            out,
-            bytes[prefix..mem::len(bytes)]
-        );
         return found.offset;
     }
     if mem::starts_with(bytes, error_name_data_prefix()) {
@@ -821,12 +803,7 @@ fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !?diagnostic::Diag
     try self.write_stack_alloc_helper(module);
     try self.write_bytes_helper();
     try self.write_line_helper();
-    try self.write_bool_helper();
     try self.write_int_value_helper();
-    try self.write_int_helper();
-    if self.enum_table_order.len() > 0 {
-        try self.write_enum_print_helper();
-    }
     if self.uses_byte_equality_runtime(module) {
         try self.write_byte_equality_helper();
     }
@@ -918,20 +895,6 @@ fn (self: &var Emitter) write_line_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes bool values as lowercase text, the Go `writeBoolHelper`.
-fn (self: &var Emitter) write_bool_helper() -> !void {
-    let truth = self.data_ref("true");
-    let falsehood = self.data_ref("false");
-    try self.line("  (func $__print_bool (param $value i32)");
-    try self.line("    (if (local.get $value)");
-    try self.line2("      (then (call $__write_line (i32.const %d) (i32.const %d)))",
-        Arg::Int(truth.offset), Arg::Int(truth.length));
-    try self.line2("      (else (call $__write_line (i32.const %d) (i32.const %d))))",
-        Arg::Int(falsehood.offset), Arg::Int(falsehood.length));
-    try self.line("  )");
-    return self.out.append_byte(self.allocator, cast<u8>(10));
-}
-
 /// Writes one signed i64 without a trailing newline, the Go
 /// `writeIntValueHelper`.
 fn (self: &var Emitter) write_int_value_helper() -> !void {
@@ -957,19 +920,6 @@ fn (self: &var Emitter) write_int_value_helper() -> !void {
     try self.line1(
         "    (call $__write_bytes (local.get $fd) (local.get $pos) (i32.sub (i32.const %d) (local.get $pos)))",
         Arg::Int(int_buffer_end())
-    );
-    try self.line("  )");
-    return self.out.append_byte(self.allocator, cast<u8>(10));
-}
-
-/// Writes signed i64 values as one stdout line, the Go `writeIntHelper`.
-fn (self: &var Emitter) write_int_helper() -> !void {
-    let newline = self.data_ref("newline");
-    try self.line("  (func $__print_i64 (param $value i64)");
-    try self.line("    (call $__write_i64 (i32.const 1) (local.get $value))");
-    try self.line1(
-        "    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))",
-        Arg::Int(newline.offset)
     );
     try self.line("  )");
     return self.out.append_byte(self.allocator, cast<u8>(10));

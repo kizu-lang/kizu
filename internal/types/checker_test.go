@@ -2661,7 +2661,7 @@ func TestCheckAllCollectsPerFunctionErrors(t *testing.T) {
 
 // TestCheckAllReturnsEmptyForValidProgram checks a sound program yields no errors.
 func TestCheckAllReturnsEmptyForValidProgram(t *testing.T) {
-	source := "fn main() { print(\"ok\"); }\n"
+	source := "fn add(a: i64, b: i64) -> i64 { return a + b; }\nfn main() { let _ = add(1, 2); }\n"
 	p := parser.New(lexer.New(source))
 	program := p.ParseProgram()
 	if len(p.Errors()) > 0 {

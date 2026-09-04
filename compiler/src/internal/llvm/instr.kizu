@@ -1034,45 +1034,20 @@ fn (self: &var Emitter) write_phi(module: &ir::Module, node: &ir::InstrNode) -> 
     return null;
 }
 
-/// Writes calls to the Kizu runtime print ABI, the Go `writePrint`; the
-/// arguments are the call's args.
-fn (self: &var Emitter) write_print(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 {
-        return try self.fail0("llvm error: print expects 1 arg");
+/// Writes one byte string and a newline to stdout, the Go `writePrintLine`:
+/// the one print primitive std::fmt::print is built on (SPEC §14.1).
+fn (self: &var Emitter) write_print_line(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+        return try self.fail0("llvm error: print.line expects []u8");
     }
     let arg = node.args.get_or_panic(0);
     let value = try self.operand(module, arg);
-    let arg_text = ir::name_text(&module.names, arg.type_name);
-    let arg_bytes = arg_text.as_bytes();
-    if mem::equal_bytes(arg_bytes, "[]u8") {
-        let ptr_synthetic = try self.next_synthetic_value("print.slice.ptr");
-        let ptr_name = try self.percent(ptr_synthetic);
-        let len_synthetic = try self.next_synthetic_value("print.slice.len");
-        let len_name = try self.percent(len_synthetic);
-        try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(value.operand));
-        try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(len_name), Arg::Str(value.operand));
-        try self.line2("  call void @kizu_print_string(ptr %s, i64 %s)", Arg::Str(ptr_name), Arg::Str(len_name));
-        return null;
-    }
-    if integer_bit_width(arg_bytes) |_| {
-        let operand = try self.runtime_integer_operand(module, arg.type_name, value.operand);
-        try self.line1("  call void @kizu_print_int(i64 %s)", Arg::Str(operand));
-        return null;
-    }
-    if mem::equal_bytes(arg_bytes, "bool") {
-        try self.line1("  call void @kizu_print_bool(i1 %s)", Arg::Str(value.operand));
-        return null;
-    }
-    if module.enums.contains(arg_bytes) {
-        try self.write_print_enum(module, arg.type_name, value.operand);
-        return null;
-    }
-    if module.error_sets.contains(arg_bytes) {
-        // An error is a global code, so its spelling comes from the one
-        // table every error shares rather than from a per-type table.
-        let table = try self.names.intern(error_name_table());
-        try self.write_print_name_table(table, error_name_table_rows(module), value.operand);
-        return null;
-    }
-    return try self.fail_name1(module, "llvm error: print does not support `%s`", arg.type_name);
+    let ptr_synthetic = try self.next_synthetic_value("print.slice.ptr");
+    let ptr_name = try self.percent(ptr_synthetic);
+    let len_synthetic = try self.next_synthetic_value("print.slice.len");
+    let len_name = try self.percent(len_synthetic);
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(value.operand));
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(len_name), Arg::Str(value.operand));
+    try self.line2("  call void @kizu_print_string(ptr %s, i64 %s)", Arg::Str(ptr_name), Arg::Str(len_name));
+    return null;
 }

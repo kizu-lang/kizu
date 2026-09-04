@@ -383,8 +383,8 @@ func TestLowerByteSliceAccess(t *testing.T) {
 		"  %6: u8 = slice.index %1: []u8, %2: i64\n",
 		"  cond_fail %12: bool, range(%7: i64, %8: i64, %9: i64)\n",
 		"  %13: []u8 = slice.slice %1: []u8, %7: i64, %8: i64\n",
-		"  call.print %6: u8\n",
-		"  call.print %13: []u8\n",
+		"  call.std::fmt::print.u8 %6: u8\n",
+		"  call.std::fmt::print._5b_5du8 %13: []u8\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
@@ -637,6 +637,8 @@ func lowerSource(t *testing.T, source string) *Module {
 	if module == nil {
 		t.Fatal(errors.New("nil module"))
 	}
+	module.Functions = programFunctions(module)
+	KeepReferencedErrorSets(module)
 	return module
 }
 
@@ -694,7 +696,7 @@ fn main() -> !void {
 const helloSnapshot = `fn main() -> void {
 entry:
   %1: []u8 = const "hello, kizu"
-  call.print %1: []u8
+  call.std::fmt::print._5b_5du8 %1: []u8
   return void: void
 }`
 
@@ -708,7 +710,7 @@ entry:
   %1: i64 = const 1
   %2: i64 = const 2
   %3: i64 = call.add %1: i64, %2: i64
-  call.print %3: i64
+  call.std::fmt::print.i64 %3: i64
   return void: void
 }`
 
@@ -718,8 +720,8 @@ entry:
   %2: i64 = const 30
   %3: i64 = const 1
   %4: i64 = binary.+ %2: i64, %3: i64
-  call.print %1: []u8
-  call.print %4: i64
+  call.std::fmt::print._5b_5du8 %1: []u8
+  call.std::fmt::print.i64 %4: i64
   return void: void
 }`
 
@@ -731,11 +733,11 @@ entry:
   branch %3: bool, if.then.1, if.else.2
 if.then.1:
   %4: []u8 = const "adult"
-  call.print %4: []u8
+  call.std::fmt::print._5b_5du8 %4: []u8
   jump if.end.3
 if.else.2:
   %6: []u8 = const "minor"
-  call.print %6: []u8
+  call.std::fmt::print._5b_5du8 %6: []u8
   jump if.end.3
 if.end.3:
   return void: void
@@ -751,7 +753,7 @@ while.header.1:
   %4: bool = binary.< %2: i64, %3: i64
   branch %4: bool, while.body.2, while.end.3
 while.body.2:
-  call.print %2: i64
+  call.std::fmt::print.i64 %2: i64
   %6: i64 = const 1
   %7: i64 = binary.+ %2: i64, %6: i64
   jump while.header.1
@@ -764,7 +766,7 @@ entry:
   %1: i64 = const 4
   %2: i64 = const 1024
   %3: i64 = binary.* %1: i64, %2: i64
-  call.print %3: i64
+  call.std::fmt::print.i64 %3: i64
   return void: void
 }`
 
@@ -772,7 +774,7 @@ const castSnapshot = `fn main() -> void {
 entry:
   %1: i64 = const 1
   %2: i32 = cast %1: i64, i32
-  call.print %2: i32
+  call.std::fmt::print.i32 %2: i32
   return void: void
 }`
 
@@ -786,7 +788,7 @@ fn main() -> !void {
 entry:
   %1: !i64 = call.parse
   %2: i64 = error.try %1: !i64
-  call.print %2: i64
+  call.std::fmt::print.i64 %2: i64
   %4: !void = error.ok
   return %4: !void
 }`
@@ -1007,4 +1009,46 @@ func writesFullStdPath(source string) bool {
 		}
 	}
 	return false
+}
+
+// programFunctions keeps what a test reads: the program's own functions and
+// the std bodies they call, minus std::fmt::print and what only it reaches.
+// print comes with every program (SPEC §14.1), and its body is std::fmt's
+// to test, not the lowering under test here.
+func programFunctions(module *Module) []*Function {
+	byName := map[string]*Function{}
+	for _, fn := range module.Functions {
+		byName[fn.Name] = fn
+	}
+	keep := map[string]bool{}
+	var queue []string
+	for _, fn := range module.Functions {
+		if !strings.HasPrefix(fn.Name, "std::") {
+			keep[fn.Name] = true
+			queue = append(queue, fn.Name)
+		}
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, block := range byName[name].Blocks {
+			for _, instr := range block.Instrs {
+				callee := strings.TrimPrefix(strings.TrimPrefix(instr.Op, "call."), "func.addr.")
+				if callee == instr.Op || strings.HasPrefix(callee, "std::fmt::print") {
+					continue
+				}
+				if byName[callee] != nil && !keep[callee] {
+					keep[callee] = true
+					queue = append(queue, callee)
+				}
+			}
+		}
+	}
+	var out []*Function
+	for _, fn := range module.Functions {
+		if keep[fn.Name] {
+			out = append(out, fn)
+		}
+	}
+	return out
 }

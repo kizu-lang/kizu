@@ -46,7 +46,7 @@ var groups = []featureGroup{
 	{"arithmetic / bitwise / float", []string{
 		"arithmetic", "comparison", "logical", "short-circuit", "bitwise",
 		"shift", "wrap", "integer-literal", "float", "f64", "f32", "saturate",
-		"nan"}},
+		"nan", "u64"}},
 	{"while / break / continue / for / label", []string{
 		"while", "break", "continue", "for", "loop", "label"}},
 	{"if / match", []string{

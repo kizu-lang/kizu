@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -7994,9 +7995,20 @@ func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeMa
 	if got == typeVoid {
 		return "", errorf("type error: `print` cannot print void")
 	}
-	if floatTypes[got] {
-		return "", errorf("type error: `print` does not accept %s\n"+
-			"help: cast the value to an integer to print it: `cast<i64>(value)`", got)
+	return c.checkPrintInstance(got, expressionSpan(expr.Callee))
+}
+
+// checkPrintInstance checks the std body `print` stands for with the argument's
+// type bound (SPEC §14.1). The body is the one place that says which types
+// print, so a type it has no case for is refused there, at this call.
+func (c *Checker) checkPrintInstance(arg Type, span ast.Span) (Type, error) {
+	fn := c.functions[stdlib.PrintFunction]
+	if fn == nil || len(fn.sig.TypeParamNames()) != 1 {
+		return "", errorf("type error: `%s` is not loaded", stdlib.PrintFunction)
+	}
+	subst := map[string]Type{fn.sig.TypeParamNames()[0]: arg}
+	if err := c.checkGenericInstantiation(fn, subst, nil, nil); err != nil {
+		return "", c.annotateInstantiation(err, span, fn, []Type{arg})
 	}
 	return typeVoid, nil
 }

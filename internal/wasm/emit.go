@@ -43,7 +43,6 @@ func LowerTarget(module *ir.Module, target Target) (*Module, error) {
 		types:              typ.NewTable(),
 		paramsByFunction:   paramsByFunction,
 		strings:            map[string]dataRef{},
-		enumTables:         map[string]nameTable{},
 		errorTable:         nameTable{},
 		values:             map[string]valueInfo{},
 		panicKinds:         map[string]bool{},
@@ -55,6 +54,13 @@ func LowerTarget(module *ir.Module, target Target) (*Module, error) {
 		return nil, err
 	}
 	return parseModule(strings.TrimRight(e.out.String(), "\n"))
+}
+
+// nameTable is a static table of {pointer, length} rows in linear memory,
+// indexed by the code whose spelling each row holds.
+type nameTable struct {
+	offset int
+	rows   []dataRef
 }
 
 type dataRef struct {
@@ -76,10 +82,6 @@ type emitter struct {
 	// dataOrder keeps assignment order when zero-length data shares an offset
 	// with the following segment. Sorting offsets alone cannot order that tie.
 	dataOrder []string
-	// enumTables are the linear-memory name tables for enum types this module
-	// prints. enumTableOrder preserves discovery order for deterministic WAT.
-	enumTables     map[string]nameTable
-	enumTableOrder []string
 	// errorTable is the global-code-indexed {pointer, length} table used only
 	// when a fallible main must report its uncaught error at the host boundary.
 	errorTable nameTable
@@ -236,7 +238,6 @@ func (e *emitter) collectStrings() {
 		offset += len(data.text)
 	}
 	offset = e.collectMainErrorStrings(offset)
-	offset = e.collectEnumPrintData(offset)
 	offset = e.collectMainErrorTable(offset)
 	e.dataEnd = alignUp(offset, 8)
 }
@@ -298,7 +299,6 @@ func (e *emitter) writeHeader() {
 		ref := e.strings[lit]
 		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", ref.offset, dataLiteral(lit))
 	}
-	e.writeEnumPrintTables()
 	e.writeMainErrorTable()
 	e.out.WriteByte('\n')
 }
@@ -334,9 +334,6 @@ func dataLiteral(key string) string {
 	if text, ok := panicDataText(key); ok {
 		return stringBytes(text)
 	}
-	if text, ok := strings.CutPrefix(key, enumPrintDataPrefix); ok {
-		return stringBytes(text)
-	}
 	if text, ok := strings.CutPrefix(key, errorNameDataPrefix); ok {
 		return stringBytes(text)
 	}
@@ -366,12 +363,7 @@ func (e *emitter) writeRuntime() error {
 	e.writeStackAllocHelper()
 	e.writeBytesHelper()
 	e.writeLineHelper()
-	e.writeBoolHelper()
 	e.writeIntValueHelper()
-	e.writeIntHelper()
-	if len(e.enumTableOrder) > 0 {
-		e.writeEnumPrintHelper()
-	}
 	if e.usesByteEqualityRuntime() {
 		e.writeByteEqualityHelper()
 	}
@@ -453,19 +445,6 @@ func (e *emitter) writeLineHelper() {
 	e.out.WriteString("  )\n\n")
 }
 
-// writeBoolHelper writes bool values as lowercase text.
-func (e *emitter) writeBoolHelper() {
-	truth := e.strings["true"]
-	falsehood := e.strings["false"]
-	e.out.WriteString("  (func $__print_bool (param $value i32)\n")
-	e.out.WriteString("    (if (local.get $value)\n")
-	fmt.Fprintf(&e.out, "      (then (call $__write_line (i32.const %d) (i32.const %d)))\n",
-		truth.offset, truth.length)
-	fmt.Fprintf(&e.out, "      (else (call $__write_line (i32.const %d) (i32.const %d))))\n",
-		falsehood.offset, falsehood.length)
-	e.out.WriteString("  )\n\n")
-}
-
 // writeIntValueHelper writes one signed i64 without a trailing newline.
 func (e *emitter) writeIntValueHelper() {
 	e.out.WriteString("  (func $__write_i64 (param $fd i32) (param $value i64)\n")
@@ -489,17 +468,6 @@ func (e *emitter) writeIntValueHelper() {
 	fmt.Fprintf(&e.out, "    (call $__write_bytes (local.get $fd) (local.get $pos) ")
 	fmt.Fprintf(&e.out, "(i32.sub (i32.const %d) ", intBufferEnd)
 	e.out.WriteString("(local.get $pos)))\n")
-	e.out.WriteString("  )\n\n")
-}
-
-// writeIntHelper writes signed i64 values as one stdout line.
-func (e *emitter) writeIntHelper() {
-	newline := e.strings["newline"]
-	e.out.WriteString("  (func $__print_i64 (param $value i64)\n")
-	e.out.WriteString("    (call $__write_i64 (i32.const 1) (local.get $value))\n")
-	fmt.Fprintf(&e.out,
-		"    (call $__write_bytes (i32.const 1) (i32.const %d) (i32.const 1))\n",
-		newline.offset)
 	e.out.WriteString("  )\n\n")
 }
 

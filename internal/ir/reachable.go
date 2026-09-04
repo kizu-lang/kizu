@@ -51,6 +51,68 @@ func keepReachableFunctions(
 		}
 	}
 	module.Functions = kept
+	KeepReferencedErrorSets(module)
+}
+
+// KeepReferencedErrorSets removes the error sets no kept function names in a
+// type. std comes with every program (SPEC §14.1) and declares its sets in
+// modules the program may never call into; a set no reachable code can carry
+// has no spelling to report, so it leaves with the code that would have
+// carried it. A combined set keeps the sets it takes its members from, since
+// a value of the combined type holds their codes.
+func KeepReferencedErrorSets(module *Module) {
+	referenced := map[string]bool{}
+	note := func(typ string) {
+		for _, name := range typeNames(typ) {
+			if _, ok := module.ErrorSets[name]; ok {
+				referenced[name] = true
+			}
+		}
+	}
+	for _, fn := range module.Functions {
+		for _, param := range fn.Params {
+			note(param.Type)
+		}
+		note(fn.Return)
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				note(instr.Result.Type)
+				for _, arg := range instr.Args {
+					note(arg.Type)
+				}
+				note(instr.Immediate)
+			}
+			note(block.Terminator.Value.Type)
+		}
+	}
+	queue := make([]string, 0, len(referenced))
+	for name := range referenced {
+		queue = append(queue, name)
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, origin := range module.ErrorSets[name].Origins {
+			if !referenced[origin] {
+				referenced[origin] = true
+				queue = append(queue, origin)
+			}
+		}
+	}
+	for name := range module.ErrorSets {
+		if !referenced[name] {
+			delete(module.ErrorSets, name)
+		}
+	}
+}
+
+// typeNames splits a type spelling into the names it is built from, so a set
+// is found inside `std::mem::Error!void` and not inside a longer name.
+func typeNames(typ string) []string {
+	return strings.FieldsFunc(typ, func(r rune) bool {
+		return !(r == '_' || r == ':' || r >= '0' && r <= '9' ||
+			r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+	})
 }
 
 // seedReachableFunctions adds requested entries and matching explicit exports.

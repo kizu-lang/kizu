@@ -40,6 +40,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::mem_page_allocator": {Return: "Allocator"},
 	"std::internal::builtin::mem_fixed_buffer":   {Args: []ArgKind{ArgBytes}, Return: "Allocator"},
 	"std::internal::builtin::mem_len":            {Args: []ArgKind{ArgBytes}, Return: "i64"},
+	"std::internal::builtin::print_line":         {Args: []ArgKind{ArgBytes}, Return: "void"},
 	"std::internal::builtin::f64_bits":           {Args: []ArgKind{ArgF64}, Return: "u64"},
 	"std::internal::builtin::f64_from_bits":      {Args: []ArgKind{ArgU64}, Return: "f64"},
 	"std::internal::builtin::io_write_stdout": {
@@ -251,6 +252,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::f64_bits":                     true,
 	"std::internal::builtin::f64_from_bits":                true,
 	"std::internal::builtin::mem_page_allocator":           true,
+	"std::internal::builtin::print_line":                   true,
 	"std::internal::builtin::net_accept":                   true,
 	"std::internal::builtin::net_close":                    true,
 	"std::internal::builtin::net_connect":                  true,

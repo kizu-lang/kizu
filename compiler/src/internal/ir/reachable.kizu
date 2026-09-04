@@ -116,7 +116,138 @@ fn keep_reachable(
         index = index + 1;
         try module.functions.append(allocator, function);
     }
+    return keep_referenced_error_sets(allocator, module);
+}
+
+/// Removes the error sets no kept function names in a type, the Go
+/// `KeepReferencedErrorSets`. std comes with every program (SPEC §14.1) and
+/// declares its sets in modules the program may never call into; a set no
+/// reachable code can carry has no spelling to report, so it leaves with the
+/// code that would have carried it. A combined set keeps the sets it takes
+/// its members from, since a value of the combined type holds their codes.
+/// Go deletes the map entries; a Map cannot shrink here, so the dropped names
+/// are filed in `dropped_error_sets` and readers ask `error_set_kept`.
+pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> !void {
+    var referenced = map::new<[]u8, bool>(allocator);
+    defer referenced.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var param_index = 0;
+        while node.params.get(param_index) |param| {
+            param_index = param_index + 1;
+            try note_error_sets(allocator, module, &var referenced, param.type_name);
+        }
+        try note_error_sets(allocator, module, &var referenced, node.return_type);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                try note_error_sets(allocator, module, &var referenced, instr_node.result.type_name);
+                var arg_index = 0;
+                while instr_node.args.get(arg_index) |arg| {
+                    arg_index = arg_index + 1;
+                    try note_error_sets(allocator, module, &var referenced, arg.type_name);
+                }
+                try note_error_sets(allocator, module, &var referenced, instr_node.immediate);
+            }
+            try note_error_sets(allocator, module, &var referenced, block_node.terminator.value.type_name);
+        }
+    }
+    // The origins closure is a work list; the order it settles in does not
+    // matter, so the list is popped rather than walked.
+    var pending = array::new<string::String>(allocator);
+    defer pending.deinit(allocator);
+    var key_index = 0;
+    while referenced.key_at(key_index) |key| {
+        key_index = key_index + 1;
+        try pending.append(allocator, try string::from_bytes(allocator, key));
+    }
+    while pending.pop() |name| {
+        defer name.deinit(allocator);
+        let name_bytes = name.as_bytes();
+        var origins = array::new<string::String>(allocator);
+        defer origins.deinit(allocator);
+        if module.error_sets.at(name_bytes) |set| {
+            var origin_index = 0;
+            while set.origins.get(origin_index) |origin| {
+                origin_index = origin_index + 1;
+                let origin_text = name_text(&module.names, origin);
+                let origin_bytes = origin_text.as_bytes();
+                if !referenced.contains(origin_bytes) {
+                    try referenced.insert(allocator, origin_bytes, true);
+                    try origins.append(allocator, try string::from_bytes(allocator, origin_bytes));
+                }
+            }
+        }
+        while origins.pop() |origin| {
+            try pending.append(allocator, move origin);
+        }
+    }
+    var set_index = 0;
+    while module.error_sets.key_at(set_index) |name| {
+        set_index = set_index + 1;
+        if !referenced.contains(name) and !module.dropped_error_sets.contains(name) {
+            try module.dropped_error_sets.insert(allocator, name, true);
+        }
+    }
     return;
+}
+
+/// Marks every error set a type spelling is built from, the Go `typeNames`
+/// walk: the spelling is split on anything that is not a name byte, so a set
+/// is found inside `std::mem::Error!void` and not inside a longer name.
+fn note_error_sets(
+    allocator: Allocator,
+    module: &Module,
+    referenced: &var map::Map<[]u8, bool>,
+    typ: Name
+) -> !void {
+    if is_empty(typ) {
+        return;
+    }
+    let retained = name_text(&module.names, typ);
+    let bytes = retained.as_bytes();
+    let length = mem::len(bytes);
+    var start = 0;
+    var index = 0;
+    while index <= length {
+        var boundary = index == length;
+        if !boundary {
+            boundary = !is_type_name_byte(bytes[index]);
+        }
+        if boundary {
+            if index > start {
+                let token = bytes[start..index];
+                if module.error_sets.contains(token) and !referenced.contains(token) {
+                    try referenced.insert(allocator, token, true);
+                }
+            }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Reports whether a byte belongs to a type name: `_`, `:`, a digit, or an
+/// ASCII letter.
+fn is_type_name_byte(byte: u8) -> bool {
+    if byte == cast<u8>(95) or byte == cast<u8>(58) {
+        return true;
+    }
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+        return true;
+    }
+    return byte >= cast<u8>(65) and byte <= cast<u8>(90);
 }
 
 /// Queues one callee the first time a reachable function names it, the body

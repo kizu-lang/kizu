@@ -38,12 +38,12 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 44 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 43/44 |
-| arithmetic / bitwise / float | 5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| fn / let / struct / literals | 45 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 44/45 |
+| arithmetic / bitwise / float | 6 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| enum / union | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
-| error union `!T` / try / errdefer | 51 | ✅ | ✅ | ✅ | 33/51 | 33/51 | 33/51 | 30/51 |
+| enum / union | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/16 |
+| error union `!T` / try / errdefer | 52 | ✅ | ✅ | ✅ | 34/52 | 34/52 | 34/52 | 31/52 |
 | optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
 | move / borrow | 60 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -60,7 +60,7 @@ not in any one execution path.
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fmt | 6 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 | 10/27 | 3/27 |
 | std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 | 2/19 | 2/19 |
@@ -68,7 +68,7 @@ not in any one execution path.
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 176 runnable examples,
+tags, so an example appears in more than one row. 177 runnable examples,
 measured on 2026-09-04 with `just backend-matrix` -- re-run it after touching a
 backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
 program's output: `run` executes the native build; `wasm` and `wasm-opt` load
@@ -79,13 +79,13 @@ builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 176/176 |
-| `kizu run` | 176/176 |
-| `kizu build --emit-llvm` | 176/176 |
-| `kizu build --target wasm32-wasi` (WAT) | 156/176 |
-| `kizu build --target wasm32-wasi --opt` (WAT) | 156/176 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 156/176 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 149/176 |
+| `kizu check` | 177/177 |
+| `kizu run` | 177/177 |
+| `kizu build --emit-llvm` | 177/177 |
+| `kizu build --target wasm32-wasi` (WAT) | 157/177 |
+| `kizu build --target wasm32-wasi --opt` (WAT) | 157/177 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 157/177 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 150/177 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 its remaining 20 examples are explicit target-unsupported capabilities: 16
