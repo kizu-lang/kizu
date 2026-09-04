@@ -22,7 +22,8 @@ bit 演算子が無く、overflow する乗算の意味も定めていないか�
 `new` はどの `i64` も seed として受け、状態を 16 手空回ししてから返します。近い seed が
 近い値から始まらないためです。`next` は暗号用途の乱数ではありません。
 
-seed を勝手に選ぶ関数はありません。毎回違う列が欲しい program は
+seed を勝手に選ぶ関数はありません(test では `std::testing::seed()` が run ごとの
+seed を持ち、失敗時にそれを報告します —— `docs/std/testing.md`)。毎回違う列が欲しい program は
 `rand::new(process::unix_millis())` と書き、そう書いたことが source に残ります。
 
 `below` の偏りは `bound / 2^32` 未満で、test の入力生成には見えない大きさです。

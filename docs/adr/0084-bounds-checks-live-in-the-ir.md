@@ -76,7 +76,7 @@ Rust の `AssertKind` と同じく、値を持つ失敗と持たない失敗を�
 Swift のようにループ外へ巻き上げられる。
 
 初版では「静的文字列にして、Rust が踏んだ整形コードの混入を避ける」と判断したが、
-これは誤りだった。Kizu の runtime は `kizu_print_int` で既に `printf` を
+これは誤りだった。Kizu の runtime は診断の出力で既に `printf` を
 リンクしており、整数を出す費用は支払い済みである。Rust の問題は `core::fmt` が
 丸ごと入ることで、専用の runtime 関数へ値を渡す形では起きない。
 

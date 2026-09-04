@@ -1044,6 +1044,12 @@ func conversionOpcode(op string) (byte, bool) {
 		return 0xa7, true
 	case "i64.extend_i32_s":
 		return 0xac, true
+	case "i64.extend8_s":
+		return 0xc2, true
+	case "i64.extend16_s":
+		return 0xc3, true
+	case "i64.extend32_s":
+		return 0xc4, true
 	case "i64.extend_i32_u":
 		return 0xad, true
 	default:
