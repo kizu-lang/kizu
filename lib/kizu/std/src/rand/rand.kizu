@@ -1,0 +1,86 @@
+// A deterministic pseudo-random sequence: the same seed gives the same
+// numbers on every run and every target, which is what makes a test that
+// draws its inputs from one repeatable.
+//
+// The generator is L'Ecuyer's MRG32k3a: two multiple-recursive generators
+// combined, period about 2^191, a well-studied choice for simulation. It is
+// here rather than a faster shift-and-xor design because Kizu has no bitwise
+// operators and does not define what an overflowing multiply does; MRG32k3a
+// needs only `*`, `-`, `%` on values that stay below 2^53, so nothing in it
+// leans on unspecified arithmetic.
+//
+// Nothing here draws a seed for you. A program that wants a fresh sequence
+// each run passes `std::process::unix_millis()` and says so.
+
+// Rng is one sequence. Every draw advances it, so a draw takes `&var self`.
+pub struct Rng {
+    s10: i64,
+    s11: i64,
+    s12: i64,
+    s20: i64,
+    s21: i64,
+    s22: i64,
+}
+
+// The two moduli and the recurrence coefficients of MRG32k3a. Products stay
+// under 1403580 * 4294967087 < 2^53.
+fn modulus1() -> i64 { return 4294967087; }
+fn modulus2() -> i64 { return 4294944443; }
+
+// new starts a sequence from `seed`. Any i64 is a valid seed; two seeds
+// that differ give different sequences from the first draw. The state is
+// warmed up so that nearby seeds do not start with nearby values.
+pub fn new(seed: i64) -> std::rand::Rng {
+    var base = seed % modulus1();
+    if base < 0 {
+        base = base + modulus1();
+    }
+    var rng = Rng {
+        s10: 12345,
+        s11: 12345,
+        s12: 1 + base % (modulus1() - 1),
+        s20: 12345,
+        s21: 12345,
+        s22: 1 + base % (modulus2() - 1),
+    };
+    var warm = 0;
+    while warm < 16 {
+        let _ = rng.next();
+        warm = warm + 1;
+    }
+    return rng;
+}
+
+// next draws the next value, uniform over `0..4294967086` inclusive.
+fn (self: &var std::rand::Rng) next() -> i64 {
+    var p1 = (1403580 * self.s11 - 810728 * self.s10) % modulus1();
+    if p1 < 0 {
+        p1 = p1 + modulus1();
+    }
+    self.s10 = self.s11;
+    self.s11 = self.s12;
+    self.s12 = p1;
+
+    var p2 = (527612 * self.s22 - 1370589 * self.s20) % modulus2();
+    if p2 < 0 {
+        p2 = p2 + modulus2();
+    }
+    self.s20 = self.s21;
+    self.s21 = self.s22;
+    self.s22 = p2;
+
+    if p1 <= p2 {
+        return p1 - p2 + modulus1() - 1;
+    }
+    return p1 - p2 - 1;
+}
+
+// below draws a value in `0..bound` (exclusive). `bound` must be positive;
+// a zero or negative bound names an empty range and traps, because there is
+// no value that would be a correct answer.
+fn (self: &var std::rand::Rng) below(bound: i64) -> i64 {
+    if bound <= 0 {
+        std::internal::builtin::panic("std::rand::Rng.below: bound must be positive");
+    }
+    return self.next() % bound;
+}
