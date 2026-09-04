@@ -14,13 +14,29 @@ seed の再現(`kizu test --seed`、`std::testing::seed()`)は入った。
 ## 7. `std::testing::run_model` と sequence shrink
 
 `run_model<Cmd, M, S>(alloc, &var rng, steps, gen, init_model, init_sut, step) -> !?Array<Cmd>`。
-失敗した列を 1 個削除・半分に切る shrink で最短にし、seed と一緒に出す。値の
-shrink(型ごとの `contract Shrink`)は最初の版に入れない。
+`gen` / `init_*` / `step` は関数 pointer(closure が無いので top-level fn で足りる)。
+`init_model` と `step` は allocator を取る(model が `Array` を持つため)。失敗した列は
+replay で最短 prefix を二分探索し、1 手ずつ削れるだけ削る。seed は #1730 の note が
+出す。値の shrink(型ごとの `contract Shrink`)は最初の版に入れない。
+列でなく値の性質(課税の単調性、按分の和)には `testing::check<T>(rng, n, gen, prop)`
+を隣に置く。
 
 ## 8. dogfood
 
 `std::map` と `std::array` を参照モデルと突き合わせる test を `tests/behavior` に置き、
-runner の API がそのまま使えるかを見る。
+runner の API がそのまま使えるかを見る。加えて言語の顔になる例を `examples/` に置く:
+帳簿(送金の列に対して残高の総和保存・二重送信の冪等性)、契約の状態機械(遷移表を
+model にする)、暦の算術(10 の後、model は日数 counter)。金額は float でなく最小
+単位の `i64` で持つ。
+
+## 10. `std::time` と `std::date`
+
+暦が無いので期限・年度・時効・HTTP の `Date` header(3)が書けない。2 層に分ける:
+`std::time` は `Duration`(ms の i64)、`Instant`(monotonic)、`UnixTime`(epoch ms)と
+加減・比較だけ。`std::date` は proleptic Gregorian の `Date { year, month, day }`、
+`to_days` / `from_days`、`weekday`、`add_days` / `add_months`(月末の丸めは明示引数)、
+ISO 8601 の parse / format、`DateTime` は UTC のみ。timezone(tzdata)、locale 書式、
+隠れた `now()` は入れない —— 時計は `process::unix_millis()` を source で渡す。
 
 ## std::http / std::net の残り
 
