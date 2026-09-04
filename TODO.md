@@ -5,20 +5,17 @@
 
 ## 浮動小数点の残り
 
-型・演算・cast・literal(PR 1)は入った。残りは 3 つ。
+型・演算・cast・literal・文字列変換(`std::float::append` / `parse`)は入った。残りは 2 つ。
 
 ## 9. `print` を std に畳む
 
 `print` は backend に型ごとの分岐(int / bool / bytes / enum 名前表 / error 表)を
 持つ。`std::fmt::print<T>` を `comptime match` と `std::meta` で書き、backend には
 「bytes を stdout に書く」primitive だけを残す。`Io` 無しで書く点は debug 用の例外として
-docs に明記する。前提として `std::meta` が enum の variant 名を取れること。
-
-## 10. float の文字列変換と `print(f64)`
-
-最短往復表現の parse / print を `std` に 1 本書く(bignum 込み)。compiler の literal
-変換もそれに切り替え、`typ::parse_float_literal` の範囲制限(19 桁、10^±22)を外す。
-`std::testing::expect_equal<f64>` もこの後。
+docs に明記する。`print(f64)` は `std::float::append` の 1 行で乗る。前提として
+`std::meta` が enum の variant 名を取れること(`variants` / `variant_name` はある)。
+error set の反射(`is_error<T>`)と、std の generic 内で出す診断を呼び出し元の位置に
+付ける仕組みが要る。
 
 ## 11. wasm backend の f32 / f64
 

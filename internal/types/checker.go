@@ -4896,10 +4896,6 @@ func (c *Checker) checkBuiltinTestFailEqual(
 	if len(args) != 2 {
 		return "", errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
 	}
-	if floatTypes[typ] {
-		return "", errorf("type error: `std::testing::expect_equal<%s>` does not accept %s\n"+
-			"help: compare the values with `expect(a == b)`", typ, typ)
-	}
 	for idx, arg := range args {
 		got, err := c.checkContextualExpr(arg, typ, env, unsafe)
 		if err != nil {

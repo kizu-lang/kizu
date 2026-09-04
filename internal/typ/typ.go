@@ -9,6 +9,7 @@ package typ
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -616,131 +617,13 @@ func CleanFloatLiteral(text string) string {
 }
 
 // ParseFloatLiteral converts a cleaned floating-point literal to the f64 it
-// names, reporting false when this compiler cannot do so exactly. It takes
-// the fast path only: a mantissa of at most 19 significant digits that fits
-// 53 bits, scaled by a power of ten that is itself exact in an f64, so one
-// multiplication or division is correctly rounded. Both compilers accept
-// exactly this set, and the shared floating-point conversion in std will
-// widen it.
+// names, rounding to the nearest value with ties to even, and reports false
+// for a spelling that is not a number or whose magnitude no f64 holds. The
+// selfhost compiler reads the same literals through `std::float::parse`.
 func ParseFloatLiteral(text string) (float64, bool) {
-	mantissa, exponent, ok := splitFloatLiteral(text)
-	if !ok {
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil || math.IsInf(value, 0) {
 		return 0, false
 	}
-	if mantissa == 0 {
-		return 0, true
-	}
-	for mantissa%10 == 0 {
-		mantissa /= 10
-		exponent++
-	}
-	if mantissa >= 1<<53 {
-		return 0, false
-	}
-	value := float64(mantissa)
-	switch {
-	case exponent >= 0 && exponent <= 22:
-		return value * exactPowerOfTen(exponent), true
-	case exponent < 0 && exponent >= -22:
-		return value / exactPowerOfTen(-exponent), true
-	case exponent > 22 && exponent <= 22+15:
-		// The extra digits move into the mantissa while it still fits 53
-		// bits, which keeps the one multiplication exact.
-		scaled := mantissa
-		for i := 22; i < exponent; i++ {
-			scaled *= 10
-			if scaled >= 1<<53 {
-				return 0, false
-			}
-		}
-		return float64(scaled) * exactPowerOfTen(22), true
-	default:
-		return 0, false
-	}
-}
-
-// splitFloatLiteral reads `digits[.digits][e[+-]digits]` into its decimal
-// mantissa and base-ten exponent, reporting false when the mantissa needs
-// more than 19 digits or the spelling is not a float literal.
-func splitFloatLiteral(text string) (uint64, int, bool) {
-	var mantissa uint64
-	digits := 0
-	exponent := 0
-	i := 0
-	seenDot := false
-	for ; i < len(text); i++ {
-		ch := text[i]
-		if ch == '.' {
-			if seenDot {
-				return 0, 0, false
-			}
-			seenDot = true
-			continue
-		}
-		if ch < '0' || ch > '9' {
-			break
-		}
-		if mantissa == 0 && ch == '0' {
-			if seenDot {
-				exponent--
-			}
-			continue
-		}
-		if digits == 19 {
-			return 0, 0, false
-		}
-		mantissa = mantissa*10 + uint64(ch-'0')
-		digits++
-		if seenDot {
-			exponent--
-		}
-	}
-	if i < len(text) {
-		if text[i] != 'e' {
-			return 0, 0, false
-		}
-		power, ok := parseExponent(text[i+1:])
-		if !ok {
-			return 0, 0, false
-		}
-		exponent += power
-	}
-	return mantissa, exponent, true
-}
-
-// parseExponent reads the signed digits after an exponent marker, refusing
-// magnitudes no literal in range could carry.
-func parseExponent(text string) (int, bool) {
-	negative := false
-	if text != "" && (text[0] == '+' || text[0] == '-') {
-		negative = text[0] == '-'
-		text = text[1:]
-	}
-	if text == "" {
-		return 0, false
-	}
-	power := 0
-	for i := 0; i < len(text); i++ {
-		if text[i] < '0' || text[i] > '9' {
-			return 0, false
-		}
-		power = power*10 + int(text[i]-'0')
-		if power > 1000 {
-			return 0, false
-		}
-	}
-	if negative {
-		return -power, true
-	}
-	return power, true
-}
-
-// exactPowerOfTen returns 10^n for 0 <= n <= 22, every one of which an f64
-// holds exactly.
-func exactPowerOfTen(n int) float64 {
-	value := 1.0
-	for i := 0; i < n; i++ {
-		value *= 10
-	}
-	return value
+	return value, true
 }
