@@ -88,7 +88,7 @@ The current backend supports only the LLVM-lowered subset:
 
 - scalar integer and boolean operations
 - string literals as `[]u8`
-- `print` through `kizu_print_*`
+- `print` through `kizu_print_string` (the body is `std::fmt::print`)
 - simple functions
 - if / if expression
 - while / for / break / continue

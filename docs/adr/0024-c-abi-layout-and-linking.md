@@ -68,8 +68,7 @@ compiler runtime が必要とする symbol は `kizu_` prefix を持つ。
 
 ```text
 kizu_print_string
-kizu_print_int
-kizu_print_bool
+kizu_main_error_message
 ```
 
 runtime symbol は user symbol と衝突しないように予約する。

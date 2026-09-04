@@ -117,9 +117,8 @@ no-libc / freestanding build は build policy としては受理済みですが�
 | 機能 | 状態 |
 | --- | --- |
 | 並列処理のための thread | **予定。** 以前の API は checker rule だけを持ち lowering も runtime も無かったため撤回しました。戻すための受け入れ条件は ADR-0025 にあり、その第 1 条件は `kizu run` で実行できることです。coroutine(`std::coro`)と evented な `Io` は入っていますが、これは 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
-| 現在の subset を超える wasm backend | **進行中。** WASI WAT / binary は 142/162、browser binary は 135/162 が動き、残る 27 件は target 非対応として分類済みです |
+| 現在の subset を超える wasm backend | **進行中。** WASI WAT / binary は 158/178、browser binary は 151/178 が動き、残りはすべて target 非対応として分類済みです |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
-| float literal と float 演算 | **未着手。** `f32` / `f64` は型名として存在しますが、`1.5` は 1 つの literal として字句解析されません |
 | type alias | **未着手** |
 | `kizu lint` | **未着手** |
 | TLS / HTTPS、middleware | **未着手。** `std::http` は平文 TCP 上の HTTP/1 です。middleware は closure 待ちです |
