@@ -5,6 +5,7 @@ symbol table と scope lookup のための最小 owned map です。
 ```text
 std::map::new<K, V>(allocator: Allocator) -> std::map::Map<K, V>
 map.insert(allocator: Allocator, key: K, value: V) -> std::mem::Error!void
+map.remove(allocator: Allocator, key: K) -> ?V
 map.get(key: K) -> ?V
 map.at(key: K) -> ?&V
 map.at_mut(key: K) -> ?&var V
@@ -26,6 +27,11 @@ struct と enum は padding と表現の取り決めが要るので、今は持�
 allocator を receiver の次に取ります(ADR-0132)。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
 `get` は missing key を `null` として返します(docs/style.md)。
+`remove` は key の値を caller へ move して entry を落とし、missing key には `null` を
+返します。entry 自身の storage(key の copy と value の slot)は map を作った
+allocator へ返すので、`insert` と同じく allocator を receiver の次に取ります
+(ADR-0132)。後続の entry が詰めるので挿入順は保たれ、cost は後続の数に
+線形です(ADR-0088)。
 in-place 更新は 1 回の lookup で書けます(ADR-0104)。
 
 ```kizu
@@ -52,6 +58,7 @@ value type は owner でもかまいません(`Map<[]u8, std::string::String>`�
 | `at` / `at_mut` | 借用 | 同じ |
 | `insert`(新しい key) | 値を書く | 値を map へ move する |
 | `insert`(既存の key) | 上書き | **trap**。上書きは既にある値を落とすため |
+| `remove` | 値を copy して返し entry を落とす | 値を caller へ move する。解放は caller |
 | `deinit` | table と key を解放 | 値を 1 つずつ解放してから table と key |
 
 既存の key への `insert` が trap なのは、map がその値の唯一の持ち主だからです。
@@ -59,7 +66,7 @@ value type は owner でもかまいません(`Map<[]u8, std::string::String>`�
 `contains` で先に分岐します。占有しているかは実行時にしか分からないので、
 `Array.set` が同じ状況を compile error にするのに対してこちらは trap です。
 
-deletion、custom hash/equality、owned key、struct / enum key は後続で扱います。
+custom hash/equality、owned key、struct / enum key は後続で扱います。
 `std::map::new<K, V>()` のような hidden default allocator は使いません。
 
 value borrow(`at` / `at_mut`)の消費規則、borrow 中に待つ操作、`key_at` が

@@ -58,6 +58,7 @@ fn is_wasm_map_op(op: ir::Op) -> bool {
         MapKeyAt => true,
         MapLen => true,
         MapTakeValueAt => true,
+        MapRemove => true,
         _ => false,
     };
 }
@@ -71,6 +72,7 @@ fn is_wasm_map_temp_op(op: ir::Op) -> bool {
         MapAt => true,
         MapAtMut => true,
         MapContains => true,
+        MapRemove => true,
         _ => false,
     };
 }
@@ -416,6 +418,72 @@ fn (self: &var Emitter) write_map_runtime() -> !void {
         \\      (i32.const 16)))
         \\  )
         \\
+        \\  (func $__map_rehash (param $map i32)
+        \\    (local $index i32) (local $mask i64) (local $entry_index i64)
+        \\    (local $entry i32) (local $slot i64)
+        \\    (local.set $index (i32.load (i32.add (local.get $map) (i32.const 24))))
+        \\    (local.set $mask (i64.sub
+        \\      (i64.load (i32.add (local.get $map) (i32.const 32))) (i64.const 1)))
+        \\    (memory.fill (local.get $index) (i32.const 255)
+        \\      (i32.wrap_i64 (i64.mul
+        \\        (i64.load (i32.add (local.get $map) (i32.const 32))) (i64.const 8))))
+        \\    (block $rebuilt
+        \\      (loop $entries
+        \\        (br_if $rebuilt (i64.ge_u (local.get $entry_index)
+        \\          (i64.load (i32.add (local.get $map) (i32.const 8)))))
+        \\        (local.set $entry
+        \\          (i32.add (i32.load (local.get $map))
+        \\            (i32.wrap_i64 (i64.mul (local.get $entry_index) (i64.const 32)))))
+        \\        (local.set $slot
+        \\          (i64.and (i64.load (i32.add (local.get $entry) (i32.const 24)))
+        \\            (local.get $mask)))
+        \\        (block $placed
+        \\          (loop $probe
+        \\            (if (i64.lt_s (i64.load (i32.add (local.get $index)
+        \\                  (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8)))))
+        \\                (i64.const 0))
+        \\              (then
+        \\                (i64.store (i32.add (local.get $index)
+        \\                  (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8))))
+        \\                  (local.get $entry_index))
+        \\                (br $placed)))
+        \\            (local.set $slot (i64.and
+        \\              (i64.add (local.get $slot) (i64.const 1)) (local.get $mask)))
+        \\            (br $probe)))
+        \\        (local.set $entry_index
+        \\          (i64.add (local.get $entry_index) (i64.const 1)))
+        \\        (br $entries)))
+        \\  )
+        \\
+        \\  (func $__map_remove
+        \\      (param $allocator i32) (param $map i32) (param $key i32)
+        \\      (param $key_length i64) (param $out i32) (param $value_size i32)
+        \\      (result i32)
+        \\    (local $found i64) (local $entry i32) (local $length i64)
+        \\    (local.set $found
+        \\      (call $__map_find (local.get $map) (local.get $key) (local.get $key_length)))
+        \\    (if (i64.lt_s (local.get $found) (i64.const 0))
+        \\      (then (return (i32.const 0))))
+        \\    (local.set $entry (i32.add (i32.load (local.get $map))
+        \\      (i32.wrap_i64 (i64.mul (local.get $found) (i64.const 32)))))
+        \\    (memory.copy (local.get $out)
+        \\      (i32.load (i32.add (local.get $entry) (i32.const 16)))
+        \\      (local.get $value_size))
+        \\    (call $__allocator_free (local.get $allocator) (i32.load (local.get $entry))
+        \\      (i32.wrap_i64 (i64.load (i32.add (local.get $entry) (i32.const 8)))))
+        \\    (call $__allocator_free (local.get $allocator)
+        \\      (i32.load (i32.add (local.get $entry) (i32.const 16)))
+        \\      (local.get $value_size))
+        \\    (local.set $length (i64.sub
+        \\      (i64.load (i32.add (local.get $map) (i32.const 8))) (i64.const 1)))
+        \\    (memory.copy (local.get $entry) (i32.add (local.get $entry) (i32.const 32))
+        \\      (i32.wrap_i64 (i64.mul
+        \\        (i64.sub (local.get $length) (local.get $found)) (i64.const 32))))
+        \\    (i64.store (i32.add (local.get $map) (i32.const 8)) (local.get $length))
+        \\    (call $__map_rehash (local.get $map))
+        \\    (i32.const 1)
+        \\  )
+        \\
         \\  (func $__map_deinit
         \\      (param $allocator i32) (param $map i32) (param $value_size i32)
         \\    (local $index i64) (local $entry i32)
@@ -624,6 +692,7 @@ fn (self: &var Emitter) write_map_instr(
         MapNew => return self.write_map_new(module, node),
         MapInsert => return self.write_map_insert(module, node),
         MapGet => return self.write_map_get(module, node),
+        MapRemove => return self.write_map_remove(module, node),
         MapAt => return self.write_map_at(module, node),
         MapAtMut => return self.write_map_at(module, node),
         MapTakeValueAt => return self.write_map_take_value_at(module, node),
@@ -900,6 +969,108 @@ fn (self: &var Emitter) write_map_get(
         node.result.type_name,
         value_bytes
     ) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
+    try self.line("              (else");
+    if try self.write_tagged_result(module, node.result, 0) |failed| {
+        return move failed;
+    }
+    try self.line("              ))");
+    return null;
+}
+
+/// Lowers Map.remove(allocator, key), the Go `writeMapRemove`: the runtime
+/// moves the value into the optional's payload before it releases the entry,
+/// and the tag says whether the key was there.
+fn (self: &var Emitter) write_map_remove(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(1).type_name, "Allocator") {
+        return try self.fail0("wasm error: map.remove expects Map, Allocator, K -> ?V");
+    }
+    var key = string::new(self.allocator);
+    defer key.deinit(self.allocator);
+    var value = string::new(self.allocator);
+    defer value.deinit(self.allocator);
+    var key_layout = WasmLayout { size: 0, align: 1 };
+    var value_layout = WasmLayout { size: 0, align: 1 };
+    if try self.map_element_layouts(
+        module,
+        node,
+        &var key,
+        &var value,
+        &var key_layout,
+        &var value_layout
+    ) |failed| {
+        return move failed;
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let key_bytes = key.as_bytes();
+    let value_bytes = value.as_bytes();
+    var result_matches = false;
+    if typ::optional_elem(result_type) |want| {
+        result_matches = mem::equal_bytes(want, value_bytes);
+    }
+    if !result_matches {
+        return try self.fail0("wasm error: map.remove expects Map, Allocator, K -> ?V");
+    }
+    var payload_offset = 0;
+    let offset_outcome = try self.tagged_payload_offset(module, value_bytes, false);
+    match offset_outcome {
+        Error(failed) => return move failed,
+        Offset(found) => {
+            payload_offset = found;
+        },
+    }
+    let temp = try self.local_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for Map temporary");
+    var key_pointer = ir::empty_name();
+    var key_length = ir::empty_name();
+    if try self.write_map_key_parts(
+        module,
+        node.args.get_or_panic(2),
+        temp,
+        key_bytes,
+        key_layout,
+        &var key_pointer,
+        &var key_length
+    ) |failed| {
+        return move failed;
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for map.remove result");
+    let destination = try self.address_at(slot, payload_offset);
+    let allocator = try self.arg_expr(module, node, 1);
+    let map_value = try self.arg_expr(module, node, 0);
+    var call = try string::from_bytes(self.allocator, "(call $__map_remove ");
+    errdefer call.deinit(self.allocator);
+    try self.names.append_to(&var call, allocator);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, map_value);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, key_pointer);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, key_length);
+    try call.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var call, destination);
+    try call.append_bytes(self.allocator, " (i32.const ");
+    try fmt::append_i64(self.allocator, &var call, value_layout.size);
+    try call.append_bytes(self.allocator, "))");
+    let found = try self.names.intern_owned(move call);
+    let retained = ir::name_text(&module.names, node.result.name);
+    let result_bytes = retained.as_bytes();
+    let symbol = try self.symbol_name_of(result_bytes);
+    try self.line2(
+        "            (local.set %s %s)",
+        Arg::Str(symbol),
+        Arg::Str(found)
+    );
+    try self.line1("            (if (local.get %s)", Arg::Str(symbol));
+    try self.line("              (then");
+    if try self.write_tagged_result(module, node.result, 1) |failed| {
         return move failed;
     }
     try self.line("              )");

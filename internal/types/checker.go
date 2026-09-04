@@ -5336,6 +5336,37 @@ func (c *Checker) checkMapPrimitiveMethod(
 	return c.checkGenericMapPrimitiveMethod(keyType, valueType, name, args, env, unsafe)
 }
 
+// checkGenericMapInsert validates the insert primitive inside the std wrapper
+// body, where the key and value are type parameters.
+func (c *Checker) checkGenericMapInsert(
+	keyType string,
+	valueType Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(args) != 3 {
+		return "", errorf("type error: `Map.insert` expects 3 args, got %d", len(args))
+	}
+	if err := c.checkGrowAllocator("Map.insert", args[0], env, unsafe); err != nil {
+		return "", err
+	}
+	if got, err := c.checkExpr(args[1], env, unsafe); err != nil {
+		return "", err
+	} else if !sameType(got, Type(keyType)) {
+		return "", errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
+	}
+	got, err := c.checkContextualExpr(args[2], valueType, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(got, valueType) {
+		return "", errorf("type error: `Map.insert` expects %s value, got %s",
+			valueType, got)
+	}
+	return "std::mem::Error!void", nil
+}
+
 // checkGenericMapPrimitiveMethod validates Map primitives applied to generic
 // static arguments, which only a std wrapper body can spell.
 func (c *Checker) checkGenericMapPrimitiveMethod(
@@ -5348,26 +5379,18 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 ) (Type, error) {
 	switch name {
 	case "insert":
-		if len(args) != 3 {
-			return "", errorf("type error: `Map.insert` expects 3 args, got %d", len(args))
+		return c.checkGenericMapInsert(keyType, valueType, args, env, unsafe)
+	case "remove":
+		if len(args) != 2 {
+			return "", errorf("type error: `Map.remove` expects 2 args, got %d", len(args))
 		}
-		if err := c.checkGrowAllocator("Map.insert", args[0], env, unsafe); err != nil {
+		if err := c.checkGrowAllocator("Map.remove", args[0], env, unsafe); err != nil {
 			return "", err
 		}
-		if got, err := c.checkExpr(args[1], env, unsafe); err != nil {
-			return "", err
-		} else if !sameType(got, Type(keyType)) {
-			return "", errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
-		}
-		got, err := c.checkContextualExpr(args[2], valueType, env, unsafe)
-		if err != nil {
+		if err := c.checkMapPrimitiveKeyArg(name, keyType, args[1:], env, unsafe); err != nil {
 			return "", err
 		}
-		if !sameType(got, valueType) {
-			return "", errorf("type error: `Map.insert` expects %s value, got %s",
-				valueType, got)
-		}
-		return "std::mem::Error!void", nil
+		return Type("?" + string(valueType)), nil
 	case "get":
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
 			return "", err
@@ -7260,13 +7283,11 @@ func (c *Checker) checkMapMethod(
 	case "insert":
 		return c.checkMapInsert(keyType, valueType, args, env, unsafe)
 	case "get":
-		if err := c.checkMapKeyArg(keyType, name, args, env, unsafe); err != nil {
-			return "", err
-		}
-		if !isGenericParamType(valueType) && !c.isCopyType(valueType) {
-			return "", errorf("type error: `Map.get` requires copy value")
-		}
-		return Type("?" + string(valueType)), nil
+		return c.checkMapGet(keyType, valueType, args, env, unsafe)
+	case "remove":
+		// The value moves out, so an owner leaves whole; the entry's storage
+		// goes back to the allocator the map was built from (ADR-0132).
+		return c.checkMapRemove(keyType, valueType, args, env, unsafe)
 	case "at", "at_mut":
 		return c.checkMapAtCondition(keyType, valueType, name, args, env, unsafe)
 	case "key_at":
@@ -7292,6 +7313,46 @@ func (c *Checker) checkMapMethod(
 	default:
 		return "", errorf("type error: Map has no method `%s`", name)
 	}
+}
+
+// checkMapGet validates Map.get(key) -> ?V, which copies the value out and so
+// is the copy-value read.
+func (c *Checker) checkMapGet(
+	keyType Type,
+	valueType Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if err := c.checkMapKeyArg(keyType, "get", args, env, unsafe); err != nil {
+		return "", err
+	}
+	if !isGenericParamType(valueType) && !c.isCopyType(valueType) {
+		return "", errorf("type error: `Map.get` requires copy value")
+	}
+	return Type("?" + string(valueType)), nil
+}
+
+// checkMapRemove validates Map.remove(allocator, key) -> ?V.
+func (c *Checker) checkMapRemove(
+	keyType Type,
+	valueType Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(args) != 2 {
+		return "", errorf("type error: `Map.remove` expects 2 args, got %d", len(args))
+	}
+	if err := c.checkGrowAllocator("Map.remove", args[0], env, unsafe); err != nil {
+		return "", err
+	}
+	if got, err := c.checkContextualExpr(args[1], keyType, env, unsafe); err != nil {
+		return "", err
+	} else if !sameType(got, keyType) {
+		return "", errorf("type error: `Map.remove` expects %s key, got %s", keyType, got)
+	}
+	return Type("?" + string(valueType)), nil
 }
 
 // checkMapAtCondition types at/at_mut inside a capture condition and refuses

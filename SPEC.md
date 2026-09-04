@@ -3029,6 +3029,8 @@ receiver は owned local または `&var Array<T>` に限り、shared borrow 越
 `Array.remove(index)` も owner element を cleanup せず caller へ move し、残りの
 順序を保って gap を詰めるため owner element に使えます。`remove` と
 `truncate` は bounds を変更前に検査し、失敗時は collection を変更しません。
+`Map.remove(allocator, key)` も同じ規則で owner value を caller へ move し、
+missing key では `null` を返して map を変更しません。
 
 `String.deinit` / `Box.deinit` / `Map.deinit` / `Arena.deinit` は caller 側の binding を
 無効化する必要があるため、owned local receiver 限定です。値を保持している

@@ -515,6 +515,11 @@ fn (self: &var Checker) check_map_method(
     if mem::equal_bytes(name, "insert") {
         return self.check_map_insert(tree, scope, key, value, args, offset, out);
     }
+    if mem::equal_bytes(name, "remove") {
+        // The value moves out, so an owner leaves whole; the entry's storage
+        // goes back to the allocator the map was built from (ADR-0132).
+        return self.check_map_remove(tree, scope, key, value, args, offset, out);
+    }
     if mem::equal_bytes(name, "get") {
         if try self.check_map_key_arg(tree, scope, name, key, args, offset) |problem| {
             return move problem;
@@ -654,6 +659,61 @@ fn (self: &var Checker) check_map_insert(
     let void_type = try self.types.void_type();
     out.* = try self.intern_declared_error_type("std::mem::Error", void_type);
     return null;
+}
+
+// Validates Map.remove(allocator, key) -> ?V, the Go `checkMapRemove`.
+fn (self: &var Checker) check_map_remove(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    key: Type,
+    value: Type,
+    args: ast::ExpressionList,
+    offset: i64,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let count = args.len(tree) - offset;
+    if count != 2 {
+        return try self.receiver_arity_error("Map", "remove", 2, count);
+    }
+    if try self.check_map_grow_allocator(tree, scope, "remove", args, offset) |problem| {
+        return move problem;
+    }
+    var got_key = empty_type();
+    let argument = args.get_or_panic(tree, offset + 1);
+    if try self.check_contextual_expr(tree, scope, argument, key, &var got_key) |problem| {
+        return move problem;
+    }
+    if !same_type(got_key, key) {
+        return try self.map_expected_arg_error("remove", "key", key, got_key);
+    }
+    out.* = try self.intern_optional_type(value);
+    return null;
+}
+
+// Checks the argument at offset is the Allocator a Map call names, the Go
+// `checkGrowAllocator` with its "`Map.<method>` expects Allocator, got T".
+fn (self: &var Checker) check_map_grow_allocator(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    method: []u8,
+    args: ast::ExpressionList,
+    offset: i64
+) -> !?diagnostic::Diagnostic {
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, offset);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if self.types.is_text(got, "Allocator") {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "`Map.");
+    try message.append_bytes(self.allocator, method);
+    try message.append_bytes(self.allocator, "` expects Allocator, got ");
+    try self.append_checker_type(&var message, got);
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 fn (self: &var Checker) check_map_key_arg(

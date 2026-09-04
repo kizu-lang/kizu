@@ -65,8 +65,8 @@ source にある(原理 2)。copy value では loop が生成されず、runtime
 loop は key ではなく挿入位置で値を取る: key を読むと map を借用し、直後の
 take がそれを返してもらう必要がある。そのための
 `std::internal::builtin::map_take_value_at` は std 専用で、この loop だけが呼ぶ。
-公開 API に move-out を足していないのは、`remove` を要る場面がまだ無いためで、
-要ったときに additive に足せる。
+公開 API の move-out は `remove` で、`Array.remove` と同じく値を caller へ
+move し、entry の storage だけを allocator へ返す(順序は ADR-0088)。
 
 ## 影響
 
