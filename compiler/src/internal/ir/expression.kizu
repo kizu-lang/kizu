@@ -451,17 +451,112 @@ fn (self: &var Lowerer) lower_binary_expr(
         return self.lower_catch_expr(tree, binary, out);
     }
     var left = empty_value();
-    if try self.lower_expr(tree, binary.left, &var left) |failed| {
+    var right = empty_value();
+    if try self.lower_binary_operands(tree, binary, &var left, &var right) |failed| {
         return move failed;
     }
-    var right = empty_value();
-    if try self.lower_expr(tree, binary.right, &var right) |failed| {
-        return move failed;
+    if text_is(tree, binary.operator, "<<") or text_is(tree, binary.operator, ">>") {
+        try self.check_shift_amount(tree, binary, right);
     }
     let operator = try self.text_name(tree, binary.operator);
     let result_type = self.binary_result_type(operator, left.type_name);
     out.* = try self.emit_op2(Op::Binary, operator, result_type, left, right);
     return null;
+}
+
+/// Lowers both sides of an operator, the Go `lowerBinaryOperands`. An
+/// integer literal on one side takes the integer type of the other, as the
+/// checker typed it, so `flags & 0x0F` with `flags: u8` is a u8 operation.
+fn (self: &var Lowerer) lower_binary_operands(
+    tree: &var ast::Ast,
+    binary: ast::BinaryExpr,
+    left: &var Value,
+    right: &var Value
+) -> !?diagnostic::Diagnostic {
+    let left_literal = is_integer_literal(tree, binary.left);
+    let right_literal = is_integer_literal(tree, binary.right);
+    if right_literal and !left_literal {
+        if try self.lower_expr(tree, binary.left, left) |failed| {
+            return move failed;
+        }
+        return self.lower_literal_operand(tree, binary.right, left.type_name, right);
+    }
+    if left_literal and !right_literal {
+        if try self.lower_expr(tree, binary.right, right) |failed| {
+            return move failed;
+        }
+        return self.lower_literal_operand(tree, binary.left, right.type_name, left);
+    }
+    if try self.lower_expr(tree, binary.left, left) |failed| {
+        return move failed;
+    }
+    return self.lower_expr(tree, binary.right, right);
+}
+
+/// Lowers an integer literal in the type of the operand it meets, or as
+/// itself when that operand is not an integer, the Go `lowerLiteralOperand`.
+fn (self: &var Lowerer) lower_literal_operand(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    other: Name,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if self.is_integer_type_name(other) {
+        return self.lower_contextual_expr(tree, expression, other, out);
+    }
+    return self.lower_expr(tree, expression, out);
+}
+
+/// Reports whether expression is an integer literal, possibly negated: the
+/// shapes the checker types contextually, the Go `isIntegerLiteral`.
+fn is_integer_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    if ownership::int_expr(tree, expression) |_| {
+        return true;
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        if !text_is(tree, prefix.operator, "-") {
+            return false;
+        }
+        if ownership::int_expr(tree, prefix.right) |_| {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether type_name is one of the fixed-width integers, the Go
+/// `isIntegerTypeName`.
+fn (self: &Lowerer) is_integer_type_name(type_name: Name) -> bool {
+    return self.module.names.is(type_name, "i64") or self.narrows_integer_literal(type_name);
+}
+
+/// Reports whether type_name is an integer that can hold a negative value,
+/// the Go `isSignedIntegerTypeName`.
+fn (self: &Lowerer) is_signed_integer_type_name(type_name: Name) -> bool {
+    let retained = name_text(&self.module.names, type_name);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, "i8") or mem::equal_bytes(bytes, "i16") or
+        mem::equal_bytes(bytes, "i32") or mem::equal_bytes(bytes, "i64") or
+        mem::equal_bytes(bytes, "isize");
+}
+
+/// Traps a negative shift amount at run time, the Go `checkShiftAmount`.
+/// Only a signed amount can be negative, and a literal one was already
+/// refused by the checker; amounts at or past the width are answered by the
+/// backend with 0 or the sign (SPEC §6.9.2), so this is the one case with
+/// no value.
+fn (self: &var Lowerer) check_shift_amount(
+    tree: &var ast::Ast,
+    binary: ast::BinaryExpr,
+    amount: Value
+) -> !void {
+    if !self.is_signed_integer_type_name(amount.type_name) or
+        is_integer_literal(tree, binary.right) {
+        return;
+    }
+    let zero = try self.emit_const_text(amount.type_name, "0");
+    let kind = try self.module.names.intern("shift_negative");
+    return self.cond_fail0(binary.operator_span, "<", amount, zero, kind);
 }
 
 /// Lowers struct construction, the Go `lowerStructLiteralExpr`.
@@ -653,6 +748,24 @@ fn (self: &var Lowerer) lower_index_expr(
     try self.cond_fail3(index.span, ">", end, length, range, start, end, length);
     out.* = try self.emit3(Op::SliceSlice, self.common.bytes_type, target, start, end);
     return null;
+}
+
+/// Emits a comparison and aborts with the named failure when it holds, the
+/// Go `condFail` with no reported value.
+fn (self: &var Lowerer) cond_fail0(
+    span: ast::Span,
+    operator: []u8,
+    left: Value,
+    right: Value,
+    kind: Name
+) -> !void {
+    let bad = try self.emit_compare(operator, left, right);
+    var instr = self.module.blank_instr(empty_value(), Op::CondFail, empty_name(), kind);
+    errdefer instr.deinit(self.allocator);
+    instr.span = span;
+    try instr.args.append(self.allocator, bad);
+    let _ = try self.module.add_instr(self.allocator, self.block, move instr);
+    return;
 }
 
 /// Emits a comparison and aborts with the named failure when it holds, the

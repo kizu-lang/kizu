@@ -150,8 +150,10 @@ func isUnsignedIntegerType(typ string) bool {
 	return strings.HasPrefix(typ, "u") || typ == "usize"
 }
 
-// llvmBinaryOp maps a Kizu binary operator to an LLVM integer instruction.
-func llvmBinaryOp(op string) string {
+// llvmBinaryOp maps a Kizu binary operator on typ to an LLVM integer
+// instruction. Division and remainder read the sign of the type; the rest
+// are the same for both.
+func llvmBinaryOp(op string, typ string) string {
 	switch op {
 	case "+":
 		return "add"
@@ -160,9 +162,21 @@ func llvmBinaryOp(op string) string {
 	case "*":
 		return "mul"
 	case "/":
+		if isUnsignedIntegerType(typ) {
+			return "udiv"
+		}
 		return "sdiv"
 	case "%":
+		if isUnsignedIntegerType(typ) {
+			return "urem"
+		}
 		return "srem"
+	case "&":
+		return "and"
+	case "|":
+		return "or"
+	case "^":
+		return "xor"
 	default:
 		return "add"
 	}

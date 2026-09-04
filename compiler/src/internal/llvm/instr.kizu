@@ -106,13 +106,65 @@ fn (self: &var Emitter) write_binary(module: &ir::Module, node: &ir::InstrNode) 
         try self.set_value(module, node.result, name);
         return null;
     }
+    if module.names.is(node.operand, "<<") or module.names.is(node.operand, ">>") {
+        return self.write_shift(module, node, left, right);
+    }
     let name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     try self.line5(
         "  %s = %s %s %s, %s",
-        Arg::Str(name), Arg::Lit(llvm_binary_op(&module.names, node.operand)), Arg::Str(result_type),
-        Arg::Str(left.operand), Arg::Str(right.operand)
+        Arg::Str(name), Arg::Lit(llvm_binary_op(&module.names, node.operand, node.result.type_name)),
+        Arg::Str(result_type), Arg::Str(left.operand), Arg::Str(right.operand)
     );
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Writes `<<` and `>>` with the width rule of SPEC §6.9.2, the Go
+/// `writeShift`: an amount at or past the width leaves 0, or the sign for a
+/// signed `>>`. LLVM makes such a shift poison, so the amount is clamped
+/// before the shift and the result chosen after it; both are selects, not
+/// branches. A negative amount never reaches here: the IR traps on it first.
+fn (self: &var Emitter) write_shift(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    left: ValueInfo,
+    right: ValueInfo
+) -> !?diagnostic::Diagnostic {
+    let type_retained = ir::name_text(&module.names, node.result.type_name);
+    let type_bytes = type_retained.as_bytes();
+    let bits = integer_bit_width(type_bytes) orelse
+        return try self.fail_name1(module, "llvm error: shift expects an integer, got %s", node.result.type_name);
+    let llvm = try self.llvm_type_of(module, node.result.type_name);
+    let name = try self.local_name(module, node.result.name);
+    let in_range = try self.suffixed(name, ".shift.in");
+    let amount = try self.suffixed(name, ".shift.amount");
+    let raw = try self.suffixed(name, ".shift.raw");
+    try self.line4("  %s = icmp ult %s %s, %s",
+        Arg::Str(in_range), Arg::Str(llvm), Arg::Str(right.operand), Arg::Int(bits));
+    try self.line5("  %s = select i1 %s, %s %s, %s 0",
+        Arg::Str(amount), Arg::Str(in_range), Arg::Str(llvm), Arg::Str(right.operand), Arg::Str(llvm));
+    if module.names.is(node.operand, "<<") {
+        try self.line4("  %s = shl %s %s, %s",
+            Arg::Str(raw), Arg::Str(llvm), Arg::Str(left.operand), Arg::Str(amount));
+        try self.line5("  %s = select i1 %s, %s %s, %s 0",
+            Arg::Str(name), Arg::Str(in_range), Arg::Str(llvm), Arg::Str(raw), Arg::Str(llvm));
+    } else {
+        if is_unsigned_integer_type(type_bytes) {
+            try self.line4("  %s = lshr %s %s, %s",
+                Arg::Str(raw), Arg::Str(llvm), Arg::Str(left.operand), Arg::Str(amount));
+            try self.line5("  %s = select i1 %s, %s %s, %s 0",
+                Arg::Str(name), Arg::Str(in_range), Arg::Str(llvm), Arg::Str(raw), Arg::Str(llvm));
+        } else {
+            let sign = try self.suffixed(name, ".shift.sign");
+            try self.line4("  %s = ashr %s %s, %s",
+                Arg::Str(sign), Arg::Str(llvm), Arg::Str(left.operand), Arg::Int(bits - 1));
+            try self.line4("  %s = ashr %s %s, %s",
+                Arg::Str(raw), Arg::Str(llvm), Arg::Str(left.operand), Arg::Str(amount));
+            try self.line6("  %s = select i1 %s, %s %s, %s %s",
+                Arg::Str(name), Arg::Str(in_range), Arg::Str(llvm), Arg::Str(raw), Arg::Str(llvm), Arg::Str(sign));
+        }
+    }
     try self.set_value(module, node.result, name);
     return null;
 }
@@ -134,7 +186,12 @@ fn (self: &var Emitter) write_unary(module: &ir::Module, node: &ir::InstrNode) -
             let result_type = try self.llvm_type_of(module, node.result.type_name);
             try self.line3("  %s = sub %s 0, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
         } else {
-            return try self.fail_name1(module, "llvm error: unsupported unary `%s`", node.operand);
+            if module.names.is(node.operand, "~") {
+                let result_type = try self.llvm_type_of(module, node.result.type_name);
+                try self.line3("  %s = xor %s %s, -1", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+            } else {
+                return try self.fail_name1(module, "llvm error: unsupported unary `%s`", node.operand);
+            }
         }
     }
     try self.set_value(module, node.result, name);

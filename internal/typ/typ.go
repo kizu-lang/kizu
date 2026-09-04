@@ -590,3 +590,20 @@ func IsMapKey(text string) bool {
 func MapKeyTypeNames() string {
 	return "[]u8, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize"
 }
+
+// ShiftInt64 shifts an i64 by a non-negative amount with the width rule of
+// SPEC §6.9.2: an amount at or past 64 leaves 0 from `<<` and the sign from
+// `>>`. Compile-time evaluation and IR constant folding both compute from
+// this one definition; a backend computes the same thing at run time.
+func ShiftInt64(op string, value int64, amount int64) int64 {
+	if amount >= 64 {
+		if op == "<<" {
+			return 0
+		}
+		amount = 63
+	}
+	if op == "<<" {
+		return value << uint(amount)
+	}
+	return value >> uint(amount)
+}

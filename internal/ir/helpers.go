@@ -7,6 +7,22 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
+// isIntegerTypeName reports whether typ is one of the fixed-width integers.
+func isIntegerTypeName(typ string) bool {
+	return typ == "i64" || narrowsIntegerLiteral(typ)
+}
+
+// isSignedIntegerTypeName reports whether typ is an integer that can hold a
+// negative value.
+func isSignedIntegerTypeName(typ string) bool {
+	switch typ {
+	case "i8", "i16", "i32", "i64", "isize":
+		return true
+	default:
+		return false
+	}
+}
+
 // newBlock appends a basic block to the current function.
 func (l *lowerer) newBlock(name string) *Block {
 	block := &Block{Name: name}

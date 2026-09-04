@@ -33,9 +33,10 @@ fn is_integer_type(names: &ir::NameTable, typ: ir::Name) -> bool {
     return names.is(typ, "usize") or names.is(typ, "isize");
 }
 
-/// Maps a Kizu binary operator to a WebAssembly integer operation, the Go
-/// `wasmBinaryOp`.
-fn wasm_binary_op(names: &ir::NameTable, op: ir::Name) -> []u8 {
+/// Maps a Kizu binary operator on one type to a WebAssembly integer
+/// operation, the Go `wasmBinaryOp`. Division and remainder read the sign
+/// of the type.
+fn wasm_binary_op(names: &ir::NameTable, op: ir::Name, typ: ir::Name) -> []u8 {
     if names.is(op, "-") {
         return "i64.sub";
     }
@@ -43,12 +44,100 @@ fn wasm_binary_op(names: &ir::NameTable, op: ir::Name) -> []u8 {
         return "i64.mul";
     }
     if names.is(op, "/") {
+        if is_unsigned_integer_type(names, typ) {
+            return "i64.div_u";
+        }
         return "i64.div_s";
     }
     if names.is(op, "%") {
+        if is_unsigned_integer_type(names, typ) {
+            return "i64.rem_u";
+        }
         return "i64.rem_s";
     }
+    if names.is(op, "&") {
+        return "i64.and";
+    }
+    if names.is(op, "|") {
+        return "i64.or";
+    }
+    if names.is(op, "^") {
+        return "i64.xor";
+    }
     return "i64.add";
+}
+
+/// Reports whether typ is one of the unsigned widths, the Go
+/// `isUnsignedIntegerType`.
+fn is_unsigned_integer_type(names: &ir::NameTable, typ: ir::Name) -> bool {
+    let retained = ir::name_text(names, typ);
+    let bytes = retained.as_bytes();
+    return mem::starts_with(bytes, "u");
+}
+
+/// Opens the wrapper that narrows an arithmetic result to the width of typ,
+/// the Go `narrowResult`: every integer lives in an i64 local, so an
+/// unsigned type keeps its low bits, a signed one is sign-extended from its
+/// top bit, and a 64-bit type gets no wrapper. This is what makes `+ - * <<`
+/// wrap as SPEC §6.9.2 says. `narrow_suffix` closes it.
+fn narrow_prefix(names: &ir::NameTable, typ: ir::Name) -> []u8 {
+    if names.is(typ, "u8") or names.is(typ, "u16") or names.is(typ, "u32") {
+        return "(i64.and ";
+    }
+    if names.is(typ, "i8") {
+        return "(i64.extend8_s ";
+    }
+    if names.is(typ, "i16") {
+        return "(i64.extend16_s ";
+    }
+    if names.is(typ, "i32") {
+        return "(i64.extend32_s ";
+    }
+    return "";
+}
+
+fn narrow_suffix(names: &ir::NameTable, typ: ir::Name) -> []u8 {
+    if names.is(typ, "u8") {
+        return " (i64.const 255))";
+    }
+    if names.is(typ, "u16") {
+        return " (i64.const 65535))";
+    }
+    if names.is(typ, "u32") {
+        return " (i64.const 4294967295))";
+    }
+    if names.is(typ, "i8") or names.is(typ, "i16") or names.is(typ, "i32") {
+        return ")";
+    }
+    return "";
+}
+
+/// Reports whether op can leave the width of its type, so that its result
+/// needs narrowing, the Go `wrapsResult`. Comparisons, `& | ^`, `/ %`, and
+/// `>>` cannot.
+fn wraps_result(names: &ir::NameTable, op: ir::Name) -> bool {
+    return names.is(op, "+") or names.is(op, "-") or names.is(op, "*") or
+        names.is(op, "<<");
+}
+
+/// Reports the width a Kizu integer type shifts within, the Go
+/// `integerBitWidth`. The value itself is held in an i64 local; the width
+/// only bounds the amount.
+fn integer_bit_width(names: &ir::NameTable, typ: ir::Name) -> ?i64 {
+    if names.is(typ, "i8") or names.is(typ, "u8") {
+        return 8;
+    }
+    if names.is(typ, "i16") or names.is(typ, "u16") {
+        return 16;
+    }
+    if names.is(typ, "i32") or names.is(typ, "u32") {
+        return 32;
+    }
+    if names.is(typ, "i64") or names.is(typ, "u64") or
+        names.is(typ, "usize") or names.is(typ, "isize") {
+        return 64;
+    }
+    return null;
 }
 
 /// Maps a Kizu comparison to a WebAssembly integer operation, the Go

@@ -831,9 +831,16 @@ or
 and
 == !=
 < <= > >=
+|
+^
+&
+<< >>
++ -
+* / %
 ```
 
-`orelse` と `catch`(§11.1)は同じ段です。
+`orelse` と `catch`(§11.1)は同じ段です。bit 演算(§6.9.2)は比較より強く、
+算術より弱く結びつくので、`flags & MASK == 0` は `(flags & MASK) == 0` です。
 
 `opt orelse default` は optional の値、無ければ default を返します。
 左辺は `?T`、右辺と結果は `T` です。右辺は左辺が null のときだけ評価
@@ -854,6 +861,37 @@ let at = find(text, b) orelse return -1;
 if age >= 20 and age < 130 or admin {
     print("ok");
 }
+```
+
+### 6.9.2 整数演算
+
+整数の二項演算子は `+ - * / %` と bit 演算の `& | ^ << >>`、単項は `-` と
+bit 反転の `~` です。両辺は同じ整数型でなければならず、一方が整数 literal なら
+もう一方の型として扱います(§7.2)。bit 演算の被演算子は整数だけで、`bool` には
+`and` / `or` / `!` を使います。
+
+**`+ - *` と `<<` は型の bit 幅で wrap します。** 結果は数学的な値を 2^N で
+割った余りを、その型の範囲に読み替えたものです。`i64` の最大値に 1 を足すと
+最小値になり、`u8` の 255 に 1 を足すと 0 になります。overflow を未定義には
+しないので、compiler は「overflow しない」前提の最適化をしません。hash や乱数の
+ように wrap する乗算そのものが計算である code は、そのまま書けます。
+
+`/` と `%` は 0 に向かって切り捨て、`%` の符号は左辺に従います。0 で割った
+結果と、符号付きの最小値を `-1` で割った結果は定義しません。
+
+shift の右辺は左辺と同じ型で、0 以上でなければなりません。
+
+* 右辺が bit 幅以上なら、`<<` と符号なしの `>>` は 0、符号付きの `>>` は
+  符号(全 bit が 0 か 1)を返します。`(1 << n) - 1` は n が 64 でも全 bit 1 の
+  mask です。
+* 右辺が負の literal なら compile error、負の値なら runtime error
+  (`negative shift amount`)です。
+
+```kizu
+let low = flags & 0x0F;          // flags: u8 なら 0x0F も u8
+let bits = 1 << 10 | 1 << 3;     // 1032
+let sign = -16 >> 2;             // -4
+let none = 1 << 64;              // 0
 ```
 
 ### 6.10 while
@@ -1012,6 +1050,10 @@ void
 
 `i64` は整数 literal のデフォルト型です。
 Kizu は `int` のような幅が曖昧な整数型を導入しません。
+整数 literal は 10 進、`0x` に続く 16 進、`0b` に続く 2 進で綴り、桁の間に `_` を
+置けます(`1_000_000`、`0xFF_FF`、`0b1010`)。先頭の `0` に意味はなく、8 進は
+ありません。値は符号付き 64 bit に収まらなければなりません。`-1` の `-` は
+literal の一部ではなく単項演算子です。
 
 文字列 literal の型は `[]u8` です。
 `string` primitive は導入しません。
@@ -1037,7 +1079,8 @@ Kizu は `Unit` という別名を導入しません。
 
 低レベル型として、次の明示幅整数、浮動小数点、raw pointer 型名を予約します。
 主に checker / `unsafe` / extern declaration のために扱います。
-完全な fixed-width arithmetic、float literal、overflow semantics はまだ扱いません。
+整数の演算と overflow の意味は §6.9.2 にあります。float literal と float の
+runtime arithmetic はまだ扱いません。
 
 ```text
 i8
@@ -1272,7 +1315,8 @@ Kizu は暗黙の numeric promotion をしません。
 ただし整数 literal だけは、期待型が明確な文脈では、その整数型として扱えます。
 
 文脈型が効くのは、関数引数、戻り値、既に型が決まっている代入先、struct literal field、
-union payload、標準ライブラリの typed container API など、期待する整数型が一意に決まる場所です。
+union payload、標準ライブラリの typed container API、二項演算子のもう一方の
+被演算子(§6.9.2)など、期待する整数型が一意に決まる場所です。
 literal の値は対象型の範囲に収まらなければなりません。
 範囲外の literal は type error です。
 `let x = 1;` のように期待型がない局所 binding では、`x` は従来どおり `i64` です。

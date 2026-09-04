@@ -3533,6 +3533,11 @@ func (c *Checker) checkPrefixExpr(
 			return "", errorf("type error: unary ! expects bool, got %s", right)
 		}
 		return typeBool, nil
+	case "~":
+		if !integerTypes[right] {
+			return "", errorf("type error: unary ~ expects integer, got %s", right)
+		}
+		return right, nil
 	default:
 		return "", errorf("type error: unsupported unary `%s`", expr.Operator)
 	}
@@ -3587,22 +3592,40 @@ func (c *Checker) checkBinaryExpr(
 	if expr.Operator == "and" || expr.Operator == "or" {
 		return checkLogical(expr.Operator, left, right, expr.OperatorSpan)
 	}
+	left, right, err = c.coerceBinaryLiteral(expr, left, right)
+	if err != nil {
+		return "", err
+	}
 	if expr.Operator == "==" || expr.Operator == "!=" {
 		return checkEquality(expr.Operator, left, right, expr.OperatorSpan)
 	}
-	if left != right {
-		return "", operatorTypeMismatch(expr.Operator, left, right, expr.OperatorSpan)
-	}
-	if !numericTypes[left] {
-		return "", operatorOperandKindError(expr.Operator, "numeric", left, right, expr.OperatorSpan)
-	}
-	if expr.Operator == "%" && !integerTypes[left] {
-		return "", operatorOperandKindError(expr.Operator, "integer", left, right, expr.OperatorSpan)
+	if err := checkArithmeticOperands(expr, left, right); err != nil {
+		return "", err
 	}
 	if isComparison(expr.Operator) {
 		return typeBool, nil
 	}
 	return left, nil
+}
+
+// checkArithmeticOperands validates the operands of a comparison, an
+// arithmetic operator, or a bit operator: the same numeric type on both
+// sides, an integer one where the operator works on bits, and a shift
+// amount that is not a negative literal.
+func checkArithmeticOperands(expr *ast.BinaryExpr, left Type, right Type) error {
+	if left != right {
+		return operatorTypeMismatch(expr.Operator, left, right, expr.OperatorSpan)
+	}
+	if !numericTypes[left] {
+		return operatorOperandKindError(expr.Operator, "numeric", left, right, expr.OperatorSpan)
+	}
+	if (expr.Operator == "%" || isBitwise(expr.Operator)) && !integerTypes[left] {
+		return operatorOperandKindError(expr.Operator, "integer", left, right, expr.OperatorSpan)
+	}
+	if isShift(expr.Operator) {
+		return checkShiftLiteral(expr)
+	}
+	return nil
 }
 
 // checkLogical validates boolean logical operands.
@@ -3671,6 +3694,61 @@ func expressionSpan(expr ast.Expression) ast.Span {
 // isComparison reports whether op returns bool for numeric operands.
 func isComparison(op string) bool {
 	return op == "<" || op == "<=" || op == ">" || op == ">="
+}
+
+// isBitwise reports whether op works on the bits of an integer.
+func isBitwise(op string) bool {
+	return op == "&" || op == "|" || op == "^" || isShift(op)
+}
+
+// isShift reports whether op is `<<` or `>>`.
+func isShift(op string) bool {
+	return op == "<<" || op == ">>"
+}
+
+// coerceBinaryLiteral lets an integer literal on one side of an operator take
+// the integer type of the other side, the way a literal argument takes its
+// parameter's type (SPEC §7.2): `flags & 0x0F` with `flags: u8` needs no cast.
+// The literal must still fit that type.
+func (c *Checker) coerceBinaryLiteral(
+	expr *ast.BinaryExpr,
+	left Type,
+	right Type,
+) (Type, Type, error) {
+	if left == right {
+		return left, right, nil
+	}
+	if _, ok := integerLiteralValue(expr.Right); ok && right == typeI64 && integerTypes[left] {
+		coerced, err := c.coerceContextualIntegerLiteral(expr.Right, left, right)
+		return left, coerced, err
+	}
+	if _, ok := integerLiteralValue(expr.Left); ok && left == typeI64 && integerTypes[right] {
+		coerced, err := c.coerceContextualIntegerLiteral(expr.Left, right, left)
+		return coerced, right, err
+	}
+	return left, right, nil
+}
+
+// checkShiftLiteral refuses a shift by a negative literal here, where the
+// source shows the sign, instead of at run time.
+func checkShiftLiteral(expr *ast.BinaryExpr) error {
+	value, ok := integerLiteralValue(expr.Right)
+	if !ok || value >= 0 {
+		return nil
+	}
+	return errorAt(expr.OperatorSpan,
+		"type error: shift amount `%d` is negative\n"+
+			"note: `%s` shifts by the right operand, which must be 0 or more\n"+
+			"help: shift the other way with `%s`",
+		value, expr.Operator, oppositeShift(expr.Operator))
+}
+
+// oppositeShift names the shift that goes the other way.
+func oppositeShift(op string) string {
+	if op == "<<" {
+		return ">>"
+	}
+	return "<<"
 }
 
 // checkCastExpr validates explicit low-level casts.

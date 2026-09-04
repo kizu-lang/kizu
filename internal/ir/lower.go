@@ -1814,16 +1814,77 @@ func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 	if expr.Operator == "catch" {
 		return l.lowerCatchExpr(expr)
 	}
-	left, err := l.lowerExpr(expr.Left)
+	left, right, err := l.lowerBinaryOperands(expr)
 	if err != nil {
 		return Value{}, err
 	}
-	right, err := l.lowerExpr(expr.Right)
-	if err != nil {
-		return Value{}, err
+	if expr.Operator == "<<" || expr.Operator == ">>" {
+		l.checkShiftAmount(expr, right)
 	}
 	resultType := binaryResultType(expr.Operator, left.Type)
 	return l.emit("binary."+expr.Operator, resultType, []Value{left, right}, ""), nil
+}
+
+// lowerBinaryOperands lowers both sides of an operator. An integer literal on
+// one side takes the integer type of the other, as the checker typed it, so
+// `flags & 0x0F` with `flags: u8` is a u8 operation.
+func (l *lowerer) lowerBinaryOperands(expr *ast.BinaryExpr) (Value, Value, error) {
+	if isIntegerLiteral(expr.Right) && !isIntegerLiteral(expr.Left) {
+		left, err := l.lowerExpr(expr.Left)
+		if err != nil {
+			return Value{}, Value{}, err
+		}
+		right, err := l.lowerLiteralOperand(expr.Right, left.Type)
+		return left, right, err
+	}
+	if isIntegerLiteral(expr.Left) && !isIntegerLiteral(expr.Right) {
+		right, err := l.lowerExpr(expr.Right)
+		if err != nil {
+			return Value{}, Value{}, err
+		}
+		left, err := l.lowerLiteralOperand(expr.Left, right.Type)
+		return left, right, err
+	}
+	left, err := l.lowerExpr(expr.Left)
+	if err != nil {
+		return Value{}, Value{}, err
+	}
+	right, err := l.lowerExpr(expr.Right)
+	return left, right, err
+}
+
+// lowerLiteralOperand lowers an integer literal in the type of the operand
+// it meets, or as itself when that operand is not an integer.
+func (l *lowerer) lowerLiteralOperand(expr ast.Expression, other string) (Value, error) {
+	if isIntegerTypeName(other) {
+		return l.lowerContextualExpr(expr, other)
+	}
+	return l.lowerExpr(expr)
+}
+
+// isIntegerLiteral reports whether expr is an integer literal, possibly
+// negated: the shapes the checker types contextually.
+func isIntegerLiteral(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.IntExpr:
+		return true
+	case *ast.PrefixExpr:
+		_, ok := e.Right.(*ast.IntExpr)
+		return ok && e.Operator == "-"
+	}
+	return false
+}
+
+// checkShiftAmount traps a negative shift amount at run time. Only a signed
+// amount can be negative, and a literal one was already refused by the
+// checker; amounts at or past the width are answered by the backend with 0
+// or the sign (SPEC §6.9.2), so this is the one case with no value.
+func (l *lowerer) checkShiftAmount(expr *ast.BinaryExpr, amount Value) {
+	if !isSignedIntegerTypeName(amount.Type) || isIntegerLiteral(expr.Right) {
+		return
+	}
+	zero := l.emitConst(amount.Type, "0")
+	l.condFail(expr.OperatorSpan, "binary.<", amount, zero, "shift_negative")
 }
 
 // lowerCallExpr lowers builtin, user, and method calls.

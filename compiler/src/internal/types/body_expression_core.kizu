@@ -184,6 +184,13 @@ fn (self: &var Checker) check_prefix_expr(
         out.* = try self.types.bool_type();
         return null;
     }
+    if mem::equal_bytes(operator, "~") {
+        if !self.checker_integer_type(right) {
+            return try self.unary_type_error(operator, "integer", right);
+        }
+        out.* = right;
+        return null;
+    }
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
     try message.append_bytes(self.allocator, "unsupported unary `");
@@ -256,6 +263,9 @@ fn (self: &var Checker) check_binary_expr(
         mem::equal_bytes(operator, "or") {
         return self.check_logical(operator, left, right, expression.operator_span, out);
     }
+    if try self.coerce_binary_literal(tree, expression, &var left, &var right) |problem| {
+        return move problem;
+    }
     if mem::equal_bytes(operator, "==") or
         mem::equal_bytes(operator, "!=") {
         return self.check_equality(operator, left, right, expression.operator_span, out);
@@ -268,11 +278,16 @@ fn (self: &var Checker) check_binary_expr(
             operator, "numeric", left, right, expression.operator_span
         );
     }
-    if mem::equal_bytes(operator, "%") and
+    if (mem::equal_bytes(operator, "%") or is_bitwise(operator)) and
         !self.checker_integer_type(left) {
         return try self.operator_operand_kind_error(
             operator, "integer", left, right, expression.operator_span
         );
+    }
+    if is_shift(operator) {
+        if try self.check_shift_literal(tree, expression, operator) |problem| {
+            return move problem;
+        }
     }
     if is_comparison(operator) {
         out.* = try self.types.bool_type();

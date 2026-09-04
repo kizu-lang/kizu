@@ -4,6 +4,7 @@ import compiler::internal::stdmeta;
 import compiler::internal::stdtarget;
 import compiler::internal::typ;
 import std::array;
+import std::fmt;
 import std::mem;
 import std::string;
 
@@ -170,6 +171,17 @@ fn (self: &var Checker) eval_comptime_prefix(
             },
             _ => {
                 return try self.comptime_error("unary - expects integer");
+            },
+        }
+    }
+    if mem::equal_bytes(operator, "~") {
+        match right {
+            Integer(integer) => {
+                out.* = ComptimeValue::Integer(~integer);
+                return null;
+            },
+            _ => {
+                return try self.comptime_error("unary ~ expects integer");
             },
         }
     }
@@ -347,6 +359,30 @@ fn (self: &Checker) eval_comptime_int_binary(
             return try self.comptime_error("modulo by zero");
         }
         out.* = ComptimeValue::Integer(left % right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "&") {
+        out.* = ComptimeValue::Integer(left & right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "|") {
+        out.* = ComptimeValue::Integer(left | right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "^") {
+        out.* = ComptimeValue::Integer(left ^ right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "<<") or mem::equal_bytes(operator, ">>") {
+        if right < 0 {
+            var negative = string::new(self.allocator);
+            errdefer negative.deinit(self.allocator);
+            try negative.append_bytes(self.allocator, "shift amount `");
+            try fmt::append_i64(self.allocator, &var negative, right);
+            try negative.append_bytes(self.allocator, "` is negative");
+            return try self.comptime_message(move negative);
+        }
+        out.* = ComptimeValue::Integer(typ::shift_i64(operator, left, right));
         return null;
     }
     if mem::equal_bytes(operator, "<") {

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -14,9 +15,13 @@ import (
 
 // Parser consumes tokens and builds a Kizu AST.
 type Parser struct {
-	l      *lexer.Lexer
-	cur    token.Token
-	peek   token.Token
+	l    *lexer.Lexer
+	cur  token.Token
+	peek token.Token
+	// ahead holds tokens scanned past peek. Two places need to see further
+	// than one token: `<<` and `>>` are two adjacent tokens, and a `|` is a
+	// payload capture only when `|name| {` follows it.
+	ahead  []token.Token
 	errors []Diagnostic
 	// safety is the `// SAFETY:` text of the statement being parsed. It is the
 	// justification every `unsafe` marker in that statement is stamped with.
@@ -1298,6 +1303,10 @@ const (
 	logicalAnd
 	equals
 	lessGreater
+	bitOr
+	bitXor
+	bitAnd
+	shift
 	sum
 	product
 	prefix
@@ -1316,6 +1325,9 @@ var precedences = map[token.Type]int{
 	token.LTE:         lessGreater,
 	token.GT:          lessGreater,
 	token.GTE:         lessGreater,
+	token.Pipe:        bitOr,
+	token.Caret:       bitXor,
+	token.Amp:         bitAnd,
 	token.Plus:        sum,
 	token.Minus:       sum,
 	token.Asterisk:    product,
@@ -1335,37 +1347,11 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 	for p.peek.Type != token.Semicolon &&
 		(precedence < p.peekPrecedence() ||
 			(p.peek.Type == token.LT && p.shouldParseTypeApply(left))) {
-		switch p.peek.Type {
-		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
-			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
-			p.nextToken()
-			left = p.parseBinaryExpr(left)
-		case token.Orelse, token.Catch:
-			p.nextToken()
-			left = p.parseGuardableExpr(left)
-		case token.LParen:
-			p.nextToken()
-			left = p.parseCallExpr(left)
-		case token.LBracket:
-			p.nextToken()
-			left = p.parseIndexExpr(left)
-		case token.LT:
-			if !p.shouldParseTypeApply(left) {
-				p.nextToken()
-				left = p.parseBinaryExpr(left)
-				continue
-			}
-			p.nextToken()
-			left = p.parseTypeApplyExpr(left)
-		case token.Dot:
-			p.nextToken()
-			left = p.parseFieldExpr(left, false)
-		case token.DoubleColon:
-			p.nextToken()
-			left = p.parseFieldExpr(left, true)
-		default:
+		next, ok := p.parseInfix(left)
+		if !ok {
 			return left
 		}
+		left = next
 	}
 	if p.peek.Type == token.LBrace {
 		if typeName, ok := structLiteralTypeName(left); ok {
@@ -1373,6 +1359,45 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 		}
 	}
 	return left
+}
+
+// parseInfix parses the operator at peek applied to left, reporting false
+// when peek is not an infix or postfix operator.
+func (p *Parser) parseInfix(left ast.Expression) (ast.Expression, bool) {
+	if p.shiftPair() {
+		return p.parseShiftExpr(left), true
+	}
+	switch p.peek.Type {
+	case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
+		token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE,
+		token.Pipe, token.Caret, token.Amp:
+		p.nextToken()
+		return p.parseBinaryExpr(left), true
+	case token.Orelse, token.Catch:
+		p.nextToken()
+		return p.parseGuardableExpr(left), true
+	case token.LParen:
+		p.nextToken()
+		return p.parseCallExpr(left), true
+	case token.LBracket:
+		p.nextToken()
+		return p.parseIndexExpr(left), true
+	case token.LT:
+		if !p.shouldParseTypeApply(left) {
+			p.nextToken()
+			return p.parseBinaryExpr(left), true
+		}
+		p.nextToken()
+		return p.parseTypeApplyExpr(left), true
+	case token.Dot:
+		p.nextToken()
+		return p.parseFieldExpr(left, false), true
+	case token.DoubleColon:
+		p.nextToken()
+		return p.parseFieldExpr(left, true), true
+	default:
+		return left, false
+	}
 }
 
 // parseIndexExpr parses checked index and one-dimensional slice expressions.
@@ -1425,7 +1450,7 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	case token.Ident:
 		return p.parseIdentPrefixExpression()
 	case token.Int:
-		return &ast.IntExpr{Value: p.cur.Literal}
+		return p.parseIntLiteral()
 	case token.String:
 		return &ast.StringExpr{Value: p.cur.Literal}
 	case token.True, token.False, token.Null:
@@ -1444,7 +1469,7 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 			p.nextToken()
 		}
 		return &ast.PrefixExpr{Operator: op, Right: p.parseExpression(prefix)}
-	case token.Bang, token.Minus:
+	case token.Bang, token.Minus, token.Tilde:
 		op := p.cur.Literal
 		p.nextToken()
 		return &ast.PrefixExpr{Operator: op, Right: p.parseExpression(prefix)}
@@ -1936,6 +1961,87 @@ func (p *Parser) parseBinaryExpr(left ast.Expression) ast.Expression {
 	return expr
 }
 
+// parseShiftExpr parses `<<` or `>>` from the two adjacent tokens at peek.
+func (p *Parser) parseShiftExpr(left ast.Expression) ast.Expression {
+	p.nextToken()
+	expr := &ast.BinaryExpr{
+		Left:         left,
+		Operator:     p.cur.Literal + p.cur.Literal,
+		OperatorSpan: tokenSpan(p.cur),
+	}
+	expr.OperatorSpan.End.Column++
+	p.nextToken()
+	p.nextToken()
+	expr.Right = p.parseExpression(shift)
+	return expr
+}
+
+// parseIntLiteral turns the spelling of an integer literal into its decimal
+// value, so that `0xFF`, `0b1111_1111`, and `255` reach the checker as one
+// number. A spelling that is not a number, or does not fit 64 bits, is a
+// parse error.
+func (p *Parser) parseIntLiteral() ast.Expression {
+	value, ok := integerLiteralValue(p.cur.Literal)
+	if !ok {
+		p.errorf("invalid integer literal `%s`", p.cur.Literal)
+		return &ast.IntExpr{Value: "0"}
+	}
+	return &ast.IntExpr{Value: strconv.FormatInt(value, 10)}
+}
+
+// integerLiteralValue reads a literal: decimal digits, or `0x` / `0b` and
+// digits of that base, with `_` allowed between two digits. There is no
+// octal form, so `017` is seventeen. The value must fit a signed 64-bit
+// integer; a `-` in front is the unary operator, not part of the literal.
+func integerLiteralValue(text string) (int64, bool) {
+	base := int64(10)
+	digits := text
+	if strings.HasPrefix(text, "0x") {
+		base, digits = 16, text[2:]
+	} else if strings.HasPrefix(text, "0b") {
+		base, digits = 2, text[2:]
+	}
+	if digits == "" {
+		return 0, false
+	}
+	var value int64
+	previousDigit := false
+	for i := 0; i < len(digits); i++ {
+		ch := digits[i]
+		if ch == '_' {
+			if !previousDigit || i+1 == len(digits) {
+				return 0, false
+			}
+			previousDigit = false
+			continue
+		}
+		digit, ok := digitValue(ch)
+		if !ok || digit >= base {
+			return 0, false
+		}
+		if value > (math.MaxInt64-digit)/base {
+			return 0, false
+		}
+		value = value*base + digit
+		previousDigit = true
+	}
+	return value, true
+}
+
+// digitValue reads one digit in any base up to 16.
+func digitValue(ch byte) (int64, bool) {
+	switch {
+	case '0' <= ch && ch <= '9':
+		return int64(ch - '0'), true
+	case 'a' <= ch && ch <= 'f':
+		return int64(ch-'a') + 10, true
+	case 'A' <= ch && ch <= 'F':
+		return int64(ch-'A') + 10, true
+	default:
+		return 0, false
+	}
+}
+
 // tokenSpan converts a token position into a half-open AST span.
 func tokenSpan(tok token.Token) ast.Span {
 	width := len([]rune(tok.Literal))
@@ -2099,7 +2205,46 @@ func (p *Parser) parseFieldExpr(receiver ast.Expression, namespace bool) ast.Exp
 // nextToken advances the current and lookahead tokens.
 func (p *Parser) nextToken() {
 	p.cur = p.peek
+	if len(p.ahead) > 0 {
+		p.peek = p.ahead[0]
+		p.ahead = p.ahead[1:]
+		return
+	}
 	p.peek = p.l.NextToken()
+}
+
+// peekAt returns the token n positions past peek, scanning as far as needed.
+func (p *Parser) peekAt(n int) token.Token {
+	for len(p.ahead) < n {
+		p.ahead = append(p.ahead, p.l.NextToken())
+	}
+	return p.ahead[n-1]
+}
+
+// shiftPair reports whether peek and the token after it spell `<<` or `>>`:
+// the same character twice with nothing between them. The scanner keeps them
+// apart so that `Array<Array<T>>` still closes two argument lists.
+func (p *Parser) shiftPair() bool {
+	if p.peek.Type != token.LT && p.peek.Type != token.GT {
+		return false
+	}
+	next := p.peekAt(1)
+	return next.Type == p.peek.Type &&
+		next.Line == p.peek.Line && next.Column == p.peek.Column+1
+}
+
+// captureAhead reports whether peek starts a payload capture: `|name| {`, or
+// `|name, name| {` for a variant capture. Any other `|` after an expression
+// is the bitwise or, since no operand can begin with `{`.
+func (p *Parser) captureAhead() bool {
+	if p.peek.Type != token.Pipe || p.peekAt(1).Type != token.Ident {
+		return false
+	}
+	n := 2
+	for p.peekAt(n).Type == token.Comma && p.peekAt(n+1).Type == token.Ident {
+		n += 2
+	}
+	return p.peekAt(n).Type == token.Pipe && p.peekAt(n+1).Type == token.LBrace
 }
 
 // expectCur reports whether the current token has type t.
@@ -2131,6 +2276,12 @@ func (p *Parser) curPrecedence() int {
 
 // peekPrecedence returns the precedence of the lookahead token.
 func (p *Parser) peekPrecedence() int {
+	if p.shiftPair() {
+		return shift
+	}
+	if p.captureAhead() {
+		return lowest
+	}
 	if prec, ok := precedences[p.peek.Type]; ok {
 		return prec
 	}
@@ -2205,11 +2356,13 @@ func (p *Parser) shouldParseTypeApply(expr ast.Expression) bool {
 func (p *Parser) typeApplyLooksLikeCall() bool {
 	cur := p.cur
 	peek := p.peek
+	ahead := append([]token.Token(nil), p.ahead...)
 	lexerState := *p.l
 	errorCount := len(p.errors)
 	defer func() {
 		p.cur = cur
 		p.peek = peek
+		p.ahead = ahead
 		*p.l = lexerState
 		p.errors = p.errors[:errorCount]
 	}()
