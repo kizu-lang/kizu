@@ -125,8 +125,6 @@ fn keep_reachable(
 /// reachable code can carry has no spelling to report, so it leaves with the
 /// code that would have carried it. A combined set keeps the sets it takes
 /// its members from, since a value of the combined type holds their codes.
-/// Go deletes the map entries; a Map cannot shrink here, so the dropped names
-/// are filed in `dropped_error_sets` and readers ask `error_set_kept`.
 pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> !void {
     var referenced = map::new<[]u8, bool>(allocator);
     defer referenced.deinit(allocator);
@@ -189,11 +187,22 @@ pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> 
             try pending.append(allocator, move origin);
         }
     }
+    // The names come out first: a removal moves the entries behind it, so
+    // the walk that finds them cannot be the one that removes them.
+    var dropped = array::new<string::String>(allocator);
+    defer dropped.deinit(allocator);
     var set_index = 0;
     while module.error_sets.key_at(set_index) |name| {
         set_index = set_index + 1;
-        if !referenced.contains(name) and !module.dropped_error_sets.contains(name) {
-            try module.dropped_error_sets.insert(allocator, name, true);
+        if !referenced.contains(name) {
+            try dropped.append(allocator, try string::from_bytes(allocator, name));
+        }
+    }
+    while dropped.pop() |name| {
+        defer name.deinit(allocator);
+        let name_bytes = name.as_bytes();
+        if module.error_sets.remove(allocator, name_bytes) |set| {
+            set.deinit(allocator);
         }
     }
     return;

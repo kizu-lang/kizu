@@ -2717,6 +2717,8 @@ func mapPrimitiveParams(method string, key string, value string) []Param {
 	switch method {
 	case "insert":
 		return []Param{self, {Type: "Allocator"}, {Type: key}, {Type: value}}
+	case "remove":
+		return []Param{self, {Type: "Allocator"}, {Type: key}}
 	case "get", "at", "at_mut", "contains":
 		return []Param{self, {Type: key}}
 	case "key_at", "take_value_at":
@@ -2729,7 +2731,7 @@ func mapPrimitiveParams(method string, key string, value string) []Param {
 // header. They receive the binding's storage; the rest receive the address of
 // a copy.
 var mapMutatingPrimitives = map[string]bool{
-	"insert": true, "at_mut": true, "take_value_at": true,
+	"insert": true, "at_mut": true, "take_value_at": true, "remove": true,
 }
 
 var arrayPrimitives = map[string]string{
@@ -2763,6 +2765,7 @@ var mapPrimitives = map[string]string{
 	"std::internal::builtin::map_insert":   "insert",
 	"std::internal::builtin::map_key_at":   "key_at",
 	"std::internal::builtin::map_len":      "len",
+	"std::internal::builtin::map_remove":   "remove",
 
 	"std::internal::builtin::map_take_value_at": "take_value_at",
 }
@@ -2877,6 +2880,10 @@ func (l *lowerer) lowerMapMethod(
 		return l.releaseOwnerOnFailure(value, args[3], args[1])
 	case "get":
 		return l.emit("map.get", "?"+valueType, args, ""), nil
+	case "remove":
+		// args are the receiver, the allocator the entry's storage goes back
+		// to, and the key; the value leaves in the optional.
+		return l.emit("map.remove", "?"+valueType, args, ""), nil
 	case "at":
 		return l.emit("map.at", "?&"+valueType, args, ""), nil
 	case "at_mut":

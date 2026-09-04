@@ -42,16 +42,16 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | enum / union | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | 15/16 |
 | error union `!T` / try / errdefer | 52 | ✅ | ✅ | ✅ | 34/52 | 34/52 | 31/52 |
 | optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
-| move / borrow | 60 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| move / borrow | 61 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | cast / slice / stack buffer / box | 14 | ✅ | ✅ | ✅ | 13/14 | 13/14 | 13/14 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 |
 | contract / generics | 15 | ✅ | ✅ | ✅ | 14/15 | 14/15 | 14/15 |
-| std::array | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::array | 21 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::map | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::map | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 20/22 |
 | std::json | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -65,7 +65,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。runnable example は 177 件、測定は 2026-09-04 に
+1 つの example は複数の行に現れます。runnable example は 178 件、測定は 2026-09-04 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run`、`wasm`、`wasm-bin`、`browser` はプログラムの出力で判定します。`run` は native
 build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmtime` で、
@@ -74,12 +74,12 @@ build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmti
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 177/177 |
-| `kizu run` | 177/177 |
-| `kizu build --emit-llvm` | 177/177 |
-| `kizu build --target wasm32-wasi` (WAT) | 157/177 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 157/177 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 150/177 |
+| `kizu check` | 178/178 |
+| `kizu run` | 178/178 |
+| `kizu build --emit-llvm` | 178/178 |
+| `kizu build --target wasm32-wasi` (WAT) | 158/178 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 158/178 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 151/178 |
 
 native 経路に pending の runnable example はありません。WASI はまだ target subset
 で、残る 20 件はすべて明示的な target 非対応(`std::net` 16、extern C 2、

@@ -3533,6 +3533,20 @@ pub fn runtime_source() -> []u8 {
         \\    return map->index[kizu_map_slot(map, key, key_len, kizu_map_hash(key, key_len))];
         \\}
         \\
+        \\/* kizu_map_place_entries files every entry into the index by its stored hash.
+        \\   The index is expected empty; the probe stops at the free slot it is bound
+        \\   to meet. */
+        \\static void kizu_map_place_entries(KizuMap *map) {
+        \\    uint64_t mask = (uint64_t)map->index_cap - 1;
+        \\    for (int64_t entry = 0; entry < map->len; entry += 1) {
+        \\        uint64_t slot = map->entries[entry].hash & mask;
+        \\        while (map->index[slot] >= 0) {
+        \\            slot = (slot + 1) & mask;
+        \\        }
+        \\        map->index[slot] = entry;
+        \\    }
+        \\}
+        \\
         \\/* kizu_map_reindex grows the index to hold needed entries below a 3/4 load and
         \\   rebuilds it. Entries carry their hash, so nothing rehashes the key bytes.   The first index holds eight slots rather than sixteen: the compiler keeps
         \\   half a million maps alive at once and most of them stay small, so what an
@@ -3558,14 +3572,32 @@ pub fn runtime_source() -> []u8 {
         \\    kizu_rt_free(allocator, map->index, map->index_cap * (int64_t)sizeof(int64_t));
         \\    map->index = index;
         \\    map->index_cap = next;
-        \\    uint64_t mask = (uint64_t)next - 1;
-        \\    for (int64_t entry = 0; entry < map->len; entry += 1) {
-        \\        uint64_t slot = map->entries[entry].hash & mask;
-        \\        while (map->index[slot] >= 0) {
-        \\            slot = (slot + 1) & mask;
-        \\        }
-        \\        map->index[slot] = entry;
+        \\    kizu_map_place_entries(map);
+        \\    return 1;
+        \\}
+        \\
+        \\/* kizu_map_remove moves the value stored for key into out and drops the
+        \\   entry: its key copy and value storage go back to the allocator, the entries
+        \\   behind it close the gap so insertion order holds (ADR-0088), and the index
+        \\   is rebuilt in place, since every entry behind the gap changed number. */
+        \\_Bool kizu_map_remove(
+        \\    void *allocator, KizuMap *map, const unsigned char *key, int64_t key_len,
+        \\    void *out, int64_t value_size) {
+        \\    int64_t found = kizu_map_find(map, key, key_len);
+        \\    if (found < 0 || !out || value_size <= 0) {
+        \\        return 0;
         \\    }
+        \\    KizuMapEntry entry = map->entries[found];
+        \\    memcpy(out, entry.value, (size_t)value_size);
+        \\    kizu_rt_free(allocator, entry.key, entry.key_len);
+        \\    kizu_rt_free(allocator, entry.value, value_size);
+        \\    memmove(&map->entries[found], &map->entries[found + 1],
+        \\        (size_t)(map->len - found - 1) * sizeof(KizuMapEntry));
+        \\    map->len -= 1;
+        \\    for (int64_t slot = 0; slot < map->index_cap; slot += 1) {
+        \\        map->index[slot] = -1;
+        \\    }
+        \\    kizu_map_place_entries(map);
         \\    return 1;
         \\}
         \\

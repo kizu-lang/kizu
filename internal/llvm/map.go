@@ -35,6 +35,7 @@ func (e *emitter) writeMapRuntimeDecls() {
 	}
 	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64)\n")
+	e.out.WriteString("declare i1 @kizu_map_remove(ptr, ptr, ptr, i64, ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_map_value_at(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_map_key_at(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64)\n")
@@ -74,6 +75,8 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 		return e.writeMapInsert(instr)
 	case "map.get":
 		return e.writeMapGet(instr)
+	case "map.remove":
+		return e.writeMapRemove(instr)
 	case "map.at", "map.at_mut":
 		return e.writeMapAt(instr)
 	case "map.take_value_at":
@@ -147,6 +150,36 @@ func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
+	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
+}
+
+// writeMapRemove lowers Map.remove(allocator, key). The runtime moves the value
+// into a stack slot before it releases the entry, and the slot's address, or
+// null when the key was absent, is what the optional result loads from.
+func (e *emitter) writeMapRemove(instr *ir.Instr) error {
+	if len(instr.Args) != 3 {
+		return fmt.Errorf("llvm error: map.remove expects Map, Allocator, K -> ?V")
+	}
+	value, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
+	mapValue := e.value(instr.Args[0])
+	allocator := e.value(instr.Args[1])
+	resultName := localName(instr.Result.Name)
+	keyPtr, keyLen, err := e.writeMapKeyParts(resultName+".key", instr.Args[2])
+	if err != nil {
+		return err
+	}
+	slotName := resultName + ".slot"
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, e.llvmType(value))
+	okName := resultName + ".found"
+	fmt.Fprintf(&e.out,
+		"  %s = call i1 @kizu_map_remove(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)\n",
+		okName, allocator.operand, mapValue.operand, keyPtr, keyLen, slotName,
+		e.elementSizeOperand(value))
+	ptrName := resultName + ".ptr"
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", ptrName, okName, slotName)
 	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
 }
 

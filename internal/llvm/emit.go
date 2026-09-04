@@ -2731,7 +2731,7 @@ func continuationLabel(instr *ir.Instr) (string, bool) {
 		return helperLabel(instr.Result.Name, "try.ok"), true
 	case "cond_fail":
 		return helperLabel(instr.Args[0].Name, "pass"), true
-	case "array.pop", "array.get", "map.get":
+	case "array.pop", "array.get", "map.get", "map.remove":
 		return helperLabel(instr.Result.Name, "array.join"), true
 	case "array.get_or_panic", "map.take_value_at", "arena.at", "arena.pop_or_panic":
 		return helperLabel(localName(instr.Result.Name)+".ptr", "ok"), true

@@ -872,6 +872,12 @@ fn (self: &var Lowerer) map_primitive_param_types(
             first: self_type, second: allocator_type, third: key, fourth: value
         };
     }
+    if shape.takes_allocator_and_key {
+        let allocator_type = try self.module.names.intern("Allocator");
+        return NamedTypes {
+            first: self_type, second: allocator_type, third: key, fourth: empty_name()
+        };
+    }
     if shape.takes_key {
         return NamedTypes {
             first: self_type, second: key, third: empty_name(), fourth: empty_name()
@@ -894,6 +900,7 @@ struct MapPrimitiveShape {
     releases: bool,
     mutates: bool,
     takes_key_and_value: bool,
+    takes_allocator_and_key: bool,
     takes_key: bool,
     takes_index: bool
 }
@@ -904,6 +911,7 @@ fn map_primitive_shape(name: []u8) -> MapPrimitiveShape {
         releases: mem::equal_bytes(name, "std::internal::builtin::map_deinit"),
         mutates: map_mutating_primitive(name),
         takes_key_and_value: mem::equal_bytes(name, "std::internal::builtin::map_insert"),
+        takes_allocator_and_key: mem::equal_bytes(name, "std::internal::builtin::map_remove"),
         takes_key: mem::equal_bytes(name, "std::internal::builtin::map_get") or
             mem::equal_bytes(name, "std::internal::builtin::map_at") or
             mem::equal_bytes(name, "std::internal::builtin::map_at_mut") or
@@ -919,7 +927,8 @@ fn map_primitive_shape(name: []u8) -> MapPrimitiveShape {
 pub fn map_mutating_primitive(name: []u8) -> bool {
     return mem::equal_bytes(name, "std::internal::builtin::map_insert") or
         mem::equal_bytes(name, "std::internal::builtin::map_at_mut") or
-        mem::equal_bytes(name, "std::internal::builtin::map_take_value_at");
+        mem::equal_bytes(name, "std::internal::builtin::map_take_value_at") or
+        mem::equal_bytes(name, "std::internal::builtin::map_remove");
 }
 
 /// Says how one arena primitive receives its arena, the Go
@@ -1548,6 +1557,9 @@ fn map_primitive(name: []u8) -> ?Op {
     if mem::equal_bytes(name, "std::internal::builtin::map_len") {
         return Op::MapLen;
     }
+    if mem::equal_bytes(name, "std::internal::builtin::map_remove") {
+        return Op::MapRemove;
+    }
     if mem::equal_bytes(name, "std::internal::builtin::map_take_value_at") {
         return Op::MapTakeValueAt;
     }
@@ -1740,6 +1752,11 @@ fn (self: &var Lowerer) lower_map_method(
             result_type = try self.name("std::mem::Error!void");
         },
         MapGet => {
+            result_type = try self.module.names.prefixed("?", value_type);
+        },
+        MapRemove => {
+            // args are the receiver, the allocator the entry's storage goes
+            // back to, and the key; the value leaves in the optional.
             result_type = try self.module.names.prefixed("?", value_type);
         },
         MapAt => {

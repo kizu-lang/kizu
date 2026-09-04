@@ -89,6 +89,7 @@ var containers = map[string]Container{
 	}},
 	"std::map::Map": {Kind: "map", Label: "Map", Elem: "value", Methods: map[string]Facts{
 		"insert":   {Access: AccessMutate, NamesAllocator: true, Lent: 2},
+		"remove":   {Access: AccessMutate, NamesAllocator: true, Lent: 2},
 		"get":      {Access: AccessRead, CopyElem: true, Lent: 1},
 		"key_at":   {Access: AccessRead},
 		"contains": {Access: AccessRead, Lent: 1},

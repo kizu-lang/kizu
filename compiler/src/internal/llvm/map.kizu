@@ -47,6 +47,7 @@ fn (self: &var Emitter) write_map_runtime_decls(module: &ir::Module) -> !void {
     }
     try self.line("declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)");
     try self.line("declare ptr @kizu_map_get(ptr, ptr, i64)");
+    try self.line("declare i1 @kizu_map_remove(ptr, ptr, ptr, i64, ptr, i64)");
     try self.line("declare ptr @kizu_map_value_at(ptr, i64)");
     try self.line("declare void @kizu_map_key_at(ptr, ptr, i64)");
     try self.line("declare i1 @kizu_map_contains(ptr, ptr, i64)");
@@ -94,6 +95,7 @@ fn (self: &var Emitter) write_map_instr(module: &ir::Module, node: &ir::InstrNod
         MapNew => return self.write_map_new(module, node),
         MapInsert => return self.write_map_insert(module, node),
         MapGet => return self.write_map_get(module, node),
+        MapRemove => return self.write_map_remove(module, node),
         MapAt => return self.write_map_at(module, node),
         MapAtMut => return self.write_map_at(module, node),
         MapTakeValueAt => return self.write_map_take_value_at(module, node),
@@ -216,6 +218,47 @@ fn (self: &var Emitter) write_map_get(module: &ir::Module, node: &ir::InstrNode)
     try self.line4(
         "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
         Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+    );
+    return self.write_array_optional_load_result(module, node, ptr_name);
+}
+
+/// Lowers Map.remove(allocator, key), the Go `writeMapRemove`. The runtime
+/// moves the value into a stack slot before it releases the entry, and the
+/// slot's address, or null when the key was absent, is what the optional
+/// result loads from.
+fn (self: &var Emitter) write_map_remove(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 {
+        return try self.fail0("llvm error: map.remove expects Map, Allocator, K -> ?V");
+    }
+    var value_type = string::new(self.allocator);
+    defer value_type.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var value_type) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let value_bytes = value_type.as_bytes();
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    let key_base = try self.suffixed(result_name, ".key");
+    var key_parts = empty_slice_parts();
+    if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(2), &var key_parts) |failed| {
+        return move failed;
+    }
+    let slot_name = try self.suffixed(result_name, ".slot");
+    let slot_type = try self.llvm_type(module, value_bytes);
+    try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(slot_type));
+    let ok_name = try self.suffixed(result_name, ".found");
+    let size = try self.element_size_operand_bytes(module, value_bytes);
+    try self.line7(
+        "  %s = call i1 @kizu_map_remove(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)",
+        Arg::Str(ok_name), Arg::Str(allocator.operand), Arg::Str(map_value.operand),
+        Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(slot_name), Arg::Str(size)
+    );
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    try self.line3(
+        "  %s = select i1 %s, ptr %s, ptr null",
+        Arg::Str(ptr_name), Arg::Str(ok_name), Arg::Str(slot_name)
     );
     return self.write_array_optional_load_result(module, node, ptr_name);
 }

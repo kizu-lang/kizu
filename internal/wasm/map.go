@@ -64,7 +64,7 @@ func (e *emitter) usesMapRuntime() bool {
 // into addressed bytes before entering the generic runtime.
 func mapInstrNeedsTemp(op string) bool {
 	switch op {
-	case "map.insert", "map.get", "map.at", "map.at_mut", "map.contains":
+	case "map.insert", "map.get", "map.at", "map.at_mut", "map.contains", "map.remove":
 		return true
 	default:
 		return false
@@ -95,6 +95,8 @@ func (e *emitter) writeMapRuntime() {
 	e.writeMapReserveHelper()
 	e.writeMapInsertHelper()
 	e.writeMapGetHelper()
+	e.writeMapRehashHelper()
+	e.writeMapRemoveHelper()
 	e.writeMapDeinitHelper()
 }
 
@@ -501,6 +503,87 @@ func (e *emitter) writeMapGetHelper() {
 	e.out.WriteString("  )\n\n")
 }
 
+// writeMapRehashHelper emits an in-place rebuild of a Map's index from the
+// hash every entry carries, for a table whose entries changed number.
+func (e *emitter) writeMapRehashHelper() {
+	e.out.WriteString("  (func $__map_rehash (param $map i32)\n")
+	e.out.WriteString("    (local $index i32) (local $mask i64) (local $entry_index i64)\n")
+	e.out.WriteString("    (local $entry i32) (local $slot i64)\n")
+	e.out.WriteString("    (local.set $index " +
+		"(i32.load (i32.add (local.get $map) (i32.const 24))))\n")
+	e.out.WriteString("    (local.set $mask (i64.sub\n")
+	e.out.WriteString("      (i64.load (i32.add (local.get $map) (i32.const 32))) (i64.const 1)))\n")
+	e.out.WriteString("    (memory.fill (local.get $index) (i32.const 255)\n")
+	e.out.WriteString("      (i32.wrap_i64 (i64.mul\n")
+	e.out.WriteString("        (i64.load (i32.add (local.get $map) (i32.const 32))) " +
+		"(i64.const 8))))\n")
+	e.out.WriteString("    (block $rebuilt\n")
+	e.out.WriteString("      (loop $entries\n")
+	e.out.WriteString("        (br_if $rebuilt (i64.ge_u (local.get $entry_index)\n")
+	e.out.WriteString("          (i64.load (i32.add (local.get $map) (i32.const 8)))))\n")
+	e.out.WriteString("        (local.set $entry\n")
+	e.out.WriteString("          (i32.add (i32.load (local.get $map))\n")
+	e.out.WriteString("            (i32.wrap_i64 " +
+		"(i64.mul (local.get $entry_index) (i64.const 32)))))\n")
+	e.out.WriteString("        (local.set $slot\n")
+	e.out.WriteString("          (i64.and (i64.load (i32.add (local.get $entry) (i32.const 24)))\n")
+	e.out.WriteString("            (local.get $mask)))\n")
+	e.out.WriteString("        (block $placed\n")
+	e.out.WriteString("          (loop $probe\n")
+	e.out.WriteString("            (if (i64.lt_s (i64.load (i32.add (local.get $index)\n")
+	e.out.WriteString("                  (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8)))))\n")
+	e.out.WriteString("                (i64.const 0))\n")
+	e.out.WriteString("              (then\n")
+	e.out.WriteString("                (i64.store (i32.add (local.get $index)\n")
+	e.out.WriteString("                  (i32.wrap_i64 (i64.mul (local.get $slot) (i64.const 8))))\n")
+	e.out.WriteString("                  (local.get $entry_index))\n")
+	e.out.WriteString("                (br $placed)))\n")
+	e.out.WriteString("            (local.set $slot (i64.and\n")
+	e.out.WriteString("              (i64.add (local.get $slot) (i64.const 1)) (local.get $mask)))\n")
+	e.out.WriteString("            (br $probe)))\n")
+	e.out.WriteString("        (local.set $entry_index\n")
+	e.out.WriteString("          (i64.add (local.get $entry_index) (i64.const 1)))\n")
+	e.out.WriteString("        (br $entries)))\n")
+	e.out.WriteString("  )\n\n")
+}
+
+// writeMapRemoveHelper emits removal of one entry: the value moves to out,
+// the key copy and value storage go back to the allocator, the entries behind
+// close the gap so insertion order holds, and the index is rebuilt.
+func (e *emitter) writeMapRemoveHelper() {
+	e.out.WriteString("  (func $__map_remove\n")
+	e.out.WriteString("      (param $allocator i32) (param $map i32) (param $key i32)\n")
+	e.out.WriteString("      (param $key_length i64) (param $out i32) (param $value_size i32)\n")
+	e.out.WriteString("      (result i32)\n")
+	e.out.WriteString("    (local $found i64) (local $entry i32) (local $length i64)\n")
+	e.out.WriteString("    (local.set $found\n")
+	e.out.WriteString("      (call $__map_find (local.get $map) " +
+		"(local.get $key) (local.get $key_length)))\n")
+	e.out.WriteString("    (if (i64.lt_s (local.get $found) (i64.const 0))\n")
+	e.out.WriteString("      (then (return (i32.const 0))))\n")
+	e.out.WriteString("    (local.set $entry (i32.add (i32.load (local.get $map))\n")
+	e.out.WriteString("      (i32.wrap_i64 (i64.mul (local.get $found) (i64.const 32)))))\n")
+	e.out.WriteString("    (memory.copy (local.get $out)\n")
+	e.out.WriteString("      (i32.load (i32.add (local.get $entry) (i32.const 16)))\n")
+	e.out.WriteString("      (local.get $value_size))\n")
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator) " +
+		"(i32.load (local.get $entry))\n")
+	e.out.WriteString("      (i32.wrap_i64 (i64.load (i32.add (local.get $entry) (i32.const 8)))))\n")
+	e.out.WriteString("    (call $__allocator_free (local.get $allocator)\n")
+	e.out.WriteString("      (i32.load (i32.add (local.get $entry) (i32.const 16)))\n")
+	e.out.WriteString("      (local.get $value_size))\n")
+	e.out.WriteString("    (local.set $length (i64.sub\n")
+	e.out.WriteString("      (i64.load (i32.add (local.get $map) (i32.const 8))) (i64.const 1)))\n")
+	e.out.WriteString("    (memory.copy (local.get $entry) " +
+		"(i32.add (local.get $entry) (i32.const 32))\n")
+	e.out.WriteString("      (i32.wrap_i64 (i64.mul\n")
+	e.out.WriteString("        (i64.sub (local.get $length) (local.get $found)) (i64.const 32))))\n")
+	e.out.WriteString("    (i64.store (i32.add (local.get $map) (i32.const 8)) (local.get $length))\n")
+	e.out.WriteString("    (call $__map_rehash (local.get $map))\n")
+	e.out.WriteString("    (i32.const 1)\n")
+	e.out.WriteString("  )\n\n")
+}
+
 // writeMapDeinitHelper emits release of Map-owned keys, values, and storage.
 func (e *emitter) writeMapDeinitHelper() {
 	e.out.WriteString("  (func $__map_deinit\n")
@@ -544,6 +627,8 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 		return e.writeMapInsert(instr)
 	case "map.get":
 		return e.writeMapGet(instr)
+	case "map.remove":
+		return e.writeMapRemove(instr)
 	case "map.at", "map.at_mut":
 		return e.writeMapAt(instr)
 	case "map.take_value_at":
@@ -701,6 +786,52 @@ func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	}
 	if err := e.writeArrayCopyValue(addressAt(slot, payloadOffset),
 		"(local.get "+symbol+")", value); err != nil {
+		return err
+	}
+	e.out.WriteString("              )\n")
+	e.out.WriteString("              (else\n")
+	if err := e.writeTaggedResult(instr.Result, 0); err != nil {
+		return err
+	}
+	e.out.WriteString("              ))\n")
+	return nil
+}
+
+// writeMapRemove lowers Map.remove(allocator, key): the runtime moves the
+// value into the optional's payload before it releases the entry, and the
+// tag says whether the key was there.
+func (e *emitter) writeMapRemove(instr *ir.Instr) error {
+	if len(instr.Args) != 3 || instr.Args[1].Type != "Allocator" {
+		return fmt.Errorf("wasm error: map.remove expects Map, Allocator, K -> ?V")
+	}
+	key, keyLayout, value, valueLayout, err := e.mapElementLayouts(instr)
+	if err != nil {
+		return err
+	}
+	want, payloadOffset, err := e.optionalPayloadOffset(instr.Result.Type)
+	if err != nil || want != value {
+		return fmt.Errorf("wasm error: map.remove expects Map, Allocator, K -> ?V")
+	}
+	temp, err := e.mapTempSlot(instr.Result)
+	if err != nil {
+		return err
+	}
+	keyPtr, keyLen, err := e.writeMapKeyParts(instr.Args[2], temp, key, keyLayout)
+	if err != nil {
+		return err
+	}
+	slot, err := e.resultSlot(instr.Result)
+	if err != nil {
+		return err
+	}
+	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out,
+		"            (local.set %s (call $__map_remove %s %s %s %s %s (i32.const %d)))\n",
+		symbol, e.value(instr.Args[1]).expr, e.value(instr.Args[0]).expr,
+		keyPtr, keyLen, addressAt(slot, payloadOffset), valueLayout.size)
+	fmt.Fprintf(&e.out, "            (if (local.get %s)\n", symbol)
+	e.out.WriteString("              (then\n")
+	if err := e.writeTaggedResult(instr.Result, 1); err != nil {
 		return err
 	}
 	e.out.WriteString("              )\n")

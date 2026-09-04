@@ -22,10 +22,6 @@ pub struct Module {
     // is one integer that means the same member in every error union it
     // crosses.
     pub error_sets: map::Map<[]u8, Enum>,
-    // dropped_error_sets names the error sets reachability pruning removed,
-    // the Go `delete(module.ErrorSets, name)`: a Map cannot shrink here, so
-    // the sets stay filed and every reader asks `error_set_kept` first.
-    pub dropped_error_sets: map::Map<[]u8, bool>,
     pub unions: map::Map<[]u8, Union>,
     pub functions: array::Array<Function>,
     pub function_nodes: arena::Arena<FunctionNode>,
@@ -40,7 +36,6 @@ pub fn new_module(allocator: Allocator) -> !Module {
         structs: map::new<[]u8, Struct>(allocator),
         enums: map::new<[]u8, Enum>(allocator),
         error_sets: map::new<[]u8, Enum>(allocator),
-        dropped_error_sets: map::new<[]u8, bool>(allocator),
         unions: map::new<[]u8, Union>(allocator),
         functions: array::new<Function>(allocator),
         function_nodes: arena::new<FunctionNode>(allocator),
@@ -403,6 +398,7 @@ pub enum Op {
     MapGet,
     MapInsert,
     MapKeyAt,
+    MapRemove,
     MapLen,
     MapTakeValueAt,
     BoxNew,
@@ -496,6 +492,7 @@ pub fn op_spelling(op: Op) -> []u8 {
         MapGet => "map.get",
         MapInsert => "map.insert",
         MapKeyAt => "map.key_at",
+        MapRemove => "map.remove",
         MapLen => "map.len",
         MapTakeValueAt => "map.take_value_at",
         BoxNew => "box.new",
@@ -640,13 +637,7 @@ pub fn (self: &Module) has_union(name: Name) -> bool {
 pub fn (self: &Module) has_error_set(name: Name) -> bool {
     let text = name_text(&self.names, name);
     let bytes = text.as_bytes();
-    return self.error_sets.contains(bytes) and self.error_set_kept(bytes);
-}
-
-/// Reports whether an error set survived reachability pruning: the Go module
-/// no longer holds a dropped set at all (see `dropped_error_sets`).
-pub fn (self: &Module) error_set_kept(name: []u8) -> bool {
-    return !self.dropped_error_sets.contains(name);
+    return self.error_sets.contains(bytes);
 }
 
 /// Reports whether name declares an enum or an error set in this module,
