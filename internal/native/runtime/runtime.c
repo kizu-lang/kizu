@@ -3306,6 +3306,10 @@ void kizu_box_deinit(void *allocator, void *payload, int64_t size) {
  * enough to fill a cache line on its own would otherwise start at one and
  * reallocate on the second append, and the wider the element the more each of
  * those reallocations moves. */
+/* The storage every array of zero-sized elements shares: see
+ * kizu_array_reserve_storage. */
+static unsigned char kizu_zero_size_storage[1];
+
 static int64_t kizu_array_init_capacity(int64_t elem_size) {
     const int64_t cache_line = 64;
     const int64_t least = 4;
@@ -3345,8 +3349,12 @@ static _Bool kizu_array_reserve_storage(
     int64_t next = kizu_array_grow_capacity(needed, elem_size);
     if (elem_size == 0) {
         /* Elements of no size occupy no storage, and a realloc to zero bytes
-         * is a free on some allocators: the capacity grows, the buffer stays
-         * what it was, and every release below sees the same pointer. */
+         * is a free on some allocators: the capacity grows and no block is
+         * asked for. Every read still names its element by a non-null
+         * address, so the storage is one static byte no allocator owns. */
+        if (!array->data) {
+            array->data = kizu_zero_size_storage;
+        }
         array->cap = next;
         return 1;
     }
@@ -3692,5 +3700,8 @@ void kizu_map_deinit(void *allocator, KizuMap *map, int64_t value_size) {
    storage rather than a pointer to the header, which no longer has an address
    of its own. */
 void kizu_array_deinit(void *allocator, void *data, int64_t bytes) {
+    if (data == kizu_zero_size_storage) {
+        return;
+    }
     kizu_rt_free(allocator, data, bytes);
 }
