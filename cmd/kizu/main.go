@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
@@ -118,8 +119,18 @@ func dispatchRun(args []string) error {
 
 // dispatchTest runs a program's tests through the Go-owned path.
 func dispatchTest(args []string) error {
+	var seed *int64
+	if len(args) >= 2 && args[0] == "--seed" {
+		value, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			usage()
+			return fmt.Errorf("test error: --seed expects an integer, got `%s`", args[1])
+		}
+		seed = &value
+		args = args[2:]
+	}
 	path, programArgs := splitProgramArgs(args)
-	return testFile(path, programArgs)
+	return testFile(path, programArgs, seed)
 }
 
 const wasmWATUsage = "usage: kizu build --target wasm32-wasi " +
@@ -140,6 +151,7 @@ const browserESMUsage = "usage: kizu build --target wasm32-browser " +
 // usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test> <file> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu test [--seed N] <file|package> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu init [path]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu fmt [--write] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")

@@ -547,11 +547,44 @@ void kizu_main_error_message(const unsigned char *s, int64_t len) {
  *
  * The position is omitted when the reporting instruction has no source span.
  */
+/* The seed a randomized test run draws from. `kizu test --seed N` sets it
+   before any test runs; otherwise the first `std::testing::seed()` picks one
+   from the clock. Once a run has asked for it, every failure names it, so the
+   run that failed can be replayed (SPEC §14.5). */
+static int64_t kizu_test_seed = 0;
+static int kizu_test_seed_given = 0;
+static int kizu_test_seed_used = 0;
+
+void std__internal__builtin__test_seed_set(int64_t seed) {
+    kizu_test_seed = seed;
+    kizu_test_seed_given = 1;
+}
+
+int64_t std__internal__builtin__test_seed(void) {
+    if (!kizu_test_seed_used) {
+        if (!kizu_test_seed_given) {
+            struct timespec ts;
+            if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+                kizu_test_seed = ((int64_t)ts.tv_sec * 1000000) + ((int64_t)ts.tv_nsec / 1000);
+            }
+            if (kizu_test_seed <= 0) {
+                kizu_test_seed = 1;
+            }
+        }
+        kizu_test_seed_used = 1;
+    }
+    return kizu_test_seed;
+}
+
 static void kizu_panic_at(int64_t line, int64_t column) {
     if (line > 0) {
         fprintf(stderr, " at %lld:%lld", (long long)line, (long long)column);
     }
     fputc('\n', stderr);
+    if (kizu_test_seed_used) {
+        fprintf(stderr, "note: seed %lld (rerun with `kizu test --seed %lld`)\n",
+                (long long)kizu_test_seed, (long long)kizu_test_seed);
+    }
 }
 
 static void kizu_panic_summary(const char *summary, int64_t line, int64_t column) {

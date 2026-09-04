@@ -578,6 +578,7 @@ fn version_command(io: Io, next: i64, count: i64) -> !i64 {
 /// Writes the usage lines for the commands this binary has.
 fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu <parse|run|check|test> <file> [-- args...]");
+    try io::write_stderr_line(io, "usage: kizu test [--seed N] <file|package> [-- args...]");
     try io::write_stderr_line(io, "usage: kizu init [path]");
     try io::write_stderr_line(io, "usage: kizu fmt [--write] <file>");
     try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
@@ -1853,22 +1854,89 @@ fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: 
     }
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
-    return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &options, child_start, child_count);
+    return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &options, null, child_start, child_count);
 }
 
 /// Runs `test <file|package> [-- args...]`, the Go `dispatchTest`.
+/// Runs `test [--seed N] <file|package> [-- args...]`, the Go `dispatchTest`.
+/// A seed on the command line is what std::testing::seed answers, so a failed
+/// randomized run replays (SPEC §14.5).
 fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: i64, count: i64) -> !i64 {
-    let child_start = next + 3;
+    let has_flag = mem::equal_bytes(target, "--seed");
+    var path_index = next + 1;
+    var path = target;
+    if has_flag {
+        if count - next < 4 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: test error: --seed expects an integer");
+            return 1;
+        }
+        path_index = next + 3;
+        path = try process::arg(path_index);
+    }
+    let seed = try seed_flag(next, has_flag);
+    if has_flag {
+        if seed |_| {
+        } else {
+            let spelled = try process::arg(next + 2);
+            try usage(io);
+            var message = try string::from_bytes(allocator, "error: test error: --seed expects an integer, got `");
+            defer message.deinit(allocator);
+            try message.append_bytes(allocator, spelled);
+            try message.append_bytes(allocator, "`");
+            let text = message.as_bytes();
+            try io::write_stderr_line(io, text);
+            return 1;
+        }
+    }
+    let child_start = path_index + 2;
     var child_count = 0;
-    if count - next >= 3 {
-        let separator = try process::arg(next + 2);
+    if count - path_index >= 2 {
+        let separator = try process::arg(path_index + 1);
         if mem::equal_bytes(separator, "--") {
             child_count = count - child_start;
         }
     }
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
-    return native_target(io, allocator, lib_dir, target, NativeCommand::Test, &options, child_start, child_count);
+    return native_target(io, allocator, lib_dir, path, NativeCommand::Test, &options, seed, child_start, child_count);
+}
+
+/// Returns the seed after `--seed`, or null when the flag was not given or
+/// its value is not an integer; the caller tells those apart by has_flag.
+fn seed_flag(next: i64, has_flag: bool) -> !?i64 {
+    if !has_flag {
+        return null;
+    }
+    let spelled = try process::arg(next + 2);
+    return parse_seed(spelled);
+}
+
+/// Reads the decimal seed `--seed` was given, the Go `strconv.ParseInt`.
+fn parse_seed(text: []u8) -> ?i64 {
+    let length = mem::len(text);
+    var index = 0;
+    var negative = false;
+    if length > 0 and text[0] == cast<u8>(45) {
+        negative = true;
+        index = 1;
+    }
+    if index >= length {
+        return null;
+    }
+    var value = 0;
+    while index < length {
+        let digit = cast<i64>(text[index]) - 48;
+        if digit < 0 or digit > 9 {
+            return null;
+        }
+        value = value * 10 + digit;
+        index = index + 1;
+    }
+    if negative {
+        return 0 - value;
+    }
+    return value;
 }
 
 /// Runs `build --target native [native-options] <file|package>`, the Go
@@ -1883,7 +1951,7 @@ fn build_native_command(io: Io, allocator: Allocator, lib_dir: []u8, first: i64,
         return parsed;
     }
     let target_bytes = target_path.as_bytes();
-    return native_target(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &options, 0, 0);
+    return native_target(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &options, null, 0, 0);
 }
 
 /// Parses native build flags and derives defaults, the Go
@@ -2038,6 +2106,7 @@ fn native_target(
     target: []u8,
     command: NativeCommand,
     options: &native::Options,
+    seed: ?i64,
     child_start: i64,
     child_count: i64
 ) -> !i64 {
@@ -2098,7 +2167,7 @@ fn native_target(
                         }
                     }
                     if command == NativeCommand::Test {
-                        if try add_test_main(allocator, &var lowerer.module) |failed| {
+                        if try add_test_main(allocator, &var lowerer.module, seed) |failed| {
                             defer failed.deinit(allocator);
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
@@ -2159,7 +2228,7 @@ fn native_target(
 /// Builds an entry that runs every lowered test block in order, the Go
 /// `addTestMain`. It writes IR by hand, so it ends by verifying what it
 /// produced, the same way `internal/ir` verifies what it returns.
-fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic::Diagnostic {
+fn add_test_main(allocator: Allocator, module: &var ir::Module, seed: ?i64) -> !?diagnostic::Diagnostic {
     var test_names = array::new<ir::Name>(allocator);
     defer test_names.deinit(allocator);
     try ir::test_function_names(allocator, module, &var test_names);
@@ -2205,6 +2274,24 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic:
     };
     try module.functions.append(allocator, main_function);
     let block = try module.add_block(main_function, entry_name);
+    if seed |given| {
+        let i64_name = try module.names.intern("i64");
+        let seed_name = try module.names.intern("%seed");
+        var spelled = string::new(allocator);
+        errdefer spelled.deinit(allocator);
+        try stdfmt::append_i64(allocator, &var spelled, given);
+        let immediate = try module.names.intern_owned(move spelled);
+        let seed_value = ir::Value { name: seed_name, type_name: i64_name };
+        let constant = module.blank_instr(seed_value, ir::Op::Const, ir::empty_name(), immediate);
+        let _ = try module.add_instr(allocator, block, move constant);
+        let set_name = try module.names.intern("%seed.set");
+        let callee = try module.names.intern("std::internal::builtin::test_seed_set");
+        let set_value = ir::Value { name: set_name, type_name: void_name };
+        var set_instr = module.blank_instr(set_value, ir::Op::Call, callee, ir::empty_name());
+        errdefer set_instr.deinit(allocator);
+        try set_instr.args.append(allocator, seed_value);
+        let _ = try module.add_instr(allocator, block, move set_instr);
+    }
     var index = 0;
     while test_names.get(index) |test_name| {
         var called_spelling = try string::from_bytes(allocator, "%test.");

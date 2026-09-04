@@ -76,7 +76,17 @@ func (e *emitter) validateRuntimeCapabilities() error {
 	if e.usesAnyBuiltin(netBuiltins...) {
 		return e.unsupportedCapability("std::net")
 	}
+	if e.usesAnyBuiltin(testSeedBuiltins...) {
+		return e.unsupportedCapability("std::testing::seed")
+	}
 	return nil
+}
+
+// testSeedBuiltins are the primitives behind std::testing::seed. `kizu test`
+// runs native binaries, so a Wasm host has no run to seed or replay.
+var testSeedBuiltins = []string{
+	"std::internal::builtin::test_seed",
+	"std::internal::builtin::test_seed_set",
 }
 
 // unsupportedCapability formats one explicit target-boundary refusal.

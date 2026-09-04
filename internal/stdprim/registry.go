@@ -68,6 +68,8 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::process::Error!void",
 	},
 	"std::internal::builtin::process_arg_count": {Return: "i64"},
+	"std::internal::builtin::test_seed":         {Return: "i64"},
+	"std::internal::builtin::test_seed_set":     {Args: []ArgKind{ArgI64}, Return: "void"},
 	"std::internal::builtin::process_arg": {
 		Args:   []ArgKind{ArgI64},
 		Return: "std::process::Error![]u8",
@@ -285,6 +287,8 @@ var primitives = map[string]bool{
 	"std::internal::builtin::panic":                        true,
 	"std::internal::builtin::process_arg":                  true,
 	"std::internal::builtin::process_arg_count":            true,
+	"std::internal::builtin::test_seed":                    true,
+	"std::internal::builtin::test_seed_set":                true,
 	"std::internal::builtin::process_executable_path_into": true,
 	"std::internal::builtin::process_env":                  true,
 	"std::internal::builtin::process_monotonic_millis":     true,
