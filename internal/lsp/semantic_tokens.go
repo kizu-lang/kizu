@@ -86,7 +86,7 @@ func semanticTokenType(
 	sources []navigationSource,
 ) (int, bool) {
 	switch tok.Type {
-	case token.Int:
+	case token.Int, token.Float:
 		return semanticNumber, true
 	case token.String:
 		return semanticString, true
@@ -153,7 +153,7 @@ func isOperatorToken(typ token.Type) bool {
 		token.Amp, token.Asterisk, token.Slash, token.Percent, token.Eq,
 		token.FatArrow, token.NotEq, token.LT, token.LTE, token.GT,
 		token.GTE, token.Arrow, token.Dot, token.Range, token.DoubleColon,
-		token.At:
+		token.At, token.Pipe, token.Caret, token.Tilde:
 		return true
 	default:
 		return false
