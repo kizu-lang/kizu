@@ -1949,3 +1949,38 @@ func writeTempKizuSource(t *testing.T, name string, source string) string {
 	}
 	return path
 }
+
+// TestTestSeedFlag checks `kizu test --seed N` is what std::testing::seed
+// answers, and that a failure names the seed the run used.
+func TestTestSeedFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed_test.kizu")
+	source := `import std::testing;
+
+test "seed" {
+    testing::expect_equal<i64>(42, testing::seed());
+}
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, runErr := runDispatchCaptureOutput(t, "test", []string{"--seed", "42", path})
+	if runErr != nil || stdout != "test: ok\n" {
+		t.Fatalf("seed 42: err %v\nstdout:\n%s\nstderr:\n%s", runErr, stdout, stderr)
+	}
+	_, stderr, runErr = runDispatchCaptureOutput(t, "test", []string{"--seed", "7", path})
+	if runErr == nil {
+		t.Fatalf("seed 7: expected the test to fail")
+	}
+	for _, want := range []string{
+		"runtime error: expected 42, got 7",
+		"note: seed 7 (rerun with `kizu test --seed 7`)",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("seed 7: stderr %q, want substring %q", stderr, want)
+		}
+	}
+	_, stderr, runErr = runDispatchCaptureOutput(t, "test", []string{path})
+	if runErr == nil || !strings.Contains(stderr, "note: seed ") {
+		t.Fatalf("no flag: err %v, stderr %q, want a chosen seed in the failure", runErr, stderr)
+	}
+}

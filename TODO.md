@@ -3,6 +3,25 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
+## std::rand と model-based testing
+
+`kizu test` だけで完結する MBT を std に置きます。model は Kizu で書き、runner の
+中核は「Cmd 列を再生して step で突き合わせる」だけにして、乱択生成器はその列の
+供給源の 1 つに留めます。Quint の ITF trace は `std::json` で読めるので、後から
+`run_trace` を足せば連携できますが、std に外部 tool への依存は入れません。
+seed の再現(`kizu test --seed`、`std::testing::seed()`)は入った。
+
+## 7. `std::testing::run_model` と sequence shrink
+
+`run_model<Cmd, M, S>(alloc, &var rng, steps, gen, init_model, init_sut, step) -> !?Array<Cmd>`。
+失敗した列を 1 個削除・半分に切る shrink で最短にし、seed と一緒に出す。値の
+shrink(型ごとの `contract Shrink`)は最初の版に入れない。
+
+## 8. dogfood
+
+`std::map` と `std::array` を参照モデルと突き合わせる test を `tests/behavior` に置き、
+runner の API がそのまま使えるかを見る。
+
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

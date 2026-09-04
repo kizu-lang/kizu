@@ -2,17 +2,20 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
-// testFile runs Kizu test blocks and reports a minimal test result.
-func testFile(path string, args []string) error {
+// testFile runs Kizu test blocks and reports a minimal test result. A seed
+// given on the command line is what std::testing::seed answers, so a failed
+// randomized run replays (SPEC §14.5).
+func testFile(path string, args []string, seed *int64) error {
 	module, err := lowerTestTarget(path)
 	if err != nil {
 		return err
 	}
-	if err := addTestMain(module); err != nil {
+	if err := addTestMain(module, seed); err != nil {
 		return err
 	}
 	exe, err := linkModule(module)
@@ -34,10 +37,11 @@ func lowerTestTarget(path string) (*ir.Module, error) {
 	return lowerFile(path, false)
 }
 
-// addTestMain builds an entry that runs every lowered test block in order. It
+// addTestMain builds an entry that runs every lowered test block in order,
+// after handing the runtime the seed the command line chose, if any. It
 // writes IR by hand, so it ends by verifying what it produced, the same way
 // `internal/ir` verifies what it returns.
-func addTestMain(module *ir.Module) error {
+func addTestMain(module *ir.Module, seed *int64) error {
 	names := ir.TestFunctionNames(module)
 	if len(names) == 0 {
 		return fmt.Errorf("test error: no tests found")
@@ -52,7 +56,17 @@ func addTestMain(module *ir.Module) error {
 	module.Functions = kept
 	// A test body returns `!void`, so the entry tries each result: the first
 	// failing test returns its message instead of letting the run report ok.
-	instrs := make([]*ir.Instr, 0, 2*len(names)+1)
+	instrs := make([]*ir.Instr, 0, 2*len(names)+3)
+	if seed != nil {
+		value := ir.Value{Name: "%seed", Type: "i64"}
+		instrs = append(instrs,
+			&ir.Instr{Result: value, Op: "const", Immediate: strconv.FormatInt(*seed, 10)},
+			&ir.Instr{
+				Result: ir.Value{Name: "%seed.set", Type: "void"},
+				Op:     "call.std::internal::builtin::test_seed_set",
+				Args:   []ir.Value{value},
+			})
+	}
 	for i, name := range names {
 		called := ir.Value{Name: fmt.Sprintf("%%test.%d", i), Type: "!void"}
 		instrs = append(instrs,

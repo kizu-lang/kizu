@@ -3100,6 +3100,9 @@ order、各file内のdeclaration orderで実行します。
 test block は parameterless `!void` body として扱うため、helper が返す `!T` には
 `try` を使えます。test block が 0 件なら失敗します。未処理 error がなければ
 `test: ok` を表示します。
+`kizu test --seed N <path>` は `std::testing::seed()` が返す値を `N` にします。
+flag が無ければ runtime が run ごとに seed を選び、`seed()` を呼んだ後の失敗は
+その seed を `note:` で報告するので、同じ flag で再生できます(`docs/std/testing.md`)。
 package test では、production fileに加えて `_test.kizu` fileを同じdirectoryのmodule
 へ加えます。test fileは同じmoduleのprivate宣言を使え、test helperも同じmoduleの
 他のtest fileから使えます。file-local importの規則はtest fileにも適用します。

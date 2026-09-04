@@ -7,6 +7,7 @@ test 用の assertion です。`test` 宣言そのものは言語の構文なの
 std::testing::expect(condition: bool) -> void
 std::testing::expect_equal<T>(expected: T, actual: T) -> void
 std::testing::fail(message: []u8) -> void
+std::testing::seed() -> i64
 std::testing::failing_io() -> Io
 ```
 
@@ -21,6 +22,13 @@ failure は `expected ... got ...` 形式の diagnostic を出し、assertion �
 static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
 期待型を明示します。type argument inference と per-type `expect_equal_i64` family は
 導入しません。
+
+`seed` は乱択 test が列を引く seed です。`kizu test --seed N` で与えた値、
+無ければ runtime がその run のために選んだ値を返し、一度呼ばれた後の失敗は
+すべて `note: seed N (rerun with \`kizu test --seed N\`)` を出すので、失敗した
+run を同じ flag で再生できます。`std::rand::new(testing::seed())` の形で使います
+(`docs/std/rand.md`)。seed の受け渡しは runtime が持つので、`wasm32-*` target は
+`std::testing::seed` を拒否します。
 
 `failing_io` はすべての操作を拒否する `Io` です。プログラムの error 経路は何かが
 失敗したときしか走らず、本物の `Io` に失敗を頼むことはできないので、失敗する
