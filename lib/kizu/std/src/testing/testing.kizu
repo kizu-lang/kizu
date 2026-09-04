@@ -7,8 +7,31 @@ pub fn expect(condition: bool) -> void {
 
 pub fn expect_equal<T>(expected: T, actual: T) -> void {
     if expected != actual {
-        std::internal::builtin::test_fail_equal<T>(expected, actual);
+        comptime if T == type<f64> {
+            fail_equal_f64(expected, actual);
+        } else {
+            std::internal::builtin::test_fail_equal<T>(expected, actual);
+        }
     }
+    return;
+}
+
+// fail_equal_f64 spells both floats the way `std::float::append` does and
+// stops through the same trap the other `expect_equal` shapes use. The
+// text is built in a stack buffer: a test failure allocates nothing the test
+// did not hand over.
+fn fail_equal_f64(expected: f64, actual: f64) -> void {
+    var storage = [16384]u8 {};
+    let bytes = storage.as_mut_bytes();
+    let allocator = std::mem::fixed_buffer(bytes);
+    var message = std::string::new(allocator);
+    defer message.deinit(allocator);
+    message.append_bytes(allocator, "expected ") catch return fail("expected and got differ (message buffer exhausted)");
+    std::float::append(allocator, &var message, expected) catch return fail("expected and got differ (message buffer exhausted)");
+    message.append_bytes(allocator, ", got ") catch return fail("expected and got differ (message buffer exhausted)");
+    std::float::append(allocator, &var message, actual) catch return fail("expected and got differ (message buffer exhausted)");
+    let text = message.as_bytes();
+    fail(text);
     return;
 }
 

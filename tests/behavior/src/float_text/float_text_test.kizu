@@ -1,0 +1,93 @@
+import std::float;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn spelled(allocator: Allocator, value: f64, want: []u8) -> !bool {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try float::append(allocator, &var text, value);
+    let bytes = text.as_bytes();
+    return mem::equal_bytes(bytes, want);
+}
+
+fn round_trips(allocator: Allocator, value: f64) -> !bool {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try float::append(allocator, &var text, value);
+    let bytes = text.as_bytes();
+    let back = try float::parse(allocator, bytes) orelse return false;
+    return float::bits(back) == float::bits(value);
+}
+
+fn rejects(allocator: Allocator, text: []u8) -> !bool {
+    if try float::parse(allocator, text) |_| {
+        return false;
+    }
+    return true;
+}
+
+fn parses_to(allocator: Allocator, text: []u8, want: f64) -> !bool {
+    let value = try float::parse(allocator, text) orelse return false;
+    return float::bits(value) == float::bits(want);
+}
+
+test "append writes the shortest spelling that reads back" {
+    let allocator = mem::page_allocator();
+    testing::expect(try spelled(allocator, 0.1, "0.1"));
+    testing::expect(try spelled(allocator, 0.1 + 0.2, "0.30000000000000004"));
+    testing::expect(try spelled(allocator, 1.0, "1.0"));
+    testing::expect(try spelled(allocator, 100.0, "100.0"));
+    testing::expect(try spelled(allocator, 1234.5, "1234.5"));
+    testing::expect(try spelled(allocator, -0.0, "-0.0"));
+    testing::expect(try spelled(allocator, 1e21, "1e21"));
+    testing::expect(try spelled(allocator, 123456789012345680000.0, "123456789012345680000.0"));
+    testing::expect(try spelled(allocator, 0.000001, "0.000001"));
+    testing::expect(try spelled(allocator, 1.5e-7, "1.5e-7"));
+    testing::expect(try spelled(allocator, 5e-324, "5e-324"));
+    testing::expect(try spelled(allocator, 1.7976931348623157e308, "1.7976931348623157e308"));
+    testing::expect(try spelled(allocator, 1.0 / 0.0, "inf"));
+    testing::expect(try spelled(allocator, -1.0 / 0.0, "-inf"));
+    testing::expect(try spelled(allocator, 0.0 / 0.0, "NaN"));
+    testing::expect(try round_trips(allocator, 1.0 / 3.0));
+    testing::expect(try round_trips(allocator, float::from_bits(1)));
+    testing::expect(try round_trips(allocator, float::from_bits(0x000FFFFFFFFFFFFF)));
+    testing::expect(try round_trips(allocator, 2.2250738585072014e-308));
+    testing::expect(try round_trips(allocator, 9007199254740993.0));
+}
+
+test "parse rounds to the nearest value and refuses non-numbers" {
+    let allocator = mem::page_allocator();
+    testing::expect(try parses_to(allocator, "0.1", 0.1));
+    testing::expect(try parses_to(allocator, "1e23", 1e23));
+    testing::expect(try parses_to(allocator, "2.2250738585072011e-308", 2.2250738585072011e-308));
+    testing::expect(try parses_to(allocator, "9007199254740993", 9007199254740992.0));
+    testing::expect(try parses_to(allocator, "9007199254740993.00000000000000001", 9007199254740994.0));
+    // Exactly halfway between two doubles: the tie goes to the even one.
+    testing::expect(try parses_to(allocator, "0.500000000000000166533453693773481063544750213623046875", float::from_bits(0x3FE0000000000002)));
+    testing::expect(try parses_to(allocator, "+7.5", 7.5));
+    testing::expect(try parses_to(allocator, "-0", -0.0));
+    testing::expect(try parses_to(allocator, "1E+2", 100.0));
+    testing::expect(try parses_to(allocator, "1e400", 1.0 / 0.0));
+    testing::expect(try parses_to(allocator, "-1e400", -1.0 / 0.0));
+    testing::expect(try parses_to(allocator, "1e-400", 0.0));
+    testing::expect(try parses_to(allocator, "2.4703282292062328e-324", 5e-324));
+    testing::expect(try parses_to(allocator, "2.4703282292062327e-324", 0.0));
+    if try float::parse(allocator, "NaN") |value| {
+        testing::expect(float::is_nan(value));
+    } else {
+        testing::fail("NaN did not parse");
+    }
+    testing::expect(try rejects(allocator, ""));
+    testing::expect(try rejects(allocator, "abc"));
+    testing::expect(try parses_to(allocator, "1.", 1.0));
+    testing::expect(try parses_to(allocator, ".5", 0.5));
+    testing::expect(try rejects(allocator, "1e"));
+    testing::expect(try rejects(allocator, "1_000"));
+    testing::expect(try rejects(allocator, "1.5x"));
+}
+
+test "expect_equal compares floats and spells a mismatch" {
+    testing::expect_equal<f64>(0.5, 1.0 / 2.0);
+    testing::expect_equal<f64>(1e21, 1000000000000000000000.0);
+}

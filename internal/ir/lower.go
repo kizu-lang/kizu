@@ -2142,7 +2142,9 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	// expect_equal lowers to its own instruction, so its std wrapper body is
 	// never called. Its arguments still arrive at the types that wrapper
 	// declares, which is what makes `expect_equal<u8>(65, byte)` compare bytes.
-	if name == "std::testing::expect_equal" {
+	// The f64 instance is the exception: the runtime has no spelling for a
+	// float, so the wrapper body runs and reports through `std::float`.
+	if name == "std::testing::expect_equal" && typeArg != "f64" {
 		params, err := l.declaredInstanceParams(name, typeArg)
 		if err != nil {
 			return Value{}, err
