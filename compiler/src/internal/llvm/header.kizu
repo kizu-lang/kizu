@@ -14,51 +14,6 @@ import std::string;
 // which of them it needs. Go sorts map keys with sort.Strings; here the
 // names are copied into an Array of Strings and sorted with std::sort.
 
-/// Returns the global holding one enum's tag spellings, the Go
-/// `enumNameTable`.
-fn (self: &var Emitter) enum_name_table(module: &ir::Module, typ_name: ir::Name) -> !ir::Name {
-    let retained = ir::name_text(&module.names, typ_name);
-    let bytes = retained.as_bytes();
-    return self.enum_table_name(bytes);
-}
-
-/// Appends a type name made usable inside an LLVM global identifier, the Go
-/// `mangleGlobalName`: `:`, `<`, `>` and `,` become `_`, and spaces drop.
-fn append_mangled_global_name(allocator: Allocator, out: &var string::String, typ_name: []u8) -> !void {
-    var index = 0;
-    while mem::byte_at(typ_name, index) |ch| {
-        index = index + 1;
-        if ch == cast<u8>(58) or ch == cast<u8>(60) or ch == cast<u8>(62) or ch == cast<u8>(44) {
-            try out.append_byte(allocator, cast<u8>(95));
-            continue;
-        }
-        if ch == cast<u8>(32) {
-            continue;
-        }
-        try out.append_byte(allocator, ch);
-    }
-    return;
-}
-
-/// Prints an enum by indexing its name table, so a new tag costs a table row
-/// rather than a branch in the backend, the Go `writePrintEnum`.
-fn (self: &var Emitter) write_print_enum(module: &ir::Module, typ_name: ir::Name, operand: ir::Name) -> !void {
-    let table = try self.enum_name_table(module, typ_name);
-    let retained = ir::name_text(&module.names, typ_name);
-    let bytes = retained.as_bytes();
-    var rows = 0;
-    if module.enums.at(bytes) |declared| {
-        rows = declared.tags.len();
-    }
-    return self.write_print_name_table(table, rows, operand);
-}
-
-/// Prints one tag by indexing a table of spellings, the Go
-/// `writePrintNameTable`.
-fn (self: &var Emitter) write_print_name_table(table: ir::Name, rows: i64, operand: ir::Name) -> !void {
-    return self.line3("  call void @kizu_print_enum(ptr %s, i64 %d, i64 %s)", Arg::Str(table), Arg::Int(rows), Arg::Str(operand));
-}
-
 /// Writes globals and runtime declarations, the Go `writeHeader`.
 fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.line("; Kizu LLVM IR");
@@ -70,7 +25,6 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.write_error_union_types(module);
     try self.write_union_types(module);
     try self.write_struct_types(module);
-    try self.write_enum_name_tables(module);
     try self.write_error_name_table(self.allocator, module);
     var literals = try self.sorted_string_literals();
     defer literals.deinit(self.allocator);
@@ -92,11 +46,6 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         try self.line("");
     }
     try self.line("declare void @kizu_print_string(ptr, i64)");
-    try self.line("declare void @kizu_print_int(i64)");
-    try self.line("declare void @kizu_print_bool(i1)");
-    if try self.prints_named_tag(module) {
-        try self.line("declare void @kizu_print_enum(ptr, i64, i64)");
-    }
     try self.line("declare void @kizu_main_error_message(ptr, i64)");
     try self.line("");
     try self.line("declare void @kizu_runtime_init_args(i32, ptr)");
@@ -265,6 +214,9 @@ fn (self: &var Emitter) write_error_name_table(allocator: Allocator, module: &ir
     var set_index = 0;
     while module.error_sets.key_at(set_index) |set_name| {
         set_index = set_index + 1;
+        if !module.error_set_kept(set_name) {
+            continue;
+        }
         if module.error_sets.at(set_name) |set| {
             var tag_index = 0;
             while set.tags.key_at(tag_index) |member| {
@@ -793,9 +745,6 @@ fn (self: &var Emitter) external_call_decls(allocator: Allocator, module: &ir::M
                 if instr_node.op != ir::Op::Call {
                     continue;
                 }
-                if module.names.is(instr_node.operand, "print") {
-                    continue;
-                }
                 if self.function_named(module, instr_node.operand) |_| {
                     continue;
                 }
@@ -1055,138 +1004,6 @@ fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
         start = start + 1;
     }
     return false;
-}
-
-/// Reports whether the module prints an enum or an error set, both of which
-/// name their value through a table of spellings, the Go `printsNamedTag`.
-fn (self: &var Emitter) prints_named_tag(module: &ir::Module) -> !bool {
-    var enums = try printed_enums(self.allocator, module);
-    defer enums.deinit(self.allocator);
-    if enums.len() > 0 {
-        return true;
-    }
-    var index = 0;
-    while module.functions.get(index) |function| {
-        index = index + 1;
-        let node = module.function_nodes.at(function.node);
-        var block_index = 0;
-        while node.blocks.get(block_index) |block| {
-            block_index = block_index + 1;
-            let block_node = module.blocks.at(block.node);
-            var instr_index = 0;
-            while block_node.instrs.get(instr_index) |instr| {
-                instr_index = instr_index + 1;
-                let instr_node = module.instrs.at(instr.node);
-                if !is_print_call(module, instr_node) {
-                    continue;
-                }
-                let first = instr_node.args.get_or_panic(0);
-                if module.has_error_set(first.type_name) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-/// Reports whether an instruction is `call.print` with one argument.
-fn is_print_call(module: &ir::Module, node: &ir::InstrNode) -> bool {
-    return node.op == ir::Op::Call and module.names.is(node.operand, "print") and node.args.len() == 1;
-}
-
-/// Returns the enums this module prints, in sorted order, the Go
-/// `printedEnums`.
-fn printed_enums(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
-    var seen = map::new<[]u8, bool>(allocator);
-    defer seen.deinit(allocator);
-    var index = 0;
-    while module.functions.get(index) |function| {
-        index = index + 1;
-        let node = module.function_nodes.at(function.node);
-        var block_index = 0;
-        while node.blocks.get(block_index) |block| {
-            block_index = block_index + 1;
-            let block_node = module.blocks.at(block.node);
-            var instr_index = 0;
-            while block_node.instrs.get(instr_index) |instr| {
-                instr_index = instr_index + 1;
-                let instr_node = module.instrs.at(instr.node);
-                if !is_print_call(module, instr_node) {
-                    continue;
-                }
-                let first = instr_node.args.get_or_panic(0);
-                let type_text = ir::name_text(&module.names, first.type_name);
-                let type_bytes = type_text.as_bytes();
-                if module.enums.contains(type_bytes) {
-                    try seen.insert(allocator, type_bytes, true);
-                }
-            }
-        }
-    }
-    return sorted_keys(allocator, &seen);
-}
-
-/// Defines the `Enum::Tag` spellings the module prints, the Go
-/// `writeEnumNameTables`.
-fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
-    var names = try printed_enums(self.allocator, module);
-    defer names.deinit(self.allocator);
-    var index = 0;
-    while names.at(index) |name| {
-        index = index + 1;
-        let name_bytes = name.as_bytes();
-        let type_name = try self.names.intern(name_bytes);
-        let table = try self.enum_table_name(name_bytes);
-        var rows = array::new<string::String>(self.allocator);
-        defer rows.deinit(self.allocator);
-        if module.enums.at(name_bytes) |declared| {
-            let count = declared.tags.len();
-            var row = 0;
-            while row < count {
-                var tag_index = 0;
-                while declared.tags.key_at(tag_index) |tag| {
-                    tag_index = tag_index + 1;
-                    let tag_value = declared.tags.get(tag) orelse continue;
-                    if tag_value != row {
-                        continue;
-                    }
-                    var spelling = try self.names.copy(type_name);
-                    defer spelling.deinit(self.allocator);
-                    try spelling.append_bytes(self.allocator, "::");
-                    try spelling.append_bytes(self.allocator, tag);
-                    let global = try self.text2("%s.%d", Arg::Str(table), Arg::Int(row));
-                    let spelling_bytes = spelling.as_bytes();
-                    try self.write_static_string_global(global, spelling_bytes);
-                    try rows.append(self.allocator, try self.sprint2(
-                        "{ ptr, i64 } { ptr %s, i64 %d }", Arg::Str(global), Arg::Int(spelling.len())
-                    ));
-                }
-                row = row + 1;
-            }
-        }
-        // A literal { ptr, i64 } rather than %kizu.slice.u8: the named type is
-        // only defined when the module otherwise uses slices, and a module can
-        // print an enum without ever touching one.
-        let joined = try string::join(self.allocator, &rows, ", ");
-        try self.line3(
-            "%s = private unnamed_addr constant [%d x { ptr, i64 }] [%s]",
-            Arg::Str(table), Arg::Int(rows.len()), Arg::Owned(move joined)
-        );
-    }
-    if names.len() > 0 {
-        try self.line("");
-    }
-    return;
-}
-
-/// Names the global holding one enum's tag spellings from the enum's bytes,
-/// the Go `enumNameTable` where the type arrives as text.
-fn (self: &var Emitter) enum_table_name(typ_name: []u8) -> !ir::Name {
-    var out = try string::from_bytes(self.allocator, "@.kizu.enum.");
-    errdefer out.deinit(self.allocator);
-    try append_mangled_global_name(self.allocator, &var out, typ_name);
-    return self.names.intern_owned(move out);
 }
 
 /// Declares every saturating float-to-integer intrinsic the module calls,

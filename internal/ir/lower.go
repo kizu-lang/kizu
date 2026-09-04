@@ -8,6 +8,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/quote"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -2080,33 +2081,15 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 
 // lowerNamedCallExpr lowers builtins and resolved function calls.
 func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Value, error) {
+	if name == "print" {
+		return l.lowerPrintCall(rawArgs)
+	}
 	args, err := l.lowerCallArgs(name, rawArgs)
 	if err != nil {
 		return Value{}, err
 	}
-	if name == "std::internal::builtin::mem_len" {
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("ir error: std::internal::builtin::mem_len expects 1 arg")
-		}
-		return l.emit("slice.len", "i64", args, ""), nil
-	}
-	if name == "std::internal::builtin::f64_bits" {
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("ir error: std::internal::builtin::f64_bits expects 1 arg")
-		}
-		return l.emit("float.bits", "u64", args, ""), nil
-	}
-	if name == "std::internal::builtin::f64_from_bits" {
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("ir error: std::internal::builtin::f64_from_bits expects 1 arg")
-		}
-		return l.emit("float.from_bits", "f64", args, ""), nil
-	}
-	if name == "std::internal::builtin::test_fail" {
-		return l.emit("test.fail", "void", args, ""), nil
-	}
-	if name == "std::internal::builtin::panic" {
-		return l.emit("panic.fail", "void", args, ""), nil
+	if value, handled, err := l.lowerCoreBuiltinCall(name, args); handled || err != nil {
+		return value, err
 	}
 	ret := "void"
 	if sig, ok := l.signatures[name]; ok {
@@ -2174,6 +2157,64 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		return Value{}, err
 	}
 	return l.emit("call."+symbol, sig.Return, args, ""), nil
+}
+
+// lowerCoreBuiltinCall lowers the std::internal::builtin calls that are one
+// instruction rather than a runtime call, and reports whether name was one.
+func (l *lowerer) lowerCoreBuiltinCall(name string, args []Value) (Value, bool, error) {
+	if name == "std::internal::builtin::print_line" {
+		if len(args) != 1 || args[0].Type != "[]u8" {
+			return Value{}, true, fmt.Errorf("ir error: std::internal::builtin::print_line expects []u8")
+		}
+		return l.emit("print.line", "void", args, ""), true, nil
+	}
+	if name == "std::internal::builtin::mem_len" {
+		if len(args) != 1 {
+			return Value{}, true, fmt.Errorf("ir error: std::internal::builtin::mem_len expects 1 arg")
+		}
+		return l.emit("slice.len", "i64", args, ""), true, nil
+	}
+	if name == "std::internal::builtin::f64_bits" {
+		if len(args) != 1 {
+			return Value{}, true, fmt.Errorf("ir error: std::internal::builtin::f64_bits expects 1 arg")
+		}
+		return l.emit("float.bits", "u64", args, ""), true, nil
+	}
+	if name == "std::internal::builtin::f64_from_bits" {
+		if len(args) != 1 {
+			return Value{}, true, fmt.Errorf("ir error: std::internal::builtin::f64_from_bits expects 1 arg")
+		}
+		return l.emit("float.from_bits", "f64", args, ""), true, nil
+	}
+	if name == "std::internal::builtin::test_fail" {
+		return l.emit("test.fail", "void", args, ""), true, nil
+	}
+	if name == "std::internal::builtin::panic" {
+		return l.emit("panic.fail", "void", args, ""), true, nil
+	}
+	return Value{}, false, nil
+}
+
+// lowerPrintCall lowers `print(value)` as the call to the std generic it stands
+// for (SPEC §14.1), with the argument's type as the one static argument. The
+// argument is lowered first because its type is what names the instance.
+func (l *lowerer) lowerPrintCall(rawArgs []ast.Expression) (Value, error) {
+	if len(rawArgs) != 1 {
+		return Value{}, fmt.Errorf("ir error: print expects 1 arg")
+	}
+	arg, err := l.lowerExpr(rawArgs[0])
+	if err != nil {
+		return Value{}, err
+	}
+	symbol, sig, err := l.requestGenericInstance(stdlib.PrintFunction, arg.Type)
+	if err != nil {
+		return Value{}, err
+	}
+	if len(sig.Params) != 1 || sig.Params[0].Type != arg.Type {
+		return Value{}, fmt.Errorf("ir error: `%s` expects %s, got %s",
+			stdlib.PrintFunction, sig.Params[0].Type, arg.Type)
+	}
+	return l.emit("call."+symbol, sig.Return, []Value{arg}, ""), nil
 }
 
 // lowerTypedContainerPrimitive lowers private storage operations whose static

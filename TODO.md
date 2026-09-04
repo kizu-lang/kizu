@@ -3,19 +3,6 @@
 ここには未完了の実装だけを置きます。番号は優先順ではなく識別子です。完了したものは
 削除し、現在の仕様は `SPEC.md` / `docs/`、経緯は ADR と git log が持ちます。
 
-## 浮動小数点の残り
-
-型・演算・cast・literal・文字列変換(`std::float::append` / `parse`)、wasm backend は入った。残りは 1 つ。
-
-## 9. `print` を std に畳む
-
-`print` は backend に型ごとの分岐(int / bool / bytes / enum 名前表 / error 表)を
-持つ。`std::fmt::print<T>` を `comptime match` と `std::meta` で書き、backend には
-「bytes を stdout に書く」primitive だけを残す。`Io` 無しで書く点は debug 用の例外として
-docs に明記する。`print(f64)` は `std::float::append` の 1 行で乗る。前提だった
-`std::meta` の error set 反射(`is_error` / `type_name` / error set の
-`comptime match`)と、generic 内の診断を呼び出し元の位置に付ける仕組みは入った。
-
 ## std::http / std::net の残り
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。

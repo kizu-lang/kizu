@@ -215,7 +215,6 @@ func (e *emitter) writeHeader() {
 	e.writeErrorUnionTypes()
 	e.writeUnionTypes()
 	e.writeStructTypes()
-	e.writeEnumNameTables()
 	e.writeErrorNameTable()
 	for _, lit := range e.sortedStringLiterals() {
 		name := e.strings[lit]
@@ -227,11 +226,6 @@ func (e *emitter) writeHeader() {
 		e.out.WriteByte('\n')
 	}
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
-	e.out.WriteString("declare void @kizu_print_int(i64)\n")
-	e.out.WriteString("declare void @kizu_print_bool(i1)\n")
-	if e.printsNamedTag() {
-		e.out.WriteString("declare void @kizu_print_enum(ptr, i64, i64)\n")
-	}
 	e.out.WriteString("declare void @kizu_main_error_message(ptr, i64)\n\n")
 	e.out.WriteString("declare void @kizu_runtime_init_args(i32, ptr)\n\n")
 	e.writeArrayRuntimeDecls()
@@ -602,7 +596,7 @@ func (e *emitter) externalCallDecls() []string {
 					continue
 				}
 				name := strings.TrimPrefix(instr.Op, "call.")
-				if name == "print" || defined[name] {
+				if defined[name] {
 					continue
 				}
 				seen[name] = e.externalCallDecl(name, instr)
@@ -1136,6 +1130,8 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "test."):
 		return e.writeTestInstr(instr)
+	case instr.Op == "print.line":
+		return e.writePrintLine(instr)
 	case instr.Op == "panic.fail":
 		return e.writePanicFail(instr)
 	case strings.HasPrefix(instr.Op, "slice."):
@@ -1661,9 +1657,6 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	foreignC := instr.ExternABI == "c"
 	if foreignC {
 		name = instr.ExternName
-	}
-	if !foreignC && name == "print" {
-		return e.writePrint(instr.Args)
 	}
 	if !foreignC && e.usesHostedRuntimeABI(name, instr) {
 		return e.writeHostedRuntimeCall(name, instr)
@@ -2649,134 +2642,19 @@ func (e *emitter) writeCleanup(cleanup ir.Cleanup) error {
 	return e.writeInstr(instr)
 }
 
-// writePrint writes calls to the Kizu runtime print ABI.
-func (e *emitter) writePrint(args []ir.Value) error {
-	if len(args) != 1 {
-		return fmt.Errorf("llvm error: print expects 1 arg")
+// writePrintLine writes one byte string and a newline to stdout: the one print
+// primitive std::fmt::print is built on (SPEC §14.1).
+func (e *emitter) writePrintLine(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" {
+		return fmt.Errorf("llvm error: print.line expects []u8")
 	}
-	value := e.value(args[0])
-	switch args[0].Type {
-	case "[]u8":
-		ptrName := "%" + e.nextSyntheticValue("print.slice.ptr")
-		lenName := "%" + e.nextSyntheticValue("print.slice.len")
-		fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n",
-			ptrName, value.operand)
-		fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n",
-			lenName, value.operand)
-		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %s)\n",
-			ptrName, lenName)
-	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
-		operand := e.runtimeIntegerOperand(args[0].Type, value.operand)
-		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", operand)
-	case "bool":
-		fmt.Fprintf(&e.out, "  call void @kizu_print_bool(i1 %s)\n", value.operand)
-	default:
-		if _, ok := e.module.Enums[args[0].Type]; ok {
-			e.writePrintEnum(args[0].Type, value.operand)
-			return nil
-		}
-		if _, ok := e.module.ErrorSets[args[0].Type]; ok {
-			// An error is a global code, so its spelling comes from the one
-			// table every error shares rather than from a per-type table.
-			e.writePrintNameTable(errorNameTable, e.errorNameTableRows(), value.operand)
-			return nil
-		}
-		return fmt.Errorf("llvm error: print does not support `%s`", args[0].Type)
-	}
+	value := e.value(instr.Args[0])
+	ptrName := "%" + e.nextSyntheticValue("print.slice.ptr")
+	lenName := "%" + e.nextSyntheticValue("print.slice.len")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, value.operand)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, value.operand)
+	fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %s)\n", ptrName, lenName)
 	return nil
-}
-
-// writePrintEnum prints an enum by indexing its name table, so a new tag costs
-// a table row rather than a branch in the backend.
-func (e *emitter) writePrintEnum(typ string, operand string) {
-	e.writePrintNameTable(enumNameTable(typ), len(e.module.Enums[typ].Tags), operand)
-}
-
-// writePrintNameTable prints one tag by indexing a table of spellings.
-func (e *emitter) writePrintNameTable(table string, rows int, operand string) {
-	fmt.Fprintf(&e.out, "  call void @kizu_print_enum(ptr %s, i64 %d, i64 %s)\n",
-		table, rows, operand)
-}
-
-// enumNameTable returns the global holding one enum's tag spellings.
-func enumNameTable(typ string) string {
-	return "@.kizu.enum." + mangleGlobalName(typ)
-}
-
-// mangleGlobalName makes a type name usable inside an LLVM global identifier.
-func mangleGlobalName(typ string) string {
-	return strings.NewReplacer(":", "_", "<", "_", ">", "_", ",", "_", " ", "").Replace(typ)
-}
-
-// printsNamedTag reports whether the module prints an enum or an error set,
-// both of which name their value through a table of spellings.
-func (e *emitter) printsNamedTag() bool {
-	if len(e.printedEnums()) > 0 {
-		return true
-	}
-	for _, fn := range e.module.Functions {
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if instr.Op != "call.print" || len(instr.Args) != 1 {
-					continue
-				}
-				if _, ok := e.module.ErrorSets[instr.Args[0].Type]; ok {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-// printedEnums returns the enums this module prints, in sorted order.
-func (e *emitter) printedEnums() []string {
-	seen := map[string]bool{}
-	for _, fn := range e.module.Functions {
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if instr.Op != "call.print" || len(instr.Args) != 1 {
-					continue
-				}
-				if _, ok := e.module.Enums[instr.Args[0].Type]; ok {
-					seen[instr.Args[0].Type] = true
-				}
-			}
-		}
-	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// writeEnumNameTables defines the `Enum::Tag` spellings the module prints.
-func (e *emitter) writeEnumNameTables() {
-	names := e.printedEnums()
-	for _, typ := range names {
-		tags := e.module.Enums[typ].Tags
-		spellings := make([]string, len(tags))
-		for tag, index := range tags {
-			spellings[index] = typ + "::" + tag
-		}
-		rows := make([]string, 0, len(spellings))
-		for index, spelling := range spellings {
-			global := fmt.Sprintf("%s.%d", enumNameTable(typ), index)
-			e.writeStaticStringGlobal(global, spelling)
-			rows = append(rows,
-				fmt.Sprintf("{ ptr, i64 } { ptr %s, i64 %d }", global, len(spelling)))
-		}
-		// A literal { ptr, i64 } rather than %kizu.slice.u8: the named type is
-		// only defined when the module otherwise uses slices, and a module can
-		// print an enum without ever touching one.
-		fmt.Fprintf(&e.out, "%s = private unnamed_addr constant [%d x { ptr, i64 }] [%s]\n",
-			enumNameTable(typ), len(rows), strings.Join(rows, ", "))
-	}
-	if len(names) > 0 {
-		e.out.WriteByte('\n')
-	}
 }
 
 // runtimeIntegerOperand widens a narrow integer to the i64 the runtime helpers

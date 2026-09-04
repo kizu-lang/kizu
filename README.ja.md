@@ -35,12 +35,12 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 | 機能 | 例の数 | check | run | llvm | wasm | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 44 | ✅ | ✅ | ✅ | ✅ | ✅ | 43/44 |
-| arithmetic / bitwise / float | 5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| fn / let / struct / literals | 45 | ✅ | ✅ | ✅ | ✅ | ✅ | 44/45 |
+| arithmetic / bitwise / float | 6 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| enum / union | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
-| error union `!T` / try / errdefer | 51 | ✅ | ✅ | ✅ | 33/51 | 33/51 | 30/51 |
+| enum / union | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | 15/16 |
+| error union `!T` / try / errdefer | 52 | ✅ | ✅ | ✅ | 34/52 | 34/52 | 31/52 |
 | optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
 | move / borrow | 60 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -57,7 +57,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fmt | 6 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 | 3/27 |
 | std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 | 2/19 |
@@ -65,7 +65,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。runnable example は 176 件、測定は 2026-09-04 に
+1 つの example は複数の行に現れます。runnable example は 177 件、測定は 2026-09-04 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run`、`wasm`、`wasm-bin`、`browser` はプログラムの出力で判定します。`run` は native
 build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmtime` で、
@@ -74,12 +74,12 @@ build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmti
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 176/176 |
-| `kizu run` | 176/176 |
-| `kizu build --emit-llvm` | 176/176 |
-| `kizu build --target wasm32-wasi` (WAT) | 156/176 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 156/176 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 149/176 |
+| `kizu check` | 177/177 |
+| `kizu run` | 177/177 |
+| `kizu build --emit-llvm` | 177/177 |
+| `kizu build --target wasm32-wasi` (WAT) | 157/177 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 157/177 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 150/177 |
 
 native 経路に pending の runnable example はありません。WASI はまだ target subset
 で、残る 20 件はすべて明示的な target 非対応(`std::net` 16、extern C 2、

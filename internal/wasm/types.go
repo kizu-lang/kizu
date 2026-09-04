@@ -157,20 +157,26 @@ func integerBitWidth(typ string) (int, bool) {
 }
 
 // wasmCompareOp maps a Kizu comparison to a WebAssembly integer operation.
-func wasmCompareOp(op string) string {
+// An unsigned operand type orders by the unsigned reading of its i64 local,
+// the way its division does.
+func wasmCompareOp(op string, typ string) string {
+	sign := "_s"
+	if isUnsignedIntegerType(typ) {
+		sign = "_u"
+	}
 	switch op {
 	case "==":
 		return "i64.eq"
 	case "!=":
 		return "i64.ne"
 	case "<":
-		return "i64.lt_s"
+		return "i64.lt" + sign
 	case "<=":
-		return "i64.le_s"
+		return "i64.le" + sign
 	case ">":
-		return "i64.gt_s"
+		return "i64.gt" + sign
 	case ">=":
-		return "i64.ge_s"
+		return "i64.ge" + sign
 	default:
 		return "i64.eq"
 	}

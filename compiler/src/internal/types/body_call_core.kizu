@@ -2,7 +2,9 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::stdprim;
 import compiler::internal::typ;
+import std::array;
 import std::fmt;
+import std::map;
 import std::mem;
 import std::string;
 
@@ -188,7 +190,7 @@ fn (self: &var Checker) check_call_expr_dispatch(
             let name = owned_name.as_bytes();
             let span = identifier.span;
             if mem::equal_bytes(name, "print") {
-                return self.check_print_call(tree, scope, expression.args, out);
+                return self.check_print_call(tree, scope, expression.args, span, out);
             }
             if mem::equal_bytes(name, "ptr_read") {
                 return self.check_ptr_read(tree, scope, span, expression.args, out);
@@ -810,6 +812,7 @@ fn (self: &var Checker) check_print_call(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     args: ast::ExpressionList,
+    span: ast::Span,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if args.len(tree) != 1 {
@@ -825,18 +828,55 @@ fn (self: &var Checker) check_print_call(
             "type error", ast::zero_span(), "`print` cannot print void"
         );
     }
-    if self.types.is_text(got, "f32") or self.types.is_text(got, "f64") {
-        var message = string::new(self.allocator);
-        errdefer message.deinit(self.allocator);
-        try message.append_bytes(self.allocator, "type error: `print` does not accept ");
-        try self.append_checker_type(&var message, got);
-        try message.append_byte(self.allocator, cast<u8>(10));
-        try message.append_bytes(self.allocator,
-            "help: cast the value to an integer to print it: `cast<i64>(value)`");
-        return try self.checker_text_diagnostic_at(ast::zero_span(), move message);
+    return self.check_print_instance(tree, got, span, out);
+}
+
+/// Names the std generic every `print(value)` is a call to, the Go
+/// `stdlib.PrintFunction` (SPEC §14.1).
+fn print_function_name() -> []u8 {
+    return "std::fmt::print";
+}
+
+// Checks the std body `print` stands for with the argument's type bound
+// (SPEC §14.1), the Go `checkPrintInstance`. The body is the one place that
+// says which types print, so a type it has no case for is refused there, at
+// this call.
+fn (self: &var Checker) check_print_instance(
+    tree: &var ast::Ast,
+    argument: Type,
+    span: ast::Span,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let name = print_function_name();
+    let handle = self.metadata.functions_by_name.get(name) orelse
+        return try self.print_not_loaded_error();
+    if self.function_static_param_count(handle) != 1 {
+        return try self.print_not_loaded_error();
+    }
+    let parameter = try self.copy_static_param(handle, 0) orelse
+        return try self.print_not_loaded_error();
+    let parameter_name = move parameter.name;
+    defer parameter_name.deinit(self.allocator);
+    var substitutions = map::new<[]u8, Type>(self.allocator);
+    defer substitutions.deinit(self.allocator);
+    let parameter_bytes = parameter_name.as_bytes();
+    try substitutions.insert(self.allocator, parameter_bytes, argument);
+    var fields = map::new<[]u8, MetaFieldHandle>(self.allocator);
+    defer fields.deinit(self.allocator);
+    var functions = map::new<[]u8, string::String>(self.allocator);
+    defer functions.deinit(self.allocator);
+    var type_args = array::new<Type>(self.allocator);
+    defer type_args.deinit(self.allocator);
+    try type_args.append(self.allocator, argument);
+    if try self.check_generic_instantiation(tree, handle, &substitutions, &fields, &functions) |problem| {
+        return try self.annotate_instantiation(move problem, span, name, &type_args);
     }
     out.* = try self.types.void_type();
     return null;
+}
+
+fn (self: &Checker) print_not_loaded_error() -> !diagnostic::Diagnostic {
+    return self.checker_error_at("type error", ast::zero_span(), "`std::fmt::print` is not loaded");
 }
 
 fn (self: &Checker) named_arity_error(

@@ -766,7 +766,7 @@ func TestEmitErrorUnionSliceSuccess(t *testing.T) {
 		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, i64 }",
 		"%kizu.2 = insertvalue %kizu.error.slice.u8 %kizu.2.ok, %kizu.slice.u8 %kizu.1, 1",
 		"%kizu.2 = extractvalue %kizu.error.slice.u8 %kizu.1, 1",
-		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.",
+		"call void @std__fmt__print__5b_5du8(%kizu.slice.u8 ",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -810,8 +810,8 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 			"  unreachable",
 		"%kizu.6 = load i8, ptr %kizu.6.elem.ptr",
 		"%kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 %kizu.13.len, 1",
-		"= zext i8 %kizu.6 to i64",
-		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.",
+		"call void @std__fmt__print_u8(i8 %kizu.6)",
+		"call void @std__fmt__print__5b_5du8(%kizu.slice.u8 ",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -1067,6 +1067,8 @@ func lowerSource(t *testing.T, source string) *ir.Module {
 	if module == nil {
 		t.Fatal(errors.New("nil module"))
 	}
+	module.Functions = programFunctions(module)
+	ir.KeepReferencedErrorSets(module)
 	return module
 }
 
@@ -1192,14 +1194,27 @@ const sliceAccessSource = `fn main() {
 
 const helloLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
+%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+
+%kizu.struct.std__float__Big = type { %kizu.array }
+%kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+%kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+%kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__string__Scalar = type { i64, i64 }
+%kizu.struct.std__string__String = type { %kizu.array }
+%kizu.struct.std__string__TrimBounds = type { i64, i64 }
+
 @.str.0 = private unnamed_addr constant [12 x i8] c"hello, kizu\00"
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_print_int(i64)
-declare void @kizu_print_bool(i1)
 declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
+
+%kizu.array = type { ptr, i64, i64 }
+
+declare void @std__fmt__print__5b_5du8(%kizu.slice.u8)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1209,19 +1224,31 @@ entry:
   %kizu.1.ptr = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 11, 1
-  %kizu.print.slice.ptr.1 = extractvalue %kizu.slice.u8 %kizu.1, 0
-  %kizu.print.slice.len.2 = extractvalue %kizu.slice.u8 %kizu.1, 1
-  call void @kizu_print_string(ptr %kizu.print.slice.ptr.1, i64 %kizu.print.slice.len.2)
+  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.1)
   ret i32 0
 }`
 
 const functionsLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
+%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+
+%kizu.struct.std__float__Big = type { %kizu.array }
+%kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+%kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+%kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__string__Scalar = type { i64, i64 }
+%kizu.struct.std__string__String = type { %kizu.array }
+%kizu.struct.std__string__TrimBounds = type { i64, i64 }
+
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_print_int(i64)
-declare void @kizu_print_bool(i1)
 declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
+
+%kizu.array = type { ptr, i64, i64 }
+
+declare void @std__fmt__print_i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1235,20 +1262,34 @@ define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.3 = call i64 @add(i64 1, i64 2)
-  call void @kizu_print_int(i64 %kizu.3)
+  call void @std__fmt__print_i64(i64 %kizu.3)
   ret i32 0
 }`
 
 const variablesLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
+%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+
+%kizu.struct.std__float__Big = type { %kizu.array }
+%kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+%kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+%kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__string__Scalar = type { i64, i64 }
+%kizu.struct.std__string__String = type { %kizu.array }
+%kizu.struct.std__string__TrimBounds = type { i64, i64 }
+
 @.str.0 = private unnamed_addr constant [6 x i8] c"alice\00"
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_print_int(i64)
-declare void @kizu_print_bool(i1)
 declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
+
+%kizu.array = type { ptr, i64, i64 }
+
+declare void @std__fmt__print__5b_5du8(%kizu.slice.u8)
+declare void @std__fmt__print_i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1259,24 +1300,35 @@ entry:
   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 5, 1
   %kizu.4 = add i64 30, 1
-  %kizu.print.slice.ptr.1 = extractvalue %kizu.slice.u8 %kizu.1, 0
-  %kizu.print.slice.len.2 = extractvalue %kizu.slice.u8 %kizu.1, 1
-  call void @kizu_print_string(ptr %kizu.print.slice.ptr.1, i64 %kizu.print.slice.len.2)
-  call void @kizu_print_int(i64 %kizu.4)
+  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.1)
+  call void @std__fmt__print_i64(i64 %kizu.4)
   ret i32 0
 }`
 
 const ifLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
+%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+
+%kizu.struct.std__float__Big = type { %kizu.array }
+%kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+%kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+%kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__string__Scalar = type { i64, i64 }
+%kizu.struct.std__string__String = type { %kizu.array }
+%kizu.struct.std__string__TrimBounds = type { i64, i64 }
+
 @.str.0 = private unnamed_addr constant [6 x i8] c"adult\00"
 @.str.1 = private unnamed_addr constant [6 x i8] c"minor\00"
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_print_int(i64)
-declare void @kizu_print_bool(i1)
 declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
+
+%kizu.array = type { ptr, i64, i64 }
+
+declare void @std__fmt__print__5b_5du8(%kizu.slice.u8)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1289,29 +1341,39 @@ if.then.1:
   %kizu.4.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 5, 1
-  %kizu.print.slice.ptr.1 = extractvalue %kizu.slice.u8 %kizu.4, 0
-  %kizu.print.slice.len.2 = extractvalue %kizu.slice.u8 %kizu.4, 1
-  call void @kizu_print_string(ptr %kizu.print.slice.ptr.1, i64 %kizu.print.slice.len.2)
+  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.4)
   br label %if.end.3
 if.else.2:
   %kizu.6.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
   %kizu.6.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.6.ptr, 0
   %kizu.6 = insertvalue %kizu.slice.u8 %kizu.6.base, i64 5, 1
-  %kizu.print.slice.ptr.3 = extractvalue %kizu.slice.u8 %kizu.6, 0
-  %kizu.print.slice.len.4 = extractvalue %kizu.slice.u8 %kizu.6, 1
-  call void @kizu_print_string(ptr %kizu.print.slice.ptr.3, i64 %kizu.print.slice.len.4)
+  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.6)
   br label %if.end.3
 if.end.3:
   ret i32 0
 }`
 
 const whileLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
+%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+
+%kizu.struct.std__float__Big = type { %kizu.array }
+%kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+%kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+%kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__string__Scalar = type { i64, i64 }
+%kizu.struct.std__string__String = type { %kizu.array }
+%kizu.struct.std__string__TrimBounds = type { i64, i64 }
+
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_print_int(i64)
-declare void @kizu_print_bool(i1)
 declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
+
+%kizu.array = type { ptr, i64, i64 }
+
+declare void @std__fmt__print_i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1324,7 +1386,7 @@ while.header.1:
   %kizu.4 = icmp slt i64 %kizu.2, 3
   br i1 %kizu.4, label %while.body.2, label %while.end.3
 while.body.2:
-  call void @kizu_print_int(i64 %kizu.2)
+  call void @std__fmt__print_i64(i64 %kizu.2)
   %kizu.7 = add i64 %kizu.2, 1
   br label %while.header.1
 while.end.3:
@@ -1332,14 +1394,27 @@ while.end.3:
 }`
 
 const structLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
+%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+
 %kizu.struct.User = type { i64 }
+%kizu.struct.std__float__Big = type { %kizu.array }
+%kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+%kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+%kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__string__Scalar = type { i64, i64 }
+%kizu.struct.std__string__String = type { %kizu.array }
+%kizu.struct.std__string__TrimBounds = type { i64, i64 }
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_print_int(i64)
-declare void @kizu_print_bool(i1)
 declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
+
+%kizu.array = type { ptr, i64, i64 }
+
+declare void @std__fmt__print_i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1348,23 +1423,37 @@ entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.2 = insertvalue %kizu.struct.User zeroinitializer, i64 30, 0
   %kizu.3 = extractvalue %kizu.struct.User %kizu.2, 0
-  call void @kizu_print_int(i64 %kizu.3)
+  call void @std__fmt__print_i64(i64 %kizu.3)
   ret i32 0
 }`
 
 //nolint:lll // snapshot text matches emitter output byte for byte
 const errorUnionLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
 %kizu.error.i64 = type { i8, i64, i64 }
 %kizu.error.void = type { i8, i64 }
+
+%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+
+%kizu.struct.std__float__Big = type { %kizu.array }
+%kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+%kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+%kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+%kizu.struct.std__string__Scalar = type { i64, i64 }
+%kizu.struct.std__string__String = type { %kizu.array }
+%kizu.struct.std__string__TrimBounds = type { i64, i64 }
 
 @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_print_int(i64)
-declare void @kizu_print_bool(i1)
 declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
+
+%kizu.array = type { ptr, i64, i64 }
+
+declare void @std__fmt__print_i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1392,7 +1481,7 @@ kizu.2.try.err:
   ret i32 1
 kizu.2.try.ok:
   %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
-  call void @kizu_print_int(i64 %kizu.2)
+  call void @std__fmt__print_i64(i64 %kizu.2)
   %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
   %kizu.main.ok.3 = extractvalue %kizu.error.void %kizu.4, 0
   %kizu.main.ok.3.bool = icmp ne i8 %kizu.main.ok.3, 0
@@ -1430,4 +1519,46 @@ func writesFullStdPath(source string) bool {
 		}
 	}
 	return false
+}
+
+// programFunctions keeps what a test reads: the program's own functions and
+// the std bodies they call, minus std::fmt::print and what only it reaches.
+// print comes with every program (SPEC §14.1), and its body is std::fmt's
+// to test, not the lowering under test here.
+func programFunctions(module *ir.Module) []*ir.Function {
+	byName := map[string]*ir.Function{}
+	for _, fn := range module.Functions {
+		byName[fn.Name] = fn
+	}
+	keep := map[string]bool{}
+	var queue []string
+	for _, fn := range module.Functions {
+		if !strings.HasPrefix(fn.Name, "std::") {
+			keep[fn.Name] = true
+			queue = append(queue, fn.Name)
+		}
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, block := range byName[name].Blocks {
+			for _, instr := range block.Instrs {
+				callee := strings.TrimPrefix(strings.TrimPrefix(instr.Op, "call."), "func.addr.")
+				if callee == instr.Op || strings.HasPrefix(callee, "std::fmt::print") {
+					continue
+				}
+				if byName[callee] != nil && !keep[callee] {
+					keep[callee] = true
+					queue = append(queue, callee)
+				}
+			}
+		}
+	}
+	var out []*ir.Function
+	for _, fn := range module.Functions {
+		if keep[fn.Name] {
+			out = append(out, fn)
+		}
+	}
+	return out
 }

@@ -221,6 +221,12 @@ func TestFloatTextWASM(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
 	want := floatTextWant(bits, parses)
 	if len(lines) != len(want) {
+		for index := range want {
+			if index >= len(lines) || lines[index] != want[index] {
+				t.Fatalf("got %d lines, want %d; first difference at line %d: got %q, want %q",
+					len(lines), len(want), index, lines[min(index, len(lines)-1)], want[index])
+			}
+		}
 		t.Fatalf("got %d lines, want %d", len(lines), len(want))
 	}
 	for i := range want {

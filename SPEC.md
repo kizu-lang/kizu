@@ -915,8 +915,8 @@ float literal は `1.0`、`2.5e-3`、`1e6` の形で、`.` の両側と指数に
 (`1.` や `.5` は literal ではない)。型は文脈が `f32` を求めるときだけ `f32`、
 それ以外は `f64` です(§7.2)。整数 literal は float になりません。
 
-`print` は float を受け付けません。文字列との変換は `std::float` が持ちます
-(`docs/std/float.md`)。
+`print` は float を最短往復表現で綴ります(§14.1)。文字列との変換は
+`std::float` が持ちます(`docs/std/float.md`)。
 
 ### 6.10 while
 
@@ -2390,12 +2390,10 @@ compiler runtime が使う symbol は `kizu_` prefix を予約します。
 
 ```text
 kizu_print_string
-kizu_print_int
-kizu_print_bool
 ```
 
 LLVM IR backend では、extern C call は将来 `declare` と `call` に lower します。
-native executable generation は、LLVM lowering 済み subset と `kizu_print_*` runtime shim に
+native executable generation は、LLVM lowering 済み subset と `kizu_` runtime shim に
 限定して扱います。extern C library selection と C layout 完全対応は別 phase で扱います。
 
 ## 13. comptime
@@ -2813,6 +2811,15 @@ print
 - `Io` capability を取りません。
 - **失敗を報告しません。** 書き込みに失敗しても error を返さず、静かに続行します。
 - したがって `!void` ではなく `void` を返し、`try` は要りません。
+
+`print(value)` は `std::fmt::print<T>(value)` の呼び出しで、`T` は引数の型です。
+compiler が知っているのは名前の解決と、`std::fmt` が常に読み込まれることだけで、
+何をどう綴るかは std の body(`docs/std/fmt.md`)が持ちます。backend に残る
+primitive は「bytes を 1 行 stdout に書く」1 つです。
+
+受け取れる型は `[]u8`、整数、`bool`、`f32` / `f64`、enum、error set です。
+整数は 10 進、float は §6.9.3 の最短往復表現、enum は `Color::Green`、error は
+宣言元 set で修飾した `FsError::NotFound` と綴ります。
 
 プログラムの出力としての書き込みは `std::io` を使います。capability を取り、
 失敗を `!void` で返します。

@@ -239,8 +239,10 @@ func (c *graphChecker) loadStd() error {
 // stdImportPaths returns the std paths this program's modules declare they
 // import, in a stable order.
 func (c *graphChecker) stdImportPaths() []string {
-	seen := map[string]bool{}
-	paths := []string{}
+	// `print` is spelled in std::fmt (SPEC §14.1), so every program reaches
+	// that module whether or not it imports it.
+	seen := map[string]bool{stdlib.PrintModule: true}
+	paths := []string{stdlib.PrintModule}
 	for _, group := range sortedModuleGroups(c.modules) {
 		for _, module := range group.files {
 			for _, decl := range module.program.Decls {

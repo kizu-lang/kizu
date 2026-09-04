@@ -109,7 +109,7 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 
 ## 4. std の二層構造
 
-- 実行時の組み込み(print、メモリ、fs、process、net、coro 等)は compiler が
+- 実行時の組み込み(stdout への 1 行書き込み、メモリ、fs、process、net、coro 等)は compiler が
   提供し(Go 側は `internal/stdprim`、Kizu 側は対応する module)、
   `lib/kizu/std/src/*/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map`
   `std::string` `std::http` …)。境界の一覧は docs/stdlib.md。

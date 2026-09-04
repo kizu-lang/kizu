@@ -17,6 +17,15 @@ import (
 // not be named this, so a path starting here always means std.
 const Root = "std"
 
+// PrintModule is the std module that spells `print`, and PrintFunction the
+// generic every `print(value)` is a call to (SPEC §14.1). The compiler loads
+// the module for every program and binds the function's one type parameter
+// to the argument's type.
+const (
+	PrintModule   = Root + "::fmt"
+	PrintFunction = PrintModule + "::print"
+)
+
 // LibDirEnv names the environment variable that overrides where the library
 // tree is. A caller that already knows the path passes it with SetLibDir; this
 // is for the ones that do not run the CLI, and for a development shell.

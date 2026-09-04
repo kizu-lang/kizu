@@ -9,9 +9,8 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ir"
-	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
-	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -30,12 +29,12 @@ func TestEmitPhase2Subsets(t *testing.T) {
 		{name: "functions", src: functionsSource, wants: []string{
 			`(func $add (param $a i64) (param $b i64) (result i64)`,
 			`(return (local.get $v1))`,
-			`(call $__print_i64 (local.get $v3))`,
+			`(call $std::fmt::print.i64 (local.get $v3))`,
 		}},
 		{name: "while", src: whileSource, wants: []string{
 			`(local.set $v2 (i64.const 0))`,
 			`(local.set $pc (i32.const 1))`,
-			`(call $__print_i64 (local.get $v2))`,
+			`(call $std::fmt::print.i64 (local.get $v2))`,
 		}},
 	}
 	for _, tt := range cases {
@@ -168,13 +167,14 @@ func TestBinaryRunsHello(t *testing.T) {
 	}
 }
 
-// lowerSource parses, checks, and lowers a source snippet.
+// lowerSource loads, checks, and lowers a source snippet. The loader brings
+// std::fmt with it, as every real path does (SPEC §14.1), and the module is
+// pruned to what a build keeps.
 func lowerSource(t *testing.T, source string) *ir.Module {
 	t.Helper()
-	p := parser.New(lexer.New(source))
-	program := p.ParseProgram()
-	if len(p.Errors()) > 0 {
-		t.Fatalf("parse failed: %v", p.Errors())
+	program, err := project.LoadSource("", source)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
 	}
 	if err := types.New().Check(program); err != nil {
 		t.Fatalf("type check failed: %v", err)
@@ -187,6 +187,7 @@ func lowerSource(t *testing.T, source string) *ir.Module {
 	if err != nil {
 		t.Fatalf("lower failed: %v", err)
 	}
+	ir.KeepTargetReachableFunctions(module, "", "main")
 	return module
 }
 

@@ -73,6 +73,9 @@ fn (self: &var Emitter) write_instr_node(
     if node.op == ir::Op::TestFail or node.op == ir::Op::TestExpectEqual {
         return self.write_test_instr(module, node);
     }
+    if node.op == ir::Op::PrintLine {
+        return self.write_print_line(module, node);
+    }
     if node.op == ir::Op::Call {
         return self.write_call(module, node);
     }
@@ -311,7 +314,7 @@ fn binary_operation(module: &ir::Module, node: &ir::InstrNode) -> []u8 {
         if is_float_type(&module.names, left_type) {
             return wasm_float_compare_op(&module.names, node.operand, left_type);
         }
-        return wasm_compare_op(&module.names, node.operand);
+        return wasm_compare_op(&module.names, node.operand, left_type);
     }
     if is_float_type(&module.names, node.result.type_name) {
         return wasm_float_binary_op(&module.names, node.operand, node.result.type_name);
@@ -563,9 +566,6 @@ fn (self: &var Emitter) write_call(
             Arg::Str(abi)
         );
     }
-    if module.names.is(node.operand, "print") {
-        return self.write_print(module, node);
-    }
     if module.names.is(node.operand, "std::internal::builtin::mem_page_allocator") {
         if node.args.len() != 0 or !module.names.is(node.result.type_name, "Allocator") {
             return try self.fail0(
@@ -670,49 +670,31 @@ fn (self: &var Emitter) write_call(
     return null;
 }
 
-/// Writes calls to the selected target's stdout helper, the Go `writePrint`.
-fn (self: &var Emitter) write_print(
+/// Writes one byte string and a newline to stdout, the Go `writePrintLine`:
+/// the one print primitive std::fmt::print is built on (SPEC §14.1).
+fn (self: &var Emitter) write_print_line(
     module: &ir::Module,
     node: &ir::InstrNode
 ) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 {
-        return try self.fail0("wasm error: print expects 1 arg");
+    if node.args.len() != 1 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+        return try self.fail0("wasm error: print.line expects []u8");
     }
-    let arg = node.args.get(0) orelse ir::empty_value();
+    let arg = node.args.get_or_panic(0);
     let info = try self.value_of(module, arg);
-    if module.names.is(arg.type_name, "[]u8") {
-        let length_address = try self.address_at(info.expr, 4);
-        var pointer = try string::from_bytes(self.allocator, "(i32.load ");
-        errdefer pointer.deinit(self.allocator);
-        try self.names.append_to(&var pointer, info.expr);
-        try pointer.append_byte(self.allocator, cast<u8>(41));
-        let pointer_expr = try self.names.intern_owned(move pointer);
-        var length = try string::from_bytes(self.allocator, "(i32.load ");
-        errdefer length.deinit(self.allocator);
-        try self.names.append_to(&var length, length_address);
-        try length.append_byte(self.allocator, cast<u8>(41));
-        let length_expr = try self.names.intern_owned(move length);
-        try self.line2("            (call $__write_line %s %s)",
-            Arg::Str(pointer_expr), Arg::Str(length_expr));
-        return null;
-    }
-    if module.names.is(arg.type_name, "i64") {
-        try self.line1("            (call $__print_i64 %s)", Arg::Str(info.expr));
-        return null;
-    }
-    if module.names.is(arg.type_name, "bool") {
-        try self.line1("            (call $__print_bool %s)", Arg::Str(info.expr));
-        return null;
-    }
-    if is_integer_type(&module.names, arg.type_name) {
-        try self.line1("            (call $__print_i64 %s)", Arg::Str(info.expr));
-        return null;
-    }
-    if try self.write_enum_print(module, arg.type_name, info.expr) {
-        return null;
-    }
-    let type_name = try self.own(module, arg.type_name);
-    return try self.fail("wasm error: unsupported print type `%s`", Arg::Str(type_name));
+    let length_address = try self.address_at(info.expr, 4);
+    var pointer = try string::from_bytes(self.allocator, "(i32.load ");
+    errdefer pointer.deinit(self.allocator);
+    try self.names.append_to(&var pointer, info.expr);
+    try pointer.append_byte(self.allocator, cast<u8>(41));
+    let pointer_expr = try self.names.intern_owned(move pointer);
+    var length = try string::from_bytes(self.allocator, "(i32.load ");
+    errdefer length.deinit(self.allocator);
+    try self.names.append_to(&var length, length_address);
+    try length.append_byte(self.allocator, cast<u8>(41));
+    let length_expr = try self.names.intern_owned(move length);
+    try self.line2("            (call $__write_line %s %s)",
+        Arg::Str(pointer_expr), Arg::Str(length_expr));
+    return null;
 }
 
 /// Returns the expression standing for one instruction argument, the Go

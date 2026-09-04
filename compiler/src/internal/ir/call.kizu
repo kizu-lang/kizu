@@ -517,10 +517,20 @@ fn (self: &var Lowerer) lower_named_call_expr(
     raw_args: ast::ExpressionList,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
+    if self.name_is(name, "print") {
+        return self.lower_print_call(tree, raw_args, out);
+    }
     var args = array::new<Value>(self.allocator);
     defer args.deinit(self.allocator);
     if try self.lower_call_args(tree, name, raw_args, &var args) |failed| {
         return move failed;
+    }
+    if self.name_is(name, "std::internal::builtin::print_line") {
+        if args.len() != 1 or !self.name_is(args.get_or_panic(0).type_name, "[]u8") {
+            return try self.fail0("ir error: std::internal::builtin::print_line expects []u8");
+        }
+        out.* = try self.emit_with(Op::PrintLine, empty_name(), self.common.void_type, empty_name(), &args);
+        return null;
     }
     if self.name_is(name, "std::internal::builtin::mem_len") {
         if args.len() != 1 {
@@ -651,6 +661,45 @@ fn (self: &var Lowerer) lower_typed_named_call_expr(
     if try self.lower_call_args_as(tree, params_of(instance.signature), raw_args, &var args) |failed| {
         return move failed;
     }
+    let return_type = self.signature_return(instance.signature);
+    out.* = try self.emit_with(Op::Call, instance.symbol, return_type, empty_name(), &args);
+    return null;
+}
+
+/// Lowers `print(value)` as the call to the std generic it stands for
+/// (SPEC §14.1), the Go `lowerPrintCall`: the argument's type is the one
+/// static argument, so the argument is lowered first.
+fn (self: &var Lowerer) lower_print_call(
+    tree: &var ast::Ast,
+    raw_args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if raw_args.len(tree) != 1 {
+        return try self.fail0("ir error: print expects 1 arg");
+    }
+    var arg = empty_value();
+    let argument = raw_args.get_or_panic(tree, 0);
+    if try self.lower_expr(tree, argument, &var arg) |failed| {
+        return move failed;
+    }
+    let name = try self.module.names.intern("std::fmt::print");
+    var instance = self.blank_instance();
+    if try self.request_generic_instance(tree, name, arg.type_name, &var instance) |failed| {
+        return move failed;
+    }
+    let param = self.signature_param(instance.signature, 0) orelse
+        return try self.fail0("ir error: `std::fmt::print` expects 1 param");
+    if self.signature_param_count(instance.signature) != 1 or !same_name(param.type_name, arg.type_name) {
+        return try self.fail2(
+            tree,
+            "ir error: `std::fmt::print` expects %s, got %s",
+            Arg::Str(param.type_name),
+            Arg::Str(arg.type_name)
+        );
+    }
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit(self.allocator);
+    try args.append(self.allocator, arg);
     let return_type = self.signature_return(instance.signature);
     out.* = try self.emit_with(Op::Call, instance.symbol, return_type, empty_name(), &args);
     return null;

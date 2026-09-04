@@ -116,11 +116,6 @@ var copyTypes = map[Type]bool{
 	"std::fs::Metadata": true,
 }
 
-var floatTypes = map[Type]bool{
-	typeF32: true,
-	typeF64: true,
-}
-
 var signedNumericTypes = map[Type]bool{
 	"i8":    true,
 	"i16":   true,

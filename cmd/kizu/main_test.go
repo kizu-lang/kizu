@@ -1101,8 +1101,12 @@ func TestIROptCommandSmoke(t *testing.T) {
 	if !strings.Contains(string(out), "%3: i64 = const 3") {
 		t.Fatalf("got %q", out)
 	}
-	if strings.Contains(string(out), "binary.+") {
-		t.Fatalf("optimized IR still contains binary.+:\n%s", out)
+	// std::fmt::print's own body reaches the dump beside main (SPEC §14.1);
+	// the fold under test is main's.
+	mainDump := string(out)[strings.Index(string(out), "fn main()"):]
+	mainDump = mainDump[:strings.Index(mainDump, "\n}\n")]
+	if strings.Contains(mainDump, "binary.+") {
+		t.Fatalf("optimized IR still contains binary.+:\n%s", mainDump)
 	}
 }
 
@@ -1168,7 +1172,7 @@ pub fn main() -> void {
 		"define internal i64 @app__math__answer()",
 		"define internal void @app__main()",
 		"call i64 @app__math__answer()",
-		"call void @kizu_print_int(i64",
+		"call void @std__fmt__print_i64(i64",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("got %q, want substring %q", out, want)
@@ -1196,7 +1200,7 @@ fn main() {
 		"%kizu.struct.User = type { i64 }",
 		"insertvalue %kizu.struct.User zeroinitializer, i64 30, 0",
 		"extractvalue %kizu.struct.User",
-		"call void @kizu_print_int(i64",
+		"call void @std__fmt__print_i64(i64",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("got %q, want substring %q", out, want)
@@ -1232,7 +1236,7 @@ fn main() -> !void {
 		// failing silently.
 		"call void @kizu_main_error_message(",
 		"  ret i32 1",
-		"call void @kizu_print_int(i64 %kizu.2)",
+		"call void @std__fmt__print_i64(i64 %kizu.2)",
 		"  ret i32 0",
 	} {
 		if !strings.Contains(string(out), want) {
@@ -1273,7 +1277,7 @@ fn main() -> !void {
 		"define internal %kizu.error.slice.u8 @read()",
 		"call %kizu.slice.u8 @identity(%kizu.slice.u8",
 		"insertvalue %kizu.error.slice.u8",
-		"extractvalue %kizu.slice.u8 %kizu.2, 0",
+		"call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.2)",
 		"call void @kizu_print_string(ptr",
 	} {
 		if !strings.Contains(string(out), want) {
@@ -1293,7 +1297,7 @@ func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "call void @kizu_print_int(i64 3)") {
+	if !strings.Contains(string(out), "call void @std__fmt__print_i64(i64 3)") {
 		t.Fatalf("got %q", out)
 	}
 }
