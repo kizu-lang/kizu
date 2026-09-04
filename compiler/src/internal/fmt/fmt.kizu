@@ -55,7 +55,11 @@ struct Builder {
     comment_index: i64,
     block_stack: array::Array<BlockState>,
     after_comment: bool,
-    in_capture: bool
+    // in_capture is true between the pipes of a `|name|` payload capture;
+    // the name hugs both pipes. A `|` that opens no capture is the bitwise or.
+    in_capture: bool,
+    // shift marks the halves of a `<<` or `>>`, which take no space between.
+    shift: array::Array<bool>
 }
 
 /// Returns the canonical formatting of source, the Go `Format`.
@@ -65,6 +69,8 @@ pub fn format(allocator: Allocator, source: []u8) -> !string::String {
     try normalize_leading_imports(allocator, &var tokens);
     let generic = try detect_generic_brackets(allocator, &tokens);
     defer generic.deinit(allocator);
+    var shift = try detect_shift_pairs(allocator, &tokens, &generic);
+    errdefer shift.deinit(allocator);
     let comments = try line_comments(allocator, source);
     defer comments.deinit(allocator);
     var builder = Builder {
@@ -84,7 +90,8 @@ pub fn format(allocator: Allocator, source: []u8) -> !string::String {
         comment_index: 0,
         block_stack: array::new<BlockState>(allocator),
         after_comment: false,
-        in_capture: false
+        in_capture: false,
+        shift: move shift
     };
     defer builder.deinit(allocator);
     var index = 0;
@@ -118,6 +125,94 @@ fn (self: Builder) deinit(allocator: Allocator) -> void {
     self.out.deinit(allocator);
     self.delimiter_lines.deinit(allocator);
     self.block_stack.deinit(allocator);
+    self.shift.deinit(allocator);
+}
+
+/// Reports whether the `<` or `>` at index sits against another of its kind
+/// with nothing between, the Go `shiftHalf`: the two tokens the lexer hands a
+/// shift over as (SPEC §6.9.2). It only keeps a `<<` out of a generic scan;
+/// whether a `>` pair is a shift is detect_shift_pairs's question.
+fn shift_half(tokens: &array::Array<token::Token>, index: i64) -> bool {
+    if tokens.at(index) |current| {
+        if tokens.at(index + 1) |next| {
+            if adjacent_same(current, next) {
+                return true;
+            }
+        }
+        if index > 0 {
+            if tokens.at(index - 1) |before| {
+                return adjacent_same(before, current);
+            }
+        }
+    }
+    return false;
+}
+
+fn adjacent_same(left: &token::Token, right: &token::Token) -> bool {
+    return left.kind == right.kind and left.line == right.line and
+        right.column == left.column + 1;
+}
+
+/// Marks the two `<` of a `<<` and the two `>` of a `>>`, the Go
+/// `detectShiftPairs`; a `>` that closes a generic argument list is not one.
+fn detect_shift_pairs(
+    allocator: Allocator,
+    tokens: &array::Array<token::Token>,
+    generic: &array::Array<bool>
+) -> !array::Array<bool> {
+    var flags = array::new<bool>(allocator);
+    errdefer flags.deinit(allocator);
+    var fill = 0;
+    while fill < tokens.len() {
+        try flags.append(allocator, false);
+        fill = fill + 1;
+    }
+    var index = 0;
+    while tokens.at(index) |current| {
+        if current.kind == token::Kind::Lt or current.kind == token::Kind::Gt {
+            if tokens.at(index + 1) |next| {
+                if adjacent_same(current, next) and
+                    !(generic.get(index) orelse false) and
+                    !(generic.get(index + 1) orelse false) {
+                    try flags.set(index, true);
+                    try flags.set(index + 1, true);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return move flags;
+}
+
+/// Reports whether the `|` at index opens a payload capture, the Go
+/// `captureOpensAt`: the form `|name| {` or `|a, b| {` (SPEC §6.9), the only
+/// place a `|` is not the bitwise or.
+fn capture_opens_at(tokens: &array::Array<token::Token>, index: i64) -> bool {
+    var cursor = index + 1;
+    var naming = true;
+    while naming {
+        if tokens.at(cursor) |name| {
+            if name.kind != token::Kind::Ident {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        cursor = cursor + 1;
+        naming = false;
+        if tokens.at(cursor) |comma| {
+            if comma.kind == token::Kind::Comma {
+                cursor = cursor + 1;
+                naming = true;
+            }
+        }
+    }
+    if tokens.at(cursor) |closing| {
+        if tokens.at(cursor + 1) |brace| {
+            return closing.kind == token::Kind::Pipe and brace.kind == token::Kind::LBrace;
+        }
+    }
+    return false;
 }
 
 /// Marks generic `<` and `>` tokens, the Go `detectGenericBrackets`.
@@ -134,7 +229,7 @@ fn detect_generic_brackets(
     }
     var index = 0;
     while tokens.at(index) |current| {
-        if current.kind != token::Kind::Lt or index == 0 {
+        if current.kind != token::Kind::Lt or index == 0 or shift_half(tokens, index) {
             index = index + 1;
             continue;
         }
@@ -159,7 +254,7 @@ fn detect_generic_brackets(
                             nested = before.kind == token::Kind::Ident;
                         }
                     }
-                    if nested {
+                    if nested and !shift_half(tokens, cursor) {
                         depth = depth + 1;
                     }
                 } else {
@@ -523,7 +618,7 @@ fn (self: &var Builder) emit(
     try self.maybe_preserve_source_line_break(current, generic);
     try self.write_separator(current, tokens, generic);
     try self.write_token(current);
-    try self.record_emitted(current, generic);
+    try self.record_emitted(current, tokens, generic);
     return self.maybe_trailing_newline(current.kind, next_kind, tokens);
 }
 
@@ -722,6 +817,7 @@ fn (self: &var Builder) write_separator(
 /// Updates state after a token is written, the Go `recordEmitted`.
 fn (self: &var Builder) record_emitted(
     current: &token::Token,
+    tokens: &array::Array<token::Token>,
     generic: &array::Array<bool>
 ) -> !void {
     self.prev_kind = current.kind;
@@ -733,7 +829,13 @@ fn (self: &var Builder) record_emitted(
     }
     self.after_comment = false;
     if current.kind == token::Kind::Pipe {
-        self.in_capture = !self.in_capture;
+        if self.in_capture {
+            self.in_capture = false;
+        } else {
+            if capture_opens_at(tokens, self.index) {
+                self.in_capture = true;
+            }
+        }
     }
     if self.opens_continuation_group(current.kind, generic) {
         try self.delimiter_lines.append(self.allocator, current.line);
@@ -1230,7 +1332,7 @@ fn (self: &Builder) should_insert_space(
     tokens: &array::Array<token::Token>,
     generic: &array::Array<bool>
 ) -> bool {
-    if self.tight_generic_bracket(current.kind, generic) {
+    if self.tight_generic_bracket(current.kind, generic) or self.shift_halves(current.kind) {
         return false;
     }
     if current.kind == token::Kind::LParen {
@@ -1239,7 +1341,10 @@ fn (self: &Builder) should_insert_space(
     if self.attached_token_hugs_left(current.kind, generic) {
         return false;
     }
-    if no_space_before(current.kind) or no_space_after(self.prev_kind) {
+    if no_space_before(current.kind) {
+        return false;
+    }
+    if no_space_after(self.prev_kind) and !self.binary_amp(tokens) {
         return false;
     }
     if self.prev_kind == token::Kind::Minus and self.sign_minus(tokens) {
@@ -1320,6 +1425,25 @@ fn (self: &Builder) tight_generic_bracket(
         (generic.get(self.index) orelse false);
 }
 
+/// Reports whether previous and current are the two halves of one shift, the
+/// Go `shiftHalves`.
+fn (self: &Builder) shift_halves(current: token::Kind) -> bool {
+    return (self.shift.get(self.index) orelse false) and
+        (self.shift.get(self.prev_index) orelse false) and self.prev_kind == current;
+}
+
+/// Reports whether the `&` just written is the bitwise and rather than a
+/// borrow, the Go `binaryAmp`: it follows an operand, as a subtraction does.
+fn (self: &Builder) binary_amp(tokens: &array::Array<token::Token>) -> bool {
+    if self.prev_kind != token::Kind::Amp or self.prev_index == 0 {
+        return false;
+    }
+    if tokens.at(self.prev_index - 1) |before| {
+        return ends_operand(before.kind);
+    }
+    return false;
+}
+
 /// Reports tokens that never take preceding space, the Go `noSpaceBefore`.
 fn no_space_before(kind: token::Kind) -> bool {
     return kind == token::Kind::RParen or kind == token::Kind::RBracket or
@@ -1333,7 +1457,7 @@ fn no_space_after(kind: token::Kind) -> bool {
     return kind == token::Kind::LParen or kind == token::Kind::LBracket or
         kind == token::Kind::Dot or kind == token::Kind::DoubleColon or
         kind == token::Kind::Bang or kind == token::Kind::Question or
-        kind == token::Kind::Amp or kind == token::Kind::Range;
+        kind == token::Kind::Amp or kind == token::Kind::Tilde or kind == token::Kind::Range;
 }
 
 /// Reports whether previous minus signs a value, the Go `signMinus`.
@@ -1350,7 +1474,7 @@ fn (self: &Builder) sign_minus(tokens: &array::Array<token::Token>) -> bool {
 /// Reports whether a token can end an operand, the Go `endsOperand`.
 fn ends_operand(kind: token::Kind) -> bool {
     return kind == token::Kind::Ident or kind == token::Kind::Int or
-        kind == token::Kind::String or kind == token::Kind::True or
+        kind == token::Kind::Float or kind == token::Kind::String or kind == token::Kind::True or
         kind == token::Kind::False or kind == token::Kind::Null or
         kind == token::Kind::RParen or kind == token::Kind::RBracket;
 }

@@ -24,6 +24,7 @@ func Format(source string) string {
 	b := &builder{
 		atLineStart: true,
 		generic:     generic,
+		shift:       detectShiftPairs(tokens, generic),
 		tokens:      tokens,
 		comments:    lineComments(source),
 	}
@@ -57,7 +58,7 @@ func Format(source string) string {
 func detectGenericBrackets(tokens []token.Token) []bool {
 	flags := make([]bool, len(tokens))
 	for i := 0; i < len(tokens); i++ {
-		if tokens[i].Type != token.LT {
+		if tokens[i].Type != token.LT || shiftHalf(tokens, i) {
 			continue
 		}
 		if i == 0 || tokens[i-1].Type != token.Ident {
@@ -69,7 +70,7 @@ func detectGenericBrackets(tokens []token.Token) []bool {
 		for j := i + 1; j < len(tokens); j++ {
 			switch tokens[j].Type {
 			case token.LT:
-				if j > 0 && tokens[j-1].Type == token.Ident {
+				if j > 0 && tokens[j-1].Type == token.Ident && !shiftHalf(tokens, j) {
 					depth++
 				}
 			case token.GT:
@@ -87,6 +88,41 @@ func detectGenericBrackets(tokens []token.Token) []bool {
 		if matchIdx >= 0 {
 			flags[i] = true
 			flags[matchIdx] = true
+		}
+	}
+	return flags
+}
+
+// shiftHalf reports whether the `<` or `>` at i sits against another of its
+// kind with nothing between: the two tokens the lexer hands a shift over as
+// (SPEC §6.9.2). Whether such a `>` pair is a shift or two generic closers is
+// detectShiftPairs's question; here it only keeps a `<<` out of a generic scan.
+func shiftHalf(tokens []token.Token, i int) bool {
+	adjacent := func(a int, b int) bool {
+		return tokens[a].Type == tokens[b].Type && tokens[a].Line == tokens[b].Line &&
+			tokens[b].Column == tokens[a].Column+1
+	}
+	if i+1 < len(tokens) && adjacent(i, i+1) {
+		return true
+	}
+	return i > 0 && adjacent(i-1, i)
+}
+
+// detectShiftPairs marks the two `<` of a `<<` and the two `>` of a `>>`, the
+// halves the formatter writes with no space between. A `>` that closes a
+// generic argument list is not one, however close the next `>` is.
+func detectShiftPairs(tokens []token.Token, generic []bool) []bool {
+	flags := make([]bool, len(tokens))
+	for i := 0; i+1 < len(tokens); i++ {
+		if tokens[i].Type != token.LT && tokens[i].Type != token.GT {
+			continue
+		}
+		if !shiftHalf(tokens, i) || tokens[i+1].Type != tokens[i].Type ||
+			generic[i] || generic[i+1] {
+			continue
+		}
+		if tokens[i+1].Line == tokens[i].Line && tokens[i+1].Column == tokens[i].Column+1 {
+			flags[i], flags[i+1] = true, true
 		}
 	}
 	return flags
@@ -258,14 +294,16 @@ type builder struct {
 	index          int
 	tokens         []token.Token
 	generic        []bool
-	sourceLine     int
-	lastTopDecl    token.Type
-	comments       []lineComment
-	commentIdx     int
-	blockStack     []blockState
-	afterComment   bool
-	// inCapture is true between the pipes of a `|name|` payload capture, the
-	// only place `|` appears; the name hugs both pipes.
+	// shift marks the halves of a `<<` or `>>`, which take no space between.
+	shift        []bool
+	sourceLine   int
+	lastTopDecl  token.Type
+	comments     []lineComment
+	commentIdx   int
+	blockStack   []blockState
+	afterComment bool
+	// inCapture is true between the pipes of a `|name|` payload capture; the
+	// name hugs both pipes. A `|` that opens no capture is the bitwise or.
 	inCapture bool
 }
 
@@ -465,13 +503,37 @@ func (b *builder) recordEmitted(t token.Token) {
 	}
 	b.afterComment = false
 	if t.Type == token.Pipe {
-		b.inCapture = !b.inCapture
+		if b.inCapture {
+			b.inCapture = false
+		} else if b.captureOpensAt(b.index) {
+			b.inCapture = true
+		}
 	}
 	if b.opensContinuationGroup(t) {
 		b.delimiterLines = append(b.delimiterLines, t.Line)
 	} else if b.closesContinuationGroup(t) && len(b.delimiterLines) > 0 {
 		b.delimiterLines = b.delimiterLines[:len(b.delimiterLines)-1]
 	}
+}
+
+// captureOpensAt reports whether the `|` at i opens a payload capture: the
+// form `|name| {` or `|a, b| {` (SPEC §6.9), which is the only place a `|`
+// is not the bitwise or.
+func (b *builder) captureOpensAt(i int) bool {
+	j := i + 1
+	for {
+		if j >= len(b.tokens) || b.tokens[j].Type != token.Ident {
+			return false
+		}
+		j++
+		if j < len(b.tokens) && b.tokens[j].Type == token.Comma {
+			j++
+			continue
+		}
+		break
+	}
+	return j+1 < len(b.tokens) && b.tokens[j].Type == token.Pipe &&
+		b.tokens[j+1].Type == token.LBrace
 }
 
 // opensContinuationGroup reports whether t adds one grouping delimiter to the
@@ -822,7 +884,7 @@ func tokenSpelling(t token.Token) string {
 // shouldInsertSpace decides whether a space goes between prev and curr.
 func (b *builder) shouldInsertSpace(curr token.Token) bool {
 	prev := b.prev
-	if b.tightGenericBracket(curr) {
+	if b.tightGenericBracket(curr) || b.shiftHalves(curr) {
 		return false
 	}
 	if curr.Type == token.LParen {
@@ -834,7 +896,7 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 	if noSpaceBefore(curr) {
 		return false
 	}
-	if noSpaceAfter(prev) {
+	if noSpaceAfter(prev) && !b.binaryAmp() {
 		return false
 	}
 	if prev.Type == token.Minus && b.signMinus() {
@@ -849,6 +911,18 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 		return false
 	}
 	return true
+}
+
+// shiftHalves reports whether prev and curr are the two halves of one shift.
+func (b *builder) shiftHalves(curr token.Token) bool {
+	return b.index < len(b.shift) && b.shift[b.index] &&
+		b.prevIndex < len(b.shift) && b.shift[b.prevIndex] && b.prev.Type == curr.Type
+}
+
+// binaryAmp reports whether the `&` just written is the bitwise and rather
+// than a borrow: it follows an operand, the way a subtraction's `-` does.
+func (b *builder) binaryAmp() bool {
+	return b.prev.Type == token.Amp && b.prevIndex > 0 && endsOperand(b.tokens[b.prevIndex-1])
 }
 
 // parenTakesSpace distinguishes a receiver or grouping parenthesis from a
@@ -915,7 +989,7 @@ func noSpaceBefore(t token.Token) bool {
 func noSpaceAfter(t token.Token) bool {
 	switch t.Type {
 	case token.LParen, token.LBracket, token.Dot, token.DoubleColon,
-		token.Bang, token.Question, token.Amp, token.Range:
+		token.Bang, token.Question, token.Amp, token.Tilde, token.Range:
 		return true
 	}
 	return false
@@ -931,7 +1005,7 @@ func (b *builder) signMinus() bool {
 // `-` a subtraction rather than a sign.
 func endsOperand(t token.Token) bool {
 	switch t.Type {
-	case token.Ident, token.Int, token.String, token.True, token.False,
+	case token.Ident, token.Int, token.Float, token.String, token.True, token.False,
 		token.Null, token.RParen, token.RBracket:
 		return true
 	}

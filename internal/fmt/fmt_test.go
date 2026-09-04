@@ -534,3 +534,40 @@ func TestFormatComptimeMatchDoesNotAddArmComma(t *testing.T) {
 		t.Fatalf("Format(comptime match):\n--- got ---\n%s\n--- want ---\n%s", got, src)
 	}
 }
+
+// TestFormatBitwiseAndShiftOperators checks the operators of SPEC §6.9.2 lay
+// out as binary operators: a shift's two tokens stay together, the bitwise
+// `&` and `|` take a space on both sides, and `~` hugs its operand -- while a
+// borrow `&`, a payload capture `|name|`, and a generic `>>` keep their forms.
+func TestFormatBitwiseAndShiftOperators(t *testing.T) {
+	src := "import std::array;\n\n" +
+		"fn main() {\n" +
+		"    let x = 1<<3;\n" +
+		"    let y = x >>1;\n" +
+		"    let z = x&0xF|y^2;\n" +
+		"    let n = ~x;\n" +
+		"    let r = &x;\n" +
+		"    let f = 1.5-2.5e-3;\n" +
+		"    let nested = array::new<array::Array<i64>>(allocator);\n" +
+		"    if lookup(x) |value,extra| { print(value); }\n" +
+		"}\n"
+	want := "import std::array;\n\n" +
+		"fn main() {\n" +
+		"    let x = 1 << 3;\n" +
+		"    let y = x >> 1;\n" +
+		"    let z = x & 0xF | y ^ 2;\n" +
+		"    let n = ~x;\n" +
+		"    let r = &x;\n" +
+		"    let f = 1.5 - 2.5e-3;\n" +
+		"    let nested = array::new<array::Array<i64>>(allocator);\n" +
+		"    if lookup(x) |value, extra| {\n" +
+		"        print(value);\n" +
+		"    }\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(bitwise):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if again := Format(want); again != want {
+		t.Fatalf("Format(bitwise) is not idempotent:\n--- got ---\n%s", again)
+	}
+}
