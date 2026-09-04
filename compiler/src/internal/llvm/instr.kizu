@@ -98,11 +98,21 @@ fn (self: &var Emitter) write_binary(module: &ir::Module, node: &ir::InstrNode) 
             );
         }
         let name = try self.local_name(module, node.result.name);
-        try self.line5(
-            "  %s = icmp %s %s %s, %s",
-            Arg::Str(name), Arg::Lit(llvm_typed_predicate(&module.names, node.operand, left_arg.type_name)),
-            Arg::Str(left_type), Arg::Str(left.operand), Arg::Str(right.operand)
-        );
+        let left_text = ir::name_text(&module.names, left_arg.type_name);
+        let left_bytes = left_text.as_bytes();
+        if is_float_type(left_bytes) {
+            try self.line5(
+                "  %s = fcmp %s %s %s, %s",
+                Arg::Str(name), Arg::Lit(llvm_float_predicate(&module.names, node.operand)),
+                Arg::Str(left_type), Arg::Str(left.operand), Arg::Str(right.operand)
+            );
+        } else {
+            try self.line5(
+                "  %s = icmp %s %s %s, %s",
+                Arg::Str(name), Arg::Lit(llvm_typed_predicate(&module.names, node.operand, left_arg.type_name)),
+                Arg::Str(left_type), Arg::Str(left.operand), Arg::Str(right.operand)
+            );
+        }
         try self.set_value(module, node.result, name);
         return null;
     }
@@ -111,11 +121,21 @@ fn (self: &var Emitter) write_binary(module: &ir::Module, node: &ir::InstrNode) 
     }
     let name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
-    try self.line5(
-        "  %s = %s %s %s, %s",
-        Arg::Str(name), Arg::Lit(llvm_binary_op(&module.names, node.operand, node.result.type_name)),
-        Arg::Str(result_type), Arg::Str(left.operand), Arg::Str(right.operand)
-    );
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    if is_float_type(result_bytes) {
+        try self.line5(
+            "  %s = %s %s %s, %s",
+            Arg::Str(name), Arg::Lit(llvm_float_binary_op(&module.names, node.operand)),
+            Arg::Str(result_type), Arg::Str(left.operand), Arg::Str(right.operand)
+        );
+    } else {
+        try self.line5(
+            "  %s = %s %s %s, %s",
+            Arg::Str(name), Arg::Lit(llvm_binary_op(&module.names, node.operand, node.result.type_name)),
+            Arg::Str(result_type), Arg::Str(left.operand), Arg::Str(right.operand)
+        );
+    }
     try self.set_value(module, node.result, name);
     return null;
 }
@@ -184,7 +204,11 @@ fn (self: &var Emitter) write_unary(module: &ir::Module, node: &ir::InstrNode) -
     } else {
         if module.names.is(node.operand, "-") {
             let result_type = try self.llvm_type_of(module, node.result.type_name);
-            try self.line3("  %s = sub %s 0, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+            if module.names.is(node.result.type_name, "f32") or module.names.is(node.result.type_name, "f64") {
+                try self.line3("  %s = fneg %s %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+            } else {
+                try self.line3("  %s = sub %s 0, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+            }
         } else {
             if module.names.is(node.operand, "~") {
                 let result_type = try self.llvm_type_of(module, node.result.type_name);
@@ -226,6 +250,9 @@ fn (self: &var Emitter) write_cast(module: &ir::Module, node: &ir::InstrNode) ->
         try self.set_value(module, node.result, value.operand);
         return null;
     }
+    if is_float_type(source_bytes) or is_float_type(result_bytes) {
+        return self.write_float_cast(module, node);
+    }
     if integer_bit_width(source_bytes) |_| {
         if integer_bit_width(result_bytes) |_| {
             return self.write_integer_cast(module, node);
@@ -233,6 +260,103 @@ fn (self: &var Emitter) write_cast(module: &ir::Module, node: &ir::InstrNode) ->
         return self.write_pointer_integer_cast(module, node, "inttoptr");
     }
     return self.write_pointer_integer_cast(module, node, "ptrtoint");
+}
+
+/// Writes a cast with a floating-point side, the Go `writeFloatCast`. An
+/// integer widens to a float by rounding; a float narrows to an integer by
+/// truncating toward zero and saturating, with NaN going to 0, through
+/// LLVM's saturating intrinsics so no value is poison (SPEC §6.9.3); `f32`
+/// and `f64` convert by rounding.
+fn (self: &var Emitter) write_float_cast(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_bytes = source_text.as_bytes();
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let value = try self.operand(module, source);
+    let name = try self.local_name(module, node.result.name);
+    let source_type = try self.llvm_type_of(module, source.type_name);
+    let target_type = try self.llvm_type_of(module, node.result.type_name);
+    if is_float_type(source_bytes) and is_float_type(result_bytes) {
+        if mem::equal_bytes(source_bytes, "f64") {
+            try self.line5("  %s = %s %s %s to %s",
+                Arg::Str(name), Arg::Lit("fptrunc"), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(target_type));
+        } else {
+            try self.line5("  %s = %s %s %s to %s",
+                Arg::Str(name), Arg::Lit("fpext"), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(target_type));
+        }
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    if is_float_type(source_bytes) {
+        if integer_bit_width(result_bytes) |_| {
+            var intrinsic = string::new(self.allocator);
+            errdefer intrinsic.deinit(self.allocator);
+            try append_float_to_int_intrinsic(self.allocator, &var intrinsic, source_bytes, result_bytes);
+            try self.line5("  %s = call %s @%s(%s %s)",
+                Arg::Str(name), Arg::Str(target_type), Arg::Owned(move intrinsic),
+                Arg::Str(source_type), Arg::Str(value.operand));
+            try self.set_value(module, node.result, name);
+            return null;
+        }
+        return try self.fail_name2(module, "llvm error: cannot cast %s to %s", source.type_name, node.result.type_name);
+    }
+    if integer_bit_width(source_bytes) |_| {
+        if is_unsigned_integer_type(source_bytes) {
+            try self.line5("  %s = %s %s %s to %s",
+                Arg::Str(name), Arg::Lit("uitofp"), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(target_type));
+        } else {
+            try self.line5("  %s = %s %s %s to %s",
+                Arg::Str(name), Arg::Lit("sitofp"), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(target_type));
+        }
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    return try self.fail_name2(module, "llvm error: cannot cast %s to %s", source.type_name, node.result.type_name);
+}
+
+/// Appends the name of the saturating conversion from one float type to one
+/// integer type, as `llvm.fptosi.sat.i64.f64`, the Go `floatToIntIntrinsic`.
+fn append_float_to_int_intrinsic(
+    allocator: Allocator,
+    out: &var string::String,
+    source: []u8,
+    target: []u8
+) -> !void {
+    try out.append_bytes(allocator, "llvm.");
+    if is_unsigned_integer_type(target) {
+        try out.append_bytes(allocator, "fptoui");
+    } else {
+        try out.append_bytes(allocator, "fptosi");
+    }
+    let target_type = integer_llvm_type(target);
+    let source_type = llvm_primitive_type(source);
+    try out.append_bytes(allocator, ".sat.");
+    try out.append_bytes(allocator, target_type);
+    try out.append_byte(allocator, cast<u8>(46));
+    try out.append_bytes(allocator, source_type);
+    return;
+}
+
+/// Reinterprets a float as its bits or bits as a float, the
+/// `std::float::bits` and `std::float::from_bits` primitives; the Go
+/// `writeFloatBits`.
+fn (self: &var Emitter) write_float_bits(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        if node.op == ir::Op::FloatBits {
+            return try self.fail0("llvm error: float.bits expects 1 arg");
+        }
+        return try self.fail0("llvm error: float.from_bits expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let value = try self.operand(module, source);
+    let name = try self.local_name(module, node.result.name);
+    let source_type = try self.llvm_type_of(module, source.type_name);
+    let target_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line4("  %s = bitcast %s %s to %s",
+        Arg::Str(name), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(target_type));
+    try self.set_value(module, node.result, name);
+    return null;
 }
 
 /// Emits the address conversion between a raw pointer and an integer, the

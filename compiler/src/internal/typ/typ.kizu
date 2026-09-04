@@ -1441,3 +1441,170 @@ pub fn shift_i64(op: []u8, value: i64, amount: i64) -> i64 {
     }
     return value >> count;
 }
+
+/// Returns the spelling of a floating-point literal with its `_` separators
+/// removed and the exponent marker lowercased, the Go `CleanFloatLiteral`.
+pub fn clean_float_literal(allocator: Allocator, text: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    let length = mem::len(text);
+    while index < length {
+        let ch = text[index];
+        index = index + 1;
+        if ch == cast<u8>(95) {
+            continue;
+        }
+        if ch == cast<u8>(69) {
+            try out.append_byte(allocator, cast<u8>(101));
+            continue;
+        }
+        try out.append_byte(allocator, ch);
+    }
+    return move out;
+}
+
+/// Converts a cleaned floating-point literal to the f64 it names, the Go
+/// `ParseFloatLiteral`; null when this compiler cannot do so exactly. It
+/// takes the fast path only: a mantissa of at most 19 significant digits
+/// that fits 53 bits, scaled by a power of ten that is itself exact in an
+/// f64, so one multiplication or division is correctly rounded. Both
+/// compilers accept exactly this set, and the shared floating-point
+/// conversion in std will widen it.
+pub fn parse_float_literal(text: []u8) -> ?f64 {
+    var mantissa = cast<u64>(0);
+    var exponent = 0;
+    if !split_float_literal(text, &var mantissa, &var exponent) {
+        return null;
+    }
+    if mantissa == 0 {
+        return 0.0;
+    }
+    while mantissa % 10 == 0 {
+        mantissa = mantissa / 10;
+        exponent = exponent + 1;
+    }
+    let limit = cast<u64>(1) << 53;
+    if mantissa >= limit {
+        return null;
+    }
+    let value = cast<f64>(mantissa);
+    if exponent >= 0 and exponent <= 22 {
+        return value * exact_power_of_ten(exponent);
+    }
+    if exponent < 0 and exponent >= -22 {
+        return value / exact_power_of_ten(0 - exponent);
+    }
+    if exponent > 22 and exponent <= 37 {
+        // The extra digits move into the mantissa while it still fits 53
+        // bits, which keeps the one multiplication exact.
+        var scaled = mantissa;
+        var step = 22;
+        while step < exponent {
+            scaled = scaled * 10;
+            if scaled >= limit {
+                return null;
+            }
+            step = step + 1;
+        }
+        return cast<f64>(scaled) * exact_power_of_ten(22);
+    }
+    return null;
+}
+
+/// Reads `digits[.digits][e[+-]digits]` into its decimal mantissa and
+/// base-ten exponent, the Go `splitFloatLiteral`; false when the mantissa
+/// needs more than 19 digits or the spelling is not a float literal.
+fn split_float_literal(text: []u8, mantissa: &var u64, exponent: &var i64) -> bool {
+    var digits = 0;
+    var index = 0;
+    var seen_dot = false;
+    let length = mem::len(text);
+    mantissa.* = 0;
+    exponent.* = 0;
+    while index < length {
+        let ch = text[index];
+        if ch == cast<u8>(46) {
+            if seen_dot {
+                return false;
+            }
+            seen_dot = true;
+            index = index + 1;
+            continue;
+        }
+        if ch < cast<u8>(48) or ch > cast<u8>(57) {
+            break;
+        }
+        if mantissa.* == 0 and ch == cast<u8>(48) {
+            if seen_dot {
+                exponent.* = exponent.* - 1;
+            }
+            index = index + 1;
+            continue;
+        }
+        if digits == 19 {
+            return false;
+        }
+        mantissa.* = mantissa.* * 10 + cast<u64>(ch - 48);
+        digits = digits + 1;
+        if seen_dot {
+            exponent.* = exponent.* - 1;
+        }
+        index = index + 1;
+    }
+    if index < length {
+        if text[index] != cast<u8>(101) {
+            return false;
+        }
+        var power = 0;
+        if !parse_exponent(text[index + 1..length], &var power) {
+            return false;
+        }
+        exponent.* = exponent.* + power;
+    }
+    return true;
+}
+
+/// Reads the signed digits after an exponent marker, the Go
+/// `parseExponent`, refusing magnitudes no literal in range could carry.
+fn parse_exponent(text: []u8, out: &var i64) -> bool {
+    var negative = false;
+    var index = 0;
+    let length = mem::len(text);
+    if length > 0 and (text[0] == cast<u8>(43) or text[0] == cast<u8>(45)) {
+        negative = text[0] == cast<u8>(45);
+        index = 1;
+    }
+    if index >= length {
+        return false;
+    }
+    var power = 0;
+    while index < length {
+        let ch = text[index];
+        if ch < cast<u8>(48) or ch > cast<u8>(57) {
+            return false;
+        }
+        power = power * 10 + cast<i64>(ch - 48);
+        if power > 1000 {
+            return false;
+        }
+        index = index + 1;
+    }
+    if negative {
+        out.* = 0 - power;
+    } else {
+        out.* = power;
+    }
+    return true;
+}
+
+/// Returns 10^n for 0 <= n <= 22, every one of which an f64 holds exactly.
+fn exact_power_of_ten(n: i64) -> f64 {
+    var value = 1.0;
+    var index = 0;
+    while index < n {
+        value = value * 10.0;
+        index = index + 1;
+    }
+    return value;
+}

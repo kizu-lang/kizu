@@ -182,7 +182,7 @@ func (l *lowerer) collectMutBorrowsExpr(expr ast.Expression, found map[string]bo
 // whether the node is one this walk knows.
 func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 	switch e := expr.(type) {
-	case *ast.IdentExpr, *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr,
+	case *ast.IdentExpr, *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr,
 		*ast.BufferLiteralExpr, *ast.NullExpr:
 		return nil, true
 	case *ast.PrefixExpr:

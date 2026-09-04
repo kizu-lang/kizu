@@ -3,6 +3,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
 import std::array;
+import std::float;
 import std::fmt;
 import std::map;
 import std::mem;
@@ -1276,6 +1277,9 @@ fn scalar_const_forwards(module: &ir::Module, node: &ir::InstrNode) -> bool {
     if integer_bit_width(type_bytes) |_| {
         return true;
     }
+    if is_float_type(type_bytes) {
+        return true;
+    }
     return mem::equal_bytes(type_bytes, "bool");
 }
 
@@ -1289,7 +1293,43 @@ fn (self: &var Emitter) scalar_const_operand(module: &ir::Module, node: &ir::Ins
     if module.names.is(node.result.type_name, "bool") {
         return try self.names.intern(llvm_bool(&module.names, node.immediate));
     }
+    if module.names.is(node.result.type_name, "f32") or module.names.is(node.result.type_name, "f64") {
+        return self.float_constant(module, node);
+    }
     return try self.own(module, node.immediate);
+}
+
+/// Spells a floating-point literal the way LLVM reads one exactly, the Go
+/// `llvmFloatConstant`: the hexadecimal bits of the double, which for an
+/// `f32` are the bits of the value widened to double. A decimal spelling
+/// would have to be exactly representable, and `0.1` is not.
+fn (self: &var Emitter) float_constant(module: &ir::Module, node: &ir::InstrNode) -> !?ir::Name {
+    let literal_text = ir::name_text(&module.names, node.immediate);
+    let literal = literal_text.as_bytes();
+    var value = typ::parse_float_literal(literal) orelse return null;
+    if module.names.is(node.result.type_name, "f32") {
+        value = cast<f64>(cast<f32>(value));
+    }
+    var text = string::new(self.allocator);
+    errdefer text.deinit(self.allocator);
+    try text.append_bytes(self.allocator, "0x");
+    try append_hex_u64(self.allocator, &var text, float::bits(value));
+    return try self.names.intern_owned(move text);
+}
+
+/// Appends value as 16 uppercase hexadecimal digits.
+fn append_hex_u64(allocator: Allocator, out: &var string::String, value: u64) -> !void {
+    var shift = 60;
+    while shift >= 0 {
+        let digit = cast<i64>(value >> cast<u64>(shift) & 15);
+        if digit < 10 {
+            try out.append_byte(allocator, cast<u8>(48 + digit));
+        } else {
+            try out.append_byte(allocator, cast<u8>(55 + digit));
+        }
+        shift = shift - 4;
+    }
+    return;
 }
 
 /// Reports whether a cast only changes the Kizu type — a same-width integer
@@ -1301,6 +1341,9 @@ fn cast_forwards_operand(module: &ir::Module, node: &ir::InstrNode) -> bool {
     let source = source_text.as_bytes();
     let target_text = ir::name_text(&module.names, node.result.type_name);
     let target = target_text.as_bytes();
+    if is_float_type(source) or is_float_type(target) {
+        return mem::equal_bytes(source, target);
+    }
     if integer_bit_width(source) |source_width| {
         if integer_bit_width(target) |target_width| {
             return source_width == target_width;
@@ -1476,6 +1519,8 @@ fn (self: &var Emitter) write_runtime_instr(module: &ir::Module, node: &ir::Inst
         OptNull => return self.write_opt_instr(module, node),
         OptHas => return self.write_opt_instr(module, node),
         OptValue => return self.write_opt_instr(module, node),
+        FloatBits => return self.write_float_bits(module, node),
+        FloatFromBits => return self.write_float_bits(module, node),
         _ => {
             let op = try self.op_name(module, node);
             return try self.fail1("llvm error: unsupported instruction `%s`", Arg::Str(op));

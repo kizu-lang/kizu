@@ -12,6 +12,11 @@ func isIntegerTypeName(typ string) bool {
 	return typ == "i64" || narrowsIntegerLiteral(typ)
 }
 
+// isFloatTypeName reports whether typ is one of the floating-point types.
+func isFloatTypeName(typ string) bool {
+	return typ == "f32" || typ == "f64"
+}
+
 // isSignedIntegerTypeName reports whether typ is an integer that can hold a
 // negative value.
 func isSignedIntegerTypeName(typ string) bool {

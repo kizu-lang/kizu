@@ -3,6 +3,7 @@ package types
 import (
 	"fmt"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -2831,7 +2832,7 @@ func missingMatchVariants(
 // checkExpr computes the static type of an expression.
 func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
+	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return c.checkScalarExpr(e)
 	case *ast.ComptimeExpr:
 		return c.checkComptimeExpr(e, env, unsafe)
@@ -3195,6 +3196,8 @@ func literalType(expr ast.Expression) (Type, error) {
 	switch expr.(type) {
 	case *ast.IntExpr:
 		return typeI64, nil
+	case *ast.FloatExpr:
+		return typeF64, nil
 	case *ast.StringExpr:
 		return typeByteString, nil
 	case *ast.BoolExpr:
@@ -3362,7 +3365,49 @@ func (c *Checker) checkContextualExpr(
 		}
 		return "", errorf("type error: expected %s, got %s", want, got)
 	}
+	return c.coerceContextualLiteral(expr, want, got)
+}
+
+// coerceContextualLiteral treats a fit-checked literal as want: an integer
+// literal as any integer type, a floating-point literal as `f32`.
+func (c *Checker) coerceContextualLiteral(expr ast.Expression, want Type, got Type) (Type, error) {
+	if got == typeF64 {
+		return coerceContextualFloatLiteral(expr, want, got)
+	}
 	return c.coerceContextualIntegerLiteral(expr, want, got)
+}
+
+// coerceContextualFloatLiteral treats an `f64` literal written where an `f32`
+// is expected as that `f32`, when its magnitude fits one.
+func coerceContextualFloatLiteral(expr ast.Expression, want Type, got Type) (Type, error) {
+	if sameType(got, want) || want != typeF32 {
+		return got, nil
+	}
+	value, ok := floatLiteralValue(expr)
+	if !ok {
+		return got, nil
+	}
+	if value > math.MaxFloat32 || value < -math.MaxFloat32 {
+		return "", errorf("type error: float literal `%s` does not fit f32", expr.String())
+	}
+	return want, nil
+}
+
+// floatLiteralValue returns the value of a floating-point literal, possibly
+// negated, and false for any other expression.
+func floatLiteralValue(expr ast.Expression) (float64, bool) {
+	switch e := expr.(type) {
+	case *ast.FloatExpr:
+		return typ.ParseFloatLiteral(e.Value)
+	case *ast.PrefixExpr:
+		if e.Operator != "-" {
+			return 0, false
+		}
+		value, ok := floatLiteralValue(e.Right)
+		return -value, ok
+	default:
+		return 0, false
+	}
 }
 
 // coerceContextualIntegerLiteral treats fit-checked integer literals as want.
@@ -3724,6 +3769,14 @@ func (c *Checker) coerceBinaryLiteral(
 	}
 	if _, ok := integerLiteralValue(expr.Left); ok && left == typeI64 && integerTypes[right] {
 		coerced, err := c.coerceContextualIntegerLiteral(expr.Left, right, left)
+		return coerced, right, err
+	}
+	if _, ok := floatLiteralValue(expr.Right); ok && right == typeF64 && left == typeF32 {
+		coerced, err := coerceContextualFloatLiteral(expr.Right, left, right)
+		return left, coerced, err
+	}
+	if _, ok := floatLiteralValue(expr.Left); ok && left == typeF64 && right == typeF32 {
+		coerced, err := coerceContextualFloatLiteral(expr.Left, right, left)
 		return coerced, right, err
 	}
 	return left, right, nil
@@ -4842,6 +4895,10 @@ func (c *Checker) checkBuiltinTestFailEqual(
 ) (Type, error) {
 	if len(args) != 2 {
 		return "", errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
+	}
+	if floatTypes[typ] {
+		return "", errorf("type error: `std::testing::expect_equal<%s>` does not accept %s\n"+
+			"help: compare the values with `expect(a == b)`", typ, typ)
 	}
 	for idx, arg := range args {
 		got, err := c.checkContextualExpr(arg, typ, env, unsafe)
@@ -7908,6 +7965,10 @@ func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeMa
 	}
 	if got == typeVoid {
 		return "", errorf("type error: `print` cannot print void")
+	}
+	if floatTypes[got] {
+		return "", errorf("type error: `print` does not accept %s\n"+
+			"help: cast the value to an integer to print it: `cast<i64>(value)`", got)
 	}
 	return typeVoid, nil
 }

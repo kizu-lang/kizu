@@ -31,6 +31,7 @@
 | [path](path.md) | file system を見ない path text 操作 |
 | [process](process.md) | 引数・環境変数・時刻・終了 status |
 | [testing](testing.md) | assertion |
+| [float](float.md) | 浮動小数点値の bit 表現 |
 
 実装は `lib/kizu/std/src/` にあります。trusted primitive の境界は
 [docs/stdlib.md](../stdlib.md) です。

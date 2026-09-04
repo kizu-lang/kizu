@@ -10,6 +10,10 @@ const (
 	ArgBytes ArgKind = "[]u8"
 	// ArgI64 is a signed 64-bit integer argument.
 	ArgI64 ArgKind = "i64"
+	// ArgU64 is an unsigned 64-bit integer argument.
+	ArgU64 ArgKind = "u64"
+	// ArgF64 is a 64-bit floating-point argument.
+	ArgF64 ArgKind = "f64"
 	// ArgIo is an explicit I/O capability argument.
 	ArgIo ArgKind = "Io"
 	// ArgStringOut is a &var std::string::String destination the callee
@@ -36,6 +40,8 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::mem_page_allocator": {Return: "Allocator"},
 	"std::internal::builtin::mem_fixed_buffer":   {Args: []ArgKind{ArgBytes}, Return: "Allocator"},
 	"std::internal::builtin::mem_len":            {Args: []ArgKind{ArgBytes}, Return: "i64"},
+	"std::internal::builtin::f64_bits":           {Args: []ArgKind{ArgF64}, Return: "u64"},
+	"std::internal::builtin::f64_from_bits":      {Args: []ArgKind{ArgU64}, Return: "f64"},
 	"std::internal::builtin::io_write_stdout": {
 		Args:   []ArgKind{ArgIo, ArgBytes},
 		Return: "std::io::Error!void",
@@ -242,6 +248,8 @@ var primitives = map[string]bool{
 	"std::internal::builtin::mem_allocator_from":           true,
 	"std::internal::builtin::mem_fixed_buffer":             true,
 	"std::internal::builtin::mem_len":                      true,
+	"std::internal::builtin::f64_bits":                     true,
+	"std::internal::builtin::f64_from_bits":                true,
 	"std::internal::builtin::mem_page_allocator":           true,
 	"std::internal::builtin::net_accept":                   true,
 	"std::internal::builtin::net_close":                    true,

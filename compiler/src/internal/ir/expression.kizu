@@ -26,6 +26,9 @@ fn (self: &var Lowerer) lower_expr(
     if ownership::int_expr(tree, expression) |_| {
         return self.lower_literal_expr(tree, expression, out);
     }
+    if ownership::float_expr(tree, expression) |_| {
+        return self.lower_literal_expr(tree, expression, out);
+    }
     if ownership::bool_expr(tree, expression) |_| {
         return self.lower_literal_expr(tree, expression, out);
     }
@@ -167,7 +170,7 @@ fn (self: &var Lowerer) lower_contextual_expr(
             return null;
         }
     }
-    if !self.narrows_integer_literal(want) {
+    if !self.narrows_integer_literal(want) and !self.narrows_float_literal(want) {
         var value = empty_value();
         if try self.lower_expr(tree, expression, &var value) |failed| {
             return move failed;
@@ -176,15 +179,24 @@ fn (self: &var Lowerer) lower_contextual_expr(
         return null;
     }
     if ownership::int_expr(tree, expression) |literal| {
-        let immediate = try self.text_name(tree, literal.value);
-        out.* = try self.emit_const(want, immediate);
-        return null;
+        if self.is_integer_type_name(want) {
+            let immediate = try self.text_name(tree, literal.value);
+            out.* = try self.emit_const(want, immediate);
+            return null;
+        }
+    }
+    if ownership::float_expr(tree, expression) |literal| {
+        if self.is_float_type_name(want) {
+            let immediate = try self.text_name(tree, literal.value);
+            out.* = try self.emit_const(want, immediate);
+            return null;
+        }
     }
     if ownership::prefix_expr(tree, expression) |prefix| {
         // A negated literal is still a literal in the position it is written
         // in, and `unary.-` takes the type of its operand.
         if text_is(tree, prefix.operator, "-") {
-            if ownership::int_expr(tree, prefix.right) |_| {
+            if is_scalar_literal(tree, prefix.right) {
                 var value = empty_value();
                 if try self.lower_contextual_expr(tree, prefix.right, want, &var value) |failed| {
                     return move failed;
@@ -277,6 +289,11 @@ fn (self: &var Lowerer) lower_literal_expr(
         out.* = try self.emit_const(self.common.i64_type, immediate);
         return null;
     }
+    if ownership::float_expr(tree, expression) |literal| {
+        let immediate = try self.text_name(tree, literal.value);
+        out.* = try self.emit_const(self.common.f64_type, immediate);
+        return null;
+    }
     if string_literal_text(tree, expression) |text| {
         let quoted = try self.quoted_name(tree, text);
         out.* = try self.emit_const(self.common.bytes_type, quoted);
@@ -329,6 +346,7 @@ fn expression_go_type(tree: &ast::Ast, expression: ast::Expression) -> []u8 {
     match tree.expressions.at(expression.node) {
         Ident(_) => return "*ast.IdentExpr",
         Int(_) => return "*ast.IntExpr",
+        Float(_) => return "*ast.FloatExpr",
         String(_) => return "*ast.StringExpr",
         Null(_) => return "*ast.NullExpr",
         OrelseGuard(_) => return "*ast.OrelseGuardExpr",
@@ -473,8 +491,8 @@ fn (self: &var Lowerer) lower_binary_operands(
     left: &var Value,
     right: &var Value
 ) -> !?diagnostic::Diagnostic {
-    let left_literal = is_integer_literal(tree, binary.left);
-    let right_literal = is_integer_literal(tree, binary.right);
+    let left_literal = is_scalar_literal(tree, binary.left);
+    let right_literal = is_scalar_literal(tree, binary.right);
     if right_literal and !left_literal {
         if try self.lower_expr(tree, binary.left, left) |failed| {
             return move failed;
@@ -493,18 +511,58 @@ fn (self: &var Lowerer) lower_binary_operands(
     return self.lower_expr(tree, binary.right, right);
 }
 
-/// Lowers an integer literal in the type of the operand it meets, or as
-/// itself when that operand is not an integer, the Go `lowerLiteralOperand`.
+/// Lowers a literal in the type of the operand it meets when that type is
+/// one the literal can take, or as itself otherwise, the Go
+/// `lowerLiteralOperand`.
 fn (self: &var Lowerer) lower_literal_operand(
     tree: &var ast::Ast,
     expression: ast::Expression,
     other: Name,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
-    if self.is_integer_type_name(other) {
+    if is_integer_literal(tree, expression) and self.is_integer_type_name(other) {
+        return self.lower_contextual_expr(tree, expression, other, out);
+    }
+    if is_float_literal(tree, expression) and self.is_float_type_name(other) {
         return self.lower_contextual_expr(tree, expression, other, out);
     }
     return self.lower_expr(tree, expression, out);
+}
+
+/// Reports whether expression is a floating-point literal, possibly negated,
+/// the Go `isFloatLiteral`.
+fn is_float_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    if ownership::float_expr(tree, expression) |_| {
+        return true;
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        if !text_is(tree, prefix.operator, "-") {
+            return false;
+        }
+        if ownership::float_expr(tree, prefix.right) |_| {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether expression is an integer or floating-point literal,
+/// possibly negated, the Go `isScalarLiteral`.
+fn is_scalar_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    return is_integer_literal(tree, expression) or is_float_literal(tree, expression);
+}
+
+/// Reports whether type_name is one of the floating-point types, the Go
+/// `isFloatTypeName`.
+fn (self: &Lowerer) is_float_type_name(type_name: Name) -> bool {
+    return self.module.names.is(type_name, "f32") or self.module.names.is(type_name, "f64");
+}
+
+/// Reports whether a floating-point literal written in a position of this
+/// type lowers as that type, the Go `narrowsFloatLiteral`. f64 is what a
+/// literal lowers as on its own.
+fn (self: &Lowerer) narrows_float_literal(type_name: Name) -> bool {
+    return self.module.names.is(type_name, "f32");
 }
 
 /// Reports whether expression is an integer literal, possibly negated: the

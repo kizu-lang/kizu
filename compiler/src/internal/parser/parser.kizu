@@ -2008,6 +2008,7 @@ fn (self: &var Parser) parse_prefix_expression(
     return match kind {
         Ident => try self.parse_ident_prefix_expression(tree),
         Int => try self.parse_int_literal_expression(tree),
+        Float => try self.parse_float_literal_expression(tree),
         String => try self.retain_literal_expression(tree, true),
         If => {
             let value = try self.parse_if_stmt(tree) orelse
@@ -2068,6 +2069,58 @@ fn (self: &var Parser) parse_int_literal_expression(
     return try tree.add_expression(ast::ExpressionNode::Int(
         ast::IntExpr { value: retained }
     ));
+}
+
+// Keeps the spelling of a floating-point literal without its separators, as
+// `1.5e3`. The value it names is the nearest f64, which this compiler
+// computes exactly only for spellings within typ::parse_float_literal's
+// range; any other spelling is a parse error rather than a value that might
+// be off by one unit.
+fn (self: &var Parser) parse_float_literal_expression(
+    tree: &var ast::Ast
+) -> !ast::Expression {
+    if !try self.current_float_in_range() {
+        try self.error_float_range();
+        let zero = try tree.add_text_from_bytes("0.0");
+        return try tree.add_expression(ast::ExpressionNode::Float(
+            ast::FloatExpr { value: zero }
+        ));
+    }
+    let text = try self.current_float_spelling();
+    let retained = try tree.add_text(move text);
+    return try tree.add_expression(ast::ExpressionNode::Float(
+        ast::FloatExpr { value: retained }
+    ));
+}
+
+fn (self: &Parser) current_float_in_range() -> !bool {
+    let text = try self.current_float_spelling();
+    defer text.deinit(self.allocator);
+    let bytes = text.as_bytes();
+    if typ::parse_float_literal(bytes) |_| {
+        return true;
+    }
+    return false;
+}
+
+fn (self: &Parser) current_float_spelling() -> !string::String {
+    return clean_float_token(self.allocator, self.current_token());
+}
+
+fn clean_float_token(allocator: Allocator, current: &token::Token) -> !string::String {
+    let bytes = current.literal.as_bytes();
+    return typ::clean_float_literal(allocator, bytes);
+}
+
+fn (self: &var Parser) error_float_range() -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit(self.allocator);
+    try entry.message.append_bytes(self.allocator, "float literal `");
+    let current = self.current_token();
+    try entry.message.append_string(self.allocator, &current.literal);
+    try entry.message.append_bytes(self.allocator,
+        "` is outside the range this compiler converts exactly (up to 19 significant digits and an exponent within 10^±22)");
+    return self.record(move entry);
 }
 
 fn (self: &Parser) current_integer_value() -> ?i64 {

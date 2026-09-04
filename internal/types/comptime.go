@@ -70,6 +70,9 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 			return comptimeValue{}, errorf("comptime error: invalid integer `%s`", e.Value)
 		}
 		return comptimeValue{typ: typeI64, i: value}, nil
+	case *ast.FloatExpr:
+		return comptimeValue{}, errorf(
+			"comptime error: a floating-point value is not evaluated at compile time")
 	case *ast.BoolExpr:
 		return comptimeValue{typ: typeBool, b: e.Value}, nil
 	case *ast.StringExpr:

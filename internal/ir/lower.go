@@ -1333,7 +1333,7 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerExpr(inner)
 	}
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.NullExpr:
+	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.NullExpr:
 		return l.lowerLiteralExpr(e)
 	case *ast.TypeExpr:
 		return l.emitConst("type", e.TypeName), nil
@@ -1615,28 +1615,44 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 			return storage, nil
 		}
 	}
-	if !narrowsIntegerLiteral(want) {
+	if !narrowsIntegerLiteral(want) && !narrowsFloatLiteral(want) {
 		value, err := l.lowerExpr(expr)
 		if err != nil {
 			return Value{}, err
 		}
 		return l.readBorrowForContext(value, want), nil
 	}
+	if value, ok, err := l.lowerContextualLiteral(expr, want); ok || err != nil {
+		return value, err
+	}
+	return l.lowerExpr(expr)
+}
+
+// lowerContextualLiteral lowers a literal, possibly negated, as the narrower
+// type its position expects, reporting false when expr is not a literal of
+// that kind.
+func (l *lowerer) lowerContextualLiteral(expr ast.Expression, want string) (Value, bool, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
-		return l.emitConst(want, e.Value), nil
+		if isIntegerTypeName(want) {
+			return l.emitConst(want, e.Value), true, nil
+		}
+	case *ast.FloatExpr:
+		if isFloatTypeName(want) {
+			return l.emitConst(want, e.Value), true, nil
+		}
 	case *ast.PrefixExpr:
 		// A negated literal is still a literal in the position it is written
 		// in, and `unary.-` takes the type of its operand.
-		if _, ok := e.Right.(*ast.IntExpr); ok && e.Operator == "-" {
+		if isScalarLiteral(e) && e.Operator == "-" {
 			value, err := l.lowerContextualExpr(e.Right, want)
 			if err != nil {
-				return Value{}, err
+				return Value{}, true, err
 			}
-			return l.emit("unary."+e.Operator, value.Type, []Value{value}, ""), nil
+			return l.emit("unary."+e.Operator, value.Type, []Value{value}, ""), true, nil
 		}
 	}
-	return l.lowerExpr(expr)
+	return Value{}, false, nil
 }
 
 // readBorrowForContext reads a borrow's value where the position wants the
@@ -1690,6 +1706,13 @@ func optionalElemType(typeName string) (string, bool) {
 	return typ.OptionalElem(typeName)
 }
 
+// narrowsFloatLiteral reports whether a floating-point literal written in a
+// position of this type lowers as that type. f64 is what a literal lowers as
+// on its own.
+func narrowsFloatLiteral(typ string) bool {
+	return typ == "f32"
+}
+
 // narrowsIntegerLiteral reports whether an integer literal written in a
 // position of this type lowers as that type. i64 is what a literal lowers as
 // on its own, so it needs no contextual form.
@@ -1707,6 +1730,8 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
 		return l.emitConst("i64", e.Value), nil
+	case *ast.FloatExpr:
+		return l.emitConst("f64", e.Value), nil
 	case *ast.StringExpr:
 		return l.emitConst("[]u8", quote.Bytes(e.Value)), nil
 	case *ast.BoolExpr:
@@ -1825,11 +1850,11 @@ func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 	return l.emit("binary."+expr.Operator, resultType, []Value{left, right}, ""), nil
 }
 
-// lowerBinaryOperands lowers both sides of an operator. An integer literal on
-// one side takes the integer type of the other, as the checker typed it, so
-// `flags & 0x0F` with `flags: u8` is a u8 operation.
+// lowerBinaryOperands lowers both sides of an operator. A literal on one
+// side takes the type of the other, as the checker typed it, so `flags & 0x0F`
+// with `flags: u8` is a u8 operation and `x * 2.0` with `x: f32` an f32 one.
 func (l *lowerer) lowerBinaryOperands(expr *ast.BinaryExpr) (Value, Value, error) {
-	if isIntegerLiteral(expr.Right) && !isIntegerLiteral(expr.Left) {
+	if isScalarLiteral(expr.Right) && !isScalarLiteral(expr.Left) {
 		left, err := l.lowerExpr(expr.Left)
 		if err != nil {
 			return Value{}, Value{}, err
@@ -1837,7 +1862,7 @@ func (l *lowerer) lowerBinaryOperands(expr *ast.BinaryExpr) (Value, Value, error
 		right, err := l.lowerLiteralOperand(expr.Right, left.Type)
 		return left, right, err
 	}
-	if isIntegerLiteral(expr.Left) && !isIntegerLiteral(expr.Right) {
+	if isScalarLiteral(expr.Left) && !isScalarLiteral(expr.Right) {
 		right, err := l.lowerExpr(expr.Right)
 		if err != nil {
 			return Value{}, Value{}, err
@@ -1853,10 +1878,13 @@ func (l *lowerer) lowerBinaryOperands(expr *ast.BinaryExpr) (Value, Value, error
 	return left, right, err
 }
 
-// lowerLiteralOperand lowers an integer literal in the type of the operand
-// it meets, or as itself when that operand is not an integer.
+// lowerLiteralOperand lowers a literal in the type of the operand it meets
+// when that type is one the literal can take, or as itself otherwise.
 func (l *lowerer) lowerLiteralOperand(expr ast.Expression, other string) (Value, error) {
-	if isIntegerTypeName(other) {
+	if isIntegerLiteral(expr) && isIntegerTypeName(other) {
+		return l.lowerContextualExpr(expr, other)
+	}
+	if isFloatLiteral(expr) && isFloatTypeName(other) {
 		return l.lowerContextualExpr(expr, other)
 	}
 	return l.lowerExpr(expr)
@@ -1873,6 +1901,25 @@ func isIntegerLiteral(expr ast.Expression) bool {
 		return ok && e.Operator == "-"
 	}
 	return false
+}
+
+// isFloatLiteral reports whether expr is a floating-point literal, possibly
+// negated.
+func isFloatLiteral(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.FloatExpr:
+		return true
+	case *ast.PrefixExpr:
+		_, ok := e.Right.(*ast.FloatExpr)
+		return ok && e.Operator == "-"
+	}
+	return false
+}
+
+// isScalarLiteral reports whether expr is an integer or floating-point
+// literal, possibly negated.
+func isScalarLiteral(expr ast.Expression) bool {
+	return isIntegerLiteral(expr) || isFloatLiteral(expr)
 }
 
 // checkShiftAmount traps a negative shift amount at run time. Only a signed
@@ -2042,6 +2089,18 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 			return Value{}, fmt.Errorf("ir error: std::internal::builtin::mem_len expects 1 arg")
 		}
 		return l.emit("slice.len", "i64", args, ""), nil
+	}
+	if name == "std::internal::builtin::f64_bits" {
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("ir error: std::internal::builtin::f64_bits expects 1 arg")
+		}
+		return l.emit("float.bits", "u64", args, ""), nil
+	}
+	if name == "std::internal::builtin::f64_from_bits" {
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("ir error: std::internal::builtin::f64_from_bits expects 1 arg")
+		}
+		return l.emit("float.from_bits", "f64", args, ""), nil
 	}
 	if name == "std::internal::builtin::test_fail" {
 		return l.emit("test.fail", "void", args, ""), nil

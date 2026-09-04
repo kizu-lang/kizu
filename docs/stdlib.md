@@ -22,6 +22,7 @@ std からしか届かず、user code からの直接呼び出しは拒否され
 | host I/O | `io_*`、`fs_*`、`net_*`、`process_*` | `std::io`、`std::fs`、`std::net`、`std::process` |
 | 実行 | `coro_*`、`task_*` | `std::coro`、`std::io` の `async` / `TaskSet` |
 | trap | `panic`、`test_fail`、`test_fail_equal<T>` | `std::json` の誤用 trap、`std::testing` |
+| float | `f64_bits`、`f64_from_bits` | `std::float` |
 
 規則:
 
