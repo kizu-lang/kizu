@@ -12,10 +12,9 @@
 `print` は backend に型ごとの分岐(int / bool / bytes / enum 名前表 / error 表)を
 持つ。`std::fmt::print<T>` を `comptime match` と `std::meta` で書き、backend には
 「bytes を stdout に書く」primitive だけを残す。`Io` 無しで書く点は debug 用の例外として
-docs に明記する。`print(f64)` は `std::float::append` の 1 行で乗る。前提として
-`std::meta` が enum の variant 名を取れること(`variants` / `variant_name` はある)。
-error set の反射(`is_error<T>`)と、std の generic 内で出す診断を呼び出し元の位置に
-付ける仕組みが要る。
+docs に明記する。`print(f64)` は `std::float::append` の 1 行で乗る。前提だった
+`std::meta` の error set 反射(`is_error` / `type_name` / error set の
+`comptime match`)と、generic 内の診断を呼び出し元の位置に付ける仕組みは入った。
 
 ## std::http / std::net の残り
 

@@ -2585,6 +2585,7 @@ std::meta::is_array<T>()           -> bool    comptime-only
 std::meta::is_box<T>()             -> bool    comptime-only
 std::meta::is_map<T>()             -> bool    comptime-only
 std::meta::is_owner<T>()           -> bool    comptime-only
+std::meta::is_error<T>()           -> bool    comptime-only
 std::meta::release_names_allocator<T>() -> bool comptime-only
 std::meta::has_public_fields<T>()  -> bool    comptime-only
 std::meta::element<T>                         comptime-only、型の位置に書く
@@ -2599,6 +2600,7 @@ std::meta::variant_type<T, v>                 comptime-only、型の位置に書
 std::meta::has_payload<T, v>()     -> bool    comptime-only
 std::meta::variant<T, v>(payload)  -> T
 std::meta::unsupported<T>()                   compile error にする
+std::meta::type_name<T>()          -> []u8    comptime-only
 ```
 
 `construct<T, worker>(args...)` は `T` の public field を宣言順に組み立てて
@@ -2635,6 +2637,22 @@ container はこれを聞いてから呼びます。宣言された `deinit` の
 `comptime if` は選ばれた branch だけを検査するので、最後の else に書けば、
 扱えない型が来たときにだけ error になります。診断は型と、拒否した関数を
 名指しします。閉じた集合を歩く walk が、集合の外を黙って通さないための形です。
+
+generic の body で見つかった error は、その body を展開した呼び出しを
+`note: in \`name<T>\`` として内側から順に持ちます。`unsupported<T>()` の
+ように位置を持たない error は、std の外で最初に通った呼び出しの位置を取ります
+—— それがプログラムの直せる行だからです。
+
+`type_name<T>()` は `T` の綴りを持つ `[]u8` literal です。`field_name` と同じく
+static storage を指し、確保は起きません。enum の値を `Color::Green` と綴る
+walk は、これと `variant_name` を並べます。
+
+`is_error<T>()` は `T` が宣言された error set かを答えます。error set は
+`variants<T>()`、`variant_name<T, v>()`、`variant<T, v>()`、`comptime match`
+でも enum と同じように歩けます。member は宣言した set に属したままなので
+(§11.2)、`variant_name` は `FsError::NotFound` の形で答え、`variant<T, v>()` は
+その member を作ります。合成 set(`error C = A or B;`)は合成元を書いた順に、
+各 set の member を宣言順に歩きます。
 
 `is_*` は `comptime if` の条件に書けます。`comptime` expression はこれらの
 組み込み形も評価します。述語が答える型の種類は std が持つ container で
@@ -2686,7 +2704,8 @@ static 引数だけです。
 ### 13.2 comptime match
 
 `comptime match` は、値が今どの variant かで分岐する compile-time 展開です。
-`comptime for` が field を歩くのに対し、これは variant を歩きます。
+`comptime for` が field を歩くのに対し、これは variant を歩きます。値は enum、
+union、または error set(§11.2)です。
 
 ```kizu
 comptime match value |v, payload| {
@@ -2728,6 +2747,8 @@ comptime match color |v| {
 `std::meta::variant<T, v>(payload)` は `T::<v の名前>(payload)` と同じもので、
 payload を持たない variant では `T::<v の名前>` です。walk が値を**作る**側で
 arm を名指しする唯一の手段で、arm は呼び出し側が型として書けないためです。
+error set では各 arm が宣言元の set で修飾され(`FsError::NotFound =>`)、
+合成 set が同名 member を 2 つの set から受け取っていても区別されます。
 
 ### 13.3 target selection
 

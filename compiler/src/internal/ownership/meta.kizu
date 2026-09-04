@@ -14,7 +14,9 @@ import std::string;
 
 /// Returns a capture record to fill in, the Go zero `metaField`.
 pub fn empty_meta_field() -> MetaField {
-    return MetaField { owner: empty_name(), name: empty_name(), typ: empty_name(), variant: false };
+    return MetaField {
+        owner: empty_name(), name: empty_name(), typ: empty_name(), variant: false, origin: empty_name()
+    };
 }
 
 /// Checks ownership effects once per expansion, the Go `checkComptimeForStmt`.
@@ -102,14 +104,30 @@ fn (self: &var Checker) variants(
         var index = 0;
         while self.enum_tag_at(owner, index) |tag| {
             index = index + 1;
-            try out.append(self.allocator, MetaField { owner: owner, name: tag, typ: empty_name(), variant: true });
+            try out.append(self.allocator, MetaField {
+                owner: owner, name: tag, typ: empty_name(), variant: true, origin: empty_name()
+            });
+        }
+        return null;
+    }
+    if self.is_error_set(owner) {
+        let retained = name_text(&self.names, owner);
+        let bytes = retained.as_bytes();
+        if self.error_order.at(bytes) |members| {
+            var index = 0;
+            while members.get(index) |member| {
+                index = index + 1;
+                try out.append(self.allocator, MetaField {
+                    owner: owner, name: member.name, typ: empty_name(), variant: true, origin: member.origin
+                });
+            }
         }
         return null;
     }
     if !self.is_union(owner) {
         let form_name = try self.form_name(stdmeta::Form::Variants);
         return try self.error2(
-            tree, ast::zero_span(), "move error: `%s` expects an enum or union, got %s",
+            tree, ast::zero_span(), "move error: `%s` expects an enum, union, or error set, got %s",
             Arg::Str(form_name), Arg::Str(owner)
         );
     }
@@ -117,7 +135,9 @@ fn (self: &var Checker) variants(
     while self.union_variant_at(owner, index) |name| {
         index = index + 1;
         let payload = self.union_variant_payload_name(owner, name) orelse empty_name();
-        try out.append(self.allocator, MetaField { owner: owner, name: name, typ: payload, variant: true });
+        try out.append(self.allocator, MetaField {
+            owner: owner, name: name, typ: payload, variant: true, origin: empty_name()
+        });
     }
     return null;
 }
@@ -146,7 +166,7 @@ fn (self: &var Checker) public_fields(
     while self.struct_public_field_at(owner, index) |name| {
         index = index + 1;
         let field_type = self.struct_field_type(owner, name) orelse empty_name();
-        try out.append(self.allocator, MetaField { owner: owner, name: name, typ: field_type, variant: false });
+        try out.append(self.allocator, MetaField { owner: owner, name: name, typ: field_type, variant: false , origin: empty_name() });
     }
     return null;
 }
@@ -316,6 +336,14 @@ fn (self: &var Checker) check_meta_apply(
         },
         IsOwner => {
             out.* = self.common.bool_name;
+            return null;
+        },
+        IsError => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        TypeName => {
+            out.* = self.common.bytes_name;
             return null;
         },
         ReleaseNamesAllocator => {
@@ -488,7 +516,7 @@ fn (self: &var Checker) check_meta_variant(
     if try self.meta_capture(tree, form, static_args, &var variant) |failed| {
         return move failed;
     }
-    let owner_name = try self.names.copy(variant.owner);
+    let owner_name = try self.names.copy(variant_owner(variant));
     defer owner_name.deinit(self.allocator);
     let variant_name = try self.names.copy(variant.name);
     defer variant_name.deinit(self.allocator);
@@ -517,7 +545,7 @@ fn (self: &var Checker) check_comptime_match_stmt(
     if try self.variants(tree, owner, &var variants) |failed| {
         failed.deinit(self.allocator);
         return try self.error1(
-            tree, ast::zero_span(), "move error: comptime match expects an enum or union, got %s",
+            tree, ast::zero_span(), "move error: comptime match expects an enum, union, or error set, got %s",
             Arg::Str(value_type)
         );
     }
@@ -541,7 +569,16 @@ fn (self: &Checker) expand_comptime_match(
         defer name_copy.deinit(self.allocator);
         let name_bytes = name_copy.as_bytes();
         let name = try tree.add_text_from_bytes(name_bytes);
-        try list.append(self.allocator, ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
+        var origin = try tree.add_empty_text();
+        if !is_empty(variant.origin) {
+            let origin_copy = try self.names.copy(variant.origin);
+            defer origin_copy.deinit(self.allocator);
+            let origin_bytes = origin_copy.as_bytes();
+            origin = try tree.add_text_from_bytes(origin_bytes);
+        }
+        try list.append(self.allocator, ast::MetaVariant {
+            name: name, has_payload: !is_empty(variant.typ), origin: origin
+        });
         index = index + 1;
     }
     let owner_copy = try self.names.copy(owner);

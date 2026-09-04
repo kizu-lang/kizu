@@ -109,12 +109,14 @@ fn (self: &var Checker) check_type_apply_call_expr(
         let span = expression_span(tree, expression.callee);
         return self.check_int_from_ptr(tree, scope, type_arg, span, args, out);
     }
+    let callee_span = expression_span(tree, expression.callee);
     if try self.check_generic_user_type_apply(
         tree,
         scope,
         name_bytes,
         type_arg,
         args,
+        callee_span,
         &var handled,
         out
     ) |problem| {
@@ -299,6 +301,56 @@ fn (self: &Checker) pointer_cast_arg_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
+// Adds where a generic body was instantiated to an error found while
+// checking it, the Go `annotateInstantiation`. Each call the error passes
+// through appends its instance, so a chain of std generics reads outward
+// from the body that failed to the call the program wrote. An error raised
+// with no position of its own -- `std::meta::unsupported<T>()` names a type,
+// not a line -- takes the first call outside std it reaches: that is the
+// line the program can change, and a position inside std would send the
+// reader into the library.
+fn (self: &Checker) annotate_instantiation(
+    problem: diagnostic::Diagnostic,
+    span: ast::Span,
+    name: []u8,
+    type_args: &array::Array<Type>
+) -> !diagnostic::Diagnostic {
+    var annotated = move problem;
+    errdefer annotated.deinit(self.allocator);
+    if annotated.span.is_zero() and !span.is_zero() and !self.checking_std() {
+        annotated.span = span;
+    }
+    var note = string::new(self.allocator);
+    defer note.deinit(self.allocator);
+    try note.append_bytes(self.allocator, "in `");
+    try note.append_bytes(self.allocator, name);
+    try note.append_byte(self.allocator, cast<u8>(60));
+    var index = 0;
+    while type_args.get(index) |type_arg| {
+        if index > 0 {
+            try note.append_bytes(self.allocator, ", ");
+        }
+        try self.append_checker_type(&var note, type_arg);
+        index = index + 1;
+    }
+    try note.append_bytes(self.allocator, ">`");
+    let bytes = note.as_bytes();
+    try annotated.with_note(self.allocator, bytes);
+    return move annotated;
+}
+
+// Reports whether the body being checked belongs to the standard library,
+// the one package with the `std::` root.
+fn (self: &Checker) checking_std() -> bool {
+    if self.current_function_handle() |handle| {
+        if self.metadata.functions.at(handle.index) |function| {
+            let name = function.name.as_bytes();
+            return mem::starts_with(name, "std::");
+        }
+    }
+    return false;
+}
+
 // Validates a source generic call with explicit static arguments.
 fn (self: &var Checker) check_generic_user_type_apply(
     tree: &var ast::Ast,
@@ -306,6 +358,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
     name: []u8,
     type_arg: []u8,
     args: ast::ExpressionList,
+    span: ast::Span,
     handled: &var bool,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -317,6 +370,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
             name,
             type_arg,
             args,
+            span,
             handled,
             out
         );
@@ -332,6 +386,7 @@ fn (self: &var Checker) check_generic_user_type_apply_function(
     name: []u8,
     type_arg: []u8,
     args: ast::ExpressionList,
+    span: ast::Span,
     handled: &var bool,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -356,6 +411,7 @@ fn (self: &var Checker) check_generic_user_type_apply_function(
             handle,
             name,
             args,
+            span,
             move checked,
             out
         ),
@@ -368,6 +424,7 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     handle: FunctionHandle,
     name: []u8,
     args: ast::ExpressionList,
+    span: ast::Span,
     checked: CheckedStaticArgs,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -403,7 +460,7 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
         &checked.field_args,
         &checked.function_args
     ) |problem| {
-        return move problem;
+        return try self.annotate_instantiation(move problem, span, name, &checked.type_args);
     }
     let previous_meta = self.meta_bindings.current;
     try self.bind_static_meta_fields(&checked.field_args);

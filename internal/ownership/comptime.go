@@ -180,6 +180,9 @@ func (c *Checker) declaredKindPredicate(form stdmeta.Form, subject string) (bool
 	case stdmeta.IsUnion:
 		_, known := c.unions[subject]
 		return known, true
+	case stdmeta.IsError:
+		_, known := c.errorSets[subject]
+		return known, true
 	default:
 		return false, false
 	}

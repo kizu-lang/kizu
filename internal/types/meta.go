@@ -18,6 +18,36 @@ type metaField struct {
 	name    string
 	typ     Type
 	variant bool
+	// origin is the error set that declared a member of an error set, and ""
+	// for a field, an enum tag, or a union variant. The member is spelled
+	// and matched through that set, not the set the walk was handed.
+	origin string
+}
+
+// variantOwner names the declaration a variant is built from and matched by:
+// the declaring set for an error member, the type itself otherwise.
+func (f metaField) variantOwner() string {
+	if f.origin != "" {
+		return f.origin
+	}
+	return string(f.owner)
+}
+
+// variantKey identifies a variant the way an arm names it, so a combined
+// error set that receives one member name from two sets keeps them apart.
+func (f metaField) variantKey() string {
+	if f.origin != "" {
+		return errorValueKey(f.origin, f.name)
+	}
+	return f.name
+}
+
+// matchArmKey identifies the variant an arm covers, paired with variantKey.
+func matchArmKey(arm ast.MatchArm) string {
+	if arm.TagSet != "" {
+		return errorValueKey(arm.TagSet, arm.Tag)
+	}
+	return arm.Tag
 }
 
 // checkComptimeForStmt expands a compile-time loop and checks each expansion.
@@ -105,9 +135,17 @@ func (c *Checker) variants(typeArg string) ([]metaField, error) {
 		}
 		return out, nil
 	}
+	if set := c.errorSets[string(owner)]; set != nil {
+		out := make([]metaField, 0, len(set.valueOrder))
+		for _, key := range set.valueOrder {
+			origin, member := splitErrorValueKey(key)
+			out = append(out, metaField{owner: owner, name: member, variant: true, origin: origin})
+		}
+		return out, nil
+	}
 	union := c.unions[string(owner)]
 	if union == nil {
-		return nil, errorf("comptime error: `%s` expects an enum or union, got %s",
+		return nil, errorf("comptime error: `%s` expects an enum, union, or error set, got %s",
 			stdmeta.Variants, owner)
 	}
 	out := make([]metaField, 0, len(union.order))
@@ -193,7 +231,8 @@ func (c *Checker) checkComptimeMatchStmt(
 	owner := borrowElem(valueType)
 	variants, err := c.variants(string(owner))
 	if err != nil {
-		return false, errorf("comptime error: comptime match expects an enum or union, got %s",
+		return false, errorf(
+			"comptime error: comptime match expects an enum, union, or error set, got %s",
 			valueType)
 	}
 	if stmt.Binding == "" && metaFieldsCarryPayload(variants) {
@@ -221,7 +260,9 @@ func metaFieldsCarryPayload(variants []metaField) bool {
 func metaVariantList(variants []metaField) []ast.MetaVariant {
 	out := make([]ast.MetaVariant, 0, len(variants))
 	for _, variant := range variants {
-		out = append(out, ast.MetaVariant{Name: variant.name, HasPayload: variant.typ != ""})
+		out = append(out, ast.MetaVariant{
+			Name: variant.name, HasPayload: variant.typ != "", Origin: variant.origin,
+		})
 	}
 	return out
 }
@@ -290,11 +331,16 @@ func (c *Checker) checkMetaForm(
 	case stdmeta.Construct:
 		return c.checkMetaConstruct(staticArgs, args, env, unsafe)
 	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
-		stdmeta.IsOwner, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
+		stdmeta.IsOwner, stdmeta.IsError, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
 		if _, err := c.metaPredicate(form, staticArgs); err != nil {
 			return "", err
 		}
 		return typeBool, nil
+	case stdmeta.TypeName:
+		if _, err := c.parseType(staticArgs[0]); err != nil {
+			return "", err
+		}
+		return typeByteString, nil
 	case stdmeta.Unsupported:
 		return "", c.metaUnsupported(staticArgs)
 	case stdmeta.PublicFields, stdmeta.Variants:
@@ -323,7 +369,7 @@ func (c *Checker) checkMetaVariant(
 		return "", err
 	}
 	return c.checkExpr(
-		ast.VariantExpansion(string(variant.owner), variant.name, args), env, unsafe)
+		ast.VariantExpansion(variant.variantOwner(), variant.name, args), env, unsafe)
 }
 
 // checkVariantArgs refuses a payload for a tag and a missing one for a variant
@@ -535,6 +581,8 @@ func (c *Checker) declaredKindPredicate(form stdmeta.Form, subject Type) (bool, 
 		return c.enums[string(subject)] != nil, true
 	case stdmeta.IsUnion:
 		return c.unions[string(subject)] != nil, true
+	case stdmeta.IsError:
+		return c.errorSets[string(subject)] != nil, true
 	default:
 		return false, false
 	}

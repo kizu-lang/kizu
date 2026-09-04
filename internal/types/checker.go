@@ -1,6 +1,7 @@
 package types
 
 import (
+	"errors"
 	"fmt"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"math"
@@ -2568,7 +2569,7 @@ func (c *Checker) checkMatchArms(
 				return false, err
 			}
 		}
-		restore := c.bindMetaField(stmt.MetaCapture, armVariants[arm.Tag])
+		restore := c.bindMetaField(stmt.MetaCapture, armVariants[matchArmKey(arm)])
 		returns, err := c.checkStmt(arm.Body, armEnv, wantReturn, unsafe)
 		restore()
 		if err != nil {
@@ -2726,7 +2727,7 @@ func (c *Checker) matchArmVariants(stmt *ast.MatchStmt) (map[string]metaField, e
 	}
 	out := make(map[string]metaField, len(variants))
 	for _, variant := range variants {
-		out[variant.name] = variant
+		out[variant.variantKey()] = variant
 	}
 	return out, nil
 }
@@ -3932,6 +3933,36 @@ func (c *Checker) checkCallExprDispatch(
 	return c.checkUserCall(name.Name, name.Span, expr.Args, env, unsafe)
 }
 
+// annotateInstantiation adds where a generic body was instantiated to an
+// error found while checking it. Each call the error passes through appends
+// its instance, so a chain of std generics reads outward from the body that
+// failed to the call the program wrote. An error raised with no position of
+// its own -- `std::meta::unsupported<T>()` names a type, not a line -- takes
+// the first call outside std it reaches: that is the line the program can
+// change, and a position inside std would send the reader into the library.
+func (c *Checker) annotateInstantiation(
+	err error,
+	span ast.Span,
+	fn *functionType,
+	typeArgs []Type,
+) error {
+	var d *DiagnosticError
+	if !errors.As(err, &d) {
+		return err
+	}
+	if d.Span.IsZero() && !span.IsZero() && !c.checkingStd() {
+		d.Span = span
+	}
+	d.Notes = append(d.Notes, fmt.Sprintf("in `%s<%s>`", fn.sig.Name, joinTypes(typeArgs)))
+	return d
+}
+
+// checkingStd reports whether the body being checked belongs to the standard
+// library, which is the one package with the `std::` root.
+func (c *Checker) checkingStd() bool {
+	return c.currentFunction != nil && strings.HasPrefix(c.currentFunction.name, "std::")
+}
+
 // funcPointerNode returns the parsed function pointer a type spells, and
 // reports whether it is one.
 func (c *Checker) funcPointerNode(value Type) (*typ.Func, bool) {
@@ -4532,7 +4563,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return c.checkIntFromPtr(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
 	if typ, ok, err := c.checkGenericUserTypeApply(
-		name, typeArg, args, env, unsafe,
+		name, typeArg, args, env, unsafe, expressionSpan(expr.Callee),
 	); ok || err != nil {
 		return typ, err
 	}
@@ -5404,6 +5435,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
+	span ast.Span,
 ) (Type, bool, error) {
 	fn := c.functions[name]
 	if fn == nil || len(fn.sig.StaticParams) == 0 {
@@ -5438,7 +5470,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		}
 	}
 	if err := c.checkGenericInstantiation(fn, subst, fieldArgs, funcArgs); err != nil {
-		return "", true, err
+		return "", true, c.annotateInstantiation(err, span, fn, typeArgs)
 	}
 	// The result the caller sees is the declaration's type with this call's
 	// arguments bound, forms included: `-> std::meta::field_type<T, f>` is a

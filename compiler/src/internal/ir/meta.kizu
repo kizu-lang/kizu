@@ -81,12 +81,17 @@ fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var 
                         owner: type_arg,
                         name: try self.text_name(tree, tag),
                         typ: empty_name(),
-                        variant: true
+                        variant: true,
+                        origin: empty_name()
                     });
                 }
             },
             _ => {},
         }
+        return null;
+    }
+    if self.module.has_error_set(type_arg) {
+        try self.error_members(type_arg, type_arg, out);
         return null;
     }
     if declared_in(&self.module.names, &self.union_decls, type_arg) |declaration| {
@@ -103,7 +108,8 @@ fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var 
                         owner: type_arg,
                         name: try self.text_name(tree, variant.name),
                         typ: payload,
-                        variant: true
+                        variant: true,
+                        origin: empty_name()
                     });
                 }
             },
@@ -113,8 +119,79 @@ fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var 
     }
     let form_name = try self.form_name(stdmeta::Form::Variants);
     return try self.fail2(
-        tree, "ir error: `%s` expects an enum or union, got %s", Arg::Str(form_name), Arg::Str(type_arg)
+        tree, "ir error: `%s` expects an enum, union, or error set, got %s", Arg::Str(form_name), Arg::Str(type_arg)
     );
+}
+
+/// Lists an error set's members in declaration order, each with the set that
+/// declared it, the Go `errorMembers`. A `{ }` set's members were numbered as
+/// they were declared, so their codes put them in order; a combined set walks
+/// the sets it names, in the order it named them.
+fn (self: &var Lowerer) error_members(owner: Name, set_name: Name, out: &var array::Array<MetaField>) -> !void {
+    var origins = array::new<Name>(self.allocator);
+    defer origins.deinit(self.allocator);
+    var members = array::new<string::String>(self.allocator);
+    defer members.deinit(self.allocator);
+    var codes = array::new<i64>(self.allocator);
+    defer codes.deinit(self.allocator);
+    let retained = name_text(&self.module.names, set_name);
+    let set_bytes = retained.as_bytes();
+    if self.module.error_sets.at(set_bytes) |set| {
+        var position = 0;
+        while set.origins.at(position) |origin| {
+            position = position + 1;
+            try origins.append(self.allocator, origin.*);
+        }
+        var index = 0;
+        while set.tags.key_at(index) |member| {
+            index = index + 1;
+            if set.tags.get(member) |code| {
+                let copied = try string::from_bytes(self.allocator, member);
+                try members.append(self.allocator, move copied);
+                try codes.append(self.allocator, code);
+            }
+        }
+    }
+    var position = 0;
+    while origins.get(position) |origin| {
+        position = position + 1;
+        try self.error_members(owner, origin, out);
+    }
+    if origins.len() > 0 {
+        return;
+    }
+    sort_by_code(&var members, &var codes);
+    var index = 0;
+    while members.at(index) |member| {
+        index = index + 1;
+        let member_bytes = member.as_bytes();
+        let name = try self.module.names.intern(member_bytes);
+        try out.append(self.allocator, MetaField {
+            owner: owner, name: name, typ: empty_name(), variant: true, origin: set_name
+        });
+    }
+    return;
+}
+
+/// Orders members by their codes, which is their declaration order.
+fn sort_by_code(members: &var array::Array<string::String>, codes: &var array::Array<i64>) -> void {
+    var index = 0;
+    while index < codes.len() {
+        var least = index;
+        var candidate = index + 1;
+        while candidate < codes.len() {
+            if codes.get_or_panic(candidate) < codes.get_or_panic(least) {
+                least = candidate;
+            }
+            candidate = candidate + 1;
+        }
+        if least != index {
+            members.swap(index, least) catch return;
+            codes.swap(index, least) catch return;
+        }
+        index = index + 1;
+    }
+    return;
 }
 
 /// Lists a struct's public fields in declaration order, the Go
@@ -130,6 +207,7 @@ fn (self: &var Lowerer) public_fields(tree: &var ast::Ast, type_arg: Name, out: 
                     continue;
                 }
                 try out.append(self.allocator, MetaField {
+                    origin: empty_name(),
                     owner: type_arg,
                     name: try self.text_name(tree, field.name),
                     typ: try self.resolve_element_forms(tree, field.type_name),
@@ -279,7 +357,15 @@ fn (self: &Lowerer) expand_comptime_match(
         let retained = name_text(&self.module.names, variant.name);
         let name_bytes = retained.as_bytes();
         let name = try tree.add_text_from_bytes(name_bytes);
-        try list.append(self.allocator, ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
+        var origin = try tree.add_empty_text();
+        if !is_empty(variant.origin) {
+            let retained_origin = name_text(&self.module.names, variant.origin);
+            let origin_bytes = retained_origin.as_bytes();
+            origin = try tree.add_text_from_bytes(origin_bytes);
+        }
+        try list.append(self.allocator, ast::MetaVariant {
+            name: name, has_payload: !is_empty(variant.typ), origin: origin
+        });
     }
     let retained = name_text(&self.module.names, owner);
     let owner_bytes = retained.as_bytes();
@@ -307,6 +393,8 @@ fn (self: &var Lowerer) lower_meta_apply(tree: &var ast::Ast, name: Name, type_a
         IsUnion => return self.lower_meta_predicate(tree, form, type_arg, out),
         IsOptional => return self.lower_meta_predicate(tree, form, type_arg, out),
         IsOwner => return self.lower_meta_predicate(tree, form, type_arg, out),
+        IsError => return self.lower_meta_predicate(tree, form, type_arg, out),
+        TypeName => return self.lower_meta_type_name(type_arg, out),
         ReleaseNamesAllocator =>
             return self.lower_meta_predicate(tree, form, type_arg, out),
         HasPayload => return self.lower_meta_predicate(tree, form, type_arg, out),
@@ -326,9 +414,28 @@ fn (self: &var Lowerer) lower_meta_capture_name(
     if try self.meta_capture(tree, form, type_arg, &var field) |failed| {
         return move failed;
     }
-    let name_copy = try self.module.names.copy(field.name);
-    defer name_copy.deinit(self.allocator);
-    let bytes = name_copy.as_bytes();
+    // The bare tag of an enum or union, and the declaring set's
+    // `Origin::Member` for an error (SPEC §11.2), the Go variantSpelling.
+    var spelling = string::new(self.allocator);
+    defer spelling.deinit(self.allocator);
+    if !is_empty(field.origin) {
+        try self.module.names.append_to(&var spelling, field.origin);
+        try spelling.append_bytes(self.allocator, "::");
+    }
+    try self.module.names.append_to(&var spelling, field.name);
+    let bytes = spelling.as_bytes();
+    let immediate = try self.quoted_bytes(bytes);
+    out.* = try self.emit_const(self.common.bytes_type, immediate);
+    return null;
+}
+
+/// Lowers `type_name<T>` to the quoted spelling of the type T resolves to,
+/// the `TypeName` case of the Go `lowerMetaApply`.
+fn (self: &var Lowerer) lower_meta_type_name(type_arg: Name, out: &var Value) -> !?diagnostic::Diagnostic {
+    let subject = try self.resolve_type_args(type_arg);
+    let subject_copy = try self.module.names.copy(subject);
+    defer subject_copy.deinit(self.allocator);
+    let bytes = subject_copy.as_bytes();
     let immediate = try self.quoted_bytes(bytes);
     out.* = try self.emit_const(self.common.bytes_type, immediate);
     return null;
@@ -396,7 +503,7 @@ fn (self: &var Lowerer) lower_meta_variant(
     if try self.meta_capture(tree, form, type_arg, &var variant) |failed| {
         return move failed;
     }
-    let owner_text = name_text(&self.module.names, variant.owner);
+    let owner_text = name_text(&self.module.names, variant_owner(variant));
     let owner_bytes = owner_text.as_bytes();
     let variant_text = name_text(&self.module.names, variant.name);
     let variant_bytes = variant_text.as_bytes();
@@ -657,6 +764,10 @@ fn (self: &var Lowerer) meta_predicate(
             if declared_in(&self.module.names, &self.union_decls, subject) |_| {
                 out.* = true;
             }
+            return null;
+        },
+        IsError => {
+            out.* = self.module.has_error_set(subject);
             return null;
         },
         IsOptional => {

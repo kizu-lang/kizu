@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/quote"
@@ -17,6 +18,44 @@ type metaField struct {
 	name    string
 	typ     string
 	variant bool
+	// origin is the error set that declared a member of an error set, and ""
+	// otherwise; the member is spelled and built through that set.
+	origin string
+}
+
+// variantOwner names the declaration a variant is built from: the declaring
+// set for an error member, the type itself otherwise.
+func (f metaField) variantOwner() string {
+	if f.origin != "" {
+		return f.origin
+	}
+	return f.owner
+}
+
+// variantSpelling is what `variant_name` answers: the bare tag of an enum or
+// union, and `Origin::Member` for an error (SPEC §11.2).
+func (f metaField) variantSpelling() string {
+	if f.origin != "" {
+		return f.origin + "::" + f.name
+	}
+	return f.name
+}
+
+// variantKey identifies a variant the way an arm names it, so a combined
+// error set that receives one member name from two sets keeps them apart.
+func (f metaField) variantKey() string {
+	if f.origin != "" {
+		return f.origin + "::" + f.name
+	}
+	return f.name
+}
+
+// matchArmKey identifies the variant an arm covers, paired with variantKey.
+func matchArmKey(arm ast.MatchArm) string {
+	if arm.TagSet != "" {
+		return arm.TagSet + "::" + arm.Tag
+	}
+	return arm.Tag
 }
 
 // lowerComptimeForStmt lowers the body once per field. The loop itself has no
@@ -77,9 +116,12 @@ func (l *lowerer) variants(typeArg string) ([]metaField, error) {
 		}
 		return out, nil
 	}
+	if set, ok := l.module.ErrorSets[typeArg]; ok {
+		return l.errorMembers(typeArg, set), nil
+	}
 	decl, ok := l.unionDecls[typeArg]
 	if !ok {
-		return nil, fmt.Errorf("ir error: `%s` expects an enum or union, got %s",
+		return nil, fmt.Errorf("ir error: `%s` expects an enum, union, or error set, got %s",
 			stdmeta.Variants, typeArg)
 	}
 	out := make([]metaField, 0, len(decl.Variants))
@@ -92,6 +134,33 @@ func (l *lowerer) variants(typeArg string) ([]metaField, error) {
 		})
 	}
 	return out, nil
+}
+
+// errorMembers lists an error set's members in declaration order, each with
+// the set that declared it. A `{ }` set's members were numbered as they were
+// declared, so their codes put them in order; a combined set walks the sets
+// it names, in the order it named them.
+func (l *lowerer) errorMembers(owner string, set Enum) []metaField {
+	if set.Origins != nil {
+		var out []metaField
+		for _, origin := range set.Origins {
+			for _, member := range l.errorMembers(owner, l.module.ErrorSets[origin]) {
+				out = append(out, metaField{owner: owner, name: member.name, variant: true,
+					origin: member.origin})
+			}
+		}
+		return out
+	}
+	names := make([]string, 0, len(set.Tags))
+	for name := range set.Tags {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return set.Tags[names[i]] < set.Tags[names[j]] })
+	out := make([]metaField, 0, len(names))
+	for _, name := range names {
+		out = append(out, metaField{owner: owner, name: name, variant: true, origin: set.Name})
+	}
+	return out
 }
 
 // publicFields lists a struct's public fields in declaration order.
@@ -161,7 +230,7 @@ func (l *lowerer) matchArmVariants(stmt *ast.MatchStmt) (map[string]metaField, e
 	}
 	out := make(map[string]metaField, len(variants))
 	for _, variant := range variants {
-		out[variant.name] = variant
+		out[variant.variantKey()] = variant
 	}
 	return out, nil
 }
@@ -185,7 +254,9 @@ func (l *lowerer) lowerComptimeMatchStmt(stmt *ast.ComptimeMatchStmt) error {
 	}
 	list := make([]ast.MetaVariant, 0, len(variants))
 	for _, variant := range variants {
-		list = append(list, ast.MetaVariant{Name: variant.name, HasPayload: variant.typ != ""})
+		list = append(list, ast.MetaVariant{
+			Name: variant.name, HasPayload: variant.typ != "", Origin: variant.origin,
+		})
 	}
 	return l.lowerMatchBody(subject, ast.ComptimeMatchExpansion(stmt, owner, list))
 }
@@ -207,7 +278,9 @@ func (l *lowerer) lowerMetaApply(
 		if err != nil {
 			return Value{}, true, err
 		}
-		return l.emitConst("[]u8", quote.Bytes(field.name)), true, nil
+		return l.emitConst("[]u8", quote.Bytes(field.variantSpelling())), true, nil
+	case stdmeta.TypeName:
+		return l.emitConst("[]u8", quote.Bytes(l.resolveTypeArgs(typeArg))), true, nil
 	case stdmeta.Field:
 		value, err := l.lowerMetaFieldBorrow(form, typeArg, args)
 		return value, true, err
@@ -218,7 +291,7 @@ func (l *lowerer) lowerMetaApply(
 		value, err := l.lowerMetaConstruct(typeArg, args)
 		return value, true, err
 	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
-		stdmeta.IsOwner, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
+		stdmeta.IsOwner, stdmeta.IsError, stdmeta.ReleaseNamesAllocator, stdmeta.HasPayload:
 		known, err := l.metaPredicate(form, typeArg)
 		if err != nil {
 			return Value{}, true, err
@@ -257,7 +330,7 @@ func (l *lowerer) lowerMetaVariant(
 	if err != nil {
 		return Value{}, err
 	}
-	return l.lowerExpr(ast.VariantExpansion(variant.owner, variant.name, args))
+	return l.lowerExpr(ast.VariantExpansion(variant.variantOwner(), variant.name, args))
 }
 
 // lowerMetaConstruct lowers `std::meta::construct<T, worker>(args...)` as the
@@ -367,6 +440,9 @@ func (l *lowerer) metaPredicate(form stdmeta.Form, typeArg string) (bool, error)
 		return ok, nil
 	case stdmeta.IsUnion:
 		_, ok := l.unionDecls[subject]
+		return ok, nil
+	case stdmeta.IsError:
+		_, ok := l.module.ErrorSets[subject]
 		return ok, nil
 	case stdmeta.IsOptional:
 		_, ok := typ.OptionalElem(subject)

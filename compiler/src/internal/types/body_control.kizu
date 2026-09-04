@@ -591,7 +591,10 @@ fn (self: &var Checker) check_match_arms(
         let previous_meta = self.meta_bindings.current;
         let capture = owned_capture.as_bytes();
         if mem::len(capture) > 0 {
-            let field = try self.match_arm_meta_field(&arm_variants, tag);
+            let arm_key = try match_arm_key(self.allocator, tree, arm);
+            defer arm_key.deinit(self.allocator);
+            let key_bytes = arm_key.as_bytes();
+            let field = try self.match_arm_meta_field(&arm_variants, key_bytes);
             try self.bind_meta_field(capture, field);
         }
         var returns = false;
@@ -633,9 +636,11 @@ fn (self: &var Checker) match_arm_variants(
     }
     var index = 0;
     while variants.get(index) |handle| {
-        let field = self.meta_field_entries.at(handle.node);
-        let name = field.name.as_bytes();
-        try out.insert(allocator, name, handle);
+        let key = try self.meta_variant_key(self.allocator, handle);
+        let retained_key = try self.match_value_keys.add(self.allocator, move key);
+        let stored = self.match_value_keys.at(retained_key);
+        let key_bytes = stored.as_bytes();
+        try out.insert(allocator, key_bytes, handle);
         index = index + 1;
     }
     return null;
@@ -686,6 +691,9 @@ fn (self: &var Checker) meta_variants(
     defer names.deinit(self.allocator);
     var payloads = array::new<Type>(self.allocator);
     defer payloads.deinit(self.allocator);
+    if self.metadata.error_sets_by_name.get(owner_bytes) |handle| {
+        return self.error_member_meta_fields(owner, handle, out);
+    }
     if self.metadata.enums_by_name.get(owner_bytes) |handle| {
         try self.enum_variant_names(tree, handle, &var names, &var payloads);
     } else {
@@ -696,7 +704,7 @@ fn (self: &var Checker) meta_variants(
             errdefer message.deinit(self.allocator);
             try message.append_byte(self.allocator, cast<u8>(96));
             try message.append_bytes(self.allocator, stdmeta::spelling(stdmeta::Form::Variants));
-            try message.append_bytes(self.allocator, "` expects an enum or union, got ");
+            try message.append_bytes(self.allocator, "` expects an enum, union, or error set, got ");
             try self.append_checker_type(&var message, owner);
             return try self.checker_message_at("comptime error", ast::zero_span(), move message);
         }

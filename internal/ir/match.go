@@ -135,7 +135,7 @@ func (l *lowerer) lowerMatchArms(
 		if err := l.lowerMatchCheck(subject, arm, armBlock, nextCheck); err != nil {
 			return nil, err
 		}
-		restore := l.bindMetaField(stmt.MetaCapture, armVariants[arm.Tag])
+		restore := l.bindMetaField(stmt.MetaCapture, armVariants[matchArmKey(arm)])
 		result, err := l.lowerMatchArmBody(subject, arm, armBlock, endLabel, saved, wantValue)
 		restore()
 		if err != nil {

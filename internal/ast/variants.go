@@ -6,6 +6,10 @@ package ast
 type MetaVariant struct {
 	Name       string
 	HasPayload bool
+	// Origin is the error set that declares a member of an error set, and ""
+	// for an enum tag or a union variant. A member keeps the set that declared
+	// it (SPEC §11.2), so the arm names that set the way a written arm would.
+	Origin string
 }
 
 // ComptimeMatchExpansion is the code `comptime match value |v, p| { ... }`
@@ -34,7 +38,9 @@ func ComptimeMatchExpansion(
 		if variant.HasPayload {
 			binding = stmt.Binding
 		}
-		arms = append(arms, MatchArm{Tag: variant.Name, Binding: binding, Body: stmt.Body})
+		arms = append(arms, MatchArm{
+			Tag: variant.Name, TagSet: variant.Origin, Binding: binding, Body: stmt.Body,
+		})
 	}
 	return &MatchStmt{
 		Value:       stmt.Value,

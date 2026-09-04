@@ -83,7 +83,11 @@ struct MetaField {
     owner: Type,
     name: string::String,
     type_name: Type,
-    variant: bool
+    variant: bool,
+    // The error set that declared a member of an error set, empty for a
+    // field, an enum tag, or a union variant. The member is spelled and
+    // matched through that set, not the set the walk was handed.
+    origin: string::String
 }
 
 union MetaCaptureResolution {
@@ -159,14 +163,82 @@ fn (self: &var Checker) retain_meta_field(
     type_name: Type,
     variant: bool
 ) -> !MetaFieldHandle {
+    return self.retain_meta_member(owner, name, type_name, variant, "");
+}
+
+// Retains one error set member with the set that declared it.
+fn (self: &var Checker) retain_error_member(
+    owner: Type,
+    name: []u8,
+    origin: []u8
+) -> !MetaFieldHandle {
+    return self.retain_meta_member(owner, name, empty_type(), true, origin);
+}
+
+fn (self: &var Checker) retain_meta_member(
+    owner: Type,
+    name: []u8,
+    type_name: Type,
+    variant: bool,
+    origin: []u8
+) -> !MetaFieldHandle {
     let retained_name = try string::from_bytes(self.allocator, name);
+    errdefer retained_name.deinit(self.allocator);
+    let retained_origin = try string::from_bytes(self.allocator, origin);
     let handle = try self.meta_field_entries.add(self.allocator, MetaField {
         owner: owner,
         name: move retained_name,
         type_name: type_name,
-        variant: variant
+        variant: variant,
+        origin: move retained_origin
     });
     return MetaFieldHandle { node: handle };
+}
+
+// Identifies a retained variant the way an arm names it: `Origin::Member`
+// for an error member, the bare tag otherwise, the Go `variantKey`.
+fn (self: &Checker) meta_variant_key(allocator: Allocator, handle: MetaFieldHandle) -> !string::String {
+    let field = self.meta_field_entries.at(handle.node);
+    var key = string::new(allocator);
+    errdefer key.deinit(allocator);
+    if field.origin.len() > 0 {
+        let origin = field.origin.as_bytes();
+        try key.append_bytes(allocator, origin);
+        try key.append_bytes(allocator, "::");
+    }
+    let name = field.name.as_bytes();
+    try key.append_bytes(allocator, name);
+    return move key;
+}
+
+// Identifies the variant an arm covers, paired with meta_variant_key, the Go
+// `matchArmKey`.
+fn match_arm_key(allocator: Allocator, tree: &ast::Ast, arm: &ast::MatchArm) -> !string::String {
+    var key = string::new(allocator);
+    errdefer key.deinit(allocator);
+    let retained_tag_set = tree.texts.at(arm.tag_set.node);
+    if retained_tag_set.len() > 0 {
+        let tag_set = retained_tag_set.as_bytes();
+        try key.append_bytes(allocator, tag_set);
+        try key.append_bytes(allocator, "::");
+    }
+    let retained_tag = tree.texts.at(arm.tag.node);
+    let tag = retained_tag.as_bytes();
+    try key.append_bytes(allocator, tag);
+    return move key;
+}
+
+// Splits an error value key `Origin::Member` at its last `::`, the Go
+// `splitErrorValueKey`; a set name may itself be module-qualified.
+fn split_error_value_key(key: []u8) -> i64 {
+    var at = mem::len(key) - 2;
+    while at > 0 {
+        if key[at] == cast<u8>(58) and key[at + 1] == cast<u8>(58) {
+            return at;
+        }
+        at = at - 1;
+    }
+    return 0;
 }
 
 // Selects one retained field under a live comptime capture name.
