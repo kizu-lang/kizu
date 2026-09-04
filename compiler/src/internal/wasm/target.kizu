@@ -1,4 +1,3 @@
-import std::mem;
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 
@@ -70,82 +69,9 @@ fn (self: &var Emitter) validate_runtime_capabilities(
     if self.uses_net(module) {
         return try self.target_capability_failure("std::net");
     }
-    if uses_float_types(module) {
-        return try self.target_capability_failure("f32 / f64");
-    }
     return null;
 }
 
-/// Reports whether any function or value in the module has a floating-point
-/// type, the Go `usesFloatTypes`. Every integer here lives in an i64 local,
-/// and a float would need a local of its own kind.
-fn uses_float_types(module: &ir::Module) -> bool {
-    var function_index = 0;
-    while module.functions.get(function_index) |function| {
-        function_index = function_index + 1;
-        let function_node = module.function_nodes.at(function.node);
-        if mentions_float_type(&module.names, function_node.return_type) {
-            return true;
-        }
-        var param_index = 0;
-        while function_node.params.get(param_index) |param| {
-            param_index = param_index + 1;
-            if mentions_float_type(&module.names, param.type_name) {
-                return true;
-            }
-        }
-        var block_index = 0;
-        while function_node.blocks.get(block_index) |block| {
-            block_index = block_index + 1;
-            let block_node = module.blocks.at(block.node);
-            var instr_index = 0;
-            while block_node.instrs.get(instr_index) |instr| {
-                instr_index = instr_index + 1;
-                let node = module.instrs.at(instr.node);
-                if mentions_float_type(&module.names, node.result.type_name) {
-                    return true;
-                }
-                var arg_index = 0;
-                while node.args.get(arg_index) |arg| {
-                    arg_index = arg_index + 1;
-                    if mentions_float_type(&module.names, arg.type_name) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-/// Reports whether a type spelling names `f32` or `f64`, on its own or
-/// inside a composite such as `?f64` or `std::array::Array<f32>`; the Go
-/// `mentionsFloatType`.
-fn mentions_float_type(names: &ir::NameTable, typ: ir::Name) -> bool {
-    let retained = ir::name_text(names, typ);
-    let bytes = retained.as_bytes();
-    let length = mem::len(bytes);
-    var index = 0;
-    while index + 3 <= length {
-        if bytes[index] == cast<u8>(102) and
-            ((bytes[index + 1] == cast<u8>(51) and bytes[index + 2] == cast<u8>(50)) or
-                (bytes[index + 1] == cast<u8>(54) and bytes[index + 2] == cast<u8>(52))) {
-            let before = index == 0 or !is_type_name_byte(bytes[index - 1]);
-            let after = index + 3 == length or !is_type_name_byte(bytes[index + 3]);
-            if before and after {
-                return true;
-            }
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-/// Reports whether b can continue an identifier in a type.
-fn is_type_name_byte(b: u8) -> bool {
-    return b == cast<u8>(95) or (b >= cast<u8>(48) and b <= cast<u8>(57)) or
-        (b >= cast<u8>(97) and b <= cast<u8>(122)) or (b >= cast<u8>(65) and b <= cast<u8>(90));
-}
 
 fn (self: &var Emitter) validate_foreign_boundary(
     module: &ir::Module

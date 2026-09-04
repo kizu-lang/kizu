@@ -916,8 +916,7 @@ float literal は `1.0`、`2.5e-3`、`1e6` の形で、`.` の両側と指数に
 それ以外は `f64` です(§7.2)。整数 literal は float になりません。
 
 `print` は float を受け付けません。文字列との変換は `std::float` が持ちます
-(`docs/std/float.md`)。wasm32 target は f32 / f64 を含む program を build 時に
-target 非対応として拒否します。
+(`docs/std/float.md`)。
 
 ### 6.10 while
 

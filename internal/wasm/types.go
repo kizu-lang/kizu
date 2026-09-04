@@ -1,6 +1,12 @@
 package wasm
 
-import "strings"
+import (
+	"fmt"
+	"math"
+	"strings"
+
+	"github.com/kizu-lang/kizu/internal/typ"
+)
 
 // wasmType maps Kizu IR types to WebAssembly value types. Memory-backed
 // aggregates and references are i32 addresses; named tags share the i64 scalar
@@ -9,7 +15,51 @@ func (e *emitter) wasmType(typ string) string {
 	if isIntegerType(typ) || e.isNamedI64Type(typ) {
 		return "i64"
 	}
+	if isFloatType(typ) {
+		return typ
+	}
 	return "i32"
+}
+
+// isFloatType reports whether typ is `f32` or `f64`, each held in the wasm
+// value type of the same name.
+func isFloatType(typ string) bool {
+	return typ == "f32" || typ == "f64"
+}
+
+// wasmFloatBinaryOp maps a Kizu arithmetic operator on a float type to a
+// WebAssembly operation.
+func wasmFloatBinaryOp(op string, typ string) string {
+	switch op {
+	case "-":
+		return typ + ".sub"
+	case "*":
+		return typ + ".mul"
+	case "/":
+		return typ + ".div"
+	default:
+		return typ + ".add"
+	}
+}
+
+// wasmFloatCompareOp maps a Kizu comparison on a float type to a WebAssembly
+// operation. Every one is ordered except `ne`, which is true for NaN, as
+// IEEE 754 says.
+func wasmFloatCompareOp(op string, typ string) string {
+	switch op {
+	case "!=":
+		return typ + ".ne"
+	case "<":
+		return typ + ".lt"
+	case "<=":
+		return typ + ".le"
+	case ">":
+		return typ + ".gt"
+	case ">=":
+		return typ + ".ge"
+	default:
+		return typ + ".eq"
+	}
 }
 
 // isIntegerType reports whether a Kizu type is a scalar integer. Every integer
@@ -165,4 +215,22 @@ func stringBytes(value string) string {
 func hexByte(value byte) string {
 	const digits = "0123456789abcdef"
 	return string([]byte{digits[value>>4], digits[value&0x0f]})
+}
+
+// floatConstExpr spells a floating-point constant exactly: the bits of the
+// value reinterpreted, since a decimal in the text format would round again.
+func floatConstExpr(kind string, literal string) (string, bool) {
+	value, ok := typ.ParseFloatLiteral(literal)
+	if !ok {
+		return "", false
+	}
+	if kind == "f32" {
+		// An f32 is spelled as the f64 it widens to, demoted: the demotion is
+		// exact, and the bits of an f64 are the one primitive both compilers
+		// have.
+		value = float64(float32(value))
+		return fmt.Sprintf("(f32.demote_f64 (f64.reinterpret_i64 (i64.const %d)))",
+			int64(math.Float64bits(value))), true
+	}
+	return fmt.Sprintf("(f64.reinterpret_i64 (i64.const %d))", int64(math.Float64bits(value))), true
 }

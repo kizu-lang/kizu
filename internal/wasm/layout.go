@@ -116,8 +116,10 @@ func primitiveLayout(typ string) (wasmLayout, bool) {
 		return wasmLayout{size: 2, align: 2}, true
 	case "i32", "u32", "usize", "isize":
 		return wasmLayout{size: 4, align: 4}, true
-	case "i64", "u64":
+	case "i64", "u64", "f64":
 		return wasmLayout{size: 8, align: 8}, true
+	case "f32":
+		return wasmLayout{size: 4, align: 4}, true
 	case "[]u8":
 		return wasmLayout{size: 8, align: 4}, true
 	case "Allocator", "Io":

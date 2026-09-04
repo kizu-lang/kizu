@@ -5,7 +5,7 @@
 
 ## 浮動小数点の残り
 
-型・演算・cast・literal・文字列変換(`std::float::append` / `parse`)は入った。残りは 2 つ。
+型・演算・cast・literal・文字列変換(`std::float::append` / `parse`)、wasm backend は入った。残りは 1 つ。
 
 ## 9. `print` を std に畳む
 
@@ -16,37 +16,6 @@ docs に明記する。`print(f64)` は `std::float::append` の 1 行で乗る�
 `std::meta` が enum の variant 名を取れること(`variants` / `variant_name` はある)。
 error set の反射(`is_error<T>`)と、std の generic 内で出す診断を呼び出し元の位置に
 付ける仕組みが要る。
-
-## 11. wasm backend の f32 / f64
-
-今は build 時に target 非対応として拒否する。局所変数の型付けが i64 前提なので、
-float の local / param / result を型で持つ変更が backend 全体に及ぶ。
-## std::rand と model-based testing
-
-浮動小数点(型・演算・cast、`print` の std 化、変換と `print(f64)`)を先に済ませ、
-そのあとで 6〜8 に戻ります。
-
-`kizu test` だけで完結する MBT を std に置きます。model は Kizu で書き、runner の
-中核は「Cmd 列を再生して step で突き合わせる」だけにして、乱択生成器はその列の
-供給源の 1 つに留めます。Quint の ITF trace は `std::json` で読めるので、後から
-`run_trace` を足せば連携できますが、std に外部 tool への依存は入れません。
-
-## 6. seed の再現 (`kizu test --seed`)
-
-`std::testing::seed()` が runtime から seed を受け取り、`kizu test --seed N` で
-同じ列を再生する。flag が無いときは runtime が seed を選び、失敗時に表示する。
-利用者には書けない部分なので SPEC §14.5 に 1 行足す。Go と `compiler/` の両方。
-
-## 7. `std::testing::run_model` と sequence shrink
-
-`run_model<Cmd, M, S>(alloc, &var rng, steps, gen, init_model, init_sut, step) -> !?Array<Cmd>`。
-失敗した列を 1 個削除・半分に切る shrink で最短にし、seed と一緒に出す。値の
-shrink(型ごとの `contract Shrink`)は最初の版に入れない。
-
-## 8. dogfood
-
-`std::map` と `std::array` を参照モデルと突き合わせる test を `tests/behavior` に置き、
-runner の API がそのまま使えるかを見る。
 
 ## std::http / std::net の残り
 

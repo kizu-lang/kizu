@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -189,5 +190,42 @@ func TestFloatText(t *testing.T) {
 	}
 	if failures > 20 {
 		t.Errorf("%d more mismatches", failures-20)
+	}
+}
+
+// TestFloatTextWASM runs the same std::float comparison on the wasm32-wasi
+// target, so the float instructions of the wasm backend and its binary encoder
+// answer exactly what the native target does.
+func TestFloatTextWASM(t *testing.T) {
+	wasmtime, err := exec.LookPath("wasmtime")
+	if err != nil {
+		t.Skip("wasmtime is required for binary execution")
+	}
+	bits := floatTextBits()
+	parses := floatTextParseCases()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "float_text.kizu")
+	if err := os.WriteFile(source, []byte(floatTextProgram(bits, parses)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(dir, "float_text.wasm")
+	build, err := kizuCommand("build", "--target", "wasm32-wasi", "--emit", "wasm",
+		"-o", artifact, source).CombinedOutput()
+	if err != nil {
+		t.Fatalf("build failed: %v\n%s", err, build)
+	}
+	output, err := exec.Command(wasmtime, "run", artifact).CombinedOutput()
+	if err != nil {
+		t.Fatalf("wasmtime failed: %v\n%s", err, output)
+	}
+	lines := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
+	want := floatTextWant(bits, parses)
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines, want %d", len(lines), len(want))
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Errorf("line %d: got %q, want %q", i, lines[i], want[i])
+		}
 	}
 }
