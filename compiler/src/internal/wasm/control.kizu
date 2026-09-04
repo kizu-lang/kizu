@@ -252,11 +252,30 @@ fn (self: &var Emitter) write_binary(
     }
     let left = try self.arg_expr(module, node, 0);
     let right = try self.arg_expr(module, node, 1);
+    if module.names.is(node.operand, "<<") or module.names.is(node.operand, ">>") {
+        return self.write_shift(module, node, left, right);
+    }
     let result_retained = ir::name_text(&module.names, node.result.name);
     let result_bytes = result_retained.as_bytes();
     let symbol = try self.symbol_name_of(result_bytes);
-    try self.line4("            (local.set %s (%s %s %s))", Arg::Str(symbol),
-        Arg::Lit(binary_operation(module, node)), Arg::Str(left), Arg::Str(right));
+    let narrow = wraps_result(&module.names, node.operand) and
+        !module.names.is(node.result.type_name, "bool");
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    if narrow {
+        try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
+    }
+    try expression.append_byte(self.allocator, cast<u8>(40));
+    try expression.append_bytes(self.allocator, binary_operation(module, node));
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, left);
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, right);
+    try expression.append_byte(self.allocator, cast<u8>(41));
+    if narrow {
+        try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
+    }
+    try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Owned(move expression));
     let expr = try self.local_expr(result_bytes);
     try self.set_value(module, node.result, expr);
     return null;
@@ -274,7 +293,60 @@ fn binary_operation(module: &ir::Module, node: &ir::InstrNode) -> []u8 {
         }
         return wasm_compare_op(&module.names, node.operand);
     }
-    return wasm_binary_op(&module.names, node.operand);
+    return wasm_binary_op(&module.names, node.operand, node.result.type_name);
+}
+
+/// Writes `<<` and `>>` with the width rule of SPEC §6.9.2, the Go
+/// `writeShift`. A WebAssembly shift reads its amount modulo 64, so the
+/// amount is compared with the width first and the result chosen by a
+/// select.
+fn (self: &var Emitter) write_shift(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    left: ir::Name,
+    right: ir::Name
+) -> !?diagnostic::Diagnostic {
+    let bits = integer_bit_width(&module.names, node.result.type_name) orelse
+        return try self.fail0("wasm error: shift expects an integer");
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    let shift_left = module.names.is(node.operand, "<<");
+    if shift_left {
+        try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
+    }
+    try expression.append_bytes(self.allocator, "(select (");
+    let signed_right = module.names.is(node.operand, ">>") and
+        !is_unsigned_integer_type(&module.names, node.result.type_name);
+    if shift_left {
+        try expression.append_bytes(self.allocator, "i64.shl ");
+    } else {
+        if signed_right {
+            try expression.append_bytes(self.allocator, "i64.shr_s ");
+        } else {
+            try expression.append_bytes(self.allocator, "i64.shr_u ");
+        }
+    }
+    try self.names.append_to(&var expression, left);
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, right);
+    try expression.append_bytes(self.allocator, ") ");
+    if signed_right {
+        try expression.append_bytes(self.allocator, "(i64.shr_s ");
+        try self.names.append_to(&var expression, left);
+        try expression.append_bytes(self.allocator, " (i64.const 63))");
+    } else {
+        try expression.append_bytes(self.allocator, "(i64.const 0)");
+    }
+    try expression.append_bytes(self.allocator, " (i64.lt_u ");
+    try self.names.append_to(&var expression, right);
+    try expression.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, &var expression, bits);
+    try expression.append_bytes(self.allocator, ")))");
+    if shift_left {
+        try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
+    }
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
 }
 
 /// Writes boolean negation and integer arithmetic negation, the Go
@@ -298,17 +370,31 @@ fn (self: &var Emitter) write_unary(
         try self.names.append_to(&var expression, value);
         try expression.append_byte(self.allocator, cast<u8>(41));
     } else {
-        if !module.names.is(node.operand, "-") {
-            expression.deinit(self.allocator);
-            return try self.fail_op(module, node, "wasm error: unsupported unary `%s`");
+        if module.names.is(node.operand, "~") {
+            if !is_integer_type(&module.names, node.result.type_name) {
+                expression.deinit(self.allocator);
+                return try self.fail0("wasm error: unary ~ expects integer");
+            }
+            try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
+            try expression.append_bytes(self.allocator, "(i64.xor ");
+            try self.names.append_to(&var expression, value);
+            try expression.append_bytes(self.allocator, " (i64.const -1))");
+            try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
+        } else {
+            if !module.names.is(node.operand, "-") {
+                expression.deinit(self.allocator);
+                return try self.fail_op(module, node, "wasm error: unsupported unary `%s`");
+            }
+            if !is_integer_type(&module.names, node.result.type_name) {
+                expression.deinit(self.allocator);
+                return try self.fail0("wasm error: unary - expects integer");
+            }
+            try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
+            try expression.append_bytes(self.allocator, "(i64.sub (i64.const 0) ");
+            try self.names.append_to(&var expression, value);
+            try expression.append_byte(self.allocator, cast<u8>(41));
+            try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
         }
-        if !is_integer_type(&module.names, node.result.type_name) {
-            expression.deinit(self.allocator);
-            return try self.fail0("wasm error: unary - expects integer");
-        }
-        try expression.append_bytes(self.allocator, "(i64.sub (i64.const 0) ");
-        try self.names.append_to(&var expression, value);
-        try expression.append_byte(self.allocator, cast<u8>(41));
     }
     let expr = try self.names.intern_owned(move expression);
     return self.write_scalar_result(module, node.result, expr);

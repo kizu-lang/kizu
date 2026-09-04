@@ -44,6 +44,12 @@ var wasmPanicCommonData = []wasmPanicData{
 
 var wasmPanicSpecs = []wasmPanicSpec{
 	{
+		kind:       "shift_negative",
+		helper:     "__panic_shift_negative",
+		valueCount: 0,
+		summary:    wasmPanicData{key: "panic.shift_negative.summary", text: "negative shift amount"},
+	},
+	{
 		kind:       "bounds",
 		helper:     "__panic_bounds",
 		valueCount: 2,

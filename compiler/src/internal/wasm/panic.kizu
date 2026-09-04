@@ -33,6 +33,14 @@ fn panic_expect_kind(module: &ir::Module, typ: ir::Name) -> []u8 {
 }
 
 fn wasm_panic_spec(kind: []u8) -> ?WasmPanicSpec {
+    if mem::equal_bytes(kind, "shift_negative") {
+        return WasmPanicSpec {
+            kind: "shift_negative",
+            helper: "__panic_shift_negative",
+            value_count: 0,
+            summary_key: "panic.shift_negative.summary"
+        };
+    }
     if mem::equal_bytes(kind, "bounds") {
         return WasmPanicSpec {
             kind: "bounds",
@@ -110,6 +118,9 @@ fn panic_data_text(key: []u8) -> ?[]u8 {
     }
     if mem::equal_bytes(key, "panic.quote") {
         return panic_quote_text();
+    }
+    if mem::equal_bytes(key, "panic.shift_negative.summary") {
+        return "negative shift amount";
     }
     if mem::equal_bytes(key, "panic.bounds.summary") {
         return "index out of bounds";
@@ -225,6 +236,11 @@ fn (self: &var Emitter) record_used_panic_data(offset: i64) -> !i64 {
     next = try self.record_panic_data("panic.prefix", "runtime error: ", next);
     next = try self.record_panic_data("panic.at", " at ", next);
     next = try self.record_panic_data("panic.colon", ":", next);
+    if self.panic_kinds.contains("shift_negative") {
+        next = try self.record_panic_data(
+            "panic.shift_negative.summary", "negative shift amount", next
+        );
+    }
     if self.panic_kinds.contains("bounds") {
         next = try self.record_panic_data("panic.bounds.summary", "index out of bounds", next);
         next = try self.record_panic_data("panic.bounds.note", "note: index is ", next);
@@ -365,6 +381,11 @@ fn (self: &var Emitter) write_panic_runtime() -> !void {
     try self.write_panic_exit_helper();
     try self.write_panic_at_helper();
     try self.write_panic_summary_helper();
+    if self.panic_kinds.contains("shift_negative") {
+        if wasm_panic_spec("shift_negative") |spec| {
+            try self.write_simple_panic_helper(move spec);
+        }
+    }
     if self.panic_kinds.contains("bounds") {
         try self.write_panic_bounds_helper();
     }

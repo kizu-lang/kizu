@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import std::array;
+import std::fmt;
 import std::mem;
 import std::string;
 
@@ -417,6 +418,91 @@ fn is_comparison(operator: []u8) -> bool {
         mem::equal_bytes(operator, "<=") or
         mem::equal_bytes(operator, ">") or
         mem::equal_bytes(operator, ">=");
+}
+
+fn is_bitwise(operator: []u8) -> bool {
+    return mem::equal_bytes(operator, "&") or
+        mem::equal_bytes(operator, "|") or
+        mem::equal_bytes(operator, "^") or
+        is_shift(operator);
+}
+
+fn is_shift(operator: []u8) -> bool {
+    return mem::equal_bytes(operator, "<<") or mem::equal_bytes(operator, ">>");
+}
+
+// Lets an integer literal on one side of an operator take the integer type
+// of the other side, the way a literal argument takes its parameter's type
+// (SPEC §7.2), the Go `coerceBinaryLiteral`: `flags & 0x0F` with
+// `flags: u8` needs no cast. The literal must still fit that type.
+fn (self: &Checker) coerce_binary_literal(
+    tree: &ast::Ast,
+    expression: &ast::BinaryExpr,
+    left: &var Type,
+    right: &var Type
+) -> !?diagnostic::Diagnostic {
+    if same_type(left.*, right.*) {
+        return null;
+    }
+    if integer_literal_value(tree, expression.right) |_| {
+        if self.types.is_text(right.*, "i64") and self.checker_integer_type(left.*) {
+            var coerced = empty_type();
+            if try self.coerce_contextual_integer_literal(
+                tree, expression.right, left.*, right.*, &var coerced
+            ) |problem| {
+                return move problem;
+            }
+            right.* = coerced;
+            return null;
+        }
+    }
+    if integer_literal_value(tree, expression.left) |_| {
+        if self.types.is_text(left.*, "i64") and self.checker_integer_type(right.*) {
+            var coerced = empty_type();
+            if try self.coerce_contextual_integer_literal(
+                tree, expression.left, right.*, left.*, &var coerced
+            ) |problem| {
+                return move problem;
+            }
+            left.* = coerced;
+            return null;
+        }
+    }
+    return null;
+}
+
+// Refuses a shift by a negative literal here, where the source shows the
+// sign, instead of at run time; the Go `checkShiftLiteral`.
+fn (self: &Checker) check_shift_literal(
+    tree: &ast::Ast,
+    expression: &ast::BinaryExpr,
+    operator: []u8
+) -> !?diagnostic::Diagnostic {
+    let value = integer_literal_value(tree, expression.right) orelse return null;
+    if value >= 0 {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "type error: shift amount `");
+    try fmt::append_i64(self.allocator, &var message, value);
+    try message.append_bytes(self.allocator, "` is negative");
+    try message.append_byte(self.allocator, cast<u8>(10));
+    try message.append_bytes(self.allocator, "note: `");
+    try message.append_bytes(self.allocator, operator);
+    try message.append_bytes(self.allocator, "` shifts by the right operand, which must be 0 or more");
+    try message.append_byte(self.allocator, cast<u8>(10));
+    try message.append_bytes(self.allocator, "help: shift the other way with `");
+    try message.append_bytes(self.allocator, opposite_shift(operator));
+    try message.append_byte(self.allocator, cast<u8>(96));
+    return try self.checker_text_diagnostic_at(expression.operator_span, move message);
+}
+
+fn opposite_shift(operator: []u8) -> []u8 {
+    if mem::equal_bytes(operator, "<<") {
+        return ">>";
+    }
+    return "<<";
 }
 
 // Returns the best source span retained on an expression.

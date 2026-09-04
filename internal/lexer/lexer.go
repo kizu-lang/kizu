@@ -36,6 +36,8 @@ var singleCharTokens = map[rune]token.Type{
 	'&': token.Amp,
 	'*': token.Asterisk,
 	'%': token.Percent,
+	'^': token.Caret,
+	'~': token.Tilde,
 	'@': token.At,
 	'?': token.Question,
 	'|': token.Pipe,
@@ -323,13 +325,26 @@ func (l *Lexer) readIdentifier() string {
 	return string(l.input[position:l.position])
 }
 
-// readNumber reads an integer literal.
+// readNumber reads an integer literal: decimal, or `0x` / `0b` followed by
+// its digits, with `_` allowed between digits. The scanner only finds where
+// the literal ends; the parser decides whether the spelling is a number.
 func (l *Lexer) readNumber() string {
 	position := l.position
-	for isDigit(l.ch) {
+	if l.ch == '0' && (l.peekChar() == 'x' || l.peekChar() == 'b') {
+		l.readChar()
+		l.readChar()
+	}
+	for isHexDigit(l.ch) || l.ch == '_' {
 		l.readChar()
 	}
 	return string(l.input[position:l.position])
+}
+
+// isHexDigit reports whether ch can appear in a `0x` literal. Decimal and
+// binary literals read the same set so that `0b12` becomes one bad token
+// rather than a number followed by an identifier.
+func isHexDigit(ch rune) bool {
+	return isDigit(ch) || ('a' <= ch && ch <= 'f') || ('A' <= ch && ch <= 'F')
 }
 
 // readString reads a string literal without the surrounding quotes.

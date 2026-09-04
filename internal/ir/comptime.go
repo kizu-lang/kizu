@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // lowerComptimeIfStmt lowers only the branch selected during compilation.
@@ -127,6 +128,9 @@ func constInt(expr ast.Expression) (int64, bool) {
 		if e.Operator == "-" {
 			return -value, ok
 		}
+		if e.Operator == "~" {
+			return ^value, ok
+		}
 	case *ast.BinaryExpr:
 		left, leftOK := constInt(e.Left)
 		right, rightOK := constInt(e.Right)
@@ -156,6 +160,17 @@ func evalConstInt(op string, left int64, right int64) (int64, bool) {
 			return 0, false
 		}
 		return left % right, true
+	case "&":
+		return left & right, true
+	case "|":
+		return left | right, true
+	case "^":
+		return left ^ right, true
+	case "<<", ">>":
+		if right < 0 {
+			return 0, false
+		}
+		return typ.ShiftInt64(op, left, right), true
 	default:
 		return 0, false
 	}

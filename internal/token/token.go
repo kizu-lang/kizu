@@ -22,6 +22,8 @@ const (
 	Asterisk Type = "*"
 	Slash    Type = "/"
 	Percent  Type = "%"
+	Caret    Type = "^"
+	Tilde    Type = "~"
 	At       Type = "@"
 
 	Eq          Type = "=="

@@ -595,6 +595,11 @@ void kizu_panic_arena_full(int64_t line, int64_t column) {
     abort();
 }
 
+void kizu_panic_shift_negative(int64_t line, int64_t column) {
+    kizu_panic_summary("negative shift amount", line, column);
+    abort();
+}
+
 /*
  * kizu_arena_origin hands back the number one arena's handles count from: an
  * instance of its own in the half of a word an index does not need, plus the

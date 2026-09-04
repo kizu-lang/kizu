@@ -1833,11 +1833,17 @@ fn (self: &var Parser) parse_expression(
     var left = try self.parse_prefix_expression(tree);
     while self.peek_kind() != token::Kind::Semicolon {
         var type_apply = false;
-        if self.peek_kind() == token::Kind::Lt {
+        let shift = try self.shift_pair();
+        if self.peek_kind() == token::Kind::Lt and !shift {
             type_apply = try self.should_parse_type_apply(tree, left);
         }
-        if binding_power >= self.peek_precedence() and !type_apply {
+        let power = try self.peek_precedence();
+        if binding_power >= power and !type_apply {
             break;
+        }
+        if shift {
+            left = try self.parse_shift_expr(tree, left);
+            continue;
         }
         let next_kind = self.peek_kind();
         if is_binary_operator(next_kind) {
@@ -1906,7 +1912,10 @@ fn is_binary_operator(kind: token::Kind) -> bool {
         kind == token::Kind::NotEq or
         kind == token::Kind::Lte or
         kind == token::Kind::Gt or
-        kind == token::Kind::Gte;
+        kind == token::Kind::Gte or
+        kind == token::Kind::Pipe or
+        kind == token::Kind::Caret or
+        kind == token::Kind::Amp;
 }
 
 fn (self: &var Parser) parse_index_expr(
@@ -1992,12 +2001,13 @@ fn (self: &var Parser) parse_prefix_expression(
         kind == token::Kind::Unsafe {
         return self.parse_marker_expression(tree);
     }
-    if kind == token::Kind::Bang or kind == token::Kind::Minus {
+    if kind == token::Kind::Bang or kind == token::Kind::Minus or
+        kind == token::Kind::Tilde {
         return self.parse_unary_prefix_expression(tree);
     }
     return match kind {
         Ident => try self.parse_ident_prefix_expression(tree),
-        Int => try self.retain_literal_expression(tree, false),
+        Int => try self.parse_int_literal_expression(tree),
         String => try self.retain_literal_expression(tree, true),
         If => {
             let value = try self.parse_if_stmt(tree) orelse
@@ -2039,6 +2049,106 @@ fn (self: &Parser) retain_literal_expression(
     ));
 }
 
+// Turns the spelling of an integer literal into its decimal value, so that
+// `0xFF`, `0b1111_1111`, and `255` reach the checker as one number. A
+// spelling that is not a number, or does not fit 64 bits, is a parse error.
+fn (self: &var Parser) parse_int_literal_expression(
+    tree: &var ast::Ast
+) -> !ast::Expression {
+    var value = 0;
+    if self.current_integer_value() |parsed| {
+        value = parsed;
+    } else {
+        try self.error_invalid_integer();
+    }
+    var text = string::new(self.allocator);
+    errdefer text.deinit(self.allocator);
+    try fmt::append_i64(self.allocator, &var text, value);
+    let retained = try tree.add_text(move text);
+    return try tree.add_expression(ast::ExpressionNode::Int(
+        ast::IntExpr { value: retained }
+    ));
+}
+
+fn (self: &Parser) current_integer_value() -> ?i64 {
+    return token_integer_value(self.current_token());
+}
+
+fn token_integer_value(current: &token::Token) -> ?i64 {
+    let bytes = current.literal.as_bytes();
+    return integer_literal_value(bytes);
+}
+
+fn (self: &var Parser) error_invalid_integer() -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit(self.allocator);
+    try entry.message.append_bytes(self.allocator, "invalid integer literal `");
+    let current = self.current_token();
+    try entry.message.append_string(self.allocator, &current.literal);
+    try entry.message.append_byte(self.allocator, cast<u8>(96));
+    return self.record(move entry);
+}
+
+// Reads a literal: decimal digits, or `0x` / `0b` and digits of that base,
+// with `_` allowed between two digits. There is no octal form, so `017` is
+// seventeen. The value must fit a signed 64-bit integer; a `-` in front is
+// the unary operator, not part of the literal.
+fn integer_literal_value(text: []u8) -> ?i64 {
+    var base = 10;
+    var index = 0;
+    if mem::starts_with(text, "0x") {
+        base = 16;
+        index = 2;
+    } else {
+        if mem::starts_with(text, "0b") {
+            base = 2;
+            index = 2;
+        }
+    }
+    let length = mem::len(text);
+    if index >= length {
+        return null;
+    }
+    var value = 0;
+    var previous_digit = false;
+    while index < length {
+        let ch = text[index];
+        if ch == cast<u8>(95) {
+            if !previous_digit or index + 1 == length {
+                return null;
+            }
+            previous_digit = false;
+            index = index + 1;
+            continue;
+        }
+        let digit = digit_value(ch) orelse return null;
+        if digit >= base {
+            return null;
+        }
+        if value > (9223372036854775807 - digit) / base {
+            return null;
+        }
+        value = value * base + digit;
+        previous_digit = true;
+        index = index + 1;
+    }
+    return value;
+}
+
+// Reads one digit in any base up to 16.
+fn digit_value(ch: u8) -> ?i64 {
+    if ch >= cast<u8>(48) and ch <= cast<u8>(57) {
+        return cast<i64>(ch) - 48;
+    }
+    if ch >= cast<u8>(97) and ch <= cast<u8>(102) {
+        return cast<i64>(ch) - 87;
+    }
+    if ch >= cast<u8>(65) and ch <= cast<u8>(70) {
+        return cast<i64>(ch) - 55;
+    }
+    return null;
+}
+
 fn (self: &var Parser) parse_borrow_prefix_expression(
     tree: &var ast::Ast
 ) -> !ast::Expression {
@@ -2069,7 +2179,7 @@ fn (self: &var Parser) parse_unary_prefix_expression(
 }
 
 fn prefix_precedence() -> i64 {
-    return 9;
+    return 13;
 }
 
 fn (self: &var Parser) parse_marker_expression(
@@ -2248,6 +2358,33 @@ fn (self: &var Parser) parse_binary_expr(
     let binding_power = self.current_precedence();
     try self.next_token();
     let right = try self.parse_expression(tree, binding_power);
+    return try tree.add_expression(ast::ExpressionNode::Binary(
+        ast::BinaryExpr {
+        left: left,
+        operator: operator,
+        operator_span: operator_span,
+        right: right
+    }
+    ));
+}
+
+// Parses `<<` or `>>` from the two adjacent tokens at the lookahead.
+fn (self: &var Parser) parse_shift_expr(
+    tree: &var ast::Ast,
+    left: ast::Expression
+) -> !ast::Expression {
+    try self.next_token();
+    let first = self.current_token();
+    var operator_span = token_span(first);
+    operator_span.end.column = operator_span.end.column + 1;
+    var spelling = "<<";
+    if first.kind == token::Kind::Gt {
+        spelling = ">>";
+    }
+    let operator = try tree.add_text_from_bytes(spelling);
+    try self.next_token();
+    try self.next_token();
+    let right = try self.parse_expression(tree, shift_precedence());
     return try tree.add_expression(ast::ExpressionNode::Binary(
         ast::BinaryExpr {
         left: left,
@@ -3281,25 +3418,108 @@ fn precedence(kind: token::Kind) -> i64 {
         Lte => 6,
         Gt => 6,
         Gte => 6,
-        Plus => 7,
-        Minus => 7,
-        Asterisk => 8,
-        Slash => 8,
-        Percent => 8,
-        LParen => 10,
-        LBracket => 10,
-        Dot => 11,
-        DoubleColon => 11,
+        Pipe => 7,
+        Caret => 8,
+        Amp => 9,
+        Plus => 11,
+        Minus => 11,
+        Asterisk => 12,
+        Slash => 12,
+        Percent => 12,
+        LParen => 14,
+        LBracket => 14,
+        Dot => 15,
+        DoubleColon => 15,
         _ => lowest_precedence(),
     };
+}
+
+// The binding power of `<<` and `>>`, which are two tokens and so have no
+// row in `precedence`.
+fn shift_precedence() -> i64 {
+    return 10;
 }
 
 fn (self: &Parser) current_precedence() -> i64 {
     return precedence(self.current_kind());
 }
 
-fn (self: &Parser) peek_precedence() -> i64 {
+// Returns the binding power of the lookahead. A `<` `<` or `>` `>` pair is a
+// shift, and a `|` that opens a payload capture binds nothing.
+fn (self: &var Parser) peek_precedence() -> !i64 {
+    if try self.shift_pair() {
+        return shift_precedence();
+    }
+    if try self.capture_ahead() {
+        return lowest_precedence();
+    }
     return precedence(self.peek_kind());
+}
+
+// Scans until the token at `offset` past the current one is in the stream.
+fn (self: &var Parser) ensure_lookahead(offset: i64) -> !void {
+    let allocator = self.allocator;
+    while self.position + offset >= self.stream.len() {
+        try append_next_token(allocator,
+            &var self.scanner,
+            &var self.tokens,
+            &var self.stream
+        );
+    }
+    return;
+}
+
+fn (self: &Parser) token_at(offset: i64) -> &token::Token {
+    let handle = self.stream.get_or_panic(self.position + offset);
+    return self.tokens.at(handle);
+}
+
+fn (self: &var Parser) kind_at(offset: i64) -> !token::Kind {
+    try self.ensure_lookahead(offset);
+    return self.token_at(offset).kind;
+}
+
+// Reports whether the lookahead and the token after it spell `<<` or `>>`:
+// the same character twice with nothing between them. The scanner keeps
+// them apart so that `Array<Array<T>>` still closes two argument lists.
+fn (self: &var Parser) shift_pair() -> !bool {
+    let kind = self.peek_kind();
+    if kind != token::Kind::Lt and kind != token::Kind::Gt {
+        return false;
+    }
+    try self.ensure_lookahead(2);
+    let first = self.peek_token();
+    let second = self.token_at(2);
+    return second.kind == kind and second.line == first.line and
+        second.column == first.column + 1;
+}
+
+// Reports whether the lookahead starts a payload capture: `|name| {`, or
+// `|name, name| {` for a variant capture. Any other `|` after an expression
+// is the bitwise or, since no operand can begin with `{`.
+fn (self: &var Parser) capture_ahead() -> !bool {
+    if self.peek_kind() != token::Kind::Pipe {
+        return false;
+    }
+    let first = try self.kind_at(2);
+    if first != token::Kind::Ident {
+        return false;
+    }
+    var offset = 3;
+    while true {
+        let separator = try self.kind_at(offset);
+        if separator != token::Kind::Comma {
+            break;
+        }
+        let name = try self.kind_at(offset + 1);
+        if name != token::Kind::Ident {
+            break;
+        }
+        offset = offset + 2;
+    }
+    let close = try self.kind_at(offset);
+    let open = try self.kind_at(offset + 1);
+    return close == token::Kind::Pipe and open == token::Kind::LBrace;
 }
 
 // Reports whether lookahead closes an optional expression value.

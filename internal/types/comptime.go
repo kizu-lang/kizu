@@ -152,6 +152,11 @@ func (c *Checker) evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error
 			return comptimeValue{}, errorf("comptime error: unary - expects integer")
 		}
 		return comptimeValue{typ: typeI64, i: -right.i}, nil
+	case "~":
+		if right.typ != typeI64 {
+			return comptimeValue{}, errorf("comptime error: unary ~ expects integer")
+		}
+		return comptimeValue{typ: typeI64, i: ^right.i}, nil
 	case "!":
 		if right.typ != typeBool {
 			return comptimeValue{}, errorf("comptime error: unary ! expects bool")
@@ -241,6 +246,17 @@ func evalComptimeIntBinary(op string, left int64, right int64) (comptimeValue, e
 		return evalComptimeDivision(left, right)
 	case "%":
 		return evalComptimeModulo(left, right)
+	case "&":
+		return comptimeValue{typ: typeI64, i: left & right}, nil
+	case "|":
+		return comptimeValue{typ: typeI64, i: left | right}, nil
+	case "^":
+		return comptimeValue{typ: typeI64, i: left ^ right}, nil
+	case "<<", ">>":
+		if right < 0 {
+			return comptimeValue{}, errorf("comptime error: shift amount `%d` is negative", right)
+		}
+		return comptimeValue{typ: typeI64, i: typ.ShiftInt64(op, left, right)}, nil
 	case "<", "<=", ">", ">=":
 		return comptimeValue{typ: typeBool, b: compareInts(op, left, right)}, nil
 	default:

@@ -133,8 +133,16 @@ fn (self: &var Lexer) scan_token() -> !token::Token {
         return self.token_from_bytes(token::lookup_ident(literal), literal, line, column);
     }
     if is_digit(self.ch) {
+        // A literal is decimal, or `0x` / `0b` and its digits, with `_`
+        // allowed between digits. The scanner only finds where it ends; the
+        // parser decides whether the spelling is a number.
         let start = self.position;
-        while is_digit(self.ch) {
+        if self.ch == cast<u8>(48) and
+            (self.peek_char() == cast<u8>(120) or self.peek_char() == cast<u8>(98)) {
+            self.read_char();
+            self.read_char();
+        }
+        while is_hex_digit(self.ch) or self.ch == cast<u8>(95) {
             self.read_char();
         }
         return self.token_from_bytes(token::Kind::Int,
@@ -420,6 +428,12 @@ fn single_char_kind(ch: u8) -> ?token::Kind {
     if ch == cast<u8>(37) {
         return token::Kind::Percent;
     }
+    if ch == cast<u8>(94) {
+        return token::Kind::Caret;
+    }
+    if ch == cast<u8>(126) {
+        return token::Kind::Tilde;
+    }
     if ch == cast<u8>(64) {
         return token::Kind::At;
     }
@@ -517,6 +531,15 @@ fn is_letter(ch: u8) -> bool {
 
 fn is_digit(ch: u8) -> bool {
     return ch >= cast<u8>(48) and ch <= cast<u8>(57);
+}
+
+// Reports whether ch can appear in a `0x` literal. Decimal and binary
+// literals read the same set so that `0b12` becomes one bad token rather
+// than a number followed by an identifier.
+fn is_hex_digit(ch: u8) -> bool {
+    return is_digit(ch) or
+        (ch >= cast<u8>(97) and ch <= cast<u8>(102)) or
+        (ch >= cast<u8>(65) and ch <= cast<u8>(70));
 }
 
 fn clear_spans(spans: &var array::Array<Span>) -> void {

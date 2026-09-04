@@ -262,16 +262,17 @@ type panicEntry struct {
 // instruction uses to select one. `cond_fail` takes its key from the IR; the
 // other keys are chosen by the instruction that reports the failure.
 var panicEntries = map[string]panicEntry{
-	"bounds":       {entry: "kizu_panic_bounds", params: []string{"i64", "i64"}},
-	"range":        {entry: "kizu_panic_range", params: []string{"i64", "i64", "i64"}},
-	"array_empty":  {entry: "kizu_panic_array_empty"},
-	"arena_empty":  {entry: "kizu_panic_arena_empty"},
-	"arena_handle": {entry: "kizu_panic_arena_handle"},
-	"arena_full":   {entry: "kizu_panic_arena_full"},
-	"test_fail":    {entry: "kizu_panic_test_fail", params: []string{"ptr", "i64"}},
-	"panic_fail":   {entry: "kizu_panic_fail", params: []string{"ptr", "i64"}},
-	"expect_int":   {entry: "kizu_panic_expect_equal_int", params: []string{"i64", "i64"}},
-	"expect_bool":  {entry: "kizu_panic_expect_equal_bool", params: []string{"i1", "i1"}},
+	"bounds":         {entry: "kizu_panic_bounds", params: []string{"i64", "i64"}},
+	"range":          {entry: "kizu_panic_range", params: []string{"i64", "i64", "i64"}},
+	"array_empty":    {entry: "kizu_panic_array_empty"},
+	"arena_empty":    {entry: "kizu_panic_arena_empty"},
+	"arena_handle":   {entry: "kizu_panic_arena_handle"},
+	"shift_negative": {entry: "kizu_panic_shift_negative"},
+	"arena_full":     {entry: "kizu_panic_arena_full"},
+	"test_fail":      {entry: "kizu_panic_test_fail", params: []string{"ptr", "i64"}},
+	"panic_fail":     {entry: "kizu_panic_fail", params: []string{"ptr", "i64"}},
+	"expect_int":     {entry: "kizu_panic_expect_equal_int", params: []string{"i64", "i64"}},
+	"expect_bool":    {entry: "kizu_panic_expect_equal_bool", params: []string{"i1", "i1"}},
 	"expect_bytes": {
 		entry:  "kizu_panic_expect_equal_bytes",
 		params: []string{"ptr", "i64", "ptr", "i64"},
@@ -1467,10 +1468,50 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: name}
 		return nil
 	}
+	if op == "<<" || op == ">>" {
+		return e.writeShift(instr, op, left, right)
+	}
 	name := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = %s %s %s, %s\n",
-		name, llvmBinaryOp(op), e.llvmType(instr.Result.Type), left.operand, right.operand)
+		name, llvmBinaryOp(op, instr.Result.Type), e.llvmType(instr.Result.Type),
+		left.operand, right.operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeShift writes `<<` and `>>` with the width rule of SPEC §6.9.2: an
+// amount at or past the width leaves 0, or the sign for a signed `>>`. LLVM
+// makes such a shift poison, so the amount is clamped before the shift and
+// the result chosen after it; both are selects, not branches. A negative
+// amount never reaches here: the IR traps on it first.
+func (e *emitter) writeShift(instr *ir.Instr, op string, left valueInfo, right valueInfo) error {
+	typ := instr.Result.Type
+	bits, ok := integerBitWidth(typ)
+	if !ok {
+		return fmt.Errorf("llvm error: shift expects an integer, got %s", typ)
+	}
+	llvm := e.llvmType(typ)
+	name := localName(instr.Result.Name)
+	inRange := name + ".shift.in"
+	amount := name + ".shift.amount"
+	raw := name + ".shift.raw"
+	fmt.Fprintf(&e.out, "  %s = icmp ult %s %s, %d\n", inRange, llvm, right.operand, bits)
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, %s %s, %s 0\n",
+		amount, inRange, llvm, right.operand, llvm)
+	shiftOp := "shl"
+	past := "0"
+	if op == ">>" {
+		shiftOp = "lshr"
+		if !isUnsignedIntegerType(typ) {
+			shiftOp = "ashr"
+			past = name + ".shift.sign"
+			fmt.Fprintf(&e.out, "  %s = ashr %s %s, %d\n", past, llvm, left.operand, bits-1)
+		}
+	}
+	fmt.Fprintf(&e.out, "  %s = %s %s %s, %s\n", raw, shiftOp, llvm, left.operand, amount)
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, %s %s, %s %s\n",
+		name, inRange, llvm, raw, llvm, past)
+	e.values[instr.Result.Name] = valueInfo{typ: typ, operand: name}
 	return nil
 }
 
@@ -1490,6 +1531,9 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 		fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", name, value.operand)
 	case "-":
 		fmt.Fprintf(&e.out, "  %s = sub %s 0, %s\n",
+			name, e.llvmType(instr.Result.Type), value.operand)
+	case "~":
+		fmt.Fprintf(&e.out, "  %s = xor %s %s, -1\n",
 			name, e.llvmType(instr.Result.Type), value.operand)
 	default:
 		return fmt.Errorf("llvm error: unsupported unary `%s`", op)

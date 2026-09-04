@@ -163,7 +163,10 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	}
 	left := e.value(instr.Args[0]).expr
 	right := e.value(instr.Args[1]).expr
-	wasmOp := wasmBinaryOp(op)
+	if op == "<<" || op == ">>" {
+		return e.writeShift(instr, op, left, right)
+	}
+	wasmOp := wasmBinaryOp(op, instr.Result.Type)
 	if instr.Result.Type == "bool" {
 		wasmOp = wasmCompareOp(op)
 		if instr.Args[0].Type == "bool" {
@@ -175,8 +178,11 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 			}
 		}
 	}
-	fmt.Fprintf(&e.out, "            (local.set %s (%s %s %s))\n",
-		symbolName(instr.Result.Name), wasmOp, left, right)
+	expr := "(" + wasmOp + " " + left + " " + right + ")"
+	if wrapsResult(op) {
+		expr = narrowResult(instr.Result.Type, expr)
+	}
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbolName(instr.Result.Name), expr)
 	e.values[instr.Result.Name] = valueInfo{
 		expr: "(local.get " + symbolName(instr.Result.Name) + ")",
 	}
@@ -200,11 +206,44 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 		if !isIntegerType(instr.Result.Type) {
 			return fmt.Errorf("wasm error: unary - expects integer")
 		}
-		expr = "(i64.sub (i64.const 0) " + value + ")"
+		expr = narrowResult(instr.Result.Type, "(i64.sub (i64.const 0) "+value+")")
+	case "~":
+		if !isIntegerType(instr.Result.Type) {
+			return fmt.Errorf("wasm error: unary ~ expects integer")
+		}
+		expr = narrowResult(instr.Result.Type, "(i64.xor "+value+" (i64.const -1))")
 	default:
 		return fmt.Errorf("wasm error: unsupported unary `%s`", instr.Op)
 	}
 	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+	return nil
+}
+
+// writeShift writes `<<` and `>>` with the width rule of SPEC §6.9.2. A
+// WebAssembly shift reads its amount modulo 64, so the amount is compared
+// with the width first and the result chosen by a select.
+func (e *emitter) writeShift(instr *ir.Instr, op string, left string, right string) error {
+	bits, ok := integerBitWidth(instr.Result.Type)
+	if !ok {
+		return fmt.Errorf("wasm error: shift expects an integer, got %s", instr.Result.Type)
+	}
+	inRange := fmt.Sprintf("(i64.lt_u %s (i64.const %d))", right, bits)
+	shiftOp := "i64.shl"
+	past := "(i64.const 0)"
+	if op == ">>" {
+		shiftOp = "i64.shr_u"
+		if !isUnsignedIntegerType(instr.Result.Type) {
+			shiftOp = "i64.shr_s"
+			past = "(i64.shr_s " + left + " (i64.const 63))"
+		}
+	}
+	symbol := symbolName(instr.Result.Name)
+	expr := fmt.Sprintf("(select (%s %s %s) %s %s)", shiftOp, left, right, past, inRange)
+	if op == "<<" {
+		expr = narrowResult(instr.Result.Type, expr)
+	}
 	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
 	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
 	return nil
