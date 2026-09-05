@@ -1,0 +1,203 @@
+// Moments and spans of time as milliseconds, kept apart by type.
+//
+//   Duration  a span, signed
+//   Instant   a moment on the monotonic clock `std::process::monotonic_millis` reads
+//   UnixTime  a moment on the wall clock `std::process::unix_millis` reads
+//
+// The two clocks do not agree with each other, so the two moment types share
+// no method: `Instant.since` takes an `Instant` and `UnixTime.since` takes a
+// `UnixTime`. Mixing them is a type error rather than a wrong number.
+//
+// Nothing here reads a clock. A program spells where its moments come from,
+// `time::instant(process::monotonic_millis())`, so a function that takes an
+// `Instant` stays pure and a test can hand it any moment it likes.
+//
+// There is no calendar here either: `days(1)` is 24 hours and a `UnixTime`
+// is a count, not a date. `std::date` is where a moment becomes a year, a
+// month and a day.
+//
+// All three are copy aggregates (SPEC §8). Their arithmetic is `i64`
+// arithmetic and wraps the way `i64` does (SPEC §6.9.2).
+
+pub struct Duration {
+    millis: i64
+}
+
+pub struct Instant {
+    millis: i64
+}
+
+pub struct UnixTime {
+    millis: i64
+}
+
+fn millis_per_second() -> i64 {
+    return 1000;
+}
+
+fn millis_per_minute() -> i64 {
+    return 60000;
+}
+
+fn millis_per_hour() -> i64 {
+    return 3600000;
+}
+
+fn millis_per_day() -> i64 {
+    return 86400000;
+}
+
+// millis is a span of `count` milliseconds. A negative count is a span
+// pointing backwards, which is what `since` answers when its argument is
+// the later moment.
+pub fn millis(count: i64) -> std::time::Duration {
+    return Duration { millis: count };
+}
+
+pub fn seconds(count: i64) -> std::time::Duration {
+    return Duration { millis: count * millis_per_second() };
+}
+
+pub fn minutes(count: i64) -> std::time::Duration {
+    return Duration { millis: count * millis_per_minute() };
+}
+
+pub fn hours(count: i64) -> std::time::Duration {
+    return Duration { millis: count * millis_per_hour() };
+}
+
+// days is `count` times 24 hours. A calendar day is `std::date`'s.
+pub fn days(count: i64) -> std::time::Duration {
+    return Duration { millis: count * millis_per_day() };
+}
+
+fn (self: std::time::Duration) as_millis() -> i64 {
+    return self.millis;
+}
+
+// The unit conversions divide and so truncate toward zero: 1999 ms is
+// 1 second, and -1999 ms is -1 second.
+fn (self: std::time::Duration) as_seconds() -> i64 {
+    return self.millis / millis_per_second();
+}
+
+fn (self: std::time::Duration) as_minutes() -> i64 {
+    return self.millis / millis_per_minute();
+}
+
+fn (self: std::time::Duration) as_hours() -> i64 {
+    return self.millis / millis_per_hour();
+}
+
+fn (self: std::time::Duration) as_days() -> i64 {
+    return self.millis / millis_per_day();
+}
+
+fn (self: std::time::Duration) add(other: std::time::Duration) -> std::time::Duration {
+    return Duration { millis: self.millis + other.millis };
+}
+
+fn (self: std::time::Duration) sub(other: std::time::Duration) -> std::time::Duration {
+    return Duration { millis: self.millis - other.millis };
+}
+
+fn (self: std::time::Duration) times(count: i64) -> std::time::Duration {
+    return Duration { millis: self.millis * count };
+}
+
+fn (self: std::time::Duration) less_than(other: std::time::Duration) -> bool {
+    return self.millis < other.millis;
+}
+
+fn (self: std::time::Duration) equals(other: std::time::Duration) -> bool {
+    return self.millis == other.millis;
+}
+
+fn (self: std::time::Duration) greater_than(other: std::time::Duration) -> bool {
+    return self.millis > other.millis;
+}
+
+// instant names a moment on the monotonic clock from one of its readings.
+// The reading is `std::process::monotonic_millis()` in a program; in a
+// test it is whatever moment the test wants to stand at.
+pub fn instant(millis: i64) -> std::time::Instant {
+    return Instant { millis: millis };
+}
+
+// as_millis reads the moment back as the count it was made from, which is
+// what a deadline setter that takes monotonic milliseconds wants.
+fn (self: std::time::Instant) as_millis() -> i64 {
+    return self.millis;
+}
+
+fn (self: std::time::Instant) add(span: std::time::Duration) -> std::time::Instant {
+    return Instant { millis: self.millis + span.millis };
+}
+
+fn (self: std::time::Instant) sub(span: std::time::Duration) -> std::time::Instant {
+    return Instant { millis: self.millis - span.millis };
+}
+
+// since is the span from `earlier` to `self`, negative when `earlier` is in
+// fact the later moment.
+fn (self: std::time::Instant) since(earlier: std::time::Instant) -> std::time::Duration {
+    return Duration { millis: self.millis - earlier.millis };
+}
+
+fn (self: std::time::Instant) before(other: std::time::Instant) -> bool {
+    return self.millis < other.millis;
+}
+
+fn (self: std::time::Instant) after(other: std::time::Instant) -> bool {
+    return self.millis > other.millis;
+}
+
+fn (self: std::time::Instant) equals(other: std::time::Instant) -> bool {
+    return self.millis == other.millis;
+}
+
+// unix names a moment on the wall clock as milliseconds since the Unix
+// epoch, the reading `std::process::unix_millis()` gives. Moments before
+// the epoch are negative.
+pub fn unix(millis: i64) -> std::time::UnixTime {
+    return UnixTime { millis: millis };
+}
+
+// unix_seconds names a moment from a count of seconds since the epoch, the
+// unit a JSON payload or a token expiry usually carries.
+pub fn unix_seconds(count: i64) -> std::time::UnixTime {
+    return UnixTime { millis: count * millis_per_second() };
+}
+
+fn (self: std::time::UnixTime) as_millis() -> i64 {
+    return self.millis;
+}
+
+// as_seconds truncates toward zero, like `Duration.as_seconds`.
+fn (self: std::time::UnixTime) as_seconds() -> i64 {
+    return self.millis / millis_per_second();
+}
+
+fn (self: std::time::UnixTime) add(span: std::time::Duration) -> std::time::UnixTime {
+    return UnixTime { millis: self.millis + span.millis };
+}
+
+fn (self: std::time::UnixTime) sub(span: std::time::Duration) -> std::time::UnixTime {
+    return UnixTime { millis: self.millis - span.millis };
+}
+
+fn (self: std::time::UnixTime) since(earlier: std::time::UnixTime) -> std::time::Duration {
+    return Duration { millis: self.millis - earlier.millis };
+}
+
+fn (self: std::time::UnixTime) before(other: std::time::UnixTime) -> bool {
+    return self.millis < other.millis;
+}
+
+fn (self: std::time::UnixTime) after(other: std::time::UnixTime) -> bool {
+    return self.millis > other.millis;
+}
+
+fn (self: std::time::UnixTime) equals(other: std::time::UnixTime) -> bool {
+    return self.millis == other.millis;
+}

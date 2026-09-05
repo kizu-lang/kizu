@@ -49,6 +49,8 @@ pub fn spawn_wait8(
 `monotonic_millis` は 1 つのプロセス内で event を順序づけるための単調な
 ミリ秒です。`unix_millis` は Unix epoch からのミリ秒で、他のプロセスや他の
 マシンと合意できる瞬間を名指します —— artifact の横に書く timestamp はこちらです。
+どちらの読みも数のままで、[`std::time`](time.md) の `instant` / `unix` が時計ごとの
+型を付けます。
 
 ## 子プロセス
 

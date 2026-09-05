@@ -60,6 +60,7 @@ not in any one execution path.
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::time | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 | 10/27 | 3/27 |
@@ -68,8 +69,8 @@ not in any one execution path.
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 180 runnable examples,
-measured on 2026-09-04 with `just backend-matrix` -- re-run it after touching a
+tags, so an example appears in more than one row. 181 runnable examples,
+measured on 2026-09-05 with `just backend-matrix` -- re-run it after touching a
 backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
 program's output: `run` executes the native build; `wasm` and `wasm-opt` load
 the default and optimized WAT with `wasmtime`; `wasm-bin` loads the binary
@@ -79,13 +80,13 @@ builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 180/180 |
-| `kizu run` | 180/180 |
-| `kizu build --emit-llvm` | 180/180 |
-| `kizu build --target wasm32-wasi` (WAT) | 160/180 |
-| `kizu build --target wasm32-wasi --opt` (WAT) | 160/180 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 160/180 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 153/180 |
+| `kizu check` | 181/181 |
+| `kizu run` | 181/181 |
+| `kizu build --emit-llvm` | 181/181 |
+| `kizu build --target wasm32-wasi` (WAT) | 161/181 |
+| `kizu build --target wasm32-wasi --opt` (WAT) | 161/181 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 161/181 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 154/181 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 its remaining 20 examples are explicit target-unsupported capabilities: 16
@@ -130,7 +131,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 160/180 runnable examples, browser binary runs 153/180, and all remaining cases are classified as target-unsupported capabilities |
+| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 161/181 runnable examples, browser binary runs 154/181, and all remaining cases are classified as target-unsupported capabilities |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
 | `kizu lint` | **not started** |

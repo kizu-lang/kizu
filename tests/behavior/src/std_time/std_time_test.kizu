@@ -1,0 +1,85 @@
+import std::process;
+import std::testing;
+import std::time;
+
+fn seconds_of(span: time::Duration) -> i64 {
+    return span.as_seconds();
+}
+
+test "durations convert between units, truncating toward zero" {
+    let second = time::seconds(1);
+    testing::expect_equal<i64>(1000, second.as_millis());
+    let minute = time::minutes(1);
+    testing::expect_equal<i64>(60000, minute.as_millis());
+    let hour = time::hours(1);
+    testing::expect_equal<i64>(3600000, hour.as_millis());
+    let day = time::days(1);
+    testing::expect_equal<i64>(86400000, day.as_millis());
+    testing::expect_equal<i64>(1, seconds_of(time::millis(1999)));
+    testing::expect_equal<i64>(-1, seconds_of(time::millis(-1999)));
+    testing::expect_equal<i64>(0, seconds_of(time::millis(-999)));
+    let long = time::minutes(150);
+    testing::expect_equal<i64>(2, long.as_hours());
+    let almost = time::hours(47);
+    testing::expect_equal<i64>(1, almost.as_days());
+}
+
+test "duration arithmetic and ordering" {
+    let a = time::seconds(90);
+    let b = time::minutes(1);
+    testing::expect_equal<i64>(150, seconds_of(a.add(b)));
+    testing::expect_equal<i64>(30, seconds_of(a.sub(b)));
+    testing::expect_equal<i64>(-30, seconds_of(b.sub(a)));
+    testing::expect_equal<i64>(270, seconds_of(a.times(3)));
+    testing::expect(b.less_than(a));
+    testing::expect(!a.less_than(b));
+    testing::expect(!a.less_than(a));
+    testing::expect(a.equals(time::millis(90000)));
+    testing::expect(!a.equals(b));
+    testing::expect(a.greater_than(b));
+    testing::expect(!b.greater_than(a));
+    testing::expect(!a.greater_than(a));
+}
+
+test "instants order on the monotonic clock" {
+    let start = time::instant(5000);
+    let end = start.add(time::millis(750));
+    testing::expect_equal<i64>(5750, end.as_millis());
+    let forward = end.since(start);
+    testing::expect_equal<i64>(750, forward.as_millis());
+    let backward = start.since(end);
+    testing::expect_equal<i64>(-750, backward.as_millis());
+    testing::expect(start.before(end));
+    testing::expect(end.after(start));
+    testing::expect(!start.after(start));
+    testing::expect(start.equals(end.sub(time::millis(750))));
+}
+
+test "unix moments carry the same arithmetic" {
+    let epoch = time::unix(0);
+    let day = epoch.add(time::days(1));
+    testing::expect_equal<i64>(86400000, day.as_millis());
+    let span = day.since(epoch);
+    testing::expect_equal<i64>(24, span.as_hours());
+    testing::expect(epoch.before(day));
+    testing::expect(!epoch.equals(day));
+    let before = time::unix(-1);
+    testing::expect(before.before(epoch));
+    let expiry = time::unix_seconds(1700000000);
+    testing::expect_equal<i64>(1700000000000, expiry.as_millis());
+    testing::expect_equal<i64>(1700000000, expiry.as_seconds());
+    let partial = time::unix(1999);
+    testing::expect_equal<i64>(1, partial.as_seconds());
+    let negative = time::unix(-1999);
+    testing::expect_equal<i64>(-1, negative.as_seconds());
+}
+
+test "a reading of the process clock becomes a moment" {
+    let first = time::instant(process::monotonic_millis());
+    let second = time::instant(process::monotonic_millis());
+    testing::expect(!second.before(first));
+    let waited = second.since(first);
+    testing::expect(waited.as_millis() >= 0);
+    let stamped = time::unix(process::unix_millis());
+    testing::expect(stamped.after(time::unix(1600000000000)));
+}
