@@ -99,7 +99,7 @@ var groups = []featureGroup{
 	{"std::time", []string{"std-time", "duration", "instant", "unix-time"}},
 	{"std::date", []string{"std-date", "date-time", "weekday", "iso-8601"}},
 	{"std::fmt", []string{"std-fmt", "formatting", "artifact"}},
-	{"std::testing", []string{"std-testing"}},
+	{"std::testing", []string{"std-testing", "run-model"}},
 	{"std::fs / path / io / process", []string{
 		"std-fs", "std-path", "std-io", "std-process", "fs", "io",
 		"explicit-io", "read-dir", "real-path", "pure-helper", "stderr"}},

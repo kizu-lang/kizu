@@ -86,3 +86,5 @@ if try testing::run_model<Cmd, Model, Sut>(
 `check` は列でなく値の性質のためのものです。`gen` で `cases` 個の値を引き、`holds`
 が最初に `false` を返した値を返します(全部通れば `null`)。値の shrink は
 しません。`tests/behavior/src/std_testing_model/` がどちらの形も示します。
+`examples/model_calendar.kizu` は日数 counter を model に `std::date` の暦を検査し、
+手で数えた曜日の bug を 1 手の列に縮めます。
