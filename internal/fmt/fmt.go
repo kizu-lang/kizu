@@ -320,9 +320,9 @@ const (
 	// not change structural indentation because all of its tokens stay on the
 	// line that opened it.
 	inlineLiteralBlock
-	// commaTerminatedBlock is a block whose entries the grammar requires to end
-	// with a comma, so dropping the trailing one produces source that no longer
-	// parses. Enum variants and match arms are both written this way.
+	// commaTerminatedBlock is a block whose last entry keeps its comma. Enum
+	// variants and match arms need it because the grammar requires it, and
+	// struct fields keep it because SPEC §6.4 writes them that way.
 	commaTerminatedBlock
 )
 
@@ -694,7 +694,7 @@ func (b *builder) currentDelimiterBase() int {
 }
 
 // opensCommaTerminatedBlockAtCurrentIndex reports whether tokens[index] opens
-// a tagged declaration or runtime match arm list.
+// a struct or tagged declaration, or a runtime match arm list.
 func opensCommaTerminatedBlockAtCurrentIndex(tokens []token.Token, index int) bool {
 	if index < 0 || index >= len(tokens) || tokens[index].Type != token.LBrace {
 		return false
@@ -707,7 +707,7 @@ func opensCommaTerminatedBlockAtCurrentIndex(tokens []token.Token, index int) bo
 	// block, which is what keeps a match arm's own `{ ... }` body normal.
 	for cursor := index - 1; cursor >= 0; cursor-- {
 		switch tokens[cursor].Type {
-		case token.Enum, token.Union:
+		case token.Struct, token.Enum, token.Union:
 			return true
 		case token.Match:
 			return cursor == 0 || tokens[cursor-1].Type != token.Comptime

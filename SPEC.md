@@ -3516,6 +3516,8 @@ kizu test
 先頭の連続 `import` block は comment を含まない場合に辞書順へ正規化します。
 line comment は落としませんが、canonical form では 1 つ 1 行になるので、code に
 続けて書いた trailing comment は次の行へ移ります。
+`struct` / `enum` / `union` / `error` 宣言の最後の member と `match` の最後の arm は
+trailing comma を持ち、それ以外の閉じ括弧直前の `,` は落とします。
 `kizu test` は file または package root 内の top-level `test` block runner です。
 `main` 実行、filesystem-wide discovery、filter は行いません。
 
