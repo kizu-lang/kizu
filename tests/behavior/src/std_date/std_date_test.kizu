@@ -1,0 +1,291 @@
+import std::date;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+import std::time;
+
+fn is_invalid_date(err: date::Error) -> bool {
+    return match err {
+        InvalidDate => true,
+        InvalidFormat => false,
+    };
+}
+
+fn is_invalid_format(err: date::Error) -> bool {
+    return !is_invalid_date(err);
+}
+
+// rejects is whether `ymd` refuses the day as not on the calendar.
+fn rejects(year: i64, month: i64, day: i64) -> bool {
+    if date::ymd(year, month, day) |made| {
+        return made.day() != day;
+    } else |err| {
+        return is_invalid_date(err);
+    }
+}
+
+fn expect_ymd(year: i64, month: i64, day: i64, actual: date::Date) -> void {
+    testing::expect_equal<i64>(year, actual.year());
+    testing::expect_equal<i64>(month, actual.month());
+    testing::expect_equal<i64>(day, actual.day());
+    return;
+}
+
+fn expect_iso(allocator: Allocator, expected: []u8, day: date::Date) -> !void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try day.append_iso(allocator, &var out);
+    let text = out.as_bytes();
+    testing::expect(mem::equal_bytes(expected, text));
+    return;
+}
+
+fn expect_stamp(allocator: Allocator, expected: []u8, moment: date::DateTime) -> !void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try moment.append_iso(allocator, &var out);
+    let text = out.as_bytes();
+    testing::expect(mem::equal_bytes(expected, text));
+    return;
+}
+
+// parse_fails is whether `parse` refuses the spelling, and with which error:
+// 1 for InvalidFormat, 2 for InvalidDate, 0 when it parses.
+fn parse_outcome(bytes: []u8) -> i64 {
+    if date::parse(bytes) |made| {
+        return made.day() - made.day();
+    } else |err| {
+        if is_invalid_format(err) {
+            return 1;
+        }
+        return 2;
+    }
+}
+
+fn parse_datetime_outcome(bytes: []u8) -> i64 {
+    if date::parse_datetime(bytes) |made| {
+        return made.hour() - made.hour();
+    } else |err| {
+        if is_invalid_format(err) {
+            return 1;
+        }
+        return 2;
+    }
+}
+
+fn unix_of(bytes: []u8) -> !i64 {
+    let moment = try date::parse_datetime(bytes);
+    let unix = moment.to_unix();
+    return unix.as_millis();
+}
+
+test "ymd accepts calendar days and refuses the rest" {
+    let leap = try date::ymd(2024, 2, 29);
+    expect_ymd(2024, 2, 29, leap);
+    testing::expect(leap.is_leap_year());
+    testing::expect_equal<i64>(29, leap.days_in_month());
+    testing::expect(rejects(2023, 2, 29));
+    testing::expect(rejects(1900, 2, 29));
+    testing::expect(!rejects(2000, 2, 29));
+    testing::expect(rejects(2024, 4, 31));
+    testing::expect(rejects(2024, 13, 1));
+    testing::expect(rejects(2024, 0, 1));
+    testing::expect(rejects(2024, 1, 0));
+    testing::expect(rejects(2024, 12, 32));
+    testing::expect(!date::is_leap_year(2100));
+    testing::expect(date::is_leap_year(2400));
+}
+
+test "days count from 1970-01-01 in both directions" {
+    let epoch = date::from_days(0);
+    expect_ymd(1970, 1, 1, epoch);
+    testing::expect_equal<i64>(0, epoch.to_days());
+    let eve = date::from_days(-1);
+    expect_ymd(1969, 12, 31, eve);
+    let leap = try date::ymd(2000, 2, 29);
+    testing::expect_equal<i64>(11016, leap.to_days());
+    let march = try date::ymd(2000, 3, 1);
+    testing::expect_equal<i64>(11017, march.to_days());
+    let four_centuries_earlier = try date::ymd(1600, 3, 1);
+    testing::expect_equal<i64>(11017 - 146097, four_centuries_earlier.to_days());
+    let year_zero = try date::ymd(0, 3, 1);
+    testing::expect_equal<i64>(-719468, year_zero.to_days());
+    let before_zero = try date::ymd(-1, 12, 31);
+    testing::expect_equal<i64>(-719529, before_zero.to_days());
+    var days = -800000;
+    while days < 800000 {
+        let day = date::from_days(days);
+        testing::expect_equal<i64>(days, day.to_days());
+        days = days + 997;
+    }
+}
+
+test "weekdays follow the ISO numbering" {
+    let thursday = date::from_days(0);
+    testing::expect(thursday.weekday() == date::Weekday::Thursday);
+    let wednesday = date::from_days(-1);
+    testing::expect(wednesday.weekday() == date::Weekday::Wednesday);
+    let saturday = try date::ymd(2000, 1, 1);
+    let saturday_name = saturday.weekday();
+    testing::expect(saturday_name == date::Weekday::Saturday);
+    testing::expect_equal<i64>(6, saturday_name.iso_number());
+    let monday = try date::ymd(2024, 1, 1);
+    let monday_name = monday.weekday();
+    testing::expect_equal<i64>(1, monday_name.iso_number());
+    let sunday = try date::ymd(2024, 1, 7);
+    let sunday_name = sunday.weekday();
+    testing::expect_equal<i64>(7, sunday_name.iso_number());
+}
+
+test "day arithmetic crosses months and years" {
+    let start = try date::ymd(2024, 2, 28);
+    expect_ymd(2024, 2, 29, start.add_days(1));
+    expect_ymd(2024, 3, 1, start.add_days(2));
+    expect_ymd(2023, 12, 31, start.add_days(-59));
+    let later = try date::ymd(2024, 3, 1);
+    testing::expect_equal<i64>(2, later.days_since(start));
+    testing::expect_equal<i64>(-2, start.days_since(later));
+    testing::expect(start.before(later));
+    testing::expect(!later.before(start));
+    testing::expect(later.after(start));
+    testing::expect(start.equals(date::from_days(19781)));
+    testing::expect(!start.equals(later));
+}
+
+test "months keep the day, clamp it or carry it" {
+    let end_of_january = try date::ymd(2024, 1, 31);
+    expect_ymd(2024, 2, 29, end_of_january.add_months(1, date::Overflow::Clamp));
+    expect_ymd(2024, 3, 2, end_of_january.add_months(1, date::Overflow::Carry));
+    let common_year = try date::ymd(2023, 1, 31);
+    expect_ymd(2023, 2, 28, common_year.add_months(1, date::Overflow::Clamp));
+    expect_ymd(2023, 3, 3, common_year.add_months(1, date::Overflow::Carry));
+    let mid_month = try date::ymd(2024, 1, 15);
+    expect_ymd(2024, 2, 15, mid_month.add_months(1, date::Overflow::Clamp));
+    expect_ymd(2025, 1, 15, mid_month.add_months(12, date::Overflow::Clamp));
+    expect_ymd(2022, 12, 15, mid_month.add_months(-13, date::Overflow::Clamp));
+    let end_of_march = try date::ymd(2024, 3, 31);
+    expect_ymd(2024, 2, 29, end_of_march.add_months(-1, date::Overflow::Clamp));
+    expect_ymd(2024, 3, 2, end_of_march.add_months(-1, date::Overflow::Carry));
+    let leap_day = try date::ymd(2024, 2, 29);
+    expect_ymd(2025, 2, 28, leap_day.add_years(1, date::Overflow::Clamp));
+    expect_ymd(2025, 3, 1, leap_day.add_years(1, date::Overflow::Carry));
+    expect_ymd(2028, 2, 29, leap_day.add_years(4, date::Overflow::Clamp));
+}
+
+test "dates spell and parse as ISO 8601" {
+    let allocator = mem::page_allocator();
+    let leap = try date::ymd(2024, 2, 29);
+    try expect_iso(allocator, "2024-02-29", leap);
+    let parsed = try date::parse("2024-02-29");
+    testing::expect(parsed.equals(leap));
+    let year_zero = try date::ymd(0, 1, 1);
+    try expect_iso(allocator, "0000-01-01", year_zero);
+    let far = try date::ymd(10000, 1, 1);
+    try expect_iso(allocator, "+10000-01-01", far);
+    let far_parsed = try date::parse("+10000-01-01");
+    testing::expect(far_parsed.equals(far));
+    let before_zero = try date::ymd(-1, 12, 31);
+    try expect_iso(allocator, "-0001-12-31", before_zero);
+    let before_parsed = try date::parse("-0001-12-31");
+    testing::expect(before_parsed.equals(before_zero));
+    let signed_now = try date::parse("+2024-02-29");
+    testing::expect(signed_now.equals(leap));
+    testing::expect_equal<i64>(1, parse_outcome("2024-2-29"));
+    testing::expect_equal<i64>(1, parse_outcome("2024-02-29x"));
+    testing::expect_equal<i64>(1, parse_outcome("12345-01-01"));
+    testing::expect_equal<i64>(1, parse_outcome("+123-01-01"));
+    testing::expect_equal<i64>(1, parse_outcome("2024/02/29"));
+    testing::expect_equal<i64>(1, parse_outcome(""));
+    testing::expect_equal<i64>(2, parse_outcome("2023-02-29"));
+    testing::expect_equal<i64>(2, parse_outcome("2024-00-10"));
+}
+
+test "moments convert to and from UnixTime" {
+    let allocator = mem::page_allocator();
+    let epoch = date::from_unix(time::unix(0));
+    try expect_stamp(allocator, "1970-01-01T00:00:00Z", epoch);
+    let epoch_day = epoch.date();
+    testing::expect_equal<i64>(0, epoch_day.to_days());
+    let just_before = date::from_unix(time::unix(-1));
+    try expect_stamp(allocator, "1969-12-31T23:59:59.999Z", just_before);
+    let moment = date::from_unix(time::unix(1700000000123));
+    try expect_stamp(allocator, "2023-11-14T22:13:20.123Z", moment);
+    testing::expect_equal<i64>(22, moment.hour());
+    testing::expect_equal<i64>(13, moment.minute());
+    testing::expect_equal<i64>(20, moment.second());
+    testing::expect_equal<i64>(123, moment.milli());
+    let back = moment.to_unix();
+    testing::expect_equal<i64>(1700000000123, back.as_millis());
+    let half = date::from_unix(time::unix(1700000000500));
+    try expect_stamp(allocator, "2023-11-14T22:13:20.5Z", half);
+    let fiftieth = date::from_unix(time::unix(1700000000050));
+    try expect_stamp(allocator, "2023-11-14T22:13:20.05Z", fiftieth);
+    let day = try date::ymd(2024, 2, 29);
+    let noon = try day.at(12, 0, 0, 0);
+    let noon_unix = noon.to_unix();
+    testing::expect_equal<i64>(19782 * 86400000 + 12 * 3600000, noon_unix.as_millis());
+    let midnight = day.midnight();
+    testing::expect(midnight.before(noon));
+    testing::expect(noon.after(midnight));
+    testing::expect(!noon.equals(midnight));
+    testing::expect(noon.equals(date::from_unix(noon_unix)));
+    let midnight_day = midnight.date();
+    testing::expect(midnight_day.equals(day));
+}
+
+test "clock fields are range checked" {
+    let day = try date::ymd(2024, 2, 29);
+    if day.at(24, 0, 0, 0) |made| {
+        testing::expect_equal<i64>(-1, made.hour());
+    } else |err| {
+        testing::expect(is_invalid_date(err));
+    }
+    if day.at(23, 60, 0, 0) |made| {
+        testing::expect_equal<i64>(-1, made.minute());
+    } else |err| {
+        testing::expect(is_invalid_date(err));
+    }
+    if day.at(23, 59, 60, 0) |made| {
+        testing::expect_equal<i64>(-1, made.second());
+    } else |err| {
+        testing::expect(is_invalid_date(err));
+    }
+    if day.at(23, 59, 59, 1000) |made| {
+        testing::expect_equal<i64>(-1, made.milli());
+    } else |err| {
+        testing::expect(is_invalid_date(err));
+    }
+    let last = try day.at(23, 59, 59, 999);
+    testing::expect_equal<i64>(999, last.milli());
+}
+
+test "RFC 3339 spellings parse, offsets folding into UTC" {
+    testing::expect_equal<i64>(1700000000000, try unix_of("2023-11-14T22:13:20Z"));
+    testing::expect_equal<i64>(1700000000123, try unix_of("2023-11-14T22:13:20.123Z"));
+    testing::expect_equal<i64>(1700000000500, try unix_of("2023-11-14T22:13:20.5Z"));
+    testing::expect_equal<i64>(1700000000123, try unix_of("2023-11-14T22:13:20.123456789Z"));
+    testing::expect_equal<i64>(1700000000000, try unix_of("2023-11-14T22:13:20+00:00"));
+    testing::expect_equal<i64>(1700000000000, try unix_of("2023-11-15T07:13:20+09:00"));
+    testing::expect_equal<i64>(1700000000000, try unix_of("2023-11-14T16:43:20-05:30"));
+    testing::expect_equal<i64>(0, try unix_of("1970-01-01T00:00:00Z"));
+    testing::expect_equal<i64>(-1, try unix_of("1969-12-31T23:59:59.999Z"));
+    testing::expect_equal<i64>(1, parse_datetime_outcome("2023-11-14T22:13:20"));
+    testing::expect_equal<i64>(1, parse_datetime_outcome("2023-11-14 22:13:20Z"));
+    testing::expect_equal<i64>(1, parse_datetime_outcome("2023-11-14T22:13:20.Z"));
+    testing::expect_equal<i64>(1, parse_datetime_outcome("2023-11-14T22:13Z"));
+    testing::expect_equal<i64>(1, parse_datetime_outcome("2023-11-14T22:13:20+0900"));
+    testing::expect_equal<i64>(1, parse_datetime_outcome("2023-11-14T22:13:20Zx"));
+    testing::expect_equal<i64>(2, parse_datetime_outcome("2023-11-14T24:00:00Z"));
+    testing::expect_equal<i64>(2, parse_datetime_outcome("2023-11-14T22:13:60Z"));
+    testing::expect_equal<i64>(2, parse_datetime_outcome("2023-11-14T22:13:20+24:00"));
+    testing::expect_equal<i64>(2, parse_datetime_outcome("2023-02-29T00:00:00Z"));
+}
+
+test "a wall clock reading becomes a UTC date" {
+    let now = date::from_unix(time::unix(process::unix_millis()));
+    let today = now.date();
+    testing::expect(today.year() >= 2024);
+    let epoch = date::from_days(0);
+    testing::expect(today.after(epoch));
+}

@@ -1,13 +1,14 @@
 import compiler::internal::fsutil;
 import compiler::internal::sha256;
-import compiler::internal::timestamp;
 import std::array;
+import std::date;
 import std::fs;
 import std::json;
 import std::mem;
 import std::path;
 import std::process;
 import std::string;
+import std::time;
 
 // Mechanical port of internal/buildcache/cache.go: the local store of build
 // artifacts both compilers share. Cache keys, artifact file names and entry
@@ -295,7 +296,8 @@ fn (self: &Cache) write_meta(
     try encoder.write_i64_field("size_bytes", size);
     var stamp = string::new(allocator);
     defer stamp.deinit(allocator);
-    try timestamp::append_rfc3339_utc(allocator, &var stamp, process::unix_millis());
+    let now = date::from_unix(time::unix(process::unix_millis()));
+    try now.append_iso(allocator, &var stamp);
     let stamp_bytes = stamp.as_bytes();
     try encoder.write_bytes_field("created_at", stamp_bytes);
     try encoder.end_object();
@@ -379,7 +381,14 @@ fn append_entry_at(io: Io, allocator: Allocator, full: []u8, out: &var array::Ar
         defer text.deinit(allocator);
         let data = text.as_bytes();
         if json::decode_ignore_unknown<Entry>(allocator, data) |entry| {
-            try out.append(allocator, move entry);
+            // Go decodes `created_at` into a time.Time, so an entry whose
+            // stamp it cannot read is one it skips; std::json reads the
+            // field as a String, so the same refusal is spelled here.
+            if created_moment(&entry) |_| {
+                try out.append(allocator, move entry);
+            } else {
+                entry.deinit(allocator);
+            }
         } else |err| {
             match err {
                 _ => return,
@@ -495,14 +504,29 @@ fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry
     return;
 }
 
+/// The moment `created_at` spells, null when it is not an RFC 3339 stamp:
+/// what Go's time.Time decodes, and what `enforceLimit` sorts by.
+fn created_moment(entry: &Entry) -> ?date::DateTime {
+    let stamp = entry.created_at.as_bytes();
+    if date::parse_datetime(stamp) |moment| {
+        return moment;
+    } else |err| {
+        match err {
+            _ => return null,
+        }
+    }
+}
+
 /// Orders two entries by the moment they were created, the ascending sort
 /// key of the Go `enforceLimit`.
 fn entry_before(all: &array::Array<Entry>, left: i64, right: i64) -> bool {
     if all.at(left) |a| {
         if all.at(right) |b| {
-            let a_bytes = a.created_at.as_bytes();
-            let b_bytes = b.created_at.as_bytes();
-            return timestamp::stamp_before(a_bytes, b_bytes);
+            if created_moment(a) |a_moment| {
+                if created_moment(b) |b_moment| {
+                    return a_moment.before(b_moment);
+                }
+            }
         }
     }
     return false;

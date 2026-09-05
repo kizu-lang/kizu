@@ -1,0 +1,534 @@
+import std::mem;
+import std::time;
+
+// Calendar dates and UTC clock readings on the proleptic Gregorian calendar.
+//
+//   Date      a year, month and day; valid by construction
+//   DateTime  a Date with an hour, minute, second and millisecond, always UTC
+//   Weekday   Monday through Sunday
+//   Overflow  what `add_months` does when the day is past the target month's end
+//
+// A `Date` is always a real calendar day: `ymd(2023, 2, 29)` is `Error::InvalidDate`
+// rather than March 1st. `DateTime` is UTC only, so converting to and from
+// `std::time::UnixTime` needs no zone; offsets in parsed spellings are folded
+// into UTC. There are no time zones, no locales and no `now()` here: a
+// program spells `date::from_unix(time::unix(process::unix_millis()))`.
+//
+// Spellings are ISO 8601: `YYYY-MM-DD` for a date and the RFC 3339 profile
+// `YYYY-MM-DDTHH:MM:SS[.fff]Z` for a moment. Years outside 0..9999 are
+// written with a sign and at least four digits, the ISO expanded form.
+//
+// Date, DateTime, Weekday and Overflow are copy aggregates (SPEC §8). Day
+// arithmetic is `i64` arithmetic and wraps the way `i64` does (SPEC §6.9.2).
+
+pub error Error {
+    InvalidDate,
+    InvalidFormat,
+}
+
+pub struct Date {
+    year: i64,
+    month: i64,
+    day: i64
+}
+
+pub struct DateTime {
+    date: Date,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    milli: i64
+}
+
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+// Overflow is what `add_months` does when the day does not exist in the
+// target month. Jan 31 + 1 month is Feb 28 with `Clamp` and Mar 3 with
+// `Carry` (Mar 2 in a leap year), which is what Go's `AddDate` does.
+pub enum Overflow {
+    Clamp,
+    Carry,
+}
+
+fn millis_per_day() -> i64 {
+    return 86400000;
+}
+
+// floor_div and floor_mod round toward negative infinity, unlike `/` and `%`
+// (SPEC §6.9.2), so days before 1970 and moments before midnight land on the
+// right day.
+fn floor_div(value: i64, divisor: i64) -> i64 {
+    let quotient = value / divisor;
+    if value % divisor != 0 and (value < 0) != (divisor < 0) {
+        return quotient - 1;
+    }
+    return quotient;
+}
+
+fn floor_mod(value: i64, divisor: i64) -> i64 {
+    return value - floor_div(value, divisor) * divisor;
+}
+
+pub fn is_leap_year(year: i64) -> bool {
+    if year % 4 != 0 {
+        return false;
+    }
+    if year % 100 != 0 {
+        return true;
+    }
+    return year % 400 == 0;
+}
+
+// month_length is the number of days in a month, 0 outside 1..12.
+fn month_length(year: i64, month: i64) -> i64 {
+    if month < 1 or month > 12 {
+        return 0;
+    }
+    if month == 2 {
+        if is_leap_year(year) {
+            return 29;
+        }
+        return 28;
+    }
+    if month == 4 or month == 6 or month == 9 or month == 11 {
+        return 30;
+    }
+    return 31;
+}
+
+// ymd is the calendar day `year-month-day`, or `Error::InvalidDate` when
+// there is no such day.
+pub fn ymd(year: i64, month: i64, day: i64) -> std::date::Error!std::date::Date {
+    if day < 1 or day > month_length(year, month) {
+        return Error::InvalidDate;
+    }
+    return Date { year: year, month: month, day: day };
+}
+
+// from_days is the calendar day `days` days after 1970-01-01, negative
+// counts landing before it.
+pub fn from_days(days: i64) -> std::date::Date {
+    let z = days + 719468;
+    let era = floor_div(z, 146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    var month = mp + 3;
+    if mp >= 10 {
+        month = mp - 9;
+    }
+    var year = yoe + era * 400;
+    if month <= 2 {
+        year = year + 1;
+    }
+    return Date { year: year, month: month, day: day };
+}
+
+fn (self: std::date::Date) year() -> i64 {
+    return self.year;
+}
+
+fn (self: std::date::Date) month() -> i64 {
+    return self.month;
+}
+
+fn (self: std::date::Date) day() -> i64 {
+    return self.day;
+}
+
+fn (self: std::date::Date) is_leap_year() -> bool {
+    return is_leap_year(self.year);
+}
+
+fn (self: std::date::Date) days_in_month() -> i64 {
+    return month_length(self.year, self.month);
+}
+
+// to_days is the number of days from 1970-01-01 to this day, the inverse of
+// `from_days`.
+fn (self: std::date::Date) to_days() -> i64 {
+    var year = self.year;
+    if self.month <= 2 {
+        year = year - 1;
+    }
+    let era = floor_div(year, 400);
+    let yoe = year - era * 400;
+    var mp = self.month - 3;
+    if self.month <= 2 {
+        mp = self.month + 9;
+    }
+    let doy = (153 * mp + 2) / 5 + self.day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+fn (self: std::date::Date) weekday() -> std::date::Weekday {
+    // 1970-01-01 was a Thursday.
+    let index = floor_mod(self.to_days() + 3, 7);
+    if index == 0 {
+        return Weekday::Monday;
+    }
+    if index == 1 {
+        return Weekday::Tuesday;
+    }
+    if index == 2 {
+        return Weekday::Wednesday;
+    }
+    if index == 3 {
+        return Weekday::Thursday;
+    }
+    if index == 4 {
+        return Weekday::Friday;
+    }
+    if index == 5 {
+        return Weekday::Saturday;
+    }
+    return Weekday::Sunday;
+}
+
+fn (self: std::date::Date) add_days(count: i64) -> std::date::Date {
+    return from_days(self.to_days() + count);
+}
+
+// add_months moves `count` calendar months, keeping the day when the target
+// month has it and applying `overflow` when it does not.
+fn (self: std::date::Date) add_months(count: i64, overflow: std::date::Overflow) -> std::date::Date {
+    let total = self.year * 12 + (self.month - 1) + count;
+    let year = floor_div(total, 12);
+    let month = floor_mod(total, 12) + 1;
+    let limit = month_length(year, month);
+    if self.day <= limit {
+        return Date { year: year, month: month, day: self.day };
+    }
+    let last = Date { year: year, month: month, day: limit };
+    return match overflow {
+        Clamp => last,
+        Carry => last.add_days(self.day - limit),
+    };
+}
+
+fn (self: std::date::Date) add_years(count: i64, overflow: std::date::Overflow) -> std::date::Date {
+    return self.add_months(count * 12, overflow);
+}
+
+// days_since is self - earlier in days, negative when `earlier` is later.
+fn (self: std::date::Date) days_since(earlier: std::date::Date) -> i64 {
+    return self.to_days() - earlier.to_days();
+}
+
+fn (self: std::date::Date) before(other: std::date::Date) -> bool {
+    return self.to_days() < other.to_days();
+}
+
+fn (self: std::date::Date) after(other: std::date::Date) -> bool {
+    return self.to_days() > other.to_days();
+}
+
+fn (self: std::date::Date) equals(other: std::date::Date) -> bool {
+    return self.year == other.year and self.month == other.month and self.day == other.day;
+}
+
+// midnight is 00:00:00.000 on this day.
+fn (self: std::date::Date) midnight() -> std::date::DateTime {
+    return DateTime { date: self, hour: 0, minute: 0, second: 0, milli: 0 };
+}
+
+// at is the UTC moment `hour:minute:second.milli` on this day, or
+// `Error::InvalidDate` when a field is out of range. Leap seconds are not
+// represented, so `second` is 0..59.
+fn (self: std::date::Date) at(
+    hour: i64,
+    minute: i64,
+    second: i64,
+    milli: i64
+) -> std::date::Error!std::date::DateTime {
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59 {
+        return Error::InvalidDate;
+    }
+    if second < 0 or second > 59 or milli < 0 or milli > 999 {
+        return Error::InvalidDate;
+    }
+    return DateTime { date: self, hour: hour, minute: minute, second: second, milli: milli };
+}
+
+// append_iso appends `YYYY-MM-DD`.
+fn (self: std::date::Date) append_iso(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    try append_year(allocator, out, self.year);
+    try out.append_byte(allocator, cast<u8>(45));
+    try append_padded(allocator, out, self.month, 10);
+    try out.append_byte(allocator, cast<u8>(45));
+    try append_padded(allocator, out, self.day, 10);
+    return;
+}
+
+// from_unix is the UTC reading of a wall-clock moment.
+pub fn from_unix(moment: std::time::UnixTime) -> std::date::DateTime {
+    let millis = moment.as_millis();
+    let days = floor_div(millis, millis_per_day());
+    let rem = floor_mod(millis, millis_per_day());
+    return DateTime {
+        date: from_days(days),
+        hour: rem / 3600000,
+        minute: (rem / 60000) % 60,
+        second: (rem / 1000) % 60,
+        milli: rem % 1000
+    };
+}
+
+fn (self: std::date::DateTime) date() -> std::date::Date {
+    return self.date;
+}
+
+fn (self: std::date::DateTime) hour() -> i64 {
+    return self.hour;
+}
+
+fn (self: std::date::DateTime) minute() -> i64 {
+    return self.minute;
+}
+
+fn (self: std::date::DateTime) second() -> i64 {
+    return self.second;
+}
+
+fn (self: std::date::DateTime) milli() -> i64 {
+    return self.milli;
+}
+
+fn (self: std::date::DateTime) to_unix() -> std::time::UnixTime {
+    let millis = self.date.to_days() * millis_per_day()
+        + self.hour * 3600000
+        + self.minute * 60000
+        + self.second * 1000
+        + self.milli;
+    return time::unix(millis);
+}
+
+fn (self: std::date::DateTime) before(other: std::date::DateTime) -> bool {
+    let own = self.to_unix();
+    return own.before(other.to_unix());
+}
+
+fn (self: std::date::DateTime) after(other: std::date::DateTime) -> bool {
+    let own = self.to_unix();
+    return own.after(other.to_unix());
+}
+
+fn (self: std::date::DateTime) equals(other: std::date::DateTime) -> bool {
+    let own = self.to_unix();
+    return own.equals(other.to_unix());
+}
+
+// append_iso appends the RFC 3339 UTC spelling `YYYY-MM-DDTHH:MM:SSZ`, with
+// `.fff` before the `Z` when the millisecond is not zero and its trailing
+// zeros trimmed, the way Go's RFC3339Nano writes it.
+fn (self: std::date::DateTime) append_iso(
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    try self.date.append_iso(allocator, out);
+    try out.append_byte(allocator, cast<u8>(84));
+    try append_padded(allocator, out, self.hour, 10);
+    try out.append_byte(allocator, cast<u8>(58));
+    try append_padded(allocator, out, self.minute, 10);
+    try out.append_byte(allocator, cast<u8>(58));
+    try append_padded(allocator, out, self.second, 10);
+    if self.milli != 0 {
+        try out.append_byte(allocator, cast<u8>(46));
+        var scale = 100;
+        var rest = self.milli;
+        while rest > 0 {
+            try out.append_byte(allocator, cast<u8>(48 + rest / scale));
+            rest = rest % scale;
+            scale = scale / 10;
+        }
+    }
+    try out.append_byte(allocator, cast<u8>(90));
+    return;
+}
+
+// append_year writes four digits for 0..9999 and otherwise a sign followed
+// by at least four digits, the ISO 8601 expanded year.
+fn append_year(allocator: Allocator, out: &var std::string::String, year: i64) -> std::mem::Error!void {
+    var value = year;
+    if year < 0 {
+        try out.append_byte(allocator, cast<u8>(45));
+        value = 0 - year;
+    } else {
+        if year > 9999 {
+            try out.append_byte(allocator, cast<u8>(43));
+        }
+    }
+    var top = 1000;
+    while top * 10 <= value {
+        top = top * 10;
+    }
+    return append_padded(allocator, out, value, top);
+}
+
+// append_padded writes value zero-padded to the width `top` spells:
+// `top` 10 writes two digits, 1000 writes four.
+fn append_padded(allocator: Allocator, out: &var std::string::String, value: i64, top: i64) -> std::mem::Error!void {
+    var divisor = top;
+    while divisor > 0 {
+        try out.append_byte(allocator, cast<u8>(48 + (value / divisor) % 10));
+        divisor = divisor / 10;
+    }
+    return;
+}
+
+// parse reads `YYYY-MM-DD`, accepting the expanded year `+YYYYY` / `-YYYY`.
+pub fn parse(bytes: []u8) -> std::date::Error!std::date::Date {
+    var at = 0;
+    let parsed = try parse_date_at(bytes, &var at);
+    if at != mem::len(bytes) {
+        return Error::InvalidFormat;
+    }
+    return parsed;
+}
+
+// parse_datetime reads the RFC 3339 spelling `YYYY-MM-DDTHH:MM:SS[.fraction]`
+// followed by `Z` or an offset `+HH:MM` / `-HH:MM`. The fraction is kept to
+// the millisecond and an offset is folded into UTC.
+pub fn parse_datetime(bytes: []u8) -> std::date::Error!std::date::DateTime {
+    var at = 0;
+    let day = try parse_date_at(bytes, &var at);
+    try expect_byte(bytes, &var at, 84);
+    let hour = try parse_digits(bytes, &var at, 2);
+    try expect_byte(bytes, &var at, 58);
+    let minute = try parse_digits(bytes, &var at, 2);
+    try expect_byte(bytes, &var at, 58);
+    let second = try parse_digits(bytes, &var at, 2);
+    var milli = 0;
+    if peek_byte(bytes, at) == 46 {
+        at = at + 1;
+        var scale = 100;
+        var count = 0;
+        while is_digit(peek_byte(bytes, at)) {
+            milli = milli + (peek_byte(bytes, at) - 48) * scale;
+            scale = scale / 10;
+            count = count + 1;
+            at = at + 1;
+        }
+        if count == 0 {
+            return Error::InvalidFormat;
+        }
+    }
+    var offset_millis = 0;
+    let zone = peek_byte(bytes, at);
+    if zone == 90 {
+        at = at + 1;
+    } else {
+        if zone != 43 and zone != 45 {
+            return Error::InvalidFormat;
+        }
+        at = at + 1;
+        let offset_hours = try parse_digits(bytes, &var at, 2);
+        try expect_byte(bytes, &var at, 58);
+        let offset_minutes = try parse_digits(bytes, &var at, 2);
+        if offset_hours > 23 or offset_minutes > 59 {
+            return Error::InvalidDate;
+        }
+        offset_millis = (offset_hours * 60 + offset_minutes) * 60000;
+        if zone == 45 {
+            offset_millis = 0 - offset_millis;
+        }
+    }
+    if at != mem::len(bytes) {
+        return Error::InvalidFormat;
+    }
+    let local = try day.at(hour, minute, second, milli);
+    if offset_millis == 0 {
+        return local;
+    }
+    let local_unix = local.to_unix();
+    return from_unix(local_unix.sub(time::millis(offset_millis)));
+}
+
+// parse_date_at reads `YYYY-MM-DD` from `at`, leaving `at` past the day.
+fn parse_date_at(bytes: []u8, at: &var i64) -> std::date::Error!std::date::Date {
+    var sign = 1;
+    var width = 4;
+    let lead = peek_byte(bytes, at.*);
+    if lead == 43 or lead == 45 {
+        if lead == 45 {
+            sign = -1;
+        }
+        at.* = at.* + 1;
+        width = 0;
+        while is_digit(peek_byte(bytes, at.* + width)) {
+            width = width + 1;
+        }
+        if width < 4 or width > 9 {
+            return Error::InvalidFormat;
+        }
+    }
+    let year = try parse_digits(bytes, at, width);
+    try expect_byte(bytes, at, 45);
+    let month = try parse_digits(bytes, at, 2);
+    try expect_byte(bytes, at, 45);
+    let day = try parse_digits(bytes, at, 2);
+    return ymd(sign * year, month, day);
+}
+
+// parse_digits reads exactly `width` decimal digits.
+fn parse_digits(bytes: []u8, at: &var i64, width: i64) -> std::date::Error!i64 {
+    var value = 0;
+    var count = 0;
+    while count < width {
+        let byte = peek_byte(bytes, at.*);
+        if !is_digit(byte) {
+            return Error::InvalidFormat;
+        }
+        value = value * 10 + (byte - 48);
+        at.* = at.* + 1;
+        count = count + 1;
+    }
+    return value;
+}
+
+fn expect_byte(bytes: []u8, at: &var i64, byte: i64) -> std::date::Error!void {
+    if peek_byte(bytes, at.*) != byte {
+        return Error::InvalidFormat;
+    }
+    at.* = at.* + 1;
+    return;
+}
+
+// peek_byte is the byte at `at` as a number, -1 past the end.
+fn peek_byte(bytes: []u8, at: i64) -> i64 {
+    if at < 0 or at >= mem::len(bytes) {
+        return -1;
+    }
+    return cast<i64>(bytes[at]);
+}
+
+fn is_digit(byte: i64) -> bool {
+    return byte >= 48 and byte <= 57;
+}
+
+// iso_number is Monday 1 through Sunday 7, the ISO 8601 weekday number.
+fn (self: std::date::Weekday) iso_number() -> i64 {
+    return match self {
+        Monday => 1,
+        Tuesday => 2,
+        Wednesday => 3,
+        Thursday => 4,
+        Friday => 5,
+        Saturday => 6,
+        Sunday => 7,
+    };
+}
