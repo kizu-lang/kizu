@@ -63,7 +63,7 @@ deadline を取る setter(`std::net`)へ渡す形です。
 ## 暦を持たない
 
 `days(1)` は 24 時間で、`UnixTime` は数であって日付ではありません。年・月・日、
-曜日、ISO 8601 は `std::date` の仕事です。
+曜日、ISO 8601 は [`std::date`](date.md) の仕事です。
 
 ## 算術
 

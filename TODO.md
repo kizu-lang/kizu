@@ -17,18 +17,8 @@ seed の再現(`kizu test --seed`、`std::testing::seed()`)と `run_model` /
 `std::map` と `std::array` を参照モデルと突き合わせる test を `tests/behavior` に置き、
 runner の API がそのまま使えるかを見る。加えて言語の顔になる例を `examples/` に置く:
 帳簿(送金の列に対して残高の総和保存・二重送信の冪等性)、契約の状態機械(遷移表を
-model にする)、暦の算術(10 の後、model は日数 counter)。金額は float でなく最小
+model にする)、暦の算術(`std::date`、model は日数 counter)。金額は float でなく最小
 単位の `i64` で持つ。`tests/behavior/src/std_testing_model/` の容器の例が出発点。
-
-## 10. `std::date`
-
-暦が無いので期限・年度・時効・HTTP の `Date` header(3)が書けない。`std::time`
-(`Duration` / `Instant` / `UnixTime`、加減と比較)は入った。残るのは `std::date`:
-proleptic Gregorian の `Date { year, month, day }`、`to_days` / `from_days`、`weekday`、
-`add_days` / `add_months`(月末の丸めは明示引数)、ISO 8601 の parse / format、
-`DateTime` は UTC のみで `UnixTime` と相互変換。timezone(tzdata)、locale 書式、
-隠れた `now()` は入れない。`compiler::internal::timestamp` の civil 変換と RFC3339 は
-これに置き換え、docs/language-gaps.md の `time` 行を閉じる。
 
 ## std::http / std::net の残り
 
