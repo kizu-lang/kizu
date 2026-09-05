@@ -9,21 +9,6 @@ std::testing::expect_equal<T>(expected: T, actual: T) -> void
 std::testing::fail(message: []u8) -> void
 std::testing::seed() -> i64
 std::testing::failing_io() -> Io
-std::testing::run_model<Cmd, M, S>(
-    allocator: Allocator,
-    rng: &var std::rand::Rng,
-    steps: i64,
-    gen: fn(&var std::rand::Rng, &M) -> Cmd,
-    init_model: fn(Allocator) -> !M,
-    init_sut: fn(Allocator) -> !S,
-    step: fn(Allocator, &var M, &var S, &Cmd) -> !bool,
-) -> !?std::array::Array<Cmd>
-std::testing::check<T>(
-    rng: &var std::rand::Rng,
-    cases: i64,
-    gen: fn(&var std::rand::Rng) -> T,
-    holds: fn(&T) -> bool,
-) -> ?T
 ```
 
 `expect` は test assertion 用の void helper です。
@@ -52,39 +37,3 @@ capability を渡す方を明示します。`examples/negative/fs_failing_io.kiz
 `examples/negative/std_io_failing_write.kizu` がその形です。
 
 `test` 宣言の構文と `kizu test` の挙動は SPEC §14.5 にあります。
-
-## model-based testing
-
-`run_model` は model(こうあるべき、と素朴に書いたもの)と実物(`S`)を同じ
-command 列で 1 手ずつ進め、両者が食い違った列のうち最短のものを返します。
-全手一致なら `null` です。`gen` は rng と model の状態から次の command を作り、
-`init_model` / `init_sut` は run ごとに新しい値を作り、`step` は両者を 1 手進めて
-一致していれば `true` を返します。食い違いを見つけた列は replay で縮めます ——
-失敗する最短 prefix を二分探索し、次に落としても失敗が保てる command を 1 つずつ
-落とします。replay のたびに `init_*` で作り直すので、storage を持つ model / 実物は
-replay ごとに作られ解放されます(`Box` 越しに 1 つの cleanup として)。
-
-`Cmd` は列に copy されるので copy 型に限ります(owner は `unsupported`)。`M` / `S` は
-owner でもかまいません。`gen` などは関数 pointer です —— closure が無いので
-top-level fn を渡します。乱数は呼び出し側が `rng` を持つので、`rand::new(testing::seed())`
-から作れば失敗時の `note: seed N` で同じ run を再生できます。返った列は呼び出し側が
-`print` して `fail` します。
-
-```kizu
-if try testing::run_model<Cmd, Model, Sut>(
-    allocator, &var rng, 200, gen, init_model, init_sut, step) |trace| {
-    var i = 0;
-    while trace.get(i) |cmd| {
-        print(cmd);
-        i = i + 1;
-    }
-    trace.deinit(allocator);
-    testing::fail("model and system diverged");
-}
-```
-
-`check` は列でなく値の性質のためのものです。`gen` で `cases` 個の値を引き、`holds`
-が最初に `false` を返した値を返します(全部通れば `null`)。値の shrink は
-しません。`tests/behavior/src/std_testing_model/` がどちらの形も示します。
-`examples/model_calendar.kizu` は日数 counter を model に `std::date` の暦を検査し、
-手で数えた曜日の bug を 1 手の列に縮めます。
