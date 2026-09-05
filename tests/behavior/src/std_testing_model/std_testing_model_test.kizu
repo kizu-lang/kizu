@@ -1,0 +1,200 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::rand;
+import std::testing;
+
+// A counter whose system stops counting past 2. run_model has to find the
+// disagreement and shrink it to the three increments that expose it.
+enum CounterCmd {
+    Inc,
+    Dec,
+    Get,
+}
+
+struct Counter {
+    count: i64,
+}
+
+fn gen_counter(rng: &var rand::Rng, model: &i64) -> CounterCmd {
+    let pick = rng.below(3);
+    if pick == 0 {
+        return CounterCmd::Inc;
+    }
+    if pick == 1 {
+        return CounterCmd::Dec;
+    }
+    return CounterCmd::Get;
+}
+
+fn init_counter_model(allocator: Allocator) -> !i64 {
+    return 0;
+}
+
+fn init_counter(allocator: Allocator) -> !Counter {
+    return Counter { count: 0 };
+}
+
+fn step_counter(allocator: Allocator, model: &var i64, sut: &var Counter, cmd: &CounterCmd) -> !bool {
+    match cmd.* {
+        Inc => {
+            model.* = model.* + 1;
+            if sut.count < 2 {
+                sut.count = sut.count + 1;
+            }
+        },
+        Dec => {
+            model.* = model.* - 1;
+            sut.count = sut.count - 1;
+        },
+        Get => {},
+    }
+    return model.* == sut.count;
+}
+
+test "run_model shrinks a counter bug to the increments that expose it" {
+    let allocator = mem::page_allocator();
+    var rng = rand::new(3);
+    if try testing::run_model<CounterCmd, i64, Counter>(
+        allocator, &var rng, 200, gen_counter, init_counter_model, init_counter, step_counter) |trace| {
+        testing::expect_equal<i64>(3, trace.len());
+        var index = 0;
+        while trace.get(index) |cmd| {
+            testing::expect_equal<CounterCmd>(CounterCmd::Inc, cmd);
+            index = index + 1;
+        }
+        trace.deinit(allocator);
+    } else {
+        testing::fail("the counter bug was not found");
+    }
+}
+
+// A map checked against the list of keys it should hold. The model owns an
+// Array, so every replay builds and releases one; nothing here disagrees, so
+// run_model answers null.
+union MapCmd {
+    Insert(i64),
+    Remove(i64),
+    Has(i64),
+}
+
+struct KeyList {
+    keys: array::Array<i64>,
+}
+
+fn (self: KeyList) deinit(allocator: Allocator) -> void {
+    self.keys.deinit(allocator);
+}
+
+struct Table {
+    map: map::Map<i64, i64>,
+}
+
+fn (self: Table) deinit(allocator: Allocator) -> void {
+    self.map.deinit(allocator);
+}
+
+fn gen_map(rng: &var rand::Rng, model: &KeyList) -> MapCmd {
+    let key = rng.below(4);
+    let pick = rng.below(3);
+    if pick == 0 {
+        return MapCmd::Insert(key);
+    }
+    if pick == 1 {
+        return MapCmd::Remove(key);
+    }
+    return MapCmd::Has(key);
+}
+
+fn init_key_list(allocator: Allocator) -> !KeyList {
+    return KeyList { keys: array::new<i64>(allocator) };
+}
+
+fn init_table(allocator: Allocator) -> !Table {
+    return Table { map: map::new<i64, i64>(allocator) };
+}
+
+fn key_index(model: &KeyList, key: i64) -> ?i64 {
+    var index = 0;
+    while model.keys.get(index) |held| {
+        if held == key {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn step_map(allocator: Allocator, model: &var KeyList, sut: &var Table, cmd: &MapCmd) -> !bool {
+    match cmd.* {
+        Insert(key) => {
+            if key_index(model, key) |_| {
+                if sut.map.at_mut(key) |slot| {
+                    slot.* = key * 10;
+                } else {
+                    return false;
+                }
+            } else {
+                try model.keys.append(allocator, key);
+                try sut.map.insert(allocator, key, key * 10);
+            }
+            return sut.map.len() == model.keys.len();
+        },
+        Remove(key) => {
+            let expected = key_index(model, key);
+            if expected |at| {
+                let _ = try model.keys.remove(at);
+            }
+            if sut.map.remove(allocator, key) |value| {
+                if expected |_| {
+                    return value == key * 10;
+                }
+                return false;
+            }
+            if expected |_| {
+                return false;
+            }
+            return true;
+        },
+        Has(key) => {
+            if key_index(model, key) |_| {
+                return sut.map.contains(key);
+            }
+            return !sut.map.contains(key);
+        },
+    }
+}
+
+test "run_model finds no disagreement between Map and its key list" {
+    let allocator = mem::page_allocator();
+    var rng = rand::new(11);
+    if try testing::run_model<MapCmd, KeyList, Table>(
+        allocator, &var rng, 300, gen_map, init_key_list, init_table, step_map) |trace| {
+        trace.deinit(allocator);
+        testing::fail("Map and its model disagreed");
+    }
+}
+
+fn small(rng: &var rand::Rng) -> i64 {
+    return rng.below(100);
+}
+
+fn under_fifty(value: &i64) -> bool {
+    return value.* < 50;
+}
+
+fn non_negative(value: &i64) -> bool {
+    return value.* >= 0;
+}
+
+test "check answers the first value a property refuses" {
+    var rng = rand::new(5);
+    if testing::check<i64>(&var rng, 100, small, under_fifty) |bad| {
+        testing::expect(bad >= 50);
+    } else {
+        testing::fail("no value reached 50");
+    }
+    if testing::check<i64>(&var rng, 100, small, non_negative) |bad| {
+        testing::fail("a value was negative");
+    }
+}

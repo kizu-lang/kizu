@@ -1,0 +1,46 @@
+import std::mem;
+
+// A function pointer is a copy value: the function it names outlives the
+// program, so handing the pointer to another function costs nothing and the
+// caller keeps it. `through` passes `f` on twice and still calls it itself.
+// A borrow travels through a pointer the way it travels through a name: the
+// `&var i64` a Box lends reaches `bump` as that same borrow.
+fn double(value: i64) -> i64 {
+    return value * 2;
+}
+
+fn bump(value: &var i64) -> void {
+    value.* = value.* + 1;
+    return;
+}
+
+fn lend(allocator: Allocator, f: fn(&var i64) -> void, start: i64) -> !i64 {
+    var cell = try mem::box<i64>(allocator, start);
+    let held = cell.borrow_mut();
+    f(held);
+    f(held);
+    let result = cell.take(allocator);
+    return result;
+}
+
+fn twice(f: fn(i64) -> i64, value: i64) -> i64 {
+    return f(f(value));
+}
+
+fn through(f: fn(i64) -> i64, value: i64) -> i64 {
+    let first = twice(f, value);
+    let second = twice(f, first);
+    return f(second);
+}
+
+fn main() -> !void {
+    print(through(double, 1));
+    print(try lend(mem::page_allocator(), bump, 5));
+    return;
+}
+
+// run
+// features: function-pointer copy borrow box
+// output:
+// 32
+// 7

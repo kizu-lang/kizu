@@ -325,9 +325,16 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 // function is when it is declared public, and every method of a public contract
 // is whatever the method itself says.
 func (c *Checker) checkPublicSignature(sig ast.FunctionSignature) error {
+	// A type parameter is the caller's to fill in, so its name says nothing
+	// about visibility -- even when a program declares a private type of the
+	// same name.
+	typeParams := map[string]bool{}
+	for _, name := range sig.TypeParamNames() {
+		typeParams[name] = true
+	}
 	for _, param := range sig.Params {
 		label := "function `" + sig.Name + "` parameter"
-		if err := c.rejectPrivateType(typ.Text(param.TypeName), label); err != nil {
+		if err := c.rejectPrivateTypeExcept(typ.Text(param.TypeName), label, typeParams); err != nil {
 			return err
 		}
 	}
@@ -335,7 +342,7 @@ func (c *Checker) checkPublicSignature(sig ast.FunctionSignature) error {
 	if returnType == "" {
 		return nil
 	}
-	return c.rejectPrivateType(returnType, "function `"+sig.Name+"` return type")
+	return c.rejectPrivateTypeExcept(returnType, "function `"+sig.Name+"` return type", typeParams)
 }
 
 // checkPublicStructFields validates public fields on one struct.
@@ -1087,8 +1094,18 @@ func (c *Checker) parseTypeNode(parsed typ.Type) (Type, error) {
 
 // rejectPrivateType reports an error when typeName exposes a private declaration.
 func (c *Checker) rejectPrivateType(typeName string, context string) error {
+	return c.rejectPrivateTypeExcept(typeName, context, nil)
+}
+
+// rejectPrivateTypeExcept is rejectPrivateType with the names a signature's
+// type parameters take, which are not declarations at all.
+func (c *Checker) rejectPrivateTypeExcept(
+	typeName string,
+	context string,
+	typeParams map[string]bool,
+) error {
 	for _, name := range c.types.referencedTypeNames(Type(typeName)) {
-		if !c.isUserDeclaredType(name) {
+		if typeParams[name] || !c.isUserDeclaredType(name) {
 			continue
 		}
 		if c.isPublicType(name) {
@@ -7960,6 +7977,11 @@ func (c *Checker) isPlainDataType(name string, seen map[string]bool) bool {
 	}
 	t := Type(name)
 	if t == typeBool || t == typeVoid || numericTypes[t] {
+		return true
+	}
+	// A function pointer is the address of a top-level function, which
+	// outlives the program (SPEC §6.10): copying it creates no obligation.
+	if _, ok := c.funcPointerNode(t); ok {
 		return true
 	}
 	if c.enums[name] != nil || c.errorSets[name] != nil {

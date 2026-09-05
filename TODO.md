@@ -9,17 +9,8 @@
 中核は「Cmd 列を再生して step で突き合わせる」だけにして、乱択生成器はその列の
 供給源の 1 つに留めます。Quint の ITF trace は `std::json` で読めるので、後から
 `run_trace` を足せば連携できますが、std に外部 tool への依存は入れません。
-seed の再現(`kizu test --seed`、`std::testing::seed()`)は入った。
-
-## 7. `std::testing::run_model` と sequence shrink
-
-`run_model<Cmd, M, S>(alloc, &var rng, steps, gen, init_model, init_sut, step) -> !?Array<Cmd>`。
-`gen` / `init_*` / `step` は関数 pointer(closure が無いので top-level fn で足りる)。
-`init_model` と `step` は allocator を取る(model が `Array` を持つため)。失敗した列は
-replay で最短 prefix を二分探索し、1 手ずつ削れるだけ削る。seed は #1730 の note が
-出す。値の shrink(型ごとの `contract Shrink`)は最初の版に入れない。
-列でなく値の性質(課税の単調性、按分の和)には `testing::check<T>(rng, n, gen, prop)`
-を隣に置く。
+seed の再現(`kizu test --seed`、`std::testing::seed()`)と `run_model` /
+`check`(`docs/std/testing.md`)は入った。
 
 ## 8. dogfood
 
@@ -27,7 +18,7 @@ replay で最短 prefix を二分探索し、1 手ずつ削れるだけ削る。
 runner の API がそのまま使えるかを見る。加えて言語の顔になる例を `examples/` に置く:
 帳簿(送金の列に対して残高の総和保存・二重送信の冪等性)、契約の状態機械(遷移表を
 model にする)、暦の算術(10 の後、model は日数 counter)。金額は float でなく最小
-単位の `i64` で持つ。
+単位の `i64` で持つ。`tests/behavior/src/std_testing_model/` の容器の例が出発点。
 
 ## 10. `std::time` と `std::date`
 

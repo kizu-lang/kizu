@@ -8664,6 +8664,11 @@ func (c *Checker) isPlainDataType(typeName string, seen map[string]bool) bool {
 		"usize", "isize", "f32", "f64":
 		return true
 	}
+	// A function pointer is the address of a top-level function, which
+	// outlives the program: copying it creates no obligation.
+	if _, ok := funcPointerNode(typeName); ok {
+		return true
+	}
 	if c.enums[typeName] != nil || c.errorSets[typeName] != nil {
 		return true
 	}

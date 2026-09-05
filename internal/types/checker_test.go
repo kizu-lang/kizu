@@ -2740,3 +2740,17 @@ func writesFullStdPath(source string) bool {
 	}
 	return false
 }
+
+// TestCheckPublicGenericIgnoresTypeParamNamedLikePrivateType keeps a public
+// generic's type parameter out of the visibility check even when the program
+// declares a private type of the same name.
+func TestCheckPublicGenericIgnoresTypeParamNamedLikePrivateType(t *testing.T) {
+	source := `struct Cmd {}
+pub fn apply<Cmd>(step: fn(&Cmd) -> bool, value: Cmd) -> bool {
+    return step(&value);
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}

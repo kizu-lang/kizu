@@ -7,7 +7,11 @@ import std::sort;
 import std::string;
 
 struct PrivateTypeNames {
-    values: array::Array<string::String>, found: ?i64
+    values: array::Array<string::String>, found: ?i64,
+    // skip names the signature under check declares as type parameters: they
+    // are the caller's to fill in and say nothing about visibility, even when
+    // a program declares a private type of the same name.
+    skip: array::Array<string::String>
 }
 
 union PublicAPIContext {
@@ -35,13 +39,13 @@ fn (self: &Checker) check_public_api(tree: &ast::Ast, program: &ast::Program) ->
     while program.declarations.get(index) |declaration| {
         let issue = match tree.declarations.at(declaration.node) {
             Function(value) => if value.signature.public {
-                check_public_signature(tree, &value.signature, &var private_names)
+                try check_public_signature(self.allocator, tree, &value.signature, &var private_names)
             } else {
                 no_public_api_issue()
             },
             Struct(value) => check_public_struct_fields(tree, value, &var private_names),
             Union(value) => check_public_union_variants(tree, value, &var private_names),
-            Contract(value) => check_public_contract(tree, value, &var private_names),
+            Contract(value) => try check_public_contract(self.allocator, tree, value, &var private_names),
             _ => no_public_api_issue(),
         };
         if issue |failure| {
@@ -57,8 +61,9 @@ fn no_public_api_issue() -> ?PublicAPIIssue {
     return null;
 }
 
-fn check_public_signature(tree: &ast::Ast, signature: &ast::FunctionSignature,
-    private_names: &var PrivateTypeNames) -> ?PublicAPIIssue {
+fn check_public_signature(allocator: Allocator, tree: &ast::Ast, signature: &ast::FunctionSignature,
+    private_names: &var PrivateTypeNames) -> !?PublicAPIIssue {
+    try private_names.set_type_params(allocator, tree, signature);
     var index = 0;
     while signature.params.at(index) |parameter| {
         if reject_private_type(&tree.types, parameter.type_name, private_names,
@@ -114,14 +119,14 @@ fn check_public_union_variants(tree: &ast::Ast, declaration: &ast::UnionDecl,
     return null;
 }
 
-fn check_public_contract(tree: &ast::Ast, declaration: &ast::ContractDecl,
-    private_names: &var PrivateTypeNames) -> ?PublicAPIIssue {
+fn check_public_contract(allocator: Allocator, tree: &ast::Ast, declaration: &ast::ContractDecl,
+    private_names: &var PrivateTypeNames) -> !?PublicAPIIssue {
     if !declaration.public {
         return null;
     }
     var index = 0;
     while declaration.methods.at(index) |method| {
-        if check_public_signature(tree, &method.signature, private_names) |issue| {
+        if try check_public_signature(allocator, tree, &method.signature, private_names) |issue| {
             return issue;
         }
         index = index + 1;
@@ -141,7 +146,10 @@ fn reject_private_type(table: &typ::Table, type_name: typ::Type,
 
 fn collect_private_type_names(allocator: Allocator, tree: &ast::Ast,
     program: &ast::Program) -> !PrivateTypeNames {
-    var names = PrivateTypeNames { values: array::new<string::String>(allocator), found: null };
+    var names = PrivateTypeNames {
+        values: array::new<string::String>(allocator), found: null,
+        skip: array::new<string::String>(allocator)
+    };
     errdefer names.deinit(allocator);
     var index = 0;
     while program.declarations.get(index) |declaration| {
@@ -169,6 +177,40 @@ fn collect_private_type_names(allocator: Allocator, tree: &ast::Ast,
     return move names;
 }
 
+/// Records the type parameters of the signature about to be checked, the Go
+/// `typeParams` set: a name among them is skipped by `visit`.
+fn (self: &var PrivateTypeNames) set_type_params(allocator: Allocator, tree: &ast::Ast,
+    signature: &ast::FunctionSignature) -> !void {
+    self.skip.clear(allocator);
+    let names = try signature.type_param_names(allocator);
+    defer names.deinit(allocator);
+    var index = 0;
+    while names.get(index) |name| {
+        let retained = tree.texts.at(name.node);
+        let bytes = retained.as_bytes();
+        let copied = try string::from_bytes(allocator, bytes);
+        errdefer copied.deinit(allocator);
+        try self.skip.append(allocator, move copied);
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: &PrivateTypeNames) skips(path: &array::Array<string::String>) -> bool {
+    if path.len() != 1 {
+        return false;
+    }
+    var index = 0;
+    while self.skip.at(index) |name| {
+        let bytes = name.as_bytes();
+        if compare_type_path(path, bytes) == 0 {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 fn (self: &var PrivateTypeNames) find(table: &typ::Table, value: typ::Type) -> ?i64 {
     self.found = null;
     typ::walk<PrivateTypeNames>(table, value, self);
@@ -181,6 +223,9 @@ fn (self: &var PrivateTypeNames) visit(value: &typ::Node) -> void {
     }
     match value {
         Name(name) => {
+            if self.skips(&name.path) {
+                return;
+            }
             var low = 0;
             var high = self.values.len();
             while low < high {
