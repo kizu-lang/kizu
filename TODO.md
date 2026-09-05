@@ -17,7 +17,7 @@ seed の再現(`kizu test --seed`、`std::testing::seed()`)と `run_model` /
 `std::map` と `std::array` を参照モデルと突き合わせる test を `tests/behavior` に置き、
 runner の API がそのまま使えるかを見る。加えて言語の顔になる例を `examples/` に置く:
 帳簿(送金の列に対して残高の総和保存・二重送信の冪等性)、契約の状態機械(遷移表を
-model にする)、暦の算術(`std::date`、model は日数 counter)。金額は float でなく最小
+model にする)。暦の算術は `examples/model_calendar.kizu` にある。金額は float でなく最小
 単位の `i64` で持つ。`tests/behavior/src/std_testing_model/` の容器の例が出発点。
 
 ## std::http / std::net の残り

@@ -125,7 +125,7 @@ func TestFormatPreservesTypeMemberDocComments(t *testing.T) {
 		"enum Color{\n/// Secondary.\nGreen,}\n"
 	want := "struct Trace {\n" +
 		"    /// Label.\n" +
-		"    label: []u8\n" +
+		"    label: []u8,\n" +
 		"}\n" +
 		"\n" +
 		"enum Color {\n" +
@@ -225,10 +225,24 @@ func TestFormatEnumAddsTrailingCommaBeforeComment(t *testing.T) {
 	}
 }
 
-// TestFormatTrailingCommaDroppedBeforeClose checks that `,}` becomes `}`.
+// TestFormatStructKeepsTrailingComma checks struct fields keep the trailing
+// comma the way SPEC §6.4 writes them, whether or not the source had one.
+func TestFormatStructKeepsTrailingComma(t *testing.T) {
+	src := "struct Point {\n    x: i64,\n    y: i64\n}\n"
+	want := "struct Point {\n    x: i64,\n    y: i64,\n}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("struct trailing comma:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got := Format(want); got != want {
+		t.Fatalf("struct trailing comma idempotent:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatTrailingCommaDroppedBeforeClose checks that `,}` becomes `}` in a
+// struct literal, where the comma is not part of the declaration style.
 func TestFormatTrailingCommaDroppedBeforeClose(t *testing.T) {
-	src := "struct Point {\n    x: i64,\n    y: i64,\n}\n"
-	want := "struct Point {\n    x: i64,\n    y: i64\n}\n"
+	src := "fn main() {\n    let p = Point {\n        x: 1,\n        y: 2,\n    };\n}\n"
+	want := "fn main() {\n    let p = Point {\n        x: 1,\n        y: 2\n    };\n}\n"
 	if got := Format(src); got != want {
 		t.Fatalf("trailing comma:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
