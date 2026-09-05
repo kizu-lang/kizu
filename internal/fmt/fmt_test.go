@@ -549,6 +549,22 @@ func TestFormatComptimeMatchDoesNotAddArmComma(t *testing.T) {
 	}
 }
 
+// TestFormatDerefKeepsSubtraction distinguishes a `-` after a postfix deref,
+// which subtracts, from one after a product's `*`, which signs its operand.
+func TestFormatDerefKeepsSubtraction(t *testing.T) {
+	src := "fn main() {\n" +
+		"    slot.* = slot.* -amount;\n" +
+		"    let scaled = base * -amount;\n" +
+		"}\n"
+	want := "fn main() {\n" +
+		"    slot.* = slot.* - amount;\n" +
+		"    let scaled = base * -amount;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(deref subtraction):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatBitwiseAndShiftOperators checks the operators of SPEC §6.9.2 lay
 // out as binary operators: a shift's two tokens stay together, the bitwise
 // `&` and `|` take a space on both sides, and `~` hugs its operand -- while a
