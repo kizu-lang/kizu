@@ -38,20 +38,20 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 45 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 44/45 |
+| fn / let / struct / literals | 46 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 45/46 |
 | arithmetic / bitwise / float | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | enum / union | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/16 |
 | error union `!T` / try / errdefer | 52 | ✅ | ✅ | ✅ | 34/52 | 34/52 | 34/52 | 31/52 |
 | optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
-| move / borrow | 61 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| move / borrow | 62 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| cast / slice / stack buffer / box | 15 | ✅ | ✅ | ✅ | 14/15 | 14/15 | 14/15 | 14/15 |
+| cast / slice / stack buffer / box | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 | 15/16 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 | 1/4 |
-| contract / generics | 15 | ✅ | ✅ | ✅ | 14/15 | 14/15 | 14/15 | 14/15 |
+| contract / generics | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 | 15/16 |
 | std::array | 21 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -68,7 +68,7 @@ not in any one execution path.
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 179 runnable examples,
+tags, so an example appears in more than one row. 180 runnable examples,
 measured on 2026-09-04 with `just backend-matrix` -- re-run it after touching a
 backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
 program's output: `run` executes the native build; `wasm` and `wasm-opt` load
@@ -79,13 +79,13 @@ builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 179/179 |
-| `kizu run` | 179/179 |
-| `kizu build --emit-llvm` | 179/179 |
-| `kizu build --target wasm32-wasi` (WAT) | 159/179 |
-| `kizu build --target wasm32-wasi --opt` (WAT) | 159/179 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 159/179 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 152/179 |
+| `kizu check` | 180/180 |
+| `kizu run` | 180/180 |
+| `kizu build --emit-llvm` | 180/180 |
+| `kizu build --target wasm32-wasi` (WAT) | 160/180 |
+| `kizu build --target wasm32-wasi --opt` (WAT) | 160/180 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 160/180 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 153/180 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 its remaining 20 examples are explicit target-unsupported capabilities: 16
@@ -130,7 +130,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 159/179 runnable examples, browser binary runs 152/179, and all remaining cases are classified as target-unsupported capabilities |
+| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 160/180 runnable examples, browser binary runs 153/180, and all remaining cases are classified as target-unsupported capabilities |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
 | `kizu lint` | **not started** |

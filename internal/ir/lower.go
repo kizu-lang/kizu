@@ -1610,6 +1610,13 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 	if isMutableReferenceType(want) {
 		target := borrowTargetExpr(expr)
 		if slot, ok := l.slotPointer(target); ok {
+			// A slot that holds a `&var T` borrow hands over the borrow it
+			// holds, not its own address: the callee wants the storage the
+			// borrow already names, and a slot of `&var T` would be `&var
+			// &var T`.
+			if slot.Type == "&var "+want {
+				return l.lowerExpr(expr)
+			}
 			return slot, nil
 		}
 		if storage, ok := l.lowerFieldStorage(target); ok {
