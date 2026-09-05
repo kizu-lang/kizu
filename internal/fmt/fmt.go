@@ -996,9 +996,17 @@ func noSpaceAfter(t token.Token) bool {
 }
 
 // signMinus reports whether the just-emitted `-` signs a value rather than
-// subtracting: nothing before it, or a token that cannot end an operand.
+// subtracting: nothing before it, or a token that cannot end an operand. A
+// postfix deref `.*` ends one, unlike the `*` of a product.
 func (b *builder) signMinus() bool {
-	return b.prevIndex == 0 || !endsOperand(b.tokens[b.prevIndex-1])
+	if b.prevIndex == 0 {
+		return true
+	}
+	before := b.tokens[b.prevIndex-1]
+	if before.Type == token.Asterisk {
+		return b.prevIndex < 2 || b.tokens[b.prevIndex-2].Type != token.Dot
+	}
+	return !endsOperand(before)
 }
 
 // endsOperand reports whether t can end an operand, which makes a following
