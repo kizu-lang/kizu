@@ -96,6 +96,7 @@ var groups = []featureGroup{
 	{"std::sort", []string{"std-sort"}},
 	{"std::float", []string{"std-float", "append", "parse", "shortest"}},
 	{"std::rand", []string{"std-rand", "seed", "deterministic"}},
+	{"std::time", []string{"std-time", "duration", "instant", "unix-time"}},
 	{"std::fmt", []string{"std-fmt", "formatting", "artifact"}},
 	{"std::testing", []string{"std-testing"}},
 	{"std::fs / path / io / process", []string{

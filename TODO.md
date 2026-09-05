@@ -20,14 +20,15 @@ runner の API がそのまま使えるかを見る。加えて言語の顔に�
 model にする)、暦の算術(10 の後、model は日数 counter)。金額は float でなく最小
 単位の `i64` で持つ。`tests/behavior/src/std_testing_model/` の容器の例が出発点。
 
-## 10. `std::time` と `std::date`
+## 10. `std::date`
 
-暦が無いので期限・年度・時効・HTTP の `Date` header(3)が書けない。2 層に分ける:
-`std::time` は `Duration`(ms の i64)、`Instant`(monotonic)、`UnixTime`(epoch ms)と
-加減・比較だけ。`std::date` は proleptic Gregorian の `Date { year, month, day }`、
-`to_days` / `from_days`、`weekday`、`add_days` / `add_months`(月末の丸めは明示引数)、
-ISO 8601 の parse / format、`DateTime` は UTC のみ。timezone(tzdata)、locale 書式、
-隠れた `now()` は入れない —— 時計は `process::unix_millis()` を source で渡す。
+暦が無いので期限・年度・時効・HTTP の `Date` header(3)が書けない。`std::time`
+(`Duration` / `Instant` / `UnixTime`、加減と比較)は入った。残るのは `std::date`:
+proleptic Gregorian の `Date { year, month, day }`、`to_days` / `from_days`、`weekday`、
+`add_days` / `add_months`(月末の丸めは明示引数)、ISO 8601 の parse / format、
+`DateTime` は UTC のみで `UnixTime` と相互変換。timezone(tzdata)、locale 書式、
+隠れた `now()` は入れない。`compiler::internal::timestamp` の civil 変換と RFC3339 は
+これに置き換え、docs/language-gaps.md の `time` 行を閉じる。
 
 ## std::http / std::net の残り
 

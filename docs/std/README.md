@@ -30,6 +30,7 @@
 | [http](http.md) | HTTP/1 の server、message、routing |
 | [path](path.md) | file system を見ない path text 操作 |
 | [process](process.md) | 引数・環境変数・時刻・終了 status |
+| [time](time.md) | ミリ秒の `Duration` と、monotonic / Unix の瞬間 |
 | [testing](testing.md) | assertion |
 | [rand](rand.md) | seed から決まる擬似乱数列 |
 | [float](float.md) | 浮動小数点値の文字列変換と bit 表現 |
