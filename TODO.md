@@ -26,7 +26,6 @@ caller のもの。停止は `break`。期限の掃除は `next` の中なので
 | pipelining | 中 | 先読みは順に処理、答えは重ねない |
 | multipart / form-data | 中 | |
 | compression | 大 | 圧縮 library が要る。別の話 |
-| `Date` header | — | std に暦が無い。暦が先 |
 | HTTP/2 / HTTP/3 | 大 | |
 
 ## 4. TLS / HTTPS (#1081)

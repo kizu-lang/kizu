@@ -58,7 +58,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::time | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::date | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fs / path / io / process | 29 | ✅ | ✅ | ✅ | 12/29 | 12/29 | 3/29 |
