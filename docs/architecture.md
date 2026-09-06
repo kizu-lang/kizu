@@ -39,6 +39,7 @@ lib/kizu/             release binaryが隣で読むlibrary tree
   std/src/            Kizuで書かれた標準ライブラリ
   browser/app.mjs     browser ESM出力へcopyする共通host runtime
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
+spec/                Lean で書いた仕様と性質の証明。example が再生する trace を生成する
 tests/behavior/      振る舞いの assert を 1 package に束ねたもの
 tests/fixtures/      module 解決などが使う固定入力
 docs/tutorial/       1 つのものを最初から最後まで作る文書と、その sample package

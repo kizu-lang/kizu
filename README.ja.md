@@ -48,12 +48,12 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | cast / slice / stack buffer / box | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 |
-| contract / generics | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 |
+| contract / generics | 17 | ✅ | ✅ | ✅ | 16/17 | 16/17 | 15/17 |
 | std::array | 21 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::map | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
 | std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 20/22 |
-| std::json | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::json | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -61,13 +61,13 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | std::date | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 27 | ✅ | ✅ | ✅ | 10/27 | 10/27 | 3/27 |
+| std::fs / path / io / process | 28 | ✅ | ✅ | ✅ | 11/28 | 11/28 | 3/28 |
 | std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 | 2/19 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。runnable example は 182 件、測定は 2026-09-05 に
+1 つの example は複数の行に現れます。runnable example は 183 件、測定は 2026-09-05 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run`、`wasm`、`wasm-bin`、`browser` はプログラムの出力で判定します。`run` は native
 build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmtime` で、
@@ -76,12 +76,12 @@ build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmti
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 182/182 |
-| `kizu run` | 182/182 |
-| `kizu build --emit-llvm` | 182/182 |
-| `kizu build --target wasm32-wasi` (WAT) | 162/182 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 162/182 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 155/182 |
+| `kizu check` | 183/183 |
+| `kizu run` | 183/183 |
+| `kizu build --emit-llvm` | 183/183 |
+| `kizu build --target wasm32-wasi` (WAT) | 163/183 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 163/183 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 155/183 |
 
 native 経路に pending の runnable example はありません。WASI はまだ target subset
 で、残る 20 件はすべて明示的な target 非対応(`std::net` 16、extern C 2、
@@ -119,7 +119,7 @@ no-libc / freestanding build は build policy としては受理済みですが�
 | 機能 | 状態 |
 | --- | --- |
 | 並列処理のための thread | **予定。** 以前の API は checker rule だけを持ち lowering も runtime も無かったため撤回しました。戻すための受け入れ条件は ADR-0025 にあり、その第 1 条件は `kizu run` で実行できることです。coroutine(`std::coro`)と evented な `Io` は入っていますが、これは 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
-| 現在の subset を超える wasm backend | **進行中。** WASI WAT / binary は 162/182、browser binary は 155/182 が動き、残りはすべて target 非対応として分類済みです |
+| 現在の subset を超える wasm backend | **進行中。** WASI WAT / binary は 163/183、browser binary は 155/183 が動き、残りはすべて target 非対応として分類済みです |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |
 | `kizu lint` | **未着手** |
