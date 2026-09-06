@@ -549,6 +549,28 @@ func TestFormatComptimeMatchDoesNotAddArmComma(t *testing.T) {
 	}
 }
 
+// TestFormatFunctionPointerTypeHugsParen keeps `fn(` in a function pointer
+// type (SPEC §7) while a receiver declaration still reads `fn (self: T) name`.
+func TestFormatFunctionPointerTypeHugsParen(t *testing.T) {
+	src := "fn apply(f: fn (i64) -> i64, value: i64) -> i64 {\n" +
+		"    return f(value);\n" +
+		"}\n" +
+		"\n" +
+		"pub fn(self: &Parser) advance() -> void {\n" +
+		"    return;\n" +
+		"}\n"
+	want := "fn apply(f: fn(i64) -> i64, value: i64) -> i64 {\n" +
+		"    return f(value);\n" +
+		"}\n" +
+		"\n" +
+		"pub fn (self: &Parser) advance() -> void {\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(function pointer type):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatDerefKeepsSubtraction distinguishes a `-` after a postfix deref,
 // which subtracts, from one after a product's `*`, which signs its operand.
 func TestFormatDerefKeepsSubtraction(t *testing.T) {
