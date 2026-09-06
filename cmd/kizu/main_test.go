@@ -782,6 +782,15 @@ fn main(){let user = make_user(); print(user.name);}
 `,
 		},
 		{
+			name: "function_pointer_and_receiver",
+			source: `fn apply(f: fn (i64) -> i64, value: i64) -> i64 { return f(value); }
+
+struct Counter { count: i64, }
+
+pub fn(self: &var Counter) bump() -> void { self.count = self.count + 1; return; }
+`,
+		},
+		{
 			name: "struct_literal_and_match_arms",
 			source: `pub union Value { Text([]u8), Count(i64), }
 

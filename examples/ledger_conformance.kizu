@@ -1,0 +1,264 @@
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::map;
+import std::mem;
+import std::string;
+
+// The ledger is specified in spec/Ledger.lean, with proofs that money is
+// conserved and that a transfer applied once is a duplicate whenever it comes
+// again. `just spec-trace` runs that file and writes
+// examples/fixtures/ledger_trace.json: transfers, the outcome the
+// specification gives each, and the balances afterwards. This program replays
+// those traces against two implementations and names the first step where one
+// disagrees with the specification.
+
+pub struct Step {
+    pub id: i64,
+    pub source: i64,
+    pub target: i64,
+    pub amount: i64,
+    pub outcome: string::String,
+    pub balances: array::Array<i64>,
+}
+
+pub struct Trace {
+    pub seed: i64,
+    pub steps: array::Array<Step>,
+}
+
+pub struct Suite {
+    pub accounts: i64,
+    pub opening: i64,
+    pub traces: array::Array<Trace>,
+}
+
+// Amounts are i64 in the smallest unit, never floats.
+struct Transfer {
+    id: i64,
+    source: i64,
+    target: i64,
+    amount: i64,
+}
+
+enum Outcome {
+    Applied,
+    Duplicate,
+    Invalid,
+    Insufficient,
+}
+
+fn outcome_name(outcome: Outcome) -> []u8 {
+    return match outcome {
+        Applied => "applied",
+        Duplicate => "duplicate",
+        Invalid => "invalid",
+        Insufficient => "insufficient",
+    };
+}
+
+// What every implementation offers: post a transfer, read a balance.
+contract Posts {
+    fn post(allocator: Allocator, transfer: &Transfer) -> !Outcome;
+    fn balance(account: i64) -> i64;
+}
+
+fn open_accounts(allocator: Allocator, suite: &Suite) -> !map::Map<i64, i64> {
+    var balances = map::new<i64, i64>(allocator);
+    errdefer balances.deinit(allocator);
+    var account = 0;
+    while account < suite.accounts {
+        try balances.insert(allocator, account, suite.opening);
+        account = account + 1;
+    }
+    return move balances;
+}
+
+// Moving money is the same in both drafts; only the memory of ids differs.
+fn move_money(balances: &var map::Map<i64, i64>, transfer: &Transfer) -> Outcome {
+    if transfer.amount <= 0 or transfer.source == transfer.target {
+        return Outcome::Invalid;
+    }
+    let source = balances.get(transfer.source) orelse 0;
+    if source < transfer.amount {
+        return Outcome::Insufficient;
+    }
+    if balances.at_mut(transfer.source) |slot| {
+        slot.* = slot.* - transfer.amount;
+    }
+    if balances.at_mut(transfer.target) |slot| {
+        slot.* = slot.* + transfer.amount;
+    }
+    return Outcome::Applied;
+}
+
+// The first draft remembers only the last id it applied, which is enough
+// for a retry that arrives right away.
+struct Draft {
+    balances: map::Map<i64, i64>,
+    last_id: i64,
+}
+
+fn (self: Draft) deinit(allocator: Allocator) -> void {
+    self.balances.deinit(allocator);
+}
+
+fn open_draft(allocator: Allocator, suite: &Suite) -> !Draft {
+    return Draft { balances: try open_accounts(allocator, suite), last_id: -1 };
+}
+
+fn (self: &var Draft) post(allocator: Allocator, transfer: &Transfer) -> !Outcome {
+    if transfer.id == self.last_id {
+        return Outcome::Duplicate;
+    }
+    let outcome = move_money(&var self.balances, transfer);
+    if outcome == Outcome::Applied {
+        self.last_id = transfer.id;
+    }
+    return outcome;
+}
+
+fn (self: &Draft) balance(account: i64) -> i64 {
+    return self.balances.get(account) orelse 0;
+}
+
+impl Posts for Draft;
+
+// The ledger keeps every applied id.
+struct Ledger {
+    balances: map::Map<i64, i64>,
+    applied: map::Map<i64, bool>,
+}
+
+fn (self: Ledger) deinit(allocator: Allocator) -> void {
+    self.balances.deinit(allocator);
+    self.applied.deinit(allocator);
+}
+
+fn open_ledger(allocator: Allocator, suite: &Suite) -> !Ledger {
+    return Ledger { balances: try open_accounts(allocator, suite), applied: map::new<i64, bool>(allocator) };
+}
+
+fn (self: &var Ledger) post(allocator: Allocator, transfer: &Transfer) -> !Outcome {
+    if self.applied.contains(transfer.id) {
+        return Outcome::Duplicate;
+    }
+    let outcome = move_money(&var self.balances, transfer);
+    if outcome == Outcome::Applied {
+        try self.applied.insert(allocator, transfer.id, true);
+    }
+    return outcome;
+}
+
+fn (self: &Ledger) balance(account: i64) -> i64 {
+    return self.balances.get(account) orelse 0;
+}
+
+impl Posts for Ledger;
+
+// "<name>: trace <seed> step <index>: transfer <id> " -- the start of every
+// line that names a disagreement.
+fn describe(allocator: Allocator, out: &var string::String, name: []u8, trace: &Trace, index: i64, step: &Step) -> !void {
+    try out.append_bytes(allocator, name);
+    try out.append_bytes(allocator, ": trace ");
+    try fmt::append_i64(allocator, out, trace.seed);
+    try out.append_bytes(allocator, " step ");
+    try fmt::append_i64(allocator, out, index);
+    try out.append_bytes(allocator, ": transfer ");
+    try fmt::append_i64(allocator, out, step.id);
+    try out.append_bytes(allocator, " ");
+    return;
+}
+
+// Replays one trace and reports the first step the implementation disagrees
+// on; true means every step agreed.
+fn replay<L>(allocator: Allocator, name: []u8, suite: &Suite, trace: &Trace, ledger: &var L) -> !bool {
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    var index = 0;
+    while trace.steps.at(index) |step| {
+        let transfer = Transfer { id: step.id, source: step.source, target: step.target, amount: step.amount };
+        let outcome = try ledger.post(allocator, &transfer);
+        let got = outcome_name(outcome);
+        let expected = step.outcome.as_bytes();
+        if !mem::equal_bytes(got, expected) {
+            try describe(allocator, &var line, name, trace, index, step);
+            try line.append_bytes(allocator, "expected ");
+            try line.append_bytes(allocator, expected);
+            try line.append_bytes(allocator, ", got ");
+            try line.append_bytes(allocator, got);
+            let text = line.as_bytes();
+            print(text);
+            return false;
+        }
+        var account = 0;
+        while account < suite.accounts {
+            let held = ledger.balance(account);
+            let wanted = step.balances.get_or_panic(account);
+            if held != wanted {
+                try describe(allocator, &var line, name, trace, index, step);
+                try line.append_bytes(allocator, "account ");
+                try fmt::append_i64(allocator, &var line, account);
+                try line.append_bytes(allocator, " expected ");
+                try fmt::append_i64(allocator, &var line, wanted);
+                try line.append_bytes(allocator, ", got ");
+                try fmt::append_i64(allocator, &var line, held);
+                let text = line.as_bytes();
+                print(text);
+                return false;
+            }
+            account = account + 1;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// Runs every trace against a fresh implementation and prints either the first
+// disagreement or the count of steps that agreed.
+fn conform<L>(allocator: Allocator, name: []u8, suite: &Suite, open: fn(Allocator, &Suite) -> !L) -> !void {
+    var steps = 0;
+    var index = 0;
+    while suite.traces.at(index) |trace| {
+        var ledger = try open(allocator, suite);
+        defer ledger.deinit(allocator);
+        if !try replay<L>(allocator, name, suite, trace, &var ledger) {
+            return;
+        }
+        steps = steps + trace.steps.len();
+        index = index + 1;
+    }
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, name);
+    try line.append_bytes(allocator, ": ");
+    try fmt::append_i64(allocator, &var line, index);
+    try line.append_bytes(allocator, " traces, ");
+    try fmt::append_i64(allocator, &var line, steps);
+    try line.append_bytes(allocator, " steps agree with the specification");
+    let text = line.as_bytes();
+    print(text);
+    return;
+}
+
+fn main() -> !void {
+    let io = io::blocking();
+    let allocator = mem::page_allocator();
+    let text = try fs::read_file(io, allocator, "examples/fixtures/ledger_trace.json", mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let document = text.as_bytes();
+    var suite = try json::decode<Suite>(allocator, document);
+    defer suite.deinit(allocator);
+    try conform<Draft>(allocator, "draft", &suite, open_draft);
+    try conform<Ledger>(allocator, "ledger", &suite, open_ledger);
+    return;
+}
+
+// run
+// features: std-json decode std-map contract generics fs io
+// dir: .
+// output:
+// draft: trace 1 step 7: transfer 526 expected duplicate, got applied
+// ledger: 3 traces, 150 steps agree with the specification

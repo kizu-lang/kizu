@@ -929,7 +929,7 @@ func (b *builder) binaryAmp() bool {
 // call parenthesis. A generic `>` ends a callee; a comparison `>` does not.
 func (b *builder) parenTakesSpace(prev token.Token) bool {
 	if prev.Type == token.Function {
-		return true
+		return b.functionOpensDeclaration()
 	}
 	switch prev.Type {
 	case token.Ident, token.RParen, token.RBracket:
@@ -938,6 +938,20 @@ func (b *builder) parenTakesSpace(prev token.Token) bool {
 		return b.prevIndex >= len(b.generic) || !b.generic[b.prevIndex]
 	}
 	return !noSpaceAfter(prev)
+}
+
+// functionOpensDeclaration reports whether the `fn` just emitted begins a
+// declaration, whose receiver parenthesis takes a space, rather than a
+// function pointer type, whose parameter list hugs the keyword (SPEC §7).
+func (b *builder) functionOpensDeclaration() bool {
+	if b.prevIndex == 0 {
+		return true
+	}
+	switch b.tokens[b.prevIndex-1].Type {
+	case token.Public, token.LBrace, token.RBrace, token.Semicolon:
+		return true
+	}
+	return false
 }
 
 // attachedTokenHugsLeft reports whether curr is postfix indexing or the `!`

@@ -14,11 +14,10 @@ seed の再現(`kizu test --seed`、`std::testing::seed()`)と `run_model` /
 
 ## 8. dogfood
 
-言語の顔になる例を `examples/` に置く: 帳簿(送金の列に対して残高の総和保存・
-再送の冪等性)、契約の状態機械(遷移表を仕様にする)。金額は float でなく最小単位の
-`i64` で持つ。`std::testing::run_model` は消した —— 呼び出しが positional 7 引数、
-食い違いの説明を出せず、列の表示も毎回自作だった。仕様を Quint / Lean のような
-仕様言語で書き、その trace を `std::json` で読んで実装を検査する形を検討中。
+言語の顔になる例を `examples/` に置く。帳簿は `spec/Ledger.lean` の仕様(総和保存と
+再送の冪等性を証明)が吐く trace を `examples/ledger_conformance.kizu` が再生する形で
+入った(`spec/README.md`)。残りは契約の状態機械で、遷移表を同じく Lean の仕様にし、
+状態ごとの許される遷移を証明する。金額は float でなく最小単位の `i64` で持つ。
 
 ## std::http / std::net の残り
 
