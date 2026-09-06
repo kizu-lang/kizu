@@ -172,6 +172,7 @@ fn (self: &Response) body_len() -> i64
 fn (self: &Response) is_finished() -> bool
 fn (self: &var Response) set_status(status: i64) -> std::http::Failure!void
 fn (self: &var Response) header(allocator, name, value) -> std::http::Failure!void
+fn (self: &var Response) set_date(allocator, moment: std::date::DateTime) -> std::http::Failure!void
 fn (self: &var Response) write(allocator, bytes) -> std::http::Failure!void
 fn (self: &var Response) finish() -> void
 fn (self: &var Response) reset(allocator) -> void
@@ -192,6 +193,14 @@ server には chunked encoding が要ります。それが入るまで、bufferi
 落とします。message が実際に何であるかから書くもので、矛盾する 2 つを並べて
 送るわけにはいきません。1xx / 204 / 304 は body を持たないので Content-Length も
 付きません。
+
+`Date` は `set_date` が書きます。値は RFC 9110 §5.6.7 の IMF-fixdate
+(`Sun, 06 Nov 1994 08:49:37 GMT`、常に UTC)で、`std::http::append_date` が
+その綴りです。server は caller の代わりに時計を読みません —— どの時計を使うか、
+相手に時刻を教えるかどうかは caller のものです。今の時刻なら
+`date::from_unix(time::unix(process::unix_millis()))` です。読む側(`Date` /
+`Expires` / `Last-Modified` の解析)はまだありません。受け取り側には RFC が
+3 つの綴りを読むことを求めていて、それは書く側とは別の仕事です。
 
 ## Limits
 
@@ -700,6 +709,9 @@ pub fn equal_ascii_fold(left: []u8, right: []u8) -> bool
 pub fn append_hex(
     allocator: Allocator, out: &var std::string::String, value: i64,
 ) -> std::mem::Error!void
+pub fn append_date(
+    allocator: Allocator, out: &var std::string::String, moment: std::date::DateTime,
+) -> std::http::Failure!void
 ```
 
 `head_end` は head を閉じる空行の直後の index を返し、まだ届いていなければ
@@ -952,8 +964,8 @@ cookie が運ぶのは、それを set したプログラムが入れたもの�
 書かず、`SameSite::None` は書きます。「言わない」と「None と言う」は違う
 ことなので、値も違います。
 
-`Expires` は持ちません。`Max-Age` が同じことを date 形式なしで言い、暦を
-持たない std が date を正直に書けないためです。
+`Expires` は持ちません。`Max-Age` が同じことを date 形式なしで言い、両方
+あるときも RFC 6265 は `Max-Age` を取るためです。
 
 cookie の名前は token、値は空白・カンマ・セミコロン・バックスラッシュ・
 制御 byte を拒否します —— それが 2 つ目の cookie(や 2 つ目の header)を
@@ -981,7 +993,8 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
   `Trailer` header で予告されたものを request に足す仕組みはありません
 - **compression**: `Content-Encoding` は素通しで、decode しません
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
-- **`Date` header**: std に暦がないので、書けないものを書きません
+- **HTTP date を読むこと**: `Date` / `Expires` / `Last-Modified` は解析しません。
+  書く側は `set_date` / `append_date` にあります
 - **multipart / form-data**、**compression**
 - **header folding**: RFC 9110 が protocol から外したもので、繋ぐのではなく拒否します
 

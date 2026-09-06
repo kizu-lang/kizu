@@ -1,0 +1,73 @@
+import std::date;
+import std::http;
+import std::mem;
+import std::string;
+import std::testing;
+import std::time;
+
+// The IMF-fixdate a server writes, checked against RFC 9110's own example and
+// the edges of the format: single-digit fields are zero-padded, the year has
+// four digits, and milliseconds are not part of it.
+
+fn expect_date(allocator: Allocator, unix_millis: i64, want: []u8) -> !void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let moment = date::from_unix(time::unix(unix_millis));
+    try http::append_date(allocator, &var out, moment);
+    let text = out.as_bytes();
+    testing::expect_equal<[]u8>(want, text);
+    return;
+}
+
+test "append_date writes RFC 9110's IMF-fixdate" {
+    let allocator = mem::page_allocator();
+    try expect_date(allocator, 784111777000, "Sun, 06 Nov 1994 08:49:37 GMT");
+    try expect_date(allocator, 0, "Thu, 01 Jan 1970 00:00:00 GMT");
+    try expect_date(allocator, 2147483647000, "Tue, 19 Jan 2038 03:14:07 GMT");
+    try expect_date(allocator, 1709166600500, "Thu, 29 Feb 2024 00:30:00 GMT");
+    try expect_date(allocator, -30641760000000, "Tue, 01 Jan 0999 00:00:00 GMT");
+}
+
+test "append_date refuses a year the format cannot spell" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let far = date::from_unix(time::unix(253402300800000));
+    if http::append_date(allocator, &var out, far) {
+        testing::fail("year 10000 was spelled");
+    } else |err| {
+        match err {
+            InvalidHeader => {},
+            _ => testing::fail("a different error arrived"),
+        }
+    }
+}
+
+test "set_date puts one Date field in the head" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.set_status(200);
+    try response.set_date(allocator, try date::parse_datetime("1994-11-06T08:49:37Z"));
+    try response.set_date(allocator, try date::parse_datetime("2024-02-29T00:30:00Z"));
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try response.encode(allocator, http::Version::Http11, http::Framing::Buffered, true, false, &var wire);
+    let text = wire.as_bytes();
+    testing::expect(mem::starts_with(text, "HTTP/1.1 200 OK"));
+    testing::expect(contains(text, "Date: Thu, 29 Feb 2024 00:30:00 GMT"));
+    testing::expect(!contains(text, "1994"));
+}
+
+fn contains(text: []u8, needle: []u8) -> bool {
+    let length = mem::len(text);
+    let width = mem::len(needle);
+    var start = 0;
+    while start + width <= length {
+        if mem::equal_bytes(text[start..start + width], needle) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
+}
