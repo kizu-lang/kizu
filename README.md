@@ -41,8 +41,8 @@ not in any one execution path.
 | fn / let / struct / literals | 46 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 45/46 |
 | arithmetic / bitwise / float | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| if / match | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| enum / union | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/16 |
+| if / match | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
+| enum / union | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/17 |
 | error union `!T` / try / errdefer | 52 | ✅ | ✅ | ✅ | 34/52 | 34/52 | 34/52 | 31/52 |
 | optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
 | move / borrow | 62 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -51,12 +51,12 @@ not in any one execution path.
 | comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | cast / slice / stack buffer / box | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 | 15/16 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 | 1/4 |
-| contract / generics | 17 | ✅ | ✅ | ✅ | 16/17 | 16/17 | 16/17 | 15/17 |
+| contract / generics | 18 | ✅ | ✅ | ✅ | 17/18 | 17/18 | 17/18 | 15/18 |
 | std::array | 21 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
 | std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 21/22 | 20/22 |
-| std::json | 15 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 14/15 |
+| std::json | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 14/16 |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -64,13 +64,13 @@ not in any one execution path.
 | std::date | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 28 | ✅ | ✅ | ✅ | 11/28 | 11/28 | 11/28 | 3/28 |
+| std::fs / path / io / process | 29 | ✅ | ✅ | ✅ | 12/29 | 12/29 | 12/29 | 3/29 |
 | std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 | 2/19 | 2/19 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 183 runnable examples,
+tags, so an example appears in more than one row. 184 runnable examples,
 measured on 2026-09-05 with `just backend-matrix` -- re-run it after touching a
 backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
 program's output: `run` executes the native build; `wasm` and `wasm-opt` load
@@ -81,13 +81,13 @@ builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 183/183 |
-| `kizu run` | 183/183 |
-| `kizu build --emit-llvm` | 183/183 |
-| `kizu build --target wasm32-wasi` (WAT) | 163/183 |
-| `kizu build --target wasm32-wasi --opt` (WAT) | 163/183 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 163/183 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 155/183 |
+| `kizu check` | 184/184 |
+| `kizu run` | 184/184 |
+| `kizu build --emit-llvm` | 184/184 |
+| `kizu build --target wasm32-wasi` (WAT) | 164/184 |
+| `kizu build --target wasm32-wasi --opt` (WAT) | 164/184 |
+| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 164/184 |
+| `kizu build --target wasm32-browser --emit wasm -o <out>` | 155/184 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 its remaining 20 examples are explicit target-unsupported capabilities: 16
@@ -132,7 +132,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 163/183 runnable examples, browser binary runs 155/183, and all remaining cases are classified as target-unsupported capabilities |
+| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 164/184 runnable examples, browser binary runs 155/184, and all remaining cases are classified as target-unsupported capabilities |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
 | `kizu lint` | **not started** |

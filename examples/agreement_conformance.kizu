@@ -1,0 +1,313 @@
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::mem;
+import std::string;
+
+// An agreement's states and the events that move it are specified in
+// spec/Agreement.lean as a transition table, with proofs that an ended
+// agreement stays ended, that only acceptance makes one active, and that
+// only an active or suspended agreement can be terminated. `just spec-trace`
+// writes examples/fixtures/agreement_trace.json: events, whether the table
+// applied or refused each, and the state afterwards. This program replays
+// those traces against two implementations and names the first step where
+// one disagrees with the table.
+
+pub struct Step {
+    pub event: string::String,
+    pub outcome: string::String,
+    pub state: string::String,
+}
+
+pub struct Trace {
+    pub seed: i64,
+    pub steps: array::Array<Step>,
+}
+
+pub struct Suite {
+    pub initial: string::String,
+    pub traces: array::Array<Trace>,
+}
+
+enum State {
+    Draft,
+    Offered,
+    Active,
+    Suspended,
+    Ended,
+}
+
+enum Event {
+    Offer,
+    Accept,
+    Reject,
+    Suspend,
+    Resume,
+    Terminate,
+}
+
+enum Outcome {
+    Applied,
+    Refused,
+}
+
+error TraceError {
+    UnknownEvent,
+    UnknownState,
+}
+
+fn state_name(state: State) -> []u8 {
+    return match state {
+        Draft => "draft",
+        Offered => "offered",
+        Active => "active",
+        Suspended => "suspended",
+        Ended => "ended",
+    };
+}
+
+fn event_name(event: Event) -> []u8 {
+    return match event {
+        Offer => "offer",
+        Accept => "accept",
+        Reject => "reject",
+        Suspend => "suspend",
+        Resume => "resume",
+        Terminate => "terminate",
+    };
+}
+
+fn outcome_name(outcome: Outcome) -> []u8 {
+    return match outcome {
+        Applied => "applied",
+        Refused => "refused",
+    };
+}
+
+fn parse_event(name: []u8) -> TraceError!Event {
+    if mem::equal_bytes(name, "offer") {
+        return Event::Offer;
+    }
+    if mem::equal_bytes(name, "accept") {
+        return Event::Accept;
+    }
+    if mem::equal_bytes(name, "reject") {
+        return Event::Reject;
+    }
+    if mem::equal_bytes(name, "suspend") {
+        return Event::Suspend;
+    }
+    if mem::equal_bytes(name, "resume") {
+        return Event::Resume;
+    }
+    if mem::equal_bytes(name, "terminate") {
+        return Event::Terminate;
+    }
+    return TraceError::UnknownEvent;
+}
+
+fn parse_state(name: []u8) -> TraceError!State {
+    if mem::equal_bytes(name, "draft") {
+        return State::Draft;
+    }
+    if mem::equal_bytes(name, "offered") {
+        return State::Offered;
+    }
+    if mem::equal_bytes(name, "active") {
+        return State::Active;
+    }
+    if mem::equal_bytes(name, "suspended") {
+        return State::Suspended;
+    }
+    if mem::equal_bytes(name, "ended") {
+        return State::Ended;
+    }
+    return TraceError::UnknownState;
+}
+
+// The transition table of spec/Agreement.lean; null is a refusal.
+fn table(state: State, event: Event) -> ?State {
+    match state {
+        Draft => match event {
+            Offer => return State::Offered,
+            _ => {},
+        },
+        Offered => match event {
+            Accept => return State::Active,
+            Reject => return State::Draft,
+            _ => {},
+        },
+        Active => match event {
+            Suspend => return State::Suspended,
+            Terminate => return State::Ended,
+            _ => {},
+        },
+        Suspended => match event {
+            Resume => return State::Active,
+            Terminate => return State::Ended,
+            _ => {},
+        },
+        Ended => {},
+    }
+    return null;
+}
+
+// What every implementation offers: apply an event, read the state.
+contract Agreement {
+    fn apply(event: Event) -> Outcome;
+    fn state() -> State;
+}
+
+// The first draft lets either party accept at any time before the end, as
+// if acceptance did not need an offer on the table.
+struct Draft {
+    state: State,
+}
+
+fn open_draft(initial: State) -> Draft {
+    return Draft { state: initial };
+}
+
+fn (self: &var Draft) apply(event: Event) -> Outcome {
+    if event == Event::Accept and self.state != State::Ended {
+        self.state = State::Active;
+        return Outcome::Applied;
+    }
+    if table(self.state, event) |next| {
+        self.state = next;
+        return Outcome::Applied;
+    }
+    return Outcome::Refused;
+}
+
+fn (self: &Draft) state() -> State {
+    return self.state;
+}
+
+impl Agreement for Draft;
+
+// The machine follows the table and nothing else.
+struct Machine {
+    state: State,
+}
+
+fn open_machine(initial: State) -> Machine {
+    return Machine { state: initial };
+}
+
+fn (self: &var Machine) apply(event: Event) -> Outcome {
+    if table(self.state, event) |next| {
+        self.state = next;
+        return Outcome::Applied;
+    }
+    return Outcome::Refused;
+}
+
+fn (self: &Machine) state() -> State {
+    return self.state;
+}
+
+impl Agreement for Machine;
+
+// "<name>: trace <seed> step <index>: event <event> " -- the start of every
+// line that names a disagreement.
+fn describe(allocator: Allocator, out: &var string::String, name: []u8, trace: &Trace, index: i64, event: Event) -> !void {
+    try out.append_bytes(allocator, name);
+    try out.append_bytes(allocator, ": trace ");
+    try fmt::append_i64(allocator, out, trace.seed);
+    try out.append_bytes(allocator, " step ");
+    try fmt::append_i64(allocator, out, index);
+    try out.append_bytes(allocator, ": event ");
+    try out.append_bytes(allocator, event_name(event));
+    try out.append_bytes(allocator, " ");
+    return;
+}
+
+// Replays one trace and reports the first step the implementation disagrees
+// on; true means every step agreed.
+fn replay<A>(allocator: Allocator, name: []u8, trace: &Trace, agreement: &var A) -> !bool {
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    var index = 0;
+    while trace.steps.at(index) |step| {
+        let event_text = step.event.as_bytes();
+        let event = try parse_event(event_text);
+        let outcome = agreement.apply(event);
+        let expected = step.outcome.as_bytes();
+        if !mem::equal_bytes(outcome_name(outcome), expected) {
+            try describe(allocator, &var line, name, trace, index, event);
+            try line.append_bytes(allocator, "expected ");
+            try line.append_bytes(allocator, expected);
+            try line.append_bytes(allocator, ", got ");
+            try line.append_bytes(allocator, outcome_name(outcome));
+            let text = line.as_bytes();
+            print(text);
+            return false;
+        }
+        let state_text = step.state.as_bytes();
+        let wanted = try parse_state(state_text);
+        let held = agreement.state();
+        if held != wanted {
+            try describe(allocator, &var line, name, trace, index, event);
+            try line.append_bytes(allocator, "state expected ");
+            try line.append_bytes(allocator, state_name(wanted));
+            try line.append_bytes(allocator, ", got ");
+            try line.append_bytes(allocator, state_name(held));
+            let text = line.as_bytes();
+            print(text);
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// Runs every trace against a fresh implementation and prints either the first
+// disagreement or the count of steps that agreed.
+fn conform<A>(allocator: Allocator, name: []u8, suite: &Suite, open: fn(State) -> A) -> !void {
+    let initial_text = suite.initial.as_bytes();
+    let initial = try parse_state(initial_text);
+    var steps = 0;
+    var index = 0;
+    while suite.traces.at(index) |trace| {
+        var agreement = open(initial);
+        if !try replay<A>(allocator, name, trace, &var agreement) {
+            return;
+        }
+        steps = steps + trace.steps.len();
+        index = index + 1;
+    }
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, name);
+    try line.append_bytes(allocator, ": ");
+    try fmt::append_i64(allocator, &var line, index);
+    try line.append_bytes(allocator, " traces, ");
+    try fmt::append_i64(allocator, &var line, steps);
+    try line.append_bytes(allocator, " steps agree with the table");
+    let text = line.as_bytes();
+    print(text);
+    return;
+}
+
+fn main() -> !void {
+    let io = io::blocking();
+    let allocator = mem::page_allocator();
+    let text = try fs::read_file(io, allocator, "examples/fixtures/agreement_trace.json", mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let document = text.as_bytes();
+    var suite = try json::decode<Suite>(allocator, document);
+    defer suite.deinit(allocator);
+    try conform<Draft>(allocator, "draft", &suite, open_draft);
+    try conform<Machine>(allocator, "machine", &suite, open_machine);
+    return;
+}
+
+// run
+// features: std-json decode contract generics enum match fs io
+// dir: .
+// output:
+// draft: trace 1 step 0: event accept expected refused, got applied
+// machine: 3 traces, 70 steps agree with the table

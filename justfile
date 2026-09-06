@@ -118,9 +118,10 @@ cache-prune:
 backend-matrix:
     go run ./scripts/backend-matrix
 
-# Regenerate the ledger trace from its Lean specification (spec/README.md).
+# Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
+    cd spec && lean --run Agreement.lean > ../examples/fixtures/agreement_trace.json
 
 # Run the broad baseline timing script.
 perf:
