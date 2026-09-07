@@ -1790,6 +1790,229 @@ test "a connection that may carry another comes back with the next request" {
     expect_target(&following, "/two");
 }
 
+// Pipelining: a peer may send its next request before this one is answered.
+// The bytes wait in the connection, the answers go out in request order, and
+// the first request this server cannot read ends the connection.
+
+test "a request read ahead is answered after the one before it, body and all" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_requests = 4;
+    var server = try http::listen_with(handle, allocator, "127.0.0.1:0", limits);
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    // Two bodies in one write. Reading the first to its declared length is
+    // what leaves the second request where the next head is looked for.
+    try send_request(handle, allocator, &var client, "POST /one HTTP/1.1", "first body");
+    try send_request(handle, allocator, &var client, "POST /two HTTP/1.1", "second");
+
+    var current = try server.first(handle, allocator, 1048576);
+    expect_target(&current, "/one");
+    let one = current.body.as_bytes();
+    testing::expect_equal<[]u8>("first body", one);
+    var following = try hand_back(handle, allocator, &var server, move current);
+    defer following.deinit(allocator);
+    expect_target(&following, "/two");
+    let two = following.body.as_bytes();
+    testing::expect_equal<[]u8>("second", two);
+}
+
+test "a request read ahead that cannot be read is refused without the loop hearing" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_requests = 4;
+    var server = try http::listen_with(handle, allocator, "127.0.0.1:0", limits);
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var other = try net::tcp_connect(handle, address_bytes);
+    defer other.deinit();
+    try send_request(handle, allocator, &var client, "GET /one HTTP/1.1", "");
+    try send_request(handle, allocator, &var client, "not a request", "");
+
+    var current = try server.first(handle, allocator, 1048576);
+    expect_target(&current, "/one");
+    // Handing the connection back is where the second request is read. It
+    // is refused there, and `next` goes on to the other caller rather than
+    // failing the loop for something one peer sent.
+    var following = try speak_then_hand_back(
+        handle, allocator, &var server, &var other, "GET /other HTTP/1.1",
+        move current);
+    defer following.deinit(allocator);
+    expect_target(&following, "/other");
+
+    // The peer that pipelined got its answer, then the refusal, then the
+    // close -- and nothing after it.
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    client.set_read_deadline(net::deadline_in_millis(2000));
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect_equal<i64>(2, count_of(wire, "HTTP/1.1 "));
+    testing::expect(contains(wire, "HTTP/1.1 200 OK"));
+    testing::expect(contains(wire, "HTTP/1.1 400 Bad Request"));
+    testing::expect(index_of(wire, "200 OK") < index_of(wire, "400 Bad Request"));
+}
+
+test "a request read ahead that cannot be read fails next and is told 400" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /one HTTP/1.1", "");
+    try send_request(handle, allocator, &var client, "not a request", "");
+
+    let failure = try answer_then_next(handle, allocator, &var server);
+    testing::expect_equal<[]u8>("MalformedRequest", failure);
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect_equal<i64>(2, count_of(wire, "HTTP/1.1 "));
+    testing::expect(index_of(wire, "200 OK") < index_of(wire, "400 Bad Request"));
+}
+
+test "the request behind a chunked body's trailers is the next one" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /upload HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try chunk(allocator, &var wire, "hello");
+    try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "X-Total: 5");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "GET /two HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    var held = try server.accept(handle, allocator, 1048576);
+    defer held.deinit(allocator);
+    let body = held.body.as_bytes();
+    testing::expect_equal<[]u8>("hello", body);
+    testing::expect(held.request.trailers.has("X-Total"));
+    try held.respond_text(handle, allocator, 200, "text/plain", "ok");
+    testing::expect(try held.next(handle, allocator, 1048576));
+    expect_target(&held, "/two");
+    testing::expect(!held.request.trailers.has("X-Total"));
+}
+
+test "a request read ahead of a close is never answered" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request_with_connection(
+        handle, allocator, &var client, "GET /last HTTP/1.1", "", "close");
+    try send_request(handle, allocator, &var client, "GET /never HTTP/1.1", "");
+
+    let answered = try serve_connection(handle, allocator, &var server);
+    testing::expect_equal<i64>(1, answered);
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let wire = reply.as_bytes();
+    testing::expect_equal<i64>(1, count_of(wire, "HTTP/1.1 "));
+}
+
+// answer_then_next answers the first request and reports how `next` failed
+// on the second, or "carried" if it did not. Its own frame, so the connection
+// is closed before the client reads what it was told.
+fn answer_then_next(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server
+) -> Failure![]u8 {
+    var held = try server.accept(handle, allocator, 1048576);
+    defer held.deinit(allocator);
+    try held.respond_text(handle, allocator, 200, "text/plain", "ok");
+    if held.next(handle, allocator, 1048576) |_| {
+        return "carried";
+    } else |failure| {
+        return match failure {
+            MalformedRequest => "MalformedRequest",
+            _ => "other",
+        };
+    }
+}
+
+fn count_of(haystack: []u8, needle: []u8) -> i64 {
+    let length = mem::len(haystack);
+    let needle_length = mem::len(needle);
+    var count = 0;
+    var index = 0;
+    while index + needle_length <= length {
+        if mem::equal_bytes(haystack[index..index + needle_length], needle) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// index_of is where `needle` first appears, or the length for nowhere.
+fn index_of(haystack: []u8, needle: []u8) -> i64 {
+    let length = mem::len(haystack);
+    let needle_length = mem::len(needle);
+    var index = 0;
+    while index + needle_length <= length {
+        if mem::equal_bytes(haystack[index..index + needle_length], needle) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return length;
+}
+
 // speak_then_hand_back answers, sets another caller talking, and hands the
 // connection back -- all inside the frame that owns the exchange.
 fn speak_then_hand_back(

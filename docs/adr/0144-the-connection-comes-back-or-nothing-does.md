@@ -61,3 +61,4 @@ current = try turn(handle, allocator, &var server, move current);
 | `stop()` を server の capability にする | 単一 thread で signal も無い今、呼べる場所は loop の中だけで、そこには既に `break` がある。呼べない capability を名乗らない |
 | token を index ではなく安定 id にする | 表からの取り出しが線形探索になる。index なら swap-remove の後に 1 本だけ watch し直せば済む |
 | `array::Error` を `http::Error` の member に変換する | 起きない失敗のために原因を発明することになる。ADR-0128 が変換を禁じている |
+| 先読みした request(pipelining)を並列に処理する executor を server が持つ | 答えの順序は接続ごとに `Exchange` を 1 つしか手渡さないことから来ていて、それ以上の仕組みが要らない。executor は handler と同じく呼び出し元の source に無い制御 flow になる(原理 2)。並列に答えたいなら接続を増やす |
