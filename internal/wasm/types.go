@@ -182,10 +182,13 @@ func wasmCompareOp(op string, typ string) string {
 	}
 }
 
-// symbolName converts an IR value name to a stable WebAssembly local name.
+// symbolName converts an IR value name to a stable WebAssembly local name. The
+// `.` stays: it is what the IR puts between a generic's name and its static
+// arguments, and no identifier can hold one, so it is what keeps the instance
+// `decode.i64` apart from a plain function named `decode_i64`.
 func symbolName(name string) string {
 	name = strings.TrimPrefix(name, "%")
-	replacer := strings.NewReplacer(".", "_", "-", "_", "<", "_", ">", "_")
+	replacer := strings.NewReplacer("-", "_", "<", "_", ">", "_")
 	name = replacer.Replace(name)
 	if name != "" && name[0] >= '0' && name[0] <= '9' {
 		name = "v" + name

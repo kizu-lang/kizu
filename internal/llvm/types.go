@@ -317,14 +317,17 @@ func isArenaHandleType(typ string) bool {
 	return strings.HasPrefix(typ, "std::arena::Handle<") && strings.HasSuffix(typ, ">")
 }
 
-// llvmNamePart keeps generated LLVM type names deterministic and readable.
+// llvmNamePart keeps generated LLVM type names deterministic and readable. The
+// `.` passes through: it is what the IR puts between a generic's name and its
+// static arguments, and no identifier can hold one, so it is what keeps the
+// instance `decode.i64` apart from a plain function named `decode_i64`.
 func llvmNamePart(name string) string {
 	if name == "[]u8" {
 		return "slice.u8"
 	}
 	var out strings.Builder
 	for _, ch := range []byte(name) {
-		if ch == '_' ||
+		if ch == '_' || ch == '.' ||
 			(ch >= 'a' && ch <= 'z') ||
 			(ch >= 'A' && ch <= 'Z') ||
 			(ch >= '0' && ch <= '9') {
