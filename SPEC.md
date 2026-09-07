@@ -3099,15 +3099,18 @@ package 内では dependency を先にした resolved module order、同じmodul
 order、各file内のdeclaration orderで実行します。
 test block は parameterless `!void` body として扱うため、helper が返す `!T` には
 `try` を使えます。test block が 0 件なら失敗します。未処理 error がなければ
-`test: ok` を表示します。
+`test: ok` を表示します。失敗は `runtime error:` の行の後に
+`note: in test "名前" at file:line:column` を出します。位置は test body の中で
+最後に始まった文のもので、helper の中で落ちても呼んだ文を指します。自分の位置を
+runtime に伝えるのは test body だけで、production code は何も伝えません。
 `kizu test --seed N <path>` は `std::testing::seed()` が返す値を `N` にします。
 flag が無ければ runtime が run ごとに seed を選び、`seed()` を呼んだ後の失敗は
 その seed を `note:` で報告するので、同じ flag で再生できます(`docs/std/testing.md`)。
 package test では、production fileに加えて `_test.kizu` fileを同じdirectoryのmodule
 へ加えます。test fileは同じmoduleのprivate宣言を使え、test helperも同じmoduleの
 他のtest fileから使えます。file-local importの規則はtest fileにも適用します。
-filesystem-wide test discovery、test filter、test attribute、async test、location-aware
-diagnostics、message builder helper は後続で扱います。
+filesystem-wide test discovery、test filter、test attribute、async test、
+message builder helper は後続で扱います。
 
 ### 14.6 collection の実装順序
 

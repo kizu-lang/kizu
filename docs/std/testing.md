@@ -17,6 +17,18 @@ test source は assertion ごとの `try` を書きません。
 `fail` は渡された `[]u8` を diagnostic として `runtime error:` を出し、その場で
 停止します。`expect` と同じ trap 境界なので、error として捕まえて続行することは
 できません。到達しないはずの branch を落とすのに使います。
+失敗の出力は `runtime error:` の行と、それがどの test のどの文で起きたかの
+`note:` です。
+
+```text
+runtime error: expected 3, got 4
+note: in test "equal fails in a helper" at src/count_test.kizu:9:5
+```
+
+位置は test body の中で最後に始まった文のものです。helper の中の `expect_equal`
+で落ちても、test body でその helper を呼んだ文を指します。`try` が返した未処理の
+error も同じ note を出します。
+
 `expect_equal<T>` は明示 static 引数付きの generic assertion です。
 failure は `expected ... got ...` 形式の diagnostic を出し、assertion ごとの `try` は不要です。
 static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように

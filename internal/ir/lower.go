@@ -47,7 +47,16 @@ type lowerer struct {
 	// methodSigs groups the signatures by the method name they end with, so a
 	// method call reaches the handful of methods that could answer it instead
 	// of every declaration in the program.
-	methodSigs  map[string][]Signature
+	methodSigs map[string][]Signature
+
+	// testName and testFile are set while a test block lowers. A test body
+	// tells the runtime which test it is and which statement it is on
+	// (`test.begin`, `test.mark`), so a failure inside whatever a statement
+	// called can still name the test and the statement that reached it. A
+	// function body records nothing.
+	testName string
+	testFile string
+
 	current     *Function
 	block       *Block
 	env         *env
@@ -524,7 +533,11 @@ func (l *lowerer) lowerTests() error {
 		}
 		previousModule := l.currentModule
 		l.currentModule = test.Module
+		l.testName = test.Name
+		l.testFile = blockFile(test.Body)
 		lowered, err := l.lowerFunctionNamed(fn, fn.Name)
+		l.testName = ""
+		l.testFile = ""
 		l.currentModule = previousModule
 		if err != nil {
 			return err
@@ -532,6 +545,123 @@ func (l *lowerer) lowerTests() error {
 		l.module.Functions = append(l.module.Functions, lowered)
 	}
 	return nil
+}
+
+// emitTestBegin tells the runtime which test is running, so a failure can name
+// it. The name and the file are two constants the body hands over once.
+func (l *lowerer) emitTestBegin() {
+	name := l.emitConst("[]u8", quote.Bytes(l.testName))
+	file := l.emitConst("[]u8", quote.Bytes(l.testFile))
+	l.emit("test.begin", "void", []Value{name, file}, "")
+}
+
+// emitTestMark tells the runtime which statement of the test body is about to
+// run, so a failure inside whatever it calls can point back here. A statement
+// with no position of its own (`return;`, `break;`) records nothing.
+func (l *lowerer) emitTestMark(stmt ast.Statement) {
+	span := statementSpan(stmt)
+	if span.Start.Line == 0 {
+		return
+	}
+	l.emit("test.mark", "void", nil, "")
+	l.block.Instrs[len(l.block.Instrs)-1].Span = span
+}
+
+// blockFile is the path of the file a block was written in, read off the first
+// statement that carries a position. Empty when none does.
+func blockFile(block *ast.BlockStmt) string {
+	for _, stmt := range block.Statements {
+		if span := statementSpan(stmt); span.Start.Line != 0 {
+			return span.Source.Path()
+		}
+	}
+	return ""
+}
+
+// statementSpan is where a statement starts, as far as the tree records it. A
+// statement carries no position of its own, so it is the first position inside
+// the expression that leads it.
+func statementSpan(stmt ast.Statement) ast.Span {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		return leadingSpan(s.Value)
+	case *ast.AssignStmt:
+		return leadingSpan(s.Target)
+	case *ast.ReturnStmt:
+		return leadingSpan(s.Value)
+	case *ast.ExprStmt:
+		return leadingSpan(s.Expr)
+	case *ast.IfStmt:
+		return leadingSpan(s.Condition)
+	case *ast.WhileStmt:
+		return leadingSpan(s.Condition)
+	case *ast.ForStmt:
+		return leadingSpan(s.Start)
+	case *ast.MatchStmt:
+		return leadingSpan(s.Value)
+	default:
+		return ast.Span{}
+	}
+}
+
+// leadingSpan is the first recorded position inside an expression: the span
+// a node carries itself, or the first one inside a compound node.
+func leadingSpan(expr ast.Expression) ast.Span {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Span
+	case *ast.NullExpr:
+		return e.Span
+	case *ast.CastExpr:
+		return e.KeywordSpan
+	case *ast.StructLiteralExpr:
+		return e.Span
+	case *ast.BufferLiteralExpr:
+		return e.Span
+	case *ast.MoveExpr:
+		return e.Span
+	case *ast.UnsafeExpr:
+		return e.Span
+	}
+	return nestedLeadingSpan(expr)
+}
+
+// nestedLeadingSpan reads a compound expression left to right: the receiver
+// before the field, the callee before the call, the operand before the
+// operator.
+func nestedLeadingSpan(expr ast.Expression) ast.Span {
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		return firstSpan(leadingSpan(e.Left), e.OperatorSpan)
+	case *ast.CallExpr:
+		return leadingSpan(e.Callee)
+	case *ast.TypeApplyExpr:
+		return leadingSpan(e.Callee)
+	case *ast.TryExpr:
+		return leadingSpan(e.Value)
+	case *ast.FieldExpr:
+		return firstSpan(leadingSpan(e.Receiver), e.Span)
+	case *ast.DerefExpr:
+		return firstSpan(leadingSpan(e.Receiver), e.OperatorSpan)
+	case *ast.IndexExpr:
+		return firstSpan(leadingSpan(e.Target), e.Span)
+	case *ast.OrelseGuardExpr:
+		return firstSpan(leadingSpan(e.Cond), e.Span)
+	case *ast.CatchGuardExpr:
+		return firstSpan(leadingSpan(e.Cond), e.Span)
+	case *ast.ComptimeExpr:
+		return leadingSpan(e.Expr)
+	default:
+		return ast.Span{}
+	}
+}
+
+// firstSpan is the first of two spans that carries a position.
+func firstSpan(first ast.Span, second ast.Span) ast.Span {
+	if first.Start.Line != 0 {
+		return first
+	}
+	return second
 }
 
 // TestFunctionName returns the IR symbol a test block lowers to.
@@ -867,6 +997,9 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		}
 		l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
 	}
+	if l.testName != "" {
+		l.emitTestBegin()
+	}
 	if err := l.lowerBlock(fn.Body); err != nil {
 		return nil, err
 	}
@@ -1063,6 +1196,9 @@ func (l *lowerer) lowerBlockBody(block *ast.BlockStmt, wantValue bool) (Value, e
 				return Value{}, err
 			}
 			continue
+		}
+		if l.testName != "" {
+			l.emitTestMark(stmt)
 		}
 		if err := l.lowerStmt(stmt); err != nil {
 			l.popDeferFrame()

@@ -41,7 +41,7 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCondFail(instr)
 	case instr.Op == "panic.fail":
 		return e.writePanicFail(instr)
-	case instr.Op == "test.fail", instr.Op == "test.expect_equal":
+	case strings.HasPrefix(instr.Op, "test."):
 		return e.writeTestInstr(instr)
 	case instr.Op == "print.line":
 		return e.writePrintLine(instr)

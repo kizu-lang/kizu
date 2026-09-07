@@ -15,7 +15,36 @@ fn (self: &var Emitter) write_test_runtime_decls(module: &ir::Module) -> !void {
         try self.line("declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)");
         try self.line("");
     }
+    if self.uses_test_context(module) {
+        try self.line("declare void @kizu_test_begin(ptr, i64, ptr, i64)");
+        try self.line("declare void @kizu_test_mark(i64, i64)");
+        try self.line("");
+    }
     return;
+}
+
+/// Reports whether a test body tells the runtime where it is, the Go
+/// `usesTestContext`.
+fn (self: &Emitter) uses_test_context(module: &ir::Module) -> bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op == ir::Op::TestBegin {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 /// Reports whether []u8 equality is needed, the Go `usesByteEqualityRuntime`.
@@ -51,11 +80,45 @@ fn (self: &var Emitter) write_test_instr(module: &ir::Module, node: &ir::InstrNo
     match node.op {
         TestFail => return self.write_test_fail(module, node),
         TestExpectEqual => return self.write_test_expect_equal(module, node),
+        TestBegin => return self.write_test_begin(module, node),
+        TestMark => return self.write_test_mark(module, node),
         _ => {
             let op = try self.op_name(module, node);
             return try self.fail1("llvm error: unsupported test instruction `%s`", Arg::Str(op));
         },
     }
+}
+
+/// Hands the runtime the name of the test that is starting and the file it
+/// was written in, the Go `writeTestBegin`, so a failure can name both.
+fn (self: &var Emitter) write_test_begin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") {
+        return try self.fail0("llvm error: test.begin expects a []u8 name and a []u8 file");
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let name_local = try self.suffixed(result_name, ".name");
+    let name_info = try self.operand(module, node.args.get_or_panic(0));
+    let name_parts = try self.write_slice_parts(name_local, name_info.operand);
+    let file_local = try self.suffixed(result_name, ".file");
+    let file_info = try self.operand(module, node.args.get_or_panic(1));
+    let file_parts = try self.write_slice_parts(file_local, file_info.operand);
+    try self.line4(
+        "  call void @kizu_test_begin(ptr %s, i64 %s, ptr %s, i64 %s)",
+        Arg::Str(name_parts.ptr), Arg::Str(name_parts.len),
+        Arg::Str(file_parts.ptr), Arg::Str(file_parts.len)
+    );
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+/// Hands the runtime the position of the statement about to run, the Go
+/// `writeTestMark`.
+fn (self: &var Emitter) write_test_mark(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let position = try self.panic_position(node.span);
+    try self.line1("  call void @kizu_test_mark(%s)", Arg::Str(position));
+    try self.set_void_value(module, node.result);
+    return null;
 }
 
 /// Reports an explicit std::testing failure and stops, the Go
