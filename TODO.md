@@ -21,7 +21,6 @@ caller のもの。停止は `break`。期限の掃除は `next` の中なので
 
 | | 大きさ | 備考 |
 | --- | --- | --- |
-| upgrade (101 / WebSocket) | 小 | `Framing::Raw` は既にある |
 | pipelining | 中 | 先読みは順に処理、答えは重ねない |
 | multipart / form-data | 中 | |
 | compression | 大 | 圧縮 library が要る。別の話 |

@@ -537,6 +537,33 @@ test "a 101 keeps the head the caller wrote and hands over the connection" {
     testing::expect(contains(wire, "after the head"));
 }
 
+// After a 101 the connection is the caller's protocol, not a place for another
+// request: `next` says the connection is done rather than calling the exchange
+// unfinished for a body that was never HTTP.
+test "next after a 101 answers false" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    try send_request(handle, allocator, &var client, "GET /upgrade HTTP/1.1", "");
+
+    var held = try server.accept_head(handle, allocator);
+    defer held.deinit(allocator);
+    try held.response.set_status(101);
+    try held.response.header(allocator, "Upgrade", "echo");
+    try held.response.header(allocator, "Connection", "Upgrade");
+    try held.respond_head(handle, allocator, http::Framing::Raw);
+    let more = try held.next_head(handle, allocator);
+    testing::expect(!more);
+}
+
 test "respond after respond_head is refused" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();

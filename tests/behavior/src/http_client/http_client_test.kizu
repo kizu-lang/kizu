@@ -382,6 +382,54 @@ test "a chunked answer is decoded" {
     }
 }
 
+// A 101 hands the connection to the caller: the bytes behind the head are the
+// switched protocol, read until the close, and `write_all` speaks back.
+test "a 101 answer hands the connection to the caller" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit(allocator);
+    var url = try url_for(allocator, pair.port, "/echo");
+    defer url.deinit(allocator);
+    try pair.client.send(
+        handle, allocator, "GET", &url, "", "", 30000);
+
+    var served = try pair.listener.accept(handle);
+    defer served.deinit();
+    var buffer = string::new(allocator);
+    defer buffer.deinit(allocator);
+    let _ = try http::read_head(
+        handle, allocator, &var served, &var buffer, http::default_limits());
+    let reply_text =
+        \\HTTP/1.1 101 Switching Protocols
+        \\Upgrade: echo
+        \\Connection: Upgrade
+    ;
+    var reply = try wire(allocator, reply_text);
+    defer reply.deinit(allocator);
+    // The switched protocol starts right behind the head, in the same write.
+    try reply.append_bytes(allocator, "after the head");
+    let reply_bytes = reply.as_bytes();
+    try served.write_all(handle, reply_bytes);
+
+    var head = try pair.client.receive(handle, allocator, "GET", http::default_limits());
+    defer head.deinit(allocator);
+    testing::expect_equal<i64>(101, head.status);
+    var switched = string::new(allocator);
+    defer switched.deinit(allocator);
+    let got = try pair.client.read_into(handle, allocator, &var switched, 64);
+    testing::expect_equal<i64>(14, got);
+    let seen = switched.as_bytes();
+    testing::expect_equal<[]u8>("after the head", seen);
+
+    try pair.client.write_all(handle, "ping");
+    var heard = string::new(allocator);
+    defer heard.deinit(allocator);
+    let _ = try served.read_into(handle, allocator, &var heard, 64);
+    let heard_bytes = heard.as_bytes();
+    testing::expect_equal<[]u8>("ping", heard_bytes);
+}
+
 test "an encoding this client does not speak is refused" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();

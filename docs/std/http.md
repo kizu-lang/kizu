@@ -441,6 +441,47 @@ byte は既に `Exchange` の中にあります。socket を渡すと caller は
 - 1 つの phase より長く生きる caller(101 の後の protocol など)は
   `exchange.set_read_deadline(net::deadline_in_millis(n))` で自分で押し直す
 
+### 101 の後: 接続は caller の protocol になる
+
+`101 Switching Protocols` は「この接続はもう HTTP ではない」という答えです。
+所有は変わりません —— 接続は `Exchange` の中に残り、caller は同じ `Exchange` で
+話します。
+
+```kizu
+var held = try server.accept_head(handle, allocator);
+defer held.deinit(allocator);          // close するのはこれ
+try held.response.set_status(101);
+try held.response.header(allocator, "Upgrade", "echo");
+try held.response.header(allocator, "Connection", "Upgrade");
+try held.respond_head(handle, allocator, http::Framing::Raw);
+// ここから先は caller の protocol
+var got = try held.read_into(handle, allocator, &var piece, 4096);
+try held.write_all(handle, allocator, reply_bytes);
+```
+
+- `Raw` は framing field を書きません。`Connection: close` は upgrade への
+  間違った答えなので、caller が書いた head がそのまま出ます
+- head の後ろに既に届いていた byte(peer が head と一緒に送った protocol の
+  先頭)は `read_into` が最初に返します。socket を渡すとここが飛ぶので渡しません
+  (ADR-0138)
+- 上限は掛かりません。読み終わりは peer の close で、`read_into` の 0 です
+- deadline は caller のものです。`respond_head` が置いた write phase の期限しか
+  無いので、長く生きる loop は `set_read_deadline` / `set_write_deadline` を
+  自分で押し直します
+- `next` / `next_head` は false を返します。upgrade した接続は次の request を
+  運びません
+- `deinit` が閉じます。worker(`accept_connection` + `TaskSet`)の中なら、
+  handler が返るまでその worker は upgrade した接続の loop を回します
+
+client も同じ形です。`receive` が 101 を読むと、続く byte は body ではなく
+切り替えた protocol なので `read_into` は close まで返し、書くのは `write_all`
+です。`Upgrade:` header を自分で書いた request は stream に書いてから `take` で
+包みます(`examples/http_upgrade.kizu`)。
+
+WebSocket はこの上に載ります。接続の持ち方はここで決まっていて、残るのは
+framing と、handshake の `Sec-WebSocket-Accept` が要る SHA-1 / base64 です。
+どちらも std にまだ無いので、WebSocket 自体は std::http にありません。
+
 ## chunked な request
 
 長さを事前に知らない client は `Content-Length` を書けないので、body を
@@ -863,6 +904,7 @@ fn (self: &var Connection) receive(io, allocator, method, limits)
 fn (self: &var Connection) read_into(io, allocator, out, max) -> std::http::Failure!i64
 fn (self: &var Connection) read_ready_into(io, allocator, out, max)
     -> std::http::Failure!?i64
+fn (self: &var Connection) write_all(io, bytes) -> std::http::Failure!void
 fn (self: &var Connection) read_body(io, allocator, response: &var ClientResponse, max)
     -> std::http::Failure!void
 fn (self: &var Connection) take_trailers(allocator, response: &var ClientResponse)
@@ -1006,6 +1048,8 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 - **trailer を書くこと**: 読むだけです。request にも response にも chunked body の
   terminator の後ろに trailer は付けません
 - **compression**: `Content-Encoding` は素通しで、decode しません
+- **WebSocket の framing**: 101 の後の接続の持ち方は上の節のとおりで、framing と
+  handshake の SHA-1 / base64 は std にありません
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
 - **HTTP date を読むこと**: `Date` / `Expires` / `Last-Modified` は解析しません。
   書く側は `set_date` / `append_date` にあります

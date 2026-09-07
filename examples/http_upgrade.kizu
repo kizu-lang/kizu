@@ -1,0 +1,145 @@
+// A 101 Switching Protocols hands the connection to the caller.
+//
+// Ownership does not move. The connection stays inside the `Exchange` on the
+// server and the `Connection` on the client; after the head, `read_into` and
+// `write_all` on the same value speak whatever protocol the two sides switched
+// to, and `deinit` closes it. The bytes a peer sent behind its head are
+// already inside, and come out of `read_into` first -- which is why the socket
+// itself is never handed out.
+//
+// Both ends live in this process, so each step is written out in the order the
+// bytes travel. The client writes its own head, because an `Upgrade:` header
+// is the client's to choose, then wraps the stream with `take`.
+
+import std::array;
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error or array::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    let limits = http::default_limits();
+
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+
+    // The request, and the first word of the switched protocol right behind
+    // it, in one write.
+    var stream = try open_client(handle, allocator, port);
+    errdefer stream.deinit();
+    try ask_to_switch(handle, allocator, &var stream);
+    var open = http::take(allocator, move stream, limits);
+    defer open.deinit(allocator);
+
+    // The server agrees to switch. `Raw` writes the head as it is: nothing
+    // about a body, and no `Connection: close` that would contradict it.
+    var held = try server.accept_head(handle, allocator);
+    defer held.deinit(allocator);
+    try held.response.set_status(101);
+    try held.response.header(allocator, "Upgrade", "shout");
+    try held.response.header(allocator, "Connection", "Upgrade");
+    try held.respond_head(handle, allocator, http::Framing::Raw);
+    try shout_back(handle, allocator, &var held);
+
+    // The client reads the head that switched, then the protocol.
+    var head = try open.receive(handle, allocator, "GET", limits);
+    defer head.deinit(allocator);
+    print(head.status);
+    try hear(handle, allocator, &var open);
+
+    // One more round each way: the connection is both sides' to keep using.
+    try open.write_all(handle, "again");
+    try shout_back(handle, allocator, &var held);
+    try hear(handle, allocator, &var open);
+
+    // `next` does not ask for another request on a connection that is no
+    // longer HTTP.
+    let more = try held.next_head(handle, allocator);
+    print(more);
+    return;
+}
+
+// shout_back reads one piece of the switched protocol and answers it in
+// capitals. The piece behind the head is what `read_into` hands out first.
+fn shout_back(handle: Io, allocator: Allocator, held: &var http::Exchange) -> Failure!void {
+    var piece = string::new(allocator);
+    defer piece.deinit(allocator);
+    let _ = try held.read_into(handle, allocator, &var piece, 4096);
+    var loud = string::new(allocator);
+    defer loud.deinit(allocator);
+    let bytes = piece.as_bytes();
+    var index = 0;
+    while index < mem::len(bytes) {
+        var byte = bytes[index];
+        if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+            byte = byte - cast<u8>(32);
+        }
+        try loud.append_byte(allocator, byte);
+        index = index + 1;
+    }
+    let reply = loud.as_bytes();
+    try held.write_all(handle, allocator, reply);
+    return;
+}
+
+fn hear(handle: Io, allocator: Allocator, open: &var http::Connection) -> Failure!void {
+    var piece = string::new(allocator);
+    defer piece.deinit(allocator);
+    let _ = try open.read_into(handle, allocator, &var piece, 4096);
+    let heard = piece.as_bytes();
+    print(heard);
+    return;
+}
+
+// ask_to_switch writes the request by hand: the `Upgrade:` header is the
+// client's to choose, and `send` writes only the head of an ordinary request.
+// The first word of the protocol goes in the same write, right behind the
+// head, which is what a real client does too.
+fn ask_to_switch(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "GET /echo HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Upgrade: shout");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Connection: Upgrade");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "hello");
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+    return;
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+fn open_client(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+// run
+// features: net http io error-union
+// output:
+// 101
+// HELLO
+// AGAIN
+// false
