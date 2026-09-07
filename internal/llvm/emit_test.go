@@ -766,7 +766,7 @@ func TestEmitErrorUnionSliceSuccess(t *testing.T) {
 		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, i64 }",
 		"%kizu.2 = insertvalue %kizu.error.slice.u8 %kizu.2.ok, %kizu.slice.u8 %kizu.1, 1",
 		"%kizu.2 = extractvalue %kizu.error.slice.u8 %kizu.1, 1",
-		"call void @std__fmt__print__5b_5du8(%kizu.slice.u8 ",
+		"call void @std__fmt__print._5b_5du8(%kizu.slice.u8 ",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -810,8 +810,8 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 			"  unreachable",
 		"%kizu.6 = load i8, ptr %kizu.6.elem.ptr",
 		"%kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 %kizu.13.len, 1",
-		"call void @std__fmt__print_u8(i8 %kizu.6)",
-		"call void @std__fmt__print__5b_5du8(%kizu.slice.u8 ",
+		"call void @std__fmt__print.u8(i8 %kizu.6)",
+		"call void @std__fmt__print._5b_5du8(%kizu.slice.u8 ",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -1214,7 +1214,7 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 %kizu.array = type { ptr, i64, i64 }
 
-declare void @std__fmt__print__5b_5du8(%kizu.slice.u8)
+declare void @std__fmt__print._5b_5du8(%kizu.slice.u8)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1224,7 +1224,7 @@ entry:
   %kizu.1.ptr = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 11, 1
-  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.1)
+  call void @std__fmt__print._5b_5du8(%kizu.slice.u8 %kizu.1)
   ret i32 0
 }`
 
@@ -1248,7 +1248,7 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 %kizu.array = type { ptr, i64, i64 }
 
-declare void @std__fmt__print_i64(i64)
+declare void @std__fmt__print.i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1262,7 +1262,7 @@ define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.3 = call i64 @add(i64 1, i64 2)
-  call void @std__fmt__print_i64(i64 %kizu.3)
+  call void @std__fmt__print.i64(i64 %kizu.3)
   ret i32 0
 }`
 
@@ -1288,8 +1288,8 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 %kizu.array = type { ptr, i64, i64 }
 
-declare void @std__fmt__print__5b_5du8(%kizu.slice.u8)
-declare void @std__fmt__print_i64(i64)
+declare void @std__fmt__print._5b_5du8(%kizu.slice.u8)
+declare void @std__fmt__print.i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1300,8 +1300,8 @@ entry:
   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 5, 1
   %kizu.4 = add i64 30, 1
-  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.1)
-  call void @std__fmt__print_i64(i64 %kizu.4)
+  call void @std__fmt__print._5b_5du8(%kizu.slice.u8 %kizu.1)
+  call void @std__fmt__print.i64(i64 %kizu.4)
   ret i32 0
 }`
 
@@ -1328,7 +1328,7 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 %kizu.array = type { ptr, i64, i64 }
 
-declare void @std__fmt__print__5b_5du8(%kizu.slice.u8)
+declare void @std__fmt__print._5b_5du8(%kizu.slice.u8)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1341,13 +1341,13 @@ if.then.1:
   %kizu.4.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
   %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
   %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 5, 1
-  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.4)
+  call void @std__fmt__print._5b_5du8(%kizu.slice.u8 %kizu.4)
   br label %if.end.3
 if.else.2:
   %kizu.6.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
   %kizu.6.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.6.ptr, 0
   %kizu.6 = insertvalue %kizu.slice.u8 %kizu.6.base, i64 5, 1
-  call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.6)
+  call void @std__fmt__print._5b_5du8(%kizu.slice.u8 %kizu.6)
   br label %if.end.3
 if.end.3:
   ret i32 0
@@ -1373,7 +1373,7 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 %kizu.array = type { ptr, i64, i64 }
 
-declare void @std__fmt__print_i64(i64)
+declare void @std__fmt__print.i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1386,7 +1386,7 @@ while.header.1:
   %kizu.4 = icmp slt i64 %kizu.2, 3
   br i1 %kizu.4, label %while.body.2, label %while.end.3
 while.body.2:
-  call void @std__fmt__print_i64(i64 %kizu.2)
+  call void @std__fmt__print.i64(i64 %kizu.2)
   %kizu.7 = add i64 %kizu.2, 1
   br label %while.header.1
 while.end.3:
@@ -1414,7 +1414,7 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 %kizu.array = type { ptr, i64, i64 }
 
-declare void @std__fmt__print_i64(i64)
+declare void @std__fmt__print.i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1423,7 +1423,7 @@ entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.2 = insertvalue %kizu.struct.User zeroinitializer, i64 30, 0
   %kizu.3 = extractvalue %kizu.struct.User %kizu.2, 0
-  call void @std__fmt__print_i64(i64 %kizu.3)
+  call void @std__fmt__print.i64(i64 %kizu.3)
   ret i32 0
 }`
 
@@ -1453,7 +1453,7 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 %kizu.array = type { ptr, i64, i64 }
 
-declare void @std__fmt__print_i64(i64)
+declare void @std__fmt__print.i64(i64)
 
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
@@ -1481,7 +1481,7 @@ kizu.2.try.err:
   ret i32 1
 kizu.2.try.ok:
   %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
-  call void @std__fmt__print_i64(i64 %kizu.2)
+  call void @std__fmt__print.i64(i64 %kizu.2)
   %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
   %kizu.main.ok.3 = extractvalue %kizu.error.void %kizu.4, 0
   %kizu.main.ok.3.bool = icmp ne i8 %kizu.main.ok.3, 0

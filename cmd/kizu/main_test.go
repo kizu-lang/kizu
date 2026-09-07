@@ -1181,7 +1181,7 @@ pub fn main() -> void {
 		"define internal i64 @app__math__answer()",
 		"define internal void @app__main()",
 		"call i64 @app__math__answer()",
-		"call void @std__fmt__print_i64(i64",
+		"call void @std__fmt__print.i64(i64",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("got %q, want substring %q", out, want)
@@ -1209,7 +1209,7 @@ fn main() {
 		"%kizu.struct.User = type { i64 }",
 		"insertvalue %kizu.struct.User zeroinitializer, i64 30, 0",
 		"extractvalue %kizu.struct.User",
-		"call void @std__fmt__print_i64(i64",
+		"call void @std__fmt__print.i64(i64",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("got %q, want substring %q", out, want)
@@ -1245,7 +1245,7 @@ fn main() -> !void {
 		// failing silently.
 		"call void @kizu_main_error_message(",
 		"  ret i32 1",
-		"call void @std__fmt__print_i64(i64 %kizu.2)",
+		"call void @std__fmt__print.i64(i64 %kizu.2)",
 		"  ret i32 0",
 	} {
 		if !strings.Contains(string(out), want) {
@@ -1286,7 +1286,7 @@ fn main() -> !void {
 		"define internal %kizu.error.slice.u8 @read()",
 		"call %kizu.slice.u8 @identity(%kizu.slice.u8",
 		"insertvalue %kizu.error.slice.u8",
-		"call void @std__fmt__print__5b_5du8(%kizu.slice.u8 %kizu.2)",
+		"call void @std__fmt__print._5b_5du8(%kizu.slice.u8 %kizu.2)",
 		"call void @kizu_print_string(ptr",
 	} {
 		if !strings.Contains(string(out), want) {
@@ -1306,7 +1306,7 @@ func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "call void @std__fmt__print_i64(i64 3)") {
+	if !strings.Contains(string(out), "call void @std__fmt__print.i64(i64 3)") {
 		t.Fatalf("got %q", out)
 	}
 }
