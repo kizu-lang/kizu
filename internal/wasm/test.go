@@ -13,6 +13,10 @@ func (e *emitter) writeTestInstr(instr *ir.Instr) error {
 		return e.writeMessageFail(instr, "test.fail")
 	case "test.expect_equal":
 		return e.writeTestExpectEqual(instr)
+	case "test.begin", "test.mark":
+		// The test runner is native. A wasm module carries no test context,
+		// so the marks a test body leaves for it are nothing here.
+		return nil
 	default:
 		return fmt.Errorf("wasm error: unsupported test instruction `%s`", instr.Op)
 	}

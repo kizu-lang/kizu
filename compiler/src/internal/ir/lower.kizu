@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import compiler::internal::project;
+import compiler::internal::source;
 import compiler::internal::stdmeta;
 import compiler::internal::stdmethod;
 import compiler::internal::typ;
@@ -28,9 +29,10 @@ import std::string;
 pub fn (self: &var Lowerer) lower(
     tree: &var ast::Ast,
     program: &ast::Program,
-    std_errors: &project::StdErrorCodes
+    std_errors: &project::StdErrorCodes,
+    sources: &source::SourceMap
 ) -> !?diagnostic::Diagnostic {
-    if try self.lower_module(tree, program, std_errors) |failed| {
+    if try self.lower_module(tree, program, std_errors, sources) |failed| {
         return move failed;
     }
     return verify(self.allocator, &self.module);
@@ -268,6 +270,13 @@ pub struct Lowerer {
     // decls lists the program's function declarations in order; tests the
     // test blocks, which lower after the functions.
     decl_facts: arena::Arena<FunctionFacts>,
+    // test_name and test_file are set while a test block lowers, quoted the
+    // way string constants are spelled, the Go `testName` / `testFile`. A test
+    // body tells the runtime which test it is and which statement it is on
+    // (`test.begin`, `test.mark`), so a failure inside whatever a statement
+    // called can still name the test and the statement that reached it.
+    test_name: Name,
+    test_file: Name,
     decls: array::Array<FactsHandle>,
     // scratch_facts, scratch_args and scratch_signature fill result slots
     // before a resolver writes them, so out parameters need no optional
@@ -353,6 +362,9 @@ pub struct ExternDecl {
 /// body.
 pub struct TestFacts {
     pub symbol: Name,
+    /// The name as written, quoted the way a string constant is spelled, so
+    /// the body can hand it to the runtime (`test.begin`).
+    pub quoted_name: Name,
     /// The package module the block was written in, empty for a loose file.
     /// A test's symbol does not carry one, and a function pointer's value is
     /// looked up through the prefix of what is being lowered.
@@ -455,6 +467,8 @@ pub fn new_lowerer_for_target(
         types: typ::new(allocator),
         common: common,
         decl_facts: move decl_facts,
+        test_name: empty_name(),
+        test_file: empty_name(),
         decls: array::new<FactsHandle>(allocator),
         scratch_facts: scratch_facts,
         scratch_args: scratch_args,
@@ -536,11 +550,13 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
                 let name_bytes = retained.as_bytes();
                 let symbol = try test_function_name(self.allocator, name_bytes);
                 let symbol_name = try self.module.names.intern_owned(move symbol);
+                let quoted_name = try self.quoted_bytes(name_bytes);
                 let retained_module = tree.texts.at(test.module.node);
                 let module_bytes = retained_module.as_bytes();
                 let module_name = try self.module.names.intern(module_bytes);
                 try self.tests.append(self.allocator, TestFacts {
                     symbol: symbol_name,
+                    quoted_name: quoted_name,
                     module: module_name,
                     body: test.body
                 });
@@ -693,7 +709,8 @@ fn (self: &Lowerer) retired_for_try(
 fn (self: &var Lowerer) lower_module(
     tree: &var ast::Ast,
     program: &ast::Program,
-    std_errors: &project::StdErrorCodes
+    std_errors: &project::StdErrorCodes,
+    sources: &source::SourceMap
 ) -> !?diagnostic::Diagnostic {
     if try self.collect_decls(tree, program, std_errors) |failed| {
         return move failed;
@@ -710,7 +727,7 @@ fn (self: &var Lowerer) lower_module(
             return move failed;
         }
     }
-    if try self.lower_tests(tree) |failed| {
+    if try self.lower_tests(tree, sources) |failed| {
         return move failed;
     }
     return self.lower_pending_generics(tree);
@@ -720,10 +737,15 @@ fn (self: &var Lowerer) lower_module(
 /// `lowerTests`, so a test runs through the same lowering as the rest of the
 /// program. A test body may `try`, so it lowers as a function returning
 /// `!void`.
-fn (self: &var Lowerer) lower_tests(tree: &var ast::Ast) -> !?diagnostic::Diagnostic {
+fn (self: &var Lowerer) lower_tests(
+    tree: &var ast::Ast,
+    sources: &source::SourceMap
+) -> !?diagnostic::Diagnostic {
     var index = 0;
     while self.tests.get(index) |test| {
         index = index + 1;
+        self.test_name = test.quoted_name;
+        self.test_file = try self.test_file_name(tree, sources, test.body);
         let return_type = try self.module.names.intern("!void");
         let facts = FunctionFacts {
             name: test.symbol,
@@ -740,8 +762,51 @@ fn (self: &var Lowerer) lower_tests(tree: &var ast::Ast) -> !?diagnostic::Diagno
         if try self.lower_function_named(tree, handle, test.symbol) |failed| {
             return move failed;
         }
+        self.test_name = empty_name();
+        self.test_file = empty_name();
     }
     return null;
+}
+
+/// Names the quoted path of the file a test body was written in, read off
+/// the first statement that carries a position, the Go `blockFile`. Quoted
+/// empty text when none does.
+fn (self: &var Lowerer) test_file_name(
+    tree: &ast::Ast,
+    sources: &source::SourceMap,
+    body: ?ast::Block
+) -> !Name {
+    if body |block| {
+        var index = 0;
+        while ownership::block_statement_at(tree, block, index) |statement| {
+            index = index + 1;
+            let span = statement_span(tree, statement);
+            if span.start.line == 0 {
+                continue;
+            }
+            if span.source |id| {
+                if sources.at(id) |file| {
+                    let path = file.path.as_bytes();
+                    return self.quoted_bytes(path);
+                }
+            }
+            return self.quoted_bytes("");
+        }
+    }
+    return self.quoted_bytes("");
+}
+
+/// Tells the runtime which test is running, the Go `emitTestBegin`: the
+/// name and the file are two constants the body hands over once.
+fn (self: &var Lowerer) emit_test_begin() -> !void {
+    let name = try self.emit_const(self.common.bytes_type, self.test_name);
+    let file = try self.emit_const(self.common.bytes_type, self.test_file);
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit(self.allocator);
+    try args.append(self.allocator, name);
+    try args.append(self.allocator, file);
+    let _ = try self.emit_with(Op::TestBegin, empty_name(), self.common.void_type, empty_name(), &args);
+    return;
 }
 
 /// Records signatures and struct layouts, the Go `collectDecls`.
@@ -1471,6 +1536,9 @@ fn (self: &var Lowerer) lower_function_named(
             let slot = try self.emit1(Op::LocalSlot, slot_type, value);
             try self.envs.bind(self.allocator, self.env, slot_name, slot);
         }
+    }
+    if !is_empty(self.test_name) {
+        try self.emit_test_begin();
     }
     if self.decl_body(decl) |body| {
         if try self.lower_block(tree, body) |failed| {

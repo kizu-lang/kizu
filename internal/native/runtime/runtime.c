@@ -533,10 +533,64 @@ void kizu_print_string(const unsigned char *s, int64_t len) {
     fputc('\n', stdout);
 }
 
+/* The test that is running, and the statement of it that ran last. A test
+   body reports both as it goes (`test.begin`, `test.mark`), so a failure
+   inside whatever a statement called can still say which test reached it and
+   from where (SPEC §14.5). A program that is not a test reports nothing, and
+   the note stays silent. */
+static const unsigned char *kizu_test_name = 0;
+static int64_t kizu_test_name_len = 0;
+static const unsigned char *kizu_test_file = 0;
+static int64_t kizu_test_file_len = 0;
+static int64_t kizu_test_line = 0;
+static int64_t kizu_test_column = 0;
+
+void kizu_test_begin(const unsigned char *name, int64_t name_len,
+                     const unsigned char *file, int64_t file_len) {
+    kizu_test_name = name;
+    kizu_test_name_len = name_len;
+    kizu_test_file = file;
+    kizu_test_file_len = file_len;
+    kizu_test_line = 0;
+    kizu_test_column = 0;
+}
+
+void kizu_test_mark(int64_t line, int64_t column) {
+    kizu_test_line = line;
+    kizu_test_column = column;
+}
+
+static void kizu_test_note(void) {
+    if (kizu_test_name == 0) {
+        return;
+    }
+    fputs("note: in test \"", stderr);
+    fwrite(kizu_test_name, 1, (size_t)kizu_test_name_len, stderr);
+    fputc('"', stderr);
+    if (kizu_test_line > 0) {
+        fputs(" at ", stderr);
+        if (kizu_test_file_len > 0) {
+            fwrite(kizu_test_file, 1, (size_t)kizu_test_file_len, stderr);
+            fputc(':', stderr);
+        }
+        fprintf(stderr, "%lld:%lld", (long long)kizu_test_line, (long long)kizu_test_column);
+    }
+    fputc('\n', stderr);
+}
+
+/* Every checked failure ends here, so the test context is the last thing a
+   failure says: after its own summary and notes, which test reached it and
+   from where. */
+static void kizu_panic_abort(void) {
+    kizu_test_note();
+    abort();
+}
+
 void kizu_main_error_message(const unsigned char *s, int64_t len) {
     fwrite("runtime error: ", 1, 15, stderr);
     fwrite(s, 1, (size_t)len, stderr);
     fputc('\n', stderr);
+    kizu_test_note();
 }
 
 /* Checked runtime failures. The wording lives here so that a failure reads the
@@ -597,7 +651,7 @@ void kizu_panic_bounds(int64_t index, int64_t length, int64_t line, int64_t colu
     kizu_panic_summary("index out of bounds", line, column);
     fprintf(stderr, "note: index is %lld, length is %lld\n",
             (long long)index, (long long)length);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_range(int64_t start, int64_t end, int64_t length,
@@ -605,32 +659,32 @@ void kizu_panic_range(int64_t start, int64_t end, int64_t length,
     kizu_panic_summary("range out of bounds", line, column);
     fprintf(stderr, "note: range is %lld..%lld, length is %lld\n",
             (long long)start, (long long)end, (long long)length);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_array_empty(int64_t line, int64_t column) {
     kizu_panic_summary("array pop from empty", line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_arena_empty(int64_t line, int64_t column) {
     kizu_panic_summary("arena pop from empty", line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_arena_handle(int64_t line, int64_t column) {
     kizu_panic_summary("invalid arena handle", line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_arena_full(int64_t line, int64_t column) {
     kizu_panic_summary("arena is full", line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_shift_negative(int64_t line, int64_t column) {
     kizu_panic_summary("negative shift amount", line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 /*
@@ -653,7 +707,7 @@ static int64_t kizu_arena_instances = 0;
 int64_t kizu_arena_origin(void) {
     if (kizu_arena_instances >= KIZU_ARENA_INSTANCE_MAX) {
         fputs("runtime error: arena instances exhausted\n", stderr);
-        abort();
+        kizu_panic_abort();
     }
     kizu_arena_instances += 1;
     return (kizu_arena_instances << KIZU_ARENA_INDEX_BITS) + 1;
@@ -664,7 +718,7 @@ void kizu_panic_test_fail(const unsigned char *s, int64_t len,
     fputs("runtime error: ", stderr);
     fwrite(s, 1, (size_t)len, stderr);
     kizu_panic_at(line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_fail(const unsigned char *s, int64_t len,
@@ -672,7 +726,7 @@ void kizu_panic_fail(const unsigned char *s, int64_t len,
     fputs("runtime error: ", stderr);
     fwrite(s, 1, (size_t)len, stderr);
     kizu_panic_at(line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_expect_equal_int(int64_t expected, int64_t actual,
@@ -680,7 +734,7 @@ void kizu_panic_expect_equal_int(int64_t expected, int64_t actual,
     fprintf(stderr, "runtime error: expected %lld, got %lld",
             (long long)expected, (long long)actual);
     kizu_panic_at(line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_expect_equal_bool(_Bool expected, _Bool actual,
@@ -688,7 +742,7 @@ void kizu_panic_expect_equal_bool(_Bool expected, _Bool actual,
     fprintf(stderr, "runtime error: expected %s, got %s",
             expected ? "true" : "false", actual ? "true" : "false");
     kizu_panic_at(line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void kizu_panic_expect_equal_bytes(const unsigned char *expected, int64_t expected_len,
@@ -700,7 +754,7 @@ void kizu_panic_expect_equal_bytes(const unsigned char *expected, int64_t expect
     fwrite(actual, 1, (size_t)actual_len, stderr);
     fputc('"', stderr);
     kizu_panic_at(line, column);
-    abort();
+    kizu_panic_abort();
 }
 
 void *std__internal__builtin__mem_page_allocator(void) {

@@ -180,6 +180,9 @@ fn (self: &var Lowerer) lower_block_statements(
             }
             continue;
         }
+        if !is_empty(self.test_name) {
+            try self.emit_test_mark(tree, statement);
+        }
         if try self.lower_stmt(tree, statement) |failed| {
             return move failed;
         }
@@ -198,6 +201,88 @@ fn (self: &var Lowerer) lower_block_statements(
 }
 
 /// Lowers one statement, the Go `lowerStmt`.
+/// Tells the runtime which statement of the test body is about to run, the
+/// Go `emitTestMark`, so a failure inside whatever it calls can point back
+/// here. A statement with no position of its own records nothing.
+fn (self: &var Lowerer) emit_test_mark(tree: &ast::Ast, statement: ast::Statement) -> !void {
+    let span = statement_span(tree, statement);
+    if span.start.line == 0 {
+        return;
+    }
+    let _ = try self.emit0(Op::TestMark, self.common.void_type);
+    if self.last_instr() |instr| {
+        if self.module.instrs.at_mut(instr.node) |node| {
+            node.span = span;
+        }
+    }
+    return;
+}
+
+/// Is where a statement starts, as far as the tree records it, the Go
+/// `statementSpan`: a statement carries no position of its own, so it is the
+/// first position inside the expression that leads it.
+fn statement_span(tree: &ast::Ast, statement: ast::Statement) -> ast::Span {
+    match tree.statements.at(statement.node) {
+        Let(value) => return leading_span(tree, value.value),
+        Assign(value) => return leading_span(tree, value.target),
+        Return(value) => {
+            if value.value |expression| {
+                return leading_span(tree, expression);
+            }
+            return ast::zero_span();
+        },
+        Expr(value) => return leading_span(tree, value.expr),
+        If(value) => return leading_span(tree, value.condition),
+        While(value) => return leading_span(tree, value.condition),
+        For(value) => return leading_span(tree, value.start),
+        Match(value) => return leading_span(tree, value.value),
+        _ => return ast::zero_span(),
+    }
+}
+
+/// Is the first recorded position inside an expression, the Go
+/// `leadingSpan`: the span a node carries itself, or the first one inside a
+/// compound node.
+fn leading_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => return value.span,
+        Null(value) => return value.span,
+        Cast(value) => return value.keyword_span,
+        StructLiteral(value) => return value.span,
+        BufferLiteral(value) => return value.span,
+        Move(value) => return value.span,
+        Unsafe(value) => return value.span,
+        _ => return nested_leading_span(tree, expression),
+    }
+}
+
+/// Reads a compound expression left to right, the Go `nestedLeadingSpan`:
+/// the receiver before the field, the callee before the call, the operand
+/// before the operator.
+fn nested_leading_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
+    match tree.expressions.at(expression.node) {
+        Binary(value) => return first_span(leading_span(tree, value.left), value.operator_span),
+        Call(value) => return leading_span(tree, value.callee),
+        TypeApply(value) => return leading_span(tree, value.callee),
+        Try(value) => return leading_span(tree, value.value),
+        Field(value) => return first_span(leading_span(tree, value.receiver), value.span),
+        Deref(value) => return first_span(leading_span(tree, value.receiver), value.operator_span),
+        Index(value) => return first_span(leading_span(tree, value.target), value.span),
+        OrelseGuard(value) => return first_span(leading_span(tree, value.condition), value.span),
+        CatchGuard(value) => return first_span(leading_span(tree, value.condition), value.span),
+        Comptime(value) => return leading_span(tree, value.expr),
+        _ => return ast::zero_span(),
+    }
+}
+
+/// Is the first of two spans that carries a position, the Go `firstSpan`.
+fn first_span(first: ast::Span, second: ast::Span) -> ast::Span {
+    if first.start.line != 0 {
+        return first;
+    }
+    return second;
+}
+
 fn (self: &var Lowerer) lower_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
     if ownership::let_stmt(tree, statement) |value| {
         return self.lower_let_stmt(tree, value);

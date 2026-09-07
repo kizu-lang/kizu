@@ -50,5 +50,4 @@ link と実行で処理する。package test の module/file 規則は ADR-0049�
 - `expect` failure は通常の recoverable error ではなく、明示 test trap になる。
 - package の `_test.kizu` discovery は filesystem の directory module 規則だけで決まり、
   test list や別の manifest 設定を持たない。
-- package root より上からの filesystem-wide discovery、filter、location-aware diagnostics
-  は後続に残す。
+- package root より上からの filesystem-wide discovery、filter は後続に残す。

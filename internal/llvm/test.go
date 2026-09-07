@@ -13,6 +13,24 @@ func (e *emitter) writeTestRuntimeDecls() {
 	if e.usesByteEqualityRuntime() {
 		e.out.WriteString("declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)\n\n")
 	}
+	if e.usesTestContext() {
+		e.out.WriteString("declare void @kizu_test_begin(ptr, i64, ptr, i64)\n")
+		e.out.WriteString("declare void @kizu_test_mark(i64, i64)\n\n")
+	}
+}
+
+// usesTestContext reports whether a test body tells the runtime where it is.
+func (e *emitter) usesTestContext() bool {
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == "test.begin" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // usesByteEqualityRuntime reports whether []u8 equality is needed.
@@ -41,9 +59,37 @@ func (e *emitter) writeTestInstr(instr *ir.Instr) error {
 		return e.writeTestFail(instr)
 	case "test.expect_equal":
 		return e.writeTestExpectEqual(instr)
+	case "test.begin":
+		return e.writeTestBegin(instr)
+	case "test.mark":
+		return e.writeTestMark(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported test instruction `%s`", instr.Op)
 	}
+}
+
+// writeTestBegin hands the runtime the name of the test that is starting and
+// the file it was written in, so a failure can name both.
+func (e *emitter) writeTestBegin(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || instr.Args[0].Type != "[]u8" || instr.Args[1].Type != "[]u8" {
+		return fmt.Errorf("llvm error: test.begin expects a []u8 name and a []u8 file")
+	}
+	namePtr, nameLen := e.writeSliceParts(localName(instr.Result.Name)+".name",
+		e.value(instr.Args[0]).operand)
+	filePtr, fileLen := e.writeSliceParts(localName(instr.Result.Name)+".file",
+		e.value(instr.Args[1]).operand)
+	fmt.Fprintf(&e.out, "  call void @kizu_test_begin(ptr %s, i64 %s, ptr %s, i64 %s)\n",
+		namePtr, nameLen, filePtr, fileLen)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
+	return nil
+}
+
+// writeTestMark hands the runtime the position of the statement about to run.
+func (e *emitter) writeTestMark(instr *ir.Instr) error {
+	fmt.Fprintf(&e.out, "  call void @kizu_test_mark(%s)\n",
+		strings.Join(panicPosition(instr.Span), ", "))
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
+	return nil
 }
 
 // writeTestFail reports an explicit std::testing failure and stops.
