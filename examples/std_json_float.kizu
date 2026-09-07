@@ -1,0 +1,50 @@
+import std::json;
+import std::mem;
+import std::string;
+
+// A float field is a JSON number like an integer field. It is written the way
+// `std::float::append` spells it -- the shortest decimal that reads back as
+// the same value, with `.0` on an integral one -- so a float stays a float
+// across a round trip and a reader can tell `100.0` from `100`.
+pub struct Reading {
+    pub celsius: f64,
+    pub samples: i64,
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"celsius": 21.5, "samples": 4}
+    ;
+    var reading = try json::decode<Reading>(allocator, document);
+    print(reading.celsius * 2.0);
+
+    reading.celsius = 100.0;
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try json::encode<Reading>(allocator, reading, out);
+    let written = out.as_bytes();
+    print(written);
+
+    // An f64 reads any number JSON has; an i64 reads only one spelled as an
+    // integer. `4.0` is not truncated to 4, it is refused.
+    let fractional =
+        \\{"celsius": 21.5, "samples": 4.0}
+    ;
+    if json::decode<Reading>(allocator, fractional) |_| {
+        print("accepted");
+    } else |err| {
+        match err {
+            InvalidNumber => { print("samples must be an integer"); },
+            _ => { print("other error"); },
+        }
+    }
+    return;
+}
+
+// run
+// features: std-json decode encode f64
+// output:
+// 43.0
+// {"celsius":100.0,"samples":4}
+// samples must be an integer

@@ -122,6 +122,20 @@ fn (self: &var Encoder) write_i64(value: i64) -> std::mem::Error!void {
     return;
 }
 
+// write_f64 spells a float the way `std::float::append` does: the shortest
+// decimal that reads back as the same value, with `.0` on an integral one so
+// the document still says it is a float. JSON has no spelling for NaN or an
+// infinity, so reaching here with one is a bug in the caller, not a recoverable
+// failure (ADR-0112): the value came from the program's own arithmetic rather
+// than from input, and what it stands for is the program's to decide.
+fn (self: &var Encoder) write_f64(value: f64) -> std::mem::Error!void {
+    let allocator = self.allocator;
+    check_finite(value);
+    try self.begin_value();
+    try std::float::append(allocator, self.out, value);
+    return;
+}
+
 fn (self: &var Encoder) write_bool(value: bool) -> std::mem::Error!void {
     let allocator = self.allocator;
     try self.begin_value();
@@ -148,6 +162,14 @@ fn (self: &var Encoder) write_i64_field(name: []u8, value: i64) -> std::mem::Err
     return;
 }
 
+fn (self: &var Encoder) write_f64_field(name: []u8, value: f64) -> std::mem::Error!void {
+    let allocator = self.allocator;
+    check_finite(value);
+    try self.begin_field(name);
+    try std::float::append(allocator, self.out, value);
+    return;
+}
+
 fn (self: &var Encoder) write_bool_field(name: []u8, value: bool) -> std::mem::Error!void {
     let allocator = self.allocator;
     try self.begin_field(name);
@@ -164,6 +186,16 @@ fn (self: &var Encoder) write_null_field(name: []u8) -> std::mem::Error!void {
 fn (self: &var Encoder) write_bytes_field(name: []u8, value: []u8) -> std::mem::Error!void {
     try self.begin_field(name);
     try self.write_quoted(value);
+    return;
+}
+
+fn check_finite(value: f64) -> void {
+    if std::float::is_nan(value) {
+        std::internal::builtin::panic("json encoder: NaN is not a JSON number");
+    }
+    if std::float::is_infinite(value) {
+        std::internal::builtin::panic("json encoder: an infinity is not a JSON number");
+    }
     return;
 }
 
@@ -240,31 +272,35 @@ pub fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem:
     comptime if T == type<i64> {
         try encoder.write_i64(value.*);
     } else {
-        comptime if T == type<bool> {
-            try encoder.write_bool(value.*);
+        comptime if T == type<f64> {
+            try encoder.write_f64(value.*);
         } else {
-            comptime if T == type<[]u8> {
-                try encoder.write_bytes(value.*);
+            comptime if T == type<bool> {
+                try encoder.write_bool(value.*);
             } else {
-                comptime if T == type<std::string::String> {
-                    let text = value.as_bytes();
-                    try encoder.write_bytes(text);
+                comptime if T == type<[]u8> {
+                    try encoder.write_bytes(value.*);
                 } else {
-                    comptime if std::meta::has_public_fields<T>() {
-                        try encoder.begin_object();
-                        try encode_fields<T>(encoder, value);
-                        try encoder.end_object();
+                    comptime if T == type<std::string::String> {
+                        let text = value.as_bytes();
+                        try encoder.write_bytes(text);
                     } else {
-                        comptime if std::meta::is_array<T>()
-                            or std::meta::is_map<T>()
-                            or std::meta::is_box<T>() {
-                            try encode_container_value<T>(encoder, value);
+                        comptime if std::meta::has_public_fields<T>() {
+                            try encoder.begin_object();
+                            try encode_fields<T>(encoder, value);
+                            try encoder.end_object();
                         } else {
-                            comptime if std::meta::is_enum<T>()
-                                or std::meta::is_union<T>() {
-                                try encode_variant_value<T>(encoder, value);
+                            comptime if std::meta::is_array<T>()
+                                or std::meta::is_map<T>()
+                                or std::meta::is_box<T>() {
+                                try encode_container_value<T>(encoder, value);
                             } else {
-                                std::meta::unsupported<T>();
+                                comptime if std::meta::is_enum<T>()
+                                    or std::meta::is_union<T>() {
+                                    try encode_variant_value<T>(encoder, value);
+                                } else {
+                                    std::meta::unsupported<T>();
+                                }
                             }
                         }
                     }
@@ -361,31 +397,35 @@ fn encode_field<T>(
     comptime if T == type<i64> {
         try encoder.write_i64_field(name, value.*);
     } else {
-        comptime if T == type<bool> {
-            try encoder.write_bool_field(name, value.*);
+        comptime if T == type<f64> {
+            try encoder.write_f64_field(name, value.*);
         } else {
-            comptime if T == type<[]u8> {
-                try encoder.write_bytes_field(name, value.*);
+            comptime if T == type<bool> {
+                try encoder.write_bool_field(name, value.*);
             } else {
-                comptime if T == type<std::string::String> {
-                    let text = value.as_bytes();
-                    try encoder.write_bytes_field(name, text);
+                comptime if T == type<[]u8> {
+                    try encoder.write_bytes_field(name, value.*);
                 } else {
-                    comptime if std::meta::has_public_fields<T>() {
-                        try encoder.begin_object_field(name);
-                        try encode_fields<T>(encoder, value);
-                        try encoder.end_object();
+                    comptime if T == type<std::string::String> {
+                        let text = value.as_bytes();
+                        try encoder.write_bytes_field(name, text);
                     } else {
-                        comptime if std::meta::is_array<T>()
-                            or std::meta::is_map<T>()
-                            or std::meta::is_box<T>() {
-                            try encode_container_field<T>(encoder, name, value);
+                        comptime if std::meta::has_public_fields<T>() {
+                            try encoder.begin_object_field(name);
+                            try encode_fields<T>(encoder, value);
+                            try encoder.end_object();
                         } else {
-                            comptime if std::meta::is_enum<T>()
-                                or std::meta::is_union<T>() {
-                                try encode_variant_field<T>(encoder, name, value);
+                            comptime if std::meta::is_array<T>()
+                                or std::meta::is_map<T>()
+                                or std::meta::is_box<T>() {
+                                try encode_container_field<T>(encoder, name, value);
                             } else {
-                                std::meta::unsupported<T>();
+                                comptime if std::meta::is_enum<T>()
+                                    or std::meta::is_union<T>() {
+                                    try encode_variant_field<T>(encoder, name, value);
+                                } else {
+                                    std::meta::unsupported<T>();
+                                }
                             }
                         }
                     }
@@ -488,6 +528,7 @@ fn encode_any_value(
         Null => try encoder.write_null(),
         Bool(flag) => try encoder.write_bool(flag),
         I64(number) => try encoder.write_i64(number),
+        F64(number) => try encoder.write_f64(number),
         Str(text) => {
             let bytes = text.as_bytes();
             try encoder.write_bytes(bytes);
@@ -517,6 +558,7 @@ fn encode_any_field(
         Null => try encoder.write_null_field(name),
         Bool(flag) => try encoder.write_bool_field(name, flag),
         I64(number) => try encoder.write_i64_field(name, number),
+        F64(number) => try encoder.write_f64_field(name, number),
         Str(text) => {
             let bytes = text.as_bytes();
             try encoder.write_bytes_field(name, bytes);
@@ -719,8 +761,9 @@ pub error Error {
     MissingField,
     UnknownField,
     DuplicateField,
-    // A number that JSON allows and `i64` cannot hold. std::json v1 has no
-    // float: SPEC §7 reserves `f64` but the language has no float arithmetic.
+    // A number that JSON allows and the asked-for type cannot hold: a
+    // fraction or an exponent asked for as `i64`, an integer past `i64`, or a
+    // magnitude past `f64`.
     InvalidNumber,
     // The escape is well-formed JSON that names no character: a lone
     // surrogate half, or a `\` before something that is not an escape.
@@ -815,46 +858,150 @@ fn is_digit(byte: u8) -> bool {
     return byte >= cast<u8>(48) and byte <= cast<u8>(57);
 }
 
-// decode_i64 reads an integer. JSON allows a fraction and an exponent; std::json
-// v1 has neither, because the language has no float arithmetic (SPEC §7
-// reserves `f64` and no more), so a number that is not an integer is an error
-// rather than a silently truncated value.
-fn decode_i64(bytes: []u8, index: &var i64) -> Error!i64 {
+// A Number is where one JSON number sits in the document, and whether it is
+// spelled as an integer. The grammar is RFC 8259's: an optional minus, an
+// integer part with no leading zero, an optional fraction, an optional
+// exponent. What the digits are worth is decided by the type that asked for
+// them, so scanning and converting are two steps.
+struct Number {
+    start: i64,
+    end: i64,
+    // False when the spelling has a fraction or an exponent. `1.0` and `1e0`
+    // are floats even though they are worth an integer: `i64` refuses them
+    // rather than deciding what `1.5` would truncate to, and `Value` reads
+    // them as `F64` so a document that said float stays float.
+    integral: bool,
+}
+
+// scan_number reads past one number and reports where it was. It stops at the
+// first byte the grammar does not allow, so `01` is the number `0` followed by
+// a `1` the caller then refuses, the way JSON asks.
+fn scan_number(bytes: []u8, index: &var i64) -> Error!Number {
     skip_space(bytes, index);
-    var negative = false;
+    let start = index.*;
     if std::mem::byte_at(bytes, index.*) |byte| {
         if byte == cast<u8>(45) {
-            negative = true;
             index.* = index.* + 1;
         }
     }
-    var digits = 0;
-    var value = 0;
+    // The integer part is a lone `0`, or digits starting with another one.
+    if std::mem::byte_at(bytes, index.*) |byte| {
+        if byte == cast<u8>(48) {
+            index.* = index.* + 1;
+        } else {
+            if skip_digits(bytes, index) == 0 {
+                return Error::UnexpectedToken;
+            }
+        }
+    } else {
+        return Error::UnexpectedToken;
+    }
+    var integral = true;
+    if std::mem::byte_at(bytes, index.*) |byte| {
+        if byte == cast<u8>(46) {
+            index.* = index.* + 1;
+            if skip_digits(bytes, index) == 0 {
+                return Error::UnexpectedToken;
+            }
+            integral = false;
+        }
+    }
+    if std::mem::byte_at(bytes, index.*) |byte| {
+        if byte == cast<u8>(101) or byte == cast<u8>(69) {
+            index.* = index.* + 1;
+            if std::mem::byte_at(bytes, index.*) |sign| {
+                if sign == cast<u8>(43) or sign == cast<u8>(45) {
+                    index.* = index.* + 1;
+                }
+            }
+            if skip_digits(bytes, index) == 0 {
+                return Error::UnexpectedToken;
+            }
+            integral = false;
+        }
+    }
+    return Number { start: start, end: index.*, integral: integral };
+}
+
+// skip_digits advances past a run of digits and returns how many there were.
+fn skip_digits(bytes: []u8, index: &var i64) -> i64 {
+    var count = 0;
     while std::mem::byte_at(bytes, index.*) |byte| {
         if !is_digit(byte) {
             break;
         }
-        // The bound keeps the multiply below from overflowing before the
-        // digit is added; a number this long is out of range either way.
-        if value > 922337203685477580 {
-            return Error::InvalidNumber;
-        }
-        value = value * 10 + cast<i64>(byte - cast<u8>(48));
-        digits = digits + 1;
         index.* = index.* + 1;
+        count = count + 1;
     }
-    if digits == 0 {
-        return Error::UnexpectedToken;
+    return count;
+}
+
+// integer_of is the `i64` a number is worth. A fraction or an exponent is
+// `InvalidNumber` rather than a truncation, and so is a magnitude past the
+// type: JSON allows both, `i64` can hold neither, and rounding silently would
+// hide the difference from the caller.
+fn integer_of(bytes: []u8, number: &Number) -> Error!i64 {
+    if !number.integral {
+        return Error::InvalidNumber;
     }
-    if std::mem::byte_at(bytes, index.*) |byte| {
-        if byte == cast<u8>(46) or byte == cast<u8>(101) or byte == cast<u8>(69) {
-            return Error::InvalidNumber;
+    var at = number.start;
+    var negative = false;
+    if std::mem::byte_at(bytes, at) |byte| {
+        if byte == cast<u8>(45) {
+            negative = true;
+            at = at + 1;
         }
+    }
+    // Accumulated below zero, because the minimum is one past the maximum in
+    // magnitude and has to fit while it is being read.
+    var value = 0;
+    while at < number.end {
+        if std::mem::byte_at(bytes, at) |byte| {
+            let digit = cast<i64>(byte - cast<u8>(48));
+            if value < -922337203685477580
+                or (value == -922337203685477580 and digit > 8) {
+                return Error::InvalidNumber;
+            }
+            value = value * 10 - digit;
+        }
+        at = at + 1;
     }
     if negative {
-        return 0 - value;
+        return value;
     }
-    return value;
+    if value < -9223372036854775807 {
+        return Error::InvalidNumber;
+    }
+    return 0 - value;
+}
+
+// float_of is the `f64` nearest to a number. `std::float::parse` reads the
+// JSON grammar as a subset of its own, so a slice scan_number accepted is one
+// it reads. A magnitude past the type comes back as an infinity, which JSON
+// has no spelling for, so it is `InvalidNumber` the way an integer past `i64`
+// is; a magnitude below the smallest subnormal is zero, the nearest value.
+fn float_of(allocator: Allocator, bytes: []u8, number: &Number) -> std::json::DecodeError!f64 {
+    if std::mem::slice(bytes, number.start, number.end) |text| {
+        if try std::float::parse(allocator, text) |value| {
+            if std::float::is_infinite(value) {
+                return Error::InvalidNumber;
+            }
+            return value;
+        }
+    }
+    return Error::UnexpectedToken;
+}
+
+// decode_i64 reads a number spelled as an integer.
+fn decode_i64(bytes: []u8, index: &var i64) -> Error!i64 {
+    let number = try scan_number(bytes, index);
+    return integer_of(bytes, &number);
+}
+
+// decode_f64 reads any number JSON has.
+fn decode_f64(allocator: Allocator, bytes: []u8, index: &var i64) -> std::json::DecodeError!f64 {
+    let number = try scan_number(bytes, index);
+    return float_of(allocator, bytes, &number);
 }
 
 fn hex_value(byte: u8) -> ?i64 {
@@ -1018,7 +1165,7 @@ fn skip_value(bytes: []u8, index: &var i64, depth: i64) -> Error!void {
         if byte == cast<u8>(110) {
             return decode_null(bytes, index);
         }
-        let _ = try decode_i64(bytes, index);
+        let _ = try scan_number(bytes, index);
         return;
     }
     return Error::UnexpectedToken;
@@ -1299,10 +1446,16 @@ fn hex4_value(bytes: []u8, index: &var i64) -> ?i64 {
 // `Obj` is the map a JSON object is: keys with the values they name, in the
 // order the document wrote them (ADR-0088). It owns both, so the keys outlive
 // the bytes they were read from.
+//
+// A number is `F64` when its spelling has a fraction or an exponent and `I64`
+// otherwise, so `1.0` stays a float and `1` stays an integer through a round
+// trip. An integer spelling `i64` cannot hold is `InvalidNumber`, not a float
+// that has lost digits.
 pub union Value {
     Null,
     Bool(bool),
     I64(i64),
+    F64(f64),
     Str(std::string::String),
     Arr(std::array::Array<std::json::Value>),
     Obj(std::map::Map<[]u8, std::json::Value>),
@@ -1313,6 +1466,7 @@ fn (self: Value) deinit(allocator: Allocator) -> void {
         Null => return,
         Bool(_) => return,
         I64(_) => return,
+        F64(_) => return,
         Str(text) => text.deinit(allocator),
         Arr(items) => items.deinit(allocator),
         Obj(entries) => entries.deinit(allocator),
@@ -1381,28 +1535,32 @@ fn decode_value<T>(
     comptime if T == type<i64> {
         return try decode_i64(bytes, index);
     } else {
-        comptime if T == type<bool> {
-            return try decode_bool(bytes, index);
+        comptime if T == type<f64> {
+            return decode_f64(allocator, bytes, index);
         } else {
-            comptime if T == type<std::string::String> {
-                return decode_string(allocator, bytes, index);
+            comptime if T == type<bool> {
+                return try decode_bool(bytes, index);
             } else {
-                comptime if T == type<std::json::Value> {
-                    return decode_any(allocator, bytes, index, 0);
+                comptime if T == type<std::string::String> {
+                    return decode_string(allocator, bytes, index);
                 } else {
-                    comptime if std::meta::is_array<T>()
-                        or std::meta::is_map<T>()
-                        or std::meta::is_box<T>() {
-                        return decode_container_value<T>(allocator, bytes, index, ignore_unknown);
+                    comptime if T == type<std::json::Value> {
+                        return decode_any(allocator, bytes, index, 0);
                     } else {
-                        comptime if std::meta::has_public_fields<T>() {
-                            return decode_struct<T>(allocator, bytes, index, ignore_unknown);
+                        comptime if std::meta::is_array<T>()
+                            or std::meta::is_map<T>()
+                            or std::meta::is_box<T>() {
+                            return decode_container_value<T>(allocator, bytes, index, ignore_unknown);
                         } else {
-                            comptime if std::meta::is_enum<T>()
-                                or std::meta::is_union<T>() {
-                                return decode_variant<T>(allocator, bytes, index, ignore_unknown);
+                            comptime if std::meta::has_public_fields<T>() {
+                                return decode_struct<T>(allocator, bytes, index, ignore_unknown);
                             } else {
-                                return std::meta::unsupported<T>();
+                                comptime if std::meta::is_enum<T>()
+                                    or std::meta::is_union<T>() {
+                                    return decode_variant<T>(allocator, bytes, index, ignore_unknown);
+                                } else {
+                                    return std::meta::unsupported<T>();
+                                }
                             }
                         }
                     }
@@ -1442,7 +1600,11 @@ fn decode_any(
             try decode_null(bytes, index);
             return std::json::Value::Null;
         }
-        return std::json::Value::I64(try decode_i64(bytes, index));
+        let number = try scan_number(bytes, index);
+        if number.integral {
+            return std::json::Value::I64(try integer_of(bytes, &number));
+        }
+        return std::json::Value::F64(try float_of(allocator, bytes, &number));
     }
     return Error::UnexpectedToken;
 }

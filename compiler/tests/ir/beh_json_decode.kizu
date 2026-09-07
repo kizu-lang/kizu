@@ -1,4 +1,5 @@
 import std::array;
+import std::float;
 import std::json;
 import std::map;
 import std::mem;
@@ -17,6 +18,11 @@ pub struct Profile {
 
 pub struct Wrapper {
     pub head: Profile,
+    pub count: i64,
+}
+
+pub struct Sample {
+    pub celsius: f64,
     pub count: i64,
 }
 
@@ -106,6 +112,85 @@ test "json decode reads a negative number" {
     testing::expect_equal<i64>(-12, counts.visits);
 }
 
+// An f64 field takes any number JSON has; an i64 field next to it still takes
+// only an integer spelling.
+test "json decode reads an f64 field" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"celsius": 21.5, "count": 4}
+    ;
+    let sample = try json::decode<Sample>(allocator, document);
+    testing::expect_equal<f64>(21.5, sample.celsius);
+    testing::expect_equal<i64>(4, sample.count);
+}
+
+fn expect_f64(allocator: Allocator, document: []u8, expected: f64) -> !void {
+    let value = try json::decode<f64>(allocator, document);
+    testing::expect_equal<f64>(expected, value);
+    return;
+}
+
+// Every spelling JSON has reads to the nearest f64: an integer, a fraction, an
+// exponent with either sign, a magnitude too small for the type (zero is the
+// nearest value), and the negative zero, which keeps its sign.
+test "json decode reads every number spelling as f64" {
+    let allocator = mem::page_allocator();
+    try expect_f64(allocator, "1.5", 1.5);
+    try expect_f64(allocator, "100", 100.0);
+    try expect_f64(allocator, "1E+2", 100.0);
+    try expect_f64(allocator, "2.5e-3", 0.0025);
+    try expect_f64(allocator, "0.1", 0.1);
+    try expect_f64(allocator, "1e-400", 0.0);
+    let negative_zero = try json::decode<f64>(allocator, "-0.0");
+    testing::expect(float::bits(negative_zero) == float::bits(-0.0));
+}
+
+// decode_outcome names how a decode ended, so a test can say which error it
+// expects without a match in every case.
+fn decode_outcome<T>(allocator: Allocator, document: []u8) -> []u8 {
+    var outcome = "ok";
+    if json::decode<T>(allocator, document) |_| {
+        outcome = "ok";
+    } else |err| {
+        match err {
+            UnexpectedToken => { outcome = "unexpected token"; },
+            InvalidNumber => { outcome = "invalid number"; },
+            _ => { outcome = "other"; },
+        }
+    }
+    return outcome;
+}
+
+// A number JSON allows and the type cannot hold is an error, not a rounded or
+// truncated value: a fraction or an exponent asked for as i64, an integer past
+// i64 in either direction, a magnitude past f64. The two ends of i64 fit.
+test "json decode refuses numbers the type cannot hold" {
+    let allocator = mem::page_allocator();
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "1.0"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "1e2"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "9223372036854775808"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "-9223372036854775809"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<f64>(allocator, "1e400"));
+    let largest = try json::decode<i64>(allocator, "9223372036854775807");
+    testing::expect_equal<i64>(9223372036854775807, largest);
+    let smallest = try json::decode<i64>(allocator, "-9223372036854775808");
+    testing::expect_equal<i64>(-9223372036854775807 - 1, smallest);
+}
+
+// The number grammar is JSON's, not std::float's: a leading zero, a point with
+// no digit on one side, a sign or an exponent with no digits, and a plus sign
+// are not numbers here even though `std::float::parse` reads some of them.
+test "json decode refuses number spellings JSON does not have" {
+    let allocator = mem::page_allocator();
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "01"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "1."));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, ".5"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "-"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "1e"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "+1"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<i64>(allocator, "-01"));
+}
+
 // A Value is a document read without deciding its type first. It is an
 // ordinary recursive union, so a walk over it is an ordinary match.
 fn value_kind(value: &json::Value) -> []u8 {
@@ -113,6 +198,7 @@ fn value_kind(value: &json::Value) -> []u8 {
         Null => "null",
         Bool(_) => "bool",
         I64(_) => "i64",
+        F64(_) => "f64",
         Str(_) => "str",
         Arr(_) => "arr",
         Obj(_) => "obj",
@@ -124,6 +210,7 @@ fn value_size(value: &json::Value) -> i64 {
         Null => 0,
         Bool(_) => 0,
         I64(number) => number,
+        F64(number) => cast<i64>(number),
         Str(text) => text.len(),
         Arr(items) => items.len(),
         Obj(entries) => entries.len(),
@@ -143,6 +230,7 @@ fn value_at_key(value: &json::Value, key: []u8) -> []u8 {
         Null => return "null",
         Bool(_) => return "bool",
         I64(_) => return "i64",
+        F64(_) => return "f64",
         Str(_) => return "str",
         Arr(_) => return "arr",
     }
@@ -180,6 +268,38 @@ test "json decode reads a scalar as a Value" {
     defer value.deinit(allocator);
     testing::expect_equal<[]u8>("i64", value_kind(value));
     testing::expect_equal<i64>(42, value_size(value));
+}
+
+// A number with a fraction or an exponent is an `F64`, one spelled as an
+// integer is an `I64`. The spelling decides, so `1.0` is a float.
+test "json decode reads a float as a Value" {
+    let allocator = mem::page_allocator();
+    var value = try json::decode<json::Value>(allocator, "2.5");
+    defer value.deinit(allocator);
+    testing::expect_equal<[]u8>("f64", value_kind(value));
+    testing::expect_equal<i64>(2, value_size(value));
+    var whole = try json::decode<json::Value>(allocator, "1.0");
+    defer whole.deinit(allocator);
+    testing::expect_equal<[]u8>("f64", value_kind(whole));
+}
+
+// A float Value writes back in its shortest spelling, so `1e2` returns as
+// `100.0`: the value is the one that went in, the digits need not be.
+test "json decode round trips a float Value through encode" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"ratio": 0.1, "scale": 1e2, "count": 3}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit(allocator);
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try json::encode<json::Value>(allocator, value, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"ratio":0.1,"scale":100.0,"count":3}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
 }
 
 test "json decode reads an array of scalars" {
@@ -554,14 +674,22 @@ test "json decode reads an omitted optional field of a nested struct" {
 
 // ir
 // lower:
+// fn expect_f64(%allocator: Allocator, %document: []u8, %expected: f64) -> !void {
+// entry:
+//   %1: std::json::DecodeError!f64 = call.std::json::decode.f64 %allocator: Allocator, %document: []u8
+//   %2: f64 = error.try %1: std::json::DecodeError!f64
+//   call.std::testing::expect_equal.f64 %expected: f64, %2: f64
+//   %4: !void = error.ok
+//   return %4: !void
+// }
 // fn value_kind(%value: &std::json::Value) -> []u8 {
 // entry:
 //   %1: std::json::Value = union.load %value: &std::json::Value
 //   %2: i64 = union.tag %1: std::json::Value
 //   jump match.check.2
 // match.end.1:
-//   %20: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8]
-//   return %20: []u8
+//   %23: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8], [match.arm.15, %22: []u8]
+//   return %23: []u8
 // match.check.2:
 //   %3: bool = binary.== %2: i64, 0: i64
 //   branch %3: bool, match.arm.3, match.check.4
@@ -586,24 +714,31 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %11: bool = binary.== %2: i64, 3: i64
 //   branch %11: bool, match.arm.9, match.check.10
 // match.arm.9:
-//   %12: std::string::String = union.payload %1: std::json::Value, Str
-//   %13: []u8 = const "str"
+//   %12: f64 = union.payload %1: std::json::Value, F64
+//   %13: []u8 = const "f64"
 //   jump match.end.1
 // match.check.10:
 //   %14: bool = binary.== %2: i64, 4: i64
 //   branch %14: bool, match.arm.11, match.check.12
 // match.arm.11:
-//   %15: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
-//   %16: []u8 = const "arr"
+//   %15: std::string::String = union.payload %1: std::json::Value, Str
+//   %16: []u8 = const "str"
 //   jump match.end.1
 // match.check.12:
 //   %17: bool = binary.== %2: i64, 5: i64
-//   branch %17: bool, match.arm.13, match.unreachable.14
+//   branch %17: bool, match.arm.13, match.check.14
 // match.arm.13:
-//   %18: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
-//   %19: []u8 = const "obj"
+//   %18: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %19: []u8 = const "arr"
 //   jump match.end.1
-// match.unreachable.14:
+// match.check.14:
+//   %20: bool = binary.== %2: i64, 6: i64
+//   branch %20: bool, match.arm.15, match.unreachable.16
+// match.arm.15:
+//   %21: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %22: []u8 = const "obj"
+//   jump match.end.1
+// match.unreachable.16:
 //   unreachable
 // }
 // fn value_size(%value: &std::json::Value) -> i64 {
@@ -612,8 +747,8 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %2: i64 = union.tag %1: std::json::Value
 //   jump match.check.2
 // match.end.1:
-//   %19: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64]
-//   return %19: i64
+//   %22: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64], [match.arm.15, %21: i64]
+//   return %22: i64
 // match.check.2:
 //   %3: bool = binary.== %2: i64, 0: i64
 //   branch %3: bool, match.arm.3, match.check.4
@@ -637,24 +772,31 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %10: bool = binary.== %2: i64, 3: i64
 //   branch %10: bool, match.arm.9, match.check.10
 // match.arm.9:
-//   %11: std::string::String = union.payload %1: std::json::Value, Str
-//   %12: i64 = call.std::string::String.len %11: std::string::String
+//   %11: f64 = union.payload %1: std::json::Value, F64
+//   %12: i64 = cast %11: f64, i64
 //   jump match.end.1
 // match.check.10:
 //   %13: bool = binary.== %2: i64, 4: i64
 //   branch %13: bool, match.arm.11, match.check.12
 // match.arm.11:
-//   %14: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
-//   %15: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %14: std::array::Array<std::json::Value>
+//   %14: std::string::String = union.payload %1: std::json::Value, Str
+//   %15: i64 = call.std::string::String.len %14: std::string::String
 //   jump match.end.1
 // match.check.12:
 //   %16: bool = binary.== %2: i64, 5: i64
-//   branch %16: bool, match.arm.13, match.unreachable.14
+//   branch %16: bool, match.arm.13, match.check.14
 // match.arm.13:
-//   %17: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
-//   %18: i64 = call.std::map::Map.len._5b_5du8.std_3a_3ajson_3a_3aValue %17: std::map::Map<[]u8, std::json::Value>
+//   %17: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %18: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %17: std::array::Array<std::json::Value>
 //   jump match.end.1
-// match.unreachable.14:
+// match.check.14:
+//   %19: bool = binary.== %2: i64, 6: i64
+//   branch %19: bool, match.arm.15, match.unreachable.16
+// match.arm.15:
+//   %20: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %21: i64 = call.std::map::Map.len._5b_5du8.std_3a_3ajson_3a_3aValue %20: std::map::Map<[]u8, std::json::Value>
+//   jump match.end.1
+// match.unreachable.16:
 //   unreachable
 // }
 // fn value_at_key(%value: &std::json::Value, %key: []u8) -> []u8 {
@@ -665,7 +807,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 // match.end.1:
 //   unreachable
 // match.check.2:
-//   %3: bool = binary.== %2: i64, 5: i64
+//   %3: bool = binary.== %2: i64, 6: i64
 //   branch %3: bool, match.arm.3, match.check.4
 // match.arm.3:
 //   %4: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
@@ -705,17 +847,24 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %18: bool = binary.== %2: i64, 3: i64
 //   branch %18: bool, match.arm.14, match.check.15
 // match.arm.14:
-//   %19: std::string::String = union.payload %1: std::json::Value, Str
-//   %20: []u8 = const "str"
+//   %19: f64 = union.payload %1: std::json::Value, F64
+//   %20: []u8 = const "f64"
 //   return %20: []u8
 // match.check.15:
 //   %21: bool = binary.== %2: i64, 4: i64
-//   branch %21: bool, match.arm.16, match.unreachable.17
+//   branch %21: bool, match.arm.16, match.check.17
 // match.arm.16:
-//   %22: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
-//   %23: []u8 = const "arr"
+//   %22: std::string::String = union.payload %1: std::json::Value, Str
+//   %23: []u8 = const "str"
 //   return %23: []u8
-// match.unreachable.17:
+// match.check.17:
+//   %24: bool = binary.== %2: i64, 5: i64
+//   branch %24: bool, match.arm.18, match.unreachable.19
+// match.arm.18:
+//   %25: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %26: []u8 = const "arr"
+//   return %26: []u8
+// match.unreachable.19:
 //   unreachable
 // }
 // fn Cell.deinit(%self: Cell, %allocator: Allocator) -> void {
@@ -977,6 +1126,133 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %9: !void = error.ok
 //   return %9: !void
 // }
+// fn test.json_decode_reads_an_f64_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"celsius\": 21.5, \"count\": 4}"
+//   %3: std::json::DecodeError!Sample = call.std::json::decode.Sample %1: Allocator, %2: []u8
+//   %4: Sample = error.try %3: std::json::DecodeError!Sample
+//   %5: f64 = const 21.5
+//   %6: f64 = field.celsius %4: Sample
+//   call.std::testing::expect_equal.f64 %5: f64, %6: f64
+//   %8: i64 = const 4
+//   %9: i64 = field.count %4: Sample
+//   test.expect_equal %8: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.json_decode_reads_every_number_spelling_as_f64() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "1.5"
+//   %3: f64 = const 1.5
+//   %4: !void = call.expect_f64 %1: Allocator, %2: []u8, %3: f64
+//   error.try %4: !void
+//   %6: []u8 = const "100"
+//   %7: f64 = const 100.0
+//   %8: !void = call.expect_f64 %1: Allocator, %6: []u8, %7: f64
+//   error.try %8: !void
+//   %10: []u8 = const "1E+2"
+//   %11: f64 = const 100.0
+//   %12: !void = call.expect_f64 %1: Allocator, %10: []u8, %11: f64
+//   error.try %12: !void
+//   %14: []u8 = const "2.5e-3"
+//   %15: f64 = const 0.0025
+//   %16: !void = call.expect_f64 %1: Allocator, %14: []u8, %15: f64
+//   error.try %16: !void
+//   %18: []u8 = const "0.1"
+//   %19: f64 = const 0.1
+//   %20: !void = call.expect_f64 %1: Allocator, %18: []u8, %19: f64
+//   error.try %20: !void
+//   %22: []u8 = const "1e-400"
+//   %23: f64 = const 0.0
+//   %24: !void = call.expect_f64 %1: Allocator, %22: []u8, %23: f64
+//   error.try %24: !void
+//   %26: []u8 = const "-0.0"
+//   %27: std::json::DecodeError!f64 = call.std::json::decode.f64 %1: Allocator, %26: []u8
+//   %28: f64 = error.try %27: std::json::DecodeError!f64
+//   %29: u64 = call.std::float::bits %28: f64
+//   %30: f64 = const 0.0
+//   %31: f64 = unary.- %30: f64
+//   %32: u64 = call.std::float::bits %31: f64
+//   %33: bool = binary.== %29: u64, %32: u64
+//   call.std::testing::expect %33: bool
+//   %35: !void = error.ok
+//   return %35: !void
+// }
+// fn test.json_decode_refuses_numbers_the_type_cannot_hold() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "invalid number"
+//   %3: []u8 = const "1.0"
+//   %4: []u8 = call.decode_outcome.i64 %1: Allocator, %3: []u8
+//   test.expect_equal %2: []u8, %4: []u8, []u8
+//   %6: []u8 = const "invalid number"
+//   %7: []u8 = const "1e2"
+//   %8: []u8 = call.decode_outcome.i64 %1: Allocator, %7: []u8
+//   test.expect_equal %6: []u8, %8: []u8, []u8
+//   %10: []u8 = const "invalid number"
+//   %11: []u8 = const "9223372036854775808"
+//   %12: []u8 = call.decode_outcome.i64 %1: Allocator, %11: []u8
+//   test.expect_equal %10: []u8, %12: []u8, []u8
+//   %14: []u8 = const "invalid number"
+//   %15: []u8 = const "-9223372036854775809"
+//   %16: []u8 = call.decode_outcome.i64 %1: Allocator, %15: []u8
+//   test.expect_equal %14: []u8, %16: []u8, []u8
+//   %18: []u8 = const "invalid number"
+//   %19: []u8 = const "1e400"
+//   %20: []u8 = call.decode_outcome.f64 %1: Allocator, %19: []u8
+//   test.expect_equal %18: []u8, %20: []u8, []u8
+//   %22: []u8 = const "9223372036854775807"
+//   %23: std::json::DecodeError!i64 = call.std::json::decode.i64 %1: Allocator, %22: []u8
+//   %24: i64 = error.try %23: std::json::DecodeError!i64
+//   %25: i64 = const 9223372036854775807
+//   test.expect_equal %25: i64, %24: i64, i64
+//   %27: []u8 = const "-9223372036854775808"
+//   %28: std::json::DecodeError!i64 = call.std::json::decode.i64 %1: Allocator, %27: []u8
+//   %29: i64 = error.try %28: std::json::DecodeError!i64
+//   %30: i64 = const 9223372036854775807
+//   %31: i64 = unary.- %30: i64
+//   %32: i64 = const 1
+//   %33: i64 = binary.- %31: i64, %32: i64
+//   test.expect_equal %33: i64, %29: i64, i64
+//   %35: !void = error.ok
+//   return %35: !void
+// }
+// fn test.json_decode_refuses_number_spellings_JSON_does_not_have() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "unexpected token"
+//   %3: []u8 = const "01"
+//   %4: []u8 = call.decode_outcome.f64 %1: Allocator, %3: []u8
+//   test.expect_equal %2: []u8, %4: []u8, []u8
+//   %6: []u8 = const "unexpected token"
+//   %7: []u8 = const "1."
+//   %8: []u8 = call.decode_outcome.f64 %1: Allocator, %7: []u8
+//   test.expect_equal %6: []u8, %8: []u8, []u8
+//   %10: []u8 = const "unexpected token"
+//   %11: []u8 = const ".5"
+//   %12: []u8 = call.decode_outcome.f64 %1: Allocator, %11: []u8
+//   test.expect_equal %10: []u8, %12: []u8, []u8
+//   %14: []u8 = const "unexpected token"
+//   %15: []u8 = const "-"
+//   %16: []u8 = call.decode_outcome.f64 %1: Allocator, %15: []u8
+//   test.expect_equal %14: []u8, %16: []u8, []u8
+//   %18: []u8 = const "unexpected token"
+//   %19: []u8 = const "1e"
+//   %20: []u8 = call.decode_outcome.f64 %1: Allocator, %19: []u8
+//   test.expect_equal %18: []u8, %20: []u8, []u8
+//   %22: []u8 = const "unexpected token"
+//   %23: []u8 = const "+1"
+//   %24: []u8 = call.decode_outcome.f64 %1: Allocator, %23: []u8
+//   test.expect_equal %22: []u8, %24: []u8, []u8
+//   %26: []u8 = const "unexpected token"
+//   %27: []u8 = const "-01"
+//   %28: []u8 = call.decode_outcome.i64 %1: Allocator, %27: []u8
+//   test.expect_equal %26: []u8, %28: []u8, []u8
+//   %30: !void = error.ok
+//   return %30: !void
+// }
 // fn test.json_decode_finds_a_Value_object_member_by_key() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
@@ -1043,6 +1319,61 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call.std::json::Value.deinit %14: std::json::Value, %1: Allocator
 //   %16: !void = error.ok
 //   return %16: !void
+// }
+// fn test.json_decode_reads_a_float_as_a_Value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "2.5"
+//   %3: std::json::DecodeError!std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: std::json::DecodeError!std::json::Value
+//   %5: &var std::json::Value = local.slot %4: std::json::Value
+//   %6: []u8 = const "f64"
+//   %7: std::json::Value = ref.load %5: &var std::json::Value
+//   %8: []u8 = call.value_kind %7: std::json::Value
+//   test.expect_equal %6: []u8, %8: []u8, []u8
+//   %10: i64 = const 2
+//   %11: std::json::Value = ref.load %5: &var std::json::Value
+//   %12: i64 = call.value_size %11: std::json::Value
+//   test.expect_equal %10: i64, %12: i64, i64
+//   %14: []u8 = const "1.0"
+//   %15: std::json::DecodeError!std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %14: []u8
+//   %16: std::json::Value = ref.load %5: &var std::json::Value
+//   %17: std::json::Value = error.try %15: std::json::DecodeError!std::json::Value, cleanup call.std::json::Value.deinit %16: std::json::Value, %1: Allocator
+//   %18: &var std::json::Value = local.slot %17: std::json::Value
+//   %19: []u8 = const "f64"
+//   %20: std::json::Value = ref.load %18: &var std::json::Value
+//   %21: []u8 = call.value_kind %20: std::json::Value
+//   test.expect_equal %19: []u8, %21: []u8, []u8
+//   %23: std::json::Value = ref.load %18: &var std::json::Value
+//   call.std::json::Value.deinit %23: std::json::Value, %1: Allocator
+//   %25: std::json::Value = ref.load %5: &var std::json::Value
+//   call.std::json::Value.deinit %25: std::json::Value, %1: Allocator
+//   %27: !void = error.ok
+//   return %27: !void
+// }
+// fn test.json_decode_round_trips_a_float_Value_through_encode() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"ratio\": 0.1, \"scale\": 1e2, \"count\": 3}"
+//   %3: std::json::DecodeError!std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: std::json::DecodeError!std::json::Value
+//   %5: &var std::json::Value = local.slot %4: std::json::Value
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: std::json::Value = ref.load %5: &var std::json::Value
+//   %9: std::mem::Error!void = call.std::json::encode.std_3a_3ajson_3a_3aValue %1: Allocator, %8: std::json::Value, %7: &var std::string::String
+//   %10: std::string::String = ref.load %7: &var std::string::String
+//   %11: std::json::Value = ref.load %5: &var std::json::Value
+//   error.try %9: std::mem::Error!void, cleanup call.std::string::String.deinit %10: std::string::String, %1: Allocator; call.std::json::Value.deinit %11: std::json::Value, %1: Allocator
+//   %13: []u8 = call.std::string::String.as_bytes %7: &var std::string::String
+//   %14: []u8 = const "{\"ratio\":0.1,\"scale\":100.0,\"count\":3}"
+//   test.expect_equal %14: []u8, %13: []u8, []u8
+//   %16: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %16: std::string::String, %1: Allocator
+//   %18: std::json::Value = ref.load %5: &var std::json::Value
+//   call.std::json::Value.deinit %18: std::json::Value, %1: Allocator
+//   %20: !void = error.ok
+//   return %20: !void
 // }
 // fn test.json_decode_reads_an_array_of_scalars() -> !void {
 // entry:
@@ -1643,15 +1974,97 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %21: !void = error.ok
 //   return %21: !void
 // }
+// fn decode_outcome.i64(%allocator: Allocator, %document: []u8) -> []u8 {
+// entry:
+//   %1: []u8 = const "ok"
+//   %2: std::json::DecodeError!i64 = call.std::json::decode.i64 %allocator: Allocator, %document: []u8
+//   %3: i64 = error.value %2: std::json::DecodeError!i64
+//   %4: std::json::DecodeError = error.code %2: std::json::DecodeError!i64
+//   %5: bool = error.has %2: std::json::DecodeError!i64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: []u8 = const "ok"
+//   jump if.end.3
+// if.else.2:
+//   jump match.check.5
+// if.end.3:
+//   %13: []u8 = phi [if.then.1, %6: []u8], [match.end.4, %12: []u8]
+//   return %13: []u8
+// match.end.4:
+//   %12: []u8 = phi [match.arm.6, %8: []u8], [match.arm.8, %10: []u8], [match.arm.10, %11: []u8]
+//   jump if.end.3
+// match.check.5:
+//   %7: bool = binary.== %4: std::json::DecodeError, 47: std::json::DecodeError
+//   branch %7: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %8: []u8 = const "unexpected token"
+//   jump match.end.4
+// match.check.7:
+//   %9: bool = binary.== %4: std::json::DecodeError, 51: std::json::DecodeError
+//   branch %9: bool, match.arm.8, match.check.9
+// match.arm.8:
+//   %10: []u8 = const "invalid number"
+//   jump match.end.4
+// match.check.9:
+//   jump match.arm.10
+// match.arm.10:
+//   %11: []u8 = const "other"
+//   jump match.end.4
+// }
+// fn decode_outcome.f64(%allocator: Allocator, %document: []u8) -> []u8 {
+// entry:
+//   %1: []u8 = const "ok"
+//   %2: std::json::DecodeError!f64 = call.std::json::decode.f64 %allocator: Allocator, %document: []u8
+//   %3: f64 = error.value %2: std::json::DecodeError!f64
+//   %4: std::json::DecodeError = error.code %2: std::json::DecodeError!f64
+//   %5: bool = error.has %2: std::json::DecodeError!f64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: []u8 = const "ok"
+//   jump if.end.3
+// if.else.2:
+//   jump match.check.5
+// if.end.3:
+//   %13: []u8 = phi [if.then.1, %6: []u8], [match.end.4, %12: []u8]
+//   return %13: []u8
+// match.end.4:
+//   %12: []u8 = phi [match.arm.6, %8: []u8], [match.arm.8, %10: []u8], [match.arm.10, %11: []u8]
+//   jump if.end.3
+// match.check.5:
+//   %7: bool = binary.== %4: std::json::DecodeError, 47: std::json::DecodeError
+//   branch %7: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %8: []u8 = const "unexpected token"
+//   jump match.end.4
+// match.check.7:
+//   %9: bool = binary.== %4: std::json::DecodeError, 51: std::json::DecodeError
+//   branch %9: bool, match.arm.8, match.check.9
+// match.arm.8:
+//   %10: []u8 = const "invalid number"
+//   jump match.end.4
+// match.check.9:
+//   jump match.arm.10
+// match.arm.10:
+//   %11: []u8 = const "other"
+//   jump match.end.4
+// }
 // opt:
+// fn expect_f64(%allocator: Allocator, %document: []u8, %expected: f64) -> !void {
+// entry:
+//   %1: std::json::DecodeError!f64 = call.std::json::decode.f64 %allocator: Allocator, %document: []u8
+//   %2: f64 = error.try %1: std::json::DecodeError!f64
+//   call.std::testing::expect_equal.f64 %expected: f64, %2: f64
+//   %4: !void = error.ok
+//   return %4: !void
+// }
 // fn value_kind(%value: &std::json::Value) -> []u8 {
 // entry:
 //   %1: std::json::Value = union.load %value: &std::json::Value
 //   %2: i64 = union.tag %1: std::json::Value
 //   jump match.check.2
 // match.end.1:
-//   %20: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8]
-//   return %20: []u8
+//   %23: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8], [match.arm.15, %22: []u8]
+//   return %23: []u8
 // match.check.2:
 //   %3: bool = binary.== %2: i64, 0: i64
 //   branch %3: bool, match.arm.3, match.check.4
@@ -1674,21 +2087,27 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %11: bool = binary.== %2: i64, 3: i64
 //   branch %11: bool, match.arm.9, match.check.10
 // match.arm.9:
-//   %13: []u8 = const "str"
+//   %13: []u8 = const "f64"
 //   jump match.end.1
 // match.check.10:
 //   %14: bool = binary.== %2: i64, 4: i64
 //   branch %14: bool, match.arm.11, match.check.12
 // match.arm.11:
-//   %16: []u8 = const "arr"
+//   %16: []u8 = const "str"
 //   jump match.end.1
 // match.check.12:
 //   %17: bool = binary.== %2: i64, 5: i64
-//   branch %17: bool, match.arm.13, match.unreachable.14
+//   branch %17: bool, match.arm.13, match.check.14
 // match.arm.13:
-//   %19: []u8 = const "obj"
+//   %19: []u8 = const "arr"
 //   jump match.end.1
-// match.unreachable.14:
+// match.check.14:
+//   %20: bool = binary.== %2: i64, 6: i64
+//   branch %20: bool, match.arm.15, match.unreachable.16
+// match.arm.15:
+//   %22: []u8 = const "obj"
+//   jump match.end.1
+// match.unreachable.16:
 //   unreachable
 // }
 // fn value_size(%value: &std::json::Value) -> i64 {
@@ -1697,8 +2116,8 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %2: i64 = union.tag %1: std::json::Value
 //   jump match.check.2
 // match.end.1:
-//   %19: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64]
-//   return %19: i64
+//   %22: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64], [match.arm.15, %21: i64]
+//   return %22: i64
 // match.check.2:
 //   %3: bool = binary.== %2: i64, 0: i64
 //   branch %3: bool, match.arm.3, match.check.4
@@ -1721,24 +2140,31 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %10: bool = binary.== %2: i64, 3: i64
 //   branch %10: bool, match.arm.9, match.check.10
 // match.arm.9:
-//   %11: std::string::String = union.payload %1: std::json::Value, Str
-//   %12: i64 = call.std::string::String.len %11: std::string::String
+//   %11: f64 = union.payload %1: std::json::Value, F64
+//   %12: i64 = cast %11: f64, i64
 //   jump match.end.1
 // match.check.10:
 //   %13: bool = binary.== %2: i64, 4: i64
 //   branch %13: bool, match.arm.11, match.check.12
 // match.arm.11:
-//   %14: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
-//   %15: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %14: std::array::Array<std::json::Value>
+//   %14: std::string::String = union.payload %1: std::json::Value, Str
+//   %15: i64 = call.std::string::String.len %14: std::string::String
 //   jump match.end.1
 // match.check.12:
 //   %16: bool = binary.== %2: i64, 5: i64
-//   branch %16: bool, match.arm.13, match.unreachable.14
+//   branch %16: bool, match.arm.13, match.check.14
 // match.arm.13:
-//   %17: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
-//   %18: i64 = call.std::map::Map.len._5b_5du8.std_3a_3ajson_3a_3aValue %17: std::map::Map<[]u8, std::json::Value>
+//   %17: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %18: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %17: std::array::Array<std::json::Value>
 //   jump match.end.1
-// match.unreachable.14:
+// match.check.14:
+//   %19: bool = binary.== %2: i64, 6: i64
+//   branch %19: bool, match.arm.15, match.unreachable.16
+// match.arm.15:
+//   %20: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %21: i64 = call.std::map::Map.len._5b_5du8.std_3a_3ajson_3a_3aValue %20: std::map::Map<[]u8, std::json::Value>
+//   jump match.end.1
+// match.unreachable.16:
 //   unreachable
 // }
 // fn value_at_key(%value: &std::json::Value, %key: []u8) -> []u8 {
@@ -1749,7 +2175,7 @@ test "json decode reads an omitted optional field of a nested struct" {
 // match.end.1:
 //   unreachable
 // match.check.2:
-//   %3: bool = binary.== %2: i64, 5: i64
+//   %3: bool = binary.== %2: i64, 6: i64
 //   branch %3: bool, match.arm.3, match.check.4
 // match.arm.3:
 //   %4: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
@@ -1787,15 +2213,21 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %18: bool = binary.== %2: i64, 3: i64
 //   branch %18: bool, match.arm.14, match.check.15
 // match.arm.14:
-//   %20: []u8 = const "str"
+//   %20: []u8 = const "f64"
 //   return %20: []u8
 // match.check.15:
 //   %21: bool = binary.== %2: i64, 4: i64
-//   branch %21: bool, match.arm.16, match.unreachable.17
+//   branch %21: bool, match.arm.16, match.check.17
 // match.arm.16:
-//   %23: []u8 = const "arr"
+//   %23: []u8 = const "str"
 //   return %23: []u8
-// match.unreachable.17:
+// match.check.17:
+//   %24: bool = binary.== %2: i64, 5: i64
+//   branch %24: bool, match.arm.18, match.unreachable.19
+// match.arm.18:
+//   %26: []u8 = const "arr"
+//   return %26: []u8
+// match.unreachable.19:
 //   unreachable
 // }
 // fn Cell.deinit(%self: Cell, %allocator: Allocator) -> void {
@@ -2056,6 +2488,133 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   %9: !void = error.ok
 //   return %9: !void
 // }
+// fn test.json_decode_reads_an_f64_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"celsius\": 21.5, \"count\": 4}"
+//   %3: std::json::DecodeError!Sample = call.std::json::decode.Sample %1: Allocator, %2: []u8
+//   %4: Sample = error.try %3: std::json::DecodeError!Sample
+//   %5: f64 = const 21.5
+//   %6: f64 = field.celsius %4: Sample
+//   call.std::testing::expect_equal.f64 %5: f64, %6: f64
+//   %8: i64 = const 4
+//   %9: i64 = field.count %4: Sample
+//   test.expect_equal %8: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.json_decode_reads_every_number_spelling_as_f64() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "1.5"
+//   %3: f64 = const 1.5
+//   %4: !void = call.expect_f64 %1: Allocator, %2: []u8, %3: f64
+//   error.try %4: !void
+//   %6: []u8 = const "100"
+//   %7: f64 = const 100.0
+//   %8: !void = call.expect_f64 %1: Allocator, %6: []u8, %7: f64
+//   error.try %8: !void
+//   %10: []u8 = const "1E+2"
+//   %11: f64 = const 100.0
+//   %12: !void = call.expect_f64 %1: Allocator, %10: []u8, %11: f64
+//   error.try %12: !void
+//   %14: []u8 = const "2.5e-3"
+//   %15: f64 = const 0.0025
+//   %16: !void = call.expect_f64 %1: Allocator, %14: []u8, %15: f64
+//   error.try %16: !void
+//   %18: []u8 = const "0.1"
+//   %19: f64 = const 0.1
+//   %20: !void = call.expect_f64 %1: Allocator, %18: []u8, %19: f64
+//   error.try %20: !void
+//   %22: []u8 = const "1e-400"
+//   %23: f64 = const 0.0
+//   %24: !void = call.expect_f64 %1: Allocator, %22: []u8, %23: f64
+//   error.try %24: !void
+//   %26: []u8 = const "-0.0"
+//   %27: std::json::DecodeError!f64 = call.std::json::decode.f64 %1: Allocator, %26: []u8
+//   %28: f64 = error.try %27: std::json::DecodeError!f64
+//   %29: u64 = call.std::float::bits %28: f64
+//   %30: f64 = const 0.0
+//   %31: f64 = unary.- %30: f64
+//   %32: u64 = call.std::float::bits %31: f64
+//   %33: bool = binary.== %29: u64, %32: u64
+//   call.std::testing::expect %33: bool
+//   %35: !void = error.ok
+//   return %35: !void
+// }
+// fn test.json_decode_refuses_numbers_the_type_cannot_hold() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "invalid number"
+//   %3: []u8 = const "1.0"
+//   %4: []u8 = call.decode_outcome.i64 %1: Allocator, %3: []u8
+//   test.expect_equal %2: []u8, %4: []u8, []u8
+//   %6: []u8 = const "invalid number"
+//   %7: []u8 = const "1e2"
+//   %8: []u8 = call.decode_outcome.i64 %1: Allocator, %7: []u8
+//   test.expect_equal %6: []u8, %8: []u8, []u8
+//   %10: []u8 = const "invalid number"
+//   %11: []u8 = const "9223372036854775808"
+//   %12: []u8 = call.decode_outcome.i64 %1: Allocator, %11: []u8
+//   test.expect_equal %10: []u8, %12: []u8, []u8
+//   %14: []u8 = const "invalid number"
+//   %15: []u8 = const "-9223372036854775809"
+//   %16: []u8 = call.decode_outcome.i64 %1: Allocator, %15: []u8
+//   test.expect_equal %14: []u8, %16: []u8, []u8
+//   %18: []u8 = const "invalid number"
+//   %19: []u8 = const "1e400"
+//   %20: []u8 = call.decode_outcome.f64 %1: Allocator, %19: []u8
+//   test.expect_equal %18: []u8, %20: []u8, []u8
+//   %22: []u8 = const "9223372036854775807"
+//   %23: std::json::DecodeError!i64 = call.std::json::decode.i64 %1: Allocator, %22: []u8
+//   %24: i64 = error.try %23: std::json::DecodeError!i64
+//   %25: i64 = const 9223372036854775807
+//   test.expect_equal %25: i64, %24: i64, i64
+//   %27: []u8 = const "-9223372036854775808"
+//   %28: std::json::DecodeError!i64 = call.std::json::decode.i64 %1: Allocator, %27: []u8
+//   %29: i64 = error.try %28: std::json::DecodeError!i64
+//   %30: i64 = const 9223372036854775807
+//   %31: i64 = unary.- %30: i64
+//   %32: i64 = const 1
+//   %33: i64 = binary.- %31: i64, %32: i64
+//   test.expect_equal %33: i64, %29: i64, i64
+//   %35: !void = error.ok
+//   return %35: !void
+// }
+// fn test.json_decode_refuses_number_spellings_JSON_does_not_have() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "unexpected token"
+//   %3: []u8 = const "01"
+//   %4: []u8 = call.decode_outcome.f64 %1: Allocator, %3: []u8
+//   test.expect_equal %2: []u8, %4: []u8, []u8
+//   %6: []u8 = const "unexpected token"
+//   %7: []u8 = const "1."
+//   %8: []u8 = call.decode_outcome.f64 %1: Allocator, %7: []u8
+//   test.expect_equal %6: []u8, %8: []u8, []u8
+//   %10: []u8 = const "unexpected token"
+//   %11: []u8 = const ".5"
+//   %12: []u8 = call.decode_outcome.f64 %1: Allocator, %11: []u8
+//   test.expect_equal %10: []u8, %12: []u8, []u8
+//   %14: []u8 = const "unexpected token"
+//   %15: []u8 = const "-"
+//   %16: []u8 = call.decode_outcome.f64 %1: Allocator, %15: []u8
+//   test.expect_equal %14: []u8, %16: []u8, []u8
+//   %18: []u8 = const "unexpected token"
+//   %19: []u8 = const "1e"
+//   %20: []u8 = call.decode_outcome.f64 %1: Allocator, %19: []u8
+//   test.expect_equal %18: []u8, %20: []u8, []u8
+//   %22: []u8 = const "unexpected token"
+//   %23: []u8 = const "+1"
+//   %24: []u8 = call.decode_outcome.f64 %1: Allocator, %23: []u8
+//   test.expect_equal %22: []u8, %24: []u8, []u8
+//   %26: []u8 = const "unexpected token"
+//   %27: []u8 = const "-01"
+//   %28: []u8 = call.decode_outcome.i64 %1: Allocator, %27: []u8
+//   test.expect_equal %26: []u8, %28: []u8, []u8
+//   %30: !void = error.ok
+//   return %30: !void
+// }
 // fn test.json_decode_finds_a_Value_object_member_by_key() -> !void {
 // entry:
 //   %1: Allocator = call.std::mem::page_allocator
@@ -2122,6 +2681,61 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call.std::json::Value.deinit %14: std::json::Value, %1: Allocator
 //   %16: !void = error.ok
 //   return %16: !void
+// }
+// fn test.json_decode_reads_a_float_as_a_Value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "2.5"
+//   %3: std::json::DecodeError!std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: std::json::DecodeError!std::json::Value
+//   %5: &var std::json::Value = local.slot %4: std::json::Value
+//   %6: []u8 = const "f64"
+//   %7: std::json::Value = ref.load %5: &var std::json::Value
+//   %8: []u8 = call.value_kind %7: std::json::Value
+//   test.expect_equal %6: []u8, %8: []u8, []u8
+//   %10: i64 = const 2
+//   %11: std::json::Value = ref.load %5: &var std::json::Value
+//   %12: i64 = call.value_size %11: std::json::Value
+//   test.expect_equal %10: i64, %12: i64, i64
+//   %14: []u8 = const "1.0"
+//   %15: std::json::DecodeError!std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %14: []u8
+//   %16: std::json::Value = ref.load %5: &var std::json::Value
+//   %17: std::json::Value = error.try %15: std::json::DecodeError!std::json::Value, cleanup call.std::json::Value.deinit %16: std::json::Value, %1: Allocator
+//   %18: &var std::json::Value = local.slot %17: std::json::Value
+//   %19: []u8 = const "f64"
+//   %20: std::json::Value = ref.load %18: &var std::json::Value
+//   %21: []u8 = call.value_kind %20: std::json::Value
+//   test.expect_equal %19: []u8, %21: []u8, []u8
+//   %23: std::json::Value = ref.load %18: &var std::json::Value
+//   call.std::json::Value.deinit %23: std::json::Value, %1: Allocator
+//   %25: std::json::Value = ref.load %5: &var std::json::Value
+//   call.std::json::Value.deinit %25: std::json::Value, %1: Allocator
+//   %27: !void = error.ok
+//   return %27: !void
+// }
+// fn test.json_decode_round_trips_a_float_Value_through_encode() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"ratio\": 0.1, \"scale\": 1e2, \"count\": 3}"
+//   %3: std::json::DecodeError!std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: std::json::DecodeError!std::json::Value
+//   %5: &var std::json::Value = local.slot %4: std::json::Value
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: std::json::Value = ref.load %5: &var std::json::Value
+//   %9: std::mem::Error!void = call.std::json::encode.std_3a_3ajson_3a_3aValue %1: Allocator, %8: std::json::Value, %7: &var std::string::String
+//   %10: std::string::String = ref.load %7: &var std::string::String
+//   %11: std::json::Value = ref.load %5: &var std::json::Value
+//   error.try %9: std::mem::Error!void, cleanup call.std::string::String.deinit %10: std::string::String, %1: Allocator; call.std::json::Value.deinit %11: std::json::Value, %1: Allocator
+//   %13: []u8 = call.std::string::String.as_bytes %7: &var std::string::String
+//   %14: []u8 = const "{\"ratio\":0.1,\"scale\":100.0,\"count\":3}"
+//   test.expect_equal %14: []u8, %13: []u8, []u8
+//   %16: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %16: std::string::String, %1: Allocator
+//   %18: std::json::Value = ref.load %5: &var std::json::Value
+//   call.std::json::Value.deinit %18: std::json::Value, %1: Allocator
+//   %20: !void = error.ok
+//   return %20: !void
 // }
 // fn test.json_decode_reads_an_array_of_scalars() -> !void {
 // entry:
@@ -2717,4 +3331,74 @@ test "json decode reads an omitted optional field of a nested struct" {
 //   call.Page.deinit %19: Page, %1: Allocator
 //   %21: !void = error.ok
 //   return %21: !void
+// }
+// fn decode_outcome.i64(%allocator: Allocator, %document: []u8) -> []u8 {
+// entry:
+//   %2: std::json::DecodeError!i64 = call.std::json::decode.i64 %allocator: Allocator, %document: []u8
+//   %4: std::json::DecodeError = error.code %2: std::json::DecodeError!i64
+//   %5: bool = error.has %2: std::json::DecodeError!i64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: []u8 = const "ok"
+//   jump if.end.3
+// if.else.2:
+//   jump match.check.5
+// if.end.3:
+//   %13: []u8 = phi [if.then.1, %6: []u8], [match.end.4, %12: []u8]
+//   return %13: []u8
+// match.end.4:
+//   %12: []u8 = phi [match.arm.6, %8: []u8], [match.arm.8, %10: []u8], [match.arm.10, %11: []u8]
+//   jump if.end.3
+// match.check.5:
+//   %7: bool = binary.== %4: std::json::DecodeError, 47: std::json::DecodeError
+//   branch %7: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %8: []u8 = const "unexpected token"
+//   jump match.end.4
+// match.check.7:
+//   %9: bool = binary.== %4: std::json::DecodeError, 51: std::json::DecodeError
+//   branch %9: bool, match.arm.8, match.check.9
+// match.arm.8:
+//   %10: []u8 = const "invalid number"
+//   jump match.end.4
+// match.check.9:
+//   jump match.arm.10
+// match.arm.10:
+//   %11: []u8 = const "other"
+//   jump match.end.4
+// }
+// fn decode_outcome.f64(%allocator: Allocator, %document: []u8) -> []u8 {
+// entry:
+//   %2: std::json::DecodeError!f64 = call.std::json::decode.f64 %allocator: Allocator, %document: []u8
+//   %4: std::json::DecodeError = error.code %2: std::json::DecodeError!f64
+//   %5: bool = error.has %2: std::json::DecodeError!f64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: []u8 = const "ok"
+//   jump if.end.3
+// if.else.2:
+//   jump match.check.5
+// if.end.3:
+//   %13: []u8 = phi [if.then.1, %6: []u8], [match.end.4, %12: []u8]
+//   return %13: []u8
+// match.end.4:
+//   %12: []u8 = phi [match.arm.6, %8: []u8], [match.arm.8, %10: []u8], [match.arm.10, %11: []u8]
+//   jump if.end.3
+// match.check.5:
+//   %7: bool = binary.== %4: std::json::DecodeError, 47: std::json::DecodeError
+//   branch %7: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %8: []u8 = const "unexpected token"
+//   jump match.end.4
+// match.check.7:
+//   %9: bool = binary.== %4: std::json::DecodeError, 51: std::json::DecodeError
+//   branch %9: bool, match.arm.8, match.check.9
+// match.arm.8:
+//   %10: []u8 = const "invalid number"
+//   jump match.end.4
+// match.check.9:
+//   jump match.arm.10
+// match.arm.10:
+//   %11: []u8 = const "other"
+//   jump match.end.4
 // }
