@@ -2,7 +2,10 @@
 //
 // A chunked body is a sequence of `SIZE CRLF DATA CRLF`, ending with a zero
 // size and whatever trailer fields follow it. The size is hex, and it may
-// carry extensions after a `;` that nothing here reads.
+// carry extensions after a `;` that nothing here reads. The trailer section
+// is head-shaped, so the reader that owns the buffer reads it with the head's
+// parser (`Reader.read_trailers`); this decoder stops at the terminator and
+// says so.
 //
 // This is the part of HTTP/1 that request smuggling lives in, so the rules it
 // keeps are the ones that make two messages out of one:
@@ -28,7 +31,6 @@ pub struct ChunkState {
     closing: bool,
     done: bool,
     seen: i64,
-    trailer_bytes: i64,
     // How much decoded body this decoder may produce. A body being read into
     // memory is bounded by what the caller will hold; a body being handed out
     // a piece at a time is not, because nothing is holding it.
@@ -42,7 +44,6 @@ fn chunk_state_new(limit: std::mem::Limit) -> std::http::ChunkState {
         closing: false,
         done: false,
         seen: 0,
-        trailer_bytes: 0,
         limit: limit,
     };
 }
@@ -62,6 +63,18 @@ fn (self: &std::http::ChunkState) is_done() -> bool {
 
 fn (self: &std::http::ChunkState) decoded() -> i64 {
     return self.seen;
+}
+
+// at_trailers reports that the terminator has been read and the trailer
+// section has not: the bytes at the cursor are fields, not chunks.
+fn (self: &std::http::ChunkState) at_trailers() -> bool {
+    return self.closing and !self.done;
+}
+
+// finish marks the trailer section read, which is the end of the body.
+fn (self: &var std::http::ChunkState) finish() -> void {
+    self.done = true;
+    return;
 }
 
 // take appends up to `max` decoded bytes from `source[from..]` and answers
@@ -84,16 +97,9 @@ fn (self: &var std::http::ChunkState) take(
             return ChunkTake { taken: taken, consumed: at, need_more: false };
         }
         if self.closing {
-            let trailers = try self.consume_trailers(source, at, limits);
-            if trailers.need_more {
-                return ChunkTake {
-                    taken: taken,
-                    consumed: trailers.consumed,
-                    need_more: true,
-                };
-            }
-            at = trailers.consumed;
-            continue;
+            // The terminator is read. What follows is the trailer section,
+            // which is the reader's to read; the data so far goes out now.
+            return ChunkTake { taken: taken, consumed: at, need_more: false };
         }
         if !self.started {
             let header = try self.read_header(source, at, limits);
@@ -165,36 +171,6 @@ fn (self: &var std::http::ChunkState) read_header(
     self.seen = self.seen + size;
     self.left = size;
     self.started = true;
-    return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
-}
-
-// consume_trailers reads the fields behind the terminator up to the blank line
-// that ends them. Nothing keeps them: a trailer this server was not told to
-// expect is one RFC 9110 lets a recipient drop, and dropping is honest where
-// pretending to have read them would not be.
-fn (self: &var std::http::ChunkState) consume_trailers(
-    source: []u8,
-    at: i64,
-    limits: std::http::Limits
-) -> std::http::Failure!std::http::ChunkTake {
-    let line_end = std::http::index_of(source, cast<u8>(13), at) orelse
-        return ChunkTake { taken: 0, consumed: at, need_more: true };
-    if line_end + 1 >= std::mem::len(source) {
-        return ChunkTake { taken: 0, consumed: at, need_more: true };
-    }
-    if source[line_end + 1] != cast<u8>(10) {
-        return std::http::Error::MalformedChunk;
-    }
-    if line_end == at {
-        self.done = true;
-        return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
-    }
-    // Trailers are head-shaped, so the head's ceiling is the one that bounds
-    // them. Without it a peer could send them forever after saying it was done.
-    self.trailer_bytes = self.trailer_bytes + (line_end + 2 - at);
-    if self.trailer_bytes > limits.max_head_bytes {
-        return std::http::Error::HeadTooLarge;
-    }
     return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
 }
 

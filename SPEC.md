@@ -3381,8 +3381,9 @@ state と stack を解放します。確保と解放の allocator は source に
 * `Transfer-Encoding: chunked` は request も response も decode する。
   `Content-Length` と併記されたら `Error::ConflictingFraming`、`chunked` 以外の
   coding は `Error::UnsupportedEncoding`、size や CRLF が読めなければ
-  `Error::MalformedChunk`。chunk extension は読み飛ばし、trailer は消費して
-  捨てる(上限は `max_head_bytes`)
+  `Error::MalformedChunk`。chunk extension は読み飛ばし、trailer は head と同じ
+  parser で `request.trailers` / `response.trailers` に読む(header には混ぜない。
+  上限は head と同じ `max_head_bytes` と `max_headers`)
 * TLS、HTTP/2、HTTP/3 は持たない
 * `accept` / `accept_head` は 1 接続ずつ。1 thread で多数を扱う道は、接続 state を
   server が持つ `first` / `next` と、接続を worker が持つ

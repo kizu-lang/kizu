@@ -21,12 +21,18 @@ pub struct ClientResponse {
     pub reason: std::string::String,
     pub headers: std::http::Headers,
     pub body: std::string::String,
+    // The fields behind a chunked answer's terminator, kept apart from
+    // `headers` the way a request's are. `read_body` fills them; a caller
+    // streaming the body moves them in with `take_trailers` once `read_into`
+    // has answered 0.
+    pub trailers: std::http::Headers,
 }
 
 fn (self: std::http::ClientResponse) deinit(allocator: Allocator) -> void {
     self.reason.deinit(allocator);
     self.headers.deinit(allocator);
     self.body.deinit(allocator);
+    self.trailers.deinit(allocator);
     return;
 }
 
@@ -259,6 +265,26 @@ fn (self: &var std::http::Connection) read_body(
     }
     let bytes = body.as_bytes();
     try response.body.append_bytes(allocator, bytes);
+    try self.take_trailers(allocator, response);
+    return;
+}
+
+// take_trailers moves what arrived behind a chunked answer into the response.
+// `read_body` does it on its own; a caller streaming the body with `read_into`
+// calls it once that read has answered 0, because before the end there is
+// nothing to move. The staging list is the same two-borrows shape the server
+// has (docs/language-gaps.md), and the second move restores wire order.
+fn (self: &var std::http::Connection) take_trailers(
+    allocator: Allocator,
+    response: &var std::http::ClientResponse
+) -> std::http::Failure!void {
+    if !self.reader.is_chunked() {
+        return;
+    }
+    var staged = std::http::headers_new(allocator);
+    defer staged.deinit(allocator);
+    try self.reader.drain_trailers(allocator, &var staged);
+    try staged.drain_into(allocator, &var response.trailers);
     return;
 }
 
@@ -393,6 +419,7 @@ pub fn parse_response_head(
         reason: std::string::new(allocator),
         headers: std::http::headers_new(allocator),
         body: std::string::new(allocator),
+        trailers: std::http::headers_new(allocator),
     };
     errdefer response.deinit(allocator);
     let after_line = try parse_status_line(allocator, &var response, head);

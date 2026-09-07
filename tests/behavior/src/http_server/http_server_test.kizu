@@ -693,6 +693,8 @@ test "accept_head streams a chunked body the same way" {
     try chunk(allocator, &var wire, " there");
     try wire.append_bytes(allocator, "0");
     try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "X-Checksum: 1");
+    try crlf(allocator, &var wire);
     try crlf(allocator, &var wire);
     let raw = wire.as_bytes();
     try client.write_all(handle, raw);
@@ -700,6 +702,9 @@ test "accept_head streams a chunked body the same way" {
     var held = try server.accept_head(handle, allocator);
     defer held.deinit(allocator);
     testing::expect_equal<i64>(0, held.body.len());
+    // The trailer is behind the body, so it is not here until the body has
+    // been read to its end.
+    testing::expect_equal<i64>(0, held.request.trailers.count());
     var body = string::new(allocator);
     defer body.deinit(allocator);
     var got = try held.read_into(handle, allocator, &var body, 4096);
@@ -708,6 +713,19 @@ test "accept_head streams a chunked body the same way" {
     }
     let text = body.as_bytes();
     testing::expect_equal<[]u8>("hello there", text);
+    expect_trailer(&held, "X-Checksum", "1");
+}
+
+// expect_trailer reads one trailer field off the request, which has it once
+// the body has been read to its end.
+fn expect_trailer(held: &http::Exchange, name: []u8, want: []u8) -> void {
+    if held.request.trailers.find(name) |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>(want, value);
+    } else {
+        testing::fail("the trailer was dropped");
+    }
+    return;
 }
 
 test "accept reads a chunked body whole" {
@@ -730,7 +748,7 @@ test "accept reads a chunked body whole" {
     try crlf(allocator, &var wire);
     try crlf(allocator, &var wire);
     // A chunk with an extension, which nothing reads, and a trailer, which
-    // nothing keeps.
+    // the request keeps apart from its headers.
     try wire.append_bytes(allocator, "3;name=value");
     try crlf(allocator, &var wire);
     try wire.append_bytes(allocator, "abc");
@@ -749,6 +767,106 @@ test "accept reads a chunked body whole" {
     let body = held.body.as_bytes();
     testing::expect_equal<[]u8>("abcdef", body);
     testing::expect(!held.request.headers.has("X-Checksum"));
+    expect_trailer(&held, "X-Checksum", "1");
+}
+
+// A trailer field is chunked framing, which both directions carry, so a bad
+// one is `MalformedChunk` rather than a malformed request.
+test "a malformed trailer is refused as chunk framing" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var server = try http::listen(handle, allocator, "127.0.0.1:0");
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /form HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try chunk(allocator, &var wire, "abc");
+    try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "X Checksum: 1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server, 1048576) {
+        testing::fail("a malformed trailer was accepted");
+    } else |err| {
+        match err {
+            MalformedChunk => { testing::expect(true); },
+            _ => { testing::fail("a malformed trailer was refused under another name"); },
+        }
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "400"));
+}
+
+// The trailer section is bounded the way the head is: a peer that said it was
+// done does not get to keep sending fields.
+test "a trailer section past the head ceiling is refused" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_head_bytes = 64;
+    var server = try http::listen_with(handle, allocator, "127.0.0.1:0", limits);
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    var client = try net::tcp_connect(handle, address_bytes);
+    defer client.deinit();
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, "POST /f HTTP/1.1");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Transfer-Encoding: chunked");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    try chunk(allocator, &var wire, "abc");
+    try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "X-Padding: ");
+    var padding = 0;
+    while padding < 80 {
+        try wire.append_bytes(allocator, "x");
+        padding = padding + 1;
+    }
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let raw = wire.as_bytes();
+    try client.write_all(handle, raw);
+
+    if refused(handle, allocator, &var server, 1048576) {
+        testing::fail("an oversized trailer section was accepted");
+    } else |err| {
+        match err {
+            HeadTooLarge => { testing::expect(true); },
+            _ => { testing::fail("an oversized trailer section was refused under another name"); },
+        }
+    }
+
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try drain(handle, allocator, &var client, &var reply);
+    let answer_bytes = reply.as_bytes();
+    testing::expect(contains(answer_bytes, "431"));
 }
 
 test "a chunked body past the ceiling is refused" {

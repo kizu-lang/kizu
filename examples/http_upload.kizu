@@ -17,7 +17,9 @@
 // no Content-Length -- which is what a client that does not know the length in
 // advance sends. `read_into` decodes it, so the loop above it is the same
 // loop. What the caller counts is the body, not the sizes and CRLFs that
-// carried it.
+// carried it. A client that did not know the length in advance can still say
+// it afterwards, in a trailer behind the terminator; the request has it once
+// the body has been read to its end.
 
 import std::array;
 import std::fmt;
@@ -93,9 +95,12 @@ fn chunked_request(
         try crlf(allocator, &var wire);
         at = end;
     }
-    // The zero chunk, and the blank line that ends the trailers there are none
-    // of.
+    // The zero chunk, then the trailer section: a field the client could not
+    // have put in the head, and the blank line that ends the section.
     try wire.append_bytes(allocator, "0");
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "X-Total: ");
+    try fmt::append_i64(allocator, &var wire, length);
     try crlf(allocator, &var wire);
     try crlf(allocator, &var wire);
     let bytes = wire.as_bytes();
@@ -129,6 +134,14 @@ fn weigh(handle: Io, allocator: Allocator, server: &var http::Server) -> Failure
     defer reply.deinit(allocator);
     try reply.append_bytes(allocator, "counted ");
     try fmt::append_i64(allocator, &var reply, seen);
+    // A trailer arrives behind the body, so it is only here once the loop
+    // above has read to the end. It sits apart from the headers: the head was
+    // finished before it existed.
+    if held.request.trailers.find("X-Total") |total| {
+        try reply.append_bytes(allocator, ", announced ");
+        let announced = total.value.as_bytes();
+        try reply.append_bytes(allocator, announced);
+    }
     let text = reply.as_bytes();
     try held.respond_text(handle, allocator, 200, "text/plain", text);
     return;
@@ -220,7 +233,7 @@ fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
 // counted 5000
 // HTTP/1.1 200 OK
 // Content-Type: text/plain
-// Content-Length: 12
+// Content-Length: 28
 // Connection: close
 //
-// counted 5000
+// counted 5000, announced 5000

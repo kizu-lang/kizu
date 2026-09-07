@@ -44,7 +44,8 @@ decoder の上限は `std::mem::Limit` です。body を保持する経路は
 どちらだったかを知らずに書けます。
 
 chunk extension は読み飛ばします。framing を変えるものが無いので、理解できない
-値は message を拒否する理由になりません。trailer は消費して捨てます。
+値は message を拒否する理由になりません。trailer は head と同じ parser で読み、
+`request.trailers` / `response.trailers` に header とは別に置きます。
 
 `MalformedChunk` は `MalformedRequest` / `MalformedResponse` と別の member です。
 chunk の framing は**どちら向きにもある**もので、同じ decoder が両方を読むので、

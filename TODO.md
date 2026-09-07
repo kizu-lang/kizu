@@ -21,7 +21,6 @@ caller のもの。停止は `break`。期限の掃除は `next` の中なので
 
 | | 大きさ | 備考 |
 | --- | --- | --- |
-| trailer を header に足す | 小 | 今は消費して捨てる |
 | upgrade (101 / WebSocket) | 小 | `Framing::Raw` は既にある |
 | pipelining | 中 | 先読みは順に処理、答えは重ねない |
 | multipart / form-data | 中 | |
