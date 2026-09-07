@@ -167,6 +167,13 @@ fn (self: &var std::http::Connection) bind_body(
     response: &std::http::ClientResponse,
     method: []u8
 ) -> std::http::Failure!void {
+    // A 101 hands the connection over: what follows the head is the protocol
+    // the peer switched to, not this message's body, and it is the caller's
+    // to read until the close and to write with `write_all`.
+    if response.status == 101 {
+        self.reader.bind_until_close();
+        return;
+    }
     // A HEAD answer carries the length the body would have had and none of it,
     // and 1xx / 204 / 304 carry no body at all.
     if std::mem::equal_bytes(method, "HEAD") {
@@ -190,6 +197,19 @@ fn (self: &var std::http::Connection) bind_body(
         return;
     }
     self.reader.bind_until_close();
+    return;
+}
+
+// write_all puts bytes on the connection with nothing added. It is what a
+// caller speaks with after a 101: `send` wrote the request, `receive` read
+// the head that switched protocols, and from here the bytes are the caller's.
+// It does not touch the deadline; a caller whose work is not one phase pushes
+// its own forward with `set_write_deadline`.
+fn (self: &var std::http::Connection) write_all(
+    io: Io,
+    bytes: []u8
+) -> std::http::Failure!void {
+    try self.reader.write_all(io, bytes);
     return;
 }
 

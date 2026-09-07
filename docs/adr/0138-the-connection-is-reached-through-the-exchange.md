@@ -51,6 +51,11 @@ std::http が組み立てなかった head はこの 1 語を grep すれば全�
 `set_read_deadline` で自分で押し直します。触ると呼び出しごとに budget が復活して、
 ADR-0137 が避けた形に戻ります。
 
+`101 Switching Protocols` もこの形で書けます。`Raw` で head を送った後、caller は
+同じ `Exchange` の `read_into` / `write_all` で切り替えた protocol を話し、`next` は
+false を答え、`deinit` が閉じます。client も同じで、`receive` が 101 を読むと
+`read_into` は close まで返し、`write_all` で書きます。
+
 keep-alive はまだ無いので、`UntilClose` は「close が終わり」で正しいままです。
 chunked transfer encoding が入ると 5 つ目の framing になります。
 
