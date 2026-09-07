@@ -28,6 +28,10 @@ pub struct Reader {
     bounded: bool,
     chunked: bool,
     chunks: std::http::ChunkState,
+    // The fields behind a chunked body's terminator, read by the head's parser
+    // once the decoder reaches them. They wait here until the owner of this
+    // reader moves them to the message they belong to.
+    trailers: std::http::Headers,
     limits: std::http::Limits,
 }
 
@@ -45,6 +49,7 @@ fn reader_new(
         bounded: true,
         chunked: false,
         chunks: std::http::chunk_state_new(std::mem::Limit::Unlimited),
+        trailers: std::http::headers_new(allocator),
         limits: limits,
     };
 }
@@ -52,6 +57,7 @@ fn reader_new(
 fn (self: std::http::Reader) deinit(allocator: Allocator) -> void {
     self.stream.deinit();
     self.held.deinit(allocator);
+    self.trailers.deinit(allocator);
     return;
 }
 
@@ -65,6 +71,7 @@ fn (self: &var std::http::Reader) reopen(allocator: Allocator) -> std::http::Fai
     self.bounded = true;
     self.chunked = false;
     self.chunks = std::http::chunk_state_new(std::mem::Limit::Unlimited);
+    self.trailers.clear(allocator);
     return;
 }
 
@@ -79,6 +86,7 @@ fn (self: &var std::http::Reader) compact(
     if self.at >= self.held.len() {
         self.held.clear();
         self.at = 0;
+        self.scanned = 0;
         return;
     }
     var tail = std::string::new(allocator);
@@ -88,6 +96,8 @@ fn (self: &var std::http::Reader) compact(
     try self.copy_held(allocator, from, end, &var tail);
     self.held.clear();
     self.at = 0;
+    // The bytes moved, so a scan that resumes has to start over with them.
+    self.scanned = 0;
     try self.take_tail(allocator, &tail);
     return;
 }
@@ -300,6 +310,16 @@ fn (self: &var std::http::Reader) read_chunked_into(
         if self.chunks.is_done() {
             return 0;
         }
+        if self.chunks.at_trailers() {
+            if try self.read_trailers(allocator) {
+                continue;
+            }
+            let got = try self.fill_waiting(io, allocator);
+            if got == 0 {
+                return std::http::Error::Incomplete;
+            }
+            continue;
+        }
         let take = try self.decode(allocator, out, max);
         if take.taken > 0 {
             return take.taken;
@@ -327,6 +347,20 @@ fn (self: &var std::http::Reader) read_ready_chunked_into(
         if self.chunks.is_done() {
             return 0;
         }
+        if self.chunks.at_trailers() {
+            if try self.read_trailers(allocator) {
+                continue;
+            }
+            let got = try self.fill_ready(io, allocator);
+            if got |count| {
+                if count == 0 {
+                    return std::http::Error::Incomplete;
+                }
+            } else {
+                return null;
+            }
+            continue;
+        }
         let take = try self.decode(allocator, out, max);
         if take.taken > 0 {
             return take.taken;
@@ -344,6 +378,97 @@ fn (self: &var std::http::Reader) read_ready_chunked_into(
         }
     }
     return null;
+}
+
+// read_trailers reads the trailer section once all of it has arrived, and
+// answers whether it did. The section is head-shaped -- fields up to a blank
+// line -- so it is found the way a head is, bounded the way a head is, and
+// parsed by the head's parser. It is not the head: a field arriving after the
+// body was framed cannot change how it was framed, so the fields wait in
+// `trailers` for the owner of this reader to hand them to the message.
+fn (self: &var std::http::Reader) read_trailers(
+    allocator: Allocator
+) -> std::http::Failure!bool {
+    let found = try self.find_trailers();
+    if found |length| {
+        // Staged through a local: parsing reads the buffer and writes the
+        // trailers, which are two borrows of `self` in one expression
+        // (docs/language-gaps.md). The section is bounded by `max_head_bytes`,
+        // so the copy is bounded too.
+        var block = std::string::new(allocator);
+        defer block.deinit(allocator);
+        let from = self.at;
+        try self.copy_held(allocator, from, from + length, &var block);
+        try self.parse_trailers(allocator, &block);
+        self.took(length);
+        self.chunks.finish();
+        try self.compact(allocator);
+        return true;
+    }
+    return false;
+}
+
+// find_trailers answers how long the trailer section is, once all of it has
+// arrived: a lone CRLF when there are no fields, or the fields through the
+// blank line that ends them. Null is "not yet", and the scan resumes where the
+// last one stopped, the way the head's does.
+fn (self: &var std::http::Reader) find_trailers() -> std::http::Failure!?i64 {
+    let bytes = self.held.as_bytes();
+    let at = self.at;
+    let length = std::mem::len(bytes);
+    if length - at >= 2 and bytes[at] == cast<u8>(13) and bytes[at + 1] == cast<u8>(10) {
+        return 2;
+    }
+    // The section is bounded the way the head is. Without a ceiling a peer
+    // could send fields forever after saying it was done.
+    let ceiling = self.limits.max_head_bytes;
+    let found = std::http::head_end(bytes, self.scanned);
+    if found |end| {
+        if end - at > ceiling {
+            return std::http::Error::HeadTooLarge;
+        }
+        return end - at;
+    }
+    if length - at >= ceiling {
+        return std::http::Error::HeadTooLarge;
+    }
+    var next = length - 3;
+    if next < at {
+        next = at;
+    }
+    self.scanned = next;
+    return null;
+}
+
+// parse_trailers reads the fields of one section into `trailers`. A bad field
+// is named for the framing it is part of: the trailer section is chunked
+// framing, which both directions carry, so `MalformedRequest` would be a lie
+// on the way back (ADR-0140).
+fn (self: &var std::http::Reader) parse_trailers(
+    allocator: Allocator,
+    block: &std::string::String
+) -> std::http::Failure!void {
+    let bytes = block.as_bytes();
+    let limits = self.limits;
+    if std::http::parse_header_fields(allocator, &var self.trailers, bytes, 0, limits) {
+        return;
+    } else |err| {
+        match err {
+            MalformedRequest => return std::http::Error::MalformedChunk,
+            _ => return err,
+        }
+    }
+}
+
+// drain_trailers moves the trailers out to `out`, last first, and leaves
+// none behind. The owner of this reader moves them on to the message they
+// belong to, and the second move puts them back in the order they arrived.
+fn (self: &var std::http::Reader) drain_trailers(
+    allocator: Allocator,
+    out: &var std::http::Headers
+) -> std::mem::Error!void {
+    try self.trailers.drain_into(allocator, out);
+    return;
 }
 
 // decode runs the chunk decoder over what has arrived and marks what it read.

@@ -106,8 +106,15 @@ pub struct Request {
     pub target: std::string::String,
     pub version: std::http::Version,
     pub headers: std::http::Headers,
+    pub trailers: std::http::Headers,
 }
 ```
+
+**trailer はここにあります。** chunked body の terminator の後ろの field は、body を
+終端まで読んだときに `trailers` に入ります —— `accept` なら返ってきた時点で、
+`accept_head` なら `read_into` が 0 を返したときです。それまでは空です。
+`headers` には混ぜません。head を読み終えた後に header が増えると、head で
+framing を決めた側の前提が壊れるためです(ADR-0140)。
 
 **body はここにありません。** body はまだ届きつつある byte で、ここに持たせると
 「この process が何 byte 受け取るか」を、誰も用途を言わないうちに決めることに
@@ -442,8 +449,10 @@ byte は既に `Exchange` の中にあります。socket を渡すと caller は
 
 chunk の extension(`3;name=value`)は読み飛ばします —— framing を変えるものが
 無いので、理解できない値は message を拒否する理由になりません。terminator の
-後ろの trailer は消費して捨てます(RFC 9110 が許す扱い)。trailer は head と
-同じ形なので `max_head_bytes` が上限です。
+後ろの trailer は head と同じ parser で読み、`request.trailers`(client は
+`response.trailers`)に header とは別に置きます。head と同じ形なので上限も同じ
+`max_head_bytes` / `max_headers` で、壊れた field は `MalformedChunk` です ——
+trailer は chunked framing の一部で、どちら向きにもあるものだからです。
 
 ### smuggling を作らないための規則
 
@@ -833,6 +842,7 @@ pub struct ClientResponse {
     pub reason: std::string::String,
     pub headers: std::http::Headers,
     pub body: std::string::String,
+    pub trailers: std::http::Headers,
 }
 
 pub fn get(io, allocator, url, max) -> std::http::Failure!std::http::ClientResponse
@@ -854,6 +864,8 @@ fn (self: &var Connection) read_into(io, allocator, out, max) -> std::http::Fail
 fn (self: &var Connection) read_ready_into(io, allocator, out, max)
     -> std::http::Failure!?i64
 fn (self: &var Connection) read_body(io, allocator, response: &var ClientResponse, max)
+    -> std::http::Failure!void
+fn (self: &var Connection) take_trailers(allocator, response: &var ClientResponse)
     -> std::http::Failure!void
 fn (self: Connection) deinit(allocator) -> void
 
@@ -894,7 +906,9 @@ while got > 0 {
 
 server 側の `accept` と `accept_head` と**同じ割れ方**です。`receive` は head で
 止め、body は接続に残して `read_into` に任せます。`response.body` が埋まるのは
-`fetch` 族と `read_body` を呼んだときだけです。
+`fetch` 族と `read_body` を呼んだときだけです。chunked の trailer も同じで、
+`read_body` は `response.trailers` に入れ、`read_into` で読み切った caller は
+0 が返った後に `take_trailers` で移します。
 
 **stream は返しません。** head を読むと packet 単位で読むので、body の先頭 byte は
 既に `Connection` の中にあります。socket を渡すと caller はそこを飛ばします。Go の
@@ -989,8 +1003,8 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 
 - **pipelining**: 先読みした request は順に処理しますが、答えを重ねて送る
   ことはしません。1 つ答えてから次を読みます
-- **trailer を読むこと**: terminator の後ろの trailer は消費して捨てます。
-  `Trailer` header で予告されたものを request に足す仕組みはありません
+- **trailer を書くこと**: 読むだけです。request にも response にも chunked body の
+  terminator の後ろに trailer は付けません
 - **compression**: `Content-Encoding` は素通しで、decode しません
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
 - **HTTP date を読むこと**: `Date` / `Expires` / `Last-Modified` は解析しません。

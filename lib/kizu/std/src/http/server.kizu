@@ -1392,6 +1392,9 @@ fn (self: &var std::http::Exchange) read_into(
     max: i64
 ) -> std::http::Failure!i64 {
     let count = try self.reader.read_into(io, allocator, out, max);
+    if count == 0 {
+        try self.collect_trailers(allocator);
+    }
     return count;
 }
 
@@ -1402,7 +1405,33 @@ fn (self: &var std::http::Exchange) read_ready_into(
     max: i64
 ) -> std::http::Failure!?i64 {
     let count = try self.reader.read_ready_into(io, allocator, out, max);
-    return count;
+    if count |got| {
+        if got == 0 {
+            try self.collect_trailers(allocator);
+        }
+        return got;
+    }
+    return null;
+}
+
+// collect_trailers moves what arrived behind a chunked body into the request,
+// which is where a handler looks for it. The end of the body is the one
+// moment they exist and the request does not have them yet, so the read that
+// answered 0 is what calls this. They go through a staging list because the
+// reader and the request are two fields of this exchange, and moving between
+// them in one expression is two borrows of it (docs/language-gaps.md); the
+// second move puts them back in wire order.
+fn (self: &var std::http::Exchange) collect_trailers(
+    allocator: Allocator
+) -> std::http::Failure!void {
+    if !self.reader.is_chunked() {
+        return;
+    }
+    var staged = std::http::headers_new(allocator);
+    defer staged.deinit(allocator);
+    try self.reader.drain_trailers(allocator, &var staged);
+    try staged.drain_into(allocator, &var self.request.trailers);
+    return;
 }
 
 // respond_text is the whole answer in one call: a status, a content type, and
