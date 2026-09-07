@@ -40,6 +40,31 @@ test "json encoder writes bool and null documents" {
     testing::expect_equal<[]u8>("null", nothing_bytes);
 }
 
+fn expect_f64_document(allocator: Allocator, value: f64, expected: []u8) -> !void {
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit(allocator);
+    try encoder.write_f64(value);
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try encoder.finish_into(allocator, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+// A float is spelled the way `std::float::append` spells it: the shortest
+// decimal that reads back as the same value, with `.0` on an integral one so
+// the document still says it is a float.
+test "json encoder writes float documents" {
+    let allocator = mem::page_allocator();
+    try expect_f64_document(allocator, 1.5, "1.5");
+    try expect_f64_document(allocator, 100.0, "100.0");
+    try expect_f64_document(allocator, 0.1 + 0.2, "0.30000000000000004");
+    try expect_f64_document(allocator, 1e21, "1e21");
+    try expect_f64_document(allocator, 1.5e-7, "1.5e-7");
+    try expect_f64_document(allocator, -0.0, "-0.0");
+}
+
 // The comma sits between elements only, so the document closes with every
 // element separated and none trailing.
 test "json encoder separates array elements" {
@@ -171,6 +196,26 @@ test "json encode writes a scalar document" {
     try json::encode<i64>(allocator, count, out);
     let bytes = out.as_bytes();
     testing::expect_equal<[]u8>("42", bytes);
+}
+
+pub struct Reading {
+    pub label: []u8,
+    pub celsius: f64,
+    pub samples: i64,
+}
+
+// An f64 field is a number like an i64 field, spelled so that it stays a float.
+test "json encode writes an f64 field" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let reading = Reading { label: "attic", celsius: 21.5, samples: 4 };
+    try json::encode<Reading>(allocator, reading, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"attic","celsius":21.5,"samples":4}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
 }
 
 pub struct Bag {

@@ -1,4 +1,5 @@
 import std::array;
+import std::float;
 import std::json;
 import std::map;
 import std::mem;
@@ -17,6 +18,11 @@ pub struct Profile {
 
 pub struct Wrapper {
     pub head: Profile,
+    pub count: i64,
+}
+
+pub struct Sample {
+    pub celsius: f64,
     pub count: i64,
 }
 
@@ -106,6 +112,85 @@ test "json decode reads a negative number" {
     testing::expect_equal<i64>(-12, counts.visits);
 }
 
+// An f64 field takes any number JSON has; an i64 field next to it still takes
+// only an integer spelling.
+test "json decode reads an f64 field" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"celsius": 21.5, "count": 4}
+    ;
+    let sample = try json::decode<Sample>(allocator, document);
+    testing::expect_equal<f64>(21.5, sample.celsius);
+    testing::expect_equal<i64>(4, sample.count);
+}
+
+fn expect_f64(allocator: Allocator, document: []u8, expected: f64) -> !void {
+    let value = try json::decode<f64>(allocator, document);
+    testing::expect_equal<f64>(expected, value);
+    return;
+}
+
+// Every spelling JSON has reads to the nearest f64: an integer, a fraction, an
+// exponent with either sign, a magnitude too small for the type (zero is the
+// nearest value), and the negative zero, which keeps its sign.
+test "json decode reads every number spelling as f64" {
+    let allocator = mem::page_allocator();
+    try expect_f64(allocator, "1.5", 1.5);
+    try expect_f64(allocator, "100", 100.0);
+    try expect_f64(allocator, "1E+2", 100.0);
+    try expect_f64(allocator, "2.5e-3", 0.0025);
+    try expect_f64(allocator, "0.1", 0.1);
+    try expect_f64(allocator, "1e-400", 0.0);
+    let negative_zero = try json::decode<f64>(allocator, "-0.0");
+    testing::expect(float::bits(negative_zero) == float::bits(-0.0));
+}
+
+// decode_outcome names how a decode ended, so a test can say which error it
+// expects without a match in every case.
+fn decode_outcome<T>(allocator: Allocator, document: []u8) -> []u8 {
+    var outcome = "ok";
+    if json::decode<T>(allocator, document) |_| {
+        outcome = "ok";
+    } else |err| {
+        match err {
+            UnexpectedToken => { outcome = "unexpected token"; },
+            InvalidNumber => { outcome = "invalid number"; },
+            _ => { outcome = "other"; },
+        }
+    }
+    return outcome;
+}
+
+// A number JSON allows and the type cannot hold is an error, not a rounded or
+// truncated value: a fraction or an exponent asked for as i64, an integer past
+// i64 in either direction, a magnitude past f64. The two ends of i64 fit.
+test "json decode refuses numbers the type cannot hold" {
+    let allocator = mem::page_allocator();
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "1.0"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "1e2"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "9223372036854775808"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<i64>(allocator, "-9223372036854775809"));
+    testing::expect_equal<[]u8>("invalid number", decode_outcome<f64>(allocator, "1e400"));
+    let largest = try json::decode<i64>(allocator, "9223372036854775807");
+    testing::expect_equal<i64>(9223372036854775807, largest);
+    let smallest = try json::decode<i64>(allocator, "-9223372036854775808");
+    testing::expect_equal<i64>(-9223372036854775807 - 1, smallest);
+}
+
+// The number grammar is JSON's, not std::float's: a leading zero, a point with
+// no digit on one side, a sign or an exponent with no digits, and a plus sign
+// are not numbers here even though `std::float::parse` reads some of them.
+test "json decode refuses number spellings JSON does not have" {
+    let allocator = mem::page_allocator();
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "01"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "1."));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, ".5"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "-"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "1e"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<f64>(allocator, "+1"));
+    testing::expect_equal<[]u8>("unexpected token", decode_outcome<i64>(allocator, "-01"));
+}
+
 // A Value is a document read without deciding its type first. It is an
 // ordinary recursive union, so a walk over it is an ordinary match.
 fn value_kind(value: &json::Value) -> []u8 {
@@ -113,6 +198,7 @@ fn value_kind(value: &json::Value) -> []u8 {
         Null => "null",
         Bool(_) => "bool",
         I64(_) => "i64",
+        F64(_) => "f64",
         Str(_) => "str",
         Arr(_) => "arr",
         Obj(_) => "obj",
@@ -124,6 +210,7 @@ fn value_size(value: &json::Value) -> i64 {
         Null => 0,
         Bool(_) => 0,
         I64(number) => number,
+        F64(number) => cast<i64>(number),
         Str(text) => text.len(),
         Arr(items) => items.len(),
         Obj(entries) => entries.len(),
@@ -143,6 +230,7 @@ fn value_at_key(value: &json::Value, key: []u8) -> []u8 {
         Null => return "null",
         Bool(_) => return "bool",
         I64(_) => return "i64",
+        F64(_) => return "f64",
         Str(_) => return "str",
         Arr(_) => return "arr",
     }
@@ -180,6 +268,38 @@ test "json decode reads a scalar as a Value" {
     defer value.deinit(allocator);
     testing::expect_equal<[]u8>("i64", value_kind(value));
     testing::expect_equal<i64>(42, value_size(value));
+}
+
+// A number with a fraction or an exponent is an `F64`, one spelled as an
+// integer is an `I64`. The spelling decides, so `1.0` is a float.
+test "json decode reads a float as a Value" {
+    let allocator = mem::page_allocator();
+    var value = try json::decode<json::Value>(allocator, "2.5");
+    defer value.deinit(allocator);
+    testing::expect_equal<[]u8>("f64", value_kind(value));
+    testing::expect_equal<i64>(2, value_size(value));
+    var whole = try json::decode<json::Value>(allocator, "1.0");
+    defer whole.deinit(allocator);
+    testing::expect_equal<[]u8>("f64", value_kind(whole));
+}
+
+// A float Value writes back in its shortest spelling, so `1e2` returns as
+// `100.0`: the value is the one that went in, the digits need not be.
+test "json decode round trips a float Value through encode" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"ratio": 0.1, "scale": 1e2, "count": 3}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit(allocator);
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try json::encode<json::Value>(allocator, value, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"ratio":0.1,"scale":100.0,"count":3}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
 }
 
 test "json decode reads an array of scalars" {

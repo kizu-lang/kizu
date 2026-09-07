@@ -16,10 +16,12 @@ encoder.end_array() -> std::mem::Error!void
 encoder.begin_object_field(name: []u8) -> std::mem::Error!void
 encoder.begin_array_field(name: []u8) -> std::mem::Error!void
 encoder.write_i64(value: i64) -> std::mem::Error!void
+encoder.write_f64(value: f64) -> std::mem::Error!void
 encoder.write_bool(value: bool) -> std::mem::Error!void
 encoder.write_null() -> std::mem::Error!void
 encoder.write_bytes(value: []u8) -> std::mem::Error!void
 encoder.write_i64_field(name: []u8, value: i64) -> std::mem::Error!void
+encoder.write_f64_field(name: []u8, value: f64) -> std::mem::Error!void
 encoder.write_bool_field(name: []u8, value: bool) -> std::mem::Error!void
 encoder.write_null_field(name: []u8) -> std::mem::Error!void
 encoder.write_bytes_field(name: []u8, value: []u8) -> std::mem::Error!void
@@ -43,6 +45,8 @@ API の誤用は error ではなく **trap** です(ADR-0112)。次は回復可�
 * top-level 値を 2 つ書く
 * container が開いたまま、あるいは値を 1 つも書かずに `finish_into` を呼ぶ
 * 62 段より深く入れ子にする
+* NaN や無限大を `write_f64` に渡す。JSON に綴りが無く、値は入力ではなく
+  program 自身の演算から来るので、何と書くかは caller が決めます
 
 `finish_into` は完成した document を caller の `String` に append します。
 `Encoder` は自分の buffer を持ち続け、`deinit` で解放します。
@@ -91,6 +95,7 @@ encode できる型は次で閉じています。
 | 型 | JSON |
 | --- | --- |
 | `i64` | number |
+| `f64` | number。`std::float::append` の最短往復表現で、整数値も `100.0` と書くので float であることが document に残ります |
 | `bool` | `true` / `false` |
 | `[]u8` | string |
 | `std::string::String` | string。所有する bytes を書きます |
@@ -130,7 +135,8 @@ pub union Note {
 `std::json::Value` は例外で、tag を付けずに書きます。`Value` の variant は
 program の型ではなく JSON 自身の形を名指しているので、tag で包むと自分が何かを
 既に言っている document を二重に包むことになります。`decode<Value>` して
-`encode<Value>` した document は、空白を除いて元のままです。
+`encode<Value>` した document は、空白と number の綴り(`1e2` は `100.0` に)を
+除いて元のままです。
 
 ## decode
 
@@ -151,7 +157,7 @@ let visit = try json::decode<Visit>(allocator, document);
 ```
 
 `T` に来られる型は encode が書ける型から `[]u8` を除いたものです —— struct、
-enum、union、`i64`、`bool`、`std::string::String`、`std::array::Array<T>`、
+enum、union、`i64`、`f64`、`bool`、`std::string::String`、`std::array::Array<T>`、
 `std::map::Map<[]u8, V>`、`std::mem::Box<T>`、`std::json::Value`。`?T` は
 struct field としてだけ書けるので、`decode<?T>` ではなく `?T` field を持つ
 struct として来ます。
@@ -213,7 +219,7 @@ std::json::Error::UnexpectedToken   その位置の bytes が JSON ではない
 std::json::Error::MissingField      T の field を document が持たない
 std::json::Error::UnknownField      document の key に対応する field が無い
 std::json::Error::DuplicateField    同じ key が 2 回現れた
-std::json::Error::InvalidNumber     JSON では有効だが i64 に入らない
+std::json::Error::InvalidNumber     JSON では有効だが求めた型に入らない(下の number を参照)
 std::json::Error::InvalidEscape     `\` の後が escape ではない、または孤立した surrogate
 std::json::Error::DepthExceeded     入れ子が 128 段を超えた
 ```
@@ -224,11 +230,23 @@ std::json::Error::DepthExceeded     入れ子が 128 段を超えた
 `std::json::DecodeError = Error or std::mem::Error` を返します(ADR-0128)。
 `else |err|` の `match` は両 set の member を網羅するか `_` で受けます。
 
-### 制限
+### number
 
-number は `i64` のみです。小数・指数は `InvalidNumber` にします。言語に float
-演算が無いためで(SPEC §7 は `f64` を予約するだけ)、黙って切り捨てるより
-error にします。
+number の文法は JSON(RFC 8259)のとおりです: 省略できる `-`、先頭 0 の無い
+整数部、省略できる小数部と指数部。`01`、`1.`、`.5`、`+1` は number ではなく
+`UnexpectedToken` です。桁をどう読むかは求めた型が決めます。
+
+| 型 | 読む綴り | 入らないとき |
+| --- | --- | --- |
+| `i64` | 整数の綴りだけ。`1.0` も `1e2` も `InvalidNumber` | 範囲外は `InvalidNumber` |
+| `f64` | すべての number を最も近い値に(`std::float::parse`) | 無限大になる大きさは `InvalidNumber`、零になる小ささは `0.0` |
+| `Value` | 小数部か指数部があれば `F64`、なければ `I64` | `I64` に入らない整数は `InvalidNumber` |
+
+小数を `i64` に切り捨てず error にするのは、黙って値が変わる経路を作らないためです。
+encode は `f64` を `std::float::append` の綴りで書くので、`100.0` は `100.0` のまま
+往復し、`i64` の `100` と混ざりません。
+
+### 制限
 
 入力サイズの上限は持ちません。`[]u8` を渡すのは caller で、何 byte あるかは
 既に caller が握っています。入れ子の深さだけ 128 段で止めます。
@@ -242,6 +260,7 @@ pub union Value {
     Null,
     Bool(bool),
     I64(i64),
+    F64(f64),
     Str(std::string::String),
     Arr(std::array::Array<Value>),
     Obj(std::map::Map<[]u8, Value>),

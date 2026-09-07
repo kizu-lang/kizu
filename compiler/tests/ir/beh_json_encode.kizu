@@ -40,6 +40,31 @@ test "json encoder writes bool and null documents" {
     testing::expect_equal<[]u8>("null", nothing_bytes);
 }
 
+fn expect_f64_document(allocator: Allocator, value: f64, expected: []u8) -> !void {
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit(allocator);
+    try encoder.write_f64(value);
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try encoder.finish_into(allocator, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+// A float is spelled the way `std::float::append` spells it: the shortest
+// decimal that reads back as the same value, with `.0` on an integral one so
+// the document still says it is a float.
+test "json encoder writes float documents" {
+    let allocator = mem::page_allocator();
+    try expect_f64_document(allocator, 1.5, "1.5");
+    try expect_f64_document(allocator, 100.0, "100.0");
+    try expect_f64_document(allocator, 0.1 + 0.2, "0.30000000000000004");
+    try expect_f64_document(allocator, 1e21, "1e21");
+    try expect_f64_document(allocator, 1.5e-7, "1.5e-7");
+    try expect_f64_document(allocator, -0.0, "-0.0");
+}
+
 // The comma sits between elements only, so the document closes with every
 // element separated and none trailing.
 test "json encoder separates array elements" {
@@ -171,6 +196,26 @@ test "json encode writes a scalar document" {
     try json::encode<i64>(allocator, count, out);
     let bytes = out.as_bytes();
     testing::expect_equal<[]u8>("42", bytes);
+}
+
+pub struct Reading {
+    pub label: []u8,
+    pub celsius: f64,
+    pub samples: i64,
+}
+
+// An f64 field is a number like an i64 field, spelled so that it stays a float.
+test "json encode writes an f64 field" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let reading = Reading { label: "attic", celsius: 21.5, samples: 4 };
+    try json::encode<Reading>(allocator, reading, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"attic","celsius":21.5,"samples":4}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
 }
 
 pub struct Bag {
@@ -447,6 +492,29 @@ test "json encode writes a Value without tagging it" {
 
 // ir
 // lower:
+// fn expect_f64_document(%allocator: Allocator, %value: f64, %expected: []u8) -> !void {
+// entry:
+//   %1: std::json::Encoder = call.std::json::encoder %allocator: Allocator
+//   %2: &var std::json::Encoder = local.slot %1: std::json::Encoder
+//   %3: std::mem::Error!void = call.std::json::Encoder.write_f64 %2: &var std::json::Encoder, %value: f64
+//   %4: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   error.try %3: std::mem::Error!void, cleanup call.std::json::Encoder.deinit %4: std::json::Encoder, %allocator: Allocator
+//   %6: std::string::String = call.std::string::new %allocator: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   %9: std::mem::Error!void = call.std::json::Encoder.finish_into %8: std::json::Encoder, %allocator: Allocator, %7: &var std::string::String
+//   %10: std::string::String = ref.load %7: &var std::string::String
+//   %11: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   error.try %9: std::mem::Error!void, cleanup call.std::string::String.deinit %10: std::string::String, %allocator: Allocator; call.std::json::Encoder.deinit %11: std::json::Encoder, %allocator: Allocator
+//   %13: []u8 = call.std::string::String.as_bytes %7: &var std::string::String
+//   test.expect_equal %expected: []u8, %13: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String, %allocator: Allocator
+//   %17: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %17: std::json::Encoder, %allocator: Allocator
+//   %19: !void = error.ok
+//   return %19: !void
+// }
 // fn Slot.deinit(%self: Slot, %allocator: Allocator) -> void {
 // entry:
 //   %1: i64 = union.tag %self: Slot
@@ -578,6 +646,39 @@ test "json encode writes a Value without tagging it" {
 //   call.std::json::Encoder.deinit %43: std::json::Encoder, %1: Allocator
 //   %45: !void = error.ok
 //   return %45: !void
+// }
+// fn test.json_encoder_writes_float_documents() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: f64 = const 1.5
+//   %3: []u8 = const "1.5"
+//   %4: !void = call.expect_f64_document %1: Allocator, %2: f64, %3: []u8
+//   error.try %4: !void
+//   %6: f64 = const 100.0
+//   %7: []u8 = const "100.0"
+//   %8: !void = call.expect_f64_document %1: Allocator, %6: f64, %7: []u8
+//   error.try %8: !void
+//   %10: f64 = const 0.1
+//   %11: f64 = const 0.2
+//   %12: f64 = binary.+ %10: f64, %11: f64
+//   %13: []u8 = const "0.30000000000000004"
+//   %14: !void = call.expect_f64_document %1: Allocator, %12: f64, %13: []u8
+//   error.try %14: !void
+//   %16: f64 = const 1e21
+//   %17: []u8 = const "1e21"
+//   %18: !void = call.expect_f64_document %1: Allocator, %16: f64, %17: []u8
+//   error.try %18: !void
+//   %20: f64 = const 1.5e-7
+//   %21: []u8 = const "1.5e-7"
+//   %22: !void = call.expect_f64_document %1: Allocator, %20: f64, %21: []u8
+//   error.try %22: !void
+//   %24: f64 = const 0.0
+//   %25: f64 = unary.- %24: f64
+//   %26: []u8 = const "-0.0"
+//   %27: !void = call.expect_f64_document %1: Allocator, %25: f64, %26: []u8
+//   error.try %27: !void
+//   %29: !void = error.ok
+//   return %29: !void
 // }
 // fn test.json_encoder_separates_array_elements() -> !void {
 // entry:
@@ -800,6 +901,26 @@ test "json encode writes a Value without tagging it" {
 //   call.std::string::String.deinit %11: std::string::String, %1: Allocator
 //   %13: !void = error.ok
 //   return %13: !void
+// }
+// fn test.json_encode_writes_an_f64_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: []u8 = const "attic"
+//   %5: f64 = const 21.5
+//   %6: i64 = const 4
+//   %7: Reading = struct.new {label: %4: []u8, celsius: %5: f64, samples: %6: i64}
+//   %8: std::mem::Error!void = call.std::json::encode.Reading %1: Allocator, %7: Reading, %3: &var std::string::String
+//   %9: std::string::String = ref.load %3: &var std::string::String
+//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %1: Allocator
+//   %11: []u8 = call.std::string::String.as_bytes %3: &var std::string::String
+//   %12: []u8 = const "{\"label\":\"attic\",\"celsius\":21.5,\"samples\":4}"
+//   test.expect_equal %12: []u8, %11: []u8, []u8
+//   %14: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %14: std::string::String, %1: Allocator
+//   %16: !void = error.ok
+//   return %16: !void
 // }
 // fn test.json_encode_writes_an_array_field() -> !void {
 // entry:
@@ -1146,6 +1267,29 @@ test "json encode writes a Value without tagging it" {
 //   return %19: !void
 // }
 // opt:
+// fn expect_f64_document(%allocator: Allocator, %value: f64, %expected: []u8) -> !void {
+// entry:
+//   %1: std::json::Encoder = call.std::json::encoder %allocator: Allocator
+//   %2: &var std::json::Encoder = local.slot %1: std::json::Encoder
+//   %3: std::mem::Error!void = call.std::json::Encoder.write_f64 %2: &var std::json::Encoder, %value: f64
+//   %4: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   error.try %3: std::mem::Error!void, cleanup call.std::json::Encoder.deinit %4: std::json::Encoder, %allocator: Allocator
+//   %6: std::string::String = call.std::string::new %allocator: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   %9: std::mem::Error!void = call.std::json::Encoder.finish_into %8: std::json::Encoder, %allocator: Allocator, %7: &var std::string::String
+//   %10: std::string::String = ref.load %7: &var std::string::String
+//   %11: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   error.try %9: std::mem::Error!void, cleanup call.std::string::String.deinit %10: std::string::String, %allocator: Allocator; call.std::json::Encoder.deinit %11: std::json::Encoder, %allocator: Allocator
+//   %13: []u8 = call.std::string::String.as_bytes %7: &var std::string::String
+//   test.expect_equal %expected: []u8, %13: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String, %allocator: Allocator
+//   %17: std::json::Encoder = ref.load %2: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %17: std::json::Encoder, %allocator: Allocator
+//   %19: !void = error.ok
+//   return %19: !void
+// }
 // fn Slot.deinit(%self: Slot, %allocator: Allocator) -> void {
 // entry:
 //   %1: i64 = union.tag %self: Slot
@@ -1276,6 +1420,39 @@ test "json encode writes a Value without tagging it" {
 //   call.std::json::Encoder.deinit %43: std::json::Encoder, %1: Allocator
 //   %45: !void = error.ok
 //   return %45: !void
+// }
+// fn test.json_encoder_writes_float_documents() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: f64 = const 1.5
+//   %3: []u8 = const "1.5"
+//   %4: !void = call.expect_f64_document %1: Allocator, %2: f64, %3: []u8
+//   error.try %4: !void
+//   %6: f64 = const 100.0
+//   %7: []u8 = const "100.0"
+//   %8: !void = call.expect_f64_document %1: Allocator, %6: f64, %7: []u8
+//   error.try %8: !void
+//   %10: f64 = const 0.1
+//   %11: f64 = const 0.2
+//   %12: f64 = binary.+ %10: f64, %11: f64
+//   %13: []u8 = const "0.30000000000000004"
+//   %14: !void = call.expect_f64_document %1: Allocator, %12: f64, %13: []u8
+//   error.try %14: !void
+//   %16: f64 = const 1e21
+//   %17: []u8 = const "1e21"
+//   %18: !void = call.expect_f64_document %1: Allocator, %16: f64, %17: []u8
+//   error.try %18: !void
+//   %20: f64 = const 1.5e-7
+//   %21: []u8 = const "1.5e-7"
+//   %22: !void = call.expect_f64_document %1: Allocator, %20: f64, %21: []u8
+//   error.try %22: !void
+//   %24: f64 = const 0.0
+//   %25: f64 = unary.- %24: f64
+//   %26: []u8 = const "-0.0"
+//   %27: !void = call.expect_f64_document %1: Allocator, %25: f64, %26: []u8
+//   error.try %27: !void
+//   %29: !void = error.ok
+//   return %29: !void
 // }
 // fn test.json_encoder_separates_array_elements() -> !void {
 // entry:
@@ -1498,6 +1675,26 @@ test "json encode writes a Value without tagging it" {
 //   call.std::string::String.deinit %11: std::string::String, %1: Allocator
 //   %13: !void = error.ok
 //   return %13: !void
+// }
+// fn test.json_encode_writes_an_f64_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: []u8 = const "attic"
+//   %5: f64 = const 21.5
+//   %6: i64 = const 4
+//   %7: Reading = struct.new {label: %4: []u8, celsius: %5: f64, samples: %6: i64}
+//   %8: std::mem::Error!void = call.std::json::encode.Reading %1: Allocator, %7: Reading, %3: &var std::string::String
+//   %9: std::string::String = ref.load %3: &var std::string::String
+//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %1: Allocator
+//   %11: []u8 = call.std::string::String.as_bytes %3: &var std::string::String
+//   %12: []u8 = const "{\"label\":\"attic\",\"celsius\":21.5,\"samples\":4}"
+//   test.expect_equal %12: []u8, %11: []u8, []u8
+//   %14: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %14: std::string::String, %1: Allocator
+//   %16: !void = error.ok
+//   return %16: !void
 // }
 // fn test.json_encode_writes_an_array_field() -> !void {
 // entry:
