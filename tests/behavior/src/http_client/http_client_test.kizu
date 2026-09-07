@@ -30,6 +30,7 @@ fn failure_name(failure: http::Failure) -> []u8 {
         BodyTooLarge => "BodyTooLarge",
         MalformedRequest => "MalformedRequest",
         ConnectionRefused => "ConnectionRefused",
+        ExchangeUnfinished => "ExchangeUnfinished",
         _ => "other",
     };
 }
@@ -428,6 +429,162 @@ test "a 101 answer hands the connection to the caller" {
     let _ = try served.read_into(handle, allocator, &var heard, 64);
     let heard_bytes = heard.as_bytes();
     testing::expect_equal<[]u8>("ping", heard_bytes);
+}
+
+// Pipelining: `send` writes and returns, so a caller can write the next
+// request before reading this answer. `receive` gives the answers back in the
+// order the requests were written, one at a time, each read to its end.
+
+test "answers to requests sent ahead come back in order" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit(allocator);
+    var one = try url_for(allocator, pair.port, "/one");
+    defer one.deinit(allocator);
+    var two = try url_for(allocator, pair.port, "/two");
+    defer two.deinit(allocator);
+    try pair.client.send(handle, allocator, "GET", &one, "", "", 30000);
+    try pair.client.send(handle, allocator, "GET", &two, "", "", 30000);
+
+    // Both answers in one write, the way a server that read both requests
+    // from one packet would send them.
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try framed(allocator, &var reply, "200 OK", "first");
+    try framed(allocator, &var reply, "201 Created", "second");
+    let reply_bytes = reply.as_bytes();
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
+    request.deinit(allocator);
+
+    var first = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
+    defer first.deinit(allocator);
+    testing::expect_equal<i64>(200, first.status);
+    let first_body = first.body.as_bytes();
+    testing::expect_equal<[]u8>("first", first_body);
+    var second = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
+    defer second.deinit(allocator);
+    testing::expect_equal<i64>(201, second.status);
+    let second_body = second.body.as_bytes();
+    testing::expect_equal<[]u8>("second", second_body);
+}
+
+test "the trailers of one answer do not reach the next" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit(allocator);
+    var url = try url_for(allocator, pair.port, "/");
+    defer url.deinit(allocator);
+    try pair.client.send(handle, allocator, "GET", &url, "", "", 30000);
+    try pair.client.send(handle, allocator, "GET", &url, "", "", 30000);
+    let reply_text =
+        \\HTTP/1.1 200 OK
+        \\Transfer-Encoding: chunked
+        \\
+        \\5
+        \\hello
+        \\0
+        \\X-First: 1
+        \\
+        \\HTTP/1.1 200 OK
+        \\Transfer-Encoding: chunked
+        \\
+        \\5
+        \\world
+        \\0
+        \\X-Second: 2
+    ;
+    var reply = try wire(allocator, reply_text);
+    defer reply.deinit(allocator);
+    let reply_bytes = reply.as_bytes();
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
+    request.deinit(allocator);
+
+    // The first answer is streamed to its end and its trailers are never
+    // taken. They are the first answer's, and `receive` starts a new one.
+    var first = try pair.client.receive(handle, allocator, "GET", http::default_limits());
+    defer first.deinit(allocator);
+    var piece = string::new(allocator);
+    defer piece.deinit(allocator);
+    var got = try pair.client.read_into(handle, allocator, &var piece, 4096);
+    while got > 0 {
+        got = try pair.client.read_into(handle, allocator, &var piece, 4096);
+    }
+    let streamed = piece.as_bytes();
+    testing::expect_equal<[]u8>("hello", streamed);
+
+    var second = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
+    defer second.deinit(allocator);
+    let second_body = second.body.as_bytes();
+    testing::expect_equal<[]u8>("world", second_body);
+    testing::expect(!second.trailers.has("X-First"));
+    testing::expect(second.trailers.has("X-Second"));
+}
+
+test "receiving the next answer before this one is read is a failure" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit(allocator);
+    var url = try url_for(allocator, pair.port, "/");
+    defer url.deinit(allocator);
+    try pair.client.send(handle, allocator, "GET", &url, "", "", 30000);
+    try pair.client.send(handle, allocator, "GET", &url, "", "", 30000);
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try framed(allocator, &var reply, "200 OK", "first");
+    try framed(allocator, &var reply, "200 OK", "second");
+    let reply_bytes = reply.as_bytes();
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
+    request.deinit(allocator);
+
+    var first = try pair.client.receive(handle, allocator, "GET", http::default_limits());
+    defer first.deinit(allocator);
+    // The body of the first is still on the connection. Reading a head there
+    // would read the body as one, so the call is refused as the caller's bug
+    // rather than reported as the peer's.
+    if pair.client.receive(handle, allocator, "GET", http::default_limits()) |second| {
+        second.deinit(allocator);
+        testing::fail("a head was read out of an unread body");
+    } else |failure| {
+        testing::expect_equal<[]u8>("ExchangeUnfinished", failure_name(failure));
+    }
+    // Reading it to the end is what makes the next receive possible.
+    try pair.client.read_body(handle, allocator, &var first, 1048576);
+    var second = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
+    defer second.deinit(allocator);
+    let second_body = second.body.as_bytes();
+    testing::expect_equal<[]u8>("second", second_body);
+}
+
+// framed appends one answer with a Content-Length, so two of them in one
+// buffer are two messages rather than one body.
+fn framed(
+    allocator: Allocator,
+    out: &var string::String,
+    status: []u8,
+    body: []u8
+) -> mem::Error!void {
+    try out.append_bytes(allocator, "HTTP/1.1 ");
+    try out.append_bytes(allocator, status);
+    try crlf(allocator, out);
+    try out.append_bytes(allocator, "Content-Length: ");
+    try fmt::append_i64(allocator, out, mem::len(body));
+    try crlf(allocator, out);
+    try crlf(allocator, out);
+    try out.append_bytes(allocator, body);
+    return;
 }
 
 test "an encoding this client does not speak is refused" {

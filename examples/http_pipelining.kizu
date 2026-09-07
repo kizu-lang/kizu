@@ -1,0 +1,236 @@
+// Pipelining: the next request arrives before this one is answered.
+//
+// HTTP/1.1 lets a client send several requests on one connection without
+// waiting for the answers. A read takes whole packets, so the server has the
+// second request in hand before the first is answered, and it promises two
+// things about it: the answers go out in the order the requests came in, and
+// the first request it cannot read ends the connection.
+//
+// Neither takes a scheduler. `first` and `next` hand out one Exchange per
+// connection, so the second request is not even parsed until the first has
+// been answered and the connection handed back. The order comes from the
+// shape of the loop, not from anything that keeps answers in line.
+//
+// The third thing the eager caller sends is not a request. `next` tells that
+// connection 400, closes it, and hands out the patient caller's request
+// instead -- the loop hears nothing, because one peer that cannot be read is
+// that peer's problem and not everyone else's.
+
+import std::array;
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+
+error Failure = http::Error or net::Error or mem::Error or array::Error;
+
+fn main() -> Failure!void {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_requests = 4;
+    var server = try http::listen_with(handle, allocator, "127.0.0.1:0", limits);
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+
+    var eager = try open_client(handle, allocator, port);
+    defer eager.deinit();
+    var patient = try open_client(handle, allocator, port);
+    defer patient.deinit();
+
+    // Two requests and something that is not one, written before anything
+    // is answered.
+    try request(handle, allocator, &var eager, "GET /one HTTP/1.1");
+    try request(handle, allocator, &var eager, "GET /two HTTP/1.1");
+    try request(handle, allocator, &var eager, "not a request");
+
+    var current = try server.first(handle, allocator, 1048576);
+    // The patient caller speaks while /one is being answered. Handing /one
+    // back is where /two is read: it was in the buffer all along, and what is
+    // in hand comes before anything a wait would have to report.
+    current = try turn_and_ask(
+        handle, allocator, &var server, move current, &var patient,
+        "GET /three HTTP/1.1");
+    // Handing /two back finds "not a request" behind it. That connection is
+    // told 400 and closed, and the request handed out is the patient caller's.
+    current = try turn(handle, allocator, &var server, move current);
+    try last(handle, allocator, move current);
+
+    try show(handle, allocator, &var eager);
+    try show(handle, allocator, &var patient);
+    return;
+}
+
+// turn answers the request it was handed and hands the connection back for
+// the following one. Its own frame, so the exchange has an owner while it is
+// answered (docs/language-gaps.md).
+fn turn(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    held: http::Exchange
+) -> Failure!http::Exchange {
+    var current = move held;
+    errdefer current.deinit(allocator);
+    try answer(handle, allocator, &var current);
+    let following = try server.next(handle, allocator, move current, 1048576);
+    return move following;
+}
+
+// turn_and_ask is `turn` with another caller set talking in between. The
+// asking happens in this frame because the exchange is owned here, and the
+// frame that owns it is the one that can clean it up if the ask fails.
+fn turn_and_ask(
+    handle: Io,
+    allocator: Allocator,
+    server: &var http::Server,
+    held: http::Exchange,
+    caller: &var net::TcpStream,
+    line: []u8
+) -> Failure!http::Exchange {
+    var current = move held;
+    errdefer current.deinit(allocator);
+    try answer(handle, allocator, &var current);
+    try request(handle, allocator, caller, line);
+    let following = try server.next(handle, allocator, move current, 1048576);
+    return move following;
+}
+
+// last answers the final request and closes its connection.
+fn last(handle: Io, allocator: Allocator, held: http::Exchange) -> Failure!void {
+    var current = move held;
+    defer current.deinit(allocator);
+    try answer(handle, allocator, &var current);
+    return;
+}
+
+// answer prints the path it is answering and sends it back as the body, so
+// the order the loop served in is visible next to the order the bytes went
+// out in.
+fn answer(handle: Io, allocator: Allocator, held: &var http::Exchange) -> Failure!void {
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try body.append_bytes(allocator, "answering ");
+    try copy_path(allocator, held, &var body);
+    // A newline so the answers do not run together on the wire: the next
+    // status line starts right where this body ends.
+    try body.append_byte(allocator, cast<u8>(10));
+    let text = body.as_bytes();
+    let path = text[10..mem::len(text) - 1];
+    print(path);
+    try held.respond_text(handle, allocator, 200, "text/plain", text);
+    return;
+}
+
+// copy_path takes the path out before the exchange is used mutably: a view
+// into the request is a borrow of the exchange it lives in.
+fn copy_path(
+    allocator: Allocator,
+    held: &http::Exchange,
+    out: &var string::String
+) -> Failure!void {
+    let target = held.request.target.as_bytes();
+    let path = http::path_of(target);
+    try out.append_bytes(allocator, path);
+    return;
+}
+
+fn open_client(handle: Io, allocator: Allocator, port: i64) -> Failure!net::TcpStream {
+    var address = string::new(allocator);
+    defer address.deinit(allocator);
+    try address.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var address, port);
+    let bytes = address.as_bytes();
+    let stream = try net::tcp_connect(handle, bytes);
+    return move stream;
+}
+
+fn request(
+    handle: Io,
+    allocator: Allocator,
+    client: &var net::TcpStream,
+    line: []u8
+) -> Failure!void {
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try wire.append_bytes(allocator, line);
+    try crlf(allocator, &var wire);
+    try wire.append_bytes(allocator, "Host: 127.0.0.1");
+    try crlf(allocator, &var wire);
+    try crlf(allocator, &var wire);
+    let bytes = wire.as_bytes();
+    try client.write_all(handle, bytes);
+    return;
+}
+
+// show reads everything one caller was told, up to the close, and prints the
+// status lines, the Connection field where there is one, and the bodies.
+fn show(handle: Io, allocator: Allocator, client: &var net::TcpStream) -> Failure!void {
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    var read = try client.read_into(handle, allocator, &var reply, 4096);
+    while read > 0 {
+        read = try client.read_into(handle, allocator, &var reply, 4096);
+    }
+    let wire = reply.as_bytes();
+    print_interesting(wire);
+    return;
+}
+
+fn print_interesting(wire: []u8) -> void {
+    let length = mem::len(wire);
+    var start = 0;
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(10) {
+            var end = index;
+            if end > start and wire[end - 1] == cast<u8>(13) {
+                end = end - 1;
+            }
+            let line = wire[start..end];
+            if interesting(line) {
+                print(line);
+            }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    if start < length {
+        print(wire[start..length]);
+    }
+    return;
+}
+
+fn interesting(line: []u8) -> bool {
+    if mem::starts_with(line, "HTTP/") {
+        return true;
+    }
+    if mem::starts_with(line, "Connection:") {
+        return true;
+    }
+    return mem::starts_with(line, "answering ");
+}
+
+fn crlf(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// run
+// features: net http io error-union
+// output:
+// /one
+// /two
+// /three
+// HTTP/1.1 200 OK
+// answering /one
+// HTTP/1.1 200 OK
+// answering /two
+// HTTP/1.1 400 Bad Request
+// Connection: close
+// Bad Request
+// HTTP/1.1 200 OK
+// answering /three

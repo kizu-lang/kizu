@@ -113,6 +113,16 @@ fn (self: &var std::http::Connection) receive(
     method: []u8,
     limits: std::http::Limits
 ) -> std::http::Failure!std::http::ClientResponse {
+    // The answer before this one has to have been read to its end. What is
+    // left of its body would be read as this head, and the failure that made
+    // would blame the peer for what is the caller's bug -- the same rule the
+    // server's `next` keeps with `ExchangeUnfinished`.
+    if !self.finished() {
+        return std::http::Error::ExchangeUnfinished;
+    }
+    // A new message. The last one's framing, decoder state and trailers are
+    // done with; what the peer sent behind it stays, and is read first.
+    try self.reader.reopen(allocator);
     self.reader.arm_read(limits.read_head_millis);
     let head_length = try self.take_head(io, allocator, limits);
     var response = try self.parse_head(allocator, head_length, limits);
@@ -121,6 +131,18 @@ fn (self: &var std::http::Connection) receive(
     try self.bind_body(&response, method);
     self.reader.arm_read(limits.read_body_millis);
     return move response;
+}
+
+// finished answers whether the last answer was read to its end. A connection
+// nothing was received on yet owes nothing, so it is finished too.
+fn (self: &std::http::Connection) finished() -> bool {
+    if self.reader.owes() > 0 {
+        return false;
+    }
+    if self.reader.is_chunked() and !self.reader.chunks_done() {
+        return false;
+    }
+    return true;
 }
 
 // take_head fills the connection until the head is complete.

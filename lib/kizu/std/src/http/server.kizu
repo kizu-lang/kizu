@@ -354,7 +354,7 @@ fn (self: &var std::http::Server) rejoin(
         try self.hold(io, allocator, move held);
         return;
     }
-    try self.restore(allocator, move held);
+    try self.restore(io, allocator, move held);
     return;
 }
 
@@ -371,13 +371,14 @@ fn (self: &var std::http::Server) hold(
     let token = try self.claim_token(allocator);
     taken.token = token;
     try taken.watch_read(io, &var self.poller, token);
-    try self.restore(allocator, move taken);
+    try self.restore(io, allocator, move taken);
     return;
 }
 
 // restore puts a connection that already has a token into the table and writes
 // down where it landed. It touches no descriptor.
 fn (self: &var std::http::Server) restore(
+    io: Io,
     allocator: Allocator,
     held: std::http::Exchange
 ) -> std::http::Failure!void {
@@ -389,7 +390,7 @@ fn (self: &var std::http::Server) restore(
     try self.slot_of.set(token, index);
     // A connection that pipelined its next request already has it in the
     // buffer, and no wait will ever mention it.
-    let done = try self.step_at(allocator, index);
+    let done = try self.settle_at(io, allocator, index);
     if done {
         try self.settled_tokens.append(allocator, token);
     }
@@ -443,7 +444,7 @@ fn (self: &var std::http::Server) wait_for_one(
     while true {
         try self.settle_tokens(allocator);
         // What is already in hand first, since no wait would mention it.
-        if try self.settled(allocator) |index| {
+        if try self.settled(io, allocator) |index| {
             let held = try self.take_out(allocator, index);
             return move held;
         }
@@ -464,12 +465,13 @@ fn (self: &var std::http::Server) wait_for_one(
 // is checked before it is believed. Checking is the parse attempt the loop
 // used to make against every open connection, now made against one.
 fn (self: &var std::http::Server) settled(
+    io: Io,
     allocator: Allocator
 ) -> std::http::Failure!?i64 {
     while self.settled_tokens.pop() |token| {
         let slot = self.slot_of.get(token) orelse -1;
         if slot >= 0 {
-            let done = try self.step_at(allocator, slot);
+            let done = try self.settle_at(io, allocator, slot);
             if done {
                 return slot;
             }
@@ -478,15 +480,33 @@ fn (self: &var std::http::Server) settled(
     return null;
 }
 
-fn (self: &var std::http::Server) step_at(
+// settle_at parses what one connection already holds and answers whether that
+// is a whole request. It reads no socket: the bytes are ones a peer sent
+// behind its last request, which is what pipelining is.
+//
+// A request read ahead that this server cannot read is refused and its
+// connection dropped here, the way `fill_at` does for one that just arrived.
+// It is that peer's failure. Handing it up would end the loop that is serving
+// everyone else, for something one connection did.
+fn (self: &var std::http::Server) settle_at(
+    io: Io,
     allocator: Allocator,
     index: i64
 ) -> std::http::Failure!bool {
+    var done = false;
+    var unreadable = false;
     if self.open.at_mut(index) |held| {
-        let progress = try held.step(allocator);
-        return !needs_more(progress);
+        if held.step_or_refuse(io, allocator) |progress| {
+            done = !needs_more(progress);
+        } else |_| {
+            unreadable = true;
+        }
     }
-    return false;
+    if unreadable {
+        try self.drop_at(allocator, index);
+        return false;
+    }
+    return done;
 }
 
 // hear moves every connection the wait named. A new caller arrives on the

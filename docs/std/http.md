@@ -744,6 +744,28 @@ request の遅延は中央値 0.455 ms、最大 0.552 ms です。100 は接続�
 3 つ目のために、`accept_head` の後の `read_into` は **`Content-Length` を超えて
 読みません**。超えて読むと、それは次の request です。
 
+### pipelining: 先読みは順に、答えは 1 つずつ
+
+HTTP/1.1 の client は前の答えを待たずに次の request を送れます。読みは packet
+単位なので、2 つ目の request は 1 つ目に答える前から接続の中にあります。server が
+約束するのは 3 つです。
+
+- **先読みした byte は捨てません。** `next` / `next_head` と server の `next` は、
+  接続に残っている byte から次の head を読みます。socket を待つのは残りが無い
+  ときだけで、`idle_millis` を数えるのもそのときだけです。
+- **答えは request の順です。** 1 つの接続から手渡される `Exchange` は常に 1 つ
+  で、次の head を解釈するのは前の答えを書いて接続を返した後です。順序は loop の
+  形から来ていて、答えを並べ直す仕組みも、先読みした request を並列に処理する
+  executor もありません。並列に答えたいなら接続を増やします。
+- **読めない request で接続は終わります。** 先読みした request が読めなければ
+  400 を書いて閉じます。`Exchange.next` はその失敗を返し、server の `next` は
+  loop に何も言わずにその接続を落として次の接続を渡します —— 1 本の peer の
+  失敗で他の全員を止めない、`accept_ready` 以来の規則です。`Connection: close`
+  を書いた後や `max_requests` に達した後に残っている request は解釈も返事も
+  されず、接続ごと閉じます。
+
+`examples/http_pipelining.kizu` が `first` / `next` でこれを見せています。
+
 ## 自分で wire を扱うための helper
 
 `Server` / `Exchange` を通さずに byte を自分で読む・組み立てるときの部品です。
@@ -959,6 +981,21 @@ server 側の `accept` と `accept_head` と**同じ割れ方**です。`receive
 TLS や proxy は `take` で刺さります —— stream を包むのが `TcpStream` か別のものかの
 違いになるだけです。
 
+### `send` を重ねる
+
+`send` は書いて返るだけなので、答えを待たずに次を書けます。`receive` は書いた順に
+答えを返します。1 つの答えを読み切る —— `read_body` か、`read_into` が 0 を返す
+まで —— 前に次の `receive` を呼ぶと `Error::ExchangeUnfinished` です。残っていた
+body を head として読めば失敗は peer のせいに見え、caller の bug が隠れるから
+です。server 側の `next` と同じ規則です。
+
+`receive` は前の答えの trailer と decoder の状態を捨てて始めます。`read_into` で
+読み切った caller が `take_trailers` を呼ばなかった trailer は、次の答えには
+混ざりません。
+
+RFC 9112 §9.3.2 は冪等でない request を pipeline しないよう言っています。守るのは
+caller で、`send` は method を見ません。
+
 ### 同じ逐次 execution path の server には `get` を使えません
 
 `get` は connect して write して **read で待つ**ので、答えるはずの逐次 accept が
@@ -1043,8 +1080,6 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 
 ## 今は話さないこと
 
-- **pipelining**: 先読みした request は順に処理しますが、答えを重ねて送る
-  ことはしません。1 つ答えてから次を読みます
 - **trailer を書くこと**: 読むだけです。request にも response にも chunked body の
   terminator の後ろに trailer は付けません
 - **compression**: `Content-Encoding` は素通しで、decode しません
