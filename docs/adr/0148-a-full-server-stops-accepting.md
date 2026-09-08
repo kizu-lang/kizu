@@ -27,8 +27,9 @@ Go の `netutil.LimitListener` に寄せる。
   ために wait が毎回起きる。
 
 TaskSet の worker loop は接続を server の外へ持ち出すので、server は close を
-見ない。そちらの上限は loop に書く形(TaskSet が持つ worker の観測)で #1083 に
-残す。
+見ない。そちらは loop 自身が同じ規則を書く。TaskSet が `running()`(終わっていない
+worker の数)と `wait_one()`(1 つ抜けるまで loop を回す)を持ち、loop は上限で
+`wait_one` を呼ぶ。数えるのは worker で、1 worker が 1 接続を持つので同じ数になる。
 
 ## 却下した案
 
@@ -39,3 +40,5 @@ TaskSet の worker loop は接続を server の外へ持ち出すので、server
 | 有限の既定(1024 など) | 1 接続の費用が loop の形で 100 倍違い、1 つの数が両方に合わない。`max_requests` の 100 は測って置いた数(ADR-0139) |
 | 上限の間も listener を poller に残す | accept しない caller のために wait が即時に返り続ける busy loop になる |
 | 黙って接続を落とす | 隠れた drop policy(原理 2) |
+| TaskSet に上限を持たせ `spawn` の中で待つ | 待ちが `spawn` に隠れる。loop は caller のもの(ADR-0144)で、待つ場所も caller が書く |
+| 上限で `spawn` が失敗する | 断る policy。失敗を受けた loop は結局待つか落とすかを書くことになる |

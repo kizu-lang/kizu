@@ -112,9 +112,10 @@ worker も進みます —— 1 回の turn は準備できたものを全て起
 
 `Future` は owner なので落とせません。解放は `deinit(allocator)` を通り、`deinit` は
 cancel してから stack を同じ allocator へ返します。`cancel` は worker に旗を立て、
-park している待ちを `std::net::Error::Canceled` で起こします。worker は自分が書いた `catch` /
-`defer` を通って戻るので、握っていたものは落ちません。旗を無視して待ち直す
-worker は cancel できません —— context を見ない goroutine と同じです。
+park している待ちを `std::net::Error::Canceled` で起こします(TaskSet の `wait_one` は
+`std::io::Error::Canceled`)。worker は自分が書いた `catch` / `defer` を通って
+戻るので、握っていたものは落ちません。旗を無視して待ち直す worker は cancel
+できません —— context を見ない goroutine と同じです。
 
 worker は `void` を返します。その下に `try` する caller は居ないので、報告は
 貸された状態に書きます。
@@ -141,6 +142,8 @@ pub fn spawn<A>(
     state: A,
 ) -> std::io::Error!void
 
+fn (self: &std::io::TaskSet) running() -> i64
+fn (self: &var std::io::TaskSet) wait_one() -> std::io::Error!void
 fn (self: std::io::TaskSet) deinit(allocator: Allocator) -> void
 ```
 
@@ -156,7 +159,22 @@ Kizu code と同じように全経路で cleanup します。spawn 自体が失�
 
 完了した worker の state と stack は TaskSet が回収します。`deinit` は残っている
 worker を cancel し、各 worker が自分の `defer` を通って終わってから set を解放
-します。個別の結果を読み戻すときは `Future`、接続のように渡したら終わりの仕事は
+します。
+
+`running` はまだ終わっていない worker の数です。`wait_one` は loop を回して、set の
+worker が 1 つ終わるまで待ちます。spawn する loop は、この 2 つで自分が抱える
+worker の数を抑えます —— 上限では断らず落とさず、1 つ抜けるまで待ちます。待って
+いる間も同じ loop の他の worker は進みます。set が空なら `wait_one` はすぐ戻り、
+cancel された caller には `Canceled` を返して待たせません。blocking Io では
+`spawn` の中で worker が最後まで走るので、`running` は常に 0 です。
+
+```kizu
+while tasks.running() >= cap {
+    tasks.wait_one() catch return;
+}
+let exchange = server.accept_connection(handle, allocator) catch return;
+io::spawn<http::Exchange>(&var tasks, serve_connection, move exchange) catch return;
+```個別の結果を読み戻すときは `Future`、接続のように渡したら終わりの仕事は
 `TaskSet` を使います。どちらも thread ではなく、evented Io の待ちの間に 1 thread
 上で交互に進みます。
 

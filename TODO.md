@@ -7,17 +7,6 @@
 
 evented server(ADR-0136〜0146)まで入った時点で残っているものです。
 
-## 2. 抱える数の上限 (#1083)
-
-`first` / `next` は `Limits.max_connections` で止まる(ADR-0148)。残りは TaskSet
-の visible accept loop で、connection を無制限に accept / spawn できる。実測では
-worker が約 269 KiB/connection を使うため、`max_requests` では代わりにならない。
-loop が worker の数を見て待てる形(TaskSet の観測)を同じ規則 —— 待つ、断らない、
-落とさない —— で入れる。
-
-serve loop 自体は `first` / `next` で入った(ADR-0144)。`serve` は作らず、loop は
-caller のもの。停止は `break`。期限の掃除は `next` の中なので、書かなくても塞がる。
-
 ## 3. protocol の穴 (#1082)
 
 | | 大きさ | 備考 |

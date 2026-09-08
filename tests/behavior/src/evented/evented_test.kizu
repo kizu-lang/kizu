@@ -303,6 +303,135 @@ test "a worker can start a worker and wait for it" {
     testing::expect_equal<i64>(1, job.inner.ran);
 }
 
+struct OwnedReader {
+    conn: net::TcpStream,
+}
+
+fn (self: OwnedReader) deinit() -> void {
+    self.conn.deinit();
+    return;
+}
+
+// read_one waits for a single byte and is done: a worker whose end its peer
+// decides.
+fn read_one(handle: Io, allocator: Allocator, job: OwnedReader) -> void {
+    var held = move job;
+    defer held.deinit();
+    var got = string::new(allocator);
+    defer got.deinit(allocator);
+    held.conn.read_into(handle, allocator, &var got, 1) catch return;
+    return;
+}
+
+fn bump_owned(handle: Io, allocator: Allocator, job: Counter) -> void {
+    return;
+}
+
+test "a task set counts its workers and waits for one to leave" {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+    var first = try dial(handle, &address);
+    defer first.deinit();
+    var first_far = try door.accept(handle);
+    errdefer first_far.deinit();
+    var second = try dial(handle, &address);
+    defer second.deinit();
+    var second_far = try door.accept(handle);
+    errdefer second_far.deinit();
+
+    var tasks = try io::task_set_new(handle, allocator);
+    defer tasks.deinit(allocator);
+    testing::expect_equal<i64>(0, tasks.running());
+    let one = OwnedReader { conn: move first_far };
+    errdefer one.deinit();
+    try io::spawn<OwnedReader>(&var tasks, read_one, move one);
+    let other = OwnedReader { conn: move second_far };
+    errdefer other.deinit();
+    try io::spawn<OwnedReader>(&var tasks, read_one, move other);
+    testing::expect_equal<i64>(2, tasks.running());
+
+    // Only the first peer speaks, so only the first worker can finish.
+    try first.write_all(handle, "x");
+    try tasks.wait_one();
+    testing::expect_equal<i64>(1, tasks.running());
+
+    try second.write_all(handle, "y");
+    try tasks.wait_one();
+    testing::expect_equal<i64>(0, tasks.running());
+    // Nothing left to wait for comes back at once.
+    try tasks.wait_one();
+}
+
+test "a blocking task set holds nothing after spawn" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var tasks = try io::task_set_new(handle, allocator);
+    defer tasks.deinit(allocator);
+    try io::spawn<Counter>(&var tasks, bump_owned, Counter { seen: 0 });
+    testing::expect_equal<i64>(0, tasks.running());
+    try tasks.wait_one();
+}
+
+struct Stubborn {
+    conn: net::TcpStream,
+    refused: bool,
+}
+
+fn (self: Stubborn) deinit() -> void {
+    self.conn.deinit();
+    return;
+}
+
+// keep_waiting shrugs off the cancel its read reports and asks its set to
+// wait instead. The set says `Canceled` too: a cancelled worker is not made to
+// wait anywhere.
+fn keep_waiting(handle: Io, allocator: Allocator, job: &var Stubborn) -> void {
+    var tasks = io::task_set_new(handle, allocator) catch return;
+    defer tasks.deinit(allocator);
+    io::spawn<Counter>(&var tasks, bump_owned, Counter { seen: 0 }) catch return;
+    var got = string::new(allocator);
+    defer got.deinit(allocator);
+    let read = job.conn.read_into(handle, allocator, &var got, 1) catch -1;
+    if read >= 0 {
+        return;
+    }
+    if tasks.wait_one() {
+        return;
+    } else |err| {
+        job.refused = err == io::Error::Canceled;
+    }
+    return;
+}
+
+test "a cancelled worker is not made to wait for its set" {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+    var near = try dial(handle, &address);
+    errdefer near.deinit();
+
+    var job = Stubborn { conn: move near, refused: false };
+    defer job.deinit();
+    var future = try io::async<Stubborn>(
+        handle, allocator, keep_waiting, &var job);
+    future.cancel();
+    future.deinit(allocator);
+    testing::expect(job.refused);
+}
+
 fn loopback(allocator: Allocator, port: i64) -> Failure!string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
