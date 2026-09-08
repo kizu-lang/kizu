@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -518,6 +519,7 @@ func (l *lowerer) lower() (*Module, error) {
 // lowerTests lowers each `test "name" { ... }` block into a function, so a
 // test runs through the same lowering as the rest of the program.
 func (l *lowerer) lowerTests() error {
+	ordinal := 0
 	for _, decl := range l.program.Decls {
 		test, ok := decl.(*ast.TestDecl)
 		if !ok {
@@ -526,7 +528,7 @@ func (l *lowerer) lowerTests() error {
 		// A test body may `try`, so it lowers as a function returning `!void`.
 		fn := &ast.FunctionDecl{
 			FunctionSignature: ast.FunctionSignature{
-				Name:       TestFunctionName(test.Name),
+				Name:       TestFunctionName(ordinal, test.Name),
 				ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 			},
 			Body: test.Body,
@@ -543,6 +545,7 @@ func (l *lowerer) lowerTests() error {
 			return err
 		}
 		l.module.Functions = append(l.module.Functions, lowered)
+		ordinal++
 	}
 	return nil
 }
@@ -664,10 +667,16 @@ func firstSpan(first ast.Span, second ast.Span) ast.Span {
 	return second
 }
 
-// TestFunctionName returns the IR symbol a test block lowers to.
-func TestFunctionName(name string) string {
+// TestFunctionName returns the IR symbol a test block lowers to. The ordinal
+// is the test's place in declaration order, and is what makes the symbol
+// unique: the name only keeps the characters a symbol can carry, so two names
+// that differ in a space and a dash, or in nothing a symbol can carry at all,
+// would otherwise lower to the same function.
+func TestFunctionName(ordinal int, name string) string {
 	var out strings.Builder
 	out.WriteString("test.")
+	out.WriteString(strconv.Itoa(ordinal))
+	out.WriteByte('.')
 	for _, r := range name {
 		if r == '_' || r == '.' ||
 			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
