@@ -30,7 +30,7 @@ language / std の不足と、その場で使った局所解です。証拠の�
 | `while` 本体で作った view が同 block の `defer owner.deinit(allocator)` と衝突する | checker body | view を iteration ごとに bind し直す |
 | `mem::slice` を view に使えない / `?[]u8` を返す helper に view binding を渡せない | checker body | `x[a..b]` で切る / index を返す helper にする |
 | union payload に `?T` を置けない | loader の qualify(optional child を持つ結果) | optional 子は inline で分岐 |
-| `?Owner` を値で渡せず `&?T` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
+| `?Owner` を値で渡せず `&?Owner` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
 | expression の match arm で `return` できない | loader / checker body | statement の match に包む |
 | closure が無いので callback 型 API(`typ::map_names`)に Loader を渡せない(struct に借用を持てない) | loader の resolve_type_node | 2 pass(名前を集めて解決し、rename 表で map_names) |
 | `std::process` は `argv[0]` すなわち実行ファイルの path を出さない | CLI の lib dir 探索(Go は binary 隣の `lib/kizu`) | `--lib-dir` / `KIZU_LIB_DIR` のみ。既定は `lib/kizu` |
@@ -46,7 +46,7 @@ language / std の不足と、その場で使った局所解です。証拠の�
 | `typ::Table.parse` の失敗は `!` で伝播し、Go の「parse できなければ text のまま」に当たる optional parse が無い | ir の `lowerReturnType` / `errorUnionParts` / `resolveMetaTypeDeep` | 空 text だけ guard し、checked program の spelling は parse できる前提にした |
 | `ownership.Result` を値で次の phase へ渡せない(`Name` が Checker の `NameTable` に tied) | ir の `Lower(program, ownershipResult)` | `Checker` を caller が生かし、`retired_return_at` / `retired_try_at` / `retired_name_text` で読んで lowerer 側の `NameTable` へ copy する |
 | `if try f(view) \|x\| { ... }` は capture の間 condition の借用が生きるため、body で `&var self` を呼べない | ir の `split_static_args` / `generic_bindings` | text を local `String` に copy してから split する |
-| `&var ?T` の parameter を書けず、後の file で宣言される型の `?T` field も置けない(struct の field 検査が file 順) | ir の control.kizu(`lower_loop_header` の index phi) | union `LoopTest { Plain(Value), Indexed(cond, phi) }` で header の結果を運ぶ |
+| 後の file で宣言される型の `?T` field を置けない(struct の field 検査が file 順) | ir の control.kizu(`lower_loop_header` の index phi) | union `LoopTest { Plain(Value), Indexed(cond, phi) }` で header の結果を運ぶ |
 | `if`/`match` は statement と expression で別 node なので、値位置の `if`/`match` を statement として歩けない | ir の `statementValue` / `collectAssigned` / slot walk | `TrailingValue` union と、値位置専用の walk(`collect_assigned_if` / `collect_mut_borrows_value_stmt`) |
 | `Map` を空にできず(`clear` が無い)、owner field の差し替えもできないので、Go が関数ごとに作り直す `map[string]T` を写せない | llvm の `values` / `blockExitLabel`(`writeFunction` が `= map{}` で作り直す) | entry に関数の generation 番号を持たせ、違う generation の entry を無いものとして読む |
 | 同じ式の中で `&var self.out` と `&self.names` を同時に渡せない(`self` 全体が借用済みになる)。逐次の文なら disjoint field の借用は通る | llvm の `line*`(`format_args(&var self.out, &self.names, ...)`) | `let names = &self.names;` に束縛してから `format_args(&var self.out, names, ...)` |
