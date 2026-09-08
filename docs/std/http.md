@@ -221,6 +221,7 @@ pub struct Limits {
     pub max_requests: i64,       // default 100
     pub idle_millis: i64,        // default 5000
     pub linger_millis: i64,      // default 500
+    pub max_connections: i64,    // default 0 (上限なし)
 }
 pub fn default_limits() -> std::http::Limits
 ```
@@ -267,6 +268,24 @@ body に head と別の deadline を与えているのは、共有すると大�
 phase の deadline は全体を覆うので、4 秒ごとに 1 byte 送る相手も head の
 `read_head_millis` を使い切って落ちます。理屈は
 [net の deadline](net.md#deadline) にあります。
+
+### 抱える接続の数
+
+`max_connections` は `first` / `next` が同時に抱える接続の数で、手渡している 1 本も
+数えます。上限に達すると server は **accept を止めます**。待っている caller は
+kernel の backlog に残り、接続が 1 本閉じれば次が accept されます。断りもしないし
+落としもしません。503 を返すにも accept と write が要り、減らしたい相手にその分を
+払うことになります。backlog が溢れたときに落とすのは kernel で、その方が安いです
+(ADR-0148)。
+
+既定は 0(上限なし)です。1 接続の費用が loop の形で違い(`first` / `next` は
+buffer だけ、worker 1 本は約 269 KiB)、測らずに置ける数がありません。
+
+上限の間、listener は poller から外れます。入れたままだと wait が accept しない
+caller のために毎回起きるからで、接続が減れば戻します。blocking の `accept` は
+1 本ずつしか抱えないのでこの上限を見ません。TaskSet の worker loop は接続を server
+の外へ持ち出すので server は close を見られず、その loop の上限は #1083 に残って
+います。
 
 ## 読めなかった request
 

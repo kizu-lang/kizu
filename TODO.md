@@ -9,10 +9,11 @@ evented server(ADR-0136〜0146)まで入った時点で残っているもので�
 
 ## 2. 抱える数の上限 (#1083)
 
-TaskSet の visible accept loop は connection を無制限に accept / spawn できる。
-実測では worker が約 269 KiB/connection を使うため、`max_requests` では代わりに
-ならない。max connections / max in-flight の数え方、上限時に accept を待つか明示的に
-断るか、完了 worker を caller がどう観測するかを #1083 で決める。
+`first` / `next` は `Limits.max_connections` で止まる(ADR-0148)。残りは TaskSet
+の visible accept loop で、connection を無制限に accept / spawn できる。実測では
+worker が約 269 KiB/connection を使うため、`max_requests` では代わりにならない。
+loop が worker の数を見て待てる形(TaskSet の観測)を同じ規則 —— 待つ、断らない、
+落とさない —— で入れる。
 
 serve loop 自体は `first` / `next` で入った(ADR-0144)。`serve` は作らず、loop は
 caller のもの。停止は `break`。期限の掃除は `next` の中なので、書かなくても塞がる。

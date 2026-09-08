@@ -40,7 +40,12 @@ pub struct Server {
     // just moved into it, so those are the two places that write here, and
     // finding the next one to hand out is a pop rather than a walk over
     // everyone who is still mid-sentence.
-    settled_tokens: std::array::Array<i64>
+    settled_tokens: std::array::Array<i64>,
+    // Whether the listener is under the poller. It comes out while this
+    // server holds `max_connections` -- a listener left in would wake every
+    // wait for a caller that is not going to be accepted -- and goes back in
+    // when a connection leaves.
+    listening: bool
 }
 
 // The listener's token. A connection's token comes from `claim_token`, which
@@ -82,7 +87,8 @@ pub fn listen_with(
         slot_of: std::array::new<i64>(allocator),
         spare: std::array::new<i64>(allocator),
         retiring: std::array::new<i64>(allocator),
-        settled_tokens: std::array::new<i64>(allocator)
+        settled_tokens: std::array::new<i64>(allocator),
+        listening: true
     };
 }
 
@@ -477,12 +483,49 @@ fn (self: &var std::http::Server) wait_for_one(
             let held = try self.take_out(allocator, index);
             return move held;
         }
+        try self.settle_listener(io);
         let at = self.nearest_deadline();
         let count = try self.poller.wait(io, at);
         try self.hear(io, allocator, count);
         try self.sweep(io, allocator);
     }
     return std::http::Error::Incomplete;
+}
+
+// settle_listener takes the listener out of the poller while this server is
+// full and puts it back when it is not. Full and still listening, every wait
+// would end at once for a caller that is not going to be accepted; stopped
+// for good, the callers it could take again would never be heard. Those
+// callers wait in the kernel's backlog meanwhile (ADR-0148).
+fn (self: &var std::http::Server) settle_listener(io: Io) -> std::http::Failure!void {
+    let full = self.at_capacity();
+    if full and self.listening {
+        try self.poller.forget_listener(io, &self.listener);
+        self.listening = false;
+        return;
+    }
+    if !full and !self.listening {
+        try self.poller.watch_listener(io, &self.listener, listener_token());
+        self.listening = true;
+    }
+    return;
+}
+
+// alive is how many connections this server holds, counting the one handed
+// out. A token is a connection's for as long as it lasts, so the tokens that
+// are neither spare nor retiring are exactly the connections that are.
+fn (self: &std::http::Server) alive() -> i64 {
+    return self.slot_of.len() - self.spare.len() - self.retiring.len();
+}
+
+// at_capacity answers whether this server holds as many connections as its
+// limits allow. Zero is no ceiling.
+fn (self: &std::http::Server) at_capacity() -> bool {
+    let most = self.limits.max_connections;
+    if most <= 0 {
+        return false;
+    }
+    return self.alive() >= most;
 }
 
 // settled answers the index of a connection whose request is complete, using
@@ -573,11 +616,14 @@ fn (self: &var std::http::Server) hear(
 
 // take_new accepts everyone waiting in the backlog, not just one. The listener
 // reports itself readable once for however many arrived while nobody looked.
+// It stops at `max_connections`: whoever is still in the backlog stays there
+// until a connection leaves, and `settle_listener` stops the wait from being
+// woken about them until then.
 fn (self: &var std::http::Server) take_new(
     io: Io,
     allocator: Allocator
 ) -> std::http::Failure!void {
-    while true {
+    while !self.at_capacity() {
         if try self.accept_ready(io, allocator) |held| {
             try self.hold(io, allocator, move held);
         } else {

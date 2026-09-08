@@ -53,6 +53,7 @@ fn (self: &var Poller) watch_listener(
     io: Io, listener: &TcpListener, token: i64,
 ) -> std::net::Error!void
 fn (self: &var Poller) forget(io: Io, stream: &TcpStream) -> std::net::Error!void
+fn (self: &var Poller) forget_listener(io: Io, listener: &TcpListener) -> std::net::Error!void
 fn (self: &var Poller) wait(io: Io, at: i64) -> std::net::Error!i64
 fn (self: &Poller) ready(index: i64) -> ?std::net::Ready
 fn (self: Poller) deinit() -> void
