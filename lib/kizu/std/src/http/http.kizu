@@ -119,6 +119,13 @@ pub struct Limits {
     // work. The caller can still lower or raise either policy.
     pub max_requests: i64,
     pub idle_millis: i64,
+    // How long a connection this server is closing waits for the peer to
+    // close first. The writing side is shut at once, so the peer reads
+    // end-of-stream after the last response; closing the rest while bytes
+    // the peer sent are still unread would make the kernel send a reset,
+    // which can reach the peer before the response does. What arrives in
+    // the meantime is read and dropped.
+    pub linger_millis: i64,
 }
 
 // default_limits is what a server that has not thought about it should use:
@@ -141,6 +148,7 @@ pub fn default_limits() -> std::http::Limits {
         write_millis: 30000,
         max_requests: 100,
         idle_millis: 5000,
+        linger_millis: 500,
     };
 }
 
@@ -222,6 +230,9 @@ pub union Progress {
 union Phase {
     ReadingHead,
     Ready,
+    // Closing in stages: the writing side is shut, and what the peer still
+    // sends is read and dropped until it closes too or the time runs out.
+    Lingering,
 }
 
 // arm_read / arm_write turn one phase's duration into the deadline that phase

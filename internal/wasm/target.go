@@ -182,6 +182,7 @@ var netBuiltins = []string{
 	"std::internal::builtin::net_write_some",
 	"std::internal::builtin::net_local_port",
 	"std::internal::builtin::net_close",
+	"std::internal::builtin::net_shutdown_write",
 	"std::internal::builtin::net_poller_new",
 	"std::internal::builtin::net_poller_add",
 	"std::internal::builtin::net_poller_remove",

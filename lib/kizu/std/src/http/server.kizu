@@ -130,7 +130,7 @@ fn (self: &var std::http::Server) accept(
     if held.take_whole_body(io, allocator, max) |_| {
         return move held;
     } else |failure| {
-        held.refuse(io, allocator, failure);
+        held.refuse_and_linger(io, allocator, failure);
         return failure;
     }
 }
@@ -200,7 +200,7 @@ fn (self: &var std::http::Exchange) take_head_or_refuse(
     if self.take_head(io, allocator) |arrived| {
         return arrived;
     } else |failure| {
-        self.refuse(io, allocator, failure);
+        self.refuse_and_linger(io, allocator, failure);
         return failure;
     }
 }
@@ -277,7 +277,7 @@ fn (self: &var std::http::Server) first(
     if held.take_whole_body(io, allocator, max) |_| {
         return move held;
     } else |failure| {
-        held.refuse(io, allocator, failure);
+        held.refuse_and_linger(io, allocator, failure);
         return failure;
     }
 }
@@ -293,7 +293,7 @@ fn (self: &var std::http::Server) next(
     if held.take_whole_body(io, allocator, max) |_| {
         return move held;
     } else |failure| {
-        held.refuse(io, allocator, failure);
+        held.refuse_and_linger(io, allocator, failure);
         return failure;
     }
 }
@@ -317,23 +317,52 @@ fn (self: &var std::http::Server) next_head(
 }
 
 // keep takes a finished exchange back. A connection that can carry another
-// request rejoins the ones being listened to; one that cannot is closed here,
+// request rejoins the ones being listened to; one that cannot is closed,
 // which is what the head that said `Connection: close` promised.
+//
+// One that was answered is closed in stages: it goes back among the watched
+// connections as `Lingering`, and leaves when the peer closes or its time
+// runs out. Closing it outright here could turn the answer it was just given
+// into a reset (`linger`). One that was never answered has nothing the peer
+// is owed, and is closed at once.
 fn (self: &var std::http::Server) keep(
     io: Io,
     allocator: Allocator,
     done: std::http::Exchange
 ) -> std::http::Failure!void {
     var held = move done;
-    if !held.carries_another() {
-        let token = held.token;
-        held.deinit(allocator);
-        if token >= 0 {
-            try self.retire(allocator, token);
-        }
+    if held.carries_another() {
+        try self.rejoin(io, allocator, move held);
         return;
     }
-    try self.rejoin(io, allocator, move held);
+    if held.is_answered() {
+        held.begin_lingering();
+        try self.rejoin_as_is(io, allocator, move held);
+        return;
+    }
+    let token = held.token;
+    held.deinit(allocator);
+    if token >= 0 {
+        try self.retire(allocator, token);
+    }
+    return;
+}
+
+// rejoin_as_is puts a connection back among the watched ones without
+// reopening it, which is what a connection that is being closed rather than
+// reused needs.
+fn (self: &var std::http::Server) rejoin_as_is(
+    io: Io,
+    allocator: Allocator,
+    held: std::http::Exchange
+) -> std::http::Failure!void {
+    var taken = move held;
+    errdefer taken.deinit(allocator);
+    if taken.token < 0 {
+        try self.hold(io, allocator, move taken);
+        return;
+    }
+    try self.restore(io, allocator, move taken);
     return;
 }
 
@@ -484,25 +513,30 @@ fn (self: &var std::http::Server) settled(
 // is a whole request. It reads no socket: the bytes are ones a peer sent
 // behind its last request, which is what pipelining is.
 //
-// A request read ahead that this server cannot read is refused and its
-// connection dropped here, the way `fill_at` does for one that just arrived.
-// It is that peer's failure. Handing it up would end the loop that is serving
-// everyone else, for something one connection did.
+// A request read ahead that this server cannot read is refused here, the way
+// `fill_at` does for one that just arrived, and its connection stays only to
+// linger until the refusal has reached the peer. It is that peer's failure.
+// Handing it up would end the loop that is serving everyone else, for
+// something one connection did.
 fn (self: &var std::http::Server) settle_at(
     io: Io,
     allocator: Allocator,
     index: i64
 ) -> std::http::Failure!bool {
     var done = false;
-    var unreadable = false;
+    var gone = false;
     if self.open.at_mut(index) |held| {
         if held.step_or_refuse(io, allocator) |progress| {
             done = !needs_more(progress);
-        } else |_| {
-            unreadable = true;
+        } else |failure| {
+            if worth_answering(failure) {
+                held.begin_lingering();
+            } else {
+                gone = true;
+            }
         }
     }
-    if unreadable {
+    if gone {
         try self.drop_at(allocator, index);
         return false;
     }
@@ -580,10 +614,16 @@ fn (self: &var std::http::Server) advance_at(
         if held.advance(io, allocator) |progress| {
             gone = is_closed(progress);
             finished = is_settled(progress);
-        } else |_| {
+        } else |failure| {
             // A connection this server could not read has already been told
-            // why by `advance`. It has nothing further to say to the loop.
-            gone = true;
+            // why by `advance`. It has nothing further to say to the loop;
+            // it stays only for the refusal to reach it (`linger`). A peer
+            // that is gone was told nothing, and is closed at once.
+            if worth_answering(failure) {
+                held.begin_lingering();
+            } else {
+                gone = true;
+            }
         }
     }
     if finished {
@@ -623,12 +663,24 @@ fn (self: &var std::http::Server) sweep(
     while index >= 0 {
         let out_of_time = self.expired_at(index, now);
         if out_of_time {
-            try self.refuse_at(io, allocator, index);
-            try self.drop_at(allocator, index);
+            // One that was already closing has waited long enough for the
+            // peer. Any other is told, and then waits the same way.
+            if self.lingering_at(index) {
+                try self.drop_at(allocator, index);
+            } else {
+                try self.refuse_at(io, allocator, index);
+            }
         }
         index = index - 1;
     }
     return;
+}
+
+fn (self: &std::http::Server) lingering_at(index: i64) -> bool {
+    if self.open.at(index) |held| {
+        return held.is_lingering();
+    }
+    return false;
 }
 
 fn (self: &std::http::Server) expired_at(index: i64, now: i64) -> bool {
@@ -645,6 +697,7 @@ fn (self: &var std::http::Server) refuse_at(
 ) -> std::http::Failure!void {
     if self.open.at_mut(index) |held| {
         held.refuse_expired(io, allocator);
+        held.begin_lingering();
     }
     return;
 }
@@ -807,6 +860,9 @@ fn (self: &var std::http::Exchange) advance(
     io: Io,
     allocator: Allocator
 ) -> std::http::Failure!std::http::Progress {
+    if self.is_lingering() {
+        return self.advance_lingering(io, allocator);
+    }
     let progress = try self.step_or_refuse(io, allocator);
     if !needs_more(progress) {
         return progress;
@@ -817,6 +873,22 @@ fn (self: &var std::http::Exchange) advance(
             return std::http::Progress::Closed;
         }
         return self.step_or_refuse(io, allocator);
+    }
+    return std::http::Progress::NeedMore;
+}
+
+// advance_lingering reads and drops what a closing connection's peer still
+// sends. `Closed` is the peer closing too, which is the end this connection
+// was waiting for.
+fn (self: &var std::http::Exchange) advance_lingering(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!std::http::Progress {
+    let got = try self.reader.discard_ready(io, allocator);
+    if got |count| {
+        if count == 0 {
+            return std::http::Progress::Closed;
+        }
     }
     return std::http::Progress::NeedMore;
 }
@@ -858,11 +930,80 @@ fn (self: &var std::http::Exchange) step(
     let reading_head = match self.phase {
         ReadingHead => true,
         Ready => false,
+        // A connection being closed reads only to drop what arrives, and
+        // never has a request.
+        Lingering => false,
     };
     if reading_head {
         return self.step_head(allocator);
     }
+    if self.is_lingering() {
+        return std::http::Progress::NeedMore;
+    }
     return std::http::Progress::Request;
+}
+
+fn (self: &std::http::Exchange) is_lingering() -> bool {
+    return match self.phase {
+        Lingering => true,
+        ReadingHead => false,
+        Ready => false,
+    };
+}
+
+// begin_lingering starts closing this connection in stages. The writing side
+// is shut, so the peer reads end-of-stream after the last thing written; the
+// reading side stays open for `linger_millis`, and what arrives on it is
+// dropped. A loop over many connections moves it on with `advance` like any
+// other; the blocking path does the waiting itself in `linger`.
+fn (self: &var std::http::Exchange) begin_lingering() -> void {
+    self.reader.close_write();
+    self.phase = std::http::Phase::Lingering;
+    let linger_millis = self.limits.linger_millis;
+    self.arm_read_phase(linger_millis);
+    return;
+}
+
+// linger is the blocking path's closing in stages: it waits for the peer to
+// close, dropping what it still sends, until it does or `linger_millis` run
+// out. Closing outright with bytes waiting unread would make the kernel send
+// a reset instead of an end-of-stream, and the reset can reach the peer
+// before the last response does -- a peer that pipelined one request past
+// this server's `Connection: close` would lose the answer to the one before
+// it (RFC 9112 §9.6). The caller's `deinit` closes what is left.
+fn (self: &var std::http::Exchange) linger(
+    io: Io,
+    allocator: Allocator
+) -> void {
+    self.begin_lingering();
+    while true {
+        if self.reader.discard_waiting(io, allocator) |got| {
+            if got == 0 {
+                return;
+            }
+        } else |_| {
+            // Out of time, or a peer that reset: nothing more to wait for
+            // either way, and nothing to report about a connection that is
+            // being closed.
+            return;
+        }
+    }
+    return;
+}
+
+// refuse_and_linger is `refuse` for the blocking path, which can afford to
+// wait for the refusal to arrive before the connection is closed.
+fn (self: &var std::http::Exchange) refuse_and_linger(
+    io: Io,
+    allocator: Allocator,
+    failure: std::http::Failure
+) -> void {
+    if !worth_answering(failure) {
+        return;
+    }
+    self.refuse(io, allocator, failure);
+    self.linger(io, allocator);
+    return;
 }
 
 fn (self: &var std::http::Exchange) step_head(
@@ -1214,6 +1355,10 @@ fn (self: &var std::http::Exchange) next_head(
         return std::http::Error::ExchangeUnfinished;
     }
     if !self.persisted {
+        // This side is ending the connection, and the peer may not know yet:
+        // it is closed in stages so the last answer arrives before the end
+        // does.
+        self.linger(io, allocator);
         return false;
     }
     try self.reopen(allocator);

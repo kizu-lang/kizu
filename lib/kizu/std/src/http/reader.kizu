@@ -226,6 +226,44 @@ fn (self: &var std::http::Reader) fill_ready(
     return count;
 }
 
+// discard_waiting reads once and keeps nothing, waiting under whatever
+// deadline was set. It is for a connection being closed: what the peer is
+// still sending is not a message any more, and holding it would be holding
+// what a peer that never stops could send.
+fn (self: &var std::http::Reader) discard_waiting(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!i64 {
+    self.drop_held();
+    let count = try self.stream.read_into(io, allocator, &var self.held, 4096);
+    return count;
+}
+
+// discard_ready is the same read for a caller with a poller: it does not
+// wait, and answers null for "nothing right now".
+fn (self: &var std::http::Reader) discard_ready(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!?i64 {
+    self.drop_held();
+    let count = try self.stream.read_ready(io, allocator, &var self.held, 4096);
+    return count;
+}
+
+fn (self: &var std::http::Reader) drop_held() -> void {
+    self.held.clear();
+    self.at = 0;
+    self.scanned = 0;
+    return;
+}
+
+// close_write shuts the writing side and keeps reading, which is the first
+// stage of closing a connection the peer may still be writing to.
+fn (self: &var std::http::Reader) close_write() -> void {
+    self.stream.close_write();
+    return;
+}
+
 // read_into hands out the body, waiting for it when it has not arrived. It
 // answers the way `std::net::read_into` does -- how many bytes it appended, and
 // 0 for the end -- so the loop that knows when a message is complete stays the
