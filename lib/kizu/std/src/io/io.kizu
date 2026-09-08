@@ -5,6 +5,7 @@ pub error Error {
     IoFailing,
     LimitExceeded,
     StackProtectionFailed,
+    Canceled,
 }
 
 pub fn blocking() -> Io {
@@ -168,6 +169,23 @@ pub fn spawn<A>(
         move state,
         worker_stack_bytes()
     );
+    return;
+}
+
+// running counts the workers still in the set: spawned and not yet finished.
+// On a blocking Io a worker runs to its end inside spawn, so the count is 0.
+fn (self: &std::io::TaskSet) running() -> i64 {
+    return std::internal::builtin::task_set_running(self.handle);
+}
+
+// wait_one runs the loop until one worker of the set has finished. It is how
+// a loop that spawns keeps its number of workers bounded: at the cap it waits
+// for one to leave instead of refusing or dropping, the rule a full server
+// follows for its own connections. Everyone else on the loop runs meanwhile,
+// the way await works. An empty set returns at once. A cancelled caller gets
+// `Canceled` instead of a wait, so a loop written with `try` unwinds.
+fn (self: &var std::io::TaskSet) wait_one() -> std::io::Error!void {
+    try std::internal::builtin::task_set_wait_one(self.io, self.handle);
     return;
 }
 

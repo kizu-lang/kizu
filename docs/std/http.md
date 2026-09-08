@@ -283,9 +283,19 @@ buffer だけ、worker 1 本は約 269 KiB)、測らずに置ける数があり�
 
 上限の間、listener は poller から外れます。入れたままだと wait が accept しない
 caller のために毎回起きるからで、接続が減れば戻します。blocking の `accept` は
-1 本ずつしか抱えないのでこの上限を見ません。TaskSet の worker loop は接続を server
-の外へ持ち出すので server は close を見られず、その loop の上限は #1083 に残って
-います。
+1 本ずつしか抱えないのでこの上限を見ません。
+
+TaskSet の worker loop は接続を server の外へ持ち出すので、server は close を
+見られません。その loop の上限は loop 自身が書きます。規則は同じで、上限では
+`tasks.wait_one()` で worker が 1 つ抜けるまで待ち、その間に来た接続は backlog に
+残ります(`docs/std/io.md`、`examples/http_tasks.kizu`)。
+
+```kizu
+while tasks.running() >= cap {
+    tasks.wait_one() catch return;
+}
+let exchange = app.server.accept_connection(handle, allocator) catch return;
+```
 
 ## 読めなかった request
 

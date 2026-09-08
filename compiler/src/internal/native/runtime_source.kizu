@@ -2674,6 +2674,10 @@ pub fn runtime_source() -> []u8 {
         \\    KizuCoro **tasks;
         \\    size_t task_count;
         \\    size_t task_cap;
+        \\    /* How many workers have left the set over its life. A wait for one to
+        \\       leave watches this rather than the count, which a spawn meanwhile would
+        \\       push back up. */
+        \\    uint64_t departed;
         \\} KizuTaskSet;
         \\
         \\static void kizu_loop_reap_task_sets(KizuLoop *loop);
@@ -2972,6 +2976,7 @@ pub fn runtime_source() -> []u8 {
         \\        }
         \\        tasks->tasks[i] = tasks->tasks[tasks->task_count - 1];
         \\        tasks->task_count -= 1;
+        \\        tasks->departed += 1;
         \\        return;
         \\    }
         \\}
@@ -3279,6 +3284,43 @@ pub fn runtime_source() -> []u8 {
         \\        tasks->tasks,
         \\        (int64_t)(tasks->task_cap * sizeof *tasks->tasks));
         \\    kizu_rt_free(allocator, tasks, (int64_t)sizeof *tasks);
+        \\}
+        \\
+        \\int64_t std__internal__builtin__task_set_running(int64_t handle) {
+        \\    KizuTaskSet *tasks = kizu_task_set_from(handle);
+        \\    if (!tasks) {
+        \\        return 0;
+        \\    }
+        \\    return (int64_t)tasks->task_count;
+        \\}
+        \\
+        \\/* Runs the loop until one worker has left the set. This is what lets a loop
+        \\   that spawns keep its number of workers bounded: at the cap it waits for one
+        \\   to finish instead of refusing or dropping (ADR-0148). The loop turns from
+        \\   wherever the caller stands, the way await does, so everyone else runs
+        \\   meanwhile. A cancelled caller is told so rather than made to wait on. An
+        \\   empty set, or a blocking Io whose workers already ran to their end inside
+        \\   spawn, has nothing to wait for. */
+        \\void std__internal__builtin__task_set_wait_one(
+        \\    KizuErrorVoid *out, void *io, int64_t handle) {
+        \\    KizuTaskSet *tasks = kizu_task_set_from(handle);
+        \\    KizuLoop *loop = kizu_io_loop(io);
+        \\    if (!tasks || !loop || tasks->task_count == 0) {
+        \\        *out = kizu_ok_void();
+        \\        return;
+        \\    }
+        \\    KizuCoro *caller = kizu_coro_current;
+        \\    uint64_t seen = tasks->departed;
+        \\    while (tasks->departed == seen) {
+        \\        if (caller && caller->canceled) {
+        \\            *out = kizu_err_void(KIZU_ERR_STD_IO_ERROR_CANCELED);
+        \\            return;
+        \\        }
+        \\        if (!kizu_loop_turn(loop)) {
+        \\            break;
+        \\        }
+        \\    }
+        \\    *out = kizu_ok_void();
         \\}
         \\
         \\/* The port the kernel picked. Binding port 0 is how a test asks for one that

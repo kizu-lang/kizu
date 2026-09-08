@@ -172,6 +172,10 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::task_set_close": {
 		Args: []ArgKind{ArgI64, ArgAllocator}, Return: "void",
 	},
+	"std::internal::builtin::task_set_running": {Args: []ArgKind{ArgI64}, Return: "i64"},
+	"std::internal::builtin::task_set_wait_one": {
+		Args: []ArgKind{ArgIo, ArgI64}, Return: "std::io::Error!void",
+	},
 	"std::internal::builtin::test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
 	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
@@ -276,7 +280,9 @@ var primitives = map[string]bool{
 	"std::internal::builtin::task_new":                     true,
 	"std::internal::builtin::task_set_close":               true,
 	"std::internal::builtin::task_set_new":                 true,
+	"std::internal::builtin::task_set_running":             true,
 	"std::internal::builtin::task_set_spawn":               true,
+	"std::internal::builtin::task_set_wait_one":            true,
 	"std::internal::builtin::net_poller_close":             true,
 	"std::internal::builtin::net_poller_flags":             true,
 	"std::internal::builtin::net_poller_new":               true,

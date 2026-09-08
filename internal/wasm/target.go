@@ -163,6 +163,8 @@ var eventedBuiltins = []string{
 	"std::internal::builtin::task_set_new",
 	"std::internal::builtin::task_set_spawn",
 	"std::internal::builtin::task_set_close",
+	"std::internal::builtin::task_set_running",
+	"std::internal::builtin::task_set_wait_one",
 }
 
 var coroBuiltins = []string{

@@ -50,7 +50,14 @@ fn accept_loop(handle: Io, allocator: Allocator, app: &var App) -> void {
     var tasks = io::task_set_new(handle, allocator) catch return;
     defer tasks.deinit(allocator);
 
+    // The loop is what spawns, so the loop is what bounds. At the cap it waits
+    // for a worker to leave; whoever connects meanwhile waits in the kernel's
+    // backlog, the way a full server's own connections do.
+    let cap = 64;
     while true {
+        while tasks.running() >= cap {
+            tasks.wait_one() catch return;
+        }
         let exchange = app.server.accept_connection(handle, allocator) catch return;
         io::spawn<http::Exchange>(
             &var tasks,
