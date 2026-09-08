@@ -122,7 +122,8 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Args:   []ArgKind{ArgI64},
 		Return: "std::net::Error!i64",
 	},
-	"std::internal::builtin::net_close": {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::net_close":          {Args: []ArgKind{ArgI64}, Return: "void"},
+	"std::internal::builtin::net_shutdown_write": {Args: []ArgKind{ArgI64}, Return: "void"},
 	"std::internal::builtin::net_poller_new": {
 		Args:   []ArgKind{ArgIo, ArgI64},
 		Return: "std::net::Error!i64",
@@ -258,6 +259,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::print_line":                   true,
 	"std::internal::builtin::net_accept":                   true,
 	"std::internal::builtin::net_close":                    true,
+	"std::internal::builtin::net_shutdown_write":           true,
 	"std::internal::builtin::net_connect":                  true,
 	"std::internal::builtin::net_listen":                   true,
 	"std::internal::builtin::net_local_port":               true,

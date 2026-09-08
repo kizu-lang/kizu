@@ -220,6 +220,7 @@ pub struct Limits {
     pub write_millis: i64,       // default 30000
     pub max_requests: i64,       // default 100
     pub idle_millis: i64,        // default 5000
+    pub linger_millis: i64,      // default 500
     pub max_connections: i64,    // default 0 (上限なし)
 }
 pub fn default_limits() -> std::http::Limits
@@ -750,6 +751,23 @@ request の遅延は中央値 0.455 ms、最大 0.552 ms です。100 は接続�
 どれか 1 つでも欠ければ head に `Connection: close` を書き、`next` は false を
 返します。続く場合、HTTP/1.1 には何も書きません(persistent が既定)。HTTP/1.0 には
 `Connection: keep-alive` を書きます。
+
+### 閉じるときは段階を踏みます
+
+この server が接続を終えるとき —— `Connection: close` を書いた後、`max_requests`
+に達した後、request を拒否した後 —— まず **write 側だけを閉じます**。peer は最後の
+答えの後に end-of-stream を読みます。read 側は `linger_millis`(既定 500 ms)の間
+開けたままで、その間に届くものは読んで捨て、peer が閉じるか時間が尽きたら全部
+閉じます。
+
+一気に閉じないのは、**未読の byte を残したまま close すると kernel が FIN ではなく
+RST を送る**からです。RST は答えより先に peer に届くことがあり、この server の
+close を知らずに request をもう 1 つ pipeline した client は、その前の答えを失い
+ます(RFC 9112 §9.6)。
+
+blocking の `next` はこの待ちを自分で行い、`first` / `next` の loop は閉じかけの
+接続を watch したまま他の接続を捌きます。peer が先に閉じた接続はすぐ終わるので、
+待つのは peer がまだ閉じていないときだけです。
 
 ### 終わっていない exchange は失敗です
 
