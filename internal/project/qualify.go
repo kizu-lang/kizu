@@ -253,6 +253,13 @@ func (c *graphChecker) qualifyStmt(module *moduleFile, stmt ast.Statement) (ast.
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		cp := *s
+		if s.TypeName != nil {
+			resolved, err := c.resolveTypeNode(module, s.TypeName)
+			if err != nil {
+				return &cp, err
+			}
+			cp.TypeName = resolved
+		}
 		value, err := c.qualifyExpr(module, s.Value)
 		cp.Value = value
 		return &cp, err

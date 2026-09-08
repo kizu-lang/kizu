@@ -490,7 +490,12 @@ func (s *BlockStmt) String() string {
 type LetStmt struct {
 	Mutable bool
 	Name    string
-	Value   Expression
+	// TypeName is the type the binding declares, or nil when the initializer
+	// alone says. A declared type is the initializer's context, the way a
+	// parameter type is an argument's: `null` and a bare literal take their
+	// type from it, and a plain value wraps into a declared `?T`.
+	TypeName typ.Type
+	Value    Expression
 }
 
 // statementNode marks LetStmt as a statement node.
@@ -501,6 +506,9 @@ func (s *LetStmt) String() string {
 	kw := "let"
 	if s.Mutable {
 		kw = "var"
+	}
+	if s.TypeName != nil {
+		return fmt.Sprintf("%s %s: %s = %s;", kw, s.Name, typ.Text(s.TypeName), s.Value.String())
 	}
 	return fmt.Sprintf("%s %s = %s;", kw, s.Name, s.Value.String())
 }

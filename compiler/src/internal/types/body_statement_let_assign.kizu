@@ -1,9 +1,112 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::typ;
 import std::array;
 import std::map;
 import std::mem;
 import std::string;
+
+// Types a binding's initializer, the Go `checkLetValue`. A declared type is
+// the initializer's context, the way a parameter type is an argument's:
+// `null` and a bare literal take their type from it, and a plain value wraps
+// into a declared `?T`. What the initializer then is has to be what was
+// declared.
+fn (self: &var Checker) check_let_value(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::LetStmt,
+    name: []u8,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let declared = statement.type_name orelse return self.check_expr(tree, scope, statement.value, out);
+    var want = empty_type();
+    if try self.let_declared_type(tree, statement, name, declared, &var want) |problem| {
+        return move problem;
+    }
+    var got = empty_type();
+    if try self.check_contextual_expr(tree, scope, statement.value, want, &var got) |problem| {
+        return move problem;
+    }
+    if !same_type(got, want) {
+        return try self.let_declared_mismatch(tree, statement, name, want, got);
+    }
+    out.* = want;
+    return null;
+}
+
+// Resolves the type a binding declares, the Go `letDeclaredType`. A borrow is
+// not a type a binding declares: it is what a `&` initializer lends, and the
+// binding's type is what is borrowed.
+fn (self: &var Checker) let_declared_type(
+    tree: &var ast::Ast,
+    statement: &ast::LetStmt,
+    name: []u8,
+    declared: typ::Type,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if declares_borrow(tree, declared) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "` cannot declare a borrow type; a borrow comes from a `&` initializer");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    match try self.resolve_type_node(self.allocator, tree, statement.type_name) {
+        Value(value) => {
+            out.* = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    return null;
+}
+
+fn declares_borrow(tree: &ast::Ast, declared: typ::Type) -> bool {
+    return match typ::root_node(&tree.types, declared) {
+        Borrow(_) => true,
+        _ => false,
+    };
+}
+
+// Checks a declared type against a binding a special initializer already
+// made -- a borrow, a box borrow, or a string view -- whose type comes from
+// what it borrows rather than from context. The Go
+// `checkLetDeclaredAgainstBinding`.
+fn (self: &var Checker) check_let_declared_against_binding(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::LetStmt,
+    name: []u8
+) -> !?diagnostic::Diagnostic {
+    let declared = statement.type_name orelse return null;
+    var want = empty_type();
+    if try self.let_declared_type(tree, statement, name, declared, &var want) |problem| {
+        return move problem;
+    }
+    let got = self.scopes.lookup(scope, name) orelse empty_type();
+    if !same_type(got, want) {
+        return try self.let_declared_mismatch(tree, statement, name, want, got);
+    }
+    return null;
+}
+
+fn (self: &var Checker) let_declared_mismatch(
+    tree: &ast::Ast,
+    statement: &ast::LetStmt,
+    name: []u8,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` is declared ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(self.allocator, ", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", expression_span(tree, statement.value), move message);
+}
 
 // Checks a let/var statement and marks the new local as unread.
 fn (self: &var Checker) check_let_stmt(
@@ -40,10 +143,13 @@ fn (self: &var Checker) check_let_binding(
         return move problem;
     }
     if handled {
+        if statement.type_name |_| {
+            return self.check_let_declared_against_binding(tree, scope, statement, name);
+        }
         return null;
     }
     var value_type = empty_type();
-    if try self.check_expr(tree, scope, statement.value, &var value_type) |problem| {
+    if try self.check_let_value(tree, scope, statement, name, &var value_type) |problem| {
         return move problem;
     }
     if self.types.contains_type_value(value_type) {

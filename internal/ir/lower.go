@@ -1285,7 +1285,15 @@ func (l *lowerer) lowerBodyStmt(stmt ast.Statement) error {
 
 // lowerLetStmt binds one declaration to the value it was written with.
 func (l *lowerer) lowerLetStmt(stmt *ast.LetStmt) error {
-	value, err := l.lowerExpr(stmt.Value)
+	var value Value
+	var err error
+	if stmt.TypeName != nil {
+		// The declared type is the initializer's context, as a parameter
+		// type is an argument's.
+		value, err = l.lowerContextualExpr(stmt.Value, typ.Text(stmt.TypeName))
+	} else {
+		value, err = l.lowerExpr(stmt.Value)
+	}
 	if err != nil {
 		return err
 	}

@@ -67,7 +67,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。runnable example は 188 件、測定は 2026-09-08 に
+1 つの example は複数の行に現れます。runnable example は 189 件、測定は 2026-09-08 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run`、`wasm`、`wasm-bin`、`browser` はプログラムの出力で判定します。`run` は native
 build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmtime` で、

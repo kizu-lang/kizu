@@ -1476,9 +1476,12 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe unsafeMark)
 func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMark) (bool, error) {
 	handled, err := c.defineSpecialLetInitializer(stmt, env, unsafe)
 	if handled || err != nil {
+		if err == nil && stmt.TypeName != nil {
+			return false, c.checkLetDeclaredAgainstBinding(stmt, env)
+		}
 		return false, err
 	}
-	typ, err := c.checkExpr(stmt.Value, env, unsafe)
+	typ, err := c.checkLetValue(stmt, env, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -1498,6 +1501,57 @@ func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMa
 		}
 	}
 	return false, requireScopeDefinition(stmt.Name, env.define(stmt.Name, typ, stmt.Mutable))
+}
+
+// checkLetValue types a binding's initializer. A declared type is the
+// initializer's context, the way a parameter type is an argument's: `null`
+// and a bare literal take their type from it, and a plain value wraps into a
+// declared `?T`. What the initializer then is has to be what was declared.
+func (c *Checker) checkLetValue(stmt *ast.LetStmt, env *scope, unsafe unsafeMark) (Type, error) {
+	if stmt.TypeName == nil {
+		return c.checkExpr(stmt.Value, env, unsafe)
+	}
+	want, err := c.letDeclaredType(stmt)
+	if err != nil {
+		return "", err
+	}
+	got, err := c.checkContextualExpr(stmt.Value, want, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(got, want) {
+		return "", errorAt(expressionSpan(stmt.Value),
+			"type error: `%s` is declared %s, got %s", stmt.Name, want, got)
+	}
+	return want, nil
+}
+
+// letDeclaredType resolves the type a binding declares. A borrow is not a
+// type a binding declares: it is what a `&` initializer lends, and the
+// binding's type is what is borrowed.
+func (c *Checker) letDeclaredType(stmt *ast.LetStmt) (Type, error) {
+	if _, ok := stmt.TypeName.(*typ.Borrow); ok {
+		return "", errorf(
+			"type error: `%s` cannot declare a borrow type; a borrow comes from a `&` initializer",
+			stmt.Name)
+	}
+	return c.parseTypeNode(stmt.TypeName)
+}
+
+// checkLetDeclaredAgainstBinding checks a declared type against a binding a
+// special initializer already made -- a borrow, a box borrow, or a string
+// view -- whose type comes from what it borrows rather than from context.
+func (c *Checker) checkLetDeclaredAgainstBinding(stmt *ast.LetStmt, env *scope) error {
+	want, err := c.letDeclaredType(stmt)
+	if err != nil {
+		return err
+	}
+	got, ok := env.lookup(stmt.Name)
+	if !ok || !sameType(got, want) {
+		return errorAt(expressionSpan(stmt.Value),
+			"type error: `%s` is declared %s, got %s", stmt.Name, want, got)
+	}
+	return nil
 }
 
 // defineSpecialLetInitializer records local borrow/view initializers with source data.
