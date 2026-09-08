@@ -1266,7 +1266,13 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
   (`?i64`、`?arena::Handle<T>`、`?std::string::String` など)。view を包んだ
   optional(`?[]u8`)は field に置けない —— view の義務は借用で、それを開く
   capture が field 型を読む規則から見えないため。union payload・static
-  argument(`Array<?u8>` など)・borrow(`&?T`)の対象にはできない
+  argument(`Array<?u8>` など)の対象にはできない
+* borrow(`&?T` / `&var ?T`)の対象にできるのは copy element の optional
+  (`?i64`、enum、arena handle、plain copy data の struct)だけ。借りた側は
+  `slot = value` / `slot = null` で書き、capture で読む。owner / view を包んだ
+  optional は借りられない —— capture は payload を取り出す操作で、copy data は
+  copy として出てくるが、owner は唯一の値そのものが出ていき、貸した側の optional
+  は「持っている」と言ったまま残るため
 * `?Owner` field の cleanup 契約は §14.4 にある。`deinit` の中で optional を開いて
   中身を解放する。宣言しなければ、それを行う body が導出される
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional

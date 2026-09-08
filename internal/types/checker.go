@@ -1055,9 +1055,19 @@ func (c *Checker) checkFunctionParam(
 			"type error: %s parameter `%s` belongs in `<...>`, not `(...)`",
 			paramType, param.Name)
 	}
-	if _, ok := optionalElem(paramType); ok && param.Borrow {
+	// A borrowed optional is read through capture, and a capture takes the
+	// payload out. Copy data comes out as a copy and the caller's optional
+	// still has it; an owner or a view would come out as the one value, and
+	// the caller's optional would still say it is there.
+	// A view is copied freely but is somebody's borrow, and an optional of
+	// one has nowhere to be kept (SPEC §7), so there is nothing to lend.
+	if elem, ok := optionalElem(paramType); ok && param.Borrow &&
+		(!c.isCopyType(elem) || elem == typeByteString) {
 		return errorf(
-			"type error: parameter `%s` cannot borrow an optional yet", param.Name)
+			"type error: parameter `%s` cannot borrow `%s`; only an optional of copy data"+
+				" (`?i64`, an enum, a handle, a plain struct) can be borrowed, because a capture"+
+				" through the borrow would move the payload out of the caller's optional",
+			param.Name, paramType)
 	}
 	return nil
 }

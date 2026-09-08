@@ -1,0 +1,79 @@
+import std::testing;
+
+// A borrowed optional of copy data is the caller's storage: the callee
+// writes a value or `null` into it and reads it through capture, and the
+// caller sees every write.
+
+enum Color {
+    Red,
+    Green,
+}
+
+struct Pair {
+    left: i64,
+    right: i64,
+}
+
+fn fill(slot: &var ?i64, value: i64) -> void {
+    slot = value;
+    return;
+}
+
+fn clear(slot: &var ?i64) -> void {
+    slot = null;
+    return;
+}
+
+fn bump(slot: &var ?i64) -> void {
+    if slot |current| {
+        slot = current + 1;
+    }
+    return;
+}
+
+fn peek(slot: &?i64) -> i64 {
+    return slot orelse -1;
+}
+
+fn paint(slot: &var ?Color) -> void {
+    slot = Color::Green;
+    return;
+}
+
+fn widen(slot: &var ?Pair) -> void {
+    if slot |pair| {
+        slot = Pair { left: pair.left * 2, right: pair.right * 2 };
+    }
+    return;
+}
+
+test "a callee fills, bumps and clears the caller's optional" {
+    var found: ?i64 = null;
+    testing::expect_equal<i64>(-1, peek(&found));
+    fill(&var found, 7);
+    testing::expect_equal<i64>(7, peek(&found));
+    bump(&var found);
+    testing::expect_equal<i64>(8, peek(&found));
+    clear(&var found);
+    testing::expect_equal<i64>(-1, peek(&found));
+}
+
+test "a bump of an empty optional leaves it empty" {
+    var found: ?i64 = null;
+    bump(&var found);
+    testing::expect_equal<i64>(-1, peek(&found));
+}
+
+test "an enum and a plain struct are copy data too" {
+    var color: ?Color = null;
+    paint(&var color);
+    testing::expect((color orelse Color::Red) == Color::Green);
+    var pair: ?Pair = Pair { left: 1, right: 2 };
+    widen(&var pair);
+    if pair |doubled| {
+        testing::expect_equal<i64>(2, doubled.left);
+        testing::expect_equal<i64>(4, doubled.right);
+    } else {
+        testing::fail("the pair was lost");
+    }
+}

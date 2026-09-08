@@ -51,8 +51,10 @@ union を宣言することになり、原理 10(定型の量産)に反する。
 
 - owner / view element(`?[]u8`、`?String`)が必要になったとき(union
   payload の所有規則を optional に適用してから)。
-- struct field への保存、static argument(`Array<?u8>`)、borrow
-  (`&?T`)が必要になったとき。
+- static argument(`Array<?u8>`)が必要になったとき。struct field への保存と、
+  copy element に限った borrow(`&?T` / `&var ?T`)は開いた(SPEC §7 の
+  optional)。owner / view element の borrow は「capture は payload を取り出す」
+  規則の下では開けない: 借りた側と貸した側の両方が持ち主になる。
 - `x.?` 強制 unwrap、`orelse break/return` が必要になったとき。
 - std の不在系 API(`mem::byte_at` など)を `?T` に移行するとき
   (breaking change として別 PR)。
