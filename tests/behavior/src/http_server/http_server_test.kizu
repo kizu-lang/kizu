@@ -2013,6 +2013,51 @@ fn index_of(haystack: []u8, needle: []u8) -> i64 {
     return length;
 }
 
+test "the server holds no more than max_connections at once" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var limits = http::default_limits();
+    limits.max_connections = 1;
+    // Short, because the quiet caller below is only let go when its head
+    // runs out of time.
+    limits.read_head_millis = 200;
+    var server = try http::listen_with(handle, allocator, "127.0.0.1:0", limits);
+    defer server.deinit(allocator);
+    let port = try server.local_port();
+    var address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+
+    // Three callers in the backlog, in this order. Only one is ever held.
+    var loud = try net::tcp_connect(handle, address_bytes);
+    defer loud.deinit();
+    try send_request_with_connection(
+        handle, allocator, &var loud, "GET /loud HTTP/1.1", "", "close");
+    var quiet = try net::tcp_connect(handle, address_bytes);
+    defer quiet.deinit();
+    var late = try net::tcp_connect(handle, address_bytes);
+    defer late.deinit();
+    try send_request(handle, allocator, &var late, "GET /late HTTP/1.1", "");
+
+    // The first in the backlog is the one accepted; the late caller has
+    // spoken too, and is not, because the server is full.
+    var current = try server.first(handle, allocator, 1048576);
+    expect_target(&current, "/loud");
+    // Closing the loud caller makes room for one: the quiet caller, which
+    // says nothing until its head runs out of time. Only then is the late
+    // caller accepted and handed out.
+    var following = try hand_back(handle, allocator, &var server, move current);
+    defer following.deinit(allocator);
+    expect_target(&following, "/late");
+
+    var told = string::new(allocator);
+    defer told.deinit(allocator);
+    quiet.set_read_deadline(net::deadline_in_millis(2000));
+    try drain(handle, allocator, &var quiet, &var told);
+    let wire = told.as_bytes();
+    testing::expect(contains(wire, "HTTP/1.1 408 Request Timeout"));
+}
+
 // speak_then_hand_back answers, sets another caller talking, and hands the
 // connection back -- all inside the frame that owns the exchange.
 fn speak_then_hand_back(
