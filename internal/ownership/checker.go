@@ -1633,10 +1633,11 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if handled, err := c.checkCaptureLetStmt(stmt, env); handled || err != nil {
 		return err
 	}
-	typeName, err := c.moveExpr(stmt.Value, env)
+	moved, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
 		return err
 	}
+	typeName := letBindingType(stmt, moved)
 	if err := c.rejectStoredOptional(typeName); err != nil {
 		return err
 	}
@@ -1732,6 +1733,16 @@ func (c *Checker) arenaAtBorrowSource(
 			errorf("arena error: Arena.at must return &%s, got %s", elem, result)
 	}
 	return borrowSource{target: target, field: path}, elem, true, nil
+}
+
+// letBindingType is the type a binding holds: what it declared, which the
+// initializer was typed against -- `7` declared `?i64` is an optional, not
+// the integer -- or the initializer's own type when nothing was declared.
+func letBindingType(stmt *ast.LetStmt, moved string) string {
+	if stmt.TypeName != nil {
+		return typ.Text(stmt.TypeName)
+	}
+	return moved
 }
 
 // rejectStoredOptional refuses to store a `?T` or `E!T` whose payload owns

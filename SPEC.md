@@ -251,6 +251,21 @@ fn main() {
 
 `let` は immutable です。mutable な変数には `var` を使います。
 
+binding には型を書けます。書いた型は初期化式の**文脈**になります —— 引数の型が
+実引数の文脈になるのと同じ規則で、`null` と裸の literal はそこから型を取り、`T` の
+値は `?T` に暗黙に wrap されます。変換ではないので、文脈で決まらない型は不一致
+として拒否されます。
+
+```kizu
+var found: ?i64 = null;      // null は ?T の文脈でだけ書ける
+let byte: u8 = 13;           // literal は文脈の幅を取る
+let wide: ?i64 = 9;          // T は ?T に wrap
+let count: i64 = "seven";    // error: `count` is declared i64, got []u8
+```
+
+borrow 型(`&T` / `&var T`)は書けません。borrow は `&` の初期化式が貸すもので、
+binding の型は借りた先の型です。
+
 使わない局所変数は compile error です。関数本体の binding は、その関数の中でしか
 消費されないので、使われないものは確実に死んでいます。値を作ったこと自体が目的
 なら `let _ = expr;` と書いて捨てます。

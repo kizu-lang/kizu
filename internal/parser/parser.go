@@ -897,6 +897,14 @@ func (p *Parser) parseLetStmt(mutable bool) ast.Statement {
 		return stmt
 	}
 	stmt.Name = p.cur.Literal
+	if p.peek.Type == token.Colon {
+		p.nextToken()
+		p.nextToken()
+		stmt.TypeName = p.parseTypeName()
+		if stmt.TypeName == nil {
+			return stmt
+		}
+	}
 	if !p.expectPeek(token.Assign) {
 		return stmt
 	}
