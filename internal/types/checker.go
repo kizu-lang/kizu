@@ -3661,7 +3661,7 @@ func (c *Checker) checkBinaryExpr(
 		return "", err
 	}
 	if expr.Operator == "==" || expr.Operator == "!=" {
-		return checkEquality(expr.Operator, left, right, expr.OperatorSpan)
+		return c.checkEquality(expr.Operator, left, right, expr.OperatorSpan)
 	}
 	if err := checkArithmeticOperands(expr, left, right); err != nil {
 		return "", err
@@ -3704,9 +3704,12 @@ func checkLogical(op string, left Type, right Type, span ast.Span) (Type, error)
 	return typeBool, nil
 }
 
-// checkEquality validates equality operands.
-func checkEquality(op string, left Type, right Type, span ast.Span) (Type, error) {
-	if left != right {
+// checkEquality validates equality operands. Two error sets compare when one
+// holds every member of the other -- a set and a union it is part of. A
+// member is one value whichever set carries it (SPEC §11.2), so the
+// comparison is the same integer comparison it is inside one set.
+func (c *Checker) checkEquality(op string, left Type, right Type, span ast.Span) (Type, error) {
+	if !c.errorSetFits(left, right) && !c.errorSetFits(right, left) {
 		return "", operatorTypeMismatch(op, left, right, span)
 	}
 	return typeBool, nil

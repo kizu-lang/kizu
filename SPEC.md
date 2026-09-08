@@ -2041,6 +2041,9 @@ member でもあるので、`CacheError!T` の関数は `FsError!T` の呼び出
   ある set(`E` 自身と、その合成元)だけ
 * `!T` 関数では `T` を返すと成功値、error set の member を返すと失敗値として扱う
 * error 値は大域一意な整数 1 個に lower される。set をまたぐ変換は存在しない
+* `==` / `!=` は、片方の member 集合がもう片方に含まれる set 同士(set と、
+  それを含む合成 set)で比較できる。member は set をまたいで同じ値なので、
+  合成 set の値を元 set の member と比べるのは同じ整数の比較
 * `!void` の成功 return は `return;` と書く
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、runtime helper を実装しない
