@@ -42,6 +42,7 @@ fn (self: &var TcpStream) set_read_deadline(at: i64) -> void
 fn (self: &var TcpStream) set_write_deadline(at: i64) -> void
 fn (self: &var TcpStream) clear_read_deadline() -> void
 fn (self: &var TcpStream) clear_write_deadline() -> void
+fn (self: &var TcpStream) close_write() -> void
 fn (self: TcpStream) deinit() -> void
 
 pub fn poller_new(io: Io, capacity: i64) -> std::net::Error!std::net::Poller
