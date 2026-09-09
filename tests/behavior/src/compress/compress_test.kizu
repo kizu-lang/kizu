@@ -1,0 +1,589 @@
+import std::compress;
+import std::fs;
+import std::io;
+import std::mem;
+import std::rand;
+import std::string;
+import std::testing;
+
+// The streams under examples/fixtures/compress/ were written by a reference
+// encoder (scripts/gen-compress-fixtures); the plain files next to them are
+// what each must inflate to. Streams that no encoder writes -- the wrong
+// ones -- are assembled here bit by bit.
+
+fn fixture(allocator: Allocator, name: []u8) -> !string::String {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, "examples/fixtures/compress/");
+    try path.append_bytes(allocator, name);
+    let view = path.as_bytes();
+    return fs::read_file(io::blocking(), allocator, view, mem::Limit::Unlimited);
+}
+
+// The three entries, chosen by number so one check serves them all: 0 is
+// raw deflate, 1 is gzip, 2 is zlib.
+fn decode(
+    allocator: Allocator,
+    kind: i64,
+    bytes: []u8,
+    limit: mem::Limit
+) -> compress::Failure!string::String {
+    if kind == 1 {
+        return compress::gunzip(allocator, bytes, limit);
+    }
+    if kind == 2 {
+        return compress::unzlib(allocator, bytes, limit);
+    }
+    return compress::inflate(allocator, bytes, limit);
+}
+
+fn expect_plain(allocator: Allocator, kind: i64, stream_name: []u8, plain_name: []u8) -> !void {
+    let stream = try fixture(allocator, stream_name);
+    defer stream.deinit(allocator);
+    let plain = try fixture(allocator, plain_name);
+    defer plain.deinit(allocator);
+    let bytes = stream.as_bytes();
+    let text = try decode(allocator, kind, bytes, mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let want = plain.as_bytes();
+    let got = text.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+fn expect_text(allocator: Allocator, kind: i64, bytes: []u8, want: []u8) -> !void {
+    let text = try decode(allocator, kind, bytes, mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let got = text.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+fn expect_refused(allocator: Allocator, kind: i64, bytes: []u8, want: compress::Error) -> void {
+    if decode(allocator, kind, bytes, mem::Limit::Unlimited) |text| {
+        text.deinit(allocator);
+        testing::fail("a wrong stream was read");
+    } else |err| {
+        testing::expect(err == want);
+    }
+    return;
+}
+
+// Writer packs bits the way deflate does: least significant first, and
+// Huffman codes most significant bit first.
+struct Writer {
+    bits: i64,
+    count: i64,
+}
+
+fn put(allocator: Allocator, out: &var string::String, w: &var Writer, value: i64, n: i64) -> mem::Error!void {
+    w.bits = w.bits | (value << w.count);
+    w.count = w.count + n;
+    while w.count >= 8 {
+        try out.append_byte(allocator, cast<u8>(w.bits & 0xFF));
+        w.bits = w.bits >> 8;
+        w.count = w.count - 8;
+    }
+    return;
+}
+
+fn put_code(allocator: Allocator, out: &var string::String, w: &var Writer, code: i64, n: i64) -> mem::Error!void {
+    var reversed = 0;
+    for 0..n |index| {
+        reversed = (reversed << 1) | ((code >> index) & 1);
+    }
+    return put(allocator, out, w, reversed, n);
+}
+
+// fixed_literal writes symbol `sym` in the fixed code of RFC 1951 §3.2.6.
+fn fixed_literal(allocator: Allocator, out: &var string::String, w: &var Writer, sym: i64) -> mem::Error!void {
+    if sym < 144 {
+        return put_code(allocator, out, w, 0x30 + sym, 8);
+    }
+    if sym < 256 {
+        return put_code(allocator, out, w, 0x190 + sym - 144, 9);
+    }
+    if sym < 280 {
+        return put_code(allocator, out, w, sym - 256, 7);
+    }
+    return put_code(allocator, out, w, 0xC0 + sym - 280, 8);
+}
+
+fn flush(allocator: Allocator, out: &var string::String, w: &var Writer) -> mem::Error!void {
+    if w.count > 0 {
+        let pad = 8 - w.count;
+        try put(allocator, out, w, 0, pad);
+    }
+    return;
+}
+
+// fixed_block starts a final block coded with the fixed code.
+fn fixed_block(allocator: Allocator, out: &var string::String, w: &var Writer) -> mem::Error!void {
+    try put(allocator, out, w, 1, 1);
+    try put(allocator, out, w, 1, 2);
+    return;
+}
+
+// dynamic_block starts a final block that describes its own code, with 257
+// literal/length codes, 1 distance code, and all 19 code-length lengths
+// listed. `code_lengths` gives the length of each code-length symbol 0..18,
+// one byte per symbol.
+fn dynamic_block(allocator: Allocator, out: &var string::String, w: &var Writer, code_lengths: []u8) -> mem::Error!void {
+    try put(allocator, out, w, 1, 1);
+    try put(allocator, out, w, 2, 2);
+    try put(allocator, out, w, 0, 5);
+    try put(allocator, out, w, 0, 5);
+    try put(allocator, out, w, 15, 4);
+    for 0..19 |index| {
+        try put(allocator, out, w, cast<i64>(code_lengths[order(index)]), 3);
+    }
+    return;
+}
+
+fn order(index: i64) -> i64 {
+    if index < 3 {
+        return 16 + index;
+    }
+    let step = index - 3;
+    if step == 0 {
+        return 0;
+    }
+    if step % 2 == 1 {
+        return 8 + (step - 1) / 2;
+    }
+    return 8 - step / 2;
+}
+
+test "a stored block is copied as it is" {
+    let allocator = mem::page_allocator();
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    try stream.append_byte(allocator, 1);
+    try stream.append_byte(allocator, 1);
+    try stream.append_byte(allocator, 0);
+    try stream.append_byte(allocator, 0xFE);
+    try stream.append_byte(allocator, 0xFF);
+    try stream.append_byte(allocator, 97);
+    let bytes = stream.as_bytes();
+    try expect_text(allocator, 0, bytes, "a");
+}
+
+test "the fixed code decodes a literal and an empty stream" {
+    let allocator = mem::page_allocator();
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    try stream.append_byte(allocator, 0x4B);
+    try stream.append_byte(allocator, 0x04);
+    try stream.append_byte(allocator, 0x00);
+    let bytes = stream.as_bytes();
+    try expect_text(allocator, 0, bytes, "a");
+
+    var empty = string::new(allocator);
+    defer empty.deinit(allocator);
+    try empty.append_byte(allocator, 0x03);
+    try empty.append_byte(allocator, 0x00);
+    let none = empty.as_bytes();
+    try expect_text(allocator, 0, none, "");
+}
+
+test "every reference stream inflates to its plain bytes" {
+    let allocator = mem::page_allocator();
+    try expect_plain(allocator, 0, "empty.deflate", "empty.txt");
+    try expect_plain(allocator, 0, "hello.deflate", "hello.txt");
+    try expect_plain(allocator, 0, "runs.deflate", "runs.txt");
+    try expect_plain(allocator, 0, "text.deflate", "text.txt");
+    try expect_plain(allocator, 0, "binary.deflate", "binary.bin");
+    try expect_plain(allocator, 0, "far.deflate", "far.bin");
+}
+
+test "the same bytes at every level and block type" {
+    let allocator = mem::page_allocator();
+    try expect_plain(allocator, 0, "text.stored.deflate", "text.txt");
+    try expect_plain(allocator, 0, "text.speed.deflate", "text.txt");
+    try expect_plain(allocator, 0, "text.best.deflate", "text.txt");
+    try expect_plain(allocator, 0, "text.huffman.deflate", "text.txt");
+}
+
+test "gzip members read to their plain bytes and check them" {
+    let allocator = mem::page_allocator();
+    try expect_plain(allocator, 1, "empty.gz", "empty.txt");
+    try expect_plain(allocator, 1, "hello.gz", "hello.txt");
+    try expect_plain(allocator, 1, "runs.gz", "runs.txt");
+    try expect_plain(allocator, 1, "text.gz", "text.txt");
+    try expect_plain(allocator, 1, "binary.gz", "binary.bin");
+    try expect_plain(allocator, 1, "hello.header.gz", "hello.txt");
+    try expect_plain(allocator, 1, "hello.hcrc.gz", "hello.txt");
+}
+
+test "concatenated gzip members are all read" {
+    let allocator = mem::page_allocator();
+    let stream = try fixture(allocator, "multi.gz");
+    defer stream.deinit(allocator);
+    let hello = try fixture(allocator, "hello.txt");
+    defer hello.deinit(allocator);
+    let text = try fixture(allocator, "text.txt");
+    defer text.deinit(allocator);
+    var want = string::new(allocator);
+    defer want.deinit(allocator);
+    try want.append_string(allocator, &hello);
+    try want.append_string(allocator, &text);
+    let bytes = stream.as_bytes();
+    let expected = want.as_bytes();
+    try expect_text(allocator, 1, bytes, expected);
+}
+
+test "zlib streams read to their plain bytes and check them" {
+    let allocator = mem::page_allocator();
+    try expect_plain(allocator, 2, "empty.zlib", "empty.txt");
+    try expect_plain(allocator, 2, "hello.zlib", "hello.txt");
+    try expect_plain(allocator, 2, "runs.zlib", "runs.txt");
+    try expect_plain(allocator, 2, "text.zlib", "text.txt");
+    try expect_plain(allocator, 2, "binary.zlib", "binary.bin");
+}
+
+test "a block type no stream defines is refused" {
+    let allocator = mem::page_allocator();
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    try stream.append_byte(allocator, 0x07);
+    let bytes = stream.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+}
+
+test "a stored length whose complement disagrees is refused" {
+    let allocator = mem::page_allocator();
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    try stream.append_byte(allocator, 1);
+    try stream.append_byte(allocator, 1);
+    try stream.append_byte(allocator, 0);
+    try stream.append_byte(allocator, 0);
+    try stream.append_byte(allocator, 0);
+    try stream.append_byte(allocator, 97);
+    let bytes = stream.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+}
+
+test "input that ends inside the stream is Truncated" {
+    let allocator = mem::page_allocator();
+    let raw = try fixture(allocator, "hello.deflate");
+    defer raw.deinit(allocator);
+    let raw_bytes = raw.as_bytes();
+    expect_refused(allocator, 0, raw_bytes[0..9], compress::Error::Truncated);
+
+    let gz = try fixture(allocator, "text.gz");
+    defer gz.deinit(allocator);
+    let gz_bytes = gz.as_bytes();
+    expect_refused(allocator, 1, gz_bytes[0..5], compress::Error::Truncated);
+    expect_refused(allocator, 1, gz_bytes[0..100], compress::Error::Truncated);
+    expect_refused(allocator, 1, gz_bytes[0..gz.len() - 4], compress::Error::Truncated);
+
+    var stored = string::new(allocator);
+    defer stored.deinit(allocator);
+    try stored.append_byte(allocator, 1);
+    try stored.append_byte(allocator, 5);
+    try stored.append_byte(allocator, 0);
+    try stored.append_byte(allocator, 0xFA);
+    try stored.append_byte(allocator, 0xFF);
+    try stored.append_byte(allocator, 97);
+    let short = stored.as_bytes();
+    expect_refused(allocator, 0, short, compress::Error::Truncated);
+    expect_refused(allocator, 0, short[0..2], compress::Error::Truncated);
+    expect_refused(allocator, 0, "", compress::Error::Truncated);
+}
+
+test "a reference before the start of the output is refused" {
+    let allocator = mem::page_allocator();
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    var w = Writer { bits: 0, count: 0 };
+    try fixed_block(allocator, &var stream, &var w);
+    try fixed_literal(allocator, &var stream, &var w, 257);
+    try put_code(allocator, &var stream, &var w, 0, 5);
+    try fixed_literal(allocator, &var stream, &var w, 256);
+    try flush(allocator, &var stream, &var w);
+    let bytes = stream.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+
+    // The same stream after bytes the caller already held: those are not
+    // the stream's to reach.
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, "abc");
+    if compress::inflate_into(allocator, bytes, &var out, mem::Limit::Unlimited) {
+        testing::fail("a reference reached the caller's bytes");
+    } else |err| {
+        testing::expect(err == compress::Error::Malformed);
+    }
+}
+
+test "the fixed code's spare symbols name nothing" {
+    let allocator = mem::page_allocator();
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    var w = Writer { bits: 0, count: 0 };
+    try fixed_block(allocator, &var stream, &var w);
+    try fixed_literal(allocator, &var stream, &var w, 286);
+    try flush(allocator, &var stream, &var w);
+    let bytes = stream.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+
+    var distance = string::new(allocator);
+    defer distance.deinit(allocator);
+    var d = Writer { bits: 0, count: 0 };
+    try fixed_block(allocator, &var distance, &var d);
+    try fixed_literal(allocator, &var distance, &var d, 97);
+    try fixed_literal(allocator, &var distance, &var d, 257);
+    try put_code(allocator, &var distance, &var d, 30, 5);
+    try flush(allocator, &var distance, &var d);
+    // Room for the decoder to look for a longer code and find none.
+    try distance.append_byte(allocator, 0);
+    try distance.append_byte(allocator, 0);
+    let far = distance.as_bytes();
+    expect_refused(allocator, 0, far, compress::Error::Malformed);
+}
+
+test "a run longer than its distance repeats the bytes" {
+    let allocator = mem::page_allocator();
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    var w = Writer { bits: 0, count: 0 };
+    try fixed_block(allocator, &var stream, &var w);
+    try fixed_literal(allocator, &var stream, &var w, 97);
+    try fixed_literal(allocator, &var stream, &var w, 98);
+    // Length code 259 is 5 bytes; distance code 1 is 2 bytes back.
+    try fixed_literal(allocator, &var stream, &var w, 259);
+    try put_code(allocator, &var stream, &var w, 1, 5);
+    try fixed_literal(allocator, &var stream, &var w, 256);
+    try flush(allocator, &var stream, &var w);
+    let bytes = stream.as_bytes();
+    try expect_text(allocator, 0, bytes, "abababa");
+}
+
+test "code lengths no prefix code can carry are refused" {
+    let allocator = mem::page_allocator();
+    var lengths = [19]u8{};
+    let l = lengths.as_mut_bytes();
+    l[0] = 1;
+    l[1] = 1;
+    l[2] = 1;
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    var w = Writer { bits: 0, count: 0 };
+    try dynamic_block(allocator, &var stream, &var w, l);
+    try flush(allocator, &var stream, &var w);
+    let bytes = stream.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+}
+
+test "the code-length code has to be complete" {
+    let allocator = mem::page_allocator();
+    var lengths = [19]u8{};
+    let l = lengths.as_mut_bytes();
+    l[0] = 1;
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    var w = Writer { bits: 0, count: 0 };
+    try dynamic_block(allocator, &var stream, &var w, l);
+    try flush(allocator, &var stream, &var w);
+    let bytes = stream.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+}
+
+test "a block without an end-of-block code is refused" {
+    let allocator = mem::page_allocator();
+    // Code-length symbols 0 and 8 each get one bit: 0 is `0`, 8 is `1`.
+    var lengths = [19]u8{};
+    let l = lengths.as_mut_bytes();
+    l[0] = 1;
+    l[8] = 1;
+    var stream = string::new(allocator);
+    defer stream.deinit(allocator);
+    var w = Writer { bits: 0, count: 0 };
+    try dynamic_block(allocator, &var stream, &var w, l);
+    // 256 literals of length 8, then no code for end-of-block, then the
+    // one distance code.
+    for 0..256 |_| {
+        try put(allocator, &var stream, &var w, 1, 1);
+    }
+    try put(allocator, &var stream, &var w, 0, 1);
+    try put(allocator, &var stream, &var w, 0, 1);
+    try flush(allocator, &var stream, &var w);
+    let bytes = stream.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+}
+
+test "bytes after the stream's end are refused" {
+    let allocator = mem::page_allocator();
+    let raw = try fixture(allocator, "hello.deflate");
+    defer raw.deinit(allocator);
+    var longer = string::new(allocator);
+    defer longer.deinit(allocator);
+    try longer.append_string(allocator, &raw);
+    try longer.append_byte(allocator, 0);
+    let bytes = longer.as_bytes();
+    expect_refused(allocator, 0, bytes, compress::Error::Malformed);
+
+    let zlib = try fixture(allocator, "hello.zlib");
+    defer zlib.deinit(allocator);
+    var trailing = string::new(allocator);
+    defer trailing.deinit(allocator);
+    try trailing.append_string(allocator, &zlib);
+    try trailing.append_byte(allocator, 0);
+    let more = trailing.as_bytes();
+    expect_refused(allocator, 2, more, compress::Error::Malformed);
+}
+
+// with_byte returns a copy of `source` with the byte at `index` replaced.
+fn with_byte(allocator: Allocator, source: &string::String, index: i64, value: u8) -> mem::Error!string::String {
+    var copy = string::new(allocator);
+    errdefer copy.deinit(allocator);
+    try copy.append_string(allocator, source);
+    let view = copy.as_mut_bytes();
+    view[index] = value;
+    return move copy;
+}
+
+test "a gzip header that is not one is refused" {
+    let allocator = mem::page_allocator();
+    let gz = try fixture(allocator, "hello.gz");
+    defer gz.deinit(allocator);
+    let magic = try with_byte(allocator, &gz, 0, 0x1E);
+    defer magic.deinit(allocator);
+    let magic_bytes = magic.as_bytes();
+    expect_refused(allocator, 1, magic_bytes, compress::Error::Malformed);
+    let method = try with_byte(allocator, &gz, 2, 9);
+    defer method.deinit(allocator);
+    let method_bytes = method.as_bytes();
+    expect_refused(allocator, 1, method_bytes, compress::Error::Malformed);
+    let reserved = try with_byte(allocator, &gz, 3, 0x80);
+    defer reserved.deinit(allocator);
+    let reserved_bytes = reserved.as_bytes();
+    expect_refused(allocator, 1, reserved_bytes, compress::Error::Malformed);
+}
+
+test "a gzip check that disagrees is ChecksumMismatch" {
+    let allocator = mem::page_allocator();
+    let gz = try fixture(allocator, "hello.gz");
+    defer gz.deinit(allocator);
+    let crc = try with_byte(allocator, &gz, gz.len() - 8, 0);
+    defer crc.deinit(allocator);
+    let crc_bytes = crc.as_bytes();
+    expect_refused(allocator, 1, crc_bytes, compress::Error::ChecksumMismatch);
+    let size = try with_byte(allocator, &gz, gz.len() - 4, 13);
+    defer size.deinit(allocator);
+    let size_bytes = size.as_bytes();
+    expect_refused(allocator, 1, size_bytes, compress::Error::ChecksumMismatch);
+
+    // The header CRC sits after the ten fixed bytes and the name.
+    let hcrc = try fixture(allocator, "hello.hcrc.gz");
+    defer hcrc.deinit(allocator);
+    let header = try with_byte(allocator, &hcrc, 20, 0);
+    defer header.deinit(allocator);
+    let header_bytes = header.as_bytes();
+    expect_refused(allocator, 1, header_bytes, compress::Error::ChecksumMismatch);
+}
+
+test "a zlib header that is not one is refused" {
+    let allocator = mem::page_allocator();
+    let zlib = try fixture(allocator, "hello.zlib");
+    defer zlib.deinit(allocator);
+    let check = try with_byte(allocator, &zlib, 1, 0x9D);
+    defer check.deinit(allocator);
+    let check_bytes = check.as_bytes();
+    expect_refused(allocator, 2, check_bytes, compress::Error::Malformed);
+    let method = try with_byte(allocator, &zlib, 0, 0x79);
+    defer method.deinit(allocator);
+    let method_bytes = method.as_bytes();
+    expect_refused(allocator, 2, method_bytes, compress::Error::Malformed);
+    // 0x78 0x20 passes the multiple-of-31 check and asks for a dictionary.
+    let dictionary = try with_byte(allocator, &zlib, 1, 0x20);
+    defer dictionary.deinit(allocator);
+    let dictionary_bytes = dictionary.as_bytes();
+    expect_refused(allocator, 2, dictionary_bytes, compress::Error::Malformed);
+    let adler = try with_byte(allocator, &zlib, zlib.len() - 1, 0);
+    defer adler.deinit(allocator);
+    let adler_bytes = adler.as_bytes();
+    expect_refused(allocator, 2, adler_bytes, compress::Error::ChecksumMismatch);
+}
+
+test "the ceiling is on what the call appends" {
+    let allocator = mem::page_allocator();
+    let raw = try fixture(allocator, "hello.deflate");
+    defer raw.deinit(allocator);
+    let bytes = raw.as_bytes();
+    let exact = try compress::inflate(allocator, bytes, mem::Limit::Bytes(12));
+    defer exact.deinit(allocator);
+    testing::expect_equal<i64>(12, exact.len());
+    if compress::inflate(allocator, bytes, mem::Limit::Bytes(11)) |text| {
+        text.deinit(allocator);
+        testing::fail("the ceiling was passed");
+    } else |err| {
+        testing::expect(err == compress::Error::LimitExceeded);
+    }
+
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, "head:");
+    try compress::inflate_into(allocator, bytes, &var out, mem::Limit::Bytes(12));
+    let plain = try fixture(allocator, "hello.txt");
+    defer plain.deinit(allocator);
+    var want = string::new(allocator);
+    defer want.deinit(allocator);
+    try want.append_bytes(allocator, "head:");
+    try want.append_string(allocator, &plain);
+    let expected = want.as_bytes();
+    let got = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, got);
+}
+
+test "a damaged stream is refused, never trapped" {
+    let allocator = mem::page_allocator();
+    let gz = try fixture(allocator, "text.gz");
+    defer gz.deinit(allocator);
+    let raw = try fixture(allocator, "text.deflate");
+    defer raw.deinit(allocator);
+    var rng = rand::new(testing::seed());
+    var refused = 0;
+    for 0..200 |round| {
+        let kind = round % 2;
+        var damaged = string::new(allocator);
+        defer damaged.deinit(allocator);
+        if kind == 1 {
+            try damaged.append_string(allocator, &gz);
+        } else {
+            try damaged.append_string(allocator, &raw);
+        }
+        let at = rng.below(damaged.len());
+        let value = cast<u8>(rng.below(256));
+        let view = damaged.as_mut_bytes();
+        view[at] = value;
+        let bytes = damaged.as_bytes();
+        if decode(allocator, kind, bytes, mem::Limit::Bytes(65536)) |text| {
+            text.deinit(allocator);
+        } else |_| {
+            if kind == 1 {
+                refused = refused + 1;
+            }
+        }
+    }
+    // A raw stream with one byte changed may still read as something. A
+    // gzip member's check catches the change unless it landed in one of the
+    // few header bytes nothing depends on.
+    testing::expect(refused >= 80);
+
+    // Bytes that were never a stream, through every entry.
+    for 0..200 |round| {
+        var noise = string::new(allocator);
+        defer noise.deinit(allocator);
+        let length = rng.below(64);
+        for 0..length |_| {
+            try noise.append_byte(allocator, cast<u8>(rng.below(256)));
+        }
+        let bytes = noise.as_bytes();
+        if decode(allocator, round % 3, bytes, mem::Limit::Bytes(65536)) |text| {
+            text.deinit(allocator);
+        } else |_| {
+        }
+    }
+}

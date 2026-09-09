@@ -1,0 +1,271 @@
+// std::compress reads deflate (RFC 1951) and the two containers it travels
+// in: zlib (RFC 1950) and gzip (RFC 1952). HTTP's `Content-Encoding: gzip`
+// and `deflate` are the latter two.
+//
+// Every entry takes the whole stream as bytes in hand and a ceiling on what
+// it will write, and appends the plain bytes to a String: the caller's own
+// through `_into`, or a fresh one it then owns. The ceiling is not optional
+// because a small stream can name a very large output, and the decision of
+// how large is the caller's to make where it is made (`std::mem::Limit`).
+// When a call fails, an `_into` buffer keeps what was appended before the
+// failure; the owning form frees its String and returns only the error.
+
+pub error Error {
+    // The bytes are not a stream this reads at this point: a block type no
+    // stream defines, a set of code lengths no prefix code can carry, a
+    // reference before the start of the output, a container with the wrong
+    // magic or a reserved flag set, bytes after the stream's end. A zlib
+    // stream that asks for a preset dictionary is refused the same way,
+    // since there is no way to hand one over.
+    Malformed,
+    // The input ends before the stream does. A caller that holds part of a
+    // stream can tell this apart from a stream that is wrong.
+    Truncated,
+    // The container's check disagrees with what was inflated: gzip's CRC-32
+    // or length, zlib's Adler-32, or the CRC-16 of a gzip header that
+    // carries one. The stream read cleanly; its bytes are not the ones the
+    // sender checked.
+    ChecksumMismatch,
+    // The output would pass the ceiling the caller named.
+    LimitExceeded,
+}
+
+// Reading fails two ways: the stream is not what the entry reads (`Error`),
+// or growing the output ran out of memory (`std::mem::Error`). The union
+// carries both without converting either, so a caller can match the members
+// of both sets.
+pub error Failure = Error or std::mem::Error;
+
+// inflate reads one raw deflate stream: no container, no check, exactly the
+// bytes of the blocks.
+pub fn inflate(
+    allocator: Allocator,
+    bytes: []u8,
+    limit: std::mem::Limit
+) -> std::compress::Failure!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    try std::compress::inflate_into(allocator, bytes, &var out, limit);
+    return move out;
+}
+
+pub fn inflate_into(
+    allocator: Allocator,
+    bytes: []u8,
+    out: &var std::string::String,
+    limit: std::mem::Limit
+) -> std::compress::Failure!void {
+    let base = out.len();
+    var bits = std::compress::Bits { pos: 0, buf: 0, count: 0 };
+    try std::compress::inflate_stream(
+        allocator, bytes, &var bits, out, std::mem::limit_bytes(limit), base);
+    if bits.pos != std::mem::len(bytes) {
+        return std::compress::Error::Malformed;
+    }
+    return;
+}
+
+// gunzip reads a gzip stream: one or more members, each a header, a
+// deflate stream, and a CRC-32 and length of the bytes it held. Members
+// follow one another the way concatenated gzip files do, and every one is
+// read.
+pub fn gunzip(
+    allocator: Allocator,
+    bytes: []u8,
+    limit: std::mem::Limit
+) -> std::compress::Failure!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    try std::compress::gunzip_into(allocator, bytes, &var out, limit);
+    return move out;
+}
+
+pub fn gunzip_into(
+    allocator: Allocator,
+    bytes: []u8,
+    out: &var std::string::String,
+    limit: std::mem::Limit
+) -> std::compress::Failure!void {
+    let cap = std::mem::limit_bytes(limit);
+    let base = out.len();
+    let end = std::mem::len(bytes);
+    var pos = 0;
+    var last = false;
+    while !last {
+        let member_base = out.len();
+        let data = try gzip_header(bytes, pos);
+        var bits = std::compress::Bits { pos: data, buf: 0, count: 0 };
+        try std::compress::inflate_stream(allocator, bytes, &var bits, out, cap, base);
+        pos = bits.pos;
+        if pos + 8 > end {
+            return std::compress::Error::Truncated;
+        }
+        let crc = read32(bytes, pos);
+        let size = read32(bytes, pos + 4);
+        let written = out.len() - member_base;
+        if crc != crc32_of(out, member_base) or size != (written & 0xFFFFFFFF) {
+            return std::compress::Error::ChecksumMismatch;
+        }
+        pos = pos + 8;
+        last = pos == end;
+    }
+    return;
+}
+
+// gzip_header reads one member's header (RFC 1952 §2.3) and returns where
+// its deflate stream begins: the fixed ten bytes, then whichever of the
+// extra field, name, comment, and header CRC the flags announce.
+fn gzip_header(bytes: []u8, start: i64) -> std::compress::Error!i64 {
+    let end = std::mem::len(bytes);
+    if start + 10 > end {
+        return std::compress::Error::Truncated;
+    }
+    if bytes[start] != 0x1F or bytes[start + 1] != 0x8B {
+        return std::compress::Error::Malformed;
+    }
+    // The compression method: 8 is deflate, and nothing else was ever
+    // assigned.
+    if bytes[start + 2] != 8 {
+        return std::compress::Error::Malformed;
+    }
+    let flags = bytes[start + 3];
+    if flags & 0xE0 != 0 {
+        return std::compress::Error::Malformed;
+    }
+    var at = start + 10;
+    if flags & 0x04 != 0 {
+        if at + 2 > end {
+            return std::compress::Error::Truncated;
+        }
+        let extra = cast<i64>(bytes[at]) | cast<i64>(bytes[at + 1]) << 8;
+        at = at + 2 + extra;
+        if at > end {
+            return std::compress::Error::Truncated;
+        }
+    }
+    if flags & 0x08 != 0 {
+        at = try skip_zero_terminated(bytes, at);
+    }
+    if flags & 0x10 != 0 {
+        at = try skip_zero_terminated(bytes, at);
+    }
+    if flags & 0x02 != 0 {
+        if at + 2 > end {
+            return std::compress::Error::Truncated;
+        }
+        let want = cast<i64>(bytes[at]) | cast<i64>(bytes[at + 1]) << 8;
+        let got = crc32(bytes[start..at]) & 0xFFFF;
+        if want != got {
+            return std::compress::Error::ChecksumMismatch;
+        }
+        at = at + 2;
+    }
+    return at;
+}
+
+fn skip_zero_terminated(bytes: []u8, start: i64) -> std::compress::Error!i64 {
+    let end = std::mem::len(bytes);
+    var at = start;
+    while at < end {
+        if bytes[at] == 0 {
+            return at + 1;
+        }
+        at = at + 1;
+    }
+    return std::compress::Error::Truncated;
+}
+
+// unzlib reads a zlib stream: a two-byte header, a deflate stream, and the
+// Adler-32 of the bytes it held.
+pub fn unzlib(
+    allocator: Allocator,
+    bytes: []u8,
+    limit: std::mem::Limit
+) -> std::compress::Failure!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    try std::compress::unzlib_into(allocator, bytes, &var out, limit);
+    return move out;
+}
+
+pub fn unzlib_into(
+    allocator: Allocator,
+    bytes: []u8,
+    out: &var std::string::String,
+    limit: std::mem::Limit
+) -> std::compress::Failure!void {
+    let end = std::mem::len(bytes);
+    if end < 2 {
+        return std::compress::Error::Truncated;
+    }
+    // RFC 1950 §2.2: the method is deflate with a window of at most 32K, the
+    // two bytes are a multiple of 31, and no preset dictionary is asked for.
+    let method = bytes[0];
+    let flags = bytes[1];
+    if method & 0x0F != 8 or method >> 4 > 7 {
+        return std::compress::Error::Malformed;
+    }
+    if (cast<i64>(method) * 256 + cast<i64>(flags)) % 31 != 0 {
+        return std::compress::Error::Malformed;
+    }
+    if flags & 0x20 != 0 {
+        return std::compress::Error::Malformed;
+    }
+    let base = out.len();
+    var bits = std::compress::Bits { pos: 2, buf: 0, count: 0 };
+    try std::compress::inflate_stream(
+        allocator, bytes, &var bits, out, std::mem::limit_bytes(limit), base);
+    if bits.pos + 4 > end {
+        return std::compress::Error::Truncated;
+    }
+    let want = cast<i64>(bytes[bits.pos]) << 24
+        | cast<i64>(bytes[bits.pos + 1]) << 16
+        | cast<i64>(bytes[bits.pos + 2]) << 8
+        | cast<i64>(bytes[bits.pos + 3]);
+    if want != adler32_of(out, base) {
+        return std::compress::Error::ChecksumMismatch;
+    }
+    if bits.pos + 4 != end {
+        return std::compress::Error::Malformed;
+    }
+    return;
+}
+
+fn read32(bytes: []u8, at: i64) -> i64 {
+    return cast<i64>(bytes[at])
+        | cast<i64>(bytes[at + 1]) << 8
+        | cast<i64>(bytes[at + 2]) << 16
+        | cast<i64>(bytes[at + 3]) << 24;
+}
+
+// crc32 is the CRC-32 of RFC 1952 §8 (the IEEE polynomial, reflected),
+// computed a bit at a time. The value is returned as an i64 in 0..2^32 so
+// that it compares with the bytes a stream carries without a cast.
+fn crc32(bytes: []u8) -> i64 {
+    var crc = 0xFFFFFFFF;
+    for 0..std::mem::len(bytes) |index| {
+        crc = crc ^ cast<i64>(bytes[index]);
+        for 0..8 |_| {
+            let mask = 0 - (crc & 1);
+            crc = (crc >> 1) ^ (0xEDB88320 & mask);
+        }
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+fn crc32_of(out: &std::string::String, start: i64) -> i64 {
+    let view = out.as_bytes();
+    return crc32(view[start..out.len()]);
+}
+
+// adler32_of is the Adler-32 of RFC 1950 §8 over the output from `start`.
+fn adler32_of(out: &std::string::String, start: i64) -> i64 {
+    let view = out.as_bytes();
+    var a = 1;
+    var b = 0;
+    for start..out.len() |index| {
+        a = (a + cast<i64>(view[index])) % 65521;
+        b = (b + a) % 65521;
+    }
+    return b << 16 | a;
+}

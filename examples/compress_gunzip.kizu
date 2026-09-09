@@ -1,0 +1,87 @@
+import std::compress;
+import std::mem;
+import std::string;
+
+// A gzip stream is a header, a deflate stream, and a check of the bytes it
+// held. `gunzip` reads one that is already in hand -- here 47 bytes written
+// out as hex, since a stream is bytes and not text -- into a String the
+// caller owns, under a ceiling the caller names: a small stream can name a
+// very large output, and how large is acceptable is decided here, not in
+// the library.
+//
+// The check is part of the contract. A member whose CRC-32 disagrees with
+// what was inflated is refused as `ChecksumMismatch`, and an output that
+// would pass the ceiling as `LimitExceeded`; the stream is not read as far
+// as it goes.
+
+fn hex_value(byte: u8) -> i64 {
+    if byte >= 97 {
+        return cast<i64>(byte) - 87;
+    }
+    return cast<i64>(byte) - 48;
+}
+
+fn from_hex(allocator: Allocator, text: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    while index < mem::len(text) {
+        let value = hex_value(text[index]) * 16 + hex_value(text[index + 1]);
+        try out.append_byte(allocator, cast<u8>(value));
+        index = index + 2;
+    }
+    return move out;
+}
+
+fn refusal(err: compress::Failure) -> []u8 {
+    if err == compress::Error::ChecksumMismatch {
+        return "the check caught the damage";
+    }
+    if err == compress::Error::LimitExceeded {
+        return "the ceiling refused it";
+    }
+    return "refused for another reason";
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let stream = try from_hex(
+        allocator,
+        "1f8b08000000000002134b54282e294a4dcc55c84f5348cac94fce2ed651484416ab2c492d0600b239d36125000000");
+    defer stream.deinit(allocator);
+    let bytes = stream.as_bytes();
+
+    let text = try compress::gunzip(allocator, bytes, mem::Limit::Bytes(1024));
+    defer text.deinit(allocator);
+    let plain = text.as_bytes();
+    print(plain);
+
+    // The same member with one byte of its CRC-32 changed.
+    var damaged = string::new(allocator);
+    defer damaged.deinit(allocator);
+    try damaged.append_string(allocator, &stream);
+    let edit = damaged.as_mut_bytes();
+    edit[39] = 0;
+    let damaged_bytes = damaged.as_bytes();
+    if compress::gunzip(allocator, damaged_bytes, mem::Limit::Bytes(1024)) |read| {
+        read.deinit(allocator);
+        print("read anyway");
+    } else |err| {
+        print(refusal(err));
+    }
+
+    if compress::gunzip(allocator, bytes, mem::Limit::Bytes(8)) |read| {
+        read.deinit(allocator);
+        print("read anyway");
+    } else |err| {
+        print(refusal(err));
+    }
+    return;
+}
+
+// run
+// features: compress gzip error-union
+// output:
+// a stream of blocks, a stream of bytes
+// the check caught the damage
+// the ceiling refused it

@@ -11,8 +11,7 @@ evented server(ADR-0136〜0146)まで入った時点で残っているもので�
 
 | | 大きさ | 備考 |
 | --- | --- | --- |
-| multipart / form-data | 中 | |
-| compression | 大 | 圧縮 library が要る。別の話 |
+| compression | 中 | 展開は `std::compress` に入った。圧縮する側と `Content-Encoding` への接続が残る |
 | HTTP/2 / HTTP/3 | 大 | |
 
 ## 4. TLS / HTTPS (#1081)

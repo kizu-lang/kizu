@@ -25,6 +25,7 @@
 | [map](map.md) | owned symbol table |
 | [fmt](fmt.md) | diagnostic 用の最小 formatting |
 | [json](json.md) | JSON の encode と decode |
+| [compress](compress.md) | deflate / gzip / zlib の展開 |
 | [fs](fs.md) | `Io` 経由の file system 操作 |
 | [net](net.md) | `Io` 経由の TCP listener と stream |
 | [http](http.md) | HTTP/1 の server、message、routing |

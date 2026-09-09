@@ -93,6 +93,7 @@ var groups = []featureGroup{
 	{"std::mem / allocator", []string{
 		"std-mem", "allocator", "user-allocator", "fixed-buffer"}},
 	{"std::json", []string{"std-json", "encode", "decode", "nested"}},
+	{"std::compress", []string{"std-compress", "compress", "gzip"}},
 	{"std::sort", []string{"std-sort"}},
 	{"std::float", []string{"std-float", "append", "parse", "shortest"}},
 	{"std::rand", []string{"std-rand", "seed", "deterministic"}},
