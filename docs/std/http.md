@@ -1111,6 +1111,79 @@ cookie の名前は token、値は空白・カンマ・セミコロン・バッ�
 制御 byte を拒否します —— それが 2 つ目の cookie(や 2 つ目の header)を
 密輸する道です。
 
+## multipart/form-data
+
+```kizu
+pub struct Part {
+    pub name: std::string::String,
+    pub filename: std::string::String,
+    pub content_type: std::string::String,
+    pub body: std::string::String,
+}
+
+pub fn boundary_of(content_type: []u8) -> ?[]u8
+pub fn parse_multipart(allocator, body: []u8, boundary: []u8)
+    -> std::http::Failure!std::http::Multipart
+
+fn (self: &Multipart) count() -> i64
+fn (self: &Multipart) at(index: i64) -> ?&std::http::Part
+fn (self: &Multipart) find(name: []u8) -> ?&std::http::Part
+fn (self: Multipart) deinit(allocator) -> void
+```
+
+file を運ぶ form は `multipart/form-data` で届きます —— boundary 行で区切った
+part の列で、各 part は小さな head(`Content-Disposition`、あれば
+`Content-Type`)とその byte です(RFC 7578、framing は RFC 2046)。
+
+`boundary_of` は request の `Content-Type` 値から boundary を取り出します。null は
+「boundary の使える form-data body ではない」—— 別の media type、boundary
+parameter が無い、RFC 2046 の文法から外れている —— で、caller が自分の status
+で答えます。まだ解析するものがないので、error ではありません。
+
+```kizu
+if exchange.request.headers.find("Content-Type") |field| {
+    let value = field.value.as_bytes();
+    if http::boundary_of(value) |boundary| {
+        let bytes = exchange.body.as_bytes();
+        var form = try http::parse_multipart(allocator, bytes, boundary);
+        defer form.deinit(allocator);
+        if form.find("attachment") |file| {
+            let filename = file.filename.as_bytes();
+            ...
+        }
+    }
+}
+```
+
+**手元にある body を切ります。** `accept` が上限まで読んだ `exchange.body`、
+または caller が自分の上限で String に読んだものが入力です。上限はここには
+ありません —— body を持った側が名乗っており、part の合計はその body より
+大きくなりません。
+
+**part は所有した copy です。** `Request` の field と同じで、切り出した buffer は
+caller が次の message のために使い直せます。`name` は必ずあります —— 無い part は
+form-data ではないので(RFC 7578 §4.2)、body ごと `MalformedMultipart` です。
+`filename` は field なら空、`content_type` は part が言わなければ空です。RFC 7578
+は無い場合を text/plain と読みますが、「言わない」と「text/plain と言う」は違う
+ことなので、空のまま置きます。同じ名前は繰り返せる(複数 file の 1 field)ので
+`Headers` と同じ list で、`find` は最初の 1 つ、比較は header と違って fold
+しません —— field 名は form の作者が書いたものです。
+
+**decode するのは head の quoting だけです。** `name="a\"b"` の quoted-pair は
+値の中の `"` に戻します。それ以外は byte のまま —— filename の `%22` は `%22`
+で、client が送った名前です。part の中の他の header(`Content-Transfer-Encoding`
+など)は読み飛ばします(RFC 7578 §4.8)。
+
+**framing は RFC 2046 の規則そのままです。** boundary は行頭の `--boundary` で、
+その前の CRLF は boundary のものです —— 行の途中の `--boundary` は data。
+最初の boundary より前は preamble、`--boundary--` より後ろは epilogue で、
+どちらも捨てます。boundary 行の後ろの空白(transport padding)も捨てます。
+閉じる boundary が来ないまま byte が尽きた body は、読めたところまでを返さず
+`MalformedMultipart` です —— 途中まで届いた form は短い form ではありません。
+
+part を接続から stream で読む形(2 GB の file を持たずに受ける)はまだありません。
+`accept_head` で body を自分の上限まで String に読み、それを切ります。
+
 ## Content type
 
 ```kizu
@@ -1135,7 +1208,8 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
 - **HTTP date を読むこと**: `Date` / `Expires` / `Last-Modified` は解析しません。
   書く側は `set_date` / `append_date` にあります
-- **multipart / form-data**、**compression**
+- **multipart の part を stream で読むこと**: `parse_multipart` は手元にある body
+  を切ります。接続から part ごとに読む形はありません
 - **header folding**: RFC 9110 が protocol から外したもので、繋ぐのではなく拒否します
 
 ## エラー
@@ -1145,11 +1219,13 @@ directory 名の中のドットは拡張子ではなく、先頭のドットは�
 `InvalidHeader`、`InvalidUrl`、`UnsupportedScheme`、`MalformedResponse`、
 `ResponseFinished`、`InvalidEncoding`、`InvalidPattern`、`ResponseOverrun`、
 `ResponseIncomplete`、`ExchangeUnfinished`、`ConflictingFraming`、
-`MalformedChunk` を持ちます。
+`MalformedChunk`、`MalformedMultipart` を持ちます。
 
 `MalformedChunk` が `MalformedRequest` / `MalformedResponse` と別なのは、
 chunk の framing が**どちら向きにもある**ものだからです。同じ decoder が
-request の body と response の body の両方を読みます。
+request の body と response の body の両方を読みます。`MalformedMultipart` も
+別です —— HTTP の framing は正しく届いた body の、その中の文法が壊れています。
+request が壊れているのでも chunk が壊れているのでもありません。
 
 `BodyTooLarge` と `ResponseOverrun` は似て非なるものです。前者は request 側 ——
 この server が決めた上限を入力が超えたので、入力を拒否して回復します。後者は

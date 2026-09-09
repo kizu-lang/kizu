@@ -1,0 +1,398 @@
+import std::http;
+import std::mem;
+import std::string;
+import std::testing;
+
+// multipart/form-data is a grammar over a body that is already in hand, so
+// none of this needs a socket. What is asserted is the framing RFC 2046 fixes
+// (where a boundary counts, what is preamble, what closes the body) and the
+// two things RFC 7578 adds on top: every part is form-data with a name, and
+// the head's quoting is the only decoding that happens.
+
+fn line(allocator: Allocator, out: &var string::String, text: []u8) -> http::Failure!void {
+    try out.append_bytes(allocator, text);
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+fn quoted(allocator: Allocator, out: &var string::String, text: []u8) -> http::Failure!void {
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, text);
+    try out.append_byte(allocator, cast<u8>(34));
+    return;
+}
+
+// field appends one complete plain-field part, boundary line included.
+fn field(
+    allocator: Allocator,
+    out: &var string::String,
+    name: []u8,
+    value: []u8
+) -> http::Failure!void {
+    try line(allocator, out, "--b");
+    try out.append_bytes(allocator, "Content-Disposition: form-data; name=");
+    try quoted(allocator, out, name);
+    try line(allocator, out, "");
+    try line(allocator, out, "");
+    try line(allocator, out, value);
+    return;
+}
+
+fn close(allocator: Allocator, out: &var string::String) -> http::Failure!void {
+    try out.append_bytes(allocator, "--b--");
+    return;
+}
+
+fn expect_text(expected: []u8, actual: &string::String) -> void {
+    let bytes = actual.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn expect_no_boundary(content_type: []u8) -> void {
+    if http::boundary_of(content_type) |found| {
+        testing::fail("a boundary was found where none should be");
+    }
+    return;
+}
+
+fn expect_refused(allocator: Allocator, body: &string::String) -> void {
+    let bytes = body.as_bytes();
+    if http::parse_multipart(allocator, bytes, "b") |form| {
+        form.deinit(allocator);
+        testing::fail("a malformed body was accepted");
+    } else |err| {
+        testing::expect(err == http::Error::MalformedMultipart);
+    }
+    return;
+}
+
+test "boundary_of reads a bare or quoted boundary out of the content type" {
+    if http::boundary_of("multipart/form-data; boundary=----kizu") |plain| {
+        testing::expect_equal<[]u8>("----kizu", plain);
+    } else {
+        testing::fail("a bare boundary was not found");
+    }
+
+    let allocator = mem::page_allocator();
+    var quoted_type = string::new(allocator);
+    defer quoted_type.deinit(allocator);
+    try quoted_type.append_bytes(allocator, "Multipart/Form-Data; charset=utf-8; BOUNDARY=");
+    try quoted(allocator, &var quoted_type, "a b:c");
+    let quoted_bytes = quoted_type.as_bytes();
+    if http::boundary_of(quoted_bytes) |from_quotes| {
+        testing::expect_equal<[]u8>("a b:c", from_quotes);
+    } else {
+        testing::fail("a quoted boundary was not found");
+    }
+}
+
+test "boundary_of is null for anything that is not a form-data body with a legal boundary" {
+    expect_no_boundary("text/plain; boundary=x");
+    expect_no_boundary("multipart/form-data");
+    expect_no_boundary("multipart/form-data; charset=utf-8");
+    expect_no_boundary("multipart/form-data; boundary=");
+    expect_no_boundary("multipart/form-data; boundary=a{b");
+    expect_no_boundary("multipart/mixed; boundary=x");
+    let long = "multipart/form-data; boundary=01234567890123456789012345678901234567890123456789012345678901234567890";
+    expect_no_boundary(long);
+}
+
+test "a body is cut into its parts in order, fields and files alike" {
+    let allocator = mem::page_allocator();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try field(allocator, &var body, "title", "Quarterly report");
+    try line(allocator, &var body, "--b");
+    try body.append_bytes(allocator, "Content-Disposition: form-data; name=");
+    try quoted(allocator, &var body, "attachment");
+    try body.append_bytes(allocator, "; filename=");
+    try quoted(allocator, &var body, "notes.txt");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "Content-Type: text/plain");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "first line");
+    try line(allocator, &var body, "second line");
+    try close(allocator, &var body);
+
+    let bytes = body.as_bytes();
+    var form = try http::parse_multipart(allocator, bytes, "b");
+    defer form.deinit(allocator);
+    testing::expect_equal<i64>(2, form.count());
+
+    if form.find("title") |title| {
+        expect_text("title", &title.name);
+        expect_text("", &title.filename);
+        expect_text("", &title.content_type);
+        expect_text("Quarterly report", &title.body);
+    } else {
+        testing::fail("title is missing");
+    }
+
+    var expected = string::new(allocator);
+    defer expected.deinit(allocator);
+    try line(allocator, &var expected, "first line");
+    try expected.append_bytes(allocator, "second line");
+    if form.at(1) |file| {
+        expect_text("attachment", &file.name);
+        expect_text("notes.txt", &file.filename);
+        expect_text("text/plain", &file.content_type);
+        let expected_bytes = expected.as_bytes();
+        let file_body = file.body.as_bytes();
+        testing::expect_equal<[]u8>(expected_bytes, file_body);
+    } else {
+        testing::fail("the file is missing");
+    }
+
+    if form.find("missing") |part| {
+        testing::fail("a name nobody sent was found");
+    }
+    if form.at(2) |part| {
+        testing::fail("a third part appeared");
+    }
+}
+
+test "preamble, epilogue and padding behind a boundary line are not data" {
+    let allocator = mem::page_allocator();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try line(allocator, &var body, "this is the preamble, which a MIME reader may show");
+    try body.append_bytes(allocator, "--b  ");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "Content-Disposition: form-data; name=a");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "one");
+    try close(allocator, &var body);
+    try line(allocator, &var body, "");
+    try body.append_bytes(allocator, "and this is the epilogue");
+
+    let bytes = body.as_bytes();
+    var form = try http::parse_multipart(allocator, bytes, "b");
+    defer form.deinit(allocator);
+    testing::expect_equal<i64>(1, form.count());
+    if form.at(0) |part| {
+        expect_text("a", &part.name);
+        expect_text("one", &part.body);
+    } else {
+        testing::fail("the part is missing");
+    }
+}
+
+test "a boundary counts only at the start of a line, so a body may contain one" {
+    let allocator = mem::page_allocator();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try field(allocator, &var body, "a", "the text --b is data here");
+    try field(allocator, &var body, "empty", "");
+    try line(allocator, &var body, "--b");
+    try line(allocator, &var body, "Content-Disposition: form-data; name=lines");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "x");
+    try line(allocator, &var body, "");
+    try close(allocator, &var body);
+
+    let bytes = body.as_bytes();
+    var form = try http::parse_multipart(allocator, bytes, "b");
+    defer form.deinit(allocator);
+    testing::expect_equal<i64>(3, form.count());
+    if form.at(0) |a| {
+        expect_text("the text --b is data here", &a.body);
+    } else {
+        testing::fail("a is missing");
+    }
+    if form.at(1) |empty| {
+        expect_text("", &empty.body);
+    } else {
+        testing::fail("empty is missing");
+    }
+    // The CRLF in front of the closing boundary is the boundary's; every
+    // other one is the body's.
+    var expected = string::new(allocator);
+    defer expected.deinit(allocator);
+    try line(allocator, &var expected, "");
+    try line(allocator, &var expected, "x");
+    if form.at(2) |lines| {
+        let expected_bytes = expected.as_bytes();
+        let lines_body = lines.body.as_bytes();
+        testing::expect_equal<[]u8>(expected_bytes, lines_body);
+    } else {
+        testing::fail("lines is missing");
+    }
+}
+
+test "the head's quoting is decoded and nothing else is" {
+    let allocator = mem::page_allocator();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try line(allocator, &var body, "--b");
+    try body.append_bytes(allocator, "content-disposition: form-data; name=");
+    // name="say \"hi\"; ok" -- the quoted-pair is a quote, the semicolon
+    // stays inside the value.
+    try body.append_byte(allocator, cast<u8>(34));
+    try body.append_bytes(allocator, "say ");
+    try body.append_byte(allocator, cast<u8>(92));
+    try body.append_byte(allocator, cast<u8>(34));
+    try body.append_bytes(allocator, "hi");
+    try body.append_byte(allocator, cast<u8>(92));
+    try body.append_byte(allocator, cast<u8>(34));
+    try body.append_bytes(allocator, "; ok");
+    try body.append_byte(allocator, cast<u8>(34));
+    try body.append_bytes(allocator, "; filename=");
+    try quoted(allocator, &var body, "a%22b.txt");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "X-Ignored: whatever");
+    try line(allocator, &var body, "");
+    try line(allocator, &var body, "v");
+    try close(allocator, &var body);
+
+    let bytes = body.as_bytes();
+    var form = try http::parse_multipart(allocator, bytes, "b");
+    defer form.deinit(allocator);
+    var expected_name = string::new(allocator);
+    defer expected_name.deinit(allocator);
+    try expected_name.append_bytes(allocator, "say ");
+    try quoted(allocator, &var expected_name, "hi");
+    try expected_name.append_bytes(allocator, "; ok");
+    if form.at(0) |part| {
+        let expected_bytes = expected_name.as_bytes();
+        let name = part.name.as_bytes();
+        testing::expect_equal<[]u8>(expected_bytes, name);
+        expect_text("a%22b.txt", &part.filename);
+    } else {
+        testing::fail("the part is missing");
+    }
+}
+
+test "a repeated name keeps every part and find answers the first" {
+    let allocator = mem::page_allocator();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try field(allocator, &var body, "tag", "one");
+    try field(allocator, &var body, "tag", "two");
+    try close(allocator, &var body);
+
+    let bytes = body.as_bytes();
+    var form = try http::parse_multipart(allocator, bytes, "b");
+    defer form.deinit(allocator);
+    testing::expect_equal<i64>(2, form.count());
+    if form.find("tag") |first| {
+        expect_text("one", &first.body);
+    } else {
+        testing::fail("tag is missing");
+    }
+    if form.at(1) |second| {
+        expect_text("two", &second.body);
+    } else {
+        testing::fail("the second tag is missing");
+    }
+}
+
+test "a part that is not form-data with a name is refused" {
+    let allocator = mem::page_allocator();
+
+    var unnamed = string::new(allocator);
+    defer unnamed.deinit(allocator);
+    try line(allocator, &var unnamed, "--b");
+    try line(allocator, &var unnamed, "Content-Disposition: form-data");
+    try line(allocator, &var unnamed, "");
+    try line(allocator, &var unnamed, "v");
+    try close(allocator, &var unnamed);
+    expect_refused(allocator, &unnamed);
+
+    var other_kind = string::new(allocator);
+    defer other_kind.deinit(allocator);
+    try line(allocator, &var other_kind, "--b");
+    try line(allocator, &var other_kind, "Content-Disposition: attachment; name=a");
+    try line(allocator, &var other_kind, "");
+    try line(allocator, &var other_kind, "v");
+    try close(allocator, &var other_kind);
+    expect_refused(allocator, &other_kind);
+
+    var headless = string::new(allocator);
+    defer headless.deinit(allocator);
+    try line(allocator, &var headless, "--b");
+    try line(allocator, &var headless, "");
+    try line(allocator, &var headless, "v");
+    try close(allocator, &var headless);
+    expect_refused(allocator, &headless);
+
+    var folded = string::new(allocator);
+    defer folded.deinit(allocator);
+    try line(allocator, &var folded, "--b");
+    try line(allocator, &var folded, "Content-Disposition: form-data;");
+    try line(allocator, &var folded, " name=a");
+    try line(allocator, &var folded, "");
+    try line(allocator, &var folded, "v");
+    try close(allocator, &var folded);
+    expect_refused(allocator, &folded);
+}
+
+test "a body without its boundary or its closing line is refused" {
+    let allocator = mem::page_allocator();
+
+    var none = string::new(allocator);
+    defer none.deinit(allocator);
+    try line(allocator, &var none, "just text");
+    expect_refused(allocator, &none);
+
+    var open = string::new(allocator);
+    defer open.deinit(allocator);
+    try field(allocator, &var open, "a", "one");
+    expect_refused(allocator, &open);
+
+    var no_blank = string::new(allocator);
+    defer no_blank.deinit(allocator);
+    try line(allocator, &var no_blank, "--b");
+    try line(allocator, &var no_blank, "Content-Disposition: form-data; name=a");
+    try body_then_close(allocator, &var no_blank);
+    expect_refused(allocator, &no_blank);
+
+    var junk_after_boundary = string::new(allocator);
+    defer junk_after_boundary.deinit(allocator);
+    try line(allocator, &var junk_after_boundary, "--bx");
+    try line(allocator, &var junk_after_boundary, "Content-Disposition: form-data; name=a");
+    try line(allocator, &var junk_after_boundary, "");
+    try line(allocator, &var junk_after_boundary, "v");
+    try close(allocator, &var junk_after_boundary);
+    expect_refused(allocator, &junk_after_boundary);
+
+    var empty = string::new(allocator);
+    defer empty.deinit(allocator);
+    let empty_bytes = empty.as_bytes();
+    if http::parse_multipart(allocator, empty_bytes, "a{b") |form| {
+        form.deinit(allocator);
+        testing::fail("an illegal boundary was accepted");
+    } else |err| {
+        testing::expect(err == http::Error::MalformedMultipart);
+    }
+}
+
+// body_then_close writes a body line straight after a head with no blank
+// line: the boundary that follows is found, but the head never ended.
+fn body_then_close(allocator: Allocator, out: &var string::String) -> http::Failure!void {
+    try line(allocator, out, "v");
+    try close(allocator, out);
+    return;
+}
+
+test "an empty form is two lines" {
+    let allocator = mem::page_allocator();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try line(allocator, &var body, "--b");
+    try close(allocator, &var body);
+    // `--b\r\n--b--`: a boundary line followed at once by the closing one is a
+    // part with no head, which is refused. The form with no parts at all is
+    // `--b--` alone.
+    expect_refused(allocator, &body);
+
+    var closed = string::new(allocator);
+    defer closed.deinit(allocator);
+    try close(allocator, &var closed);
+    let bytes = closed.as_bytes();
+    var form = try http::parse_multipart(allocator, bytes, "b");
+    defer form.deinit(allocator);
+    testing::expect_equal<i64>(0, form.count());
+}
