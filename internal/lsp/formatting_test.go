@@ -9,9 +9,7 @@ func TestFormatEditsReturnsFullDocumentEdit(t *testing.T) {
 	if len(edits) != 1 {
 		t.Fatalf("got %d edits, want 1", len(edits))
 	}
-	want := "fn main() {\n" +
-		"    return;\n" +
-		"}\n"
+	want := "fn main() { return; }\n"
 	if edits[0].NewText != want {
 		t.Fatalf("formatted text:\n--- got ---\n%s\n--- want ---\n%s", edits[0].NewText, want)
 	}

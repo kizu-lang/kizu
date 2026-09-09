@@ -37,9 +37,6 @@ func Format(source string) string {
 		if t.Type == token.EOF {
 			break
 		}
-		if isTrailingCommaBeforeClose(tokens, i) {
-			continue
-		}
 		next := token.Token{Type: token.EOF}
 		if i+1 < len(tokens) {
 			next = tokens[i+1]
@@ -147,16 +144,21 @@ type importRange struct {
 }
 
 type lineComment struct {
-	line        int
-	text        string
+	line int
+	text string
+	// trailing marks a comment written after code on its line. It stays
+	// there, after the spaces the author put before it, so a column of
+	// margin notes keeps its column.
+	trailing    bool
+	padding     int
 	blankBefore bool
 	blankAfter  bool
 }
 
-// lineComments records every line comment in source, whether it stands alone or
-// trails code. The canonical form puts each one on its own line, so a trailing
-// comment is recorded against the line it was written on and emitted before the
-// next line's content. Dropping them instead would lose what the author wrote.
+// lineComments records every line comment in source. One that stands alone
+// is emitted on its own line before the next line's content; one that trails
+// code is emitted at the end of that code's line. Dropping either would lose
+// what the author wrote.
 func lineComments(source string) []lineComment {
 	lines := strings.Split(source, "\n")
 	comments := make([]lineComment, 0)
@@ -165,10 +167,13 @@ func lineComments(source string) []lineComment {
 		if start < 0 {
 			continue
 		}
-		standalone := strings.TrimSpace(line[:start]) == ""
+		before := line[:start]
+		standalone := strings.TrimSpace(before) == ""
 		comments = append(comments, lineComment{
 			line:        idx + 1,
 			text:        strings.TrimRight(strings.TrimSpace(line[start:]), "\r"),
+			trailing:    !standalone,
+			padding:     len(before) - len(strings.TrimRight(before, " \t")),
 			blankBefore: standalone && hasBlankLineBefore(lines, idx),
 			blankAfter:  standalone && hasBlankLineAfter(lines, idx),
 		})
@@ -266,21 +271,6 @@ func importPathKey(tokens []token.Token, r importRange) string {
 	return b.String()
 }
 
-// isTrailingCommaBeforeClose drops a trailing `,` that immediately precedes `}` or `)` or `]`.
-func isTrailingCommaBeforeClose(tokens []token.Token, i int) bool {
-	if tokens[i].Type != token.Comma {
-		return false
-	}
-	if i+1 >= len(tokens) {
-		return false
-	}
-	switch tokens[i+1].Type {
-	case token.RBrace, token.RParen, token.RBracket:
-		return true
-	}
-	return false
-}
-
 // builder accumulates formatted output and tracks layout state.
 type builder struct {
 	out            strings.Builder
@@ -316,10 +306,12 @@ type blockState struct {
 
 const (
 	normalBlock blockKind = iota
-	// inlineLiteralBlock keeps a same-line aggregate literal compact. It does
-	// not change structural indentation because all of its tokens stay on the
-	// line that opened it.
-	inlineLiteralBlock
+	// inlineBlock is a block the author closed on the line that opened it:
+	// an aggregate literal, a one-line body, an error set with one member.
+	// It stays on that line, with a space around each statement, and does
+	// not change structural indentation because none of its tokens starts a
+	// line. Line breaks are the author's; the formatter settles spacing.
+	inlineBlock
 	// commaTerminatedBlock is a block whose last entry keeps its comma. Enum
 	// variants and match arms need it because the grammar requires it, and
 	// struct fields keep it because SPEC §6.4 writes them that way.
@@ -347,37 +339,69 @@ func (b *builder) emit(t token.Token, next token.Token) {
 	b.maybeTrailingNewline(t, next)
 }
 
-// emitCommentsBefore writes preserved standalone comments before token t.
+// emitCommentsBefore writes the comments that come before token t: one
+// trailing the line just written goes at its end, the standalone ones each
+// on their own line.
 func (b *builder) emitCommentsBefore(t token.Token) {
 	if t.Line <= 0 {
 		return
 	}
 	for b.commentIdx < len(b.comments) && b.comments[b.commentIdx].line < t.Line {
-		b.writeCommentLine(b.comments[b.commentIdx])
-		b.commentIdx++
+		if !b.flushTrailingComment() {
+			b.writeCommentLine(b.comments[b.commentIdx])
+			b.commentIdx++
+		}
 	}
 }
 
 // emitRemainingComments writes comments after the final token.
 func (b *builder) emitRemainingComments() {
 	for b.commentIdx < len(b.comments) {
-		b.writeCommentLine(b.comments[b.commentIdx])
-		b.commentIdx++
+		if !b.flushTrailingComment() {
+			b.writeCommentLine(b.comments[b.commentIdx])
+			b.commentIdx++
+		}
 	}
+}
+
+// newline ends the output line. A comment the author wrote after the code
+// on this source line goes out first, so it stays on that line.
+func (b *builder) newline() {
+	b.flushTrailingComment()
+	b.out.WriteByte('\n')
+	b.atLineStart = true
+}
+
+// flushTrailingComment writes the next comment when it trails the line the
+// last token was on and that line is still open, and reports whether it did.
+func (b *builder) flushTrailingComment() bool {
+	if b.commentIdx >= len(b.comments) || b.atLineStart {
+		return false
+	}
+	comment := b.comments[b.commentIdx]
+	if !comment.trailing || comment.line != b.sourceLine {
+		return false
+	}
+	padding := comment.padding
+	if padding < 1 {
+		padding = 1
+	}
+	b.out.WriteString(strings.Repeat(" ", padding))
+	b.out.WriteString(comment.text)
+	b.commentIdx++
+	return true
 }
 
 // writeCommentLine emits one standalone comment at the current indentation depth.
 func (b *builder) writeCommentLine(comment lineComment) {
 	if comment.blankBefore && b.out.Len() > 0 && !endsWithBlankLine(&b.out) {
 		if !b.atLineStart {
-			b.out.WriteByte('\n')
-			b.atLineStart = true
+			b.newline()
 		}
 		b.out.WriteByte('\n')
 	}
 	if !b.atLineStart {
-		b.out.WriteByte('\n')
-		b.atLineStart = true
+		b.newline()
 	}
 	if b.hasPrev {
 		b.continuation = b.continuationIndent(token.Token{})
@@ -427,11 +451,23 @@ func (b *builder) maybePreserveSourceLineBreak(t token.Token) {
 		if b.afterComment {
 			b.continuation = b.continuationIndent(t)
 		}
+		b.maybeKeepBlankLine(t)
 		return
 	}
-	b.out.WriteByte('\n')
-	b.atLineStart = true
+	b.newline()
 	b.continuation = b.continuationIndent(t)
+}
+
+// maybeKeepBlankLine keeps one blank line the author left between two
+// entries of a block, the way one between top-level declarations is kept.
+// Several collapse to one, and one right after the opening brace is dropped.
+func (b *builder) maybeKeepBlankLine(t token.Token) {
+	if b.depth == 0 || t.Line <= b.sourceLine+1 || b.prev.Type == token.LBrace {
+		return
+	}
+	if !endsWithBlankLine(&b.out) {
+		b.out.WriteByte('\n')
+	}
 }
 
 // continuationIndent reports the indentation beyond the surrounding brace
@@ -454,6 +490,11 @@ func (b *builder) continuationIndent(t token.Token) int {
 	groups := b.distinctDelimiterLines(end)
 	if groups > 0 {
 		return groups
+	}
+	// Outside every delimiter at top level, a new line starts a declaration
+	// or a comment before one; an extern declaration has no `;` to say so.
+	if b.depth == 0 {
+		return 0
 	}
 	switch b.prev.Type {
 	case token.LBrace, token.RBrace, token.Semicolon, token.Comma:
@@ -562,18 +603,20 @@ func (b *builder) maybeTrailingNewline(t token.Token, next token.Token) {
 			kind:          kind,
 			delimiterBase: len(b.delimiterLines),
 		})
-		if kind == inlineLiteralBlock {
+		if kind == inlineBlock {
 			return
 		}
 		b.depth++
 		if next.Type == token.RBrace {
 			return
 		}
-		b.out.WriteByte('\n')
-		b.atLineStart = true
+		b.newline()
 	case token.Semicolon:
-		b.out.WriteByte('\n')
-		b.atLineStart = true
+		// `expr;,` is a match arm whose comma follows its statement.
+		if b.currentBlockKind() == inlineBlock || next.Type == token.Comma {
+			return
+		}
+		b.newline()
 		b.continuation = 0
 	}
 }
@@ -581,7 +624,7 @@ func (b *builder) maybeTrailingNewline(t token.Token, next token.Token) {
 // emitRBrace closes a block, deciding whether to emit a trailing newline.
 func (b *builder) emitRBrace(t token.Token, next token.Token) {
 	block := b.popBlock()
-	if block.kind == inlineLiteralBlock {
+	if block.kind == inlineBlock {
 		b.emitInlineRBrace(t, next)
 		return
 	}
@@ -595,7 +638,7 @@ func (b *builder) emitRBrace(t token.Token, next token.Token) {
 		b.writeToken(rb)
 	} else {
 		if !b.atLineStart {
-			b.out.WriteByte('\n')
+			b.newline()
 		}
 		b.writeIndent()
 		b.writeToken(rb)
@@ -610,13 +653,11 @@ func (b *builder) emitRBrace(t token.Token, next token.Token) {
 	b.afterComment = false
 
 	if rbraceWantsNewline(next) {
-		b.out.WriteByte('\n')
-		b.atLineStart = true
+		b.newline()
 	}
 }
 
-// emitInlineRBrace closes a compact aggregate literal without treating it as
-// a statement block.
+// emitInlineRBrace closes a block that stays on its opening line.
 func (b *builder) emitInlineRBrace(t token.Token, next token.Token) {
 	if b.hasPrev && b.prev.Type != token.LBrace {
 		b.out.WriteByte(' ')
@@ -631,14 +672,14 @@ func (b *builder) emitInlineRBrace(t token.Token, next token.Token) {
 	}
 	b.afterComment = false
 	if rbraceWantsNewline(next) {
-		b.out.WriteByte('\n')
-		b.atLineStart = true
+		b.newline()
 		b.continuation = 0
 	}
 }
 
-// emitTrailingCommaBeforeClose restores the comma that isTrailingCommaBeforeClose
-// dropped, for the blocks whose grammar requires it on the last entry.
+// emitTrailingCommaBeforeClose adds the comma after the last entry of a
+// multi-line declaration block when the author left it out. A comma the
+// author wrote is never removed, before any closer: `f(x,)` is theirs.
 func (b *builder) emitTrailingCommaBeforeClose() {
 	if b.currentBlockKind() != commaTerminatedBlock ||
 		!b.hasPrev ||
@@ -656,13 +697,33 @@ func (b *builder) emitTrailingCommaBeforeClose() {
 
 // currentOpenBlockKind reports the kind of block opened by the current `{`.
 func (b *builder) currentOpenBlockKind() blockKind {
+	if closesOnSameLine(b.tokens, b.index) {
+		return inlineBlock
+	}
 	if opensCommaTerminatedBlockAtCurrentIndex(b.tokens, b.index) {
 		return commaTerminatedBlock
 	}
-	if opensInlineLiteralAtCurrentIndex(b.tokens, b.index) {
-		return inlineLiteralBlock
-	}
 	return normalBlock
+}
+
+// closesOnSameLine reports whether the `{` at index has its `}` on the same
+// source line.
+func closesOnSameLine(tokens []token.Token, index int) bool {
+	depth := 0
+	for cursor := index + 1; cursor < len(tokens); cursor++ {
+		switch tokens[cursor].Type {
+		case token.LBrace:
+			depth++
+		case token.RBrace:
+			if depth == 0 {
+				return tokens[cursor].Line == tokens[index].Line
+			}
+			depth--
+		case token.EOF:
+			return false
+		}
+	}
+	return false
 }
 
 // currentBlockKind reports the innermost block kind without popping it.
@@ -729,69 +790,6 @@ func opensErrorSetBlock(tokens []token.Token, index int) bool {
 		tokens[index-2].Literal == "error"
 }
 
-// opensInlineLiteralAtCurrentIndex recognizes a same-line aggregate literal.
-// A top-level colon distinguishes fields from an ordinary statement block;
-// declaration and control-flow keywords keep their braces structural.
-func opensInlineLiteralAtCurrentIndex(tokens []token.Token, index int) bool {
-	if index <= 0 || index >= len(tokens) || tokens[index].Type != token.LBrace {
-		return false
-	}
-	if !canOpenAggregateLiteral(tokens[index-1]) || braceStartsBody(tokens, index) {
-		return false
-	}
-	line := tokens[index].Line
-	depth := 0
-	hasField := false
-	for cursor := index + 1; cursor < len(tokens); cursor++ {
-		t := tokens[cursor]
-		switch t.Type {
-		case token.LBrace:
-			depth++
-		case token.RBrace:
-			if depth == 0 {
-				return hasField && t.Line == line
-			}
-			depth--
-		case token.Colon:
-			if depth == 0 {
-				hasField = true
-			}
-		case token.Semicolon, token.EOF:
-			if depth == 0 {
-				return false
-			}
-		}
-	}
-	return false
-}
-
-// canOpenAggregateLiteral reports whether t can name an aggregate constructor.
-func canOpenAggregateLiteral(t token.Token) bool {
-	return t.Type == token.Ident || t.Type == token.GT
-}
-
-// braceStartsBody distinguishes declaration and control-flow bodies from
-// aggregate literals whose opening token also follows an identifier.
-func braceStartsBody(tokens []token.Token, index int) bool {
-	if opensErrorSetBlock(tokens, index) {
-		return true
-	}
-	for cursor := index - 1; cursor >= 0; cursor-- {
-		switch tokens[cursor].Type {
-		case token.Function, token.Struct, token.Enum, token.Union, token.Contract,
-			token.Impl, token.If, token.Else, token.While, token.For, token.Match:
-			return true
-		case token.Ident:
-			if tokens[cursor].Literal == "test" {
-				return true
-			}
-		case token.LBrace, token.RBrace, token.Semicolon:
-			return false
-		}
-	}
-	return false
-}
-
 // rbraceWantsNewline reports whether a `}` should be followed by a newline.
 func rbraceWantsNewline(next token.Token) bool {
 	switch next.Type {
@@ -845,7 +843,7 @@ func (b *builder) writeStringLiteral(value string) {
 // and the next token starts on a fresh line at the parent indent.
 func (b *builder) emitMultilineString(t token.Token) {
 	if !b.atLineStart {
-		b.out.WriteByte('\n')
+		b.newline()
 	}
 	lines := strings.Split(t.Literal, "\n")
 	indent := strings.Repeat(indentUnit, b.depth+1)
@@ -890,9 +888,22 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 	if curr.Type == token.LParen {
 		return b.parenTakesSpace(prev)
 	}
-	if b.attachedTokenHugsLeft(curr, prev) {
+	if b.attachedTokenHugsLeft(curr, prev) || b.labelHugsColon(prev) {
 		return false
 	}
+	if curr.Type == token.LBrace && b.stackBufferBrace() {
+		return false
+	}
+	// `break :outer` spaces the colon off the keyword and hugs the label.
+	if curr.Type == token.Colon && labelReference(prev) {
+		return true
+	}
+	return b.operatorSpacing(curr, prev)
+}
+
+// operatorSpacing decides the space between two tokens by their kinds alone,
+// once the forms that override kinds have had their say.
+func (b *builder) operatorSpacing(curr token.Token, prev token.Token) bool {
 	if noSpaceBefore(curr) {
 		return false
 	}
@@ -913,6 +924,27 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 	return true
 }
 
+// labelHugsColon reports whether the `:` just written names a loop after
+// `break` or `continue`, so that the label hugs it.
+func (b *builder) labelHugsColon(prev token.Token) bool {
+	return prev.Type == token.Colon && b.prevIndex > 0 && labelReference(b.tokens[b.prevIndex-1])
+}
+
+// labelReference reports the keywords whose `:label` names a loop.
+func labelReference(t token.Token) bool {
+	return t.Type == token.Break || t.Type == token.Continue
+}
+
+// stackBufferBrace reports whether the `{` about to be written opens a
+// `[N]u8{}` stack buffer, whose brace hugs the type (SPEC §6.x).
+func (b *builder) stackBufferBrace() bool {
+	i := b.prevIndex
+	return b.prev.Type == token.Ident && i >= 3 &&
+		b.tokens[i-1].Type == token.RBracket &&
+		b.tokens[i-2].Type == token.Int &&
+		b.tokens[i-3].Type == token.LBracket
+}
+
 // shiftHalves reports whether prev and curr are the two halves of one shift.
 func (b *builder) shiftHalves(curr token.Token) bool {
 	return b.index < len(b.shift) && b.shift[b.index] &&
@@ -930,6 +962,14 @@ func (b *builder) binaryAmp() bool {
 func (b *builder) parenTakesSpace(prev token.Token) bool {
 	if prev.Type == token.Function {
 		return b.functionOpensDeclaration()
+	}
+	// A sign hugs its group, `-(x)`; a subtraction or a bitwise and keeps
+	// the space a binary operator has.
+	if prev.Type == token.Minus {
+		return !b.signMinus()
+	}
+	if prev.Type == token.Amp {
+		return b.binaryAmp()
 	}
 	switch prev.Type {
 	case token.Ident, token.RParen, token.RBracket:

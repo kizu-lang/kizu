@@ -383,7 +383,7 @@ func TestServerFormattingReturnsEdit(t *testing.T) {
 		t.Fatalf("got %d edits, want 1", len(edits))
 	}
 	edit := edits[0].(map[string]any)
-	want := "fn main() {\n    return;\n}\n"
+	want := "fn main() { return; }\n"
 	if edit["newText"] != want {
 		t.Fatalf("newText = %#v, want %#v", edit["newText"], want)
 	}

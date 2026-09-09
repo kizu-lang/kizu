@@ -41,7 +41,7 @@ func TestFmtWriteUpdatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "fn main() {\n    print(\"hello, kizu\");\n}\n"
+	want := "fn main() { print(\"hello, kizu\"); }\n"
 	if string(got) != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -744,9 +744,7 @@ fn main(){return;}
 		"import app::lexer;\n" +
 		"import app::parser;\n" +
 		"\n" +
-		"fn main() {\n" +
-		"    return;\n" +
-		"}\n"
+		"fn main() { return; }\n"
 	if got != want {
 		t.Fatalf("fmt imports:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -863,7 +861,7 @@ func TestFmtCommandPreservesLeadingLineComments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "// keep this comment\nfn main() {\n    print(\"hello, kizu\");\n}\n"
+	want := "// keep this comment\nfn main() { print(\"hello, kizu\"); }\n"
 	if string(out) != want {
 		t.Fatalf("got %q, want %q", out, want)
 	}
@@ -880,7 +878,7 @@ func TestFmtCommandPreservesFunctionDocComments(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("got stderr %q, want empty", stderr)
 	}
-	want := "/// keep this doc\nfn main() {\n    print(\"hello, kizu\");\n}\n"
+	want := "/// keep this doc\nfn main() { print(\"hello, kizu\"); }\n"
 	if got != want {
 		t.Fatalf("fmt doc comments:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -904,7 +902,8 @@ func TestFmtCommandPreservesBlockLineComments(t *testing.T) {
 	}
 }
 
-// TestFmtCommandPreservesInlineLineComments keeps inline comments as canonical trivia.
+// TestFmtCommandPreservesInlineLineComments keeps a comment written after
+// code on the line it was written on.
 func TestFmtCommandPreservesInlineLineComments(t *testing.T) {
 	path := writeTempKizuSource(t, "inline-comment.kizu",
 		"fn main() { // keep this comment\n    print(\"hello, kizu\");\n}\n")
@@ -915,7 +914,7 @@ func TestFmtCommandPreservesInlineLineComments(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("got stderr %q, want empty", stderr)
 	}
-	want := "fn main() {\n    // keep this comment\n    print(\"hello, kizu\");\n}\n"
+	want := "fn main() { // keep this comment\n    print(\"hello, kizu\");\n}\n"
 	if got != want {
 		t.Fatalf("fmt inline comments:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -956,13 +955,14 @@ func TestFmtWritePreservesLeadingLineComments(t *testing.T) {
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	want := "// keep this comment\nfn main() {\n    print(\"hello, kizu\");\n}\n"
+	want := "// keep this comment\nfn main() { print(\"hello, kizu\"); }\n"
 	if string(got) != want {
 		t.Fatalf("file changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
-// TestFmtWritePreservesInlineLineComments checks --write keeps inline comment trivia.
+// TestFmtWritePreservesInlineLineComments checks --write keeps a comment
+// written after code on its line.
 func TestFmtWritePreservesInlineLineComments(t *testing.T) {
 	src := "fn main() { // keep this comment\n    print(\"hello, kizu\");\n}\n"
 	path := filepath.Join(t.TempDir(), "inline-comment.kizu")
@@ -980,7 +980,7 @@ func TestFmtWritePreservesInlineLineComments(t *testing.T) {
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	want := "fn main() {\n    // keep this comment\n    print(\"hello, kizu\");\n}\n"
+	want := "fn main() { // keep this comment\n    print(\"hello, kizu\");\n}\n"
 	if string(got) != want {
 		t.Fatalf("file changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}

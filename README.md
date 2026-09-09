@@ -223,7 +223,7 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu check <file-or-package>` runs type, ownership, move, borrow, and arena checks.
 - `kizu run <file-or-package>` builds a native executable and runs it.
 - `kizu test <file-or-package>` runs checked top-level test blocks without invoking `main`.
-- `kizu fmt [--write|-w] <file>` prints or writes canonical token formatter output. It is not a source-preserving formatter: line comments are kept, but the canonical form puts each on its own line, so a comment trailing code moves to the next line.
+- `kizu fmt [--write|-w] <file>` prints or writes the formatter's output. It settles spacing, indentation, and the trailing comma of a multi-line declaration; line breaks stay where the author put them, so a block written on one line stays on one line, one blank line between statements is kept, and a comment keeps its line and its column.
 - `kizu init [path]` scaffolds a package.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
