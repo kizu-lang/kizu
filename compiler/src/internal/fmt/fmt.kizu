@@ -10,30 +10,39 @@ import std::string;
 
 struct ImportRange {
     start: i64,
-    end: i64
+    end: i64,
 }
 
 struct LineRange {
     start: i64,
-    end: i64
+    end: i64,
 }
 
 struct LineComment {
     line: i64,
     text: string::String,
+    // trailing marks a comment written after code on its line. It stays
+    // there, after the spaces the author put before it, so a column of
+    // margin notes keeps its column.
+    trailing: bool,
+    padding: i64,
     blank_before: bool,
-    blank_after: bool
+    blank_after: bool,
 }
 
 enum BlockKind {
     Normal,
-    InlineLiteral,
+    // Inline is a block the author closed on the line that opened it. It
+    // stays on that line, with a space around each statement, and does not
+    // change structural indentation because none of its tokens starts a
+    // line. Line breaks are the author's; the formatter settles spacing.
+    Inline,
     CommaTerminated,
 }
 
 struct BlockState {
     kind: BlockKind,
-    delimiter_base: i64
+    delimiter_base: i64,
 }
 
 struct Builder {
@@ -59,7 +68,7 @@ struct Builder {
     // the name hugs both pipes. A `|` that opens no capture is the bitwise or.
     in_capture: bool,
     // shift marks the halves of a `<<` or `>>`, which take no space between.
-    shift: array::Array<bool>
+    shift: array::Array<bool>,
 }
 
 /// Returns the canonical formatting of source, the Go `Format`.
@@ -103,16 +112,12 @@ pub fn format(allocator: Allocator, source: []u8) -> !string::String {
         if current.kind == token::Kind::Eof {
             break;
         }
-        if is_trailing_comma_before_close(&tokens, index) {
-            index = index + 1;
-            continue;
-        }
         var next_kind = token::Kind::Eof;
         if tokens.at(index + 1) |next| {
             next_kind = next.kind;
         }
         builder.index = index;
-        try builder.emit(current, next_kind, &tokens, &generic);
+        try builder.emit(current, next_kind, &tokens, &generic, &comments);
         index = index + 1;
     }
     try builder.emit_remaining_comments(&comments, &generic);
@@ -335,6 +340,8 @@ fn line_comments(allocator: Allocator, source: []u8) -> !array::Array<LineCommen
         try comments.append(allocator, LineComment {
             line: index + 1,
             text: move text,
+            trailing: !standalone,
+            padding: padding_before(line, start),
             blank_before: blank_before,
             blank_after: blank_after
         });
@@ -385,6 +392,15 @@ fn comment_start(line: []u8) -> i64 {
         index = index + 1;
     }
     return -1;
+}
+
+/// Counts the spaces and tabs right before the `//` at start.
+fn padding_before(line: []u8, start: i64) -> i64 {
+    var end = start;
+    while end > 0 and (line[end - 1] == cast<u8>(32) or line[end - 1] == cast<u8>(9)) {
+        end = end - 1;
+    }
+    return start - end;
 }
 
 fn trim_space_empty(allocator: Allocator, bytes: []u8) -> !bool {
@@ -581,45 +597,63 @@ fn rotate_adjacent_ranges(
 
 /// Reports a comma immediately before a closing delimiter, the Go
 /// `isTrailingCommaBeforeClose`.
-fn is_trailing_comma_before_close(
-    tokens: &array::Array<token::Token>,
-    index: i64
-) -> bool {
-    if tokens.at(index) |current| {
-        if current.kind != token::Kind::Comma {
-            return false;
-        }
-    } else {
-        return false;
-    }
-    if tokens.at(index + 1) |next| {
-        return next.kind == token::Kind::RBrace or
-            next.kind == token::Kind::RParen or
-            next.kind == token::Kind::RBracket;
-    }
-    return false;
-}
-
 /// Emits one token using the current layout state, the Go `builder.emit`.
 fn (self: &var Builder) emit(
     current: &token::Token,
     next_kind: token::Kind,
     tokens: &array::Array<token::Token>,
-    generic: &array::Array<bool>
+    generic: &array::Array<bool>,
+    comments: &array::Array<LineComment>
 ) -> !void {
     if current.kind == token::Kind::RBrace {
-        return self.emit_rbrace(current, next_kind);
+        return self.emit_rbrace(current, next_kind, comments);
     }
     let literal = current.literal.as_bytes();
     if current.kind == token::Kind::String and contains_quote_or_newline(literal) {
-        return self.emit_multiline_string(current);
+        return self.emit_multiline_string(current, comments);
     }
     try self.maybe_blank_line_for_top_level(current);
-    try self.maybe_preserve_source_line_break(current, generic);
+    try self.maybe_preserve_source_line_break(current, generic, comments);
     try self.write_separator(current, tokens, generic);
     try self.write_token(current);
     try self.record_emitted(current, tokens, generic);
-    return self.maybe_trailing_newline(current.kind, next_kind, tokens);
+    return self.maybe_trailing_newline(current.kind, next_kind, tokens, comments);
+}
+
+/// Ends the output line, the Go `newline`. A comment the author wrote after
+/// the code on this source line goes out first, so it stays on that line.
+fn (self: &var Builder) newline(comments: &array::Array<LineComment>) -> !void {
+    let _ = try self.flush_trailing_comment(comments);
+    try self.out.append_byte(self.allocator, cast<u8>(10));
+    self.at_line_start = true;
+    return;
+}
+
+/// Writes the next comment when it trails the line the last token was on
+/// and that line is still open, the Go `flushTrailingComment`.
+fn (self: &var Builder) flush_trailing_comment(
+    comments: &array::Array<LineComment>
+) -> !bool {
+    if self.at_line_start {
+        return false;
+    }
+    if comments.at(self.comment_index) |comment| {
+        if !comment.trailing or comment.line != self.source_line {
+            return false;
+        }
+        var padding = comment.padding;
+        if padding < 1 {
+            padding = 1;
+        }
+        for 0..padding |_| {
+            try self.out.append_byte(self.allocator, cast<u8>(32));
+        }
+        let text = comment.text.as_bytes();
+        try self.out.append_bytes(self.allocator, text);
+        self.comment_index = self.comment_index + 1;
+        return true;
+    }
+    return false;
 }
 
 /// Writes preserved comments before current, the Go `emitCommentsBefore`.
@@ -637,8 +671,10 @@ fn (self: &var Builder) emit_comments_before(
             if comment.line >= current.line {
                 scanning = false;
             } else {
-                try self.write_comment_line(comment, generic);
-                self.comment_index = self.comment_index + 1;
+                if !try self.flush_trailing_comment(comments) {
+                    try self.write_comment_line(comment, generic, comments);
+                    self.comment_index = self.comment_index + 1;
+                }
             }
         } else {
             scanning = false;
@@ -653,8 +689,10 @@ fn (self: &var Builder) emit_remaining_comments(
     generic: &array::Array<bool>
 ) -> !void {
     while comments.at(self.comment_index) |comment| {
-        try self.write_comment_line(comment, generic);
-        self.comment_index = self.comment_index + 1;
+        if !try self.flush_trailing_comment(comments) {
+            try self.write_comment_line(comment, generic, comments);
+            self.comment_index = self.comment_index + 1;
+        }
     }
     return;
 }
@@ -662,18 +700,17 @@ fn (self: &var Builder) emit_remaining_comments(
 /// Writes one standalone comment, the Go `writeCommentLine`.
 fn (self: &var Builder) write_comment_line(
     comment: &LineComment,
-    generic: &array::Array<bool>
+    generic: &array::Array<bool>,
+    comments: &array::Array<LineComment>
 ) -> !void {
     if comment.blank_before and self.out.len() > 0 and !self.ends_with_blank_line() {
         if !self.at_line_start {
-            try self.out.append_byte(self.allocator, cast<u8>(10));
-            self.at_line_start = true;
+            try self.newline(comments);
         }
         try self.out.append_byte(self.allocator, cast<u8>(10));
     }
     if !self.at_line_start {
-        try self.out.append_byte(self.allocator, cast<u8>(10));
-        self.at_line_start = true;
+        try self.newline(comments);
     }
     if self.has_prev {
         self.continuation = self.continuation_indent(
@@ -730,7 +767,8 @@ fn (self: &Builder) is_consecutive_import(kind: token::Kind) -> bool {
 /// `maybePreserveSourceLineBreak`.
 fn (self: &var Builder) maybe_preserve_source_line_break(
     current: &token::Token,
-    generic: &array::Array<bool>
+    generic: &array::Array<bool>,
+    comments: &array::Array<LineComment>
 ) -> !void {
     if !self.has_prev or self.source_line == 0 or current.line <= self.source_line {
         return;
@@ -739,11 +777,25 @@ fn (self: &var Builder) maybe_preserve_source_line_break(
         if self.after_comment {
             self.continuation = self.continuation_indent(current.kind, generic);
         }
+        try self.maybe_keep_blank_line(current);
         return;
     }
-    try self.out.append_byte(self.allocator, cast<u8>(10));
-    self.at_line_start = true;
+    try self.newline(comments);
     self.continuation = self.continuation_indent(current.kind, generic);
+    return;
+}
+
+/// Keeps one blank line the author left between two entries of a block, the
+/// Go `maybeKeepBlankLine`: several collapse to one, and one right after the
+/// opening brace is dropped.
+fn (self: &var Builder) maybe_keep_blank_line(current: &token::Token) -> !void {
+    if self.depth == 0 or current.line <= self.source_line + 1 or
+        self.prev_kind == token::Kind::LBrace {
+        return;
+    }
+    if !self.ends_with_blank_line() {
+        try self.out.append_byte(self.allocator, cast<u8>(10));
+    }
     return;
 }
 
@@ -769,6 +821,11 @@ fn (self: &Builder) continuation_indent(
     let groups = self.distinct_delimiter_lines(end);
     if groups > 0 {
         return groups;
+    }
+    // Outside every delimiter at top level, a new line starts a declaration
+    // or a comment before one; an extern declaration has no `;` to say so.
+    if self.depth == 0 {
+        return 0;
     }
     if self.prev_kind == token::Kind::LBrace or
         self.prev_kind == token::Kind::RBrace or
@@ -882,7 +939,8 @@ fn (self: &Builder) closes_continuation_group(
 fn (self: &var Builder) maybe_trailing_newline(
     kind: token::Kind,
     next_kind: token::Kind,
-    tokens: &array::Array<token::Token>
+    tokens: &array::Array<token::Token>,
+    comments: &array::Array<LineComment>
 ) -> !void {
     if kind == token::Kind::LBrace {
         let block_kind = current_open_block_kind(tokens, self.index);
@@ -890,20 +948,22 @@ fn (self: &var Builder) maybe_trailing_newline(
             kind: block_kind,
             delimiter_base: self.delimiter_lines.len()
         });
-        if block_kind == BlockKind::InlineLiteral {
+        if block_kind == BlockKind::Inline {
             return;
         }
         self.depth = self.depth + 1;
         if next_kind == token::Kind::RBrace {
             return;
         }
-        try self.out.append_byte(self.allocator, cast<u8>(10));
-        self.at_line_start = true;
+        try self.newline(comments);
         return;
     }
     if kind == token::Kind::Semicolon {
-        try self.out.append_byte(self.allocator, cast<u8>(10));
-        self.at_line_start = true;
+        // `expr;,` is a match arm whose comma follows its statement.
+        if self.current_block_kind() == BlockKind::Inline or next_kind == token::Kind::Comma {
+            return;
+        }
+        try self.newline(comments);
         self.continuation = 0;
     }
     return;
@@ -912,11 +972,12 @@ fn (self: &var Builder) maybe_trailing_newline(
 /// Closes a structural block, the Go `emitRBrace`.
 fn (self: &var Builder) emit_rbrace(
     current: &token::Token,
-    next_kind: token::Kind
+    next_kind: token::Kind,
+    comments: &array::Array<LineComment>
 ) -> !void {
     let block = self.pop_block();
-    if block.kind == BlockKind::InlineLiteral {
-        return self.emit_inline_rbrace(current, next_kind);
+    if block.kind == BlockKind::Inline {
+        return self.emit_inline_rbrace(current, next_kind, comments);
     }
     if self.depth > 0 {
         self.depth = self.depth - 1;
@@ -925,7 +986,7 @@ fn (self: &var Builder) emit_rbrace(
         try self.out.append_byte(self.allocator, cast<u8>(125));
     } else {
         if !self.at_line_start {
-            try self.out.append_byte(self.allocator, cast<u8>(10));
+            try self.newline(comments);
         }
         try self.write_indent();
         try self.out.append_byte(self.allocator, cast<u8>(125));
@@ -939,16 +1000,16 @@ fn (self: &var Builder) emit_rbrace(
     }
     self.after_comment = false;
     if rbrace_wants_newline(next_kind) {
-        try self.out.append_byte(self.allocator, cast<u8>(10));
-        self.at_line_start = true;
+        try self.newline(comments);
     }
     return;
 }
 
-/// Closes a compact aggregate literal, the Go `emitInlineRBrace`.
+/// Closes a block that stays on its opening line, the Go `emitInlineRBrace`.
 fn (self: &var Builder) emit_inline_rbrace(
     current: &token::Token,
-    next_kind: token::Kind
+    next_kind: token::Kind,
+    comments: &array::Array<LineComment>
 ) -> !void {
     if self.has_prev and self.prev_kind != token::Kind::LBrace {
         try self.out.append_byte(self.allocator, cast<u8>(32));
@@ -963,15 +1024,15 @@ fn (self: &var Builder) emit_inline_rbrace(
     }
     self.after_comment = false;
     if rbrace_wants_newline(next_kind) {
-        try self.out.append_byte(self.allocator, cast<u8>(10));
-        self.at_line_start = true;
+        try self.newline(comments);
         self.continuation = 0;
     }
     return;
 }
 
-/// Restores a required trailing comma, the Go
-/// `emitTrailingCommaBeforeClose`.
+/// Adds the comma after the last entry of a multi-line declaration block
+/// when the author left it out, the Go `emitTrailingCommaBeforeClose`. A
+/// comma the author wrote is never removed, before any closer.
 fn (self: &var Builder) emit_trailing_comma_before_close() -> !void {
     if self.current_block_kind() != BlockKind::CommaTerminated or
         !self.has_prev or self.prev_kind == token::Kind::Comma or
@@ -991,13 +1052,45 @@ fn current_open_block_kind(
     tokens: &array::Array<token::Token>,
     index: i64
 ) -> BlockKind {
+    if closes_on_same_line(tokens, index) {
+        return BlockKind::Inline;
+    }
     if opens_comma_terminated_block_at_current_index(tokens, index) {
         return BlockKind::CommaTerminated;
     }
-    if opens_inline_literal_at_current_index(tokens, index) {
-        return BlockKind::InlineLiteral;
-    }
     return BlockKind::Normal;
+}
+
+/// Reports whether the `{` at index has its `}` on the same source line, the
+/// Go `closesOnSameLine`.
+fn closes_on_same_line(
+    tokens: &array::Array<token::Token>,
+    index: i64
+) -> bool {
+    var line = 0;
+    if tokens.at(index) |open| {
+        line = open.line;
+    } else {
+        return false;
+    }
+    var depth = 0;
+    var cursor = index + 1;
+    while tokens.at(cursor) |current| {
+        if current.kind == token::Kind::LBrace {
+            depth = depth + 1;
+        }
+        if current.kind == token::Kind::RBrace {
+            if depth == 0 {
+                return current.line == line;
+            }
+            depth = depth - 1;
+        }
+        if current.kind == token::Kind::Eof {
+            return false;
+        }
+        cursor = cursor + 1;
+    }
+    return false;
 }
 
 /// Returns the innermost block kind, the Go `currentBlockKind`.
@@ -1098,110 +1191,6 @@ fn opens_error_set_block(
     return false;
 }
 
-/// Recognizes a same-line aggregate literal, the Go
-/// `opensInlineLiteralAtCurrentIndex`.
-fn opens_inline_literal_at_current_index(
-    tokens: &array::Array<token::Token>,
-    index: i64
-) -> bool {
-    if index <= 0 or index >= tokens.len() {
-        return false;
-    }
-    var line = 0;
-    if tokens.at(index) |current| {
-        if current.kind != token::Kind::LBrace {
-            return false;
-        }
-        line = current.line;
-    } else {
-        return false;
-    }
-    if tokens.at(index - 1) |previous| {
-        if !can_open_aggregate_literal(previous.kind) {
-            return false;
-        }
-    } else {
-        return false;
-    }
-    if brace_starts_body(tokens, index) {
-        return false;
-    }
-    var depth = 0;
-    var has_field = false;
-    var cursor = index + 1;
-    while tokens.at(cursor) |current| {
-        if current.kind == token::Kind::LBrace {
-            depth = depth + 1;
-        } else {
-            if current.kind == token::Kind::RBrace {
-                if depth == 0 {
-                    return has_field and current.line == line;
-                }
-                depth = depth - 1;
-            } else {
-                if current.kind == token::Kind::Colon and depth == 0 {
-                    has_field = true;
-                } else {
-                    if (current.kind == token::Kind::Semicolon or
-                        current.kind == token::Kind::Eof) and depth == 0 {
-                        return false;
-                    }
-                }
-            }
-        }
-        cursor = cursor + 1;
-    }
-    return false;
-}
-
-/// Reports whether a token can name an aggregate constructor, the Go
-/// `canOpenAggregateLiteral`.
-fn can_open_aggregate_literal(kind: token::Kind) -> bool {
-    return kind == token::Kind::Ident or kind == token::Kind::Gt;
-}
-
-/// Distinguishes declaration and control-flow bodies, the Go
-/// `braceStartsBody`.
-fn brace_starts_body(
-    tokens: &array::Array<token::Token>,
-    index: i64
-) -> bool {
-    if opens_error_set_block(tokens, index) {
-        return true;
-    }
-    var cursor = index - 1;
-    while cursor >= 0 {
-        if tokens.at(cursor) |current| {
-            if current.kind == token::Kind::Function or
-                current.kind == token::Kind::Struct or
-                current.kind == token::Kind::Enum or
-                current.kind == token::Kind::Union or
-                current.kind == token::Kind::Contract or
-                current.kind == token::Kind::Impl or
-                current.kind == token::Kind::If or
-                current.kind == token::Kind::Else or
-                current.kind == token::Kind::While or
-                current.kind == token::Kind::For or
-                current.kind == token::Kind::Match {
-                return true;
-            }
-            if current.kind == token::Kind::Ident {
-                let literal = current.literal.as_bytes();
-                if mem::equal_bytes(literal, "test") {
-                    return true;
-                }
-            }
-            if current.kind == token::Kind::LBrace or
-                current.kind == token::Kind::RBrace or
-                current.kind == token::Kind::Semicolon {
-                return false;
-            }
-        }
-        cursor = cursor - 1;
-    }
-    return false;
-}
-
 /// Reports whether a closing brace wants a newline, the Go
 /// `rbraceWantsNewline`.
 fn rbrace_wants_newline(next: token::Kind) -> bool {
@@ -1277,9 +1266,12 @@ fn (self: &var Builder) write_string_literal(value: []u8) -> !void {
 }
 
 /// Writes a multiline literal, the Go `emitMultilineString`.
-fn (self: &var Builder) emit_multiline_string(current: &token::Token) -> !void {
+fn (self: &var Builder) emit_multiline_string(
+    current: &token::Token,
+    comments: &array::Array<LineComment>
+) -> !void {
     if !self.at_line_start {
-        try self.out.append_byte(self.allocator, cast<u8>(10));
+        try self.newline(comments);
     }
     let literal = current.literal.as_bytes();
     var start = 0;
@@ -1340,9 +1332,25 @@ fn (self: &Builder) should_insert_space(
     if current.kind == token::Kind::LParen {
         return self.paren_takes_space(tokens, generic);
     }
-    if self.attached_token_hugs_left(current.kind, generic) {
+    if self.attached_token_hugs_left(current.kind, generic) or self.label_hugs_colon(tokens) {
         return false;
     }
+    if current.kind == token::Kind::LBrace and self.stack_buffer_brace(tokens) {
+        return false;
+    }
+    // `break :outer` spaces the colon off the keyword and hugs the label.
+    if current.kind == token::Kind::Colon and label_reference(self.prev_kind) {
+        return true;
+    }
+    return self.operator_spacing(current, tokens);
+}
+
+/// Decides the space between two tokens by their kinds alone, the Go
+/// `operatorSpacing`, once the forms that override kinds have had their say.
+fn (self: &Builder) operator_spacing(
+    current: &token::Token,
+    tokens: &array::Array<token::Token>
+) -> bool {
     if no_space_before(current.kind) {
         return false;
     }
@@ -1362,6 +1370,36 @@ fn (self: &Builder) should_insert_space(
     return true;
 }
 
+/// Reports whether the `:` just written names a loop after `break` or
+/// `continue`, the Go `labelHugsColon`.
+fn (self: &Builder) label_hugs_colon(tokens: &array::Array<token::Token>) -> bool {
+    return self.prev_kind == token::Kind::Colon and self.prev_index > 0 and
+        label_reference(kind_at(tokens, self.prev_index - 1));
+}
+
+/// Reports the keywords whose `:label` names a loop, the Go `labelReference`.
+fn label_reference(kind: token::Kind) -> bool {
+    return kind == token::Kind::Break or kind == token::Kind::Continue;
+}
+
+/// Returns the kind of the token at index, or Illegal past the end.
+fn kind_at(tokens: &array::Array<token::Token>, index: i64) -> token::Kind {
+    if tokens.at(index) |current| {
+        return current.kind;
+    }
+    return token::Kind::Illegal;
+}
+
+/// Reports whether the `{` about to be written opens a `[N]u8{}` stack
+/// buffer, whose brace hugs the type, the Go `stackBufferBrace`.
+fn (self: &Builder) stack_buffer_brace(tokens: &array::Array<token::Token>) -> bool {
+    let i = self.prev_index;
+    return self.prev_kind == token::Kind::Ident and i >= 3 and
+        kind_at(tokens, i - 1) == token::Kind::RBracket and
+        kind_at(tokens, i - 2) == token::Kind::Int and
+        kind_at(tokens, i - 3) == token::Kind::LBracket;
+}
+
 /// Distinguishes receiver/group parentheses from calls, the Go
 /// `parenTakesSpace`.
 fn (self: &Builder) paren_takes_space(
@@ -1370,6 +1408,14 @@ fn (self: &Builder) paren_takes_space(
 ) -> bool {
     if self.prev_kind == token::Kind::Function {
         return self.function_opens_declaration(tokens);
+    }
+    // A sign hugs its group, `-(x)`; a subtraction or a bitwise and keeps
+    // the space a binary operator has.
+    if self.prev_kind == token::Kind::Minus {
+        return !self.sign_minus(tokens);
+    }
+    if self.prev_kind == token::Kind::Amp {
+        return self.binary_amp(tokens);
     }
     if self.prev_kind == token::Kind::Ident or
         self.prev_kind == token::Kind::RParen or

@@ -4,14 +4,123 @@ import (
 	"testing"
 )
 
-// TestFormatHelloIsMultiLine lays out a one-line function across multiple lines.
-func TestFormatHelloIsMultiLine(t *testing.T) {
-	src := `fn main() { print("hello, kizu"); }`
-	want := "fn main() {\n" +
-		"    print(\"hello, kizu\");\n" +
-		"}\n"
+// TestFormatOneLineBodyStaysOnItsLine settles the spacing inside a block the
+// author closed on its opening line and leaves the line break to the author.
+func TestFormatOneLineBodyStaysOnItsLine(t *testing.T) {
+	src := `fn main(){print("hello, kizu");return;}`
+	want := "fn main() { print(\"hello, kizu\"); return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(hello):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got := Format(want); got != want {
+		t.Fatalf("Format(hello idempotent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatOneLineExpressionBlocksStayOnTheirLine keeps the compact forms
+// SPEC writes: an if expression, a match, a match arm with an empty body.
+func TestFormatOneLineExpressionBlocksStayOnTheirLine(t *testing.T) {
+	src := "fn pick(color: Color, count: ?i64) -> i64 {\n" +
+		"    let doubled = if count |n| { n * 2 } else { 0 };\n" +
+		"    let base = match color { Red => 1, Green => 2 };\n" +
+		"    match color {\n" +
+		"        Red => {},\n" +
+		"        Green => { print(base); },\n" +
+		"    }\n" +
+		"    return doubled + base;\n" +
+		"}\n"
+	if got := Format(src); got != src {
+		t.Fatalf("Format(one-line blocks):\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
+// TestFormatKeepsOneBlankLineBetweenStatements keeps a blank line the author
+// put between statements, collapses several to one, and drops one that
+// follows the opening brace or precedes the closing one.
+func TestFormatKeepsOneBlankLineBetweenStatements(t *testing.T) {
+	src := "fn main() {\n" +
+		"\n" +
+		"    let a = 1;\n" +
+		"\n" +
+		"\n" +
+		"    let b = 2;\n" +
+		"    if a {\n" +
+		"        use(b);\n" +
+		"    }\n" +
+		"\n" +
+		"    return;\n" +
+		"\n" +
+		"}\n"
+	want := "fn main() {\n" +
+		"    let a = 1;\n" +
+		"\n" +
+		"    let b = 2;\n" +
+		"    if a {\n" +
+		"        use(b);\n" +
+		"    }\n" +
+		"\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(blank lines):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got := Format(want); got != want {
+		t.Fatalf("Format(blank lines idempotent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatExternDeclarationEndsItsLine keeps the declaration after an
+// extern one, which has no `;`, at the left margin.
+func TestFormatExternDeclarationEndsItsLine(t *testing.T) {
+	src := "extern \"c\" fn raw() -> u8\n" +
+		"extern \"c\" fn maybe() -> ?ptr<const u8>\n" +
+		"\n" +
+		"// reads one\n" +
+		"fn read() -> u8 {\n" +
+		"    return raw();\n" +
+		"}\n"
+	if got := Format(src); got != src {
+		t.Fatalf("Format(extern):\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
+// TestFormatStackBufferBraceHugsType writes `[N]u8{}` the way SPEC does,
+// while an aggregate literal keeps the space before its brace.
+func TestFormatStackBufferBraceHugsType(t *testing.T) {
+	src := "fn main() {\n" +
+		"    var buf = [8]u8 {};\n" +
+		"    let p = Point{};\n" +
+		"}\n"
+	want := "fn main() {\n" +
+		"    var buf = [8]u8{};\n" +
+		"    let p = Point {};\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(stack buffer):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatLabelReferenceHugsName writes a loop label as `outer:` where it
+// is declared and `:outer` where `break` or `continue` names it (SPEC §6.10).
+func TestFormatLabelReferenceHugsName(t *testing.T) {
+	src := "fn main() {\n" +
+		"    outer : while x {\n" +
+		"        while y {\n" +
+		"            break : outer;\n" +
+		"            continue:outer;\n" +
+		"        }\n" +
+		"    }\n" +
+		"}\n"
+	want := "fn main() {\n" +
+		"    outer: while x {\n" +
+		"        while y {\n" +
+		"            break :outer;\n" +
+		"            continue :outer;\n" +
+		"        }\n" +
+		"    }\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(labels):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
@@ -25,7 +134,7 @@ func TestFormatPreservesAlreadyFormatted(t *testing.T) {
 
 // TestFormatErrDeferCleanup checks errdefer lays out like a statement keyword.
 func TestFormatErrDeferCleanup(t *testing.T) {
-	src := `fn build(allocator: Allocator) -> !void {errdefer values.deinit(allocator);return;}`
+	src := "fn build(allocator: Allocator) -> !void {errdefer values.deinit(allocator);\nreturn;}"
 	want := "fn build(allocator: Allocator) -> !void {\n" +
 		"    errdefer values.deinit(allocator);\n" +
 		"    return;\n" +
@@ -48,13 +157,9 @@ func TestFormatIsIdempotent(t *testing.T) {
 // TestFormatTopLevelBlankLineSeparator checks a blank line separates top-level declarations.
 func TestFormatTopLevelBlankLineSeparator(t *testing.T) {
 	src := `fn a() { return; } fn b() { return; }`
-	want := "fn a() {\n" +
-		"    return;\n" +
-		"}\n" +
+	want := "fn a() { return; }\n" +
 		"\n" +
-		"fn b() {\n" +
-		"    return;\n" +
-		"}\n"
+		"fn b() { return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(two fns):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -63,9 +168,7 @@ func TestFormatTopLevelBlankLineSeparator(t *testing.T) {
 // TestFormatUnsafeFnDeclaration keeps the unsafe marker on the declaration.
 func TestFormatUnsafeFnDeclaration(t *testing.T) {
 	src := `unsafe fn raw(){return;}`
-	want := "unsafe fn raw() {\n" +
-		"    return;\n" +
-		"}\n"
+	want := "unsafe fn raw() { return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(unsafe fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -74,9 +177,7 @@ func TestFormatUnsafeFnDeclaration(t *testing.T) {
 // TestFormatUnsafeExpression keeps the unsafe marker on the expression it covers.
 func TestFormatUnsafeExpression(t *testing.T) {
 	src := `fn read(p:ptr<u8>)->u8{return unsafe ptr_read(p);}`
-	want := "fn read(p: ptr<u8>) -> u8 {\n" +
-		"    return unsafe ptr_read(p);\n" +
-		"}\n"
+	want := "fn read(p: ptr<u8>) -> u8 { return unsafe ptr_read(p); }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(unsafe expr):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -86,9 +187,7 @@ func TestFormatUnsafeExpression(t *testing.T) {
 func TestFormatPreservesFunctionLineComment(t *testing.T) {
 	src := "// explain main\nfn main(){return;}\n"
 	want := "// explain main\n" +
-		"fn main() {\n" +
-		"    return;\n" +
-		"}\n"
+		"fn main() { return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(commented fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -98,9 +197,7 @@ func TestFormatPreservesFunctionLineComment(t *testing.T) {
 func TestFormatPreservesFunctionDocComment(t *testing.T) {
 	src := "/// explain main\nfn main(){return;}\n"
 	want := "/// explain main\n" +
-		"fn main() {\n" +
-		"    return;\n" +
-		"}\n"
+		"fn main() { return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(doc commented fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -111,9 +208,7 @@ func TestFormatPreservesFunctionDocComment(t *testing.T) {
 func TestFormatPreservesMethodDocComment(t *testing.T) {
 	src := "/// Advances.\nfn(self: &var Parser)advance()->void{return;}\n"
 	want := "/// Advances.\n" +
-		"fn (self: &var Parser) advance() -> void {\n" +
-		"    return;\n" +
-		"}\n"
+		"fn (self: &var Parser) advance() -> void { return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(doc commented method):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -140,13 +235,9 @@ func TestFormatPreservesTypeMemberDocComments(t *testing.T) {
 // TestFormatKeepsFunctionLineCommentAttached keeps doc comments with following functions.
 func TestFormatKeepsFunctionLineCommentAttached(t *testing.T) {
 	src := "fn helper(){return;}\n// explain main\nfn main(){return;}\n"
-	want := "fn helper() {\n" +
-		"    return;\n" +
-		"}\n" +
+	want := "fn helper() { return; }\n" +
 		"// explain main\n" +
-		"fn main() {\n" +
-		"    return;\n" +
-		"}\n"
+		"fn main() { return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(comment after fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -155,14 +246,10 @@ func TestFormatKeepsFunctionLineCommentAttached(t *testing.T) {
 // TestFormatPreservesBlankLineBeforeTopLevelComment keeps section comments separated.
 func TestFormatPreservesBlankLineBeforeTopLevelComment(t *testing.T) {
 	src := "fn helper(){return;}\n\n// color choices\nenum Color{Red}\n"
-	want := "fn helper() {\n" +
-		"    return;\n" +
-		"}\n" +
+	want := "fn helper() { return; }\n" +
 		"\n" +
 		"// color choices\n" +
-		"enum Color {\n" +
-		"    Red,\n" +
-		"}\n"
+		"enum Color { Red }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(blank before comment):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -171,14 +258,10 @@ func TestFormatPreservesBlankLineBeforeTopLevelComment(t *testing.T) {
 // TestFormatPreservesBlankLineAfterTopLevelComment keeps section comments detached.
 func TestFormatPreservesBlankLineAfterTopLevelComment(t *testing.T) {
 	src := "fn helper(){return;}\n// color choices\n\nenum Color{Red}\n"
-	want := "fn helper() {\n" +
-		"    return;\n" +
-		"}\n" +
+	want := "fn helper() { return; }\n" +
 		"// color choices\n" +
 		"\n" +
-		"enum Color {\n" +
-		"    Red,\n" +
-		"}\n"
+		"enum Color { Red }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(blank after comment):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -194,17 +277,20 @@ fn main(){return;}`
 		"import app::lexer;\n" +
 		"import app::parser;\n" +
 		"\n" +
-		"fn main() {\n" +
-		"    return;\n" +
-		"}\n"
+		"fn main() { return; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(imports):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
-// TestFormatEnumKeepsTrailingComma checks enum declarations prefer trailing commas.
+// TestFormatEnumKeepsTrailingComma checks a multi-line enum declaration ends
+// its last variant with a comma, while a one-line one stays as written.
 func TestFormatEnumKeepsTrailingComma(t *testing.T) {
-	src := "enum Color { Red, Green }\n"
+	compact := "enum Color { Red, Green }\n"
+	if got := Format(compact); got != compact {
+		t.Fatalf("enum one line:\n--- got ---\n%s\n--- want ---\n%s", got, compact)
+	}
+	src := "enum Color {\n    Red, Green\n}\n"
 	want := "enum Color {\n" +
 		"    Red, Green,\n" +
 		"}\n"
@@ -238,22 +324,81 @@ func TestFormatStructKeepsTrailingComma(t *testing.T) {
 	}
 }
 
-// TestFormatTrailingCommaDroppedBeforeClose checks that `,}` becomes `}` in a
-// struct literal, where the comma is not part of the declaration style.
-func TestFormatTrailingCommaDroppedBeforeClose(t *testing.T) {
-	src := "fn main() {\n    let p = Point {\n        x: 1,\n        y: 2,\n    };\n}\n"
-	want := "fn main() {\n    let p = Point {\n        x: 1,\n        y: 2\n    };\n}\n"
+// TestFormatTrailingCommaStaysAsWritten never removes a comma the author
+// wrote before a closer, and adds one only after the last entry of a
+// multi-line declaration block.
+func TestFormatTrailingCommaStaysAsWritten(t *testing.T) {
+	src := "fn choose(value: i64,) -> i64 {\n" +
+		"    let p = Point { x: 1, y: 2, };\n" +
+		"    let q = Point {\n" +
+		"        x: 1,\n" +
+		"        y: 2,\n" +
+		"    };\n" +
+		"    return descend(\n" +
+		"        q,\n" +
+		"        value - 1,\n" +
+		"    ) + choose(1,);\n" +
+		"}\n"
+	if got := Format(src); got != src {
+		t.Fatalf("trailing comma:\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
+// TestFormatTrailingCommentStaysOnItsLine keeps a comment written after code
+// at the end of that code's line, with the spaces the author put before it,
+// while a comment on its own line stays on its own line.
+func TestFormatTrailingCommentStaysOnItsLine(t *testing.T) {
+	src := "fn main() {\n" +
+		"    let a = 1;    // margin note\n" +
+		"    // own line\n" +
+		"    if a { // opens\n" +
+		"        use(a);\n" +
+		"    } // closes\n" +
+		"    call(a, // first\n" +
+		"        a);\n" +
+		"}\n" +
+		"// last\n"
+	if got := Format(src); got != src {
+		t.Fatalf("trailing comment:\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
+// TestFormatStatementArmKeepsItsComma keeps `expr;,` together: the comma
+// that ends a match arm whose body is one statement.
+func TestFormatStatementArmKeepsItsComma(t *testing.T) {
+	src := "fn main() {\n" +
+		"    match value {\n" +
+		"        Item(v) => use(v);,\n" +
+		"        None => {},\n" +
+		"    }\n" +
+		"}\n"
+	if got := Format(src); got != src {
+		t.Fatalf("statement arm:\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
+// TestFormatSignAndBitwiseAndBeforeParen hugs a sign to its group and keeps
+// the space after a binary operator.
+func TestFormatSignAndBitwiseAndBeforeParen(t *testing.T) {
+	src := "fn main() {\n" +
+		"    let a = - (2.0) == 0.0 - (2.0);\n" +
+		"    let b = bits &((1 << n) - 1);\n" +
+		"    let c = &(x);\n" +
+		"}\n"
+	want := "fn main() {\n" +
+		"    let a = -(2.0) == 0.0 - (2.0);\n" +
+		"    let b = bits & ((1 << n) - 1);\n" +
+		"    let c = &(x);\n" +
+		"}\n"
 	if got := Format(src); got != want {
-		t.Fatalf("trailing comma:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+		t.Fatalf("paren spacing:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
 // TestFormatGenericBracketsTight checks generic `<T>` keeps no surrounding spaces.
 func TestFormatGenericBracketsTight(t *testing.T) {
-	src := `fn main() { let a = std::array::new<i64>(x); }`
-	want := "fn main() {\n" +
-		"    let a = std::array::new<i64>(x);\n" +
-		"}\n"
+	src := `fn main() { let a = std :: array :: new < i64 > (x); }`
+	want := "fn main() { let a = std::array::new<i64>(x); }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("generic brackets:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -407,9 +552,7 @@ func TestFormatPostfixIndexAndComparisonGroup(t *testing.T) {
 // error set appears on its left, while the return arrow remains separated.
 func TestFormatNamedErrorUnionHugsBothTypes(t *testing.T) {
 	src := "fn read() -> ReadError ! []u8 { return Error::Closed; }"
-	want := "fn read() -> ReadError![]u8 {\n" +
-		"    return Error::Closed;\n" +
-		"}\n"
+	want := "fn read() -> ReadError![]u8 { return Error::Closed; }\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(named error union):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -500,8 +643,8 @@ func TestFormatKeepsSameLineAggregateLiteralCompact(t *testing.T) {
 // TestFormatTaggedDeclarationsKeepTrailingComma applies the same list style
 // to error names and union variants that enums already use.
 func TestFormatTaggedDeclarationsKeepTrailingComma(t *testing.T) {
-	src := "error ReadError { Closed, Invalid }\n" +
-		"union Value { Int(i64), None }\n"
+	src := "error ReadError {\n    Closed, Invalid\n}\n" +
+		"union Value {\n    Int(i64), None\n}\n"
 	want := "error ReadError {\n" +
 		"    Closed, Invalid,\n" +
 		"}\n" +
@@ -518,7 +661,7 @@ func TestFormatTaggedDeclarationsKeepTrailingComma(t *testing.T) {
 // the `error Name { ... }` declaration introducer.
 func TestFormatMethodNamedErrorKeepsNormalBody(t *testing.T) {
 	src := "struct Diagnostic {}\n" +
-		"fn (self: &Diagnostic) error() -> void { return; }\n"
+		"fn (self: &Diagnostic) error() -> void {\n    return;\n}\n"
 	want := "struct Diagnostic {}\n" +
 		"\n" +
 		"fn (self: &Diagnostic) error() -> void {\n" +
@@ -612,9 +755,7 @@ func TestFormatBitwiseAndShiftOperators(t *testing.T) {
 		"    let r = &x;\n" +
 		"    let f = 1.5 - 2.5e-3;\n" +
 		"    let nested = array::new<array::Array<i64>>(allocator);\n" +
-		"    if lookup(x) |value, extra| {\n" +
-		"        print(value);\n" +
-		"    }\n" +
+		"    if lookup(x) |value, extra| { print(value); }\n" +
 		"}\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(bitwise):\n--- got ---\n%s\n--- want ---\n%s", got, want)
