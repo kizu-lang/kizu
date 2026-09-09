@@ -1,0 +1,454 @@
+// The RFC 1951 decoder. A deflate stream is a run of blocks, each stored as
+// it is, coded with the fixed Huffman code, or coded with a code the block
+// itself describes. A coded block is literals and back-references: a length
+// and a distance that name bytes already written.
+//
+// The decoder takes the whole stream as bytes in hand and appends what it
+// reads to a String the caller owns. It is written to be total: every loop
+// either consumes an input bit, appends an output byte, or returns, so no
+// input keeps it running longer than the input's bits and the output's
+// ceiling allow. Bytes are read through checked indexing and the output
+// through `append`, so a wrong step in here is a trap, never a write past a
+// buffer. What the stream can get wrong is reported, not trapped: a block
+// type no stream defines, a set of code lengths no prefix code can carry, a
+// distance before the start of the output, a stored length whose complement
+// disagrees are `Malformed`; input that ends first is `Truncated`.
+//
+// The structure follows the reference decoder in RFC 1951's own terms: a
+// canonical code is a count of codes per length and the symbols in code
+// order, and decoding reads a bit at a time until the code so far falls in
+// the range of codes of that length. A lookup table would decode faster;
+// this shape is the one whose every step is checkable against the RFC.
+
+// Bits is the reader's position in the input. The input itself is passed
+// alongside rather than held here, so the state carries no view and is lent
+// `&var` without tying it to the bytes.
+struct Bits {
+    // The next unread byte.
+    pos: i64,
+    // Bits taken from the input but not yet handed out, least significant
+    // first. Fewer than 8 remain after every `take`, so they are always the
+    // tail of the byte before `pos`.
+    buf: i64,
+    count: i64,
+}
+
+// take hands out the next `n` bits (n at most 16) as an integer, least
+// significant bit first, the way deflate packs everything but Huffman codes.
+fn take(input: []u8, bits: &var std::compress::Bits, n: i64) -> std::compress::Error!i64 {
+    while bits.count < n {
+        if bits.pos >= std::mem::len(input) {
+            return std::compress::Error::Truncated;
+        }
+        bits.buf = bits.buf | cast<i64>(input[bits.pos]) << bits.count;
+        bits.pos = bits.pos + 1;
+        bits.count = bits.count + 8;
+    }
+    let value = bits.buf & ((1 << n) - 1);
+    bits.buf = bits.buf >> n;
+    bits.count = bits.count - n;
+    return value;
+}
+
+// One stack buffer holds every table a block needs, so decoding allocates
+// nothing but its output. The regions, as byte offsets; a `u16` region holds
+// its values as two bytes, low first.
+//
+//   len_count     16 x u16   literal/length code: codes of each length
+//   len_symbol   288 x u16   literal/length code: symbols in code order
+//   dist_count    16 x u16   distance code: codes of each length
+//   dist_symbol   32 x u16   distance code: symbols in code order
+//   lengths      320 x u8    code lengths as a dynamic block lists them
+//   offsets       16 x u16   `build`'s scratch: next slot per length
+fn len_count() -> i64 { return 0; }
+fn len_symbol() -> i64 { return 32; }
+fn dist_count() -> i64 { return 608; }
+fn dist_symbol() -> i64 { return 640; }
+fn lengths() -> i64 { return 704; }
+fn offsets() -> i64 { return 1024; }
+
+fn get16(scratch: []u8, region: i64, index: i64) -> i64 {
+    let at = region + index * 2;
+    return cast<i64>(scratch[at]) | cast<i64>(scratch[at + 1]) << 8;
+}
+
+fn put16(scratch: &var []u8, region: i64, index: i64, value: i64) -> void {
+    let at = region + index * 2;
+    scratch[at] = cast<u8>(value & 0xFF);
+    scratch[at + 1] = cast<u8>(value >> 8);
+    return;
+}
+
+// build turns the `n` code lengths at `lengths_at` into the canonical code
+// of RFC 1951 §3.2.2: `count_at` gets how many codes have each length,
+// `symbol_at` the symbols sorted by code. It returns how much of the code
+// space the lengths leave unused: 0 for a complete code, more for an
+// incomplete one. Lengths that claim more codes than a prefix code has room
+// for describe no code at all and are Malformed.
+//
+// Every index into the tables is bounded by construction: a length is at
+// most 15, a slot at most the count of nonzero lengths, and the code space
+// check keeps the counts consistent with the slots.
+fn build(
+    scratch: &var []u8,
+    count_at: i64,
+    symbol_at: i64,
+    lengths_at: i64,
+    n: i64
+) -> std::compress::Error!i64 {
+    for 0..16 |len| {
+        put16(scratch, count_at, len, 0);
+    }
+    for 0..n |sym| {
+        let len = cast<i64>(scratch[lengths_at + sym]);
+        let seen = get16(scratch, count_at, len);
+        put16(scratch, count_at, len, seen + 1);
+    }
+
+    var left = 1;
+    for 1..16 |len| {
+        left = left << 1;
+        left = left - get16(scratch, count_at, len);
+        if left < 0 {
+            return std::compress::Error::Malformed;
+        }
+    }
+
+    put16(scratch, offsets(), 1, 0);
+    for 1..15 |len| {
+        let first = get16(scratch, offsets(), len);
+        let here = get16(scratch, count_at, len);
+        put16(scratch, offsets(), len + 1, first + here);
+    }
+    for 0..n |sym| {
+        let len = cast<i64>(scratch[lengths_at + sym]);
+        if len != 0 {
+            let slot = get16(scratch, offsets(), len);
+            put16(scratch, symbol_at, slot, sym);
+            put16(scratch, offsets(), len, slot + 1);
+        }
+    }
+    return left;
+}
+
+// single_code reports the one incomplete code deflate allows: `n` symbols of
+// which all but one have no code and that one is a single bit. A stream
+// that uses one distance, or one literal, is written this way.
+fn single_code(scratch: []u8, count_at: i64, n: i64) -> bool {
+    return n == get16(scratch, count_at, 0) + get16(scratch, count_at, 1);
+}
+
+// decode reads one symbol. Huffman codes are packed most significant bit
+// first, so the code grows a bit at a time and is complete as soon as it
+// falls under the count of codes of its length: canonical codes of one
+// length are consecutive, and `first` is the first of them.
+fn decode(
+    input: []u8,
+    bits: &var std::compress::Bits,
+    scratch: []u8,
+    count_at: i64,
+    symbol_at: i64
+) -> std::compress::Error!i64 {
+    var code = 0;
+    var first = 0;
+    var index = 0;
+    for 1..16 |len| {
+        code = code | try take(input, bits, 1);
+        let count = get16(scratch, count_at, len);
+        if code - count < first {
+            return get16(scratch, symbol_at, index + (code - first));
+        }
+        index = index + count;
+        first = first + count;
+        first = first << 1;
+        code = code << 1;
+    }
+    return std::compress::Error::Malformed;
+}
+
+// The length and distance tables of RFC 1951 §3.2.5, as the rule they
+// follow rather than as lists. Length codes 0..7 are lengths 3..10 with no
+// extra bits, and 28 is 258; the ones between come in groups of four, group
+// `e` counting by 2^e from 4 * 2^e + 3. Distance codes 0..3 are distances
+// 1..4; the rest come in pairs, pair `e` counting by 2^e from 2 * 2^e + 1.
+fn length_extra(code: i64) -> i64 {
+    if code < 8 or code == 28 {
+        return 0;
+    }
+    return (code - 4) / 4;
+}
+
+fn length_base(code: i64) -> i64 {
+    if code < 8 {
+        return code + 3;
+    }
+    if code == 28 {
+        return 258;
+    }
+    let extra = length_extra(code);
+    return (4 << extra) + 3 + ((code % 4) << extra);
+}
+
+fn distance_extra(code: i64) -> i64 {
+    if code < 4 {
+        return 0;
+    }
+    return (code - 2) / 2;
+}
+
+fn distance_base(code: i64) -> i64 {
+    if code < 4 {
+        return code + 1;
+    }
+    let extra = distance_extra(code);
+    return (2 << extra) + 1 + ((code % 2) << extra);
+}
+
+// code_length_order is the order a dynamic block lists the lengths of its
+// code-length code in: 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13,
+// 2, 14, 1, 15 (RFC 1951 §3.2.7). After the first four it walks outward
+// from 8, alternating up and down.
+fn code_length_order(index: i64) -> i64 {
+    if index < 3 {
+        return 16 + index;
+    }
+    let step = index - 3;
+    if step == 0 {
+        return 0;
+    }
+    if step % 2 == 1 {
+        return 8 + (step - 1) / 2;
+    }
+    return 8 - step / 2;
+}
+
+// room refuses output past the ceiling. `cap` is the ceiling in bytes or
+// -1, and `base` the output's length when decoding began: the ceiling is on
+// what this call appends, not on what the caller's buffer already held.
+fn room(out: &std::string::String, cap: i64, base: i64, n: i64) -> std::compress::Error!void {
+    if cap >= 0 and out.len() - base + n > cap {
+        return std::compress::Error::LimitExceeded;
+    }
+    return;
+}
+
+fn byte_of(out: &std::string::String, index: i64) -> u8 {
+    let view = out.as_bytes();
+    return view[index];
+}
+
+// inflate_stream reads blocks until the one marked final. It returns with
+// `bits.pos` on the byte after the last one the stream used; whatever bits
+// remain of that byte are the stream's padding.
+fn inflate_stream(
+    allocator: Allocator,
+    input: []u8,
+    bits: &var std::compress::Bits,
+    out: &var std::string::String,
+    cap: i64,
+    base: i64
+) -> std::compress::Failure!void {
+    var scratch = [1056]u8{};
+    let tables = scratch.as_mut_bytes();
+    var final = 0;
+    while final == 0 {
+        final = try take(input, bits, 1);
+        let kind = try take(input, bits, 2);
+        if kind == 3 {
+            return std::compress::Error::Malformed;
+        }
+        if kind == 0 {
+            try stored(allocator, input, bits, out, cap, base);
+        }
+        if kind == 1 {
+            try fixed_tables(tables);
+            try codes(allocator, input, bits, tables, out, cap, base);
+        }
+        if kind == 2 {
+            try dynamic_tables(input, bits, tables);
+            try codes(allocator, input, bits, tables, out, cap, base);
+        }
+    }
+    return;
+}
+
+// stored copies a block written as it is: after the block header the rest
+// of the byte is padding, then the length and its one's complement, then
+// the bytes.
+fn stored(
+    allocator: Allocator,
+    input: []u8,
+    bits: &var std::compress::Bits,
+    out: &var std::string::String,
+    cap: i64,
+    base: i64
+) -> std::compress::Failure!void {
+    bits.buf = 0;
+    bits.count = 0;
+    let end = std::mem::len(input);
+    if bits.pos + 4 > end {
+        return std::compress::Error::Truncated;
+    }
+    let length = cast<i64>(input[bits.pos]) | cast<i64>(input[bits.pos + 1]) << 8;
+    let complement = cast<i64>(input[bits.pos + 2]) | cast<i64>(input[bits.pos + 3]) << 8;
+    if length != (complement ^ 0xFFFF) {
+        return std::compress::Error::Malformed;
+    }
+    bits.pos = bits.pos + 4;
+    if bits.pos + length > end {
+        return std::compress::Error::Truncated;
+    }
+    try room(out, cap, base, length);
+    try out.append_bytes(allocator, input[bits.pos..bits.pos + length]);
+    bits.pos = bits.pos + length;
+    return;
+}
+
+// fixed_tables builds the code every stream shares (RFC 1951 §3.2.6):
+// literals 0..143 are 8 bits, 144..255 are 9, 256..279 are 7, 280..287 are
+// 8, and the 30 distances are 5 bits each.
+fn fixed_tables(scratch: &var []u8) -> std::compress::Error!void {
+    for 0..144 |sym| {
+        scratch[lengths() + sym] = 8;
+    }
+    for 144..256 |sym| {
+        scratch[lengths() + sym] = 9;
+    }
+    for 256..280 |sym| {
+        scratch[lengths() + sym] = 7;
+    }
+    for 280..288 |sym| {
+        scratch[lengths() + sym] = 8;
+    }
+    let _ = try build(scratch, len_count(), len_symbol(), lengths(), 288);
+    for 0..30 |sym| {
+        scratch[lengths() + sym] = 5;
+    }
+    let _ = try build(scratch, dist_count(), dist_symbol(), lengths(), 30);
+    return;
+}
+
+// dynamic_tables reads the code a block describes for itself (RFC 1951
+// §3.2.7): the counts of literal/length, distance, and code-length codes,
+// then the code-length code's own lengths, then the literal/length and
+// distance lengths coded with it, with symbols 16..18 repeating a length.
+fn dynamic_tables(
+    input: []u8,
+    bits: &var std::compress::Bits,
+    scratch: &var []u8
+) -> std::compress::Error!void {
+    let literal_count = try take(input, bits, 5) + 257;
+    let distance_count = try take(input, bits, 5) + 1;
+    let code_count = try take(input, bits, 4) + 4;
+    if literal_count > 286 or distance_count > 30 {
+        return std::compress::Error::Malformed;
+    }
+
+    for 0..19 |index| {
+        scratch[lengths() + index] = 0;
+    }
+    for 0..code_count |index| {
+        let length = try take(input, bits, 3);
+        scratch[lengths() + code_length_order(index)] = cast<u8>(length);
+    }
+    // The code-length code is the one code that has to be complete: it has
+    // no single-symbol form, and a gap in it would make some lengths
+    // unreadable.
+    let left = try build(scratch, len_count(), len_symbol(), lengths(), 19);
+    if left != 0 {
+        return std::compress::Error::Malformed;
+    }
+
+    let total = literal_count + distance_count;
+    var index = 0;
+    while index < total {
+        let symbol = try decode(input, bits, scratch, len_count(), len_symbol());
+        if symbol < 16 {
+            scratch[lengths() + index] = cast<u8>(symbol);
+            index = index + 1;
+        } else {
+            var length = cast<u8>(0);
+            var repeat = 0;
+            if symbol == 16 {
+                if index == 0 {
+                    return std::compress::Error::Malformed;
+                }
+                length = scratch[lengths() + index - 1];
+                repeat = 3 + try take(input, bits, 2);
+            }
+            if symbol == 17 {
+                repeat = 3 + try take(input, bits, 3);
+            }
+            if symbol == 18 {
+                repeat = 11 + try take(input, bits, 7);
+            }
+            if index + repeat > total {
+                return std::compress::Error::Malformed;
+            }
+            for 0..repeat |_| {
+                scratch[lengths() + index] = length;
+                index = index + 1;
+            }
+        }
+    }
+
+    // A block with no end-of-block code could only end by running out of
+    // input, which is not an end.
+    if scratch[lengths() + 256] == 0 {
+        return std::compress::Error::Malformed;
+    }
+    let literal_left = try build(scratch, len_count(), len_symbol(), lengths(), literal_count);
+    if literal_left != 0 and !single_code(scratch, len_count(), literal_count) {
+        return std::compress::Error::Malformed;
+    }
+    let distance_left = try build(
+        scratch, dist_count(), dist_symbol(), lengths() + literal_count, distance_count);
+    if distance_left != 0 and !single_code(scratch, dist_count(), distance_count) {
+        return std::compress::Error::Malformed;
+    }
+    return;
+}
+
+// codes reads a coded block's symbols until end-of-block. A literal is one
+// byte; a length symbol names a run to copy from `distance` bytes back in
+// the output, byte by byte so that a run longer than its distance repeats
+// the way RFC 1951 says it does.
+fn codes(
+    allocator: Allocator,
+    input: []u8,
+    bits: &var std::compress::Bits,
+    scratch: []u8,
+    out: &var std::string::String,
+    cap: i64,
+    base: i64
+) -> std::compress::Failure!void {
+    var symbol = try decode(input, bits, scratch, len_count(), len_symbol());
+    while symbol != 256 {
+        if symbol < 256 {
+            try room(out, cap, base, 1);
+            try out.append_byte(allocator, cast<u8>(symbol));
+        } else {
+            // The fixed code has room for 286 and 287, which name no length.
+            let length_code = symbol - 257;
+            if length_code >= 29 {
+                return std::compress::Error::Malformed;
+            }
+            let length = length_base(length_code)
+                + try take(input, bits, length_extra(length_code));
+            let distance_code = try decode(input, bits, scratch, dist_count(), dist_symbol());
+            let distance = distance_base(distance_code)
+                + try take(input, bits, distance_extra(distance_code));
+            // A reference can reach back only into what this stream wrote.
+            if distance > out.len() - base {
+                return std::compress::Error::Malformed;
+            }
+            try room(out, cap, base, length);
+            for 0..length |_| {
+                let byte = byte_of(out, out.len() - distance);
+                try out.append_byte(allocator, byte);
+            }
+        }
+        symbol = try decode(input, bits, scratch, len_count(), len_symbol());
+    }
+    return;
+}

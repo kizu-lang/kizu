@@ -118,6 +118,10 @@ cache-prune:
 backend-matrix:
     go run ./scripts/backend-matrix
 
+# Regenerate the deflate / gzip / zlib streams the std::compress tests read.
+compress-fixtures:
+    go run ./scripts/gen-compress-fixtures
+
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
