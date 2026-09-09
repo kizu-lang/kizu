@@ -2,6 +2,7 @@ import std::fmt;
 import std::io;
 import std::mem;
 import std::net;
+import std::process;
 import std::string;
 import std::testing;
 
@@ -228,6 +229,62 @@ test "cancel stops a parked worker and lets it unwind" {
     future.deinit(allocator);
     testing::expect(job.stopped);
     testing::expect_equal<i64>(0, job.read);
+}
+
+test "a cancel reaches a parked worker while another wait stands" {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let allocator = mem::page_allocator();
+
+    var door = try net::tcp_listen(handle, "127.0.0.1:0");
+    defer door.deinit();
+    var address = try loopback(allocator, try door.local_port());
+    defer address.deinit(allocator);
+    var near = try dial(handle, &address);
+    defer near.deinit();
+    var far = try door.accept(handle);
+    errdefer far.deinit();
+    var other_near = try dial(handle, &address);
+    defer other_near.deinit();
+    var other_far = try door.accept(handle);
+    errdefer other_far.deinit();
+    // The other read has a deadline the loop would otherwise sleep towards.
+    other_far.set_read_deadline(net::deadline_in_millis(5000));
+
+    var job = Waiter {
+        conn: move far,
+        got: string::new(allocator),
+        read: 0,
+        stopped: false,
+    };
+    defer job.deinit(allocator);
+    var future = try io::async<Waiter>(handle, allocator, drink, &var job);
+    var other = Waiter {
+        conn: move other_far,
+        got: string::new(allocator),
+        read: 0,
+        stopped: false,
+    };
+    defer other.deinit(allocator);
+    var patient = try io::async<Waiter>(handle, allocator, drink, &var other);
+    // One turn of the loop, so that both reads are standing in their parks.
+    var counter = Counter { seen: 0 };
+    var tick = try io::async<Counter>(handle, allocator, bump, &var counter);
+    tick.await();
+    tick.deinit(allocator);
+
+    // The cancel is delivered at once, not when the other read's deadline
+    // would have woken the loop.
+    let before = process::monotonic_millis();
+    future.cancel();
+    let waited = process::monotonic_millis() - before;
+    testing::expect(future.finished());
+    future.deinit(allocator);
+    testing::expect(job.stopped);
+    testing::expect(waited < 1000);
+    patient.cancel();
+    patient.deinit(allocator);
 }
 
 test "a parked read still runs out of its deadline" {

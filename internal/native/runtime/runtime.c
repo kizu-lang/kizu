@@ -2797,14 +2797,20 @@ static int kizu_loop_turn(KizuLoop *loop) {
     }
 
     size_t waiting = 0;
+    size_t settled = 0;
     int64_t earliest = KIZU_NET_NO_DEADLINE;
     int64_t now = kizu_monotonic_millis();
     for (size_t i = 0; i < loop->park_count; i += 1) {
-        if (!loop->parks[i].live || loop->parks[i].done) {
+        if (!loop->parks[i].live) {
+            continue;
+        }
+        if (loop->parks[i].done) {
+            settled += 1;
             continue;
         }
         if (loop->parks[i].deadline >= 0 && loop->parks[i].deadline <= now) {
             kizu_loop_settle(loop, i, KIZU_ERR_STD_NET_ERROR_TIMED_OUT);
+            settled += 1;
             continue;
         }
         loop->pfds[waiting].fd = loop->parks[i].fd;
@@ -2820,7 +2826,12 @@ static int kizu_loop_turn(KizuLoop *loop) {
 
     if (waiting > 0) {
         int budget = -1;
-        if (earliest >= 0) {
+        if (settled > 0) {
+            /* A park already settled -- by a cancel, or by its deadline --
+               has a coroutine to resume now. The poll still collects what
+               is ready, but it does not wait for the others' deadlines. */
+            budget = 0;
+        } else if (earliest >= 0) {
             int64_t left = earliest - kizu_monotonic_millis();
             if (left < 0) {
                 left = 0;
