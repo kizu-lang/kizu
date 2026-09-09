@@ -1,0 +1,130 @@
+// A form that carries a file arrives as multipart/form-data: a body cut into
+// parts by a boundary line, each part a small head and its bytes.
+//
+// `boundary_of` reads the boundary out of the request's Content-Type, and
+// `parse_multipart` cuts a body that is already in hand -- `exchange.body`
+// after `accept` -- into owned parts. A part has the field name, the filename
+// when it is a file, its own Content-Type when it said one, and its bytes.
+// A body that ends before its closing boundary is refused, not read as far as
+// it goes.
+//
+// Nothing here opens a socket: these are functions over bytes.
+
+import std::http;
+import std::mem;
+import std::string;
+
+fn main() -> http::Failure!void {
+    let allocator = mem::page_allocator();
+
+    let content_type = "multipart/form-data; boundary=kizu-form";
+    let boundary = http::boundary_of(content_type) orelse return;
+    print(boundary);
+
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try line(allocator, &var body, "--kizu-form");
+    try field_head(allocator, &var body, "title");
+    try line(allocator, &var body, "Quarterly report");
+    try line(allocator, &var body, "--kizu-form");
+    try file_head(allocator, &var body, "attachment", "notes.txt", "text/plain");
+    try line(allocator, &var body, "the bytes of the file");
+    try body.append_bytes(allocator, "--kizu-form--");
+
+    let bytes = body.as_bytes();
+    var form = try http::parse_multipart(allocator, bytes, boundary);
+    defer form.deinit(allocator);
+
+    var index = 0;
+    while form.at(index) |part| {
+        let name = part.name.as_bytes();
+        print(name);
+        if part.filename.len() > 0 {
+            let filename = part.filename.as_bytes();
+            print(filename);
+        } else {
+            print("(a field, not a file)");
+        }
+        if part.content_type.len() > 0 {
+            let content = part.content_type.as_bytes();
+            print(content);
+        } else {
+            print("(no Content-Type of its own)");
+        }
+        let text = part.body.as_bytes();
+        print(text);
+        index = index + 1;
+    }
+
+    // A body cut short is not a shorter form. Everything up to the last
+    // complete boundary line parses, but without the closing one nothing is
+    // handed back.
+    let cut = bytes[0..body.len() - 2];
+    if http::parse_multipart(allocator, cut, boundary) |accepted| {
+        accepted.deinit(allocator);
+        print("a truncated body was accepted");
+    } else |err| {
+        print("a truncated body was refused");
+    }
+    return;
+}
+
+fn line(allocator: Allocator, out: &var string::String, text: []u8) -> http::Failure!void {
+    try out.append_bytes(allocator, text);
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return;
+}
+
+// quoted writes `"text"`. A literal cannot hold a quote, so the quotes are
+// bytes here.
+fn quoted(allocator: Allocator, out: &var string::String, text: []u8) -> http::Failure!void {
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, text);
+    try out.append_byte(allocator, cast<u8>(34));
+    return;
+}
+
+// field_head is the head of a plain field: one Content-Disposition line and
+// the blank line that ends the head.
+fn field_head(allocator: Allocator, out: &var string::String, name: []u8) -> http::Failure!void {
+    try out.append_bytes(allocator, "Content-Disposition: form-data; name=");
+    try quoted(allocator, out, name);
+    try line(allocator, out, "");
+    try line(allocator, out, "");
+    return;
+}
+
+// file_head is the head of a file part: the disposition names the field and
+// the file, and the part says its own Content-Type.
+fn file_head(
+    allocator: Allocator,
+    out: &var string::String,
+    name: []u8,
+    filename: []u8,
+    content_type: []u8
+) -> http::Failure!void {
+    try out.append_bytes(allocator, "Content-Disposition: form-data; name=");
+    try quoted(allocator, out, name);
+    try out.append_bytes(allocator, "; filename=");
+    try quoted(allocator, out, filename);
+    try line(allocator, out, "");
+    try out.append_bytes(allocator, "Content-Type: ");
+    try line(allocator, out, content_type);
+    try line(allocator, out, "");
+    return;
+}
+
+// run
+// features: http multipart error-union
+// output:
+// kizu-form
+// title
+// (a field, not a file)
+// (no Content-Type of its own)
+// Quarterly report
+// attachment
+// notes.txt
+// text/plain
+// the bytes of the file
+// a truncated body was refused

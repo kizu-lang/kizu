@@ -104,7 +104,7 @@ var groups = []featureGroup{
 		"std-fs", "std-path", "std-io", "std-process", "fs", "io",
 		"explicit-io", "read-dir", "real-path", "pure-helper", "stderr"}},
 	{"std::net / http", []string{
-		"net", "http", "routing", "client", "url"}},
+		"net", "http", "routing", "client", "url", "multipart"}},
 	{"async / coro", []string{"async", "evented", "coro", "task-set"}},
 }
 

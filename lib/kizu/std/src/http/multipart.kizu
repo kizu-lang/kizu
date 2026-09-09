@@ -1,0 +1,378 @@
+// multipart/form-data is how a browser posts a form that carries a file: the
+// body is parts separated by a boundary line, and each part is a small head
+// (`Content-Disposition`, maybe `Content-Type`) followed by its bytes
+// (RFC 7578; the framing is RFC 2046's).
+//
+// The parser reads a body that is already in hand -- `exchange.body` after
+// `accept`, or whatever a caller read into a String under a ceiling it named.
+// The parts it hands back are owned copies, the way a Request's fields are:
+// the buffer they were cut from is the caller's to reuse. Nothing is decoded
+// beyond the quoting the head grammar itself defines; a filename is the bytes
+// the client sent, and a part's body is the bytes between its head and the
+// next boundary.
+
+pub struct Part {
+    // The `name` parameter of Content-Disposition. Every part has one: a part
+    // without it is not form data (RFC 7578 §4.2), and the body is refused.
+    pub name: std::string::String,
+    // The `filename` parameter, or empty when the part is a plain field.
+    pub filename: std::string::String,
+    // The part's own Content-Type, or empty when it said none. RFC 7578 reads
+    // an absent one as text/plain; saying nothing and saying text/plain are
+    // different things, so the empty String is kept.
+    pub content_type: std::string::String,
+    pub body: std::string::String,
+}
+
+fn (self: std::http::Part) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
+    self.filename.deinit(allocator);
+    self.content_type.deinit(allocator);
+    self.body.deinit(allocator);
+    return;
+}
+
+// Multipart is the parts of one body, in the order they arrived. A form may
+// repeat a name (a multi-select, several files under one field), so it is a
+// list like Headers, not a map.
+pub struct Multipart {
+    parts: std::array::Array<std::http::Part>,
+}
+
+fn (self: &std::http::Multipart) count() -> i64 {
+    return self.parts.len();
+}
+
+fn (self: &std::http::Multipart) at(index: i64) -> ?&std::http::Part {
+    return self.parts.at(index);
+}
+
+// find is the first part under a name. Field names are what the form's author
+// wrote, so the comparison is exact, not case-folded like a header's.
+fn (self: &std::http::Multipart) find(name: []u8) -> ?&std::http::Part {
+    var index = 0;
+    while self.parts.at(index) |part| {
+        let part_name = part.name.as_bytes();
+        if std::mem::equal_bytes(part_name, name) {
+            return self.parts.at(index);
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: std::http::Multipart) deinit(allocator: Allocator) -> void {
+    self.parts.deinit(allocator);
+    return;
+}
+
+// boundary_of reads the boundary out of a Content-Type value such as
+// `multipart/form-data; boundary=----x`. Null is "this is not a form-data body
+// with a usable boundary": another media type, no boundary parameter, or one
+// outside RFC 2046's grammar. The caller answers that with a status of its
+// own choosing; there is nothing here to parse yet.
+pub fn boundary_of(content_type: []u8) -> ?[]u8 {
+    let length = std::mem::len(content_type);
+    let semicolon = std::http::index_of(content_type, cast<u8>(59), 0) orelse
+        return null;
+    let kind = std::http::trim_ows(content_type[0..semicolon]);
+    if !std::http::equal_ascii_fold(kind, "multipart/form-data") {
+        return null;
+    }
+    let raw = param_of(content_type[semicolon..length], "boundary") orelse
+        return null;
+    if !valid_boundary(raw) {
+        return null;
+    }
+    return raw;
+}
+
+// parse_multipart cuts a body into its parts. The boundary is the one the
+// Content-Type named; a body that does not carry it, a part head that is not
+// form data with a name, or bytes that run out before the closing boundary are
+// `MalformedMultipart`. Anything before the first boundary and after the
+// closing one is preamble and epilogue, which RFC 2046 says to ignore.
+pub fn parse_multipart(
+    allocator: Allocator,
+    body: []u8,
+    boundary: []u8
+) -> std::http::Failure!std::http::Multipart {
+    if !valid_boundary(boundary) {
+        return std::http::Error::MalformedMultipart;
+    }
+    var parts = std::array::new<std::http::Part>(allocator);
+    errdefer parts.deinit(allocator);
+    let length = std::mem::len(body);
+    let dash_length = 2 + std::mem::len(boundary);
+
+    // The CRLF in front of a boundary line belongs to the boundary, except
+    // that the very first one may stand at the start of the body with nothing
+    // in front of it.
+    var cursor = 0;
+    if delimiter_at(body, 0, boundary) {
+        cursor = dash_length;
+    } else {
+        let first = find_delimiter(body, boundary, 0) orelse
+            return std::http::Error::MalformedMultipart;
+        cursor = first + 2 + dash_length;
+    }
+
+    while true {
+        // Behind a boundary line: `--` closes the body; otherwise padding,
+        // then the CRLF that ends the line, then a part.
+        if std::mem::starts_with(body[cursor..length], "--") {
+            break;
+        }
+        while cursor < length and std::http::is_space_or_tab(body[cursor]) {
+            cursor = cursor + 1;
+        }
+        if !starts_with_crlf(body, cursor) {
+            return std::http::Error::MalformedMultipart;
+        }
+        cursor = cursor + 2;
+
+        var part = Part {
+            name: std::string::new(allocator),
+            filename: std::string::new(allocator),
+            content_type: std::string::new(allocator),
+            body: std::string::new(allocator)
+        };
+        errdefer part.deinit(allocator);
+        var named = false;
+        while true {
+            let line_end = std::http::index_of(body, cast<u8>(13), cursor) orelse
+                return std::http::Error::MalformedMultipart;
+            if line_end + 1 >= length or body[line_end + 1] != cast<u8>(10) {
+                return std::http::Error::MalformedMultipart;
+            }
+            if line_end == cursor {
+                cursor = cursor + 2;
+                break;
+            }
+            let line = body[cursor..line_end];
+            if try read_part_field(allocator, &var part, line) {
+                named = true;
+            }
+            cursor = line_end + 2;
+        }
+        if !named {
+            return std::http::Error::MalformedMultipart;
+        }
+        let end = find_delimiter(body, boundary, cursor) orelse
+            return std::http::Error::MalformedMultipart;
+        try part.body.append_bytes(allocator, body[cursor..end]);
+        try parts.append(allocator, move part);
+        cursor = end + 2 + dash_length;
+    }
+    return Multipart { parts: move parts };
+}
+
+// read_part_field reads one head line of a part. Content-Disposition gives
+// the name and filename, Content-Type is kept as the part's own; every other
+// field is ignored, as RFC 7578 §4.8 says to. Answers whether a name arrived.
+fn read_part_field(
+    allocator: Allocator,
+    part: &var std::http::Part,
+    line: []u8
+) -> std::http::Failure!bool {
+    if std::http::is_space_or_tab(line[0]) {
+        return std::http::Error::MalformedMultipart;
+    }
+    let colon = std::http::index_of(line, cast<u8>(58), 0) orelse
+        return std::http::Error::MalformedMultipart;
+    let name = line[0..colon];
+    let value = std::http::trim_ows(line[colon + 1..std::mem::len(line)]);
+    if std::http::equal_ascii_fold(name, "content-disposition") {
+        return try read_disposition(allocator, part, value);
+    }
+    if std::http::equal_ascii_fold(name, "content-type") {
+        part.content_type.clear();
+        try part.content_type.append_bytes(allocator, value);
+        return false;
+    }
+    return false;
+}
+
+// read_disposition takes `form-data; name="a"; filename="b"` apart. The
+// disposition type has to be form-data: a body whose parts say something else
+// is some other multipart, not a form.
+fn read_disposition(
+    allocator: Allocator,
+    part: &var std::http::Part,
+    value: []u8
+) -> std::http::Failure!bool {
+    let length = std::mem::len(value);
+    var kind_end = length;
+    if std::http::index_of(value, cast<u8>(59), 0) |semicolon| {
+        kind_end = semicolon;
+    }
+    let kind = std::http::trim_ows(value[0..kind_end]);
+    if !std::http::equal_ascii_fold(kind, "form-data") {
+        return std::http::Error::MalformedMultipart;
+    }
+    let params = value[kind_end..length];
+    var named = false;
+    if param_of(params, "name") |raw| {
+        try unquote_into(allocator, raw, &var part.name);
+        named = true;
+    }
+    if param_of(params, "filename") |raw| {
+        try unquote_into(allocator, raw, &var part.filename);
+    }
+    return named;
+}
+
+// param_of finds `key=value` in a `; key=value; key="value"` parameter list
+// and answers the value with its quotes taken off. A quoted value may hold `;`
+// and `\"`, so the scan reads the quoting instead of splitting on `;`. Names
+// are case-insensitive, as RFC 9110 has them. Null is "not there", which
+// includes a quote that never closes.
+fn param_of(params: []u8, key: []u8) -> ?[]u8 {
+    let length = std::mem::len(params);
+    var cursor = 0;
+    while cursor < length {
+        while cursor < length and is_param_gap(params[cursor]) {
+            cursor = cursor + 1;
+        }
+        if cursor >= length {
+            break;
+        }
+        let name_start = cursor;
+        while cursor < length and params[cursor] != cast<u8>(61) and params[cursor] != cast<u8>(59) {
+            cursor = cursor + 1;
+        }
+        let name = std::http::trim_ows(params[name_start..cursor]);
+        if cursor >= length or params[cursor] == cast<u8>(59) {
+            continue;
+        }
+        cursor = cursor + 1;
+        while cursor < length and std::http::is_space_or_tab(params[cursor]) {
+            cursor = cursor + 1;
+        }
+        var value_start = cursor;
+        var value_end = cursor;
+        if cursor < length and params[cursor] == cast<u8>(34) {
+            value_start = cursor + 1;
+            cursor = value_start;
+            while cursor < length and params[cursor] != cast<u8>(34) {
+                if params[cursor] == cast<u8>(92) and cursor + 1 < length {
+                    cursor = cursor + 2;
+                } else {
+                    cursor = cursor + 1;
+                }
+            }
+            if cursor >= length {
+                return null;
+            }
+            value_end = cursor;
+            cursor = cursor + 1;
+        } else {
+            while cursor < length and params[cursor] != cast<u8>(59) {
+                cursor = cursor + 1;
+            }
+            value_end = cursor;
+        }
+        if std::http::equal_ascii_fold(name, key) {
+            return std::http::trim_ows(params[value_start..value_end]);
+        }
+    }
+    return null;
+}
+
+fn is_param_gap(byte: u8) -> bool {
+    return byte == cast<u8>(59) or std::http::is_space_or_tab(byte);
+}
+
+// unquote_into copies a parameter value, dropping the backslash of each
+// quoted-pair: `\"` is a quote in the value, which is the one thing the head
+// grammar itself encodes. Nothing else is decoded -- a percent sign is a
+// percent sign.
+fn unquote_into(
+    allocator: Allocator,
+    raw: []u8,
+    out: &var std::string::String
+) -> std::http::Failure!void {
+    out.clear();
+    let length = std::mem::len(raw);
+    var index = 0;
+    while index < length {
+        if raw[index] == cast<u8>(92) and index + 1 < length {
+            index = index + 1;
+        }
+        try out.append_byte(allocator, raw[index]);
+        index = index + 1;
+    }
+    return;
+}
+
+// valid_boundary is RFC 2046's bchars: 1 to 70 of letters, digits,
+// `'()+_,-./:=?` and space, not ending in a space.
+fn valid_boundary(boundary: []u8) -> bool {
+    let length = std::mem::len(boundary);
+    if length == 0 or length > 70 {
+        return false;
+    }
+    if boundary[length - 1] == cast<u8>(32) {
+        return false;
+    }
+    var index = 0;
+    while index < length {
+        if !is_boundary_byte(boundary[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn is_boundary_byte(byte: u8) -> bool {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+        return true;
+    }
+    return byte == cast<u8>(39) or byte == cast<u8>(40) or byte == cast<u8>(41) or
+        byte == cast<u8>(43) or byte == cast<u8>(95) or byte == cast<u8>(44) or
+        byte == cast<u8>(45) or byte == cast<u8>(46) or byte == cast<u8>(47) or
+        byte == cast<u8>(58) or byte == cast<u8>(61) or byte == cast<u8>(63) or
+        byte == cast<u8>(32);
+}
+
+// delimiter_at reports whether `--boundary` stands at `at`.
+fn delimiter_at(body: []u8, at: i64, boundary: []u8) -> bool {
+    let length = std::mem::len(body);
+    if at + 2 > length {
+        return false;
+    }
+    if !std::mem::starts_with(body[at..length], "--") {
+        return false;
+    }
+    return std::mem::starts_with(body[at + 2..length], boundary);
+}
+
+// find_delimiter is the position of the next `CRLF --boundary` at or after
+// `from`. The CRLF is part of what is found: a body that happens to contain
+// `--boundary` in the middle of a line is data, not a boundary.
+fn find_delimiter(body: []u8, boundary: []u8, from: i64) -> ?i64 {
+    let length = std::mem::len(body);
+    var index = from;
+    while index + 2 < length {
+        if starts_with_crlf(body, index) and delimiter_at(body, index + 2, boundary) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn starts_with_crlf(body: []u8, at: i64) -> bool {
+    let length = std::mem::len(body);
+    if at + 2 > length {
+        return false;
+    }
+    return body[at] == cast<u8>(13) and body[at + 1] == cast<u8>(10);
+}
