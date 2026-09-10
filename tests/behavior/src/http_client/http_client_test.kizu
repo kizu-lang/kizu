@@ -1,4 +1,5 @@
 import std::array;
+import std::compress;
 import std::fmt;
 import std::http;
 import std::io;
@@ -191,6 +192,127 @@ test "a written request carries the method, the target and the Host" {
     }
     let body = sent.as_bytes();
     testing::expect_equal<[]u8>("hi", body);
+}
+
+test "a written request carries the caller's fields, and not its framing ones" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit(allocator);
+    var url = try url_for(allocator, pair.port, "/items");
+    defer url.deinit(allocator);
+    var headers = http::headers_new(allocator);
+    defer headers.deinit(allocator);
+    try headers.add(allocator, "Accept-Encoding", "gzip");
+    try headers.add(allocator, "X-Trace", "abc123");
+    try headers.add(allocator, "Content-Type", "text/plain");
+    // The fields that say what the message is are the client's to write,
+    // from the message: a caller's claim about them is dropped, not sent
+    // beside the true one.
+    try headers.add(allocator, "Host", "elsewhere");
+    try headers.add(allocator, "Content-Length", "999");
+    try headers.add(allocator, "Connection", "keep-alive");
+    try pair.client.send_with(
+        handle, allocator, "POST", &url, &headers, "hi", 30000);
+
+    var reply = try wire(allocator, "HTTP/1.1 204 No Content");
+    defer reply.deinit(allocator);
+    let reply_bytes = reply.as_bytes();
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
+    defer request.deinit(allocator);
+
+    if request.headers.find("Accept-Encoding") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("gzip", value);
+    } else {
+        testing::fail("the caller's field was dropped");
+    }
+    if request.headers.find("X-Trace") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("abc123", value);
+    } else {
+        testing::fail("the caller's field was dropped");
+    }
+    if request.headers.find("Content-Type") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("text/plain", value);
+    } else {
+        testing::fail("the content type was dropped");
+    }
+    // Host, the three the caller sent, Content-Length, Connection: nothing
+    // twice.
+    testing::expect_equal<i64>(6, request.headers.count());
+    if request.headers.find("Host") |field| {
+        let host = field.value.as_bytes();
+        testing::expect(mem::starts_with(host, "127.0.0.1:"));
+    } else {
+        testing::fail("the request carried no Host");
+    }
+    if request.headers.find("Content-Length") |field| {
+        let length = field.value.as_bytes();
+        testing::expect_equal<[]u8>("2", length);
+    } else {
+        testing::fail("the request carried no Content-Length");
+    }
+    if request.headers.find("Connection") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("close", value);
+    } else {
+        testing::fail("the request carried no Connection");
+    }
+}
+
+test "a compressed answer is asked for and read back plain" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    var pair = try open_pair(handle, allocator);
+    defer pair.deinit(allocator);
+    var url = try url_for(allocator, pair.port, "/report");
+    defer url.deinit(allocator);
+    var headers = http::headers_new(allocator);
+    defer headers.deinit(allocator);
+    try headers.add(allocator, "Accept-Encoding", "gzip");
+    try pair.client.send_with(
+        handle, allocator, "GET", &url, &headers, "", 30000);
+
+    // The server's side: the request asked for gzip, so the answer is one.
+    var plain = string::new(allocator);
+    defer plain.deinit(allocator);
+    for 0..30 |_| {
+        try plain.append_bytes(allocator, "a line that repeats, and compresses");
+        try plain.append_byte(allocator, 10);
+    }
+    let plain_bytes = plain.as_bytes();
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    try reply.append_bytes(allocator, "HTTP/1.1 200 OK");
+    try crlf(allocator, &var reply);
+    try reply.append_bytes(allocator, "Content-Encoding: gzip");
+    try crlf(allocator, &var reply);
+    try reply.append_bytes(allocator, "Connection: close");
+    try crlf(allocator, &var reply);
+    try crlf(allocator, &var reply);
+    try compress::gzip_into(allocator, plain_bytes, &var reply);
+    let reply_bytes = reply.as_bytes();
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    var request = try answer(handle, allocator, &var pair, reply_bytes, &var sent);
+    defer request.deinit(allocator);
+    testing::expect(http::accepts_encoding(&request.headers, "gzip"));
+
+    var response = try answer_of(
+        handle, allocator, &var pair, "GET", http::default_limits(), 1048576);
+    defer response.deinit(allocator);
+    testing::expect_equal<i64>(200, response.status);
+    let packed = response.body.as_bytes();
+    testing::expect(mem::len(packed) < plain.len() / 4);
+    let text = try http::decode_body(
+        allocator, &response.headers, packed, mem::Limit::Bytes(65536));
+    defer text.deinit(allocator);
+    let got = text.as_bytes();
+    testing::expect_equal<[]u8>(plain_bytes, got);
 }
 
 test "a response with a Content-Length is read to exactly that length" {
