@@ -1,8 +1,8 @@
 # std::compress
 
 deflate(RFC 1951)と、それを運ぶ 2 つの container —— zlib(RFC 1950)と
-gzip(RFC 1952)—— を読みます。HTTP の `Content-Encoding: gzip` と `deflate`
-がこの 2 つです。書く側(圧縮)はまだありません。
+gzip(RFC 1952)—— を読み書きします。HTTP の `Content-Encoding: gzip` と
+`deflate` がこの 2 つです。
 
 ```text
 std::compress::inflate(allocator: Allocator, bytes: []u8, limit: std::mem::Limit) -> Failure!String
@@ -12,6 +12,13 @@ std::compress::inflate_into(allocator: Allocator, bytes: []u8, out: &var String,
 std::compress::gunzip_into(allocator: Allocator, bytes: []u8, out: &var String, limit: std::mem::Limit) -> Failure!void
 std::compress::unzlib_into(allocator: Allocator, bytes: []u8, out: &var String, limit: std::mem::Limit) -> Failure!void
 
+std::compress::deflate(allocator: Allocator, bytes: []u8) -> std::mem::Error!String
+std::compress::gzip(allocator: Allocator, bytes: []u8) -> std::mem::Error!String
+std::compress::zlib(allocator: Allocator, bytes: []u8) -> std::mem::Error!String
+std::compress::deflate_into(allocator: Allocator, bytes: []u8, out: &var String) -> std::mem::Error!void
+std::compress::gzip_into(allocator: Allocator, bytes: []u8, out: &var String) -> std::mem::Error!void
+std::compress::zlib_into(allocator: Allocator, bytes: []u8, out: &var String) -> std::mem::Error!void
+
 std::compress::Error    Malformed | Truncated | ChecksumMismatch | LimitExceeded
 std::compress::Failure  Error or std::mem::Error
 ```
@@ -19,12 +26,17 @@ std::compress::Failure  Error or std::mem::Error
 ```kizu
 let text = try compress::gunzip(allocator, body, mem::Limit::Bytes(1 << 20));
 defer text.deinit(allocator);
+
+let plain = text.as_bytes();
+let member = try compress::gzip(allocator, plain);
+defer member.deinit(allocator);
 ```
 
 `inflate` は container の無い生の deflate stream、`gunzip` は gzip、`unzlib` は
-zlib を読みます。どれも stream 全体を bytes で受け取り、展開した bytes を
-String に append します。`_into` は呼び手の String に、それ以外は新しい String
-に append して owner として返します。
+zlib を読みます。`deflate` / `gzip` / `zlib` はそれぞれの対になる書き手です。
+どれも入力全体を bytes で受け取り、結果の bytes を String に append します。
+`_into` は呼び手の String に、それ以外は新しい String に append して owner
+として返します。
 
 ## 上限は呼び手が決める
 
@@ -57,6 +69,38 @@ stream 自体は最後まで読めた、という意味です。bytes は送り�
 zlib の preset dictionary(FDICT)は `Malformed` です。辞書を渡す口が無いので、
 この decoder が読める stream ではありません。
 
+書く側が失敗するのは出力の確保だけ(`std::mem::Error`)で、上限も取りません。
+stream が入力より大きくなるのは高々 block ごとの数 byte で、入力を手に持って
+いる呼び手にとって新しい量ではないからです。
+
+## 書く側に level は無い
+
+`deflate` は入力の中に前に出た bytes の繰り返し(back-reference)を探し、
+block ごとに 3 つの符号化 —— block 自身が記述する Huffman code、固定 code、
+そのまま —— の中で bit 数が最も少ないものを選びます。探索は window 32 KiB、
+hash chain を 64 step までです。
+
+zlib や Go の `compress/flate` が持つ level は、この探索をどこまで粘るかの
+つまみです。最速と最小の差は出力の数 % で、代償は数倍の時間です。Kizu では
+1 つの形だけを持ち、それが reference encoder の default level と同じ程度の
+大きさを書くことを `tests/behavior/src/compress/` で見ています。それより
+小さくしたい呼び手に必要なのは、つまみではなく新しい format です。
+
+書き出した stream は自分の reader が読み戻すだけでなく、外の reader にも
+読ませます。`examples/compress_gzip.kizu` が印字する member を、Go の
+`compress/gzip` が開くことを `cmd/kizu` の test が見ています。
+
+| 入力 | stream |
+| --- | --- |
+| 空 | 2 byte(最終 block が 1 つ、すぐ終わる) |
+| 乱数のような bytes | 入力 + block(16384 token)ごとに 5 byte |
+| gzip | deflate + header 10 byte + trailer 8 byte |
+| zlib | deflate + header 2 byte + trailer 4 byte |
+
+gzip の header は format 以外を何も言いません。名前も時刻も無く、OS は
+「不明」(255)です。何を言うかは呼び手が知っていることで、library が
+勝手に書くものではないからです。
+
 ## gzip の member
 
 gzip file は member の連結でよく(`gzip -c a b`)、`gunzip` は続く member を
@@ -76,7 +120,7 @@ bytes で返ることを見ています。
 
 ## 今は話さないこと
 
-- **圧縮**(deflate / gzip / zlib を書く側)。
-- **streaming**: bytes を少しずつ受け取りながら展開すること。今は stream 全体を
-  手に持ってから読みます。
+- **streaming**: bytes を少しずつ受け取りながら展開・圧縮すること。今は入力
+  全体を手に持ってから始めます。
 - **preset dictionary**。
+- **gzip header の name / time / comment** を書くこと。

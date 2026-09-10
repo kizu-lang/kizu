@@ -1,0 +1,68 @@
+import std::compress;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// `gzip` writes a member any gzip reader opens: the header, a deflate
+// stream, and the CRC-32 and length of the bytes. The stream is bytes and
+// not text, so it is printed as hex; the same hex is what a reference
+// decoder is handed, so that what Kizu writes is read outside Kizu too,
+// not only by its own `gunzip`.
+//
+// There is no level to choose. The writer finds the references it finds
+// and codes each block the cheapest of the three ways deflate has; a
+// repeated line costs a few bytes after the first.
+
+fn append_hex(allocator: Allocator, out: &var string::String, bytes: []u8) -> mem::Error!void {
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value >> 4]);
+        try out.append_byte(allocator, digits[value & 15]);
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    for 0..3 |_| {
+        try text.append_bytes(allocator, "a stream of blocks, a stream of bytes");
+        try text.append_byte(allocator, 10);
+    }
+    let plain = text.as_bytes();
+
+    let member = try compress::gzip(allocator, plain);
+    defer member.deinit(allocator);
+    let stream = member.as_bytes();
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try fmt::append_i64(allocator, &var line, text.len());
+    try line.append_bytes(allocator, " bytes in, ");
+    try fmt::append_i64(allocator, &var line, member.len());
+    try line.append_bytes(allocator, " bytes out");
+    let sizes = line.as_bytes();
+    print(sizes);
+
+    var hex = string::new(allocator);
+    defer hex.deinit(allocator);
+    try append_hex(allocator, &var hex, stream);
+    let digits = hex.as_bytes();
+    print(digits);
+
+    let back = try compress::gunzip(allocator, stream, mem::Limit::Bytes(1024));
+    defer back.deinit(allocator);
+    let read = back.as_bytes();
+    if mem::equal_bytes(plain, read) {
+        print("reads back");
+    }
+    return;
+}
+
+// run
+// features: compress gzip
+// output:
+// 114 bytes in, 49 bytes out
+// 1f8b08000000000000ff4b54282e294a4dcc55c84f5348cac94fce2ed6514011ab2c492de6a2a62a00c768c9dc72000000
+// reads back

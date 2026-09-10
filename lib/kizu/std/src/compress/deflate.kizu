@@ -1,0 +1,750 @@
+// The RFC 1951 encoder. It finds back-references the way every deflate
+// encoder does -- a hash of the next three bytes names the chain of earlier
+// positions that began with them, and the longest match along that chain
+// wins -- and codes each block with the code that costs it the fewest bits:
+// one the block describes for itself, the fixed one, or none.
+//
+// The encoder has no level. One shape is what the reader of this file has
+// to check, and the gap between the fastest and the smallest deflate is a
+// few percent of the output for several times the work; a caller that wants
+// bytes smaller than this writes chooses a newer format, not a knob.
+//
+// Tables live in two places. The hash tables and the block's tokens are
+// large and come from the allocator; the code tables are small and live on
+// the stack, so building a code allocates nothing.
+
+// The window and the finder. A reference reaches back at most 32768 bytes
+// (RFC 1951 §3.2.5); the hash has as many slots as the window has bytes; a
+// chain is followed at most this many steps before the best match so far
+// is taken; a block holds this many tokens before it is written.
+fn window() -> i64 { return 32768; }
+
+fn max_chain() -> i64 { return 64; }
+
+fn max_tokens() -> i64 { return 16384; }
+
+// The allocated buffer, as byte offsets. Positions are stored as 32-bit
+// values plus one, so that a zero slot means no position yet. Past 4 GiB
+// of input the stored positions wrap, which loses matches and never
+// invents one: a candidate is only taken after its bytes are compared.
+//
+//   head     32768 x u32   hash of three bytes -> the latest position
+//   prev     32768 x u32   position mod window -> the position before it
+//   tokens   16384 x u32   distance << 9 | length, or literal when distance is 0
+fn head() -> i64 { return 0; }
+
+fn prev() -> i64 { return 131072; }
+
+fn tokens() -> i64 { return 262144; }
+
+fn work_size() -> i64 { return 327680; }
+
+// The stack buffer, as byte offsets. A `u16` region holds its values as two
+// bytes, low first. Codes are stored bit-reversed, ready to be written
+// least significant bit first like every other field.
+//
+//   lit_freq    286 x u16   literal/length symbol counts of the block
+//   dist_freq    30 x u16   distance symbol counts
+//   lit_len     288 x u8    code lengths (288 so the fixed code fits)
+//   dist_len     32 x u8
+//   lit_code    288 x u16
+//   dist_code    32 x u16
+//   cl_freq      19 x u16   code-length code: counts, lengths, codes
+//   cl_len       19 x u8    (+ 1 byte of padding)
+//   cl_code      19 x u16
+//   cl_seq      316 x (u8 symbol, u8 extra)  run-length coded lengths
+//   weight      571 x u16   Huffman construction: node weights
+//   parent      571 x u16   and parents (none is 0xFFFF)
+//   bl_count     16 x u16   canonical code: codes per length
+//   next_code    16 x u16   and the next code of each length
+fn lit_freq() -> i64 { return 0; }
+
+fn dist_freq() -> i64 { return 572; }
+
+fn lit_len() -> i64 { return 632; }
+
+fn dist_len() -> i64 { return 920; }
+
+fn lit_code() -> i64 { return 952; }
+
+fn dist_code() -> i64 { return 1528; }
+
+fn cl_freq() -> i64 { return 1592; }
+
+fn cl_len() -> i64 { return 1630; }
+
+fn cl_code() -> i64 { return 1650; }
+
+fn cl_seq() -> i64 { return 1688; }
+
+fn weight() -> i64 { return 2320; }
+
+fn parent() -> i64 { return 3462; }
+
+fn bl_count() -> i64 { return 4604; }
+
+fn next_code() -> i64 { return 4636; }
+
+fn tables_size() -> i64 { return 4668; }
+
+fn no_parent() -> i64 { return 0xFFFF; }
+
+// get16 and put16 are the decoder's; count16 adds one to a count, and the
+// 32-bit pair is for positions.
+fn count16(scratch: &var []u8, region: i64, index: i64) -> void {
+    let seen = std::compress::get16(scratch, region, index);
+    std::compress::put16(scratch, region, index, seen + 1);
+    return;
+}
+
+fn get32(scratch: []u8, region: i64, index: i64) -> i64 {
+    let at = region + index * 4;
+    return cast<i64>(scratch[at])
+        | cast<i64>(scratch[at + 1]) << 8
+        | cast<i64>(scratch[at + 2]) << 16
+        | cast<i64>(scratch[at + 3]) << 24;
+}
+
+fn put32(scratch: &var []u8, region: i64, index: i64, value: i64) -> void {
+    let at = region + index * 4;
+    scratch[at] = cast<u8>(value & 0xFF);
+    scratch[at + 1] = cast<u8>((value >> 8) & 0xFF);
+    scratch[at + 2] = cast<u8>((value >> 16) & 0xFF);
+    scratch[at + 3] = cast<u8>((value >> 24) & 0xFF);
+    return;
+}
+
+// Sink packs bits into the output: least significant first, fewer than 8
+// held between calls.
+struct Sink {
+    buf: i64,
+    count: i64,
+}
+
+fn emit(
+    allocator: Allocator,
+    out: &var std::string::String,
+    sink: &var std::compress::Sink,
+    value: i64,
+    n: i64
+) -> std::mem::Error!void {
+    sink.buf = sink.buf | value << sink.count;
+    sink.count = sink.count + n;
+    while sink.count >= 8 {
+        try out.append_byte(allocator, cast<u8>(sink.buf & 0xFF));
+        sink.buf = sink.buf >> 8;
+        sink.count = sink.count - 8;
+    }
+    return;
+}
+
+// align pads to the next byte with zero bits: what a stored block needs
+// before its length, and what the stream's end needs.
+fn align(
+    allocator: Allocator,
+    out: &var std::string::String,
+    sink: &var std::compress::Sink
+) -> std::mem::Error!void {
+    if sink.count > 0 {
+        let pad = 8 - sink.count;
+        try emit(allocator, out, sink, 0, pad);
+    }
+    return;
+}
+
+// reverse turns a code into the order it is written in: Huffman codes go
+// most significant bit first (RFC 1951 §3.1.1).
+fn reverse(code: i64, n: i64) -> i64 {
+    var reversed = 0;
+    for 0..n |index| {
+        reversed = reversed << 1 | (code >> index) & 1;
+    }
+    return reversed;
+}
+
+// hash names the slot of the three bytes at `pos`: their 24 bits spread by
+// the multiplication and the top 15 of the low 32 bits kept.
+fn hash(input: []u8, pos: i64) -> i64 {
+    let three = cast<i64>(input[pos]) << 16
+        | cast<i64>(input[pos + 1]) << 8
+        | cast<i64>(input[pos + 2]);
+    return ((three * 2654435761) & 0xFFFFFFFF) >> 17;
+}
+
+// insert records that `pos` begins the three bytes it hashes to, ahead of
+// whatever position held that slot.
+fn insert(input: []u8, work: &var []u8, pos: i64) -> void {
+    let slot = hash(input, pos);
+    let before = get32(work, head(), slot);
+    put32(work, prev(), pos & (window() - 1), before);
+    put32(work, head(), slot, pos + 1);
+    return;
+}
+
+// match_length counts how many bytes from `earlier` and `pos` agree, up to
+// `limit`. The two runs may overlap: a match that reaches past `pos` is the
+// repeat RFC 1951 §3.2.3 describes, and the decoder copies it byte by byte.
+fn match_length(input: []u8, earlier: i64, pos: i64, limit: i64) -> i64 {
+    var n = 0;
+    while n < limit and input[earlier + n] == input[pos + n] {
+        n = n + 1;
+    }
+    return n;
+}
+
+// longest_match walks the chain of positions that hashed like `pos` and
+// returns the longest match as `distance << 9 | length`, or 0 when none is
+// worth a token: three bytes are shorter as literals than as a reference
+// far back. The chain is followed only inside the window, where every
+// `prev` slot still belongs to the position it was written for: a slot is
+// reused after `window` more positions, and those are all past `pos`.
+fn longest_match(input: []u8, work: []u8, pos: i64, end: i64) -> i64 {
+    var limit = end - pos;
+    if limit > 258 {
+        limit = 258;
+    }
+    var best = 0;
+    var best_distance = 0;
+    var candidate = get32(work, head(), hash(input, pos)) - 1;
+    var steps = max_chain();
+    while candidate >= 0 and pos - candidate <= window() and steps > 0 and best < limit {
+        // The byte past the best match so far has to agree before the
+        // candidate can beat it; most candidates fail here.
+        if input[candidate + best] == input[pos + best] {
+            let length = match_length(input, candidate, pos, limit);
+            if length > best {
+                best = length;
+                best_distance = pos - candidate;
+            }
+        }
+        candidate = get32(work, prev(), candidate & (window() - 1)) - 1;
+        steps = steps - 1;
+    }
+    if best < 3 or (best == 3 and best_distance > 4096) {
+        return 0;
+    }
+    return best_distance << 9 | best;
+}
+
+// length_code and distance_code invert the tables of RFC 1951 §3.2.5 as
+// `length_base` and `distance_base` state them: past the codes with no extra
+// bits, code groups double in size, and a value's group is found by the
+// power of two it lies under.
+fn length_code(length: i64) -> i64 {
+    if length <= 10 {
+        return length - 3;
+    }
+    if length == 258 {
+        return 28;
+    }
+    let rest = length - 3;
+    var extra = 0;
+    while (8 << extra) <= rest {
+        extra = extra + 1;
+    }
+    return 4 * extra + 4 + ((rest - (4 << extra)) >> extra);
+}
+
+fn distance_code(distance: i64) -> i64 {
+    if distance <= 4 {
+        return distance - 1;
+    }
+    let rest = distance - 1;
+    var extra = 0;
+    while (4 << extra) <= rest {
+        extra = extra + 1;
+    }
+    return 2 * extra + 2 + ((rest - (2 << extra)) >> extra);
+}
+
+// record appends a token to the block and counts its symbols. It returns
+// the extra bits the token will need, so the caller can keep the block's
+// cost in step.
+fn record(work: &var []u8, tables: &var []u8, index: i64, token: i64) -> i64 {
+    put32(work, tokens(), index, token);
+    let distance = token >> 9;
+    if distance == 0 {
+        let literal = token & 0x1FF;
+        count16(tables, lit_freq(), literal);
+        return 0;
+    }
+    let length_symbol = 257 + length_code(token & 0x1FF);
+    let distance_symbol = distance_code(distance);
+    count16(tables, lit_freq(), length_symbol);
+    count16(tables, dist_freq(), distance_symbol);
+    return std::compress::length_extra(length_symbol - 257)
+        + std::compress::distance_extra(distance_symbol);
+}
+
+fn clear_frequencies(tables: &var []u8) -> void {
+    for 0..286 |sym| {
+        std::compress::put16(tables, lit_freq(), sym, 0);
+    }
+    for 0..30 |sym| {
+        std::compress::put16(tables, dist_freq(), sym, 0);
+    }
+    return;
+}
+
+// deflate_stream writes the whole input as blocks, the last marked final.
+// Tokens gather until the block is full or the input ends, and the finder
+// keeps its tables across blocks: a reference may reach into the block
+// before, since the window is the output's and not the block's.
+fn deflate_stream(
+    allocator: Allocator,
+    input: []u8,
+    work: &var []u8,
+    tables: &var []u8,
+    sink: &var std::compress::Sink,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    let end = std::mem::len(input);
+    clear_frequencies(tables);
+    var pos = 0;
+    var block_start = 0;
+    var count = 0;
+    var extra_bits = 0;
+    var closed = false;
+    while pos < end {
+        var token = cast<i64>(input[pos]);
+        var advance = 1;
+        if end - pos >= 3 {
+            let found = longest_match(input, work, pos, end);
+            insert(input, work, pos);
+            if found != 0 {
+                token = found;
+                advance = found & 0x1FF;
+                for 1..advance |step| {
+                    if end - (pos + step) >= 3 {
+                        insert(input, work, pos + step);
+                    }
+                }
+            }
+        }
+        extra_bits = extra_bits + record(work, tables, count, token);
+        count = count + 1;
+        pos = pos + advance;
+        if count == max_tokens() {
+            let final = pos == end;
+            try write_block(
+                allocator, input, work, tables, sink, out,
+                block_start, pos, count, extra_bits, final);
+            closed = final;
+            clear_frequencies(tables);
+            block_start = pos;
+            count = 0;
+            extra_bits = 0;
+        }
+    }
+    if !closed {
+        try write_block(
+            allocator, input, work, tables, sink, out,
+            block_start, end, count, extra_bits, true);
+    }
+    try align(allocator, out, sink);
+    return;
+}
+
+// write_block writes the gathered tokens in the cheapest of the three block
+// types (RFC 1951 §3.2.3). The dynamic code is built first because its cost
+// is only known once built; the fixed code's is a sum over the counts; a
+// stored block's is the bytes plus five per 65535 of them.
+fn write_block(
+    allocator: Allocator,
+    input: []u8,
+    work: []u8,
+    tables: &var []u8,
+    sink: &var std::compress::Sink,
+    out: &var std::string::String,
+    block_start: i64,
+    block_end: i64,
+    count: i64,
+    extra_bits: i64,
+    final: bool
+) -> std::mem::Error!void {
+    count16(tables, lit_freq(), 256);
+    huffman_lengths(tables, lit_freq(), lit_len(), 286, 15);
+    huffman_lengths(tables, dist_freq(), dist_len(), 30, 15);
+    let hlit = used_count(tables, lit_len(), 286, 257);
+    let hdist = used_count(tables, dist_len(), 30, 1);
+    let seq_count = run_lengths(tables, hlit, hdist);
+    huffman_lengths(tables, cl_freq(), cl_len(), 19, 7);
+    let hclen = code_length_count(tables);
+
+    var dynamic_bits = 3 + 14 + 3 * hclen + extra_bits;
+    for 0..19 |sym| {
+        dynamic_bits = dynamic_bits + std::compress::get16(tables, cl_freq(), sym) * cast<i64>(tables[cl_len() + sym]);
+    }
+    dynamic_bits = dynamic_bits
+        + std::compress::get16(tables, cl_freq(), 16) * 2
+        + std::compress::get16(tables, cl_freq(), 17) * 3
+        + std::compress::get16(tables, cl_freq(), 18) * 7;
+    var fixed_bits = 3 + extra_bits;
+    for 0..286 |sym| {
+        let freq = std::compress::get16(tables, lit_freq(), sym);
+        dynamic_bits = dynamic_bits + freq * cast<i64>(tables[lit_len() + sym]);
+        fixed_bits = fixed_bits + freq * fixed_length(sym);
+    }
+    for 0..30 |sym| {
+        let freq = std::compress::get16(tables, dist_freq(), sym);
+        dynamic_bits = dynamic_bits + freq * cast<i64>(tables[dist_len() + sym]);
+        fixed_bits = fixed_bits + freq * 5;
+    }
+    let stored_size = block_end - block_start;
+    var stored_chunks = (stored_size + 65534) / 65535;
+    if stored_chunks == 0 {
+        stored_chunks = 1;
+    }
+    let stored_bits = 8 * stored_size + 40 * stored_chunks + 7;
+
+    if stored_bits < dynamic_bits and stored_bits < fixed_bits {
+        return stored_blocks(allocator, input, sink, out, block_start, block_end, final);
+    }
+    var final_bit = 0;
+    if final {
+        final_bit = 1;
+    }
+    try emit(allocator, out, sink, final_bit, 1);
+    // The fixed code has two symbols past the alphabet, which get codes so
+    // that its canonical form is the one the RFC lists.
+    var lit_symbols = 286;
+    if fixed_bits <= dynamic_bits {
+        try emit(allocator, out, sink, 1, 2);
+        fixed_lengths(tables);
+        lit_symbols = 288;
+    } else {
+        try emit(allocator, out, sink, 2, 2);
+        try emit(allocator, out, sink, hlit - 257, 5);
+        try emit(allocator, out, sink, hdist - 1, 5);
+        try emit(allocator, out, sink, hclen - 4, 4);
+        canonical_codes(tables, cl_len(), cl_code(), 19);
+        for 0..hclen |index| {
+            let sym = std::compress::code_length_order(index);
+            try emit(allocator, out, sink, cast<i64>(tables[cl_len() + sym]), 3);
+        }
+        for 0..seq_count |index| {
+            let sym = cast<i64>(tables[cl_seq() + index * 2]);
+            let extra = cast<i64>(tables[cl_seq() + index * 2 + 1]);
+            try emit(
+                allocator, out, sink,
+                std::compress::get16(tables, cl_code(), sym), cast<i64>(tables[cl_len() + sym]));
+            if sym == 16 {
+                try emit(allocator, out, sink, extra, 2);
+            }
+            if sym == 17 {
+                try emit(allocator, out, sink, extra, 3);
+            }
+            if sym == 18 {
+                try emit(allocator, out, sink, extra, 7);
+            }
+        }
+    }
+    canonical_codes(tables, lit_len(), lit_code(), lit_symbols);
+    canonical_codes(tables, dist_len(), dist_code(), 30);
+    for 0..count |index| {
+        let token = get32(work, tokens(), index);
+        let distance = token >> 9;
+        if distance == 0 {
+            try emit_symbol(allocator, out, sink, tables, lit_code(), lit_len(), token & 0x1FF);
+        } else {
+            let length = token & 0x1FF;
+            let code = length_code(length);
+            try emit_symbol(allocator, out, sink, tables, lit_code(), lit_len(), 257 + code);
+            try emit(
+                allocator, out, sink,
+                length - std::compress::length_base(code), std::compress::length_extra(code));
+            let dcode = distance_code(distance);
+            try emit_symbol(allocator, out, sink, tables, dist_code(), dist_len(), dcode);
+            try emit(
+                allocator, out, sink,
+                distance - std::compress::distance_base(dcode),
+                std::compress::distance_extra(dcode));
+        }
+    }
+    try emit_symbol(allocator, out, sink, tables, lit_code(), lit_len(), 256);
+    return;
+}
+
+fn emit_symbol(
+    allocator: Allocator,
+    out: &var std::string::String,
+    sink: &var std::compress::Sink,
+    tables: []u8,
+    code_at: i64,
+    len_at: i64,
+    sym: i64
+) -> std::mem::Error!void {
+    return emit(allocator, out, sink, std::compress::get16(tables, code_at, sym), cast<i64>(tables[len_at + sym]));
+}
+
+// stored_blocks copies the input range as it is, 65535 bytes to a block
+// (RFC 1951 §3.2.4). An empty range still writes one block, so that a
+// stream always has a final block to end on.
+fn stored_blocks(
+    allocator: Allocator,
+    input: []u8,
+    sink: &var std::compress::Sink,
+    out: &var std::string::String,
+    start: i64,
+    end: i64,
+    final: bool
+) -> std::mem::Error!void {
+    var at = start;
+    var last = false;
+    while !last {
+        var length = end - at;
+        if length > 65535 {
+            length = 65535;
+        }
+        last = at + length == end;
+        var final_bit = 0;
+        if final and last {
+            final_bit = 1;
+        }
+        try emit(allocator, out, sink, final_bit, 1);
+        try emit(allocator, out, sink, 0, 2);
+        try align(allocator, out, sink);
+        try out.append_byte(allocator, cast<u8>(length & 0xFF));
+        try out.append_byte(allocator, cast<u8>(length >> 8));
+        try out.append_byte(allocator, cast<u8>((length ^ 0xFFFF) & 0xFF));
+        try out.append_byte(allocator, cast<u8>((length ^ 0xFFFF) >> 8));
+        try out.append_bytes(allocator, input[at..at + length]);
+        at = at + length;
+    }
+    return;
+}
+
+// fixed_length is the fixed code of RFC 1951 §3.2.6, as `fixed_tables`
+// builds it for reading.
+fn fixed_length(sym: i64) -> i64 {
+    if sym < 144 {
+        return 8;
+    }
+    if sym < 256 {
+        return 9;
+    }
+    if sym < 280 {
+        return 7;
+    }
+    return 8;
+}
+
+fn fixed_lengths(tables: &var []u8) -> void {
+    for 0..288 |sym| {
+        tables[lit_len() + sym] = cast<u8>(fixed_length(sym));
+    }
+    for 0..30 |sym| {
+        tables[dist_len() + sym] = 5;
+    }
+    return;
+}
+
+// huffman_lengths gives the `n` symbols counted at `freq_at` code lengths
+// at `len_at` of at most `max_len` bits, zero for a symbol never seen. A
+// Huffman tree over the counts gives the shortest total; when a length
+// passes the ceiling, the counts are halved (never below one) and the tree
+// built again, which flattens it a little each time and ends at equal
+// counts, whose tree is as flat as the alphabet allows.
+//
+// One symbol alone gets a one-bit code, the one incomplete code deflate
+// allows (RFC 1951 §3.2.7); the tree, with no node to join it to, would
+// give it none.
+//
+// The tree is built by joining the two lightest loose nodes until one is
+// left, each pair found by a pass over the nodes. The alphabets are small
+// enough that this plain form costs less than a block's finding did.
+fn huffman_lengths(tables: &var []u8, freq_at: i64, len_at: i64, n: i64, max_len: i64) -> void {
+    var used = 0;
+    var alone = 0;
+    for 0..n |sym| {
+        tables[len_at + sym] = 0;
+        let freq = std::compress::get16(tables, freq_at, sym);
+        std::compress::put16(tables, weight(), sym, freq);
+        if freq > 0 {
+            used = used + 1;
+            alone = sym;
+        }
+    }
+    if used == 0 {
+        return;
+    }
+    if used == 1 {
+        tables[len_at + alone] = 1;
+        return;
+    }
+    var over = true;
+    while over {
+        for 0..n |sym| {
+            std::compress::put16(tables, parent(), sym, no_parent());
+        }
+        var total = n;
+        let joins = used - 1;
+        for 0..joins |_| {
+            var lightest = -1;
+            var second = -1;
+            for 0..total |node| {
+                if std::compress::get16(tables, weight(), node) == 0 or std::compress::get16(tables, parent(), node) != no_parent() {
+                    continue;
+                }
+                let w = std::compress::get16(tables, weight(), node);
+                if lightest < 0 or w < std::compress::get16(tables, weight(), lightest) {
+                    second = lightest;
+                    lightest = node;
+                    continue;
+                }
+                if second < 0 or w < std::compress::get16(tables, weight(), second) {
+                    second = node;
+                }
+            }
+            let joined = std::compress::get16(tables, weight(), lightest)
+                + std::compress::get16(tables, weight(), second);
+            std::compress::put16(tables, weight(), total, joined);
+            std::compress::put16(tables, parent(), total, no_parent());
+            std::compress::put16(tables, parent(), lightest, total);
+            std::compress::put16(tables, parent(), second, total);
+            total = total + 1;
+        }
+        over = false;
+        for 0..n |sym| {
+            if std::compress::get16(tables, weight(), sym) == 0 {
+                continue;
+            }
+            var depth = 0;
+            var node = sym;
+            while std::compress::get16(tables, parent(), node) != no_parent() {
+                node = std::compress::get16(tables, parent(), node);
+                depth = depth + 1;
+            }
+            tables[len_at + sym] = cast<u8>(depth);
+            if depth > max_len {
+                over = true;
+            }
+        }
+        if over {
+            for 0..n |sym| {
+                let w = std::compress::get16(tables, weight(), sym);
+                if w > 0 {
+                    std::compress::put16(tables, weight(), sym, (w + 1) / 2);
+                }
+            }
+        }
+    }
+    return;
+}
+
+// canonical_codes assigns the codes RFC 1951 §3.2.2 derives from lengths
+// alone, stored reversed for writing.
+fn canonical_codes(tables: &var []u8, len_at: i64, code_at: i64, n: i64) -> void {
+    for 0..16 |len| {
+        std::compress::put16(tables, bl_count(), len, 0);
+    }
+    for 0..n |sym| {
+        let len = cast<i64>(tables[len_at + sym]);
+        count16(tables, bl_count(), len);
+    }
+    std::compress::put16(tables, bl_count(), 0, 0);
+    var code = 0;
+    for 1..16 |len| {
+        code = (code + std::compress::get16(tables, bl_count(), len - 1)) << 1;
+        std::compress::put16(tables, next_code(), len, code);
+    }
+    for 0..n |sym| {
+        let len = cast<i64>(tables[len_at + sym]);
+        if len != 0 {
+            let next = std::compress::get16(tables, next_code(), len);
+            std::compress::put16(tables, code_at, sym, reverse(next, len));
+            std::compress::put16(tables, next_code(), len, next + 1);
+        }
+    }
+    return;
+}
+
+// used_count is how many lengths a dynamic block lists: through the last
+// nonzero one, and at least `floor`.
+fn used_count(tables: []u8, len_at: i64, n: i64, floor: i64) -> i64 {
+    var used = floor;
+    for 0..n |sym| {
+        if tables[len_at + sym] != 0 and sym + 1 > used {
+            used = sym + 1;
+        }
+    }
+    return used;
+}
+
+// run_lengths codes the block's `hlit` literal/length and `hdist` distance
+// lengths with the code-length alphabet (RFC 1951 §3.2.7): a length is its
+// own symbol, three to six repeats of the one before are 16, and a run of
+// zeros is 17 up to ten or 18 up to 138. The pairs land in `cl_seq`, their
+// counts in `cl_freq`, and the count of pairs is returned.
+fn run_lengths(tables: &var []u8, hlit: i64, hdist: i64) -> i64 {
+    for 0..19 |sym| {
+        std::compress::put16(tables, cl_freq(), sym, 0);
+    }
+    let total = hlit + hdist;
+    var written = 0;
+    var index = 0;
+    while index < total {
+        let value = length_at(tables, hlit, index);
+        var run = 1;
+        while index + run < total and length_at(tables, hlit, index + run) == value {
+            run = run + 1;
+        }
+        index = index + run;
+        if value == 0 {
+            while run >= 11 {
+                var take = run;
+                if take > 138 {
+                    take = 138;
+                }
+                written = push_pair(tables, written, 18, take - 11);
+                run = run - take;
+            }
+            if run >= 3 {
+                written = push_pair(tables, written, 17, run - 3);
+                run = 0;
+            }
+        } else {
+            written = push_pair(tables, written, value, 0);
+            run = run - 1;
+            while run >= 3 {
+                var take = run;
+                if take > 6 {
+                    take = 6;
+                }
+                written = push_pair(tables, written, 16, take - 3);
+                run = run - take;
+            }
+        }
+        for 0..run |_| {
+            written = push_pair(tables, written, value, 0);
+        }
+    }
+    return written;
+}
+
+fn length_at(tables: []u8, hlit: i64, index: i64) -> i64 {
+    if index < hlit {
+        return cast<i64>(tables[lit_len() + index]);
+    }
+    return cast<i64>(tables[dist_len() + index - hlit]);
+}
+
+fn push_pair(tables: &var []u8, index: i64, sym: i64, extra: i64) -> i64 {
+    tables[cl_seq() + index * 2] = cast<u8>(sym);
+    tables[cl_seq() + index * 2 + 1] = cast<u8>(extra);
+    count16(tables, cl_freq(), sym);
+    return index + 1;
+}
+
+// code_length_count is how many code-length lengths the block lists, in
+// the order `code_length_order` gives: through the last nonzero one, and
+// at least four.
+fn code_length_count(tables: []u8) -> i64 {
+    var used = 4;
+    for 0..19 |index| {
+        if tables[cl_len() + std::compress::code_length_order(index)] != 0 and index + 1 > used {
+            used = index + 1;
+        }
+    }
+    return used;
+}
