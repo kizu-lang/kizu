@@ -1,14 +1,15 @@
-// std::compress reads deflate (RFC 1951) and the two containers it travels
-// in: zlib (RFC 1950) and gzip (RFC 1952). HTTP's `Content-Encoding: gzip`
-// and `deflate` are the latter two.
+// std::compress reads and writes deflate (RFC 1951) and the two containers
+// it travels in: zlib (RFC 1950) and gzip (RFC 1952). HTTP's
+// `Content-Encoding: gzip` and `deflate` are the latter two.
 //
-// Every entry takes the whole stream as bytes in hand and a ceiling on what
-// it will write, and appends the plain bytes to a String: the caller's own
-// through `_into`, or a fresh one it then owns. The ceiling is not optional
+// Every entry takes the whole input as bytes in hand and appends what it
+// makes of them to a String: the caller's own through `_into`, or a fresh
+// one it then owns. Reading also takes a ceiling on what it will write,
 // because a small stream can name a very large output, and the decision of
 // how large is the caller's to make where it is made (`std::mem::Limit`).
-// When a call fails, an `_into` buffer keeps what was appended before the
-// failure; the owning form frees its String and returns only the error.
+// Writing needs none: a stream is never much larger than its input. When a
+// call fails, an `_into` buffer keeps what was appended before the failure;
+// the owning form frees its String and returns only the error.
 
 pub error Error {
     // The bytes are not a stream this reads at this point: a block type no
@@ -231,6 +232,108 @@ pub fn unzlib_into(
     return;
 }
 
+// deflate writes one raw deflate stream: no container, no check, exactly
+// the bytes of the blocks. What `inflate` reads.
+pub fn deflate(allocator: Allocator, bytes: []u8) -> std::mem::Error!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    try std::compress::deflate_into(allocator, bytes, &var out);
+    return move out;
+}
+
+pub fn deflate_into(
+    allocator: Allocator,
+    bytes: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    // The finder's tables are too large for a frame and are zeroed bytes
+    // from the allocator; the code tables are small enough to be a stack
+    // buffer, whose one literal size matches `tables_size`.
+    var work = std::string::new(allocator);
+    defer work.deinit(allocator);
+    var zeros = [4096]u8{};
+    let chunk = zeros.as_bytes();
+    let chunks = std::compress::work_size() / 4096;
+    for 0..chunks |_| {
+        try work.append_bytes(allocator, chunk);
+    }
+    var tables = [4668]u8{};
+    var sink = std::compress::Sink { buf: 0, count: 0 };
+    let finder = work.as_mut_bytes();
+    let codes = tables.as_mut_bytes();
+    try std::compress::deflate_stream(allocator, bytes, finder, codes, &var sink, out);
+    return;
+}
+
+// gzip writes one gzip member: a header that says nothing beyond the
+// format -- no name, no time, an unknown system -- the deflate stream, and
+// the CRC-32 and length of the bytes. What `gunzip` reads.
+pub fn gzip(allocator: Allocator, bytes: []u8) -> std::mem::Error!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    try std::compress::gzip_into(allocator, bytes, &var out);
+    return move out;
+}
+
+pub fn gzip_into(
+    allocator: Allocator,
+    bytes: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    // RFC 1952 §2.3: the magic, deflate, no flags, no time, no hint about
+    // the compression, and 255 for a system it does not name.
+    try out.append_byte(allocator, 0x1F);
+    try out.append_byte(allocator, 0x8B);
+    try out.append_byte(allocator, 8);
+    try out.append_byte(allocator, 0);
+    try append32(allocator, out, 0);
+    try out.append_byte(allocator, 0);
+    try out.append_byte(allocator, 255);
+    try std::compress::deflate_into(allocator, bytes, out);
+    try append32(allocator, out, crc32(bytes));
+    try append32(allocator, out, std::mem::len(bytes) & 0xFFFFFFFF);
+    return;
+}
+
+// zlib writes one zlib stream: the two-byte header, the deflate stream,
+// and the Adler-32 of the bytes. What `unzlib` reads.
+pub fn zlib(allocator: Allocator, bytes: []u8) -> std::mem::Error!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    try std::compress::zlib_into(allocator, bytes, &var out);
+    return move out;
+}
+
+pub fn zlib_into(
+    allocator: Allocator,
+    bytes: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    // RFC 1950 §2.2: deflate with a 32K window, no preset dictionary, the
+    // default level as the hint, and check bits that make the pair a
+    // multiple of 31.
+    let method = 8 | 7 << 4;
+    let level = 2 << 6;
+    let check = (31 - (method * 256 + level) % 31) % 31;
+    try out.append_byte(allocator, cast<u8>(method));
+    try out.append_byte(allocator, cast<u8>(level | check));
+    try std::compress::deflate_into(allocator, bytes, out);
+    let sum = adler32(bytes);
+    try out.append_byte(allocator, cast<u8>(sum >> 24));
+    try out.append_byte(allocator, cast<u8>((sum >> 16) & 0xFF));
+    try out.append_byte(allocator, cast<u8>((sum >> 8) & 0xFF));
+    try out.append_byte(allocator, cast<u8>(sum & 0xFF));
+    return;
+}
+
+fn append32(allocator: Allocator, out: &var std::string::String, value: i64) -> std::mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(value & 0xFF));
+    try out.append_byte(allocator, cast<u8>((value >> 8) & 0xFF));
+    try out.append_byte(allocator, cast<u8>((value >> 16) & 0xFF));
+    try out.append_byte(allocator, cast<u8>((value >> 24) & 0xFF));
+    return;
+}
+
 fn read32(bytes: []u8, at: i64) -> i64 {
     return cast<i64>(bytes[at])
         | cast<i64>(bytes[at + 1]) << 8
@@ -258,14 +361,18 @@ fn crc32_of(out: &std::string::String, start: i64) -> i64 {
     return crc32(view[start..out.len()]);
 }
 
-// adler32_of is the Adler-32 of RFC 1950 §8 over the output from `start`.
-fn adler32_of(out: &std::string::String, start: i64) -> i64 {
-    let view = out.as_bytes();
+// adler32 is the Adler-32 of RFC 1950 §8.
+fn adler32(bytes: []u8) -> i64 {
     var a = 1;
     var b = 0;
-    for start..out.len() |index| {
-        a = (a + cast<i64>(view[index])) % 65521;
+    for 0..std::mem::len(bytes) |index| {
+        a = (a + cast<i64>(bytes[index])) % 65521;
         b = (b + a) % 65521;
     }
     return b << 16 | a;
+}
+
+fn adler32_of(out: &std::string::String, start: i64) -> i64 {
+    let view = out.as_bytes();
+    return adler32(view[start..out.len()]);
 }

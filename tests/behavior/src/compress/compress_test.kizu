@@ -586,3 +586,196 @@ test "a damaged stream is refused, never trapped" {
         } else |_| {}
     }
 }
+
+// The writing side. What `deflate`, `gzip`, and `zlib` write is read back
+// here by their readers; examples/compress_gzip.kizu holds one written
+// stream for a reference decoder to read, so that the two sides are not
+// only in agreement with each other.
+
+// encode is `decode`'s counterpart: 0 writes raw deflate, 1 gzip, 2 zlib.
+fn encode(allocator: Allocator, kind: i64, bytes: []u8) -> mem::Error!string::String {
+    if kind == 1 {
+        return compress::gzip(allocator, bytes);
+    }
+    if kind == 2 {
+        return compress::zlib(allocator, bytes);
+    }
+    return compress::deflate(allocator, bytes);
+}
+
+// expect_roundtrip writes `bytes` and reads them back, and returns how
+// long the stream was.
+fn expect_roundtrip(allocator: Allocator, kind: i64, bytes: []u8) -> !i64 {
+    let stream = try encode(allocator, kind, bytes);
+    defer stream.deinit(allocator);
+    let packed = stream.as_bytes();
+    let back = try decode(allocator, kind, packed, mem::Limit::Unlimited);
+    defer back.deinit(allocator);
+    let got = back.as_bytes();
+    testing::expect_equal<[]u8>(bytes, got);
+    return stream.len();
+}
+
+fn expect_plain_roundtrip(allocator: Allocator, name: []u8) -> !i64 {
+    let plain = try fixture(allocator, name);
+    defer plain.deinit(allocator);
+    let bytes = plain.as_bytes();
+    let raw = try expect_roundtrip(allocator, 0, bytes);
+    let _ = try expect_roundtrip(allocator, 1, bytes);
+    let _ = try expect_roundtrip(allocator, 2, bytes);
+    return raw;
+}
+
+fn byte_at(text: &string::String, index: i64) -> u8 {
+    let view = text.as_bytes();
+    return view[index];
+}
+
+// structured fills `out` to `length` bytes with what compressible data is
+// made of: bytes at random, runs of one byte, and copies of what came
+// before at random distances.
+fn structured(allocator: Allocator, rng: &var rand::Rng, out: &var string::String, length: i64) -> !void {
+    while out.len() < length {
+        let pick = rng.below(3);
+        if pick == 0 {
+            try out.append_byte(allocator, cast<u8>(rng.below(256)));
+        }
+        if pick == 1 {
+            let byte = cast<u8>(rng.below(256));
+            let run = 1 + rng.below(300);
+            for 0..run |_| {
+                try out.append_byte(allocator, byte);
+            }
+        }
+        if pick == 2 and out.len() > 0 {
+            var reach = out.len();
+            if reach > 40000 {
+                reach = 40000;
+            }
+            let distance = 1 + rng.below(reach);
+            let count = 1 + rng.below(300);
+            for 0..count |_| {
+                let byte = byte_at(out, out.len() - distance);
+                try out.append_byte(allocator, byte);
+            }
+        }
+    }
+    return;
+}
+
+test "what is written reads back through every container" {
+    let allocator = mem::page_allocator();
+    let _ = try expect_plain_roundtrip(allocator, "empty.txt");
+    let _ = try expect_plain_roundtrip(allocator, "hello.txt");
+    let _ = try expect_plain_roundtrip(allocator, "binary.bin");
+    let _ = try expect_plain_roundtrip(allocator, "far.bin");
+    // Runs and a repeated paragraph collapse into references. The reference
+    // encoder writes them in 24 and 201 bytes.
+    let runs = try expect_plain_roundtrip(allocator, "runs.txt");
+    testing::expect(runs < 40);
+    let text = try expect_plain_roundtrip(allocator, "text.txt");
+    testing::expect(text < 260);
+}
+
+test "a stream is never much longer than its bytes" {
+    let allocator = mem::page_allocator();
+    var rng = rand::new(testing::seed());
+    // Bytes at random are stored as they are: five more for each block of
+    // 16384 tokens, and the container's own bytes.
+    var noise = string::new(allocator);
+    defer noise.deinit(allocator);
+    for 0..70000 |_| {
+        try noise.append_byte(allocator, cast<u8>(rng.below(256)));
+    }
+    let bytes = noise.as_bytes();
+    let blocks = 70000 / 16384 + 1;
+    let raw = try expect_roundtrip(allocator, 0, bytes);
+    testing::expect(raw <= 70000 + 5 * blocks);
+    let gz = try expect_roundtrip(allocator, 1, bytes);
+    testing::expect(gz <= 70000 + 5 * blocks + 18);
+    let zl = try expect_roundtrip(allocator, 2, bytes);
+    testing::expect(zl <= 70000 + 5 * blocks + 6);
+
+    // The shortest stream: one final block that ends at once.
+    let empty = try compress::deflate(allocator, "");
+    defer empty.deinit(allocator);
+    testing::expect_equal<i64>(2, empty.len());
+}
+
+test "references reach across blocks and back to the window's edge" {
+    let allocator = mem::page_allocator();
+    var rng = rand::new(testing::seed());
+    // More tokens than one block holds, with copies from as far back as a
+    // reference can reach.
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try structured(allocator, &var rng, &var text, 150000);
+    let bytes = text.as_bytes();
+    let length = try expect_roundtrip(allocator, 0, bytes);
+    testing::expect(length < text.len() / 2);
+
+    // A page repeated past the window is found no better than once.
+    var page = string::new(allocator);
+    defer page.deinit(allocator);
+    for 0..30000 |_| {
+        try page.append_byte(allocator, cast<u8>(rng.below(256)));
+    }
+    var twice = string::new(allocator);
+    defer twice.deinit(allocator);
+    try twice.append_string(allocator, &page);
+    try twice.append_string(allocator, &page);
+    let both = twice.as_bytes();
+    let doubled = try expect_roundtrip(allocator, 0, both);
+    testing::expect(doubled < 30000 + 400);
+}
+
+test "streams of every shape read back" {
+    let allocator = mem::page_allocator();
+    var rng = rand::new(testing::seed());
+    for 0..60 |round| {
+        var text = string::new(allocator);
+        defer text.deinit(allocator);
+        let length = rng.below(4000);
+        try structured(allocator, &var rng, &var text, length);
+        let bytes = text.as_bytes();
+        let _ = try expect_roundtrip(allocator, round % 3, bytes);
+    }
+}
+
+test "the containers carry what their readers check" {
+    let allocator = mem::page_allocator();
+    let gz = try compress::gzip(allocator, "hello, kizu");
+    defer gz.deinit(allocator);
+    let member = gz.as_bytes();
+    // RFC 1952 §2.3: the magic, deflate, no flags, no time, and no system;
+    // then the length of the bytes, after their CRC-32.
+    testing::expect_equal<i64>(0x1F, cast<i64>(member[0]));
+    testing::expect_equal<i64>(0x8B, cast<i64>(member[1]));
+    testing::expect_equal<i64>(8, cast<i64>(member[2]));
+    testing::expect_equal<i64>(0, cast<i64>(member[3]));
+    testing::expect_equal<i64>(255, cast<i64>(member[9]));
+    testing::expect_equal<i64>(11, cast<i64>(member[gz.len() - 4]));
+    testing::expect_equal<i64>(0, cast<i64>(member[gz.len() - 1]));
+
+    // RFC 1950 §2.2: deflate with a 32K window, and a pair that is a
+    // multiple of 31.
+    let zl = try compress::zlib(allocator, "hello, kizu");
+    defer zl.deinit(allocator);
+    let stream = zl.as_bytes();
+    testing::expect_equal<i64>(0x78, cast<i64>(stream[0]));
+    testing::expect_equal<i64>(0, (cast<i64>(stream[0]) * 256 + cast<i64>(stream[1])) % 31);
+    testing::expect_equal<i64>(0, cast<i64>(stream[1]) & 0x20);
+}
+
+test "the writer appends after what the buffer held" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, "head:");
+    try compress::gzip_into(allocator, "hello, kizu", &var out);
+    let whole = out.as_bytes();
+    let head = whole[0..5];
+    testing::expect_equal<[]u8>("head:", head);
+    let member = whole[5..out.len()];
+    try expect_text(allocator, 1, member, "hello, kizu");
+}
