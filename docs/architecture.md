@@ -135,8 +135,8 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke + std lexer/parser parity(native 実行)|
 | 両実装の突き合わせ | `go test ./cmd/kizu`(`TestSelfhostFrontend` / `TestSelfhostBehavior`) | Kizu compiler と Go seed の出力差分。`compiler/tests/` の corpus は `-update` で両方を同時に更新する |
 | bootstrap | `go test ./cmd/kizu -run TestSelfhostBootstrap` | Kizu compiler が自分自身を build し、byte 単位で同じ実行ファイルになること |
-| Kizu 側 unit test | `just selfhost` (= `kizu check compiler` + `kizu test compiler`) | `compiler/src/**/*_test.kizu`。commit hook でも走る |
-| commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査 + `just selfhost` |
+| Kizu 側 unit test | `go test ./internal/selfhost`(= `kizu test compiler`、`just selfhost` でも) | `compiler/src/**/*_test.kizu`。seed が compiler とその test を 1 つの実行ファイルにして走らせる。`cmd/kizu` と並んで走るよう別 package |
+| commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査 + `kizu check compiler`。数秒で終わるものだけ |
 
 CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両方で回します。
 定時実行は置きません。

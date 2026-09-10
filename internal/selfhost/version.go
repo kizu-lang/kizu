@@ -43,7 +43,27 @@ func WriteVersionSource(root string) error {
 		return err
 	}
 	source := fmt.Sprintf(versionSourceTemplate, kizuStringLiteral(line))
-	return os.WriteFile(path, []byte(source), 0o644)
+	// Written whole and moved into place: the test packages that build
+	// `compiler/` each write this first and run beside one another, and a
+	// reader must never see a file one of them is halfway through.
+	staging, err := os.CreateTemp(filepath.Dir(path), "version_source.*.tmp")
+	if err != nil {
+		return err
+	}
+	if _, err := staging.Write([]byte(source)); err != nil {
+		staging.Close()
+		os.Remove(staging.Name())
+		return err
+	}
+	if err := staging.Close(); err != nil {
+		os.Remove(staging.Name())
+		return err
+	}
+	if err := os.Chmod(staging.Name(), 0o644); err != nil {
+		os.Remove(staging.Name())
+		return err
+	}
+	return os.Rename(staging.Name(), path)
 }
 
 // repositoryVCS reads the revision, its time, and whether the tree carries
