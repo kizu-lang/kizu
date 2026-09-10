@@ -40,7 +40,9 @@ package doc にあります。
   `compiler/` の check / test / build は `just selfhost` から回す。`kizu version` が
   名乗る行は commit ごとに変わるので checked-in にできず、
   `go run ./scripts/gen-selfhost-version` が先に生成する必要がある(pre-commit と
-  `cmd/kizu` の test は自分で走らせる)。
+  `go test` は自分で走らせる)。`compiler/` の test block は
+  `go test ./internal/selfhost` が走らせる。commit hook は `kizu check compiler`
+  までで、test は push 時と CI に回る。
 - Go の comment は英語で書く。package comment と `package main` の command
   comment は必須(pre-commit の `go comments` が見ている)。
 
@@ -86,8 +88,9 @@ ADR が持つのは **なぜそうしたか** と **却下した案とその理�
 テスト実行時間は 30s 以内に収めることを目標にしてください。
 遅くなったら profile、重複削除、アルゴリズム改善、不要な gate 分離で改善します。
 雑な並列化でごまかす改善は NG です。
-commit 前は原則 `pre-commit run --all-files` を通してください。
+commit 前は原則 `pre-commit run --all-files` を通してください(数秒)。
 `go test ./...` は pre-push hook にあり、commit 時ではなく push 時に走ります。
+Kizu compiler 自身の test(`kizu test compiler`)もそこに含まれます。
 
 
 ## PR Workflow
