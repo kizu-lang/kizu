@@ -716,6 +716,13 @@ fn (self: &var Lowerer) lower_module(
     if try self.collect_decls(tree, program, std_errors) |failed| {
         return move failed;
     }
+    // The program's own functions lower in declaration order, every one of
+    // them: what `kizu ir` shows, and what a corpus expects, does not depend
+    // on who calls whom. std lowers on demand, the way a generic instance
+    // already does: a std function lowers once a lowered body reaches it, so
+    // a program pays for the part of the library it uses.
+    var std = map::new<i64, FactsHandle>(self.allocator);
+    defer std.deinit(self.allocator);
     var index = 0;
     while self.decls.get(index) |handle| {
         index = index + 1;
@@ -724,6 +731,10 @@ fn (self: &var Lowerer) lower_module(
             continue;
         }
         let name = facts.name;
+        if self.module.names.starts_with(name, "std::") {
+            try std.insert(self.allocator, name_id(name), handle);
+            continue;
+        }
         if try self.lower_function_named(tree, handle, name) |failed| {
             return move failed;
         }
@@ -731,7 +742,54 @@ fn (self: &var Lowerer) lower_module(
     if try self.lower_tests(tree, sources) |failed| {
         return move failed;
     }
-    return self.lower_pending_generics(tree);
+    return self.lower_reached(tree, &var std);
+}
+
+/// Lowers the std functions the module reaches and the generic instances it
+/// asks for, until nothing new is reached, the Go `lowerReached`. Every
+/// lowered function is scanned once for what it calls or takes the address
+/// of; a std function reached for the first time lowers next, ahead of the
+/// pending generics, so this compiler and the Go one append the same
+/// functions in the same order.
+fn (self: &var Lowerer) lower_reached(
+    tree: &var ast::Ast,
+    std: &var map::Map<i64, FactsHandle>
+) -> !?diagnostic::Diagnostic {
+    var scanned = 0;
+    var queue = array::new<FactsHandle>(self.allocator);
+    defer queue.deinit(self.allocator);
+    var next = 0;
+    while true {
+        while self.module.functions.get(scanned) |function| {
+            scanned = scanned + 1;
+            let callees = try direct_callees(self.allocator, &self.module, function);
+            defer callees.deinit(self.allocator);
+            var callee_index = 0;
+            while callees.get(callee_index) |callee| {
+                callee_index = callee_index + 1;
+                if std.remove(self.allocator, name_id(callee)) |handle| {
+                    try queue.append(self.allocator, handle);
+                }
+            }
+        }
+        if queue.get(next) |handle| {
+            next = next + 1;
+            let facts = self.decl_facts.at(handle.node);
+            let name = facts.name;
+            if try self.lower_function_named(tree, handle, name) |failed| {
+                return move failed;
+            }
+            continue;
+        }
+        if self.pending_next < self.pending.len() {
+            if try self.lower_pending_generics(tree) |failed| {
+                return move failed;
+            }
+            continue;
+        }
+        return null;
+    }
+    return null;
 }
 
 /// Lowers each `test "name" { ... }` block into a function, the Go

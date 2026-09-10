@@ -490,6 +490,12 @@ func (l *lowerer) lower() (*Module, error) {
 	if err := l.collectDecls(); err != nil {
 		return nil, err
 	}
+	// The program's own functions lower in declaration order, every one of
+	// them: what `kizu ir` shows, and what a corpus expects, does not depend
+	// on who calls whom. std lowers on demand, the way a generic instance
+	// already does: a std function lowers once a lowered body reaches it, so
+	// a program pays for the part of the library it uses.
+	std := map[string]*ast.FunctionDecl{}
 	for _, decl := range l.program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
 		if !ok {
@@ -501,6 +507,10 @@ func (l *lowerer) lower() (*Module, error) {
 		if len(fn.StaticParams) > 0 {
 			continue
 		}
+		if isStdSymbol(fn.Name) {
+			std[fn.Name] = fn
+			continue
+		}
 		lowered, err := l.lowerFunction(fn)
 		if err != nil {
 			return nil, err
@@ -510,10 +520,54 @@ func (l *lowerer) lower() (*Module, error) {
 	if err := l.lowerTests(); err != nil {
 		return nil, err
 	}
-	if err := l.lowerPendingGenerics(); err != nil {
+	if err := l.lowerReached(std); err != nil {
 		return nil, err
 	}
 	return l.module, nil
+}
+
+// lowerReached lowers the std functions the module reaches and the generic
+// instances it asks for, until nothing new is reached. Every lowered function
+// is scanned once for what it calls or takes the address of; a std function
+// reached for the first time lowers next, ahead of the pending generics, so
+// the selfhost compiler and this one append the same functions in the same
+// order.
+func (l *lowerer) lowerReached(std map[string]*ast.FunctionDecl) error {
+	scanned := 0
+	var queue []*ast.FunctionDecl
+	for {
+		for ; scanned < len(l.module.Functions); scanned++ {
+			for _, callee := range directCallees(l.module.Functions[scanned]) {
+				if decl, ok := std[callee]; ok {
+					delete(std, callee)
+					queue = append(queue, decl)
+				}
+			}
+		}
+		if len(queue) > 0 {
+			decl := queue[0]
+			queue = queue[1:]
+			lowered, err := l.lowerFunction(decl)
+			if err != nil {
+				return err
+			}
+			l.module.Functions = append(l.module.Functions, lowered)
+			continue
+		}
+		if len(l.pending) > 0 {
+			if err := l.lowerPendingGenerics(); err != nil {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+}
+
+// isStdSymbol reports a function the library declares, by the module prefix
+// every std symbol carries.
+func isStdSymbol(name string) bool {
+	return strings.HasPrefix(name, "std::")
 }
 
 // lowerTests lowers each `test "name" { ... }` block into a function, so a
