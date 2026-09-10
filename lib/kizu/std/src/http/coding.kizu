@@ -1,0 +1,281 @@
+// Content codings: what `Content-Encoding` says a body is and what
+// `Accept-Encoding` says an answer may be (RFC 9110 §8.4, §12.5.3).
+// std::compress does the coding; this file only reads and writes the two
+// fields around it, and decides nothing on its own. A server compresses
+// when its handler says so, after asking `accepts_encoding`; a reader gets
+// the plain bytes when it calls `decode_body`. Neither happens behind a
+// caller's back: a coded body is a different body, with a different length
+// and a different cost, and which side pays it is the caller's choice.
+
+// DecodeFailure is what reading a coded body can fail with: a coding this
+// implementation does not speak (`Error::UnsupportedEncoding`), a stream
+// that is not what its coding says (`std::compress::Error`), or the memory
+// the plain bytes need. Nothing is converted, so a caller that matches on it
+// sees which layer said no.
+pub error DecodeFailure = Error or std::compress::Error or std::mem::Error;
+
+// accepts_encoding reports whether the request's Accept-Encoding lets the
+// answer be sent in `coding`: the coding is listed with a weight above zero,
+// or `*` is and the coding is not listed at all. Every Accept-Encoding field
+// counts, and a coding listed twice is read from its last mention.
+//
+// A request with no Accept-Encoding gets the plain bytes. RFC 9110 §12.5.3
+// lets a server read the absent field as "anything is acceptable", but a
+// client that said nothing is more often one that cannot decode than one
+// that does not care, and the plain answer is right for both.
+pub fn accepts_encoding(headers: &std::http::Headers, coding: []u8) -> bool {
+    var listed = false;
+    var accepted = false;
+    var any = false;
+    var from = 0;
+    while headers.index_of(from, "Accept-Encoding") |at| {
+        if headers.at(at) |field| {
+            let value = field.value.as_bytes();
+            var start = 0;
+            let end = std::mem::len(value);
+            while start <= end {
+                var stop = start;
+                while stop < end and value[stop] != cast<u8>(44) {
+                    stop = stop + 1;
+                }
+                let element = std::mem::trim_ascii(value[start..stop]);
+                if std::mem::len(element) > 0 {
+                    let token = token_of(element);
+                    let weight = weight_of(element);
+                    if std::http::equal_ascii_fold(token, coding) {
+                        listed = true;
+                        accepted = weight > 0;
+                    }
+                    if std::mem::equal_bytes(token, "*") {
+                        any = weight > 0;
+                    }
+                }
+                start = stop + 1;
+            }
+        }
+        from = at + 1;
+    }
+    if listed {
+        return accepted;
+    }
+    return any;
+}
+
+// token_of is the element up to its first `;`, without the space around it.
+fn token_of(element: []u8) -> []u8 {
+    var stop = 0;
+    let end = std::mem::len(element);
+    while stop < end and element[stop] != cast<u8>(59) {
+        stop = stop + 1;
+    }
+    return std::mem::trim_ascii(element[0..stop]);
+}
+
+// weight_of is the element's `q` in thousandths: 1000 when it has none, 0
+// when it has one that is not a qvalue. Only whether it is zero matters
+// here, so `1.5` reads as a weight and not as an error.
+fn weight_of(element: []u8) -> i64 {
+    let end = std::mem::len(element);
+    var at = 0;
+    while at < end and element[at] != cast<u8>(59) {
+        at = at + 1;
+    }
+    while at < end {
+        // Past a `;`: the parameter, which is `q=` and a value, or one this
+        // does not read.
+        let rest = std::mem::trim_ascii(element[at + 1..end]);
+        var stop = 0;
+        while stop < std::mem::len(rest) and rest[stop] != cast<u8>(59) {
+            stop = stop + 1;
+        }
+        let parameter = std::mem::trim_ascii(rest[0..stop]);
+        if std::mem::len(parameter) >= 2
+            and (parameter[0] == cast<u8>(113) or parameter[0] == cast<u8>(81))
+            and parameter[1] == cast<u8>(61) {
+            return qvalue(std::mem::trim_ascii(parameter[2..std::mem::len(parameter)]));
+        }
+        at = at + 1 + stop;
+    }
+    return 1000;
+}
+
+// qvalue reads `0`, `1`, or either with up to three digits after a point
+// (RFC 9110 §12.4.2), as thousandths.
+fn qvalue(text: []u8) -> i64 {
+    let end = std::mem::len(text);
+    if end == 0 {
+        return 0;
+    }
+    var value = 0;
+    if text[0] == cast<u8>(49) {
+        value = 1000;
+    }
+    if text[0] != cast<u8>(49) and text[0] != cast<u8>(48) {
+        return 0;
+    }
+    if end == 1 {
+        return value;
+    }
+    if text[1] != cast<u8>(46) or end > 5 {
+        return 0;
+    }
+    var scale = 100;
+    for 2..end |index| {
+        let digit = cast<i64>(text[index]) - 48;
+        if digit < 0 or digit > 9 {
+            return 0;
+        }
+        value = value + digit * scale;
+        scale = scale / 10;
+    }
+    return value;
+}
+
+// decode_body returns the plain bytes of a body whose head says how it is
+// coded. The codings in Content-Encoding were applied in the order listed,
+// so they are undone from the last: `deflate, gzip` is gunzipped first.
+// `gzip` (and its old spelling `x-gzip`) and `deflate` -- the zlib format,
+// as RFC 9110 §8.4.1.2 defines it -- are spoken; `identity` is nothing;
+// anything else is `Error::UnsupportedEncoding`. With no Content-Encoding
+// the bytes come back as they are, copied, so a caller holds one shape
+// either way.
+//
+// The ceiling is the one std::compress takes, for the reason it takes it:
+// a small body can name a very large one, and how large is acceptable is
+// known where the body is read. It bounds what each coding unpacks to.
+pub fn decode_body(
+    allocator: Allocator,
+    headers: &std::http::Headers,
+    body: []u8,
+    limit: std::mem::Limit
+) -> std::http::DecodeFailure!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, body);
+    var coding = std::string::new(allocator);
+    defer coding.deinit(allocator);
+    var step = try codings(allocator, headers, -1, &var coding);
+    while step > 0 {
+        step = step - 1;
+        coding.clear();
+        let _ = try codings(allocator, headers, step, &var coding);
+        let name = coding.as_bytes();
+        if std::http::equal_ascii_fold(name, "identity") {
+            continue;
+        }
+        var plain = std::string::new(allocator);
+        defer plain.deinit(allocator);
+        try unpack(allocator, name, &out, &var plain, limit);
+        out.clear();
+        try out.append_string(allocator, &plain);
+    }
+    return move out;
+}
+
+// unpack writes the plain bytes of `packed` under one coding.
+fn unpack(
+    allocator: Allocator,
+    coding: []u8,
+    packed: &std::string::String,
+    plain: &var std::string::String,
+    limit: std::mem::Limit
+) -> std::http::DecodeFailure!void {
+    let bytes = packed.as_bytes();
+    if std::http::equal_ascii_fold(coding, "gzip") or std::http::equal_ascii_fold(coding, "x-gzip") {
+        try std::compress::gunzip_into(allocator, bytes, plain, limit);
+        return;
+    }
+    if std::http::equal_ascii_fold(coding, "deflate") {
+        try std::compress::unzlib_into(allocator, bytes, plain, limit);
+        return;
+    }
+    return std::http::Error::UnsupportedEncoding;
+}
+
+// codings walks the Content-Encoding fields as one list and returns how many
+// codings they name. The one at `wanted` is copied into `out` on the way;
+// -1 wants none.
+fn codings(
+    allocator: Allocator,
+    headers: &std::http::Headers,
+    wanted: i64,
+    out: &var std::string::String
+) -> std::mem::Error!i64 {
+    var count = 0;
+    var from = 0;
+    while headers.index_of(from, "Content-Encoding") |at| {
+        if headers.at(at) |field| {
+            let value = field.value.as_bytes();
+            var start = 0;
+            let end = std::mem::len(value);
+            while start <= end {
+                var stop = start;
+                while stop < end and value[stop] != cast<u8>(44) {
+                    stop = stop + 1;
+                }
+                let token = std::mem::trim_ascii(value[start..stop]);
+                if std::mem::len(token) > 0 {
+                    if count == wanted {
+                        try out.append_bytes(allocator, token);
+                    }
+                    count = count + 1;
+                }
+                start = stop + 1;
+            }
+        }
+        from = at + 1;
+    }
+    return count;
+}
+
+// compress replaces the body with its `coding` -- `gzip`, or `deflate` in
+// the zlib format RFC 9110 §8.4.1.2 names -- and adds the coding to
+// Content-Encoding behind whatever it already lists, since codings are
+// listed in the order applied. Nothing here asks whether the client can
+// read the result: that is `accepts_encoding`, and asking is the handler's
+// part. An answer that depends on what the request accepted also has to
+// say so, and `Vary: Accept-Encoding` is the handler's to write for the
+// same reason `Date` is -- the library does not know what the handler
+// decided on.
+fn (self: &var std::http::Response) compress(
+    allocator: Allocator,
+    coding: []u8
+) -> std::http::Failure!void {
+    if self.finished {
+        return std::http::Error::ResponseFinished;
+    }
+    var packed = std::string::new(allocator);
+    defer packed.deinit(allocator);
+    try pack(allocator, coding, &self.body, &var packed);
+    self.body.clear();
+    try self.body.append_string(allocator, &packed);
+    var list = std::string::new(allocator);
+    defer list.deinit(allocator);
+    if self.headers.find("Content-Encoding") |field| {
+        try list.append_string(allocator, &field.value);
+        try list.append_bytes(allocator, ", ");
+    }
+    try list.append_bytes(allocator, coding);
+    let value = list.as_bytes();
+    try self.headers.set(allocator, "Content-Encoding", value);
+    return;
+}
+
+// pack writes `plain` under one coding, or refuses a coding it cannot write.
+fn pack(
+    allocator: Allocator,
+    coding: []u8,
+    plain: &std::string::String,
+    packed: &var std::string::String
+) -> std::http::Failure!void {
+    let bytes = plain.as_bytes();
+    if std::http::equal_ascii_fold(coding, "gzip") {
+        try std::compress::gzip_into(allocator, bytes, packed);
+        return;
+    }
+    if std::http::equal_ascii_fold(coding, "deflate") {
+        try std::compress::zlib_into(allocator, bytes, packed);
+        return;
+    }
+    return std::http::Error::UnsupportedEncoding;
+}

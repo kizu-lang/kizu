@@ -1,0 +1,127 @@
+// A compressed answer is a choice the handler makes, in the open.
+//
+// The request says what it can read in Accept-Encoding; `accepts_encoding`
+// reads that field, weights and all. The handler then asks the response to
+// `compress` its body, which swaps the bytes for their gzip and names the
+// coding in Content-Encoding. Nothing compresses on its own: a coded body
+// is a different body, with a different length, and which side pays for
+// it is decided here.
+//
+// The reader's side is `decode_body`: given the head that names the coding
+// and the bytes, it returns the plain bytes, under a ceiling the reader
+// names -- a small body can name a very large one.
+//
+// This example never opens a socket. Both sides are functions over bytes.
+
+import std::fmt;
+import std::http;
+import std::mem;
+import std::string;
+
+fn crlf_wire(allocator: Allocator, text: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    for 0..mem::len(text) |index| {
+        if text[index] == cast<u8>(10) {
+            try out.append_byte(allocator, cast<u8>(13));
+        }
+        try out.append_byte(allocator, text[index]);
+    }
+    try out.append_byte(allocator, cast<u8>(13));
+    try out.append_byte(allocator, cast<u8>(10));
+    return move out;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let request_text =
+        \\GET /report HTTP/1.1
+        \\Host: example
+        \\Accept-Encoding: gzip;q=0.8, br
+        \\
+    ;
+    var head = try crlf_wire(allocator, request_text);
+    defer head.deinit(allocator);
+    let head_bytes = head.as_bytes();
+    let request = try http::parse_request_head(allocator, head_bytes, http::default_limits());
+    defer request.deinit(allocator);
+
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.header(allocator, "Content-Type", "text/plain");
+    var lines = string::new(allocator);
+    defer lines.deinit(allocator);
+    for 0..20 |_| {
+        try lines.append_bytes(allocator, "the same line, sent again and again");
+        try lines.append_byte(allocator, cast<u8>(10));
+    }
+    let lines_bytes = lines.as_bytes();
+    try response.write(allocator, lines_bytes);
+    let plain_len = response.body_len();
+    if http::accepts_encoding(&request.headers, "gzip") {
+        try response.compress(allocator, "gzip");
+        // The answer now depends on what the request accepted, and a cache
+        // has to know that. The library does not write this: it does not
+        // know the handler negotiated.
+        try response.header(allocator, "Vary", "Accept-Encoding");
+    }
+    var sizes = string::new(allocator);
+    defer sizes.deinit(allocator);
+    try fmt::append_i64(allocator, &var sizes, plain_len);
+    try sizes.append_bytes(allocator, " bytes of body, ");
+    try fmt::append_i64(allocator, &var sizes, response.body_len());
+    try sizes.append_bytes(allocator, " on the wire");
+    let sizes_text = sizes.as_bytes();
+    print(sizes_text);
+
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try response.encode(allocator, http::Version::Http11, http::Framing::Buffered, false, false, &var wire);
+    let bytes = wire.as_bytes();
+    let split = http::head_end(bytes, 0) orelse return;
+    show(bytes[0..split]);
+
+    // The reader: the head names the coding, the ceiling is the reader's.
+    let answer = try http::parse_response_head(allocator, bytes[0..split], http::default_limits());
+    defer answer.deinit(allocator);
+    let body = bytes[split..mem::len(bytes)];
+    let text = try http::decode_body(allocator, &answer.headers, body, mem::Limit::Bytes(4096));
+    defer text.deinit(allocator);
+    let plain = text.as_bytes();
+    print(plain[0..35]);
+    return;
+}
+
+// show writes one head line at a time with the CR left off, so the wire
+// reads as text here.
+fn show(wire: []u8) -> void {
+    let length = mem::len(wire);
+    var start = 0;
+    var index = 0;
+    while index < length {
+        if wire[index] == cast<u8>(10) {
+            var end = index;
+            if end > start and wire[end - 1] == cast<u8>(13) {
+                end = end - 1;
+            }
+            if end > start {
+                print(wire[start..end]);
+            }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// run
+// features: http compress error-union
+// output:
+// 720 bytes of body, 58 on the wire
+// HTTP/1.1 200 OK
+// Content-Type: text/plain
+// Content-Encoding: gzip
+// Vary: Accept-Encoding
+// Content-Length: 58
+// Connection: close
+// the same line, sent again and again

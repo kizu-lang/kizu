@@ -181,6 +181,7 @@ fn (self: &var Response) set_status(status: i64) -> std::http::Failure!void
 fn (self: &var Response) header(allocator, name, value) -> std::http::Failure!void
 fn (self: &var Response) set_date(allocator, moment: std::date::DateTime) -> std::http::Failure!void
 fn (self: &var Response) write(allocator, bytes) -> std::http::Failure!void
+fn (self: &var Response) compress(allocator, coding: []u8) -> std::http::Failure!void
 fn (self: &var Response) finish() -> void
 fn (self: &var Response) reset(allocator) -> void
 ```
@@ -1198,11 +1199,62 @@ upload を HTML として配ってしまう道です。知らない拡張子は
 directory 名の中のドットは拡張子ではなく、先頭のドットは名前です
 (`.gitignore` は拡張子なし)。
 
+## Content-Encoding
+
+```kizu
+pub fn accepts_encoding(headers: &Headers, coding: []u8) -> bool
+pub fn decode_body(allocator, headers: &Headers, body: []u8, limit: std::mem::Limit)
+    -> std::http::DecodeFailure!std::string::String
+fn (self: &var Response) compress(allocator, coding: []u8) -> std::http::Failure!void
+
+pub error DecodeFailure = Error or std::compress::Error or std::mem::Error
+```
+
+```kizu
+if http::accepts_encoding(&exchange.request.headers, "gzip") {
+    try exchange.response.compress(allocator, "gzip");
+    try exchange.response.header(allocator, "Vary", "Accept-Encoding");
+}
+```
+
+body の圧縮は handler の判断で、library は勝手にしません。圧縮した body は
+別の body —— 長さも、作る費用も、読む費用も違う —— で、どちら側がそれを
+払うかは handler が決めることです。
+
+`accepts_encoding` は request の `Accept-Encoding` を weight 込みで読みます
+(RFC 9110 §12.5.3)。coding が `q=0` でなく挙がっていれば true、挙がって
+いなくても `*` があれば true、field が無ければ **false** です。RFC は field が
+無い request を「何でもよい」と読むことを許しますが、何も言わない client は
+「読めない」client であることの方が多く、plain な答えはどちらにも正しい
+答えです。
+
+`compress` は body を `gzip` か `deflate`(RFC 9110 §8.4.1.2 が言うとおり
+zlib format)に置き換え、`Content-Encoding` に coding を**足します**。既に
+あれば後ろに並べます —— coding は適用した順に並ぶものだからです。`Vary:
+Accept-Encoding` は handler が書きます。`Date` と同じで、library は handler が
+何を negotiate したかを知りません。`finish` の後は `ResponseFinished`、知らない
+coding は `UnsupportedEncoding` です。
+
+`decode_body` は読む側で、request の body にも `ClientResponse` の body にも
+同じ関数です。`Content-Encoding` の coding を**後ろから**外します(`deflate,
+gzip` なら先に gunzip)。`gzip`(と古い綴りの `x-gzip`)と `deflate` を話し、
+`identity` は何もせず、それ以外は `UnsupportedEncoding` です。field が無ければ
+bytes をそのまま copy して返すので、呼び手が持つ形は 1 つです。`limit` は
+`std::compress` のものと同じ理由で必須です —— 小さな body が巨大な body を
+名指しできます。
+
+client が `Accept-Encoding` を送る口はまだありません。`fetch` / `send` は
+header を取らないので、求めるなら request を自分で書いて `write_all` し、
+`receive` で答えを読みます。
+
 ## 今は話さないこと
 
 - **trailer を書くこと**: 読むだけです。request にも response にも chunked body の
   terminator の後ろに trailer は付けません
-- **compression**: `Content-Encoding` は素通しで、decode しません
+- **client からの `Accept-Encoding`**: `fetch` / `send` に header を渡す口が無く、
+  client は圧縮した答えを求められません。読む側の `decode_body` はあります
+- **`br` / `zstd`**: std::compress が deflate だけなので、`Content-Encoding` も
+  それだけです
 - **WebSocket の framing**: 101 の後の接続の持ち方は上の節のとおりで、framing と
   handshake の SHA-1 / base64 は std にありません
 - **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
@@ -1234,7 +1286,9 @@ response 側 —— message が自分の framing と矛盾しており、回復�
 
 `std::http::Failure` はその和 —— `Error or std::net::Error or std::mem::Error or
 std::array::Error` —— です。どれも変換されないので、`match` した caller はどの層が
-拒否したかを見ます。
+拒否したかを見ます。`decode_body` だけは `std::http::DecodeFailure` —— `Error or
+std::compress::Error or std::mem::Error` —— を返します。socket は関わらず、代わりに
+stream が coding のとおりでないこと(`ChecksumMismatch` など)が起きるからです。
 
 `std::array::Error` が入っているのは、多数を捌く server が接続を `Array` に
 持つからです。member は 1 つで、ここに到達する経路はありません(index は array

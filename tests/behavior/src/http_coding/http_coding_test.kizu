@@ -1,0 +1,281 @@
+import std::compress;
+import std::fmt;
+import std::http;
+import std::mem;
+import std::string;
+import std::testing;
+
+// Content codings, tested without a socket: reading Accept-Encoding is a
+// function over a head, compressing a response is a function over its body,
+// and decoding a body is a function over bytes and the head that names them.
+
+fn failure_name(failure: http::Failure) -> []u8 {
+    return match failure {
+        UnsupportedEncoding => "UnsupportedEncoding",
+        ResponseFinished => "ResponseFinished",
+        InvalidHeader => "InvalidHeader",
+        _ => "other",
+    };
+}
+
+fn decode_failure_name(failure: http::DecodeFailure) -> []u8 {
+    return match failure {
+        UnsupportedEncoding => "UnsupportedEncoding",
+        Malformed => "Malformed",
+        Truncated => "Truncated",
+        ChecksumMismatch => "ChecksumMismatch",
+        LimitExceeded => "LimitExceeded",
+        _ => "other",
+    };
+}
+
+// with_accept builds a head whose Accept-Encoding fields are the values given,
+// an empty one standing for no field.
+fn with_accept(allocator: Allocator, first: []u8, second: []u8) -> http::Failure!http::Headers {
+    var headers = http::headers_new(allocator);
+    errdefer headers.deinit(allocator);
+    if mem::len(first) > 0 {
+        try headers.add(allocator, "Accept-Encoding", first);
+    }
+    if mem::len(second) > 0 {
+        try headers.add(allocator, "Accept-Encoding", second);
+    }
+    return move headers;
+}
+
+fn expect_accepts(allocator: Allocator, first: []u8, second: []u8, coding: []u8, want: bool) -> http::Failure!void {
+    let headers = try with_accept(allocator, first, second);
+    defer headers.deinit(allocator);
+    testing::expect_equal<bool>(want, http::accepts_encoding(&headers, coding));
+    return;
+}
+
+// paragraph is a body worth compressing: the same line many times.
+fn paragraph(allocator: Allocator) -> mem::Error!string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit(allocator);
+    for 0..40 |_| {
+        try text.append_bytes(allocator, "the same line, sent again and again");
+        try text.append_byte(allocator, 10);
+    }
+    return move text;
+}
+
+// body_of is the bytes behind the blank line of an encoded message.
+fn body_of(wire: []u8) -> []u8 {
+    let split = http::head_end(wire, 0) orelse return "";
+    return wire[split..mem::len(wire)];
+}
+
+// with_coding builds a head that names the codings given, one field each.
+fn with_coding(allocator: Allocator, first: []u8, second: []u8) -> http::Failure!http::Headers {
+    var headers = http::headers_new(allocator);
+    errdefer headers.deinit(allocator);
+    if mem::len(first) > 0 {
+        try headers.add(allocator, "Content-Encoding", first);
+    }
+    if mem::len(second) > 0 {
+        try headers.add(allocator, "Content-Encoding", second);
+    }
+    return move headers;
+}
+
+test "Accept-Encoding is read with its weights, across every field" {
+    let allocator = mem::page_allocator();
+    // No field: the plain bytes, whatever the RFC allows.
+    try expect_accepts(allocator, "", "", "gzip", false);
+    try expect_accepts(allocator, "gzip, deflate", "", "gzip", true);
+    try expect_accepts(allocator, "gzip, deflate", "", "deflate", true);
+    try expect_accepts(allocator, "gzip, deflate", "", "br", false);
+    // A weight of zero refuses; `*` covers what is not listed.
+    try expect_accepts(allocator, "gzip;q=0, *;q=0.5", "", "gzip", false);
+    try expect_accepts(allocator, "gzip;q=0, *;q=0.5", "", "deflate", true);
+    try expect_accepts(allocator, "*;q=0", "", "gzip", false);
+    try expect_accepts(allocator, "*", "", "gzip", true);
+    try expect_accepts(allocator, "gzip;q=0.000", "", "gzip", false);
+    try expect_accepts(allocator, "gzip ; Q=0.001", "", "gzip", true);
+    try expect_accepts(allocator, "GZIP", "", "gzip", true);
+    try expect_accepts(allocator, "identity", "", "gzip", false);
+    // Two fields read as one list; the last mention wins.
+    try expect_accepts(allocator, "gzip", "deflate", "deflate", true);
+    try expect_accepts(allocator, "gzip", "gzip;q=0", "gzip", false);
+    // A weight that is not one counts as zero rather than as anything.
+    try expect_accepts(allocator, "gzip;q=yes", "", "gzip", false);
+}
+
+test "a response compresses its body and names the coding in its head" {
+    let allocator = mem::page_allocator();
+    let text = try paragraph(allocator);
+    defer text.deinit(allocator);
+    let plain = text.as_bytes();
+
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.write(allocator, plain);
+    try response.compress(allocator, "gzip");
+    testing::expect(response.body_len() < text.len() / 4);
+    if response.headers.find("Content-Encoding") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("gzip", value);
+    } else {
+        testing::fail("the coding was not named");
+    }
+
+    // On the wire, the length is the coded body's, and the head a client
+    // parses is enough to get the plain bytes back.
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try response.encode(
+        allocator, http::Version::Http11, http::Framing::Buffered, false, false, &var wire);
+    let bytes = wire.as_bytes();
+    let split = http::head_end(bytes, 0) orelse return http::Error::Incomplete;
+    let head = try http::parse_response_head(allocator, bytes[0..split], http::default_limits());
+    defer head.deinit(allocator);
+    var length = string::new(allocator);
+    defer length.deinit(allocator);
+    try fmt::append_i64(allocator, &var length, response.body_len());
+    if head.headers.find("Content-Length") |field| {
+        let value = field.value.as_bytes();
+        let want = length.as_bytes();
+        testing::expect_equal<[]u8>(want, value);
+    } else {
+        testing::fail("no Content-Length");
+    }
+    let body = body_of(bytes);
+    let back = try http::decode_body(allocator, &head.headers, body, mem::Limit::Bytes(65536));
+    defer back.deinit(allocator);
+    let got = back.as_bytes();
+    testing::expect_equal<[]u8>(plain, got);
+
+    // deflate is the zlib format, as RFC 9110 names it.
+    var other = http::response_new(allocator);
+    defer other.deinit(allocator);
+    try other.write(allocator, plain);
+    try other.compress(allocator, "deflate");
+    var packed = string::new(allocator);
+    defer packed.deinit(allocator);
+    try other.encode(
+        allocator, http::Version::Http11, http::Framing::Buffered, false, false, &var packed);
+    let packed_bytes = packed.as_bytes();
+    let zlib = body_of(packed_bytes);
+    testing::expect_equal<i64>(0x78, cast<i64>(zlib[0]));
+    let unpacked = try http::decode_body(allocator, &other.headers, zlib, mem::Limit::Bytes(65536));
+    defer unpacked.deinit(allocator);
+    let plain_again = unpacked.as_bytes();
+    testing::expect_equal<[]u8>(plain, plain_again);
+}
+
+test "codings stack in the order applied and are undone from the last" {
+    let allocator = mem::page_allocator();
+    let text = try paragraph(allocator);
+    defer text.deinit(allocator);
+    let plain = text.as_bytes();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.write(allocator, plain);
+    try response.compress(allocator, "gzip");
+    try response.compress(allocator, "deflate");
+    if response.headers.find("Content-Encoding") |field| {
+        let value = field.value.as_bytes();
+        testing::expect_equal<[]u8>("gzip, deflate", value);
+    } else {
+        testing::fail("the codings were not named");
+    }
+    var wire = string::new(allocator);
+    defer wire.deinit(allocator);
+    try response.encode(
+        allocator, http::Version::Http11, http::Framing::Buffered, false, false, &var wire);
+    let bytes = wire.as_bytes();
+    let body = body_of(bytes);
+    let back = try http::decode_body(allocator, &response.headers, body, mem::Limit::Bytes(65536));
+    defer back.deinit(allocator);
+    let got = back.as_bytes();
+    testing::expect_equal<[]u8>(plain, got);
+
+    // The same list split over two fields, with identity and the old
+    // spelling of gzip in it, reads the same way.
+    var gz = string::new(allocator);
+    defer gz.deinit(allocator);
+    try compress::gzip_into(allocator, plain, &var gz);
+    let member = gz.as_bytes();
+    let headers = try with_coding(allocator, "identity, x-gzip", "identity");
+    defer headers.deinit(allocator);
+    let again = try http::decode_body(allocator, &headers, member, mem::Limit::Bytes(65536));
+    defer again.deinit(allocator);
+    let got_again = again.as_bytes();
+    testing::expect_equal<[]u8>(plain, got_again);
+}
+
+test "a coding this implementation does not speak is refused on both sides" {
+    let allocator = mem::page_allocator();
+    var response = http::response_new(allocator);
+    defer response.deinit(allocator);
+    try response.write(allocator, "plain");
+    if response.compress(allocator, "br") {
+        testing::fail("an unknown coding was written");
+    } else |err| {
+        testing::expect_equal<[]u8>("UnsupportedEncoding", failure_name(err));
+    }
+    testing::expect(!response.headers.has("Content-Encoding"));
+    response.finish();
+    if response.compress(allocator, "gzip") {
+        testing::fail("a finished response was changed");
+    } else |err| {
+        testing::expect_equal<[]u8>("ResponseFinished", failure_name(err));
+    }
+
+    let headers = try with_coding(allocator, "br", "");
+    defer headers.deinit(allocator);
+    if http::decode_body(allocator, &headers, "plain", mem::Limit::Unlimited) |text| {
+        text.deinit(allocator);
+        testing::fail("an unknown coding was read");
+    } else |err| {
+        testing::expect_equal<[]u8>("UnsupportedEncoding", decode_failure_name(err));
+    }
+}
+
+test "a body that is not its coding is refused, and one past the ceiling too" {
+    let allocator = mem::page_allocator();
+    let text = try paragraph(allocator);
+    defer text.deinit(allocator);
+    let plain = text.as_bytes();
+    var gz = string::new(allocator);
+    defer gz.deinit(allocator);
+    try compress::gzip_into(allocator, plain, &var gz);
+    let headers = try with_coding(allocator, "gzip", "");
+    defer headers.deinit(allocator);
+
+    let member = gz.as_bytes();
+    if http::decode_body(allocator, &headers, member, mem::Limit::Bytes(100)) |back| {
+        back.deinit(allocator);
+        testing::fail("the ceiling was passed");
+    } else |err| {
+        testing::expect_equal<[]u8>("LimitExceeded", decode_failure_name(err));
+    }
+
+    let at = gz.len() - 5;
+    let edit = gz.as_mut_bytes();
+    let byte = edit[at];
+    edit[at] = byte ^ cast<u8>(1);
+    let damaged = gz.as_bytes();
+    if http::decode_body(allocator, &headers, damaged, mem::Limit::Unlimited) |back| {
+        back.deinit(allocator);
+        testing::fail("a damaged member was read");
+    } else |err| {
+        testing::expect_equal<[]u8>("ChecksumMismatch", decode_failure_name(err));
+    }
+
+    // No coding, or `identity`: the bytes as they are, owned.
+    let none = try with_coding(allocator, "", "");
+    defer none.deinit(allocator);
+    let copy = try http::decode_body(allocator, &none, "as it is", mem::Limit::Bytes(8));
+    defer copy.deinit(allocator);
+    let copied = copy.as_bytes();
+    testing::expect_equal<[]u8>("as it is", copied);
+    let same = try with_coding(allocator, "identity", "");
+    defer same.deinit(allocator);
+    let kept = try http::decode_body(allocator, &same, "as it is", mem::Limit::Bytes(8));
+    defer kept.deinit(allocator);
+    let kept_bytes = kept.as_bytes();
+    testing::expect_equal<[]u8>("as it is", kept_bytes);
+}
