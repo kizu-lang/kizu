@@ -961,13 +961,15 @@ pub fn post(io, allocator, url, content_type, body, max)
     -> std::http::Failure!std::http::ClientResponse
 pub fn fetch(io, allocator, method, url, content_type, body, max)
     -> std::http::Failure!std::http::ClientResponse
-pub fn fetch_with(io, allocator, method, url, content_type, body, limits, max)
+pub fn fetch_with(io, allocator, method, url, headers: &Headers, body, limits, max)
     -> std::http::Failure!std::http::ClientResponse
 
 pub fn connect(io, allocator, address, limits)
     -> std::http::Failure!std::http::Connection
 pub fn take(allocator, stream: std::net::TcpStream, limits) -> std::http::Connection
 fn (self: &var Connection) send(io, allocator, method, url: &Url, content_type, body, write_millis)
+    -> std::http::Failure!void
+fn (self: &var Connection) send_with(io, allocator, method, url: &Url, headers: &Headers, body, write_millis)
     -> std::http::Failure!void
 fn (self: &var Connection) receive(io, allocator, method, limits)
     -> std::http::Failure!std::http::ClientResponse
@@ -995,6 +997,26 @@ pub fn parse_response_head(allocator, head, limits)
 
 `ClientResponse` は `Response` とは別の型です。片方は server がまだ組み立てて
 いるもの、もう片方は client がもう持っているものだからです(原理 7)。
+
+### 自分の field を送る
+
+`get` / `post` / `fetch` / `send` は content type だけを取ります。それ以外の
+field —— `Accept-Encoding`、`Authorization`、`If-None-Match` —— は `fetch_with` と
+`send_with` が `&Headers` で受け取り、head にそのまま書きます。
+
+```kizu
+var headers = http::headers_new(allocator);
+defer headers.deinit(allocator);
+try headers.add(allocator, "Accept-Encoding", "gzip");
+try headers.add(allocator, "Authorization", "Bearer ...");
+var response = try http::fetch_with(
+    handle, allocator, "GET", url, &headers, "", limits, 1 << 20);
+```
+
+`Host` / `Content-Length` / `Transfer-Encoding` / `Connection` は caller が入れて
+も落とします。message が実際に何であるかから client が書くもので、`Response.encode`
+と同じ規則です。`Host` は URL の authority、`Content-Length` は body の長さ、
+`Connection` は `close` です。
 
 ### `Connection` —— 答えを保持しないで読む
 
@@ -1243,16 +1265,14 @@ bytes をそのまま copy して返すので、呼び手が持つ形は 1 つ�
 `std::compress` のものと同じ理由で必須です —— 小さな body が巨大な body を
 名指しできます。
 
-client が `Accept-Encoding` を送る口はまだありません。`fetch` / `send` は
-header を取らないので、求めるなら request を自分で書いて `write_all` し、
-`receive` で答えを読みます。
+client が圧縮した答えを求めるには、`fetch_with` / `send_with` の headers に
+`Accept-Encoding` を入れ、返った `response.body` を `decode_body` に通します。
+client も勝手には求めません —— 求めた答えを読む費用を払うのは呼び手です。
 
 ## 今は話さないこと
 
 - **trailer を書くこと**: 読むだけです。request にも response にも chunked body の
   terminator の後ろに trailer は付けません
-- **client からの `Accept-Encoding`**: `fetch` / `send` に header を渡す口が無く、
-  client は圧縮した答えを求められません。読む側の `decode_body` はあります
 - **`br` / `zstd`**: std::compress が deflate だけなので、`Content-Encoding` も
   それだけです
 - **WebSocket の framing**: 101 の後の接続の持ち方は上の節のとおりで、framing と

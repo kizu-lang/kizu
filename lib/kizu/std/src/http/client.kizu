@@ -78,8 +78,8 @@ fn (self: std::http::Connection) deinit(allocator: Allocator) -> void {
     return;
 }
 
-// send writes one request. The write deadline comes from the limits this
-// connection was opened with, and is set when the write starts.
+// send writes one request under a content type, the spelling `post` uses.
+// The write deadline is `write_millis` from when the write starts.
 fn (self: &var std::http::Connection) send(
     io: Io,
     allocator: Allocator,
@@ -89,16 +89,45 @@ fn (self: &var std::http::Connection) send(
     body: []u8,
     write_millis: i64
 ) -> std::http::Failure!void {
+    var headers = try content_type_headers(allocator, content_type);
+    defer headers.deinit(allocator);
+    return self.send_with(io, allocator, method, url, &headers, body, write_millis);
+}
+
+// send_with writes one request with the caller's fields in its head.
+fn (self: &var std::http::Connection) send_with(
+    io: Io,
+    allocator: Allocator,
+    method: []u8,
+    url: &std::http::Url,
+    headers: &std::http::Headers,
+    body: []u8,
+    write_millis: i64
+) -> std::http::Failure!void {
     if !std::http::valid_field_name(method) {
         return std::http::Error::MalformedRequest;
     }
     var request = std::string::new(allocator);
     defer request.deinit(allocator);
-    try build_request(allocator, url, &var request, method, content_type, body);
+    try build_request(allocator, url, &var request, method, headers, body);
     let wire = request.as_bytes();
     self.reader.arm_write(write_millis);
     try self.reader.write_all(io, wire);
     return;
+}
+
+// content_type_headers is the head the content-type spellings send: one
+// field when a type is given, none when it is empty.
+fn content_type_headers(
+    allocator: Allocator,
+    content_type: []u8
+) -> std::http::Failure!std::http::Headers {
+    var headers = std::http::headers_new(allocator);
+    errdefer headers.deinit(allocator);
+    if std::mem::len(content_type) > 0 {
+        try headers.add(allocator, "Content-Type", content_type);
+    }
+    return move headers;
 }
 
 // receive reads the answer's head and stops there, leaving the body on the
@@ -366,20 +395,23 @@ pub fn fetch(
     body: []u8,
     max: i64
 ) -> std::http::Failure!std::http::ClientResponse {
+    var headers = try content_type_headers(allocator, content_type);
+    defer headers.deinit(allocator);
     return fetch_with(
-        io, allocator, method, url, content_type, body,
+        io, allocator, method, url, &headers, body,
         std::http::default_limits(), max);
 }
 
-// fetch_with is the whole client in one call. The limits bound the head and
-// the time each phase may take; `max` bounds the body this holds. A server
-// that is not trusted is exactly the case they exist for.
+// fetch_with is the whole client in one call, with every knob: the caller's
+// own fields in the head, the limits that bound the head and the time each
+// phase may take, and `max` for the body this holds. A server that is not
+// trusted is exactly the case the limits exist for.
 pub fn fetch_with(
     io: Io,
     allocator: Allocator,
     method: []u8,
     url: []u8,
-    content_type: []u8,
+    headers: &std::http::Headers,
     body: []u8,
     limits: std::http::Limits,
     max: i64
@@ -397,7 +429,7 @@ pub fn fetch_with(
     let address_bytes = address.as_bytes();
     var open = try connect(io, allocator, address_bytes, limits);
     defer open.deinit(allocator);
-    try open.send(io, allocator, method, &parsed, content_type, body, limits.write_millis);
+    try open.send_with(io, allocator, method, &parsed, headers, body, limits.write_millis);
     var response = try open.receive(io, allocator, method, limits);
     errdefer response.deinit(allocator);
     try open.read_body(io, allocator, &var response, max);
@@ -406,13 +438,18 @@ pub fn fetch_with(
 
 // build_request writes the request line and the head. Host is required by
 // HTTP/1.1 and is the authority the URL named, so it is written here rather
-// than left to the caller to remember.
+// than left to the caller to remember. The caller's fields follow it, all
+// but the ones that say what the message is -- Host, Content-Length,
+// Transfer-Encoding, Connection -- which are written from the message
+// itself, the rule `Response.encode` keeps: a field that disagreed with the
+// body would desynchronise the connection, and sending both is worse than
+// sending neither.
 fn build_request(
     allocator: Allocator,
     url: &std::http::Url,
     out: &var std::string::String,
     method: []u8,
-    content_type: []u8,
+    headers: &std::http::Headers,
     body: []u8
 ) -> std::http::Failure!void {
     let target = url.target.as_bytes();
@@ -425,13 +462,17 @@ fn build_request(
     try out.append_bytes(allocator, "Host: ");
     try url.authority(allocator, out);
     try std::http::append_crlf(allocator, out);
-    if std::mem::len(content_type) > 0 {
-        if !std::http::valid_field_value(content_type) {
-            return std::http::Error::InvalidHeader;
+    var index = 0;
+    while headers.at(index) |field| {
+        let name = field.name.as_bytes();
+        if !is_message_field(name) {
+            let value = field.value.as_bytes();
+            try out.append_bytes(allocator, name);
+            try out.append_bytes(allocator, ": ");
+            try out.append_bytes(allocator, value);
+            try std::http::append_crlf(allocator, out);
         }
-        try out.append_bytes(allocator, "Content-Type: ");
-        try out.append_bytes(allocator, content_type);
-        try std::http::append_crlf(allocator, out);
+        index = index + 1;
     }
     if std::mem::len(body) > 0 {
         try out.append_bytes(allocator, "Content-Length: ");
@@ -445,6 +486,21 @@ fn build_request(
     try std::http::append_crlf(allocator, out);
     try out.append_bytes(allocator, body);
     return;
+}
+
+// is_message_field reports whether a field is one the client writes from the
+// message itself rather than takes from the caller.
+fn is_message_field(name: []u8) -> bool {
+    if std::http::equal_ascii_fold(name, "Host") {
+        return true;
+    }
+    if std::http::equal_ascii_fold(name, "Content-Length") {
+        return true;
+    }
+    if std::http::equal_ascii_fold(name, "Transfer-Encoding") {
+        return true;
+    }
+    return std::http::equal_ascii_fold(name, "Connection");
 }
 
 // parse_response_head reads `HTTP/1.x SP STATUS SP REASON CRLF` and the header
