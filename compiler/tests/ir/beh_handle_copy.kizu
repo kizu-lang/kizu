@@ -30,23 +30,24 @@ fn read_value(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
 test "handle assignment leaves the source usable" {
     let allocator = mem::page_allocator();
     let items = arena::new<Item>(allocator);
+    defer items.deinit(allocator);
     let h = try items.add(allocator, Item { value: 7 });
     let h2 = h;
     testing::expect_equal<i64>(14, items.at(h).value + items.at(h2).value);
-    items.deinit(allocator);
 }
 
 test "a helper takes the same handle twice" {
     let allocator = mem::page_allocator();
     let items = arena::new<Item>(allocator);
+    defer items.deinit(allocator);
     let h = try items.add(allocator, Item { value: 21 });
     testing::expect_equal<i64>(42, read_value(&items, h) + read_value(&items, h));
-    items.deinit(allocator);
 }
 
 test "two parents share one child" {
     let allocator = mem::page_allocator();
     let nodes = arena::new<Node>(allocator);
+    defer nodes.deinit(allocator);
     let leaf = try nodes.add(allocator, Node { value: 5, child: null });
     let a = try nodes.add(allocator, Node { value: 10, child: leaf });
     let b = try nodes.add(allocator, Node { value: 20, child: leaf });
@@ -58,7 +59,6 @@ test "two parents share one child" {
         total = total + nodes.at(c).value;
     }
     testing::expect_equal<i64>(15, total);
-    nodes.deinit(allocator);
 }
 
 test "an array holds handles as a worklist" {
@@ -82,15 +82,487 @@ test "an array holds handles as a worklist" {
 test "a struct holding a handle is copy" {
     let allocator = mem::page_allocator();
     let items = arena::new<Item>(allocator);
+    defer items.deinit(allocator);
     let h = try items.add(allocator, Item { value: 7 });
     let r = Ref { h: h, weight: 3 };
     let r2 = r;
     testing::expect_equal<i64>(17, items.at(r.h).value + items.at(r2.h).value + r.weight);
-    items.deinit(allocator);
 }
 
 // ir
 // lower:
-// check failed: move error: owned value `items` would leak on this `try`'s error exit; register `defer` or `errdefer` cleanup before it at 33:17
+// fn read_value(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: i64 = field.value %1: Item
+//   return %2: i64
+// }
+// fn test.0.handle_assignment_leaves_the_source_usable() -> !void {
+// entry:
+//   %1: []u8 = const "handle assignment leaves the source usable"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Item> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Item> = local.slot %7: std::arena::Arena<Item>
+//   test.mark 
+//   %10: i64 = const 7
+//   %11: Item = struct.new {value: %10: i64}
+//   %12: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %8: &var std::arena::Arena<Item>, %5: Allocator, %11: Item
+//   %13: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %14: std::arena::Handle<Item> = error.try %12: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %13: std::arena::Arena<Item>, %5: Allocator
+//   test.mark 
+//   test.mark 
+//   %17: i64 = const 14
+//   %18: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %19: i64 = field.value %18: Item
+//   %20: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %21: i64 = field.value %20: Item
+//   %22: i64 = binary.+ %19: i64, %21: i64
+//   test.expect_equal %17: i64, %22: i64, i64
+//   %24: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   arena.deinit %24: std::arena::Arena<Item>, %5: Allocator
+//   %26: !void = error.ok
+//   return %26: !void
+// }
+// fn test.1.a_helper_takes_the_same_handle_twice() -> !void {
+// entry:
+//   %1: []u8 = const "a helper takes the same handle twice"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Item> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Item> = local.slot %7: std::arena::Arena<Item>
+//   test.mark 
+//   %10: i64 = const 21
+//   %11: Item = struct.new {value: %10: i64}
+//   %12: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %8: &var std::arena::Arena<Item>, %5: Allocator, %11: Item
+//   %13: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %14: std::arena::Handle<Item> = error.try %12: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %13: std::arena::Arena<Item>, %5: Allocator
+//   test.mark 
+//   %16: i64 = const 42
+//   %17: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %18: i64 = call.read_value %17: std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %19: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %20: i64 = call.read_value %19: std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %21: i64 = binary.+ %18: i64, %20: i64
+//   test.expect_equal %16: i64, %21: i64, i64
+//   %23: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   arena.deinit %23: std::arena::Arena<Item>, %5: Allocator
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.2.two_parents_share_one_child() -> !void {
+// entry:
+//   %1: []u8 = const "two parents share one child"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Node> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Node> = local.slot %7: std::arena::Arena<Node>
+//   test.mark 
+//   %10: i64 = const 5
+//   %11: ?std::arena::Handle<Node> = opt.null
+//   %12: Node = struct.new {value: %10: i64, child: %11: ?std::arena::Handle<Node>}
+//   %13: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %12: Node
+//   %14: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %15: std::arena::Handle<Node> = error.try %13: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %14: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %17: i64 = const 10
+//   %18: ?std::arena::Handle<Node> = opt.some %15: std::arena::Handle<Node>
+//   %19: Node = struct.new {value: %17: i64, child: %18: ?std::arena::Handle<Node>}
+//   %20: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %19: Node
+//   %21: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %22: std::arena::Handle<Node> = error.try %20: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %21: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %24: i64 = const 20
+//   %25: ?std::arena::Handle<Node> = opt.some %15: std::arena::Handle<Node>
+//   %26: Node = struct.new {value: %24: i64, child: %25: ?std::arena::Handle<Node>}
+//   %27: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %26: Node
+//   %28: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %29: std::arena::Handle<Node> = error.try %27: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %28: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %31: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %15: std::arena::Handle<Node>
+//   %32: i64 = field.value %31: Node
+//   test.mark 
+//   %34: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %22: std::arena::Handle<Node>
+//   %35: ?std::arena::Handle<Node> = field.child %34: Node
+//   %36: std::arena::Handle<Node> = opt.value %35: ?std::arena::Handle<Node>
+//   %37: bool = opt.has %35: ?std::arena::Handle<Node>
+//   branch %37: bool, if.then.1, if.else.2
+// if.then.1:
+//   test.mark 
+//   %39: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %36: std::arena::Handle<Node>
+//   %40: i64 = field.value %39: Node
+//   %41: i64 = binary.+ %32: i64, %40: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %42: i64 = phi [if.then.1, %41: i64], [if.else.2, %32: i64]
+//   test.mark 
+//   %44: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %29: std::arena::Handle<Node>
+//   %45: ?std::arena::Handle<Node> = field.child %44: Node
+//   %46: std::arena::Handle<Node> = opt.value %45: ?std::arena::Handle<Node>
+//   %47: bool = opt.has %45: ?std::arena::Handle<Node>
+//   branch %47: bool, if.then.4, if.else.5
+// if.then.4:
+//   test.mark 
+//   %49: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %46: std::arena::Handle<Node>
+//   %50: i64 = field.value %49: Node
+//   %51: i64 = binary.+ %42: i64, %50: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %52: i64 = phi [if.then.4, %51: i64], [if.else.5, %42: i64]
+//   test.mark 
+//   %54: i64 = const 15
+//   test.expect_equal %54: i64, %52: i64, i64
+//   %56: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   arena.deinit %56: std::arena::Arena<Node>, %5: Allocator
+//   %58: !void = error.ok
+//   return %58: !void
+// }
+// fn test.3.an_array_holds_handles_as_a_worklist() -> !void {
+// entry:
+//   %1: []u8 = const "an array holds handles as a worklist"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Node> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Node> = local.slot %7: std::arena::Arena<Node>
+//   test.mark 
+//   %10: i64 = const 1
+//   %11: ?std::arena::Handle<Node> = opt.null
+//   %12: Node = struct.new {value: %10: i64, child: %11: ?std::arena::Handle<Node>}
+//   %13: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %12: Node
+//   %14: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %15: std::arena::Handle<Node> = error.try %13: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %14: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %17: std::array::Array<std::arena::Handle<Node>> = array.new %5: Allocator
+//   %18: &var std::array::Array<std::arena::Handle<Node>> = local.slot %17: std::array::Array<std::arena::Handle<Node>>
+//   test.mark 
+//   %20: std::mem::Error!void = call.std::array::Array.append.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>, %5: Allocator, %15: std::arena::Handle<Node>
+//   %21: std::array::Array<std::arena::Handle<Node>> = ref.load %18: &var std::array::Array<std::arena::Handle<Node>>
+//   %22: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   error.try %20: std::mem::Error!void, cleanup array.deinit %21: std::array::Array<std::arena::Handle<Node>>, %5: Allocator; arena.deinit %22: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %25: std::mem::Error!void = call.std::array::Array.append.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>, %5: Allocator, %15: std::arena::Handle<Node>
+//   %26: std::array::Array<std::arena::Handle<Node>> = ref.load %18: &var std::array::Array<std::arena::Handle<Node>>
+//   %27: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   error.try %25: std::mem::Error!void, cleanup array.deinit %26: std::array::Array<std::arena::Handle<Node>>, %5: Allocator; arena.deinit %27: std::arena::Arena<Node>, %5: Allocator
+//   %29: i64 = const 0
+//   %30: i64 = const 0
+//   test.mark 
+//   jump while.header.1
+// while.header.1:
+//   %32: i64 = phi [entry, %29: i64], [while.body.2, %40: i64]
+//   %33: i64 = phi [entry, %30: i64], [while.body.2, %43: i64]
+//   %34: i64 = call.std::array::Array.len.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>
+//   %35: bool = binary.< %33: i64, %34: i64
+//   branch %35: bool, while.body.2, while.end.3
+// while.body.2:
+//   test.mark 
+//   %37: std::arena::Handle<Node> = call.std::array::Array.get_or_panic.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>, %33: i64
+//   %38: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %37: std::arena::Handle<Node>
+//   %39: i64 = field.value %38: Node
+//   %40: i64 = binary.+ %32: i64, %39: i64
+//   test.mark 
+//   %42: i64 = const 1
+//   %43: i64 = binary.+ %33: i64, %42: i64
+//   jump while.header.1
+// while.end.3:
+//   test.mark 
+//   %45: i64 = const 2
+//   test.expect_equal %45: i64, %32: i64, i64
+//   %47: std::array::Array<std::arena::Handle<Node>> = ref.load %18: &var std::array::Array<std::arena::Handle<Node>>
+//   array.deinit %47: std::array::Array<std::arena::Handle<Node>>, %5: Allocator
+//   %49: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   arena.deinit %49: std::arena::Arena<Node>, %5: Allocator
+//   %51: !void = error.ok
+//   return %51: !void
+// }
+// fn test.4.a_struct_holding_a_handle_is_copy() -> !void {
+// entry:
+//   %1: []u8 = const "a struct holding a handle is copy"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Item> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Item> = local.slot %7: std::arena::Arena<Item>
+//   test.mark 
+//   %10: i64 = const 7
+//   %11: Item = struct.new {value: %10: i64}
+//   %12: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %8: &var std::arena::Arena<Item>, %5: Allocator, %11: Item
+//   %13: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %14: std::arena::Handle<Item> = error.try %12: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %13: std::arena::Arena<Item>, %5: Allocator
+//   test.mark 
+//   %16: i64 = const 3
+//   %17: Ref = struct.new {h: %14: std::arena::Handle<Item>, weight: %16: i64}
+//   test.mark 
+//   test.mark 
+//   %20: i64 = const 17
+//   %21: std::arena::Handle<Item> = field.h %17: Ref
+//   %22: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %21: std::arena::Handle<Item>
+//   %23: i64 = field.value %22: Item
+//   %24: std::arena::Handle<Item> = field.h %17: Ref
+//   %25: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %24: std::arena::Handle<Item>
+//   %26: i64 = field.value %25: Item
+//   %27: i64 = binary.+ %23: i64, %26: i64
+//   %28: i64 = field.weight %17: Ref
+//   %29: i64 = binary.+ %27: i64, %28: i64
+//   test.expect_equal %20: i64, %29: i64, i64
+//   %31: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   arena.deinit %31: std::arena::Arena<Item>, %5: Allocator
+//   %33: !void = error.ok
+//   return %33: !void
+// }
 // opt:
-// check failed: move error: owned value `items` would leak on this `try`'s error exit; register `defer` or `errdefer` cleanup before it at 33:17
+// fn read_value(%items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>) -> i64 {
+// entry:
+//   %1: Item = call.std::arena::Arena.at.Item %items: &std::arena::Arena<Item>, %h: std::arena::Handle<Item>
+//   %2: i64 = field.value %1: Item
+//   return %2: i64
+// }
+// fn test.0.handle_assignment_leaves_the_source_usable() -> !void {
+// entry:
+//   %1: []u8 = const "handle assignment leaves the source usable"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Item> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Item> = local.slot %7: std::arena::Arena<Item>
+//   test.mark 
+//   %10: i64 = const 7
+//   %11: Item = struct.new {value: %10: i64}
+//   %12: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %8: &var std::arena::Arena<Item>, %5: Allocator, %11: Item
+//   %13: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %14: std::arena::Handle<Item> = error.try %12: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %13: std::arena::Arena<Item>, %5: Allocator
+//   test.mark 
+//   test.mark 
+//   %17: i64 = const 14
+//   %18: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %19: i64 = field.value %18: Item
+//   %20: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %21: i64 = field.value %20: Item
+//   %22: i64 = binary.+ %19: i64, %21: i64
+//   test.expect_equal %17: i64, %22: i64, i64
+//   %24: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   arena.deinit %24: std::arena::Arena<Item>, %5: Allocator
+//   %26: !void = error.ok
+//   return %26: !void
+// }
+// fn test.1.a_helper_takes_the_same_handle_twice() -> !void {
+// entry:
+//   %1: []u8 = const "a helper takes the same handle twice"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Item> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Item> = local.slot %7: std::arena::Arena<Item>
+//   test.mark 
+//   %10: i64 = const 21
+//   %11: Item = struct.new {value: %10: i64}
+//   %12: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %8: &var std::arena::Arena<Item>, %5: Allocator, %11: Item
+//   %13: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %14: std::arena::Handle<Item> = error.try %12: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %13: std::arena::Arena<Item>, %5: Allocator
+//   test.mark 
+//   %16: i64 = const 42
+//   %17: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %18: i64 = call.read_value %17: std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %19: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %20: i64 = call.read_value %19: std::arena::Arena<Item>, %14: std::arena::Handle<Item>
+//   %21: i64 = binary.+ %18: i64, %20: i64
+//   test.expect_equal %16: i64, %21: i64, i64
+//   %23: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   arena.deinit %23: std::arena::Arena<Item>, %5: Allocator
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.2.two_parents_share_one_child() -> !void {
+// entry:
+//   %1: []u8 = const "two parents share one child"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Node> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Node> = local.slot %7: std::arena::Arena<Node>
+//   test.mark 
+//   %10: i64 = const 5
+//   %11: ?std::arena::Handle<Node> = opt.null
+//   %12: Node = struct.new {value: %10: i64, child: %11: ?std::arena::Handle<Node>}
+//   %13: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %12: Node
+//   %14: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %15: std::arena::Handle<Node> = error.try %13: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %14: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %17: i64 = const 10
+//   %18: ?std::arena::Handle<Node> = opt.some %15: std::arena::Handle<Node>
+//   %19: Node = struct.new {value: %17: i64, child: %18: ?std::arena::Handle<Node>}
+//   %20: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %19: Node
+//   %21: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %22: std::arena::Handle<Node> = error.try %20: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %21: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %24: i64 = const 20
+//   %25: ?std::arena::Handle<Node> = opt.some %15: std::arena::Handle<Node>
+//   %26: Node = struct.new {value: %24: i64, child: %25: ?std::arena::Handle<Node>}
+//   %27: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %26: Node
+//   %28: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %29: std::arena::Handle<Node> = error.try %27: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %28: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %31: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %15: std::arena::Handle<Node>
+//   %32: i64 = field.value %31: Node
+//   test.mark 
+//   %34: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %22: std::arena::Handle<Node>
+//   %35: ?std::arena::Handle<Node> = field.child %34: Node
+//   %36: std::arena::Handle<Node> = opt.value %35: ?std::arena::Handle<Node>
+//   %37: bool = opt.has %35: ?std::arena::Handle<Node>
+//   branch %37: bool, if.then.1, if.else.2
+// if.then.1:
+//   test.mark 
+//   %39: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %36: std::arena::Handle<Node>
+//   %40: i64 = field.value %39: Node
+//   %41: i64 = binary.+ %32: i64, %40: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %42: i64 = phi [if.then.1, %41: i64], [if.else.2, %32: i64]
+//   test.mark 
+//   %44: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %29: std::arena::Handle<Node>
+//   %45: ?std::arena::Handle<Node> = field.child %44: Node
+//   %46: std::arena::Handle<Node> = opt.value %45: ?std::arena::Handle<Node>
+//   %47: bool = opt.has %45: ?std::arena::Handle<Node>
+//   branch %47: bool, if.then.4, if.else.5
+// if.then.4:
+//   test.mark 
+//   %49: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %46: std::arena::Handle<Node>
+//   %50: i64 = field.value %49: Node
+//   %51: i64 = binary.+ %42: i64, %50: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %52: i64 = phi [if.then.4, %51: i64], [if.else.5, %42: i64]
+//   test.mark 
+//   %54: i64 = const 15
+//   test.expect_equal %54: i64, %52: i64, i64
+//   %56: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   arena.deinit %56: std::arena::Arena<Node>, %5: Allocator
+//   %58: !void = error.ok
+//   return %58: !void
+// }
+// fn test.3.an_array_holds_handles_as_a_worklist() -> !void {
+// entry:
+//   %1: []u8 = const "an array holds handles as a worklist"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Node> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Node> = local.slot %7: std::arena::Arena<Node>
+//   test.mark 
+//   %10: i64 = const 1
+//   %11: ?std::arena::Handle<Node> = opt.null
+//   %12: Node = struct.new {value: %10: i64, child: %11: ?std::arena::Handle<Node>}
+//   %13: std::mem::Error!std::arena::Handle<Node> = call.std::arena::Arena.add.Node %8: &var std::arena::Arena<Node>, %5: Allocator, %12: Node
+//   %14: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   %15: std::arena::Handle<Node> = error.try %13: std::mem::Error!std::arena::Handle<Node>, cleanup arena.deinit %14: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %17: std::array::Array<std::arena::Handle<Node>> = array.new %5: Allocator
+//   %18: &var std::array::Array<std::arena::Handle<Node>> = local.slot %17: std::array::Array<std::arena::Handle<Node>>
+//   test.mark 
+//   %20: std::mem::Error!void = call.std::array::Array.append.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>, %5: Allocator, %15: std::arena::Handle<Node>
+//   %21: std::array::Array<std::arena::Handle<Node>> = ref.load %18: &var std::array::Array<std::arena::Handle<Node>>
+//   %22: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   error.try %20: std::mem::Error!void, cleanup array.deinit %21: std::array::Array<std::arena::Handle<Node>>, %5: Allocator; arena.deinit %22: std::arena::Arena<Node>, %5: Allocator
+//   test.mark 
+//   %25: std::mem::Error!void = call.std::array::Array.append.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>, %5: Allocator, %15: std::arena::Handle<Node>
+//   %26: std::array::Array<std::arena::Handle<Node>> = ref.load %18: &var std::array::Array<std::arena::Handle<Node>>
+//   %27: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   error.try %25: std::mem::Error!void, cleanup array.deinit %26: std::array::Array<std::arena::Handle<Node>>, %5: Allocator; arena.deinit %27: std::arena::Arena<Node>, %5: Allocator
+//   %29: i64 = const 0
+//   %30: i64 = const 0
+//   test.mark 
+//   jump while.header.1
+// while.header.1:
+//   %32: i64 = phi [entry, %29: i64], [while.body.2, %40: i64]
+//   %33: i64 = phi [entry, %30: i64], [while.body.2, %43: i64]
+//   %34: i64 = call.std::array::Array.len.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>
+//   %35: bool = binary.< %33: i64, %34: i64
+//   branch %35: bool, while.body.2, while.end.3
+// while.body.2:
+//   test.mark 
+//   %37: std::arena::Handle<Node> = call.std::array::Array.get_or_panic.std_3a_3aarena_3a_3aHandle_3cNode_3e %18: &var std::array::Array<std::arena::Handle<Node>>, %33: i64
+//   %38: Node = call.std::arena::Arena.at.Node %8: &var std::arena::Arena<Node>, %37: std::arena::Handle<Node>
+//   %39: i64 = field.value %38: Node
+//   %40: i64 = binary.+ %32: i64, %39: i64
+//   test.mark 
+//   %42: i64 = const 1
+//   %43: i64 = binary.+ %33: i64, %42: i64
+//   jump while.header.1
+// while.end.3:
+//   test.mark 
+//   %45: i64 = const 2
+//   test.expect_equal %45: i64, %32: i64, i64
+//   %47: std::array::Array<std::arena::Handle<Node>> = ref.load %18: &var std::array::Array<std::arena::Handle<Node>>
+//   array.deinit %47: std::array::Array<std::arena::Handle<Node>>, %5: Allocator
+//   %49: std::arena::Arena<Node> = ref.load %8: &var std::arena::Arena<Node>
+//   arena.deinit %49: std::arena::Arena<Node>, %5: Allocator
+//   %51: !void = error.ok
+//   return %51: !void
+// }
+// fn test.4.a_struct_holding_a_handle_is_copy() -> !void {
+// entry:
+//   %1: []u8 = const "a struct holding a handle is copy"
+//   %2: []u8 = const ""
+//   test.begin %1: []u8, %2: []u8
+//   test.mark 
+//   %5: Allocator = call.std::mem::page_allocator
+//   test.mark 
+//   %7: std::arena::Arena<Item> = arena.new %5: Allocator
+//   %8: &var std::arena::Arena<Item> = local.slot %7: std::arena::Arena<Item>
+//   test.mark 
+//   %10: i64 = const 7
+//   %11: Item = struct.new {value: %10: i64}
+//   %12: std::mem::Error!std::arena::Handle<Item> = call.std::arena::Arena.add.Item %8: &var std::arena::Arena<Item>, %5: Allocator, %11: Item
+//   %13: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   %14: std::arena::Handle<Item> = error.try %12: std::mem::Error!std::arena::Handle<Item>, cleanup arena.deinit %13: std::arena::Arena<Item>, %5: Allocator
+//   test.mark 
+//   %16: i64 = const 3
+//   %17: Ref = struct.new {h: %14: std::arena::Handle<Item>, weight: %16: i64}
+//   test.mark 
+//   test.mark 
+//   %20: i64 = const 17
+//   %21: std::arena::Handle<Item> = field.h %17: Ref
+//   %22: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %21: std::arena::Handle<Item>
+//   %23: i64 = field.value %22: Item
+//   %24: std::arena::Handle<Item> = field.h %17: Ref
+//   %25: Item = call.std::arena::Arena.at.Item %8: &var std::arena::Arena<Item>, %24: std::arena::Handle<Item>
+//   %26: i64 = field.value %25: Item
+//   %27: i64 = binary.+ %23: i64, %26: i64
+//   %28: i64 = field.weight %17: Ref
+//   %29: i64 = binary.+ %27: i64, %28: i64
+//   test.expect_equal %20: i64, %29: i64, i64
+//   %31: std::arena::Arena<Item> = ref.load %8: &var std::arena::Arena<Item>
+//   arena.deinit %31: std::arena::Arena<Item>, %5: Allocator
+//   %33: !void = error.ok
+//   return %33: !void
+// }
