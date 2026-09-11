@@ -76,15 +76,20 @@ fn append_rendered(allocator: Allocator, out: &var string::String, rendered: []u
     return out.append_byte(allocator, cast<u8>(10));
 }
 
-/// Renders one section: the module lowered from input, optimized when asked.
-fn render_section(
+/// Renders the expectation block of one case: `// lower:` with the module
+/// as lowered, then `// opt:` with the same module after the optimizer,
+/// the way the llvm corpus renders its two sections -- the front end, the
+/// costly half, runs once. A program the front end or the lowerer rejects
+/// yields the same line under both headers; one the optimizer rejects
+/// yields its message under `// opt:` alone.
+fn render_ir_case(
     io: Io,
     allocator: Allocator,
     std_errors: &project::StdErrorCodes,
-    input: []u8,
-    opt: bool,
-    out: &var string::String
-) -> !void {
+    input: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
@@ -93,58 +98,86 @@ fn render_section(
     match loaded {
         Error(failed) => {
             defer failed.deinit(allocator);
-            try out.append_bytes(allocator, "// check failed: ");
             let text = try failed.error(allocator, &loader.sources);
             defer text.deinit(allocator);
             let bytes = text.as_bytes();
-            return append_folded(allocator, out, bytes);
+            try append_both_sections(allocator, &var out, "// check failed: ", bytes);
+            return move out;
         },
         Program(program) => {
             defer program.deinit(allocator);
             if try types::check(allocator, &var tree, &program) |failed| {
                 defer failed.deinit(allocator);
-                try out.append_bytes(allocator, "// check failed: ");
                 let text = try failed.error(allocator, &loader.sources);
                 defer text.deinit(allocator);
                 let bytes = text.as_bytes();
-                return append_folded(allocator, out, bytes);
+                try append_both_sections(allocator, &var out, "// check failed: ", bytes);
+                return move out;
             }
             var checker = try ownership::new_checker(allocator, &tree, &program);
             defer checker.deinit(allocator);
             if try checker.check_program(&var tree, &program) |failed| {
                 defer failed.deinit(allocator);
-                try out.append_bytes(allocator, "// check failed: ");
                 let text = try failed.error(allocator, &loader.sources);
                 defer text.deinit(allocator);
                 let bytes = text.as_bytes();
-                return append_folded(allocator, out, bytes);
+                try append_both_sections(allocator, &var out, "// check failed: ", bytes);
+                return move out;
             }
             var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
             defer lowerer.deinit(allocator);
             if try lowerer.lower(&var tree, &program, std_errors, &loader.sources) |failed| {
                 defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                let bytes = text.as_bytes();
+                try append_both_sections(allocator, &var out, "// ", bytes);
+                return move out;
+            }
+            try out.append_bytes(allocator, "// lower:");
+            try out.append_byte(allocator, cast<u8>(10));
+            try append_module(allocator, &var out, &lowerer.module);
+            try out.append_bytes(allocator, "// opt:");
+            try out.append_byte(allocator, cast<u8>(10));
+            if try ir::optimize(allocator, &var lowerer.module) |failed| {
+                defer failed.deinit(allocator);
                 try out.append_bytes(allocator, "// ");
                 let text = try failed.error(allocator, &loader.sources);
                 defer text.deinit(allocator);
                 let bytes = text.as_bytes();
-                return append_folded(allocator, out, bytes);
+                try append_folded(allocator, &var out, bytes);
+                return move out;
             }
-            if opt {
-                if try ir::optimize(allocator, &var lowerer.module) |failed| {
-                    defer failed.deinit(allocator);
-                    try out.append_bytes(allocator, "// ");
-                    let text = try failed.error(allocator, &loader.sources);
-                    defer text.deinit(allocator);
-                    let bytes = text.as_bytes();
-                    return append_folded(allocator, out, bytes);
-                }
-            }
-            let rendered = try render_user_functions(allocator, &lowerer.module);
-            defer rendered.deinit(allocator);
-            let bytes = rendered.as_bytes();
-            return append_rendered(allocator, out, bytes);
+            try append_module(allocator, &var out, &lowerer.module);
+            return move out;
         },
     }
+}
+
+/// Appends the same line under both section headers, for a case that never
+/// reached the optimizer.
+fn append_both_sections(
+    allocator: Allocator,
+    out: &var string::String,
+    prefix: []u8,
+    text: []u8
+) -> !void {
+    try out.append_bytes(allocator, "// lower:");
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, prefix);
+    try append_folded(allocator, out, text);
+    try out.append_bytes(allocator, "// opt:");
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, prefix);
+    return append_folded(allocator, out, text);
+}
+
+/// Appends the module's user functions as expectation lines.
+fn append_module(allocator: Allocator, out: &var string::String, module: &ir::Module) -> !void {
+    let rendered = try render_user_functions(allocator, module);
+    defer rendered.deinit(allocator);
+    let bytes = rendered.as_bytes();
+    return append_rendered(allocator, out, bytes);
 }
 
 /// Renders the functions a case declares itself, the Go `Dump` over the
@@ -170,24 +203,6 @@ fn render_user_functions(allocator: Allocator, module: &ir::Module) -> !string::
 fn last_is_newline(out: &string::String) -> bool {
     let bytes = out.as_bytes();
     return bytes[out.len() - 1] == cast<u8>(10);
-}
-
-/// Renders the expectation block of one case: `// lower:` then `// opt:`.
-fn render_ir_case(
-    io: Io,
-    allocator: Allocator,
-    std_errors: &project::StdErrorCodes,
-    input: []u8
-) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit(allocator);
-    try out.append_bytes(allocator, "// lower:");
-    try out.append_byte(allocator, cast<u8>(10));
-    try render_section(io, allocator, std_errors, input, false, &var out);
-    try out.append_bytes(allocator, "// opt:");
-    try out.append_byte(allocator, cast<u8>(10));
-    try render_section(io, allocator, std_errors, input, true, &var out);
-    return move out;
 }
 
 test "ir corpus lowers like the shipping compiler" {
