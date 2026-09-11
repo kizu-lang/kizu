@@ -64,34 +64,41 @@ func TestIRCorpus(t *testing.T) {
 
 // renderIRCase loads input as a program outside any package and renders the
 // expectation block: `// lower:` with one line per line of the lowered
-// module's dump, then `// opt:` with the dump of a fresh lowering after
-// Optimize. Each section lowers from scratch because Optimize rewrites the
-// module in place. A program the front end rejects yields one
-// `check failed:` line per section; a lowering or optimizing error yields its
-// message as the section's only line. Std functions are lowered but not
-// listed, the way the check corpus lists no std declaration: an `import std;`
-// lowers the whole library, and repeating it in every case would say nothing
-// the case is about.
+// module's dump, then `// opt:` with the dump of the same module after
+// Optimize, the way the llvm corpus renders its two sections -- the front
+// end, the costly half, runs once. A program the front end or the lowerer
+// rejects yields the same line under both headers; one Optimize rejects
+// yields its message under `// opt:` alone. Std functions are lowered but
+// not listed, the way the check corpus lists no std declaration: an
+// `import std;` lowers the whole library, and repeating it in every case
+// would say nothing the case is about.
 func renderIRCase(input string) string {
 	var out bytes.Buffer
+	module, err := lowerCorpusInput(input)
+	if err != nil {
+		for _, header := range []string{"// lower:\n", "// opt:\n"} {
+			out.WriteString(header)
+			out.WriteString("// ")
+			writeFoldedLine(&out, err.Error())
+		}
+		return out.String()
+	}
 	out.WriteString("// lower:\n")
-	writeIRSection(&out, input, false)
+	writeIRDump(&out, module)
 	out.WriteString("// opt:\n")
-	writeIRSection(&out, input, true)
+	if err := Optimize(module); err != nil {
+		out.WriteString("// ")
+		writeFoldedLine(&out, err.Error())
+		return out.String()
+	}
+	writeIRDump(&out, module)
 	return out.String()
 }
 
-// writeIRSection lowers input, optimizes the module when opt is set, and
-// writes the dump of the user functions one `// ` line per dump line. A
-// module with no user function writes no lines, so a section can be just its
-// header.
-func writeIRSection(out *bytes.Buffer, input string, opt bool) {
-	module, err := lowerCorpusInput(input, opt)
-	if err != nil {
-		out.WriteString("// ")
-		writeFoldedLine(out, err.Error())
-		return
-	}
+// writeIRDump writes the dump of the user functions one `// ` line per dump
+// line. A module with no user function writes no lines, so a section can be
+// just its header.
+func writeIRDump(out *bytes.Buffer, module *Module) {
 	dump := Dump(&Module{Functions: userFunctions(module)})
 	if dump == "" {
 		return
@@ -104,11 +111,10 @@ func writeIRSection(out *bytes.Buffer, input string, opt bool) {
 }
 
 // lowerCorpusInput runs the front end gates in CLI order (load, type check,
-// ownership check) and lowers the program, optimizing it when opt is set. A
-// front end failure is reported as a check failure so that the expectation
-// block tells a corpus input that never reached the lowerer from one the
-// lowerer rejected.
-func lowerCorpusInput(input string, opt bool) (*Module, error) {
+// ownership check) and lowers the program. A front end failure is reported
+// as a check failure so that the expectation block tells a corpus input that
+// never reached the lowerer from one the lowerer rejected.
+func lowerCorpusInput(input string) (*Module, error) {
 	program, err := project.LoadSource("", input)
 	if err != nil {
 		return nil, fmt.Errorf("check failed: %w", err)
@@ -120,16 +126,7 @@ func lowerCorpusInput(input string, opt bool) (*Module, error) {
 	if err := checker.Check(program); err != nil {
 		return nil, fmt.Errorf("check failed: %w", err)
 	}
-	module, err := Lower(program, checker.Result())
-	if err != nil {
-		return nil, err
-	}
-	if opt {
-		if err := Optimize(module); err != nil {
-			return nil, err
-		}
-	}
-	return module, nil
+	return Lower(program, checker.Result())
 }
 
 // userFunctions lists the module's functions that did not come from the
