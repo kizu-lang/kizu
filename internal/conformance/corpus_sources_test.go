@@ -8,10 +8,13 @@ import (
 )
 
 // TestDerivedCorpusCasesMatchTheirSources checks that a corpus case copied
-// from an example (`ex_<name>`) or from a behavior test (`beh_<name>`) still
-// carries that source. The copy is what the selfhost compiler is compared
-// against on a real program, and a copy that drifts pins the output of a
-// program nobody runs any more.
+// from an example (`ex_<name>`) still carries that source. The copy is what
+// the selfhost compiler is compared against on a real program, and a copy
+// that drifts pins the output of a program nobody runs any more.
+//
+// The behavior tests have no copies: TestSelfhostFrontend compares the two
+// compilers on the whole tests/behavior package, which covers every module
+// in it at once.
 func TestDerivedCorpusCasesMatchTheirSources(t *testing.T) {
 	root := filepath.Join("..", "..")
 	for _, corpus := range []string{"check", "ir", "llvm"} {
@@ -51,12 +54,8 @@ func TestDerivedCorpusCasesMatchTheirSources(t *testing.T) {
 // case written for the corpus itself.
 func derivedSource(root string, name string) string {
 	stem := strings.TrimSuffix(name, ".kizu")
-	switch {
-	case strings.HasPrefix(stem, "ex_"):
+	if strings.HasPrefix(stem, "ex_") {
 		return filepath.Join(root, "examples", stem[len("ex_"):]+".kizu")
-	case strings.HasPrefix(stem, "beh_"):
-		test := stem[len("beh_"):]
-		return filepath.Join(root, "tests", "behavior", "src", test, test+"_test.kizu")
 	}
 	return ""
 }
