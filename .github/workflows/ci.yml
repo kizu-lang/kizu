@@ -12,12 +12,24 @@ on:
 
 jobs:
   test:
+    # Named by platform alone: the required checks on main go by these names,
+    # and the matrix's second field would otherwise become part of them.
+    name: test (${{ matrix.os }})
     # The toolchain links through the host clang, so the gates say nothing
     # about a platform they never ran on. Both are built and tested.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest]
+        include:
+          - os: macos-14
+            packages: ./...
+          # The Kizu compiler's own tests (internal/selfhost) compare the text
+          # its front end writes with what the Go seed wrote, and that text
+          # does not depend on the host. One platform runs them; the slower
+          # runner is spared the longest package, and still builds and runs
+          # the compiler itself through cmd/kizu.
+          - os: ubuntu-latest
+            packages: $(go list ./... | grep -v /internal/selfhost)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -41,6 +53,6 @@ jobs:
         env:
           KIZU_CACHE_DIR: ${{ runner.temp }}/kizu-cache
           KIZU_TEST_SELFHOST: ${{ runner.temp }}/selfhost/kizu
-        run: go test ./... -count=1 -timeout=15m
+        run: go test ${{ matrix.packages }} -count=1 -timeout=15m
       - name: gofmt
         run: test -z "$(gofmt -l cmd internal)"
