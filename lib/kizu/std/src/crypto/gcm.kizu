@@ -1,0 +1,291 @@
+// AES-GCM, as NIST SP 800-38D defines it: the text is encrypted with AES
+// in counter mode from counter 2, and the tag is GHASH over the
+// associated data and the ciphertext, each padded to 16 bytes, and their
+// lengths in bits, XORed with the encryption of counter 1. GHASH is a
+// polynomial over GF(2^128) evaluated at H, the encryption of zero.
+//
+// The GF(2^128) multiplication is BearSSL's ghash_ctmul64 (src/hash/
+// ghash_ctmul64.c, Copyright (c) 2016 Thomas Pornin, MIT; the notice is
+// in aes.kizu): a carry-less multiply written as integer multiplies of
+// bits spread four apart, so nothing about the key or the data chooses
+// an address or a branch. The high half comes from multiplying the
+// bit-reversed operands.
+//
+// A key is 16 or 32 bytes and a nonce 12, and a nonce is used once under
+// a key: GCM with a repeated nonce gives away the authentication key.
+// TLS counts records into the nonce; nothing here draws one.
+
+// aes_gcm_seal appends the ciphertext of `plain` and its 16-byte tag to
+// `out`. `aad` is authenticated but not encrypted. A key that is not 16
+// or 32 bytes, or a nonce that is not 12, is a misuse and traps.
+pub fn aes_gcm_seal(
+    allocator: Allocator,
+    key: []u8,
+    nonce: []u8,
+    aad: []u8,
+    plain: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    std::crypto::require_aes_key_and_nonce(key, nonce);
+    var comp_buffer = [240]u8{};
+    var skey_buffer = [960]u8{};
+    let comp = comp_buffer.as_mut_bytes();
+    let rounds = std::crypto::aes_keysched(key, comp);
+    let skey = skey_buffer.as_mut_bytes();
+    std::crypto::aes_skey_expand(comp, rounds, skey);
+    let start = out.len();
+    try std::crypto::aes_ctr_xor(allocator, rounds, skey, nonce, 2, plain, out);
+    var tag_buffer = [16]u8{};
+    let tag = tag_buffer.as_mut_bytes();
+    let whole = out.as_bytes();
+    let sealed = whole[start..out.len()];
+    std::crypto::gcm_tag(rounds, skey, nonce, aad, sealed, tag);
+    let tag_bytes = tag_buffer.as_bytes();
+    try out.append_bytes(allocator, tag_bytes);
+    return;
+}
+
+// aes_gcm_open checks the tag on `sealed` -- the ciphertext with its tag
+// behind it -- and appends the plain bytes to `out`. When the tag does
+// not match, nothing is appended and the answer is
+// `Error::AuthenticationFailed`. The check compares in constant time.
+pub fn aes_gcm_open(
+    allocator: Allocator,
+    key: []u8,
+    nonce: []u8,
+    aad: []u8,
+    sealed: []u8,
+    out: &var std::string::String
+) -> std::crypto::Failure!void {
+    std::crypto::require_aes_key_and_nonce(key, nonce);
+    let end = std::mem::len(sealed);
+    if end < 16 {
+        return std::crypto::Error::AuthenticationFailed;
+    }
+    var comp_buffer = [240]u8{};
+    var skey_buffer = [960]u8{};
+    let comp = comp_buffer.as_mut_bytes();
+    let rounds = std::crypto::aes_keysched(key, comp);
+    let skey = skey_buffer.as_mut_bytes();
+    std::crypto::aes_skey_expand(comp, rounds, skey);
+    let text = sealed[0..end - 16];
+    let received = sealed[end - 16..end];
+    var tag_buffer = [16]u8{};
+    let tag = tag_buffer.as_mut_bytes();
+    std::crypto::gcm_tag(rounds, skey, nonce, aad, text, tag);
+    let expected = tag_buffer.as_bytes();
+    if !std::crypto::equal_constant_time(expected, received) {
+        return std::crypto::Error::AuthenticationFailed;
+    }
+    try std::crypto::aes_ctr_xor(allocator, rounds, skey, nonce, 2, text, out);
+    return;
+}
+
+// gcm_tag writes the tag over `aad` and `text` to the front of `tag`.
+fn gcm_tag(rounds: i64, skey: []u8, nonce: []u8, aad: []u8, text: []u8, tag: &var []u8) -> void {
+    var h_buffer = [64]u8{};
+    let h_blocks = h_buffer.as_mut_bytes();
+    std::crypto::aes_encrypt4(rounds, skey, h_blocks);
+    let h_all = h_buffer.as_bytes();
+    let h = h_all[0..16];
+    var y_buffer = [16]u8{};
+    let y = y_buffer.as_mut_bytes();
+    ghash(y, h, aad);
+    ghash(y, h, text);
+    var lengths_buffer = [16]u8{};
+    let lengths = lengths_buffer.as_mut_bytes();
+    set_be64(lengths, 0, cast<u64>(std::mem::len(aad) * 8));
+    set_be64(lengths, 8, cast<u64>(std::mem::len(text) * 8));
+    ghash(y, h, lengths);
+    var counter_buffer = [64]u8{};
+    let counter = counter_buffer.as_mut_bytes();
+    fill_counter_blocks(counter, nonce, 1);
+    std::crypto::aes_encrypt4(rounds, skey, counter);
+    for 0..16 |index| {
+        tag[index] = y[index] ^ counter[index];
+    }
+    return;
+}
+
+// aes_ctr_xor appends `text` XORed with the counter-mode stream from
+// `counter` on, four blocks at a time.
+fn aes_ctr_xor(
+    allocator: Allocator,
+    rounds: i64,
+    skey: []u8,
+    nonce: []u8,
+    counter: i64,
+    text: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    var stream_buffer = [64]u8{};
+    let stream = stream_buffer.as_mut_bytes();
+    let end = std::mem::len(text);
+    var at = 0;
+    var block = counter;
+    while at < end {
+        fill_counter_blocks(stream, nonce, block);
+        std::crypto::aes_encrypt4(rounds, skey, stream);
+        var take = end - at;
+        if take > 64 {
+            take = 64;
+        }
+        for 0..take |index| {
+            try out.append_byte(allocator, text[at + index] ^ stream[index]);
+        }
+        at = at + take;
+        block = block + 4;
+    }
+    return;
+}
+
+// fill_counter_blocks writes the four counter blocks `first` through
+// `first + 3`: the nonce, then the counter as 32 bits big-endian.
+fn fill_counter_blocks(blocks: &var []u8, nonce: []u8, first: i64) -> void {
+    for 0..4 |index| {
+        let at = index * 16;
+        for 0..12 |offset| {
+            blocks[at + offset] = nonce[offset];
+        }
+        let value = (first + index) & 0xFFFFFFFF;
+        blocks[at + 12] = cast<u8>((value >> 24) & 255);
+        blocks[at + 13] = cast<u8>((value >> 16) & 255);
+        blocks[at + 14] = cast<u8>((value >> 8) & 255);
+        blocks[at + 15] = cast<u8>(value & 255);
+    }
+    return;
+}
+
+// ghash folds `data`, its last block padded with zeros, into `y` under
+// the key `h`; both are 16 bytes, big-endian.
+fn ghash(y: &var []u8, h: []u8, data: []u8) -> void {
+    var y1 = be64(y, 0);
+    var y0 = be64(y, 8);
+    let h1 = be64(h, 0);
+    let h0 = be64(h, 8);
+    let h0r = rev64(h0);
+    let h1r = rev64(h1);
+    let h2 = h0 ^ h1;
+    let h2r = h0r ^ h1r;
+    let end = std::mem::len(data);
+    var at = 0;
+    var last_buffer = [16]u8{};
+    let last = last_buffer.as_mut_bytes();
+    while at < end {
+        var m1 = cast<u64>(0);
+        var m0 = cast<u64>(0);
+        if at + 16 <= end {
+            m1 = be64(data, at);
+            m0 = be64(data, at + 8);
+        } else {
+            let rest = end - at;
+            for 0..16 |index| {
+                last[index] = 0;
+            }
+            for 0..rest |index| {
+                last[index] = data[at + index];
+            }
+            m1 = be64(last, 0);
+            m0 = be64(last, 8);
+        }
+        y1 = y1 ^ m1;
+        y0 = y0 ^ m0;
+        let y0r = rev64(y0);
+        let y1r = rev64(y1);
+        let y2 = y0 ^ y1;
+        let y2r = y0r ^ y1r;
+        let z0 = bmul64(y0, h0);
+        let z1 = bmul64(y1, h1);
+        var z2 = bmul64(y2, h2);
+        var z0h = bmul64(y0r, h0r);
+        var z1h = bmul64(y1r, h1r);
+        var z2h = bmul64(y2r, h2r);
+        z2 = z2 ^ z0 ^ z1;
+        z2h = z2h ^ z0h ^ z1h;
+        z0h = rev64(z0h) >> 1;
+        z1h = rev64(z1h) >> 1;
+        z2h = rev64(z2h) >> 1;
+        var v0 = z0;
+        var v1 = z0h ^ z2;
+        var v2 = z1 ^ z2h;
+        var v3 = z1h;
+        v3 = (v3 << 1) | (v2 >> 63);
+        v2 = (v2 << 1) | (v1 >> 63);
+        v1 = (v1 << 1) | (v0 >> 63);
+        v0 = v0 << 1;
+        v2 = v2 ^ v0 ^ (v0 >> 1) ^ (v0 >> 2) ^ (v0 >> 7);
+        v1 = v1 ^ (v0 << 63) ^ (v0 << 62) ^ (v0 << 57);
+        v3 = v3 ^ v1 ^ (v1 >> 1) ^ (v1 >> 2) ^ (v1 >> 7);
+        v2 = v2 ^ (v1 << 63) ^ (v1 << 62) ^ (v1 << 57);
+        y0 = v2;
+        y1 = v3;
+        at = at + 16;
+    }
+    set_be64(y, 0, y1);
+    set_be64(y, 8, y0);
+    return;
+}
+
+// bmul64 is the low 64 bits of the carry-less product of x and y: each
+// operand is split into four words with its bits four apart, so the
+// integer products have no carries between the bits that matter.
+fn bmul64(x: u64, y: u64) -> u64 {
+    let x0 = x & std::crypto::mask1();
+    let x1 = x & std::crypto::mask2();
+    let x2 = x & std::crypto::mask4();
+    let x3 = x & std::crypto::mask8();
+    let y0 = y & std::crypto::mask1();
+    let y1 = y & std::crypto::mask2();
+    let y2 = y & std::crypto::mask4();
+    let y3 = y & std::crypto::mask8();
+    let z0 = (x0 * y0) ^ (x1 * y3) ^ (x2 * y2) ^ (x3 * y1);
+    let z1 = (x0 * y1) ^ (x1 * y0) ^ (x2 * y3) ^ (x3 * y2);
+    let z2 = (x0 * y2) ^ (x1 * y1) ^ (x2 * y0) ^ (x3 * y3);
+    let z3 = (x0 * y3) ^ (x1 * y2) ^ (x2 * y1) ^ (x3 * y0);
+    return (z0 & std::crypto::mask1())
+        | (z1 & std::crypto::mask2())
+        | (z2 & std::crypto::mask4())
+        | (z3 & std::crypto::mask8());
+}
+
+// rev64 reverses the order of the 64 bits.
+fn rev64(value: u64) -> u64 {
+    var x = value;
+    x = ((x & 0x5555555555555555) << 1) | ((x >> 1) & 0x5555555555555555);
+    x = ((x & 0x3333333333333333) << 2) | ((x >> 2) & 0x3333333333333333);
+    x = ((x & 0x0F0F0F0F0F0F0F0F) << 4) | ((x >> 4) & 0x0F0F0F0F0F0F0F0F);
+    x = ((x & 0x00FF00FF00FF00FF) << 8) | ((x >> 8) & 0x00FF00FF00FF00FF);
+    x = ((x & 0x0000FFFF0000FFFF) << 16) | ((x >> 16) & 0x0000FFFF0000FFFF);
+    return (x << 32) | (x >> 32);
+}
+
+// be64 reads the big-endian word at byte `at`.
+fn be64(view: []u8, at: i64) -> u64 {
+    var value = cast<u64>(0);
+    for 0..8 |index| {
+        value = (value << 8) | cast<u64>(view[at + index]);
+    }
+    return value;
+}
+
+// set_be64 writes `value` big-endian at byte `at`.
+fn set_be64(view: &var []u8, at: i64, value: u64) -> void {
+    for 0..8 |index| {
+        let shift = cast<u64>((7 - index) * 8);
+        view[at + index] = cast<u8>((value >> shift) & 255);
+    }
+    return;
+}
+
+// require_aes_key_and_nonce traps on a key or nonce that is not a length
+// the cipher defines, since a wrong length is a bug and not an input.
+fn require_aes_key_and_nonce(key: []u8, nonce: []u8) -> void {
+    let key_len = std::mem::len(key);
+    if key_len != 16 and key_len != 32 {
+        std::internal::builtin::panic("crypto aes_gcm: key must be 16 or 32 bytes");
+    }
+    if std::mem::len(nonce) != 12 {
+        std::internal::builtin::panic("crypto aes_gcm: nonce must be 12 bytes");
+    }
+    return;
+}

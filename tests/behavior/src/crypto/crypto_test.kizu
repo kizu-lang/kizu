@@ -116,6 +116,35 @@ fn hex_value(byte: u8) -> i64 {
     return value - 48;
 }
 
+fn expect_gcm(allocator: Allocator, key: []u8, nonce: []u8, aad: []u8, plain: []u8, want: []u8) -> crypto::Failure!void {
+    var sealed = string::new(allocator);
+    defer sealed.deinit(allocator);
+    try crypto::aes_gcm_seal(allocator, key, nonce, aad, plain, &var sealed);
+    let sealed_bytes = sealed.as_bytes();
+    let hex = try hex_of(allocator, sealed_bytes);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    var opened = string::new(allocator);
+    defer opened.deinit(allocator);
+    try crypto::aes_gcm_open(allocator, key, nonce, aad, sealed_bytes, &var opened);
+    let opened_bytes = opened.as_bytes();
+    testing::expect_equal<[]u8>(plain, opened_bytes);
+    return;
+}
+
+fn expect_gcm_refused(allocator: Allocator, key: []u8, nonce: []u8, aad: []u8, sealed: []u8) -> void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if crypto::aes_gcm_open(allocator, key, nonce, aad, sealed, &var out) {
+        testing::fail("a forged message was opened");
+    } else |err| {
+        testing::expect(err == crypto::Error::AuthenticationFailed);
+    }
+    testing::expect_equal<i64>(0, out.len());
+    return;
+}
+
 fn expect_refused(allocator: Allocator, key: []u8, nonce: []u8, aad: []u8, sealed: []u8) -> void {
     var out = string::new(allocator);
     defer out.deinit(allocator);
@@ -504,6 +533,105 @@ test "a long message crosses many blocks and comes back whole" {
     var opened = string::new(allocator);
     defer opened.deinit(allocator);
     try crypto::chacha20_poly1305_open(allocator, key_bytes, "twelve bytes", "aad", sealed_bytes[5..sealed.len()], &var opened);
+    let opened_bytes = opened.as_bytes();
+    testing::expect_equal<[]u8>(text_bytes, opened_bytes);
+}
+
+test "the GCM specification cases seal and open under AES-128 and AES-256" {
+    let allocator = mem::page_allocator();
+    let zero16 = try repeated(allocator, 0, 16);
+    defer zero16.deinit(allocator);
+    let zero32 = try repeated(allocator, 0, 32);
+    defer zero32.deinit(allocator);
+    let zero12 = try repeated(allocator, 0, 12);
+    defer zero12.deinit(allocator);
+    let zero16_bytes = zero16.as_bytes();
+    let zero32_bytes = zero32.as_bytes();
+    let zero12_bytes = zero12.as_bytes();
+    // Cases 1, 2, 13, 14: the zero key, no data or one zero block.
+    try expect_gcm(allocator, zero16_bytes, zero12_bytes, "", "",
+        "58e2fccefa7e3061367f1d57a4e7455a");
+    try expect_gcm(allocator, zero16_bytes, zero12_bytes, "", zero16_bytes,
+        "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf");
+    try expect_gcm(allocator, zero32_bytes, zero12_bytes, "", "",
+        "530f8afbc74536b9a963b4f1c4cb738b");
+    try expect_gcm(allocator, zero32_bytes, zero12_bytes, "", zero16_bytes,
+        "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919");
+    // Cases 3, 4, 15, 16: four blocks, then 60 bytes with associated data.
+    let key = try bytes_of_hex(allocator, "feffe9928665731c6d6a8f9467308308");
+    defer key.deinit(allocator);
+    let key256 = try bytes_of_hex(allocator, "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+    defer key256.deinit(allocator);
+    let nonce = try bytes_of_hex(allocator, "cafebabefacedbaddecaf888");
+    defer nonce.deinit(allocator);
+    let plain = try bytes_of_hex(allocator, "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39");
+    defer plain.deinit(allocator);
+    let aad = try bytes_of_hex(allocator, "feedfacedeadbeeffeedfacedeadbeefabaddad2");
+    defer aad.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let key256_bytes = key256.as_bytes();
+    let nonce_bytes = nonce.as_bytes();
+    let plain_bytes = plain.as_bytes();
+    let aad_bytes = aad.as_bytes();
+    try expect_gcm(allocator, key_bytes, nonce_bytes, "", plain_bytes,
+        "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091cc15abcc191161501aabab46b8fbac85");
+    try expect_gcm(allocator, key_bytes, nonce_bytes, aad_bytes, plain_bytes[0..60],
+        "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e0915bc94fbc3221a5db94fae95ae7121a47");
+    try expect_gcm(allocator, key256_bytes, nonce_bytes, "", plain_bytes,
+        "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662eb9f796c8d356fc31a8433884b696f4f");
+    try expect_gcm(allocator, key256_bytes, nonce_bytes, aad_bytes, plain_bytes[0..60],
+        "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f66276fc6ece0f4e1768cddf8853bb2d551b");
+}
+
+test "an AES-GCM message changed anywhere is refused and yields no bytes" {
+    let allocator = mem::page_allocator();
+    let key = "an example key!!";
+    let nonce = "twelve bytes";
+    var sealed = string::new(allocator);
+    defer sealed.deinit(allocator);
+    try crypto::aes_gcm_seal(allocator, key, nonce, "header", "a message", &var sealed);
+    testing::expect_equal<i64>(9 + 16, sealed.len());
+    var text_changed = string::new(allocator);
+    defer text_changed.deinit(allocator);
+    try text_changed.append_string(allocator, &sealed);
+    let text_view = text_changed.as_mut_bytes();
+    text_view[3] = text_view[3] ^ 128;
+    let text_bytes = text_changed.as_bytes();
+    expect_gcm_refused(allocator, key, nonce, "header", text_bytes);
+    var tag_changed = string::new(allocator);
+    defer tag_changed.deinit(allocator);
+    try tag_changed.append_string(allocator, &sealed);
+    let tag_view = tag_changed.as_mut_bytes();
+    tag_view[24] = tag_view[24] ^ 1;
+    let tag_bytes = tag_changed.as_bytes();
+    expect_gcm_refused(allocator, key, nonce, "header", tag_bytes);
+    let sealed_bytes = sealed.as_bytes();
+    expect_gcm_refused(allocator, key, nonce, "Header", sealed_bytes);
+    expect_gcm_refused(allocator, key, "twelve Bytes", "header", sealed_bytes);
+    expect_gcm_refused(allocator, key, nonce, "header", sealed_bytes[0..20]);
+    expect_gcm_refused(allocator, key, nonce, "header", "");
+}
+
+test "a long AES-GCM message crosses many counter blocks and comes back whole" {
+    let allocator = mem::page_allocator();
+    let key = try sequence(allocator, 0, 31);
+    defer key.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    for 0..5000 |index| {
+        try text.append_byte(allocator, cast<u8>(index % 251));
+    }
+    let text_bytes = text.as_bytes();
+    var sealed = string::new(allocator);
+    defer sealed.deinit(allocator);
+    try sealed.append_bytes(allocator, "kept:");
+    try crypto::aes_gcm_seal(allocator, key_bytes, "twelve bytes", "aad", text_bytes, &var sealed);
+    testing::expect_equal<i64>(5 + 5000 + 16, sealed.len());
+    let sealed_bytes = sealed.as_bytes();
+    var opened = string::new(allocator);
+    defer opened.deinit(allocator);
+    try crypto::aes_gcm_open(allocator, key_bytes, "twelve bytes", "aad", sealed_bytes[5..sealed.len()], &var opened);
     let opened_bytes = opened.as_bytes();
     testing::expect_equal<[]u8>(text_bytes, opened_bytes);
 }

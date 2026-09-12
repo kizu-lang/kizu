@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -74,5 +76,40 @@ func TestHkdfExampleAgreesOutsideKizu(t *testing.T) {
 	expand.Write([]byte{1})
 	if got := hex.EncodeToString(expand.Sum(nil)[:16]); got != lines[1] {
 		t.Fatalf("Go's HKDF-Expand gives %s, the example promises %s", got, lines[1])
+	}
+}
+
+// TestAesGcmExampleAgreesOutsideKizu seals the message of
+// examples/crypto_aes_gcm.kizu with Go's AES-GCM and compares the bytes
+// the example promises to print. The bitsliced AES and the carry-less
+// GHASH are Kizu source; an implementation Kizu did not write has to
+// arrive at the same ciphertext and tag.
+func TestAesGcmExampleAgreesOutsideKizu(t *testing.T) {
+	cases, err := conformance.Discover(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "examples/crypto_aes_gcm.kizu"
+	var promised string
+	for _, tt := range cases {
+		if tt.Path == path && tt.Stdout != nil {
+			promised = *tt.Stdout
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(promised), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("%s promises %d lines, want the sealed hex, the text, and the refusal", path, len(lines))
+	}
+	block, err := aes.NewCipher([]byte("an example key!!"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := gcm.Seal(nil, []byte("twelve bytes"), []byte("attack at dawn"), []byte("record 1"))
+	if got := hex.EncodeToString(sealed); got != lines[0] {
+		t.Fatalf("Go's AES-GCM seals to %s, the example promises %s", got, lines[0])
 	}
 }

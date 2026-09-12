@@ -14,6 +14,8 @@ std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
 
 std::crypto::chacha20_poly1305_seal(allocator, key: []u8, nonce: []u8, aad: []u8, plain: []u8, out: &var String) -> std::mem::Error!void
 std::crypto::chacha20_poly1305_open(allocator, key: []u8, nonce: []u8, aad: []u8, sealed: []u8, out: &var String) -> Failure!void
+std::crypto::aes_gcm_seal(allocator, key: []u8, nonce: []u8, aad: []u8, plain: []u8, out: &var String) -> std::mem::Error!void
+std::crypto::aes_gcm_open(allocator, key: []u8, nonce: []u8, aad: []u8, sealed: []u8, out: &var String) -> Failure!void
 
 std::crypto::random_bytes(io: Io, allocator: Allocator, count: i64) -> Error!String
 std::crypto::random_into(io: Io, allocator: Allocator, out: &var String, count: i64) -> Error!void
@@ -73,10 +75,18 @@ TLS 1.3 の key schedule はこの 2 段に TLS 自身の info を与えたも�
 せず `Error::AuthenticationFailed` です。message が変わったのか、この key / nonce /
 aad で封をしたものでないのかは分からず、言いません。
 
-key は 32 byte、nonce は 12 byte で、違う長さは誤用なので trap します。nonce は
-1 つの key の下で 1 回だけ使います。同じ組で 2 つの message を封じると、2 つの
-平文の XOR が漏れます。どの nonce を使うかは protocol の決めることで(TLS は
-record を数える)、ここでは引きません。
+`aes_gcm_seal` / `aes_gcm_open` は NIST SP 800-38D の AES-GCM で、同じ形です。
+key が 16 byte なら AES-128、32 byte なら AES-256。AES は table を引かず、S-box を
+bitslice した word 上の論理回路(Boyar–Peralta)で計算し、GHASH の GF(2^128) 乗算は
+bit を 4 つおきに広げた整数乗算で書いてあります(BearSSL の `aes_ct64` と
+`ghash_ctmul64` の移植、MIT)。どちらも key や text が address や分岐を選ばないので、
+かかる時間が key を言いません。table 引きの AES は cache timing で key が漏れます。
+
+ChaCha20-Poly1305 の key は 32 byte、nonce は 12 byte で、違う長さは誤用なので
+trap します(AES-GCM も同様)。nonce は 1 つの key の下で 1 回だけ使います。同じ組で
+2 つの message を封じると、2 つの平文の XOR が漏れ、GCM では認証鍵も漏れます。
+どの nonce を使うかは protocol の決めることで(TLS は record を数える)、ここでは
+引きません。
 
 ## 比較
 
