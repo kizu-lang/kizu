@@ -1,0 +1,59 @@
+// HKDF over SHA-256, as RFC 5869 defines it, in its two steps. `extract`
+// takes keying material that is not uniformly random -- a shared secret
+// from a key exchange -- and a salt, and gives one pseudorandom key.
+// `expand` takes that key and an `info` naming what the output is for,
+// and gives as many bytes as the caller's buffer holds: block i is the
+// HMAC of block i-1, the info, and i. TLS 1.3's key schedule is these two
+// steps with its own infos, and nothing else.
+
+// hkdf_extract writes the 32-byte pseudorandom key of `keying_material`
+// under `salt` to the front of `key`. A salt of no bytes is the salt RFC
+// 5869 uses when none is given.
+pub fn hkdf_extract(salt: []u8, keying_material: []u8, key: &var []u8) -> void {
+    std::crypto::hmac_sha256(salt, keying_material, key);
+    return;
+}
+
+// hkdf_expand fills `out` with the output keying material of `key` for
+// `info`. The output is as long as the view, up to 255 blocks (8160
+// bytes); a longer view is a misuse the standard gives no output for, and
+// it traps rather than wrapping the block counter into repeating output.
+pub fn hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void {
+    let length = std::mem::len(out);
+    if length > 8160 {
+        std::internal::builtin::panic("crypto hkdf_expand: output longer than 255 blocks");
+    }
+    var previous_buffer = [32]u8{};
+    var block_buffer = [32]u8{};
+    var counter_buffer = [1]u8{};
+    var offset = 0;
+    var round = 0;
+    while offset < length {
+        round = round + 1;
+        let counter = counter_buffer.as_mut_bytes();
+        counter[0] = cast<u8>(round);
+        let count = counter_buffer.as_bytes();
+        var held = 32;
+        if round == 1 {
+            held = 0;
+        }
+        let previous_all = previous_buffer.as_bytes();
+        let previous = previous_all[0..held];
+        let block = block_buffer.as_mut_bytes();
+        std::crypto::hmac_parts(key, previous, info, count, block);
+        let produced = block_buffer.as_bytes();
+        var take = length - offset;
+        if take > 32 {
+            take = 32;
+        }
+        for 0..take |index| {
+            out[offset + index] = produced[index];
+        }
+        let keep = previous_buffer.as_mut_bytes();
+        for 0..32 |index| {
+            keep[index] = produced[index];
+        }
+        offset = offset + take;
+    }
+    return;
+}

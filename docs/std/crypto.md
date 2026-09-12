@@ -8,6 +8,8 @@ binary と同じ digest を出します。乱数だけは host から来ます�
 ```text
 std::crypto::sha256(bytes: []u8, digest: &var []u8) -> void
 std::crypto::hmac_sha256(key: []u8, message: []u8, tag: &var []u8) -> void
+std::crypto::hkdf_extract(salt: []u8, keying_material: []u8, key: &var []u8) -> void
+std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
 std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
 
 std::crypto::random_bytes(io: Io, allocator: Allocator, count: i64) -> Error!String
@@ -46,6 +48,16 @@ message は 1 回の呼び出しで全部渡します。少しずつ渡す hashe
 途中の block を struct に持たせる必要があり、stack buffer は struct field に
 置けないからです(SPEC §7)。組み立て中のものを hash するなら、組み立ててから
 渡します。
+
+## 鍵導出
+
+`hkdf_extract` と `hkdf_expand` は RFC 5869 の HKDF の 2 段です。`extract` は一様で
+ない keying material(鍵交換の共有秘密)と salt から 32 byte の擬似乱数鍵を
+`key` の先頭に書きます。salt が空なら RFC が salt 無しのときに使う salt です。
+`expand` はその鍵と、用途を名指す `info` から、`out` の長さぶんの bytes を
+書きます。長さは 255 block(8160 byte)までで、それより長い view は標準が出力を
+定めない誤用なので trap します(block 番号を wrap させて繰り返しを出すより)。
+TLS 1.3 の key schedule はこの 2 段に TLS 自身の info を与えたものです。
 
 ## 比較
 
