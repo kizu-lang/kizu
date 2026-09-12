@@ -1,0 +1,64 @@
+import std::crypto;
+import std::mem;
+import std::string;
+
+// A digest names a message: the same bytes give the same 32 bytes, on
+// every target, and a message that differs in one bit gives a digest that
+// shares nothing with it. A tag goes one step further: it is the digest of
+// the message under a key, so only a holder of the key could have written
+// it. Both are printed as hex, and the same inputs handed to another
+// implementation give the same hex, which is what makes a digest a name.
+//
+// The digest lands in a buffer the caller owns; hashing allocates nothing
+// and cannot fail.
+
+fn append_hex(allocator: Allocator, out: &var string::String, bytes: []u8) -> mem::Error!void {
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value >> 4]);
+        try out.append_byte(allocator, digits[value & 15]);
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let message = "The quick brown fox jumps over the lazy dog";
+
+    var digest = [32]u8{};
+    let digest_view = digest.as_mut_bytes();
+    crypto::sha256(message, digest_view);
+    var digest_hex = string::new(allocator);
+    defer digest_hex.deinit(allocator);
+    let digest_bytes = digest.as_bytes();
+    try append_hex(allocator, &var digest_hex, digest_bytes);
+    let digest_text = digest_hex.as_bytes();
+    print(digest_text);
+
+    var tag = [32]u8{};
+    let tag_view = tag.as_mut_bytes();
+    crypto::hmac_sha256("key", message, tag_view);
+    var tag_hex = string::new(allocator);
+    defer tag_hex.deinit(allocator);
+    let tag_bytes = tag.as_bytes();
+    try append_hex(allocator, &var tag_hex, tag_bytes);
+    let tag_text = tag_hex.as_bytes();
+    print(tag_text);
+
+    var again = [32]u8{};
+    let again_view = again.as_mut_bytes();
+    crypto::hmac_sha256("key", message, again_view);
+    let again_bytes = again.as_bytes();
+    if crypto::equal_constant_time(tag_bytes, again_bytes) {
+        print("the same key writes the same tag");
+    }
+    return;
+}
+
+// run
+// features: crypto sha256 hmac
+// output:
+// d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592
+// f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
+// the same key writes the same tag

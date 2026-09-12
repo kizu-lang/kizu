@@ -1,0 +1,223 @@
+// SHA-256, as FIPS 180-4 defines it: the message is padded to whole
+// 64-byte blocks, and each block is folded into eight 32-bit words of
+// state by 64 rounds. The words are `u32`, whose `+` wraps at 32 bits
+// (SPEC §6.9.2), so the rounds are written as the standard writes them.
+//
+// The whole message is hashed in one call. There is no hasher that takes
+// the message a piece at a time, because a partial block would have to
+// wait in a struct, and a stack buffer cannot (SPEC §7). A caller that
+// hashes something it is still assembling assembles it first.
+
+// sha256 writes the 32-byte digest of `bytes` to the front of `digest`.
+// The digest is a view of the caller's buffer -- `var out = [32]u8{}` and
+// its `as_mut_bytes()` -- so hashing allocates nothing and cannot fail. A
+// view shorter than 32 bytes is a bounds trap, the way any index past the
+// end is.
+pub fn sha256(bytes: []u8, digest: &var []u8) -> void {
+    std::crypto::sha256_after("", bytes, digest);
+    return;
+}
+
+// sha256_after hashes `prefix` followed by `bytes`. The prefix is empty or
+// exactly one block: it is what HMAC puts before a message, and folding it
+// in place saves the concatenation that would need an allocator.
+fn sha256_after(prefix: []u8, bytes: []u8, digest: &var []u8) -> void {
+    var state_buffer = [32]u8{};
+    var schedule_buffer = [256]u8{};
+    var constants_buffer = [256]u8{};
+    var tail_buffer = [128]u8{};
+    let state = state_buffer.as_mut_bytes();
+    let schedule = schedule_buffer.as_mut_bytes();
+    let constants = constants_buffer.as_mut_bytes();
+    let tail = tail_buffer.as_mut_bytes();
+    fill_hex(constants, round_constants());
+    fill_hex(state, initial_state());
+    if std::mem::len(prefix) == 64 {
+        compress_block(state, prefix, schedule, constants);
+    }
+    let end = std::mem::len(bytes);
+    var at = 0;
+    while at + 64 <= end {
+        let block = bytes[at..at + 64];
+        compress_block(state, block, schedule, constants);
+        at = at + 64;
+    }
+    // The last block carries what is left, a 1 bit, zeros, and the length
+    // in bits as 64 bits big-endian; when the length does not fit after
+    // the 1 bit, there are two. `tail` is fresh and zero, so only the
+    // bytes that are not zero are written.
+    let rest = end - at;
+    for 0..rest |index| {
+        tail[index] = bytes[at + index];
+    }
+    tail[rest] = cast<u8>(128);
+    var last = 64;
+    if rest + 9 > 64 {
+        last = 128;
+    }
+    let total_bits = (std::mem::len(prefix) + end) * 8;
+    put_length(tail, last - 8, total_bits);
+    let first = tail[0..64];
+    compress_block(state, first, schedule, constants);
+    if last == 128 {
+        let second = tail[64..128];
+        compress_block(state, second, schedule, constants);
+    }
+    for 0..32 |index| {
+        digest[index] = state[index];
+    }
+    return;
+}
+
+// compress_block folds one 64-byte block into the eight state words
+// (FIPS 180-4 §6.2.2). `schedule` holds the 64 message words and `k` the
+// 64 round constants, both as big-endian bytes.
+fn compress_block(state: &var []u8, block: []u8, schedule: &var []u8, k: []u8) -> void {
+    for 0..16 |t| {
+        let word = word_at(block, t);
+        set_word(schedule, t, word);
+    }
+    for 16..64 |t| {
+        let w2 = word_at(schedule, t - 2);
+        let w7 = word_at(schedule, t - 7);
+        let w15 = word_at(schedule, t - 15);
+        let w16 = word_at(schedule, t - 16);
+        let s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >> 3);
+        let s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >> 10);
+        let word = w16 + s0 + w7 + s1;
+        set_word(schedule, t, word);
+    }
+    var a = word_at(state, 0);
+    var b = word_at(state, 1);
+    var c = word_at(state, 2);
+    var d = word_at(state, 3);
+    var e = word_at(state, 4);
+    var f = word_at(state, 5);
+    var g = word_at(state, 6);
+    var h = word_at(state, 7);
+    for 0..64 |t| {
+        let big1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        let choose = (e & f) ^ (~e & g);
+        let kt = word_at(k, t);
+        let wt = word_at(schedule, t);
+        let t1 = h + big1 + choose + kt + wt;
+        let big0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let t2 = big0 + majority;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+    let a0 = word_at(state, 0);
+    let b0 = word_at(state, 1);
+    let c0 = word_at(state, 2);
+    let d0 = word_at(state, 3);
+    let e0 = word_at(state, 4);
+    let f0 = word_at(state, 5);
+    let g0 = word_at(state, 6);
+    let h0 = word_at(state, 7);
+    set_word(state, 0, a0 + a);
+    set_word(state, 1, b0 + b);
+    set_word(state, 2, c0 + c);
+    set_word(state, 3, d0 + d);
+    set_word(state, 4, e0 + e);
+    set_word(state, 5, f0 + f);
+    set_word(state, 6, g0 + g);
+    set_word(state, 7, h0 + h);
+    return;
+}
+
+// rotr rotates a word right by `n` bits, 0 < n < 32.
+fn rotr(x: u32, n: u32) -> u32 {
+    return (x >> n) | (x << (32 - n));
+}
+
+// word_at reads word `index` of a big-endian word table.
+fn word_at(view: []u8, index: i64) -> u32 {
+    let at = index * 4;
+    return (cast<u32>(view[at]) << 24)
+        | (cast<u32>(view[at + 1]) << 16)
+        | (cast<u32>(view[at + 2]) << 8)
+        | cast<u32>(view[at + 3]);
+}
+
+// set_word writes word `index` of a big-endian word table.
+fn set_word(view: &var []u8, index: i64, value: u32) -> void {
+    let at = index * 4;
+    view[at] = cast<u8>((value >> 24) & 255);
+    view[at + 1] = cast<u8>((value >> 16) & 255);
+    view[at + 2] = cast<u8>((value >> 8) & 255);
+    view[at + 3] = cast<u8>(value & 255);
+    return;
+}
+
+// put_length writes `value` as 64 bits big-endian at `at`.
+fn put_length(view: &var []u8, at: i64, value: i64) -> void {
+    for 0..8 |index| {
+        let shift = (7 - index) * 8;
+        view[at + index] = cast<u8>((value >> shift) & 255);
+    }
+    return;
+}
+
+// fill_hex writes the bytes a hex text spells, in order, skipping the
+// spaces and line breaks that keep the text readable. It is how the
+// tables below are read, since a literal holds text and not bytes.
+fn fill_hex(view: &var []u8, hex: []u8) -> void {
+    var at = 0;
+    var high = 0;
+    var pending = false;
+    for 0..std::mem::len(hex) |index| {
+        let value = hex_digit(hex[index]);
+        if value < 0 {
+            continue;
+        }
+        if pending {
+            view[at] = cast<u8>(high * 16 + value);
+            at = at + 1;
+            pending = false;
+        } else {
+            high = value;
+            pending = true;
+        }
+    }
+    return;
+}
+
+// hex_digit is the value of one hex digit, or -1 for any other byte.
+fn hex_digit(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 48 and value <= 57 {
+        return value - 48;
+    }
+    if value >= 97 and value <= 102 {
+        return value - 87;
+    }
+    return -1;
+}
+
+// initial_state is H(0) of FIPS 180-4 §5.3.3: the first 32 bits of the
+// fractional parts of the square roots of the first eight primes.
+fn initial_state() -> []u8 {
+    return "6a09e667 bb67ae85 3c6ef372 a54ff53a 510e527f 9b05688c 1f83d9ab 5be0cd19";
+}
+
+// round_constants is K of FIPS 180-4 §4.2.2: the first 32 bits of the
+// fractional parts of the cube roots of the first 64 primes.
+fn round_constants() -> []u8 {
+    return
+        \\428a2f98 71374491 b5c0fbcf e9b5dba5 3956c25b 59f111f1 923f82a4 ab1c5ed5
+        \\d807aa98 12835b01 243185be 550c7dc3 72be5d74 80deb1fe 9bdc06a7 c19bf174
+        \\e49b69c1 efbe4786 0fc19dc6 240ca1cc 2de92c6f 4a7484aa 5cb0a9dc 76f988da
+        \\983e5152 a831c66d b00327c8 bf597fc7 c6e00bf3 d5a79147 06ca6351 14292967
+        \\27b70a85 2e1b2138 4d2c6dfc 53380d13 650a7354 766a0abb 81c2c92e 92722c85
+        \\a2bfe8a1 a81a664b c24b8b70 c76c51a3 d192e819 d6990624 f40e3585 106aa070
+        \\19a4c116 1e376c08 2748774c 34b0bcb5 391c0cb3 4ed8aa4a 5b9cca4f 682e6ff3
+        \\748f82ee 78a5636f 84c87814 8cc70208 90befffa a4506ceb bef9a3f7 c67178f2
+    ;
+}
