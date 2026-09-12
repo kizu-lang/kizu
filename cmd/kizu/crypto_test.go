@@ -42,3 +42,37 @@ func TestSha256ExampleAgreesOutsideKizu(t *testing.T) {
 		t.Fatalf("Go's HMAC-SHA-256 of the message is %s, the example promises %s", got, lines[1])
 	}
 }
+
+// TestHkdfExampleAgreesOutsideKizu computes, with Go's HMAC, the key and
+// the derived bytes that examples/crypto_hkdf.kizu promises to print, the
+// way RFC 5869 spells them: extract is one HMAC, and each expand block is
+// the HMAC of the block before it, the info, and the block number.
+func TestHkdfExampleAgreesOutsideKizu(t *testing.T) {
+	cases, err := conformance.Discover(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "examples/crypto_hkdf.kizu"
+	var promised string
+	for _, tt := range cases {
+		if tt.Path == path && tt.Stdout != nil {
+			promised = *tt.Stdout
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(promised), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("%s promises %d lines, want the key, the derived bytes, and the check", path, len(lines))
+	}
+	extract := hmac.New(sha256.New, []byte("salt"))
+	extract.Write([]byte("a shared secret"))
+	key := extract.Sum(nil)
+	if got := hex.EncodeToString(key); got != lines[0] {
+		t.Fatalf("Go's HKDF-Extract gives %s, the example promises %s", got, lines[0])
+	}
+	expand := hmac.New(sha256.New, key)
+	expand.Write([]byte("kizu example key"))
+	expand.Write([]byte{1})
+	if got := hex.EncodeToString(expand.Sum(nil)[:16]); got != lines[1] {
+		t.Fatalf("Go's HKDF-Expand gives %s, the example promises %s", got, lines[1])
+	}
+}

@@ -1,0 +1,61 @@
+import std::crypto;
+import std::mem;
+import std::string;
+
+// A shared secret from a key exchange is not a key: it is not uniformly
+// random, and one secret is wanted as several keys for several purposes.
+// HKDF is the two steps between. `extract` folds the secret and a salt
+// into one pseudorandom key; `expand` draws from it as many bytes as the
+// buffer holds, for the purpose `info` names, and a different info gives
+// unrelated bytes from the same key. Both land in buffers the caller
+// owns, and the same inputs give the same hex to any implementation.
+
+fn append_hex(allocator: Allocator, out: &var string::String, bytes: []u8) -> mem::Error!void {
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value >> 4]);
+        try out.append_byte(allocator, digits[value & 15]);
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+
+    var key = [32]u8{};
+    let key_view = key.as_mut_bytes();
+    crypto::hkdf_extract("salt", "a shared secret", key_view);
+    var key_hex = string::new(allocator);
+    defer key_hex.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    try append_hex(allocator, &var key_hex, key_bytes);
+    let key_text = key_hex.as_bytes();
+    print(key_text);
+
+    var derived = [16]u8{};
+    let derived_view = derived.as_mut_bytes();
+    crypto::hkdf_expand(key_bytes, "kizu example key", derived_view);
+    var derived_hex = string::new(allocator);
+    defer derived_hex.deinit(allocator);
+    let derived_bytes = derived.as_bytes();
+    try append_hex(allocator, &var derived_hex, derived_bytes);
+    let derived_text = derived_hex.as_bytes();
+    print(derived_text);
+
+    var other = [16]u8{};
+    let other_view = other.as_mut_bytes();
+    crypto::hkdf_expand(key_bytes, "kizu example iv", other_view);
+    let other_bytes = other.as_bytes();
+    if !mem::equal_bytes(derived_bytes, other_bytes) {
+        print("a different info gives different bytes");
+    }
+    return;
+}
+
+// run
+// features: crypto hkdf
+// output:
+// 1372251be9b090eb9ed6a9c1ad0b6644ddf0852286607958e3a98037d359e761
+// 9127d0ef281429e318a1b5c710d884a4
+// a different info gives different bytes

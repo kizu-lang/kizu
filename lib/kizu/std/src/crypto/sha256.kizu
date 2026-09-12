@@ -5,8 +5,9 @@
 //
 // The whole message is hashed in one call. There is no hasher that takes
 // the message a piece at a time, because a partial block would have to
-// wait in a struct, and a stack buffer cannot (SPEC §7). A caller that
-// hashes something it is still assembling assembles it first.
+// wait in a struct, and a stack buffer cannot (SPEC §7). What HMAC and
+// HKDF need instead -- the hash of a few views laid end to end -- is
+// `sha256_parts`, which keeps the partial block in its own frame.
 
 // sha256 writes the 32-byte digest of `bytes` to the front of `digest`.
 // The digest is a view of the caller's buffer -- `var out = [32]u8{}` and
@@ -14,59 +15,101 @@
 // view shorter than 32 bytes is a bounds trap, the way any index past the
 // end is.
 pub fn sha256(bytes: []u8, digest: &var []u8) -> void {
-    std::crypto::sha256_after("", bytes, digest);
+    std::crypto::sha256_parts("", bytes, "", "", digest);
     return;
 }
 
-// sha256_after hashes `prefix` followed by `bytes`. The prefix is empty or
-// exactly one block: it is what HMAC puts before a message, and folding it
-// in place saves the concatenation that would need an allocator.
-fn sha256_after(prefix: []u8, bytes: []u8, digest: &var []u8) -> void {
+// sha256_parts hashes `prefix`, `a`, `b`, and `c` laid end to end, without
+// laying them end to end. The prefix is empty or exactly one block: it is
+// the padded key HMAC puts first. The three parts are what the callers
+// here put after it -- a message; or a previous output, an info, and a
+// counter -- and a caller with fewer passes "" for the rest. The block
+// being filled lives in this frame, which is what a piecewise hasher
+// would need a struct for.
+fn sha256_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> void {
     var state_buffer = [32]u8{};
     var schedule_buffer = [256]u8{};
     var constants_buffer = [256]u8{};
-    var tail_buffer = [128]u8{};
+    var block_buffer = [64]u8{};
     let state = state_buffer.as_mut_bytes();
     let schedule = schedule_buffer.as_mut_bytes();
     let constants = constants_buffer.as_mut_bytes();
-    let tail = tail_buffer.as_mut_bytes();
+    let block = block_buffer.as_mut_bytes();
     fill_hex(constants, round_constants());
     fill_hex(state, initial_state());
     if std::mem::len(prefix) == 64 {
         compress_block(state, prefix, schedule, constants);
     }
-    let end = std::mem::len(bytes);
-    var at = 0;
-    while at + 64 <= end {
-        let block = bytes[at..at + 64];
-        compress_block(state, block, schedule, constants);
-        at = at + 64;
-    }
-    // The last block carries what is left, a 1 bit, zeros, and the length
+    var filled = 0;
+    filled = absorb(state, block, filled, a, schedule, constants);
+    filled = absorb(state, block, filled, b, schedule, constants);
+    filled = absorb(state, block, filled, c, schedule, constants);
+    // The last block carries what is held, a 1 bit, zeros, and the length
     // in bits as 64 bits big-endian; when the length does not fit after
-    // the 1 bit, there are two. `tail` is fresh and zero, so only the
-    // bytes that are not zero are written.
-    let rest = end - at;
-    for 0..rest |index| {
-        tail[index] = bytes[at + index];
+    // the 1 bit, there are two.
+    let total_bits = (std::mem::len(prefix) + std::mem::len(a) + std::mem::len(b) + std::mem::len(c)) * 8;
+    block[filled] = cast<u8>(128);
+    var index = filled + 1;
+    if filled + 9 > 64 {
+        while index < 64 {
+            block[index] = 0;
+            index = index + 1;
+        }
+        let full = block[0..64];
+        compress_block(state, full, schedule, constants);
+        index = 0;
     }
-    tail[rest] = cast<u8>(128);
-    var last = 64;
-    if rest + 9 > 64 {
-        last = 128;
+    while index < 56 {
+        block[index] = 0;
+        index = index + 1;
     }
-    let total_bits = (std::mem::len(prefix) + end) * 8;
-    put_length(tail, last - 8, total_bits);
-    let first = tail[0..64];
-    compress_block(state, first, schedule, constants);
-    if last == 128 {
-        let second = tail[64..128];
-        compress_block(state, second, schedule, constants);
-    }
-    for 0..32 |index| {
-        digest[index] = state[index];
+    put_length(block, 56, total_bits);
+    let last = block[0..64];
+    compress_block(state, last, schedule, constants);
+    for 0..32 |at| {
+        digest[at] = state[at];
     }
     return;
+}
+
+// absorb feeds one part to the hash: it completes the block being filled,
+// folds whole blocks straight from the part, and keeps what is left in the
+// block for the next part. It returns how much of the block is filled.
+fn absorb(
+    state: &var []u8,
+    block: &var []u8,
+    filled: i64,
+    bytes: []u8,
+    schedule: &var []u8,
+    constants: []u8
+) -> i64 {
+    var held = filled;
+    var at = 0;
+    let end = std::mem::len(bytes);
+    if held > 0 {
+        while held < 64 and at < end {
+            block[held] = bytes[at];
+            held = held + 1;
+            at = at + 1;
+        }
+        if held < 64 {
+            return held;
+        }
+        let full = block[0..64];
+        compress_block(state, full, schedule, constants);
+        held = 0;
+    }
+    while at + 64 <= end {
+        let chunk = bytes[at..at + 64];
+        compress_block(state, chunk, schedule, constants);
+        at = at + 64;
+    }
+    while at < end {
+        block[held] = bytes[at];
+        held = held + 1;
+        at = at + 1;
+    }
+    return held;
 }
 
 // compress_block folds one 64-byte block into the eight state words

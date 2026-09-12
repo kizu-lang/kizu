@@ -54,6 +54,47 @@ fn expect_hmac(allocator: Allocator, key: []u8, message: []u8, want: []u8) -> me
     return;
 }
 
+fn sequence(allocator: Allocator, from: i64, to: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var value = from;
+    while value <= to {
+        try out.append_byte(allocator, cast<u8>(value));
+        value = value + 1;
+    }
+    return move out;
+}
+
+fn expect_extract(
+    allocator: Allocator,
+    salt: []u8,
+    keying_material: []u8,
+    key: &var []u8,
+    want: []u8
+) -> mem::Error!void {
+    crypto::hkdf_extract(salt, keying_material, key);
+    let hex = try hex_of(allocator, key);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+fn expect_expand(
+    allocator: Allocator,
+    key: []u8,
+    info: []u8,
+    out: &var []u8,
+    want: []u8
+) -> mem::Error!void {
+    crypto::hkdf_expand(key, info, out);
+    let hex = try hex_of(allocator, out);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
 fn expect_repeated_sha256(allocator: Allocator, count: i64, want: []u8) -> mem::Error!void {
     let input = try repeated(allocator, 97, count);
     defer input.deinit(allocator);
@@ -154,6 +195,81 @@ test "a key of no bytes and a key of one block are taken as they are" {
     let key_bytes = key.as_bytes();
     try expect_hmac(allocator, key_bytes, "exactly one block of key",
         "baa93ea4ccc7062ed6870c5e7937dbd35ad7791df4e29df9addeb429ff491acf");
+}
+
+test "the RFC 5869 cases extract and expand as the RFC says" {
+    let allocator = mem::page_allocator();
+    // A.1: a short salt, a short info, 42 bytes out.
+    let salt1 = try sequence(allocator, 0, 12);
+    defer salt1.deinit(allocator);
+    let ikm1 = try repeated(allocator, 11, 22);
+    defer ikm1.deinit(allocator);
+    let info1 = try sequence(allocator, 240, 249);
+    defer info1.deinit(allocator);
+    let salt1_bytes = salt1.as_bytes();
+    let ikm1_bytes = ikm1.as_bytes();
+    let info1_bytes = info1.as_bytes();
+    var key1 = [32]u8{};
+    let key1_view = key1.as_mut_bytes();
+    try expect_extract(allocator, salt1_bytes, ikm1_bytes, key1_view,
+        "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5");
+    let key1_bytes = key1.as_bytes();
+    var out1 = [42]u8{};
+    let out1_view = out1.as_mut_bytes();
+    try expect_expand(allocator, key1_bytes, info1_bytes, out1_view,
+        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865");
+    // A.2: everything longer than a block, 82 bytes out across three blocks.
+    let salt2 = try sequence(allocator, 96, 175);
+    defer salt2.deinit(allocator);
+    let ikm2 = try sequence(allocator, 0, 79);
+    defer ikm2.deinit(allocator);
+    let info2 = try sequence(allocator, 176, 255);
+    defer info2.deinit(allocator);
+    let salt2_bytes = salt2.as_bytes();
+    let ikm2_bytes = ikm2.as_bytes();
+    let info2_bytes = info2.as_bytes();
+    var key2 = [32]u8{};
+    let key2_view = key2.as_mut_bytes();
+    try expect_extract(allocator, salt2_bytes, ikm2_bytes, key2_view,
+        "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244");
+    let key2_bytes = key2.as_bytes();
+    var out2 = [82]u8{};
+    let out2_view = out2.as_mut_bytes();
+    try expect_expand(allocator, key2_bytes, info2_bytes, out2_view,
+        "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87");
+    // A.3: no salt and no info.
+    var key3 = [32]u8{};
+    let key3_view = key3.as_mut_bytes();
+    try expect_extract(allocator, "", ikm1_bytes, key3_view,
+        "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04");
+    let key3_bytes = key3.as_bytes();
+    var out3 = [42]u8{};
+    let out3_view = out3.as_mut_bytes();
+    try expect_expand(allocator, key3_bytes, "", out3_view,
+        "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8");
+}
+
+test "an expansion is the same bytes however long it is cut" {
+    let allocator = mem::page_allocator();
+    var key = [32]u8{};
+    let key_view = key.as_mut_bytes();
+    crypto::hkdf_extract("salt", "a shared secret", key_view);
+    let key_bytes = key.as_bytes();
+    var short = [16]u8{};
+    let short_view = short.as_mut_bytes();
+    crypto::hkdf_expand(key_bytes, "kizu example key", short_view);
+    var long = [64]u8{};
+    let long_view = long.as_mut_bytes();
+    crypto::hkdf_expand(key_bytes, "kizu example key", long_view);
+    let short_bytes = short.as_bytes();
+    let long_bytes = long.as_bytes();
+    testing::expect_equal<[]u8>(short_bytes, long_bytes[0..16]);
+    let long_hex = try hex_of(allocator, long_bytes);
+    defer long_hex.deinit(allocator);
+    let got = long_hex.as_bytes();
+    testing::expect_equal<[]u8>(
+        "9127d0ef281429e318a1b5c710d884a49e3c97bbd4c30d7cc4f63f6112789f646539bb2d7dbe4821604c31d1349cd91f5208ac9be0c9e06fcd2bc929cf4ceaff",
+        got);
 }
 
 test "a constant-time comparison answers what a plain one does" {
