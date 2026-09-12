@@ -196,6 +196,7 @@ func compileRuntime(source string, output string, options Options) error {
 // them would fail in the C compiler with an undeclared name.
 var runtimeErrorSets = []string{
 	"std::coro::Error",
+	"std::crypto::Error",
 	"std::fs::Error",
 	"std::io::Error",
 	"std::net::Error",

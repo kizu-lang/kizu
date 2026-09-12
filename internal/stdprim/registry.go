@@ -59,6 +59,10 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Args:   []ArgKind{ArgIo, ArgAllocator, ArgStringOut, ArgI64},
 		Return: "std::io::Error!void",
 	},
+	"std::internal::builtin::crypto_random_into": {
+		Args:   []ArgKind{ArgIo, ArgAllocator, ArgStringOut, ArgI64},
+		Return: "std::crypto::Error!void",
+	},
 	"std::internal::builtin::fs_real_path_into": {
 		Args:   []ArgKind{ArgIo, ArgAllocator, ArgBytes, ArgStringOut},
 		Return: "std::fs::Error!void",
@@ -273,6 +277,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::coro_new":                     true,
 	"std::internal::builtin::coro_resume":                  true,
 	"std::internal::builtin::coro_suspend":                 true,
+	"std::internal::builtin::crypto_random_into":           true,
 	"std::internal::builtin::task_await":                   true,
 	"std::internal::builtin::task_cancel":                  true,
 	"std::internal::builtin::task_close":                   true,

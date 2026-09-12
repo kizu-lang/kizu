@@ -26,7 +26,7 @@
 | [fmt](fmt.md) | diagnostic 用の最小 formatting |
 | [json](json.md) | JSON の encode と decode |
 | [compress](compress.md) | deflate / gzip / zlib の展開と圧縮 |
-| [crypto](crypto.md) | SHA-256、HMAC、定数時間比較 |
+| [crypto](crypto.md) | SHA-256、HMAC、定数時間比較、host の乱数 |
 | [fs](fs.md) | `Io` 経由の file system 操作 |
 | [net](net.md) | `Io` 経由の TCP listener と stream |
 | [http](http.md) | HTTP/1 の server、message、routing |

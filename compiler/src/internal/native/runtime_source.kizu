@@ -41,6 +41,7 @@ pub fn runtime_source() -> []u8 {
         \\#include <time.h>
         \\#include <ucontext.h>
         \\#include <unistd.h>
+        \\#include <sys/random.h>
         \\#if defined(__APPLE__)
         \\#include <mach-o/dyld.h>
         \\#include <sys/event.h>
@@ -919,6 +920,46 @@ pub fn runtime_source() -> []u8 {
         \\void std__internal__builtin__io_read_stdin_into(
         \\    KizuErrorVoid *out, void *io, void *allocator, KizuString *dst, int64_t max) {
         \\    *out = kizu_std_builtin_io_read_stdin_into_result(io, allocator, dst, max);
+        \\}
+        \\
+        \\/* Random bytes come from the kernel's entropy source. getentropy answers at
+        \\   most 256 bytes per call and never returns short, so the draw is a loop of
+        \\   whole chunks straight into the String's storage; the length is committed
+        \\   only once every chunk was answered, so a refused draw leaves the String as
+        \\   it was. */
+        \\static KizuErrorVoid kizu_std_builtin_crypto_random_into_result(
+        \\    void *io, void *allocator, KizuString *dst, int64_t count) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_CRYPTO_ERROR_IO_FAILING);
+        \\    }
+        \\    KizuArray *array = dst;
+        \\    if (!array) {
+        \\        return kizu_err_void(KIZU_ERR_STD_CRYPTO_ERROR_READ_FAILED);
+        \\    }
+        \\    if (count <= 0) {
+        \\        return kizu_ok_void();
+        \\    }
+        \\    if (!kizu_array_reserve_storage(allocator, array, array->len + count, 1)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_CRYPTO_ERROR_OUT_OF_MEMORY);
+        \\    }
+        \\    int64_t filled = 0;
+        \\    while (filled < count) {
+        \\        size_t want = (size_t)(count - filled);
+        \\        if (want > 256) {
+        \\            want = 256;
+        \\        }
+        \\        if (getentropy(array->data + array->len + filled, want) != 0) {
+        \\            return kizu_err_void(KIZU_ERR_STD_CRYPTO_ERROR_READ_FAILED);
+        \\        }
+        \\        filled += (int64_t)want;
+        \\    }
+        \\    array->len += count;
+        \\    return kizu_ok_void();
+        \\}
+        \\
+        \\void std__internal__builtin__crypto_random_into(
+        \\    KizuErrorVoid *out, void *io, void *allocator, KizuString *dst, int64_t count) {
+        \\    *out = kizu_std_builtin_crypto_random_into_result(io, allocator, dst, count);
         \\}
         \\
         \\int64_t std__internal__builtin__process_arg_count(void) {
