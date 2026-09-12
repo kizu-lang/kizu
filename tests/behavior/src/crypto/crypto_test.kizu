@@ -1,0 +1,165 @@
+import std::crypto;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The digests and tags here are the published ones: FIPS 180-4 gives the
+// SHA-256 examples, RFC 4231 the HMAC-SHA-256 cases. The padding boundaries
+// and the long message are the places an implementation goes wrong on its
+// own, so they are held to the digests a reference implementation gives.
+
+fn hex_of(allocator: Allocator, bytes: []u8) -> mem::Error!string::String {
+    let digits = "0123456789abcdef";
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value >> 4]);
+        try out.append_byte(allocator, digits[value & 15]);
+    }
+    return move out;
+}
+
+fn repeated(allocator: Allocator, byte: u8, count: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    for 0..count |_| {
+        try out.append_byte(allocator, byte);
+    }
+    return move out;
+}
+
+fn expect_sha256(allocator: Allocator, input: []u8, want: []u8) -> mem::Error!void {
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256(input, view);
+    let bytes = digest.as_bytes();
+    let hex = try hex_of(allocator, bytes);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+fn expect_hmac(allocator: Allocator, key: []u8, message: []u8, want: []u8) -> mem::Error!void {
+    var tag = [32]u8{};
+    let view = tag.as_mut_bytes();
+    crypto::hmac_sha256(key, message, view);
+    let bytes = tag.as_bytes();
+    let hex = try hex_of(allocator, bytes);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got[0..mem::len(want)]);
+    return;
+}
+
+fn expect_repeated_sha256(allocator: Allocator, count: i64, want: []u8) -> mem::Error!void {
+    let input = try repeated(allocator, 97, count);
+    defer input.deinit(allocator);
+    let bytes = input.as_bytes();
+    return expect_sha256(allocator, bytes, want);
+}
+
+test "the FIPS 180-4 examples digest as the standard says" {
+    let allocator = mem::page_allocator();
+    try expect_sha256(allocator, "",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    try expect_sha256(allocator, "abc",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    try expect_sha256(allocator, "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+}
+
+test "a message ending at each padding boundary is padded right" {
+    let allocator = mem::page_allocator();
+    // 55 bytes leave room for the 1 bit and the length in one block; 56
+    // do not, and need a second; 64 fill a block exactly.
+    try expect_repeated_sha256(allocator, 55,
+        "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+    try expect_repeated_sha256(allocator, 56,
+        "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
+    try expect_repeated_sha256(allocator, 63,
+        "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34");
+    try expect_repeated_sha256(allocator, 64,
+        "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+    try expect_repeated_sha256(allocator, 65,
+        "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0");
+    try expect_repeated_sha256(allocator, 119,
+        "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb");
+    try expect_repeated_sha256(allocator, 120,
+        "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c");
+}
+
+test "one million bytes go through the blocks the long way" {
+    let allocator = mem::page_allocator();
+    try expect_repeated_sha256(allocator, 1000000,
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+}
+
+test "the RFC 4231 cases tag as the RFC says" {
+    let allocator = mem::page_allocator();
+    let key1 = try repeated(allocator, 11, 20);
+    defer key1.deinit(allocator);
+    let key1_bytes = key1.as_bytes();
+    try expect_hmac(allocator, key1_bytes, "Hi There",
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+    try expect_hmac(allocator, "Jefe", "what do ya want for nothing?",
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    let key3 = try repeated(allocator, 170, 20);
+    defer key3.deinit(allocator);
+    let data3 = try repeated(allocator, 221, 50);
+    defer data3.deinit(allocator);
+    let key3_bytes = key3.as_bytes();
+    let data3_bytes = data3.as_bytes();
+    try expect_hmac(allocator, key3_bytes, data3_bytes,
+        "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe");
+    var key4 = string::new(allocator);
+    defer key4.deinit(allocator);
+    for 1..26 |value| {
+        try key4.append_byte(allocator, cast<u8>(value));
+    }
+    let data4 = try repeated(allocator, 205, 50);
+    defer data4.deinit(allocator);
+    let key4_bytes = key4.as_bytes();
+    let data4_bytes = data4.as_bytes();
+    try expect_hmac(allocator, key4_bytes, data4_bytes,
+        "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b");
+    // Case 5 is compared on its first 128 bits, as the RFC lists it.
+    let key5 = try repeated(allocator, 12, 20);
+    defer key5.deinit(allocator);
+    let key5_bytes = key5.as_bytes();
+    try expect_hmac(allocator, key5_bytes, "Test With Truncation",
+        "a3b6167473100ee06e0c796c2955552b");
+}
+
+test "a key longer than a block is hashed first" {
+    let allocator = mem::page_allocator();
+    let key = try repeated(allocator, 170, 131);
+    defer key.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    try expect_hmac(allocator, key_bytes, "Test Using Larger Than Block-Size Key - Hash Key First",
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+    try expect_hmac(allocator, key_bytes,
+        "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.",
+        "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2");
+}
+
+test "a key of no bytes and a key of one block are taken as they are" {
+    let allocator = mem::page_allocator();
+    try expect_hmac(allocator, "", "",
+        "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad");
+    let key = try repeated(allocator, 107, 64);
+    defer key.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    try expect_hmac(allocator, key_bytes, "exactly one block of key",
+        "baa93ea4ccc7062ed6870c5e7937dbd35ad7791df4e29df9addeb429ff491acf");
+}
+
+test "a constant-time comparison answers what a plain one does" {
+    testing::expect(crypto::equal_constant_time("", ""));
+    testing::expect(crypto::equal_constant_time("secret", "secret"));
+    testing::expect(!crypto::equal_constant_time("secret", "secreT"));
+    testing::expect(!crypto::equal_constant_time("Secret", "secret"));
+    testing::expect(!crypto::equal_constant_time("secret", "secret!"));
+    testing::expect(!crypto::equal_constant_time("secret", ""));
+}

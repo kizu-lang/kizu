@@ -1,0 +1,37 @@
+// HMAC over SHA-256, as RFC 2104 and FIPS 198-1 define it: the key is
+// brought to one block, and the tag is the hash of the key XOR opad
+// followed by the hash of the key XOR ipad followed by the message. A key
+// longer than a block is hashed first and the digest is the key; a shorter
+// one is padded with zeros. The two inner hashes are `sha256_after`, which
+// takes the padded block ahead of its message, so no buffer holding key
+// and message together is ever made.
+
+// hmac_sha256 writes the 32-byte tag of `message` under `key` to the front
+// of `tag`. The tag is a view of the caller's buffer, as `sha256`'s digest
+// is. A key of any length is accepted, including none. Whether a received
+// tag matches is `equal_constant_time`'s question, not `equal_bytes`'.
+pub fn hmac_sha256(key: []u8, message: []u8, tag: &var []u8) -> void {
+    var key_buffer = [64]u8{};
+    var pad_buffer = [64]u8{};
+    var inner_buffer = [32]u8{};
+    let block_key = key_buffer.as_mut_bytes();
+    if std::mem::len(key) > 64 {
+        std::crypto::sha256(key, block_key);
+    } else {
+        for 0..std::mem::len(key) |index| {
+            block_key[index] = key[index];
+        }
+    }
+    let pad = pad_buffer.as_mut_bytes();
+    for 0..64 |index| {
+        pad[index] = block_key[index] ^ 54;
+    }
+    let inner = inner_buffer.as_mut_bytes();
+    std::crypto::sha256_after(pad, message, inner);
+    for 0..64 |index| {
+        pad[index] = block_key[index] ^ 92;
+    }
+    let inner_digest = inner_buffer.as_bytes();
+    std::crypto::sha256_after(pad, inner_digest, tag);
+    return;
+}
