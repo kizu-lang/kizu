@@ -1,0 +1,70 @@
+import std::crypto;
+import std::mem;
+import std::string;
+
+// Sealing a message under a key and a nonce gives bytes nobody without
+// the key can read or change: the ciphertext, and a tag over it and over
+// the associated data that travels in the clear beside it. Opening checks
+// the tag before it decrypts, so a message that was changed in transit --
+// one byte of ciphertext, of tag, or of the associated data -- gives no
+// bytes at all, and says so as `Error::AuthenticationFailed`.
+//
+// The key and nonce here are fixed so the output is checkable; a program
+// draws the key with `random_bytes` and gives each message its own nonce.
+
+fn append_hex(allocator: Allocator, out: &var string::String, bytes: []u8) -> mem::Error!void {
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value >> 4]);
+        try out.append_byte(allocator, digits[value & 15]);
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let key = "an example key of thirty-two byt";
+    let nonce = "twelve bytes";
+    let header = "record 1";
+
+    var sealed = string::new(allocator);
+    defer sealed.deinit(allocator);
+    try crypto::chacha20_poly1305_seal(allocator, key, nonce, header, "attack at dawn", &var sealed);
+    var hex = string::new(allocator);
+    defer hex.deinit(allocator);
+    let sealed_bytes = sealed.as_bytes();
+    try append_hex(allocator, &var hex, sealed_bytes);
+    let sealed_text = hex.as_bytes();
+    print(sealed_text);
+
+    var opened = string::new(allocator);
+    defer opened.deinit(allocator);
+    try crypto::chacha20_poly1305_open(allocator, key, nonce, header, sealed_bytes, &var opened);
+    let plain = opened.as_bytes();
+    print(plain);
+
+    var changed = string::new(allocator);
+    defer changed.deinit(allocator);
+    try changed.append_string(allocator, &sealed);
+    let changed_view = changed.as_mut_bytes();
+    changed_view[0] = changed_view[0] ^ 1;
+    let changed_bytes = changed.as_bytes();
+    var refused = string::new(allocator);
+    defer refused.deinit(allocator);
+    if crypto::chacha20_poly1305_open(allocator, key, nonce, header, changed_bytes, &var refused) {
+        print("a changed message opened");
+    } else |err| {
+        if err == crypto::Error::AuthenticationFailed {
+            print("a changed message is refused");
+        }
+    }
+    return;
+}
+
+// run
+// features: crypto aead chacha20 poly1305
+// output:
+// dee43ff37f7ec318d1a74d076e3660fbaf8b51e08729d1388e2b9b606945
+// attack at dawn
+// a changed message is refused

@@ -12,10 +12,14 @@ std::crypto::hkdf_extract(salt: []u8, keying_material: []u8, key: &var []u8) -> 
 std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
 std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
 
+std::crypto::chacha20_poly1305_seal(allocator, key: []u8, nonce: []u8, aad: []u8, plain: []u8, out: &var String) -> std::mem::Error!void
+std::crypto::chacha20_poly1305_open(allocator, key: []u8, nonce: []u8, aad: []u8, sealed: []u8, out: &var String) -> Failure!void
+
 std::crypto::random_bytes(io: Io, allocator: Allocator, count: i64) -> Error!String
 std::crypto::random_into(io: Io, allocator: Allocator, out: &var String, count: i64) -> Error!void
 
-std::crypto::Error    IoFailing | OutOfMemory | ReadFailed
+std::crypto::Error    IoFailing | OutOfMemory | ReadFailed | AuthenticationFailed
+std::crypto::Failure  Error or std::mem::Error
 ```
 
 ```kizu
@@ -58,6 +62,21 @@ message は 1 回の呼び出しで全部渡します。少しずつ渡す hashe
 書きます。長さは 255 block(8160 byte)までで、それより長い view は標準が出力を
 定めない誤用なので trap します(block 番号を wrap させて繰り返しを出すより)。
 TLS 1.3 の key schedule はこの 2 段に TLS 自身の info を与えたものです。
+
+## 封をする
+
+`chacha20_poly1305_seal` は RFC 8439 の AEAD_CHACHA20_POLY1305 で、`plain` の
+暗号文と 16 byte の tag を `out` の末尾に append します。`aad` は認証されるが暗号化
+されない bytes で、相手が開く前に読む record header がそれです。
+`chacha20_poly1305_open` は `sealed`(暗号文の後ろに tag)の tag を先に定数時間で
+検査し、通ったものだけ復号して `out` に append します。合わなければ何も append
+せず `Error::AuthenticationFailed` です。message が変わったのか、この key / nonce /
+aad で封をしたものでないのかは分からず、言いません。
+
+key は 32 byte、nonce は 12 byte で、違う長さは誤用なので trap します。nonce は
+1 つの key の下で 1 回だけ使います。同じ組で 2 つの message を封じると、2 つの
+平文の XOR が漏れます。どの nonce を使うかは protocol の決めることで(TLS は
+record を数える)、ここでは引きません。
 
 ## 比較
 
