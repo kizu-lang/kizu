@@ -23,6 +23,7 @@ target が常に持つ境界は次です。
 | 向き | 名前 | WebAssembly 型 | 意味 |
 | --- | --- | --- | --- |
 | import | `kizu.write` | `(stream: i32, ptr: i32, len: i32) -> i32` | bytes を同期的に渡す。0 は受理、非 0 は拒否 |
+| import | `kizu.random` | `(ptr: i32, len: i32) -> i32` | `ptr..ptr+len` を `crypto.getRandomValues` で埋める。0 は成功、非 0 は失敗。`std::crypto::random_bytes` が届くときだけ import する |
 | export | `memory` | `WebAssembly.Memory` | guest の linear memory |
 | export | `kizu_start` | `() -> i32` | `main` を 1 回実行し、status を返す |
 

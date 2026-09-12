@@ -1,0 +1,52 @@
+import std::crypto;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+// Random bytes come from the host -- the kernel, WASI, or the browser --
+// and reach a program through an `Io`, the way every host boundary does.
+// The call names the source, and a failing Io refuses the draw like any
+// other read. Nothing about the bytes themselves can be printed and
+// promised; what a program can promise is how many it asked for and that
+// two draws are not the same.
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+
+    let key = try crypto::random_bytes(io, allocator, 32);
+    defer key.deinit(allocator);
+    print(key.len());
+
+    let again = try crypto::random_bytes(io, allocator, 32);
+    defer again.deinit(allocator);
+    let first = key.as_bytes();
+    let second = again.as_bytes();
+    if !mem::equal_bytes(first, second) {
+        print("two draws differ");
+    }
+
+    var nonce = string::new(allocator);
+    defer nonce.deinit(allocator);
+    try nonce.append_bytes(allocator, "nonce:");
+    try crypto::random_into(io, allocator, &var nonce, 12);
+    print(nonce.len());
+
+    if crypto::random_bytes(testing::failing_io(), allocator, 32) |drawn| {
+        drawn.deinit(allocator);
+    } else |err| {
+        if err == crypto::Error::IoFailing {
+            print("a failing io draws nothing");
+        }
+    }
+    return;
+}
+
+// run
+// features: crypto random io testing
+// output:
+// 32
+// two draws differ
+// 18
+// a failing io draws nothing

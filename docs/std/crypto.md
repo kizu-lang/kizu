@@ -1,14 +1,19 @@
 # std::crypto
 
-protocol の安全性が乗る算術です。message に名前を付ける digest、書き手を証明する
-tag、どこで違ったかを漏らさない比較。全部 Kizu source で、どの target でも
-同じ bytes を返します。C を link しない wasm module も native binary と同じ
-digest を出します。
+protocol の安全性が乗る算術と、それが必要とする乱数です。message に名前を付ける
+digest、書き手を証明する tag、どこで違ったかを漏らさない比較は全部 Kizu source で、
+どの target でも同じ bytes を返します。C を link しない wasm module も native
+binary と同じ digest を出します。乱数だけは host から来ます。
 
 ```text
 std::crypto::sha256(bytes: []u8, digest: &var []u8) -> void
 std::crypto::hmac_sha256(key: []u8, message: []u8, tag: &var []u8) -> void
 std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
+
+std::crypto::random_bytes(io: Io, allocator: Allocator, count: i64) -> Error!String
+std::crypto::random_into(io: Io, allocator: Allocator, out: &var String, count: i64) -> Error!void
+
+std::crypto::Error    IoFailing | OutOfMemory | ReadFailed
 ```
 
 ```kizu
@@ -50,11 +55,22 @@ message は 1 回の呼び出しで全部渡します。少しずつ渡す hashe
 1 byte ずつ当てられます。長さが違う 2 つは等しくなく、それは即座に決まります。
 tag の長さは秘密ではありません。
 
+## 乱数
+
+`random_bytes` は host の乱数源から `count` byte を引き、owner の String で返します。
+native では kernel の entropy(`getentropy`)、WASI では `random_get`、browser では
+`crypto.getRandomValues` です。`random_into` は呼び手の String の末尾に append し、
+失敗したら String は元のままです。`count` が 0 以下なら何も引きません。
+
+引くには `Io` が要ります。乱数は host の境界で、他の host 境界と同じく呼び出しが
+source に見え、`std::testing::failing_io()` は `IoFailing` で拒否します。
+`std::rand` は seed から決まる列で、test が欲しいもの、鍵にしてはいけないものです
+(`docs/std/rand.md`)。
+
 ## 今は話さないこと
 
-乱数と時計はここにありません。primitive が必要とするものは呼び手が渡し、
-どこから来たかは呼び手の source に残ります。`std::rand` は seed から決まる列で、
-暗号用途の乱数ではありません(`docs/std/rand.md`)。
+時計はここにありません。証明書の有効期限のように「今」が要る検証は、呼び手が
+`std::process::unix_millis()` を渡し、そう書いたことが source に残ります。
 
 検証は公開されている test vector です。FIPS 180-4 の例と RFC 4231 の case が
 `tests/behavior/src/crypto/` にあり、`examples/crypto_sha256.kizu` が約束する

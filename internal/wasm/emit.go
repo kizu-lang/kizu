@@ -266,6 +266,7 @@ func (e *emitter) writeHeader() {
 	if e.target.isBrowser() {
 		e.out.WriteString("  (import \"kizu\" \"write\"\n")
 		e.out.WriteString("    (func $__kizu_write (param i32 i32 i32) (result i32)))\n")
+		e.writeBrowserCryptoImports()
 		e.writeBrowserImports()
 	} else {
 		e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
@@ -276,6 +277,7 @@ func (e *emitter) writeHeader() {
 		}
 		e.writeProcessImports()
 		e.writeFSImports()
+		e.writeCryptoImports()
 	}
 	pages := (e.dataEnd + 65535) / 65536
 	if pages < 1 {
@@ -371,6 +373,9 @@ func (e *emitter) writeRuntime() error {
 		return err
 	}
 	if err := e.writeFSRuntime(); err != nil {
+		return err
+	}
+	if err := e.writeCryptoRuntime(); err != nil {
 		return err
 	}
 	if len(e.panicKinds) > 0 {

@@ -1,4 +1,5 @@
 import std::crypto;
+import std::io;
 import std::mem;
 import std::string;
 import std::testing;
@@ -162,4 +163,69 @@ test "a constant-time comparison answers what a plain one does" {
     testing::expect(!crypto::equal_constant_time("Secret", "secret"));
     testing::expect(!crypto::equal_constant_time("secret", "secret!"));
     testing::expect(!crypto::equal_constant_time("secret", ""));
+}
+
+fn all_zero(bytes: []u8) -> bool {
+    for 0..mem::len(bytes) |index| {
+        if bytes[index] != 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+test "a draw has the length asked for and two draws differ" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let first = try crypto::random_bytes(io, allocator, 32);
+    defer first.deinit(allocator);
+    let second = try crypto::random_bytes(io, allocator, 32);
+    defer second.deinit(allocator);
+    testing::expect_equal<i64>(32, first.len());
+    testing::expect_equal<i64>(32, second.len());
+    let first_bytes = first.as_bytes();
+    let second_bytes = second.as_bytes();
+    testing::expect(!mem::equal_bytes(first_bytes, second_bytes));
+}
+
+test "a long draw is filled to the end" {
+    let allocator = mem::page_allocator();
+    // Longer than any one chunk a host answers, so the tail is drawn too.
+    let long = try crypto::random_bytes(io::blocking(), allocator, 100000);
+    defer long.deinit(allocator);
+    testing::expect_equal<i64>(100000, long.len());
+    let bytes = long.as_bytes();
+    testing::expect(!all_zero(bytes[99000..100000]));
+}
+
+test "a draw of nothing is an empty string" {
+    let allocator = mem::page_allocator();
+    let none = try crypto::random_bytes(io::blocking(), allocator, 0);
+    defer none.deinit(allocator);
+    testing::expect_equal<i64>(0, none.len());
+}
+
+test "random_into appends after what the buffer held" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, "nonce:");
+    try crypto::random_into(io::blocking(), allocator, &var out, 12);
+    testing::expect_equal<i64>(18, out.len());
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("nonce:", bytes[0..6]);
+}
+
+test "a failing io draws nothing and leaves the buffer as it was" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, "kept");
+    if crypto::random_into(testing::failing_io(), allocator, &var out, 8) {
+        testing::fail("a failing io drew bytes");
+    } else |err| {
+        testing::expect(err == crypto::Error::IoFailing);
+    }
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("kept", bytes);
 }

@@ -1,0 +1,135 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+
+// Mechanical port of internal/wasm/crypto.go. The host's random source is
+// reached through one primitive that fills guest memory, with a different
+// callee on WASI and in the browser.
+
+struct CryptoErrorCodes {
+    io_failing: i64,
+    out_of_memory: i64,
+    read_failed: i64,
+}
+
+fn (self: &Emitter) uses_crypto_random(module: &ir::Module) -> bool {
+    return self.uses_builtin_call(
+        module,
+        "std::internal::builtin::crypto_random_into"
+    );
+}
+
+/// Declares the WASI random source only when it is reached.
+fn (self: &var Emitter) write_crypto_imports(module: &ir::Module) -> !void {
+    if !self.uses_crypto_random(module) {
+        return;
+    }
+    let import_line =
+        \\  (import "wasi_snapshot_preview1" "random_get"
+    ;
+    try self.line(import_line);
+    return self.line("    (func $__wasi_random_get (param i32 i32) (result i32)))");
+}
+
+/// Declares the browser host's random source only when it is reached.
+fn (self: &var Emitter) write_browser_crypto_imports(module: &ir::Module) -> !void {
+    if !self.uses_crypto_random(module) {
+        return;
+    }
+    let import_line =
+        \\  (import "kizu" "random"
+    ;
+    try self.line(import_line);
+    return self.line("    (func $__kizu_random (param i32 i32) (result i32)))");
+}
+
+/// Emits the random draw when the guest reaches it.
+fn (self: &var Emitter) write_crypto_runtime(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    if !self.uses_crypto_random(module) {
+        return null;
+    }
+    let io_failing = wasm_error_code(
+        module,
+        "std::crypto::Error",
+        "IoFailing"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::crypto::Error` has no member `IoFailing`"
+    );
+    let out_of_memory = wasm_error_code(
+        module,
+        "std::crypto::Error",
+        "OutOfMemory"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::crypto::Error` has no member `OutOfMemory`"
+    );
+    let read_failed = wasm_error_code(
+        module,
+        "std::crypto::Error",
+        "ReadFailed"
+    ) orelse return try self.fail0(
+        "wasm error: error set `std::crypto::Error` has no member `ReadFailed`"
+    );
+    let codes = CryptoErrorCodes {
+        io_failing: io_failing,
+        out_of_memory: out_of_memory,
+        read_failed: read_failed,
+    };
+    try self.write_crypto_random_into(codes);
+    return null;
+}
+
+/// Appends `count` host random bytes to the destination String. The storage
+/// is grown first, the host writes straight into it, and the length is
+/// committed only after the host said yes.
+fn (self: &var Emitter) write_crypto_random_into(codes: CryptoErrorCodes) -> !void {
+    try self.line("  (func $std::internal::builtin::crypto_random_into");
+    try self.line(
+        "      (param $out i32) (param $io i32) (param $allocator i32)"
+    );
+    try self.line("      (param $dst i32) (param $count i64)");
+    try self.line("    (local $errno i32) (local $ptr i32) (local $needed i64)");
+    try self.line("    (if (i32.eq (local.get $io) (i32.const 2))");
+    try self.line("      (then");
+    try self.write_error_result(codes.io_failing, "        ");
+    try self.line("        (return)))");
+    try self.line("    (if (i64.le_s (local.get $count) (i64.const 0))");
+    try self.line("      (then");
+    try self.line("        (i64.store (local.get $out) (i64.const 1))");
+    try self.line("        (return)))");
+    try self.line("    (local.set $needed");
+    try self.line1(
+        "      (i64.add (i64.load (i32.add (local.get $dst) (i32.const %d)))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("        (local.get $count)))");
+    try self.line("    (if (i32.eqz (call $__array_reserve");
+    try self.line("          (local.get $allocator) (local.get $dst)");
+    try self.line("          (local.get $needed) (i32.const 1)))");
+    try self.line("      (then");
+    try self.write_error_result(codes.out_of_memory, "        ");
+    try self.line("        (return)))");
+    try self.line("    (local.set $ptr");
+    try self.line("      (i32.add (i32.load (local.get $dst))");
+    try self.line1(
+        "        (i32.wrap_i64 (i64.load (i32.add (local.get $dst) (i32.const %d))))))",
+        Arg::Int(array_len_offset())
+    );
+    if self.is_browser() {
+        try self.line("    (local.set $errno (call $__kizu_random");
+    } else {
+        try self.line("    (local.set $errno (call $__wasi_random_get");
+    }
+    try self.line("      (local.get $ptr) (i32.wrap_i64 (local.get $count))))");
+    try self.line("    (if (local.get $errno)");
+    try self.line("      (then");
+    try self.write_error_result(codes.read_failed, "        ");
+    try self.line("        (return)))");
+    try self.line1(
+        "    (i64.store (i32.add (local.get $dst) (i32.const %d)) (local.get $needed))",
+        Arg::Int(array_len_offset())
+    );
+    try self.line("    (i64.store (local.get $out) (i64.const 1))");
+    try self.line("  )");
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
