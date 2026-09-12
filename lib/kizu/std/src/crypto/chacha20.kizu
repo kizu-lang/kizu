@@ -1,0 +1,122 @@
+// ChaCha20, as RFC 8439 §2 defines it: a 64-byte block is 20 rounds over
+// sixteen 32-bit words -- four constants, the key, a block counter, and
+// the nonce -- added back to the words they started from, and the stream
+// is the blocks for counter 0, 1, 2, ... XORed onto the text. The words
+// are `u32`, whose `+` wraps at 32 bits (SPEC §6.9.2), and the working
+// state lives in a stack buffer read and written a word at a time.
+
+// chacha20_block writes the 64-byte block for `counter` to the front of
+// `out`. Block 0 under a nonce is where the AEAD takes its Poly1305 key,
+// and blocks 1, 2, ... are what it encrypts with.
+fn chacha20_block(key: []u8, counter: i64, nonce: []u8, out: &var []u8) -> void {
+    var state_buffer = [64]u8{};
+    var work_buffer = [64]u8{};
+    let state = state_buffer.as_mut_bytes();
+    let work = work_buffer.as_mut_bytes();
+    set_le32(state, 0, 0x61707865);
+    set_le32(state, 1, 0x3320646e);
+    set_le32(state, 2, 0x79622d32);
+    set_le32(state, 3, 0x6b206574);
+    for 0..8 |index| {
+        let word = le32(key, index * 4);
+        set_le32(state, 4 + index, word);
+    }
+    set_le32(state, 12, cast<u32>(counter & 0xFFFFFFFF));
+    for 0..3 |index| {
+        let word = le32(nonce, index * 4);
+        set_le32(state, 13 + index, word);
+    }
+    for 0..64 |index| {
+        work[index] = state[index];
+    }
+    for 0..10 |_| {
+        quarter_round(work, 0, 4, 8, 12);
+        quarter_round(work, 1, 5, 9, 13);
+        quarter_round(work, 2, 6, 10, 14);
+        quarter_round(work, 3, 7, 11, 15);
+        quarter_round(work, 0, 5, 10, 15);
+        quarter_round(work, 1, 6, 11, 12);
+        quarter_round(work, 2, 7, 8, 13);
+        quarter_round(work, 3, 4, 9, 14);
+    }
+    for 0..16 |index| {
+        let mixed = le32(work, index * 4);
+        let start = le32(state, index * 4);
+        set_le32(out, index, mixed + start);
+    }
+    return;
+}
+
+// quarter_round is RFC 8439 §2.1 on words a, b, c, d of the state.
+fn quarter_round(state: &var []u8, a: i64, b: i64, c: i64, d: i64) -> void {
+    var xa = le32(state, a * 4);
+    var xb = le32(state, b * 4);
+    var xc = le32(state, c * 4);
+    var xd = le32(state, d * 4);
+    xa = xa + xb;
+    xd = rotl(xd ^ xa, 16);
+    xc = xc + xd;
+    xb = rotl(xb ^ xc, 12);
+    xa = xa + xb;
+    xd = rotl(xd ^ xa, 8);
+    xc = xc + xd;
+    xb = rotl(xb ^ xc, 7);
+    set_le32(state, a, xa);
+    set_le32(state, b, xb);
+    set_le32(state, c, xc);
+    set_le32(state, d, xd);
+    return;
+}
+
+// chacha20_xor appends `text` XORed with the stream from `counter` on.
+// Encrypting and decrypting are the same call.
+fn chacha20_xor(
+    allocator: Allocator,
+    key: []u8,
+    nonce: []u8,
+    counter: i64,
+    text: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    var stream_buffer = [64]u8{};
+    let stream = stream_buffer.as_mut_bytes();
+    let end = std::mem::len(text);
+    var at = 0;
+    var block = counter;
+    while at < end {
+        chacha20_block(key, block, nonce, stream);
+        var take = end - at;
+        if take > 64 {
+            take = 64;
+        }
+        for 0..take |index| {
+            try out.append_byte(allocator, text[at + index] ^ stream[index]);
+        }
+        at = at + take;
+        block = block + 1;
+    }
+    return;
+}
+
+// rotl rotates a word left by `n` bits, 0 < n < 32.
+fn rotl(x: u32, n: u32) -> u32 {
+    return (x << n) | (x >> (32 - n));
+}
+
+// le32 reads the little-endian word at byte `at`.
+fn le32(view: []u8, at: i64) -> u32 {
+    return cast<u32>(view[at])
+        | (cast<u32>(view[at + 1]) << 8)
+        | (cast<u32>(view[at + 2]) << 16)
+        | (cast<u32>(view[at + 3]) << 24);
+}
+
+// set_le32 writes word `index` of a little-endian word table.
+fn set_le32(view: &var []u8, index: i64, value: u32) -> void {
+    let at = index * 4;
+    view[at] = cast<u8>(value & 255);
+    view[at + 1] = cast<u8>((value >> 8) & 255);
+    view[at + 2] = cast<u8>((value >> 16) & 255);
+    view[at + 3] = cast<u8>((value >> 24) & 255);
+    return;
+}

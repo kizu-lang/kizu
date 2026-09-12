@@ -1,0 +1,108 @@
+// AEAD_CHACHA20_POLY1305, as RFC 8439 §2.8 defines it: the text is
+// encrypted with ChaCha20 from block 1, and a Poly1305 tag under the key
+// block 0 gives covers the associated data and the ciphertext, each
+// padded to 16 bytes, followed by their lengths. Sealing appends the
+// ciphertext and then the tag; opening checks the tag first and decrypts
+// only a message that passed, so a forged message yields no bytes at all.
+//
+// A key is 32 bytes and a nonce 12, and a nonce is used once under a key:
+// two messages sealed under the same pair give away the XOR of their
+// texts. Which nonce to use is the protocol's decision -- TLS counts
+// records -- and nothing here draws one.
+
+// chacha20_poly1305_seal appends the ciphertext of `plain` and its
+// 16-byte tag to `out`. `aad` is authenticated but not encrypted: a
+// record header, say, that the other side reads before opening. A key or
+// nonce of the wrong length is a misuse and traps.
+pub fn chacha20_poly1305_seal(
+    allocator: Allocator,
+    key: []u8,
+    nonce: []u8,
+    aad: []u8,
+    plain: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    std::crypto::require_key_and_nonce(key, nonce);
+    let start = out.len();
+    try std::crypto::chacha20_xor(allocator, key, nonce, 1, plain, out);
+    var tag_buffer = [16]u8{};
+    let tag = tag_buffer.as_mut_bytes();
+    let whole = out.as_bytes();
+    let sealed = whole[start..out.len()];
+    std::crypto::poly1305_tag(key, nonce, aad, sealed, tag);
+    let tag_bytes = tag_buffer.as_bytes();
+    try out.append_bytes(allocator, tag_bytes);
+    return;
+}
+
+// chacha20_poly1305_open checks the tag on `sealed` -- the ciphertext
+// with its tag behind it -- and appends the plain bytes to `out`. When
+// the tag does not match, nothing is appended and the answer is
+// `Error::AuthenticationFailed`. The check compares in constant time.
+pub fn chacha20_poly1305_open(
+    allocator: Allocator,
+    key: []u8,
+    nonce: []u8,
+    aad: []u8,
+    sealed: []u8,
+    out: &var std::string::String
+) -> std::crypto::Failure!void {
+    std::crypto::require_key_and_nonce(key, nonce);
+    let end = std::mem::len(sealed);
+    if end < 16 {
+        return std::crypto::Error::AuthenticationFailed;
+    }
+    let text = sealed[0..end - 16];
+    let received = sealed[end - 16..end];
+    var tag_buffer = [16]u8{};
+    let tag = tag_buffer.as_mut_bytes();
+    std::crypto::poly1305_tag(key, nonce, aad, text, tag);
+    let expected = tag_buffer.as_bytes();
+    if !std::crypto::equal_constant_time(expected, received) {
+        return std::crypto::Error::AuthenticationFailed;
+    }
+    try std::crypto::chacha20_xor(allocator, key, nonce, 1, text, out);
+    return;
+}
+
+// poly1305_tag writes the AEAD's tag over `aad` and `text` to the front
+// of `tag`: the one-time key is ChaCha20 block 0, and the message is the
+// two inputs padded to 16 bytes and their lengths as 64 bits each.
+fn poly1305_tag(key: []u8, nonce: []u8, aad: []u8, text: []u8, tag: &var []u8) -> void {
+    var block_buffer = [64]u8{};
+    let block = block_buffer.as_mut_bytes();
+    std::crypto::chacha20_block(key, 0, nonce, block);
+    let one_time = block_buffer.as_bytes();
+    var mac = std::crypto::poly1305_new(one_time[0..32]);
+    mac.absorb_padded(aad);
+    mac.absorb_padded(text);
+    var lengths_buffer = [16]u8{};
+    let lengths = lengths_buffer.as_mut_bytes();
+    put_le64(lengths, 0, std::mem::len(aad));
+    put_le64(lengths, 8, std::mem::len(text));
+    let trailer = lengths_buffer.as_bytes();
+    mac.block(trailer);
+    mac.finish(one_time[0..32], tag);
+    return;
+}
+
+// put_le64 writes `value` as 64 bits little-endian at `at`.
+fn put_le64(view: &var []u8, at: i64, value: i64) -> void {
+    for 0..8 |index| {
+        let shift = index * 8;
+        view[at + index] = cast<u8>((value >> shift) & 255);
+    }
+    return;
+}
+
+// require_key_and_nonce traps on a key or nonce that is not the length
+// the cipher defines, since a wrong length is a bug and not an input.
+fn require_key_and_nonce(key: []u8, nonce: []u8) -> void {
+    if std::mem::len(key) != 32 {
+        std::internal::builtin::panic("crypto chacha20_poly1305: key must be 32 bytes");
+    }
+    if std::mem::len(nonce) != 12 {
+        std::internal::builtin::panic("crypto chacha20_poly1305: nonce must be 12 bytes");
+    }
+    return;
+}
