@@ -1,0 +1,83 @@
+import std::crypto;
+import std::mem;
+import std::string;
+
+// Two parties who have never met agree on a secret over a channel
+// anyone can read: each draws a private key, sends the public key that
+// X25519 makes from it, and multiplies its own private key onto the
+// other's public key. Both arrive at the same 32 bytes; a listener who
+// saw only the two public keys does not.
+//
+// The private keys here are fixed so the output is checkable; a program
+// draws each with `random_bytes` and never sends it.
+
+fn append_hex(allocator: Allocator, out: &var string::String, bytes: []u8) -> mem::Error!void {
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value >> 4]);
+        try out.append_byte(allocator, digits[value & 15]);
+    }
+    return;
+}
+
+fn print_hex(allocator: Allocator, bytes: []u8) -> mem::Error!void {
+    var hex = string::new(allocator);
+    defer hex.deinit(allocator);
+    try append_hex(allocator, &var hex, bytes);
+    let text = hex.as_bytes();
+    print(text);
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let alice_private = "alice's private key, 32 bytes...";
+    let bob_private = "bob's private key, also 32 bytes";
+
+    var alice_public = [32]u8{};
+    let alice_public_view = alice_public.as_mut_bytes();
+    crypto::x25519_base(alice_private, alice_public_view);
+    var bob_public = [32]u8{};
+    let bob_public_view = bob_public.as_mut_bytes();
+    crypto::x25519_base(bob_private, bob_public_view);
+    let alice_sends = alice_public.as_bytes();
+    let bob_sends = bob_public.as_bytes();
+    try print_hex(allocator, alice_sends);
+    try print_hex(allocator, bob_sends);
+
+    var alice_secret = [32]u8{};
+    let alice_secret_view = alice_secret.as_mut_bytes();
+    try crypto::x25519(alice_private, bob_sends, alice_secret_view);
+    var bob_secret = [32]u8{};
+    let bob_secret_view = bob_secret.as_mut_bytes();
+    try crypto::x25519(bob_private, alice_sends, bob_secret_view);
+    let alice_has = alice_secret.as_bytes();
+    let bob_has = bob_secret.as_bytes();
+    try print_hex(allocator, alice_has);
+    if crypto::equal_constant_time(alice_has, bob_has) {
+        print("both sides hold the same secret");
+    }
+
+    var zero = [32]u8{};
+    let low_order = zero.as_bytes();
+    var refused = [32]u8{};
+    let refused_view = refused.as_mut_bytes();
+    if crypto::x25519(alice_private, low_order, refused_view) {
+        print("a low-order point was accepted");
+    } else |err| {
+        if err == crypto::Error::LowOrderPoint {
+            print("a low-order point is refused");
+        }
+    }
+    return;
+}
+
+// run
+// features: crypto x25519
+// output:
+// 1650e2d3d6e90f286f9d0ee1a650ebf3b559938a96c03b84c9fdcdcfbe5deb2e
+// e0cf5e5c5c789d2da7baf9ea6175950bc1e5f3f3d5e1bf0c551b6c3e67cf190b
+// 1e7d7579d75f45b45583e86a000810445ec6569af94cc8f0c498c430604a072d
+// both sides hold the same secret
+// a low-order point is refused

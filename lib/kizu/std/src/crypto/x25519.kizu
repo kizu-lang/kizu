@@ -1,0 +1,298 @@
+// X25519, as RFC 7748 defines it: a scalar multiplied onto a point of
+// Curve25519 by the Montgomery ladder, with only the u coordinate in
+// hand. Two parties each multiply their own scalar onto the other's
+// public point and arrive at the same 32 bytes, and nobody who saw only
+// the two public points can.
+//
+// The field is the integers modulo 2^255 - 19, held as sixteen limbs of
+// 16 bits in `i64`, the way TweetNaCl (Bernstein, van Gastel, Janssen,
+// Lange, Schwabe, Smetsers; public domain) holds them: a product of two
+// limbs is 32 bits, a column of sixteen products 36, and there is room
+// for that and the carries in 64. The ladder does the same work for
+// every scalar -- the swap is a mask, never a branch -- so its timing
+// says nothing about the secret.
+
+// x25519 writes the 32-byte shared secret of `scalar` and `point` to the
+// front of `out`: the scalar is one party's private key and the point
+// the other's public key. A point of low order gives the all-zero
+// secret, which says the other side chose its point to make the secret
+// known, and the answer is `Error::LowOrderPoint` (RFC 7748 §6.1). A
+// scalar or point of the wrong length is a misuse and traps.
+pub fn x25519(scalar: []u8, point: []u8, out: &var []u8) -> std::crypto::Error!void {
+    require_x25519_lengths(scalar, point);
+    scalar_mult(scalar, point, out);
+    var all = cast<u8>(0);
+    for 0..32 |index| {
+        all = all | out[index];
+    }
+    if all == 0 {
+        return std::crypto::Error::LowOrderPoint;
+    }
+    return;
+}
+
+// x25519_base writes the public key of the private key `scalar` to the
+// front of `out`: the scalar multiplied onto the base point u = 9. The
+// base point has the order of the group, so this cannot be all zero.
+pub fn x25519_base(scalar: []u8, out: &var []u8) -> void {
+    var base_buffer = [32]u8{};
+    let base = base_buffer.as_mut_bytes();
+    base[0] = 9;
+    let point = base_buffer.as_bytes();
+    require_x25519_lengths(scalar, point);
+    scalar_mult(scalar, point, out);
+    return;
+}
+
+// require_x25519_lengths traps on a scalar or point that is not 32 bytes.
+fn require_x25519_lengths(scalar: []u8, point: []u8) -> void {
+    if std::mem::len(scalar) != 32 {
+        std::internal::builtin::panic("crypto x25519: scalar must be 32 bytes");
+    }
+    if std::mem::len(point) != 32 {
+        std::internal::builtin::panic("crypto x25519: point must be 32 bytes");
+    }
+    return;
+}
+
+// scalar_mult is the ladder of RFC 7748 §5. The scalar is clamped as
+// §5 says -- low three bits cleared, bit 255 cleared, bit 254 set -- and
+// the point's bit 255 is ignored. Each field element has its own buffer,
+// and every operation writes to a buffer it does not read, so no step
+// needs a copy.
+fn scalar_mult(scalar: []u8, point: []u8, out: &var []u8) -> void {
+    var clamped_buffer = [32]u8{};
+    let clamped = clamped_buffer.as_mut_bytes();
+    for 0..32 |index| {
+        clamped[index] = scalar[index];
+    }
+    clamped[0] = clamped[0] & 248;
+    clamped[31] = (clamped[31] & 127) | 64;
+
+    var x1_buffer = [16]i64{};
+    var x2_buffer = [16]i64{};
+    var z2_buffer = [16]i64{};
+    var x3_buffer = [16]i64{};
+    var z3_buffer = [16]i64{};
+    var a_buffer = [16]i64{};
+    var aa_buffer = [16]i64{};
+    var b_buffer = [16]i64{};
+    var bb_buffer = [16]i64{};
+    var e_buffer = [16]i64{};
+    var c_buffer = [16]i64{};
+    var d_buffer = [16]i64{};
+    var da_buffer = [16]i64{};
+    var cb_buffer = [16]i64{};
+    var t1_buffer = [16]i64{};
+    var t2_buffer = [16]i64{};
+    let x1 = x1_buffer.as_mut_slice();
+    let x2 = x2_buffer.as_mut_slice();
+    let z2 = z2_buffer.as_mut_slice();
+    let x3 = x3_buffer.as_mut_slice();
+    let z3 = z3_buffer.as_mut_slice();
+    let a = a_buffer.as_mut_slice();
+    let aa = aa_buffer.as_mut_slice();
+    let b = b_buffer.as_mut_slice();
+    let bb = bb_buffer.as_mut_slice();
+    let e = e_buffer.as_mut_slice();
+    let c = c_buffer.as_mut_slice();
+    let d = d_buffer.as_mut_slice();
+    let da = da_buffer.as_mut_slice();
+    let cb = cb_buffer.as_mut_slice();
+    let t1 = t1_buffer.as_mut_slice();
+    let t2 = t2_buffer.as_mut_slice();
+    unpack(x1, point);
+    unpack(x3, point);
+    x2[0] = 1;
+    z3[0] = 1;
+
+    var swap = 0;
+    var t = 254;
+    while t >= 0 {
+        let bit = cast<i64>(clamped[t >> 3] >> cast<u8>(t & 7)) & 1;
+        swap = swap ^ bit;
+        conditional_swap(swap, x2, x3);
+        conditional_swap(swap, z2, z3);
+        swap = bit;
+        add(a, x2, z2);
+        square(aa, a);
+        subtract(b, x2, z2);
+        square(bb, b);
+        subtract(e, aa, bb);
+        add(c, x3, z3);
+        subtract(d, x3, z3);
+        multiply(da, d, a);
+        multiply(cb, c, b);
+        add(t1, da, cb);
+        square(x3, t1);
+        subtract(t1, da, cb);
+        square(t2, t1);
+        multiply(z3, x1, t2);
+        multiply(x2, aa, bb);
+        multiply_a24(t1, e);
+        add(t2, aa, t1);
+        multiply(z2, e, t2);
+        t = t - 1;
+    }
+    conditional_swap(swap, x2, x3);
+    conditional_swap(swap, z2, z3);
+    invert(t1, z2);
+    multiply(t2, x2, t1);
+    pack(out, t2);
+    return;
+}
+
+// conditional_swap exchanges `p` and `q` when `swap` is 1 and leaves
+// them when it is 0, through a mask and not a branch.
+fn conditional_swap(swap: i64, p: &var []i64, q: &var []i64) -> void {
+    let mask = ~(swap - 1);
+    for 0..16 |index| {
+        let differ = mask & (p[index] ^ q[index]);
+        p[index] = p[index] ^ differ;
+        q[index] = q[index] ^ differ;
+    }
+    return;
+}
+
+// carry brings every limb back under 16 bits, folding what overflows
+// the top limb around as 38 = 2 * 19, since 2^256 = 38 mod p.
+fn carry(o: &var []i64) -> void {
+    for 0..16 |index| {
+        o[index] = o[index] + 65536;
+        let c = o[index] >> 16;
+        if index < 15 {
+            o[index + 1] = o[index + 1] + c - 1;
+        } else {
+            o[0] = o[0] + 38 * (c - 1);
+        }
+        o[index] = o[index] - (c << 16);
+    }
+    return;
+}
+
+fn add(o: &var []i64, a: []i64, b: []i64) -> void {
+    for 0..16 |index| {
+        o[index] = a[index] + b[index];
+    }
+    return;
+}
+
+fn subtract(o: &var []i64, a: []i64, b: []i64) -> void {
+    for 0..16 |index| {
+        o[index] = a[index] - b[index];
+    }
+    return;
+}
+
+// multiply is the schoolbook product of the limbs, the upper half folded
+// down by 38, then carried twice.
+fn multiply(o: &var []i64, a: []i64, b: []i64) -> void {
+    var product_buffer = [31]i64{};
+    let product = product_buffer.as_mut_slice();
+    for 0..16 |i| {
+        for 0..16 |j| {
+            product[i + j] = product[i + j] + a[i] * b[j];
+        }
+    }
+    for 0..15 |index| {
+        o[index] = product[index] + 38 * product[index + 16];
+    }
+    o[15] = product[15];
+    carry(o);
+    carry(o);
+    return;
+}
+
+fn square(o: &var []i64, a: []i64) -> void {
+    multiply(o, a, a);
+    return;
+}
+
+// multiply_a24 is the product with (486662 - 2) / 4 = 121665, the
+// curve constant the ladder's doubling uses.
+fn multiply_a24(o: &var []i64, a: []i64) -> void {
+    for 0..16 |index| {
+        o[index] = a[index] * 121665;
+    }
+    carry(o);
+    carry(o);
+    return;
+}
+
+// invert raises to p - 2, which by Fermat is the inverse: 254 squarings
+// with a multiplication after each but the ones for bits 2 and 4, the
+// zero bits of p - 2.
+fn invert(o: &var []i64, z: []i64) -> void {
+    var c_buffer = [16]i64{};
+    var t_buffer = [16]i64{};
+    let c = c_buffer.as_mut_slice();
+    let t = t_buffer.as_mut_slice();
+    for 0..16 |index| {
+        c[index] = z[index];
+    }
+    var bit = 253;
+    while bit >= 0 {
+        square(t, c);
+        if bit != 2 and bit != 4 {
+            multiply(c, t, z);
+        } else {
+            for 0..16 |index| {
+                c[index] = t[index];
+            }
+        }
+        bit = bit - 1;
+    }
+    for 0..16 |index| {
+        o[index] = c[index];
+    }
+    return;
+}
+
+// unpack reads the 32 little-endian bytes of a point into limbs and
+// drops bit 255, as RFC 7748 §5 says to.
+fn unpack(o: &var []i64, point: []u8) -> void {
+    for 0..16 |index| {
+        o[index] = cast<i64>(point[2 * index]) + (cast<i64>(point[2 * index + 1]) << 8);
+    }
+    o[15] = o[15] & 32767;
+    return;
+}
+
+// pack writes the limbs as the 32 little-endian bytes of the one value
+// below p they stand for: carried until each limb is 16 bits, then p is
+// subtracted twice and each time kept only when it did not borrow.
+fn pack(out: &var []u8, n: []i64) -> void {
+    var t_buffer = [16]i64{};
+    var m_buffer = [16]i64{};
+    let t = t_buffer.as_mut_slice();
+    let m = m_buffer.as_mut_slice();
+    for 0..16 |index| {
+        t[index] = n[index];
+    }
+    carry(t);
+    carry(t);
+    carry(t);
+    for 0..2 |_| {
+        subtract_p(m, t);
+        let borrow = (m[15] >> 16) & 1;
+        m[14] = m[14] & 65535;
+        conditional_swap(1 - borrow, t, m);
+    }
+    for 0..16 |index| {
+        out[2 * index] = cast<u8>(t[index] & 255);
+        out[2 * index + 1] = cast<u8>(t[index] >> 8);
+    }
+    return;
+}
+
+// subtract_p writes t - p to `m`, with the borrow of each limb carried
+// into the next and left in the top one for pack to read.
+fn subtract_p(m: &var []i64, t: []i64) -> void {
+    m[0] = t[0] - 65517;
+    for 1..15 |index| {
+        m[index] = t[index] - 65535 - ((m[index - 1] >> 16) & 1);
+        m[index - 1] = m[index - 1] & 65535;
+    }
+    m[15] = t[15] - 32767 - ((m[14] >> 16) & 1);
+    return;
+}

@@ -635,3 +635,100 @@ test "a long AES-GCM message crosses many counter blocks and comes back whole" {
     let opened_bytes = opened.as_bytes();
     testing::expect_equal<[]u8>(text_bytes, opened_bytes);
 }
+
+fn expect_x25519(allocator: Allocator, scalar_hex: []u8, point_hex: []u8, want: []u8) -> crypto::Failure!void {
+    let scalar = try bytes_of_hex(allocator, scalar_hex);
+    defer scalar.deinit(allocator);
+    let point = try bytes_of_hex(allocator, point_hex);
+    defer point.deinit(allocator);
+    let scalar_bytes = scalar.as_bytes();
+    let point_bytes = point.as_bytes();
+    var out = [32]u8{};
+    let view = out.as_mut_bytes();
+    try crypto::x25519(scalar_bytes, point_bytes, view);
+    let bytes = out.as_bytes();
+    let hex = try hex_of(allocator, bytes);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+fn expect_x25519_base(allocator: Allocator, scalar_hex: []u8, want: []u8) -> mem::Error!void {
+    let scalar = try bytes_of_hex(allocator, scalar_hex);
+    defer scalar.deinit(allocator);
+    let scalar_bytes = scalar.as_bytes();
+    var out = [32]u8{};
+    let view = out.as_mut_bytes();
+    crypto::x25519_base(scalar_bytes, view);
+    let bytes = out.as_bytes();
+    let hex = try hex_of(allocator, bytes);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+test "the RFC 7748 section 5.2 scalars multiply as the RFC says" {
+    let allocator = mem::page_allocator();
+    try expect_x25519(allocator,
+        "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
+        "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
+        "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552");
+    try expect_x25519(allocator,
+        "4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d",
+        "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493",
+        "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957");
+}
+
+test "the base point multiplied by itself once is what the RFC lists" {
+    let allocator = mem::page_allocator();
+    try expect_x25519_base(allocator,
+        "0900000000000000000000000000000000000000000000000000000000000000",
+        "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079");
+}
+
+test "the RFC 7748 section 6.1 parties agree on the secret the RFC lists" {
+    let allocator = mem::page_allocator();
+    let alice = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+    let bob = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
+    let alice_public = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
+    let bob_public = "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+    let shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+    try expect_x25519_base(allocator, alice, alice_public);
+    try expect_x25519_base(allocator, bob, bob_public);
+    try expect_x25519(allocator, alice, bob_public, shared);
+    try expect_x25519(allocator, bob, alice_public, shared);
+}
+
+test "a point of low order is refused and a point above p is reduced" {
+    let allocator = mem::page_allocator();
+    let scalar = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+    let scalar_bytes = try bytes_of_hex(allocator, scalar);
+    defer scalar_bytes.deinit(allocator);
+    let key = scalar_bytes.as_bytes();
+    // u = 0 and u = 1 have order 1 and 2; both give the all-zero secret.
+    var zero = [32]u8{};
+    let zero_point = zero.as_bytes();
+    var out = [32]u8{};
+    let view = out.as_mut_bytes();
+    if crypto::x25519(key, zero_point, view) {
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == crypto::Error::LowOrderPoint);
+    }
+    var one = [32]u8{};
+    let one_view = one.as_mut_bytes();
+    one_view[0] = 1;
+    let one_point = one.as_bytes();
+    if crypto::x25519(key, one_point, view) {
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == crypto::Error::LowOrderPoint);
+    }
+    // Bit 255 of a point is ignored, and a u at or above p is read
+    // modulo p (RFC 7748 §5): p + 9 is the base point.
+    try expect_x25519(allocator, scalar,
+        "f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+}
