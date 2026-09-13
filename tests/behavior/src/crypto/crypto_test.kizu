@@ -732,3 +732,63 @@ test "a point of low order is refused and a point above p is reduced" {
         "f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
         "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
 }
+
+// rfc6979_key is the P-256 public key of RFC 6979 §A.2.5, uncompressed.
+fn rfc6979_key() -> []u8 {
+    return "0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299";
+}
+
+fn ecdsa_verifies(allocator: Allocator, key_hex: []u8, message: []u8, signature_hex: []u8) -> mem::Error!bool {
+    let key = try bytes_of_hex(allocator, key_hex);
+    defer key.deinit(allocator);
+    let signature = try bytes_of_hex(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256(message, view);
+    let hash = digest.as_bytes();
+    let key_bytes = key.as_bytes();
+    let signature_bytes = signature.as_bytes();
+    let valid = crypto::ecdsa_p256_verify(key_bytes, hash, signature_bytes);
+    return valid;
+}
+
+test "the RFC 6979 P-256 signatures over sample and test verify" {
+    let allocator = mem::page_allocator();
+    testing::expect(try ecdsa_verifies(allocator, rfc6979_key(), "sample",
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"));
+    testing::expect(try ecdsa_verifies(allocator, rfc6979_key(), "test",
+        "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083"));
+}
+
+test "a signature over another message, or with r and s exchanged, is invalid" {
+    let allocator = mem::page_allocator();
+    testing::expect(!try ecdsa_verifies(allocator, rfc6979_key(), "sample!",
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"));
+    testing::expect(!try ecdsa_verifies(allocator, rfc6979_key(), "sample",
+        "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716"));
+}
+
+test "an r of zero, an s of the group order, and a short signature are invalid" {
+    let allocator = mem::page_allocator();
+    testing::expect(!try ecdsa_verifies(allocator, rfc6979_key(), "sample",
+        "0000000000000000000000000000000000000000000000000000000000000000f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"));
+    testing::expect(!try ecdsa_verifies(allocator, rfc6979_key(), "sample",
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"));
+    testing::expect(!try ecdsa_verifies(allocator, rfc6979_key(), "sample",
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716"));
+}
+
+test "a key that is compressed, off the curve, or the wrong length is invalid" {
+    let allocator = mem::page_allocator();
+    let signature = "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8";
+    testing::expect(!try ecdsa_verifies(allocator,
+        "0260fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+        "sample", signature));
+    testing::expect(!try ecdsa_verifies(allocator,
+        "0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d446229a",
+        "sample", signature));
+    testing::expect(!try ecdsa_verifies(allocator,
+        "0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6",
+        "sample", signature));
+}
