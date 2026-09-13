@@ -1142,10 +1142,12 @@ type StructLiteralExpr struct {
 // expressionNode marks StructLiteralExpr as an expression node.
 func (*StructLiteralExpr) expressionNode() {}
 
-// BufferLiteralExpr is `[N]u8{}`: a zero-filled fixed-length stack buffer
-// (ADR-0097).
+// BufferLiteralExpr is `[N]T{}`: a zero-filled fixed-length stack buffer of
+// fixed-width numbers (ADR-0097).
 type BufferLiteralExpr struct {
 	Size int64
+	// Elem is the element type's spelling, one of the fixed-width numbers.
+	Elem string
 	Span Span
 }
 
@@ -1159,7 +1161,7 @@ func (e *BufferLiteralExpr) String() string {
 
 // TypeText returns the buffer's type spelling.
 func (e *BufferLiteralExpr) TypeText() string {
-	return fmt.Sprintf("[%d]u8", e.Size)
+	return fmt.Sprintf("[%d]%s", e.Size, e.Elem)
 }
 
 // String returns a compact debug representation of the struct literal.

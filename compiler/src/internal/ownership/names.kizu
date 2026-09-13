@@ -582,12 +582,55 @@ fn raw_pointer_element_index(bytes: []u8) -> ?i64 {
     return start + open + 1;
 }
 
-/// Reports whether a spelling is a fixed-length stack buffer (`[N]u8`).
+/// Reports whether a spelling is a fixed-length stack buffer (`[N]T`).
 fn (self: &NameTable) is_buffer_type(name: Name) -> bool {
     let retained = name_text(self, name);
     let bytes = retained.as_bytes();
     return mem::len(bytes) > 1 and bytes[0] == cast<u8>(91) and
         bytes[1] >= cast<u8>(48) and bytes[1] <= cast<u8>(57);
+}
+
+/// Reports whether a spelling is a view (`[]T`), the Go `isViewTypeName`.
+fn (self: &NameTable) is_view_type(name: Name) -> bool {
+    return self.starts_with(name, "[]");
+}
+
+/// Returns the view a String or a stack buffer gives -- bytes for a String,
+/// `[]T` for a `[N]T` -- the Go `viewOfTypeName`.
+fn (self: &var NameTable) view_of_type(name: Name) -> !Name {
+    var spelling = try string::from_bytes(self.allocator, "[]");
+    defer spelling.deinit(self.allocator);
+    if self.is_buffer_type(name) {
+        let copied = try self.copy_text(name);
+        defer copied.deinit(self.allocator);
+        let bytes = copied.as_bytes();
+        var at = 0;
+        while bytes[at] != cast<u8>(93) {
+            at = at + 1;
+        }
+        try spelling.append_bytes(self.allocator, bytes[at + 1..mem::len(bytes)]);
+    } else {
+        try spelling.append_bytes(self.allocator, "u8");
+    }
+    let text = spelling.as_bytes();
+    return self.intern(text);
+}
+
+/// Returns the element a view `[]T` reads.
+fn (self: &var NameTable) view_elem(name: Name) -> !Name {
+    let copied = try self.copy_text(name);
+    defer copied.deinit(self.allocator);
+    let bytes = copied.as_bytes();
+    let text = bytes[2..mem::len(bytes)];
+    return self.intern(text);
+}
+
+/// Copies the text of a name into an owned String, for the places that need
+/// its bytes while the table is mutated.
+fn (self: &NameTable) copy_text(name: Name) -> !string::String {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return string::from_bytes(self.allocator, bytes);
 }
 
 /// Reports whether a type is a fixed-width integer, the Go

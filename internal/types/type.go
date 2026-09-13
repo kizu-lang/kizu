@@ -231,6 +231,33 @@ func sortedMethodNames(methods map[string]*functionType) []string {
 	return names
 }
 
+// sliceElem returns the element type of a view spelling `[]T`.
+func sliceElem(value Type) (Type, bool) {
+	if strings.HasPrefix(string(value), "[]") {
+		return Type(string(value)[2:]), true
+	}
+	return "", false
+}
+
+// isSliceType reports whether value is a view `[]T`.
+func isSliceType(value Type) bool {
+	_, ok := sliceElem(value)
+	return ok
+}
+
+// bufferElem returns the element type of a stack buffer spelling `[N]T`.
+func (t *typeTable) bufferElem(value Type) (Type, bool) {
+	parsed, ok := t.lookup(value)
+	if !ok {
+		return "", false
+	}
+	buffer, ok := parsed.(*typ.Buffer)
+	if !ok {
+		return "", false
+	}
+	return Type(typ.Text(buffer.Elem)), true
+}
+
 // isBufferType reports whether value is a fixed-length stack buffer (`[N]T`).
 func (t *typeTable) isBufferType(value Type) bool {
 	parsed, ok := t.lookup(value)

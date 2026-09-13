@@ -1314,11 +1314,12 @@ let tail = bytes[start..];
 let head = bytes[..end];
 ```
 
-最初の対象は `[]u8` です。
+対象は view `[]T` です。index は element を 1 つ、slice は同じ element の view を
+返します。
 
 ```text
-[]u8 [ i64 ] -> u8
-[]u8 [ i64 .. i64 ] -> []u8
+[]T [ i64 ] -> T
+[]T [ i64 .. i64 ] -> []T
 ```
 
 index / slice syntax は 1 次元 contiguous sequence に限定します。
@@ -1335,23 +1336,27 @@ index / slice syntax は recoverable error を返しません。
 境界外を回復可能な値として扱いたい場合は、`std::mem::byte_at` や
 `std::mem::slice` のような明示 API を使います。
 
-writable slice place(`&var []u8` binding)への indexed assignment
-`buf[i] = x` は許可します。bounds は読みと同じく trap です。
+writable slice place(`&var []T` binding)への indexed assignment
+`buf[i] = x` は許可します。bounds は読みと同じく element 単位で trap です。
 書き込みの供給源は §9 の mutable view 規則が定めます。
 indexed borrow、multi-dimensional slicing、
 `std::array::Array<T>` への直接 indexing は後続に分離します(ADR-0096
 決定 3: Array は std 定義の struct であり、組み込み indexing は IR の
 layout 結合か隠れ call になるため)。
 
-固定長の stack buffer は `[N]u8` です(ADR-0097)。N は正の整数 literal で、
-`var buf = [64]u8{};` が zero 埋めで生成します。view の入口は
-`buf.as_bytes()` / `buf.as_mut_bytes()` で、規則は `String` の同名 method と
-同じです(束縛必須、`as_mut_bytes` は mutable binding 限定で exclusive)。
+固定長の stack buffer は `[N]T` です(ADR-0097)。N は正の整数 literal、T は
+固定幅の数値型(`u8 u16 u32 u64 i8 i16 i32 i64 f32 f64`)で、
+`var buf = [64]u8{};` / `var words = [16]u32{};` が zero 埋めで生成します。
+view の入口は、`[N]u8` では `buf.as_bytes()` / `buf.as_mut_bytes()`(規則は
+`String` の同名 method と同じ: 束縛必須、`as_mut_bytes` は mutable binding 限定で
+exclusive)、それ以外の T では `words.as_slice()` / `words.as_mut_slice()` で、
+view の型は `[]T` です。名前が返るものを言うので、`[N]u32` に `as_bytes` は
+なく、`[N]u8` に `as_slice` はありません。`[]u8` と `[]T` の間の reinterpret は
+持ちません: word の bytes がどの順かは source に書きます。
 stack buffer は local 限定です: struct field / union payload / parameter /
 返り値 / container element に置けず、`&` / `&var` で直接 borrow できません。
-関数境界へは view を渡します。element は `u8` だけで、buffer への直接
-indexing は持ちません(書き込みは view 経由の 1 経路)。stack buffer は
-owner ではなく、`deinit` は不要です。
+関数境界へは view を渡します。buffer への直接 indexing は持ちません(書き込みは
+view 経由の 1 経路)。stack buffer は owner ではなく、`deinit` は不要です。
 
 ### 7.2 明示 cast
 

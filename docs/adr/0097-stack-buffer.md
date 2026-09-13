@@ -1,4 +1,4 @@
-# ADR-0097: stack buffer `[N]u8` — local 限定の固定長 buffer
+# ADR-0097: stack buffer `[N]T` — local 限定の固定長 buffer
 
 Status: 採用
 
@@ -27,11 +27,14 @@ view の作り方が言語内で 1 つに揃う(原理 9)。buffer への書き�
 `as_mut_bytes` の view 経由だけで、buffer への直接 indexing は持たない
 (view で書けるものへの第二経路を作らない)。
 
-### 3. v1 は local 限定・u8 限定
+### 3. local 限定・element は固定幅の数値型
 
-- element は `u8` のみ。`[N]T` の一般化は generic slice(`[]T`)が入るまで
-  延期する(view で読み書きする設計のため、slice にならない element は
-  使い道がない)
+- element は `u8 u16 u32 u64 i8 i16 i32 i64 f32 f64`。view は `[]T` で、
+  index / slice は element 単位。`[N]u8` の view は `as_bytes` /
+  `as_mut_bytes`、他の T は `as_slice` / `as_mut_slice`(名前が返るものを言う)。
+  `[]u8` と `[]T` の間の reinterpret は持たない: byte 順が target 依存になり、
+  「どの target でも同じ bytes」が崩れる。byte との変換は明示の読み書き
+  (#1779: std::crypto の word 状態を byte から組み立てる経路が 3〜5 倍の差だった)
 - **struct field・union payload・関数 parameter・返り値・container element に
   置けない**。関数境界は view(`[]u8` / `&var []u8`)で渡す
 - `&buf` / `&var buf` の直接 borrow は不可(view method が唯一の入口)
@@ -56,7 +59,8 @@ IR/backend では buffer 値は alloca の pointer そのもので、view は
 | `mem::stack_bytes<64>()` factory | 戻り型が値依存(`[n]u8`)になり型検査の新機構が要る。stack 確保が関数呼びに見えるのも実態と乖離 |
 | `&var buf[0..n]` slicing 構文 | `&var` + index の新しい合成を文法に足す。as_mut_bytes で同じものが既存規則のまま得られる |
 | 直接 indexing `buf[0] = x` | view 経由で書けるものへの第二経路(原理 9)。必要なら additive に追加できる |
-| 最初から `[N]T` 一般 | generic slice がなく view にできない。u8 以外の実需もまだない |
+| `[]u8` を `[]u32` に reinterpret する view | byte 順が target 依存になり、同じ source が target ごとに違う bytes を出す |
+| element を struct や owner にも開く | index は等幅の cell を前提にして成り立つ。owner を element にすると cleanup の所在が view に乗る |
 
 ## 影響
 
@@ -73,4 +77,4 @@ IR/backend では buffer 値は alloca の pointer そのもので、view は
 
 - fixed_buffer_allocator(ADR-0092 決定 3)の設計時に、struct field への
   格納制限(決定 3)を再評価する
-- generic slice(`[]T`)が入った時に element の一般化を検討する
+- element を数値以外に開くかは実需が出た時に検討する

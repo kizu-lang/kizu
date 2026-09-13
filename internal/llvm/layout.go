@@ -1,6 +1,10 @@
 package llvm
 
-import "github.com/kizu-lang/kizu/internal/ir"
+import (
+	"strings"
+
+	"github.com/kizu-lang/kizu/internal/ir"
+)
 
 // maxInlinePayloadAlign bounds the alignment the #991 inline tagged-union
 // payload storage can guarantee. A union lowers to `{ i64, [N x i8] }`; the
@@ -80,9 +84,10 @@ func primitiveLayout(typ string) (int, int, bool) {
 		return 8, 8, true
 	case "f32":
 		return 4, 4, true
-	case "[]u8":
-		return 16, 8, true
 	default:
+		if strings.HasPrefix(typ, "[]") {
+			return 16, 8, true
+		}
 		return 0, 0, false
 	}
 }

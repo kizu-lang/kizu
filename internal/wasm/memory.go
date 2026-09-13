@@ -149,7 +149,7 @@ func (e *emitter) loadOp(typ string) (string, error) {
 // A stack-buffer value is its storage address even though its storage layout
 // is the full fixed byte count.
 func (e *emitter) isAddressValueType(typ string) bool {
-	if _, ok := e.bufferSize(typ); ok {
+	if _, _, ok := e.bufferSize(typ); ok {
 		return true
 	}
 	return isReferenceType(typ) || isRawPointerType(typ) ||

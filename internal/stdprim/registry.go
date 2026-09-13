@@ -8,6 +8,8 @@ type ArgKind string
 const (
 	// ArgBytes is a read-only byte slice argument.
 	ArgBytes ArgKind = "[]u8"
+	// ArgView is a read-only view of any fixed-width element, `[]T`.
+	ArgView ArgKind = "[]T"
 	// ArgI64 is a signed 64-bit integer argument.
 	ArgI64 ArgKind = "i64"
 	// ArgU64 is an unsigned 64-bit integer argument.
@@ -39,7 +41,7 @@ type CoreSignature struct {
 var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::mem_page_allocator": {Return: "Allocator"},
 	"std::internal::builtin::mem_fixed_buffer":   {Args: []ArgKind{ArgBytes}, Return: "Allocator"},
-	"std::internal::builtin::mem_len":            {Args: []ArgKind{ArgBytes}, Return: "i64"},
+	"std::internal::builtin::mem_len":            {Args: []ArgKind{ArgView}, Return: "i64"},
 	"std::internal::builtin::print_line":         {Args: []ArgKind{ArgBytes}, Return: "void"},
 	"std::internal::builtin::f64_bits":           {Args: []ArgKind{ArgF64}, Return: "u64"},
 	"std::internal::builtin::f64_from_bits":      {Args: []ArgKind{ArgU64}, Return: "f64"},

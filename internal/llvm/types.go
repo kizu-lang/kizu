@@ -27,9 +27,12 @@ func llvmPrimitiveType(typ string) string {
 		return "float"
 	case "f64":
 		return "double"
-	case "[]u8":
-		return "%kizu.slice.u8"
 	default:
+		if strings.HasPrefix(typ, "[]") {
+			// Every view is the same {ptr, len} pair whatever it counts; the
+			// name keeps the element the type was first written for.
+			return "%kizu.slice.u8"
+		}
 		if isArenaHandleType(typ) {
 			return "i64"
 		}
@@ -87,7 +90,7 @@ func (e *emitter) usesIndirectStructParamABI(typ string) bool {
 // behind a pointer: aggregates -- slices, module structs, unions -- never
 // cross the C boundary by value.
 func (e *emitter) hostedRuntimeIndirectABI(typ string) bool {
-	if typ == "[]u8" {
+	if strings.HasPrefix(typ, "[]") {
 		return true
 	}
 	if _, ok := e.module.Structs[typ]; ok {
@@ -322,8 +325,8 @@ func isArenaHandleType(typ string) bool {
 // static arguments, and no identifier can hold one, so it is what keeps the
 // instance `decode.i64` apart from a plain function named `decode_i64`.
 func llvmNamePart(name string) string {
-	if name == "[]u8" {
-		return "slice.u8"
+	if strings.HasPrefix(name, "[]") {
+		return "slice." + llvmNamePart(name[2:])
 	}
 	var out strings.Builder
 	for _, ch := range []byte(name) {

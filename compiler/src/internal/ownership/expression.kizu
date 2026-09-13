@@ -43,7 +43,7 @@ fn (self: &var Checker) read_expr(
             return null;
         },
         BufferLiteral(value) => {
-            let text = try value.type_text(self.allocator);
+            let text = try value.type_text(self.allocator, tree);
             out.* = try self.names.intern_owned(move text);
             return null;
         },
@@ -216,9 +216,9 @@ fn (self: &var Checker) read_index_expr(
     if try self.read_expr(tree, env, index.target, &var target) |failed| {
         return move failed;
     }
-    if !self.names.is(target, "[]u8") {
+    if !self.names.is_view_type(target) {
         return try self.error1(
-            tree, ast::zero_span(), "move error: index/slice target expects []u8, got %s",
+            tree, ast::zero_span(), "move error: index/slice target expects a view (`[]T`), got %s",
             Arg::Str(target)
         );
     }
@@ -229,7 +229,7 @@ fn (self: &var Checker) read_index_expr(
                 return move failed;
             }
         }
-        out.* = self.common.u8_name;
+        out.* = try self.names.view_elem(target);
         return null;
     }
     if index.start |present| {
@@ -635,7 +635,7 @@ fn (self: &var Checker) refuse_view_escape(
     expression: ast::Expression,
     type_name: Name
 ) -> !?diagnostic::Diagnostic {
-    if !self.names.is(type_name, "[]u8") or self.returned_view(expression) {
+    if !self.names.is_view_type(type_name) or self.returned_view(expression) {
         return null;
     }
     let root = try self.borrow_class_view_root(tree, env, expression) orelse return null;

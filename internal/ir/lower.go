@@ -1382,8 +1382,10 @@ func (l *lowerer) assignTargetType(target ast.Expression) string {
 	case *ast.UnsafeExpr:
 		return l.assignTargetType(t.Value)
 	case *ast.IndexExpr:
-		if !t.Slice {
-			return "u8"
+		// An element write lands in the view's element type, read from the
+		// view the target names.
+		if view := l.assignTargetType(t.Target); !t.Slice && strings.HasPrefix(view, "[]") {
+			return view[2:]
 		}
 		return ""
 	default:
@@ -2634,10 +2636,15 @@ func (l *lowerer) lowerResolvedMethod(
 }
 
 // isBufferIRType reports whether an IR type spelling is a fixed-length stack
-// buffer (`[N]u8`).
+// buffer (`[N]T`).
 func isBufferIRType(typeName string) bool {
 	return len(typeName) > 1 && typeName[0] == '[' &&
 		typeName[1] >= '0' && typeName[1] <= '9'
+}
+
+// bufferViewIRType returns the view a `[N]T` buffer gives: `[]T`.
+func bufferViewIRType(typeName string) string {
+	return "[]" + typeName[strings.IndexByte(typeName, ']')+1:]
 }
 
 // lowerBufferMethod lowers stack buffer view methods (ADR-0097). Both view
@@ -2649,11 +2656,11 @@ func (l *lowerer) lowerBufferMethod(
 	args []ast.Expression,
 ) (Value, error) {
 	switch name {
-	case "as_bytes", "as_mut_bytes":
+	case "as_bytes", "as_mut_bytes", "as_slice", "as_mut_slice":
 		if len(args) != 0 {
 			return Value{}, fmt.Errorf("ir error: buffer `%s` expects 0 args", name)
 		}
-		return l.emit("buffer.as_bytes", "[]u8", []Value{receiver}, ""), nil
+		return l.emit("buffer.as_bytes", bufferViewIRType(receiver.Type), []Value{receiver}, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown buffer method `%s`", name)
 	}
@@ -3334,7 +3341,8 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 		length := l.emit("slice.len", "i64", []Value{target}, "")
 		l.condFail(expr.Span, "binary.<", index, zeroIndex, "bounds", index, length)
 		l.condFail(expr.Span, "binary.>=", index, length, "bounds", index, length)
-		return l.emit("slice.index", "u8", []Value{target, index}, ""), nil
+		elem := strings.TrimPrefix(target.Type, "[]")
+		return l.emit("slice.index", elem, []Value{target, index}, ""), nil
 	}
 	start, err := l.lowerSliceBound(expr.Start, zeroIndex)
 	if err != nil {
@@ -3348,7 +3356,7 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 	l.condFail(expr.Span, "binary.<", start, zeroIndex, "range", start, end, length)
 	l.condFail(expr.Span, "binary.>", start, end, "range", start, end, length)
 	l.condFail(expr.Span, "binary.>", end, length, "range", start, end, length)
-	return l.emit("slice.slice", "[]u8", []Value{target, start, end}, ""), nil
+	return l.emit("slice.slice", target.Type, []Value{target, start, end}, ""), nil
 }
 
 // zeroIndex is the constant a negative bound is tested against.

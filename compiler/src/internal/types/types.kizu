@@ -368,6 +368,58 @@ pub fn (self: &TypeTable) is_map_key_type(value: Type) -> bool {
     return false;
 }
 
+/// Returns the element type of a view spelling `[]T`, or null, the Go
+/// `sliceElem`.
+pub fn (self: &var TypeTable) slice_elem(value: Type) -> !?Type {
+    if self.lookup(value) |parsed| {
+        match typ::root_node(&self.parsed, parsed) {
+            Slice(node) => {
+                let child = typ::child_type(parsed, node.elem);
+                return try self.retain_parsed(child);
+            },
+            _ => return null,
+        }
+    }
+    return null;
+}
+
+/// Reports whether value is a view `[]T`, the Go `isSliceType`.
+pub fn (self: &TypeTable) is_slice_type(value: Type) -> bool {
+    if self.lookup(value) |parsed| {
+        return match typ::root_node(&self.parsed, parsed) {
+            Slice(_) => true,
+            _ => false,
+        };
+    }
+    return false;
+}
+
+/// Returns the element type of a stack buffer spelling `[N]T`, or null,
+/// the Go `bufferElem`.
+pub fn (self: &var TypeTable) buffer_elem(value: Type) -> !?Type {
+    if self.lookup(value) |parsed| {
+        match typ::root_node(&self.parsed, parsed) {
+            Buffer(node) => {
+                let child = typ::child_type(parsed, node.elem);
+                return try self.retain_parsed(child);
+            },
+            _ => return null,
+        }
+    }
+    return null;
+}
+
+/// Returns the view type `[]T` of an element type.
+pub fn (self: &var TypeTable) slice_of(elem: Type) -> !Type {
+    var spelling = try string::from_bytes(self.allocator, "[]");
+    defer spelling.deinit(self.allocator);
+    let text = try self.copy_text(self.allocator, elem);
+    defer text.deinit(self.allocator);
+    try spelling.append_string(self.allocator, &text);
+    let bytes = spelling.as_bytes();
+    return try self.intern(bytes);
+}
+
 /// Reports whether value is a fixed-length stack buffer.
 pub fn (self: &TypeTable) is_buffer_type(value: Type) -> bool {
     if self.lookup(value) |parsed| {
@@ -903,7 +955,7 @@ pub fn is_numeric_type(name: []u8) -> bool {
 /// Reports whether one built-in spelling carries no ownership obligation.
 pub fn is_builtin_copy_type(name: []u8) -> bool {
     return is_numeric_type(name) or
-        equal(name, "bool") or equal(name, "[]u8") or
+        equal(name, "bool") or mem::starts_with(name, "[]") or
         equal(name, "void") or equal(name, "Io") or
         equal(name, "Allocator") or
         equal(name, "std::fs::Metadata");
