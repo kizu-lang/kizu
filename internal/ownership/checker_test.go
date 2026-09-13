@@ -236,6 +236,63 @@ fn main() -> !void {
 	}
 }
 
+// TestCheckAcceptsViewCaptureThroughTry ties a binding to the view a factory
+// that can refuse captured, once `try` has unwrapped the result; the tie is
+// the value's, and the capture cannot leave the frame.
+func TestCheckAcceptsViewCaptureThroughTry(t *testing.T) {
+	source := `error Error {
+    Empty,
+}
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+fn iter(bytes: []u8) -> Error!BytesIter {
+    if std::mem::len(bytes) == 0 {
+        return Error::Empty;
+    }
+    return BytesIter { bytes: bytes, index: 0 };
+}
+fn main() -> !void {
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let made = try iter(view);
+    print(made.index);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+	escaping := `error Error {
+    Empty,
+}
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+fn iter(bytes: []u8) -> Error!BytesIter {
+    if std::mem::len(bytes) == 0 {
+        return Error::Empty;
+    }
+    return BytesIter { bytes: bytes, index: 0 };
+}
+fn make() -> !BytesIter {
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let made = try iter(view);
+    return made;
+}
+fn main() -> !void {
+    let it = try make();
+    print(it.index);
+    return;
+}`
+	err := checkSource(escaping)
+	if err == nil || !strings.Contains(err.Error(), "borrowed value `made` cannot escape") {
+		t.Fatalf("want the capture refused, got %v", err)
+	}
+}
+
 // TestCheckAcceptsOwnerViewCapture keeps a view tie and an explicit deinit
 // obligation on the same binding. The source becomes writable again after
 // the owner is consumed.

@@ -506,14 +506,34 @@ fn (self: &var Checker) returned_borrow_initializer(
     recognized.* = false;
     // A factory that can refuse hands its result back through `try`. The tie
     // is a property of the value, not of how the failure was spelled, so the
-    // `try` is read through rather than treated as a different expression.
+    // `try` is read through rather than treated as a different expression,
+    // and the binding takes the success payload the `try` unwraps.
     if try_expr(tree, expression) |attempt| {
-        return self.returned_borrow_initializer(
-            tree, env, attempt.value, sources, returned, recognized);
+        return self.unwrapped_borrow_initializer(
+            tree, env, attempt.value, true, sources, returned, recognized);
     }
+    return self.unwrapped_borrow_initializer(
+        tree, env, expression, false, sources, returned, recognized);
+}
+
+/// returned_borrow_initializer once any `try` has been read through;
+/// `unwrapped` says whether one was, the Go `unwrappedBorrowInitializer`.
+fn (self: &var Checker) unwrapped_borrow_initializer(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    unwrapped: bool,
+    sources: &var array::Array<BorrowSource>,
+    returned: &var ReturnedBorrow,
+    recognized: &var bool
+) -> !?diagnostic::Diagnostic {
     let call = call_expr(tree, expression) orelse return null;
     let called = try self.called_user_function(tree, env, call.callee) orelse return null;
     let ret_name = self.return_type_name(called.function);
+    var payload = ret_name;
+    if unwrapped {
+        payload = try self.names.after_bang(ret_name);
+    }
     var mutable = false;
     var elem = empty_name();
     var allocator_return = false;
@@ -546,9 +566,9 @@ fn (self: &var Checker) returned_borrow_initializer(
                 allocator_return = self.task_set_return(ret_name);
                 elem = try self.view_carrier_payload(ret_name);
             } else {
-                if self.names.is_view_type(ret_name) or try self.view_capture_struct_type(ret_name) {
+                if self.names.is_view_type(payload) or try self.view_capture_struct_type(payload) {
                     view_return = true;
-                    elem = ret_name;
+                    elem = payload;
                 } else {
                     return null;
                 }
