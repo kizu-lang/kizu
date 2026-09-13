@@ -2,31 +2,30 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
 import std::mem;
+import std::string;
 
 // Mechanical port of internal/wasm/buffer.go. A fixed buffer is its inline
 // frame storage; buffer.as_bytes builds the `{pointer, length}` view into it.
 
-/// Reports whether a verified IR spelling is one fixed byte-buffer type.
+/// Reports whether a verified IR spelling is one fixed stack-buffer type
+/// `[N]T`: a bracketed run of digits followed by the element.
 fn is_buffer_wasm_type(type_name: []u8) -> bool {
     let length = mem::len(type_name);
-    if length < 5 or type_name[0] != cast<u8>(91) or
-        type_name[length - 3] != cast<u8>(93) or
-        type_name[length - 2] != cast<u8>(117) or
-        type_name[length - 1] != cast<u8>(56) {
+    if length < 4 or type_name[0] != cast<u8>(91) {
         return false;
     }
     var index = 1;
-    while index < length - 3 {
+    while index < length and type_name[index] != cast<u8>(93) {
         let byte = type_name[index];
         if byte < cast<u8>(48) or byte > cast<u8>(57) {
             return false;
         }
         index = index + 1;
     }
-    return true;
+    return index > 1 and index + 1 < length;
 }
 
-/// Returns N for one fixed stack-buffer spelling `[N]u8`.
+/// Returns N for one fixed stack-buffer spelling `[N]T`.
 fn (self: &var Emitter) buffer_size(type_name: []u8) -> !?i64 {
     if mem::len(type_name) == 0 {
         return null;
@@ -36,6 +35,31 @@ fn (self: &var Emitter) buffer_size(type_name: []u8) -> !?i64 {
         Buffer(node) => return node.size,
         _ => return null,
     }
+}
+
+/// Renders T from a `[N]T` spelling, null for any other spelling.
+fn (self: &var Emitter) buffer_elem(type_name: []u8) -> !?string::String {
+    if mem::len(type_name) == 0 {
+        return null;
+    }
+    let parsed = try self.types.parse(type_name);
+    match typ::root_node(&self.types, parsed) {
+        Buffer(node) => {
+            let child = typ::child_type(parsed, node.elem);
+            return try typ::render(self.allocator, &self.types, child);
+        },
+        _ => return null,
+    }
+}
+
+/// Returns the byte width of one buffer element, 0 for a spelling that is
+/// not a buffer of a fixed-width number.
+fn (self: &var Emitter) buffer_cell(type_name: []u8) -> !WasmLayout {
+    let elem = try self.buffer_elem(type_name) orelse
+        return WasmLayout { size: 0, align: 1 };
+    defer elem.deinit(self.allocator);
+    let elem_bytes = elem.as_bytes();
+    return wasm_primitive_layout(elem_bytes) orelse WasmLayout { size: 0, align: 1 };
 }
 
 /// Lowers fixed-length zeroed storage and its byte view.
@@ -60,23 +84,24 @@ fn (self: &var Emitter) write_buffer_new(
     let type_name = retained.as_bytes();
     let shown = try self.own(module, node.result.type_name);
     let size = try self.buffer_size(type_name) orelse return try self.fail(
-        "wasm error: buffer.new expects `[N]u8` result, got %s",
+        "wasm error: buffer.new expects `[N]T` result, got %s",
         Arg::Str(shown)
     );
     if node.args.len() != 0 {
         let shown = try self.own(module, node.result.type_name);
         return try self.fail(
-            "wasm error: buffer.new expects `[N]u8` result, got %s",
+            "wasm error: buffer.new expects `[N]T` result, got %s",
             Arg::Str(shown)
         );
     }
+    let cell = try self.buffer_cell(type_name);
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for buffer result");
     if size > 0 {
         try self.line2(
             "            (memory.fill %s (i32.const 0) (i32.const %d))",
             Arg::Str(slot),
-            Arg::Int(size)
+            Arg::Int(size * cell.size)
         );
     }
     try self.set_value(module, node.result, slot);
@@ -87,15 +112,15 @@ fn (self: &var Emitter) write_buffer_as_bytes(
     module: &ir::Module,
     node: &ir::InstrNode
 ) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !module.names.is(node.result.type_name, "[]u8") {
-        return try self.fail0("wasm error: buffer.as_bytes expects buffer -> []u8");
+    if node.args.len() != 1 or !module.names.starts_with(node.result.type_name, "[]") {
+        return try self.fail0("wasm error: buffer.as_bytes expects `[N]T` -> `[]T`");
     }
     let buffer = node.args.get_or_panic(0);
     let retained = ir::name_text(&module.names, buffer.type_name);
     let type_name = retained.as_bytes();
     let shown = try self.own(module, buffer.type_name);
     let size = try self.buffer_size(type_name) orelse return try self.fail(
-        "wasm error: buffer.as_bytes expects `[N]u8`, got %s",
+        "wasm error: buffer.as_bytes expects `[N]T`, got %s",
         Arg::Str(shown)
     );
     let slot = try self.result_slot(module, node.result) orelse

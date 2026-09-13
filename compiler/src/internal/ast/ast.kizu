@@ -568,9 +568,11 @@ pub struct StructLiteralExpr {
     pub span: Span,
 }
 
-/// Is a zero-filled fixed-length byte buffer literal.
+/// Is a zero-filled fixed-length stack buffer literal `[N]T{}`; elem is the
+/// element type's spelling.
 pub struct BufferLiteralExpr {
     pub size: i64,
+    pub elem: Text,
     pub span: Span,
 }
 
@@ -785,21 +787,26 @@ pub fn (self: &MatchArm) is_wildcard(ast: &Ast) -> bool {
 
 /// Returns this fixed buffer literal's type spelling.
 pub fn (self: &BufferLiteralExpr) type_text(
-    allocator: Allocator
+    allocator: Allocator,
+    tree: &Ast
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try self.append_type_text(allocator, &var out);
+    try self.append_type_text(allocator, tree, &var out);
     return move out;
 }
 
 fn (self: &BufferLiteralExpr) append_type_text(
     allocator: Allocator,
+    tree: &Ast,
     out: &var string::String
 ) -> !void {
     try out.append_byte(allocator, cast<u8>(91));
     try fmt::append_i64(allocator, out, self.size);
-    try out.append_bytes(allocator, "]u8");
+    try out.append_byte(allocator, cast<u8>(93));
+    let retained = tree.texts.at(self.elem.node);
+    let elem = retained.as_bytes();
+    try out.append_bytes(allocator, elem);
     return;
 }
 
@@ -998,7 +1005,7 @@ fn append_expression(
             try out.append_bytes(allocator, " }");
         },
         BufferLiteral(value) => {
-            try value.append_type_text(allocator, out);
+            try value.append_type_text(allocator, ast, out);
             try out.append_bytes(allocator, "{}");
         },
         Field(value) => {

@@ -23,6 +23,7 @@ box.borrow_mut() -> &var T
 box.take(allocator: Allocator) -> T
 box.deinit(allocator: Allocator) -> void
 std::mem::len(bytes: []u8) -> i64
+std::mem::count<T>(view: []T) -> i64
 std::mem::byte_at(bytes: []u8, index: i64) -> ?u8
 std::mem::equal_bytes(left: []u8, right: []u8) -> bool
 std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool

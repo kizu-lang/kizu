@@ -792,7 +792,7 @@ func instrHasSliceType(instr *ir.Instr) bool {
 // %kizu.slice.u8, so a module whose only slice sits inside one still needs
 // the declaration.
 func isSliceType(typ string) bool {
-	return strings.Contains(typ, "[]u8")
+	return strings.Contains(typ, "[]")
 }
 
 // sortedErrorUnionNames returns all error-union types referenced by this module.
@@ -1393,22 +1393,23 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 // reaches the backend as preceding cond_fail instructions, so no check is
 // generated here.
 func (e *emitter) writeSliceStore(instr *ir.Instr) error {
-	if len(instr.Args) != 3 ||
-		instr.Args[0].Type != "[]u8" ||
+	elem, ok := viewElem(instr.Args[0].Type)
+	if len(instr.Args) != 3 || !ok ||
 		instr.Args[1].Type != "i64" ||
-		instr.Args[2].Type != "u8" {
-		return fmt.Errorf("llvm error: slice.store expects []u8, i64, u8")
+		instr.Args[2].Type != elem {
+		return fmt.Errorf("llvm error: slice.store expects []T, i64, T")
 	}
 	slice := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
-	byteValue := e.value(instr.Args[2])
+	value := e.value(instr.Args[2])
 	base := "%" + e.nextSyntheticValue("slice.store")
 	ptrName := base + ".ptr"
 	elemPtrName := base + ".elem.ptr"
+	elemType := llvmPrimitiveType(elem)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
-	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n",
-		elemPtrName, ptrName, index.operand)
-	fmt.Fprintf(&e.out, "  store i8 %s, ptr %s\n", byteValue.operand, elemPtrName)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+		elemPtrName, elemType, ptrName, index.operand)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", elemType, value.operand, elemPtrName)
 	return nil
 }
 
@@ -2337,10 +2338,19 @@ func (e *emitter) writeRefLoad(instr *ir.Instr) error {
 	return nil
 }
 
-// writeSliceLen extracts the byte length from a []u8 value.
+// viewElem returns the element type of a view spelling `[]T`.
+func viewElem(typ string) (string, bool) {
+	if strings.HasPrefix(typ, "[]") {
+		return typ[2:], true
+	}
+	return "", false
+}
+
+// writeSliceLen extracts the element count from a view value.
 func (e *emitter) writeSliceLen(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" || instr.Result.Type != "i64" {
-		return fmt.Errorf("llvm error: slice.len expects []u8 -> i64")
+	_, ok := viewElem(instr.Args[0].Type)
+	if len(instr.Args) != 1 || !ok || instr.Result.Type != "i64" {
+		return fmt.Errorf("llvm error: slice.len expects []T -> i64")
 	}
 	slice := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
@@ -2350,24 +2360,25 @@ func (e *emitter) writeSliceLen(instr *ir.Instr) error {
 	return nil
 }
 
-// writeSliceIndex loads one byte. The bounds test reaches the backend as a
-// preceding cond_fail instruction, so no check is generated here.
+// writeSliceIndex loads one element. The bounds test reaches the backend as
+// a preceding cond_fail instruction, so no check is generated here.
 func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
-	if len(instr.Args) != 2 ||
-		instr.Args[0].Type != "[]u8" ||
+	elem, ok := viewElem(instr.Args[0].Type)
+	if len(instr.Args) != 2 || !ok ||
 		instr.Args[1].Type != "i64" ||
-		instr.Result.Type != "u8" {
-		return fmt.Errorf("llvm error: slice.index expects []u8, i64 -> u8")
+		instr.Result.Type != elem {
+		return fmt.Errorf("llvm error: slice.index expects []T, i64 -> T")
 	}
 	slice := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
 	resultName := localName(instr.Result.Name)
 	ptrName := resultName + ".ptr"
 	elemPtrName := resultName + ".elem.ptr"
+	elemType := llvmPrimitiveType(elem)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
-	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n",
-		elemPtrName, ptrName, index.operand)
-	fmt.Fprintf(&e.out, "  %s = load i8, ptr %s\n", resultName, elemPtrName)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+		elemPtrName, elemType, ptrName, index.operand)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, elemType, elemPtrName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -2375,12 +2386,12 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 // writeSliceSlice builds a sub-slice. The bounds test reaches the backend as
 // preceding cond_fail instructions, so no check is generated here.
 func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
-	if len(instr.Args) != 3 ||
-		instr.Args[0].Type != "[]u8" ||
+	elem, ok := viewElem(instr.Args[0].Type)
+	if len(instr.Args) != 3 || !ok ||
 		instr.Args[1].Type != "i64" ||
 		instr.Args[2].Type != "i64" ||
-		instr.Result.Type != "[]u8" {
-		return fmt.Errorf("llvm error: slice.slice expects []u8, i64, i64 -> []u8")
+		instr.Result.Type != instr.Args[0].Type {
+		return fmt.Errorf("llvm error: slice.slice expects []T, i64, i64 -> []T")
 	}
 	slice := e.value(instr.Args[0])
 	start := e.value(instr.Args[1])
@@ -2391,8 +2402,8 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	baseName := resultName + ".base"
 	sliceLenName := resultName + ".len"
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
-	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n",
-		slicePtrName, ptrName, start.operand)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+		slicePtrName, llvmPrimitiveType(elem), ptrName, start.operand)
 	fmt.Fprintf(&e.out, "  %s = sub i64 %s, %s\n", sliceLenName, end.operand, start.operand)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
 		baseName, slicePtrName)
@@ -2406,27 +2417,28 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 // registered for the result is the alloca pointer: a buffer is its storage,
 // and the views buffer.as_bytes hands out point into it (ADR-0097).
 func (e *emitter) writeBufferNew(instr *ir.Instr) error {
-	size, ok := e.bufferSize(instr.Result.Type)
+	size, elem, ok := e.bufferSize(instr.Result.Type)
 	if !ok {
-		return fmt.Errorf("llvm error: buffer.new expects `[N]u8` result, got %s",
+		return fmt.Errorf("llvm error: buffer.new expects `[N]T` result, got %s",
 			instr.Result.Type)
 	}
 	name := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = alloca [%d x i8]\n", name, size)
-	fmt.Fprintf(&e.out, "  store [%d x i8] zeroinitializer, ptr %s\n", size, name)
+	elemType := llvmPrimitiveType(elem)
+	fmt.Fprintf(&e.out, "  %s = alloca [%d x %s]\n", name, size, elemType)
+	fmt.Fprintf(&e.out, "  store [%d x %s] zeroinitializer, ptr %s\n", size, elemType, name)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 
 // writeBufferAsBytes builds the {ptr, len} view of a stack buffer.
 func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Result.Type != "[]u8" {
-		return fmt.Errorf("llvm error: buffer.as_bytes expects buffer -> []u8")
-	}
-	size, ok := e.bufferSize(instr.Args[0].Type)
+	size, elem, ok := e.bufferSize(instr.Args[0].Type)
 	if !ok {
-		return fmt.Errorf("llvm error: buffer.as_bytes expects `[N]u8`, got %s",
+		return fmt.Errorf("llvm error: buffer.as_bytes expects `[N]T`, got %s",
 			instr.Args[0].Type)
+	}
+	if len(instr.Args) != 1 || instr.Result.Type != "[]"+elem {
+		return fmt.Errorf("llvm error: buffer.as_bytes expects `[N]T` -> `[]T`")
 	}
 	buffer := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
@@ -2439,17 +2451,17 @@ func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
 	return nil
 }
 
-// bufferSize parses N from a `[N]u8` spelling.
-func (e *emitter) bufferSize(typeName string) (int64, bool) {
+// bufferSize parses N and T from a `[N]T` spelling.
+func (e *emitter) bufferSize(typeName string) (int64, string, bool) {
 	parsed, err := e.types.Parse(typeName)
 	if err != nil {
-		return 0, false
+		return 0, "", false
 	}
 	buffer, ok := parsed.(*typ.Buffer)
 	if !ok {
-		return 0, false
+		return 0, "", false
 	}
-	return buffer.Size, true
+	return buffer.Size, typ.Text(buffer.Elem), true
 }
 
 // writeCondFail reports the named failure when the tested condition holds.

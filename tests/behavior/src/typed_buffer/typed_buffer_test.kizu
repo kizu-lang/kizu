@@ -1,0 +1,104 @@
+import std::mem;
+import std::testing;
+
+// A `[N]T` buffer is N elements of a fixed-width number, and its view
+// `[]T` indexes elements, not bytes. Every element type has the same
+// entry points, and the arithmetic on what is read is the element's own.
+
+fn fill_words(words: &var []u32) -> void {
+    for 0..mem::count<u32>(words) |index| {
+        words[index] = cast<u32>(index) * 1000000000;
+    }
+    return;
+}
+
+test "a u32 buffer indexes words and wraps at 32 bits" {
+    var words = [4]u32{};
+    let view = words.as_mut_slice();
+    fill_words(view);
+    let read = words.as_slice();
+    testing::expect_equal<i64>(4, mem::count<u32>(read));
+    testing::expect(read[0] == 0);
+    testing::expect(read[1] == 1000000000);
+    testing::expect(read[2] == 2000000000);
+    testing::expect(read[3] == 3000000000);
+    testing::expect(read[3] + read[2] == 705032704);
+}
+
+test "a u64 buffer holds every bit" {
+    var wide = [2]u64{};
+    let view = wide.as_mut_slice();
+    view[1] = ~cast<u64>(0);
+    view[0] = view[1] >> 1;
+    let read = wide.as_slice();
+    testing::expect(read[1] == ~cast<u64>(0));
+    testing::expect(read[0] == 9223372036854775807);
+    testing::expect(read[1] - read[0] == read[0] + 1);
+}
+
+test "signed elements keep their sign" {
+    var small = [3]i8{};
+    let view = small.as_mut_slice();
+    view[0] = cast<i8>(0 - 128);
+    view[2] = 127;
+    let read = small.as_slice();
+    testing::expect(read[0] == cast<i8>(0 - 128));
+    testing::expect(read[1] == 0);
+    testing::expect(read[2] == 127);
+    var medium = [2]i16{};
+    let medium_view = medium.as_mut_slice();
+    medium_view[1] = cast<i16>(0 - 32768);
+    let medium_read = medium.as_slice();
+    testing::expect(medium_read[1] == cast<i16>(0 - 32768));
+    var wide = [2]i32{};
+    let wide_view = wide.as_mut_slice();
+    wide_view[0] = cast<i32>(0 - 2147483648);
+    let wide_read = wide.as_slice();
+    testing::expect(wide_read[0] == cast<i32>(0 - 2147483648));
+}
+
+test "float buffers hold f32 and f64" {
+    var singles = [2]f32{};
+    let single_view = singles.as_mut_slice();
+    single_view[0] = 1.5;
+    single_view[1] = single_view[0] * 3.0;
+    let single = singles.as_slice();
+    testing::expect(single[1] == 4.5);
+    var doubles = [2]f64{};
+    let double_view = doubles.as_mut_slice();
+    double_view[1] = 0.1;
+    let double = doubles.as_slice();
+    testing::expect(double[1] == 0.1);
+    testing::expect(double[0] == 0.0);
+}
+
+fn fill_hundreds(words: &var []u16) -> void {
+    for 0..mem::count<u16>(words) |index| {
+        words[index] = cast<u16>(index * 100);
+    }
+    return;
+}
+
+test "a sub-view counts elements and starts where it was cut" {
+    var words = [8]u16{};
+    let view = words.as_mut_slice();
+    fill_hundreds(view);
+    let read = words.as_slice();
+    let middle = read[2..5];
+    testing::expect_equal<i64>(3, mem::count<u16>(middle));
+    testing::expect(middle[0] == 200);
+    testing::expect(middle[2] == 400);
+    let tail = read[6..];
+    testing::expect_equal<i64>(2, mem::count<u16>(tail));
+    testing::expect(tail[1] == 700);
+}
+
+test "a byte buffer is still viewed as bytes and counted either way" {
+    var bytes = [4]u8{};
+    let view = bytes.as_mut_bytes();
+    view[3] = 9;
+    let read = bytes.as_bytes();
+    testing::expect_equal<i64>(4, mem::len(read));
+    testing::expect_equal<i64>(4, mem::count<u8>(read));
+    testing::expect(read[3] == 9);
+}

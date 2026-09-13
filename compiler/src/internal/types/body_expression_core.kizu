@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::typ;
 import std::mem;
 import std::string;
 
@@ -82,7 +83,16 @@ fn (self: &var Checker) check_expr(
         },
         StructLiteral(_) => return self.check_struct_literal_expr(tree, scope, expression, out),
         BufferLiteral(value) => {
-            let text = try value.type_text(self.allocator);
+            let retained = tree.texts.at(value.elem.node);
+            let elem = retained.as_bytes();
+            if !typ::is_buffer_elem(elem) {
+                var message = string::new(self.allocator);
+                errdefer message.deinit(self.allocator);
+                try message.append_bytes(self.allocator, "buffer element must be a fixed-width number, got ");
+                try message.append_bytes(self.allocator, elem);
+                return try self.checker_message_at("type error", ast::zero_span(), move message);
+            }
+            let text = try value.type_text(self.allocator, tree);
             defer text.deinit(self.allocator);
             let bytes = text.as_bytes();
             out.* = try self.types.intern(bytes);
@@ -491,18 +501,13 @@ fn (self: &var Checker) check_index_expr(
     if try self.check_expr(tree, scope, expression.target, &var target) |problem| {
         return move problem;
     }
-    if !self.types.is_text(target, "[]u8") {
-        var message = string::new(self.allocator);
-        errdefer message.deinit(self.allocator);
-        try message.append_bytes(self.allocator, "index/slice target expects []u8, got ");
-        try self.append_checker_type(&var message, target);
-        return try self.checker_message_at("type error", ast::zero_span(), move message);
-    }
+    let elem = try self.types.slice_elem(target) orelse
+        return try self.index_target_error(target);
     if !expression.slice {
         if try self.check_index_bound(tree, scope, "index", expression.index) |problem| {
             return move problem;
         }
-        out.* = try self.types.u8_type();
+        out.* = elem;
         return null;
     }
     if expression.start |_| {
@@ -517,6 +522,14 @@ fn (self: &var Checker) check_index_expr(
     }
     out.* = target;
     return null;
+}
+
+fn (self: &Checker) index_target_error(target: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "index/slice target expects a view (`[]T`), got ");
+    try self.append_checker_type(&var message, target);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 fn (self: &var Checker) check_index_bound(

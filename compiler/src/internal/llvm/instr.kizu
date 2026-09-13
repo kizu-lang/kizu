@@ -799,34 +799,41 @@ fn (self: &var Emitter) write_slice_instr(module: &ir::Module, node: &ir::InstrN
 /// bounds test reaches the backend as preceding cond_fail instructions, so
 /// no check is generated here.
 fn (self: &var Emitter) write_slice_store(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 3 or
-        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
-        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
-        !module.names.is(node.args.get_or_panic(2).type_name, "u8") {
-        return try self.fail0("llvm error: slice.store expects []u8, i64, u8");
+    let view_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("llvm error: slice.store expects []T, i64, T");
     }
+    let elem = view_bytes[2..mem::len(view_bytes)];
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.args.get_or_panic(2).type_name, elem) {
+        return try self.fail0("llvm error: slice.store expects []T, i64, T");
+    }
+    let elem_type = llvm_primitive_type(elem);
+    let elem_name = try self.names.intern(elem_type);
     let slice = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
-    let byte_value = try self.operand(module, node.args.get_or_panic(2));
+    let value = try self.operand(module, node.args.get_or_panic(2));
     let synthetic = try self.next_synthetic_value("slice.store");
     let base = try self.percent(synthetic);
     let ptr_name = try self.suffixed(base, ".ptr");
     let elem_ptr_name = try self.suffixed(base, ".elem.ptr");
     try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
-    try self.line3(
-        "  %s = getelementptr i8, ptr %s, i64 %s",
-        Arg::Str(elem_ptr_name), Arg::Str(ptr_name), Arg::Str(index.operand)
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 %s",
+        Arg::Str(elem_ptr_name), Arg::Str(elem_name), Arg::Str(ptr_name), Arg::Str(index.operand)
     );
-    try self.line2("  store i8 %s, ptr %s", Arg::Str(byte_value.operand), Arg::Str(elem_ptr_name));
+    try self.line3("  store %s %s, ptr %s", Arg::Str(elem_name), Arg::Str(value.operand), Arg::Str(elem_ptr_name));
     return null;
 }
 
 /// Extracts the byte length from a []u8 value, the Go `writeSliceLen`.
 fn (self: &var Emitter) write_slice_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or
-        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.starts_with(node.args.get_or_panic(0).type_name, "[]") or
         !module.names.is(node.result.type_name, "i64") {
-        return try self.fail0("llvm error: slice.len expects []u8 -> i64");
+        return try self.fail0("llvm error: slice.len expects []T -> i64");
     }
     let slice = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
@@ -839,23 +846,30 @@ fn (self: &var Emitter) write_slice_len(module: &ir::Module, node: &ir::InstrNod
 /// backend as a preceding cond_fail instruction, so no check is generated
 /// here.
 fn (self: &var Emitter) write_slice_index(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or
-        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
-        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
-        !module.names.is(node.result.type_name, "u8") {
-        return try self.fail0("llvm error: slice.index expects []u8, i64 -> u8");
+    let view_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("llvm error: slice.index expects []T, i64 -> T");
     }
+    let elem = view_bytes[2..mem::len(view_bytes)];
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.result.type_name, elem) {
+        return try self.fail0("llvm error: slice.index expects []T, i64 -> T");
+    }
+    let elem_type = llvm_primitive_type(elem);
+    let elem_name = try self.names.intern(elem_type);
     let slice = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");
     let elem_ptr_name = try self.suffixed(result_name, ".elem.ptr");
     try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
-    try self.line3(
-        "  %s = getelementptr i8, ptr %s, i64 %s",
-        Arg::Str(elem_ptr_name), Arg::Str(ptr_name), Arg::Str(index.operand)
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 %s",
+        Arg::Str(elem_ptr_name), Arg::Str(elem_name), Arg::Str(ptr_name), Arg::Str(index.operand)
     );
-    try self.line2("  %s = load i8, ptr %s", Arg::Str(result_name), Arg::Str(elem_ptr_name));
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(elem_name), Arg::Str(elem_ptr_name));
     try self.set_value(module, node.result, result_name);
     return null;
 }
@@ -864,13 +878,20 @@ fn (self: &var Emitter) write_slice_index(module: &ir::Module, node: &ir::InstrN
 /// backend as preceding cond_fail instructions, so no check is generated
 /// here.
 fn (self: &var Emitter) write_slice_slice(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let view_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("llvm error: slice.slice expects []T, i64, i64 -> []T");
+    }
+    let elem = view_bytes[2..mem::len(view_bytes)];
     if node.args.len() != 3 or
-        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
         !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
         !module.names.is(node.args.get_or_panic(2).type_name, "i64") or
-        !module.names.is(node.result.type_name, "[]u8") {
-        return try self.fail0("llvm error: slice.slice expects []u8, i64, i64 -> []u8");
+        !ir::same_name(node.result.type_name, node.args.get_or_panic(0).type_name) {
+        return try self.fail0("llvm error: slice.slice expects []T, i64, i64 -> []T");
     }
+    let elem_type = llvm_primitive_type(elem);
+    let elem_name = try self.names.intern(elem_type);
     let slice = try self.operand(module, node.args.get_or_panic(0));
     let start = try self.operand(module, node.args.get_or_panic(1));
     let end = try self.operand(module, node.args.get_or_panic(2));
@@ -880,9 +901,9 @@ fn (self: &var Emitter) write_slice_slice(module: &ir::Module, node: &ir::InstrN
     let base_name = try self.suffixed(result_name, ".base");
     let slice_len_name = try self.suffixed(result_name, ".len");
     try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
-    try self.line3(
-        "  %s = getelementptr i8, ptr %s, i64 %s",
-        Arg::Str(slice_ptr_name), Arg::Str(ptr_name), Arg::Str(start.operand)
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 %s",
+        Arg::Str(slice_ptr_name), Arg::Str(elem_name), Arg::Str(ptr_name), Arg::Str(start.operand)
     );
     try self.line3("  %s = sub i64 %s, %s", Arg::Str(slice_len_name), Arg::Str(end.operand), Arg::Str(start.operand));
     try self.line2("  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0", Arg::Str(base_name), Arg::Str(slice_ptr_name));
@@ -902,19 +923,25 @@ fn (self: &var Emitter) write_buffer_new(module: &ir::Module, node: &ir::InstrNo
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
     if try self.buffer_size(result_type) |size| {
+        let elem = try self.buffer_elem(result_type) orelse
+            return try self.fail_name1(module, "llvm error: buffer.new expects `[N]T` result, got %s", node.result.type_name);
+        defer elem.deinit(self.allocator);
+        let elem_bytes = elem.as_bytes();
+        let elem_type = llvm_primitive_type(elem_bytes);
+        let elem_name = try self.names.intern(elem_type);
         let name = try self.local_name(module, node.result.name);
-        try self.line2("  %s = alloca [%d x i8]", Arg::Str(name), Arg::Int(size));
-        try self.line2("  store [%d x i8] zeroinitializer, ptr %s", Arg::Int(size), Arg::Str(name));
+        try self.line3("  %s = alloca [%d x %s]", Arg::Str(name), Arg::Int(size), Arg::Str(elem_name));
+        try self.line3("  store [%d x %s] zeroinitializer, ptr %s", Arg::Int(size), Arg::Str(elem_name), Arg::Str(name));
         try self.set_value(module, node.result, name);
         return null;
     }
-    return try self.fail_name1(module, "llvm error: buffer.new expects `[N]u8` result, got %s", node.result.type_name);
+    return try self.fail_name1(module, "llvm error: buffer.new expects `[N]T` result, got %s", node.result.type_name);
 }
 
 /// Builds the {ptr, len} view of a stack buffer, the Go `writeBufferAsBytes`.
 fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 1 or !module.names.is(node.result.type_name, "[]u8") {
-        return try self.fail0("llvm error: buffer.as_bytes expects buffer -> []u8");
+    if node.args.len() != 1 or !module.names.starts_with(node.result.type_name, "[]") {
+        return try self.fail0("llvm error: buffer.as_bytes expects `[N]T` -> `[]T`");
     }
     let buffer_arg = node.args.get_or_panic(0);
     let buffer_text = ir::name_text(&module.names, buffer_arg.type_name);
@@ -931,7 +958,22 @@ fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::In
         try self.set_value(module, node.result, result_name);
         return null;
     }
-    return try self.fail_name1(module, "llvm error: buffer.as_bytes expects `[N]u8`, got %s", buffer_arg.type_name);
+    return try self.fail_name1(module, "llvm error: buffer.as_bytes expects `[N]T`, got %s", buffer_arg.type_name);
+}
+
+/// Renders T from a `[N]T` spelling, null for any other spelling.
+fn (self: &var Emitter) buffer_elem(typ_name: []u8) -> !?string::String {
+    if mem::len(typ_name) == 0 {
+        return null;
+    }
+    let parsed = try self.types.parse(typ_name);
+    match typ::root_node(&self.types, parsed) {
+        Buffer(node) => {
+            let child = typ::child_type(parsed, node.elem);
+            return try typ::render(self.allocator, &self.types, child);
+        },
+        _ => return null,
+    }
 }
 
 /// Parses N from a `[N]u8` spelling, the Go `bufferSize`; null for any other

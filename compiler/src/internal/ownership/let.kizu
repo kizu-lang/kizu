@@ -265,11 +265,12 @@ fn (self: &var Checker) check_capture_let_stmt(
         return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, elem, false);
     }
     var found = false;
-    if try self.view_initializer(tree, env, statement.value, &var sources, &var found) |failed| {
+    var view_type = empty_name();
+    if try self.view_initializer(tree, env, statement.value, &var sources, &var view_type, &var found) |failed| {
         return move failed;
     }
     if found {
-        return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, self.common.bytes_name, false);
+        return self.check_returned_borrow_let_stmt(tree, env, statement, &sources, view_type, false);
     }
     handled.* = false;
     return null;
@@ -334,6 +335,7 @@ fn (self: &var Checker) view_initializer(
     env: ScopeHandle,
     expression: ast::Expression,
     sources: &var array::Array<BorrowSource>,
+    view_type: &var Name,
     found: &var bool
 ) -> !?diagnostic::Diagnostic {
     found.* = false;
@@ -343,8 +345,7 @@ fn (self: &var Checker) view_initializer(
     if roots.len() == 0 {
         return null;
     }
-    var ignored = empty_name();
-    if try self.read_expr(tree, env, expression, &var ignored) |failed| {
+    if try self.read_expr(tree, env, expression, view_type) |failed| {
         return move failed;
     }
     var index = 0;
@@ -545,7 +546,7 @@ fn (self: &var Checker) returned_borrow_initializer(
                 allocator_return = self.task_set_return(ret_name);
                 elem = try self.view_carrier_payload(ret_name);
             } else {
-                if self.names.is(ret_name, "[]u8") or try self.view_capture_struct_type(ret_name) {
+                if self.names.is_view_type(ret_name) or try self.view_capture_struct_type(ret_name) {
                     view_return = true;
                     elem = ret_name;
                 } else {
@@ -660,7 +661,7 @@ fn (self: &var Checker) call_borrow_return_sources(
                     try sources.append(self.allocator, BorrowSource { target: alloc, field: empty_name() });
                 }
             }
-            if view_return and self.names.is(param.type_name, "[]u8") {
+            if view_return and self.names.is_view_type(param.type_name) {
                 if try self.borrow_class_view_root(tree, env, arg) |view| {
                     try sources.append(self.allocator, BorrowSource { target: view, field: empty_name() });
                 }
@@ -833,10 +834,13 @@ pub struct StringView {
     pub target: BindingHandle,
     pub path: Name,
     pub mutable: bool,
+    // Whether the initializer called a slice view (`as_slice` /
+    // `as_mut_slice`) rather than a byte one, for the diagnostic.
+    pub slice: bool,
 }
 
 fn (self: &Checker) new_string_view() -> StringView {
-    return StringView { target: self.scratch_binding, path: empty_name(), mutable: false };
+    return StringView { target: self.scratch_binding, path: empty_name(), mutable: false, slice: false };
 }
 
 /// Binds a local byte view and activates the String owner, the Go
@@ -852,15 +856,24 @@ fn (self: &var Checker) check_string_view_let_stmt(
         return move failed;
     }
     let target = self.binding(view.target);
+    var viewed = target.type_name;
+    if !is_empty(view.path) {
+        viewed = self.field_path_type(target.type_name, view.path) orelse target.type_name;
+    }
     if view.mutable and !target.mutable and !(target.borrowed_param and target.mut_borrow) {
         var kind = "String";
         if self.names.is_buffer_type(target.type_name) {
             kind = "buffer";
         }
         let kind_name = try self.names.intern(kind);
-        return try self.error2(
-            tree, ast::zero_span(), "string error: `%s.as_mut_bytes` requires mutable %s binding",
-            Arg::Str(kind_name), Arg::Str(kind_name)
+        var method_text = "as_mut_bytes";
+        if view.slice {
+            method_text = "as_mut_slice";
+        }
+        let method = try self.names.intern(method_text);
+        return try self.error3(
+            tree, ast::zero_span(), "string error: `%s.%s` requires mutable %s binding",
+            Arg::Str(kind_name), Arg::Str(method), Arg::Str(kind_name)
         );
     }
     if try self.check_borrow_conflict_for_field(tree, view.target, view.path, view.mutable) |failed| {
@@ -868,7 +881,8 @@ fn (self: &var Checker) check_string_view_let_stmt(
     }
     try self.activate_borrow(view.target, view.path, view.mutable);
     let name = try self.names.intern_text(tree, statement.name);
-    var value = self.store.new_binding(name, self.common.bytes_name);
+    let view_type = try self.names.view_of_type(viewed);
+    var value = self.store.new_binding(name, view_type);
     errdefer value.deinit(self.allocator);
     value.borrowed_param = true;
     value.local_borrow = true;
@@ -888,7 +902,7 @@ fn (self: &var Checker) check_string_view_initializer_shape(
         return try self.error0(ast::zero_span(), "string error: String view initializer must call String.as_bytes");
     let field = field_expr(tree, call.callee) orelse
         return try self.error0(ast::zero_span(), "string error: String view initializer must call String.as_bytes");
-    if !text_equals(tree, field.name, "as_bytes") and !text_equals(tree, field.name, "as_mut_bytes") {
+    if !is_view_method_name(tree, field.name) {
         return try self.error0(ast::zero_span(), "string error: String view initializer must call String.as_bytes");
     }
     let count = arg_count(tree, call.args);
@@ -915,7 +929,7 @@ fn (self: &var Checker) string_view_initializer(
 ) -> !bool {
     let call = call_expr(tree, expression) orelse return false;
     let field = field_expr(tree, call.callee) orelse return false;
-    if !text_equals(tree, field.name, "as_bytes") and !text_equals(tree, field.name, "as_mut_bytes") {
+    if !is_view_method_name(tree, field.name) {
         return false;
     }
     let receiver = try self.view_receiver_path(tree, env, field.receiver) orelse return false;
@@ -932,8 +946,17 @@ fn (self: &var Checker) string_view_initializer(
     }
     out.target = target;
     out.path = receiver.path;
-    out.mutable = text_equals(tree, field.name, "as_mut_bytes");
+    out.mutable = text_equals(tree, field.name, "as_mut_bytes") or
+        text_equals(tree, field.name, "as_mut_slice");
+    out.slice = text_equals(tree, field.name, "as_slice") or
+        text_equals(tree, field.name, "as_mut_slice");
     return true;
+}
+
+/// Reports whether name is one of the four view entries.
+fn is_view_method_name(tree: &ast::Ast, name: ast::Text) -> bool {
+    return text_equals(tree, name, "as_bytes") or text_equals(tree, name, "as_mut_bytes") or
+        text_equals(tree, name, "as_slice") or text_equals(tree, name, "as_mut_slice");
 }
 
 /// Reads the local a view initializer borrows from, and the dotted field

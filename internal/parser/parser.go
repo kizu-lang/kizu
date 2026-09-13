@@ -1496,8 +1496,9 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	}
 }
 
-// parseBufferLiteralExpr parses `[N]u8{}`, the zero-filled fixed-length stack
-// buffer literal (ADR-0097).
+// parseBufferLiteralExpr parses `[N]T{}`, the zero-filled fixed-length stack
+// buffer literal (ADR-0097). Which elements a buffer may hold is the
+// checker's question.
 func (p *Parser) parseBufferLiteralExpr() ast.Expression {
 	span := tokenSpan(p.cur)
 	parsed := p.parseTypeName()
@@ -1506,17 +1507,13 @@ func (p *Parser) parseBufferLiteralExpr() ast.Expression {
 	}
 	buffer, ok := parsed.(*typ.Buffer)
 	if !ok {
-		p.errorf("expected buffer literal `[N]u8{}`, got type `%s`", typ.Text(parsed))
-		return &ast.IdentExpr{Name: "<error>", Span: span}
-	}
-	if typ.Text(buffer.Elem) != "u8" {
-		p.errorf("buffer element must be u8, got %s", typ.Text(buffer.Elem))
+		p.errorf("expected buffer literal `[N]T{}`, got type `%s`", typ.Text(parsed))
 		return &ast.IdentExpr{Name: "<error>", Span: span}
 	}
 	if !p.expectPeek(token.LBrace) || !p.expectPeek(token.RBrace) {
 		return &ast.IdentExpr{Name: "<error>", Span: span}
 	}
-	return &ast.BufferLiteralExpr{Size: buffer.Size, Span: span}
+	return &ast.BufferLiteralExpr{Size: buffer.Size, Elem: typ.Text(buffer.Elem), Span: span}
 }
 
 // parseMarkerExpression parses the keywords that sit in front of an expression

@@ -369,7 +369,7 @@ fn (self: &var Checker) sanctioned_view_lend(
     arg: ast::Expression
 ) -> !bool {
     let param = self.param_at(function, index) orelse return false;
-    if !sanctioned or !self.names.is(param.type_name, "[]u8") {
+    if !sanctioned or !self.names.is_view_type(param.type_name) {
         return false;
     }
     if try self.borrow_class_view_root(tree, env, arg) |_| {
@@ -445,7 +445,7 @@ fn (self: &var Checker) view_arg_lend(
     arg: ast::Expression
 ) -> !bool {
     let param = self.param_at(function, index) orelse return false;
-    if !self.names.is(param.type_name, "[]u8") {
+    if !self.names.is_view_type(param.type_name) {
         return false;
     }
     var lent_view = false;
@@ -465,7 +465,7 @@ fn (self: &var Checker) view_arg_lend(
 fn (self: &Checker) borrowed_view_param_arg(tree: &ast::Ast, env: ScopeHandle, arg: ast::Expression) -> bool {
     let value = self.lookup_ident(tree, env, arg) orelse return false;
     let record = self.binding(value);
-    return record.borrowed_param and self.names.is(record.type_name, "[]u8");
+    return record.borrowed_param and self.names.is_view_type(record.type_name);
 }
 
 /// Reports whether fn declares a `&var` parameter whose type can hold a
@@ -476,7 +476,7 @@ fn (self: &var Checker) view_smuggling_params(function: FunctionHandle) -> !bool
     var index = 0;
     while self.param_at(function, index) |param| {
         index = index + 1;
-        if !param.borrow or !param.mut_borrow or self.names.is(param.type_name, "[]u8") {
+        if !param.borrow or !param.mut_borrow or self.names.is_view_type(param.type_name) {
             continue;
         }
         if try self.view_carrying_type(param.type_name) {
@@ -576,7 +576,7 @@ fn (self: &var Checker) view_carrier_payload(type_name: Name) -> !Name {
 /// `viewCarryingTypeSeen`.
 fn (self: &var Checker) view_carrying_type_seen(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
     let payload = try self.view_carrier_payload(type_name);
-    if self.names.is(payload, "[]u8") or self.names.starts_with(payload, "&") {
+    if self.names.is_view_type(payload) or self.names.starts_with(payload, "&") {
         return true;
     }
     if self.seen_contains(seen, payload) {
@@ -745,12 +745,12 @@ fn (self: &var Checker) place_view_roots(
     if !is_empty(direct.path) {
         type_name = self.field_path_type(self.binding(root).type_name, direct.path) orelse return;
     }
-    if !self.names.is(type_name, "[]u8") {
+    if !self.names.is_view_type(type_name) {
         if !reference {
             return;
         }
         let parts = try self.names.explicit_borrow(type_name) orelse return;
-        if !self.names.is(parts.inner, "[]u8") {
+        if !self.names.is_view_type(parts.inner) {
             return;
         }
     }
@@ -1002,6 +1002,19 @@ fn (self: &var Checker) check_core_arg(
     let spelling = stdprim::arg_kind_spelling(want);
     let want_name = try self.names.intern(spelling);
     var got = empty_name();
+    if want == stdprim::ArgKind::View {
+        if try self.read_expr(tree, env, arg, &var got) |failed| {
+            return move failed;
+        }
+        if !self.names.is_view_type(got) {
+            let spelled = try self.names.intern(name);
+            return try self.error4(
+                tree, ast::zero_span(), "move error: `%s` arg %d expects %s, got %s",
+                Arg::Str(spelled), Arg::Int(index + 1), Arg::Str(want_name), Arg::Str(got)
+            );
+        }
+        return null;
+    }
     if try self.read_contextual_expr(tree, env, arg, want_name, &var got) |failed| {
         return move failed;
     }

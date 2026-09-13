@@ -1,9 +1,11 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import std::fmt;
+import std::mem;
 import std::string;
 
-// Mechanical port of internal/wasm/slice.go. A []u8 value is an addressed
-// `{ i32 pointer, i32 length }` descriptor.
+// Mechanical port of internal/wasm/slice.go. A `[]T` value is an addressed
+// `{ i32 pointer, i32 length }` descriptor, the length counted in elements.
 
 fn (self: &var Emitter) write_slice_instr(
     module: &ir::Module,
@@ -24,14 +26,95 @@ fn (self: &var Emitter) write_slice_instr(
     return try self.fail_op(module, node, "wasm error: unsupported slice instruction `%s`");
 }
 
+/// Spells the wasm load for one element type: integers widen to the i64
+/// every integer lives in, a signed one sign-extending and an unsigned one
+/// zero-extending; floats load as themselves.
+fn view_load(elem: []u8) -> []u8 {
+    if mem::equal_bytes(elem, "u8") {
+        return "i64.load8_u";
+    }
+    if mem::equal_bytes(elem, "i8") {
+        return "i64.load8_s";
+    }
+    if mem::equal_bytes(elem, "u16") {
+        return "i64.load16_u";
+    }
+    if mem::equal_bytes(elem, "i16") {
+        return "i64.load16_s";
+    }
+    if mem::equal_bytes(elem, "u32") {
+        return "i64.load32_u";
+    }
+    if mem::equal_bytes(elem, "i32") {
+        return "i64.load32_s";
+    }
+    if mem::equal_bytes(elem, "f32") {
+        return "f32.load";
+    }
+    if mem::equal_bytes(elem, "f64") {
+        return "f64.load";
+    }
+    return "i64.load";
+}
+
+/// Spells the wasm store for one element type.
+fn view_store(elem: []u8) -> []u8 {
+    if mem::equal_bytes(elem, "u8") or mem::equal_bytes(elem, "i8") {
+        return "i64.store8";
+    }
+    if mem::equal_bytes(elem, "u16") or mem::equal_bytes(elem, "i16") {
+        return "i64.store16";
+    }
+    if mem::equal_bytes(elem, "u32") or mem::equal_bytes(elem, "i32") {
+        return "i64.store32";
+    }
+    if mem::equal_bytes(elem, "f32") {
+        return "f32.store";
+    }
+    if mem::equal_bytes(elem, "f64") {
+        return "f64.store";
+    }
+    return "i64.store";
+}
+
+/// Returns the byte width of one element, 0 for a type no view holds.
+fn view_cell(elem: []u8) -> i64 {
+    let layout = wasm_primitive_layout(elem) orelse return 0;
+    return layout.size;
+}
+
+/// Spells the address of element `index` of a view: the pointer word plus
+/// the index scaled by the cell width.
+fn (self: &var Emitter) element_address(
+    descriptor: ir::Name,
+    index: ir::Name,
+    cell: i64
+) -> !ir::Name {
+    var address = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
+    errdefer address.deinit(self.allocator);
+    try self.names.append_to(&var address, descriptor);
+    if cell == 1 {
+        try address.append_bytes(self.allocator, ") (i32.wrap_i64 ");
+        try self.names.append_to(&var address, index);
+        try address.append_bytes(self.allocator, "))");
+    } else {
+        try address.append_bytes(self.allocator, ") (i32.mul (i32.wrap_i64 ");
+        try self.names.append_to(&var address, index);
+        try address.append_bytes(self.allocator, ") (i32.const ");
+        try fmt::append_i64(self.allocator, &var address, cell);
+        try address.append_bytes(self.allocator, ")))");
+    }
+    return self.names.intern_owned(move address);
+}
+
 fn (self: &var Emitter) write_slice_len(
     module: &ir::Module,
     node: &ir::InstrNode
 ) -> !?diagnostic::Diagnostic {
     let arg = node.args.get(0) orelse ir::empty_value();
-    if node.args.len() != 1 or !module.names.is(arg.type_name, "[]u8") or
+    if node.args.len() != 1 or !module.names.starts_with(arg.type_name, "[]") or
         !module.names.is(node.result.type_name, "i64") {
-        return try self.fail0("wasm error: slice.len expects []u8 -> i64");
+        return try self.fail0("wasm error: slice.len expects []T -> i64");
     }
     let descriptor = try self.value_of(module, arg);
     let length_address = try self.address_at(descriptor.expr, 4);
@@ -49,22 +132,26 @@ fn (self: &var Emitter) write_slice_index(
 ) -> !?diagnostic::Diagnostic {
     let slice = node.args.get(0) orelse ir::empty_value();
     let at = node.args.get(1) orelse ir::empty_value();
-    if node.args.len() != 2 or !module.names.is(slice.type_name, "[]u8") or
-        !module.names.is(at.type_name, "i64") or
-        !module.names.is(node.result.type_name, "u8") {
-        return try self.fail0("wasm error: slice.index expects []u8, i64 -> u8");
+    let view_text = ir::name_text(&module.names, slice.type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("wasm error: slice.index expects []T, i64 -> T");
     }
+    let elem = view_bytes[2..mem::len(view_bytes)];
+    let cell = view_cell(elem);
+    if node.args.len() != 2 or cell == 0 or
+        !module.names.is(at.type_name, "i64") or
+        !module.names.is(node.result.type_name, elem) {
+        return try self.fail0("wasm error: slice.index expects []T, i64 -> T");
+    }
+    let load = view_load(elem);
     let descriptor = try self.value_of(module, slice);
     let index = try self.value_of(module, at);
-    var address = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
-    errdefer address.deinit(self.allocator);
-    try self.names.append_to(&var address, descriptor.expr);
-    try address.append_bytes(self.allocator, ") (i32.wrap_i64 ");
-    try self.names.append_to(&var address, index.expr);
-    try address.append_bytes(self.allocator, "))");
-    let address_name = try self.names.intern_owned(move address);
-    var loaded = try string::from_bytes(self.allocator, "(i64.load8_u ");
+    let address_name = try self.element_address(descriptor.expr, index.expr, cell);
+    var loaded = try string::from_bytes(self.allocator, "(");
     errdefer loaded.deinit(self.allocator);
+    try loaded.append_bytes(self.allocator, load);
+    try loaded.append_byte(self.allocator, cast<u8>(32));
     try self.names.append_to(&var loaded, address_name);
     try loaded.append_byte(self.allocator, cast<u8>(41));
     let expr = try self.names.intern_owned(move loaded);
@@ -78,24 +165,27 @@ fn (self: &var Emitter) write_slice_store(
     let slice = node.args.get(0) orelse ir::empty_value();
     let at = node.args.get(1) orelse ir::empty_value();
     let stored = node.args.get(2) orelse ir::empty_value();
-    if node.args.len() != 3 or !module.names.is(slice.type_name, "[]u8") or
-        !module.names.is(at.type_name, "i64") or
-        !module.names.is(stored.type_name, "u8") or
-        !module.names.is(node.result.type_name, "void") {
-        return try self.fail0("wasm error: slice.store expects []u8, i64, u8 -> void");
+    let view_text = ir::name_text(&module.names, slice.type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("wasm error: slice.store expects []T, i64, T -> void");
     }
+    let elem = view_bytes[2..mem::len(view_bytes)];
+    let cell = view_cell(elem);
+    if node.args.len() != 3 or cell == 0 or
+        !module.names.is(at.type_name, "i64") or
+        !module.names.is(stored.type_name, elem) or
+        !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("wasm error: slice.store expects []T, i64, T -> void");
+    }
+    let store_text = view_store(elem);
+    let store = try self.names.intern(store_text);
     let descriptor = try self.value_of(module, slice);
     let index = try self.value_of(module, at);
     let value = try self.value_of(module, stored);
-    var address = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
-    errdefer address.deinit(self.allocator);
-    try self.names.append_to(&var address, descriptor.expr);
-    try address.append_bytes(self.allocator, ") (i32.wrap_i64 ");
-    try self.names.append_to(&var address, index.expr);
-    try address.append_bytes(self.allocator, "))");
-    let address_name = try self.names.intern_owned(move address);
-    try self.line2("            (i64.store8 %s %s)",
-        Arg::Str(address_name), Arg::Str(value.expr));
+    let address_name = try self.element_address(descriptor.expr, index.expr, cell);
+    try self.line3("            (%s %s %s)",
+        Arg::Str(store), Arg::Str(address_name), Arg::Str(value.expr));
     return null;
 }
 
@@ -106,23 +196,24 @@ fn (self: &var Emitter) write_slice_slice(
     let slice = node.args.get(0) orelse ir::empty_value();
     let from = node.args.get(1) orelse ir::empty_value();
     let to = node.args.get(2) orelse ir::empty_value();
-    if node.args.len() != 3 or !module.names.is(slice.type_name, "[]u8") or
+    let view_text = ir::name_text(&module.names, slice.type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("wasm error: slice.slice expects []T, i64, i64 -> []T");
+    }
+    let elem = view_bytes[2..mem::len(view_bytes)];
+    let cell = view_cell(elem);
+    if node.args.len() != 3 or cell == 0 or
         !module.names.is(from.type_name, "i64") or !module.names.is(to.type_name, "i64") or
-        !module.names.is(node.result.type_name, "[]u8") {
-        return try self.fail0("wasm error: slice.slice expects []u8, i64, i64 -> []u8");
+        !ir::same_name(node.result.type_name, slice.type_name) {
+        return try self.fail0("wasm error: slice.slice expects []T, i64, i64 -> []T");
     }
     let descriptor = try self.value_of(module, slice);
     let start = try self.value_of(module, from);
     let end = try self.value_of(module, to);
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for slice result");
-    var pointer = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
-    errdefer pointer.deinit(self.allocator);
-    try self.names.append_to(&var pointer, descriptor.expr);
-    try pointer.append_bytes(self.allocator, ") (i32.wrap_i64 ");
-    try self.names.append_to(&var pointer, start.expr);
-    try pointer.append_bytes(self.allocator, "))");
-    let pointer_expr = try self.names.intern_owned(move pointer);
+    let pointer_expr = try self.element_address(descriptor.expr, start.expr, cell);
     try self.line2("            (i32.store %s %s)", Arg::Str(slot), Arg::Str(pointer_expr));
     var length = try string::from_bytes(self.allocator, "(i32.wrap_i64 (i64.sub ");
     errdefer length.deinit(self.allocator);

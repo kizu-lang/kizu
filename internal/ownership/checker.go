@@ -1795,12 +1795,12 @@ func (c *Checker) checkCaptureLetStmt(stmt *ast.LetStmt, env *scope) (bool, erro
 	if ok {
 		return true, c.checkReturnedBorrowLetStmt(stmt, sources, elem, false, env)
 	}
-	sources, ok, err = c.viewInitializer(stmt.Value, env)
+	sources, view, ok, err := c.viewInitializer(stmt.Value, env)
 	if err != nil {
 		return true, err
 	}
 	if ok {
-		return true, c.checkReturnedBorrowLetStmt(stmt, sources, "[]u8", false, env)
+		return true, c.checkReturnedBorrowLetStmt(stmt, sources, view, false, env)
 	}
 	return false, nil
 }
@@ -1851,19 +1851,20 @@ func (c *Checker) structCaptureInitializer(
 func (c *Checker) viewInitializer(
 	expr ast.Expression,
 	env *scope,
-) ([]borrowSource, bool, error) {
+) ([]borrowSource, string, bool, error) {
 	roots := c.borrowClassViewRoots(expr, env)
 	if len(roots) == 0 {
-		return nil, false, nil
+		return nil, "", false, nil
 	}
-	if _, err := c.readExpr(expr, env); err != nil {
-		return nil, true, err
+	view, err := c.readExpr(expr, env)
+	if err != nil {
+		return nil, "", true, err
 	}
 	sources := make([]borrowSource, 0, len(roots))
 	for _, root := range roots {
 		sources = append(sources, borrowSource{target: root})
 	}
-	return sources, true, nil
+	return sources, view, true, nil
 }
 
 // attachAllocProvenance ties a fresh owner to the tied allocators its
@@ -2006,7 +2007,7 @@ func (c *Checker) returnedBorrowInitializer(
 			mutable = !taskSetReturn(retName)
 			allocatorReturn = taskSetReturn(retName)
 			elem = viewCarrierPayload(retName)
-		case retName == "[]u8" || c.viewCaptureStructType(retName):
+		case isViewTypeName(retName) || c.viewCaptureStructType(retName):
 			viewReturn = true
 			elem = retName
 		default:
@@ -2108,7 +2109,7 @@ func (c *Checker) callBorrowReturnSources(
 					sources = append(sources, borrowSource{target: alloc})
 				}
 			}
-			if viewReturn && fn.params[idx].typeName == "[]u8" {
+			if viewReturn && isViewTypeName(fn.params[idx].typeName) {
 				if view := c.borrowClassViewRoot(call.Args[idx], env); view != nil {
 					sources = append(sources, borrowSource{target: view})
 				}
@@ -2263,13 +2264,18 @@ func (c *Checker) checkStringViewLetStmt(
 		if isBufferTypeName(target.typeName) {
 			kind = "buffer"
 		}
-		return errorf("string error: `%s.as_mut_bytes` requires mutable %s binding", kind, kind)
+		return errorf("string error: `%s.%s` requires mutable %s binding",
+			kind, viewMethodName(stmt.Value), kind)
 	}
 	if err := checkBorrowConflictForField(target, path, mutable); err != nil {
 		return err
 	}
 	c.activateBorrow(target, path, mutable)
-	value := c.newBinding(stmt.Name, "[]u8")
+	viewed := target.typeName
+	if path != "" {
+		viewed, _ = c.fieldPathType(target.typeName, path)
+	}
+	value := c.newBinding(stmt.Name, viewOfTypeName(viewed))
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: path}}
@@ -2286,7 +2292,7 @@ func (c *Checker) checkStringViewInitializerShape(expr ast.Expression) error {
 		return errorf("string error: String view initializer must call String.as_bytes")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || (field.Name != "as_bytes" && field.Name != "as_mut_bytes") {
+	if !ok || !isViewMethodName(field.Name) {
 		return errorf("string error: String view initializer must call String.as_bytes")
 	}
 	if len(call.Args) != 0 {
@@ -2294,6 +2300,22 @@ func (c *Checker) checkStringViewInitializerShape(expr ast.Expression) error {
 			field.Name, len(call.Args))
 	}
 	return nil
+}
+
+// isViewMethodName reports whether name is one of the four view entries.
+func isViewMethodName(name string) bool {
+	return name == "as_bytes" || name == "as_mut_bytes" ||
+		name == "as_slice" || name == "as_mut_slice"
+}
+
+// viewMethodName returns the view method a view initializer calls.
+func viewMethodName(expr ast.Expression) string {
+	if call, ok := expr.(*ast.CallExpr); ok {
+		if field, ok := call.Callee.(*ast.FieldExpr); ok {
+			return field.Name
+		}
+	}
+	return "as_bytes"
 }
 
 // stringViewInitializer recognizes string.as_bytes() / as_mut_bytes() local
@@ -2311,7 +2333,7 @@ func (c *Checker) stringViewInitializer(
 		return nil, "", false, false
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || (field.Name != "as_bytes" && field.Name != "as_mut_bytes") {
+	if !ok || !isViewMethodName(field.Name) {
 		return nil, "", false, false
 	}
 	root, path, ok := viewReceiverPath(field.Receiver)
@@ -2332,7 +2354,7 @@ func (c *Checker) stringViewInitializer(
 	if viewed != "std::string::String" && !isBufferTypeName(viewed) {
 		return nil, "", false, false
 	}
-	return target, path, field.Name == "as_mut_bytes", true
+	return target, path, field.Name == "as_mut_bytes" || field.Name == "as_mut_slice", true
 }
 
 // viewReceiverPath reads the local a view initializer borrows from, and the
@@ -2349,10 +2371,24 @@ func viewReceiverPath(receiver ast.Expression) (string, string, bool) {
 }
 
 // isBufferTypeName reports whether a type spelling is a fixed-length stack
-// buffer (`[N]u8`).
+// buffer (`[N]T`).
 func isBufferTypeName(typeName string) bool {
 	return len(typeName) > 1 && typeName[0] == '[' &&
 		typeName[1] >= '0' && typeName[1] <= '9'
+}
+
+// isViewTypeName reports whether a type spelling is a view (`[]T`).
+func isViewTypeName(typeName string) bool {
+	return strings.HasPrefix(typeName, "[]")
+}
+
+// viewOfTypeName returns the view a String or a stack buffer gives: bytes
+// for a String, `[]T` for a `[N]T`.
+func viewOfTypeName(typeName string) string {
+	if isBufferTypeName(typeName) {
+		return "[]" + typeName[strings.IndexByte(typeName, ']')+1:]
+	}
+	return "[]u8"
 }
 
 // borrowCaptureTarget names one binding (or one field of it) a recognized
@@ -4065,14 +4101,14 @@ func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if !sameOwnershipType(target, "[]u8") {
-		return "", errorf("move error: index/slice target expects []u8, got %s", target)
+	if !isViewTypeName(target) {
+		return "", errorf("move error: index/slice target expects a view (`[]T`), got %s", target)
 	}
 	if !expr.Slice {
 		if _, err := c.readExpr(expr.Index, env); err != nil {
 			return "", err
 		}
-		return "u8", nil
+		return target[2:], nil
 	}
 	if expr.Start != nil {
 		if _, err := c.readExpr(expr.Start, env); err != nil {
@@ -5097,7 +5133,7 @@ func (c *Checker) sanctionedViewLend(
 	arg ast.Expression,
 	env *scope,
 ) bool {
-	if !sanctioned || fn.params[idx].typeName != "[]u8" {
+	if !sanctioned || !isViewTypeName(fn.params[idx].typeName) {
 		return false
 	}
 	return c.borrowClassViewRoot(arg, env) != nil
@@ -5158,7 +5194,7 @@ func (c *Checker) viewArgLend(
 	arg ast.Expression,
 	env *scope,
 ) bool {
-	if fn.params[idx].typeName != "[]u8" {
+	if !isViewTypeName(fn.params[idx].typeName) {
 		return false
 	}
 	if c.borrowClassViewRoot(arg, env) == nil && !borrowedViewParamArg(arg, env) {
@@ -5176,7 +5212,7 @@ func borrowedViewParamArg(arg ast.Expression, env *scope) bool {
 		return false
 	}
 	value, exists := env.lookup(ident.Name)
-	return exists && value.borrowedParam && value.typeName == "[]u8"
+	return exists && value.borrowedParam && isViewTypeName(value.typeName)
 }
 
 // viewSmugglingParams reports whether fn declares a `&var` parameter whose
@@ -5185,7 +5221,7 @@ func borrowedViewParamArg(arg ast.Expression, env *scope) bool {
 // be re-pointed (ADR-0096) and is exempt.
 func (c *Checker) viewSmugglingParams(fn *functionInfo) bool {
 	for _, param := range fn.params {
-		if !param.borrow || !param.mutBorrow || param.typeName == "[]u8" {
+		if !param.borrow || !param.mutBorrow || isViewTypeName(param.typeName) {
 			continue
 		}
 		if c.viewCarryingType(param.typeName) {
@@ -5277,7 +5313,7 @@ func viewCarrierPayload(typeName string) string {
 // viewCarryingTypeSeen is viewCarryingType with a cycle guard over named types.
 func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bool {
 	typeName = viewCarrierPayload(typeName)
-	if typeName == "[]u8" || strings.HasPrefix(typeName, "&") {
+	if isViewTypeName(typeName) || strings.HasPrefix(typeName, "&") {
 		return true
 	}
 	if seen[typeName] {
@@ -5455,7 +5491,7 @@ func mergeViewRoots(roots, more []*binding) []*binding {
 
 // isViewType reports whether typeName is the byte view.
 func isViewType(typeName string) bool {
-	return typeName == "[]u8"
+	return isViewTypeName(typeName)
 }
 
 // isViewOrReferenceType reports whether typeName is the byte view or a
@@ -5467,7 +5503,7 @@ func isViewOrReferenceType(typeName string) bool {
 		return true
 	}
 	_, _, inner, ok := explicitOwnershipBorrowType(typeName)
-	return ok && inner == "[]u8"
+	return ok && isViewTypeName(inner)
 }
 
 // checkFieldCallExpr validates calls whose callee is a dotted expression.
@@ -5595,6 +5631,17 @@ func (c *Checker) checkCoreArg(
 	}
 	if want == stdprim.ArgStringOut {
 		return c.checkStringOutArg(name, arg, env)
+	}
+	if want == stdprim.ArgView {
+		got, err := c.readExpr(arg, env)
+		if err != nil {
+			return err
+		}
+		if !isViewTypeName(got) {
+			return errorf("move error: `%s` arg %d expects a view (`[]T`), got %s",
+				name, index+1, got)
+		}
+		return nil
 	}
 	got, err := c.readContextualExpr(arg, string(want), env)
 	if err != nil {
@@ -7177,7 +7224,7 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	}
 	// A `[]u8` field of a borrow-class value is a view of the same backing;
 	// copying it out in a move context would shed the tie.
-	if typeName == "[]u8" && c.borrowClassViewRoot(expr, env) != nil {
+	if isViewTypeName(typeName) && c.borrowClassViewRoot(expr, env) != nil {
 		return "", errorAt(expr.Span,
 			"borrow error: view field `%s` cannot escape its borrowed owner", expr.String())
 	}
@@ -8636,7 +8683,7 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 
 // isCopyType reports whether values of typeName can be reused after move contexts.
 func (c *Checker) isCopyType(typeName string) bool {
-	if typeName == "[]u8" {
+	if isViewTypeName(typeName) {
 		return true
 	}
 	if isRawPointerType(typeName) {

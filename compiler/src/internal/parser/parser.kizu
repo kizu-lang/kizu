@@ -2658,17 +2658,15 @@ fn (self: &var Parser) parse_buffer_literal_expr(
         Buffer(buffer) => {
             let elem_type = typ::child_type(type_name, buffer.elem);
             let elem = try typ::render(self.allocator, &tree.types, elem_type);
-            defer elem.deinit(self.allocator);
-            if !string_equals_bytes(&elem, "u8") {
-                try self.error_value("buffer element must be u8, got ", &elem, "");
-                return try tree.add_recovered_expression(span);
-            }
+            errdefer elem.deinit(self.allocator);
             if !try self.expect_peek(token::Kind::LBrace) or
                 !try self.expect_peek(token::Kind::RBrace) {
+                elem.deinit(self.allocator);
                 return try tree.add_recovered_expression(span);
             }
+            let elem_text = try tree.add_text(move elem);
             return try tree.add_expression(ast::ExpressionNode::BufferLiteral(
-                ast::BufferLiteralExpr { size: buffer.size, span: span }
+                ast::BufferLiteralExpr { size: buffer.size, elem: elem_text, span: span }
             ));
         },
         _ => {},
@@ -2676,7 +2674,7 @@ fn (self: &var Parser) parse_buffer_literal_expr(
     let rendered = try typ::render(self.allocator, &tree.types, type_name);
     defer rendered.deinit(self.allocator);
     try self.error_value(
-        "expected buffer literal `[N]u8{}`, got type `",
+        "expected buffer literal `[N]T{}`, got type `",
         &rendered,
         "`"
     );

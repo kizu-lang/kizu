@@ -1062,7 +1062,7 @@ func (c *Checker) checkFunctionParam(
 	// A view is copied freely but is somebody's borrow, and an optional of
 	// one has nowhere to be kept (SPEC §7), so there is nothing to lend.
 	if elem, ok := optionalElem(paramType); ok && param.Borrow &&
-		(!c.isCopyType(elem) || elem == typeByteString) {
+		(!c.isCopyType(elem) || isSliceType(elem)) {
 		return errorf(
 			"type error: parameter `%s` cannot borrow `%s`; only an optional of copy data"+
 				" (`?i64`, an enum, a handle, a plain struct) can be borrowed, because a capture"+
@@ -1587,13 +1587,13 @@ func (c *Checker) defineSpecialLetInitializer(
 		return true, requireScopeDefinition(
 			stmt.Name, defineScopeParam(&c.types, env, stmt.Name, typ, true, mutable))
 	}
-	sources, mutable, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe)
+	sources, view, mutable, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
 		if err != nil {
 			return true, err
 		}
 		return true, requireScopeDefinition(stmt.Name,
-			env.defineParamWithSource(stmt.Name, typeByteString, true, mutable, sources, false))
+			env.defineParamWithSource(stmt.Name, view, true, mutable, sources, false))
 	}
 	return false, nil
 }
@@ -1641,37 +1641,35 @@ func boxBorrowMutReceiverIsMutable(expr ast.Expression, env *scope) bool {
 	return ok && env.isMutable(root.Name)
 }
 
-// checkStringViewInitializer recognizes string.as_bytes() / as_mut_bytes()
-// local byte views. The boolean result mutable reports the as_mut_bytes form,
-// whose receiver must be a writable String place (ADR-0096).
+// checkStringViewInitializer recognizes the local view initializers:
+// `as_bytes()` / `as_mut_bytes()` of a String or a `[N]u8`, and
+// `as_slice()` / `as_mut_slice()` of a `[N]T` of any other number. The
+// results are the borrow sources, the view's type, and whether it is the
+// mutable form, whose receiver must be a writable place (ADR-0096).
 func (c *Checker) checkStringViewInitializer(
 	expr ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
-) ([]string, bool, bool, error) {
+) ([]string, Type, bool, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return nil, false, false, nil
+		return nil, "", false, false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || (field.Name != "as_bytes" && field.Name != "as_mut_bytes") {
-		return nil, false, false, nil
+	if !ok || !isViewMethodName(field.Name) {
+		return nil, "", false, false, nil
 	}
-	mutable := field.Name == "as_mut_bytes"
+	mutable := field.Name == "as_mut_bytes" || field.Name == "as_mut_slice"
 	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
 	if err != nil {
-		return nil, mutable, true, err
+		return nil, "", mutable, true, err
 	}
-	if receiver != "std::string::String" && !c.types.isBufferType(receiver) {
-		return nil, mutable, true, errorf(
-			"type error: `%s` expects String or stack buffer receiver", field.Name)
-	}
-	kind := "String"
-	if c.types.isBufferType(receiver) {
-		kind = "buffer"
+	view, kind, err := c.viewOfReceiver(receiver, field.Name)
+	if err != nil {
+		return nil, "", mutable, true, err
 	}
 	if len(call.Args) != 0 {
-		return nil, mutable, true, errorf("type error: `%s.%s` expects 0 args, got %d",
+		return nil, "", mutable, true, errorf("type error: `%s.%s` expects 0 args, got %d",
 			kind, field.Name, len(call.Args))
 	}
 	if mutable {
@@ -1680,12 +1678,48 @@ func (c *Checker) checkStringViewInitializer(
 		// position reads (ADR-0111).
 		place, ok := mutablePlaceBase(field.Receiver)
 		if !ok || !(env.isMutable(place.Name) || env.isMutBorrowed(place.Name)) {
-			return nil, mutable, true, errorf(
-				"type error: `%s.as_mut_bytes` requires mutable %s binding", kind, kind)
+			return nil, "", mutable, true, errorf(
+				"type error: `%s.%s` requires mutable %s binding", kind, field.Name, kind)
 		}
 	}
 	sources := c.exprBorrowSourceList(field.Receiver, env, unsafe)
-	return sources, mutable, true, nil
+	return sources, view, mutable, true, nil
+}
+
+// isViewMethodName reports whether name is one of the four view entries.
+func isViewMethodName(name string) bool {
+	return name == "as_bytes" || name == "as_mut_bytes" ||
+		name == "as_slice" || name == "as_mut_slice"
+}
+
+// viewOfReceiver returns the view type a view method gives on a receiver, and
+// what the receiver is called in a diagnostic. A String and a buffer of u8
+// are viewed as bytes; a buffer of any other number is viewed as a slice of
+// that number, and the name says which, so `[8]u32` has no `as_bytes`.
+func (c *Checker) viewOfReceiver(receiver Type, method string) (Type, string, error) {
+	bytes := method == "as_bytes" || method == "as_mut_bytes"
+	if receiver == "std::string::String" {
+		if !bytes {
+			return "", "", errorf("type error: `String` has no `%s`; its view is `as_bytes`", method)
+		}
+		return typeByteString, "String", nil
+	}
+	elem, ok := c.types.bufferElem(receiver)
+	if !ok {
+		return "", "", errorf(
+			"type error: `%s` expects String or stack buffer receiver", method)
+	}
+	if bytes && elem != typeU8 {
+		return "", "", errorf(
+			"type error: `%s` has no `%s`; a buffer of %s is viewed with `as_slice`",
+			receiver, method, elem)
+	}
+	if !bytes && elem == typeU8 {
+		return "", "", errorf(
+			"type error: `%s` has no `%s`; a buffer of u8 is viewed with `as_bytes`",
+			receiver, method)
+	}
+	return Type("[]" + string(elem)), "buffer", nil
 }
 
 // checkContainerBorrowCondition recognizes capture conditions whose call
@@ -1792,21 +1826,22 @@ func (c *Checker) checkAssignableIndex(
 	ident, ok := expr.Target.(*ast.IdentExpr)
 	if !ok {
 		return "", errorf(
-			"type error: indexed assignment target must be a local `&var []u8` binding")
+			"type error: indexed assignment target must be a local `&var []T` binding")
 	}
 	typ, exists := env.lookup(ident.Name)
 	if !exists {
 		return "", errorf("type error: unknown local `%s`", ident.Name)
 	}
-	if !sameType(typ, typeByteString) || !env.isMutBorrowed(ident.Name) {
+	elem, ok := sliceElem(typ)
+	if !ok || !env.isMutBorrowed(ident.Name) {
 		return "", errorf(
-			"type error: indexed assignment requires a writable slice view (`&var []u8`), `%s` is not one",
+			"type error: indexed assignment requires a writable slice view (`&var []T`), `%s` is not one",
 			ident.Name)
 	}
 	if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
 		return "", err
 	}
-	return typeU8, nil
+	return elem, nil
 }
 
 // checkAssignableIdent validates direct binding assignment. A `&var T`
@@ -2943,6 +2978,9 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) 
 	case *ast.StructLiteralExpr:
 		return c.checkStructLiteralExpr(e, env, unsafe)
 	case *ast.BufferLiteralExpr:
+		if !typ.IsBufferElem(e.Elem) {
+			return "", errorf("type error: buffer element must be a fixed-width number, got %s", e.Elem)
+		}
 		return Type(e.TypeText()), nil
 	default:
 		return c.checkControlExpr(expr, env, unsafe)
@@ -3226,20 +3264,22 @@ func (c *Checker) checkMatchExprArm(
 	return c.checkStmtValue(arm.Body, armEnv, unsafe)
 }
 
-// checkIndexExpr validates checked one-dimensional byte indexing and slicing.
+// checkIndexExpr validates checked one-dimensional indexing and slicing of a
+// view: an index reads one element, a slice is a view of the same element.
 func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	target, err := c.checkExpr(expr.Target, env, unsafe)
 	if err != nil {
 		return "", err
 	}
-	if !sameType(target, typeByteString) {
-		return "", errorf("type error: index/slice target expects []u8, got %s", target)
+	elem, ok := sliceElem(target)
+	if !ok {
+		return "", errorf("type error: index/slice target expects a view (`[]T`), got %s", target)
 	}
 	if !expr.Slice {
 		if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
 			return "", err
 		}
-		return typeU8, nil
+		return elem, nil
 	}
 	if expr.Start != nil {
 		if err := c.checkIndexBound("slice start", expr.Start, env, unsafe); err != nil {
@@ -4256,6 +4296,17 @@ func (c *Checker) checkCoreArg(
 	}
 	if want == stdprim.ArgStringOut {
 		return c.checkStringOutArg(name, arg, env, unsafe)
+	}
+	if want == stdprim.ArgView {
+		got, err := c.checkExpr(arg, env, unsafe)
+		if err != nil {
+			return err
+		}
+		if !isSliceType(got) {
+			return errorf("type error: `%s` arg %d expects a view (`[]T`), got %s",
+				name, index+1, got)
+		}
+		return nil
 	}
 	got, err := c.checkContextualExpr(arg, Type(want), env, unsafe)
 	if err != nil {
@@ -6549,7 +6600,7 @@ func (c *Checker) checkAssignableDeref(
 		// A writable slice view grants element writes only (ADR-0096):
 		// re-pointing it would assign the caller's binding, which the flat
 		// view representation never reaches.
-		if typ, exists := env.lookup(ident.Name); exists && sameType(typ, typeByteString) {
+		if typ, exists := env.lookup(ident.Name); exists && isSliceType(typ) {
 			return "", errorf(
 				"type error: `%s.*` cannot re-point a slice view; write elements with `%s[i] = ...`",
 				ident.Name, ident.Name)
@@ -7684,12 +7735,12 @@ func (c *Checker) checkCallableArgs(
 // be lent — a `var`-bound plain slice does not guarantee writable backing.
 // want may be "" when the slot's type is unknown at the call site.
 func requireMutableBorrowArg(expr ast.Expression, want Type, env *scope) error {
-	if sameType(want, typeByteString) {
+	if isSliceType(want) {
 		if ident, ok := expr.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
 			return nil
 		}
 		return errorf(
-			"type error: `&var []u8` argument must be a writable view binding")
+			"type error: `&var %s` argument must be a writable view binding", want)
 	}
 	base, ok := mutablePlaceBase(expr)
 	if !ok {
@@ -8015,7 +8066,7 @@ func (c *Checker) releaseNamesAllocator(typ Type) bool {
 
 // isCopyType reports whether values of typ can be duplicated safe code.
 func (c *Checker) isCopyType(typ Type) bool {
-	if typ == typeByteString {
+	if isSliceType(typ) {
 		return true
 	}
 	if c.enums[string(typ)] != nil {

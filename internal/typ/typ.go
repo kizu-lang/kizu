@@ -35,6 +35,18 @@ type Name struct {
 // Slice is `[]T`.
 type Slice struct{ Elem Type }
 
+// IsBufferElem reports whether name is a type a stack buffer may hold: a
+// fixed-width number (ADR-0097). A view over one is a contiguous run of
+// equal-sized cells, which is what an index into it assumes.
+func IsBufferElem(name string) bool {
+	switch name {
+	case "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64":
+		return true
+	default:
+		return false
+	}
+}
+
 // Buffer is `[N]T`, a fixed-length stack buffer (ADR-0097).
 type Buffer struct {
 	Size int64

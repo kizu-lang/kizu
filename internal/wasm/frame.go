@@ -79,7 +79,7 @@ func (e *emitter) registerFrameValues(fn *ir.Function) error {
 // cell. A stack buffer value is its storage address (ADR-0097), so the cell
 // holds one i32 pointer rather than a second inline byte buffer.
 func (e *emitter) valueSlotLayout(typ string) (wasmLayout, error) {
-	if _, ok := e.bufferSize(typ); ok {
+	if _, _, ok := e.bufferSize(typ); ok {
 		return wasmLayout{size: 4, align: 4}, nil
 	}
 	return e.typeLayout(typ)

@@ -84,8 +84,9 @@ func (e *emitter) directLayout(typ string) (wasmLayout, bool) {
 	if layout, ok := primitiveLayout(typ); ok {
 		return layout, true
 	}
-	if size, ok := e.bufferSize(typ); ok {
-		return wasmLayout{size: size, align: 1}, true
+	if size, elem, ok := e.bufferSize(typ); ok {
+		cell, _ := primitiveLayout(elem)
+		return wasmLayout{size: size * cell.size, align: cell.align}, true
 	}
 	if isArrayWasmType(typ) {
 		return wasmLayout{size: arrayHeaderSize, align: 8}, true
@@ -120,20 +121,21 @@ func primitiveLayout(typ string) (wasmLayout, bool) {
 		return wasmLayout{size: 8, align: 8}, true
 	case "f32":
 		return wasmLayout{size: 4, align: 4}, true
-	case "[]u8":
-		return wasmLayout{size: 8, align: 4}, true
 	case "Allocator", "Io":
 		return wasmLayout{size: 4, align: 4}, true
 	}
 	if isReferenceType(typ) || isRawPointerType(typ) || isFunctionPointerType(typ) {
 		return wasmLayout{size: 4, align: 4}, true
 	}
+	if strings.HasPrefix(typ, "[]") {
+		return wasmLayout{size: 8, align: 4}, true
+	}
 	return wasmLayout{}, false
 }
 
 // isMemoryType reports whether a wasm local represents typ by an i32 address.
 func (e *emitter) isMemoryType(typ string) bool {
-	if typ == "[]u8" {
+	if strings.HasPrefix(typ, "[]") {
 		return true
 	}
 	if isArrayWasmType(typ) {
