@@ -3,30 +3,29 @@
 // the nonce -- added back to the words they started from, and the stream
 // is the blocks for counter 0, 1, 2, ... XORed onto the text. The words
 // are `u32`, whose `+` wraps at 32 bits (SPEC §6.9.2), and the working
-// state lives in a stack buffer read and written a word at a time.
+// state is a stack buffer of them; bytes become words only where the key,
+// the nonce, and the block cross in and out.
 
 // chacha20_block writes the 64-byte block for `counter` to the front of
 // `out`. Block 0 under a nonce is where the AEAD takes its Poly1305 key,
 // and blocks 1, 2, ... are what it encrypts with.
 fn chacha20_block(key: []u8, counter: i64, nonce: []u8, out: &var []u8) -> void {
-    var state_buffer = [64]u8{};
-    var work_buffer = [64]u8{};
-    let state = state_buffer.as_mut_bytes();
-    let work = work_buffer.as_mut_bytes();
-    set_le32(state, 0, 0x61707865);
-    set_le32(state, 1, 0x3320646e);
-    set_le32(state, 2, 0x79622d32);
-    set_le32(state, 3, 0x6b206574);
+    var state_buffer = [16]u32{};
+    var work_buffer = [16]u32{};
+    let state = state_buffer.as_mut_slice();
+    let work = work_buffer.as_mut_slice();
+    state[0] = 0x61707865;
+    state[1] = 0x3320646e;
+    state[2] = 0x79622d32;
+    state[3] = 0x6b206574;
     for 0..8 |index| {
-        let word = le32(key, index * 4);
-        set_le32(state, 4 + index, word);
+        state[4 + index] = le32(key, index * 4);
     }
-    set_le32(state, 12, cast<u32>(counter & 0xFFFFFFFF));
+    state[12] = cast<u32>(counter & 0xFFFFFFFF);
     for 0..3 |index| {
-        let word = le32(nonce, index * 4);
-        set_le32(state, 13 + index, word);
+        state[13 + index] = le32(nonce, index * 4);
     }
-    for 0..64 |index| {
+    for 0..16 |index| {
         work[index] = state[index];
     }
     for 0..10 |_| {
@@ -40,19 +39,17 @@ fn chacha20_block(key: []u8, counter: i64, nonce: []u8, out: &var []u8) -> void 
         quarter_round(work, 3, 4, 9, 14);
     }
     for 0..16 |index| {
-        let mixed = le32(work, index * 4);
-        let start = le32(state, index * 4);
-        set_le32(out, index, mixed + start);
+        set_le32(out, index, work[index] + state[index]);
     }
     return;
 }
 
 // quarter_round is RFC 8439 §2.1 on words a, b, c, d of the state.
-fn quarter_round(state: &var []u8, a: i64, b: i64, c: i64, d: i64) -> void {
-    var xa = le32(state, a * 4);
-    var xb = le32(state, b * 4);
-    var xc = le32(state, c * 4);
-    var xd = le32(state, d * 4);
+fn quarter_round(state: &var []u32, a: i64, b: i64, c: i64, d: i64) -> void {
+    var xa = state[a];
+    var xb = state[b];
+    var xc = state[c];
+    var xd = state[d];
     xa = xa + xb;
     xd = rotl(xd ^ xa, 16);
     xc = xc + xd;
@@ -61,10 +58,10 @@ fn quarter_round(state: &var []u8, a: i64, b: i64, c: i64, d: i64) -> void {
     xd = rotl(xd ^ xa, 8);
     xc = xc + xd;
     xb = rotl(xb ^ xc, 7);
-    set_le32(state, a, xa);
-    set_le32(state, b, xb);
-    set_le32(state, c, xc);
-    set_le32(state, d, xd);
+    state[a] = xa;
+    state[b] = xb;
+    state[c] = xc;
+    state[d] = xd;
     return;
 }
 

@@ -27,16 +27,16 @@ pub fn sha256(bytes: []u8, digest: &var []u8) -> void {
 // being filled lives in this frame, which is what a piecewise hasher
 // would need a struct for.
 fn sha256_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> void {
-    var state_buffer = [32]u8{};
-    var schedule_buffer = [256]u8{};
-    var constants_buffer = [256]u8{};
+    var state_buffer = [8]u32{};
+    var schedule_buffer = [64]u32{};
+    var constants_buffer = [64]u32{};
     var block_buffer = [64]u8{};
-    let state = state_buffer.as_mut_bytes();
-    let schedule = schedule_buffer.as_mut_bytes();
-    let constants = constants_buffer.as_mut_bytes();
+    let state = state_buffer.as_mut_slice();
+    let schedule = schedule_buffer.as_mut_slice();
+    let constants = constants_buffer.as_mut_slice();
     let block = block_buffer.as_mut_bytes();
-    fill_hex(constants, round_constants());
-    fill_hex(state, initial_state());
+    fill_hex_words(constants, round_constants());
+    fill_hex_words(state, initial_state());
     if std::mem::len(prefix) == 64 {
         compress_block(state, prefix, schedule, constants);
     }
@@ -66,8 +66,8 @@ fn sha256_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> v
     put_length(block, 56, total_bits);
     let last = block[0..64];
     compress_block(state, last, schedule, constants);
-    for 0..32 |at| {
-        digest[at] = state[at];
+    for 0..8 |index| {
+        set_word(digest, index, state[index]);
     }
     return;
 }
@@ -76,12 +76,12 @@ fn sha256_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> v
 // folds whole blocks straight from the part, and keeps what is left in the
 // block for the next part. It returns how much of the block is filled.
 fn absorb(
-    state: &var []u8,
+    state: &var []u32,
     block: &var []u8,
     filled: i64,
     bytes: []u8,
-    schedule: &var []u8,
-    constants: []u8
+    schedule: &var []u32,
+    constants: []u32
 ) -> i64 {
     var held = filled;
     var at = 0;
@@ -114,36 +114,32 @@ fn absorb(
 
 // compress_block folds one 64-byte block into the eight state words
 // (FIPS 180-4 §6.2.2). `schedule` holds the 64 message words and `k` the
-// 64 round constants, both as big-endian bytes.
-fn compress_block(state: &var []u8, block: []u8, schedule: &var []u8, k: []u8) -> void {
+// 64 round constants.
+fn compress_block(state: &var []u32, block: []u8, schedule: &var []u32, k: []u32) -> void {
     for 0..16 |t| {
-        let word = word_at(block, t);
-        set_word(schedule, t, word);
+        schedule[t] = word_at(block, t);
     }
     for 16..64 |t| {
-        let w2 = word_at(schedule, t - 2);
-        let w7 = word_at(schedule, t - 7);
-        let w15 = word_at(schedule, t - 15);
-        let w16 = word_at(schedule, t - 16);
+        let w2 = schedule[t - 2];
+        let w7 = schedule[t - 7];
+        let w15 = schedule[t - 15];
+        let w16 = schedule[t - 16];
         let s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >> 3);
         let s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >> 10);
-        let word = w16 + s0 + w7 + s1;
-        set_word(schedule, t, word);
+        schedule[t] = w16 + s0 + w7 + s1;
     }
-    var a = word_at(state, 0);
-    var b = word_at(state, 1);
-    var c = word_at(state, 2);
-    var d = word_at(state, 3);
-    var e = word_at(state, 4);
-    var f = word_at(state, 5);
-    var g = word_at(state, 6);
-    var h = word_at(state, 7);
+    var a = state[0];
+    var b = state[1];
+    var c = state[2];
+    var d = state[3];
+    var e = state[4];
+    var f = state[5];
+    var g = state[6];
+    var h = state[7];
     for 0..64 |t| {
         let big1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
         let choose = (e & f) ^ (~e & g);
-        let kt = word_at(k, t);
-        let wt = word_at(schedule, t);
-        let t1 = h + big1 + choose + kt + wt;
+        let t1 = h + big1 + choose + k[t] + schedule[t];
         let big0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
         let majority = (a & b) ^ (a & c) ^ (b & c);
         let t2 = big0 + majority;
@@ -156,22 +152,14 @@ fn compress_block(state: &var []u8, block: []u8, schedule: &var []u8, k: []u8) -
         b = a;
         a = t1 + t2;
     }
-    let a0 = word_at(state, 0);
-    let b0 = word_at(state, 1);
-    let c0 = word_at(state, 2);
-    let d0 = word_at(state, 3);
-    let e0 = word_at(state, 4);
-    let f0 = word_at(state, 5);
-    let g0 = word_at(state, 6);
-    let h0 = word_at(state, 7);
-    set_word(state, 0, a0 + a);
-    set_word(state, 1, b0 + b);
-    set_word(state, 2, c0 + c);
-    set_word(state, 3, d0 + d);
-    set_word(state, 4, e0 + e);
-    set_word(state, 5, f0 + f);
-    set_word(state, 6, g0 + g);
-    set_word(state, 7, h0 + h);
+    state[0] = state[0] + a;
+    state[1] = state[1] + b;
+    state[2] = state[2] + c;
+    state[3] = state[3] + d;
+    state[4] = state[4] + e;
+    state[5] = state[5] + f;
+    state[6] = state[6] + g;
+    state[7] = state[7] + h;
     return;
 }
 
@@ -208,25 +196,26 @@ fn put_length(view: &var []u8, at: i64, value: i64) -> void {
     return;
 }
 
-// fill_hex writes the bytes a hex text spells, in order, skipping the
-// spaces and line breaks that keep the text readable. It is how the
-// tables below are read, since a literal holds text and not bytes.
-fn fill_hex(view: &var []u8, hex: []u8) -> void {
+// fill_hex_words writes the 32-bit words a hex text spells, eight digits
+// each, in order, skipping the spaces and line breaks that keep the text
+// readable. It is how the tables below are read, since a literal holds
+// text and not words.
+fn fill_hex_words(view: &var []u32, hex: []u8) -> void {
     var at = 0;
-    var high = 0;
-    var pending = false;
+    var word = cast<u32>(0);
+    var digits = 0;
     for 0..std::mem::len(hex) |index| {
         let value = hex_digit(hex[index]);
         if value < 0 {
             continue;
         }
-        if pending {
-            view[at] = cast<u8>(high * 16 + value);
+        word = (word << 4) | cast<u32>(value);
+        digits = digits + 1;
+        if digits == 8 {
+            view[at] = word;
             at = at + 1;
-            pending = false;
-        } else {
-            high = value;
-            pending = true;
+            word = 0;
+            digits = 0;
         }
     }
     return;
