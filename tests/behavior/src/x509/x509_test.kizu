@@ -1,0 +1,253 @@
+import std::array;
+import std::crypto::x509;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The chain here was made with another implementation's certificate
+// writer, so what is read from it -- dates, names, keys, signatures --
+// is held to what that implementation wrote. Malformed and changed
+// certificates are the fixed chain with bytes cut or flipped.
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+// The chain: a leaf for example.com, the intermediate that signed it,
+// and the self-signed root that signed the intermediate. All are P-256
+// with ECDSA-SHA256, valid from 2025-01-01 to 2035-01-01.
+fn leaf_hex() -> []u8 {
+    return "308201be30820163a003020102020103300a06082a8648ce3d040302302431223020060355040313194578616d706c65205465737420496e7465726d656469617465301e170d3235303130313030303030305a170d3335303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d3059301306072a8648ce3d020106082a8648ce3d03010703420004e1768007b5395d5ec95fddd693811d02082789b940d023425a7ebc91f764118299e7225e2e2c638b1275ab6e4625ddcdc2725caeb4e1a87f58d782c7ba1cf053a38193308190300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070301300c0603551d130101ff04023000301f0603551d23041830168014302c6ef5932c4ef63188bdfe1308ec04272eb94d303a0603551d1104333031820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d82112a2e6465762e6578616d706c652e636f6d300a06082a8648ce3d0403020349003046022100864df220d1d8b2d7fe241d6f3422097a2e6db7c3062430957617bc77c51d3d2d022100e16c815887a3d274f8091ce9e56c9a219af22dc5de2748f6e7c7f004918e45bf";
+}
+
+fn intermediate_hex() -> []u8 {
+    return "308201943082013ba003020102020102300a06082a8648ce3d040302301c311a3018060355040313114578616d706c65205465737420526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a302431223020060355040313194578616d706c65205465737420496e7465726d6564696174653059301306072a8648ce3d020106082a8648ce3d030107034200046295e90df975ea098e381ad0feaff5e289ce746b3f8f87c7c4b33b83700a1cde01f016683d45f79fba2feae4625b2e1927fb38b04964f8d02e5c5b4130779003a3663064300e0603551d0f0101ff04040302010630120603551d130101ff040830060101ff020100301d0603551d0e04160414302c6ef5932c4ef63188bdfe1308ec04272eb94d301f0603551d2304183016801462accd0fc5fe45d77edd5db27755499945f0a846300a06082a8648ce3d0403020347003044022067b852cd0c4e10514cef5ef72ba51e88fa24ecdc124268eb4b122182290a24bf0220709383012397f1ca60530bdc77e9bbb2ef80872f62879e6ca316328676a8062d";
+}
+
+fn root_hex() -> []u8 {
+    return "308201693082010fa003020102020101300a06082a8648ce3d040302301c311a3018060355040313114578616d706c65205465737420526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a301c311a3018060355040313114578616d706c65205465737420526f6f743059301306072a8648ce3d020106082a8648ce3d030107034200048c82a5fd94dcd3061fcb63347fa5126c4e1db8b781e5657a6fb4cafffb45a28721c1fabe0fc06d73e90985d9eafa9b30c62502fd47922a800b8cc7b4e7433680a3423040300e0603551d0f0101ff040403020106300f0603551d130101ff040530030101ff301d0603551d0e0416041462accd0fc5fe45d77edd5db27755499945f0a846300a06082a8648ce3d0403020348003045022100cdae962f6519e1ca2cd7bfc3fdbed6a909e95ecdb06f1faafe92d874cd3ff09702204496b668041fa5a400b8083de292627fd5a4148201a726f813f24b1272ead0af";
+}
+
+fn error_name(err: x509::Error) -> []u8 {
+    return match err {
+        Malformed => "Malformed",
+        Unsupported => "Unsupported",
+        Expired => "Expired",
+        NameMismatch => "NameMismatch",
+        BadSignature => "BadSignature",
+        UnknownIssuer => "UnknownIssuer",
+    };
+}
+
+fn expect_chain(
+    chain: &array::Array<string::String>,
+    roots: &array::Array<string::String>,
+    host: []u8,
+    now: i64,
+    want: []u8
+) -> void {
+    if x509::verify_chain(chain, roots, host, now) {
+        testing::expect_equal<[]u8>(want, "ok");
+    } else |err| {
+        testing::expect_equal<[]u8>(want, error_name(err));
+    }
+    return;
+}
+
+fn expect_parse_fails(der: []u8, want: []u8) -> void {
+    if x509::parse(der) |_| {
+        testing::expect_equal<[]u8>(want, "ok");
+    } else |err| {
+        testing::expect_equal<[]u8>(want, error_name(err));
+    }
+    return;
+}
+
+// jan_2030 is 2030-01-01T00:00:00Z, within every certificate's validity.
+fn jan_2030() -> i64 {
+    return 1893456000;
+}
+
+test "the leaf reads as the writer wrote it" {
+    let allocator = mem::page_allocator();
+    let leaf = try bytes_of_hex(allocator, leaf_hex());
+    defer leaf.deinit(allocator);
+    let der = leaf.as_bytes();
+    let cert = try x509::parse(der);
+    testing::expect_equal<i64>(1735689600, cert.not_before);
+    testing::expect_equal<i64>(2051222400, cert.not_after);
+    testing::expect(!cert.is_ca);
+    testing::expect(cert.key_algorithm == x509::KeyAlgorithm::EcdsaP256);
+    testing::expect(cert.signature_algorithm == x509::SignatureAlgorithm::EcdsaSha256);
+    let key = cert.public_key();
+    testing::expect_equal<i64>(65, mem::len(key));
+    testing::expect_equal<u8>(4, key[0]);
+    let serial = cert.serial();
+    testing::expect_equal<i64>(1, mem::len(serial));
+    testing::expect_equal<u8>(3, serial[0]);
+    testing::expect(cert.valid_at(1735689600));
+    testing::expect(!cert.valid_at(1735689599));
+    testing::expect(cert.valid_at(2051222400));
+    testing::expect(!cert.valid_at(2051222401));
+}
+
+test "a dNSName matches the host without regard to case and a wildcard one label" {
+    let allocator = mem::page_allocator();
+    let leaf = try bytes_of_hex(allocator, leaf_hex());
+    defer leaf.deinit(allocator);
+    let der = leaf.as_bytes();
+    let cert = try x509::parse(der);
+    testing::expect(cert.matches_host("example.com"));
+    testing::expect(cert.matches_host("WWW.Example.COM"));
+    testing::expect(cert.matches_host("api.dev.example.com"));
+    testing::expect(!cert.matches_host("dev.example.com"));
+    testing::expect(!cert.matches_host("a.b.dev.example.com"));
+    testing::expect(!cert.matches_host("other.example.com"));
+    testing::expect(!cert.matches_host("example.co"));
+    testing::expect(!cert.matches_host(""));
+}
+
+test "each certificate is issued by the next and the root by itself" {
+    let allocator = mem::page_allocator();
+    let leaf = try bytes_of_hex(allocator, leaf_hex());
+    defer leaf.deinit(allocator);
+    let intermediate = try bytes_of_hex(allocator, intermediate_hex());
+    defer intermediate.deinit(allocator);
+    let root = try bytes_of_hex(allocator, root_hex());
+    defer root.deinit(allocator);
+    let leaf_der = leaf.as_bytes();
+    let intermediate_der = intermediate.as_bytes();
+    let root_der = root.as_bytes();
+    let leaf_cert = try x509::parse(leaf_der);
+    let intermediate_cert = try x509::parse(intermediate_der);
+    let root_cert = try x509::parse(root_der);
+    testing::expect(intermediate_cert.is_ca);
+    testing::expect(root_cert.is_ca);
+    testing::expect(leaf_cert.issued_by(&intermediate_cert));
+    testing::expect(intermediate_cert.issued_by(&root_cert));
+    testing::expect(root_cert.issued_by(&root_cert));
+    testing::expect(!leaf_cert.issued_by(&root_cert));
+    testing::expect(!intermediate_cert.issued_by(&leaf_cert));
+    let issuer = leaf_cert.issuer();
+    let subject = intermediate_cert.subject();
+    testing::expect(mem::equal_bytes(issuer, subject));
+}
+
+test "the chain verifies against its root and fails for the reason it fails" {
+    let allocator = mem::page_allocator();
+    var chain = array::new<string::String>(allocator);
+    defer chain.deinit(allocator);
+    try chain.append(allocator, try bytes_of_hex(allocator, leaf_hex()));
+    try chain.append(allocator, try bytes_of_hex(allocator, intermediate_hex()));
+    var roots = array::new<string::String>(allocator);
+    defer roots.deinit(allocator);
+    try roots.append(allocator, try bytes_of_hex(allocator, root_hex()));
+    expect_chain(&chain, &roots, "www.example.com", jan_2030(), "ok");
+    expect_chain(&chain, &roots, "other.example.com", jan_2030(), "NameMismatch");
+    expect_chain(&chain, &roots, "www.example.com", 1735689599, "Expired");
+    expect_chain(&chain, &roots, "www.example.com", 2051222401, "Expired");
+    var nobody = array::new<string::String>(allocator);
+    defer nobody.deinit(allocator);
+    expect_chain(&chain, &nobody, "www.example.com", jan_2030(), "UnknownIssuer");
+    // The root itself as the only trusted certificate of the chain.
+    var with_root = array::new<string::String>(allocator);
+    defer with_root.deinit(allocator);
+    try with_root.append(allocator, try bytes_of_hex(allocator, leaf_hex()));
+    try with_root.append(allocator, try bytes_of_hex(allocator, intermediate_hex()));
+    try with_root.append(allocator, try bytes_of_hex(allocator, root_hex()));
+    expect_chain(&with_root, &roots, "www.example.com", jan_2030(), "ok");
+    // A leaf alone reaches no root; a leaf with the root but without the
+    // intermediate is not signed by what follows it.
+    var alone = array::new<string::String>(allocator);
+    defer alone.deinit(allocator);
+    try alone.append(allocator, try bytes_of_hex(allocator, leaf_hex()));
+    expect_chain(&alone, &roots, "www.example.com", jan_2030(), "UnknownIssuer");
+    var skipped = array::new<string::String>(allocator);
+    defer skipped.deinit(allocator);
+    try skipped.append(allocator, try bytes_of_hex(allocator, leaf_hex()));
+    try skipped.append(allocator, try bytes_of_hex(allocator, root_hex()));
+    expect_chain(&skipped, &roots, "www.example.com", jan_2030(), "BadSignature");
+    var empty = array::new<string::String>(allocator);
+    defer empty.deinit(allocator);
+    expect_chain(&empty, &roots, "www.example.com", jan_2030(), "Malformed");
+}
+
+// subject_name_at is the offset of the subject's `example.com` in the
+// leaf: its first occurrence, since the issuer's name is capitalized and
+// the subjectAltName comes later.
+fn subject_name_at(der: []u8) -> i64 {
+    let count = mem::len(der);
+    for 0..count - 11 |index| {
+        if der[index] == 101 and der[index + 1] == 120 and der[index + 2] == 97
+            and der[index + 10] == 109 {
+            return index;
+        }
+    }
+    return 0;
+}
+
+fn change_byte(text: &var string::String, at: i64, value: u8) -> void {
+    let bytes = text.as_mut_bytes();
+    bytes[at] = value;
+    return;
+}
+
+test "a changed byte in the signed part or the signature is a bad signature" {
+    let allocator = mem::page_allocator();
+    var roots = array::new<string::String>(allocator);
+    defer roots.deinit(allocator);
+    try roots.append(allocator, try bytes_of_hex(allocator, root_hex()));
+    var changed_name = array::new<string::String>(allocator);
+    defer changed_name.deinit(allocator);
+    var leaf = try bytes_of_hex(allocator, leaf_hex());
+    let count = leaf.len();
+    let view = leaf.as_bytes();
+    let at = subject_name_at(view);
+    // `example.com` becomes `example.con`.
+    change_byte(&var leaf, at + 10, 110);
+    try changed_name.append(allocator, move leaf);
+    try changed_name.append(allocator, try bytes_of_hex(allocator, intermediate_hex()));
+    expect_chain(&changed_name, &roots, "www.example.com", jan_2030(), "BadSignature");
+    var changed_signature = array::new<string::String>(allocator);
+    defer changed_signature.deinit(allocator);
+    var signed = try bytes_of_hex(allocator, leaf_hex());
+    change_byte(&var signed, count - 1, 0);
+    try changed_signature.append(allocator, move signed);
+    try changed_signature.append(allocator, try bytes_of_hex(allocator, intermediate_hex()));
+    expect_chain(&changed_signature, &roots, "www.example.com", jan_2030(), "BadSignature");
+}
+
+test "DER that is cut short or claims the wrong length is malformed" {
+    let allocator = mem::page_allocator();
+    let leaf = try bytes_of_hex(allocator, leaf_hex());
+    defer leaf.deinit(allocator);
+    let der = leaf.as_bytes();
+    let count = mem::len(der);
+    expect_parse_fails(der[0..count - 1], "Malformed");
+    expect_parse_fails(der[0..count / 2], "Malformed");
+    expect_parse_fails(der[0..1], "Malformed");
+    expect_parse_fails("", "Malformed");
+    expect_parse_fails("not a certificate at all", "Malformed");
+    var longer = try bytes_of_hex(allocator, leaf_hex());
+    defer longer.deinit(allocator);
+    try longer.append_byte(allocator, 0);
+    let padded = longer.as_bytes();
+    expect_parse_fails(padded, "Malformed");
+}

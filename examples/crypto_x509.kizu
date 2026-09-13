@@ -1,0 +1,102 @@
+import std::array;
+import std::crypto::x509;
+import std::mem;
+import std::string;
+
+// A server proves who it is with a chain of certificates: one that
+// names it, signed by an issuer, signed in turn by a root the client
+// already trusts. Verifying the chain is checking that each link is in
+// date and signed by the next, that the first names the host, and that
+// the last is vouched for by a trusted root. The chain here is a fixed
+// test one so the outcome is checkable; a client takes it from the TLS
+// handshake and the roots from the system's trust store.
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+// The chain: a leaf for example.com, the intermediate that signed it,
+// and the self-signed root that signed the intermediate. All are P-256
+// with ECDSA-SHA256, valid from 2025-01-01 to 2035-01-01.
+fn leaf_hex() -> []u8 {
+    return "308201be30820163a003020102020103300a06082a8648ce3d040302302431223020060355040313194578616d706c65205465737420496e7465726d656469617465301e170d3235303130313030303030305a170d3335303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d3059301306072a8648ce3d020106082a8648ce3d03010703420004e1768007b5395d5ec95fddd693811d02082789b940d023425a7ebc91f764118299e7225e2e2c638b1275ab6e4625ddcdc2725caeb4e1a87f58d782c7ba1cf053a38193308190300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070301300c0603551d130101ff04023000301f0603551d23041830168014302c6ef5932c4ef63188bdfe1308ec04272eb94d303a0603551d1104333031820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d82112a2e6465762e6578616d706c652e636f6d300a06082a8648ce3d0403020349003046022100864df220d1d8b2d7fe241d6f3422097a2e6db7c3062430957617bc77c51d3d2d022100e16c815887a3d274f8091ce9e56c9a219af22dc5de2748f6e7c7f004918e45bf";
+}
+
+fn intermediate_hex() -> []u8 {
+    return "308201943082013ba003020102020102300a06082a8648ce3d040302301c311a3018060355040313114578616d706c65205465737420526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a302431223020060355040313194578616d706c65205465737420496e7465726d6564696174653059301306072a8648ce3d020106082a8648ce3d030107034200046295e90df975ea098e381ad0feaff5e289ce746b3f8f87c7c4b33b83700a1cde01f016683d45f79fba2feae4625b2e1927fb38b04964f8d02e5c5b4130779003a3663064300e0603551d0f0101ff04040302010630120603551d130101ff040830060101ff020100301d0603551d0e04160414302c6ef5932c4ef63188bdfe1308ec04272eb94d301f0603551d2304183016801462accd0fc5fe45d77edd5db27755499945f0a846300a06082a8648ce3d0403020347003044022067b852cd0c4e10514cef5ef72ba51e88fa24ecdc124268eb4b122182290a24bf0220709383012397f1ca60530bdc77e9bbb2ef80872f62879e6ca316328676a8062d";
+}
+
+fn root_hex() -> []u8 {
+    return "308201693082010fa003020102020101300a06082a8648ce3d040302301c311a3018060355040313114578616d706c65205465737420526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a301c311a3018060355040313114578616d706c65205465737420526f6f743059301306072a8648ce3d020106082a8648ce3d030107034200048c82a5fd94dcd3061fcb63347fa5126c4e1db8b781e5657a6fb4cafffb45a28721c1fabe0fc06d73e90985d9eafa9b30c62502fd47922a800b8cc7b4e7433680a3423040300e0603551d0f0101ff040403020106300f0603551d130101ff040530030101ff301d0603551d0e0416041462accd0fc5fe45d77edd5db27755499945f0a846300a06082a8648ce3d0403020348003045022100cdae962f6519e1ca2cd7bfc3fdbed6a909e95ecdb06f1faafe92d874cd3ff09702204496b668041fa5a400b8083de292627fd5a4148201a726f813f24b1272ead0af";
+}
+
+fn chain_verifies(
+    allocator: Allocator,
+    chain: &array::Array<string::String>,
+    roots: &array::Array<string::String>,
+    host: []u8,
+    now: i64
+) -> mem::Error!void {
+    if x509::verify_chain(chain, roots, host, now) {
+        print("verified");
+    } else |err| {
+        print(match err {
+            Malformed => "malformed",
+            Unsupported => "unsupported",
+            Expired => "expired",
+            NameMismatch => "name mismatch",
+            BadSignature => "bad signature",
+            UnknownIssuer => "unknown issuer",
+        });
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var chain = array::new<string::String>(allocator);
+    defer chain.deinit(allocator);
+    try chain.append(allocator, try bytes_of_hex(allocator, leaf_hex()));
+    try chain.append(allocator, try bytes_of_hex(allocator, intermediate_hex()));
+    var roots = array::new<string::String>(allocator);
+    defer roots.deinit(allocator);
+    try roots.append(allocator, try bytes_of_hex(allocator, root_hex()));
+
+    // 2030-01-01, within the validity of all three.
+    let now = 1893456000;
+    try chain_verifies(allocator, &chain, &roots, "www.example.com", now);
+    try chain_verifies(allocator, &chain, &roots, "api.dev.example.com", now);
+    try chain_verifies(allocator, &chain, &roots, "other.example.com", now);
+    try chain_verifies(allocator, &chain, &roots, "www.example.com", now + 10 * 365 * 86400);
+
+    var nobody = array::new<string::String>(allocator);
+    defer nobody.deinit(allocator);
+    try chain_verifies(allocator, &chain, &nobody, "www.example.com", now);
+    return;
+}
+
+// run
+// features: crypto x509 certificate
+// output:
+// verified
+// verified
+// name mismatch
+// expired
+// unknown issuer

@@ -1,0 +1,511 @@
+// std::crypto::x509 reads the certificates a TLS server presents and
+// decides whether they vouch for the host it claims to be: each is
+// signed by the next, the last by a root the program trusts, the first
+// names the host, and all are in date. What a certificate says is read
+// from its DER (RFC 5280) and left there: a Certificate is spans into the
+// bytes it was parsed from, and holds no copy.
+//
+// The keys and signatures understood are the ones std::crypto has --
+// P-256 keys and ECDSA with SHA-256 -- and a certificate with another
+// kind is `Error::Unsupported`, said and not guessed.
+
+// Error is what parsing and verifying can fail with. `Malformed` is DER
+// that is not a certificate; `Unsupported` is a certificate this reader
+// cannot judge -- another key or signature kind, or a critical extension
+// it does not know. The rest are a chain that does not vouch for the
+// host: a certificate out of date (`Expired`), a leaf that does not name
+// the host (`NameMismatch`), a signature that does not verify under the
+// issuer's key (`BadSignature`), or a chain that ends short of any
+// trusted root (`UnknownIssuer`).
+pub error Error {
+    Malformed,
+    Unsupported,
+    Expired,
+    NameMismatch,
+    BadSignature,
+    UnknownIssuer,
+}
+
+// KeyAlgorithm is the kind of public key a certificate holds.
+pub enum KeyAlgorithm {
+    EcdsaP256,
+    Unsupported,
+}
+
+// SignatureAlgorithm is the kind of signature a certificate carries.
+pub enum SignatureAlgorithm {
+    EcdsaSha256,
+    Unsupported,
+}
+
+// A Certificate is what `parse` read from one DER certificate. It keeps
+// a view of the DER and spans into it; the bytes are the caller's and
+// must outlive it.
+pub struct Certificate {
+    der: []u8,
+    tbs: std::crypto::x509::Element,
+    serial: std::crypto::x509::Element,
+    issuer: std::crypto::x509::Element,
+    subject: std::crypto::x509::Element,
+    // Seconds since 1970 the certificate is valid from and until, inclusive.
+    pub not_before: i64,
+    pub not_after: i64,
+    pub key_algorithm: std::crypto::x509::KeyAlgorithm,
+    key_start: i64,
+    key_end: i64,
+    pub signature_algorithm: std::crypto::x509::SignatureAlgorithm,
+    signature_start: i64,
+    signature_end: i64,
+    // Whether basicConstraints says this certificate may sign others.
+    pub is_ca: bool,
+    // The subjectAltName extension's SEQUENCE, or an empty span.
+    alt_names: std::crypto::x509::Element,
+}
+
+// parse reads one DER certificate. The result points into `der`.
+pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certificate {
+    let length = std::mem::len(der);
+    let outer = try std::crypto::x509::expect_element(der, 0, length, std::crypto::x509::tag_sequence());
+    if outer.end != length {
+        return Error::Malformed;
+    }
+    let tbs = try std::crypto::x509::expect_element(der, outer.start, outer.end, std::crypto::x509::tag_sequence());
+    let signature_algorithm = try std::crypto::x509::expect_element(der, tbs.end, outer.end, std::crypto::x509::tag_sequence());
+    let signature = try std::crypto::x509::expect_element(der, signature_algorithm.end, outer.end, std::crypto::x509::tag_bit_string());
+    if signature.end != outer.end or signature.end - signature.start < 2 or der[signature.start] != 0 {
+        return Error::Malformed;
+    }
+
+    // TBSCertificate: an optional explicit version, then the fields in
+    // order (RFC 5280 §4.1).
+    var at = tbs.start;
+    var version = 1;
+    var first = try std::crypto::x509::read_element(der, at, tbs.end);
+    if first.tag == std::crypto::x509::tag_explicit(0) {
+        let number = try std::crypto::x509::expect_element(der, first.start, first.end, std::crypto::x509::tag_integer());
+        if number.end != first.end or number.end - number.start != 1 or der[number.start] > 2 {
+            return Error::Malformed;
+        }
+        version = cast<i64>(der[number.start]) + 1;
+        at = first.end;
+        first = try std::crypto::x509::read_element(der, at, tbs.end);
+    }
+    if first.tag != std::crypto::x509::tag_integer() {
+        return Error::Malformed;
+    }
+    let serial = first;
+    let inner_algorithm = try std::crypto::x509::expect_element(der, serial.end, tbs.end, std::crypto::x509::tag_sequence());
+    if !std::crypto::x509::same_content(der, inner_algorithm, der, signature_algorithm) {
+        return Error::Malformed;
+    }
+    let issuer = try std::crypto::x509::expect_element(der, inner_algorithm.end, tbs.end, std::crypto::x509::tag_sequence());
+    let validity = try std::crypto::x509::expect_element(der, issuer.end, tbs.end, std::crypto::x509::tag_sequence());
+    let not_before_element = try std::crypto::x509::read_time(der, validity.start, validity.end);
+    let not_after_element = try std::crypto::x509::read_time(der, not_before_element.end, validity.end);
+    if not_after_element.end != validity.end {
+        return Error::Malformed;
+    }
+    let not_before = try std::crypto::x509::time_value(der, not_before_element);
+    let not_after = try std::crypto::x509::time_value(der, not_after_element);
+    let subject = try std::crypto::x509::expect_element(der, validity.end, tbs.end, std::crypto::x509::tag_sequence());
+
+    // SubjectPublicKeyInfo: an AlgorithmIdentifier and the key bits.
+    let spki = try std::crypto::x509::expect_element(der, subject.end, tbs.end, std::crypto::x509::tag_sequence());
+    let key_algorithm_element = try std::crypto::x509::expect_element(der, spki.start, spki.end, std::crypto::x509::tag_sequence());
+    let key_oid = try std::crypto::x509::expect_element(der, key_algorithm_element.start, key_algorithm_element.end, std::crypto::x509::tag_oid());
+    let key_bits = try std::crypto::x509::expect_element(der, key_algorithm_element.end, spki.end, std::crypto::x509::tag_bit_string());
+    if key_bits.end != spki.end or key_bits.end - key_bits.start < 2 or der[key_bits.start] != 0 {
+        return Error::Malformed;
+    }
+    var key_algorithm = KeyAlgorithm::Unsupported;
+    if std::crypto::x509::content_is_hex(der, key_oid, oid_ec_public_key()) {
+        let curve = try std::crypto::x509::expect_element(der, key_oid.end, key_algorithm_element.end, std::crypto::x509::tag_oid());
+        if std::crypto::x509::content_is_hex(der, curve, oid_prime256v1()) {
+            if key_bits.end - key_bits.start == 66 and der[key_bits.start + 1] == 4 {
+                key_algorithm = KeyAlgorithm::EcdsaP256;
+            }
+        }
+    }
+
+    // What follows the key: issuer and subject unique IDs, which are
+    // skipped, and the extensions of a version 3 certificate.
+    at = spki.end;
+    var is_ca = false;
+    var alt_names = Element { tag: 0, head: 0, start: 0, end: 0 };
+    while at < tbs.end {
+        let part = try std::crypto::x509::read_element(der, at, tbs.end);
+        if part.tag == std::crypto::x509::tag_explicit(3) {
+            if version != 3 or part.end != tbs.end {
+                return Error::Malformed;
+            }
+            let list = try std::crypto::x509::expect_element(der, part.start, part.end, std::crypto::x509::tag_sequence());
+            if list.end != part.end {
+                return Error::Malformed;
+            }
+            var extension_at = list.start;
+            while extension_at < list.end {
+                let extension = try std::crypto::x509::expect_element(der, extension_at, list.end, std::crypto::x509::tag_sequence());
+                let oid = try std::crypto::x509::expect_element(der, extension.start, extension.end, std::crypto::x509::tag_oid());
+                var value_at = oid.end;
+                var critical = false;
+                let flag = try std::crypto::x509::read_element(der, value_at, extension.end);
+                if flag.tag == std::crypto::x509::tag_boolean() {
+                    if flag.end - flag.start != 1 {
+                        return Error::Malformed;
+                    }
+                    critical = der[flag.start] != 0;
+                    value_at = flag.end;
+                }
+                let value = try std::crypto::x509::expect_element(der, value_at, extension.end, std::crypto::x509::tag_octet_string());
+                if value.end != extension.end {
+                    return Error::Malformed;
+                }
+                if std::crypto::x509::content_is_hex(der, oid, oid_basic_constraints()) {
+                    is_ca = try read_basic_constraints(der, value);
+                } else {
+                    if std::crypto::x509::content_is_hex(der, oid, oid_subject_alt_name()) {
+                        alt_names = try std::crypto::x509::expect_element(der, value.start, value.end, std::crypto::x509::tag_sequence());
+                        if alt_names.end != value.end {
+                            return Error::Malformed;
+                        }
+                    } else {
+                        if critical and !known_extension(der, oid) {
+                            return Error::Unsupported;
+                        }
+                    }
+                }
+                extension_at = extension.end;
+            }
+        } else {
+            if part.tag != 129 and part.tag != 130 {
+                return Error::Malformed;
+            }
+        }
+        at = part.end;
+    }
+
+    let signature_oid = try std::crypto::x509::expect_element(der, signature_algorithm.start, signature_algorithm.end, std::crypto::x509::tag_oid());
+    var signature_kind = SignatureAlgorithm::Unsupported;
+    if std::crypto::x509::content_is_hex(der, signature_oid, oid_ecdsa_with_sha256()) {
+        signature_kind = SignatureAlgorithm::EcdsaSha256;
+    }
+    return Certificate {
+        der: der,
+        tbs: tbs,
+        serial: serial,
+        issuer: issuer,
+        subject: subject,
+        not_before: not_before,
+        not_after: not_after,
+        key_algorithm: key_algorithm,
+        key_start: key_bits.start + 1,
+        key_end: key_bits.end,
+        signature_algorithm: signature_kind,
+        signature_start: signature.start + 1,
+        signature_end: signature.end,
+        is_ca: is_ca,
+        alt_names: alt_names,
+    };
+}
+
+// read_basic_constraints reads `SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+// pathLenConstraint INTEGER OPTIONAL }` and returns cA.
+fn read_basic_constraints(der: []u8, value: std::crypto::x509::Element) -> std::crypto::x509::Error!bool {
+    let list = try std::crypto::x509::expect_element(der, value.start, value.end, std::crypto::x509::tag_sequence());
+    if list.end != value.end {
+        return Error::Malformed;
+    }
+    if list.start == list.end {
+        return false;
+    }
+    let first = try std::crypto::x509::read_element(der, list.start, list.end);
+    if first.tag != std::crypto::x509::tag_boolean() {
+        return false;
+    }
+    if first.end - first.start != 1 {
+        return Error::Malformed;
+    }
+    return der[first.start] != 0;
+}
+
+// known_extension reports the extensions a critical flag on which does
+// not make the certificate unreadable: they constrain uses this reader
+// does not make, or name keys it looks up by other means.
+fn known_extension(der: []u8, oid: std::crypto::x509::Element) -> bool {
+    return std::crypto::x509::content_is_hex(der, oid, oid_key_usage())
+        or std::crypto::x509::content_is_hex(der, oid, oid_extended_key_usage());
+}
+
+// Object identifiers, as the bytes of their DER content.
+fn oid_ec_public_key() -> []u8 {
+    return "2a8648ce3d0201";
+}
+
+fn oid_prime256v1() -> []u8 {
+    return "2a8648ce3d030107";
+}
+
+fn oid_ecdsa_with_sha256() -> []u8 {
+    return "2a8648ce3d040302";
+}
+
+fn oid_basic_constraints() -> []u8 {
+    return "551d13";
+}
+
+fn oid_subject_alt_name() -> []u8 {
+    return "551d11";
+}
+
+fn oid_key_usage() -> []u8 {
+    return "551d0f";
+}
+
+fn oid_extended_key_usage() -> []u8 {
+    return "551d25";
+}
+
+// subject is the DER of the subject Name, whole, for comparing with an
+// issuer's.
+pub fn (self: &std::crypto::x509::Certificate) subject() -> []u8 {
+    return self.der[self.subject.head..self.subject.end];
+}
+
+// issuer is the DER of the issuer Name, whole.
+pub fn (self: &std::crypto::x509::Certificate) issuer() -> []u8 {
+    return self.der[self.issuer.head..self.issuer.end];
+}
+
+// serial is the serial number's bytes, big-endian as DER holds them.
+pub fn (self: &std::crypto::x509::Certificate) serial() -> []u8 {
+    return self.der[self.serial.start..self.serial.end];
+}
+
+// public_key is the key's bytes: for a P-256 key, the 65 of the
+// uncompressed point that `std::crypto::ecdsa_p256_verify` takes.
+pub fn (self: &std::crypto::x509::Certificate) public_key() -> []u8 {
+    return self.der[self.key_start..self.key_end];
+}
+
+// valid_at reports whether `unix_seconds` is within the validity.
+pub fn (self: &std::crypto::x509::Certificate) valid_at(unix_seconds: i64) -> bool {
+    return unix_seconds >= self.not_before and unix_seconds <= self.not_after;
+}
+
+// matches_host reports whether a dNSName in the subjectAltName extension
+// names `host`, compared without regard to case. A name `*.example.com`
+// matches one label in the wildcard's place and no more (RFC 6125
+// §6.4.3). A certificate with no subjectAltName names no host.
+pub fn (self: &std::crypto::x509::Certificate) matches_host(host: []u8) -> bool {
+    if self.alt_names.end == 0 {
+        return false;
+    }
+    var at = self.alt_names.start;
+    while at < self.alt_names.end {
+        let name = std::crypto::x509::read_element(self.der, at, self.alt_names.end) catch return false;
+        if name.tag == std::crypto::x509::tag_dns_name() {
+            let pattern = self.der[name.start..name.end];
+            if host_matches_pattern(host, pattern) {
+                return true;
+            }
+        }
+        at = name.end;
+    }
+    return false;
+}
+
+// host_matches_pattern compares a host with one dNSName.
+fn host_matches_pattern(host: []u8, pattern: []u8) -> bool {
+    let pattern_length = std::mem::len(pattern);
+    let host_length = std::mem::len(host);
+    if pattern_length >= 2 and pattern[0] == 42 and pattern[1] == 46 {
+        let dot = index_of_dot(host) orelse return false;
+        if dot == 0 {
+            return false;
+        }
+        let host_rest = host[dot + 1..host_length];
+        let pattern_rest = pattern[2..pattern_length];
+        return equal_ascii_fold(host_rest, pattern_rest);
+    }
+    return equal_ascii_fold(host, pattern);
+}
+
+fn index_of_dot(text: []u8) -> ?i64 {
+    for 0..std::mem::len(text) |index| {
+        if text[index] == 46 {
+            return index;
+        }
+    }
+    return null;
+}
+
+// equal_ascii_fold compares two names with ASCII letters folded to one
+// case.
+fn equal_ascii_fold(a: []u8, b: []u8) -> bool {
+    let count = std::mem::len(a);
+    if count != std::mem::len(b) {
+        return false;
+    }
+    for 0..count |index| {
+        if fold(a[index]) != fold(b[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn fold(byte: u8) -> u8 {
+    if byte >= 65 and byte <= 90 {
+        return byte + 32;
+    }
+    return byte;
+}
+
+// issued_by reports whether `issuer` vouches for this certificate: the
+// issuer may sign certificates, its subject is this certificate's
+// issuer, and this certificate's signature verifies under its key. A
+// key or signature kind std::crypto lacks cannot be verified and gives
+// false.
+pub fn (self: &std::crypto::x509::Certificate) issued_by(issuer: &std::crypto::x509::Certificate) -> bool {
+    if !issuer.is_ca {
+        return false;
+    }
+    let mine = self.issuer();
+    let theirs = issuer.subject();
+    if !std::mem::equal_bytes(mine, theirs) {
+        return false;
+    }
+    if self.signature_algorithm != SignatureAlgorithm::EcdsaSha256
+        or issuer.key_algorithm != KeyAlgorithm::EcdsaP256 {
+        return false;
+    }
+    var signature_buffer = [64]u8{};
+    let signature = signature_buffer.as_mut_bytes();
+    if !read_ecdsa_signature(self.der, self.signature_start, self.signature_end, signature) {
+        return false;
+    }
+    var digest_buffer = [32]u8{};
+    let digest = digest_buffer.as_mut_bytes();
+    let signed = self.der[self.tbs.head..self.tbs.end];
+    std::crypto::sha256(signed, digest);
+    let key = issuer.public_key();
+    let signature_bytes = signature_buffer.as_bytes();
+    let digest_bytes = digest_buffer.as_bytes();
+    return std::crypto::ecdsa_p256_verify(key, digest_bytes, signature_bytes);
+}
+
+// read_ecdsa_signature reads `SEQUENCE { r INTEGER, s INTEGER }` into r
+// and s as 32 bytes each, right-aligned. An integer's leading zero byte,
+// there to keep a high bit from reading as a sign, is dropped; a value
+// that does not fit in 32 bytes is not a P-256 signature.
+fn read_ecdsa_signature(der: []u8, start: i64, end: i64, out: &var []u8) -> bool {
+    let list = std::crypto::x509::expect_element(der, start, end, std::crypto::x509::tag_sequence()) catch return false;
+    if list.end != end {
+        return false;
+    }
+    let r = std::crypto::x509::expect_element(der, list.start, list.end, std::crypto::x509::tag_integer()) catch return false;
+    let s = std::crypto::x509::expect_element(der, r.end, list.end, std::crypto::x509::tag_integer()) catch return false;
+    if s.end != list.end {
+        return false;
+    }
+    return copy_integer(der, r, out, 0) and copy_integer(der, s, out, 32);
+}
+
+fn copy_integer(der: []u8, value: std::crypto::x509::Element, out: &var []u8, at: i64) -> bool {
+    var start = value.start;
+    if start < value.end and der[start] == 0 {
+        start = start + 1;
+    }
+    let count = value.end - start;
+    if count > 32 {
+        return false;
+    }
+    for 0..count |index| {
+        out[at + 32 - count + index] = der[start + index];
+    }
+    return true;
+}
+
+// verify_chain decides whether `chain` -- the certificates a server
+// presented, the host's first and each issuer after the one it signed --
+// vouches for `host` at time `now`, given the DER of the `roots` the
+// program trusts. The first must name the host, each must be in date
+// and signed by the next, and one must be signed by a trusted root; a
+// certificate that is itself a trusted root ends the chain too. The
+// first failure is the answer.
+pub fn verify_chain(
+    chain: &std::array::Array<std::string::String>,
+    roots: &std::array::Array<std::string::String>,
+    host: []u8,
+    now: i64
+) -> std::crypto::x509::Error!void {
+    let count = chain.len();
+    if count == 0 {
+        return Error::Malformed;
+    }
+    for 0..count |index| {
+        try verify_link(chain, index, host, now);
+        if try trusted(chain, roots, index) {
+            return;
+        }
+    }
+    return Error::UnknownIssuer;
+}
+
+// verify_link checks certificate `index` of the chain: in date, naming
+// the host when it is the first, and, when there is a next one, signed
+// by it.
+fn verify_link(
+    chain: &std::array::Array<std::string::String>,
+    index: i64,
+    host: []u8,
+    now: i64
+) -> std::crypto::x509::Error!void {
+    if chain.at(index) |item| {
+        let der = item.as_bytes();
+        let current = try std::crypto::x509::parse(der);
+        if !current.valid_at(now) {
+            return Error::Expired;
+        }
+        if index == 0 and !current.matches_host(host) {
+            return Error::NameMismatch;
+        }
+        if index + 1 < chain.len() {
+            if chain.at(index + 1) |next_item| {
+                let next_der = next_item.as_bytes();
+                let next = try std::crypto::x509::parse(next_der);
+                if !current.issued_by(&next) {
+                    return Error::BadSignature;
+                }
+            }
+        }
+        return;
+    }
+    return Error::Malformed;
+}
+
+// trusted reports whether certificate `index` of the chain is one of
+// the roots or is signed by one.
+fn trusted(
+    chain: &std::array::Array<std::string::String>,
+    roots: &std::array::Array<std::string::String>,
+    index: i64
+) -> std::crypto::x509::Error!bool {
+    if chain.at(index) |item| {
+        let der = item.as_bytes();
+        let current = try std::crypto::x509::parse(der);
+        for 0..roots.len() |root_index| {
+            if roots.at(root_index) |root_item| {
+                let root_der = root_item.as_bytes();
+                if std::mem::equal_bytes(der, root_der) {
+                    return true;
+                }
+                let root = try std::crypto::x509::parse(root_der);
+                if current.issued_by(&root) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}

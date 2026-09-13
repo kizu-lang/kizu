@@ -13,6 +13,10 @@
 普通の Kizu code なのでここに来ますが、`Array.at` が capture 条件でしか
 消費できないのは checker の規則なので SPEC に残ります。
 
+まだ無いもの、対応しないと決めたものは、各 module の文書の末尾の
+`## 今は話さないこと` の節にだけ書きます。実装が追いついたらその項を消します。
+一覧は `grep -n -A 12 '^## 今は話さないこと' docs/std/*.md` で出ます。
+
 | module | 内容 |
 | --- | --- |
 | [io](io.md) | explicit stdout / stderr / stdin、evented な `Io` と `async` |
@@ -26,7 +30,8 @@
 | [fmt](fmt.md) | diagnostic 用の最小 formatting |
 | [json](json.md) | JSON の encode と decode |
 | [compress](compress.md) | deflate / gzip / zlib の展開と圧縮 |
-| [crypto](crypto.md) | SHA-256、HMAC、定数時間比較、host の乱数 |
+| [crypto](crypto.md) | SHA-256、HMAC、HKDF、AEAD、X25519、ECDSA P-256、host の乱数 |
+| [crypto::x509](x509.md) | 証明書の DER を読み、chain を検証する |
 | [fs](fs.md) | `Io` 経由の file system 操作 |
 | [net](net.md) | `Io` 経由の TCP listener と stream |
 | [http](http.md) | HTTP/1 の server、message、routing |

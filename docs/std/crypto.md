@@ -97,7 +97,7 @@ SubjectPublicKeyInfo が持つ形そのものです。`signature` は r と s �
 
 検証しか無いのは、署名には秘密鍵と 2 度使ってはならない nonce が要り、client には
 どちらもまだ無いからです。DER の `SEQUENCE { INTEGER r, INTEGER s }` から r と s を
-取り出すのは X.509 側の仕事です。
+取り出すのは `std::crypto::x509`(`docs/std/x509.md`)の仕事です。
 
 算術は 32 bit limb 8 本を `u64` で持つ Montgomery 乗算で、体 p と位数 n の両方に同じ
 code を使います。point は Jacobian 座標で、u1 G + u2 Q は Straus–Shamir の同時

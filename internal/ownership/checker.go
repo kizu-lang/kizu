@@ -1968,10 +1968,21 @@ func (c *Checker) returnedBorrowInitializer(
 ) ([]borrowSource, string, bool, bool, error) {
 	// A factory that can refuse hands its result back through `try`. The tie
 	// is a property of the value, not of how the failure was spelled, so the
-	// `try` is read through rather than treated as a different expression.
+	// `try` is read through rather than treated as a different expression,
+	// and the binding takes the success payload the `try` unwraps.
 	if try, ok := expr.(*ast.TryExpr); ok {
-		return c.returnedBorrowInitializer(try.Value, env)
+		return c.unwrappedBorrowInitializer(try.Value, env, true)
 	}
+	return c.unwrappedBorrowInitializer(expr, env, false)
+}
+
+// unwrappedBorrowInitializer is returnedBorrowInitializer once any `try` has
+// been read through; `unwrapped` says whether one was.
+func (c *Checker) unwrappedBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+	unwrapped bool,
+) ([]borrowSource, string, bool, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return nil, "", false, false, nil
@@ -1985,6 +1996,10 @@ func (c *Checker) returnedBorrowInitializer(
 	allocatorReturn := false
 	viewReturn := false
 	tiedStruct := false
+	payload := retName
+	if unwrapped {
+		payload = successPayload(retName)
+	}
 	if !ok {
 		// An Allocator return with tie-capable sources is a tied allocator: it
 		// holds the buffer's writable view exclusively, so it behaves as a
@@ -2007,9 +2022,9 @@ func (c *Checker) returnedBorrowInitializer(
 			mutable = !taskSetReturn(retName)
 			allocatorReturn = taskSetReturn(retName)
 			elem = viewCarrierPayload(retName)
-		case isViewTypeName(retName) || c.viewCaptureStructType(retName):
+		case isViewTypeName(payload) || c.viewCaptureStructType(payload):
 			viewReturn = true
-			elem = retName
+			elem = payload
 		default:
 			return nil, "", false, false, nil
 		}
@@ -5296,6 +5311,15 @@ func (c *Checker) capabilityCarryingTypeSeen(typeName string, seen map[string]bo
 		}
 	}
 	return false
+}
+
+// successPayload is the success type of a `!T` spelling, or the spelling
+// itself when it is not one.
+func successPayload(typeName string) string {
+	if idx := strings.Index(typeName, "!"); idx >= 0 {
+		return typeName[idx+1:]
+	}
+	return typeName
 }
 
 // viewCarrierPayload strips the wrappers a view rides through: the success of
