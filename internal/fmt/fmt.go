@@ -918,10 +918,29 @@ func (b *builder) operatorSpacing(curr token.Token, prev token.Token) bool {
 	if b.inCapture && (curr.Type == token.Pipe || prev.Type == token.Pipe) {
 		return false
 	}
-	if prev.Type == token.RBracket && canFollowSliceMarker(curr) {
+	if b.closesTypeBrackets() && canFollowSliceMarker(curr) {
 		return false
 	}
 	return true
+}
+
+// closesTypeBrackets reports whether the `]` just written ends the `[]` of
+// a slice type or the `[N]` of a buffer type, which the element hugs,
+// rather than an index such as `q[0]`, which keeps the space a binary
+// operator or `and` takes after it. A type's `[` follows something that is
+// not an operand; an index's `[` follows the operand it indexes.
+func (b *builder) closesTypeBrackets() bool {
+	open := b.prevIndex - 1
+	if b.prev.Type != token.RBracket || open < 0 {
+		return false
+	}
+	if b.tokens[open].Type == token.Int {
+		open--
+	}
+	if open < 0 || b.tokens[open].Type != token.LBracket {
+		return false
+	}
+	return open == 0 || !endsOperand(b.tokens[open-1])
 }
 
 // labelHugsColon reports whether the `:` just written names a loop after

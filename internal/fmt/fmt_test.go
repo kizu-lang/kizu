@@ -395,6 +395,31 @@ func TestFormatSignAndBitwiseAndBeforeParen(t *testing.T) {
 	}
 }
 
+// TestFormatIndexKeepsSpaceBeforeOperator checks that a binary operator
+// or `and` after an index keeps its space, while the element of a `[]T` or
+// `[N]T` type still hugs its brackets.
+func TestFormatIndexKeepsSpaceBeforeOperator(t *testing.T) {
+	src := "fn f(q: [] u64, b: [] bool) -> bool {\n" +
+		"    let x = q[0] & 1;\n" +
+		"    let y = b[0] and b[1];\n" +
+		"    let z = b[0] or b[1];\n" +
+		"    var t = [4] u8{};\n" +
+		"    let s: [] u8 = t.as_bytes();\n" +
+		"    return y;\n" +
+		"}\n"
+	want := "fn f(q: []u64, b: []bool) -> bool {\n" +
+		"    let x = q[0] & 1;\n" +
+		"    let y = b[0] and b[1];\n" +
+		"    let z = b[0] or b[1];\n" +
+		"    var t = [4]u8{};\n" +
+		"    let s: []u8 = t.as_bytes();\n" +
+		"    return y;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("index spacing:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatGenericBracketsTight checks generic `<T>` keeps no surrounding spaces.
 func TestFormatGenericBracketsTight(t *testing.T) {
 	src := `fn main() { let a = std :: array :: new < i64 > (x); }`
