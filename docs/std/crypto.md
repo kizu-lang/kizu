@@ -12,6 +12,7 @@ std::crypto::hkdf_extract(salt: []u8, keying_material: []u8, key: &var []u8) -> 
 std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
 std::crypto::x25519(scalar: []u8, point: []u8, out: &var []u8) -> Error!void
 std::crypto::x25519_base(scalar: []u8, out: &var []u8) -> void
+std::crypto::ecdsa_p256_verify(public_key: []u8, digest: []u8, signature: []u8) -> bool
 std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
 
 std::crypto::chacha20_poly1305_seal(allocator, key: []u8, nonce: []u8, aad: []u8, plain: []u8, out: &var String) -> std::mem::Error!void
@@ -85,6 +86,24 @@ scalar や point は誤用で trap します。
 mask で branch ではなく、時間は秘密鍵に依らないです。1 回の乗算は `--opt` で
 1 ms 弱です(Go の assembly は 0.05 ms)。
 
+## 署名
+
+`ecdsa_p256_verify` は P-256(secp256r1)上の ECDSA 署名を検証します(FIPS 186-4
+§6.4.2)。`public_key` は SEC 1 の非圧縮 point 65 byte(`04`、x、y)で、証明書の
+SubjectPublicKeyInfo が持つ形そのものです。`signature` は r と s を 32 byte big-endian
+で並べた 64 byte、`digest` は SHA-256 の 32 byte です。鍵や署名が別の形、鍵が曲線上に
+ない、r や s が 1..n-1 の外、のどれも「不正な署名」であって bug ではないので false を
+返します。digest が 32 byte でないのは呼び手の誤用で trap します。
+
+検証しか無いのは、署名には秘密鍵と 2 度使ってはならない nonce が要り、client には
+どちらもまだ無いからです。DER の `SEQUENCE { INTEGER r, INTEGER s }` から r と s を
+取り出すのは X.509 側の仕事です。
+
+算術は 32 bit limb 8 本を `u64` で持つ Montgomery 乗算で、体 p と位数 n の両方に同じ
+code を使います。point は Jacobian 座標で、u1 G + u2 Q は Straus–Shamir の同時
+double-and-add です。扱うのは公開鍵と署名だけなので、値で branch し早く比べます。
+1 回の検証は `--opt` で約 1 ms です。
+
 ## 封をする
 
 `chacha20_poly1305_seal` は RFC 8439 の AEAD_CHACHA20_POLY1305 で、`plain` の
@@ -134,5 +153,5 @@ source に見え、`std::testing::failing_io()` は `IoFailing` で拒否しま�
 `std::process::unix_millis()` を渡し、そう書いたことが source に残ります。
 
 検証は公開されている test vector です。FIPS 180-4 の例、RFC 4231、RFC 5869、
-RFC 8439、RFC 7748 の case が `tests/behavior/src/crypto/` にあり、`examples/`
+RFC 8439、RFC 7748、RFC 6979 の case が `tests/behavior/src/crypto/` にあり、`examples/`
 の crypto example が約束する hex は compiler の test が Go の実装と突き合わせます。

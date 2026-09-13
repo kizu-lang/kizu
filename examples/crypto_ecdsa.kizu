@@ -1,0 +1,63 @@
+import std::crypto;
+import std::mem;
+import std::string;
+
+// A signature is what a certificate carries: bytes that only the holder
+// of a private key could have made over a message, and that anyone with
+// the public key can check. Here the key and the signature are the ones
+// RFC 6979 §A.2.5 lists for P-256 with SHA-256 over the message
+// "sample", so the outcome is checkable; a program takes both from the
+// certificate or the handshake it is verifying.
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+fn verifies(key: []u8, message: []u8, signed: []u8) -> bool {
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256(message, view);
+    let hash = digest.as_bytes();
+    return crypto::ecdsa_p256_verify(key, hash, signed);
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let public_key = try bytes_of_hex(allocator, "0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299");
+    defer public_key.deinit(allocator);
+    let signature = try bytes_of_hex(allocator, "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8");
+    defer signature.deinit(allocator);
+    let key = public_key.as_bytes();
+    let signed = signature.as_bytes();
+
+    if verifies(key, "sample", signed) {
+        print("the signature over the message verifies");
+    }
+    if !verifies(key, "sampled", signed) {
+        print("a changed message does not");
+    }
+    return;
+}
+
+// run
+// features: crypto ecdsa p256
+// output:
+// the signature over the message verifies
+// a changed message does not

@@ -4,9 +4,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -160,3 +166,114 @@ func TestX25519ExampleAgreesOutsideKizu(t *testing.T) {
 		t.Fatalf("Go agrees on %s, the example promises %s", got, lines[2])
 	}
 }
+
+// TestEcdsaP256VerifiesWhatGoSigns signs digests with fresh P-256 keys
+// from Go's crypto/ecdsa and has a Kizu program verify each signature,
+// then the same signature over another digest and with one byte of s
+// changed. The field and point arithmetic are Kizu source; a signature
+// an implementation Kizu did not write made has to pass, and a changed
+// one has to fail.
+func TestEcdsaP256VerifiesWhatGoSigns(t *testing.T) {
+	var program strings.Builder
+	program.WriteString(ecdsaProgramHead)
+	var want []string
+	for i := 0; i < 6; i++ {
+		private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		public, err := private.PublicKey.ECDH()
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256([]byte(fmt.Sprintf("message %d", i)))
+		r, s, err := ecdsa.Sign(rand.Reader, private, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		signature := append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...)
+		other := sha256.Sum256([]byte(fmt.Sprintf("message %d changed", i)))
+		changed := append([]byte(nil), signature...)
+		changed[40] ^= 1
+		key := hex.EncodeToString(public.Bytes())
+		for _, c := range []struct {
+			digest, signature []byte
+			verdict           string
+		}{
+			{digest[:], signature, "valid"},
+			{other[:], signature, "invalid"},
+			{digest[:], changed, "invalid"},
+		} {
+			fmt.Fprintf(&program, "    try check(allocator, %q, %q, %q);\n",
+				key, hex.EncodeToString(c.digest), hex.EncodeToString(c.signature))
+			want = append(want, c.verdict)
+		}
+	}
+	program.WriteString("    return;\n}\n")
+	path := filepath.Join(t.TempDir(), "ecdsa_oracle.kizu")
+	if err := os.WriteFile(path, []byte(program.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := kizuCommand("run", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != strings.Join(want, "\n") {
+		t.Fatalf("Kizu verified Go's signatures as:\n%s\nwant:\n%s",
+			got, strings.Join(want, "\n"))
+	}
+}
+
+// ecdsaProgramHead is the program TestEcdsaP256VerifiesWhatGoSigns
+// completes with one `check` per signature.
+const ecdsaProgramHead = `import std::crypto;
+import std::mem;
+import std::string;
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+fn check(
+    allocator: Allocator,
+    key_hex: []u8,
+    digest_hex: []u8,
+    signature_hex: []u8
+) -> mem::Error!void {
+    let key = try bytes_of_hex(allocator, key_hex);
+    defer key.deinit(allocator);
+    let digest = try bytes_of_hex(allocator, digest_hex);
+    defer digest.deinit(allocator);
+    let signature = try bytes_of_hex(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let digest_bytes = digest.as_bytes();
+    let signature_bytes = signature.as_bytes();
+    if crypto::ecdsa_p256_verify(key_bytes, digest_bytes, signature_bytes) {
+        print("valid");
+    } else {
+        print("invalid");
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+`
