@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -111,5 +112,51 @@ func TestAesGcmExampleAgreesOutsideKizu(t *testing.T) {
 	sealed := gcm.Seal(nil, []byte("twelve bytes"), []byte("attack at dawn"), []byte("record 1"))
 	if got := hex.EncodeToString(sealed); got != lines[0] {
 		t.Fatalf("Go's AES-GCM seals to %s, the example promises %s", got, lines[0])
+	}
+}
+
+// TestX25519ExampleAgreesOutsideKizu derives, with Go's crypto/ecdh, the
+// public keys and the shared secret that examples/crypto_x25519.kizu
+// promises to print. The ladder and the field arithmetic are Kizu
+// source; an implementation Kizu did not write has to arrive at the
+// same 32 bytes from the same private keys.
+func TestX25519ExampleAgreesOutsideKizu(t *testing.T) {
+	cases, err := conformance.Discover(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "examples/crypto_x25519.kizu"
+	var promised string
+	for _, tt := range cases {
+		if tt.Path == path && tt.Stdout != nil {
+			promised = *tt.Stdout
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(promised), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("%s promises %d lines, want two public keys, the secret, and two verdicts",
+			path, len(lines))
+	}
+	curve := ecdh.X25519()
+	alice, err := curve.NewPrivateKey([]byte("alice's private key, 32 bytes..."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := curve.NewPrivateKey([]byte("bob's private key, also 32 bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(alice.PublicKey().Bytes()); got != lines[0] {
+		t.Fatalf("Go derives Alice's public key %s, the example promises %s", got, lines[0])
+	}
+	if got := hex.EncodeToString(bob.PublicKey().Bytes()); got != lines[1] {
+		t.Fatalf("Go derives Bob's public key %s, the example promises %s", got, lines[1])
+	}
+	shared, err := alice.ECDH(bob.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(shared); got != lines[2] {
+		t.Fatalf("Go agrees on %s, the example promises %s", got, lines[2])
 	}
 }

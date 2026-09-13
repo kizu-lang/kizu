@@ -10,6 +10,8 @@ std::crypto::sha256(bytes: []u8, digest: &var []u8) -> void
 std::crypto::hmac_sha256(key: []u8, message: []u8, tag: &var []u8) -> void
 std::crypto::hkdf_extract(salt: []u8, keying_material: []u8, key: &var []u8) -> void
 std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
+std::crypto::x25519(scalar: []u8, point: []u8, out: &var []u8) -> Error!void
+std::crypto::x25519_base(scalar: []u8, out: &var []u8) -> void
 std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
 
 std::crypto::chacha20_poly1305_seal(allocator, key: []u8, nonce: []u8, aad: []u8, plain: []u8, out: &var String) -> std::mem::Error!void
@@ -20,7 +22,7 @@ std::crypto::aes_gcm_open(allocator, key: []u8, nonce: []u8, aad: []u8, sealed: 
 std::crypto::random_bytes(io: Io, allocator: Allocator, count: i64) -> Error!String
 std::crypto::random_into(io: Io, allocator: Allocator, out: &var String, count: i64) -> Error!void
 
-std::crypto::Error    IoFailing | OutOfMemory | ReadFailed | AuthenticationFailed
+std::crypto::Error    IoFailing | OutOfMemory | ReadFailed | AuthenticationFailed | LowOrderPoint
 std::crypto::Failure  Error or std::mem::Error
 ```
 
@@ -64,6 +66,24 @@ message は 1 回の呼び出しで全部渡します。少しずつ渡す hashe
 書きます。長さは 255 block(8160 byte)までで、それより長い view は標準が出力を
 定めない誤用なので trap します(block 番号を wrap させて繰り返しを出すより)。
 TLS 1.3 の key schedule はこの 2 段に TLS 自身の info を与えたものです。
+
+## 鍵合意
+
+`x25519` は RFC 7748 の X25519 で、`scalar`(自分の秘密鍵、32 byte)を `point`
+(相手の公開鍵、32 byte)に掛けた 32 byte を `out` の先頭に書きます。`x25519_base`
+は秘密鍵から公開鍵を作ります(base point u = 9 に掛けたもの)。双方がそれぞれ自分の
+秘密鍵を相手の公開鍵に掛けると同じ 32 byte になり、公開鍵しか見ていない者には
+分かりません。秘密鍵は `random_bytes` で引いた 32 byte そのままでよく、RFC の言う
+clamp は中でします。
+
+相手の point が低位数(u = 0、1、p - 1 など)なら結果は全 0 で、それは相手が共有
+秘密を誰にでも分かるものにしたということなので、`LowOrderPoint` で拒否します
+(RFC 7748 §6.1、TLS 1.3 は RFC 8446 §7.4.2 でこの検査を求めます)。長さが 32 でない
+scalar や point は誤用で trap します。
+
+体の算術は 16 bit の limb 16 本を `i64` で持つ TweetNaCl の形で、ladder の swap は
+mask で branch ではなく、時間は秘密鍵に依らないです。1 回の乗算は `--opt` で
+1 ms 弱です(Go の assembly は 0.05 ms)。
 
 ## 封をする
 
@@ -113,6 +133,6 @@ source に見え、`std::testing::failing_io()` は `IoFailing` で拒否しま�
 時計はここにありません。証明書の有効期限のように「今」が要る検証は、呼び手が
 `std::process::unix_millis()` を渡し、そう書いたことが source に残ります。
 
-検証は公開されている test vector です。FIPS 180-4 の例と RFC 4231 の case が
-`tests/behavior/src/crypto/` にあり、`examples/crypto_sha256.kizu` が約束する
-hex は compiler の test が Go の実装と突き合わせます。
+検証は公開されている test vector です。FIPS 180-4 の例、RFC 4231、RFC 5869、
+RFC 8439、RFC 7748 の case が `tests/behavior/src/crypto/` にあり、`examples/`
+の crypto example が約束する hex は compiler の test が Go の実装と突き合わせます。
