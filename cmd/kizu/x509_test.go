@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -16,61 +18,51 @@ import (
 	"time"
 )
 
-// TestX509VerifiesWhatGoIssues has Go's crypto/x509 issue a fresh chain
+// TestX509VerifiesWhatGoIssues has Go's crypto/x509 issue fresh chains
 // -- a root, an intermediate, a leaf naming a host -- and a Kizu program
-// verify it, then the same chain against an unrelated root, at a time
+// verify them, then the same chain against an unrelated root, at a time
 // before the leaf's validity, and for a host the leaf does not name.
-// The DER reader and the checks are Kizu source; what another
-// implementation writes has to read back and verify the way it meant.
+// One chain is P-256 throughout; the other has RSA keys on the root and
+// the intermediate, signing with SHA-256, SHA-384 and SHA-512, under a
+// P-256 leaf. The DER reader and the checks are Kizu source; what
+// another implementation writes has to read back and verify the way it
+// meant.
 func TestX509VerifiesWhatGoIssues(t *testing.T) {
 	notBefore := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	notAfter := time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC)
-	root, rootKey := issueCertificate(t, &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "Test Root", Organization: []string{"Test"}},
-		NotBefore:    notBefore, NotAfter: notAfter, IsCA: true, BasicConstraintsValid: true,
-		KeyUsage: x509.KeyUsageCertSign,
-	}, nil, nil)
-	intermediate, intermediateKey := issueCertificate(t, &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "Test Intermediate", Organization: []string{"Test"}},
-		NotBefore:    notBefore, NotAfter: notAfter, IsCA: true, BasicConstraintsValid: true,
-		KeyUsage: x509.KeyUsageCertSign,
-	}, root, rootKey)
-	leaf, _ := issueCertificate(t, &x509.Certificate{
-		SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "example.net"},
-		NotBefore: notBefore.AddDate(1, 0, 0), NotAfter: notAfter, BasicConstraintsValid: true,
-		KeyUsage:    x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:    []string{"example.net", "*.example.net"},
-	}, intermediate, intermediateKey)
 	other, _ := issueCertificate(t, &x509.Certificate{
 		SerialNumber: big.NewInt(4), Subject: pkix.Name{CommonName: "Other Root"},
 		NotBefore: notBefore, NotAfter: notAfter, IsCA: true, BasicConstraintsValid: true,
 		KeyUsage: x509.KeyUsageCertSign,
-	}, nil, nil)
+	}, nil, nil, 0)
 
 	var program strings.Builder
 	program.WriteString(x509ProgramHead)
 	within := notBefore.AddDate(5, 0, 0).Unix()
-	cases := []struct {
-		roots   []byte
-		host    string
-		now     int64
-		verdict string
-	}{
-		{root, "example.net", within, "verified"},
-		{root, "api.example.net", within, "verified"},
-		{root, "a.b.example.net", within, "name mismatch"},
-		{root, "example.net", notBefore.AddDate(0, 6, 0).Unix(), "expired"},
-		{other, "example.net", within, "unknown issuer"},
-	}
 	var want []string
-	for _, c := range cases {
-		fmt.Fprintf(&program, "    try check(allocator, %q, %q, %q, %q, %d);\n",
-			hex.EncodeToString(leaf), hex.EncodeToString(intermediate), hex.EncodeToString(c.roots),
-			c.host, c.now)
-		want = append(want, c.verdict)
+	for _, chain := range []testChain{
+		{0, 0, x509.ECDSAWithSHA256, x509.ECDSAWithSHA256},
+		{2048, 3072, x509.SHA384WithRSA, x509.SHA512WithRSA},
+	} {
+		root, intermediate, leaf := issueTestChain(t, notBefore, notAfter, chain)
+		cases := []struct {
+			roots   []byte
+			host    string
+			now     int64
+			verdict string
+		}{
+			{root, "example.net", within, "verified"},
+			{root, "api.example.net", within, "verified"},
+			{root, "a.b.example.net", within, "name mismatch"},
+			{root, "example.net", notBefore.AddDate(0, 6, 0).Unix(), "expired"},
+			{other, "example.net", within, "unknown issuer"},
+		}
+		for _, c := range cases {
+			fmt.Fprintf(&program, "    try check(allocator, %q, %q, %q, %q, %d);\n",
+				hex.EncodeToString(leaf), hex.EncodeToString(intermediate),
+				hex.EncodeToString(c.roots), c.host, c.now)
+			want = append(want, c.verdict)
+		}
 	}
 	program.WriteString("    return;\n}\n")
 	path := filepath.Join(t.TempDir(), "x509_oracle.kizu")
@@ -86,16 +78,66 @@ func TestX509VerifiesWhatGoIssues(t *testing.T) {
 	}
 }
 
+// A testChain says what keys and signatures a chain is issued with: RSA
+// of so many bits or P-256 when 0 for the root and the intermediate,
+// and the algorithm each of the intermediate and the leaf is signed
+// with.
+type testChain struct {
+	rootBits, intermediateBits           int
+	intermediateAlgorithm, leafAlgorithm x509.SignatureAlgorithm
+}
+
+// issueTestChain issues a root, an intermediate under it, and a leaf
+// for example.net under that, as `chain` says, valid from a year after
+// notBefore.
+func issueTestChain(
+	t *testing.T,
+	notBefore, notAfter time.Time,
+	chain testChain,
+) ([]byte, []byte, []byte) {
+	t.Helper()
+	root, rootKey := issueCertificate(t, &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "Test Root", Organization: []string{"Test"}},
+		NotBefore:    notBefore, NotAfter: notAfter, IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign,
+	}, nil, nil, chain.rootBits)
+	intermediate, intermediateKey := issueCertificate(t, &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "Test Intermediate", Organization: []string{"Test"}},
+		NotBefore:    notBefore, NotAfter: notAfter, IsCA: true, BasicConstraintsValid: true,
+		KeyUsage:           x509.KeyUsageCertSign,
+		SignatureAlgorithm: chain.intermediateAlgorithm,
+	}, root, rootKey, chain.intermediateBits)
+	leaf, _ := issueCertificate(t, &x509.Certificate{
+		SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "example.net"},
+		NotBefore: notBefore.AddDate(1, 0, 0), NotAfter: notAfter, BasicConstraintsValid: true,
+		KeyUsage:           x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:        []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:           []string{"example.net", "*.example.net"},
+		SignatureAlgorithm: chain.leafAlgorithm,
+	}, intermediate, intermediateKey, 0)
+	return root, intermediate, leaf
+}
+
 // issueCertificate signs template under the parent's key, or under its
-// own when there is no parent, and returns the DER and the new key.
+// own when there is no parent, and returns the DER and the new key: RSA
+// of `rsaBits` bits, or P-256 when that is 0.
 func issueCertificate(
 	t *testing.T,
 	template *x509.Certificate,
 	parentDER []byte,
-	parentKey *ecdsa.PrivateKey,
-) ([]byte, *ecdsa.PrivateKey) {
+	parentKey crypto.Signer,
+	rsaBits int,
+) ([]byte, crypto.Signer) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	var key crypto.Signer
+	var err error
+	if rsaBits == 0 {
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	} else {
+		key, err = rsa.GenerateKey(rand.Reader, rsaBits)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +150,7 @@ func issueCertificate(
 		}
 		signer = parentKey
 	}
-	der, err := x509.CreateCertificate(rand.Reader, template, parent, &key.PublicKey, signer)
+	der, err := x509.CreateCertificate(rand.Reader, template, parent, key.Public(), signer)
 	if err != nil {
 		t.Fatal(err)
 	}

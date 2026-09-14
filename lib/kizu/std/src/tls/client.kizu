@@ -80,8 +80,10 @@ pub struct Client {
     write_iv: std::string::String,
     write_sequence: i64,
     handshake_secret: std::string::String,
-    // The server's public key, from the first certificate of its chain.
+    // The server's public key, from the first certificate of its chain,
+    // and what kind it is.
     peer_key: std::string::String,
+    peer_key_algorithm: std::crypto::x509::KeyAlgorithm,
     certificate_requested: bool,
 }
 
@@ -120,6 +122,7 @@ pub fn connect(
         write_sequence: 0,
         handshake_secret: std::string::new(allocator),
         peer_key: std::string::new(allocator),
+        peer_key_algorithm: std::crypto::x509::KeyAlgorithm::Unsupported,
         certificate_requested: false,
     };
     errdefer client.deinit(allocator);
@@ -466,6 +469,7 @@ fn (self: &var std::tls::Client) take_certificate(
         let key = cert.public_key();
         self.peer_key.clear();
         try self.peer_key.append_bytes(allocator, key);
+        self.peer_key_algorithm = cert.key_algorithm;
     }
     try self.transcript.append_bytes(allocator, message);
     return;
@@ -519,10 +523,11 @@ fn (self: &var std::tls::Client) take_certificate_verify(
 ) -> std::tls::Failure!void {
     try self.advance_with(io, allocator, std::tls::Event::CertificateVerify);
     let verify = try self.read_certificate_verify_or_alert(io, allocator, message);
-    if verify.scheme != std::tls::signature_ecdsa_secp256r1_sha256() {
+    if !self.scheme_verifiable(verify.scheme) {
         try self.fail(io, allocator, alert_handshake_failure());
         return std::tls::Error::Unsupported;
     }
+    let kind = scheme_hash(verify.scheme);
     // The signed content: 64 spaces, the context string, a zero, and the
     // transcript hash (RFC 8446 §4.4.3).
     var signed = std::string::new(allocator);
@@ -537,12 +542,12 @@ fn (self: &var std::tls::Client) take_certificate_verify(
     self.hash_transcript(hash);
     let hash_bytes = hash_buffer.as_bytes();
     try signed.append_bytes(allocator, hash_bytes);
-    var digest_buffer = [32]u8{};
+    var digest_buffer = [64]u8{};
     let digest = digest_buffer.as_mut_bytes();
     let signed_bytes = signed.as_bytes();
-    std::crypto::sha256(signed_bytes, digest);
-    let digest_bytes = digest_buffer.as_bytes();
-    let valid = self.signature_valid(digest_bytes, message[verify.signature_start..verify.signature_end]);
+    std::crypto::digest_of(kind, signed_bytes, digest);
+    let digest_bytes = digest[0..std::crypto::digest_length(kind)];
+    let valid = self.signature_valid(verify.scheme, digest_bytes, message[verify.signature_start..verify.signature_end]);
     if !valid {
         try self.fail(io, allocator, alert_decrypt_error());
         return std::tls::Error::BadSignature;
@@ -551,11 +556,40 @@ fn (self: &var std::tls::Client) take_certificate_verify(
     return;
 }
 
-// signature_valid checks a DER signature over `digest` under the
-// server's key.
-fn (self: &std::tls::Client) signature_valid(digest: []u8, signature: []u8) -> bool {
+// scheme_verifiable reports whether a CertificateVerify scheme is one
+// this client checks with the key the server's certificate holds: ECDSA
+// with a P-256 key, RSA-PSS with an RSA key.
+fn (self: &std::tls::Client) scheme_verifiable(scheme: i64) -> bool {
+    if scheme == std::tls::signature_ecdsa_secp256r1_sha256() {
+        return self.peer_key_algorithm == std::crypto::x509::KeyAlgorithm::EcdsaP256;
+    }
+    if scheme == std::tls::signature_rsa_pss_rsae_sha256()
+        or scheme == std::tls::signature_rsa_pss_rsae_sha384()
+        or scheme == std::tls::signature_rsa_pss_rsae_sha512() {
+        return self.peer_key_algorithm == std::crypto::x509::KeyAlgorithm::Rsa;
+    }
+    return false;
+}
+
+// scheme_hash is the hash a verifiable scheme signs over.
+fn scheme_hash(scheme: i64) -> std::crypto::Hash {
+    if scheme == std::tls::signature_rsa_pss_rsae_sha384() {
+        return std::crypto::Hash::Sha384;
+    }
+    if scheme == std::tls::signature_rsa_pss_rsae_sha512() {
+        return std::crypto::Hash::Sha512;
+    }
+    return std::crypto::Hash::Sha256;
+}
+
+// signature_valid checks a CertificateVerify signature over `digest`
+// under the server's key, as the scheme says.
+fn (self: &std::tls::Client) signature_valid(scheme: i64, digest: []u8, signature: []u8) -> bool {
     let key = self.peer_key.as_bytes();
-    return std::crypto::x509::ecdsa_signature_verifies(key, digest, signature);
+    if scheme == std::tls::signature_ecdsa_secp256r1_sha256() {
+        return std::crypto::x509::ecdsa_signature_verifies(key, digest, signature);
+    }
+    return std::crypto::x509::rsa_pss_signature_verifies(scheme_hash(scheme), key, digest, signature);
 }
 
 fn (self: &var std::tls::Client) read_certificate_verify_or_alert(

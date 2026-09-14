@@ -26,16 +26,30 @@ pub error Error {
     UnknownIssuer,
 }
 
-// KeyAlgorithm is the kind of public key a certificate holds.
+// KeyAlgorithm is the kind of public key a certificate holds: a P-256
+// point, or an RSA modulus and exponent.
 pub enum KeyAlgorithm {
     EcdsaP256,
+    Rsa,
     Unsupported,
 }
 
-// SignatureAlgorithm is the kind of signature a certificate carries.
+// SignatureAlgorithm is the kind of signature a certificate carries:
+// ECDSA over SHA-256, or RSA PKCS #1 v1.5 over one of three hashes.
 pub enum SignatureAlgorithm {
     EcdsaSha256,
+    RsaSha256,
+    RsaSha384,
+    RsaSha512,
     Unsupported,
+}
+
+// An RsaKey is where an RSA public key's modulus and exponent lie in
+// the DER of `RSAPublicKey ::= SEQUENCE { modulus INTEGER,
+// publicExponent INTEGER }`.
+struct RsaKey {
+    modulus: std::crypto::x509::Element,
+    exponent: std::crypto::x509::Element,
 }
 
 // A Certificate is what `parse` read from one DER certificate. It keeps
@@ -126,6 +140,10 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
             }
         }
     }
+    if std::crypto::x509::content_is_hex(der, key_oid, oid_rsa_encryption()) {
+        let _ = try read_rsa_key(der, key_bits.start + 1, key_bits.end);
+        key_algorithm = KeyAlgorithm::Rsa;
+    }
 
     // What follows the key: issuer and subject unique IDs, which are
     // skipped, and the extensions of a version 3 certificate.
@@ -189,6 +207,15 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
     if std::crypto::x509::content_is_hex(der, signature_oid, oid_ecdsa_with_sha256()) {
         signature_kind = SignatureAlgorithm::EcdsaSha256;
     }
+    if std::crypto::x509::content_is_hex(der, signature_oid, oid_sha256_with_rsa()) {
+        signature_kind = SignatureAlgorithm::RsaSha256;
+    }
+    if std::crypto::x509::content_is_hex(der, signature_oid, oid_sha384_with_rsa()) {
+        signature_kind = SignatureAlgorithm::RsaSha384;
+    }
+    if std::crypto::x509::content_is_hex(der, signature_oid, oid_sha512_with_rsa()) {
+        signature_kind = SignatureAlgorithm::RsaSha512;
+    }
     return Certificate {
         der: der,
         tbs: tbs,
@@ -249,6 +276,22 @@ fn oid_ecdsa_with_sha256() -> []u8 {
     return "2a8648ce3d040302";
 }
 
+fn oid_rsa_encryption() -> []u8 {
+    return "2a864886f70d010101";
+}
+
+fn oid_sha256_with_rsa() -> []u8 {
+    return "2a864886f70d01010b";
+}
+
+fn oid_sha384_with_rsa() -> []u8 {
+    return "2a864886f70d01010c";
+}
+
+fn oid_sha512_with_rsa() -> []u8 {
+    return "2a864886f70d01010d";
+}
+
 fn oid_basic_constraints() -> []u8 {
     return "551d13";
 }
@@ -282,7 +325,9 @@ pub fn (self: &std::crypto::x509::Certificate) serial() -> []u8 {
 }
 
 // public_key is the key's bytes: for a P-256 key, the 65 of the
-// uncompressed point that `std::crypto::ecdsa_p256_verify` takes.
+// uncompressed point that `std::crypto::ecdsa_p256_verify` takes; for
+// an RSA key, the DER of `RSAPublicKey`, which
+// `rsa_pss_signature_verifies` reads.
 pub fn (self: &std::crypto::x509::Certificate) public_key() -> []u8 {
     return self.der[self.key_start..self.key_end];
 }
@@ -375,23 +420,67 @@ pub fn (self: &std::crypto::x509::Certificate) issued_by(issuer: &std::crypto::x
     if !std::mem::equal_bytes(mine, theirs) {
         return false;
     }
-    if self.signature_algorithm != SignatureAlgorithm::EcdsaSha256
-        or issuer.key_algorithm != KeyAlgorithm::EcdsaP256 {
-        return false;
-    }
-    var signature_buffer = [64]u8{};
-    let signature = signature_buffer.as_mut_bytes();
-    if !read_ecdsa_signature(self.der, self.signature_start, self.signature_end, signature) {
-        return false;
-    }
-    var digest_buffer = [32]u8{};
-    let digest = digest_buffer.as_mut_bytes();
-    let signed = self.der[self.tbs.head..self.tbs.end];
-    std::crypto::sha256(signed, digest);
     let key = issuer.public_key();
-    let signature_bytes = signature_buffer.as_bytes();
-    let digest_bytes = digest_buffer.as_bytes();
-    return std::crypto::ecdsa_p256_verify(key, digest_bytes, signature_bytes);
+    let signed = self.der[self.tbs.head..self.tbs.end];
+    let signature = self.der[self.signature_start..self.signature_end];
+    match self.signature_algorithm {
+        EcdsaSha256 => {
+            if issuer.key_algorithm != KeyAlgorithm::EcdsaP256 {
+                return false;
+            }
+            var digest_buffer = [32]u8{};
+            let digest = digest_buffer.as_mut_bytes();
+            std::crypto::sha256(signed, digest);
+            let digest_bytes = digest_buffer.as_bytes();
+            return ecdsa_signature_verifies(key, digest_bytes, signature);
+        },
+        RsaSha256 => return rsa_pkcs1_signature_verifies(std::crypto::Hash::Sha256, key, signed, signature),
+        RsaSha384 => return rsa_pkcs1_signature_verifies(std::crypto::Hash::Sha384, key, signed, signature),
+        RsaSha512 => return rsa_pkcs1_signature_verifies(std::crypto::Hash::Sha512, key, signed, signature),
+        Unsupported => return false,
+    }
+}
+
+// rsa_pkcs1_signature_verifies reports whether a certificate's RSA
+// PKCS #1 v1.5 signature over `signed` is valid under the issuer's
+// `RSAPublicKey` DER; a key of another shape gives false.
+fn rsa_pkcs1_signature_verifies(hash: std::crypto::Hash, public_key: []u8, signed: []u8, signature: []u8) -> bool {
+    let key = read_rsa_key(public_key, 0, std::mem::len(public_key)) catch return false;
+    var digest_buffer = [64]u8{};
+    let digest = digest_buffer.as_mut_bytes();
+    std::crypto::digest_of(hash, signed, digest);
+    let digest_bytes = digest[0..std::crypto::digest_length(hash)];
+    let modulus = public_key[key.modulus.start..key.modulus.end];
+    let exponent = public_key[key.exponent.start..key.exponent.end];
+    return std::crypto::rsa_pkcs1_verify(hash, modulus, exponent, digest_bytes, signature);
+}
+
+// rsa_pss_signature_verifies reports whether an RSA-PSS signature over
+// `digest` -- the form a TLS CertificateVerify carries under
+// `rsa_pss_rsae_sha256` and its SHA-384 and SHA-512 kin -- is valid
+// under an RSA `public_key` as `Certificate.public_key` gives it, the
+// way `std::crypto::rsa_pss_verify` judges; a key of another shape
+// gives false.
+pub fn rsa_pss_signature_verifies(hash: std::crypto::Hash, public_key: []u8, digest: []u8, signature: []u8) -> bool {
+    let key = read_rsa_key(public_key, 0, std::mem::len(public_key)) catch return false;
+    let modulus = public_key[key.modulus.start..key.modulus.end];
+    let exponent = public_key[key.exponent.start..key.exponent.end];
+    return std::crypto::rsa_pss_verify(hash, modulus, exponent, digest, signature);
+}
+
+// read_rsa_key reads `SEQUENCE { modulus INTEGER, publicExponent
+// INTEGER }` filling `start..end` of `der`.
+fn read_rsa_key(der: []u8, start: i64, end: i64) -> std::crypto::x509::Error!std::crypto::x509::RsaKey {
+    let list = try std::crypto::x509::expect_element(der, start, end, std::crypto::x509::tag_sequence());
+    if list.end != end {
+        return Error::Malformed;
+    }
+    let modulus = try std::crypto::x509::expect_element(der, list.start, list.end, std::crypto::x509::tag_integer());
+    let exponent = try std::crypto::x509::expect_element(der, modulus.end, list.end, std::crypto::x509::tag_integer());
+    if exponent.end != list.end {
+        return Error::Malformed;
+    }
+    return RsaKey { modulus: modulus, exponent: exponent };
 }
 
 // ecdsa_signature_verifies reports whether a DER-encoded ECDSA
