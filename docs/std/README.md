@@ -32,6 +32,7 @@
 | [compress](compress.md) | deflate / gzip / zlib の展開と圧縮 |
 | [crypto](crypto.md) | SHA-256、HMAC、HKDF、AEAD、X25519、ECDSA P-256、host の乱数 |
 | [crypto::x509](x509.md) | 証明書の DER を読み、chain を検証する |
+| [tls](tls.md) | TLS 1.3 client の handshake 状態機械 |
 | [fs](fs.md) | `Io` 経由の file system 操作 |
 | [net](net.md) | `Io` 経由の TCP listener と stream |
 | [http](http.md) | HTTP/1 の server、message、routing |

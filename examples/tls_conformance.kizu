@@ -1,0 +1,303 @@
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::mem;
+import std::string;
+import std::tls;
+
+// A TLS 1.3 client takes the server's handshake messages in one order and
+// no other; spec/Tls.lean is that order as a transition table, with proofs
+// that a closed connection stays closed, that only the awaited Finished
+// connects, and that application data is taken only once connected. `just
+// spec-trace` writes examples/fixtures/tls_trace.json: server messages,
+// what the table did with each, and the state afterwards. This program
+// replays those traces against std::tls and against a client that does not
+// mind the order, and names the first step where one disagrees with the table.
+
+pub struct Step {
+    pub event: string::String,
+    pub outcome: string::String,
+    pub state: string::String,
+}
+
+pub struct Trace {
+    pub seed: i64,
+    pub steps: array::Array<Step>,
+}
+
+pub struct Suite {
+    pub initial: string::String,
+    pub traces: array::Array<Trace>,
+}
+
+error TraceError {
+    UnknownEvent,
+    UnknownState,
+}
+
+fn state_name(state: tls::State) -> []u8 {
+    return match state {
+        WaitServerHello => "wait_server_hello",
+        WaitEncryptedExtensions => "wait_encrypted_extensions",
+        WaitCertificateRequest => "wait_certificate_request",
+        WaitCertificate => "wait_certificate",
+        WaitCertificateVerify => "wait_certificate_verify",
+        WaitFinished => "wait_finished",
+        Connected => "connected",
+        Closed => "closed",
+    };
+}
+
+fn event_name(event: tls::Event) -> []u8 {
+    return match event {
+        ServerHello => "server_hello",
+        HelloRetryRequest => "hello_retry_request",
+        EncryptedExtensions => "encrypted_extensions",
+        CertificateRequest => "certificate_request",
+        Certificate => "certificate",
+        CertificateVerify => "certificate_verify",
+        Finished => "finished",
+        NewSessionTicket => "new_session_ticket",
+        KeyUpdate => "key_update",
+        ApplicationData => "application_data",
+        CloseNotify => "close_notify",
+        FatalAlert => "fatal_alert",
+    };
+}
+
+fn outcome_name(outcome: tls::Outcome) -> []u8 {
+    return match outcome {
+        Applied => "applied",
+        Refused => "refused",
+        Unsupported => "unsupported",
+    };
+}
+
+fn parse_event(name: []u8) -> TraceError!tls::Event {
+    if mem::equal_bytes(name, "server_hello") {
+        return tls::Event::ServerHello;
+    }
+    if mem::equal_bytes(name, "hello_retry_request") {
+        return tls::Event::HelloRetryRequest;
+    }
+    if mem::equal_bytes(name, "encrypted_extensions") {
+        return tls::Event::EncryptedExtensions;
+    }
+    if mem::equal_bytes(name, "certificate_request") {
+        return tls::Event::CertificateRequest;
+    }
+    if mem::equal_bytes(name, "certificate") {
+        return tls::Event::Certificate;
+    }
+    if mem::equal_bytes(name, "certificate_verify") {
+        return tls::Event::CertificateVerify;
+    }
+    if mem::equal_bytes(name, "finished") {
+        return tls::Event::Finished;
+    }
+    if mem::equal_bytes(name, "new_session_ticket") {
+        return tls::Event::NewSessionTicket;
+    }
+    if mem::equal_bytes(name, "key_update") {
+        return tls::Event::KeyUpdate;
+    }
+    if mem::equal_bytes(name, "application_data") {
+        return tls::Event::ApplicationData;
+    }
+    if mem::equal_bytes(name, "close_notify") {
+        return tls::Event::CloseNotify;
+    }
+    if mem::equal_bytes(name, "fatal_alert") {
+        return tls::Event::FatalAlert;
+    }
+    return TraceError::UnknownEvent;
+}
+
+fn parse_state(name: []u8) -> TraceError!tls::State {
+    if mem::equal_bytes(name, "wait_server_hello") {
+        return tls::State::WaitServerHello;
+    }
+    if mem::equal_bytes(name, "wait_encrypted_extensions") {
+        return tls::State::WaitEncryptedExtensions;
+    }
+    if mem::equal_bytes(name, "wait_certificate_request") {
+        return tls::State::WaitCertificateRequest;
+    }
+    if mem::equal_bytes(name, "wait_certificate") {
+        return tls::State::WaitCertificate;
+    }
+    if mem::equal_bytes(name, "wait_certificate_verify") {
+        return tls::State::WaitCertificateVerify;
+    }
+    if mem::equal_bytes(name, "wait_finished") {
+        return tls::State::WaitFinished;
+    }
+    if mem::equal_bytes(name, "connected") {
+        return tls::State::Connected;
+    }
+    if mem::equal_bytes(name, "closed") {
+        return tls::State::Closed;
+    }
+    return TraceError::UnknownState;
+}
+
+// What every implementation offers: take a message, read the state.
+contract Client {
+    fn apply(event: tls::Event) -> tls::Outcome;
+    fn state() -> tls::State;
+}
+
+// The machine is std::tls and nothing else.
+struct Machine {
+    state: tls::State,
+}
+
+fn open_machine(initial: tls::State) -> Machine {
+    return Machine { state: initial };
+}
+
+fn (self: &var Machine) apply(event: tls::Event) -> tls::Outcome {
+    let next = tls::advance(self.state, event);
+    self.state = next.state;
+    return next.outcome;
+}
+
+fn (self: &Machine) state() -> tls::State {
+    return self.state;
+}
+
+impl Client for Machine;
+
+// An unordered client takes every handshake message whenever it arrives,
+// as if the order did not matter, and moves on when the table has a
+// place for it.
+struct Unordered {
+    state: tls::State,
+}
+
+fn open_unordered(initial: tls::State) -> Unordered {
+    return Unordered { state: initial };
+}
+
+fn is_handshake(event: tls::Event) -> bool {
+    return event != tls::Event::ApplicationData and event != tls::Event::CloseNotify
+        and event != tls::Event::FatalAlert;
+}
+
+fn (self: &var Unordered) apply(event: tls::Event) -> tls::Outcome {
+    let next = tls::advance(self.state, event);
+    if next.outcome == tls::Outcome::Refused and self.state != tls::State::Closed and is_handshake(event) {
+        return tls::Outcome::Applied;
+    }
+    self.state = next.state;
+    return next.outcome;
+}
+
+fn (self: &Unordered) state() -> tls::State {
+    return self.state;
+}
+
+impl Client for Unordered;
+
+// "<name>: trace <seed> step <index>: event <event> " -- the start of every
+// line that names a disagreement.
+fn describe(allocator: Allocator, out: &var string::String, name: []u8, trace: &Trace, index: i64, event: tls::Event) -> !void {
+    try out.append_bytes(allocator, name);
+    try out.append_bytes(allocator, ": trace ");
+    try fmt::append_i64(allocator, out, trace.seed);
+    try out.append_bytes(allocator, " step ");
+    try fmt::append_i64(allocator, out, index);
+    try out.append_bytes(allocator, ": event ");
+    try out.append_bytes(allocator, event_name(event));
+    try out.append_bytes(allocator, " ");
+    return;
+}
+
+// Replays one trace and reports the first step the implementation disagrees
+// on; true means every step agreed.
+fn replay<C>(allocator: Allocator, name: []u8, trace: &Trace, client: &var C) -> !bool {
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    var index = 0;
+    while trace.steps.at(index) |step| {
+        let event_text = step.event.as_bytes();
+        let event = try parse_event(event_text);
+        let outcome = client.apply(event);
+        let expected = step.outcome.as_bytes();
+        if !mem::equal_bytes(outcome_name(outcome), expected) {
+            try describe(allocator, &var line, name, trace, index, event);
+            try line.append_bytes(allocator, "expected ");
+            try line.append_bytes(allocator, expected);
+            try line.append_bytes(allocator, ", got ");
+            try line.append_bytes(allocator, outcome_name(outcome));
+            let text = line.as_bytes();
+            print(text);
+            return false;
+        }
+        let state_text = step.state.as_bytes();
+        let wanted = try parse_state(state_text);
+        let held = client.state();
+        if held != wanted {
+            try describe(allocator, &var line, name, trace, index, event);
+            try line.append_bytes(allocator, "state expected ");
+            try line.append_bytes(allocator, state_name(wanted));
+            try line.append_bytes(allocator, ", got ");
+            try line.append_bytes(allocator, state_name(held));
+            let text = line.as_bytes();
+            print(text);
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// Runs every trace against a fresh implementation and prints either the first
+// disagreement or the count of steps that agreed.
+fn conform<C>(allocator: Allocator, name: []u8, suite: &Suite, open: fn(tls::State) -> C) -> !void {
+    let initial_text = suite.initial.as_bytes();
+    let initial = try parse_state(initial_text);
+    var steps = 0;
+    var index = 0;
+    while suite.traces.at(index) |trace| {
+        var client = open(initial);
+        if !try replay<C>(allocator, name, trace, &var client) {
+            return;
+        }
+        steps = steps + trace.steps.len();
+        index = index + 1;
+    }
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, name);
+    try line.append_bytes(allocator, ": ");
+    try fmt::append_i64(allocator, &var line, index);
+    try line.append_bytes(allocator, " traces, ");
+    try fmt::append_i64(allocator, &var line, steps);
+    try line.append_bytes(allocator, " steps agree with the table");
+    let text = line.as_bytes();
+    print(text);
+    return;
+}
+
+fn main() -> !void {
+    let io = io::blocking();
+    let allocator = mem::page_allocator();
+    let text = try fs::read_file(io, allocator, "examples/fixtures/tls_trace.json", mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let document = text.as_bytes();
+    var suite = try json::decode<Suite>(allocator, document);
+    defer suite.deinit(allocator);
+    try conform<Unordered>(allocator, "unordered", &suite, open_unordered);
+    try conform<Machine>(allocator, "std::tls", &suite, open_machine);
+    return;
+}
+
+// run
+// features: std-json decode contract generics enum match fs io tls
+// dir: .
+// output:
+// unordered: trace 1 step 11: event finished expected refused, got applied
+// std::tls: 12 traces, 79 steps agree with the table
