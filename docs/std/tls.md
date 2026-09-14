@@ -124,8 +124,9 @@ RFC 8448 §3 の handshake の secret、key、record は `tests/behavior/src/tls
 
 ## 今は話さないこと
 
-- `TLS_AES_256_GCM_SHA384`(SHA-384 が無い)と、`ecdsa_secp256r1_sha256` 以外の
-  署名(RSA、P-384)。公開 CA の証明書の多くはこれらを使う
+- `TLS_AES_256_GCM_SHA384`(key schedule が SHA-256 固定)と、
+  `ecdsa_secp256r1_sha256` 以外の署名(RSA、P-384)。公開 CA の証明書の多くは
+  これらを使う
 - `HelloRetryRequest`、PSK / session resumption、0-RTT、client 証明書、
   自分から送る KeyUpdate、ALPN
 - server 側

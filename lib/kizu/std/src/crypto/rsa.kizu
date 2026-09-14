@@ -1,0 +1,281 @@
+// RSA signatures, as a TLS 1.3 client meets them: PKCS #1 v1.5 on a
+// certificate, and PSS on a certificate or on the handshake transcript
+// (RFC 8017 §8). Only verifying is here; signing needs a private key,
+// which has no place in a client yet. A public key is its modulus and
+// exponent as big-endian bytes, as a certificate's SubjectPublicKeyInfo
+// carries them; a modulus is at most 4096 bits.
+
+// rsa_pkcs1_verify reports whether `signature` is a valid
+// RSASSA-PKCS1-v1_5 signature, for the key `modulus` and `exponent`,
+// of a message whose digest under `hash` is `digest` (RFC 8017 §8.2.2).
+// A modulus that is even, wider than 4096 bits, or too narrow for the
+// padding, an exponent that is even or wider than 32 bits, or a
+// signature of another length than the modulus or not below it, is an
+// invalid signature and not a bug: the answer is false. A digest that is
+// not as long as `hash` makes is the caller's mistake and traps.
+pub fn rsa_pkcs1_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool {
+    if std::mem::len(digest) != digest_length(hash) {
+        std::internal::builtin::panic("crypto rsa_pkcs1_verify: digest length does not match the hash");
+    }
+    var encoded_buffer = [512]u8{};
+    let encoded = encoded_buffer.as_mut_bytes();
+    let length = recover_encoded(modulus, exponent, signature, encoded);
+    if length == 0 {
+        return false;
+    }
+    let message = encoded[0..length];
+    return pkcs1_encoded(message, hash, digest);
+}
+
+// rsa_pss_verify reports whether `signature` is a valid RSASSA-PSS
+// signature, for the key `modulus` and `exponent`, of a message whose
+// digest under `hash` is `digest` (RFC 8017 §8.1.2), with MGF1 over the
+// same hash and a salt as long as the digest, which is what TLS 1.3 and
+// certificates use. What is refused is as for `rsa_pkcs1_verify`.
+pub fn rsa_pss_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool {
+    if std::mem::len(digest) != digest_length(hash) {
+        std::internal::builtin::panic("crypto rsa_pss_verify: digest length does not match the hash");
+    }
+    var encoded_buffer = [512]u8{};
+    let encoded = encoded_buffer.as_mut_bytes();
+    let length = recover_encoded(modulus, exponent, signature, encoded);
+    if length == 0 {
+        return false;
+    }
+    let message = encoded[0..length];
+    let modulus_bits = bit_length_of_bytes(modulus);
+    return pss_encoded(message, modulus_bits, hash, digest);
+}
+
+// recover_encoded writes the encoded message a signature stands for,
+// signature^exponent mod modulus, as as many bytes as the modulus has
+// once its leading zeros are dropped, and returns that length; 0 when
+// the key or the signature is not one this can check.
+fn recover_encoded(modulus: []u8, exponent: []u8, signature: []u8, out: &var []u8) -> i64 {
+    let n_bytes = without_leading_zeros(modulus);
+    let e_bytes = without_leading_zeros(exponent);
+    let length = std::mem::len(n_bytes);
+    if length == 0 or length > 512 or n_bytes[length - 1] & 1 == 0 {
+        return 0;
+    }
+    let e_length = std::mem::len(e_bytes);
+    if e_length == 0 or e_length > 4 or e_bytes[e_length - 1] & 1 == 0 {
+        return 0;
+    }
+    if std::mem::len(signature) != length {
+        return 0;
+    }
+    let count = (length + 3) / 4;
+    var n_buffer = [128]u64{};
+    var s_buffer = [128]u64{};
+    let n = n_buffer.as_mut_slice();
+    let s = s_buffer.as_mut_slice();
+    limbs_of_padded_bytes(n, n_bytes, count);
+    limbs_of_padded_bytes(s, signature, count);
+    let n_view = n[0..count];
+    let s_view = s[0..count];
+    if !less_than(s_view, n_view) {
+        return 0;
+    }
+    var m_buffer = [257]u64{};
+    let m = m_buffer.as_mut_slice();
+    fill_modulus(m, n_view);
+    let m_view = m[0..count * 2 + 1];
+    var sm_buffer = [128]u64{};
+    var power_buffer = [128]u64{};
+    var plain_buffer = [128]u64{};
+    let sm = sm_buffer.as_mut_slice();
+    let power = power_buffer.as_mut_slice();
+    let plain = plain_buffer.as_mut_slice();
+    to_mont(sm, s_view, m_view);
+    mont_pow(power, sm, e_bytes, m_view);
+    from_mont(plain, power, m_view);
+    var padded_buffer = [512]u8{};
+    let padded = padded_buffer.as_mut_bytes();
+    let plain_view = plain[0..count];
+    bytes_of_limbs(padded, plain_view);
+    let skip = count * 4 - length;
+    for 0..length |index| {
+        out[index] = padded[skip + index];
+    }
+    return length;
+}
+
+// limbs_of_padded_bytes reads big-endian bytes into `count` limbs,
+// taking the bytes as the low end of 4 count.
+fn limbs_of_padded_bytes(o: &var []u64, bytes: []u8, count: i64) -> void {
+    var padded_buffer = [512]u8{};
+    let padded = padded_buffer.as_mut_bytes();
+    let skip = count * 4 - std::mem::len(bytes);
+    for 0..std::mem::len(bytes) |index| {
+        padded[skip + index] = bytes[index];
+    }
+    let padded_view = padded[0..count * 4];
+    limbs_of_bytes(o, padded_view);
+    return;
+}
+
+fn without_leading_zeros(bytes: []u8) -> []u8 {
+    var at = 0;
+    while at < std::mem::len(bytes) and bytes[at] == 0 {
+        at = at + 1;
+    }
+    return bytes[at..std::mem::len(bytes)];
+}
+
+// bit_length_of_bytes is the number of bits a big-endian number takes.
+fn bit_length_of_bytes(bytes: []u8) -> i64 {
+    let digits = without_leading_zeros(bytes);
+    let length = std::mem::len(digits);
+    if length == 0 {
+        return 0;
+    }
+    return (length - 1) * 8 + bit_length_of(cast<i64>(digits[0]));
+}
+
+// pkcs1_encoded reports whether an encoded message is what EMSA-PKCS1-v1_5
+// makes of `digest` (RFC 8017 §9.2): 00 01, at least eight ff, 00, the
+// DER DigestInfo naming the hash, and the digest.
+fn pkcs1_encoded(message: []u8, hash: Hash, digest: []u8) -> bool {
+    let prefix = digest_info(hash);
+    let prefix_length = std::mem::len(prefix) / 2;
+    let trailer = prefix_length + std::mem::len(digest);
+    let length = std::mem::len(message);
+    if length < trailer + 11 {
+        return false;
+    }
+    if message[0] != 0 or message[1] != 1 {
+        return false;
+    }
+    for 2..length - trailer - 1 |index| {
+        if message[index] != 255 {
+            return false;
+        }
+    }
+    if message[length - trailer - 1] != 0 {
+        return false;
+    }
+    if !matches_hex(message[length - trailer..length - std::mem::len(digest)], prefix) {
+        return false;
+    }
+    return std::mem::equal_bytes(message[length - std::mem::len(digest)..length], digest);
+}
+
+// digest_info is the DER DigestInfo prefix of RFC 8017 §9.2 note 1 for
+// a hash, as hex.
+fn digest_info(hash: Hash) -> []u8 {
+    return match hash {
+        Sha256 => "3031300d060960864801650304020105000420",
+        Sha384 => "3041300d060960864801650304020205000430",
+        Sha512 => "3051300d060960864801650304020305000440",
+    };
+}
+
+// matches_hex reports whether bytes are what a hex text spells.
+fn matches_hex(bytes: []u8, hex: []u8) -> bool {
+    if std::mem::len(bytes) * 2 != std::mem::len(hex) {
+        return false;
+    }
+    for 0..std::mem::len(bytes) |index| {
+        let high = hex_digit(hex[index * 2]);
+        let low = hex_digit(hex[index * 2 + 1]);
+        if cast<i64>(bytes[index]) != high * 16 + low {
+            return false;
+        }
+    }
+    return true;
+}
+
+// pss_encoded reports whether an encoded message is one EMSA-PSS could
+// have made of `digest` (RFC 8017 §9.1.2): the encoded message is one
+// bit narrower than the modulus, ends in bc, and holds the masked data
+// block and H; the block unmasked with MGF1 over H is zeros, 01, and
+// the salt, and H is the hash of eight zeros, the digest, and the salt.
+fn pss_encoded(message: []u8, modulus_bits: i64, hash: Hash, digest: []u8) -> bool {
+    let hash_length = std::mem::len(digest);
+    let salt_length = hash_length;
+    let bits = modulus_bits - 1;
+    let length = (bits + 7) / 8;
+    let width = std::mem::len(message);
+    if length > width {
+        return false;
+    }
+    if length < width and message[0] != 0 {
+        return false;
+    }
+    let encoded = message[width - length..width];
+    if length < hash_length + salt_length + 2 or encoded[length - 1] != 188 {
+        return false;
+    }
+    let block_length = length - hash_length - 1;
+    let masked = encoded[0..block_length];
+    let h = encoded[block_length..block_length + hash_length];
+    let spare = cast<u8>(length * 8 - bits);
+    if spare > 0 and (masked[0] >> (8 - spare)) != 0 {
+        return false;
+    }
+    var block_buffer = [512]u8{};
+    let block = block_buffer.as_mut_bytes();
+    mgf1(hash, h, block, block_length);
+    for 0..block_length |index| {
+        block[index] = block[index] ^ masked[index];
+    }
+    block[0] = block[0] & (cast<u8>(255) >> spare);
+    let salt_at = block_length - salt_length;
+    for 0..salt_at - 1 |index| {
+        if block[index] != 0 {
+            return false;
+        }
+    }
+    if block[salt_at - 1] != 1 {
+        return false;
+    }
+    // M' = eight zeros, the digest, the salt; its hash must be H.
+    var prime_buffer = [136]u8{};
+    let prime = prime_buffer.as_mut_bytes();
+    for 0..hash_length |index| {
+        prime[8 + index] = digest[index];
+    }
+    for 0..salt_length |index| {
+        prime[8 + hash_length + index] = block[salt_at + index];
+    }
+    var want_buffer = [64]u8{};
+    let want = want_buffer.as_mut_bytes();
+    let prime_view = prime[0..8 + hash_length + salt_length];
+    digest_of(hash, prime_view, want);
+    let got = want[0..hash_length];
+    return std::mem::equal_bytes(got, h);
+}
+
+// mgf1 writes `length` bytes of the mask generation function of RFC 8017
+// §B.2.1 over `seed`: the hashes of the seed followed by a big-endian
+// counter, from 0, concatenated and cut.
+fn mgf1(hash: Hash, seed: []u8, out: &var []u8, length: i64) -> void {
+    let hash_length = digest_length(hash);
+    var input_buffer = [68]u8{};
+    let input = input_buffer.as_mut_bytes();
+    let seed_length = std::mem::len(seed);
+    for 0..seed_length |index| {
+        input[index] = seed[index];
+    }
+    var block_buffer = [64]u8{};
+    let block = block_buffer.as_mut_bytes();
+    var at = 0;
+    var counter = 0;
+    while at < length {
+        input[seed_length] = cast<u8>((counter >> 24) & 255);
+        input[seed_length + 1] = cast<u8>((counter >> 16) & 255);
+        input[seed_length + 2] = cast<u8>((counter >> 8) & 255);
+        input[seed_length + 3] = cast<u8>(counter & 255);
+        let input_view = input[0..seed_length + 4];
+        digest_of(hash, input_view, block);
+        var index = 0;
+        while index < hash_length and at < length {
+            out[at] = block[index];
+            at = at + 1;
+            index = index + 1;
+        }
+        counter = counter + 1;
+    }
+    return;
+}

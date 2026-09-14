@@ -878,3 +878,267 @@ test "one million bytes go through the 128-byte blocks the long way" {
         "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b",
         "9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985");
 }
+
+fn bytes_of_hex_lines(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var digits = string::new(allocator);
+    defer digits.deinit(allocator);
+    for 0..mem::len(hex) |index| {
+        let byte = hex[index];
+        if (byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102) {
+            try digits.append_byte(allocator, byte);
+        }
+    }
+    let view = digits.as_bytes();
+    return bytes_of_hex(allocator, view);
+}
+
+fn rsa_message() -> []u8 {
+    return "The quick brown fox jumps over the lazy dog";
+}
+
+// rsa_verifies checks a signature over `message` under `hash`, with PSS
+// when `pss` is set and PKCS #1 v1.5 otherwise.
+fn rsa_verifies(
+    allocator: Allocator,
+    hash: crypto::Hash,
+    pss: bool,
+    modulus_hex: []u8,
+    exponent_hex: []u8,
+    message: []u8,
+    signature_hex: []u8
+) -> mem::Error!bool {
+    let modulus = try bytes_of_hex_lines(allocator, modulus_hex);
+    defer modulus.deinit(allocator);
+    let exponent = try bytes_of_hex_lines(allocator, exponent_hex);
+    defer exponent.deinit(allocator);
+    let signature = try bytes_of_hex_lines(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    var digest_buffer = [64]u8{};
+    let digest = digest_buffer.as_mut_bytes();
+    crypto::digest_of(hash, message, digest);
+    let digest_view = digest[0..crypto::digest_length(hash)];
+    let n = modulus.as_bytes();
+    let e = exponent.as_bytes();
+    let s = signature.as_bytes();
+    if pss {
+        return crypto::rsa_pss_verify(hash, n, e, digest_view, s);
+    }
+    return crypto::rsa_pkcs1_verify(hash, n, e, digest_view, s);
+}
+
+test "the 2048-bit key's PKCS #1 v1.5 and PSS signatures verify under each hash" {
+    let allocator = mem::page_allocator();
+    let n = rsa_2048_modulus();
+    let message = rsa_message();
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010001", message, rsa_2048_pkcs1_sha256()));
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha384, false, n, "010001", message, rsa_2048_pkcs1_sha384()));
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha512, false, n, "010001", message, rsa_2048_pkcs1_sha512()));
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, n, "010001", message, rsa_2048_pss_sha256()));
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha384, true, n, "010001", message, rsa_2048_pss_sha384()));
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha512, true, n, "010001", message, rsa_2048_pss_sha512()));
+}
+
+test "the 4096-bit key's signatures verify, and leading zeros on the key do not matter" {
+    let allocator = mem::page_allocator();
+    let n = rsa_4096_modulus();
+    let message = rsa_message();
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010001", message, rsa_4096_pkcs1_sha256()));
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, n, "010001", message, rsa_4096_pss_sha256()));
+    let padded = try string::from_bytes(allocator, "0000");
+    defer padded.deinit(allocator);
+    try padded.append_bytes(allocator, n);
+    let padded_view = padded.as_bytes();
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, padded_view, "00010001", message, rsa_4096_pkcs1_sha256()));
+}
+
+test "a changed signature, another message, or the other scheme is an invalid RSA signature" {
+    let allocator = mem::page_allocator();
+    let n = rsa_2048_modulus();
+    let message = rsa_message();
+    var changed = try string::from_bytes(allocator, rsa_2048_pkcs1_sha256());
+    defer changed.deinit(allocator);
+    let flipped = changed.as_mut_bytes();
+    flipped[40] = if flipped[40] == 48 { cast<u8>(49) } else { cast<u8>(48) };
+    let changed_view = changed.as_bytes();
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010001", message, changed_view));
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010001", "The quick brown fox jumps over the lazy cog", rsa_2048_pkcs1_sha256()));
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, true, n, "010001", message, rsa_2048_pkcs1_sha256()));
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010001", message, rsa_2048_pss_sha256()));
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, n, "010001", message, rsa_2048_pkcs1_sha256()));
+}
+
+test "a signature not below the modulus, a short one, an even modulus, or an even exponent is invalid" {
+    let allocator = mem::page_allocator();
+    let n = rsa_2048_modulus();
+    let message = rsa_message();
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010001", message, n));
+    let short = rsa_2048_pkcs1_sha256();
+    let short_view = short[0..mem::len(short) - 2];
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010001", message, short_view));
+    var even = try string::from_bytes(allocator, n);
+    defer even.deinit(allocator);
+    let even_bytes = even.as_mut_bytes();
+    let last = mem::len(n) - 1;
+    even_bytes[last] = if even_bytes[last] == 52 { cast<u8>(53) } else { cast<u8>(52) };
+    let even_view = even.as_bytes();
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, even_view, "010001", message, rsa_2048_pkcs1_sha256()));
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, n, "010000", message, rsa_2048_pkcs1_sha256()));
+}
+
+// rsa_2048_modulus and rsa_4096_modulus are the moduli of two keys
+// generated for these tests, exponent 65537; the signatures below were
+// made with them over the digests of "The quick brown fox jumps over
+// the lazy dog".
+fn rsa_2048_modulus() -> []u8 {
+    return
+        \\c643e6e65aa19b27d5fe848351dc0a1e8558e5e7254711b7437da815b1470b6e
+        \\d945154609b9b627e871935df0f76ac364d06d22003b609758c68aca96cf6d4b
+        \\458955f70686440be32d800bc0dffbdb87e4ad6f914f152961d3c012e1cb2538
+        \\f5f4c8d893fa16667e0326ff895d6a5bdd44cf7268516990577b4855ae419bdf
+        \\e37d7e3c0055d01bbe4c85c060b859783cfa510986048fba23381f478bb869ba
+        \\0eeb1240109ca9256d2f495baa51c7e50c0ef65a5c5ac58ca9976023205dfdc8
+        \\23c20340e99a026af90816fc73ea5ed3f863c9e20505c474fddcc91deabfd45e
+        \\50d17e05c44c1b74fd7fd8ee751b5932cac8c31066d8be11ba336bdf6a2c0455
+    ;
+}
+
+fn rsa_2048_pkcs1_sha256() -> []u8 {
+    return
+        \\01377dbde90b53224044551f2f3b10b17d460eacd35d7a812ca6238435c73c29
+        \\51b2ff582e097ee0ade1e6a57f4c0eb4455c2f19be511dbdfc0c15071952e64c
+        \\7ceedc8c427c0854fa39b1ff8bd8f37fb2c959fad16aa84b71161bece06f2ec3
+        \\cab388d2dc703456c8c8cc955013ec0d0fc6af8508281b0f2950af435e865d22
+        \\cb3ea13d290468267545f14c41ab7af2f51981f474dd76670998f4c51e542bab
+        \\c8c2357d2bcee4fb94fcbced7e96df2d3206e9503d2a3ac95c5ae06069878d1a
+        \\24eb5dedfd26b703eea08e835a74e357fa70d896d074147af94857d6e2d463e6
+        \\1f197a41b6a50b957a54596310ce08ad2792a49be8d4bb09ef0e7348cb14bb1a
+    ;
+}
+
+fn rsa_2048_pkcs1_sha384() -> []u8 {
+    return
+        \\235860c0b61f43b7eea2d546048678fedc5fec14781106b9abf55460b0bda668
+        \\0b50495a1ee70098b155acfa66f526b77b5d3b34387854b1532153550f49a0a4
+        \\6ede1e7c5617e539c4e918cbddd53e05917a49259a8af8dfb453e02c4d61a744
+        \\289988d62716c2280675881f316287212ed54ae81ed64d040a26180cde843b12
+        \\a805d4cf21e39b37cd0abe79ccfc96232d8ef0aaed527c5f10b580dcd05841e4
+        \\ad81fc8c897ea874a9a7b4881f493dd86f2ecc9f7889dd242fd2c581a723f5c0
+        \\8ff75672adc110b88ba74a15d6dbb0dcc37a0dbdf844f29139a0a23ee975c659
+        \\8477b00dda0c15118cd9c62139c52a058362249b518cfb5bdd53b0bb82eaea07
+    ;
+}
+
+fn rsa_2048_pkcs1_sha512() -> []u8 {
+    return
+        \\9b3d8f15ee9d28891daa891cc93609595f7b87e99d747667b71bb22eaa000fb2
+        \\ecf536693c4aac7f5d9da0c5088c48f2c73e8d5e79ad4f333fac134bc048faa1
+        \\026d48d3aba8b424b2f4867ab0558a07007f8bd37913803e33fd60e6c613c56b
+        \\a764f76ba13976e1e19940f190b48feb70a4cfc69cf319fd1c10dc96b656e57b
+        \\4b9d46e9700194f46106b88be668c77d6d70cb71c92d4cd6aef0f1542bd1bc4c
+        \\97659c493b61f69a484e943f31c5749192ef94ead3c016b93d9e1bc226c5b497
+        \\cb1ae89cfc70d9dfca53708d56dbab438feb73a61fd35b701f736741cd5736ab
+        \\445f3ca42d643abac243672decbb697f8a7610bf5d97d8990de2d23a1e233d2c
+    ;
+}
+
+fn rsa_2048_pss_sha256() -> []u8 {
+    return
+        \\1ad3041f9212d21f144273995a44d761f9877c44da17df7bee9b4511929f51aa
+        \\e2997f21984cbafe448d6af1f62cd24bef899bb4bf951eb095c302f8cf958af6
+        \\a927c26559843112e70d449bb7c3d62a1d7b9d40a72db3df0d4006e41c2f7d80
+        \\fe4acdd6bd6efdaa4fcefc382083d1228e2c901990baa0499a0335c0670e71d3
+        \\99cdbb5d1eafdda998e5910b1675966d27b9a1c7234fb490a171786a71f7454c
+        \\9737e409ac3b0e9cb4bbb8087120bc812983e764672282512670c4cb774f9d17
+        \\c71b6e45007cb84e688e5221cee8cbb5362b06ca749139025b9740679914116e
+        \\3a8a39551497138c34243b8e12bfb90fa4159707c0cd7191c48d56e57aec5b72
+    ;
+}
+
+fn rsa_2048_pss_sha384() -> []u8 {
+    return
+        \\1340e4dd6b8cbe998d967e9496839a741668453b6380295f462d51544fca2867
+        \\9d7c20f141421f21fa20f67987cc5b6a34e8a690207c8f73863f7046fce3e8ec
+        \\f37eb9ccb2760cd70e08ef367c6e1760c9304ed41356fee29f58c1e2e8dd5adb
+        \\17289ad9741a18b57016f19006745311824b9c8aed8a9504f08d1a03ed02aa7c
+        \\a43892531591b338be360aa6c2eca352a30ab7687347988b4b8b51ebb44ef39a
+        \\de76b4f46cfefb2fca77e2aeb9d2abbc6f73d3a3a13b1b83108b95e29582250a
+        \\3874025fc92e513ed414dddf59ef537b36b191e77cddbb1d277350fa9947e1d2
+        \\c4ff9b49d21ad7de8f458e2a66371dddb1b242c26767ad11c0ca8fceef02528b
+    ;
+}
+
+fn rsa_2048_pss_sha512() -> []u8 {
+    return
+        \\46be9eade26d5ab4f475d56359b6378c3ca6c48f16f6ad4186e898a988b6e93e
+        \\de46e64cbb85d3d8179daf0aa5b0403eea9775741fe05e5fbe71d33309348ad0
+        \\22709458d9867ba1ae884fac0cfdfa3a821ddfd7b2fb9149d2cde569ca0a77e6
+        \\e4cfc4bd4298a847a15f86537dfa306271873ceced2ae208a76e3cb7716bdf27
+        \\d150d506acda3cfc4e8fd775ea6f6c3906ecde1e560bf5b3a1c75901a063772d
+        \\17857c661f495a673eeec33b3e033f02f1df21a062378ffb4ff169ba83c28e49
+        \\e676caf7375717c124f2c537f3ed49f7861f000627668b6ad2cc1da002a65d45
+        \\41d059e375313f22ae3df6872baf5c55a0566a59050579081a25e0ae3b6be44b
+    ;
+}
+
+fn rsa_4096_pkcs1_sha256() -> []u8 {
+    return
+        \\62b7a705695d2cb19cdf3273c4f2f4b69c41ba202b66dbd513da0e97de42c660
+        \\8dfeea537ada0d890389a146d596d8ac7f72d0e573e9d24a317ebd85e263a930
+        \\820e0c9ca755ed5de72feb9a443920ae6ee98607d3d5151b7385d1d2a74667a5
+        \\f237b67d6c063ebdf23178024f3ada03482969da2200ce8fc18cfef1fb06eac9
+        \\36e200fb6b695731b0cf1683de1b0b33560d151f9d23b1f4f3057420da0df3d0
+        \\a992392bd50888a41a4c4df222271a71967951f33a3a38151a3c935fec1c1875
+        \\88f2728ed40ab2b6c063d388f15cbddde3be497437379b43c3b5ec782c81ffd6
+        \\6346c03f993739d1994d5692d29f937445a18362db28b37c7e7dde849b981d12
+        \\5dbb796b9648fa772f2eff092f128614d87b7d7308f4188e14aae69a39930481
+        \\767e96474b43b2d8f0df7d0d2c273425499030f5afea95bc91ae539ab25f6ac5
+        \\71c24ea96ff3c82cd512f75e204a0c1767768ddab6a7647d5caa9b90b364d8d4
+        \\d7e4bc75c4f6f2cf28ea0c6c23d181a1aac48c397ea0dee7c81446856701c562
+        \\61cccbff22cc5896d4133ed90bd7cb9f2fd3a159374337628b7bdfe05b3355a5
+        \\e4af3b3101f6d30df18d357a427268bc358b9266dc11a295ca71e96ff3b37cf3
+        \\833145f5d8e9b11509d7b8150139e75dd87db9dc0862d590285c10e0a88a046b
+        \\a960fa8e122beb20da4f757c0b777e92f8ddd28f13b1bdc290aa90bdc45a487a
+    ;
+}
+
+fn rsa_4096_pss_sha256() -> []u8 {
+    return
+        \\407850ccdc69d2be690cf0fc0fad1f29fd3aa803784297a74b8b09d4d540eb4a
+        \\d9ee77b7bf3a05a8553ecb96fc71b5ea448207641568496e5fc3c2c4888459fa
+        \\8aefb016027473eee4a5a2344de68f131c3b47ca885fd13bbee75618af8276a0
+        \\1b5390c9f8e1ada8af55e01629cb3cc833d03c928dafd4e576d2ed0222271c92
+        \\8f84b14ab24e00a211c2a9a14221826d801c462df936b383caaf570137d5f8e7
+        \\90746f7c4cdc8d4c286516948c816e34eaf0f4778714bd30e4a2ab2f0a203a6a
+        \\b60804e2dcd03ff5cf12f8927085ecb21ac9023872a64f9ba68e274585f6a570
+        \\c9c26c7a43ae81e6e4698674235cd73da2e930f0887061430476d48f6f3b6580
+        \\94d593aaeadcc0468c83b5bfbfe0c3d21cc6c570579c311187d0761e2c30b87c
+        \\2fb8caa6c6eb06b4f78a54fd2782f86369038bcd1369e54d4771ed239cab0683
+        \\24f25928cc06d8f099c526d41b431c624ead16ed29645b28e52fa5a7c2898746
+        \\2a69244d9adeea84c9b51aab19ae45c479e1b602c37c307310a31af2a249f561
+        \\db1404a6cf79116db4433c45f1c4cd6c404b2889c57b2259964a6b90e275441a
+        \\78e31b3f86bd5c7bf648b3fef21fe550e8d15b8db23e09d11ce451217926bd60
+        \\ff672965bc81769ea6783ac1f87cfc44b82dee9d967530b5ddf8ccdb289ae949
+        \\006b1b1d526687e142147e39250657777b9a9f1a5d28b07a527f8d0d6134cb21
+    ;
+}
+
+fn rsa_4096_modulus() -> []u8 {
+    return
+        \\aa5452584a105b858090eea1745613c7562704cfb9ba7e38646bd7d3ecddd187
+        \\703317409d87633240c9ef78a2e95bdd02d777e24d5851ba0d14255f3727b8df
+        \\95f20990d3a795fed218d19bd7f7e2c31a2ec7c35f84519b0cdf12467587e5e2
+        \\a5782f6dc56bb24d095432b4e7010ff5f545a421194f366e91d643e60d0965e9
+        \\dd8219ca29e666c1be602576ca083394969dd14a202ae06438fbb6f0fbb23421
+        \\ec6d32fc2d69d1c18414e35f53b73e2153654b3b81b7045c2e73998fadfee7c7
+        \\a4910a2696a489ee8fdd57bac3bf2bebfdeb5768d24442d5a349f242be139d03
+        \\70d39b33659e5b7bc70b15e9e20f891cf44c25bd3dac3a4440fdf96a2738d961
+        \\0c08cc73c79352dcad4a9b28ea4fa7dba3e3d4859127bb96454acf85e56fd6a6
+        \\a3cd7657696989942cf7da3730643358dff6461592121ae6f39db87c1399285a
+        \\98e3d1e4039cfe0221b80bd7fbe922a26af40f859f0f4580b5c4c32f50646383
+        \\f8ad405501666dbee6837f03dc386b7574eff4c10ebaa2a39520b97d4b15bf70
+        \\3e1929a8666be230555a3bf3d42fc3cf88a5f51a823a1a4c20303a45c9a35990
+        \\8c15085b76ddf9a3011456523a4716708750b014baa0f689c7c264328e609685
+        \\4037844dc3d9dc90413430b4a31e06e446ecb195629ae93d84c43ab338725cc2
+        \\0bcb29031e34631fea31df411789fadbc66d05bd5292c39c029c82ff33d24f7f
+    ;
+}
