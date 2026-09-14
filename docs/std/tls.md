@@ -61,7 +61,8 @@ try client.close(io, allocator);
 ## 接続
 
 `connect` は ClientHello(TLS 1.3 だけ、`TLS_AES_128_GCM_SHA256` と
-`TLS_CHACHA20_POLY1305_SHA256`、x25519、`ecdsa_secp256r1_sha256`、server_name)を
+`TLS_CHACHA20_POLY1305_SHA256`、x25519、`ecdsa_secp256r1_sha256` と
+`rsa_pss_rsae_sha256` / 384 / 512(証明書には `rsa_pkcs1_*` も)、server_name)を
 送り、server の message を状態機械の順に受けます。ServerHello で共有秘密と
 handshake の鍵を作り、Certificate は `x509::verify_chain(chain, roots, host, now)` で
 判断し、CertificateVerify は transcript hash への署名を証明書の鍵で検証し、Finished
@@ -124,9 +125,8 @@ RFC 8448 §3 の handshake の secret、key、record は `tests/behavior/src/tls
 
 ## 今は話さないこと
 
-- `TLS_AES_256_GCM_SHA384`(key schedule が SHA-256 固定)と、
-  `ecdsa_secp256r1_sha256` 以外の署名(RSA、P-384)。公開 CA の証明書の多くは
-  これらを使う
+- `TLS_AES_256_GCM_SHA384`(key schedule が SHA-256 固定)と、P-384 の署名
+  (`ecdsa_secp384r1_sha384`)
 - `HelloRetryRequest`、PSK / session resumption、0-RTT、client 証明書、
   自分から送る KeyUpdate、ALPN
 - server 側

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -25,27 +27,33 @@ import (
 // did not write has to accept the ClientHello, verify the client's
 // Finished, and read what it sends. The same server is then refused for
 // a host its certificate does not name, and under a root that did not
-// issue it.
+// issue it; a server with an RSA key, which signs its CertificateVerify
+// with RSA-PSS, is talked to as well.
 func TestTlsClientTalksToGoServer(t *testing.T) {
-	der, key := selfSignedServer(t, "localhost")
-	other, _ := selfSignedServer(t, "other.test")
+	der, key := selfSignedServer(t, "localhost", 0)
+	other, _ := selfSignedServer(t, "other.test", 0)
+	rsaDER, rsaKey := selfSignedServer(t, "localhost", 2048)
 	path := filepath.Join(t.TempDir(), "tls_client.kizu")
 	if err := os.WriteFile(path, []byte(tlsClientProgram), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
 		name string
+		cert []byte
+		key  crypto.PrivateKey
 		root []byte
 		host string
 		want string
 	}{
-		{"echo", der, "localhost", "connected with AES-128-GCM\nHELLO OVER TLS\nclosed"},
-		{"wrong host", der, "example.test", "NameMismatch"},
-		{"wrong root", other, "localhost", "UnknownIssuer"},
+		{"echo", der, key, der, "localhost", "connected with AES-128-GCM\nHELLO OVER TLS\nclosed"},
+		{"wrong host", der, key, der, "example.test", "NameMismatch"},
+		{"wrong root", der, key, other, "localhost", "UnknownIssuer"},
+		{"echo over RSA", rsaDER, rsaKey, rsaDER, "localhost",
+			"connected with AES-128-GCM\nHELLO OVER TLS\nclosed"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			port, done := serveOnce(t, der, key)
+			port, done := serveOnce(t, tt.cert, tt.key)
 			out, _ := kizuCommand("run", path, "--",
 				fmt.Sprint(port), hex.EncodeToString(tt.root), tt.host).CombinedOutput()
 			<-done
@@ -56,11 +64,18 @@ func TestTlsClientTalksToGoServer(t *testing.T) {
 	}
 }
 
-// selfSignedServer makes a P-256 certificate for `host`, self-signed and
-// marked as a CA so it can be its own root.
-func selfSignedServer(t *testing.T, host string) ([]byte, *ecdsa.PrivateKey) {
+// selfSignedServer makes a certificate for `host`, self-signed and
+// marked as a CA so it can be its own root, with an RSA key of `rsaBits`
+// bits or a P-256 key when that is 0.
+func selfSignedServer(t *testing.T, host string, rsaBits int) ([]byte, crypto.Signer) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	var key crypto.Signer
+	var err error
+	if rsaBits == 0 {
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	} else {
+		key, err = rsa.GenerateKey(rand.Reader, rsaBits)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +89,7 @@ func selfSignedServer(t *testing.T, host string) ([]byte, *ecdsa.PrivateKey) {
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		DNSNames:              []string{host},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +99,7 @@ func selfSignedServer(t *testing.T, host string) ([]byte, *ecdsa.PrivateKey) {
 // serveOnce listens on a free port and, in the background, accepts one
 // connection, completes the TLS handshake, and echoes what it reads in
 // upper case. Whatever happens, `done` is closed when the server is.
-func serveOnce(t *testing.T, der []byte, key *ecdsa.PrivateKey) (int, chan struct{}) {
+func serveOnce(t *testing.T, der []byte, key crypto.PrivateKey) (int, chan struct{}) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

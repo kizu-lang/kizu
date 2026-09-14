@@ -1,5 +1,6 @@
 import std::array;
 import std::crypto;
+import std::crypto::x509;
 import std::mem;
 import std::string;
 import std::testing;
@@ -521,6 +522,70 @@ test "a ClientHello carries what the client offers and a ServerHello reads back"
         testing::expect(false);
     } else |err| {
         testing::expect(err == tls::Error::IllegalParameter);
+    }
+}
+
+// certificate_verify_digest is the SHA-256 of what the RFC 8448 server
+// signed in its CertificateVerify: 64 spaces, the context string, a
+// zero, and the hash of the transcript through its Certificate.
+fn certificate_verify_digest(allocator: Allocator, digest: &var []u8) -> mem::Error!void {
+    var through_certificate = try transcript(allocator, false);
+    defer through_certificate.deinit(allocator);
+    let extensions = try bytes_of_hex(allocator, encrypted_extensions());
+    defer extensions.deinit(allocator);
+    try through_certificate.append_string(allocator, &extensions);
+    let cert = try bytes_of_hex(allocator, certificate());
+    defer cert.deinit(allocator);
+    try through_certificate.append_string(allocator, &cert);
+    var hash = [32]u8{};
+    let hash_view = hash.as_mut_bytes();
+    let through_bytes = through_certificate.as_bytes();
+    tls::transcript_hash(through_bytes, hash_view);
+    var signed = string::new(allocator);
+    defer signed.deinit(allocator);
+    for 0..64 |_| {
+        try signed.append_byte(allocator, 32);
+    }
+    try signed.append_bytes(allocator, "TLS 1.3, server CertificateVerify");
+    try signed.append_byte(allocator, 0);
+    let hash_bytes = hash.as_bytes();
+    try signed.append_bytes(allocator, hash_bytes);
+    let signed_bytes = signed.as_bytes();
+    crypto::sha256(signed_bytes, digest);
+    return;
+}
+
+test "the RFC 8448 server's RSA key verifies its CertificateVerify and nothing else" {
+    let allocator = mem::page_allocator();
+    let message = try bytes_of_hex(allocator, certificate());
+    defer message.deinit(allocator);
+    let message_bytes = message.as_bytes();
+    var chain = array::new<string::String>(allocator);
+    defer chain.deinit(allocator);
+    try tls::read_certificate(allocator, message_bytes, &var chain);
+    var digest = [32]u8{};
+    let digest_view = digest.as_mut_bytes();
+    try certificate_verify_digest(allocator, digest_view);
+    let digest_bytes = digest.as_bytes();
+    var verify = try bytes_of_hex(allocator, certificate_verify());
+    defer verify.deinit(allocator);
+    if chain.at(0) |der| {
+        let der_bytes = der.as_bytes();
+        let cert = try x509::parse(der_bytes);
+        testing::expect(cert.key_algorithm == x509::KeyAlgorithm::Rsa);
+        testing::expect(cert.signature_algorithm == x509::SignatureAlgorithm::RsaSha256);
+        let key = cert.public_key();
+        let verify_bytes = verify.as_bytes();
+        let read = try tls::read_certificate_verify(verify_bytes);
+        let signature = verify_bytes[read.signature_start..read.signature_end];
+        testing::expect(x509::rsa_pss_signature_verifies(crypto::Hash::Sha256, key, digest_bytes, signature));
+        testing::expect(!x509::rsa_pss_signature_verifies(crypto::Hash::Sha256, key, message_bytes[0..32], signature));
+        testing::expect(!x509::ecdsa_signature_verifies(key, digest_bytes, signature));
+        let changed = verify.as_mut_bytes();
+        changed[40] = changed[40] ^ 1;
+        let changed_bytes = verify.as_bytes();
+        let changed_signature = changed_bytes[read.signature_start..read.signature_end];
+        testing::expect(!x509::rsa_pss_signature_verifies(crypto::Hash::Sha256, key, digest_bytes, changed_signature));
     }
 }
 
