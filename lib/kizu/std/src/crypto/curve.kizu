@@ -1,67 +1,117 @@
-// The NIST P-256 curve (FIPS 186-4 §D.1.2.3, SEC 2 secp256r1), as far
-// as verifying a signature needs it: the field prime p and the group
-// order n as moduli for the arithmetic in limbs.kizu, and point addition
-// and doubling in Jacobian coordinates. Numbers are 256 bits, eight
-// limbs; the point functions take the modulus view of p and read their
-// width from it.
+// The NIST curves P-256 and P-384 (FIPS 186-4 §D.1.2, SEC 2 secp256r1
+// and secp384r1), as far as verifying a signature needs them: each
+// curve's field prime p and group order n as moduli for the arithmetic
+// in limbs.kizu, its constant b and generator G, and point addition and
+// doubling in Jacobian coordinates, which take the modulus view of p
+// and read their width from it -- eight limbs for P-256, twelve for
+// P-384. Both curves have a = -3, so one set of formulas serves.
 //
 // Everything here works on public data -- a certificate's key, a
 // signature, a digest -- so it branches on values and compares them
 // early; nothing here handles a private key.
 
+// Curve names one of the two curves.
+enum Curve {
+    P256,
+    P384,
+}
+
+// curve_bytes is how many bytes a coordinate or a scalar takes.
+fn curve_bytes(curve: Curve) -> i64 {
+    return match curve {
+        P256 => 32,
+        P384 => 48,
+    };
+}
+
 // fill_field writes the modulus view for the field prime p.
-fn fill_field(o: &var []u64) -> void {
-    var p_buffer = [8]u64{};
+fn fill_field(o: &var []u64, curve: Curve) -> void {
+    var p_buffer = [12]u64{};
     let p = p_buffer.as_mut_slice();
-    limbs_of_hex(p, 0, "ffffffff 00000001 00000000 00000000 00000000 ffffffff ffffffff ffffffff");
-    fill_modulus(o, p);
+    let hex = match curve {
+        P256 => "ffffffff 00000001 00000000 00000000 00000000 ffffffff ffffffff ffffffff",
+        P384 =>
+            \\ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff fffffffe
+            \\ffffffff 00000000 00000000 ffffffff
+        ,
+    };
+    limbs_of_hex(p, 0, hex);
+    let p_view = p[0..curve_bytes(curve) / 4];
+    fill_modulus(o, p_view);
     return;
 }
 
 // fill_order writes the modulus view for the group order n.
-fn fill_order(o: &var []u64) -> void {
-    var n_buffer = [8]u64{};
+fn fill_order(o: &var []u64, curve: Curve) -> void {
+    var n_buffer = [12]u64{};
     let n = n_buffer.as_mut_slice();
-    limbs_of_hex(n, 0, "ffffffff 00000000 ffffffff ffffffff bce6faad a7179e84 f3b9cac2 fc632551");
-    fill_modulus(o, n);
+    let hex = match curve {
+        P256 => "ffffffff 00000000 ffffffff ffffffff bce6faad a7179e84 f3b9cac2 fc632551",
+        P384 =>
+            \\ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff c7634d81 f4372ddf
+            \\581a0db2 48b0a77a ecec196a ccc52973
+        ,
+    };
+    limbs_of_hex(n, 0, hex);
+    let n_view = n[0..curve_bytes(curve) / 4];
+    fill_modulus(o, n_view);
     return;
 }
 
 // curve_b is the constant b of y^2 = x^3 - 3x + b.
-fn curve_b() -> []u8 {
-    return "5ac635d8 aa3a93e7 b3ebbd55 769886bc 651d06b0 cc53b0f6 3bce3c3e 27d2604b";
+fn curve_b(curve: Curve) -> []u8 {
+    return match curve {
+        P256 => "5ac635d8 aa3a93e7 b3ebbd55 769886bc 651d06b0 cc53b0f6 3bce3c3e 27d2604b",
+        P384 =>
+            \\b3312fa7 e23ee7e4 988e056b e3f82d19 181d9c6e fe814112 0314088f 5013875a
+            \\c656398d 8a2ed19d 2a85c8ed d3ec2aef
+        ,
+    };
 }
 
 // generator_x and generator_y are the affine coordinates of G.
-fn generator_x() -> []u8 {
-    return "6b17d1f2 e12c4247 f8bce6e5 63a440f2 77037d81 2deb33a0 f4a13945 d898c296";
+fn generator_x(curve: Curve) -> []u8 {
+    return match curve {
+        P256 => "6b17d1f2 e12c4247 f8bce6e5 63a440f2 77037d81 2deb33a0 f4a13945 d898c296",
+        P384 =>
+            \\aa87ca22 be8b0537 8eb1c71e f320ad74 6e1d3b62 8ba79b98 59f741e0 82542a38
+            \\5502f25d bf55296c 3a545e38 72760ab7
+        ,
+    };
 }
 
-fn generator_y() -> []u8 {
-    return "4fe342e2 fe1a7f9b 8ee7eb4a 7c0f9e16 2bce3357 6b315ece cbb64068 37bf51f5";
+fn generator_y(curve: Curve) -> []u8 {
+    return match curve {
+        P256 => "4fe342e2 fe1a7f9b 8ee7eb4a 7c0f9e16 2bce3357 6b315ece cbb64068 37bf51f5",
+        P384 =>
+            \\3617de4a 96262c6f 5d9e98bf 9292dc29 f8f41dbd 289a147c e9da3113 b5f0b8c0
+            \\0a60b1ce 1d7e819d 7a431d7c 90ea0e5f
+        ,
+    };
 }
 
-// A point is 24 limbs: Jacobian X, Y, Z in Montgomery form, where the
-// affine point is (X / Z^2, Y / Z^3) and Z = 0 is the point at infinity.
-fn point_x(p: []u64) -> []u64 {
-    return p[0..8];
+// A point is 3 count limbs: Jacobian X, Y, Z in Montgomery form, where
+// the affine point is (X / Z^2, Y / Z^3) and Z = 0 is the point at
+// infinity. `count` is the width the modulus view gives.
+fn point_x(p: []u64, count: i64) -> []u64 {
+    return p[0..count];
 }
 
-fn point_y(p: []u64) -> []u64 {
-    return p[8..16];
+fn point_y(p: []u64, count: i64) -> []u64 {
+    return p[count..count * 2];
 }
 
-fn point_z(p: []u64) -> []u64 {
-    return p[16..24];
+fn point_z(p: []u64, count: i64) -> []u64 {
+    return p[count * 2..count * 3];
 }
 
-fn is_infinity(p: []u64) -> bool {
-    let z = point_z(p);
+fn is_infinity(p: []u64, count: i64) -> bool {
+    let z = point_z(p, count);
     return is_zero(z);
 }
 
-fn copy_point(o: &var []u64, p: []u64) -> void {
-    for 0..24 |index| {
+fn copy_point(o: &var []u64, p: []u64, count: i64) -> void {
+    for 0..count * 3 |index| {
         o[index] = p[index];
     }
     return;
@@ -74,16 +124,16 @@ fn copy_point(o: &var []u64, p: []u64) -> void {
 // Y' = alpha (4 beta - X') - 8 gamma^2.
 fn point_double(o: &var []u64, p: []u64, m: []u64) -> void {
     let count = count_of(m);
-    let x = point_x(p);
-    let y = point_y(p);
-    let z = point_z(p);
-    var delta_buffer = [8]u64{};
-    var gamma_buffer = [8]u64{};
-    var beta_buffer = [8]u64{};
-    var alpha_buffer = [8]u64{};
-    var t1_buffer = [8]u64{};
-    var t2_buffer = [8]u64{};
-    var t3_buffer = [8]u64{};
+    let x = point_x(p, count);
+    let y = point_y(p, count);
+    let z = point_z(p, count);
+    var delta_buffer = [12]u64{};
+    var gamma_buffer = [12]u64{};
+    var beta_buffer = [12]u64{};
+    var alpha_buffer = [12]u64{};
+    var t1_buffer = [12]u64{};
+    var t2_buffer = [12]u64{};
+    var t3_buffer = [12]u64{};
     let delta = delta_buffer.as_mut_slice();
     let gamma = gamma_buffer.as_mut_slice();
     let beta = beta_buffer.as_mut_slice();
@@ -111,7 +161,7 @@ fn point_double(o: &var []u64, p: []u64, m: []u64) -> void {
     mont_mul(t2, t1, t1, m);
     mod_sub(t1, t2, gamma, m);
     mod_sub(t2, t1, delta, m);
-    copy_limbs(o, 16, t2, count);
+    copy_limbs(o, count * 2, t2, count);
     // Y' = alpha (4 beta - X') - 8 gamma^2
     mod_add(t1, beta, beta, m);
     mod_add(t2, t1, t1, m);
@@ -122,7 +172,7 @@ fn point_double(o: &var []u64, p: []u64, m: []u64) -> void {
     mod_add(t1, t3, t3, m);
     mod_add(t3, t1, t1, m);
     mod_sub(t1, t2, t3, m);
-    copy_limbs(o, 8, t1, count);
+    copy_limbs(o, count, t1, count);
     return;
 }
 
@@ -134,34 +184,34 @@ fn point_double(o: &var []u64, p: []u64, m: []u64) -> void {
 // other; equal points double, and opposite points give infinity.
 fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     let count = count_of(m);
-    if is_infinity(p) {
-        copy_point(o, q);
+    if is_infinity(p, count) {
+        copy_point(o, q, count);
         return;
     }
-    if is_infinity(q) {
-        copy_point(o, p);
+    if is_infinity(q, count) {
+        copy_point(o, p, count);
         return;
     }
-    let x1 = point_x(p);
-    let y1 = point_y(p);
-    let z1 = point_z(p);
-    let x2 = point_x(q);
-    let y2 = point_y(q);
-    let z2 = point_z(q);
-    var z1z1_buffer = [8]u64{};
-    var z2z2_buffer = [8]u64{};
-    var u1_buffer = [8]u64{};
-    var u2_buffer = [8]u64{};
-    var s1_buffer = [8]u64{};
-    var s2_buffer = [8]u64{};
-    var h_buffer = [8]u64{};
-    var i_buffer = [8]u64{};
-    var j_buffer = [8]u64{};
-    var r_buffer = [8]u64{};
-    var v_buffer = [8]u64{};
-    var t1_buffer = [8]u64{};
-    var t2_buffer = [8]u64{};
-    var t3_buffer = [8]u64{};
+    let x1 = point_x(p, count);
+    let y1 = point_y(p, count);
+    let z1 = point_z(p, count);
+    let x2 = point_x(q, count);
+    let y2 = point_y(q, count);
+    let z2 = point_z(q, count);
+    var z1z1_buffer = [12]u64{};
+    var z2z2_buffer = [12]u64{};
+    var u1_buffer = [12]u64{};
+    var u2_buffer = [12]u64{};
+    var s1_buffer = [12]u64{};
+    var s2_buffer = [12]u64{};
+    var h_buffer = [12]u64{};
+    var i_buffer = [12]u64{};
+    var j_buffer = [12]u64{};
+    var r_buffer = [12]u64{};
+    var v_buffer = [12]u64{};
+    var t1_buffer = [12]u64{};
+    var t2_buffer = [12]u64{};
+    var t3_buffer = [12]u64{};
     let z1z1 = z1z1_buffer.as_mut_slice();
     let z2z2 = z2z2_buffer.as_mut_slice();
     let u1 = u1_buffer.as_mut_slice();
@@ -190,7 +240,7 @@ fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
         if is_zero(t1) {
             point_double(o, p, m);
         } else {
-            for 0..24 |index| {
+            for 0..count * 3 |index| {
                 o[index] = 0;
             }
         }
@@ -213,14 +263,14 @@ fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     mont_mul(t1, s1, j, m);
     mod_add(t3, t1, t1, m);
     mod_sub(t1, t2, t3, m);
-    copy_limbs(o, 8, t1, count);
+    copy_limbs(o, count, t1, count);
     // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) H
     mod_add(t1, z1, z2, m);
     mont_mul(t2, t1, t1, m);
     mod_sub(t1, t2, z1z1, m);
     mod_sub(t2, t1, z2z2, m);
     mont_mul(t1, t2, h, m);
-    copy_limbs(o, 16, t1, count);
+    copy_limbs(o, count * 2, t1, count);
     return;
 }
 
@@ -228,27 +278,28 @@ fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
 // plain numbers: Montgomery form with Z = 1.
 fn point_from_affine(o: &var []u64, x: []u64, y: []u64, m: []u64) -> void {
     let count = count_of(m);
-    var t_buffer = [8]u64{};
+    var t_buffer = [12]u64{};
     let t = t_buffer.as_mut_slice();
     to_mont(t, x, m);
     copy_limbs(o, 0, t, count);
     to_mont(t, y, m);
-    copy_limbs(o, 8, t, count);
-    var one_buffer = [8]u64{};
+    copy_limbs(o, count, t, count);
+    var one_buffer = [12]u64{};
     let one = one_buffer.as_mut_slice();
     one[0] = 1;
     to_mont(t, one, m);
-    copy_limbs(o, 16, t, count);
+    copy_limbs(o, count * 2, t, count);
     return;
 }
 
 // affine_x writes the plain affine x of a point that is not infinity:
 // X / Z^2, out of Montgomery form.
 fn affine_x(o: &var []u64, p: []u64, m: []u64) -> void {
-    let x = point_x(p);
-    let z = point_z(p);
-    var t1_buffer = [8]u64{};
-    var t2_buffer = [8]u64{};
+    let count = count_of(m);
+    let x = point_x(p, count);
+    let z = point_z(p, count);
+    var t1_buffer = [12]u64{};
+    var t2_buffer = [12]u64{};
     let t1 = t1_buffer.as_mut_slice();
     let t2 = t2_buffer.as_mut_slice();
     mont_mul(t1, z, z, m);
@@ -263,14 +314,15 @@ fn affine_x(o: &var []u64, p: []u64, m: []u64) -> void {
 // ready for the bits where both are set (Straus and Shamir). The
 // scalars are public here, so the branches on their bits are too.
 fn scalar_mul_add(o: &var []u64, k1: []u64, p1: []u64, k2: []u64, p2: []u64, m: []u64) -> void {
-    var both_buffer = [24]u64{};
-    var acc_buffer = [24]u64{};
-    var next_buffer = [24]u64{};
+    let count = count_of(m);
+    var both_buffer = [36]u64{};
+    var acc_buffer = [36]u64{};
+    var next_buffer = [36]u64{};
     let both = both_buffer.as_mut_slice();
     let acc = acc_buffer.as_mut_slice();
     let next = next_buffer.as_mut_slice();
     point_add(both, p1, p2, m);
-    var bit = count_of(m) * 32 - 1;
+    var bit = count * 32 - 1;
     while bit >= 0 {
         point_double(next, acc, m);
         let limb = bit >> 5;
@@ -286,26 +338,26 @@ fn scalar_mul_add(o: &var []u64, k1: []u64, p1: []u64, k2: []u64, p2: []u64, m: 
                 if bit2 == 1 {
                     point_add(acc, next, p2, m);
                 } else {
-                    copy_point(acc, next);
+                    copy_point(acc, next, count);
                 }
             }
         }
         bit = bit - 1;
     }
-    copy_point(o, acc);
+    copy_point(o, acc, count);
     return;
 }
 
 // on_curve reports whether plain affine (x, y), both below p, satisfy
 // y^2 = x^3 - 3x + b.
-fn on_curve(x: []u64, y: []u64, m: []u64) -> bool {
-    var xm_buffer = [8]u64{};
-    var ym_buffer = [8]u64{};
-    var b_buffer = [8]u64{};
-    var bm_buffer = [8]u64{};
-    var t1_buffer = [8]u64{};
-    var t2_buffer = [8]u64{};
-    var t3_buffer = [8]u64{};
+fn on_curve(curve: Curve, x: []u64, y: []u64, m: []u64) -> bool {
+    var xm_buffer = [12]u64{};
+    var ym_buffer = [12]u64{};
+    var b_buffer = [12]u64{};
+    var bm_buffer = [12]u64{};
+    var t1_buffer = [12]u64{};
+    var t2_buffer = [12]u64{};
+    var t3_buffer = [12]u64{};
     let xm = xm_buffer.as_mut_slice();
     let ym = ym_buffer.as_mut_slice();
     let b = b_buffer.as_mut_slice();
@@ -315,7 +367,7 @@ fn on_curve(x: []u64, y: []u64, m: []u64) -> bool {
     let t3 = t3_buffer.as_mut_slice();
     to_mont(xm, x, m);
     to_mont(ym, y, m);
-    limbs_of_hex(b, 0, curve_b());
+    limbs_of_hex(b, 0, curve_b(curve));
     to_mont(bm, b, m);
     // left = y^2
     mont_mul(t1, ym, ym, m);

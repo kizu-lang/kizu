@@ -2,10 +2,7 @@ package main
 
 import (
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -27,11 +24,12 @@ import (
 // did not write has to accept the ClientHello, verify the client's
 // Finished, and read what it sends. The same server is then refused for
 // a host its certificate does not name, and under a root that did not
-// issue it; a server with an RSA key, which signs its CertificateVerify
-// with RSA-PSS, is talked to as well.
+// issue it; servers with a P-384 key and with an RSA key, which signs
+// its CertificateVerify with RSA-PSS, are talked to as well.
 func TestTlsClientTalksToGoServer(t *testing.T) {
-	der, key := selfSignedServer(t, "localhost", 0)
-	other, _ := selfSignedServer(t, "other.test", 0)
+	der, key := selfSignedServer(t, "localhost", 256)
+	other, _ := selfSignedServer(t, "other.test", 256)
+	p384DER, p384Key := selfSignedServer(t, "localhost", 384)
 	rsaDER, rsaKey := selfSignedServer(t, "localhost", 2048)
 	path := filepath.Join(t.TempDir(), "tls_client.kizu")
 	if err := os.WriteFile(path, []byte(tlsClientProgram), 0o644); err != nil {
@@ -48,6 +46,8 @@ func TestTlsClientTalksToGoServer(t *testing.T) {
 		{"echo", der, key, der, "localhost", "connected with AES-128-GCM\nHELLO OVER TLS\nclosed"},
 		{"wrong host", der, key, der, "example.test", "NameMismatch"},
 		{"wrong root", der, key, other, "localhost", "UnknownIssuer"},
+		{"echo over P-384", p384DER, p384Key, p384DER, "localhost",
+			"connected with AES-128-GCM\nHELLO OVER TLS\nclosed"},
 		{"echo over RSA", rsaDER, rsaKey, rsaDER, "localhost",
 			"connected with AES-128-GCM\nHELLO OVER TLS\nclosed"},
 	}
@@ -65,17 +65,11 @@ func TestTlsClientTalksToGoServer(t *testing.T) {
 }
 
 // selfSignedServer makes a certificate for `host`, self-signed and
-// marked as a CA so it can be its own root, with an RSA key of `rsaBits`
-// bits or a P-256 key when that is 0.
-func selfSignedServer(t *testing.T, host string, rsaBits int) ([]byte, crypto.Signer) {
+// marked as a CA so it can be its own root, with a key of `keyBits` as
+// `generateKey` reads it.
+func selfSignedServer(t *testing.T, host string, keyBits int) ([]byte, crypto.Signer) {
 	t.Helper()
-	var key crypto.Signer
-	var err error
-	if rsaBits == 0 {
-		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	} else {
-		key, err = rsa.GenerateKey(rand.Reader, rsaBits)
-	}
+	key, err := generateKey(keyBits)
 	if err != nil {
 		t.Fatal(err)
 	}
