@@ -15,6 +15,7 @@ std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
 std::crypto::x25519(scalar: []u8, point: []u8, out: &var []u8) -> Error!void
 std::crypto::x25519_base(scalar: []u8, out: &var []u8) -> void
 std::crypto::ecdsa_p256_verify(public_key: []u8, digest: []u8, signature: []u8) -> bool
+std::crypto::ecdsa_p384_verify(public_key: []u8, digest: []u8, signature: []u8) -> bool
 std::crypto::rsa_pkcs1_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool
 std::crypto::rsa_pss_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool
 std::crypto::digest_length(hash: Hash) -> i64
@@ -105,7 +106,9 @@ mask で branch ではなく、時間は秘密鍵に依らないです。1 回�
 SubjectPublicKeyInfo が持つ形そのものです。`signature` は r と s を 32 byte big-endian
 で並べた 64 byte、`digest` は SHA-256 の 32 byte です。鍵や署名が別の形、鍵が曲線上に
 ない、r や s が 1..n-1 の外、のどれも「不正な署名」であって bug ではないので false を
-返します。digest が 32 byte でないのは呼び手の誤用で trap します。
+返します。digest が 32 byte でないのは呼び手の誤用で trap します。`ecdsa_p384_verify` は
+同じことを P-384(secp384r1)と SHA-384 でします。鍵は 97 byte、r と s は 48 byte ずつ、
+digest は 48 byte です。
 
 検証しか無いのは、署名には秘密鍵と 2 度使ってはならない nonce が要り、client には
 どちらもまだ無いからです。DER の `SEQUENCE { INTEGER r, INTEGER s }` から r と s を
@@ -121,10 +124,11 @@ signature の長さが modulus と違うか値が modulus 以上、のどれも 
 長さが `hash` と合わないのは呼び手の誤用で trap します。
 
 算術は 32 bit limb を `u64` で持つ Montgomery 乗算で、limb 数は modulus から決まり
-(P-256 は 8 本、RSA は 4096 bit まで 128 本)、体 p、位数 n、RSA の modulus に同じ
-code を使います。point は Jacobian 座標で、u1 G + u2 Q は Straus–Shamir の同時
-double-and-add です。扱うのは公開鍵と署名だけなので、値で branch し早く比べます。
-1 回の検証は `--opt` で P-256 が 1 ms 弱、RSA-2048 が約 0.3 ms です。
+(P-256 は 8 本、P-384 は 12 本、RSA は 4096 bit まで 128 本)、体 p、位数 n、RSA の
+modulus に同じ code を使います。point は Jacobian 座標で、2 つの曲線とも a = -3 なので
+同じ式が使え、u1 G + u2 Q は Straus–Shamir の同時 double-and-add です。扱うのは
+公開鍵と署名だけなので、値で branch し早く比べます。1 回の検証は `--opt` で P-256 が
+1 ms 弱、RSA-2048 が約 0.3 ms です。
 
 ## 封をする
 

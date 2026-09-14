@@ -22,11 +22,11 @@ import (
 // -- a root, an intermediate, a leaf naming a host -- and a Kizu program
 // verify them, then the same chain against an unrelated root, at a time
 // before the leaf's validity, and for a host the leaf does not name.
-// One chain is P-256 throughout; the other has RSA keys on the root and
-// the intermediate, signing with SHA-256, SHA-384 and SHA-512, under a
-// P-256 leaf. The DER reader and the checks are Kizu source; what
-// another implementation writes has to read back and verify the way it
-// meant.
+// One chain is P-256 throughout; one has P-384 keys on the root and the
+// intermediate, signing with SHA-384; one has RSA keys there, signing
+// with SHA-256, SHA-384 and SHA-512; all under a P-256 leaf. The DER
+// reader and the checks are Kizu source; what another implementation
+// writes has to read back and verify the way it meant.
 func TestX509VerifiesWhatGoIssues(t *testing.T) {
 	notBefore := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	notAfter := time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -34,14 +34,15 @@ func TestX509VerifiesWhatGoIssues(t *testing.T) {
 		SerialNumber: big.NewInt(4), Subject: pkix.Name{CommonName: "Other Root"},
 		NotBefore: notBefore, NotAfter: notAfter, IsCA: true, BasicConstraintsValid: true,
 		KeyUsage: x509.KeyUsageCertSign,
-	}, nil, nil, 0)
+	}, nil, nil, 256)
 
 	var program strings.Builder
 	program.WriteString(x509ProgramHead)
 	within := notBefore.AddDate(5, 0, 0).Unix()
 	var want []string
 	for _, chain := range []testChain{
-		{0, 0, x509.ECDSAWithSHA256, x509.ECDSAWithSHA256},
+		{256, 256, x509.ECDSAWithSHA256, x509.ECDSAWithSHA256},
+		{384, 384, x509.ECDSAWithSHA384, x509.ECDSAWithSHA384},
 		{2048, 3072, x509.SHA384WithRSA, x509.SHA512WithRSA},
 	} {
 		root, intermediate, leaf := issueTestChain(t, notBefore, notAfter, chain)
@@ -78,10 +79,10 @@ func TestX509VerifiesWhatGoIssues(t *testing.T) {
 	}
 }
 
-// A testChain says what keys and signatures a chain is issued with: RSA
-// of so many bits or P-256 when 0 for the root and the intermediate,
-// and the algorithm each of the intermediate and the leaf is signed
-// with.
+// A testChain says what keys and signatures a chain is issued with: the
+// key size of the root and the intermediate, as `issueCertificate`
+// reads it, and the algorithm each of the intermediate and the leaf is
+// signed with.
 type testChain struct {
 	rootBits, intermediateBits           int
 	intermediateAlgorithm, leafAlgorithm x509.SignatureAlgorithm
@@ -116,28 +117,36 @@ func issueTestChain(
 		ExtKeyUsage:        []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:           []string{"example.net", "*.example.net"},
 		SignatureAlgorithm: chain.leafAlgorithm,
-	}, intermediate, intermediateKey, 0)
+	}, intermediate, intermediateKey, 256)
 	return root, intermediate, leaf
 }
 
+// generateKey makes a P-256 key for `keyBits` 256, a P-384 key for 384,
+// and an RSA key of that many bits otherwise.
+func generateKey(keyBits int) (crypto.Signer, error) {
+	switch keyBits {
+	case 256:
+		return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case 384:
+		return ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	default:
+		return rsa.GenerateKey(rand.Reader, keyBits)
+	}
+}
+
 // issueCertificate signs template under the parent's key, or under its
-// own when there is no parent, and returns the DER and the new key: RSA
-// of `rsaBits` bits, or P-256 when that is 0.
+// own when there is no parent, and returns the DER and the new key:
+// P-256 for `keyBits` 256, P-384 for 384, and RSA of that many bits
+// otherwise.
 func issueCertificate(
 	t *testing.T,
 	template *x509.Certificate,
 	parentDER []byte,
 	parentKey crypto.Signer,
-	rsaBits int,
+	keyBits int,
 ) ([]byte, crypto.Signer) {
 	t.Helper()
-	var key crypto.Signer
-	var err error
-	if rsaBits == 0 {
-		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	} else {
-		key, err = rsa.GenerateKey(rand.Reader, rsaBits)
-	}
+	key, err := generateKey(keyBits)
 	if err != nil {
 		t.Fatal(err)
 	}

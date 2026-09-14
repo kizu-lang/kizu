@@ -1,8 +1,8 @@
-// ECDSA over P-256 with SHA-256, as a TLS 1.3 client meets it: the
-// signature on a certificate, or on the handshake transcript, checked
-// against a public key. Only verifying is here. Signing needs a private
-// key and a nonce that must never repeat, and neither has a place in a
-// client yet.
+// ECDSA over P-256 with SHA-256 and over P-384 with SHA-384, as a TLS
+// 1.3 client meets them: the signature on a certificate, or on the
+// handshake transcript, checked against a public key. Only verifying is
+// here. Signing needs a private key and a nonce that must never repeat,
+// and neither has a place in a client yet.
 
 // ecdsa_p256_verify reports whether `signature` is a valid signature of
 // `digest` under `public_key` (FIPS 186-4 §6.4.2). The key is the 65
@@ -17,98 +17,122 @@ pub fn ecdsa_p256_verify(public_key: []u8, digest: []u8, signature: []u8) -> boo
     if std::mem::len(digest) != 32 {
         std::internal::builtin::panic("crypto ecdsa_p256_verify: digest must be 32 bytes");
     }
-    if std::mem::len(public_key) != 65 or public_key[0] != 4 {
+    return ecdsa_verify(Curve::P256, public_key, digest, signature);
+}
+
+// ecdsa_p384_verify is `ecdsa_p256_verify` for P-384: the key is 97
+// bytes, r and s 48 each, and the digest the 48 bytes of SHA-384.
+pub fn ecdsa_p384_verify(public_key: []u8, digest: []u8, signature: []u8) -> bool {
+    if std::mem::len(digest) != 48 {
+        std::internal::builtin::panic("crypto ecdsa_p384_verify: digest must be 48 bytes");
+    }
+    return ecdsa_verify(Curve::P384, public_key, digest, signature);
+}
+
+fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -> bool {
+    let bytes = curve_bytes(curve);
+    let count = bytes / 4;
+    if std::mem::len(public_key) != 1 + bytes * 2 or public_key[0] != 4 {
         return false;
     }
-    if std::mem::len(signature) != 64 {
+    if std::mem::len(signature) != bytes * 2 {
         return false;
     }
-    var field_buffer = [17]u64{};
-    var order_buffer = [17]u64{};
+    var field_buffer = [25]u64{};
+    var order_buffer = [25]u64{};
     let field = field_buffer.as_mut_slice();
     let order = order_buffer.as_mut_slice();
-    std::crypto::fill_field(field);
-    std::crypto::fill_order(order);
-    let p = std::crypto::modulus_of(field);
-    let n = std::crypto::modulus_of(order);
+    fill_field(field, curve);
+    fill_order(order, curve);
+    let field_view = field[0..count * 2 + 1];
+    let order_view = order[0..count * 2 + 1];
+    let p = modulus_of(field_view);
+    let n = modulus_of(order_view);
 
-    var x_buffer = [8]u64{};
-    var y_buffer = [8]u64{};
-    var r_buffer = [8]u64{};
-    var s_buffer = [8]u64{};
-    var e_buffer = [8]u64{};
+    var x_buffer = [12]u64{};
+    var y_buffer = [12]u64{};
+    var r_buffer = [12]u64{};
+    var s_buffer = [12]u64{};
+    var e_buffer = [12]u64{};
     let x = x_buffer.as_mut_slice();
     let y = y_buffer.as_mut_slice();
     let r = r_buffer.as_mut_slice();
     let s = s_buffer.as_mut_slice();
     let e = e_buffer.as_mut_slice();
-    std::crypto::limbs_of_bytes(x, public_key[1..33]);
-    std::crypto::limbs_of_bytes(y, public_key[33..65]);
-    std::crypto::limbs_of_bytes(r, signature[0..32]);
-    std::crypto::limbs_of_bytes(s, signature[32..64]);
-    std::crypto::limbs_of_bytes(e, digest);
-    if !std::crypto::less_than(x, p) or !std::crypto::less_than(y, p) {
+    limbs_of_bytes(x, public_key[1..1 + bytes]);
+    limbs_of_bytes(y, public_key[1 + bytes..1 + bytes * 2]);
+    limbs_of_bytes(r, signature[0..bytes]);
+    limbs_of_bytes(s, signature[bytes..bytes * 2]);
+    limbs_of_bytes(e, digest);
+    let x_view = x[0..count];
+    let y_view = y[0..count];
+    let r_view = r[0..count];
+    let s_view = s[0..count];
+    let e_view = e[0..count];
+    if !less_than(x_view, p) or !less_than(y_view, p) {
         return false;
     }
-    if !std::crypto::on_curve(x, y, field) {
+    if !on_curve(curve, x_view, y_view, field_view) {
         return false;
     }
-    if std::crypto::is_zero(r) or !std::crypto::less_than(r, n) {
+    if is_zero(r_view) or !less_than(r_view, n) {
         return false;
     }
-    if std::crypto::is_zero(s) or !std::crypto::less_than(s, n) {
+    if is_zero(s_view) or !less_than(s_view, n) {
         return false;
     }
 
     // u1 = e / s and u2 = r / s mod n, computed in Montgomery form and
     // brought back out.
-    var sm_buffer = [8]u64{};
-    var w_buffer = [8]u64{};
-    var t_buffer = [8]u64{};
-    var u1_buffer = [8]u64{};
-    var u2_buffer = [8]u64{};
+    var sm_buffer = [12]u64{};
+    var w_buffer = [12]u64{};
+    var t_buffer = [12]u64{};
+    var u1_buffer = [12]u64{};
+    var u2_buffer = [12]u64{};
     let sm = sm_buffer.as_mut_slice();
     let w = w_buffer.as_mut_slice();
     let t = t_buffer.as_mut_slice();
     let u1 = u1_buffer.as_mut_slice();
     let u2 = u2_buffer.as_mut_slice();
-    std::crypto::to_mont(sm, s, order);
-    std::crypto::mont_inverse(w, sm, order);
-    std::crypto::to_mont(t, e, order);
-    std::crypto::mont_mul(sm, t, w, order);
-    std::crypto::from_mont(u1, sm, order);
-    std::crypto::to_mont(t, r, order);
-    std::crypto::mont_mul(sm, t, w, order);
-    std::crypto::from_mont(u2, sm, order);
+    to_mont(sm, s_view, order_view);
+    mont_inverse(w, sm, order_view);
+    to_mont(t, e_view, order_view);
+    mont_mul(sm, t, w, order_view);
+    from_mont(u1, sm, order_view);
+    to_mont(t, r_view, order_view);
+    mont_mul(sm, t, w, order_view);
+    from_mont(u2, sm, order_view);
 
-    var generator_buffer = [24]u64{};
-    var key_buffer = [24]u64{};
-    var result_buffer = [24]u64{};
+    var generator_buffer = [36]u64{};
+    var key_buffer = [36]u64{};
+    var result_buffer = [36]u64{};
     let generator = generator_buffer.as_mut_slice();
     let key = key_buffer.as_mut_slice();
     let result = result_buffer.as_mut_slice();
-    var gx_buffer = [8]u64{};
-    var gy_buffer = [8]u64{};
+    var gx_buffer = [12]u64{};
+    var gy_buffer = [12]u64{};
     let gx = gx_buffer.as_mut_slice();
     let gy = gy_buffer.as_mut_slice();
-    std::crypto::limbs_of_hex(gx, 0, std::crypto::generator_x());
-    std::crypto::limbs_of_hex(gy, 0, std::crypto::generator_y());
-    std::crypto::point_from_affine(generator, gx, gy, field);
-    std::crypto::point_from_affine(key, x, y, field);
-    std::crypto::scalar_mul_add(result, u1, generator, u2, key, field);
-    if std::crypto::is_infinity(result) {
+    limbs_of_hex(gx, 0, generator_x(curve));
+    limbs_of_hex(gy, 0, generator_y(curve));
+    point_from_affine(generator, gx, gy, field_view);
+    point_from_affine(key, x_view, y_view, field_view);
+    scalar_mul_add(result, u1, generator, u2, key, field_view);
+    if is_infinity(result, count) {
         return false;
     }
     // The signature is valid when the x of the result, taken mod n, is
     // r. x is below p < 2n, so at most one subtraction of n is needed.
-    var rx_buffer = [8]u64{};
+    var rx_buffer = [12]u64{};
     let rx = rx_buffer.as_mut_slice();
-    std::crypto::affine_x(rx, result, field);
-    if !std::crypto::less_than(rx, n) {
-        var reduced_buffer = [8]u64{};
+    affine_x(rx, result, field_view);
+    let rx_view = rx[0..count];
+    if !less_than(rx_view, n) {
+        var reduced_buffer = [12]u64{};
         let reduced = reduced_buffer.as_mut_slice();
-        let _ = std::crypto::subtract_limbs(reduced, rx, n);
-        return std::crypto::equal_limbs(reduced, r);
+        let _ = subtract_limbs(reduced, rx_view, n);
+        let reduced_view = reduced[0..count];
+        return equal_limbs(reduced_view, r_view);
     }
-    return std::crypto::equal_limbs(rx, r);
+    return equal_limbs(rx_view, r_view);
 }

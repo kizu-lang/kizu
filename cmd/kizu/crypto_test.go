@@ -170,18 +170,24 @@ func TestX25519ExampleAgreesOutsideKizu(t *testing.T) {
 	}
 }
 
-// TestEcdsaP256VerifiesWhatGoSigns signs digests with fresh P-256 keys
+// TestEcdsaVerifiesWhatGoSigns signs digests with fresh P-256 keys
 // from Go's crypto/ecdsa and has a Kizu program verify each signature,
 // then the same signature over another digest and with one byte of s
 // changed. The field and point arithmetic are Kizu source; a signature
 // an implementation Kizu did not write made has to pass, and a changed
 // one has to fail.
-func TestEcdsaP256VerifiesWhatGoSigns(t *testing.T) {
+func TestEcdsaVerifiesWhatGoSigns(t *testing.T) {
 	var program strings.Builder
 	program.WriteString(ecdsaProgramHead)
 	var want []string
+	curves := []struct {
+		curve elliptic.Curve
+		hash  crypto.Hash
+		width int
+	}{{elliptic.P256(), crypto.SHA256, 32}, {elliptic.P384(), crypto.SHA384, 48}}
 	for i := 0; i < 6; i++ {
-		private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		c := curves[i%2]
+		private, err := ecdsa.GenerateKey(c.curve, rand.Reader)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,13 +195,13 @@ func TestEcdsaP256VerifiesWhatGoSigns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		digest := sha256.Sum256([]byte(fmt.Sprintf("message %d", i)))
-		r, s, err := ecdsa.Sign(rand.Reader, private, digest[:])
+		digest := digestOf(c.hash, fmt.Sprintf("message %d", i))
+		r, s, err := ecdsa.Sign(rand.Reader, private, digest)
 		if err != nil {
 			t.Fatal(err)
 		}
-		signature := append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...)
-		other := sha256.Sum256([]byte(fmt.Sprintf("message %d changed", i)))
+		signature := append(r.FillBytes(make([]byte, c.width)), s.FillBytes(make([]byte, c.width))...)
+		other := digestOf(c.hash, fmt.Sprintf("message %d changed", i))
 		changed := append([]byte(nil), signature...)
 		changed[40] ^= 1
 		key := hex.EncodeToString(public.Bytes())
@@ -203,9 +209,9 @@ func TestEcdsaP256VerifiesWhatGoSigns(t *testing.T) {
 			digest, signature []byte
 			verdict           string
 		}{
-			{digest[:], signature, "valid"},
-			{other[:], signature, "invalid"},
-			{digest[:], changed, "invalid"},
+			{digest, signature, "valid"},
+			{other, signature, "invalid"},
+			{digest, changed, "invalid"},
 		} {
 			fmt.Fprintf(&program, "    try check(allocator, %q, %q, %q);\n",
 				key, hex.EncodeToString(c.digest), hex.EncodeToString(c.signature))
@@ -227,8 +233,9 @@ func TestEcdsaP256VerifiesWhatGoSigns(t *testing.T) {
 	}
 }
 
-// ecdsaProgramHead is the program TestEcdsaP256VerifiesWhatGoSigns
-// completes with one `check` per signature.
+// ecdsaProgramHead is the program TestEcdsaVerifiesWhatGoSigns
+// completes with one `check` per signature; the key's length says
+// which curve.
 const ecdsaProgramHead = `import std::crypto;
 import std::mem;
 import std::string;
@@ -269,7 +276,12 @@ fn check(
     let key_bytes = key.as_bytes();
     let digest_bytes = digest.as_bytes();
     let signature_bytes = signature.as_bytes();
-    if crypto::ecdsa_p256_verify(key_bytes, digest_bytes, signature_bytes) {
+    let valid = if mem::len(key_bytes) == 97 {
+        crypto::ecdsa_p384_verify(key_bytes, digest_bytes, signature_bytes)
+    } else {
+        crypto::ecdsa_p256_verify(key_bytes, digest_bytes, signature_bytes)
+    };
+    if valid {
         print("valid");
     } else {
         print("invalid");

@@ -793,6 +793,56 @@ test "a key that is compressed, off the curve, or the wrong length is invalid" {
         "sample", signature));
 }
 
+// rfc6979_p384_key is the P-384 public key of RFC 6979 §A.2.6,
+// uncompressed.
+fn rfc6979_p384_key() -> []u8 {
+    return
+        \\04ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc13
+        \\8015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720
+    ;
+}
+
+fn rfc6979_p384_sample() -> []u8 {
+    return
+        \\94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe46
+        \\99ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8
+    ;
+}
+
+fn rfc6979_p384_test() -> []u8 {
+    return
+        \\8203b63d3c853e8d77227fb377bcf7b7b772e97892a80f36ab775d509d7a5feb0542a7f0812998da8f1dd3ca3cf023db
+        \\ddd0760448d42d8a43af45af836fce4de8be06b485e9b61b827c2f13173923e06a739f040649a667bf3b828246baa5a5
+    ;
+}
+
+fn ecdsa_p384_verifies(allocator: Allocator, key_hex: []u8, message: []u8, signature_hex: []u8) -> mem::Error!bool {
+    let key = try bytes_of_hex_lines(allocator, key_hex);
+    defer key.deinit(allocator);
+    let signature = try bytes_of_hex_lines(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    var digest = [48]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha384(message, view);
+    let hash = digest.as_bytes();
+    let key_bytes = key.as_bytes();
+    let signature_bytes = signature.as_bytes();
+    let valid = crypto::ecdsa_p384_verify(key_bytes, hash, signature_bytes);
+    return valid;
+}
+
+test "the RFC 6979 P-384 signatures over sample and test verify, and not across messages or curves" {
+    let allocator = mem::page_allocator();
+    testing::expect(try ecdsa_p384_verifies(allocator, rfc6979_p384_key(), "sample", rfc6979_p384_sample()));
+    testing::expect(try ecdsa_p384_verifies(allocator, rfc6979_p384_key(), "test", rfc6979_p384_test()));
+    testing::expect(!try ecdsa_p384_verifies(allocator, rfc6979_p384_key(), "sample", rfc6979_p384_test()));
+    testing::expect(!try ecdsa_p384_verifies(allocator, rfc6979_p384_key(), "test!", rfc6979_p384_test()));
+    testing::expect(!try ecdsa_p384_verifies(allocator, rfc6979_key(), "sample", rfc6979_p384_sample()));
+    let short = rfc6979_p384_sample();
+    let short_view = short[0..mem::len(short) - 4];
+    testing::expect(!try ecdsa_p384_verifies(allocator, rfc6979_p384_key(), "sample", short_view));
+}
+
 fn expect_sha512(allocator: Allocator, input: []u8, want: []u8) -> mem::Error!void {
     var digest = [64]u8{};
     let view = digest.as_mut_bytes();

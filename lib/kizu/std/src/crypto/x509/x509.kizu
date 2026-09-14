@@ -27,17 +27,20 @@ pub error Error {
 }
 
 // KeyAlgorithm is the kind of public key a certificate holds: a P-256
-// point, or an RSA modulus and exponent.
+// or P-384 point, or an RSA modulus and exponent.
 pub enum KeyAlgorithm {
     EcdsaP256,
+    EcdsaP384,
     Rsa,
     Unsupported,
 }
 
 // SignatureAlgorithm is the kind of signature a certificate carries:
-// ECDSA over SHA-256, or RSA PKCS #1 v1.5 over one of three hashes.
+// ECDSA over SHA-256 or SHA-384, or RSA PKCS #1 v1.5 over one of three
+// hashes.
 pub enum SignatureAlgorithm {
     EcdsaSha256,
+    EcdsaSha384,
     RsaSha256,
     RsaSha384,
     RsaSha512,
@@ -139,6 +142,11 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
                 key_algorithm = KeyAlgorithm::EcdsaP256;
             }
         }
+        if std::crypto::x509::content_is_hex(der, curve, oid_secp384r1()) {
+            if key_bits.end - key_bits.start == 98 and der[key_bits.start + 1] == 4 {
+                key_algorithm = KeyAlgorithm::EcdsaP384;
+            }
+        }
     }
     if std::crypto::x509::content_is_hex(der, key_oid, oid_rsa_encryption()) {
         let _ = try read_rsa_key(der, key_bits.start + 1, key_bits.end);
@@ -207,6 +215,9 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
     if std::crypto::x509::content_is_hex(der, signature_oid, oid_ecdsa_with_sha256()) {
         signature_kind = SignatureAlgorithm::EcdsaSha256;
     }
+    if std::crypto::x509::content_is_hex(der, signature_oid, oid_ecdsa_with_sha384()) {
+        signature_kind = SignatureAlgorithm::EcdsaSha384;
+    }
     if std::crypto::x509::content_is_hex(der, signature_oid, oid_sha256_with_rsa()) {
         signature_kind = SignatureAlgorithm::RsaSha256;
     }
@@ -272,8 +283,16 @@ fn oid_prime256v1() -> []u8 {
     return "2a8648ce3d030107";
 }
 
+fn oid_secp384r1() -> []u8 {
+    return "2b81040022";
+}
+
 fn oid_ecdsa_with_sha256() -> []u8 {
     return "2a8648ce3d040302";
+}
+
+fn oid_ecdsa_with_sha384() -> []u8 {
+    return "2a8648ce3d040303";
 }
 
 fn oid_rsa_encryption() -> []u8 {
@@ -324,10 +343,10 @@ pub fn (self: &std::crypto::x509::Certificate) serial() -> []u8 {
     return self.der[self.serial.start..self.serial.end];
 }
 
-// public_key is the key's bytes: for a P-256 key, the 65 of the
-// uncompressed point that `std::crypto::ecdsa_p256_verify` takes; for
-// an RSA key, the DER of `RSAPublicKey`, which
-// `rsa_pss_signature_verifies` reads.
+// public_key is the key's bytes: for a P-256 or P-384 key, the 65 or
+// 97 of the uncompressed point that `std::crypto::ecdsa_p256_verify`
+// and `ecdsa_p384_verify` take; for an RSA key, the DER of
+// `RSAPublicKey`, which `rsa_pss_signature_verifies` reads.
 pub fn (self: &std::crypto::x509::Certificate) public_key() -> []u8 {
     return self.der[self.key_start..self.key_end];
 }
@@ -434,6 +453,16 @@ pub fn (self: &std::crypto::x509::Certificate) issued_by(issuer: &std::crypto::x
             let digest_bytes = digest_buffer.as_bytes();
             return ecdsa_signature_verifies(key, digest_bytes, signature);
         },
+        EcdsaSha384 => {
+            if issuer.key_algorithm != KeyAlgorithm::EcdsaP384 {
+                return false;
+            }
+            var digest_buffer = [48]u8{};
+            let digest = digest_buffer.as_mut_bytes();
+            std::crypto::sha384(signed, digest);
+            let digest_bytes = digest_buffer.as_bytes();
+            return ecdsa_signature_verifies(key, digest_bytes, signature);
+        },
         RsaSha256 => return rsa_pkcs1_signature_verifies(std::crypto::Hash::Sha256, key, signed, signature),
         RsaSha384 => return rsa_pkcs1_signature_verifies(std::crypto::Hash::Sha384, key, signed, signature),
         RsaSha512 => return rsa_pkcs1_signature_verifies(std::crypto::Hash::Sha512, key, signed, signature),
@@ -486,23 +515,37 @@ fn read_rsa_key(der: []u8, start: i64, end: i64) -> std::crypto::x509::Error!std
 // ecdsa_signature_verifies reports whether a DER-encoded ECDSA
 // signature -- `SEQUENCE { r INTEGER, s INTEGER }`, the form a
 // certificate and a TLS CertificateVerify carry -- is valid for
-// `digest` under a P-256 `public_key`, the way
-// `std::crypto::ecdsa_p256_verify` judges.
+// `digest` under a P-256 or P-384 `public_key`, told apart by its
+// length, the way `std::crypto::ecdsa_p256_verify` and
+// `ecdsa_p384_verify` judge: a 32-byte digest goes with P-256 and a
+// 48-byte one with P-384, and a key of another length gives false.
 pub fn ecdsa_signature_verifies(public_key: []u8, digest: []u8, signature: []u8) -> bool {
-    var raw_buffer = [64]u8{};
-    let raw = raw_buffer.as_mut_bytes();
-    if !read_ecdsa_signature(signature, 0, std::mem::len(signature), raw) {
+    let key_length = std::mem::len(public_key);
+    if key_length != 65 and key_length != 97 {
         return false;
     }
-    let raw_bytes = raw_buffer.as_bytes();
-    return std::crypto::ecdsa_p256_verify(public_key, digest, raw_bytes);
+    let width = (key_length - 1) / 2;
+    if std::mem::len(digest) != width {
+        return false;
+    }
+    var raw_buffer = [96]u8{};
+    let raw = raw_buffer.as_mut_bytes();
+    if !read_ecdsa_signature(signature, 0, std::mem::len(signature), raw, width) {
+        return false;
+    }
+    let raw_bytes = raw[0..width * 2];
+    if width == 32 {
+        return std::crypto::ecdsa_p256_verify(public_key, digest, raw_bytes);
+    }
+    return std::crypto::ecdsa_p384_verify(public_key, digest, raw_bytes);
 }
 
 // read_ecdsa_signature reads `SEQUENCE { r INTEGER, s INTEGER }` into r
-// and s as 32 bytes each, right-aligned. An integer's leading zero byte,
-// there to keep a high bit from reading as a sign, is dropped; a value
-// that does not fit in 32 bytes is not a P-256 signature.
-fn read_ecdsa_signature(der: []u8, start: i64, end: i64, out: &var []u8) -> bool {
+// and s as `width` bytes each, right-aligned. An integer's leading zero
+// byte, there to keep a high bit from reading as a sign, is dropped; a
+// value that does not fit in `width` bytes is not a signature on the
+// curve.
+fn read_ecdsa_signature(der: []u8, start: i64, end: i64, out: &var []u8, width: i64) -> bool {
     let list = std::crypto::x509::expect_element(der, start, end, std::crypto::x509::tag_sequence()) catch return false;
     if list.end != end {
         return false;
@@ -512,20 +555,20 @@ fn read_ecdsa_signature(der: []u8, start: i64, end: i64, out: &var []u8) -> bool
     if s.end != list.end {
         return false;
     }
-    return copy_integer(der, r, out, 0) and copy_integer(der, s, out, 32);
+    return copy_integer(der, r, out, 0, width) and copy_integer(der, s, out, width, width);
 }
 
-fn copy_integer(der: []u8, value: std::crypto::x509::Element, out: &var []u8, at: i64) -> bool {
+fn copy_integer(der: []u8, value: std::crypto::x509::Element, out: &var []u8, at: i64, width: i64) -> bool {
     var start = value.start;
     if start < value.end and der[start] == 0 {
         start = start + 1;
     }
     let count = value.end - start;
-    if count > 32 {
+    if count > width {
         return false;
     }
     for 0..count |index| {
-        out[at + 32 - count + index] = der[start + index];
+        out[at + width - count + index] = der[start + index];
     }
     return true;
 }
