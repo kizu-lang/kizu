@@ -1,0 +1,177 @@
+// The TLS 1.3 record layer (RFC 8446 §5): once the handshake has keys,
+// every record is one AEAD sealing of the content with its real type
+// appended, under a nonce the record's sequence number makes from the
+// IV, with the five-byte record header as the associated data. The
+// header says `application_data` whatever is inside; the type is the
+// last byte of the plaintext, behind any zero padding.
+
+// CipherSuite is the AEAD a connection agreed on. Both are 16-byte
+// tags under a 12-byte nonce; the key is 16 bytes for AES-128-GCM and
+// 32 for ChaCha20-Poly1305.
+pub enum CipherSuite {
+    Aes128GcmSha256,
+    Chacha20Poly1305Sha256,
+}
+
+// key_length is how many bytes of key a suite's AEAD takes.
+pub fn key_length(suite: std::tls::CipherSuite) -> i64 {
+    if suite == CipherSuite::Aes128GcmSha256 {
+        return 16;
+    }
+    return 32;
+}
+
+// Content types (RFC 8446 §5.1).
+pub fn content_handshake() -> u8 {
+    return 22;
+}
+
+pub fn content_application_data() -> u8 {
+    return 23;
+}
+
+pub fn content_alert() -> u8 {
+    return 21;
+}
+
+// seal_record appends one encrypted record to `out`: the header, the
+// sealed content with `content_type` appended, and the tag. `sequence`
+// is how many records have been sealed under this key before, from 0.
+// Content longer than 2^14 bytes is the caller's mistake and traps;
+// a record is at most that, and a longer message is sent as several.
+pub fn seal_record(
+    allocator: Allocator,
+    suite: std::tls::CipherSuite,
+    key: []u8,
+    iv: []u8,
+    sequence: i64,
+    content_type: u8,
+    content: []u8,
+    out: &var std::string::String
+) -> std::mem::Error!void {
+    let length = std::mem::len(content);
+    if length > 16384 {
+        std::internal::builtin::panic("tls seal_record: content longer than a record");
+    }
+    var header_buffer = [5]u8{};
+    let header = header_buffer.as_mut_bytes();
+    let sealed_length = length + 1 + 16;
+    header[0] = content_application_data();
+    header[1] = 3;
+    header[2] = 3;
+    header[3] = cast<u8>((sealed_length >> 8) & 255);
+    header[4] = cast<u8>(sealed_length & 255);
+    let aad = header_buffer.as_bytes();
+    try out.append_bytes(allocator, aad);
+    var nonce_buffer = [12]u8{};
+    let nonce = nonce_buffer.as_mut_bytes();
+    record_nonce(iv, sequence, nonce);
+    let nonce_bytes = nonce_buffer.as_bytes();
+    // The plaintext is the content with its type behind it; it is laid
+    // out once in an owned buffer, since the AEAD takes one view.
+    var plain = std::string::new(allocator);
+    defer plain.deinit(allocator);
+    try plain.append_bytes(allocator, content);
+    try plain.append_byte(allocator, content_type);
+    let plain_bytes = plain.as_bytes();
+    if suite == CipherSuite::Aes128GcmSha256 {
+        try std::crypto::aes_gcm_seal(allocator, key, nonce_bytes, aad, plain_bytes, out);
+    } else {
+        try std::crypto::chacha20_poly1305_seal(allocator, key, nonce_bytes, aad, plain_bytes, out);
+    }
+    return;
+}
+
+// open_record opens one encrypted record -- header, sealed content, tag,
+// and nothing after -- appends the content to `out`, and returns its
+// type. A record whose header is not TLS 1.3's, or whose tag does not
+// verify, or that holds no type behind its padding, is
+// `Error::BadRecord`.
+pub fn open_record(
+    allocator: Allocator,
+    suite: std::tls::CipherSuite,
+    key: []u8,
+    iv: []u8,
+    sequence: i64,
+    record: []u8,
+    out: &var std::string::String
+) -> std::tls::Failure!u8 {
+    let length = std::mem::len(record);
+    if length < 5 + 16 or record[0] != content_application_data() or record[1] != 3 or record[2] != 3 {
+        return std::tls::Error::BadRecord;
+    }
+    let sealed_length = (cast<i64>(record[3]) << 8) | cast<i64>(record[4]);
+    if sealed_length != length - 5 or sealed_length > 16384 + 256 {
+        return std::tls::Error::BadRecord;
+    }
+    let aad = record[0..5];
+    let sealed = record[5..length];
+    var nonce_buffer = [12]u8{};
+    let nonce = nonce_buffer.as_mut_bytes();
+    record_nonce(iv, sequence, nonce);
+    let nonce_bytes = nonce_buffer.as_bytes();
+    var plain = std::string::new(allocator);
+    defer plain.deinit(allocator);
+    try open_sealed(allocator, suite, key, nonce_bytes, aad, sealed, &var plain);
+    // The type is the last byte that is not padding.
+    let plain_bytes = plain.as_bytes();
+    var end = std::mem::len(plain_bytes);
+    while end > 0 and plain_bytes[end - 1] == 0 {
+        end = end - 1;
+    }
+    if end == 0 {
+        return std::tls::Error::BadRecord;
+    }
+    let content_type = plain_bytes[end - 1];
+    try out.append_bytes(allocator, plain_bytes[0..end - 1]);
+    return content_type;
+}
+
+// open_sealed opens the sealed content under the suite's AEAD. A tag
+// that does not verify is a bad record; what else the AEAD can fail
+// with is memory.
+fn open_sealed(
+    allocator: Allocator,
+    suite: std::tls::CipherSuite,
+    key: []u8,
+    nonce: []u8,
+    aad: []u8,
+    sealed: []u8,
+    plain: &var std::string::String
+) -> std::tls::Failure!void {
+    if suite == CipherSuite::Aes128GcmSha256 {
+        if std::crypto::aes_gcm_open(allocator, key, nonce, aad, sealed, plain) {
+            return;
+        } else |err| {
+            return refusal(err);
+        }
+    }
+    if std::crypto::chacha20_poly1305_open(allocator, key, nonce, aad, sealed, plain) {
+        return;
+    } else |err| {
+        return refusal(err);
+    }
+}
+
+// refusal is the record layer's reading of the AEAD's failure.
+fn refusal(err: std::crypto::Failure) -> std::tls::Failure!void {
+    if err == std::crypto::Error::AuthenticationFailed {
+        return std::tls::Error::BadRecord;
+    }
+    return err;
+}
+
+// record_nonce writes the per-record nonce (RFC 8446 §5.3): the
+// sequence number as 64 bits big-endian, left-padded to the IV's 12
+// bytes, XORed with the IV.
+fn record_nonce(iv: []u8, sequence: i64, out: &var []u8) -> void {
+    for 0..12 |index| {
+        out[index] = iv[index];
+    }
+    for 0..8 |index| {
+        let shift = (7 - index) * 8;
+        let byte = cast<u8>((sequence >> shift) & 255);
+        out[4 + index] = out[4 + index] ^ byte;
+    }
+    return;
+}
