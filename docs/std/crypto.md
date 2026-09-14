@@ -7,6 +7,8 @@ binary と同じ digest を出します。乱数だけは host から来ます�
 
 ```text
 std::crypto::sha256(bytes: []u8, digest: &var []u8) -> void
+std::crypto::sha512(bytes: []u8, digest: &var []u8) -> void
+std::crypto::sha384(bytes: []u8, digest: &var []u8) -> void
 std::crypto::hmac_sha256(key: []u8, message: []u8, tag: &var []u8) -> void
 std::crypto::hkdf_extract(salt: []u8, keying_material: []u8, key: &var []u8) -> void
 std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
@@ -45,7 +47,8 @@ if crypto::equal_constant_time(mine, theirs) {
 ## digest と tag
 
 `sha256` は FIPS 180-4 の SHA-256 で、`bytes` 全体の 32 byte の digest を
-`digest` の先頭に書きます。`hmac_sha256` は RFC 2104 の HMAC で、`key` の下での
+`digest` の先頭に書きます。`sha512` と `sha384` は同じ標準の 64 bit word 版で、
+64 byte と 48 byte の digest を書きます(P-384 の証明書の署名は SHA-384 の上)。`hmac_sha256` は RFC 2104 の HMAC で、`key` の下での
 `message` の 32 byte の tag を `tag` の先頭に書きます。key はどんな長さでもよく、
 1 block(64 byte)より長い key は先に hash され、短い key は 0 で埋められます。
 

@@ -9,6 +9,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -277,3 +278,32 @@ fn check(
 fn main() -> !void {
     let allocator = mem::page_allocator();
 `
+
+// TestSha512ExampleAgreesOutsideKizu computes, with Go's crypto, the two
+// digests examples/crypto_sha512.kizu promises to print.
+func TestSha512ExampleAgreesOutsideKizu(t *testing.T) {
+	cases, err := conformance.Discover(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "examples/crypto_sha512.kizu"
+	var promised string
+	for _, tt := range cases {
+		if tt.Path == path && tt.Stdout != nil {
+			promised = *tt.Stdout
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(promised), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("%s promises %d lines, want the SHA-512 and the SHA-384 digest", path, len(lines))
+	}
+	message := []byte("The quick brown fox jumps over the lazy dog")
+	long := sha512.Sum512(message)
+	if got := hex.EncodeToString(long[:]); got != lines[0] {
+		t.Fatalf("Go's SHA-512 is %s, the example promises %s", got, lines[0])
+	}
+	short := sha512.Sum384(message)
+	if got := hex.EncodeToString(short[:]); got != lines[1] {
+		t.Fatalf("Go's SHA-384 is %s, the example promises %s", got, lines[1])
+	}
+}

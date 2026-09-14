@@ -1,0 +1,227 @@
+// SHA-512 and SHA-384, as FIPS 180-4 defines them: the message is padded
+// to whole 128-byte blocks, and each block is folded into eight 64-bit
+// words of state by 80 rounds. SHA-384 is SHA-512 from other initial
+// words with the digest cut to 48 bytes. The words are `u64`, whose `+`
+// wraps at 64 bits (SPEC §6.9.2). Like `sha256`, the whole message is
+// hashed in one call.
+
+// sha512 writes the 64-byte digest of `bytes` to the front of `digest`.
+pub fn sha512(bytes: []u8, digest: &var []u8) -> void {
+    sha512_family(bytes, initial_state_512(), 8, digest);
+    return;
+}
+
+// sha384 writes the 48-byte digest of `bytes` to the front of `digest`.
+pub fn sha384(bytes: []u8, digest: &var []u8) -> void {
+    sha512_family(bytes, initial_state_384(), 6, digest);
+    return;
+}
+
+// sha512_family hashes `bytes` from the eight initial words `initial`
+// spells and writes `words` words of the state, big-endian, to `digest`.
+fn sha512_family(bytes: []u8, initial: []u8, words: i64, digest: &var []u8) -> void {
+    var state_buffer = [8]u64{};
+    var schedule_buffer = [80]u64{};
+    var constants_buffer = [80]u64{};
+    var block_buffer = [128]u8{};
+    let state = state_buffer.as_mut_slice();
+    let schedule = schedule_buffer.as_mut_slice();
+    let constants = constants_buffer.as_mut_slice();
+    let block = block_buffer.as_mut_bytes();
+    fill_hex_words64(constants, round_constants_512());
+    fill_hex_words64(state, initial);
+    let end = std::mem::len(bytes);
+    var at = 0;
+    while at + 128 <= end {
+        let chunk = bytes[at..at + 128];
+        compress_block_512(state, chunk, schedule, constants);
+        at = at + 128;
+    }
+    var filled = 0;
+    while at < end {
+        block[filled] = bytes[at];
+        filled = filled + 1;
+        at = at + 1;
+    }
+    // The last block carries what is held, a 1 bit, zeros, and the length
+    // in bits as 128 bits big-endian; when the length does not fit after
+    // the 1 bit, there are two.
+    block[filled] = cast<u8>(128);
+    var index = filled + 1;
+    if filled + 17 > 128 {
+        while index < 128 {
+            block[index] = 0;
+            index = index + 1;
+        }
+        let full = block[0..128];
+        compress_block_512(state, full, schedule, constants);
+        index = 0;
+    }
+    while index < 112 {
+        block[index] = 0;
+        index = index + 1;
+    }
+    put_length_512(block, 112, end * 8);
+    let last = block[0..128];
+    compress_block_512(state, last, schedule, constants);
+    for 0..words |word| {
+        set_word64_be(digest, word, state[word]);
+    }
+    return;
+}
+
+// compress_block_512 folds one 128-byte block into the eight state words
+// (FIPS 180-4 §6.4.2).
+fn compress_block_512(state: &var []u64, block: []u8, schedule: &var []u64, k: []u64) -> void {
+    for 0..16 |t| {
+        schedule[t] = word64_be(block, t);
+    }
+    for 16..80 |t| {
+        let w2 = schedule[t - 2];
+        let w7 = schedule[t - 7];
+        let w15 = schedule[t - 15];
+        let w16 = schedule[t - 16];
+        let s0 = rotr64(w15, 1) ^ rotr64(w15, 8) ^ (w15 >> 7);
+        let s1 = rotr64(w2, 19) ^ rotr64(w2, 61) ^ (w2 >> 6);
+        schedule[t] = w16 + s0 + w7 + s1;
+    }
+    var a = state[0];
+    var b = state[1];
+    var c = state[2];
+    var d = state[3];
+    var e = state[4];
+    var f = state[5];
+    var g = state[6];
+    var h = state[7];
+    for 0..80 |t| {
+        let big1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41);
+        let choose = (e & f) ^ (~e & g);
+        let t1 = h + big1 + choose + k[t] + schedule[t];
+        let big0 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let t2 = big0 + majority;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+    state[0] = state[0] + a;
+    state[1] = state[1] + b;
+    state[2] = state[2] + c;
+    state[3] = state[3] + d;
+    state[4] = state[4] + e;
+    state[5] = state[5] + f;
+    state[6] = state[6] + g;
+    state[7] = state[7] + h;
+    return;
+}
+
+// rotr64 rotates a word right by `n` bits, 0 < n < 64.
+fn rotr64(x: u64, n: u64) -> u64 {
+    return (x >> n) | (x << (64 - n));
+}
+
+// word64_be reads word `index` of a big-endian 64-bit word table.
+fn word64_be(view: []u8, index: i64) -> u64 {
+    let at = index * 8;
+    var value = cast<u64>(0);
+    for 0..8 |offset| {
+        value = (value << 8) | cast<u64>(view[at + offset]);
+    }
+    return value;
+}
+
+// set_word64_be writes word `index` of a big-endian 64-bit word table.
+fn set_word64_be(view: &var []u8, index: i64, value: u64) -> void {
+    let at = index * 8;
+    for 0..8 |offset| {
+        let shift = cast<u64>((7 - offset) * 8);
+        view[at + offset] = cast<u8>((value >> shift) & 255);
+    }
+    return;
+}
+
+// put_length_512 writes `value` as the low 64 bits of a 128-bit
+// big-endian length at `at`, the high 64 bits being zero.
+fn put_length_512(view: &var []u8, at: i64, value: i64) -> void {
+    for 0..8 |index| {
+        view[at + index] = 0;
+    }
+    for 0..8 |index| {
+        let shift = (7 - index) * 8;
+        view[at + 8 + index] = cast<u8>((value >> shift) & 255);
+    }
+    return;
+}
+
+// fill_hex_words64 writes the 64-bit words a hex text spells, sixteen
+// digits each, skipping the spaces and line breaks.
+fn fill_hex_words64(view: &var []u64, hex: []u8) -> void {
+    var at = 0;
+    var word = cast<u64>(0);
+    var digits = 0;
+    for 0..std::mem::len(hex) |index| {
+        let value = std::crypto::hex_digit(hex[index]);
+        if value < 0 {
+            continue;
+        }
+        word = (word << 4) | cast<u64>(value);
+        digits = digits + 1;
+        if digits == 16 {
+            view[at] = word;
+            at = at + 1;
+            word = 0;
+            digits = 0;
+        }
+    }
+    return;
+}
+
+// initial_state_512 is H(0) of FIPS 180-4 §5.3.5: the first 64 bits of
+// the fractional parts of the square roots of the first eight primes.
+fn initial_state_512() -> []u8 {
+    return
+        \\6a09e667f3bcc908 bb67ae8584caa73b 3c6ef372fe94f82b a54ff53a5f1d36f1
+        \\510e527fade682d1 9b05688c2b3e6c1f 1f83d9abfb41bd6b 5be0cd19137e2179
+    ;
+}
+
+// initial_state_384 is H(0) of FIPS 180-4 §5.3.4: the ninth through the
+// sixteenth primes.
+fn initial_state_384() -> []u8 {
+    return
+        \\cbbb9d5dc1059ed8 629a292a367cd507 9159015a3070dd17 152fecd8f70e5939
+        \\67332667ffc00b31 8eb44a8768581511 db0c2e0d64f98fa7 47b5481dbefa4fa4
+    ;
+}
+
+// round_constants_512 is K of FIPS 180-4 §4.2.3: the first 64 bits of
+// the fractional parts of the cube roots of the first 80 primes.
+fn round_constants_512() -> []u8 {
+    return
+        \\428a2f98d728ae22 7137449123ef65cd b5c0fbcfec4d3b2f e9b5dba58189dbbc
+        \\3956c25bf348b538 59f111f1b605d019 923f82a4af194f9b ab1c5ed5da6d8118
+        \\d807aa98a3030242 12835b0145706fbe 243185be4ee4b28c 550c7dc3d5ffb4e2
+        \\72be5d74f27b896f 80deb1fe3b1696b1 9bdc06a725c71235 c19bf174cf692694
+        \\e49b69c19ef14ad2 efbe4786384f25e3 0fc19dc68b8cd5b5 240ca1cc77ac9c65
+        \\2de92c6f592b0275 4a7484aa6ea6e483 5cb0a9dcbd41fbd4 76f988da831153b5
+        \\983e5152ee66dfab a831c66d2db43210 b00327c898fb213f bf597fc7beef0ee4
+        \\c6e00bf33da88fc2 d5a79147930aa725 06ca6351e003826f 142929670a0e6e70
+        \\27b70a8546d22ffc 2e1b21385c26c926 4d2c6dfc5ac42aed 53380d139d95b3df
+        \\650a73548baf63de 766a0abb3c77b2a8 81c2c92e47edaee6 92722c851482353b
+        \\a2bfe8a14cf10364 a81a664bbc423001 c24b8b70d0f89791 c76c51a30654be30
+        \\d192e819d6ef5218 d69906245565a910 f40e35855771202a 106aa07032bbd1b8
+        \\19a4c116b8d2d0c8 1e376c085141ab53 2748774cdf8eeb99 34b0bcb5e19b48a8
+        \\391c0cb3c5c95a63 4ed8aa4ae3418acb 5b9cca4f7763e373 682e6ff3d6b2b8a3
+        \\748f82ee5defb2fc 78a5636f43172f60 84c87814a1f0ab72 8cc702081a6439ec
+        \\90befffa23631e28 a4506cebde82bde9 bef9a3f7b2c67915 c67178f2e372532b
+        \\ca273eceea26619c d186b8c721c0c207 eada7dd6cde0eb1e f57d4f7fee6ed178
+        \\06f067aa72176fba 0a637dc5a2c898a6 113f9804bef90dae 1b710b35131c471b
+        \\28db77f523047d84 32caab7b40c72493 3c9ebe0a15c9bebc 431d67c49c100d4c
+        \\4cc5d4becb3e42b6 597f299cfc657e2a 5fcb6fab3ad6faec 6c44198c4a475817
+    ;
+}
