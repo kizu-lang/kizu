@@ -1,0 +1,421 @@
+// The handshake messages a client writes and reads (RFC 8446 §4): a
+// ClientHello built from what the client offers, and the server's
+// messages read into where their parts are. A message is its four-byte
+// header -- the type and a 24-bit length -- and its body; what is read
+// is left in the message's bytes and named by offsets, the way
+// std::crypto::x509 leaves a certificate in its DER.
+
+// Handshake message types (RFC 8446 §4).
+pub fn handshake_client_hello() -> u8 {
+    return 1;
+}
+
+pub fn handshake_server_hello() -> u8 {
+    return 2;
+}
+
+pub fn handshake_new_session_ticket() -> u8 {
+    return 4;
+}
+
+pub fn handshake_encrypted_extensions() -> u8 {
+    return 8;
+}
+
+pub fn handshake_certificate() -> u8 {
+    return 11;
+}
+
+pub fn handshake_certificate_request() -> u8 {
+    return 13;
+}
+
+pub fn handshake_certificate_verify() -> u8 {
+    return 15;
+}
+
+pub fn handshake_finished() -> u8 {
+    return 20;
+}
+
+pub fn handshake_key_update() -> u8 {
+    return 24;
+}
+
+// Cipher suite and group codes on the wire.
+fn suite_code(suite: std::tls::CipherSuite) -> i64 {
+    if suite == std::tls::CipherSuite::Aes128GcmSha256 {
+        return 0x1301;
+    }
+    return 0x1303;
+}
+
+fn group_x25519() -> i64 {
+    return 0x001d;
+}
+
+// signature_ecdsa_secp256r1_sha256 is the one SignatureScheme this
+// client can verify (RFC 8446 §4.2.3).
+pub fn signature_ecdsa_secp256r1_sha256() -> i64 {
+    return 0x0403;
+}
+
+// write_client_hello appends a ClientHello handshake message: TLS 1.3
+// only, the two suites std::tls has, x25519 with the given share,
+// ECDSA P-256 with SHA-256 as the signature algorithm, and the host as
+// the server name. `random` and `session_id` are 32 bytes each; the
+// session id is echoed by the server and is what makes middleboxes take
+// the handshake for TLS 1.2 (§D.4).
+pub fn write_client_hello(
+    allocator: Allocator,
+    out: &var std::string::String,
+    random: []u8,
+    session_id: []u8,
+    host: []u8,
+    key_share: []u8
+) -> std::mem::Error!void {
+    let start = out.len();
+    try append_u8(allocator, out, handshake_client_hello());
+    try append_u24(allocator, out, 0);
+    try append_u16(allocator, out, 0x0303);
+    try out.append_bytes(allocator, random);
+    try append_u8(allocator, out, 32);
+    try out.append_bytes(allocator, session_id);
+    try append_u16(allocator, out, 4);
+    try append_u16(allocator, out, suite_code(std::tls::CipherSuite::Aes128GcmSha256));
+    try append_u16(allocator, out, suite_code(std::tls::CipherSuite::Chacha20Poly1305Sha256));
+    try append_u8(allocator, out, 1);
+    try append_u8(allocator, out, 0);
+    let extensions_at = out.len();
+    try append_u16(allocator, out, 0);
+    // server_name: one host_name entry.
+    let host_length = std::mem::len(host);
+    try append_u16(allocator, out, 0);
+    try append_u16(allocator, out, host_length + 5);
+    try append_u16(allocator, out, host_length + 3);
+    try append_u8(allocator, out, 0);
+    try append_u16(allocator, out, host_length);
+    try out.append_bytes(allocator, host);
+    // supported_groups: x25519.
+    try append_u16(allocator, out, 10);
+    try append_u16(allocator, out, 4);
+    try append_u16(allocator, out, 2);
+    try append_u16(allocator, out, group_x25519());
+    // signature_algorithms: ecdsa_secp256r1_sha256.
+    try append_u16(allocator, out, 13);
+    try append_u16(allocator, out, 4);
+    try append_u16(allocator, out, 2);
+    try append_u16(allocator, out, signature_ecdsa_secp256r1_sha256());
+    // supported_versions: 1.3.
+    try append_u16(allocator, out, 43);
+    try append_u16(allocator, out, 3);
+    try append_u8(allocator, out, 2);
+    try append_u16(allocator, out, 0x0304);
+    // key_share: the x25519 share.
+    try append_u16(allocator, out, 51);
+    try append_u16(allocator, out, 38);
+    try append_u16(allocator, out, 36);
+    try append_u16(allocator, out, group_x25519());
+    try append_u16(allocator, out, 32);
+    try out.append_bytes(allocator, key_share);
+    let end = out.len();
+    set_u16(out, extensions_at, end - extensions_at - 2);
+    set_u24(out, start + 1, end - start - 4);
+    return;
+}
+
+// write_finished appends a Finished handshake message with `verify_data`.
+pub fn write_finished(
+    allocator: Allocator,
+    out: &var std::string::String,
+    verify_data: []u8
+) -> std::mem::Error!void {
+    try append_u8(allocator, out, handshake_finished());
+    try append_u24(allocator, out, std::mem::len(verify_data));
+    try out.append_bytes(allocator, verify_data);
+    return;
+}
+
+// write_empty_certificate appends the Certificate a client without a
+// certificate answers a CertificateRequest with: an empty context and
+// an empty list.
+pub fn write_empty_certificate(allocator: Allocator, out: &var std::string::String) -> std::mem::Error!void {
+    try append_u8(allocator, out, handshake_certificate());
+    try append_u24(allocator, out, 4);
+    try append_u8(allocator, out, 0);
+    try append_u24(allocator, out, 0);
+    return;
+}
+
+// write_key_update appends a KeyUpdate that asks for none in return.
+pub fn write_key_update(allocator: Allocator, out: &var std::string::String) -> std::mem::Error!void {
+    try append_u8(allocator, out, handshake_key_update());
+    try append_u24(allocator, out, 1);
+    try append_u8(allocator, out, 0);
+    return;
+}
+
+// message_length is the whole length of the handshake message at the
+// front of `bytes`, header and body, or null when the bytes do not yet
+// hold the whole message.
+pub fn message_length(bytes: []u8) -> ?i64 {
+    if std::mem::len(bytes) < 4 {
+        return null;
+    }
+    let body = read_u24(bytes, 1);
+    if std::mem::len(bytes) < 4 + body {
+        return null;
+    }
+    return 4 + body;
+}
+
+// A ServerHello, read: the suite the server chose, where its x25519
+// share is in the message, and whether it is a HelloRetryRequest.
+pub struct ServerHello {
+    pub suite: std::tls::CipherSuite,
+    pub key_share_start: i64,
+    pub key_share_end: i64,
+    pub retry: bool,
+}
+
+// read_server_hello reads a ServerHello (RFC 8446 §4.1.3). The session
+// id must echo the client's (`session_id`, of whatever length it sent),
+// the suite and group must be ones the client offered, and
+// supported_versions must say 1.3. A message that does not fit is
+// `Error::IllegalParameter`.
+pub fn read_server_hello(message: []u8, session_id: []u8) -> std::tls::Error!std::tls::ServerHello {
+    let length = std::mem::len(message);
+    if length < 4 + 2 + 32 + 1 or message[0] != handshake_server_hello() or read_u24(message, 1) != length - 4 {
+        return std::tls::Error::IllegalParameter;
+    }
+    if read_u16(message, 4) != 0x0303 {
+        return std::tls::Error::IllegalParameter;
+    }
+    let random = message[6..38];
+    let retry = is_hex(random, hello_retry_request_random());
+    var at = 38;
+    let id_length = cast<i64>(message[at]);
+    at = at + 1;
+    if id_length != std::mem::len(session_id) or at + id_length + 3 > length {
+        return std::tls::Error::IllegalParameter;
+    }
+    let echoed = message[at..at + id_length];
+    if !std::mem::equal_bytes(echoed, session_id) {
+        return std::tls::Error::IllegalParameter;
+    }
+    at = at + id_length;
+    let suite_code = read_u16(message, at);
+    var suite = std::tls::CipherSuite::Aes128GcmSha256;
+    if suite_code == 0x1303 {
+        suite = std::tls::CipherSuite::Chacha20Poly1305Sha256;
+    } else {
+        if suite_code != 0x1301 {
+            return std::tls::Error::IllegalParameter;
+        }
+    }
+    at = at + 2;
+    if message[at] != 0 {
+        return std::tls::Error::IllegalParameter;
+    }
+    at = at + 1;
+    if at + 2 > length {
+        return std::tls::Error::IllegalParameter;
+    }
+    let extensions_length = read_u16(message, at);
+    at = at + 2;
+    if at + extensions_length != length {
+        return std::tls::Error::IllegalParameter;
+    }
+    var version_seen = false;
+    var share_start = 0;
+    var share_end = 0;
+    while at < length {
+        if at + 4 > length {
+            return std::tls::Error::IllegalParameter;
+        }
+        let kind = read_u16(message, at);
+        let size = read_u16(message, at + 2);
+        let body = at + 4;
+        if body + size > length {
+            return std::tls::Error::IllegalParameter;
+        }
+        if kind == 43 {
+            if size != 2 or read_u16(message, body) != 0x0304 {
+                return std::tls::Error::IllegalParameter;
+            }
+            version_seen = true;
+        }
+        if kind == 51 {
+            if retry {
+                return std::tls::Error::Unsupported;
+            }
+            if size != 36 or read_u16(message, body) != group_x25519() or read_u16(message, body + 2) != 32 {
+                return std::tls::Error::IllegalParameter;
+            }
+            share_start = body + 4;
+            share_end = body + 36;
+        }
+        at = body + size;
+    }
+    if !version_seen or (!retry and share_end == 0) {
+        return std::tls::Error::IllegalParameter;
+    }
+    return ServerHello { suite: suite, key_share_start: share_start, key_share_end: share_end, retry: retry };
+}
+
+// hello_retry_request_random is the ServerHello.random that makes the
+// message a HelloRetryRequest (RFC 8446 §4.1.3), as hex.
+fn hello_retry_request_random() -> []u8 {
+    return "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c";
+}
+
+// is_hex reports whether `bytes` are what a lowercase hex text spells.
+fn is_hex(bytes: []u8, hex: []u8) -> bool {
+    let count = std::mem::len(hex) / 2;
+    if std::mem::len(bytes) != count {
+        return false;
+    }
+    for 0..count |index| {
+        let high = hex_value(hex[index * 2]);
+        let low = hex_value(hex[index * 2 + 1]);
+        if cast<i64>(bytes[index]) != high * 16 + low {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+// read_certificate reads a Certificate (RFC 8446 §4.4.2) and appends
+// each certificate's DER to `chain`, the server's first. The request
+// context must be empty, since the client asked for nothing.
+pub fn read_certificate(
+    allocator: Allocator,
+    message: []u8,
+    chain: &var std::array::Array<std::string::String>
+) -> std::tls::Failure!void {
+    let length = std::mem::len(message);
+    if length < 8 or message[0] != handshake_certificate() or read_u24(message, 1) != length - 4 {
+        return std::tls::Error::IllegalParameter;
+    }
+    if message[4] != 0 {
+        return std::tls::Error::IllegalParameter;
+    }
+    let list_length = read_u24(message, 5);
+    var at = 8;
+    if at + list_length != length {
+        return std::tls::Error::IllegalParameter;
+    }
+    while at < length {
+        if at + 3 > length {
+            return std::tls::Error::IllegalParameter;
+        }
+        let der_length = read_u24(message, at);
+        at = at + 3;
+        if at + der_length + 2 > length {
+            return std::tls::Error::IllegalParameter;
+        }
+        let der = message[at..at + der_length];
+        var copy = std::string::new(allocator);
+        errdefer copy.deinit(allocator);
+        try copy.append_bytes(allocator, der);
+        try chain.append(allocator, move copy);
+        at = at + der_length;
+        let extensions_length = read_u16(message, at);
+        at = at + 2 + extensions_length;
+        if at > length {
+            return std::tls::Error::IllegalParameter;
+        }
+    }
+    return;
+}
+
+// A CertificateVerify, read: the signature scheme and where the
+// signature is.
+pub struct CertificateVerify {
+    pub scheme: i64,
+    pub signature_start: i64,
+    pub signature_end: i64,
+}
+
+// read_certificate_verify reads a CertificateVerify (RFC 8446 §4.4.3).
+pub fn read_certificate_verify(message: []u8) -> std::tls::Error!std::tls::CertificateVerify {
+    let length = std::mem::len(message);
+    if length < 8 or message[0] != handshake_certificate_verify() or read_u24(message, 1) != length - 4 {
+        return std::tls::Error::IllegalParameter;
+    }
+    let scheme = read_u16(message, 4);
+    let signature_length = read_u16(message, 6);
+    if 8 + signature_length != length {
+        return std::tls::Error::IllegalParameter;
+    }
+    return CertificateVerify { scheme: scheme, signature_start: 8, signature_end: length };
+}
+
+// read_finished checks a Finished message's shape and returns its 32
+// bytes of verify_data.
+pub fn read_finished(message: []u8) -> std::tls::Error![]u8 {
+    let length = std::mem::len(message);
+    if length != 36 or message[0] != handshake_finished() or read_u24(message, 1) != 32 {
+        return std::tls::Error::IllegalParameter;
+    }
+    return message[4..36];
+}
+
+// read_key_update reads a KeyUpdate and reports whether the peer asked
+// for one in return.
+pub fn read_key_update(message: []u8) -> std::tls::Error!bool {
+    let length = std::mem::len(message);
+    if length != 5 or message[0] != handshake_key_update() or read_u24(message, 1) != 1 or message[4] > 1 {
+        return std::tls::Error::IllegalParameter;
+    }
+    return message[4] == 1;
+}
+
+fn read_u16(bytes: []u8, at: i64) -> i64 {
+    return (cast<i64>(bytes[at]) << 8) | cast<i64>(bytes[at + 1]);
+}
+
+fn read_u24(bytes: []u8, at: i64) -> i64 {
+    return (cast<i64>(bytes[at]) << 16) | (cast<i64>(bytes[at + 1]) << 8) | cast<i64>(bytes[at + 2]);
+}
+
+fn append_u8(allocator: Allocator, out: &var std::string::String, value: u8) -> std::mem::Error!void {
+    try out.append_byte(allocator, value);
+    return;
+}
+
+fn append_u16(allocator: Allocator, out: &var std::string::String, value: i64) -> std::mem::Error!void {
+    try out.append_byte(allocator, cast<u8>((value >> 8) & 255));
+    try out.append_byte(allocator, cast<u8>(value & 255));
+    return;
+}
+
+fn append_u24(allocator: Allocator, out: &var std::string::String, value: i64) -> std::mem::Error!void {
+    try out.append_byte(allocator, cast<u8>((value >> 16) & 255));
+    try out.append_byte(allocator, cast<u8>((value >> 8) & 255));
+    try out.append_byte(allocator, cast<u8>(value & 255));
+    return;
+}
+
+fn set_u16(out: &var std::string::String, at: i64, value: i64) -> void {
+    let bytes = out.as_mut_bytes();
+    bytes[at] = cast<u8>((value >> 8) & 255);
+    bytes[at + 1] = cast<u8>(value & 255);
+    return;
+}
+
+fn set_u24(out: &var std::string::String, at: i64, value: i64) -> void {
+    let bytes = out.as_mut_bytes();
+    bytes[at] = cast<u8>((value >> 16) & 255);
+    bytes[at + 1] = cast<u8>((value >> 8) & 255);
+    bytes[at + 2] = cast<u8>(value & 255);
+    return;
+}

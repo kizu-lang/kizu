@@ -1,3 +1,4 @@
+import std::array;
 import std::crypto;
 import std::mem;
 import std::string;
@@ -470,4 +471,80 @@ test "a record under the wrong sequence, with a changed byte, or with another he
     try expect_bad_record(allocator, 1, "17030100432e937e11ef4ac740e538ad36005fc4a46932fc3225d05f82aa1b36e30efaf97d90e6dffc602dcb501a59a8fcc49c4bf2e5f0a21c0047c2abf332540dd032e167c2955d");
     try expect_bad_record(allocator, 1, "17030300442e937e11ef4ac740e538ad36005fc4a46932fc3225d05f82aa1b36e30efaf97d90e6dffc602dcb501a59a8fcc49c4bf2e5f0a21c0047c2abf332540dd032e167c2955d");
     try expect_bad_record(allocator, 1, "1703030002");
+}
+
+test "a ClientHello carries what the client offers and a ServerHello reads back" {
+    let allocator = mem::page_allocator();
+    let random = try bytes_of_hex(allocator, "cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7");
+    defer random.deinit(allocator);
+    let share = try bytes_of_hex(allocator, client_public());
+    defer share.deinit(allocator);
+    let random_bytes = random.as_bytes();
+    let share_bytes = share.as_bytes();
+    var hello = string::new(allocator);
+    defer hello.deinit(allocator);
+    try tls::write_client_hello(allocator, &var hello, random_bytes, random_bytes, "server", share_bytes);
+    let bytes = hello.as_bytes();
+    // The type, the 24-bit length, the version, the random.
+    testing::expect_equal<u8>(1, bytes[0]);
+    testing::expect_equal<i64>(mem::len(bytes) - 4, (cast<i64>(bytes[2]) << 8) | cast<i64>(bytes[3]));
+    try expect_hex(allocator, "0303", bytes[4..6]);
+    testing::expect(mem::equal_bytes(bytes[6..38], random_bytes));
+    // The session id, then the suites and the null compression.
+    testing::expect_equal<u8>(32, bytes[38]);
+    testing::expect(mem::equal_bytes(bytes[39..71], random_bytes));
+    try expect_hex(allocator, "000413011303", bytes[71..77]);
+    try expect_hex(allocator, "0100", bytes[77..79]);
+    // The extensions end with the key share.
+    let count = mem::len(bytes);
+    testing::expect(mem::equal_bytes(bytes[count - 32..count], share_bytes));
+    try expect_hex(allocator, "003300260024001d0020", bytes[count - 42..count - 32]);
+    if tls::message_length(bytes) |whole| {
+        testing::expect_equal<i64>(count, whole);
+    } else {
+        testing::expect(false);
+    }
+    if tls::message_length(bytes[0..count - 1]) |_| {
+        testing::expect(false);
+    }
+
+    // The RFC 8448 ServerHello answers an empty session id with an empty one.
+    let server = try bytes_of_hex(allocator, server_hello());
+    defer server.deinit(allocator);
+    let server_bytes = server.as_bytes();
+    let read = try tls::read_server_hello(server_bytes, "");
+    testing::expect(read.suite == tls::CipherSuite::Aes128GcmSha256);
+    testing::expect(!read.retry);
+    let key_share = server_bytes[read.key_share_start..read.key_share_end];
+    try expect_hex(allocator, server_public(), key_share);
+    if tls::read_server_hello(server_bytes, random_bytes) |_| {
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == tls::Error::IllegalParameter);
+    }
+}
+
+test "the RFC 8448 Certificate, CertificateVerify and Finished read back" {
+    let allocator = mem::page_allocator();
+    let message = try bytes_of_hex(allocator, certificate());
+    defer message.deinit(allocator);
+    let message_bytes = message.as_bytes();
+    var chain = array::new<string::String>(allocator);
+    defer chain.deinit(allocator);
+    try tls::read_certificate(allocator, message_bytes, &var chain);
+    testing::expect_equal<i64>(1, chain.len());
+    if chain.at(0) |der| {
+        testing::expect_equal<i64>(432, der.len());
+    }
+    let verify = try bytes_of_hex(allocator, certificate_verify());
+    defer verify.deinit(allocator);
+    let verify_bytes = verify.as_bytes();
+    let read = try tls::read_certificate_verify(verify_bytes);
+    testing::expect_equal<i64>(0x0804, read.scheme);
+    testing::expect_equal<i64>(128, read.signature_end - read.signature_start);
+    let finished = try bytes_of_hex(allocator, server_finished());
+    defer finished.deinit(allocator);
+    let finished_bytes = finished.as_bytes();
+    let verify_data = try tls::read_finished(finished_bytes);
+    try expect_hex(allocator, server_finished_data(), verify_data);
 }
