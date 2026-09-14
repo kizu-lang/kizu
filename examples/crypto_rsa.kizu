@@ -1,0 +1,125 @@
+import std::crypto;
+import std::mem;
+import std::string;
+
+// An RSA signature is what most certificates on the public web carry:
+// the CA's key is an RSA modulus and exponent, and the signature is the
+// digest of the certificate padded and raised to the private exponent.
+// Two paddings are in use. PKCS #1 v1.5 is what certificates are
+// signed with; PSS is what TLS 1.3 signs the handshake with, and what
+// newer certificates use. Here a 2048-bit key generated for this
+// example checks one signature of each kind over the same message.
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var high = -1;
+    for 0..mem::len(hex) |index| {
+        let value = hex_value(hex[index]);
+        if value < 0 {
+            continue;
+        }
+        if high < 0 {
+            high = value;
+        } else {
+            try out.append_byte(allocator, cast<u8>(high * 16 + value));
+            high = -1;
+        }
+    }
+    return move out;
+}
+
+// hex_value is the value of a hex digit, or -1 for a line break.
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    if value >= 48 {
+        return value - 48;
+    }
+    return -1;
+}
+
+fn modulus() -> []u8 {
+    return
+        \\c643e6e65aa19b27d5fe848351dc0a1e8558e5e7254711b7437da815b1470b6e
+        \\d945154609b9b627e871935df0f76ac364d06d22003b609758c68aca96cf6d4b
+        \\458955f70686440be32d800bc0dffbdb87e4ad6f914f152961d3c012e1cb2538
+        \\f5f4c8d893fa16667e0326ff895d6a5bdd44cf7268516990577b4855ae419bdf
+        \\e37d7e3c0055d01bbe4c85c060b859783cfa510986048fba23381f478bb869ba
+        \\0eeb1240109ca9256d2f495baa51c7e50c0ef65a5c5ac58ca9976023205dfdc8
+        \\23c20340e99a026af90816fc73ea5ed3f863c9e20505c474fddcc91deabfd45e
+        \\50d17e05c44c1b74fd7fd8ee751b5932cac8c31066d8be11ba336bdf6a2c0455
+    ;
+}
+
+fn pkcs1_signature() -> []u8 {
+    return
+        \\01377dbde90b53224044551f2f3b10b17d460eacd35d7a812ca6238435c73c29
+        \\51b2ff582e097ee0ade1e6a57f4c0eb4455c2f19be511dbdfc0c15071952e64c
+        \\7ceedc8c427c0854fa39b1ff8bd8f37fb2c959fad16aa84b71161bece06f2ec3
+        \\cab388d2dc703456c8c8cc955013ec0d0fc6af8508281b0f2950af435e865d22
+        \\cb3ea13d290468267545f14c41ab7af2f51981f474dd76670998f4c51e542bab
+        \\c8c2357d2bcee4fb94fcbced7e96df2d3206e9503d2a3ac95c5ae06069878d1a
+        \\24eb5dedfd26b703eea08e835a74e357fa70d896d074147af94857d6e2d463e6
+        \\1f197a41b6a50b957a54596310ce08ad2792a49be8d4bb09ef0e7348cb14bb1a
+    ;
+}
+
+fn pss_signature() -> []u8 {
+    return
+        \\1ad3041f9212d21f144273995a44d761f9877c44da17df7bee9b4511929f51aa
+        \\e2997f21984cbafe448d6af1f62cd24bef899bb4bf951eb095c302f8cf958af6
+        \\a927c26559843112e70d449bb7c3d62a1d7b9d40a72db3df0d4006e41c2f7d80
+        \\fe4acdd6bd6efdaa4fcefc382083d1228e2c901990baa0499a0335c0670e71d3
+        \\99cdbb5d1eafdda998e5910b1675966d27b9a1c7234fb490a171786a71f7454c
+        \\9737e409ac3b0e9cb4bbb8087120bc812983e764672282512670c4cb774f9d17
+        \\c71b6e45007cb84e688e5221cee8cbb5362b06ca749139025b9740679914116e
+        \\3a8a39551497138c34243b8e12bfb90fa4159707c0cd7191c48d56e57aec5b72
+    ;
+}
+
+// verifies checks a signature over `message` under SHA-256 against the
+// key, with PSS when `pss` is set and PKCS #1 v1.5 otherwise.
+fn verifies(allocator: Allocator, pss: bool, message: []u8, signature_hex: []u8) -> mem::Error!bool {
+    let n = try bytes_of_hex(allocator, modulus());
+    defer n.deinit(allocator);
+    let exponent = try bytes_of_hex(allocator, "010001");
+    defer exponent.deinit(allocator);
+    let signature = try bytes_of_hex(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256(message, view);
+    let hash = digest.as_bytes();
+    let n_bytes = n.as_bytes();
+    let e_bytes = exponent.as_bytes();
+    let signed = signature.as_bytes();
+    if pss {
+        return crypto::rsa_pss_verify(crypto::Hash::Sha256, n_bytes, e_bytes, hash, signed);
+    }
+    return crypto::rsa_pkcs1_verify(crypto::Hash::Sha256, n_bytes, e_bytes, hash, signed);
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let message = "The quick brown fox jumps over the lazy dog";
+    if try verifies(allocator, false, message, pkcs1_signature()) {
+        print("the PKCS #1 v1.5 signature over the message verifies");
+    }
+    if try verifies(allocator, true, message, pss_signature()) {
+        print("the PSS signature over the message verifies");
+    }
+    if !try verifies(allocator, false, "The quick brown fox jumps over the lazy cog", pkcs1_signature()) {
+        print("a changed message does not");
+    }
+    return;
+}
+
+// run
+// features: crypto rsa
+// output:
+// the PKCS #1 v1.5 signature over the message verifies
+// the PSS signature over the message verifies
+// a changed message does not

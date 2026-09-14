@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -8,6 +9,7 @@ import (
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -307,3 +309,140 @@ func TestSha512ExampleAgreesOutsideKizu(t *testing.T) {
 		t.Fatalf("Go's SHA-384 is %s, the example promises %s", got, lines[1])
 	}
 }
+
+// TestRsaVerifiesWhatGoSigns signs digests with keys Go generates, under
+// PKCS #1 v1.5 and PSS over each of the three hashes, and has std::crypto
+// verify them: the valid ones, one over another message, and one with a
+// bit changed. The verdicts must be Go's.
+func TestRsaVerifiesWhatGoSigns(t *testing.T) {
+	var program strings.Builder
+	program.WriteString(rsaProgramHead)
+	var want []string
+	hashes := []struct {
+		name string
+		hash crypto.Hash
+	}{{"Sha256", crypto.SHA256}, {"Sha384", crypto.SHA384}, {"Sha512", crypto.SHA512}}
+	for i, bits := range []int{2048, 3072} {
+		private, err := rsa.GenerateKey(rand.Reader, bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		modulus := hex.EncodeToString(private.N.Bytes())
+		for _, h := range hashes {
+			digest := digestOf(h.hash, fmt.Sprintf("message %d", i))
+			other := digestOf(h.hash, fmt.Sprintf("message %d changed", i))
+			pkcs1, err := rsa.SignPKCS1v15(rand.Reader, private, h.hash, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pss, err := rsa.SignPSS(rand.Reader, private, h.hash, digest,
+				&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := append([]byte(nil), pss...)
+			changed[len(changed)/2] ^= 1
+			for _, c := range []struct {
+				scheme    string
+				digest    []byte
+				signature []byte
+				verdict   string
+			}{
+				{"pkcs1", digest, pkcs1, "valid"},
+				{"pss", digest, pss, "valid"},
+				{"pkcs1", other, pkcs1, "invalid"},
+				{"pss", digest, changed, "invalid"},
+				{"pss", digest, pkcs1, "invalid"},
+			} {
+				fmt.Fprintf(&program, "    try check(allocator, crypto::Hash::%s, %t, %q, %q, %q);\n",
+					h.name, c.scheme == "pss", modulus,
+					hex.EncodeToString(c.digest), hex.EncodeToString(c.signature))
+				want = append(want, c.verdict)
+			}
+		}
+	}
+	program.WriteString("    return;\n}\n")
+	path := filepath.Join(t.TempDir(), "rsa_oracle.kizu")
+	if err := os.WriteFile(path, []byte(program.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := kizuCommand("run", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != strings.Join(want, "\n") {
+		t.Fatalf("Kizu verified Go's RSA signatures as:\n%s\nwant:\n%s",
+			got, strings.Join(want, "\n"))
+	}
+}
+
+// digestOf hashes a message under one of the hashes RSA signatures use.
+func digestOf(hash crypto.Hash, message string) []byte {
+	h := hash.New()
+	h.Write([]byte(message))
+	return h.Sum(nil)
+}
+
+// rsaProgramHead is the program TestRsaVerifiesWhatGoSigns completes with
+// one `check` per signature; the exponent is the 65537 Go's keys have.
+const rsaProgramHead = `import std::crypto;
+import std::mem;
+import std::string;
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+fn check(
+    allocator: Allocator,
+    hash: crypto::Hash,
+    pss: bool,
+    modulus_hex: []u8,
+    digest_hex: []u8,
+    signature_hex: []u8
+) -> mem::Error!void {
+    let modulus = try bytes_of_hex(allocator, modulus_hex);
+    defer modulus.deinit(allocator);
+    let exponent = try bytes_of_hex(allocator, "010001");
+    defer exponent.deinit(allocator);
+    let digest = try bytes_of_hex(allocator, digest_hex);
+    defer digest.deinit(allocator);
+    let signature = try bytes_of_hex(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    let n = modulus.as_bytes();
+    let e = exponent.as_bytes();
+    let digest_bytes = digest.as_bytes();
+    let signature_bytes = signature.as_bytes();
+    let valid = if pss {
+        crypto::rsa_pss_verify(hash, n, e, digest_bytes, signature_bytes)
+    } else {
+        crypto::rsa_pkcs1_verify(hash, n, e, digest_bytes, signature_bytes)
+    };
+    if valid {
+        print("valid");
+    } else {
+        print("invalid");
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+`

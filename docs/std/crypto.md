@@ -15,6 +15,10 @@ std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
 std::crypto::x25519(scalar: []u8, point: []u8, out: &var []u8) -> Error!void
 std::crypto::x25519_base(scalar: []u8, out: &var []u8) -> void
 std::crypto::ecdsa_p256_verify(public_key: []u8, digest: []u8, signature: []u8) -> bool
+std::crypto::rsa_pkcs1_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool
+std::crypto::rsa_pss_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool
+std::crypto::digest_length(hash: Hash) -> i64
+std::crypto::digest_of(hash: Hash, bytes: []u8, digest: &var []u8) -> void
 std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
 
 std::crypto::chacha20_poly1305_seal(allocator, key: []u8, nonce: []u8, aad: []u8, plain: []u8, out: &var String) -> std::mem::Error!void
@@ -25,6 +29,7 @@ std::crypto::aes_gcm_open(allocator, key: []u8, nonce: []u8, aad: []u8, sealed: 
 std::crypto::random_bytes(io: Io, allocator: Allocator, count: i64) -> Error!String
 std::crypto::random_into(io: Io, allocator: Allocator, out: &var String, count: i64) -> Error!void
 
+std::crypto::Hash     Sha256 | Sha384 | Sha512
 std::crypto::Error    IoFailing | OutOfMemory | ReadFailed | AuthenticationFailed | LowOrderPoint
 std::crypto::Failure  Error or std::mem::Error
 ```
@@ -55,6 +60,10 @@ if crypto::equal_constant_time(mine, theirs) {
 結果は呼び手の buffer の view に書きます。`var out = [32]u8{}` と
 `as_mut_bytes()` がその形で、hash は何も確保せず、失敗もしません。32 byte より
 短い view は bounds trap です(index が末尾を越えたときと同じ)。
+
+`Hash` は 3 つの digest に付けた名前で、署名の検証のように「どの digest の上か」を
+受け取る API が使います。`digest_of(hash, bytes, digest)` はその名前で hash し、
+`digest_length(hash)` はその digest の長さです。
 
 message は 1 回の呼び出しで全部渡します。少しずつ渡す hasher はありません。
 途中の block を struct に持たせる必要があり、stack buffer は struct field に
@@ -102,10 +111,20 @@ SubjectPublicKeyInfo が持つ形そのものです。`signature` は r と s �
 どちらもまだ無いからです。DER の `SEQUENCE { INTEGER r, INTEGER s }` から r と s を
 取り出すのは `std::crypto::x509`(`docs/std/x509.md`)の仕事です。
 
-算術は 32 bit limb 8 本を `u64` で持つ Montgomery 乗算で、体 p と位数 n の両方に同じ
+`rsa_pkcs1_verify` と `rsa_pss_verify` は RSA 署名を検証します(RFC 8017 §8.2.2 と
+§8.1.2)。鍵は `modulus` と `exponent` を big-endian の byte で持ち、証明書の
+SubjectPublicKeyInfo が持つ形そのものです。`hash` は署名が乗る digest の名前、
+`digest` はその digest、`signature` は modulus と同じ長さです。PSS は MGF1 に同じ
+hash を使い、salt は digest と同じ長さで、TLS 1.3 と証明書はその形です。modulus が
+偶数か 4096 bit より広いか padding に足りない、exponent が偶数か 32 bit より広い、
+signature の長さが modulus と違うか値が modulus 以上、のどれも false です。digest の
+長さが `hash` と合わないのは呼び手の誤用で trap します。
+
+算術は 32 bit limb を `u64` で持つ Montgomery 乗算で、limb 数は modulus から決まり
+(P-256 は 8 本、RSA は 4096 bit まで 128 本)、体 p、位数 n、RSA の modulus に同じ
 code を使います。point は Jacobian 座標で、u1 G + u2 Q は Straus–Shamir の同時
 double-and-add です。扱うのは公開鍵と署名だけなので、値で branch し早く比べます。
-1 回の検証は `--opt` で約 1 ms です。
+1 回の検証は `--opt` で P-256 が 1 ms 弱、RSA-2048 が約 0.3 ms です。
 
 ## 封をする
 
@@ -158,3 +177,4 @@ source に見え、`std::testing::failing_io()` は `IoFailing` で拒否しま�
 検証は公開されている test vector です。FIPS 180-4 の例、RFC 4231、RFC 5869、
 RFC 8439、RFC 7748、RFC 6979 の case が `tests/behavior/src/crypto/` にあり、`examples/`
 の crypto example が約束する hex は compiler の test が Go の実装と突き合わせます。
+ECDSA と RSA は Go が生成した鍵で署名したものを Kizu が検証する test もあります。
