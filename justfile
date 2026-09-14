@@ -126,6 +126,7 @@ compress-fixtures:
 spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
     cd spec && lean --run Agreement.lean > ../examples/fixtures/agreement_trace.json
+    cd spec && lean --run Tls.lean > ../examples/fixtures/tls_trace.json
 
 # Run the broad baseline timing script.
 perf:

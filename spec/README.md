@@ -6,6 +6,7 @@
 ```
 spec/Ledger.lean                  帳簿: 送金の意味、総和保存と再送の冪等性の証明、trace 生成
 spec/Agreement.lean               契約: 状態と事象の遷移表、終了の吸収性などの証明、trace 生成
+spec/Tls.lean                     TLS 1.3 client の handshake: server の message と状態の遷移表、順序の証明、trace 生成
 spec/lean-toolchain               elan が読む Lean の版
 examples/fixtures/*_trace.json    生成した trace(checked in)
 examples/*_conformance.kizu       trace を実装に流して食い違う手を名指しする program
@@ -16,6 +17,14 @@ examples/*_conformance.kizu       trace を実装に流して食い違う手を�
 `active_only_by_acceptance`(active になるのは offered からの accept か suspended
 からの resume だけ)、`terminate_needs_agreement`(terminate が効くのは active か
 suspended だけ)です。
+
+`Tls.lean` は RFC 8446 §A.1 の client の状態機械です。表に無い message は
+`unexpected_message` で接続を閉じ(`refusal_closes`)、閉じた接続には何も起きず
+(`closed_absorbing`)、connected になるのは待っていた `Finished` によってだけ
+(`connected_only_by_finished`)、application data は connected でだけ受け取り
+(`data_needs_connection`)、`CertificateVerify` は `Certificate` の後にだけ来ます
+(`verify_needs_certificate`、`certificate_first`)。`std::tls` の handshake が
+この表で、`examples/tls_conformance.kizu` が trace を流します。
 
 仕様が持つのは 3 つです。**定義**(`Ledger.lean` なら `Book.post`: 1 件の送金が
 状態をどう変え、どの結果を返すか)、**性質の証明**(`total_reachable`: 到達可能な

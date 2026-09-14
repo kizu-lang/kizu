@@ -1,0 +1,119 @@
+// The TLS 1.3 client handshake as a machine (RFC 8446 §A.1): the client
+// waits for the server's messages in one order and no other, and a
+// message out of that order ends the connection with an
+// `unexpected_message` alert. `spec/Tls.lean` is the specification of
+// this table, with the proofs that a closed connection stays closed,
+// that only the awaited `Finished` connects, that application data is
+// taken only once connected, and that a `CertificateVerify` follows a
+// `Certificate`; `examples/tls_conformance.kizu` replays its traces
+// against `advance`.
+//
+// The client offers no pre-shared key and no early data, and holds no
+// certificate of its own, so the server's `CertificateRequest` is
+// acknowledged with an empty `Certificate`, and `HelloRetryRequest` is
+// not handled: the client answers `handshake_failure` and closes.
+
+// State is where the client is in the handshake, named as RFC 8446 §A.1
+// names them. A connection starts in `WaitServerHello`, its ClientHello
+// sent. `Closed` is after a `close_notify`, a fatal alert, or a refusal.
+pub enum State {
+    WaitServerHello,
+    WaitEncryptedExtensions,
+    WaitCertificateRequest,
+    WaitCertificate,
+    WaitCertificateVerify,
+    WaitFinished,
+    Connected,
+    Closed,
+}
+
+// Event is what arrives from the server: a handshake message,
+// application data, or an alert.
+pub enum Event {
+    ServerHello,
+    HelloRetryRequest,
+    EncryptedExtensions,
+    CertificateRequest,
+    Certificate,
+    CertificateVerify,
+    Finished,
+    NewSessionTicket,
+    KeyUpdate,
+    ApplicationData,
+    CloseNotify,
+    FatalAlert,
+}
+
+// Outcome is what the client did with a message. `Applied` took it as the
+// table says. `Refused` is a message the table does not list for the
+// state, answered with an `unexpected_message` alert. `Unsupported` is
+// a `HelloRetryRequest`, answered with `handshake_failure`. Both of the
+// last close the connection.
+pub enum Outcome {
+    Applied,
+    Refused,
+    Unsupported,
+}
+
+// A Transition is the state after a message and what was done with it.
+pub struct Transition {
+    pub state: std::tls::State,
+    pub outcome: std::tls::Outcome,
+}
+
+// advance applies one message from the server to the client's state.
+pub fn advance(state: std::tls::State, event: std::tls::Event) -> std::tls::Transition {
+    if state == State::Closed {
+        return Transition { state: State::Closed, outcome: Outcome::Refused };
+    }
+    if state == State::WaitServerHello and event == Event::HelloRetryRequest {
+        return Transition { state: State::Closed, outcome: Outcome::Unsupported };
+    }
+    if table(state, event) |next| {
+        return Transition { state: next, outcome: Outcome::Applied };
+    }
+    return Transition { state: State::Closed, outcome: Outcome::Refused };
+}
+
+// table is the transition table of spec/Tls.lean; null is a refusal.
+// Every state but `Closed` takes `close_notify` and a fatal alert.
+fn table(state: std::tls::State, event: std::tls::Event) -> ?std::tls::State {
+    if event == Event::CloseNotify or event == Event::FatalAlert {
+        return State::Closed;
+    }
+    match state {
+        WaitServerHello => match event {
+            ServerHello => return State::WaitEncryptedExtensions,
+            _ => {},
+        },
+        WaitEncryptedExtensions => match event {
+            EncryptedExtensions => return State::WaitCertificateRequest,
+            _ => {},
+        },
+        WaitCertificateRequest => match event {
+            CertificateRequest => return State::WaitCertificate,
+            Certificate => return State::WaitCertificateVerify,
+            _ => {},
+        },
+        WaitCertificate => match event {
+            Certificate => return State::WaitCertificateVerify,
+            _ => {},
+        },
+        WaitCertificateVerify => match event {
+            CertificateVerify => return State::WaitFinished,
+            _ => {},
+        },
+        WaitFinished => match event {
+            Finished => return State::Connected,
+            _ => {},
+        },
+        Connected => match event {
+            NewSessionTicket => return State::Connected,
+            KeyUpdate => return State::Connected,
+            ApplicationData => return State::Connected,
+            _ => {},
+        },
+        Closed => {},
+    }
+    return null;
+}
