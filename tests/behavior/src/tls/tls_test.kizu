@@ -1,0 +1,473 @@
+import std::crypto;
+import std::mem;
+import std::string;
+import std::testing;
+import std::tls;
+
+// RFC 8448 §3 is one complete TLS 1.3 handshake with every secret, key,
+// and record written down. The key schedule here is held to those
+// secrets, from the key exchange to the application traffic keys, and
+// the record layer to those records: what the RFC's server sealed opens
+// to the messages it lists, and what its client sent is sealed byte for
+// byte.
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+fn hex_of(allocator: Allocator, bytes: []u8) -> mem::Error!string::String {
+    let digits = "0123456789abcdef";
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value >> 4]);
+        try out.append_byte(allocator, digits[value & 15]);
+    }
+    return move out;
+}
+
+fn expect_hex(allocator: Allocator, want: []u8, bytes: []u8) -> mem::Error!void {
+    let hex = try hex_of(allocator, bytes);
+    defer hex.deinit(allocator);
+    let got = hex.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+// The RFC's values, as hex.
+fn client_private() -> []u8 {
+    return "49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005";
+}
+
+fn client_public() -> []u8 {
+    return "99381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c";
+}
+
+fn client_hello() -> []u8 {
+    return "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001";
+}
+
+fn early_secret() -> []u8 {
+    return "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a";
+}
+
+fn server_private() -> []u8 {
+    return "b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e";
+}
+
+fn server_public() -> []u8 {
+    return "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f";
+}
+
+fn server_hello() -> []u8 {
+    return "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304";
+}
+
+fn handshake_secret() -> []u8 {
+    return "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac";
+}
+
+fn client_hs_traffic() -> []u8 {
+    return "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21";
+}
+
+fn server_hs_traffic() -> []u8 {
+    return "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38";
+}
+
+fn transcript_hash_sh() -> []u8 {
+    return "860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8";
+}
+
+fn master_secret() -> []u8 {
+    return "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919";
+}
+
+fn server_hs_key() -> []u8 {
+    return "3fce516009c21727d0f2e4e86ee403bc";
+}
+
+fn server_hs_iv() -> []u8 {
+    return "5d313eb2671276ee13000b30";
+}
+
+fn encrypted_extensions() -> []u8 {
+    return "080000240022000a00140012001d00170018001901000101010201030104001c0002400100000000";
+}
+
+fn certificate() -> []u8 {
+    return "0b0001b9000001b50001b0308201ac30820115a003020102020102300d06092a864886f70d01010b0500300e310c300a06035504031303727361301e170d3136303733303031323335395a170d3236303733303031323335395a300e310c300a0603550403130372736130819f300d06092a864886f70d010101050003818d0030818902818100b4bb498f8279303d980836399b36c6988c0c68de55e1bdb826d3901a2461eafd2de49a91d015abbc9a95137ace6c1af19eaa6af98c7ced43120998e187a80ee0ccb0524b1b018c3e0b63264d449a6d38e22a5fda430846748030530ef0461c8ca9d9efbfae8ea6d1d03e2bd193eff0ab9a8002c47428a6d35a8d88d79f7f1e3f0203010001a31a301830090603551d1304023000300b0603551d0f0404030205a0300d06092a864886f70d01010b05000381810085aad2a0e5b9276b908c65f73a7267170618a54c5f8a7b337d2df7a594365417f2eae8f8a58c8f8172f9319cf36b7fd6c55b80f21a03015156726096fd335e5e67f2dbf102702e608ccae6bec1fc63a42a99be5c3eb7107c3c54e9b9eb2bd5203b1c3b84e0a8b2f759409ba3eac9d91d402dcc0cc8f8961229ac9187b42b4de10000";
+}
+
+fn certificate_verify() -> []u8 {
+    return "0f000084080400805a747c5d88fa9bd2e55ab085a61015b7211f824cd484145ab3ff52f1fda8477b0b7abc90db78e2d33a5c141a078653fa6bef780c5ea248eeaaa785c4f394cab6d30bbe8d4859ee511f602957b15411ac027671459e46445c9ea58c181e818e95b8c3fb0bf3278409d3be152a3da5043e063dda65cdf5aea20d53dfacd42f74f3";
+}
+
+fn server_finished_data() -> []u8 {
+    return "9b9b141d906337fbd2cbdce71df4deda4ab42c309572cb7fffee5454b78f0718";
+}
+
+fn server_finished() -> []u8 {
+    return "140000209b9b141d906337fbd2cbdce71df4deda4ab42c309572cb7fffee5454b78f0718";
+}
+
+fn server_hs_record() -> []u8 {
+    return "17030302a2d1ff334a56f5bff6594a07cc87b580233f500f45e489e7f33af35edf7869fcf40aa40aa2b8ea73f848a7ca07612ef9f945cb960b4068905123ea78b111b429ba9191cd05d2a389280f526134aadc7fc78c4b729df828b5ecf7b13bd9aefb0e57f271585b8ea9bb355c7c79020716cfb9b1183ef3ab20e37d57a6b9d7477609aee6e122a4cf51427325250c7d0e509289444c9b3a648f1d71035d2ed65b0e3cdd0cbae8bf2d0b227812cbb360987255cc744110c453baa4fcd610928d809810e4b7ed1a8fd991f06aa6248204797e36a6a73b70a2559c09ead686945ba246ab66e5edd8044b4c6de3fcf2a89441ac66272fd8fb330ef8190579b3684596c960bd596eea520a56a8d650f563aad27409960dca63d3e688611ea5e22f4415cf9538d51a200c27034272968a264ed6540c84838d89f72c24461aad6d26f59ecaba9acbbb317b66d902f4f292a36ac1b639c637ce343117b659622245317b49eeda0c6258f100d7d961ffb138647e92ea330faeea6dfa31c7a84dc3bd7e1b7a6c7178af36879018e3f252107f243d243dc7339d5684c8b0378bf30244da8c87c843f5e56eb4c5e8280a2b48052cf93b16499a66db7cca71e4599426f7d461e66f99882bd89fc50800becca62d6c74116dbd2972fda1fa80f85df881edbe5a37668936b335583b599186dc5c6918a396fa48a181d6b6fa4f9d62d513afbb992f2b992f67f8afe67f76913fa388cb5630c8ca01e0c65d11c66a1e2ac4c85977b7c7a6999bbf10dc35ae69f5515614636c0b9b68c19ed2e31c0b3b66763038ebba42f3b38edc0399f3a9f23faa63978c317fc9fa66a73f60f0504de93b5b845e275592c12335ee340bbc4fddd502784016e4b3be7ef04dda49f4b440a30cb5d2af939828fd4ae3794e44f94df5a631ede42c1719bfdabf0253fe5175be898e750edc53370d2b";
+}
+
+fn client_ap_traffic() -> []u8 {
+    return "9e40646ce79a7f9dc05af8889bce6552875afa0b06df0087f792ebb7c17504a5";
+}
+
+fn server_ap_traffic() -> []u8 {
+    return "a11af9f05531f856ad47116b45a950328204b4f44bfb6b3a4b4f1f3fcb631643";
+}
+
+fn transcript_hash_fin() -> []u8 {
+    return "9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13";
+}
+
+fn server_ap_key() -> []u8 {
+    return "9f02283b6c9c07efc26bb9f2ac92e356";
+}
+
+fn server_ap_iv() -> []u8 {
+    return "cf782b88dd83549aadf1e984";
+}
+
+fn client_hs_key() -> []u8 {
+    return "dbfaa693d1762c5b666af5d950258d01";
+}
+
+fn client_hs_iv() -> []u8 {
+    return "5bd3c71b836e0b76bb73265f";
+}
+
+fn client_finished_data() -> []u8 {
+    return "a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61";
+}
+
+fn client_finished_record() -> []u8 {
+    return "170303003575ec4dc238cce60b298044a71e219c56cc77b0517fe9b93c7a4bfc44d87f38f80338ac98fc46deb384bd1caeacab6867d726c40546";
+}
+
+fn client_ap_key() -> []u8 {
+    return "17422dda596ed5d9acd890e3c63f5051";
+}
+
+fn client_ap_iv() -> []u8 {
+    return "5b78923dee08579033e523d9";
+}
+
+fn client_app_record() -> []u8 {
+    return "1703030043a23f7054b62c94d0affafe8228ba55cbefacea42f914aa66bcab3f2b9819a8a5b46b395bd54a9a20441e2b62974e1f5a6292a2977014bd1e3deae63aeebb21694915e4";
+}
+
+fn server_app_record() -> []u8 {
+    return "17030300432e937e11ef4ac740e538ad36005fc4a46932fc3225d05f82aa1b36e30efaf97d90e6dffc602dcb501a59a8fcc49c4bf2e5f0a21c0047c2abf332540dd032e167c2955d";
+}
+
+fn app_payload() -> []u8 {
+    return "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031";
+}
+
+fn client_alert_record() -> []u8 {
+    return "1703030013c9872760655666b74d7ff1153efd6db6d0b0e3";
+}
+
+fn server_alert_record() -> []u8 {
+    return "1703030013b58fd67166ebf599d24720cfbe7efa7a8864a9";
+}
+
+// transcript appends the handshake messages named, in order.
+fn transcript(allocator: Allocator, through_finished: bool) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    let client = try bytes_of_hex(allocator, client_hello());
+    defer client.deinit(allocator);
+    try out.append_string(allocator, &client);
+    let server = try bytes_of_hex(allocator, server_hello());
+    defer server.deinit(allocator);
+    try out.append_string(allocator, &server);
+    if !through_finished {
+        return move out;
+    }
+    let extensions = try bytes_of_hex(allocator, encrypted_extensions());
+    defer extensions.deinit(allocator);
+    try out.append_string(allocator, &extensions);
+    let cert = try bytes_of_hex(allocator, certificate());
+    defer cert.deinit(allocator);
+    try out.append_string(allocator, &cert);
+    let verify = try bytes_of_hex(allocator, certificate_verify());
+    defer verify.deinit(allocator);
+    try out.append_string(allocator, &verify);
+    let finished = try bytes_of_hex(allocator, server_finished());
+    defer finished.deinit(allocator);
+    try out.append_string(allocator, &finished);
+    return move out;
+}
+
+fn expect_derived(allocator: Allocator, secret: []u8, label: []u8, hash: []u8, want: []u8) -> mem::Error!void {
+    var out = [32]u8{};
+    let view = out.as_mut_bytes();
+    tls::derive_secret(secret, label, hash, view);
+    let bytes = out.as_bytes();
+    try expect_hex(allocator, want, bytes);
+    return;
+}
+
+fn expect_traffic_key(allocator: Allocator, secret: []u8, want_key: []u8, want_iv: []u8) -> mem::Error!void {
+    var key = [16]u8{};
+    var iv = [12]u8{};
+    let key_view = key.as_mut_bytes();
+    let iv_view = iv.as_mut_bytes();
+    tls::traffic_key(secret, key_view, iv_view);
+    let key_bytes = key.as_bytes();
+    let iv_bytes = iv.as_bytes();
+    try expect_hex(allocator, want_key, key_bytes);
+    try expect_hex(allocator, want_iv, iv_bytes);
+    return;
+}
+
+fn expect_finished(allocator: Allocator, secret: []u8, hash: []u8, want: []u8) -> mem::Error!void {
+    var out = [32]u8{};
+    let view = out.as_mut_bytes();
+    tls::finished_verify_data(secret, hash, view);
+    let bytes = out.as_bytes();
+    try expect_hex(allocator, want, bytes);
+    return;
+}
+
+test "the RFC 8448 secrets derive from the key exchange and the transcript" {
+    let allocator = mem::page_allocator();
+    var early = [32]u8{};
+    let early_view = early.as_mut_bytes();
+    tls::early_secret(early_view);
+    let early_bytes = early.as_bytes();
+    try expect_hex(allocator, early_secret(), early_bytes);
+
+    let client_key = try bytes_of_hex(allocator, client_private());
+    defer client_key.deinit(allocator);
+    let server_key = try bytes_of_hex(allocator, server_public());
+    defer server_key.deinit(allocator);
+    let scalar = client_key.as_bytes();
+    let point = server_key.as_bytes();
+    var shared = [32]u8{};
+    let shared_view = shared.as_mut_bytes();
+    try crypto::x25519(scalar, point, shared_view);
+    let shared_bytes = shared.as_bytes();
+    var handshake = [32]u8{};
+    let handshake_view = handshake.as_mut_bytes();
+    tls::handshake_secret(early_bytes, shared_bytes, handshake_view);
+    let handshake_bytes = handshake.as_bytes();
+    try expect_hex(allocator, handshake_secret(), handshake_bytes);
+
+    let hello = try transcript(allocator, false);
+    defer hello.deinit(allocator);
+    let hello_bytes = hello.as_bytes();
+    var hash = [32]u8{};
+    let hash_view = hash.as_mut_bytes();
+    tls::transcript_hash(hello_bytes, hash_view);
+    let hash_bytes = hash.as_bytes();
+    try expect_hex(allocator, transcript_hash_sh(), hash_bytes);
+    try expect_derived(allocator, handshake_bytes, "c hs traffic", hash_bytes, client_hs_traffic());
+    try expect_derived(allocator, handshake_bytes, "s hs traffic", hash_bytes, server_hs_traffic());
+
+    var master = [32]u8{};
+    let master_view = master.as_mut_bytes();
+    tls::master_secret(handshake_bytes, master_view);
+    let master_bytes = master.as_bytes();
+    try expect_hex(allocator, master_secret(), master_bytes);
+
+    let whole = try transcript(allocator, true);
+    defer whole.deinit(allocator);
+    let whole_bytes = whole.as_bytes();
+    var finished_hash = [32]u8{};
+    let finished_hash_view = finished_hash.as_mut_bytes();
+    tls::transcript_hash(whole_bytes, finished_hash_view);
+    let finished_hash_bytes = finished_hash.as_bytes();
+    try expect_hex(allocator, transcript_hash_fin(), finished_hash_bytes);
+    try expect_derived(allocator, master_bytes, "c ap traffic", finished_hash_bytes, client_ap_traffic());
+    try expect_derived(allocator, master_bytes, "s ap traffic", finished_hash_bytes, server_ap_traffic());
+}
+
+test "the RFC 8448 traffic keys and Finished values come from their secrets" {
+    let allocator = mem::page_allocator();
+    let server_hs = try bytes_of_hex(allocator, server_hs_traffic());
+    defer server_hs.deinit(allocator);
+    let client_hs = try bytes_of_hex(allocator, client_hs_traffic());
+    defer client_hs.deinit(allocator);
+    let server_ap = try bytes_of_hex(allocator, server_ap_traffic());
+    defer server_ap.deinit(allocator);
+    let client_ap = try bytes_of_hex(allocator, client_ap_traffic());
+    defer client_ap.deinit(allocator);
+    let server_hs_bytes = server_hs.as_bytes();
+    let client_hs_bytes = client_hs.as_bytes();
+    let server_ap_bytes = server_ap.as_bytes();
+    let client_ap_bytes = client_ap.as_bytes();
+    try expect_traffic_key(allocator, server_hs_bytes, server_hs_key(), server_hs_iv());
+    try expect_traffic_key(allocator, client_hs_bytes, client_hs_key(), client_hs_iv());
+    try expect_traffic_key(allocator, server_ap_bytes, server_ap_key(), server_ap_iv());
+    try expect_traffic_key(allocator, client_ap_bytes, client_ap_key(), client_ap_iv());
+
+    // The server's Finished covers the transcript through CertificateVerify;
+    // the client's covers it through the server's Finished.
+    let whole = try transcript(allocator, true);
+    defer whole.deinit(allocator);
+    let whole_bytes = whole.as_bytes();
+    let through_verify = whole_bytes[0..mem::len(whole_bytes) - 36];
+    var hash = [32]u8{};
+    let hash_view = hash.as_mut_bytes();
+    tls::transcript_hash(through_verify, hash_view);
+    let hash_bytes = hash.as_bytes();
+    try expect_finished(allocator, server_hs_bytes, hash_bytes, server_finished_data());
+    var whole_hash = [32]u8{};
+    let whole_hash_view = whole_hash.as_mut_bytes();
+    tls::transcript_hash(whole_bytes, whole_hash_view);
+    let whole_hash_bytes = whole_hash.as_bytes();
+    try expect_finished(allocator, client_hs_bytes, whole_hash_bytes, client_finished_data());
+}
+
+fn expect_opened(
+    allocator: Allocator,
+    key_hex: []u8,
+    iv_hex: []u8,
+    sequence: i64,
+    record_hex: []u8,
+    want_type: u8,
+    want_hex: []u8
+) -> tls::Failure!void {
+    let key = try bytes_of_hex(allocator, key_hex);
+    defer key.deinit(allocator);
+    let iv = try bytes_of_hex(allocator, iv_hex);
+    defer iv.deinit(allocator);
+    let record = try bytes_of_hex(allocator, record_hex);
+    defer record.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let iv_bytes = iv.as_bytes();
+    let record_bytes = record.as_bytes();
+    var opened = string::new(allocator);
+    defer opened.deinit(allocator);
+    let content_type = try tls::open_record(allocator, tls::CipherSuite::Aes128GcmSha256,
+        key_bytes, iv_bytes, sequence, record_bytes, &var opened);
+    testing::expect_equal<u8>(want_type, content_type);
+    let opened_bytes = opened.as_bytes();
+    try expect_hex(allocator, want_hex, opened_bytes);
+    return;
+}
+
+fn expect_sealed(
+    allocator: Allocator,
+    key_hex: []u8,
+    iv_hex: []u8,
+    sequence: i64,
+    content_type: u8,
+    content_hex: []u8,
+    want_hex: []u8
+) -> mem::Error!void {
+    let key = try bytes_of_hex(allocator, key_hex);
+    defer key.deinit(allocator);
+    let iv = try bytes_of_hex(allocator, iv_hex);
+    defer iv.deinit(allocator);
+    let content = try bytes_of_hex(allocator, content_hex);
+    defer content.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let iv_bytes = iv.as_bytes();
+    let content_bytes = content.as_bytes();
+    var sealed = string::new(allocator);
+    defer sealed.deinit(allocator);
+    try tls::seal_record(allocator, tls::CipherSuite::Aes128GcmSha256,
+        key_bytes, iv_bytes, sequence, content_type, content_bytes, &var sealed);
+    let sealed_bytes = sealed.as_bytes();
+    try expect_hex(allocator, want_hex, sealed_bytes);
+    return;
+}
+
+test "the RFC 8448 server records open to the messages the RFC lists" {
+    let allocator = mem::page_allocator();
+    var messages = string::new(allocator);
+    defer messages.deinit(allocator);
+    try messages.append_bytes(allocator, encrypted_extensions());
+    try messages.append_bytes(allocator, certificate());
+    try messages.append_bytes(allocator, certificate_verify());
+    try messages.append_bytes(allocator, server_finished());
+    let messages_hex = messages.as_bytes();
+    try expect_opened(allocator, server_hs_key(), server_hs_iv(), 0, server_hs_record(),
+        tls::content_handshake(), messages_hex);
+    // The server's NewSessionTicket took sequence 0 under these keys.
+    try expect_opened(allocator, server_ap_key(), server_ap_iv(), 1, server_app_record(),
+        tls::content_application_data(), app_payload());
+    try expect_opened(allocator, server_ap_key(), server_ap_iv(), 2, server_alert_record(),
+        tls::content_alert(), "0100");
+}
+
+test "the RFC 8448 client records seal byte for byte" {
+    let allocator = mem::page_allocator();
+    var finished = string::new(allocator);
+    defer finished.deinit(allocator);
+    try finished.append_bytes(allocator, "14000020");
+    try finished.append_bytes(allocator, client_finished_data());
+    let finished_hex = finished.as_bytes();
+    try expect_sealed(allocator, client_hs_key(), client_hs_iv(), 0, tls::content_handshake(),
+        finished_hex, client_finished_record());
+    try expect_sealed(allocator, client_ap_key(), client_ap_iv(), 0, tls::content_application_data(),
+        app_payload(), client_app_record());
+    try expect_sealed(allocator, client_ap_key(), client_ap_iv(), 1, tls::content_alert(),
+        "0100", client_alert_record());
+}
+
+fn expect_bad_record(allocator: Allocator, sequence: i64, record_hex: []u8) -> mem::Error!void {
+    let key = try bytes_of_hex(allocator, server_ap_key());
+    defer key.deinit(allocator);
+    let iv = try bytes_of_hex(allocator, server_ap_iv());
+    defer iv.deinit(allocator);
+    let record = try bytes_of_hex(allocator, record_hex);
+    defer record.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let iv_bytes = iv.as_bytes();
+    let record_bytes = record.as_bytes();
+    var opened = string::new(allocator);
+    defer opened.deinit(allocator);
+    if tls::open_record(allocator, tls::CipherSuite::Aes128GcmSha256,
+        key_bytes, iv_bytes, sequence, record_bytes, &var opened) |_| {
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == tls::Error::BadRecord);
+    }
+    testing::expect_equal<i64>(0, opened.len());
+    return;
+}
+
+test "a record under the wrong sequence, with a changed byte, or with another header is refused" {
+    let allocator = mem::page_allocator();
+    try expect_bad_record(allocator, 0, server_app_record());
+    var changed = string::new(allocator);
+    defer changed.deinit(allocator);
+    try changed.append_bytes(allocator, server_app_record());
+    let bytes = changed.as_mut_bytes();
+    bytes[20] = 48;
+    let changed_hex = changed.as_bytes();
+    try expect_bad_record(allocator, 1, changed_hex);
+    // A TLS 1.0 version in the header, and a length that does not match.
+    try expect_bad_record(allocator, 1, "17030100432e937e11ef4ac740e538ad36005fc4a46932fc3225d05f82aa1b36e30efaf97d90e6dffc602dcb501a59a8fcc49c4bf2e5f0a21c0047c2abf332540dd032e167c2955d");
+    try expect_bad_record(allocator, 1, "17030300442e937e11ef4ac740e538ad36005fc4a46932fc3225d05f82aa1b36e30efaf97d90e6dffc602dcb501a59a8fcc49c4bf2e5f0a21c0047c2abf332540dd032e167c2955d");
+    try expect_bad_record(allocator, 1, "1703030002");
+}

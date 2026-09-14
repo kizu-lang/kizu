@@ -1,0 +1,130 @@
+// The TLS 1.3 key schedule (RFC 8446 §7.1): from the shared secret of the
+// key exchange and the hash of what has been said so far, the secrets
+// each side encrypts with, and the keys and nonces those secrets turn
+// into (§7.3). Every step is HKDF over SHA-256 from std::crypto with the
+// labels the RFC fixes; nothing here is secret-dependent in its timing
+// beyond what the hash and the HMAC are.
+//
+// The transcript is hashed whole each time it is needed. A handshake is
+// a few kilobytes and is hashed a handful of times, and a hash that
+// could be fed a piece at a time would have to keep a partial block in
+// a struct, which std::crypto's does not.
+
+// hkdf_expand_label is HKDF-Expand-Label (RFC 8446 §7.1): HKDF-Expand
+// with an HkdfLabel of the output length, `"tls13 "` before the label,
+// and the context. It writes the length of `out`, at most 255 * 32.
+pub fn hkdf_expand_label(secret: []u8, label: []u8, context: []u8, out: &var []u8) -> void {
+    let label_length = std::mem::len(label);
+    let context_length = std::mem::len(context);
+    let out_length = std::mem::len(out);
+    if label_length > 249 or context_length > 255 or out_length > 65535 {
+        std::internal::builtin::panic("tls hkdf_expand_label: label or context too long");
+    }
+    var info_buffer = [514]u8{};
+    let info = info_buffer.as_mut_bytes();
+    let info_length = fill_hkdf_label(info, out_length, label, context);
+    let info_bytes = info_buffer.as_bytes();
+    std::crypto::hkdf_expand(secret, info_bytes[0..info_length], out);
+    return;
+}
+
+// fill_hkdf_label writes the HkdfLabel and returns its length.
+fn fill_hkdf_label(info: &var []u8, out_length: i64, label: []u8, context: []u8) -> i64 {
+    let label_length = std::mem::len(label);
+    let context_length = std::mem::len(context);
+    info[0] = cast<u8>((out_length >> 8) & 255);
+    info[1] = cast<u8>(out_length & 255);
+    info[2] = cast<u8>(6 + label_length);
+    let prefix = "tls13 ";
+    for 0..6 |index| {
+        info[3 + index] = prefix[index];
+    }
+    for 0..label_length |index| {
+        info[9 + index] = label[index];
+    }
+    let at = 9 + label_length;
+    info[at] = cast<u8>(context_length);
+    for 0..context_length |index| {
+        info[at + 1 + index] = context[index];
+    }
+    return at + 1 + context_length;
+}
+
+// derive_secret is Derive-Secret (RFC 8446 §7.1): the label expanded
+// under `secret` with the transcript hash as the context, 32 bytes.
+pub fn derive_secret(secret: []u8, label: []u8, transcript_hash: []u8, out: &var []u8) -> void {
+    std::tls::hkdf_expand_label(secret, label, transcript_hash, out);
+    return;
+}
+
+// transcript_hash writes the SHA-256 of the handshake messages so far,
+// laid end to end, to `out`.
+pub fn transcript_hash(transcript: []u8, out: &var []u8) -> void {
+    std::crypto::sha256(transcript, out);
+    return;
+}
+
+// early_secret writes the Early Secret of a handshake without a
+// pre-shared key: HKDF-Extract of 32 zero bytes with an empty salt.
+pub fn early_secret(out: &var []u8) -> void {
+    var zeros = [32]u8{};
+    let ikm = zeros.as_bytes();
+    std::crypto::hkdf_extract("", ikm, out);
+    return;
+}
+
+// handshake_secret writes the Handshake Secret: the shared secret of
+// the key exchange extracted under the early secret's derived salt.
+pub fn handshake_secret(early: []u8, shared: []u8, out: &var []u8) -> void {
+    var salt_buffer = [32]u8{};
+    let salt = salt_buffer.as_mut_bytes();
+    derived_salt(early, salt);
+    let salt_bytes = salt_buffer.as_bytes();
+    std::crypto::hkdf_extract(salt_bytes, shared, out);
+    return;
+}
+
+// master_secret writes the Master Secret: 32 zero bytes extracted under
+// the handshake secret's derived salt.
+pub fn master_secret(handshake: []u8, out: &var []u8) -> void {
+    var salt_buffer = [32]u8{};
+    let salt = salt_buffer.as_mut_bytes();
+    derived_salt(handshake, salt);
+    let salt_bytes = salt_buffer.as_bytes();
+    var zeros = [32]u8{};
+    let ikm = zeros.as_bytes();
+    std::crypto::hkdf_extract(salt_bytes, ikm, out);
+    return;
+}
+
+// derived_salt is Derive-Secret(secret, "derived", "") -- the hash of
+// nothing as the context -- which each extract after the first takes as
+// its salt.
+fn derived_salt(secret: []u8, out: &var []u8) -> void {
+    var empty_hash_buffer = [32]u8{};
+    let empty_hash = empty_hash_buffer.as_mut_bytes();
+    std::crypto::sha256("", empty_hash);
+    let context = empty_hash_buffer.as_bytes();
+    std::tls::hkdf_expand_label(secret, "derived", context, out);
+    return;
+}
+
+// traffic_key writes the key and the IV a traffic secret turns into
+// (RFC 8446 §7.3): `key` is as long as the cipher's key, `iv` 12 bytes.
+pub fn traffic_key(secret: []u8, key: &var []u8, iv: &var []u8) -> void {
+    std::tls::hkdf_expand_label(secret, "key", "", key);
+    std::tls::hkdf_expand_label(secret, "iv", "", iv);
+    return;
+}
+
+// finished_verify_data writes the 32 bytes a Finished message carries
+// (RFC 8446 §4.4.4): HMAC under the finished key of the base secret,
+// over the transcript hash.
+pub fn finished_verify_data(base_secret: []u8, transcript_hash: []u8, out: &var []u8) -> void {
+    var key_buffer = [32]u8{};
+    let key = key_buffer.as_mut_bytes();
+    std::tls::hkdf_expand_label(base_secret, "finished", "", key);
+    let key_bytes = key_buffer.as_bytes();
+    std::crypto::hmac_sha256(key_bytes, transcript_hash, out);
+    return;
+}
