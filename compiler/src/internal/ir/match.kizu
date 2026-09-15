@@ -25,6 +25,9 @@ pub struct MatchSubject {
     pub union_value: Value,
     pub enum_name: Name,
     pub union_name: Name,
+    // storage is the `&var` union the match reads through when it reads a
+    // mutable borrow place; the arms bind aggregate payloads inside it.
+    pub storage: Value,
 }
 
 /// Returns the subject a match value lowering fills, the Go zero
@@ -33,6 +36,7 @@ fn blank_subject() -> MatchSubject {
     return MatchSubject {
         value: empty_value(),
         union_value: empty_value(),
+        storage: empty_value(),
         enum_name: empty_name(),
         union_name: empty_name()
     };
@@ -146,20 +150,34 @@ fn (self: &var Lowerer) lower_match_expr(tree: &var ast::Ast, node: MatchNode, o
 /// Lowers and validates the enum or union value used by a match, the Go
 /// `lowerMatchValue`.
 fn (self: &var Lowerer) lower_match_value(tree: &var ast::Ast, expression: ast::Expression, out: &var MatchSubject) -> !?diagnostic::Diagnostic {
+    if try self.match_storage(tree, expression) |storage| {
+        let union_name = try self.deref_type(storage.type_name);
+        if self.module.has_union(union_name) {
+            let union_value = try self.emit1(Op::UnionLoad, union_name, storage);
+            let tag = try self.emit1(Op::UnionTag, self.common.i64_type, union_value);
+            out.* = MatchSubject {
+                value: tag, union_value: union_value, enum_name: empty_name(), union_name: union_name,
+                storage: storage
+            };
+            return null;
+        }
+    }
     var value = empty_value();
     if try self.lower_expr(tree, expression, &var value) |failed| {
         return move failed;
     }
     if self.module.has_enum_or_error_set(value.type_name) {
         out.* = MatchSubject {
-            value: value, union_value: empty_value(), enum_name: value.type_name, union_name: empty_name()
+            value: value, union_value: empty_value(), enum_name: value.type_name, union_name: empty_name(),
+            storage: empty_value()
         };
         return null;
     }
     if self.module.has_union(value.type_name) {
         let tag = try self.emit1(Op::UnionTag, self.common.i64_type, value);
         out.* = MatchSubject {
-            value: tag, union_value: value, enum_name: empty_name(), union_name: value.type_name
+            value: tag, union_value: value, enum_name: empty_name(), union_name: value.type_name,
+            storage: empty_value()
         };
         return null;
     }
@@ -169,7 +187,8 @@ fn (self: &var Lowerer) lower_match_value(tree: &var ast::Ast, expression: ast::
             let union_value = try self.emit1(Op::UnionLoad, union_name, value);
             let tag = try self.emit1(Op::UnionTag, self.common.i64_type, union_value);
             out.* = MatchSubject {
-                value: tag, union_value: union_value, enum_name: empty_name(), union_name: union_name
+                value: tag, union_value: union_value, enum_name: empty_name(), union_name: union_name,
+                storage: empty_value()
             };
             return null;
         }
@@ -378,9 +397,74 @@ fn (self: &var Lowerer) bind_match_payload(
     }
     let binding = try self.text_name(tree, arm.binding);
     let saved = self.saved_binding(binding);
-    let payload = try self.emit_imm1(Op::UnionPayload, variant.payload, variant.name, subject.union_value);
+    var payload = empty_value();
+    if !is_empty(subject.storage.type_name) and self.payload_binds_by_reference(variant.payload) {
+        let ref_type = try self.module.names.prefixed("&var ", variant.payload);
+        payload = try self.emit_imm1(Op::UnionPayloadRef, ref_type, variant.name, subject.storage);
+    } else {
+        payload = try self.emit_imm1(Op::UnionPayload, variant.payload, variant.name, subject.union_value);
+    }
     try self.bind_capture(binding, payload);
     return saved;
+}
+
+/// Finds the storage a match reads through when its value is a mutable
+/// borrow place, the Go `matchStorage`: a `&var` parameter or borrow binding
+/// by name, or a field path of a union type rooted in storage. A `var` local
+/// by name is not one: it owns what it holds, and its payloads move out
+/// (ADR-0090).
+fn (self: &var Lowerer) match_storage(tree: &var ast::Ast, expression: ast::Expression) -> !?Value {
+    if ownership::ident_expr(tree, expression) |ident| {
+        let name = try self.text_name(tree, ident.name);
+        let value = self.envs.get(self.env, name) orelse return null;
+        if !self.is_mutable_reference_type(value.type_name) {
+            return null;
+        }
+        if self.has_slot(name) and !self.is_caller_storage_param(name) {
+            return null;
+        }
+        return value;
+    }
+    let field_type = try self.storage_field_type(tree, expression);
+    if !self.module.has_union(field_type) {
+        return null;
+    }
+    return self.lower_field_storage(tree, expression);
+}
+
+/// Is the type `lower_field_storage` would project for a field path, read
+/// without emitting anything, the Go `storageFieldType`; empty when the path
+/// is not rooted in storage.
+fn (self: &var Lowerer) storage_field_type(tree: &ast::Ast, expression: ast::Expression) -> !Name {
+    let field = ownership::field_expr(tree, expression) orelse return empty_name();
+    if field.namespace {
+        return empty_name();
+    }
+    var base = empty_name();
+    if ownership::ident_expr(tree, field.receiver) |ident| {
+        let name = try self.text_name(tree, ident.name);
+        if !self.has_slot(name) {
+            return empty_name();
+        }
+        let value = self.envs.get(self.env, name) orelse return empty_name();
+        base = try self.deref_type(value.type_name);
+    } else {
+        base = try self.storage_field_type(tree, field.receiver);
+        if is_empty(base) {
+            return empty_name();
+        }
+    }
+    let field_name = try self.text_name(tree, field.name);
+    return self.field_type(base, field_name);
+}
+
+/// Reports whether a payload has an inside a mutable borrow can reach, the
+/// Go `payloadBindsByReference`: a declared struct or union, or a type with
+/// a deinit contract. Scalars, enums and views copy.
+fn (self: &Lowerer) payload_binds_by_reference(payload: Name) -> bool {
+    let retained = name_text(&self.module.names, payload);
+    let bytes = retained.as_bytes();
+    return self.module.structs.contains(bytes) or self.module.has_union(payload) or self.is_owner_type(payload);
 }
 
 /// Takes a bound payload back out of scope, the closure `bindMatchPayload`

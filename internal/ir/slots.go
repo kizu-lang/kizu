@@ -45,6 +45,12 @@ func (l *lowerer) collectMutBorrowsStmt(stmt ast.Statement, found map[string]boo
 		markIfName(cleanupReceiver(s.Expr), found)
 	case *ast.ErrDeferStmt:
 		markIfName(cleanupReceiver(s.Expr), found)
+	case *ast.MatchStmt:
+		// A match through a field of a local binds payloads where they lie
+		// (SPEC §6.8), so the local is storage the arm writes into.
+		if _, isField := s.Value.(*ast.FieldExpr); isField && matchBindsPayload(s) {
+			markIfName(s.Value, found)
+		}
 	}
 	exprs, stmts, known := statementChildren(stmt)
 	if !known {
@@ -138,6 +144,17 @@ func blocks(list ...*ast.BlockStmt) []ast.Statement {
 }
 
 // matchArmBodies returns the statement each arm of a match runs.
+// matchBindsPayload reports whether any arm of a match names its payload.
+func matchBindsPayload(stmt *ast.MatchStmt) bool {
+	for _, arm := range stmt.Arms {
+		if arm.Binding != "" && !arm.IsWildcard() {
+			return true
+		}
+	}
+	return false
+}
+
+// matchArmBodies lists the arm bodies of a match, the statements it nests.
 func matchArmBodies(stmt *ast.MatchStmt) []ast.Statement {
 	bodies := make([]ast.Statement, 0, len(stmt.Arms))
 	for _, arm := range stmt.Arms {

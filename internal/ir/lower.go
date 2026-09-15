@@ -85,6 +85,11 @@ type lowerer struct {
 	// parameters that arrive as such storage. Their entry in env is the
 	// storage, not the value.
 	slots map[string]bool
+	// callerStorageParams names the parameters that arrive as the caller's
+	// storage, apart from the locals that were given a slot of their own: a
+	// match through one binds payloads where they lie, a match on a local
+	// moves them out (ADR-0090).
+	callerStorageParams map[string]bool
 	// genericDecls indexes the program's generic function declarations by
 	// name, so every call site resolves in one lookup.
 	genericDecls map[string]*ast.FunctionDecl
@@ -1030,6 +1035,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		return nil, err
 	}
 	l.slots = slots
+	l.callerStorageParams = map[string]bool{}
 	l.nextValue = 0
 	l.nextBlock = 0
 	l.loops = nil
@@ -1042,6 +1048,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		// consumers take the pointer itself.
 		if signature.Params[index].Passing == PassCallerStorage {
 			l.slots[param.Name] = true
+			l.callerStorageParams[param.Name] = true
 			continue
 		}
 		// One that arrives as a value and is written through needs storage of

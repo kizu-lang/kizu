@@ -324,6 +324,9 @@ fn (self: &var Emitter) write_union_instr(
     if node.op == ir::Op::UnionPayload {
         return self.write_union_payload(module, node);
     }
+    if node.op == ir::Op::UnionPayloadRef {
+        return self.write_union_payload_ref(module, node);
+    }
     return try self.fail_op(module, node, "wasm error: unsupported union instruction `%s`");
 }
 
@@ -413,6 +416,54 @@ fn (self: &var Emitter) write_union_tag(
     }
     let info = try self.value_of(module, arg);
     return self.write_load_value(module, node.result, info.expr, 0);
+}
+
+/// Projects the address of the checked active variant payload out of a
+/// `&var` union, the Go `writeUnionPayloadRef`: for a match that binds the
+/// payload as a `&var` borrow of where it lies.
+fn (self: &var Emitter) write_union_payload_ref(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: union.payload_ref expects one `&var` union argument");
+    }
+    let arg = node.args.get(0) orelse ir::empty_value();
+    if !module.names.starts_with(arg.type_name, "&var ") {
+        return try self.fail0("wasm error: union.payload_ref expects one `&var` union argument");
+    }
+    let type_text = ir::name_text(&module.names, arg.type_name);
+    let type_bytes = type_text.as_bytes();
+    let union_name = deref_wasm_type(type_bytes);
+    if module.unions.at(union_name) |declared| {
+        let variant_text = ir::name_text(&module.names, node.immediate);
+        let variant_bytes = variant_text.as_bytes();
+        let variant = declared.variants.get(variant_bytes) orelse
+            return try self.fail0("wasm error: unknown union payload");
+        let result_text = ir::name_text(&module.names, node.result.type_name);
+        let result_bytes = result_text.as_bytes();
+        let result_elem = deref_wasm_type(result_bytes);
+        if ir::is_empty(variant.payload) or !module.names.starts_with(node.result.type_name, "&var ") or
+            !module.names.is(variant.payload, result_elem) {
+            return try self.fail0("wasm error: union.payload_ref must refer to the variant's payload");
+        }
+        let outcome = try self.union_payload_offset(module, union_name);
+        match outcome {
+            Error(failed) => return move failed,
+            Offset(offset) => {
+                let info = try self.value_of(module, arg);
+                let expr = try self.address_at(info.expr, offset);
+                let result_name = ir::name_text(&module.names, node.result.name);
+                let result_name_bytes = result_name.as_bytes();
+                let symbol = try self.symbol_name_of(result_name_bytes);
+                try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(expr));
+                let local = try self.local_expr(result_name_bytes);
+                try self.set_value(module, node.result, local);
+                return null;
+            },
+        }
+    }
+    return try self.fail0("wasm error: unknown union type");
 }
 
 fn (self: &var Emitter) write_union_payload(

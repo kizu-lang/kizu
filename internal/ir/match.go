@@ -19,6 +19,9 @@ type matchSubject struct {
 	unionValue Value
 	enum       Enum
 	union      Union
+	// storage is the `&var` union the match reads through when it reads a
+	// mutable borrow place; the arms bind aggregate payloads inside it.
+	storage Value
 }
 
 // lowerMatchStmt lowers a checked enum match statement to a branch chain.
@@ -81,6 +84,14 @@ func (l *lowerer) lowerMatchExpr(stmt *ast.MatchStmt) (Value, error) {
 
 // lowerMatchValue lowers and validates the enum or union value used by a match.
 func (l *lowerer) lowerMatchValue(expr ast.Expression) (matchSubject, error) {
+	if storage, ok := l.matchStorage(expr); ok {
+		unionName := derefType(storage.Type)
+		if unionType, ok := l.module.Unions[unionName]; ok {
+			unionValue := l.emit("union.load", unionName, []Value{storage}, "")
+			tag := l.emit("union.tag", "i64", []Value{unionValue}, "")
+			return matchSubject{value: tag, unionValue: unionValue, union: unionType, storage: storage}, nil
+		}
+	}
 	value, err := l.lowerExpr(expr)
 	if err != nil {
 		return matchSubject{}, err
@@ -245,10 +256,67 @@ func (l *lowerer) lowerMatchArmBody(
 	return result, nil
 }
 
+// matchStorage finds the storage a match reads through when its value is a
+// mutable borrow place: a `&var` parameter or borrow binding by name, or a
+// field path of a union type rooted in storage. A `var` local by name is not
+// one: it owns what it holds, and its payloads move out (ADR-0090).
+func (l *lowerer) matchStorage(expr ast.Expression) (Value, bool) {
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		value, bound := l.env.get(ident.Name)
+		if !bound || !isMutableReferenceType(value.Type) {
+			return Value{}, false
+		}
+		if l.slots[ident.Name] && !l.callerStorageParams[ident.Name] {
+			return Value{}, false
+		}
+		return value, true
+	}
+	if _, ok := l.module.Unions[l.storageFieldType(expr)]; !ok {
+		return Value{}, false
+	}
+	return l.lowerFieldStorage(expr)
+}
+
+// storageFieldType is the type lowerFieldStorage would project for a field
+// path, read without emitting anything; "" when the path is not rooted in
+// storage.
+func (l *lowerer) storageFieldType(expr ast.Expression) string {
+	field, ok := expr.(*ast.FieldExpr)
+	if !ok || field.Namespace {
+		return ""
+	}
+	var base string
+	if ident, isIdent := field.Receiver.(*ast.IdentExpr); isIdent {
+		value, bound := l.env.get(ident.Name)
+		if !bound || !l.slots[ident.Name] {
+			return ""
+		}
+		base = derefType(value.Type)
+	} else if base = l.storageFieldType(field.Receiver); base == "" {
+		return ""
+	}
+	return l.fieldType(base, field.Name)
+}
+
+// payloadBindsByReference reports whether a payload has an inside a mutable
+// borrow can reach: a declared struct or union, or a type with a deinit
+// contract. Scalars, enums and views copy.
+func (l *lowerer) payloadBindsByReference(payload string) bool {
+	if _, ok := l.module.Structs[payload]; ok {
+		return true
+	}
+	if _, ok := l.module.Unions[payload]; ok {
+		return true
+	}
+	return ast.OwnerType(l.deinitOwners, payload)
+}
+
 // bindMatchPayload binds a union payload for `Tag(name)` arms and returns a
 // function that takes the binding back out of scope, the way a block does with
 // its declarations. A binding left in the arm environment reaches the merge,
-// where a later match would phi over a value its own arms never defined.
+// where a later match would phi over a value its own arms never defined. A
+// match through storage binds an aggregate payload as a `&var` borrow of it
+// where it lies (SPEC §6.8); every other payload is a copy.
 func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) func() {
 	if arm.Binding == "" || arm.IsWildcard() || subject.union.Name == "" {
 		return func() {}
@@ -258,12 +326,21 @@ func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) func(
 		return func() {}
 	}
 	previous, bound := l.env.get(arm.Binding)
-	l.bindCapture(arm.Binding, l.emit(
-		"union.payload",
-		variant.Payload,
-		[]Value{subject.unionValue},
-		variant.Name,
-	))
+	if subject.storage.Type != "" && l.payloadBindsByReference(variant.Payload) {
+		l.bindCapture(arm.Binding, l.emit(
+			"union.payload_ref",
+			"&var "+variant.Payload,
+			[]Value{subject.storage},
+			variant.Name,
+		))
+	} else {
+		l.bindCapture(arm.Binding, l.emit(
+			"union.payload",
+			variant.Payload,
+			[]Value{subject.unionValue},
+			variant.Name,
+		))
+	}
 	return func() {
 		if bound {
 			l.env.set(arm.Binding, previous)
