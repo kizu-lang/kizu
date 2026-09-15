@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
 )
@@ -17,6 +18,8 @@ func (e *emitter) writeUnionInstr(instr *ir.Instr) error {
 		return e.writeUnionTag(instr)
 	case "union.payload":
 		return e.writeUnionPayload(instr)
+	case "union.payload_ref":
+		return e.writeUnionPayloadRef(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported union instruction `%s`", instr.Op)
 	}
@@ -163,6 +166,31 @@ func (e *emitter) writeUnionPayload(instr *ir.Instr) error {
 		payloadPtr, llvmUnion, slotName)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s, align %d\n",
 		resultName, e.llvmType(instr.Result.Type), payloadPtr, payloadAlign)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeUnionPayloadRef projects the address of the checked active variant's
+// payload out of a `&var` union, for a match that binds the payload as a
+// `&var` borrow of where it lies. The tag was dispatched on before this
+// runs; the address is into the caller's storage, not a copy.
+func (e *emitter) writeUnionPayloadRef(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || !strings.HasPrefix(instr.Args[0].Type, "&var ") {
+		return fmt.Errorf("llvm error: union.payload_ref expects one `&var` union argument")
+	}
+	unionName := derefLLVMType(instr.Args[0].Type)
+	unionType, variant, ok := e.unionVariant(unionName, instr.Immediate)
+	if !ok || variant.Payload == "" {
+		return fmt.Errorf("llvm error: unknown union payload `%s::%s`", unionName, instr.Immediate)
+	}
+	if instr.Result.Type != "&var "+variant.Payload {
+		return fmt.Errorf("llvm error: union payload `%s::%s` refers to &var %s, got %s",
+			unionType.Name, variant.Name, variant.Payload, instr.Result.Type)
+	}
+	value := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 1\n",
+		resultName, e.llvmType(unionName), value.operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

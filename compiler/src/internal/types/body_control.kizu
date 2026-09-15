@@ -492,6 +492,7 @@ fn (self: &var Checker) check_match_stmt(
                     scope,
                     &arms,
                     target,
+                    value_expr,
                     meta_capture,
                     meta_owner,
                     want_return,
@@ -513,6 +514,7 @@ fn (self: &var Checker) check_match_arms(
     scope: ScopeHandle,
     arms: &array::Array<ast::MatchArm>,
     target: MatchTarget,
+    value_expr: ast::Expression,
     meta_capture: ast::Text,
     meta_owner: ast::Text,
     want_return: Type,
@@ -583,7 +585,7 @@ fn (self: &var Checker) check_match_arms(
         let retained_binding = tree.texts.at(arm.binding.node);
         let binding = retained_binding.as_bytes();
         if !same_type(payload, empty_type()) and mem::len(binding) > 0 {
-            let defined = try self.scopes.define(arm_scope, binding, payload, false);
+            let defined = try self.define_match_arm_binding(tree, scope, arm_scope, value_expr, binding, payload);
             if try self.require_scope_definition(binding, defined) |problem| {
                 return move problem;
             }
@@ -1497,7 +1499,78 @@ fn (self: &var Checker) check_match_expr(
     value_type = try self.types.borrowed_value_type(value_type);
     let target = self.match_target(value_type) orelse
         return try self.match_target_error(value_type);
-    return self.check_match_expr_arms(self.allocator, tree, scope, &arms, target, out);
+    return self.check_match_expr_arms(self.allocator, tree, scope, &arms, target, value_expr, out);
+}
+
+// Binds one arm's payload, the Go `defineMatchArmBinding`. Matched through
+// a mutable borrow place -- a `&var` borrow binding by name, or a field path
+// rooted at a `var` local or a `&var` borrow -- a declared aggregate or
+// owner payload binds as a `&var` borrow of the payload where it lies, so
+// the arm can call its `&var self` methods (SPEC §6.8). Every other payload
+// binds as before: a copy, or a move out of an owned local (ADR-0090).
+fn (self: &var Checker) define_match_arm_binding(
+    tree: &ast::Ast,
+    scope: ScopeHandle,
+    arm_scope: ScopeHandle,
+    value_expr: ast::Expression,
+    binding: []u8,
+    payload: Type
+) -> !bool {
+    if try self.match_payload_reference_root(tree, scope, value_expr, payload) |root| {
+        let retained = tree.texts.at(root.name.node);
+        let root_name = retained.as_bytes();
+        var sources = array::new<string::String>(self.allocator);
+        errdefer sources.deinit(self.allocator);
+        let copied = try string::from_bytes(self.allocator, root_name);
+        try sources.append(self.allocator, move copied);
+        return self.scopes.define_param_with_source(arm_scope, binding, payload, true, true, move sources, false);
+    }
+    return self.scopes.define(arm_scope, binding, payload, false);
+}
+
+// Names the place a match borrows its payload from mutably, when it does,
+// the Go `matchPayloadReferenceRoot`. A `var` local matched by name is not
+// such a place: it owns what it holds, and its payloads move out.
+fn (self: &var Checker) match_payload_reference_root(
+    tree: &ast::Ast,
+    scope: ScopeHandle,
+    value_expr: ast::Expression,
+    payload: Type
+) -> !?ast::IdentExpr {
+    if !try self.payload_binds_by_reference(payload) {
+        return null;
+    }
+    let root = try mutable_place_base(self.allocator, tree, value_expr) orelse return null;
+    let retained = tree.texts.at(root.name.node);
+    let name = retained.as_bytes();
+    var direct = false;
+    match tree.expressions.at(value_expr.node) {
+        Ident(_) => {
+            direct = true;
+        },
+        _ => {},
+    }
+    if direct {
+        if !self.scopes.is_mut_borrowed(scope, name) {
+            return null;
+        }
+        return root;
+    }
+    if !self.scopes.is_mutable(scope, name) and !self.scopes.is_mut_borrowed(scope, name) {
+        return null;
+    }
+    return root;
+}
+
+// Reports whether a payload has an inside a mutable borrow can reach, the Go
+// `payloadBindsByReference`: a declared struct or union, or a type with a
+// deinit contract. Scalars, enums and views copy.
+fn (self: &var Checker) payload_binds_by_reference(payload: Type) -> !bool {
+    let retained = try self.types.copy_text(self.allocator, payload);
+    defer retained.deinit(self.allocator);
+    let text = retained.as_bytes();
+    return self.metadata.structs.contains(text) or self.metadata.unions_by_name.contains(text) or
+        self.owner_type(payload);
 }
 
 // Validates match expression arms and returns their common type.
@@ -1507,6 +1580,7 @@ fn (self: &var Checker) check_match_expr_arms(
     scope: ScopeHandle,
     arms: &array::Array<ast::MatchArm>,
     target: MatchTarget,
+    value_expr: ast::Expression,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     var seen = map::new<[]u8, bool>(self.allocator);
@@ -1555,7 +1629,7 @@ fn (self: &var Checker) check_match_expr_arms(
                     return move problem;
                 }
             } else {
-                if try self.check_match_expr_arm(tree, scope, arm, target, &var got) |problem| {
+                if try self.check_match_expr_arm(tree, scope, arm, target, value_expr, &var got) |problem| {
                     return move problem;
                 }
                 let retained_tag = tree.texts.at(arm.tag.node);
@@ -1596,6 +1670,7 @@ fn (self: &var Checker) check_match_expr_arm(
     scope: ScopeHandle,
     arm: &ast::MatchArm,
     target: MatchTarget,
+    value_expr: ast::Expression,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if arm.is_wildcard(tree) {
@@ -1610,7 +1685,7 @@ fn (self: &var Checker) check_match_expr_arm(
     let retained_binding = tree.texts.at(arm.binding.node);
     let binding = retained_binding.as_bytes();
     if !same_type(payload, empty_type()) and mem::len(binding) > 0 {
-        let defined = try self.scopes.define(arm_scope, binding, payload, false);
+        let defined = try self.define_match_arm_binding(tree, scope, arm_scope, value_expr, binding, payload);
         if try self.require_scope_definition(binding, defined) |problem| {
             return move problem;
         }

@@ -2681,8 +2681,8 @@ func (c *Checker) checkMatchArms(
 		}
 		armEnv := env.child()
 		if payload != "" && arm.Binding != "" {
-			if err := requireScopeDefinition(
-				arm.Binding, armEnv.define(arm.Binding, Type(payload), false)); err != nil {
+			if err := requireScopeDefinition(arm.Binding,
+				c.defineMatchArmBinding(stmt.Value, arm.Binding, Type(payload), env, armEnv)); err != nil {
 				return false, err
 			}
 		}
@@ -3146,25 +3146,26 @@ func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeM
 	}
 	valueType = borrowedValueType(valueType)
 	if set := c.errorSets[string(valueType)]; set != nil {
-		return c.checkMatchExprArms(stmt.Arms, nil, nil, set, env, unsafe)
+		return c.checkMatchExprArms(stmt, nil, nil, set, env, unsafe)
 	}
 	tagged := c.taggedType(valueType)
 	unionType := c.unions[string(valueType)]
 	if tagged == nil && unionType == nil {
 		return "", errorf("type error: match expects enum or union, got %s", valueType)
 	}
-	return c.checkMatchExprArms(stmt.Arms, tagged, unionType, nil, env, unsafe)
+	return c.checkMatchExprArms(stmt, tagged, unionType, nil, env, unsafe)
 }
 
 // checkMatchExprArms validates match expression arms and returns their common type.
 func (c *Checker) checkMatchExprArms(
-	arms []ast.MatchArm,
+	stmt *ast.MatchStmt,
 	enumType *enumType,
 	unionType *unionType,
 	errorSet *errorSetType,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	arms := stmt.Arms
 	seen := map[string]bool{}
 	wildcard := false
 	var result Type
@@ -3185,7 +3186,8 @@ func (c *Checker) checkMatchExprArms(
 			}
 		} else {
 			var err error
-			got, err = c.checkRecordedMatchExprArm(arm, enumType, unionType, errorSet, seen, env, unsafe)
+			got, err = c.checkRecordedMatchExprArm(
+				stmt.Value, arm, enumType, unionType, errorSet, seen, env, unsafe)
 			if err != nil {
 				return "", err
 			}
@@ -3207,6 +3209,7 @@ func (c *Checker) checkMatchExprArms(
 // checkRecordedMatchExprArm validates one non-wildcard match expression arm,
 // records what it covers, and returns its value type.
 func (c *Checker) checkRecordedMatchExprArm(
+	value ast.Expression,
 	arm ast.MatchArm,
 	enumType *enumType,
 	unionType *unionType,
@@ -3227,7 +3230,7 @@ func (c *Checker) checkRecordedMatchExprArm(
 		seen[key] = true
 		return c.checkStmtValue(arm.Body, env.child(), unsafe)
 	}
-	got, err := c.checkMatchExprArm(arm, enumType, unionType, env, unsafe)
+	got, err := c.checkMatchExprArm(value, arm, enumType, unionType, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -3241,6 +3244,7 @@ func (c *Checker) checkRecordedMatchExprArm(
 
 // checkMatchExprArm validates one match expression arm and returns its value type.
 func (c *Checker) checkMatchExprArm(
+	value ast.Expression,
 	arm ast.MatchArm,
 	enumType *enumType,
 	unionType *unionType,
@@ -3256,12 +3260,70 @@ func (c *Checker) checkMatchExprArm(
 	}
 	armEnv := env.child()
 	if payload != "" && arm.Binding != "" {
-		if err := requireScopeDefinition(
-			arm.Binding, armEnv.define(arm.Binding, Type(payload), false)); err != nil {
+		if err := requireScopeDefinition(arm.Binding,
+			c.defineMatchArmBinding(value, arm.Binding, Type(payload), env, armEnv)); err != nil {
 			return "", err
 		}
 	}
 	return c.checkStmtValue(arm.Body, armEnv, unsafe)
+}
+
+// defineMatchArmBinding binds one arm's payload. Matched through a mutable
+// borrow place -- a `&var` borrow binding by name, or a field path rooted at
+// a `var` local or a `&var` borrow -- a declared aggregate or owner payload
+// binds as a `&var` borrow of the payload where it lies, so the arm can call
+// its `&var self` methods (SPEC §6.8). Every other payload binds as before:
+// a copy, or a move out of an owned local (ADR-0090).
+func (c *Checker) defineMatchArmBinding(
+	value ast.Expression,
+	name string,
+	payload Type,
+	env *scope,
+	armEnv *scope,
+) bool {
+	if root, ok := c.matchPayloadReferenceRoot(value, payload, env); ok {
+		return armEnv.defineParamWithSource(name, payload, true, true, []string{root}, false)
+	}
+	return armEnv.define(name, payload, false)
+}
+
+// matchPayloadReferenceRoot names the place a match borrows its payload
+// from mutably, when it does. A `var` local matched by name is not such a
+// place: it owns what it holds, and its payloads move out.
+func (c *Checker) matchPayloadReferenceRoot(
+	value ast.Expression,
+	payload Type,
+	env *scope,
+) (string, bool) {
+	if !c.payloadBindsByReference(payload) {
+		return "", false
+	}
+	root, ok := mutablePlaceBase(value)
+	if !ok {
+		return "", false
+	}
+	if _, direct := value.(*ast.IdentExpr); direct {
+		if !env.isMutBorrowed(root.Name) {
+			return "", false
+		}
+	} else if !env.isMutable(root.Name) && !env.isMutBorrowed(root.Name) {
+		return "", false
+	}
+	return root.Name, true
+}
+
+// payloadBindsByReference reports whether a payload has an inside a mutable
+// borrow can reach: a declared struct or union, or a type with a deinit
+// contract. Scalars, enums and views copy.
+func (c *Checker) payloadBindsByReference(payload Type) bool {
+	name := string(payload)
+	if _, ok := c.structs[name]; ok {
+		return true
+	}
+	if _, ok := c.unions[name]; ok {
+		return true
+	}
+	return ast.OwnerType(c.deinitOwners, name)
 }
 
 // checkIndexExpr validates checked one-dimensional indexing and slicing of a

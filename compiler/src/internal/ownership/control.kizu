@@ -1036,6 +1036,7 @@ fn (self: &var Checker) check_match_stmt(
     var live = array::new<ScopeHandle>(self.allocator);
     defer live.deinit(self.allocator);
     let context = MatchArmContext {
+        value: head.value,
         value_type: value_type,
         tags: tags,
         has_arm_variants: has_arm_variants,
@@ -1061,6 +1062,7 @@ fn (self: &var Checker) check_match_stmt(
 /// Carries what every arm of one match is checked against, the Go
 /// `matchArmContext`.
 struct MatchArmContext {
+    value: ast::Expression,
     value_type: Name,
     tags: MatchTags,
     has_arm_variants: bool,
@@ -1103,9 +1105,11 @@ fn (self: &var Checker) check_match_stmt_arms(
         }
         let arm_env = try self.store.clone_scope(base);
         let child = try self.store.child(arm_env);
-        try self.define_match_arm_payload(
-            tree, arm, context.tags, context.owner_deinit_dispatch, context.owned_match, child, context.value_span
-        );
+        if try self.define_match_arm_payload(
+            tree, arm, context.tags, context.owner_deinit_dispatch, context.owned_match, context.value, child
+        ) |failed| {
+            return move failed;
+        }
         let restore = try self.bind_arm_meta_field(tree, context.meta_capture, arm, arm_variants, context.has_arm_variants);
         if try self.check_stmt(tree, child, arm.body) |failed| {
             self.meta_fields.restore(restore);
@@ -1358,26 +1362,88 @@ fn (self: &var Checker) define_match_arm_payload(
     tags: MatchTags,
     owner_deinit_dispatch: bool,
     owned_match: bool,
-    child: ScopeHandle,
-    span: ast::Span
-) -> !void {
+    scrutinee: ast::Expression,
+    child: ScopeHandle
+) -> !?diagnostic::Diagnostic {
     let payload = self.union_payload_for_tag(tree, tags, arm.tag);
     if arm.is_wildcard(tree) or is_empty(payload) or text_empty(tree, arm.binding) {
-        return;
+        return null;
     }
     let name = try self.names.intern_text(tree, arm.binding);
     var value = self.store.new_binding(name, payload);
     errdefer value.deinit(self.allocator);
-    value.decl_span = span;
-    let class = try self.classify_match_payload(payload);
-    let owned = class == MatchPayloadClass::Copies or
-        (class == MatchPayloadClass::Moves and owned_match) or
-        (owner_deinit_dispatch and !try self.is_copy_type(payload));
-    if !owned {
-        value.borrowed_param = true;
+    value.decl_span = expression_span(tree, scrutinee);
+    var tied = false;
+    if !owner_deinit_dispatch {
+        if try self.tie_match_payload_reference(tree, &var value, scrutinee, payload, child, &var tied) |failed| {
+            value.deinit(self.allocator);
+            return move failed;
+        }
+    }
+    if !tied {
+        let class = try self.classify_match_payload(payload);
+        let owned = class == MatchPayloadClass::Copies or
+            (class == MatchPayloadClass::Moves and owned_match) or
+            (owner_deinit_dispatch and !try self.is_copy_type(payload));
+        if !owned {
+            value.borrowed_param = true;
+        }
     }
     let _ = try self.define(child, move value);
-    return;
+    return null;
+}
+
+/// Binds a payload as a `&var` borrow of where it lies when the match reads
+/// a mutable borrow place -- a `&var` borrow binding by name, or a field path
+/// rooted at a `var` local or a `&var` borrow -- and the payload is a
+/// declared aggregate or an owner, the Go `tieMatchPayloadReference`. The
+/// place is mutably borrowed for the arm, as a `&var` argument would borrow
+/// it, so nothing else reads or moves it while the arm holds the payload. A
+/// `var` local matched by name is not such a place: it owns what it holds
+/// (ADR-0090).
+fn (self: &var Checker) tie_match_payload_reference(
+    tree: &ast::Ast,
+    value: &var Binding,
+    scrutinee: ast::Expression,
+    payload: Name,
+    child: ScopeHandle,
+    tied: &var bool
+) -> !?diagnostic::Diagnostic {
+    if !try self.payload_binds_by_reference(payload) {
+        return null;
+    }
+    let found = try self.direct_field_root(tree, child, scrutinee) orelse return null;
+    let holder = found.root;
+    if is_empty(found.path) {
+        if !self.binding(holder).borrowed_param or !self.binding(holder).mut_borrow {
+            return null;
+        }
+        if try self.check_borrow_conflict(tree, holder, true) |failed| {
+            return move failed;
+        }
+    } else {
+        if !self.mutable_place(holder) {
+            return null;
+        }
+        if try self.check_borrow_conflict_for_field(tree, holder, found.path, true) |failed| {
+            return move failed;
+        }
+    }
+    try self.activate_borrow(holder, found.path, true);
+    value.borrowed_param = true;
+    value.local_borrow = true;
+    value.mut_borrow = true;
+    try value.borrow_targets.append(self.allocator, BorrowSource { target: holder, field: found.path });
+    tied.* = true;
+    return null;
+}
+
+/// Reports whether a payload has an inside a mutable borrow can reach, the
+/// Go `payloadBindsByReference`: a declared struct or union, or a type with
+/// a deinit contract. Scalars, enums and views copy.
+fn (self: &var Checker) payload_binds_by_reference(payload: Name) -> !bool {
+    return self.is_struct(payload) or self.is_union(payload) or
+        try self.value_type_needs_consume(self.allocator, payload);
 }
 
 /// Says what a match on an owned value may do with one bound payload, the Go

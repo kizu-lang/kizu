@@ -15,6 +15,7 @@ fn (self: &var Emitter) write_union_instr(module: &ir::Module, node: &ir::InstrN
         UnionLoad => return self.write_union_load(module, node),
         UnionTag => return self.write_union_tag(module, node),
         UnionPayload => return self.write_union_payload(module, node),
+        UnionPayloadRef => return self.write_union_payload_ref(module, node),
         _ => {
             let op = try self.op_name(module, node);
             return try self.fail1("llvm error: unsupported union instruction `%s`", Arg::Str(op));
@@ -166,6 +167,46 @@ fn (self: &var Emitter) write_union_tag(module: &ir::Module, node: &ir::InstrNod
 }
 
 /// Reads the active variant's payload from the inline storage, the Go
+/// Projects the address of the checked active variant's payload out of a
+/// `&var` union, the Go `writeUnionPayloadRef`: for a match that binds the
+/// payload as a `&var` borrow of where it lies. The tag was dispatched on
+/// before this runs; the address is into the caller's storage, not a copy.
+fn (self: &var Emitter) write_union_payload_ref(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: union.payload_ref expects one `&var` union argument");
+    }
+    let arg = node.args.get_or_panic(0);
+    if !module.names.starts_with(arg.type_name, "&var ") {
+        return try self.fail0("llvm error: union.payload_ref expects one `&var` union argument");
+    }
+    let arg_text = ir::name_text(&module.names, arg.type_name);
+    let arg_bytes = arg_text.as_bytes();
+    let union_name = deref_llvm_type(arg_bytes);
+    if module.unions.at(union_name) |declared| {
+        let variant_text = ir::name_text(&module.names, node.immediate);
+        let variant_bytes = variant_text.as_bytes();
+        let variant = declared.variants.get(variant_bytes) orelse
+            return try self.fail0("llvm error: unknown union payload");
+        let result_text = ir::name_text(&module.names, node.result.type_name);
+        let result_bytes = result_text.as_bytes();
+        let result_elem = deref_llvm_type(result_bytes);
+        if ir::is_empty(variant.payload) or !module.names.starts_with(node.result.type_name, "&var ") or
+            !module.names.is(variant.payload, result_elem) {
+            return try self.fail0("llvm error: union.payload_ref must refer to the variant's payload");
+        }
+        let info = try self.operand(module, arg);
+        let llvm_union = try self.llvm_type(module, union_name);
+        let result_name = try self.local_name(module, node.result.name);
+        try self.line3(
+            "  %s = getelementptr %s, ptr %s, i32 0, i32 1",
+            Arg::Str(result_name), Arg::Str(llvm_union), Arg::Str(info.operand)
+        );
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    return try self.fail0("llvm error: unknown union type");
+}
+
 /// `writeUnionPayload`. The tag dispatch happens in match before this runs,
 /// so only the active payload bytes are read; inactive storage is never
 /// touched.

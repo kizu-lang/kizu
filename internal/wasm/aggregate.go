@@ -218,6 +218,8 @@ func (e *emitter) writeUnionInstr(instr *ir.Instr) error {
 		return e.writeUnionTag(instr)
 	case "union.payload":
 		return e.writeUnionPayload(instr)
+	case "union.payload_ref":
+		return e.writeUnionPayloadRef(instr)
 	default:
 		return fmt.Errorf("wasm error: unsupported union instruction `%s`", instr.Op)
 	}
@@ -281,6 +283,33 @@ func (e *emitter) writeUnionTag(instr *ir.Instr) error {
 		return fmt.Errorf("wasm error: union.tag expects union, got `%s`", instr.Args[0].Type)
 	}
 	return e.writeLoadValue(instr.Result, e.value(instr.Args[0]).expr, 0)
+}
+
+// writeUnionPayloadRef projects the address of the checked active variant
+// payload out of a `&var` union, for a match that binds the payload as a
+// `&var` borrow of where it lies.
+func (e *emitter) writeUnionPayloadRef(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || !strings.HasPrefix(instr.Args[0].Type, "&var ") {
+		return fmt.Errorf("wasm error: union.payload_ref expects one `&var` union argument")
+	}
+	unionName := derefWasmType(instr.Args[0].Type)
+	union, ok := e.module.Unions[unionName]
+	if !ok {
+		return fmt.Errorf("wasm error: unknown union type `%s`", unionName)
+	}
+	variant, ok := union.Variants[instr.Immediate]
+	if !ok || variant.Payload == "" || derefWasmType(instr.Result.Type) != variant.Payload {
+		return fmt.Errorf("wasm error: unknown union payload `%s::%s`", unionName, instr.Immediate)
+	}
+	offset, err := e.unionPayloadOffset(unionName)
+	if err != nil {
+		return err
+	}
+	expr := addressAt(e.value(instr.Args[0]).expr, offset)
+	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+	return nil
 }
 
 // writeUnionPayload loads the checked active variant payload.

@@ -30,12 +30,26 @@ import std::string;
 /// callee's own copy, which can live in a slot like any local.
 fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: FactsHandle) -> !?diagnostic::Diagnostic {
     while self.slots.pop() |_| {}
+    while self.caller_storage_params.pop() |_| {}
     if self.decl_body(decl) |body| {
         if try self.collect_mut_borrows_stmt(tree, body.as_statement()) |failed| {
             return move failed;
         }
     }
     return null;
+}
+
+/// Reports whether name is a parameter that arrived as the caller's storage,
+/// the Go `l.callerStorageParams[name]`.
+fn (self: &Lowerer) is_caller_storage_param(name: Name) -> bool {
+    var index = 0;
+    while self.caller_storage_params.get(index) |param| {
+        index = index + 1;
+        if same_name(param, name) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Reports whether name is in the slot set, the Go `l.slots[name]`.
@@ -73,6 +87,19 @@ fn (self: &var Lowerer) remove_slot(name: Name) -> !void {
     return;
 }
 
+/// Reports whether any arm of a match names its payload, the Go
+/// `matchBindsPayload`.
+fn match_binds_payload(tree: &ast::Ast, arms: &array::Array<ast::MatchArm>) -> bool {
+    var index = 0;
+    while arms.get(index) |arm| {
+        index = index + 1;
+        if !text_empty(tree, arm.binding) and !arm.is_wildcard(tree) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Walks one statement for names passed as `&var`, the Go
 /// `collectMutBorrowsStmt`.
 fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
@@ -87,6 +114,17 @@ fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement:
     if ownership::errdefer_stmt(tree, statement) |value| {
         if cleanup_receiver(tree, value.expr) |receiver| {
             try self.mark_if_name(tree, ast::Expression { node: receiver });
+        }
+    }
+    // A match through a field of a local binds payloads where they lie
+    // (SPEC §6.8), so the local is storage the arm writes into.
+    if ownership::match_stmt_head(tree, statement) |head| {
+        if ownership::field_expr(tree, head.value) |field| {
+            let arms = try ownership::match_stmt_arms(self.allocator, tree, statement);
+            defer arms.deinit(self.allocator);
+            if !field.namespace and match_binds_payload(tree, &arms) {
+                try self.mark_if_name(tree, head.value);
+            }
         }
     }
     var exprs = array::new<ast::Expression>(self.allocator);

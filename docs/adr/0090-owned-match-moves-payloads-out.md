@@ -57,9 +57,17 @@ owned scrutinee は次の 2 つ。
   (arena.get、method call、`borrows` 付き関数)は除く。temporary は match で
   死ぬので consume の記帳は要らない
 
-borrow、projection(field access)、上記以外の式への match では、aggregate
-payload は従来通り borrow binding のまま。必要な形が現れた時に field-level の
-move 追跡と合わせて再検討する。
+`&var` な place —— `&var` の borrow binding そのもの、または `var` local か
+`&var` borrow を root とする field path —— への match では、宣言された
+struct / union と deinit を持つ型の payload を、その場所への `&var` borrow
+として束縛する。arm の間その place は mutably borrowed になる(`&var` 引数と
+同じ排他)。これが無いと union に入れた owner を取り出さずに変更する手段が
+無く、`union Stream { Plain(TcpStream), Secure(tls::Client) }` のような
+stream の抽象が書けない。lowering は payload の address(`union.payload_ref`)
+を束縛する。
+
+それ以外の borrow、projection、式への match では、aggregate payload は
+従来通り不変の borrow binding のまま。
 
 これは Rust の by-value match と同じ意味論である。Rust の E0509(Drop 型からの
 move out 禁止)は採らない。E0509 は自動 Drop を守るための規則で、Kizu には
@@ -106,6 +114,8 @@ zero-copy(borrows-in-union)を将来入れるかは arena の性能検証(#549)�
 
 - borrows-in-union / zero-copy を導入する時、決定 3 を見直す(#549 の結果が前提)
 - ident でない scrutinee(field access 等)からの move out は、必要な API が
-  現れた時に検討する
+  現れた時に検討する(`&var` place への match は借用で足りるので対象外)
+- `?T` の capture(`if x |v|`)を `&var` place で同じ規則にするかは、union を
+  経ずに optional の owner を変更したい形が現れた時に決める
 - `?T` payload の copy out は、`?i64` のような scalar optional が実際に union
   payload に現れた時に scalar 側へ広げるか判断する

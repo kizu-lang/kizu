@@ -774,6 +774,12 @@ payload binding の所有は、payload の型と match される値の所有で�
   束縛されます。
 * `[]T` や raw pointer などの view 型 payload は常に borrow として束縛され、
   arm の外へ escape できません。
+* `&var` な place —— `&var` の borrow binding そのもの、または `var` local か
+  `&var` borrow を root とする field path —— への match では、宣言された
+  struct / union と deinit を持つ型の payload は、その場所への `&var` borrow
+  として束縛されます。arm の間その place は mutably borrowed で、payload に
+  `&var self` の method を呼べます。名前で match した `var` local は上の
+  規則どおり move out です。
 
 ### 6.9 if
 

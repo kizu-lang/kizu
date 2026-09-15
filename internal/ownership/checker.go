@@ -3672,8 +3672,10 @@ func (c *Checker) checkMatchArms(
 		}
 		armEnv := base.clone()
 		child := armEnv.child()
-		c.defineMatchArmPayload(arm, ctx.unionPayloads, ctx.ownerDeinitDispatch,
-			ctx.ownedMatch, child, expressionSpan(stmt.Value))
+		if err := c.defineMatchArmPayload(arm, ctx.unionPayloads, ctx.ownerDeinitDispatch,
+			ctx.ownedMatch, stmt.Value, child); err != nil {
+			return nil, err
+		}
 		restore := c.bindMetaField(stmt.MetaCapture, ctx.armVariants[matchArmKey(arm)])
 		err := c.checkStmt(arm.Body, child)
 		restore()
@@ -3860,25 +3862,36 @@ func (c *Checker) consumeOwnerUnionReceiver(value ast.Expression, env *scope) {
 
 // defineMatchArmPayload binds one union variant payload for a match arm.
 // Scalar payloads bind as copies from any match; declared aggregates move out
-// of an owned scrutinee (ADR-0090); view payloads and aggregate payloads of a
-// borrowed scrutinee stay borrowed so they cannot escape. Inside an owner
-// union's own `deinit` the active owner payload is bound as an owned local so
-// it can be cleaned through its explicit `deinit`. Inactive variants are never
-// bound.
+// of an owned scrutinee (ADR-0090); a match through a mutable borrow place
+// binds an aggregate or owner payload as a `&var` borrow of where it lies
+// (SPEC §6.8); view payloads and aggregate payloads of any other borrowed
+// scrutinee stay borrowed so they cannot escape. Inside an owner union's own
+// `deinit` the active owner payload is bound as an owned local so it can be
+// cleaned through its explicit `deinit`. Inactive variants are never bound.
 func (c *Checker) defineMatchArmPayload(
 	arm ast.MatchArm,
 	unionPayloads map[string]string,
 	ownerDeinitDispatch bool,
 	ownedMatch bool,
+	scrutinee ast.Expression,
 	child *scope,
-	span ast.Span,
-) {
+) error {
 	payload := unionPayloads[arm.Tag]
 	if arm.IsWildcard() || payload == "" || arm.Binding == "" {
-		return
+		return nil
 	}
 	value := c.newBinding(arm.Binding, payload)
-	value.declSpan = span
+	value.declSpan = expressionSpan(scrutinee)
+	if !ownerDeinitDispatch {
+		tied, err := c.tieMatchPayloadReference(value, scrutinee, payload, child)
+		if err != nil {
+			return err
+		}
+		if tied {
+			child.define(value)
+			return nil
+		}
+	}
 	class := c.classifyMatchPayload(payload)
 	owned := class == payloadCopies ||
 		(class == payloadMoves && ownedMatch) ||
@@ -3887,6 +3900,62 @@ func (c *Checker) defineMatchArmPayload(
 		value.borrowedParam = true
 	}
 	child.define(value)
+	return nil
+}
+
+// tieMatchPayloadReference binds a payload as a `&var` borrow of where it
+// lies when the match reads a mutable borrow place -- a `&var` borrow binding
+// by name, or a field path rooted at a `var` local or a `&var` borrow -- and
+// the payload is a declared aggregate or an owner. The place is mutably
+// borrowed for the arm, as a `&var` argument would borrow it, so nothing else
+// reads or moves it while the arm holds the payload. A `var` local matched by
+// name is not such a place: it owns what it holds (ADR-0090).
+func (c *Checker) tieMatchPayloadReference(
+	value *binding,
+	scrutinee ast.Expression,
+	payload string,
+	child *scope,
+) (bool, error) {
+	if !c.payloadBindsByReference(payload) {
+		return false, nil
+	}
+	name, path, ok := viewReceiverPath(scrutinee)
+	if !ok {
+		return false, nil
+	}
+	holder, exists := child.lookup(name)
+	if !exists {
+		return false, nil
+	}
+	if path == "" {
+		if !holder.borrowedParam || !holder.mutBorrow {
+			return false, nil
+		}
+		if err := checkBorrowConflict(holder, true); err != nil {
+			return false, err
+		}
+	} else {
+		if !holder.mutable && !(holder.borrowedParam && holder.mutBorrow) {
+			return false, nil
+		}
+		if err := checkBorrowConflictForField(holder, path, true); err != nil {
+			return false, err
+		}
+	}
+	c.activateBorrow(holder, path, true)
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.mutBorrow = true
+	value.borrowTargets = append(value.borrowTargets, borrowSource{target: holder, field: path})
+	return true, nil
+}
+
+// payloadBindsByReference reports whether a payload has an inside a mutable
+// borrow can reach: a declared struct or union, or a type with a deinit
+// contract. Scalars, enums and views copy.
+func (c *Checker) payloadBindsByReference(typeName string) bool {
+	return c.structs[typeName] != nil || c.unions[typeName] != nil ||
+		c.valueTypeNeedsConsume(typeName)
 }
 
 // matchPayloadClass says what a match on an owned value may do with one bound
@@ -4572,7 +4641,7 @@ func (c *Checker) checkMatchExprValue(
 	for idx, arm := range stmt.Arms {
 		c.settleOwnerTemps(pending, places, "void", nil)
 		got, err := c.checkMatchExprArmValue(arm, tags, unionPayloads, ownedMatch,
-			expressionSpan(stmt.Value), env, moveTail)
+			stmt.Value, env, moveTail)
 		if err != nil {
 			return "", err
 		}
@@ -4592,7 +4661,7 @@ func (c *Checker) checkMatchExprArmValue(
 	tags map[string]bool,
 	unionPayloads map[string]string,
 	ownedMatch bool,
-	span ast.Span,
+	value ast.Expression,
 	env *scope,
 	moveTail bool,
 ) (string, error) {
@@ -4605,7 +4674,10 @@ func (c *Checker) checkMatchExprArmValue(
 	}
 	armEnv := env.clone()
 	child := armEnv.child()
-	c.defineMatchArmPayload(arm, unionPayloads, false, ownedMatch, child, span)
+	if err := c.defineMatchArmPayload(
+		arm, unionPayloads, false, ownedMatch, value, child); err != nil {
+		return "", err
+	}
 	got, err := c.checkStmtValue(arm.Body, child, moveTail)
 	if err != nil {
 		return "", err
