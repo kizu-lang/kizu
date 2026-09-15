@@ -337,12 +337,13 @@ fn (self: &var std::http::Server) keep(
     done: std::http::Exchange
 ) -> std::http::Failure!void {
     var held = move done;
+    errdefer held.deinit(allocator);
     if held.carries_another() {
         try self.rejoin(io, allocator, move held);
         return;
     }
     if held.is_answered() {
-        held.begin_lingering();
+        try held.begin_lingering(io, allocator);
         try self.rejoin_as_is(io, allocator, move held);
         return;
     }
@@ -573,7 +574,7 @@ fn (self: &var std::http::Server) settle_at(
             done = !needs_more(progress);
         } else |failure| {
             if worth_answering(failure) {
-                held.begin_lingering();
+                try held.begin_lingering(io, allocator);
             } else {
                 gone = true;
             }
@@ -666,7 +667,7 @@ fn (self: &var std::http::Server) advance_at(
             // it stays only for the refusal to reach it (`linger`). A peer
             // that is gone was told nothing, and is closed at once.
             if worth_answering(failure) {
-                held.begin_lingering();
+                try held.begin_lingering(io, allocator);
             } else {
                 gone = true;
             }
@@ -743,7 +744,7 @@ fn (self: &var std::http::Server) refuse_at(
 ) -> std::http::Failure!void {
     if self.open.at_mut(index) |held| {
         held.refuse_expired(io, allocator);
-        held.begin_lingering();
+        try held.begin_lingering(io, allocator);
     }
     return;
 }
@@ -821,7 +822,7 @@ fn (self: &std::http::Server) opening(
     stream: std::net::TcpStream
 ) -> std::http::Failure!std::http::Exchange {
     return Exchange {
-        reader: std::http::reader_new(allocator, move stream, self.limits),
+        reader: std::http::reader_new(allocator, std::http::Stream::Plain(move stream), self.limits),
         request: std::http::request_new(allocator),
         response: std::http::response_new(allocator),
         body: std::string::new(allocator),
@@ -1002,8 +1003,8 @@ fn (self: &std::http::Exchange) is_lingering() -> bool {
 // reading side stays open for `linger_millis`, and what arrives on it is
 // dropped. A loop over many connections moves it on with `advance` like any
 // other; the blocking path does the waiting itself in `linger`.
-fn (self: &var std::http::Exchange) begin_lingering() -> void {
-    self.reader.close_write();
+fn (self: &var std::http::Exchange) begin_lingering(io: Io, allocator: Allocator) -> std::http::Failure!void {
+    try self.reader.close_write(io, allocator);
     self.phase = std::http::Phase::Lingering;
     let linger_millis = self.limits.linger_millis;
     self.arm_read_phase(linger_millis);
@@ -1021,7 +1022,9 @@ fn (self: &var std::http::Exchange) linger(
     io: Io,
     allocator: Allocator
 ) -> void {
-    self.begin_lingering();
+    // A close that cannot be said is a connection already gone: nothing
+    // more to wait for, and nothing to report about one being closed.
+    self.begin_lingering(io, allocator) catch return;
     while true {
         if self.reader.discard_waiting(io, allocator) |got| {
             if got == 0 {
@@ -1265,7 +1268,7 @@ fn (self: &var std::http::Exchange) finish_body(
         try std::http::append_crlf(allocator, &var out);
         try std::http::append_crlf(allocator, &var out);
         let wire = out.as_bytes();
-        try self.reader.write_all(io, wire);
+        try self.reader.write_all(io, allocator, wire);
     }
     self.body_open = false;
     return;
@@ -1317,7 +1320,7 @@ fn (self: &var std::http::Exchange) send_head(
     let wire = out.as_bytes();
     let write_millis = self.limits.write_millis;
     self.reader.arm_write(write_millis);
-    try self.reader.write_all(io, wire);
+    try self.reader.write_all(io, allocator, wire);
     self.answered = true;
     self.persisted = persist;
     return;
@@ -1544,7 +1547,7 @@ fn (self: &var std::http::Exchange) write_all(
         try self.write_chunk(io, allocator, bytes, count);
         return;
     }
-    try self.reader.write_all(io, bytes);
+    try self.reader.write_all(io, allocator, bytes);
     return;
 }
 
@@ -1567,7 +1570,7 @@ fn (self: &var std::http::Exchange) write_chunk(
     try out.append_bytes(allocator, bytes);
     try std::http::append_crlf(allocator, &var out);
     let wire = out.as_bytes();
-    try self.reader.write_all(io, wire);
+    try self.reader.write_all(io, allocator, wire);
     return;
 }
 
@@ -1723,7 +1726,7 @@ fn (self: &var std::http::Exchange) refuse_status(
         allocator, std::http::Version::Http11, std::http::Framing::Buffered,
         false, false, &var out) catch return;
     let wire = out.as_bytes();
-    self.reader.write_some(io, wire) catch return;
+    self.reader.write_some(io, allocator, wire) catch return;
     return;
 }
 
@@ -1732,8 +1735,8 @@ fn (self: &var std::http::Exchange) refuse_status(
 fn worth_answering(failure: std::http::Failure) -> bool {
     return match failure {
         ConnectionReset => false,
-        Closed => false,
-        ReadFailed => false,
+        std::net::Error::Closed => false,
+        std::net::Error::ReadFailed => false,
         _ => true,
     };
 }

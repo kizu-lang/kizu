@@ -65,7 +65,7 @@ fn (self: &var Exchange) respond_text(
 fn (self: &var Exchange) respond_head(
     io: Io, allocator: Allocator, framing: std::http::Framing,
 ) -> std::http::Failure!void
-fn (self: &var Exchange) write_all(io: Io, bytes: []u8) -> std::http::Failure!void
+fn (self: &var Exchange) write_all(io: Io, allocator: Allocator, bytes: []u8) -> std::http::Failure!void
 fn (self: &Exchange) owes() -> i64
 fn (self: &var Exchange) read_into(
     io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
@@ -866,9 +866,9 @@ pub fn form_value(allocator, query, name, out: &var String)
     -> std::http::Failure!bool
 ```
 
-`parse_url` が読むのは `http://host[:port][/target]` です。**`https` は
-`Error::UnsupportedScheme` で拒否します** —— TLS が要り、std は持っていません。
-暗号化を頼まれたものを黙って平文で送るのが、出してはいけない唯一の答えです。
+`parse_url` が読むのは `http://host[:port][/target]` と `https://...` で、port を
+書かなければ 80 と 443、`Url.secure` が scheme を言います。他の scheme は
+`Error::UnsupportedScheme` です。
 
 `target` は path と query をまとめて持ちます。request line に載るのがそれ
 そのものだからで、分けるときは server 側と同じ `path_of` / `query_of` を
@@ -961,10 +961,12 @@ pub fn post(io, allocator, url, content_type, body, max)
     -> std::http::Failure!std::http::ClientResponse
 pub fn fetch(io, allocator, method, url, content_type, body, max)
     -> std::http::Failure!std::http::ClientResponse
-pub fn fetch_with(io, allocator, method, url, headers: &Headers, body, limits, max)
+pub fn fetch_with(io, allocator, method, url, headers: &Headers, body, roots: &Array<String>, limits, max)
     -> std::http::Failure!std::http::ClientResponse
 
 pub fn connect(io, allocator, address, limits)
+    -> std::http::Failure!std::http::Connection
+pub fn connect_secure(io, allocator, address, host, roots: &Array<String>, limits)
     -> std::http::Failure!std::http::Connection
 pub fn take(allocator, stream: std::net::TcpStream, limits) -> std::http::Connection
 fn (self: &var Connection) send(io, allocator, method, url: &Url, content_type, body, write_millis)
@@ -976,7 +978,7 @@ fn (self: &var Connection) receive(io, allocator, method, limits)
 fn (self: &var Connection) read_into(io, allocator, out, max) -> std::http::Failure!i64
 fn (self: &var Connection) read_ready_into(io, allocator, out, max)
     -> std::http::Failure!?i64
-fn (self: &var Connection) write_all(io, bytes) -> std::http::Failure!void
+fn (self: &var Connection) write_all(io, allocator, bytes) -> std::http::Failure!void
 fn (self: &var Connection) read_body(io, allocator, response: &var ClientResponse, max)
     -> std::http::Failure!void
 fn (self: &var Connection) take_trailers(allocator, response: &var ClientResponse)
@@ -1010,8 +1012,30 @@ defer headers.deinit(allocator);
 try headers.add(allocator, "Accept-Encoding", "gzip");
 try headers.add(allocator, "Authorization", "Bearer ...");
 var response = try http::fetch_with(
-    handle, allocator, "GET", url, &headers, "", limits, 1 << 20);
+    handle, allocator, "GET", url, &headers, "", &roots, limits, 1 << 20);
 ```
+
+### https
+
+URL が `https` なら `fetch_with` は TLS(`std::tls`、`docs/std/tls.md`)で繋ぎます。
+`roots` は server の証明書の chain が辿り着くべき root の DER の列で、`Array<String>`
+で渡します。証明書の host 名の照合は URL の host、有効期限の判定は
+`process::unix_millis()` の今です。`get` / `post` / `fetch` は roots を持たないので、
+`https` の URL には `Error::NoTrustedRoots` を返します —— 検証できない接続を黙って
+張ることも、平文で送ることもしません。
+
+```kizu
+var roots = array::new<string::String>(allocator);
+defer roots.deinit(allocator);
+try roots.append(allocator, root_der);     // 信頼する root の DER
+var response = try http::fetch_with(
+    handle, allocator, "GET", "https://example.com/", &headers, "", &roots, limits, 1 << 20);
+```
+
+`connect_secure(io, allocator, address, host, roots, limits)` は `Connection` を TLS
+の上に開き、あとは `connect` で開いたものと同じに使えます。`std::http::Failure` は
+`std::tls::Failure` を含むので、chain の検証が落ちた理由(`UnknownIssuer`、
+`NameMismatch`、`Expired`)はそのまま呼び手に届きます。
 
 `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` は caller が入れて
 も落とします。message が実際に何であるかから client が書くもので、`Response.encode`
@@ -1277,7 +1301,7 @@ client も勝手には求めません —— 求めた答えを読む費用を�
   それだけです
 - **WebSocket の framing**: 101 の後の接続の持ち方は上の節のとおりで、framing と
   handshake の SHA-1 / base64 は std にありません
-- **HTTPS / TLS**、**HTTP/2**、**HTTP/3**
+- **HTTP/2**、**HTTP/3**
 - **HTTP date を読むこと**: `Date` / `Expires` / `Last-Modified` は解析しません。
   書く側は `set_date` / `append_date` にあります
 - **multipart の part を stream で読むこと**: `parse_multipart` は手元にある body
@@ -1288,7 +1312,7 @@ client も勝手には求めません —— 求めた答えを読む費用を�
 
 `std::http::Error` は `MalformedRequest`、`HeadTooLarge`、`BodyTooLarge`、
 `UnsupportedVersion`、`UnsupportedEncoding`、`Incomplete`、`InvalidStatus`、
-`InvalidHeader`、`InvalidUrl`、`UnsupportedScheme`、`MalformedResponse`、
+`InvalidHeader`、`InvalidUrl`、`UnsupportedScheme`、`NoTrustedRoots`、`MalformedResponse`、
 `ResponseFinished`、`InvalidEncoding`、`InvalidPattern`、`ResponseOverrun`、
 `ResponseIncomplete`、`ExchangeUnfinished`、`ConflictingFraming`、
 `MalformedChunk`、`MalformedMultipart` を持ちます。
@@ -1305,8 +1329,9 @@ response 側 —— message が自分の framing と矛盾しており、回復�
 接続に届く前に拒否します(原理 7)。
 
 `std::http::Failure` はその和 —— `Error or std::net::Error or std::mem::Error or
-std::array::Error` —— です。どれも変換されないので、`match` した caller はどの層が
-拒否したかを見ます。`decode_body` だけは `std::http::DecodeFailure` —— `Error or
+std::array::Error or std::tls::Failure` —— です。どれも変換されないので、`match` した
+caller はどの層が拒否したかを見ます(`Closed` は net と tls の両方にあるので、
+`std::net::Error::Closed` のように set を書いて分けます)。`decode_body` だけは `std::http::DecodeFailure` —— `Error or
 std::compress::Error or std::mem::Error` —— を返します。socket は関わらず、代わりに
 stream が coding のとおりでないこと(`ChecksumMismatch` など)が起きるからです。
 

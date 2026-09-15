@@ -1,0 +1,145 @@
+// A Stream is what a Reader reads from and writes to: a socket, or a TLS
+// client over one. The reader does not know which; every read, write and
+// deadline goes through here, and this is the one place that knows a TLS
+// write allocates the record it sends. A caller that wants something else
+// underneath -- a proxy, a test double -- adds a variant here, not a second
+// reader.
+pub union Stream {
+    Plain(std::net::TcpStream),
+    Secure(std::tls::Client),
+}
+
+fn (self: Stream) deinit(allocator: Allocator) -> void {
+    match self {
+        Plain(stream) => stream.deinit(),
+        Secure(client) => client.deinit(allocator),
+    }
+    return;
+}
+
+// read_into appends up to `max` bytes to `out`, waiting for them; zero is
+// the peer closing.
+fn (self: &var std::http::Stream) read_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!i64 {
+    match self {
+        Plain(stream) => {
+            let count = try stream.read_into(io, allocator, out, max);
+            return count;
+        },
+        Secure(client) => {
+            let count = try client.read_into(io, allocator, out, max);
+            return count;
+        },
+    }
+}
+
+// read_ready appends what has already arrived, or answers null when nothing
+// has; it never waits.
+fn (self: &var std::http::Stream) read_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::http::Failure!?i64 {
+    match self {
+        Plain(stream) => {
+            let count = try stream.read_ready(io, allocator, out, max);
+            return count;
+        },
+        Secure(client) => {
+            let count = try client.read_ready(io, allocator, out, max);
+            return count;
+        },
+    }
+}
+
+fn (self: &var std::http::Stream) write_all(io: Io, allocator: Allocator, bytes: []u8) -> std::http::Failure!void {
+    match self {
+        Plain(stream) => try stream.write_all(io, bytes),
+        Secure(client) => try client.write(io, allocator, bytes),
+    }
+    return;
+}
+
+// write_some sends what fits right now and answers with how many bytes that
+// was; a TLS record is sent whole, so over TLS that is all of them.
+fn (self: &var std::http::Stream) write_some(io: Io, allocator: Allocator, bytes: []u8) -> std::http::Failure!i64 {
+    match self {
+        Plain(stream) => {
+            let count = try stream.write_some(io, bytes);
+            return count;
+        },
+        Secure(client) => {
+            try client.write(io, allocator, bytes);
+            return std::mem::len(bytes);
+        },
+    }
+}
+
+// close_write ends the writing half: the socket's half-close, or over TLS
+// the close_notify alert and then the half-close.
+fn (self: &var std::http::Stream) close_write(io: Io, allocator: Allocator) -> std::http::Failure!void {
+    match self {
+        Plain(stream) => stream.close_write(),
+        Secure(client) => try client.close(io, allocator),
+    }
+    return;
+}
+
+fn (self: &var std::http::Stream) set_read_deadline(at: i64) -> void {
+    match self {
+        Plain(stream) => stream.set_read_deadline(at),
+        Secure(client) => client.set_read_deadline(at),
+    }
+    return;
+}
+
+fn (self: &var std::http::Stream) set_write_deadline(at: i64) -> void {
+    match self {
+        Plain(stream) => stream.set_write_deadline(at),
+        Secure(client) => client.set_write_deadline(at),
+    }
+    return;
+}
+
+fn (self: &var std::http::Stream) clear_read_deadline() -> void {
+    match self {
+        Plain(stream) => stream.clear_read_deadline(),
+        Secure(client) => client.clear_read_deadline(),
+    }
+    return;
+}
+
+fn (self: &var std::http::Stream) clear_write_deadline() -> void {
+    match self {
+        Plain(stream) => stream.clear_write_deadline(),
+        Secure(client) => client.clear_write_deadline(),
+    }
+    return;
+}
+
+// watch and forget register the socket underneath with a poller.
+fn (self: &std::http::Stream) watch(
+    io: Io,
+    poller: &var std::net::Poller,
+    token: i64,
+    interest: std::net::Interest
+) -> std::http::Failure!void {
+    match self {
+        Plain(stream) => try poller.watch_stream(io, stream, token, interest),
+        Secure(client) => try client.watch(io, poller, token, interest),
+    }
+    return;
+}
+
+fn (self: &std::http::Stream) forget(io: Io, poller: &var std::net::Poller) -> std::http::Failure!void {
+    match self {
+        Plain(stream) => try poller.forget(io, stream),
+        Secure(client) => try client.forget(io, poller),
+    }
+    return;
+}

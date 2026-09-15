@@ -1,4 +1,3 @@
-import std::array;
 import std::compress;
 import std::fmt;
 import std::http;
@@ -18,13 +17,14 @@ import std::testing;
 
 // Every call here fails the same three ways, and std::http::Failure is
 // already that union, so nothing declares a second one.
-error Failure = http::Error or net::Error or mem::Error or array::Error;
+error Failure = http::Failure;
 
 fn failure_name(failure: http::Failure) -> []u8 {
     return match failure {
         MalformedResponse => "MalformedResponse",
         UnsupportedVersion => "UnsupportedVersion",
         UnsupportedScheme => "UnsupportedScheme",
+        NoTrustedRoots => "NoTrustedRoots",
         UnsupportedEncoding => "UnsupportedEncoding",
         ConflictingFraming => "ConflictingFraming",
         MalformedChunk => "MalformedChunk",
@@ -545,7 +545,7 @@ test "a 101 answer hands the connection to the caller" {
     let seen = switched.as_bytes();
     testing::expect_equal<[]u8>("after the head", seen);
 
-    try pair.client.write_all(handle, "ping");
+    try pair.client.write_all(handle, allocator, "ping");
     var heard = string::new(allocator);
     defer heard.deinit(allocator);
     let _ = try served.read_into(handle, allocator, &var heard, 64);
@@ -809,12 +809,23 @@ test "a body past the ceiling is refused" {
     }
 }
 
-test "https is refused before anything is sent" {
+test "https without trusted roots is refused before anything is sent" {
     let handle = io::blocking();
     let allocator = mem::page_allocator();
     if http::get(handle, allocator, "https://example.invalid/", 1048576) |response| {
         response.deinit(allocator);
-        testing::fail("https was accepted");
+        testing::fail("https was accepted without roots");
+    } else |err| {
+        testing::expect_equal<[]u8>("NoTrustedRoots", failure_name(err));
+    }
+}
+
+test "a scheme that is neither http nor https is refused before anything is sent" {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    if http::get(handle, allocator, "ftp://example.invalid/", 1048576) |response| {
+        response.deinit(allocator);
+        testing::fail("ftp was accepted");
     } else |err| {
         testing::expect_equal<[]u8>("UnsupportedScheme", failure_name(err));
     }
