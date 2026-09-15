@@ -3,6 +3,9 @@
 // they came from is usually a literal the caller no longer holds.
 pub struct Url {
     pub scheme: std::string::String,
+    // secure is the scheme read as a fact: `https`, so the connection goes
+    // over TLS to `host`.
+    pub secure: bool,
     pub host: std::string::String,
     pub port: i64,
     // The request target: the path, and the query behind its `?` if there was
@@ -39,9 +42,9 @@ fn (self: &std::http::Url) authority(
     return;
 }
 
-// parse_url reads `http://host[:port][/target]`. Only `http` is accepted:
-// `https` needs TLS, std has none, and quietly sending in the clear what the
-// caller asked to encrypt is the one answer that must not be given.
+// parse_url reads `http://host[:port][/target]` and
+// `https://host[:port][/target]`; the port is 80 or 443 when not written.
+// Any other scheme is `UnsupportedScheme`.
 pub fn parse_url(
     allocator: Allocator,
     text: []u8
@@ -49,10 +52,8 @@ pub fn parse_url(
     let length = std::mem::len(text);
     let mark = find_scheme_end(text) orelse return std::http::Error::InvalidUrl;
     let scheme = text[0..mark];
-    if !std::http::equal_ascii_fold(scheme, "http") {
-        if std::http::equal_ascii_fold(scheme, "https") {
-            return std::http::Error::UnsupportedScheme;
-        }
+    let secure = std::http::equal_ascii_fold(scheme, "https");
+    if !secure and !std::http::equal_ascii_fold(scheme, "http") {
         return std::http::Error::UnsupportedScheme;
     }
     let rest = text[mark + 3..length];
@@ -65,12 +66,13 @@ pub fn parse_url(
     let target = rest[authority_end..rest_length];
     var url = Url {
         scheme: std::string::new(allocator),
+        secure: secure,
         host: std::string::new(allocator),
-        port: 80,
+        port: if secure { 443 } else { 80 },
         target: std::string::new(allocator),
     };
     errdefer url.deinit(allocator);
-    try url.scheme.append_bytes(allocator, "http");
+    try url.scheme.append_bytes(allocator, if secure { "https" } else { "http" });
     try split_authority(allocator, &var url, authority);
     if std::mem::len(target) == 0 {
         try url.target.append_byte(allocator, cast<u8>(47));

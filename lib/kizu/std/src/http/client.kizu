@@ -48,8 +48,11 @@ pub struct Connection {
     reader: std::http::Reader,
 }
 
-// connect opens one. `take` wraps a stream the caller already has, which is
-// what lets TLS or a proxy go underneath without this module knowing.
+// connect opens one in the clear. `connect_secure` opens one over TLS: the
+// handshake is done, the certificate chain checked against `roots` for
+// `host` at the clock's now, before it returns. `take` wraps a socket the
+// caller already has, which is what lets a proxy go underneath without this
+// module knowing.
 pub fn connect(
     io: Io,
     allocator: Allocator,
@@ -59,7 +62,23 @@ pub fn connect(
     var stream = try std::net::tcp_connect(io, address);
     errdefer stream.deinit();
     return Connection {
-        reader: std::http::reader_new(allocator, move stream, limits),
+        reader: std::http::reader_new(allocator, std::http::Stream::Plain(move stream), limits),
+    };
+}
+
+pub fn connect_secure(
+    io: Io,
+    allocator: Allocator,
+    address: []u8,
+    host: []u8,
+    roots: &std::array::Array<std::string::String>,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Connection {
+    let now = std::process::unix_millis() / 1000;
+    var client = try std::tls::connect(io, allocator, address, host, roots, now);
+    errdefer client.deinit(allocator);
+    return Connection {
+        reader: std::http::reader_new(allocator, std::http::Stream::Secure(move client), limits),
     };
 }
 
@@ -69,7 +88,7 @@ pub fn take(
     limits: std::http::Limits
 ) -> std::http::Connection {
     return Connection {
-        reader: std::http::reader_new(allocator, move stream, limits),
+        reader: std::http::reader_new(allocator, std::http::Stream::Plain(move stream), limits),
     };
 }
 
@@ -112,7 +131,7 @@ fn (self: &var std::http::Connection) send_with(
     try build_request(allocator, url, &var request, method, headers, body);
     let wire = request.as_bytes();
     self.reader.arm_write(write_millis);
-    try self.reader.write_all(io, wire);
+    try self.reader.write_all(io, allocator, wire);
     return;
 }
 
@@ -258,9 +277,10 @@ fn (self: &var std::http::Connection) bind_body(
 // its own forward with `set_write_deadline`.
 fn (self: &var std::http::Connection) write_all(
     io: Io,
+    allocator: Allocator,
     bytes: []u8
 ) -> std::http::Failure!void {
-    try self.reader.write_all(io, bytes);
+    try self.reader.write_all(io, allocator, bytes);
     return;
 }
 
@@ -362,7 +382,9 @@ fn (self: &var std::http::Connection) take_trailers(
 // get asks for a URL and returns what came back, holding the body up to
 // `max` bytes. The ceiling is an argument because the size of an answer is
 // what the caller asking for it knows, not something this module can name once
-// for every URL there is.
+// for every URL there is. `get`, `post` and `fetch` carry no trusted roots,
+// so an `https` URL is `NoTrustedRoots` from them: `fetch_with` takes the
+// roots.
 pub fn get(
     io: Io,
     allocator: Allocator,
@@ -397,15 +419,18 @@ pub fn fetch(
 ) -> std::http::Failure!std::http::ClientResponse {
     var headers = try content_type_headers(allocator, content_type);
     defer headers.deinit(allocator);
+    var roots = std::array::new<std::string::String>(allocator);
+    defer roots.deinit(allocator);
     return fetch_with(
-        io, allocator, method, url, &headers, body,
+        io, allocator, method, url, &headers, body, &roots,
         std::http::default_limits(), max);
 }
 
 // fetch_with is the whole client in one call, with every knob: the caller's
-// own fields in the head, the limits that bound the head and the time each
-// phase may take, and `max` for the body this holds. A server that is not
-// trusted is exactly the case the limits exist for.
+// own fields in the head, the `roots` an `https` server's certificate chain
+// must lead to (the DER of each), the limits that bound the head and the
+// time each phase may take, and `max` for the body this holds. A server
+// that is not trusted is exactly the case the limits exist for.
 pub fn fetch_with(
     io: Io,
     allocator: Allocator,
@@ -413,6 +438,7 @@ pub fn fetch_with(
     url: []u8,
     headers: &std::http::Headers,
     body: []u8,
+    roots: &std::array::Array<std::string::String>,
     limits: std::http::Limits,
     max: i64
 ) -> std::http::Failure!std::http::ClientResponse {
@@ -423,17 +449,37 @@ pub fn fetch_with(
     }
     var parsed = try std::http::parse_url(allocator, url);
     defer parsed.deinit(allocator);
+    if parsed.secure and roots.len() == 0 {
+        return std::http::Error::NoTrustedRoots;
+    }
     var address = std::string::new(allocator);
     defer address.deinit(allocator);
     try parsed.authority(allocator, &var address);
     let address_bytes = address.as_bytes();
-    var open = try connect(io, allocator, address_bytes, limits);
+    var open = try open_connection(io, allocator, &parsed, address_bytes, roots, limits);
     defer open.deinit(allocator);
     try open.send_with(io, allocator, method, &parsed, headers, body, limits.write_millis);
     var response = try open.receive(io, allocator, method, limits);
     errdefer response.deinit(allocator);
     try open.read_body(io, allocator, &var response, max);
     return move response;
+}
+
+// open_connection opens the connection a URL asks for: over TLS to the
+// URL's host when the scheme is `https`, in the clear otherwise.
+fn open_connection(
+    io: Io,
+    allocator: Allocator,
+    url: &std::http::Url,
+    address: []u8,
+    roots: &std::array::Array<std::string::String>,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Connection {
+    if url.secure {
+        let host = url.host.as_bytes();
+        return connect_secure(io, allocator, address, host, roots, limits);
+    }
+    return connect(io, allocator, address, limits);
 }
 
 // build_request writes the request line and the head. Host is required by

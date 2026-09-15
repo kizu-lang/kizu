@@ -68,11 +68,33 @@ test "a bracketed IPv6 host survives the round trip through authority" {
     expect_text("[::1]:9000", &authority);
 }
 
-test "https is refused by name rather than sent in the clear" {
+test "https parses with port 443 and says it is secure" {
     let allocator = mem::page_allocator();
-    if http::parse_url(allocator, "https://example.test/") |url| {
+    var url = try http::parse_url(allocator, "https://example.test/path?q=1");
+    defer url.deinit(allocator);
+    testing::expect(url.secure);
+    testing::expect_equal<i64>(443, url.port);
+    let scheme = url.scheme.as_bytes();
+    testing::expect_equal<[]u8>("https", scheme);
+    let host = url.host.as_bytes();
+    testing::expect_equal<[]u8>("example.test", host);
+    let target = url.target.as_bytes();
+    testing::expect_equal<[]u8>("/path?q=1", target);
+    var explicit = try http::parse_url(allocator, "https://example.test:8443/");
+    defer explicit.deinit(allocator);
+    testing::expect(explicit.secure);
+    testing::expect_equal<i64>(8443, explicit.port);
+    var plain = try http::parse_url(allocator, "http://example.test/");
+    defer plain.deinit(allocator);
+    testing::expect(!plain.secure);
+    testing::expect_equal<i64>(80, plain.port);
+}
+
+test "a scheme that is neither http nor https is refused by name" {
+    let allocator = mem::page_allocator();
+    if http::parse_url(allocator, "ftp://example.test/") |url| {
         url.deinit(allocator);
-        testing::fail("https was accepted");
+        testing::fail("ftp was accepted");
     } else |err| {
         testing::expect_equal<[]u8>("UnsupportedScheme", failure_name(err));
     }

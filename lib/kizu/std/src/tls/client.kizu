@@ -984,6 +984,41 @@ fn (self: &var std::tls::Client) fill(io: Io, allocator: Allocator, count: i64) 
     return;
 }
 
+// fill_ready is `fill` for a caller that must not wait: false when the
+// bytes have not all arrived yet.
+fn (self: &var std::tls::Client) fill_ready(io: Io, allocator: Allocator, count: i64) -> std::tls::Failure!bool {
+    while self.inbound.len() - self.inbound_at < count {
+        let got = try self.stream.read_ready(io, allocator, &var self.inbound, 16384 + 256 + 5) orelse return false;
+        if got == 0 {
+            self.state = std::tls::State::Closed;
+            return std::tls::Error::Closed;
+        }
+    }
+    return true;
+}
+
+// read_record_ready is `read_record` for a caller that must not wait: null
+// when the record has not all arrived, its bytes so far kept.
+fn (self: &var std::tls::Client) read_record_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::tls::Failure!?u8 {
+    if !try self.fill_ready(io, allocator, 5) {
+        return null;
+    }
+    let length = (cast<i64>(self.held_byte(3)) << 8) | cast<i64>(self.held_byte(4));
+    if length > 16384 + 256 {
+        try self.fail(io, allocator, alert_bad_record_mac());
+        return std::tls::Error::BadRecord;
+    }
+    if !try self.fill_ready(io, allocator, 5 + length) {
+        return null;
+    }
+    let kind = try self.read_record(io, allocator, out);
+    return kind;
+}
+
 // send writes one record of `content`: in the clear before the keys are
 // on, sealed after.
 fn (self: &var std::tls::Client) send(
@@ -1080,22 +1115,75 @@ pub fn (self: &var std::tls::Client) read_into(
         defer content.deinit(allocator);
         let kind = try self.read_record(io, allocator, &var content);
         let content_bytes = content.as_bytes();
-        if kind == std::tls::content_application_data() {
-            try self.plain.append_bytes(allocator, content_bytes);
-        } else {
-            if kind == std::tls::content_handshake() {
-                try self.handshake.append_bytes(allocator, content_bytes);
-                try self.take_post_handshake(io, allocator);
-            } else {
-                if kind == std::tls::content_alert() and std::mem::len(content_bytes) == 2
-                    and content_bytes[1] == alert_close_notify() {
-                    try self.advance_with(io, allocator, std::tls::Event::CloseNotify);
-                    return 0;
-                }
-                try self.take_other_record(io, allocator, kind, content_bytes);
-            }
+        if try self.take_record(io, allocator, kind, content_bytes) {
+            return 0;
         }
     }
+    let count = try self.take_plain(allocator, out, max);
+    return count;
+}
+
+// read_ready is `read_into` for a caller that must not wait: it appends the
+// application data a whole record that has already arrived holds, and
+// answers null when no whole record has; zero is still the close_notify.
+// The bytes of a record still arriving are kept for the next call.
+pub fn (self: &var std::tls::Client) read_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::tls::Failure!?i64 {
+    while self.plain.len() == self.plain_at {
+        if self.state != std::tls::State::Connected {
+            return 0;
+        }
+        self.plain.clear();
+        self.plain_at = 0;
+        var content = std::string::new(allocator);
+        defer content.deinit(allocator);
+        let kind = try self.read_record_ready(io, allocator, &var content) orelse return null;
+        let content_bytes = content.as_bytes();
+        if try self.take_record(io, allocator, kind, content_bytes) {
+            return 0;
+        }
+    }
+    let count = try self.take_plain(allocator, out, max);
+    return count;
+}
+
+// take_record keeps one opened record: application data is held for the
+// caller, handshake content is taken as post-handshake messages, and the
+// rest is judged; true is the server's close_notify.
+fn (self: &var std::tls::Client) take_record(
+    io: Io,
+    allocator: Allocator,
+    kind: u8,
+    content: []u8
+) -> std::tls::Failure!bool {
+    if kind == std::tls::content_application_data() {
+        try self.plain.append_bytes(allocator, content);
+        return false;
+    }
+    if kind == std::tls::content_handshake() {
+        try self.handshake.append_bytes(allocator, content);
+        try self.take_post_handshake(io, allocator);
+        return false;
+    }
+    if kind == std::tls::content_alert() and std::mem::len(content) == 2
+        and content[1] == alert_close_notify() {
+        try self.advance_with(io, allocator, std::tls::Event::CloseNotify);
+        return true;
+    }
+    try self.take_other_record(io, allocator, kind, content);
+    return false;
+}
+
+// take_plain hands out up to `max` of the application data held.
+fn (self: &var std::tls::Client) take_plain(
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::mem::Error!i64 {
     var take = self.plain.len() - self.plain_at;
     if take > max {
         take = max;
@@ -1148,6 +1236,43 @@ fn (self: &var std::tls::Client) take_post_handshake(io: Io, allocator: Allocato
 
 // close sends close_notify and half-closes the socket; the server's own
 // close_notify, if it answers with one, is read as the end.
+// The socket underneath, for what a stream over it needs to say to the
+// socket itself: the deadlines a phase runs under, and a poller's watch.
+pub fn (self: &var std::tls::Client) set_read_deadline(at: i64) -> void {
+    self.stream.set_read_deadline(at);
+    return;
+}
+
+pub fn (self: &var std::tls::Client) set_write_deadline(at: i64) -> void {
+    self.stream.set_write_deadline(at);
+    return;
+}
+
+pub fn (self: &var std::tls::Client) clear_read_deadline() -> void {
+    self.stream.clear_read_deadline();
+    return;
+}
+
+pub fn (self: &var std::tls::Client) clear_write_deadline() -> void {
+    self.stream.clear_write_deadline();
+    return;
+}
+
+pub fn (self: &std::tls::Client) watch(
+    io: Io,
+    poller: &var std::net::Poller,
+    token: i64,
+    interest: std::net::Interest
+) -> std::tls::Failure!void {
+    try poller.watch_stream(io, &self.stream, token, interest);
+    return;
+}
+
+pub fn (self: &std::tls::Client) forget(io: Io, poller: &var std::net::Poller) -> std::tls::Failure!void {
+    try poller.forget(io, &self.stream);
+    return;
+}
+
 pub fn (self: &var std::tls::Client) close(io: Io, allocator: Allocator) -> std::tls::Failure!void {
     if self.state == std::tls::State::Connected {
         var alert = [2]u8{};

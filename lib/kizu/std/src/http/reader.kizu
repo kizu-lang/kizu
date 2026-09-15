@@ -12,7 +12,7 @@
 // One buffer serves the head and the body. `at` is how much has been handed
 // out, so the body starts where the head ended without the bytes moving.
 pub struct Reader {
-    stream: std::net::TcpStream,
+    stream: std::http::Stream,
     held: std::string::String,
     at: i64,
     // How far the head scan has looked. A CRLF CRLF can straddle a read
@@ -37,7 +37,7 @@ pub struct Reader {
 
 fn reader_new(
     allocator: Allocator,
-    stream: std::net::TcpStream,
+    stream: std::http::Stream,
     limits: std::http::Limits
 ) -> std::http::Reader {
     return Reader {
@@ -55,7 +55,7 @@ fn reader_new(
 }
 
 fn (self: std::http::Reader) deinit(allocator: Allocator) -> void {
-    self.stream.deinit();
+    self.stream.deinit(allocator);
     self.held.deinit(allocator);
     self.trailers.deinit(allocator);
     return;
@@ -259,8 +259,8 @@ fn (self: &var std::http::Reader) drop_held() -> void {
 
 // close_write shuts the writing side and keeps reading, which is the first
 // stage of closing a connection the peer may still be writing to.
-fn (self: &var std::http::Reader) close_write() -> void {
-    self.stream.close_write();
+fn (self: &var std::http::Reader) close_write(io: Io, allocator: Allocator) -> std::http::Failure!void {
+    try self.stream.close_write(io, allocator);
     return;
 }
 
@@ -575,17 +575,19 @@ fn (self: &var std::http::Reader) spend(count: i64) -> void {
 // did not frame, and the deadlines a caller whose work is not one phase sets.
 fn (self: &var std::http::Reader) write_all(
     io: Io,
+    allocator: Allocator,
     bytes: []u8
 ) -> std::http::Failure!void {
-    try self.stream.write_all(io, bytes);
+    try self.stream.write_all(io, allocator, bytes);
     return;
 }
 
 fn (self: &var std::http::Reader) write_some(
     io: Io,
+    allocator: Allocator,
     bytes: []u8
 ) -> std::http::Failure!i64 {
-    let count = try self.stream.write_some(io, bytes);
+    let count = try self.stream.write_some(io, allocator, bytes);
     return count;
 }
 
@@ -623,7 +625,7 @@ fn (self: &std::http::Reader) forget(
     io: Io,
     poller: &var std::net::Poller
 ) -> std::http::Failure!void {
-    try poller.forget(io, &self.stream);
+    try self.stream.forget(io, poller);
     return;
 }
 
@@ -633,6 +635,6 @@ fn (self: &std::http::Reader) watch(
     token: i64,
     interest: std::net::Interest
 ) -> std::http::Failure!void {
-    try poller.watch_stream(io, &self.stream, token, interest);
+    try self.stream.watch(io, poller, token, interest);
     return;
 }
