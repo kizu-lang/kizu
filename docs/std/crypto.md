@@ -1,6 +1,6 @@
 # std::crypto
 
-暗号 protocol に必要な算術(hash、MAC、鍵導出、鍵合意、署名検証、AEAD、定数時間
+暗号 protocol に必要な算術(hash、MAC、鍵導出、鍵合意、署名、AEAD、定数時間
 比較)と乱数です。乱数以外は全部 Kizu source で、どの target でも同じ bytes を
 返します。C を link しない wasm module も native binary と同じ digest を出します。
 乱数だけは host から取得します。
@@ -10,6 +10,8 @@ std::crypto::sha256(bytes: []u8, digest: &var []u8) -> void
 std::crypto::sha512(bytes: []u8, digest: &var []u8) -> void
 std::crypto::sha384(bytes: []u8, digest: &var []u8) -> void
 std::crypto::hmac_sha256(key: []u8, message: []u8, tag: &var []u8) -> void
+std::crypto::hmac_sha384(key: []u8, message: []u8, tag: &var []u8) -> void
+std::crypto::hmac_sha512(key: []u8, message: []u8, tag: &var []u8) -> void
 std::crypto::hkdf_extract(salt: []u8, keying_material: []u8, key: &var []u8) -> void
 std::crypto::hkdf_expand(key: []u8, info: []u8, out: &var []u8) -> void
 std::crypto::x25519(scalar: []u8, point: []u8, out: &var []u8) -> Error!void
@@ -18,6 +20,11 @@ std::crypto::ecdsa_p256_verify(public_key: []u8, digest: []u8, signature: []u8) 
 std::crypto::ecdsa_p384_verify(public_key: []u8, digest: []u8, signature: []u8) -> bool
 std::crypto::rsa_pkcs1_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool
 std::crypto::rsa_pss_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, signature: []u8) -> bool
+std::crypto::ecdsa_p256_sign(private_key: []u8, digest: []u8, signature: &var []u8) -> Error!void
+std::crypto::ecdsa_p384_sign(private_key: []u8, digest: []u8, signature: &var []u8) -> Error!void
+std::crypto::rsa_pkcs1_sign(hash: Hash, key: &RsaPrivateKey, digest: []u8, signature: &var []u8) -> Error!void
+std::crypto::rsa_pss_sign(hash: Hash, key: &RsaPrivateKey, digest: []u8, salt: []u8, signature: &var []u8) -> Error!void
+std::crypto::RsaPrivateKey { modulus, public_exponent, prime1, prime2, exponent1, exponent2, coefficient: []u8 }
 std::crypto::digest_length(hash: Hash) -> i64
 std::crypto::digest_of(hash: Hash, bytes: []u8, digest: &var []u8) -> void
 std::crypto::equal_constant_time(a: []u8, b: []u8) -> bool
@@ -31,7 +38,7 @@ std::crypto::random_bytes(io: Io, allocator: Allocator, count: i64) -> Error!Str
 std::crypto::random_into(io: Io, allocator: Allocator, out: &var String, count: i64) -> Error!void
 
 std::crypto::Hash     Sha256 | Sha384 | Sha512
-std::crypto::Error    IoFailing | OutOfMemory | ReadFailed | AuthenticationFailed | LowOrderPoint
+std::crypto::Error    IoFailing | OutOfMemory | ReadFailed | AuthenticationFailed | LowOrderPoint | InvalidKey
 std::crypto::Failure  Error or std::mem::Error
 ```
 
@@ -58,6 +65,8 @@ if crypto::equal_constant_time(mine, theirs) {
 `hmac_sha256` は RFC 2104 の HMAC で、`key` による `message` の 32 byte の tag を
 `tag` の先頭に書きます。key はどんな長さでもよく、
 1 block(64 byte)より長い key は先に hash され、短い key は 0 で埋められます。
+`hmac_sha384` / `hmac_sha512` は同じことを SHA-384 / SHA-512 でします(tag は
+48 / 64 byte、block は 128 byte)。
 
 結果は呼び手の buffer の view に書きます。`var out = [32]u8{}` と
 `as_mut_bytes()` がその形で、hash は何も確保せず、失敗もしません。32 byte より
@@ -112,9 +121,13 @@ SubjectPublicKeyInfo が持つ形そのものです。`signature` は r と s �
 同じことを P-384(secp384r1)と SHA-384 でします。鍵は 97 byte、r と s は 48 byte ずつ、
 digest は 48 byte です。
 
-署名の生成はありません。生成には秘密鍵と、1 度しか使ってはならない nonce の管理が
-要り、今の利用者(TLS client と証明書の検証)はどちらも必要としないからです。DER の `SEQUENCE { INTEGER r, INTEGER s }` から r と s を
-取り出すのは `std::crypto::x509`(`docs/std/x509.md`)の仕事です。
+`ecdsa_p256_sign` / `ecdsa_p384_sign` は秘密鍵(32 / 48 byte の scalar)で `digest` に
+署名し、`ecdsa_*_verify` が読む形(r、s の連結)を `signature` に書きます。nonce は
+RFC 6979 のとおり鍵と digest から HMAC で導出するので、乱数源は要らず、同じ鍵と
+digest からは常に同じ署名ができます(RFC の test vector と一致します)。鍵の長さが
+違う、0、位数以上なら `InvalidKey` です。DER の
+`SEQUENCE { INTEGER r, INTEGER s }` と r、s の連結との変換は
+`std::crypto::x509`(`docs/std/x509.md`)の仕事です。
 
 `rsa_pkcs1_verify` と `rsa_pss_verify` は RSA 署名を検証します(RFC 8017 §8.2.2 と
 §8.1.2)。鍵は `modulus` と `exponent` を big-endian の byte で持ち、証明書の
@@ -125,12 +138,24 @@ hash を使い、salt は digest と同じ長さで、TLS 1.3 と証明書はそ
 signature の長さが modulus と違うか値が modulus 以上、のどれも false です。digest の
 長さが `hash` と合わないのは呼び手の誤用で trap します。
 
+`rsa_pkcs1_sign` / `rsa_pss_sign` は `RsaPrivateKey` で署名します。鍵は RSAPrivateKey
+(RFC 8017 §A.1.2)の部品を big-endian の byte で持つ struct で、modulus、
+public exponent、2 つの素数、それぞれの素数での指数、coefficient(q⁻¹ mod p)です。
+計算は CRT(2 つの素数で別々にべき乗して合成)で、結果を public exponent で
+検証してから返すので、部品が食い違う鍵や計算の fault で素数が漏れる署名は
+`InvalidKey` になります。PSS の salt は呼び手が `random_bytes` で引いた digest と
+同じ長さの bytes です(TLS 1.3 の形)。`signature` は modulus と同じ長さの view で、
+違う長さは trap します。
+
 算術は 32 bit limb を `u64` で持つ Montgomery 乗算で、limb 数は modulus から決まり
 (P-256 は 8 本、P-384 は 12 本、RSA は 4096 bit まで 128 本)、体 p、位数 n、RSA の
 modulus に同じ code を使います。point は Jacobian 座標で、2 つの曲線とも a = -3 なので
-同じ式が使え、u1 G + u2 Q は Straus–Shamir の同時 double-and-add です。扱うのは
-公開鍵と署名だけで秘密は無いので、定数時間にはせず、値で分岐する速い実装です。1 回の検証は `--opt` で P-256 が
-1 ms 弱、RSA-2048 が約 0.3 ms です。
+同じ式が使え、検証の u1 G + u2 Q は Straus–Shamir の同時 double-and-add です。検証が
+扱うのは公開鍵と署名だけで秘密は無いので、値で分岐する速い実装です。署名は秘密鍵と
+nonce を扱うので、nonce による点の乗算は固定長の Montgomery ladder、秘密指数の
+べき乗は毎 bit 乗算して mask で選ぶ形、剰余の補正も mask で、処理時間と memory
+access が秘密に依存しません。1 回の検証は `--opt` で P-256 が 1 ms 弱、RSA-2048 が
+約 0.3 ms、署名は P-256 が約 1 ms、RSA-2048 が約 5 ms です。
 
 ## AEAD
 
@@ -185,4 +210,5 @@ native では kernel の entropy(`getentropy`)、WASI では `random_get`、brow
 test は公開されている test vector を使います。FIPS 180-4 の例、RFC 4231、RFC 5869、
 RFC 8439、RFC 7748、RFC 6979 の case が `tests/behavior/src/crypto/` にあり、`examples/`
 の crypto example が出力する hex は `cmd/kizu` の test が Go の実装の出力と比べます。
-ECDSA と RSA は Go が生成した鍵で署名したものを Kizu が検証する test もあります。
+ECDSA と RSA は Go が生成した鍵で署名したものを Kizu が検証する test と、Kizu が
+署名したものを Go が検証する test があります。

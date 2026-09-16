@@ -1,45 +1,85 @@
-// HMAC over SHA-256, as RFC 2104 and FIPS 198-1 define it: the key is
-// brought to one block, and the tag is the hash of the key XOR opad
-// followed by the hash of the key XOR ipad followed by the message. A key
-// longer than a block is hashed first and the digest is the key; a shorter
-// one is padded with zeros. The two hashes are `sha256_parts`, which takes
-// the padded block ahead of its message, so no buffer holding key and
-// message together is ever made.
+// HMAC over SHA-256, SHA-384, and SHA-512, as RFC 2104 and FIPS 198-1
+// define it: the key is brought to one block, and the tag is the hash of
+// the key XOR opad followed by the hash of the key XOR ipad followed by
+// the message. A key longer than a block is hashed first and the digest
+// is the key; a shorter one is padded with zeros. The two hashes are
+// `hash_parts`, which takes the padded block ahead of its message, so no
+// buffer holding key and message together is ever made.
 
 // hmac_sha256 writes the 32-byte tag of `message` under `key` to the front
 // of `tag`. The tag is a view of the caller's buffer, as `sha256`'s digest
 // is. A key of any length is accepted, including none. Whether a received
 // tag matches is `equal_constant_time`'s question, not `equal_bytes`'.
 pub fn hmac_sha256(key: []u8, message: []u8, tag: &var []u8) -> void {
-    std::crypto::hmac_parts(key, message, "", "", tag);
+    std::crypto::hmac_parts(Hash::Sha256, key, message, "", "", tag);
     return;
 }
 
-// hmac_parts is the tag of `a`, `b`, and `c` laid end to end. HKDF's
-// message is a previous output, an info, and a counter byte, and passing
-// them as parts is how it is written without a buffer holding all three.
-fn hmac_parts(key: []u8, a: []u8, b: []u8, c: []u8, tag: &var []u8) -> void {
-    var key_buffer = [64]u8{};
-    var pad_buffer = [64]u8{};
-    var inner_buffer = [32]u8{};
+// hmac_sha384 is `hmac_sha256` over SHA-384: the tag is 48 bytes and the
+// block the key is brought to is 128.
+pub fn hmac_sha384(key: []u8, message: []u8, tag: &var []u8) -> void {
+    std::crypto::hmac_parts(Hash::Sha384, key, message, "", "", tag);
+    return;
+}
+
+// hmac_sha512 is `hmac_sha256` over SHA-512: the tag is 64 bytes.
+pub fn hmac_sha512(key: []u8, message: []u8, tag: &var []u8) -> void {
+    std::crypto::hmac_parts(Hash::Sha512, key, message, "", "", tag);
+    return;
+}
+
+// hmac_parts is the tag under `hash` of `a`, `b`, and `c` laid end to
+// end. HKDF's message is a previous output, an info, and a counter byte,
+// and RFC 6979's is a state, a separator, and a key; passing them as
+// parts is how they are written without a buffer holding all three.
+fn hmac_parts(hash: Hash, key: []u8, a: []u8, b: []u8, c: []u8, tag: &var []u8) -> void {
+    let block_length = block_length_of(hash);
+    let tag_length = digest_length(hash);
+    var key_buffer = [128]u8{};
+    var pad_buffer = [128]u8{};
+    var inner_buffer = [64]u8{};
     let block_key = key_buffer.as_mut_bytes();
-    if std::mem::len(key) > 64 {
-        std::crypto::sha256(key, block_key);
+    if std::mem::len(key) > block_length {
+        std::crypto::digest_of(hash, key, block_key);
     } else {
         for 0..std::mem::len(key) |index| {
             block_key[index] = key[index];
         }
     }
     let pad = pad_buffer.as_mut_bytes();
-    for 0..64 |index| {
+    for 0..block_length |index| {
         pad[index] = block_key[index] ^ 54;
     }
     let inner = inner_buffer.as_mut_bytes();
-    std::crypto::sha256_parts(pad, a, b, c, inner);
-    for 0..64 |index| {
+    let ipad = pad[0..block_length];
+    std::crypto::hash_parts(hash, ipad, a, b, c, inner);
+    for 0..block_length |index| {
         pad[index] = block_key[index] ^ 92;
     }
-    let inner_digest = inner_buffer.as_bytes();
-    std::crypto::sha256_parts(pad, inner_digest, "", "", tag);
+    let inner_all = inner_buffer.as_bytes();
+    let inner_digest = inner_all[0..tag_length];
+    let opad = pad[0..block_length];
+    std::crypto::hash_parts(hash, opad, inner_digest, "", "", tag);
+    return;
+}
+
+// block_length_of is the block size of a hash, which is what HMAC pads
+// the key to.
+fn block_length_of(hash: Hash) -> i64 {
+    return match hash {
+        Sha256 => 64,
+        Sha384 => 128,
+        Sha512 => 128,
+    };
+}
+
+// hash_parts hashes `prefix`, `a`, `b`, and `c` laid end to end under
+// `hash`, with the prefix empty or exactly one block.
+fn hash_parts(hash: Hash, prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> void {
+    match hash {
+        Sha256 => sha256_parts(prefix, a, b, c, digest),
+        Sha384 => sha512_parts(prefix, a, b, c, initial_state_384(), 6, digest),
+        Sha512 => sha512_parts(prefix, a, b, c, initial_state_512(), 8, digest),
+    }
     return;
 }

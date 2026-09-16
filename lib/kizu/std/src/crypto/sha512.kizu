@@ -3,23 +3,27 @@
 // words of state by 80 rounds. SHA-384 is SHA-512 from other initial
 // words with the digest cut to 48 bytes. The words are `u64`, whose `+`
 // wraps at 64 bits (SPEC §6.9.2). Like `sha256`, the whole message is
-// hashed in one call.
+// hashed in one call, and `sha512_parts` hashes parts laid end to end
+// for HMAC.
 
 // sha512 writes the 64-byte digest of `bytes` to the front of `digest`.
 pub fn sha512(bytes: []u8, digest: &var []u8) -> void {
-    sha512_family(bytes, initial_state_512(), 8, digest);
+    sha512_parts("", bytes, "", "", initial_state_512(), 8, digest);
     return;
 }
 
 // sha384 writes the 48-byte digest of `bytes` to the front of `digest`.
 pub fn sha384(bytes: []u8, digest: &var []u8) -> void {
-    sha512_family(bytes, initial_state_384(), 6, digest);
+    sha512_parts("", bytes, "", "", initial_state_384(), 6, digest);
     return;
 }
 
-// sha512_family hashes `bytes` from the eight initial words `initial`
-// spells and writes `words` words of the state, big-endian, to `digest`.
-fn sha512_family(bytes: []u8, initial: []u8, words: i64, digest: &var []u8) -> void {
+// sha512_parts hashes `prefix`, `a`, `b`, and `c` laid end to end, as
+// `sha256_parts` does, from the eight initial words `initial` spells,
+// and writes `words` words of the state, big-endian, to `digest`. The
+// prefix is empty or exactly one 128-byte block: the padded key HMAC
+// puts first.
+fn sha512_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, initial: []u8, words: i64, digest: &var []u8) -> void {
     var state_buffer = [8]u64{};
     var schedule_buffer = [80]u64{};
     var constants_buffer = [80]u64{};
@@ -30,22 +34,17 @@ fn sha512_family(bytes: []u8, initial: []u8, words: i64, digest: &var []u8) -> v
     let block = block_buffer.as_mut_bytes();
     fill_hex_words64(constants, round_constants_512());
     fill_hex_words64(state, initial);
-    let end = std::mem::len(bytes);
-    var at = 0;
-    while at + 128 <= end {
-        let chunk = bytes[at..at + 128];
-        compress_block_512(state, chunk, schedule, constants);
-        at = at + 128;
+    if std::mem::len(prefix) == 128 {
+        compress_block_512(state, prefix, schedule, constants);
     }
     var filled = 0;
-    while at < end {
-        block[filled] = bytes[at];
-        filled = filled + 1;
-        at = at + 1;
-    }
+    filled = absorb_512(state, block, filled, a, schedule, constants);
+    filled = absorb_512(state, block, filled, b, schedule, constants);
+    filled = absorb_512(state, block, filled, c, schedule, constants);
     // The last block carries what is held, a 1 bit, zeros, and the length
     // in bits as 128 bits big-endian; when the length does not fit after
     // the 1 bit, there are two.
+    let total_bits = (std::mem::len(prefix) + std::mem::len(a) + std::mem::len(b) + std::mem::len(c)) * 8;
     block[filled] = cast<u8>(128);
     var index = filled + 1;
     if filled + 17 > 128 {
@@ -61,13 +60,52 @@ fn sha512_family(bytes: []u8, initial: []u8, words: i64, digest: &var []u8) -> v
         block[index] = 0;
         index = index + 1;
     }
-    put_length_512(block, 112, end * 8);
+    put_length_512(block, 112, total_bits);
     let last = block[0..128];
     compress_block_512(state, last, schedule, constants);
     for 0..words |word| {
         set_word64_be(digest, word, state[word]);
     }
     return;
+}
+
+// absorb_512 feeds one part to the hash, as `absorb` does for SHA-256
+// with 128-byte blocks, and returns how much of the block is filled.
+fn absorb_512(
+    state: &var []u64,
+    block: &var []u8,
+    filled: i64,
+    bytes: []u8,
+    schedule: &var []u64,
+    constants: []u64
+) -> i64 {
+    var held = filled;
+    var at = 0;
+    let end = std::mem::len(bytes);
+    if held > 0 {
+        while held < 128 and at < end {
+            block[held] = bytes[at];
+            held = held + 1;
+            at = at + 1;
+        }
+        if held < 128 {
+            return held;
+        }
+        let full = block[0..128];
+        compress_block_512(state, full, schedule, constants);
+        held = 0;
+    }
+    while at + 128 <= end {
+        let chunk = bytes[at..at + 128];
+        compress_block_512(state, chunk, schedule, constants);
+        at = at + 128;
+    }
+    while at < end {
+        block[held] = bytes[at];
+        held = held + 1;
+        at = at + 1;
+    }
+    return held;
 }
 
 // compress_block_512 folds one 128-byte block into the eight state words

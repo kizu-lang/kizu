@@ -8,9 +8,12 @@
 // inputs and writes that many of its output, and one that takes none
 // reads as many as its first input holds.
 //
-// Everything here works on public data -- a certificate's key, a
-// signature, a digest -- so it branches on values and compares them
-// early; nothing here handles a private key.
+// Verifying works on public data -- a certificate's key, a signature,
+// a digest -- and branches on values freely. Signing works on a private
+// key and a nonce, and the functions it uses (`mont_mul` through
+// `reduce_once`, `mont_pow_secret`, `select_limbs`, `swap_limbs`) take
+// the same time and touch the same addresses whatever the values are:
+// a choice is made with a mask, never with a branch.
 
 // max_limbs is the widest modulus, 4096 bits.
 fn max_limbs() -> i64 {
@@ -245,14 +248,69 @@ fn add_in_place(o: &var []u64, b: []u64) -> void {
 
 // reduce_once brings a sum that is below 2m, with `carry` its bit above
 // the top limb, below m: m is taken off, and put back when that
-// borrowed with nothing to borrow from.
+// borrowed with nothing to borrow from. The putting back is masked, not
+// branched, so the time does not say whether the sum was below m.
 fn reduce_once(o: &var []u64, carry: u64, m: []u64) -> void {
     let modulus = modulus_of(m);
     let borrow = subtract_in_place(o, modulus);
-    if carry == 0 and borrow == 1 {
-        add_in_place(o, modulus);
+    let mask = mask_of((1 - carry) & borrow);
+    add_masked_in_place(o, modulus, mask);
+    return;
+}
+
+// mask_of is all ones for a flag of 1 and all zeros for 0.
+fn mask_of(flag: u64) -> u64 {
+    return 0 - flag;
+}
+
+// nonzero_flag is 1 when `value` is not zero, without a branch.
+fn nonzero_flag(value: u64) -> u64 {
+    return (value | (0 - value)) >> 63;
+}
+
+// zero_mask is all ones when every limb of `a` is zero.
+fn zero_mask(a: []u64) -> u64 {
+    var all = cast<u64>(0);
+    for 0..std::mem::count<u64>(a) |index| {
+        all = all | a[index];
+    }
+    return mask_of(1 - nonzero_flag(all));
+}
+
+// add_masked_in_place writes o + (b & mask) over o, dropping the carry
+// out of the top: o + b when the mask is all ones, o when it is zero.
+fn add_masked_in_place(o: &var []u64, b: []u64, mask: u64) -> void {
+    var carry = cast<u64>(0);
+    for 0..std::mem::count<u64>(b) |index| {
+        let sum = o[index] + (b[index] & mask) + carry;
+        o[index] = sum & 0xFFFFFFFF;
+        carry = sum >> 32;
     }
     return;
+}
+
+// select_limbs writes `count` limbs of a when the mask is all ones and
+// of b when it is zero.
+fn select_limbs(o: &var []u64, a: []u64, b: []u64, mask: u64, count: i64) -> void {
+    for 0..count |index| {
+        o[index] = (a[index] & mask) | (b[index] & (mask ^ all_ones()));
+    }
+    return;
+}
+
+// swap_limbs exchanges `count` limbs of a and b when the mask is all
+// ones and leaves them when it is zero.
+fn swap_limbs(a: &var []u64, b: &var []u64, mask: u64, count: i64) -> void {
+    for 0..count |index| {
+        let t = (a[index] ^ b[index]) & mask;
+        a[index] = a[index] ^ t;
+        b[index] = b[index] ^ t;
+    }
+    return;
+}
+
+fn all_ones() -> u64 {
+    return 0 - cast<u64>(1);
 }
 
 // mod_add writes a + b mod m for a and b below m.
@@ -267,8 +325,46 @@ fn mod_add(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
 fn mod_sub(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
     let count = count_of(m);
     let borrow = subtract_limbs(o, a[0..count], b[0..count]);
-    if borrow == 1 {
-        add_in_place(o, modulus_of(m));
+    add_masked_in_place(o, modulus_of(m), mask_of(borrow));
+    return;
+}
+
+// reduce_wide writes a mod m for `a` of 2 count limbs, through Montgomery
+// form: with a = hi R + lo, the form of a is the product of hi and R^2
+// taken twice, plus the form of lo.
+fn reduce_wide(o: &var []u64, a: []u64, m: []u64) -> void {
+    let count = count_of(m);
+    let r_squared = r_squared_of(m);
+    let lo = a[0..count];
+    let hi = a[count..count * 2];
+    var t_buffer = [128]u64{};
+    var u_buffer = [128]u64{};
+    var v_buffer = [128]u64{};
+    let t = t_buffer.as_mut_slice();
+    let u = u_buffer.as_mut_slice();
+    let v = v_buffer.as_mut_slice();
+    mont_mul(t, hi, r_squared, m);
+    mont_mul(u, t, r_squared, m);
+    mont_mul(v, lo, r_squared, m);
+    mod_add(t, u, v, m);
+    from_mont(o, t, m);
+    return;
+}
+
+// mul_limbs_wide writes the 2 count limbs of a * b for a and b of
+// `count` limbs each.
+fn mul_limbs_wide(o: &var []u64, a: []u64, b: []u64, count: i64) -> void {
+    for 0..count * 2 |index| {
+        o[index] = 0;
+    }
+    for 0..count |i| {
+        var carry = cast<u64>(0);
+        for 0..count |j| {
+            let sum = o[i + j] + a[i] * b[j] + carry;
+            o[i + j] = sum & 0xFFFFFFFF;
+            carry = sum >> 32;
+        }
+        o[i + count] = carry;
     }
     return;
 }
@@ -329,7 +425,9 @@ fn from_mont(o: &var []u64, a: []u64, m: []u64) -> void {
 // mont_pow writes the Montgomery form of a^e, for `a` in Montgomery
 // form and `e` as big-endian bytes, squaring and multiplying from the
 // top bit down. Squaring and multiplying alternate between two buffers,
-// since no product writes where it reads.
+// since no product writes where it reads. The bits of e choose with a
+// branch, so e must be public: a verifying exponent, or a modulus less
+// two for an inverse.
 fn mont_pow(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
     let count = count_of(m);
     var acc_buffer = [128]u64{};
@@ -349,6 +447,35 @@ fn mont_pow(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
             } else {
                 copy_limbs(acc, 0, next, count);
             }
+            bit = bit - 1;
+        }
+    }
+    copy_limbs(o, 0, acc, count);
+    return;
+}
+
+// mont_pow_secret is `mont_pow` for an exponent that is a secret: every
+// bit squares and multiplies, and the mask of the bit picks which of the
+// two results is kept.
+fn mont_pow_secret(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
+    let count = count_of(m);
+    var acc_buffer = [128]u64{};
+    var next_buffer = [128]u64{};
+    var product_buffer = [128]u64{};
+    let acc = acc_buffer.as_mut_slice();
+    let next = next_buffer.as_mut_slice();
+    let product = product_buffer.as_mut_slice();
+    var one_buffer = [128]u64{};
+    let one = one_buffer.as_mut_slice();
+    one[0] = 1;
+    to_mont(acc, one, m);
+    for 0..std::mem::len(e) |index| {
+        var bit = 7;
+        while bit >= 0 {
+            mont_mul(next, acc, acc, m);
+            mont_mul(product, next, a, m);
+            let mask = mask_of(cast<u64>((e[index] >> cast<u8>(bit)) & 1));
+            select_limbs(acc, product, next, mask, count);
             bit = bit - 1;
         }
     }

@@ -14,6 +14,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -452,6 +453,245 @@ fn check(
     } else {
         print("invalid");
     }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+`
+
+// TestGoVerifiesWhatKizuSigns has Kizu sign digests with keys Go
+// generated -- P-256, P-384, and RSA 2048 with PKCS #1 v1.5 and PSS
+// under each hash -- and verifies every signature with Go's crypto: a
+// signature that Go accepts is one a TLS peer would accept.
+func TestGoVerifiesWhatKizuSigns(t *testing.T) {
+	var program strings.Builder
+	program.WriteString(signProgramHead)
+	checks := signEcdsaCases(t, &program)
+	checks = append(checks, signRsaCases(t, &program)...)
+	program.WriteString("    return;\n}\n")
+	path := filepath.Join(t.TempDir(), "sign_oracle.kizu")
+	if err := os.WriteFile(path, []byte(program.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := kizuCommand("run", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run failed: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != len(checks) {
+		t.Fatalf("Kizu printed %d signatures, want %d:\n%s", len(lines), len(checks), out)
+	}
+	for i, line := range lines {
+		signature, err := hex.DecodeString(line)
+		if err != nil {
+			t.Fatalf("signature %d is not hex: %v", i, err)
+		}
+		if err := checks[i](signature); err != nil {
+			t.Errorf("signature %d: %v", i, err)
+		}
+	}
+}
+
+// signatureCheck verifies one signature Kizu printed.
+type signatureCheck func(signature []byte) error
+
+// signEcdsaCases appends one `sign_ecdsa` call per curve to the program
+// and returns the checks for the signatures they print.
+func signEcdsaCases(t *testing.T, program *strings.Builder) []signatureCheck {
+	var checks []signatureCheck
+	for i, c := range []struct {
+		curve elliptic.Curve
+		hash  crypto.Hash
+		width int
+	}{{elliptic.P256(), crypto.SHA256, 32}, {elliptic.P384(), crypto.SHA384, 48}} {
+		private, err := ecdsa.GenerateKey(c.curve, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := digestOf(c.hash, fmt.Sprintf("message %d", i))
+		scalar := private.D.FillBytes(make([]byte, c.width))
+		fmt.Fprintf(program, "    try sign_ecdsa(allocator, %q, %q);\n",
+			hex.EncodeToString(scalar), hex.EncodeToString(digest))
+		public := &private.PublicKey
+		checks = append(checks, func(signature []byte) error {
+			if len(signature) != 2*c.width {
+				return fmt.Errorf("signature is %d bytes, want %d", len(signature), 2*c.width)
+			}
+			r := new(big.Int).SetBytes(signature[:c.width])
+			s := new(big.Int).SetBytes(signature[c.width:])
+			if !ecdsa.Verify(public, digest, r, s) {
+				return fmt.Errorf("Go rejects the ECDSA signature")
+			}
+			return nil
+		})
+	}
+	return checks
+}
+
+// signRsaCases appends one `sign_rsa` call per hash and padding to the
+// program and returns the checks for the signatures they print.
+func signRsaCases(t *testing.T, program *strings.Builder) []signatureCheck {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.Precompute()
+	parts := []string{
+		hex.EncodeToString(private.N.Bytes()),
+		hex.EncodeToString(private.Primes[0].Bytes()),
+		hex.EncodeToString(private.Primes[1].Bytes()),
+		hex.EncodeToString(private.Precomputed.Dp.Bytes()),
+		hex.EncodeToString(private.Precomputed.Dq.Bytes()),
+		hex.EncodeToString(private.Precomputed.Qinv.Bytes()),
+	}
+	var checks []signatureCheck
+	for _, h := range []struct {
+		name string
+		hash crypto.Hash
+	}{{"Sha256", crypto.SHA256}, {"Sha384", crypto.SHA384}, {"Sha512", crypto.SHA512}} {
+		digest := digestOf(h.hash, "message "+h.name)
+		for _, pss := range []bool{false, true} {
+			fmt.Fprintf(program,
+				"    try sign_rsa(allocator, crypto::Hash::%s, %t, %q, %q, %q, %q, %q, %q, %q);\n",
+				h.name, pss, parts[0], parts[1], parts[2], parts[3], parts[4], parts[5],
+				hex.EncodeToString(digest))
+			hash, usePSS := h.hash, pss
+			checks = append(checks, func(signature []byte) error {
+				if usePSS {
+					return rsa.VerifyPSS(&private.PublicKey, hash, digest, signature,
+						&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
+				}
+				return rsa.VerifyPKCS1v15(&private.PublicKey, hash, digest, signature)
+			})
+		}
+	}
+	return checks
+}
+
+// signProgramHead is the program TestGoVerifiesWhatKizuSigns completes
+// with one `sign_ecdsa` or `sign_rsa` per signature; each prints the
+// signature as hex. The RSA salt is the digest of the digest, since the
+// test only needs some salt as long as the hash.
+const signProgramHead = `import std::crypto;
+import std::mem;
+import std::string;
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+fn print_hex(allocator: Allocator, bytes: []u8) -> mem::Error!void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        try out.append_byte(allocator, digits[cast<i64>(bytes[index] >> 4)]);
+        try out.append_byte(allocator, digits[cast<i64>(bytes[index] & 15)]);
+    }
+    let text = out.as_bytes();
+    print(text);
+    return;
+}
+
+fn sign_ecdsa(allocator: Allocator, key_hex: []u8, digest_hex: []u8) -> crypto::Failure!void {
+    let key = try bytes_of_hex(allocator, key_hex);
+    defer key.deinit(allocator);
+    let digest = try bytes_of_hex(allocator, digest_hex);
+    defer digest.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let digest_bytes = digest.as_bytes();
+    if mem::len(key_bytes) == 48 {
+        var signature = [96]u8{};
+        let out = signature.as_mut_bytes();
+        try crypto::ecdsa_p384_sign(key_bytes, digest_bytes, out);
+        let made = signature.as_bytes();
+        try print_hex(allocator, made);
+        return;
+    }
+    var signature = [64]u8{};
+    let out = signature.as_mut_bytes();
+    try crypto::ecdsa_p256_sign(key_bytes, digest_bytes, out);
+    let made = signature.as_bytes();
+    try print_hex(allocator, made);
+    return;
+}
+
+fn sign_rsa(
+    allocator: Allocator,
+    hash: crypto::Hash,
+    pss: bool,
+    n_hex: []u8,
+    p_hex: []u8,
+    q_hex: []u8,
+    dp_hex: []u8,
+    dq_hex: []u8,
+    qinv_hex: []u8,
+    digest_hex: []u8
+) -> crypto::Failure!void {
+    let n = try bytes_of_hex(allocator, n_hex);
+    defer n.deinit(allocator);
+    let e = try bytes_of_hex(allocator, "010001");
+    defer e.deinit(allocator);
+    let p = try bytes_of_hex(allocator, p_hex);
+    defer p.deinit(allocator);
+    let q = try bytes_of_hex(allocator, q_hex);
+    defer q.deinit(allocator);
+    let dp = try bytes_of_hex(allocator, dp_hex);
+    defer dp.deinit(allocator);
+    let dq = try bytes_of_hex(allocator, dq_hex);
+    defer dq.deinit(allocator);
+    let qinv = try bytes_of_hex(allocator, qinv_hex);
+    defer qinv.deinit(allocator);
+    let digest = try bytes_of_hex(allocator, digest_hex);
+    defer digest.deinit(allocator);
+    let n_bytes = n.as_bytes();
+    let e_bytes = e.as_bytes();
+    let p_bytes = p.as_bytes();
+    let q_bytes = q.as_bytes();
+    let dp_bytes = dp.as_bytes();
+    let dq_bytes = dq.as_bytes();
+    let qinv_bytes = qinv.as_bytes();
+    let key = crypto::RsaPrivateKey {
+        modulus: n_bytes,
+        public_exponent: e_bytes,
+        prime1: p_bytes,
+        prime2: q_bytes,
+        exponent1: dp_bytes,
+        exponent2: dq_bytes,
+        coefficient: qinv_bytes,
+    };
+    let digest_bytes = digest.as_bytes();
+    var salt = [64]u8{};
+    let salt_view = salt.as_mut_bytes();
+    crypto::digest_of(hash, digest_bytes, salt_view);
+    let salt_bytes = salt_view[0..crypto::digest_length(hash)];
+    var signature = [256]u8{};
+    let out = signature.as_mut_bytes();
+    if pss {
+        try crypto::rsa_pss_sign(hash, &key, digest_bytes, salt_bytes, out);
+    } else {
+        try crypto::rsa_pkcs1_sign(hash, &key, digest_bytes, out);
+    }
+    let made = signature.as_bytes();
+    try print_hex(allocator, made);
     return;
 }
 

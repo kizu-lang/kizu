@@ -1192,3 +1192,320 @@ fn rsa_4096_modulus() -> []u8 {
         \\0bcb29031e34631fea31df411789fadbc66d05bd5292c39c029c82ff33d24f7f
     ;
 }
+
+fn ecdsa_signs(allocator: Allocator, curve_bytes: i64, key_hex: []u8, message: []u8, want_hex: []u8) -> crypto::Failure!bool {
+    let key = try bytes_of_hex_lines(allocator, key_hex);
+    defer key.deinit(allocator);
+    let want = try bytes_of_hex_lines(allocator, want_hex);
+    defer want.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let want_bytes = want.as_bytes();
+    if curve_bytes == 32 {
+        let same = try p256_signs(key_bytes, message, want_bytes);
+        return same;
+    }
+    let same = try p384_signs(key_bytes, message, want_bytes);
+    return same;
+}
+
+fn p256_signs(key: []u8, message: []u8, want: []u8) -> crypto::Error!bool {
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256(message, view);
+    let hash = digest.as_bytes();
+    var signature = [64]u8{};
+    let out = signature.as_mut_bytes();
+    try crypto::ecdsa_p256_sign(key, hash, out);
+    let got = signature.as_bytes();
+    return mem::equal_bytes(got, want);
+}
+
+fn p384_signs(key: []u8, message: []u8, want: []u8) -> crypto::Error!bool {
+    var digest = [48]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha384(message, view);
+    let hash = digest.as_bytes();
+    var signature = [96]u8{};
+    let out = signature.as_mut_bytes();
+    try crypto::ecdsa_p384_sign(key, hash, out);
+    let got = signature.as_bytes();
+    return mem::equal_bytes(got, want);
+}
+
+test "signing with the RFC 6979 keys makes the signatures the RFC lists" {
+    let allocator = mem::page_allocator();
+    let p256_key = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721";
+    testing::expect(try ecdsa_signs(allocator, 32, p256_key, "sample",
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"));
+    testing::expect(try ecdsa_signs(allocator, 32, p256_key, "test",
+        "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083"));
+    let p384_key =
+        \\6b9d3dad2e1b8c1c05b19875b6659f4de23c3b667bf297ba9aa47740787137d8
+        \\96d5724e4c70a825f872c9ea60d2edf5
+    ;
+    testing::expect(try ecdsa_signs(allocator, 48, p384_key, "sample", rfc6979_p384_sample()));
+    testing::expect(try ecdsa_signs(allocator, 48, p384_key, "test", rfc6979_p384_test()));
+}
+
+fn ecdsa_sign_refused(allocator: Allocator, key_hex: []u8) -> mem::Error!bool {
+    let key = try bytes_of_hex(allocator, key_hex);
+    defer key.deinit(allocator);
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256("sample", view);
+    let hash = digest.as_bytes();
+    var signature = [64]u8{};
+    let out = signature.as_mut_bytes();
+    let key_bytes = key.as_bytes();
+    if crypto::ecdsa_p256_sign(key_bytes, hash, out) {
+        return false;
+    } else |err| {
+        return match err {
+            InvalidKey => true,
+            _ => false,
+        };
+    }
+}
+
+test "a private key of zero, of the group order, or of the wrong length is refused" {
+    let allocator = mem::page_allocator();
+    testing::expect(try ecdsa_sign_refused(allocator, "0000000000000000000000000000000000000000000000000000000000000000"));
+    testing::expect(try ecdsa_sign_refused(allocator, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"));
+    testing::expect(try ecdsa_sign_refused(allocator, "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f67"));
+    testing::expect(!try ecdsa_sign_refused(allocator, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550"));
+}
+
+test "a signature made here verifies here, and not over another digest" {
+    let allocator = mem::page_allocator();
+    let key = try bytes_of_hex(allocator, "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+    defer key.deinit(allocator);
+    let public = try bytes_of_hex(allocator, rfc6979_key());
+    defer public.deinit(allocator);
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256("another message", view);
+    var other = [32]u8{};
+    let other_view = other.as_mut_bytes();
+    crypto::sha256("another message!", other_view);
+    var signature = [64]u8{};
+    let out = signature.as_mut_bytes();
+    let key_bytes = key.as_bytes();
+    let hash = digest.as_bytes();
+    try crypto::ecdsa_p256_sign(key_bytes, hash, out);
+    let public_bytes = public.as_bytes();
+    let made = signature.as_bytes();
+    let other_hash = other.as_bytes();
+    testing::expect(crypto::ecdsa_p256_verify(public_bytes, hash, made));
+    testing::expect(!crypto::ecdsa_p256_verify(public_bytes, other_hash, made));
+}
+
+// sign_key_* are the parts of a 2048-bit key generated for these tests.
+fn sign_key_modulus() -> []u8 {
+    return
+        \\b34f516e785faa0ce779ca21f73ad86c3b307b6e8802619cf9efaecbbc27e702
+        \\d8a00c0e21ff61945dbfa2567a19445bfe6c597dbb8b81db666f37cc60714b89
+        \\c69e1e11fd5713aa7760861a4cbc8c3df154ab0f7a6c1a20c4b0b10e55aee507
+        \\c8a83471b761b263feadb36ff9bc129bc6e28492f8be9df41e6345396b7f50c9
+        \\80bd3f764e9a0ae4a6c6c1a17cca97a4cc2b09083020be150f3c23aaf1967808
+        \\99ddcc9df08ef14f97051a6f6fef5219da88cb5e3d8b3fff770467cbec00c59a
+        \\c1d365d3a63b1d9249304ac65841d37281a478dd04e73644e074f4aef8e7a282
+        \\d72d57f5fba371e8f83f926b3ff374c8b3a3b18a6b2986c691c9a0612af69dcd
+    ;
+}
+
+fn sign_key_prime1() -> []u8 {
+    return
+        \\d9dd12e13e757c5e989b0a8ae6bd1109058b8fa4d82e1da86448affc3b41772d
+        \\22c734fe06eed1887f8401631cddb179da407b753ea531e7065bc6d5bbd913f5
+        \\4df67a6018fdf1434f430700c1f141dc38685aa3e57b6b63d5bece3a2c3bdf34
+        \\906417c1d1d74004dae8882df8839295a4a125ecdd391ec7e5fb3c8b6c71f215
+    ;
+}
+
+fn sign_key_prime2() -> []u8 {
+    return
+        \\d2b291f986e55e4858ba542f5658d5ea680ee1fbb112312759196f1dc61a1d7e
+        \\a3089968daccb2745ecc453fe81adb4fdbddcb3db140f4d900caaa4be6dd912b
+        \\0f1853fd0fc09b5fb9184a7b4c721503ee8120c057f57db0ceba668fcb0ad416
+        \\e607b853a398bbfb6a90d4781a83534381da6762ed1c5031b7641ff72edb42d9
+    ;
+}
+
+fn sign_key_exponent1() -> []u8 {
+    return
+        \\be88ddce2835cfc35b6b9cd8c5db6c5e9b7ee6eda03314b5049f9d69d6d8f645
+        \\7f39015b78ecbc4bc859c66ccbfe070d2e975e61b79bf9fcb64ee5a25f5b065d
+        \\6f05b518fe42791208ebf1dff3bdef7f8dc5961fe8befbb8a062f3316526279b
+        \\6cfc5cdaa18ec2ea7c1909a04acba713409bbef35cb66bf91f658e19d18a05d1
+    ;
+}
+
+fn sign_key_exponent2() -> []u8 {
+    return
+        \\29a71bac94ba6b7529f54c073faeb83b6aeee645f7af7d0026611cd26a0367a9
+        \\4d59b9da3cc712d0669d43636ae3444ff94b538e92a820bf75a49b1dfe39f724
+        \\e80b0b2f9019a79db8ddd07ba795360a5cf03225543e37e6e83779671be0bc24
+        \\fabcb3f7f4f390d6172f2291cbcc027dea01df467351919902844cbd7509eba1
+    ;
+}
+
+fn sign_key_coefficient() -> []u8 {
+    return
+        \\5c5d994437ee158f67b409646911999d41a81a450c913b6351e05986d9e0c521
+        \\059a41e93c10275ea557d268a15ad570ca888ed2113c5babe971592122074471
+        \\87f07cf94f5fef62901cf90bd07b9a7f77ff2517106878c09f44e7ab027a1e0c
+        \\cd0fe7ea90d379ce8982a30c07c31e05f2ce2bf069ce9ad54caaaa34c1cbe864
+    ;
+}
+
+// sign_key_pkcs1_sha256_of_sample is the signature Go's crypto/rsa makes
+// over SHA-256 of "sample" with that key.
+fn sign_key_pkcs1_sha256_of_sample() -> []u8 {
+    return
+        \\3b8c81c88d973cce25bafec2693225f0b9c3167c4216c6e290f61ef923aa7302
+        \\91d2c28a9a48a342c52ac02f43b1444b5dbde628bdffffb25b23d5339550110d
+        \\e54b46a94bf25d5f9d765fecf9fba59df055a952e7f40879ba9be4041480e134
+        \\41630600512480d58880a673255031e477d6b676803262e3598bd512d9c185ea
+        \\cb22c3b6ac8a9c91949b5d9b5fef0754f26bf22891ad5829917bcbaee5de8c1b
+        \\900b07a29907d961858bf786e71716454a71f7de7a4f4c3b7324377cc3f8bbc4
+        \\a7553bdacfa5393c1bdac45e288d99f135294c7374e5718810fba85b3b57dec1
+        \\d5a24c18a8c2f3407c2992adb093cba57896e5250df3c204c6ea16606a0c330d
+    ;
+}
+
+// rsa_signs makes the signature under `hash` over `message` with the
+// test key, PSS with `salt` when it is given, and reports whether it
+// verifies under the public key and, for PKCS #1, equals `want_hex`.
+fn rsa_signs(
+    allocator: Allocator,
+    hash: crypto::Hash,
+    salt: []u8,
+    message: []u8,
+    want_hex: []u8
+) -> crypto::Failure!bool {
+    let n = try bytes_of_hex_lines(allocator, sign_key_modulus());
+    defer n.deinit(allocator);
+    let e = try bytes_of_hex(allocator, "010001");
+    defer e.deinit(allocator);
+    let p = try bytes_of_hex_lines(allocator, sign_key_prime1());
+    defer p.deinit(allocator);
+    let q = try bytes_of_hex_lines(allocator, sign_key_prime2());
+    defer q.deinit(allocator);
+    let dp = try bytes_of_hex_lines(allocator, sign_key_exponent1());
+    defer dp.deinit(allocator);
+    let dq = try bytes_of_hex_lines(allocator, sign_key_exponent2());
+    defer dq.deinit(allocator);
+    let qinv = try bytes_of_hex_lines(allocator, sign_key_coefficient());
+    defer qinv.deinit(allocator);
+    let want = try bytes_of_hex_lines(allocator, want_hex);
+    defer want.deinit(allocator);
+    let n_bytes = n.as_bytes();
+    let e_bytes = e.as_bytes();
+    let p_bytes = p.as_bytes();
+    let q_bytes = q.as_bytes();
+    let dp_bytes = dp.as_bytes();
+    let dq_bytes = dq.as_bytes();
+    let qinv_bytes = qinv.as_bytes();
+    let key = crypto::RsaPrivateKey {
+        modulus: n_bytes,
+        public_exponent: e_bytes,
+        prime1: p_bytes,
+        prime2: q_bytes,
+        exponent1: dp_bytes,
+        exponent2: dq_bytes,
+        coefficient: qinv_bytes,
+    };
+    var digest = [64]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::digest_of(hash, message, view);
+    let digest_view = view[0..crypto::digest_length(hash)];
+    var signature = [256]u8{};
+    let out = signature.as_mut_bytes();
+    let pss = mem::len(salt) > 0;
+    if pss {
+        try crypto::rsa_pss_sign(hash, &key, digest_view, salt, out);
+    } else {
+        try crypto::rsa_pkcs1_sign(hash, &key, digest_view, out);
+    }
+    let made = signature.as_bytes();
+    if pss {
+        return crypto::rsa_pss_verify(hash, n_bytes, e_bytes, digest_view, made);
+    }
+    if !crypto::rsa_pkcs1_verify(hash, n_bytes, e_bytes, digest_view, made) {
+        return false;
+    }
+    if mem::len(want_hex) == 0 {
+        return true;
+    }
+    let want_bytes = want.as_bytes();
+    return mem::equal_bytes(made, want_bytes);
+}
+
+test "an RSA PKCS #1 signature made here is the one Go makes, and PSS signatures verify" {
+    let allocator = mem::page_allocator();
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha256, "", "sample", sign_key_pkcs1_sha256_of_sample()));
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha512, "", "sample", ""));
+    var salt = [48]u8{};
+    let salt_view = salt.as_mut_bytes();
+    crypto::sha384("salt", salt_view);
+    let salt_256 = salt_view[0..32];
+    let salt_384 = salt_view[0..48];
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha256, salt_256, "sample", ""));
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha384, salt_384, "sample", ""));
+}
+
+fn rsa_sign_refused(allocator: Allocator, prime1_hex: []u8) -> mem::Error!bool {
+    let n = try bytes_of_hex_lines(allocator, sign_key_modulus());
+    defer n.deinit(allocator);
+    let e = try bytes_of_hex(allocator, "010001");
+    defer e.deinit(allocator);
+    let p = try bytes_of_hex_lines(allocator, prime1_hex);
+    defer p.deinit(allocator);
+    let q = try bytes_of_hex_lines(allocator, sign_key_prime2());
+    defer q.deinit(allocator);
+    let dp = try bytes_of_hex_lines(allocator, sign_key_exponent1());
+    defer dp.deinit(allocator);
+    let dq = try bytes_of_hex_lines(allocator, sign_key_exponent2());
+    defer dq.deinit(allocator);
+    let qinv = try bytes_of_hex_lines(allocator, sign_key_coefficient());
+    defer qinv.deinit(allocator);
+    let n_bytes = n.as_bytes();
+    let e_bytes = e.as_bytes();
+    let p_bytes = p.as_bytes();
+    let q_bytes = q.as_bytes();
+    let dp_bytes = dp.as_bytes();
+    let dq_bytes = dq.as_bytes();
+    let qinv_bytes = qinv.as_bytes();
+    let key = crypto::RsaPrivateKey {
+        modulus: n_bytes,
+        public_exponent: e_bytes,
+        prime1: p_bytes,
+        prime2: q_bytes,
+        exponent1: dp_bytes,
+        exponent2: dq_bytes,
+        coefficient: qinv_bytes,
+    };
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256("sample", view);
+    let hash = digest.as_bytes();
+    var signature = [256]u8{};
+    let out = signature.as_mut_bytes();
+    if crypto::rsa_pkcs1_sign(crypto::Hash::Sha256, &key, hash, out) {
+        return false;
+    } else |err| {
+        return match err {
+            InvalidKey => true,
+            _ => false,
+        };
+    }
+}
+
+test "an RSA key whose prime is wrong, even, or too wide is refused" {
+    let allocator = mem::page_allocator();
+    // The other prime in place of the first: the parts disagree.
+    testing::expect(try rsa_sign_refused(allocator, sign_key_prime2()));
+    testing::expect(try rsa_sign_refused(allocator, "d9dd12e13e757c5e989b0a8ae6bd1109058b8fa4000000000000000000000000"));
+    testing::expect(try rsa_sign_refused(allocator, sign_key_modulus()));
+    testing::expect(!try rsa_sign_refused(allocator, sign_key_prime1()));
+}
