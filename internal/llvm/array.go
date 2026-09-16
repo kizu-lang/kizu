@@ -50,6 +50,7 @@ func (e *emitter) writeArrayRuntimeDecls() {
 		arrayEmptyGlobal, arrayHeaderType)
 	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr, ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)\n")
+	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
 	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_pop(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_swap(ptr, i64, i64, i64)\n")
@@ -364,9 +365,41 @@ func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
 	okName := localName(instr.Result.Name) + ".ok"
+	// The run is copied into the reserved tail when it fits, the way one
+	// element is (writeArrayAppendPaths); only growing goes to the runtime.
+	// The bytes may be a view of this same array, but a view covers
+	// initialized bytes and the tail lies above them, so the copy never
+	// overlaps its source.
+	handle := e.arrayHandle(array.operand)
+	length := "%" + e.nextSyntheticValue("array.append_bytes.held")
+	capacity := "%" + e.nextSyntheticValue("array.append_bytes.cap")
+	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append_bytes.held.addr")
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", length, lengthAddr)
+	e.arrayLoadField(handle, arrayFieldCapacity, "array.append_bytes.cap", capacity)
+	needed := "%" + e.nextSyntheticValue("array.append_bytes.needed")
+	fmt.Fprintf(&e.out, "  %s = add i64 %s, %s\n", needed, length, lenName)
+	fits := "%" + e.nextSyntheticValue("array.append_bytes.fits")
+	fmt.Fprintf(&e.out, "  %s = icmp sle i64 %s, %s\n", fits, needed, capacity)
+	fastLabel := helperLabel(okName, "array.append_bytes.fast")
+	slowLabel := helperLabel(okName, "array.append_bytes.slow")
+	joinLabel := helperLabel(okName, "array.append_bytes.join")
+	e.markCurrentBlockExit(joinLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", fits, fastLabel, slowLabel)
+	fmt.Fprintf(&e.out, "%s:\n", fastLabel)
+	tailAddr := e.arrayElementAddr(handle, "u8", length)
+	fmt.Fprintf(&e.out, "  call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
+		tailAddr, ptrName, lenName)
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s\n", needed, lengthAddr)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", slowLabel)
+	slowOk := "%" + e.nextSyntheticValue("array.append_bytes.slow.ok")
 	fmt.Fprintf(&e.out,
 		"  %s = call i1 @kizu_array_append_bytes(ptr %s, ptr %s, ptr %s, i64 %s)\n",
-		okName, allocator.operand, array.operand, ptrName, lenName)
+		slowOk, allocator.operand, array.operand, ptrName, lenName)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
+	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ %s, %%%s ]\n",
+		okName, fastLabel, slowOk, slowLabel)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_append_bytes")
 }
 
