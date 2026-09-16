@@ -118,7 +118,7 @@ decoder は「どの入力にも `Error` か bytes を返す」ように書か�
 壊れた stream、乱数で 1 byte 変えた stream を流し、どれも trap せず error か
 bytes で返ることを見ています。
 
-## 今は話さないこと
+## まだ無いもの
 
 - **streaming**: bytes を少しずつ受け取りながら展開・圧縮すること。今は入力
   全体を手に持ってから始めます。

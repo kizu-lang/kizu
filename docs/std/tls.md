@@ -1,11 +1,11 @@
 # std::tls
 
 TLS 1.3(RFC 8446)の client です。`connect` が TCP 接続の上で handshake を終え、
-`Client` が application data を読み書きします。中身は 4 つ: handshake の状態機械
-(遷移表は `spec/Tls.lean` が仕様として持ち、性質を証明し、trace を吐き、
-`examples/tls_conformance.kizu` がそれを `std::tls` に流します)、key schedule、
-record layer、handshake message の codec です。証明書は `std::crypto::x509` が
-判断し、算術は全部 `std::crypto` で、C は link しません。
+`Client` が application data を読み書きします。構成は 4 つです。handshake の
+状態機械(遷移表は `spec/Tls.lean` が仕様として持ち、性質を証明し、trace を出力
+します。`examples/tls_conformance.kizu` がその trace を `std::tls` で再生します)、
+key schedule、record layer、handshake message の codec です。証明書の検証は
+`std::crypto::x509`、算術は全部 `std::crypto` で、C は link しません。
 
 ```text
 std::tls::connect(io: Io, allocator, address: []u8, host: []u8, roots: &Array<String>, now: i64) -> Failure!Client
@@ -66,9 +66,9 @@ try client.close(io, allocator);
 `rsa_pkcs1_*` も)、server_name)を
 送り、server の message を状態機械の順に受けます。ServerHello で共有秘密と
 handshake の鍵を作り、Certificate は `x509::verify_chain(chain, roots, host, now)` で
-判断し、CertificateVerify は transcript hash への署名を証明書の鍵で検証し、Finished
+検証し、CertificateVerify は transcript hash への署名を証明書の鍵で検証し、Finished
 を確かめてから自分の Finished を送り、application の鍵に切り替えます。どこかで
-破れたら RFC の名指す alert(`unexpected_message`、`illegal_parameter`、
+失敗したら RFC が定める alert(`unexpected_message`、`illegal_parameter`、
 `bad_certificate` / `unknown_ca` / `certificate_expired`、`decrypt_error`、
 `handshake_failure`)を送って閉じ、その理由を error で返します。
 
@@ -76,8 +76,8 @@ handshake の鍵を作り、Certificate は `x509::verify_chain(chain, roots, ho
 鍵を更新して(求められれば自分も送って)続けます。server の close_notify は 0 で、
 それ以外の alert は `Alert` です。`close` は close_notify を送って書き込み側を閉じます。
 
-random は `std::crypto::random_bytes` から、時刻は呼び手の `now` からで、ここには
-時計も乱数源もありません。
+乱数は `std::crypto::random_bytes` から取得し、時刻は呼び手の `now` を使います。
+`std::tls` 自身は現在時刻も乱数も取得しません。
 
 ## 状態機械
 
@@ -95,7 +95,7 @@ RFC 8446 §A.1 の順に受けます。表に無い message は `Refused` で、
 (`verify_needs_certificate`、`certificate_first`)、拒否した接続は閉じる
 (`refusal_closes`)、です。
 
-client は PSK も early data も出さず、自分の証明書も持ちません。server の
+client は PSK も early data も送らず、自分の証明書も持ちません。server の
 `CertificateRequest` は空の `Certificate` で答えます。
 
 ## key schedule
@@ -109,12 +109,12 @@ Early Secret、`handshake_secret` は鍵交換の共有秘密(`std::crypto::x255
 
 transcript は handshake message を並べた bytes をそのまま持ち、要るたびに
 `transcript_hash` で丸ごと hash します。数 KB を数回 hash するだけで、途中の
-block を struct に抱える hasher は要りません。
+block を struct に持つ hasher は要りません。
 
 ## record layer
 
-RFC 8446 §5 の暗号化された record です。`seal_record` は content の末尾に本当の
-type を付けて AEAD で封じ、5 byte の header(type は常に `application_data`、
+RFC 8446 §5 の暗号化された record です。`seal_record` は content の末尾に実際の
+content type を付けて AEAD で暗号化し、5 byte の header(type は常に `application_data`、
 version は 0x0303)を associated data にし、nonce は IV と sequence number の
 XOR です。`open_record` はその逆で、padding の 0 を剥がして type を返します。
 header が TLS 1.3 のものでない、tag が合わない、type が無い record は
@@ -124,7 +124,7 @@ RFC 8448 §3 の handshake の secret、key、record は `tests/behavior/src/tls
 全部確かめ、`cmd/kizu` の test は Go の `crypto/tls` の server と実際に handshake
 して echo し、名前の違う host と別の root では拒否されることを見ます。
 
-## 今は話さないこと
+## まだ無いもの
 
 - `TLS_AES_256_GCM_SHA384`(key schedule が SHA-256 固定)
 - `HelloRetryRequest`、PSK / session resumption、0-RTT、client 証明書、

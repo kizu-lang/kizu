@@ -204,8 +204,8 @@ server には chunked encoding が要ります。それが入るまで、bufferi
 
 `Date` は `set_date` が書きます。値は RFC 9110 §5.6.7 の IMF-fixdate
 (`Sun, 06 Nov 1994 08:49:37 GMT`、常に UTC)で、`std::http::append_date` が
-その綴りです。server は caller の代わりに時計を読みません —— どの時計を使うか、
-相手に時刻を教えるかどうかは caller のものです。今の時刻なら
+その綴りです。server は caller の代わりに現在時刻を取得しません。どの時刻源を
+使うか、相手に時刻を教えるかどうかは caller が決めます。今の時刻なら
 `date::from_unix(time::unix(process::unix_millis()))` です。読む側(`Date` /
 `Expires` / `Last-Modified` の解析)はまだありません。受け取り側には RFC が
 3 つの綴りを読むことを求めていて、それは書く側とは別の仕事です。
@@ -694,9 +694,9 @@ let now = process::monotonic_millis();
 // ... 自分の表を 1 周して、expired(now) なものを refuse_expired して閉じる ...
 ```
 
-`now` を引数に取るのは、**時計を読む回数を loop が決められる**ようにするためです。
-接続 1000 本の sweep で時計を 1000 回読む理由はありません。読む場所が source に
-見えるのも同じ理由です。
+`now` を引数に取るのは、**現在時刻を取得する回数を loop が決められる**ようにする
+ためです。接続 1000 本の sweep で現在時刻を 1000 回取得する理由はありません。
+取得する場所が source に見えるのも同じ理由です。
 
 `refuse_expired` は 408 を 1 回書いて待ちません。他の refusal と同じ理由です。
 
@@ -1018,9 +1018,9 @@ var response = try http::fetch_with(
 ### https
 
 URL が `https` なら `fetch_with` は TLS(`std::tls`、`docs/std/tls.md`)で繋ぎます。
-`roots` は server の証明書の chain が辿り着くべき root の DER の列で、`Array<String>`
-で渡します。証明書の host 名の照合は URL の host、有効期限の判定は
-`process::unix_millis()` の今です。`get` / `post` / `fetch` は roots を持たないので、
+`roots` は信頼する root 証明書の DER の列で、`Array<String>` で渡します。証明書の
+host 名の照合には URL の host、有効期限の判定には `process::unix_millis()` の現在
+時刻を使います。`get` / `post` / `fetch` は roots を持たないので、
 `https` の URL には `Error::NoTrustedRoots` を返します —— 検証できない接続を黙って
 張ることも、平文で送ることもしません。
 
@@ -1034,7 +1034,7 @@ var response = try http::fetch_with(
 
 `connect_secure(io, allocator, address, host, roots, limits)` は `Connection` を TLS
 の上に開き、あとは `connect` で開いたものと同じに使えます。`std::http::Failure` は
-`std::tls::Failure` を含むので、chain の検証が落ちた理由(`UnknownIssuer`、
+`std::tls::Failure` を含むので、chain の検証が失敗した理由(`UnknownIssuer`、
 `NameMismatch`、`Expired`)はそのまま呼び手に届きます。
 
 `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` は caller が入れて
@@ -1293,7 +1293,7 @@ client が圧縮した答えを求めるには、`fetch_with` / `send_with` の 
 `Accept-Encoding` を入れ、返った `response.body` を `decode_body` に通します。
 client も勝手には求めません —— 求めた答えを読む費用を払うのは呼び手です。
 
-## 今は話さないこと
+## まだ無いもの
 
 - **trailer を書くこと**: 読むだけです。request にも response にも chunked body の
   terminator の後ろに trailer は付けません
@@ -1331,7 +1331,7 @@ response 側 —— message が自分の framing と矛盾しており、回復�
 `std::http::Failure` はその和 —— `Error or std::net::Error or std::mem::Error or
 std::array::Error or std::tls::Failure` —— です。どれも変換されないので、`match` した
 caller はどの層が拒否したかを見ます(`Closed` は net と tls の両方にあるので、
-`std::net::Error::Closed` のように set を書いて分けます)。`decode_body` だけは `std::http::DecodeFailure` —— `Error or
+`std::net::Error::Closed` のように error set 名を付けて区別します)。`decode_body` だけは `std::http::DecodeFailure` —— `Error or
 std::compress::Error or std::mem::Error` —— を返します。socket は関わらず、代わりに
 stream が coding のとおりでないこと(`ChecksumMismatch` など)が起きるからです。
 

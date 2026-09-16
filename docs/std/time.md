@@ -51,11 +51,11 @@ if took.greater_than(time::seconds(5)) { ... }
 `Instant` を、`UnixTime.since` は `UnixTime` を取り、混ぜると数が狂うのではなく type
 error になります(`examples/negative/std_time_mixed_clocks.kizu`)。
 
-## 時計を読まない
+## 現在時刻を取得しない
 
-この module に `now()` はありません。瞬間は `std::process` の読み 1 つから作り、
-`time::instant(process::monotonic_millis())` と source に書きます。`Instant` を取る
-関数は時計に触れないので、test は好きな瞬間を渡せます。
+この module に `now()` はありません。瞬間は `std::process` で取得した値 1 つから
+作り、`time::instant(process::monotonic_millis())` と source に書きます。`Instant` を
+取る関数は現在時刻を取得しないので、test は好きな瞬間を渡せます。
 
 `Instant.as_millis` は作ったときの読みをそのまま返します。monotonic なミリ秒の
 deadline を取る setter(`std::net`)へ渡す形です。
