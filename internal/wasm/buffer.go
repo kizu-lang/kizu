@@ -44,10 +44,7 @@ func (e *emitter) writeBufferNew(instr *ir.Instr) error {
 		return err
 	}
 	cell, _ := primitiveLayout(elem)
-	if size > 0 {
-		fmt.Fprintf(&e.out, "            (memory.fill %s (i32.const 0) (i32.const %d))\n",
-			slot, size*cell.size)
-	}
+	e.writeMemoryZero(slot, size*cell.size)
 	e.values[instr.Result.Name] = valueInfo{expr: slot}
 	return nil
 }

@@ -204,7 +204,87 @@ func (e *emitter) writeRefLoad(instr *ir.Instr) error {
 		return fmt.Errorf("wasm error: borrow read of `%s` gives %s, got %s",
 			instr.Args[0].Type, want, instr.Result.Type)
 	}
+	if e.cleanupLoads[instr.Result.Name] {
+		e.pendingLoads[instr.Result.Name] = instr
+		return nil
+	}
 	return e.writeLoadValue(instr.Result, e.value(instr.Args[0]).expr, 0)
+}
+
+// cleanupOnlyLoads names the reads a function makes only for the cleanups of
+// the error.try that follows them. Lowering reads each owner a cleanup releases
+// right before the try, and the read is wanted only if the try fails; nothing
+// between the reads and the try writes memory, so the read is made inside the
+// failing arm and a try that succeeds copies nothing.
+func cleanupOnlyLoads(fn *ir.Function) map[string]bool {
+	uses := map[string]int{}
+	forEachRead(fn, func(_ *ir.Instr, _ int, value ir.Value) { uses[value.Name]++ })
+	loads := map[string]bool{}
+	for _, block := range fn.Blocks {
+		for index, instr := range block.Instrs {
+			if instr.Op != "error.try" {
+				continue
+			}
+			released := map[string]int{}
+			for _, cleanup := range instr.Cleanups {
+				for _, arg := range cleanup.Args {
+					released[arg.Name]++
+				}
+			}
+			for back := index - 1; back >= 0 && block.Instrs[back].Op == "ref.load"; back-- {
+				name := block.Instrs[back].Result.Name
+				if released[name] > 0 && released[name] == uses[name] {
+					loads[name] = true
+				}
+			}
+		}
+	}
+	return loads
+}
+
+// forEachRead calls visit with every value fn reads: each instruction's
+// arguments with their position, and its phi incomings, struct fields and
+// cleanup arguments with position -1; a terminator's value and condition
+// come with a nil instruction.
+func forEachRead(fn *ir.Function, visit func(instr *ir.Instr, index int, value ir.Value)) {
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			for index, arg := range instr.Args {
+				visit(instr, index, arg)
+			}
+			for _, incoming := range instr.Incoming {
+				visit(instr, -1, incoming.Value)
+			}
+			for _, field := range instr.Fields {
+				visit(instr, -1, field.Value)
+			}
+			for _, cleanup := range instr.Cleanups {
+				for _, arg := range cleanup.Args {
+					visit(instr, -1, arg)
+				}
+			}
+		}
+		visit(nil, -1, block.Terminator.Value)
+		visit(nil, -1, block.Terminator.Cond)
+	}
+}
+
+// writePendingLoads makes the reads cleanupOnlyLoads held back for the
+// cleanups of one failing error.try.
+func (e *emitter) writePendingLoads(cleanups []ir.Cleanup) error {
+	for _, cleanup := range cleanups {
+		for _, arg := range cleanup.Args {
+			instr, ok := e.pendingLoads[arg.Name]
+			if !ok {
+				continue
+			}
+			delete(e.pendingLoads, arg.Name)
+			if err := e.writeLoadValue(instr.Result, e.value(instr.Args[0]).expr, 0); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // writeUnionInstr dispatches tagged-union construction and projection.

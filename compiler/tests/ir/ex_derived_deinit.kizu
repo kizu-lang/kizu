@@ -138,8 +138,9 @@ fn main() -> !void {
 // opt:
 // fn build(%allocator: Allocator, %byte: u8) -> !std::string::String {
 // entry:
-//   %1: std::string::String = call.std::string::new %allocator: Allocator
-//   %2: &var std::string::String = local.slot %1: std::string::String
+//   %in1.1: std::array::Array<u8> = array.new %allocator: Allocator
+//   %in1.2: std::string::String = struct.new {bytes: %in1.1: std::array::Array<u8>}
+//   %2: &var std::string::String = local.slot %in1.2: std::string::String
 //   %3: std::mem::Error!void = call.std::string::String.append_byte %2: &var std::string::String, %allocator: Allocator, %byte: u8
 //   %4: std::string::String = ref.load %2: &var std::string::String
 //   error.try %3: std::mem::Error!void, cleanup call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
@@ -149,10 +150,10 @@ fn main() -> !void {
 // }
 // fn main() -> !void {
 // entry:
-//   %1: Allocator = call.std::mem::page_allocator
+//   %in1.1: Allocator = call.std::internal::builtin::mem_page_allocator
 //   %2: i64 = const 97
 //   %3: u8 = cast %2: i64, u8
-//   %4: !std::string::String = call.build %1: Allocator, %3: u8
+//   %4: !std::string::String = call.build %in1.1: Allocator, %3: u8
 //   %5: std::string::String = error.try %4: !std::string::String
 //   %6: ?std::string::String = opt.null
 //   %7: Visitor = struct.new {name: %5: std::string::String, nick: %6: ?std::string::String}
@@ -160,31 +161,38 @@ fn main() -> !void {
 //   %9: Visitor = ref.load %8: &var Visitor
 //   %10: i64 = const 98
 //   %11: u8 = cast %10: i64, u8
-//   %12: !std::string::String = call.build %1: Allocator, %11: u8
+//   %12: !std::string::String = call.build %in1.1: Allocator, %11: u8
 //   %13: Visitor = ref.load %8: &var Visitor
-//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.Visitor.deinit %13: Visitor, %1: Allocator
+//   %14: std::string::String = error.try %12: !std::string::String, cleanup call.Visitor.deinit %13: Visitor, %in1.1: Allocator
 //   %15: Slot = union.new %14: std::string::String, Kept
 //   %16: Party = struct.new {host: %9: Visitor, seat: %15: Slot}
 //   %17: &var Party = local.slot %16: Party
 //   %18: &var Visitor = field.addr.host %17: &var Party
 //   %19: &var std::string::String = field.addr.name %18: &var Visitor
-//   %20: i64 = call.std::string::String.len %19: &var std::string::String
-//   call.std::fmt::print.i64 %20: i64
+//   %in2.1: std::array::Array<u8> = field.ref.bytes %19: &var std::string::String
+//   %in2.2: i64 = call.std::array::Array.len.u8 %in2.1: std::array::Array<u8>
+//   %in3.1: i64 = cast %in2.2: i64, i64
+//   call.std::fmt::write_i64 %in3.1: i64
 //   %22: Party = ref.load %17: &var Party
-//   call.Party.deinit %22: Party, %1: Allocator
+//   %in4.1: Visitor = field.host %22: Party
+//   call.Visitor.deinit %in4.1: Visitor, %in1.1: Allocator
+//   %in4.3: Slot = field.seat %22: Party
+//   call.Slot.deinit %in4.3: Slot, %in1.1: Allocator
 //   %24: !void = error.ok
 //   return %24: !void
 // }
 // fn Visitor.deinit(%self: Visitor, %allocator: Allocator) -> void {
 // entry:
 //   %1: std::string::String = field.name %self: Visitor
-//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
+//   %in1.1: std::array::Array<u8> = field.bytes %1: std::string::String
+//   call.std::array::Array.deinit.u8 %in1.1: std::array::Array<u8>, %allocator: Allocator
 //   %3: ?std::string::String = field.nick %self: Visitor
 //   %4: std::string::String = opt.value %3: ?std::string::String
 //   %5: bool = opt.has %3: ?std::string::String
 //   branch %5: bool, if.then.1, if.else.2
 // if.then.1:
-//   call.std::string::String.deinit %4: std::string::String, %allocator: Allocator
+//   %in2.1: std::array::Array<u8> = field.bytes %4: std::string::String
+//   call.std::array::Array.deinit.u8 %in2.1: std::array::Array<u8>, %allocator: Allocator
 //   jump if.end.3
 // if.else.2:
 //   jump if.end.3
@@ -202,7 +210,8 @@ fn main() -> !void {
 //   branch %2: bool, match.arm.3, match.check.4
 // match.arm.3:
 //   %3: std::string::String = union.payload %self: Slot, Kept
-//   call.std::string::String.deinit %3: std::string::String, %allocator: Allocator
+//   %in1.1: std::array::Array<u8> = field.bytes %3: std::string::String
+//   call.std::array::Array.deinit.u8 %in1.1: std::array::Array<u8>, %allocator: Allocator
 //   jump match.end.1
 // match.check.4:
 //   %5: bool = binary.== %1: i64, 1: i64
@@ -215,8 +224,46 @@ fn main() -> !void {
 // fn Party.deinit(%self: Party, %allocator: Allocator) -> void {
 // entry:
 //   %1: Visitor = field.host %self: Party
-//   call.Visitor.deinit %1: Visitor, %allocator: Allocator
+//   jump in1.entry
+// in1.entry:
+//   %in1.1: std::string::String = field.name %1: Visitor
+//   %in1.in1.1: std::array::Array<u8> = field.bytes %in1.1: std::string::String
+//   call.std::array::Array.deinit.u8 %in1.in1.1: std::array::Array<u8>, %allocator: Allocator
+//   %in1.3: ?std::string::String = field.nick %1: Visitor
+//   %in1.4: std::string::String = opt.value %in1.3: ?std::string::String
+//   %in1.5: bool = opt.has %in1.3: ?std::string::String
+//   branch %in1.5: bool, in1.if.then.1, in1.if.else.2
+// in1.if.then.1:
+//   %in1.in2.1: std::array::Array<u8> = field.bytes %in1.4: std::string::String
+//   call.std::array::Array.deinit.u8 %in1.in2.1: std::array::Array<u8>, %allocator: Allocator
+//   jump in1.if.end.3
+// in1.if.else.2:
+//   jump in1.if.end.3
+// in1.if.end.3:
+//   jump in1.cont
+// in1.cont:
 //   %3: Slot = field.seat %self: Party
-//   call.Slot.deinit %3: Slot, %allocator: Allocator
+//   jump in2.entry
+// in2.entry:
+//   %in2.1: i64 = union.tag %3: Slot
+//   jump in2.match.check.2
+// in2.match.end.1:
+//   jump in2.cont
+// in2.match.check.2:
+//   %in2.2: bool = binary.== %in2.1: i64, 0: i64
+//   branch %in2.2: bool, in2.match.arm.3, in2.match.check.4
+// in2.match.arm.3:
+//   %in2.3: std::string::String = union.payload %3: Slot, Kept
+//   %in2.in1.1: std::array::Array<u8> = field.bytes %in2.3: std::string::String
+//   call.std::array::Array.deinit.u8 %in2.in1.1: std::array::Array<u8>, %allocator: Allocator
+//   jump in2.match.end.1
+// in2.match.check.4:
+//   %in2.5: bool = binary.== %in2.1: i64, 1: i64
+//   branch %in2.5: bool, in2.match.arm.5, in2.match.unreachable.6
+// in2.match.arm.5:
+//   jump in2.match.end.1
+// in2.match.unreachable.6:
+//   unreachable
+// in2.cont:
 //   return void: void
 // }

@@ -33,7 +33,8 @@ func TestEmitPhase2Subsets(t *testing.T) {
 		}},
 		{name: "while", src: whileSource, wants: []string{
 			`(local.set $v2 (i64.const 0))`,
-			`(local.set $pc (i32.const 1))`,
+			`(loop $loop.while.header.1`,
+			`(br $loop.while.header.1)`,
 			`(call $std::fmt::print.i64 (local.get $v2))`,
 		}},
 	}

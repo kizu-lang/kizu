@@ -13,6 +13,7 @@ import std::mem;
 /// pass rewrites values in place, so what it produces is verified the same
 /// way lowering is.
 pub fn optimize(allocator: Allocator, module: &var Module) -> !?diagnostic::Diagnostic {
+    try inline_calls(allocator, module);
     try constant_fold(allocator, module);
     try copy_propagate(allocator, module);
     try dead_code_eliminate(allocator, module);
@@ -367,20 +368,74 @@ fn result_used(module: &Module, used: &map::Map<[]u8, bool>, instr: Instr) -> bo
 }
 
 /// Reports whether an instruction must remain even if its result is unused,
-/// the Go `hasEffect`. Calls stay until the IR carries an effect summary: a
-/// callee may mutate through a borrow, allocate, trap, or perform host I/O
-/// regardless of its return type. An error.try keeps its failure return and
-/// cleanups even when its success payload is discarded. A volatile load stays
-/// because the access itself is the effect: device registers change state
-/// when read.
+/// the Go `hasEffect`. Only an instruction known to do nothing but compute its
+/// result may go: what a result's type says is no guide, since popping an
+/// element, storing one, or failing a bounds check each return a value and do
+/// something as well. Inline makes this matter, because an operation that was
+/// the body of a call the caller discarded lands in the caller with its
+/// result unread.
 fn has_effect(module: &Module, instr: Instr) -> bool {
     let node = module.instrs.at(instr.node);
-    if node.op == Op::Call or node.op == Op::CallIndirect {
-        return true;
-    }
-    if node.op == Op::ErrorTry or node.op == Op::ArenaAdd or node.op == Op::ArenaAt or
-        node.op == Op::VolatileLoad or node.op == Op::BoxNew or node.op == Op::BoxTake {
-        return true;
-    }
-    return module.names.is(node.result.type_name, "void");
+    return !is_pure_op(node.op);
+}
+
+/// Reports whether op only computes its result, the Go `isPureOp`: it writes
+/// no memory, calls nothing, allocates nothing and cannot fail on its own.
+fn is_pure_op(op: Op) -> bool {
+    return match op {
+        Const => true,
+        Id => true,
+        Phi => true,
+        Cast => true,
+        StructNew => true,
+        LocalSlot => true,
+        RefLoad => true,
+        OptNull => true,
+        OptSome => true,
+        OptHas => true,
+        OptValue => true,
+        ErrorOk => true,
+        ErrorError => true,
+        ErrorHas => true,
+        ErrorValue => true,
+        ErrorCode => true,
+        UnionNew => true,
+        UnionTag => true,
+        UnionPayload => true,
+        UnionPayloadRef => true,
+        UnionLoad => true,
+        SliceLen => true,
+        SliceIndex => true,
+        SliceSlice => true,
+        BufferNew => true,
+        BufferAsBytes => true,
+        FloatBits => true,
+        FloatFromBits => true,
+        BoxBorrow => true,
+        BoxBorrowMut => true,
+        ArrayNew => true,
+        ArrayLen => true,
+        ArrayCapacity => true,
+        ArrayGet => true,
+        ArrayAt => true,
+        ArrayAtMut => true,
+        ArrayAsBytes => true,
+        MapNew => true,
+        MapLen => true,
+        MapGet => true,
+        MapContains => true,
+        MapAt => true,
+        MapAtMut => true,
+        MapKeyAt => true,
+        ArenaNew => true,
+        ArenaLen => true,
+        Binary => true,
+        Unary => true,
+        Field => true,
+        FieldRef => true,
+        FieldSet => true,
+        FieldAddr => true,
+        FuncAddr => true,
+        _ => false,
+    };
 }

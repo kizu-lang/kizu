@@ -83,22 +83,6 @@ fn (self: &var Emitter) box_element_layout(
     return WasmLayoutResult::Error(try self.fail0("wasm error: expected Box<T>"));
 }
 
-fn (self: &var Emitter) box_expr1(format: []u8, a: Arg) -> !ir::Name {
-    var out = string::new(self.allocator);
-    errdefer out.deinit(self.allocator);
-    try format_args(
-        self.allocator,
-        &var out,
-        &self.names,
-        format,
-        move a,
-        Arg::None,
-        Arg::None,
-        Arg::None
-    );
-    return self.names.intern_owned(move out);
-}
-
 fn (self: &var Emitter) box_expr2(format: []u8, a: Arg, b: Arg) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -185,21 +169,28 @@ fn (self: &var Emitter) write_box_new(
             Arg::Int(layout.size)
         );
     }
+    // The cell is held in the result's own local while the payload is
+    // stored, so the store addresses a local rather than a load from the
+    // result slot.
+    let result_retained = ir::name_text(&module.names, node.result.name);
+    let result_bytes = result_retained.as_bytes();
+    let symbol = try self.symbol_name_of(result_bytes);
+    let pointer = try self.local_expr(result_bytes);
+    try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(allocation));
     try self.line2(
         "            (i32.store %s %s)",
         Arg::Str(cell),
-        Arg::Str(allocation)
+        Arg::Str(pointer)
     );
     try self.line2(
-        "            (i64.store %s (i64.extend_i32_u (i32.ne (i32.load %s) (i32.const 0))))",
+        "            (i64.store %s (i64.extend_i32_u (i32.ne %s (i32.const 0))))",
         Arg::Str(slot),
-        Arg::Str(cell)
+        Arg::Str(pointer)
     );
-    try self.line1("            (if (i32.load %s)", Arg::Str(cell));
+    try self.line1("            (if %s", Arg::Str(pointer));
     try self.line("              (then");
-    let payload = try self.box_expr1("(i32.load %s)", Arg::Str(cell));
     let info = try self.value_of(module, value);
-    if try self.write_store_value(module, payload, 0, value.type_name, info) |failed| {
+    if try self.write_store_value(module, pointer, 0, value.type_name, info) |failed| {
         return move failed;
     }
     try self.line("              )");

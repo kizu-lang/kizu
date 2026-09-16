@@ -1295,7 +1295,8 @@ fn main() -> !void {
 	}
 }
 
-// TestBuildEmitLLVMOptCommandSmoke checks LLVM build can use optimized IR.
+// TestBuildEmitLLVMOptCommandSmoke checks LLVM build can use optimized IR: the
+// sum is folded, and print, one call long, is inlined into its caller.
 func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
 	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2); }`), 0o644); err != nil {
@@ -1306,7 +1307,7 @@ func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "call void @std__fmt__print.i64(i64 3)") {
+	if !strings.Contains(string(out), "call void @std__fmt__write_i64(i64 3)") {
 		t.Fatalf("got %q", out)
 	}
 }

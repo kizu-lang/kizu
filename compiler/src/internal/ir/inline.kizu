@@ -1,0 +1,679 @@
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/ir/inline.go: replacing direct calls to small
+// functions with a copy of the callee's body. Go keys its function map, its
+// parameter map and its defined-name set by the Go string of a name; here
+// they are keyed by the id of the interned Name, which names the same text.
+// Go copies an instruction by value; here a copy is a new node in the
+// module's instruction arena.
+
+/// Returns how many instructions a function may hold for inline_calls to
+/// copy its body into a caller, the Go `inlineLimit`. A backend that
+/// compiles each function alone, as wasm's engines do, otherwise pays a call,
+/// a frame and a result written to memory for each std accessor that is one
+/// instruction long.
+fn inline_limit() -> i64 {
+    return 8;
+}
+
+/// Replaces direct calls to small functions with a copy of the callee's
+/// body, the Go `Inline`. A callee is copied as it stands when its caller is
+/// reached, in module order, and the copy is not searched again, so a chain
+/// of calls is flattened no deeper than the order the functions are declared
+/// in allows, and a recursive callee is never copied into itself.
+pub fn inline_calls(allocator: Allocator, module: &var Module) -> !void {
+    var functions = map::new<i64, Function>(allocator);
+    defer functions.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try functions.insert(allocator, name_id(module.function_name(function)), function);
+    }
+    index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try inline_into(allocator, module, function, &functions);
+    }
+    return;
+}
+
+/// Copies each inlinable callee of function into it, the Go `inlineInto`. A
+/// single-block callee is spliced where its call was; a callee with more
+/// blocks splits the calling block, and its returns jump to the half after
+/// the call.
+fn inline_into(
+    allocator: Allocator,
+    module: &var Module,
+    function: Function,
+    functions: &map::Map<i64, Function>
+) -> !void {
+    var site = 0;
+    var results = map::new<i64, Value>(allocator);
+    defer results.deinit(allocator);
+    var block_index = 0;
+    while inline_block_at(module, function, block_index) |block| {
+        var advance = 1;
+        var instr_index = 0;
+        var split = false;
+        while inline_instr_at(module, block, instr_index) |call| {
+            if try inline_callee(module, function, call, functions) |callee| {
+                site = site + 1;
+                var spelled = try string::from_bytes(allocator, "in");
+                errdefer spelled.deinit(allocator);
+                try fmt::append_i64(allocator, &var spelled, site);
+                try spelled.append_byte(allocator, cast<u8>(46));
+                let prefix = try module.names.intern_owned(move spelled);
+                var copier = try new_body_copier(allocator, module, prefix, callee, call);
+                defer copier.deinit(allocator);
+                let callee_blocks = inline_block_count(module, callee);
+                if callee_blocks == 1 {
+                    let spliced = try splice_inlined_call(allocator, module, block, instr_index, callee, call, &copier, &var results);
+                    instr_index = instr_index + spliced;
+                } else {
+                    advance = try split_at_inlined_call(allocator, module, function, block_index, instr_index, callee, &copier, &var results);
+                    split = true;
+                }
+            } else {
+                instr_index = instr_index + 1;
+            }
+            if split {
+                break;
+            }
+        }
+        block_index = block_index + advance;
+    }
+    if results.len() > 0 {
+        try replace_function_values(allocator, module, function, &results);
+    }
+    return;
+}
+
+/// Returns the block at index of a function, null past the last.
+fn inline_block_at(module: &Module, function: Function, index: i64) -> ?Block {
+    let node = module.function_nodes.at(function.node);
+    return node.blocks.get(index);
+}
+
+/// Returns how many blocks a function holds.
+fn inline_block_count(module: &Module, function: Function) -> i64 {
+    let node = module.function_nodes.at(function.node);
+    return node.blocks.len();
+}
+
+/// Returns the instruction at index of a block, null past the last.
+fn inline_instr_at(module: &Module, block: Block, index: i64) -> ?Instr {
+    let node = module.blocks.at(block.node);
+    return node.instrs.get(index);
+}
+
+/// Replaces the call at instr_index of block with a copy of the single block
+/// callee holds, and returns how many instructions the copy is. The call's
+/// result is read afterwards as the value the callee returned.
+fn splice_inlined_call(
+    allocator: Allocator,
+    module: &var Module,
+    block: Block,
+    instr_index: i64,
+    callee: Function,
+    call: Instr,
+    copier: &BodyCopier,
+    results: &var map::Map<i64, Value>
+) -> !i64 {
+    let callee_block = inline_block_at(module, callee, 0) orelse return 0;
+    var body = array::new<Instr>(allocator);
+    defer body.deinit(allocator);
+    try copier.copy_instrs(allocator, module, callee_block, &var body);
+    var spliced = array::new<Instr>(allocator);
+    defer spliced.deinit(allocator);
+    var index = 0;
+    while inline_instr_at(module, block, index) |instr| {
+        if index == instr_index {
+            var body_index = 0;
+            while body.get(body_index) |copied| {
+                body_index = body_index + 1;
+                try spliced.append(allocator, copied);
+            }
+        } else {
+            try spliced.append(allocator, instr);
+        }
+        index = index + 1;
+    }
+    try set_block_instrs(allocator, module, block, &spliced);
+    let call_result = module.instr_result(call);
+    if !module.names.is(call_result.type_name, "void") {
+        let returned = module.block_terminator(callee_block).value;
+        let replacement = try copier.value(module, returned);
+        try results.insert(allocator, name_id(call_result.name), replacement);
+    }
+    return body.len();
+}
+
+/// Replaces the call at instr_index of the block at block_index with a jump
+/// into a copy of callee's blocks, whose returns jump to a block holding what
+/// followed the call, the Go `splitAtInlinedCall`. It returns how many blocks
+/// now follow the calling block, the last of which is that continuation.
+fn split_at_inlined_call(
+    allocator: Allocator,
+    module: &var Module,
+    function: Function,
+    block_index: i64,
+    instr_index: i64,
+    callee: Function,
+    copier: &BodyCopier,
+    results: &var map::Map<i64, Value>
+) -> !i64 {
+    let block = inline_block_at(module, function, block_index) orelse return 0;
+    let call = inline_instr_at(module, block, instr_index) orelse return 0;
+    let call_result = module.instr_result(call);
+    let block_name = module.block_name(block);
+    let original_terminator = module.block_terminator(block);
+    let cont_name = try module.names.wrapped("", copier.prefix, "cont");
+    let cont = try new_detached_block(allocator, module, cont_name);
+    var before = array::new<Instr>(allocator);
+    defer before.deinit(allocator);
+    var after = array::new<Instr>(allocator);
+    defer after.deinit(allocator);
+    var index = 0;
+    while inline_instr_at(module, block, index) |instr| {
+        if index < instr_index {
+            try before.append(allocator, instr);
+        }
+        if index > instr_index {
+            try after.append(allocator, instr);
+        }
+        index = index + 1;
+    }
+    try retarget_phis(module, function, block_name, cont_name, original_terminator);
+    try set_block_instrs(allocator, module, block, &before);
+    let callee_entry = inline_block_at(module, callee, 0) orelse return 0;
+    let entry_name = try copier.block(module, module.block_name(callee_entry));
+    module.set_terminator(block, jump_terminator(entry_name));
+
+    var body = array::new<Block>(allocator);
+    defer body.deinit(allocator);
+    var returns = array::new<Incoming>(allocator);
+    defer returns.deinit(allocator);
+    var source_index = 0;
+    while inline_block_at(module, callee, source_index) |source| {
+        source_index = source_index + 1;
+        let copied_name = try copier.block(module, module.block_name(source));
+        let copied = try new_detached_block(allocator, module, copied_name);
+        var instrs = array::new<Instr>(allocator);
+        defer instrs.deinit(allocator);
+        try copier.copy_instrs(allocator, module, source, &var instrs);
+        try set_block_instrs(allocator, module, copied, &instrs);
+        let source_terminator = module.block_terminator(source);
+        let terminator = try copier.terminator(module, source_terminator);
+        if source_terminator.op == TermOp::Return {
+            try returns.append(allocator, Incoming { block: copied_name, value: terminator.value });
+            module.set_terminator(copied, jump_terminator(cont_name));
+        } else {
+            module.set_terminator(copied, terminator);
+        }
+        try body.append(allocator, copied);
+    }
+    var cont_instrs = array::new<Instr>(allocator);
+    defer cont_instrs.deinit(allocator);
+    if !module.names.is(call_result.type_name, "void") {
+        if returns.len() == 1 {
+            let only = returns.get_or_panic(0);
+            try results.insert(allocator, name_id(call_result.name), only.value);
+        } else {
+            var phi = module.blank_instr(call_result, Op::Phi, empty_name(), empty_name());
+            errdefer phi.deinit(allocator);
+            var return_index = 0;
+            while returns.get(return_index) |incoming| {
+                return_index = return_index + 1;
+                try phi.incoming.append(allocator, incoming);
+            }
+            let handle = Instr { node: try module.instrs.add(allocator, move phi) };
+            try cont_instrs.append(allocator, handle);
+        }
+    }
+    index = 0;
+    while after.get(index) |instr| {
+        index = index + 1;
+        try cont_instrs.append(allocator, instr);
+    }
+    try set_block_instrs(allocator, module, cont, &cont_instrs);
+    module.set_terminator(cont, original_terminator);
+    try body.append(allocator, cont);
+
+    var blocks = array::new<Block>(allocator);
+    defer blocks.deinit(allocator);
+    index = 0;
+    while inline_block_at(module, function, index) |existing| {
+        try blocks.append(allocator, existing);
+        if index == block_index {
+            var body_index = 0;
+            while body.get(body_index) |inserted| {
+                body_index = body_index + 1;
+                try blocks.append(allocator, inserted);
+            }
+        }
+        index = index + 1;
+    }
+    if module.function_nodes.at_mut(function.node) |node| {
+        while node.blocks.pop() |_| {}
+        index = 0;
+        while blocks.get(index) |kept| {
+            index = index + 1;
+            try node.blocks.append(allocator, kept);
+        }
+    }
+    return body.len();
+}
+
+/// Retains a block node that no function lists yet.
+fn new_detached_block(allocator: Allocator, module: &var Module, name: Name) -> !Block {
+    return Block {
+        node: try module.blocks.add(allocator, BlockNode {
+            name: name,
+            instrs: array::new<Instr>(allocator),
+            terminator: no_terminator()
+        })
+    };
+}
+
+/// Writes instrs over a block's instruction list.
+fn set_block_instrs(allocator: Allocator, module: &var Module, block: Block, instrs: &array::Array<Instr>) -> !void {
+    if module.blocks.at_mut(block.node) |node| {
+        while node.instrs.pop() |_| {}
+        var index = 0;
+        while instrs.get(index) |instr| {
+            index = index + 1;
+            try node.instrs.append(allocator, instr);
+        }
+    }
+    return;
+}
+
+/// Renames the predecessor `from` to `to` in the phis of the blocks the
+/// terminator names, the edges that moved with a split block's terminator,
+/// the Go `retargetPhis`.
+fn retarget_phis(module: &var Module, function: Function, from: Name, to: Name, terminator: Terminator) -> !void {
+    var block_index = 0;
+    while inline_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        let name = module.block_name(block);
+        var named = false;
+        var position = 0;
+        while terminator.successor(position) |successor| {
+            position = position + 1;
+            if same_name(successor, name) {
+                named = true;
+            }
+        }
+        if !named {
+            continue;
+        }
+        var instr_index = 0;
+        while inline_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if module.instrs.at_mut(instr.node) |node| {
+                var incoming_index = 0;
+                while node.incoming.at_mut(incoming_index) |incoming| {
+                    incoming_index = incoming_index + 1;
+                    if same_name(incoming.block, from) {
+                        incoming.block = to;
+                    }
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Returns the function a call instruction may be replaced with, or null,
+/// the Go `inlineCallee`. The callee must be small, reach no error.try
+/// (whose failure would return from the caller), not call itself, not be
+/// looped back to at its entry, and return values of the type it declares.
+/// Each argument must be the type its parameter reads, or a `&var` borrow of
+/// a parameter's `&`.
+fn inline_callee(
+    module: &Module,
+    function: Function,
+    call: Instr,
+    functions: &map::Map<i64, Function>
+) -> !?Function {
+    let node = module.instrs.at(call.node);
+    if !is_empty(node.extern_abi) or node.op != Op::Call {
+        return null;
+    }
+    let caller_name = module.function_name(function);
+    if same_name(node.operand, caller_name) {
+        return null;
+    }
+    let callee = functions.get(name_id(node.operand)) orelse return null;
+    let callee_node = module.function_nodes.at(callee.node);
+    if callee_node.blocks.len() == 0 or !same_name(callee_node.return_type, node.result.type_name) or
+        callee_node.params.len() != node.args.len() {
+        return null;
+    }
+    var index = 0;
+    while callee_node.params.get(index) |param| {
+        let arg = node.args.get_or_panic(index);
+        index = index + 1;
+        if !inline_argument_fits(module, param.type_name, arg.type_name) {
+            return null;
+        }
+    }
+    if !inlinable_body(module, callee) {
+        return null;
+    }
+    return callee;
+}
+
+/// Reports whether an argument of type got can stand for a parameter of
+/// type want once the call is gone, the Go `inlineArgumentFits`.
+fn inline_argument_fits(module: &Module, want: Name, got: Name) -> bool {
+    if same_name(want, got) {
+        return true;
+    }
+    if !module.names.starts_with(want, "&") or module.names.starts_with(want, "&var ") {
+        return false;
+    }
+    if !module.names.starts_with(got, "&var ") {
+        return false;
+    }
+    let want_text = name_text(&module.names, want);
+    let want_bytes = want_text.as_bytes();
+    let got_text = name_text(&module.names, got);
+    let got_bytes = got_text.as_bytes();
+    let want_elem = want_bytes[1..mem::len(want_bytes)];
+    let got_elem = got_bytes[5..mem::len(got_bytes)];
+    return mem::equal_bytes(want_elem, got_elem);
+}
+
+/// Reports whether callee's body can be copied into a caller, the Go
+/// `inlinableBody`. The body has to return: a call's result is read
+/// afterwards as what the copy returned, and a single block is spliced in
+/// whole only when its terminator is a return.
+fn inlinable_body(module: &Module, callee: Function) -> bool {
+    let callee_node = module.function_nodes.at(callee.node);
+    let entry = callee_node.blocks.get_or_panic(0);
+    let entry_name = module.block_name(entry);
+    if callee_node.blocks.len() == 1 and module.block_terminator(entry).op != TermOp::Return {
+        return false;
+    }
+    var returns = 0;
+    var count = 0;
+    var block_index = 0;
+    while callee_node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            count = count + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if count > inline_limit() or instr_node.op == Op::ErrorTry {
+                return false;
+            }
+            if instr_node.op == Op::Call and same_name(instr_node.operand, callee_node.name) {
+                return false;
+            }
+        }
+        let terminator = block_node.terminator;
+        var position = 0;
+        while terminator.successor(position) |target| {
+            position = position + 1;
+            if same_name(target, entry_name) {
+                return false;
+            }
+        }
+        if terminator.op == TermOp::Return {
+            returns = returns + 1;
+            if !module.names.is(callee_node.return_type, "void") and
+                !same_name(terminator.value.type_name, callee_node.return_type) {
+                return false;
+            }
+        }
+    }
+    return returns > 0;
+}
+
+/// Renames one callee body for one call site, the Go `bodyCopier`:
+/// parameters become the call's arguments, and every value and block the
+/// body defines gains the site's prefix.
+struct BodyCopier {
+    prefix: Name,
+    percent_prefix: Name,
+    params: map::Map<i64, Value>,
+    defined: map::Map<i64, bool>,
+}
+
+/// Maps callee's parameters to call's arguments and records the names
+/// callee's instructions define, the Go `newBodyCopier`.
+fn new_body_copier(
+    allocator: Allocator,
+    module: &var Module,
+    prefix: Name,
+    callee: Function,
+    call: Instr
+) -> !BodyCopier {
+    var copier = BodyCopier {
+        prefix: prefix,
+        percent_prefix: try module.names.prefixed("%", prefix),
+        params: map::new<i64, Value>(allocator),
+        defined: map::new<i64, bool>(allocator)
+    };
+    errdefer copier.deinit(allocator);
+    let callee_node = module.function_nodes.at(callee.node);
+    let call_node = module.instrs.at(call.node);
+    var index = 0;
+    while callee_node.params.get(index) |param| {
+        let arg = call_node.args.get_or_panic(index);
+        index = index + 1;
+        try copier.params.insert(allocator, name_id(param.name), arg);
+    }
+    var block_index = 0;
+    while callee_node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let result = module.instr_result(instr);
+            try copier.defined.insert(allocator, name_id(result.name), true);
+        }
+    }
+    return move copier;
+}
+
+/// Releases a copier's name tables.
+fn (self: BodyCopier) deinit(allocator: Allocator) -> void {
+    self.params.deinit(allocator);
+    self.defined.deinit(allocator);
+    return;
+}
+
+/// Renames one value the body reads, the Go `bodyCopier.value`.
+fn (self: &BodyCopier) value(module: &var Module, value: Value) -> !Value {
+    if self.params.get(name_id(value.name)) |arg| {
+        return arg;
+    }
+    if !is_empty(value.name) and self.defined.contains(name_id(value.name)) {
+        let trimmed = try module.names.trim_prefix(value.name, "%");
+        let name = try module.names.joined(self.percent_prefix, "", trimmed);
+        return Value { name: name, type_name: value.type_name };
+    }
+    return value;
+}
+
+/// Names a block of the body at this site.
+fn (self: &BodyCopier) block(module: &var Module, name: Name) -> !Name {
+    return module.names.joined(self.prefix, "", name);
+}
+
+/// Copies the instructions of a callee block under the site's names into
+/// out, the Go `bodyCopier.instrs`.
+fn (self: &BodyCopier) copy_instrs(allocator: Allocator, module: &var Module, source: Block, out: &var array::Array<Instr>) -> !void {
+    var index = 0;
+    while inline_instr_at(module, source, index) |instr| {
+        index = index + 1;
+        let copied = try self.copy_instr(allocator, module, instr);
+        try out.append(allocator, copied);
+    }
+    return;
+}
+
+/// Copies one instruction under the site's names into a new node.
+fn (self: &BodyCopier) copy_instr(allocator: Allocator, module: &var Module, instr: Instr) -> !Instr {
+    let source = module.instrs.at(instr.node);
+    let op = source.op;
+    let operand = source.operand;
+    let immediate = source.immediate;
+    let extern_abi = source.extern_abi;
+    let extern_name = source.extern_name;
+    let span = source.span;
+    let source_result = source.result;
+    var args = array::new<Value>(allocator);
+    defer args.deinit(allocator);
+    var index = 0;
+    while source.args.get(index) |arg| {
+        index = index + 1;
+        try args.append(allocator, arg);
+    }
+    var call_params = array::new<Param>(allocator);
+    defer call_params.deinit(allocator);
+    index = 0;
+    while source.call_params.get(index) |param| {
+        index = index + 1;
+        try call_params.append(allocator, param);
+    }
+    var fields = array::new<FieldArg>(allocator);
+    defer fields.deinit(allocator);
+    index = 0;
+    while source.fields.get(index) |field| {
+        index = index + 1;
+        try fields.append(allocator, field);
+    }
+    var incoming = array::new<Incoming>(allocator);
+    defer incoming.deinit(allocator);
+    index = 0;
+    while source.incoming.get(index) |entry| {
+        index = index + 1;
+        try incoming.append(allocator, entry);
+    }
+    var cleanups = array::new<Cleanup>(allocator);
+    defer cleanups.deinit(allocator);
+    index = 0;
+    while source.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        try cleanups.append(allocator, cleanup);
+    }
+
+    let result = try self.value(module, source_result);
+    var node = module.blank_instr(result, op, operand, immediate);
+    errdefer node.deinit(allocator);
+    node.extern_abi = extern_abi;
+    node.extern_name = extern_name;
+    node.span = span;
+    index = 0;
+    while args.get(index) |arg| {
+        index = index + 1;
+        try node.args.append(allocator, try self.value(module, arg));
+    }
+    index = 0;
+    while call_params.get(index) |param| {
+        index = index + 1;
+        try node.call_params.append(allocator, param);
+    }
+    index = 0;
+    while fields.get(index) |field| {
+        index = index + 1;
+        try node.fields.append(allocator, FieldArg { name: field.name, value: try self.value(module, field.value) });
+    }
+    index = 0;
+    while incoming.get(index) |entry| {
+        index = index + 1;
+        try node.incoming.append(allocator, Incoming {
+            block: try self.block(module, entry.block),
+            value: try self.value(module, entry.value)
+        });
+    }
+    index = 0;
+    while cleanups.get(index) |cleanup| {
+        index = index + 1;
+        var renamed = cleanup;
+        renamed.arg = try self.value(module, cleanup.arg);
+        renamed.allocator = try self.value(module, cleanup.allocator);
+        try node.cleanups.append(allocator, renamed);
+    }
+    return Instr { node: try module.instrs.add(allocator, move node) };
+}
+
+/// Copies a terminator under the site's names, the Go
+/// `bodyCopier.terminator`.
+fn (self: &BodyCopier) terminator(module: &var Module, terminator: Terminator) -> !Terminator {
+    var copied = terminator;
+    copied.value = try self.value(module, terminator.value);
+    copied.cond = try self.value(module, terminator.cond);
+    if !is_empty(terminator.target) {
+        copied.target = try self.block(module, terminator.target);
+    }
+    if !is_empty(terminator.else_target) {
+        copied.else_target = try self.block(module, terminator.else_target);
+    }
+    return copied;
+}
+
+/// Rewrites every read of a replaced name in a function, following a
+/// replacement that is itself replaced, the Go `replaceFunctionValues`.
+fn replace_function_values(
+    allocator: Allocator,
+    module: &var Module,
+    function: Function,
+    replacements: &map::Map<i64, Value>
+) -> !void {
+    var block_index = 0;
+    while inline_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while inline_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if module.instrs.at_mut(instr.node) |node| {
+                var index = 0;
+                while node.args.get(index) |arg| {
+                    try node.args.set(index, resolve_replacement(replacements, arg));
+                    index = index + 1;
+                }
+                index = 0;
+                while node.incoming.at_mut(index) |incoming| {
+                    index = index + 1;
+                    incoming.value = resolve_replacement(replacements, incoming.value);
+                }
+                index = 0;
+                while node.fields.at_mut(index) |field| {
+                    index = index + 1;
+                    field.value = resolve_replacement(replacements, field.value);
+                }
+                index = 0;
+                while node.cleanups.at_mut(index) |cleanup| {
+                    index = index + 1;
+                    cleanup.arg = resolve_replacement(replacements, cleanup.arg);
+                    cleanup.allocator = resolve_replacement(replacements, cleanup.allocator);
+                }
+            }
+        }
+        var terminator = module.block_terminator(block);
+        terminator.value = resolve_replacement(replacements, terminator.value);
+        terminator.cond = resolve_replacement(replacements, terminator.cond);
+        module.set_terminator(block, terminator);
+    }
+    return;
+}
+
+/// Follows a value through the replacements until it is not replaced.
+fn resolve_replacement(replacements: &map::Map<i64, Value>, value: Value) -> Value {
+    var current = value;
+    while replacements.get(name_id(current.name)) |next| {
+        current = next;
+    }
+    return current;
+}

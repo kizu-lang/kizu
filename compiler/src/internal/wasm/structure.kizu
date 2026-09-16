@@ -1,0 +1,320 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::map;
+
+// Mechanical port of internal/wasm/structure.go: a function's blocks are
+// emitted as WebAssembly's structured control flow rather than as a dispatch
+// loop over a program counter, by the translation Ramsey gives in "Beyond
+// Relooper" for reducible graphs. A block is placed under its immediate
+// dominator; a merge node gets a `block` that ends where its code begins; a
+// loop header gets a `loop` around its code; a block with one predecessor
+// is written where that predecessor branches to it. Blocks are named here
+// by their position in the function's block list.
+
+/// Is what the emission of one function reads, the Go `structure`: the
+/// blocks in reverse postorder, their predecessors, dominators, and which
+/// of them head a loop or merge forward edges.
+struct Structure {
+    by_name: map::Map<[]u8, i64>,
+    order: array::Array<i64>,
+    rpo: array::Array<i64>,
+    preds: array::Array<array::Array<i64>>,
+    idom: array::Array<i64>,
+    loop_header: array::Array<bool>,
+    merge: array::Array<bool>,
+    merge_children: array::Array<array::Array<i64>>,
+}
+
+fn structure_new(allocator: Allocator) -> Structure {
+    return Structure {
+        by_name: map::new<[]u8, i64>(allocator),
+        order: array::new<i64>(allocator),
+        rpo: array::new<i64>(allocator),
+        preds: array::new<array::Array<i64>>(allocator),
+        idom: array::new<i64>(allocator),
+        loop_header: array::new<bool>(allocator),
+        merge: array::new<bool>(allocator),
+        merge_children: array::new<array::Array<i64>>(allocator),
+    };
+}
+
+fn (self: Structure) deinit(allocator: Allocator) -> void {
+    self.by_name.deinit(allocator);
+    self.order.deinit(allocator);
+    self.rpo.deinit(allocator);
+    self.preds.deinit(allocator);
+    self.idom.deinit(allocator);
+    self.loop_header.deinit(allocator);
+    self.merge.deinit(allocator);
+    self.merge_children.deinit(allocator);
+    return;
+}
+
+/// Returns the position of the block a name reaches, or -1.
+fn (self: &Structure) index_of(module: &ir::Module, name: ir::Name) -> i64 {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    return self.by_name.get(bytes) orelse -1;
+}
+
+fn (self: &Structure) rpo_of(index: i64) -> i64 {
+    return self.rpo.get(index) orelse -1;
+}
+
+fn (self: &Structure) idom_of(index: i64) -> i64 {
+    return self.idom.get(index) orelse -1;
+}
+
+fn (self: &Structure) is_loop_header(index: i64) -> bool {
+    return self.loop_header.get(index) orelse false;
+}
+
+fn (self: &Structure) is_merge(index: i64) -> bool {
+    return self.merge.get(index) orelse false;
+}
+
+/// Reports whether `a` is `b` or an ancestor of `b` in the dominator tree,
+/// the Go `dominates`.
+fn (self: &Structure) dominates(a: i64, b: i64) -> bool {
+    var current = b;
+    while true {
+        if a == current {
+            return true;
+        }
+        let parent = self.idom_of(current);
+        if parent == current or parent < 0 {
+            return false;
+        }
+        current = parent;
+    }
+    return false;
+}
+
+/// Walks two blocks up the dominator tree to their common ancestor, the Go
+/// `intersect`.
+fn (self: &Structure) intersect(a: i64, b: i64) -> i64 {
+    var left = a;
+    var right = b;
+    while left != right {
+        while self.rpo_of(left) > self.rpo_of(right) {
+            left = self.idom_of(left);
+        }
+        while self.rpo_of(right) > self.rpo_of(left) {
+            right = self.idom_of(right);
+        }
+    }
+    return left;
+}
+
+/// Computes the structure of one function's control flow graph, the Go
+/// `analyze`: reverse postorder, predecessors, dominators, loop headers,
+/// merge nodes, and each block's merge children latest first.
+fn (self: &var Emitter) analyze(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    out: &var Structure
+) -> !?diagnostic::Diagnostic {
+    let count = node.blocks.len();
+    if count == 0 {
+        return null;
+    }
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        let name = module.block_name(block);
+        let retained = ir::name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try out.by_name.insert(self.allocator, bytes, index);
+        try out.rpo.append(self.allocator, -1);
+        try out.preds.append(self.allocator, array::new<i64>(self.allocator));
+        try out.idom.append(self.allocator, -1);
+        try out.loop_header.append(self.allocator, false);
+        try out.merge.append(self.allocator, false);
+        try out.merge_children.append(self.allocator, array::new<i64>(self.allocator));
+        index = index + 1;
+    }
+    var visited = array::new<bool>(self.allocator);
+    defer visited.deinit(self.allocator);
+    for 0..count |_| {
+        try visited.append(self.allocator, false);
+    }
+    var post = array::new<i64>(self.allocator);
+    defer post.deinit(self.allocator);
+    try self.visit_postorder(module, node, out, 0, &var visited, &var post);
+    var position = post.len() - 1;
+    while position >= 0 {
+        let block_index = post.get_or_panic(position);
+        try out.rpo.set(block_index, out.order.len());
+        try out.order.append(self.allocator, block_index);
+        position = position - 1;
+    }
+    try self.collect_predecessors(module, node, out);
+    self.compute_dominators(out);
+    if try self.classify_blocks(module, node, out) |failed| {
+        return move failed;
+    }
+    try self.collect_merge_children(out);
+    return null;
+}
+
+/// Lists the blocks reachable from `index` in postorder, the walk of the Go
+/// `postorderReversed`.
+fn (self: &var Emitter) visit_postorder(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    out: &Structure,
+    index: i64,
+    visited: &var array::Array<bool>,
+    post: &var array::Array<i64>
+) -> !void {
+    try visited.set(index, true);
+    let block = node.blocks.get_or_panic(index);
+    let term = module.block_terminator(block);
+    var position = 0;
+    while term.successor(position) |target| {
+        position = position + 1;
+        let target_index = out.index_of(module, target);
+        if target_index < 0 {
+            continue;
+        }
+        if !(visited.get(target_index) orelse false) {
+            try self.visit_postorder(module, node, out, target_index, visited, post);
+        }
+    }
+    try post.append(self.allocator, index);
+    return;
+}
+
+/// Records each reachable block's predecessors among the reachable blocks.
+fn (self: &var Emitter) collect_predecessors(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    out: &var Structure
+) -> !void {
+    var position = 0;
+    while out.order.get(position) |index| {
+        position = position + 1;
+        let block = node.blocks.get_or_panic(index);
+        let term = module.block_terminator(block);
+        var successor = 0;
+        while term.successor(successor) |target| {
+            successor = successor + 1;
+            let target_index = out.index_of(module, target);
+            if target_index < 0 or out.rpo_of(target_index) < 0 {
+                continue;
+            }
+            if out.preds.at_mut(target_index) |list| {
+                try list.append(self.allocator, index);
+            }
+        }
+    }
+    return;
+}
+
+/// Finds each block's immediate dominator by the iterative algorithm of
+/// Cooper, Harvey and Kennedy over reverse postorder, the Go
+/// `computeDominators`.
+fn (self: &Emitter) compute_dominators(out: &var Structure) -> void {
+    let entry = out.order.get_or_panic(0);
+    let _ = out.idom.set(entry, entry);
+    var changed = true;
+    while changed {
+        changed = false;
+        var position = 1;
+        while out.order.get(position) |index| {
+            position = position + 1;
+            var candidate = -1;
+            if out.preds.at(index) |list| {
+                var at = 0;
+                while list.get(at) |pred| {
+                    at = at + 1;
+                    if out.idom_of(pred) < 0 {
+                        continue;
+                    }
+                    if candidate < 0 {
+                        candidate = pred;
+                    } else {
+                        candidate = out.intersect(pred, candidate);
+                    }
+                }
+            }
+            if candidate >= 0 and out.idom_of(index) != candidate {
+                let _ = out.idom.set(index, candidate);
+                changed = true;
+            }
+        }
+    }
+    return;
+}
+
+/// Marks loop headers and merge nodes, refusing a back edge whose target
+/// does not dominate it.
+fn (self: &var Emitter) classify_blocks(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    out: &var Structure
+) -> !?diagnostic::Diagnostic {
+    var position = 0;
+    while out.order.get(position) |index| {
+        position = position + 1;
+        var forward = 0;
+        var header = false;
+        var irreducible_from = -1;
+        if out.preds.at(index) |list| {
+            var at = 0;
+            while list.get(at) |pred| {
+                at = at + 1;
+                if out.rpo_of(pred) >= out.rpo_of(index) {
+                    if !out.dominates(index, pred) {
+                        irreducible_from = pred;
+                    }
+                    header = true;
+                } else {
+                    forward = forward + 1;
+                }
+            }
+        }
+        if irreducible_from >= 0 {
+            let source = module.block_name(node.blocks.get_or_panic(irreducible_from));
+            let target = module.block_name(node.blocks.get_or_panic(index));
+            return try self.fail2(
+                "wasm error: irreducible control flow: `%s` jumps back to `%s` without being dominated by it",
+                Arg::Str(source),
+                Arg::Str(target)
+            );
+        }
+        try out.loop_header.set(index, header);
+        try out.merge.set(index, forward >= 2);
+    }
+    return null;
+}
+
+/// Lists, for each block, the merge nodes it immediately dominates, latest
+/// in reverse postorder first.
+fn (self: &var Emitter) collect_merge_children(out: &var Structure) -> !void {
+    var position = 0;
+    while out.order.get(position) |index| {
+        position = position + 1;
+        if !out.is_merge(index) {
+            continue;
+        }
+        let parent = out.idom_of(index);
+        if out.merge_children.at_mut(parent) |list| {
+            // Insert keeping the list sorted by rpo descending.
+            var place = 0;
+            while list.get(place) |other| {
+                if out.rpo_of(other) < out.rpo_of(index) {
+                    break;
+                }
+                place = place + 1;
+            }
+            try list.append(self.allocator, index);
+            var shift = list.len() - 1;
+            while shift > place {
+                try list.swap(shift - 1, shift);
+                shift = shift - 1;
+            }
+        }
+    }
+    return;
+}

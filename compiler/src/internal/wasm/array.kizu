@@ -1,6 +1,7 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
+import std::array;
 import std::mem;
 import std::string;
 
@@ -223,11 +224,7 @@ fn (self: &var Emitter) write_array_new(
     }
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for Array result");
-    try self.line2(
-        "            (memory.fill %s (i32.const 0) (i32.const %d))",
-        Arg::Str(slot),
-        Arg::Int(array_header_size())
-    );
+    try self.write_memory_zero(slot, array_header_size());
     try self.set_value(module, node.result, slot);
     return null;
 }
@@ -253,6 +250,9 @@ fn (self: &var Emitter) write_array_field(
     return self.write_scalar_result(module, node.result, loaded);
 }
 
+/// Appends one element, the Go `writeArrayAppend`: into the reserved tail
+/// when there is room, and through the reserve helper only when the storage
+/// must grow.
 fn (self: &var Emitter) write_array_append(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -290,51 +290,89 @@ fn (self: &var Emitter) write_array_append(
     let length_address = try self.array_field_address(array.expr, array_len_offset());
     let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
     let needed = try self.array_expr1("(i64.add %s (i64.const 1))", Arg::Str(length));
-    let ok = try self.array_expr4(
+    let reserve = try self.array_expr4(
         "(call $__array_reserve %s %s %s (i32.const %d))",
         Arg::Str(allocator.expr),
         Arg::Str(array.expr),
         Arg::Str(needed),
         Arg::Int(layout.size)
     );
+    let capacity_address = try self.array_field_address(array.expr, array_capacity_offset());
+    let capacity = try self.array_expr1("(i64.load %s)", Arg::Str(capacity_address));
+    try self.line2("            (if (i64.lt_u %s %s)", Arg::Str(length), Arg::Str(capacity));
+    try self.line("              (then");
+    let ok = try self.names.intern("(i32.const 1)");
+    if try self.write_array_error_slot(module, node.result, ok) |failed| {
+        return move failed;
+    }
+    if try self.write_array_append_element(module, node, array.expr, length, needed, layout.size) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
+    try self.line("              (else");
     let slot_outcome = try self.write_array_error_result(
         module,
         node.result,
-        ok,
+        reserve,
         "std::mem::Error",
         "OutOfMemory"
     );
-    var slot = ir::empty_name();
+    var grown = ir::empty_name();
     match slot_outcome {
         Error(failed) => return move failed,
         Name(found) => {
-            slot = found;
+            grown = found;
         },
     }
-    try self.line1(
-        "            (if (i32.wrap_i64 (i64.load %s))",
-        Arg::Str(slot)
-    );
+    try self.line1("            (if %s", Arg::Str(grown));
     try self.line("              (then");
-    let destination = try self.array_element_address(array.expr, length, layout.size);
-    let value_info = try self.value_of(module, value);
-    if try self.write_store_value(
-        module,
-        destination,
-        0,
-        value.type_name,
-        value_info
-    ) |failed| {
+    if try self.write_array_append_element(module, node, array.expr, length, needed, layout.size) |failed| {
         return move failed;
     }
-    try self.line2(
-        "                (i64.store %s %s)))",
-        Arg::Str(length_address),
-        Arg::Str(needed)
-    );
+    try self.line("              ))");
+    try self.line("              )");
+    try self.line("            )");
     return null;
 }
 
+/// Writes the success result of an append's fast path: the same two stores
+/// `write_array_error_result` makes, with success as the answer.
+fn (self: &var Emitter) write_array_error_slot(
+    module: &ir::Module,
+    result: ir::Value,
+    ok: ir::Name
+) -> !?diagnostic::Diagnostic {
+    let outcome = try self.write_array_error_result(module, result, ok, "std::mem::Error", "OutOfMemory");
+    match outcome {
+        Error(failed) => return move failed,
+        Name(_) => {},
+    }
+    return null;
+}
+
+/// Stores the appended element at the tail and counts it, the `write`
+/// closure of the Go `writeArrayAppend`.
+fn (self: &var Emitter) write_array_append_element(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    array_expr: ir::Name,
+    length: ir::Name,
+    needed: ir::Name,
+    size: i64
+) -> !?diagnostic::Diagnostic {
+    let value = node.args.get_or_panic(2);
+    let length_address = try self.array_field_address(array_expr, array_len_offset());
+    let destination = try self.array_element_address(array_expr, length, size);
+    let value_info = try self.value_of(module, value);
+    if try self.write_store_value(module, destination, 0, value.type_name, value_info) |failed| {
+        return move failed;
+    }
+    try self.line2("                (i64.store %s %s)", Arg::Str(length_address), Arg::Str(needed));
+    return null;
+}
+
+/// Appends one byte slice to an Array of bytes, the Go
+/// `writeArrayAppendBytes`: into the reserved tail when the run fits.
 fn (self: &var Emitter) write_array_append_bytes(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -374,44 +412,64 @@ fn (self: &var Emitter) write_array_append_bytes(
         Arg::Str(length),
         Arg::Str(byte_length)
     );
-    let ok = try self.array_expr3(
+    let reserve = try self.array_expr3(
         "(call $__array_reserve %s %s %s (i32.const 1))",
         Arg::Str(allocator.expr),
         Arg::Str(array.expr),
         Arg::Str(needed)
     );
+    let capacity_address = try self.array_field_address(array.expr, array_capacity_offset());
+    let capacity = try self.array_expr1("(i64.load %s)", Arg::Str(capacity_address));
+    try self.line2("            (if (i64.le_u %s %s)", Arg::Str(needed), Arg::Str(capacity));
+    try self.line("              (then");
+    let ok = try self.names.intern("(i32.const 1)");
+    if try self.write_array_error_slot(module, node.result, ok) |failed| {
+        return move failed;
+    }
+    try self.write_array_append_run(array.expr, bytes.expr, length, needed, byte_length_32);
+    try self.line("              )");
+    try self.line("              (else");
     let slot_outcome = try self.write_array_error_result(
         module,
         node.result,
-        ok,
+        reserve,
         "std::mem::Error",
         "OutOfMemory"
     );
-    var slot = ir::empty_name();
+    var grown = ir::empty_name();
     match slot_outcome {
         Error(failed) => return move failed,
         Name(found) => {
-            slot = found;
+            grown = found;
         },
     }
-    try self.line1(
-        "            (if (i32.wrap_i64 (i64.load %s))",
-        Arg::Str(slot)
-    );
+    try self.line1("            (if %s", Arg::Str(grown));
     try self.line("              (then");
-    let destination = try self.array_element_address(array.expr, length, 1);
+    try self.write_array_append_run(array.expr, bytes.expr, length, needed, byte_length_32);
+    try self.line("              ))");
+    try self.line("              )");
+    try self.line("            )");
+    return null;
+}
+
+/// Copies the run to the tail and counts it, the `write` closure of the Go
+/// `writeArrayAppendBytes`.
+fn (self: &var Emitter) write_array_append_run(
+    array_expr: ir::Name,
+    bytes_expr: ir::Name,
+    length: ir::Name,
+    needed: ir::Name,
+    byte_length_32: ir::Name
+) -> !void {
+    let length_address = try self.array_field_address(array_expr, array_len_offset());
+    let destination = try self.array_element_address(array_expr, length, 1);
     try self.line3(
         "                (memory.copy %s (i32.load %s) %s)",
         Arg::Str(destination),
-        Arg::Str(bytes.expr),
+        Arg::Str(bytes_expr),
         Arg::Str(byte_length_32)
     );
-    try self.line2(
-        "                (i64.store %s %s)))",
-        Arg::Str(length_address),
-        Arg::Str(needed)
-    );
-    return null;
+    return self.line2("                (i64.store %s %s)", Arg::Str(length_address), Arg::Str(needed));
 }
 
 fn (self: &var Emitter) write_array_reserve(
@@ -812,16 +870,16 @@ fn (self: &var Emitter) write_array_set(
         "std::array::Error",
         "OutOfBounds"
     );
-    var slot = ir::empty_name();
+    var in_bounds = ir::empty_name();
     match slot_outcome {
         Error(failed) => return move failed,
         Name(found) => {
-            slot = found;
+            in_bounds = found;
         },
     }
     try self.line1(
-        "            (if (i32.wrap_i64 (i64.load %s))",
-        Arg::Str(slot)
+        "            (if %s",
+        Arg::Str(in_bounds)
     );
     try self.line("              (then");
     let destination = try self.array_element_address(array.expr, index.expr, layout.size);
@@ -864,12 +922,39 @@ fn (self: &var Emitter) write_array_swap(
     let array = try self.value_of(module, node.args.get_or_panic(0));
     let left = try self.value_of(module, node.args.get_or_panic(1));
     let right = try self.value_of(module, node.args.get_or_panic(2));
+    let elem_bytes = elem.as_bytes();
+    let module_elem = module.names.lookup(elem_bytes) orelse ir::empty_name();
+    if ir::is_empty(module_elem) or try self.is_memory_type(module, module_elem) or
+        !self.is_plain_address(array.expr) {
+        let ok = try self.array_expr4(
+            "(call $__array_swap %s %s %s (i32.const %d))",
+            Arg::Str(array.expr),
+            Arg::Str(left.expr),
+            Arg::Str(right.expr),
+            Arg::Int(layout.size)
+        );
+        let outcome = try self.write_array_error_result(
+            module,
+            node.result,
+            ok,
+            "std::array::Error",
+            "OutOfBounds"
+        );
+        match outcome {
+            Error(failed) => return move failed,
+            Name(_) => return null,
+        }
+    }
+    // A scalar element is moved as the one word it is, through the swap
+    // local its type declares, instead of byte by byte in a helper.
+    let length_address = try self.array_field_address(array.expr, array_len_offset());
+    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
     let ok = try self.array_expr4(
-        "(call $__array_swap %s %s %s (i32.const %d))",
-        Arg::Str(array.expr),
+        "(i32.and (i64.lt_u %s %s) (i64.lt_u %s %s))",
         Arg::Str(left.expr),
+        Arg::Str(length),
         Arg::Str(right.expr),
-        Arg::Int(layout.size)
+        Arg::Str(length)
     );
     let outcome = try self.write_array_error_result(
         module,
@@ -878,10 +963,91 @@ fn (self: &var Emitter) write_array_swap(
         "std::array::Error",
         "OutOfBounds"
     );
+    var in_bounds = ir::empty_name();
     match outcome {
         Error(failed) => return move failed,
-        Name(_) => return null,
+        Name(found) => {
+            in_bounds = found;
+        },
     }
+    let left_address = try self.array_element_address(array.expr, left.expr, layout.size);
+    let right_address = try self.array_element_address(array.expr, right.expr, layout.size);
+    let temp = try self.swap_local(wasm_type(module, module_elem));
+    if wasm_load_op(module, module_elem) |load_op| {
+        if wasm_store_op(module, module_elem) |store_op| {
+            let load = try self.names.intern(load_op);
+            let store = try self.names.intern(store_op);
+            try self.line1("            (if %s", Arg::Str(in_bounds));
+            try self.line("              (then");
+            try self.line3("            (local.set %s (%s %s))", Arg::Str(temp), Arg::Str(load), Arg::Str(left_address));
+            try self.line4(
+                "            (%s %s (%s %s))",
+                Arg::Str(store),
+                Arg::Str(left_address),
+                Arg::Str(load),
+                Arg::Str(right_address)
+            );
+            try self.line3("            (%s %s (local.get %s))", Arg::Str(store), Arg::Str(right_address), Arg::Str(temp));
+            try self.line("              ))");
+            return null;
+        }
+    }
+    return try self.fail0("wasm error: array.swap element cannot be moved as one word");
+}
+
+/// Names the local an inline swap of one wasm value type holds the left
+/// element in, the Go `swapLocal`.
+fn (self: &var Emitter) swap_local(wasm_value_type: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "$__kizu_swap_");
+    errdefer out.deinit(self.allocator);
+    try out.append_bytes(self.allocator, wasm_value_type);
+    return self.names.intern_owned(move out);
+}
+
+/// Declares, in first-use order, the swap locals a function's inline swaps
+/// hold an element in, the Go `swapLocalTypes` and its declaration loop.
+fn (self: &var Emitter) write_swap_locals(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var declared = array::new<ir::Name>(self.allocator);
+    defer declared.deinit(self.allocator);
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != ir::Op::ArraySwap or instr_node.args.len() != 3 {
+                continue;
+            }
+            let container = instr_node.args.get_or_panic(0);
+            let array_text = ir::name_text(&module.names, container.type_name);
+            let array_bytes = array_text.as_bytes();
+            var module_elem = ir::empty_name();
+            if array_element_wasm_type(array_bytes) |elem| {
+                module_elem = module.names.lookup(elem) orelse ir::empty_name();
+            }
+            if ir::is_empty(module_elem) or try self.is_memory_type(module, module_elem) {
+                continue;
+            }
+            let value_type = wasm_type(module, module_elem);
+            let value_type_name = try self.names.intern(value_type);
+            var seen = false;
+            var index = 0;
+            while declared.get(index) |existing| {
+                index = index + 1;
+                if ir::same_name(existing, value_type_name) {
+                    seen = true;
+                }
+            }
+            if !seen {
+                try declared.append(self.allocator, value_type_name);
+                let temp = try self.swap_local(value_type);
+                try self.line2("    (local %s %s)", Arg::Str(temp), Arg::Str(value_type_name));
+            }
+        }
+    }
+    return;
 }
 
 fn (self: &var Emitter) write_array_truncate(
@@ -919,16 +1085,16 @@ fn (self: &var Emitter) write_array_truncate(
         "std::array::Error",
         "OutOfBounds"
     );
-    var slot = ir::empty_name();
+    var in_bounds = ir::empty_name();
     match slot_outcome {
         Error(failed) => return move failed,
         Name(found) => {
-            slot = found;
+            in_bounds = found;
         },
     }
     try self.line1(
-        "            (if (i32.wrap_i64 (i64.load %s))",
-        Arg::Str(slot)
+        "            (if %s",
+        Arg::Str(in_bounds)
     );
     try self.line2(
         "              (then (i64.store %s %s)))",
@@ -1084,6 +1250,20 @@ fn (self: &var Emitter) write_array_error_result(
             offset = found;
         },
     }
+    if self.is_flag_result(result.name) {
+        let retained = ir::name_text(&module.names, result.name);
+        let bytes = retained.as_bytes();
+        let symbol = try self.symbol_name_of(bytes);
+        try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(ok));
+        try self.values.insert(self.allocator, bytes, ValueInfo {
+            expr: ir::empty_name(),
+            generation: self.generation,
+            flag: symbol,
+            code: code
+        });
+        let local = try self.local_expr(bytes);
+        return WasmNameResult::Name(local);
+    }
     let slot = try self.result_slot(module, result) orelse return WasmNameResult::Error(
         try self.fail0("wasm error: no frame slot for array failure result")
     );
@@ -1099,7 +1279,107 @@ fn (self: &var Emitter) write_array_error_result(
         Arg::Int(code)
     );
     try self.set_value(module, result, slot);
-    return WasmNameResult::Name(slot);
+    let reread = try self.array_expr1("(i32.wrap_i64 (i64.load %s))", Arg::Str(slot));
+    return WasmNameResult::Name(reread);
+}
+
+/// Reports whether op writes its E!void result through
+/// write_array_error_result, whose failure code is a constant of the
+/// operation, the Go `writesFlagResult`.
+fn writes_flag_result(op: ir::Op) -> bool {
+    return match op {
+        ArrayAppend => true,
+        ArrayAppendBytes => true,
+        ArrayReserve => true,
+        ArraySet => true,
+        ArraySwap => true,
+        ArrayTruncate => true,
+        MapInsert => true,
+        _ => false,
+    };
+}
+
+/// Reports whether a result is held as a success local in this function.
+fn (self: &Emitter) is_flag_result(name: ir::Name) -> bool {
+    if self.flag_results.get(ir::name_id(name)) |filed| {
+        return filed == self.generation;
+    }
+    return false;
+}
+
+/// Names the results of a function a flag local can hold, the Go
+/// `flagResultsOf`: an operation that writes its E!void result through
+/// write_array_error_result, read only by the instructions that ask for its
+/// tag or its code. Such a result is never handed on, so nothing needs it at
+/// an address, and a success that is tested where it was produced does not go
+/// through memory to be tested.
+fn (self: &var Emitter) flag_results_of(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var found = false;
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if writes_flag_result(instr_node.op) and module.names.ends_with(instr_node.result.type_name, "!void") {
+                try self.flag_results.insert(self.allocator, ir::name_id(instr_node.result.name), self.generation);
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return;
+    }
+    block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            var index = 0;
+            while instr_node.args.get(index) |arg| {
+                let reads_tag = index == 0 and (instr_node.op == ir::Op::ErrorTry or
+                    instr_node.op == ir::Op::ErrorHas or instr_node.op == ir::Op::ErrorCode);
+                index = index + 1;
+                if !reads_tag {
+                    try self.drop_flag_result(arg.name);
+                }
+            }
+            index = 0;
+            while instr_node.incoming.get(index) |incoming| {
+                index = index + 1;
+                try self.drop_flag_result(incoming.value.name);
+            }
+            index = 0;
+            while instr_node.fields.get(index) |field| {
+                index = index + 1;
+                try self.drop_flag_result(field.value.name);
+            }
+            index = 0;
+            while instr_node.cleanups.get(index) |cleanup| {
+                index = index + 1;
+                try self.drop_flag_result(cleanup.arg.name);
+                if !ir::is_empty(cleanup.allocator.name) {
+                    try self.drop_flag_result(cleanup.allocator.name);
+                }
+            }
+        }
+        try self.drop_flag_result(block_node.terminator.value.name);
+        try self.drop_flag_result(block_node.terminator.cond.name);
+    }
+    return;
+}
+
+/// Takes a result read as a whole back out of the flag set.
+fn (self: &var Emitter) drop_flag_result(name: ir::Name) -> !void {
+    if self.is_flag_result(name) {
+        try self.flag_results.insert(self.allocator, ir::name_id(name), -1);
+    }
+    return;
 }
 
 /// Copies one element into an already-addressed optional payload.
@@ -1129,7 +1409,7 @@ fn (self: &var Emitter) write_array_copy_value(
     if wasm_load_op(module, module_elem) |op| {
         let op_name = try self.names.intern(op);
         let loaded = try self.array_expr2("(%s %s)", Arg::Str(op_name), Arg::Str(source));
-        let info = ValueInfo { expr: loaded, generation: self.generation };
+        let info = ValueInfo { expr: loaded, generation: self.generation, flag: ir::empty_name(), code: 0 };
         return self.write_store_value(module, destination, 0, module_elem, info);
     }
     return try self.fail(

@@ -1,5 +1,6 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import std::array;
 import std::fmt;
 import std::map;
 import std::mem;
@@ -304,8 +305,150 @@ fn (self: &var Emitter) write_ref_load(
     if !mem::equal_bytes(want, result_bytes) {
         return try self.fail0("wasm error: borrow read has mismatched type");
     }
+    if self.cleanup_loads.get(ir::name_id(node.result.name)) |filed| {
+        if filed == self.generation {
+            return self.hold_pending_load(module, node);
+        }
+    }
     let info = try self.value_of(module, reference);
     return self.write_load_value(module, node.result, info.expr, 0);
+}
+
+/// Holds one ref.load back for the cleanups of the error.try that follows it.
+fn (self: &var Emitter) hold_pending_load(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let reference = node.args.get(0) orelse ir::empty_value();
+    try self.pending_loads.insert(self.allocator, ir::name_id(node.result.name), PendingLoad {
+        result: node.result,
+        reference: reference,
+        generation: self.generation
+    });
+    return null;
+}
+
+/// Names the reads a function makes only for the cleanups of the error.try
+/// that follows them, the Go `cleanupOnlyLoads`. Lowering reads each owner a
+/// cleanup releases right before the try, and the read is wanted only if the
+/// try fails; nothing between the reads and the try writes memory, so the
+/// read is made inside the failing arm and a try that succeeds copies nothing.
+fn (self: &var Emitter) cleanup_only_loads(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var uses = map::new<i64, i64>(self.allocator);
+    defer uses.deinit(self.allocator);
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            var index = 0;
+            while instr_node.args.get(index) |arg| {
+                index = index + 1;
+                try count_use(self.allocator, &var uses, arg.name);
+            }
+            index = 0;
+            while instr_node.incoming.get(index) |incoming| {
+                index = index + 1;
+                try count_use(self.allocator, &var uses, incoming.value.name);
+            }
+            index = 0;
+            while instr_node.fields.get(index) |field| {
+                index = index + 1;
+                try count_use(self.allocator, &var uses, field.value.name);
+            }
+            index = 0;
+            while instr_node.cleanups.get(index) |cleanup| {
+                index = index + 1;
+                try count_use(self.allocator, &var uses, cleanup.arg.name);
+                if !ir::is_empty(cleanup.allocator.name) {
+                    try count_use(self.allocator, &var uses, cleanup.allocator.name);
+                }
+            }
+        }
+        try count_use(self.allocator, &var uses, block_node.terminator.value.name);
+        try count_use(self.allocator, &var uses, block_node.terminator.cond.name);
+    }
+    block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            let position = instr_index;
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != ir::Op::ErrorTry {
+                continue;
+            }
+            var released = map::new<i64, i64>(self.allocator);
+            defer released.deinit(self.allocator);
+            var index = 0;
+            while instr_node.cleanups.get(index) |cleanup| {
+                index = index + 1;
+                try count_use(self.allocator, &var released, cleanup.arg.name);
+                if !ir::is_empty(cleanup.allocator.name) {
+                    try count_use(self.allocator, &var released, cleanup.allocator.name);
+                }
+            }
+            var back = position - 1;
+            while back >= 0 {
+                let load = block_node.instrs.get_or_panic(back);
+                let load_node = module.instrs.at(load.node);
+                if load_node.op != ir::Op::RefLoad {
+                    break;
+                }
+                let id = ir::name_id(load_node.result.name);
+                let released_count = released.get(id) orelse 0;
+                let use_count = uses.get(id) orelse 0;
+                if released_count > 0 and released_count == use_count {
+                    try self.cleanup_loads.insert(self.allocator, id, self.generation);
+                }
+                back = back - 1;
+            }
+        }
+    }
+    return;
+}
+
+/// Counts one read of a name, the Go `uses[value.Name]++`.
+fn count_use(allocator: Allocator, uses: &var map::Map<i64, i64>, name: ir::Name) -> !void {
+    let id = ir::name_id(name);
+    let count = uses.get(id) orelse 0;
+    return uses.insert(allocator, id, count + 1);
+}
+
+/// Makes the reads cleanup_only_loads held back for the cleanups of one
+/// failing error.try, the Go `writePendingLoads`.
+fn (self: &var Emitter) write_pending_loads(module: &ir::Module, cleanups: &array::Array<ir::Cleanup>) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while cleanups.get(index) |cleanup| {
+        index = index + 1;
+        if try self.write_pending_load(module, cleanup.arg) |failed| {
+            return move failed;
+        }
+        if !ir::is_empty(cleanup.allocator.name) {
+            if try self.write_pending_load(module, cleanup.allocator) |failed| {
+                return move failed;
+            }
+        }
+    }
+    return null;
+}
+
+/// Makes one held-back read, if value names one still pending.
+fn (self: &var Emitter) write_pending_load(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
+    let id = ir::name_id(value.name);
+    let pending = self.pending_loads.get(id) orelse return null;
+    if pending.generation != self.generation {
+        return null;
+    }
+    try self.pending_loads.insert(self.allocator, id, PendingLoad {
+        result: pending.result,
+        reference: pending.reference,
+        generation: -1
+    });
+    let info = try self.value_of(module, pending.reference);
+    return self.write_load_value(module, pending.result, info.expr, 0);
 }
 
 fn (self: &var Emitter) write_union_instr(

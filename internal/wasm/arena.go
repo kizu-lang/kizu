@@ -139,8 +139,7 @@ func (e *emitter) writeArenaNew(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (memory.fill %s (i32.const 0) (i32.const %d))\n",
-		slot, arenaHeaderSize)
+	e.writeMemoryZero(slot, arenaHeaderSize)
 	fmt.Fprintf(&e.out, "            (i64.store %s (call $__arena_origin))\n",
 		addressAt(slot, arenaOriginOffset))
 	e.values[instr.Result.Name] = valueInfo{expr: slot}

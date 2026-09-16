@@ -909,7 +909,6 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.entryParamLoads = nil
 	e.precomputeNicheAliases(fn)
 	e.wroteParamLoads = false
-	e.precomputeBlockExitLabels(fn)
 	returnType := e.llvmType(fn.Return)
 	_, returnsErrorUnion := e.errorUnionSuccessType(fn.Return)
 	e.mainReturnsInt = fn.Name == "main" && (fn.Return == "void" || returnsErrorUnion)
@@ -941,7 +940,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	// Bytes, not String: String copies the whole buffer, and the buffer holds
 	// the module written so far, so taking one function body that way costs
 	// the module size once per function.
-	body := string(e.out.Bytes()[bodyStart:])
+	body := e.resolvePhiPredecessors(string(e.out.Bytes()[bodyStart:]))
 	hoisted, err := hoistAllocasToEntry(body)
 	if err != nil {
 		return fmt.Errorf("llvm error: function `%s`: %w", fn.Name, err)
@@ -1407,7 +1406,7 @@ func (e *emitter) writeSliceStore(instr *ir.Instr) error {
 	elemPtrName := base + ".elem.ptr"
 	elemType := llvmPrimitiveType(elem)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
-	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
 		elemPtrName, elemType, ptrName, index.operand)
 	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", elemType, value.operand, elemPtrName)
 	return nil
@@ -2376,7 +2375,7 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	elemPtrName := resultName + ".elem.ptr"
 	elemType := llvmPrimitiveType(elem)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
-	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
 		elemPtrName, elemType, ptrName, index.operand)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, elemType, elemPtrName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
@@ -2693,9 +2692,10 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 	for _, incoming := range instr.Incoming {
 		value := e.value(incoming.Value)
 		parts = append(parts, fmt.Sprintf(
-			"[ %s, %%%s ]",
+			"[ %s, %s%s ]",
 			value.operand,
-			e.incomingBlockLabel(incoming.Block),
+			phiPredecessorMark,
+			incoming.Block,
 		))
 	}
 	name := localName(instr.Result.Name)
@@ -2705,54 +2705,38 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 	return nil
 }
 
-// incomingBlockLabel returns the concrete LLVM label that reaches a successor.
-func (e *emitter) incomingBlockLabel(block string) string {
-	if label, ok := e.blockExitLabel[block]; ok {
-		return label
-	}
-	return block
-}
+// phiPredecessorMark is what a phi names an incoming block by until the
+// function's body is written. A block's instructions can expand into helper
+// blocks, so the label that branches to a successor is the last one its
+// expansion opened; a loop header's phi is written before the latch block
+// that feeds it, so that label is known only once the body is.
+const phiPredecessorMark = "%kizu.phi.from."
 
-// precomputeBlockExitLabels records helper labels before phi nodes are emitted.
-func (e *emitter) precomputeBlockExitLabels(fn *ir.Function) {
-	for _, block := range fn.Blocks {
-		if label, ok := e.computeBlockExitLabel(block); ok {
-			e.blockExitLabel[block.Name] = label
+// resolvePhiPredecessors replaces each phiPredecessorMark in a written body
+// with the label its block ended in.
+func (e *emitter) resolvePhiPredecessors(body string) string {
+	if !strings.Contains(body, phiPredecessorMark) {
+		return body
+	}
+	var out strings.Builder
+	out.Grow(len(body))
+	rest := body
+	for {
+		index := strings.Index(rest, phiPredecessorMark)
+		if index < 0 {
+			out.WriteString(rest)
+			return out.String()
 		}
-	}
-}
-
-// computeBlockExitLabel returns the final helper label that continues one IR block.
-func (e *emitter) computeBlockExitLabel(block *ir.Block) (string, bool) {
-	label := ""
-	for _, instr := range block.Instrs {
-		if next, ok := continuationLabel(instr); ok {
-			label = next
+		out.WriteString(rest[:index])
+		rest = rest[index+len(phiPredecessorMark):]
+		end := strings.Index(rest, " ]")
+		block := rest[:end]
+		label := block
+		if exit, ok := e.blockExitLabel[block]; ok {
+			label = exit
 		}
-	}
-	if label == "" {
-		return "", false
-	}
-	return label, true
-}
-
-// continuationLabel reports helper labels introduced by instruction expansion.
-func continuationLabel(instr *ir.Instr) (string, bool) {
-	switch instr.Op {
-	case "error.try":
-		return helperLabel(instr.Result.Name, "try.ok"), true
-	case "cond_fail":
-		return helperLabel(instr.Args[0].Name, "pass"), true
-	case "array.pop", "array.get", "map.get", "map.remove":
-		return helperLabel(instr.Result.Name, "array.join"), true
-	case "array.get_or_panic", "map.take_value_at", "arena.at", "arena.pop_or_panic":
-		return helperLabel(localName(instr.Result.Name)+".ptr", "ok"), true
-	case "arena.add":
-		return helperLabel(localName(instr.Result.Name)+".bad", "ok"), true
-	case "test.expect_equal":
-		return helperLabel(localName(instr.Result.Name)+".ok", "ok"), true
-	default:
-		return "", false
+		out.WriteString("%" + label)
+		rest = rest[end:]
 	}
 }
 

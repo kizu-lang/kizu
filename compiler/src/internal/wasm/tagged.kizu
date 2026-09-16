@@ -1,6 +1,7 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
+import std::fmt;
 import std::mem;
 import std::string;
 
@@ -415,6 +416,12 @@ fn (self: &var Emitter) write_error_code(
             Arg::Str(got)
         );
     }
+    let flagged = try self.value_of(module, source);
+    if !ir::is_empty(flagged.flag) {
+        let code = try self.error_code_expr(flagged.code);
+        try self.set_value(module, node.result, code);
+        return null;
+    }
     let success = parts.success.as_bytes();
     let offset_outcome = try self.tagged_payload_offset(module, success, true);
     match offset_outcome {
@@ -424,6 +431,15 @@ fn (self: &var Emitter) write_error_code(
             return self.write_load_value(module, node.result, info.expr, offset);
         },
     }
+}
+
+/// Names the `(i64.const code)` a flag result's failure code reads as.
+fn (self: &var Emitter) error_code_expr(code: i64) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "(i64.const ");
+    errdefer out.deinit(self.allocator);
+    try fmt::append_i64(self.allocator, &var out, code);
+    try out.append_bytes(self.allocator, ")");
+    return self.names.intern_owned(move out);
 }
 
 /// Tests the i64 tag shared by optionals and error unions.
@@ -458,6 +474,12 @@ fn (self: &var Emitter) write_tagged_has(
     let bytes = retained.as_bytes();
     let symbol = try self.symbol_name_of(bytes);
     let info = try self.value_of(module, source);
+    if !ir::is_empty(info.flag) {
+        try self.line2("            (local.set %s (local.get %s))", Arg::Str(symbol), Arg::Str(info.flag));
+        let flag_local = try self.local_expr(bytes);
+        try self.set_value(module, node.result, flag_local);
+        return null;
+    }
     try self.line2(
         "            (local.set %s (i64.ne (i64.load %s) (i64.const 0)))",
         Arg::Str(symbol),
@@ -536,11 +558,21 @@ fn (self: &var Emitter) write_error_try(
                 Error(failed) => return move failed,
                 Offset(target_offset) => {
                     let info = try self.value_of(module, source);
-                    try self.line1(
-                        "            (if (i64.eq (i64.load %s) (i64.const 0))",
-                        Arg::Str(info.expr)
-                    );
+                    let result_expr = try self.names.intern("(local.get $__kizu_result)");
+                    let target_address = try self.address_at(result_expr, target_offset);
+                    let source_address = try self.address_at(info.expr, source_offset);
+                    if ir::is_empty(info.flag) {
+                        try self.line1(
+                            "            (if (i64.eq (i64.load %s) (i64.const 0))",
+                            Arg::Str(info.expr)
+                        );
+                    } else {
+                        try self.line1("            (if (i32.eqz (local.get %s))", Arg::Str(info.flag));
+                    }
                     try self.line("              (then");
+                    if try self.write_pending_loads(module, &node.cleanups) |failed| {
+                        return move failed;
+                    }
                     var cleanup_index = 0;
                     while node.cleanups.get(cleanup_index) |cleanup| {
                         cleanup_index = cleanup_index + 1;
@@ -551,15 +583,20 @@ fn (self: &var Emitter) write_error_try(
                     try self.line(
                         "                (i64.store (local.get $__kizu_result) (i64.const 0))"
                     );
-                    let result_expr = try self.names.intern("(local.get $__kizu_result)");
-                    let target_address = try self.address_at(result_expr, target_offset);
-                    let source_address = try self.address_at(info.expr, source_offset);
-                    try self.line2(
-                        "                (i64.store %s (i64.load %s))",
-                        Arg::Str(target_address),
-                        Arg::Str(source_address)
-                    );
-                    try self.restore_frame(module);
+                    if ir::is_empty(info.flag) {
+                        try self.line2(
+                            "                (i64.store %s (i64.load %s))",
+                            Arg::Str(target_address),
+                            Arg::Str(source_address)
+                        );
+                    } else {
+                        try self.line2(
+                            "                (i64.store %s (i64.const %d))",
+                            Arg::Str(target_address),
+                            Arg::Int(info.code)
+                        );
+                    }
+                    try self.restore_frame();
                     try self.line("                (br $exit)))");
                     if mem::equal_bytes(success, "void") {
                         return null;
@@ -684,14 +721,7 @@ fn (self: &var Emitter) write_browser_start_for(
                     return move failed;
                 }
             }
-            if self.uses_allocator_runtime(module) {
-                try self.line1(
-                    "    (call $__stack_free (local.get $__kizu_main_result) (i32.const %d))",
-                    Arg::Int(layout.size)
-                );
-            } else {
-                try self.line("    (global.set $__stack_pointer (local.get $__kizu_main_result))");
-            }
+            try self.line("    (global.set $__stack_pointer (local.get $__kizu_main_result))");
             try self.line("    (local.get $__kizu_status)");
             try self.line("  )");
             try self.line(")");
@@ -739,14 +769,7 @@ fn (self: &var Emitter) write_start_for(
                     return move failed;
                 }
             }
-            if self.uses_allocator_runtime(module) {
-                try self.line1(
-                    "    (call $__stack_free (local.get $__kizu_main_result) (i32.const %d))",
-                    Arg::Int(layout.size)
-                );
-            } else {
-                try self.line("    (global.set $__stack_pointer (local.get $__kizu_main_result))");
-            }
+            try self.line("    (global.set $__stack_pointer (local.get $__kizu_main_result))");
             try self.line("  )");
             try self.line(")");
             return null;

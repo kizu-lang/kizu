@@ -8,10 +8,37 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
-// writeBlock writes a dispatch arm for one IR block.
-func (e *emitter) writeBlock(block *ir.Block, index map[string]dispatchBlock, id int) error {
-	fmt.Fprintf(&e.out, "        (if (i32.eq (local.get $pc) (i32.const %d))\n", id)
-	e.out.WriteString("          (then\n")
+// writeTree writes one block and everything it dominates, the Go
+// spelling of Ramsey's doTree: a loop header's code sits inside a `loop`,
+// and the merge nodes it dominates are given their `block`s by
+// writeNodeWithin.
+func (e *emitter) writeTree(s *structure, name string) error {
+	if s.loopHeaders[name] {
+		fmt.Fprintf(&e.out, "        (loop %s\n", loopLabel(name))
+	}
+	if err := e.writeNodeWithin(s, name, s.mergeChildren[name]); err != nil {
+		return err
+	}
+	if s.loopHeaders[name] {
+		e.out.WriteString("        )\n")
+	}
+	return nil
+}
+
+// writeNodeWithin writes a block's code under the `block`s of the merge
+// nodes it dominates, latest first so that the earliest is innermost: each
+// `block` ends exactly where the code of its merge node begins, which is
+// what a branch to it reaches.
+func (e *emitter) writeNodeWithin(s *structure, name string, merges []string) error {
+	if len(merges) > 0 {
+		fmt.Fprintf(&e.out, "        (block %s\n", blockLabel(merges[0]))
+		if err := e.writeNodeWithin(s, name, merges[1:]); err != nil {
+			return err
+		}
+		e.out.WriteString("        )\n")
+		return e.writeTree(s, merges[0])
+	}
+	block := s.blocks[name]
 	for _, instr := range block.Instrs {
 		if instr.Op == "phi" {
 			continue
@@ -20,12 +47,7 @@ func (e *emitter) writeBlock(block *ir.Block, index map[string]dispatchBlock, id
 			return err
 		}
 	}
-	if err := e.writeTerminator(block, index); err != nil {
-		return err
-	}
-	e.out.WriteString("          )\n")
-	e.out.WriteString("        )\n")
-	return nil
+	return e.writeTerminator(s, block)
 }
 
 // writeInstr writes one WebAssembly instruction sequence.
@@ -543,15 +565,15 @@ func (e *emitter) writePrintLine(instr *ir.Instr) error {
 	return nil
 }
 
-// writeTerminator writes control transfer for one dispatch arm.
-func (e *emitter) writeTerminator(block *ir.Block, index map[string]dispatchBlock) error {
+// writeTerminator writes the control transfer at the end of a block.
+func (e *emitter) writeTerminator(s *structure, block *ir.Block) error {
 	switch block.Terminator.Op {
 	case "return":
 		return e.writeReturn(block.Terminator.Value)
 	case "jump":
-		e.writeJump(block, block.Terminator.Target, index)
+		return e.writeBranchTo(s, block.Name, block.Terminator.Target)
 	case "branch":
-		e.writeBranch(block, index)
+		return e.writeBranch(s, block)
 	case "unreachable":
 		e.out.WriteString("            (unreachable)\n")
 	default:
@@ -585,41 +607,50 @@ func (e *emitter) writeReturn(value ir.Value) error {
 // restoreFrame releases this invocation's fixed frame before any return.
 func (e *emitter) restoreFrame() {
 	if e.frame != nil && e.frame.size > 0 {
-		if e.usesAllocatorRuntime() {
-			fmt.Fprintf(&e.out,
-				"            (call $__stack_free (local.get $__kizu_frame) (i32.const %d))\n",
-				e.frame.size)
-		} else {
-			e.out.WriteString("            (global.set $__stack_pointer (local.get $__kizu_frame))\n")
-		}
+		e.out.WriteString("            (global.set $__stack_pointer (local.get $__kizu_frame))\n")
 	}
 }
 
-// writeJump writes an unconditional dispatch jump.
-func (e *emitter) writeJump(block *ir.Block, target string, index map[string]dispatchBlock) {
-	e.writePhiCopies(block.Name, target, index)
-	fmt.Fprintf(&e.out, "            (local.set $pc (i32.const %d))\n", index[target].id)
-	e.out.WriteString("            (br $dispatch)\n")
+// writeBranchTo writes the edge from `source` to `target`: the phi copies
+// the edge carries, then a branch to the loop the target heads when the
+// edge goes back, a branch to the target's block when it is a merge node,
+// and otherwise the target's own code, since this edge is the only way in.
+func (e *emitter) writeBranchTo(s *structure, source string, target string) error {
+	e.writePhiCopies(source, target, s)
+	if s.loopHeaders[target] && s.rpo[target] <= s.rpo[source] {
+		fmt.Fprintf(&e.out, "            (br %s)\n", loopLabel(target))
+		return nil
+	}
+	if s.merges[target] {
+		fmt.Fprintf(&e.out, "            (br %s)\n", blockLabel(target))
+		return nil
+	}
+	return e.writeTree(s, target)
 }
 
-// writeBranch writes a conditional dispatch jump.
-func (e *emitter) writeBranch(block *ir.Block, index map[string]dispatchBlock) {
+// writeBranch writes a conditional transfer as an `if` whose arms each
+// take their edge.
+func (e *emitter) writeBranch(s *structure, block *ir.Block) error {
 	term := block.Terminator
 	e.out.WriteString("            (if " + e.value(term.Cond).expr + "\n")
 	e.out.WriteString("              (then\n")
-	e.writePhiCopies(block.Name, term.Target, index)
-	fmt.Fprintf(&e.out, "                (local.set $pc (i32.const %d))\n", index[term.Target].id)
-	e.out.WriteString("                (br $dispatch))\n")
+	if err := e.writeBranchTo(s, block.Name, term.Target); err != nil {
+		return err
+	}
+	e.out.WriteString("              )\n")
 	e.out.WriteString("              (else\n")
-	e.writePhiCopies(block.Name, term.Else, index)
-	fmt.Fprintf(&e.out, "                (local.set $pc (i32.const %d))\n", index[term.Else].id)
-	e.out.WriteString("                (br $dispatch)))\n")
+	if err := e.writeBranchTo(s, block.Name, term.Else); err != nil {
+		return err
+	}
+	e.out.WriteString("              )\n")
+	e.out.WriteString("            )\n")
+	return nil
 }
 
 // writePhiCopies assigns target phi locals for an edge. The edge stays inside
-// one function, so the target is read out of that function's dispatch map.
-func (e *emitter) writePhiCopies(source string, target string, index map[string]dispatchBlock) {
-	block := index[target].block
+// one function, so the target is read out of that function's structure.
+func (e *emitter) writePhiCopies(source string, target string, s *structure) {
+	block := s.blocks[target]
 	if block == nil {
 		return
 	}

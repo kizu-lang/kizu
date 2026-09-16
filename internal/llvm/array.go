@@ -48,12 +48,11 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	}
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
 		arrayEmptyGlobal, arrayHeaderType)
-	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr, ptr, i64)\n")
+	e.out.WriteString("declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)\n")
 	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
 	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_pop(ptr, i64)\n")
-	e.out.WriteString("declare i1 @kizu_array_swap(ptr, i64, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_truncate(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_array_clear(ptr)\n")
 	e.out.WriteString("declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)\n")
@@ -70,10 +69,11 @@ func (e *emitter) arrayHandle(operand string) string {
 	return handleName
 }
 
-// arrayFieldAddr returns the address of one header field.
+// arrayFieldAddr returns the address of one header field. The handle always
+// points at a header (arrayHandle), so the address is inbounds.
 func (e *emitter) arrayFieldAddr(handle string, field int, name string) string {
 	addr := "%" + e.nextSyntheticValue(name)
-	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 0, i32 %d\n",
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 0, i32 %d\n",
 		addr, arrayHeaderType, handle, field)
 	return addr
 }
@@ -86,13 +86,16 @@ func (e *emitter) arrayLoadField(handle string, field int, name string, into str
 
 // arrayElementAddr returns the address of the element at index. The stride is
 // the element type, which is what array.new sized the elements by, and the
-// index is not checked here.
+// index is not checked here. Every caller has checked it, or selects the
+// address only when the check passes, so the address is marked inbounds: that
+// is what lets the optimizer treat an index walk as a pointer walk that does
+// not wrap.
 func (e *emitter) arrayElementAddr(handle string, elem string, index string) string {
 	dataAddr := e.arrayFieldAddr(handle, arrayFieldData, "array.data.addr")
 	data := "%" + e.nextSyntheticValue("array.data")
 	elemAddr := "%" + e.nextSyntheticValue("array.elem")
 	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", data, dataAddr)
-	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
 		elemAddr, e.llvmType(elem), data, index)
 	return elemAddr
 }
@@ -215,17 +218,43 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 		return fmt.Errorf(
 			"llvm error: array.swap expects Array<T>, i64, i64 -> std::array::Error!void")
 	}
-	array := e.value(instr.Args[0])
-	left := e.value(instr.Args[1])
-	right := e.value(instr.Args[2])
 	elem, err := e.instrElementType(instr)
 	if err != nil {
 		return err
 	}
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	left := e.value(instr.Args[1]).operand
+	right := e.value(instr.Args[2]).operand
 	okName := localName(instr.Result.Name) + ".ok"
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_swap(ptr %s, i64 %s, i64 %s, i64 %s)\n",
-		okName, array.operand, left.operand, right.operand,
-		e.elementSizeOperand(elem))
+	length := "%" + e.nextSyntheticValue("array.swap.len")
+	e.arrayLoadField(handle, arrayFieldLen, "array.swap.len.addr", length)
+	leftIn := "%" + e.nextSyntheticValue("array.swap.left_in")
+	rightIn := "%" + e.nextSyntheticValue("array.swap.right_in")
+	inRange := "%" + e.nextSyntheticValue("array.swap.in_range")
+	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", leftIn, left, length)
+	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", rightIn, right, length)
+	fmt.Fprintf(&e.out, "  %s = and i1 %s, %s\n", inRange, leftIn, rightIn)
+	swapLabel := helperLabel(okName, "array.swap.move")
+	skipLabel := helperLabel(okName, "array.swap.skip")
+	joinLabel := helperLabel(okName, "array.swap.join")
+	e.markCurrentBlockExit(joinLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", inRange, swapLabel, skipLabel)
+	fmt.Fprintf(&e.out, "%s:\n", swapLabel)
+	elemType := e.llvmType(elem)
+	leftAddr := e.arrayElementAddr(handle, elem, left)
+	rightAddr := e.arrayElementAddr(handle, elem, right)
+	leftValue := "%" + e.nextSyntheticValue("array.swap.left")
+	rightValue := "%" + e.nextSyntheticValue("array.swap.right")
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", leftValue, elemType, leftAddr)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", rightValue, elemType, rightAddr)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", elemType, rightValue, leftAddr)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", elemType, leftValue, rightAddr)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", skipLabel)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
+	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ false, %%%s ]\n",
+		okName, swapLabel, skipLabel)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_swap")
 }
 
@@ -261,10 +290,13 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	return e.writeArrayBoolResult(instr.Result, okName, "array_append")
 }
 
-// writeArrayAppendPaths writes into the reserved tail when there is one and
-// otherwise hands the append back to the runtime, which is what owns growing
-// the storage. The slow path is given the handle as it came, not the readable
-// stand-in, so a null handle still comes back as the failure it is.
+// writeArrayAppendPaths writes into the reserved tail, growing the storage
+// first when there is none. Growing is the runtime's: it is handed the data
+// pointer and capacity and hands back the new ones, never the header itself,
+// so the header stays a local the optimizer can keep in registers, and the
+// length the append ends at is one value computed before the paths part,
+// which is what lets a loop of appends be counted. A null handle still comes
+// back as the failure it is.
 //
 // It returns the length the append started from, the index the element lands
 // at. An array has no use for it; an arena hands it back as the handle that
@@ -282,32 +314,69 @@ func (e *emitter) writeArrayAppendPaths(
 	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append.len.addr")
 	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", length, lengthAddr)
 	e.arrayLoadField(handle, arrayFieldCapacity, "array.append.cap", capacity)
+	grown := "%" + e.nextSyntheticValue("array.append.grown")
+	fmt.Fprintf(&e.out, "  %s = add i64 %s, 1\n", grown, length)
 	fits := "%" + e.nextSyntheticValue("array.append.fits")
 	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, %s\n", fits, length, capacity)
 	fastLabel := helperLabel(okName, "array.append.fast")
 	slowLabel := helperLabel(okName, "array.append.slow")
+	growLabel := helperLabel(okName, "array.append.grow")
+	storeLabel := helperLabel(okName, "array.append.store")
 	joinLabel := helperLabel(okName, "array.append.join")
 	e.markCurrentBlockExit(joinLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", fits, fastLabel, slowLabel)
+	fmt.Fprintf(&e.out, "%s:\n", slowLabel)
+	isNull := "%" + e.nextSyntheticValue("array.append.handle.null")
+	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", isNull, handleOperand)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", isNull, joinLabel, growLabel)
+	fmt.Fprintf(&e.out, "%s:\n", growLabel)
+	e.writeArrayGrowth(instr, elem, handle, capacity, grown, fastLabel, storeLabel, joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", fastLabel)
 	elemAddr := e.arrayElementAddr(handle, elem, length)
 	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
 		e.llvmType(instr.Args[2].Type), e.value(instr.Args[2]).operand, elemAddr)
-	grown := "%" + e.nextSyntheticValue("array.append.grown")
-	fmt.Fprintf(&e.out, "  %s = add i64 %s, 1\n", grown, length)
 	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s\n", grown, lengthAddr)
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
-	fmt.Fprintf(&e.out, "%s:\n", slowLabel)
-	elemSlot := e.writeStackValue(localName(instr.Result.Name)+".elem", instr.Args[2])
-	slowOk := "%" + e.nextSyntheticValue("array.append.slow.ok")
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append(ptr %s, ptr %s, ptr %s, i64 %s)\n",
-		slowOk, e.value(instr.Args[1]).operand, handleOperand, elemSlot,
-		e.elementSizeOperand(elem))
-	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
-	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ %s, %%%s ]\n",
-		okName, fastLabel, slowOk, slowLabel)
+	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ false, %%%s ], [ false, %%%s ]\n",
+		okName, fastLabel, slowLabel, growLabel)
 	return length
+}
+
+// writeArrayGrowth asks the runtime for storage that holds grown elements,
+// handing it the data pointer and capacity rather than the header, and stores
+// what comes back before continuing at fastLabel; a refusal goes to
+// joinLabel.
+func (e *emitter) writeArrayGrowth(
+	instr *ir.Instr,
+	elem string,
+	handle string,
+	capacity string,
+	grown string,
+	fastLabel string,
+	storeLabel string,
+	joinLabel string,
+) {
+	dataAddr := e.arrayFieldAddr(handle, arrayFieldData, "array.append.data.addr")
+	data := "%" + e.nextSyntheticValue("array.append.data")
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", data, dataAddr)
+	storage := "%" + e.nextSyntheticValue("array.append.storage")
+	fmt.Fprintf(&e.out,
+		"  %s = call { ptr, i64 } @kizu_array_grow(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)\n",
+		storage, e.value(instr.Args[1]).operand, data, capacity, grown,
+		e.elementSizeOperand(elem))
+	storageData := "%" + e.nextSyntheticValue("array.append.storage.data")
+	storageCap := "%" + e.nextSyntheticValue("array.append.storage.cap")
+	grew := "%" + e.nextSyntheticValue("array.append.grew")
+	fmt.Fprintf(&e.out, "  %s = extractvalue { ptr, i64 } %s, 0\n", storageData, storage)
+	fmt.Fprintf(&e.out, "  %s = extractvalue { ptr, i64 } %s, 1\n", storageCap, storage)
+	fmt.Fprintf(&e.out, "  %s = icmp sge i64 %s, 0\n", grew, storageCap)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", grew, storeLabel, joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", storeLabel)
+	fmt.Fprintf(&e.out, "  store ptr %s, ptr %s\n", storageData, dataAddr)
+	capacityAddr := e.arrayFieldAddr(handle, arrayFieldCapacity, "array.append.cap.addr")
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s\n", storageCap, capacityAddr)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", fastLabel)
 }
 
 // writeBoundsFailure traps when index is outside the array. The comparison is
