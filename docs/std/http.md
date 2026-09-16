@@ -35,6 +35,9 @@ pub fn listen(io: Io, allocator: Allocator, address: []u8)
     -> std::http::Failure!std::http::Server
 pub fn listen_with(io: Io, allocator: Allocator, address: []u8, limits: Limits)
     -> std::http::Failure!std::http::Server
+pub fn listen_secure(
+    io: Io, allocator: Allocator, address: []u8, chain: &Array<String>, key: []u8, limits: Limits,
+) -> std::http::Failure!std::http::Server
 
 fn (self: &Server) local_port() -> std::http::Failure!i64
 fn (self: &var Server) accept(io: Io, allocator: Allocator, max: i64)
@@ -1041,6 +1044,32 @@ var response = try http::fetch_with(
 も落とします。message が実際に何であるかから client が書くもので、`Response.encode`
 と同じ規則です。`Host` は URL の authority、`Content-Length` は body の長さ、
 `Connection` は `close` です。
+
+#### server
+
+`listen_secure` は https の server です。`chain` は自分の証明書を先頭にした DER の列、
+`key` はその秘密鍵の DER(`std::crypto::x509::parse_private_key` が読む形。PEM なら
+`x509::decode_pem` で DER にしてから)で、server が copy を持ちます。接続ごとに
+最初の request の前に TLS 1.3 の handshake(`std::tls::accept`)が入り、head の
+deadline(`read_head_millis`)の中で終わらなければ他の read と同じく時間切れです。
+handshake は `accept` / `first` の待ちの中で、poller の loop では `advance` が
+少しずつ進めます。handshake に失敗した接続(client が別の root を信頼していた、
+TLS 1.3 を話さない)は alert を送って閉じ、request として渡らないので、`accept` は
+その失敗を返し、`first` / `next` は次の接続に進みます。
+
+```kizu
+var chain = array::new<string::String>(allocator);
+defer chain.deinit(allocator);
+try chain.append(allocator, try x509::decode_pem(allocator, cert_pem, "CERTIFICATE"));
+let key_der = try x509::decode_pem(allocator, key_pem, "PRIVATE KEY");
+defer key_der.deinit(allocator);
+let key_bytes = key_der.as_bytes();
+var server = try http::listen_secure(handle, allocator, "0.0.0.0:443", &chain, key_bytes, limits);
+```
+
+各接続は chain と鍵の copy を持ちます。handshake を進めるのは exchange を持っている
+側(server の loop でも、`accept_ready` で受け取った呼び手の loop でも)で、そこに
+鍵が要るからです。
 
 ### `Connection` —— 答えを保持しないで読む
 

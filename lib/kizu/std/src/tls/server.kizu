@@ -16,7 +16,7 @@
 // certificate first, then its issuers, each as DER -- and signing with
 // `key`, the chain's private key as `std::crypto::x509::parse_private_key`
 // read it. The connection is ready for application data when this
-// returns.
+// returns. It is `accepting` followed by `accept_wait`.
 pub fn accept(
     io: Io,
     allocator: Allocator,
@@ -24,24 +24,79 @@ pub fn accept(
     chain: &std::array::Array<std::string::String>,
     key: &std::crypto::x509::PrivateKey
 ) -> std::tls::Failure!std::tls::Connection {
-    var connection = new_connection(allocator, move stream, Role::Server);
+    var connection = accepting(allocator, move stream);
     errdefer connection.deinit(allocator);
-    try connection.serve_handshake(io, allocator, chain, key);
+    try connection.accept_wait(io, allocator, chain, key);
     return move connection;
 }
 
-// serve_handshake takes the ClientHello, sends the server's flight, and
-// takes the client's Finished.
-fn (self: &var std::tls::Connection) serve_handshake(
+// accepting is a server's connection over `stream` with the handshake not
+// begun, for a caller that must not wait: `accept_ready` moves it on by
+// what has arrived, and the caller's poller says when to call again.
+pub fn accepting(allocator: Allocator, stream: std::net::TcpStream) -> std::tls::Connection {
+    return new_connection(allocator, move stream, Role::Server);
+}
+
+// accept_wait runs the handshake of an accepting connection to the end,
+// waiting on the socket for each of the client's messages.
+pub fn (self: &var std::tls::Connection) accept_wait(
     io: Io,
     allocator: Allocator,
     chain: &std::array::Array<std::string::String>,
     key: &std::crypto::x509::PrivateKey
 ) -> std::tls::Failure!void {
-    var hello = std::string::new(allocator);
-    defer hello.deinit(allocator);
-    try self.next_handshake_message(io, allocator, &var hello);
-    let hello_bytes = hello.as_bytes();
+    while !try self.accept_ready(io, allocator, chain, key) {
+        let held = self.inbound.len() - self.inbound_at;
+        try self.fill(io, allocator, held + 1);
+    }
+    return;
+}
+
+// accept_ready moves an accepting connection's handshake on by what has
+// already arrived and answers whether it is done: the ClientHello, once
+// whole, is answered with the server's whole flight; the client's
+// Finished, once whole, connects. It never waits for the socket. A
+// connection that failed and closed is `Error::Closed`.
+pub fn (self: &var std::tls::Connection) accept_ready(
+    io: Io,
+    allocator: Allocator,
+    chain: &std::array::Array<std::string::String>,
+    key: &std::crypto::x509::PrivateKey
+) -> std::tls::Failure!bool {
+    if self.server_state == std::tls::ServerState::WaitClientHello {
+        var hello = std::string::new(allocator);
+        defer hello.deinit(allocator);
+        if !try self.next_handshake_message_ready(io, allocator, &var hello) {
+            return false;
+        }
+        let hello_bytes = hello.as_bytes();
+        try self.take_client_hello(io, allocator, hello_bytes, chain, key);
+    }
+    if self.server_state == std::tls::ServerState::WaitFinished {
+        var finished = std::string::new(allocator);
+        defer finished.deinit(allocator);
+        if !try self.next_handshake_message_ready(io, allocator, &var finished) {
+            return false;
+        }
+        let finished_bytes = finished.as_bytes();
+        try self.take_client_finished(io, allocator, finished_bytes);
+        self.transcript.clear();
+    }
+    if self.closed() {
+        return std::tls::Error::Closed;
+    }
+    return self.connected();
+}
+
+// take_client_hello takes the ClientHello and sends the server's flight
+// through its Finished.
+fn (self: &var std::tls::Connection) take_client_hello(
+    io: Io,
+    allocator: Allocator,
+    hello_bytes: []u8,
+    chain: &std::array::Array<std::string::String>,
+    key: &std::crypto::x509::PrivateKey
+) -> std::tls::Failure!void {
     if hello_bytes[0] != std::tls::handshake_client_hello() {
         try self.fail(io, allocator, alert_unexpected_message());
         return std::tls::Error::UnexpectedMessage;
@@ -76,8 +131,6 @@ fn (self: &var std::tls::Connection) serve_handshake(
 
     try self.send_certificate_verify(io, allocator, key, scheme);
     try self.send_finished(io, allocator);
-    try self.take_client_finished(io, allocator);
-    self.transcript.clear();
     return;
 }
 
@@ -262,16 +315,16 @@ fn (self: &var std::tls::Connection) send_finished(io: Io, allocator: Allocator)
 // take_client_finished takes the client's Finished, checks it against
 // the transcript through the server's own, and turns on the
 // application keys in both directions.
-fn (self: &var std::tls::Connection) take_client_finished(io: Io, allocator: Allocator) -> std::tls::Failure!void {
+fn (self: &var std::tls::Connection) take_client_finished(
+    io: Io,
+    allocator: Allocator,
+    message_bytes: []u8
+) -> std::tls::Failure!void {
     var server_secret_buffer = [32]u8{};
     var client_secret_buffer = [32]u8{};
     let server_secret = server_secret_buffer.as_mut_bytes();
     let client_secret = client_secret_buffer.as_mut_bytes();
     self.derive_application_secrets(server_secret, client_secret);
-    var message = std::string::new(allocator);
-    defer message.deinit(allocator);
-    try self.next_handshake_message(io, allocator, &var message);
-    let message_bytes = message.as_bytes();
     if message_bytes[0] != std::tls::handshake_finished() {
         try self.fail(io, allocator, alert_unexpected_message());
         return std::tls::Error::UnexpectedMessage;

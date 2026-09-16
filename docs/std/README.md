@@ -35,7 +35,7 @@
 | [tls](tls.md) | TLS 1.3 の client と server、handshake 状態機械 |
 | [fs](fs.md) | `Io` 経由の file system 操作 |
 | [net](net.md) | `Io` 経由の TCP listener と stream |
-| [http](http.md) | HTTP/1 の server と client(https)、message、routing |
+| [http](http.md) | HTTP/1 の server と client(どちらも https)、message、routing |
 | [path](path.md) | file system を見ない path text 操作 |
 | [process](process.md) | 引数・環境変数・時刻・終了 status |
 | [time](time.md) | ミリ秒の `Duration` と、monotonic / Unix の瞬間 |

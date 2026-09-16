@@ -1,5 +1,5 @@
 // A Stream is what a Reader reads from and writes to: a socket, or a TLS
-// client over one. The reader does not know which; every read, write and
+// connection over one. The reader does not know which; every read, write and
 // deadline goes through here, and this is the one place that knows a TLS
 // write allocates the record it sends. A caller that wants something else
 // underneath -- a proxy, a test double -- adds a variant here, not a second
@@ -13,6 +13,38 @@ fn (self: Stream) deinit(allocator: Allocator) -> void {
     match self {
         Plain(stream) => stream.deinit(),
         Secure(client) => client.deinit(allocator),
+    }
+    return;
+}
+
+// handshake_ready moves a TLS server's handshake on by what has arrived and
+// answers whether it is done, without waiting; a plain socket has nothing
+// to do and is done at once. `chain` and `key` are the server's.
+fn (self: &var std::http::Stream) handshake_ready(
+    io: Io,
+    allocator: Allocator,
+    chain: &std::array::Array<std::string::String>,
+    key: &std::crypto::x509::PrivateKey
+) -> std::http::Failure!bool {
+    match self {
+        Plain(_) => return true,
+        Secure(connection) => {
+            let done = try connection.accept_ready(io, allocator, chain, key);
+            return done;
+        },
+    }
+}
+
+// handshake_wait is the same handshake for a caller that waits.
+fn (self: &var std::http::Stream) handshake_wait(
+    io: Io,
+    allocator: Allocator,
+    chain: &std::array::Array<std::string::String>,
+    key: &std::crypto::x509::PrivateKey
+) -> std::http::Failure!void {
+    match self {
+        Plain(_) => {},
+        Secure(connection) => try connection.accept_wait(io, allocator, chain, key),
     }
     return;
 }

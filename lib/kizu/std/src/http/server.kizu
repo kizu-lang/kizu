@@ -16,6 +16,12 @@
 pub struct Server {
     listener: std::net::TcpListener,
     limits: std::http::Limits,
+    // The certificate chain and the private key's DER of a server that
+    // speaks TLS, empty for one that does not. Each connection takes a
+    // copy, since a handshake may be moved on by whoever holds the
+    // exchange.
+    chain: std::array::Array<std::string::String>,
+    key: std::string::String,
     // Every connection this server holds. The one the caller is answering is
     // not in here: it was handed out, and `next` is the only way to get
     // another, so handing it back is the only way forward. A caller cannot
@@ -72,6 +78,35 @@ pub fn listen_with(
     address: []u8,
     limits: std::http::Limits
 ) -> std::http::Failure!std::http::Server {
+    let chain = std::array::new<std::string::String>(allocator);
+    defer chain.deinit(allocator);
+    return listen_secure(io, allocator, address, &chain, "", limits);
+}
+
+// listen_secure binds an address for https: every connection is a TLS 1.3
+// handshake (std::tls::accept) before its first request, presenting
+// `chain` -- the server's certificate first, then its issuers, each as
+// DER -- and signing with `key`, the DER of the chain's private key as
+// std::crypto::x509::parse_private_key reads it. The handshake runs under
+// the head's deadline. An empty chain and key is a plain server, which
+// is what `listen` and `listen_with` are.
+pub fn listen_secure(
+    io: Io,
+    allocator: Allocator,
+    address: []u8,
+    chain: &std::array::Array<std::string::String>,
+    key: []u8,
+    limits: std::http::Limits
+) -> std::http::Failure!std::http::Server {
+    if std::mem::len(key) > 0 {
+        let parsed = try std::crypto::x509::parse_private_key(key);
+        let _ = parsed.algorithm;
+    }
+    var own_chain = std::array::new<std::string::String>(allocator);
+    errdefer own_chain.deinit(allocator);
+    try copy_chain(allocator, chain, &var own_chain);
+    var own_key = try std::string::from_bytes(allocator, key);
+    errdefer own_key.deinit(allocator);
     var listener = try std::net::tcp_listen(io, address);
     errdefer listener.deinit();
     // 64 events per wait. More ready descriptors than that are not lost: they
@@ -82,6 +117,8 @@ pub fn listen_with(
     return Server {
         listener: move listener,
         limits: limits,
+        chain: move own_chain,
+        key: move own_key,
         open: std::array::new<std::http::Exchange>(allocator),
         poller: move poller,
         slot_of: std::array::new<i64>(allocator),
@@ -92,6 +129,22 @@ pub fn listen_with(
     };
 }
 
+// copy_chain appends a copy of each certificate of `chain` to `out`.
+fn copy_chain(
+    allocator: Allocator,
+    chain: &std::array::Array<std::string::String>,
+    out: &var std::array::Array<std::string::String>
+) -> std::http::Failure!void {
+    var index = 0;
+    while chain.at(index) |der| {
+        let bytes = der.as_bytes();
+        let copy = try std::string::from_bytes(allocator, bytes);
+        try out.append(allocator, move copy);
+        index = index + 1;
+    }
+    return;
+}
+
 // local_port is the port this server is on. Binding port 0 and asking is how
 // a program takes a free port without racing another for a fixed one.
 fn (self: &std::http::Server) local_port() -> std::http::Failure!i64 {
@@ -100,6 +153,8 @@ fn (self: &std::http::Server) local_port() -> std::http::Failure!i64 {
 }
 
 fn (self: std::http::Server) deinit(allocator: Allocator) -> void {
+    self.chain.deinit(allocator);
+    self.key.deinit(allocator);
     self.slot_of.deinit(allocator);
     self.spare.deinit(allocator);
     self.retiring.deinit(allocator);
@@ -217,6 +272,10 @@ fn (self: &var std::http::Exchange) take_head(
 ) -> std::http::Failure!bool {
     let head_millis = self.limits.read_head_millis;
     self.arm_read_phase(head_millis);
+    if self.is_handshaking() {
+        try self.handshake_wait(io, allocator);
+        self.phase = std::http::Phase::ReadingHead;
+    }
     while true {
         let progress = try self.step(allocator);
         if !needs_more(progress) {
@@ -817,17 +876,38 @@ fn (self: &var std::http::Server) drop_at(
 }
 
 // opening builds an exchange that has a connection and nothing else yet.
+// On a TLS server the connection is still to shake hands, which the first
+// read does: `take_head` waiting, `advance` not.
 fn (self: &std::http::Server) opening(
     allocator: Allocator,
     stream: std::net::TcpStream
 ) -> std::http::Failure!std::http::Exchange {
+    var socket = move stream;
+    errdefer socket.deinit();
+    let secure = self.key.len() > 0;
+    var chain = std::array::new<std::string::String>(allocator);
+    errdefer chain.deinit(allocator);
+    var key = std::string::new(allocator);
+    errdefer key.deinit(allocator);
+    if secure {
+        try copy_chain(allocator, &self.chain, &var chain);
+        let key_bytes = self.key.as_bytes();
+        try key.append_bytes(allocator, key_bytes);
+    }
+    let wrapped = if secure {
+        std::http::Stream::Secure(std::tls::accepting(allocator, move socket))
+    } else {
+        std::http::Stream::Plain(move socket)
+    };
     return Exchange {
-        reader: std::http::reader_new(allocator, std::http::Stream::Plain(move stream), self.limits),
+        reader: std::http::reader_new(allocator, move wrapped, self.limits),
         request: std::http::request_new(allocator),
         response: std::http::response_new(allocator),
         body: std::string::new(allocator),
         answered: false,
-        phase: std::http::Phase::ReadingHead,
+        phase: if secure { std::http::Phase::Handshaking } else { std::http::Phase::ReadingHead },
+        chain: move chain,
+        key: move key,
         deadline: phase_deadline(self.limits.read_head_millis),
         framing: std::http::Framing::Buffered,
         body_open: false,
@@ -910,6 +990,14 @@ fn (self: &var std::http::Exchange) advance(
     if self.is_lingering() {
         return self.advance_lingering(io, allocator);
     }
+    if self.is_handshaking() {
+        // The request may follow the client's Finished in the same read,
+        // so a handshake that just finished goes on to parse.
+        if !try self.handshake_ready(io, allocator) {
+            return std::http::Progress::NeedMore;
+        }
+        self.phase = std::http::Phase::ReadingHead;
+    }
     let progress = try self.step_or_refuse(io, allocator);
     if !needs_more(progress) {
         return progress;
@@ -975,6 +1063,7 @@ fn (self: &var std::http::Exchange) step(
     allocator: Allocator
 ) -> std::http::Failure!std::http::Progress {
     let reading_head = match self.phase {
+        Handshaking => false,
         ReadingHead => true,
         Ready => false,
         // A connection being closed reads only to drop what arrives, and
@@ -984,7 +1073,7 @@ fn (self: &var std::http::Exchange) step(
     if reading_head {
         return self.step_head(allocator);
     }
-    if self.is_lingering() {
+    if self.is_lingering() or self.is_handshaking() {
         return std::http::Progress::NeedMore;
     }
     return std::http::Progress::Request;
@@ -993,9 +1082,41 @@ fn (self: &var std::http::Exchange) step(
 fn (self: &std::http::Exchange) is_lingering() -> bool {
     return match self.phase {
         Lingering => true,
+        Handshaking => false,
         ReadingHead => false,
         Ready => false,
     };
+}
+
+fn (self: &std::http::Exchange) is_handshaking() -> bool {
+    return match self.phase {
+        Handshaking => true,
+        Lingering => false,
+        ReadingHead => false,
+        Ready => false,
+    };
+}
+
+// handshake_ready and handshake_wait run this connection's TLS handshake
+// with the chain and key the server gave it.
+fn (self: &var std::http::Exchange) handshake_ready(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!bool {
+    let key_bytes = self.key.as_bytes();
+    let key = try std::crypto::x509::parse_private_key(key_bytes);
+    let done = try self.reader.handshake_ready(io, allocator, &self.chain, &key);
+    return done;
+}
+
+fn (self: &var std::http::Exchange) handshake_wait(
+    io: Io,
+    allocator: Allocator
+) -> std::http::Failure!void {
+    let key_bytes = self.key.as_bytes();
+    let key = try std::crypto::x509::parse_private_key(key_bytes);
+    try self.reader.handshake_wait(io, allocator, &self.chain, &key);
+    return;
 }
 
 // begin_lingering starts closing this connection in stages. The writing side
@@ -1176,6 +1297,10 @@ pub struct Exchange {
     // when the write starts. A deadline stamped at accept would already be
     // spent by whatever the caller did in between.
     limits: std::http::Limits,
+    // The server's certificate chain and key, copied for a TLS handshake;
+    // empty on a plain server and once the handshake is done.
+    chain: std::array::Array<std::string::String>,
+    key: std::string::String,
     // What the poller calls this connection. It is the connection's for as
     // long as the connection lasts, so being handed out and taken back moves
     // it in the server's table without touching the descriptor. -1 is an
@@ -1676,6 +1801,8 @@ fn (self: &std::http::Exchange) is_answered() -> bool {
 }
 
 fn (self: std::http::Exchange) deinit(allocator: Allocator) -> void {
+    self.chain.deinit(allocator);
+    self.key.deinit(allocator);
     self.reader.deinit(allocator);
     self.request.deinit(allocator);
     self.response.deinit(allocator);
@@ -1737,6 +1864,15 @@ fn worth_answering(failure: std::http::Failure) -> bool {
         ConnectionReset => false,
         std::net::Error::Closed => false,
         std::net::Error::ReadFailed => false,
+        // A TLS failure has already been answered with its alert, or the
+        // peer's alert ended the connection; there is no one to tell.
+        BadRecord => false,
+        IllegalParameter => false,
+        std::tls::Error::Unsupported => false,
+        UnexpectedMessage => false,
+        std::tls::Error::BadSignature => false,
+        Alert => false,
+        std::tls::Error::Closed => false,
         _ => true,
     };
 }

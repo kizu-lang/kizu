@@ -582,6 +582,37 @@ fn (self: &var std::tls::Connection) next_handshake_message(
     return;
 }
 
+// next_handshake_message_ready is `next_handshake_message` for a caller
+// that must not wait: false when no whole message has arrived, with the
+// bytes so far kept.
+fn (self: &var std::tls::Connection) next_handshake_message_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String
+) -> std::tls::Failure!bool {
+    while true {
+        if self.pending_message_length() |length| {
+            try self.copy_pending(allocator, out, length);
+            self.handshake_at = self.handshake_at + length;
+            if self.handshake_at == self.handshake.len() {
+                self.handshake.clear();
+                self.handshake_at = 0;
+            }
+            return true;
+        }
+        var content = std::string::new(allocator);
+        defer content.deinit(allocator);
+        let kind = try self.read_record_ready(io, allocator, &var content) orelse return false;
+        let content_bytes = content.as_bytes();
+        if kind == std::tls::content_handshake() {
+            try self.handshake.append_bytes(allocator, content_bytes);
+        } else {
+            try self.take_other_record(io, allocator, kind, content_bytes);
+        }
+    }
+    return false;
+}
+
 // pending_message_length is the length of the next whole handshake
 // message held, or null when none is whole yet.
 fn (self: &std::tls::Connection) pending_message_length() -> ?i64 {

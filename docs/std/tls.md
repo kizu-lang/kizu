@@ -11,6 +11,9 @@ key schedule、record layer、handshake message の codec です。証明書の�
 ```text
 std::tls::connect(io: Io, allocator, address: []u8, host: []u8, roots: &Array<String>, now: i64) -> Failure!Connection
 std::tls::accept(io: Io, allocator, stream: std::net::TcpStream, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!Connection
+std::tls::accepting(allocator, stream: std::net::TcpStream) -> Connection
+Connection.accept_ready(io, allocator, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!bool
+Connection.accept_wait(io, allocator, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!void
 Connection.write(io, allocator, bytes: []u8) -> Failure!void
 Connection.read_into(io, allocator, out: &var String, max: i64) -> Failure!i64   // 0 は相手の close_notify
 Connection.read_ready(io, allocator, out: &var String, max: i64) -> Failure!?i64
@@ -106,7 +109,9 @@ ServerHello、change_cipher_spec(§D.4)、EncryptedExtensions(空)、Certificate
 `protocol_version`、suite / x25519 share / scheme が無い client には
 `handshake_failure` を送って閉じます(HelloRetryRequest は送りません)。client 証明書
 は求めず、session ticket は発行しません。`server_name` は client が SNI で求めた host
-で、virtual host の選択は呼び手の仕事です。
+で、virtual host の選択は呼び手の仕事です。待てない呼び手(poller の loop)は
+`accepting` で接続を作り、届いた分だけ `accept_ready` で進めます(true で完了)。
+`accept` は `accepting` に `accept_wait` を続けたものです。
 
 乱数は `std::crypto::random_bytes` から取得し、時刻は呼び手の `now` を使います。
 `std::tls` 自身は現在時刻も乱数も取得しません。
