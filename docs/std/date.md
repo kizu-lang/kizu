@@ -72,7 +72,7 @@ if today_day.after(due) { ... }
 `date()` を読みます。
 
 `now()` はありません。今日は `date::from_unix(time::unix(process::unix_millis()))`
-と書き、`Date` を取る関数は時計に触れません。
+と書き、`Date` を取る関数は現在時刻を取得しません。
 
 ## 綴りは ISO 8601
 
