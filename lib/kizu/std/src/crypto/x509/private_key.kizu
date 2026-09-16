@@ -1,0 +1,316 @@
+// A private key as a key file carries it, read from DER. Three shapes
+// are in use, and all are read: PKCS #8 (RFC 5958's PrivateKeyInfo,
+// what `openssl genpkey` and most tools write), the bare SEC 1
+// ECPrivateKey (RFC 5915, "EC PRIVATE KEY"), and the bare PKCS #1
+// RSAPrivateKey (RFC 8017 §A.1.2, "RSA PRIVATE KEY"). What comes out is
+// the P-256 or P-384 scalar, or the parts of the RSA key, as spans into
+// the DER; the bytes stay the caller's, and where they came from and
+// how long they live is the caller's to decide.
+
+// A PrivateKey is what `parse_private_key` read: which kind of key, and
+// where its parts lie in the DER.
+pub struct PrivateKey {
+    der: []u8,
+    pub algorithm: std::crypto::x509::KeyAlgorithm,
+    // The EC private scalar's OCTET STRING content, 32 or 48 bytes.
+    scalar: std::crypto::x509::Element,
+    // The RSAPrivateKey INTEGERs an RSA signature needs.
+    modulus: std::crypto::x509::Element,
+    public_exponent: std::crypto::x509::Element,
+    prime1: std::crypto::x509::Element,
+    prime2: std::crypto::x509::Element,
+    exponent1: std::crypto::x509::Element,
+    exponent2: std::crypto::x509::Element,
+    coefficient: std::crypto::x509::Element,
+}
+
+// parse_private_key reads one DER private key of any of the three
+// shapes, told apart by their first two elements: PKCS #8 is version 0
+// then an AlgorithmIdentifier, RSAPrivateKey is version 0 then the
+// modulus, ECPrivateKey is version 1 then the scalar. A key for another
+// algorithm or curve, an RSA key with more than two primes, or an EC
+// key that names no curve is `Unsupported`; anything else that is not
+// one of the three is `Malformed`. The result points into `der`.
+pub fn parse_private_key(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::PrivateKey {
+    let length = std::mem::len(der);
+    let outer = try std::crypto::x509::expect_element(der, 0, length, std::crypto::x509::tag_sequence());
+    if outer.end != length {
+        return Error::Malformed;
+    }
+    let version = try std::crypto::x509::expect_element(der, outer.start, outer.end, std::crypto::x509::tag_integer());
+    if version.end - version.start != 1 {
+        return Error::Malformed;
+    }
+    let second = try std::crypto::x509::read_element(der, version.end, outer.end);
+    let number = der[version.start];
+    if number == 0 and second.tag == std::crypto::x509::tag_sequence() {
+        return read_pkcs8(der, second, outer.end);
+    }
+    if number == 0 and second.tag == std::crypto::x509::tag_integer() {
+        return read_rsa_private_key(der, outer);
+    }
+    if number == 1 and second.tag == std::crypto::x509::tag_octet_string() {
+        return read_ec_private_key(der, outer, KeyAlgorithm::Unsupported);
+    }
+    return Error::Malformed;
+}
+
+// read_pkcs8 reads what follows the version of a PrivateKeyInfo: the
+// AlgorithmIdentifier `algorithm` (an OID and, for EC, the curve's OID
+// as parameters), then the OCTET STRING holding the algorithm's own key
+// structure. Attributes and a public key may follow and are skipped.
+fn read_pkcs8(der: []u8, algorithm: std::crypto::x509::Element, limit: i64) -> std::crypto::x509::Error!std::crypto::x509::PrivateKey {
+    let oid = try std::crypto::x509::expect_element(der, algorithm.start, algorithm.end, std::crypto::x509::tag_oid());
+    let key = try std::crypto::x509::expect_element(der, algorithm.end, limit, std::crypto::x509::tag_octet_string());
+    if std::crypto::x509::content_is_hex(der, oid, oid_rsa_encryption()) {
+        let inner = try std::crypto::x509::expect_element(der, key.start, key.end, std::crypto::x509::tag_sequence());
+        if inner.end != key.end {
+            return Error::Malformed;
+        }
+        return read_rsa_private_key(der, inner);
+    }
+    if std::crypto::x509::content_is_hex(der, oid, oid_ec_public_key()) {
+        let parameters = try std::crypto::x509::expect_element(der, oid.end, algorithm.end, std::crypto::x509::tag_oid());
+        let curve = curve_of(der, parameters);
+        if curve == KeyAlgorithm::Unsupported {
+            return Error::Unsupported;
+        }
+        let inner = try std::crypto::x509::expect_element(der, key.start, key.end, std::crypto::x509::tag_sequence());
+        if inner.end != key.end {
+            return Error::Malformed;
+        }
+        return read_ec_private_key(der, inner, curve);
+    }
+    return Error::Unsupported;
+}
+
+// curve_of names the curve an OID is, or Unsupported.
+fn curve_of(der: []u8, oid: std::crypto::x509::Element) -> std::crypto::x509::KeyAlgorithm {
+    if std::crypto::x509::content_is_hex(der, oid, oid_prime256v1()) {
+        return KeyAlgorithm::EcdsaP256;
+    }
+    if std::crypto::x509::content_is_hex(der, oid, oid_secp384r1()) {
+        return KeyAlgorithm::EcdsaP384;
+    }
+    return KeyAlgorithm::Unsupported;
+}
+
+// read_ec_private_key reads `ECPrivateKey ::= SEQUENCE { version 1,
+// privateKey OCTET STRING, parameters [0] OID OPTIONAL, publicKey [1]
+// BIT STRING OPTIONAL }` filling `outer`. The curve is the parameters'
+// when present, else `known` from the PKCS #8 wrapper; both present must
+// agree. The scalar must be exactly as long as the curve's order.
+fn read_ec_private_key(
+    der: []u8,
+    outer: std::crypto::x509::Element,
+    known: std::crypto::x509::KeyAlgorithm
+) -> std::crypto::x509::Error!std::crypto::x509::PrivateKey {
+    let version = try std::crypto::x509::expect_element(der, outer.start, outer.end, std::crypto::x509::tag_integer());
+    if version.end - version.start != 1 or der[version.start] != 1 {
+        return Error::Malformed;
+    }
+    let scalar = try std::crypto::x509::expect_element(der, version.end, outer.end, std::crypto::x509::tag_octet_string());
+    var curve = known;
+    if scalar.end < outer.end {
+        let next = try std::crypto::x509::read_element(der, scalar.end, outer.end);
+        if next.tag == std::crypto::x509::tag_explicit(0) {
+            let named = try std::crypto::x509::expect_element(der, next.start, next.end, std::crypto::x509::tag_oid());
+            if named.end != next.end {
+                return Error::Malformed;
+            }
+            let found = curve_of(der, named);
+            if found == KeyAlgorithm::Unsupported or (known != KeyAlgorithm::Unsupported and found != known) {
+                return Error::Unsupported;
+            }
+            curve = found;
+        }
+    }
+    if curve == KeyAlgorithm::Unsupported {
+        return Error::Unsupported;
+    }
+    let width = match curve {
+        EcdsaP256 => 32,
+        EcdsaP384 => 48,
+        _ => 0,
+    };
+    if scalar.end - scalar.start != width {
+        return Error::Malformed;
+    }
+    let none = Element { tag: 0, head: 0, start: 0, end: 0 };
+    return PrivateKey {
+        der: der,
+        algorithm: curve,
+        scalar: scalar,
+        modulus: none,
+        public_exponent: none,
+        prime1: none,
+        prime2: none,
+        exponent1: none,
+        exponent2: none,
+        coefficient: none,
+    };
+}
+
+// read_rsa_private_key reads `RSAPrivateKey ::= SEQUENCE { version 0,
+// modulus, publicExponent, privateExponent, prime1, prime2, exponent1,
+// exponent2, coefficient INTEGER }` filling `outer`. A version of 1
+// means more primes follow, which is Unsupported.
+fn read_rsa_private_key(der: []u8, outer: std::crypto::x509::Element) -> std::crypto::x509::Error!std::crypto::x509::PrivateKey {
+    let version = try std::crypto::x509::expect_element(der, outer.start, outer.end, std::crypto::x509::tag_integer());
+    if version.end - version.start != 1 {
+        return Error::Malformed;
+    }
+    if der[version.start] != 0 {
+        return Error::Unsupported;
+    }
+    let modulus = try std::crypto::x509::expect_element(der, version.end, outer.end, std::crypto::x509::tag_integer());
+    let public_exponent = try std::crypto::x509::expect_element(der, modulus.end, outer.end, std::crypto::x509::tag_integer());
+    let private_exponent = try std::crypto::x509::expect_element(der, public_exponent.end, outer.end, std::crypto::x509::tag_integer());
+    let prime1 = try std::crypto::x509::expect_element(der, private_exponent.end, outer.end, std::crypto::x509::tag_integer());
+    let prime2 = try std::crypto::x509::expect_element(der, prime1.end, outer.end, std::crypto::x509::tag_integer());
+    let exponent1 = try std::crypto::x509::expect_element(der, prime2.end, outer.end, std::crypto::x509::tag_integer());
+    let exponent2 = try std::crypto::x509::expect_element(der, exponent1.end, outer.end, std::crypto::x509::tag_integer());
+    let coefficient = try std::crypto::x509::expect_element(der, exponent2.end, outer.end, std::crypto::x509::tag_integer());
+    if coefficient.end != outer.end {
+        return Error::Malformed;
+    }
+    let none = Element { tag: 0, head: 0, start: 0, end: 0 };
+    return PrivateKey {
+        der: der,
+        algorithm: KeyAlgorithm::Rsa,
+        scalar: none,
+        modulus: modulus,
+        public_exponent: public_exponent,
+        prime1: prime1,
+        prime2: prime2,
+        exponent1: exponent1,
+        exponent2: exponent2,
+        coefficient: coefficient,
+    };
+}
+
+// scalar is the EC private scalar, 32 bytes for P-256 and 48 for
+// P-384, as `std::crypto::ecdsa_p256_sign` takes it; empty for an RSA
+// key.
+pub fn (self: &std::crypto::x509::PrivateKey) scalar() -> []u8 {
+    return self.der[self.scalar.start..self.scalar.end];
+}
+
+// rsa_key is the RSA key's parts as `std::crypto::rsa_pss_sign` takes
+// them; for an EC key every part is empty.
+pub fn (self: &std::crypto::x509::PrivateKey) rsa_key() -> std::crypto::RsaPrivateKey {
+    return std::crypto::RsaPrivateKey {
+        modulus: self.der[self.modulus.start..self.modulus.end],
+        public_exponent: self.der[self.public_exponent.start..self.public_exponent.end],
+        prime1: self.der[self.prime1.start..self.prime1.end],
+        prime2: self.der[self.prime2.start..self.prime2.end],
+        exponent1: self.der[self.exponent1.start..self.exponent1.end],
+        exponent2: self.der[self.exponent2.start..self.exponent2.end],
+        coefficient: self.der[self.coefficient.start..self.coefficient.end],
+    };
+}
+
+// sign makes the signature of `digest` under `key` in the form a TLS
+// 1.3 CertificateVerify carries, which is also what a certificate
+// carries: for an EC key, ECDSA as DER `SEQUENCE { r INTEGER, s
+// INTEGER }`, with the digest of the curve's hash (32 bytes for P-256,
+// 48 for P-384; another length is `Unsupported`); for an RSA key,
+// RSASSA-PSS under `hash` with `salt`, as long as the digest, drawn by
+// the caller from `std::crypto::random_bytes`. `hash` is what the peer
+// asked for, and `salt` is read only for RSA. The signature is returned
+// in a new String.
+pub fn sign(
+    allocator: Allocator,
+    key: &std::crypto::x509::PrivateKey,
+    hash: std::crypto::Hash,
+    digest: []u8,
+    salt: []u8
+) -> std::crypto::x509::Failure!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    match key.algorithm {
+        Rsa => {
+            let parts = key.rsa_key();
+            let modulus = without_leading_zeros(parts.modulus);
+            var buffer = [512]u8{};
+            let signature = buffer.as_mut_bytes();
+            try std::crypto::rsa_pss_sign(hash, &parts, digest, salt, signature);
+            let made = buffer.as_bytes();
+            let bytes = made[0..std::mem::len(modulus)];
+            try out.append_bytes(allocator, bytes);
+        },
+        EcdsaP256 => {
+            if std::mem::len(digest) != 32 {
+                return Error::Unsupported;
+            }
+            var raw = [64]u8{};
+            let raw_view = raw.as_mut_bytes();
+            let scalar = key.scalar();
+            try std::crypto::ecdsa_p256_sign(scalar, digest, raw_view);
+            let raw_bytes = raw.as_bytes();
+            try append_ecdsa_signature(allocator, &var out, raw_bytes, 32);
+        },
+        EcdsaP384 => {
+            if std::mem::len(digest) != 48 {
+                return Error::Unsupported;
+            }
+            var raw = [96]u8{};
+            let raw_view = raw.as_mut_bytes();
+            let scalar = key.scalar();
+            try std::crypto::ecdsa_p384_sign(scalar, digest, raw_view);
+            let raw_bytes = raw.as_bytes();
+            try append_ecdsa_signature(allocator, &var out, raw_bytes, 48);
+        },
+        Unsupported => {
+            return Error::Unsupported;
+        },
+    }
+    return move out;
+}
+
+// append_ecdsa_signature appends `SEQUENCE { r INTEGER, s INTEGER }` for
+// r and s given as `width` bytes each: each INTEGER is its value in the
+// fewest bytes, with a leading zero when the top bit is set so it does
+// not read as negative. Both fit in one-byte lengths.
+fn append_ecdsa_signature(allocator: Allocator, out: &var std::string::String, raw: []u8, width: i64) -> std::mem::Error!void {
+    let r = without_leading_zeros(raw[0..width]);
+    let s = without_leading_zeros(raw[width..width * 2]);
+    let r_length = integer_length(r);
+    let s_length = integer_length(s);
+    try out.append_byte(allocator, cast<u8>(std::crypto::x509::tag_sequence()));
+    try out.append_byte(allocator, cast<u8>(2 + r_length + 2 + s_length));
+    try append_integer(allocator, out, r);
+    try append_integer(allocator, out, s);
+    return;
+}
+
+// integer_length is how many content bytes a positive INTEGER takes:
+// one for zero, the value's bytes, and one more when the top bit is set.
+fn integer_length(value: []u8) -> i64 {
+    let count = std::mem::len(value);
+    if count == 0 {
+        return 1;
+    }
+    if value[0] >= 128 {
+        return count + 1;
+    }
+    return count;
+}
+
+fn append_integer(allocator: Allocator, out: &var std::string::String, value: []u8) -> std::mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(std::crypto::x509::tag_integer()));
+    try out.append_byte(allocator, cast<u8>(integer_length(value)));
+    if std::mem::len(value) == 0 or value[0] >= 128 {
+        try out.append_byte(allocator, 0);
+    }
+    try out.append_bytes(allocator, value);
+    return;
+}
+
+fn without_leading_zeros(bytes: []u8) -> []u8 {
+    var at = 0;
+    while at < std::mem::len(bytes) and bytes[at] == 0 {
+        at = at + 1;
+    }
+    return bytes[at..std::mem::len(bytes)];
+}

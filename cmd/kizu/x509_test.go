@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"os"
@@ -221,6 +222,196 @@ fn check(
             UnknownIssuer => "unknown issuer",
         });
     }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+`
+
+// TestX509SignsWhatGoVerifies hands Kizu private keys Go generated, in
+// each shape a key file takes -- PKCS #8, SEC 1, PKCS #1, and one of
+// them as PEM -- and has it sign a digest the way a CertificateVerify
+// is signed; Go then verifies each signature under the public key.
+func TestX509SignsWhatGoVerifies(t *testing.T) {
+	var program strings.Builder
+	program.WriteString(x509SignProgramHead)
+	var checks []signatureCheck
+	for n, c := range []struct {
+		bits int
+		hash crypto.Hash
+	}{{256, crypto.SHA256}, {384, crypto.SHA384}, {2048, crypto.SHA256}, {2048, crypto.SHA384}} {
+		signer, err := generateKey(c.bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := digestOf(c.hash, fmt.Sprintf("message %d", c.bits))
+		for i, shape := range keyShapes(t, signer) {
+			name := fmt.Sprintf("key_%d_%d", n, i)
+			if shape.pem {
+				// A Kizu literal carries no escapes, so PEM's lines go
+				// in as a multi-line literal.
+				fmt.Fprintf(&program, "    let %s =\n", name)
+				for _, line := range strings.Split(strings.TrimSpace(shape.text), "\n") {
+					fmt.Fprintf(&program, "        \\\\%s\n", line)
+				}
+				program.WriteString("    ;\n")
+			} else {
+				fmt.Fprintf(&program, "    let %s = %q;\n", name, shape.text)
+			}
+			fmt.Fprintf(&program, "    try sign(allocator, %s, %t, crypto::Hash::%s, %q);\n",
+				name, shape.pem, hashName(c.hash), hex.EncodeToString(digest))
+			public := signer.Public()
+			hash := c.hash
+			checks = append(checks, func(signature []byte) error {
+				switch key := public.(type) {
+				case *ecdsa.PublicKey:
+					if !ecdsa.VerifyASN1(key, digest, signature) {
+						return fmt.Errorf("Go rejects the ECDSA signature")
+					}
+					return nil
+				case *rsa.PublicKey:
+					return rsa.VerifyPSS(key, hash, digest, signature,
+						&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
+				}
+				return fmt.Errorf("unexpected key type %T", public)
+			})
+		}
+	}
+	program.WriteString("    return;\n}\n")
+	path := filepath.Join(t.TempDir(), "x509_sign_oracle.kizu")
+	if err := os.WriteFile(path, []byte(program.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := kizuCommand("run", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run failed: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != len(checks) {
+		t.Fatalf("Kizu printed %d signatures, want %d:\n%s", len(lines), len(checks), out)
+	}
+	for i, line := range lines {
+		signature, err := hex.DecodeString(line)
+		if err != nil {
+			t.Fatalf("signature %d is not hex: %v", i, err)
+		}
+		if err := checks[i](signature); err != nil {
+			t.Errorf("signature %d: %v", i, err)
+		}
+	}
+}
+
+// A keyShape is one encoding of a private key: DER as hex, or PEM text.
+type keyShape struct {
+	text string
+	pem  bool
+}
+
+// keyShapes encodes a key every way a key file might: PKCS #8, the
+// algorithm's own bare form, and PKCS #8 wrapped in PEM.
+func keyShapes(t *testing.T, signer crypto.Signer) []keyShape {
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bare []byte
+	switch key := signer.(type) {
+	case *ecdsa.PrivateKey:
+		if bare, err = x509.MarshalECPrivateKey(key); err != nil {
+			t.Fatal(err)
+		}
+	case *rsa.PrivateKey:
+		bare = x509.MarshalPKCS1PrivateKey(key)
+	}
+	text := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})
+	return []keyShape{
+		{hex.EncodeToString(pkcs8), false},
+		{hex.EncodeToString(bare), false},
+		{string(text), true},
+	}
+}
+
+// hashName is the std::crypto::Hash member for a Go hash.
+func hashName(hash crypto.Hash) string {
+	switch hash {
+	case crypto.SHA384:
+		return "Sha384"
+	case crypto.SHA512:
+		return "Sha512"
+	}
+	return "Sha256"
+}
+
+// x509SignProgramHead is the program TestX509SignsWhatGoVerifies
+// completes with one `sign` per key shape; each parses the key, signs
+// the digest, and prints the signature as hex. The salt is the digest
+// of the digest, since the test only needs some salt as long as the hash.
+const x509SignProgramHead = `import std::crypto;
+import std::crypto::x509;
+import std::mem;
+import std::string;
+
+fn bytes_of_hex(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+fn print_hex(allocator: Allocator, bytes: []u8) -> mem::Error!void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        try out.append_byte(allocator, digits[cast<i64>(bytes[index] >> 4)]);
+        try out.append_byte(allocator, digits[cast<i64>(bytes[index] & 15)]);
+    }
+    let text = out.as_bytes();
+    print(text);
+    return;
+}
+
+fn sign(
+    allocator: Allocator,
+    key_text: []u8,
+    pem: bool,
+    hash: crypto::Hash,
+    digest_hex: []u8
+) -> x509::Failure!void {
+    let der = if pem {
+        try x509::decode_pem(allocator, key_text, "PRIVATE KEY")
+    } else {
+        try bytes_of_hex(allocator, key_text)
+    };
+    defer der.deinit(allocator);
+    let digest = try bytes_of_hex(allocator, digest_hex);
+    defer digest.deinit(allocator);
+    let der_bytes = der.as_bytes();
+    let key = try x509::parse_private_key(der_bytes);
+    let digest_bytes = digest.as_bytes();
+    var salt = [64]u8{};
+    let salt_view = salt.as_mut_bytes();
+    crypto::digest_of(hash, digest_bytes, salt_view);
+    let salt_bytes = salt_view[0..crypto::digest_length(hash)];
+    let signature = try x509::sign(allocator, &key, hash, digest_bytes, salt_bytes);
+    defer signature.deinit(allocator);
+    let made = signature.as_bytes();
+    try print_hex(allocator, made);
     return;
 }
 

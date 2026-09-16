@@ -1,0 +1,100 @@
+import std::crypto;
+import std::crypto::x509;
+import std::mem;
+import std::string;
+
+// A server's private key arrives as a file: PEM text wrapping the DER
+// of a PKCS #8 PrivateKeyInfo, or of the bare EC or RSA structure. The
+// file is decoded and read into the key's parts, and the key signs a
+// digest the way a TLS CertificateVerify is signed -- ECDSA as the DER
+// pair of integers a certificate carries too. The key here is RFC 6979's
+// P-256 test key, so the signature over "sample" is the pair the RFC
+// lists, and it verifies under the RFC's public point.
+
+fn key_file() -> []u8 {
+    return
+        \\-----BEGIN PRIVATE KEY-----
+        \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgya+p2EW6dRZrXCFX
+        \\Z7HWk05Qw9s26JsSe4piKxIPZyGhRANCAARg/tS6JVqdMclh63TGNW1owEm4kjth
+        \\+mzmaWIuYPKftnkD/hAIuLyZpBrp6VYovGTy8bIMLX6fUXejwpTURiKZ
+        \\-----END PRIVATE KEY-----
+    ;
+}
+
+fn public_key(allocator: Allocator) -> mem::Error!string::String {
+    let hex =
+        \\0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6
+        \\7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299
+    ;
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var high = -1;
+    for 0..mem::len(hex) |index| {
+        let value = cast<i64>(hex[index]);
+        let digit = if value >= 97 { value - 87 } else { value - 48 };
+        if digit < 0 or digit > 15 {
+            continue;
+        }
+        if high < 0 {
+            high = digit;
+        } else {
+            try out.append_byte(allocator, cast<u8>(high * 16 + digit));
+            high = -1;
+        }
+    }
+    return move out;
+}
+
+fn print_hex(allocator: Allocator, bytes: []u8) -> mem::Error!void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        try out.append_byte(allocator, digits[cast<i64>(bytes[index] >> 4)]);
+        try out.append_byte(allocator, digits[cast<i64>(bytes[index] & 15)]);
+    }
+    let text = out.as_bytes();
+    print(text);
+    return;
+}
+
+fn run(allocator: Allocator) -> x509::Failure!void {
+    let der = try x509::decode_pem(allocator, key_file(), "PRIVATE KEY");
+    defer der.deinit(allocator);
+    let der_bytes = der.as_bytes();
+    let key = try x509::parse_private_key(der_bytes);
+    print(match key.algorithm {
+        EcdsaP256 => "a P-256 key",
+        EcdsaP384 => "a P-384 key",
+        Rsa => "an RSA key",
+        Unsupported => "a key of another kind",
+    });
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256("sample", view);
+    let hash = digest.as_bytes();
+    let signature = try x509::sign(allocator, &key, crypto::Hash::Sha256, hash, "");
+    defer signature.deinit(allocator);
+    let made = signature.as_bytes();
+    try print_hex(allocator, made);
+    let public = try public_key(allocator);
+    defer public.deinit(allocator);
+    let public_bytes = public.as_bytes();
+    if x509::ecdsa_signature_verifies(public_bytes, hash, made) {
+        print("the signature verifies under the public key");
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    try run(allocator);
+    return;
+}
+
+// run
+// features: crypto x509 ecdsa
+// output:
+// a P-256 key
+// 3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8
+// the signature verifies under the public key

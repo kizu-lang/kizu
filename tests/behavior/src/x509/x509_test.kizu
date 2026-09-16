@@ -1,4 +1,5 @@
 import std::array;
+import std::crypto;
 import std::crypto::x509;
 import std::mem;
 import std::string;
@@ -250,4 +251,384 @@ test "DER that is cut short or claims the wrong length is malformed" {
     try longer.append_byte(allocator, 0);
     let padded = longer.as_bytes();
     expect_parse_fails(padded, "Malformed");
+}
+
+// p256_pkcs8 is the RFC 6979 P-256 key as PKCS #8.
+fn p256_pkcs8() -> []u8 {
+    return
+        \\308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b02
+        \\01010420c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b
+        \\120f6721a1440342000460fed4ba255a9d31c961eb74c6356d68c049b8923b61
+        \\fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e
+        \\9f5177a3c294d4462299
+    ;
+}
+
+// p384_sec1 is the RFC 6979 P-384 key as a bare SEC 1 ECPrivateKey.
+fn p384_sec1() -> []u8 {
+    return
+        \\3081a402010104306b9d3dad2e1b8c1c05b19875b6659f4de23c3b667bf297ba
+        \\9aa47740787137d896d5724e4c70a825f872c9ea60d2edf5a00706052b810400
+        \\22a16403620004ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06
+        \\aae5286b300c64def8f0ea9055866064a254515480bc138015d9b72d7d57244e
+        \\a8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe73
+        \\44fd2533264720
+    ;
+}
+
+// rsa_pkcs1 is a 2048-bit key generated for these tests as a bare RSAPrivateKey.
+fn rsa_pkcs1() -> []u8 {
+    return
+        \\308204a30201000282010100b34f516e785faa0ce779ca21f73ad86c3b307b6e
+        \\8802619cf9efaecbbc27e702d8a00c0e21ff61945dbfa2567a19445bfe6c597d
+        \\bb8b81db666f37cc60714b89c69e1e11fd5713aa7760861a4cbc8c3df154ab0f
+        \\7a6c1a20c4b0b10e55aee507c8a83471b761b263feadb36ff9bc129bc6e28492
+        \\f8be9df41e6345396b7f50c980bd3f764e9a0ae4a6c6c1a17cca97a4cc2b0908
+        \\3020be150f3c23aaf196780899ddcc9df08ef14f97051a6f6fef5219da88cb5e
+        \\3d8b3fff770467cbec00c59ac1d365d3a63b1d9249304ac65841d37281a478dd
+        \\04e73644e074f4aef8e7a282d72d57f5fba371e8f83f926b3ff374c8b3a3b18a
+        \\6b2986c691c9a0612af69dcd02030100010282010025596939dc82f8b5d5656d
+        \\f0234233a05fb7da8e0c708a8a9b190ccccd35768e0637582b7d73678cf2f61e
+        \\c76a8966ceceb11cf6eea0c17cc4da77c1ef78c9e639e3e79991ae989f125c9d
+        \\b24eb79b72af99164494187e5cc2fb96f5c86d34b1a95f380553d05acb2f5a59
+        \\1d02e4e4ef63befd246c01b07f0ff15792fd4c38b45702e4c86f0f256a452808
+        \\14e9152714db00bd38ceeec2deaa8d02147aa59984557b50af813c12f27f1cd3
+        \\5d2a0e9accf5b8e6479455c66b8b4eadb98ca88f194f720fa693bee5a5a0587c
+        \\50b8104adc655fbbba73b9b59c4d7243e75cae7c0589f6e5e9a3aa866de1071e
+        \\5e22dc676d88768b0d5740b6706f9ccee4460260a102818100d9dd12e13e757c
+        \\5e989b0a8ae6bd1109058b8fa4d82e1da86448affc3b41772d22c734fe06eed1
+        \\887f8401631cddb179da407b753ea531e7065bc6d5bbd913f54df67a6018fdf1
+        \\434f430700c1f141dc38685aa3e57b6b63d5bece3a2c3bdf34906417c1d1d740
+        \\04dae8882df8839295a4a125ecdd391ec7e5fb3c8b6c71f21502818100d2b291
+        \\f986e55e4858ba542f5658d5ea680ee1fbb112312759196f1dc61a1d7ea30899
+        \\68daccb2745ecc453fe81adb4fdbddcb3db140f4d900caaa4be6dd912b0f1853
+        \\fd0fc09b5fb9184a7b4c721503ee8120c057f57db0ceba668fcb0ad416e607b8
+        \\53a398bbfb6a90d4781a83534381da6762ed1c5031b7641ff72edb42d9028181
+        \\00be88ddce2835cfc35b6b9cd8c5db6c5e9b7ee6eda03314b5049f9d69d6d8f6
+        \\457f39015b78ecbc4bc859c66ccbfe070d2e975e61b79bf9fcb64ee5a25f5b06
+        \\5d6f05b518fe42791208ebf1dff3bdef7f8dc5961fe8befbb8a062f331652627
+        \\9b6cfc5cdaa18ec2ea7c1909a04acba713409bbef35cb66bf91f658e19d18a05
+        \\d102818029a71bac94ba6b7529f54c073faeb83b6aeee645f7af7d0026611cd2
+        \\6a0367a94d59b9da3cc712d0669d43636ae3444ff94b538e92a820bf75a49b1d
+        \\fe39f724e80b0b2f9019a79db8ddd07ba795360a5cf03225543e37e6e8377967
+        \\1be0bc24fabcb3f7f4f390d6172f2291cbcc027dea01df467351919902844cbd
+        \\7509eba10281805c5d994437ee158f67b409646911999d41a81a450c913b6351
+        \\e05986d9e0c521059a41e93c10275ea557d268a15ad570ca888ed2113c5babe9
+        \\7159212207447187f07cf94f5fef62901cf90bd07b9a7f77ff2517106878c09f
+        \\44e7ab027a1e0ccd0fe7ea90d379ce8982a30c07c31e05f2ce2bf069ce9ad54c
+        \\aaaa34c1cbe864
+    ;
+}
+
+// rsa_pkcs8 is the same key as PKCS #8.
+fn rsa_pkcs8() -> []u8 {
+    return
+        \\308204bd020100300d06092a864886f70d0101010500048204a7308204a30201
+        \\000282010100b34f516e785faa0ce779ca21f73ad86c3b307b6e8802619cf9ef
+        \\aecbbc27e702d8a00c0e21ff61945dbfa2567a19445bfe6c597dbb8b81db666f
+        \\37cc60714b89c69e1e11fd5713aa7760861a4cbc8c3df154ab0f7a6c1a20c4b0
+        \\b10e55aee507c8a83471b761b263feadb36ff9bc129bc6e28492f8be9df41e63
+        \\45396b7f50c980bd3f764e9a0ae4a6c6c1a17cca97a4cc2b09083020be150f3c
+        \\23aaf196780899ddcc9df08ef14f97051a6f6fef5219da88cb5e3d8b3fff7704
+        \\67cbec00c59ac1d365d3a63b1d9249304ac65841d37281a478dd04e73644e074
+        \\f4aef8e7a282d72d57f5fba371e8f83f926b3ff374c8b3a3b18a6b2986c691c9
+        \\a0612af69dcd02030100010282010025596939dc82f8b5d5656df0234233a05f
+        \\b7da8e0c708a8a9b190ccccd35768e0637582b7d73678cf2f61ec76a8966cece
+        \\b11cf6eea0c17cc4da77c1ef78c9e639e3e79991ae989f125c9db24eb79b72af
+        \\99164494187e5cc2fb96f5c86d34b1a95f380553d05acb2f5a591d02e4e4ef63
+        \\befd246c01b07f0ff15792fd4c38b45702e4c86f0f256a45280814e9152714db
+        \\00bd38ceeec2deaa8d02147aa59984557b50af813c12f27f1cd35d2a0e9accf5
+        \\b8e6479455c66b8b4eadb98ca88f194f720fa693bee5a5a0587c50b8104adc65
+        \\5fbbba73b9b59c4d7243e75cae7c0589f6e5e9a3aa866de1071e5e22dc676d88
+        \\768b0d5740b6706f9ccee4460260a102818100d9dd12e13e757c5e989b0a8ae6
+        \\bd1109058b8fa4d82e1da86448affc3b41772d22c734fe06eed1887f8401631c
+        \\ddb179da407b753ea531e7065bc6d5bbd913f54df67a6018fdf1434f430700c1
+        \\f141dc38685aa3e57b6b63d5bece3a2c3bdf34906417c1d1d74004dae8882df8
+        \\839295a4a125ecdd391ec7e5fb3c8b6c71f21502818100d2b291f986e55e4858
+        \\ba542f5658d5ea680ee1fbb112312759196f1dc61a1d7ea3089968daccb2745e
+        \\cc453fe81adb4fdbddcb3db140f4d900caaa4be6dd912b0f1853fd0fc09b5fb9
+        \\184a7b4c721503ee8120c057f57db0ceba668fcb0ad416e607b853a398bbfb6a
+        \\90d4781a83534381da6762ed1c5031b7641ff72edb42d902818100be88ddce28
+        \\35cfc35b6b9cd8c5db6c5e9b7ee6eda03314b5049f9d69d6d8f6457f39015b78
+        \\ecbc4bc859c66ccbfe070d2e975e61b79bf9fcb64ee5a25f5b065d6f05b518fe
+        \\42791208ebf1dff3bdef7f8dc5961fe8befbb8a062f3316526279b6cfc5cdaa1
+        \\8ec2ea7c1909a04acba713409bbef35cb66bf91f658e19d18a05d102818029a7
+        \\1bac94ba6b7529f54c073faeb83b6aeee645f7af7d0026611cd26a0367a94d59
+        \\b9da3cc712d0669d43636ae3444ff94b538e92a820bf75a49b1dfe39f724e80b
+        \\0b2f9019a79db8ddd07ba795360a5cf03225543e37e6e83779671be0bc24fabc
+        \\b3f7f4f390d6172f2291cbcc027dea01df467351919902844cbd7509eba10281
+        \\805c5d994437ee158f67b409646911999d41a81a450c913b6351e05986d9e0c5
+        \\21059a41e93c10275ea557d268a15ad570ca888ed2113c5babe9715921220744
+        \\7187f07cf94f5fef62901cf90bd07b9a7f77ff2517106878c09f44e7ab027a1e
+        \\0ccd0fe7ea90d379ce8982a30c07c31e05f2ce2bf069ce9ad54caaaa34c1cbe8
+        \\64
+    ;
+}
+
+// rsa_public is that key's RSAPublicKey, what Certificate.public_key gives.
+fn rsa_public() -> []u8 {
+    return
+        \\3082010a0282010100b34f516e785faa0ce779ca21f73ad86c3b307b6e880261
+        \\9cf9efaecbbc27e702d8a00c0e21ff61945dbfa2567a19445bfe6c597dbb8b81
+        \\db666f37cc60714b89c69e1e11fd5713aa7760861a4cbc8c3df154ab0f7a6c1a
+        \\20c4b0b10e55aee507c8a83471b761b263feadb36ff9bc129bc6e28492f8be9d
+        \\f41e6345396b7f50c980bd3f764e9a0ae4a6c6c1a17cca97a4cc2b09083020be
+        \\150f3c23aaf196780899ddcc9df08ef14f97051a6f6fef5219da88cb5e3d8b3f
+        \\ff770467cbec00c59ac1d365d3a63b1d9249304ac65841d37281a478dd04e736
+        \\44e074f4aef8e7a282d72d57f5fba371e8f83f926b3ff374c8b3a3b18a6b2986
+        \\c691c9a0612af69dcd0203010001
+    ;
+}
+
+// p256_pkcs8_pem is p256_pkcs8 as a PEM file.
+fn p256_pkcs8_pem() -> []u8 {
+    return
+        \\-----BEGIN PRIVATE KEY-----
+        \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgya+p2EW6dRZrXCFX
+        \\Z7HWk05Qw9s26JsSe4piKxIPZyGhRANCAARg/tS6JVqdMclh63TGNW1owEm4kjth
+        \\+mzmaWIuYPKftnkD/hAIuLyZpBrp6VYovGTy8bIMLX6fUXejwpTURiKZ
+        \\-----END PRIVATE KEY-----
+    ;
+}
+
+fn bytes_of_hex_lines(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var high = -1;
+    for 0..mem::len(hex) |index| {
+        let value = hex_value(hex[index]);
+        if value < 0 or hex[index] == 10 {
+            continue;
+        }
+        if high < 0 {
+            high = value;
+        } else {
+            try out.append_byte(allocator, cast<u8>(high * 16 + value));
+            high = -1;
+        }
+    }
+    return move out;
+}
+
+fn parsed_algorithm(allocator: Allocator, hex: []u8) -> x509::Failure!x509::KeyAlgorithm {
+    let der = try bytes_of_hex_lines(allocator, hex);
+    defer der.deinit(allocator);
+    let bytes = der.as_bytes();
+    let key = try x509::parse_private_key(bytes);
+    let algorithm = key.algorithm;
+    return algorithm;
+}
+
+test "a private key of each shape is read and named" {
+    let allocator = mem::page_allocator();
+    let p256 = try parsed_algorithm(allocator, p256_pkcs8());
+    testing::expect(p256 == x509::KeyAlgorithm::EcdsaP256);
+    let p384 = try parsed_algorithm(allocator, p384_sec1());
+    testing::expect(p384 == x509::KeyAlgorithm::EcdsaP384);
+    let rsa1 = try parsed_algorithm(allocator, rsa_pkcs1());
+    testing::expect(rsa1 == x509::KeyAlgorithm::Rsa);
+    let rsa8 = try parsed_algorithm(allocator, rsa_pkcs8());
+    testing::expect(rsa8 == x509::KeyAlgorithm::Rsa);
+}
+
+test "a key that is cut short, or not a key, is malformed" {
+    let allocator = mem::page_allocator();
+    let der = try bytes_of_hex_lines(allocator, p256_pkcs8());
+    defer der.deinit(allocator);
+    let bytes = der.as_bytes();
+    let count = mem::len(bytes);
+    let cut = bytes[0..count - 5];
+    let cut_result = private_key_failure(cut);
+    testing::expect_equal<[]u8>("malformed", cut_result);
+    let empty_result = private_key_failure("");
+    testing::expect_equal<[]u8>("malformed", empty_result);
+    let certificate = try bytes_of_hex(allocator, leaf_hex());
+    defer certificate.deinit(allocator);
+    let certificate_bytes = certificate.as_bytes();
+    let certificate_result = private_key_failure(certificate_bytes);
+    testing::expect_equal<[]u8>("malformed", certificate_result);
+}
+
+fn private_key_failure(der: []u8) -> []u8 {
+    if x509::parse_private_key(der) |key| {
+        let _ = key.algorithm;
+        return "parsed";
+    } else |err| {
+        return match err {
+            Malformed => "malformed",
+            Unsupported => "unsupported",
+            _ => "other",
+        };
+    }
+}
+
+test "the EC scalar and the RSA parts are the bytes the key file holds" {
+    let allocator = mem::page_allocator();
+    let der = try bytes_of_hex_lines(allocator, p256_pkcs8());
+    defer der.deinit(allocator);
+    let bytes = der.as_bytes();
+    let key = try x509::parse_private_key(bytes);
+    let scalar = key.scalar();
+    let want = try bytes_of_hex(allocator, "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+    defer want.deinit(allocator);
+    let want_bytes = want.as_bytes();
+    testing::expect(mem::equal_bytes(scalar, want_bytes));
+    let rsa_der = try bytes_of_hex_lines(allocator, rsa_pkcs1());
+    defer rsa_der.deinit(allocator);
+    let rsa_bytes = rsa_der.as_bytes();
+    let rsa = try x509::parse_private_key(rsa_bytes);
+    let parts = rsa.rsa_key();
+    testing::expect(mem::len(parts.modulus) == 257);
+    testing::expect(mem::len(parts.public_exponent) == 3);
+    testing::expect(mem::len(parts.prime1) >= 128 and mem::len(parts.prime1) <= 129);
+    testing::expect(mem::len(parts.coefficient) >= 1);
+}
+
+fn signs_and_verifies(allocator: Allocator, key_hex: []u8, public_hex: []u8, hash: crypto::Hash, message: []u8) -> x509::Failure!bool {
+    let der = try bytes_of_hex_lines(allocator, key_hex);
+    defer der.deinit(allocator);
+    let public = try bytes_of_hex_lines(allocator, public_hex);
+    defer public.deinit(allocator);
+    let bytes = der.as_bytes();
+    let key = try x509::parse_private_key(bytes);
+    var digest = [64]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::digest_of(hash, message, view);
+    let digest_view = view[0..crypto::digest_length(hash)];
+    var salt = [64]u8{};
+    let salt_view = salt.as_mut_bytes();
+    crypto::digest_of(hash, "salt", salt_view);
+    let salt_bytes = salt_view[0..crypto::digest_length(hash)];
+    let signature = try x509::sign(allocator, &key, hash, digest_view, salt_bytes);
+    defer signature.deinit(allocator);
+    let made = signature.as_bytes();
+    let public_bytes = public.as_bytes();
+    if key.algorithm == x509::KeyAlgorithm::Rsa {
+        return x509::rsa_pss_signature_verifies(hash, public_bytes, digest_view, made);
+    }
+    return x509::ecdsa_signature_verifies(public_bytes, digest_view, made);
+}
+
+test "a signature made from a key file verifies under the matching public key" {
+    let allocator = mem::page_allocator();
+    let p256_public = "0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299";
+    let p384_public =
+        \\04ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc13
+        \\8015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720
+    ;
+    testing::expect(try signs_and_verifies(allocator, p256_pkcs8(), p256_public, crypto::Hash::Sha256, "sample"));
+    testing::expect(try signs_and_verifies(allocator, p384_sec1(), p384_public, crypto::Hash::Sha384, "sample"));
+    testing::expect(try signs_and_verifies(allocator, rsa_pkcs1(), rsa_public(), crypto::Hash::Sha256, "sample"));
+    testing::expect(try signs_and_verifies(allocator, rsa_pkcs8(), rsa_public(), crypto::Hash::Sha512, "sample"));
+}
+
+test "the DER of an ECDSA signature is the RFC 6979 numbers as INTEGERs" {
+    let allocator = mem::page_allocator();
+    let der = try bytes_of_hex_lines(allocator, p256_pkcs8());
+    defer der.deinit(allocator);
+    let bytes = der.as_bytes();
+    let key = try x509::parse_private_key(bytes);
+    var digest = [32]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha256("sample", view);
+    let hash = digest.as_bytes();
+    let signature = try x509::sign(allocator, &key, crypto::Hash::Sha256, hash, "");
+    defer signature.deinit(allocator);
+    // r and s both have their top bit set, so each INTEGER is 33 bytes.
+    let want = try bytes_of_hex_lines(allocator,
+        \\3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716
+        \\022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8
+    );
+    defer want.deinit(allocator);
+    let made = signature.as_bytes();
+    let want_bytes = want.as_bytes();
+    testing::expect(mem::equal_bytes(made, want_bytes));
+}
+
+test "a digest of the wrong length for the curve is unsupported" {
+    let allocator = mem::page_allocator();
+    let der = try bytes_of_hex_lines(allocator, p256_pkcs8());
+    defer der.deinit(allocator);
+    let bytes = der.as_bytes();
+    let key = try x509::parse_private_key(bytes);
+    var digest = [48]u8{};
+    let view = digest.as_mut_bytes();
+    crypto::sha384("sample", view);
+    let hash = digest.as_bytes();
+    if x509::sign(allocator, &key, crypto::Hash::Sha384, hash, "") |made| {
+        made.deinit(allocator);
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == x509::Error::Unsupported);
+    }
+}
+
+test "a PEM block decodes to the DER it wraps" {
+    let allocator = mem::page_allocator();
+    let decoded = try x509::decode_pem(allocator, p256_pkcs8_pem(), "PRIVATE KEY");
+    defer decoded.deinit(allocator);
+    let want = try bytes_of_hex_lines(allocator, p256_pkcs8());
+    defer want.deinit(allocator);
+    let got = decoded.as_bytes();
+    let want_bytes = want.as_bytes();
+    testing::expect(mem::equal_bytes(got, want_bytes));
+    let any = try x509::decode_pem(allocator, p256_pkcs8_pem(), "");
+    defer any.deinit(allocator);
+    let any_bytes = any.as_bytes();
+    testing::expect(mem::equal_bytes(any_bytes, want_bytes));
+    if x509::decode_pem(allocator, p256_pkcs8_pem(), "CERTIFICATE") |other| {
+        other.deinit(allocator);
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == x509::Error::Malformed);
+    }
+}
+
+test "PEM blocks are found one after another and a broken body is malformed" {
+    let allocator = mem::page_allocator();
+    let text =
+        \\some text before
+        \\-----BEGIN CERTIFICATE-----
+        \\AQID
+        \\-----END CERTIFICATE-----
+        \\-----BEGIN CERTIFICATE-----
+        \\BAUGBw==
+        \\-----END CERTIFICATE-----
+        \\-----BEGIN CERTIFICATE-----
+        \\AQ=
+        \\-----END CERTIFICATE-----
+    ;
+    var count = 0;
+    var from = 0;
+    while x509::next_pem_block(text, from) |block| {
+        count = count + 1;
+        let label = block.label(text);
+        testing::expect(mem::equal_bytes(label, "CERTIFICATE"));
+        if count == 1 {
+            let first = try x509::decode_pem_block(allocator, text, &block);
+            defer first.deinit(allocator);
+            let first_bytes = first.as_bytes();
+            testing::expect(mem::len(first_bytes) == 3 and first_bytes[0] == 1 and first_bytes[2] == 3);
+        }
+        if count == 2 {
+            let second = try x509::decode_pem_block(allocator, text, &block);
+            defer second.deinit(allocator);
+            let second_bytes = second.as_bytes();
+            testing::expect(mem::len(second_bytes) == 4 and second_bytes[3] == 7);
+        }
+        if count == 3 {
+            if x509::decode_pem_block(allocator, text, &block) |third| {
+                third.deinit(allocator);
+                testing::expect(false);
+            } else |err| {
+                testing::expect(err == x509::Error::Malformed);
+            }
+        }
+        from = block.next;
+    }
+    testing::expect(count == 3);
+    if x509::next_pem_block("no block here", 0) |stray| {
+        let _ = stray;
+        testing::expect(false);
+    }
 }
