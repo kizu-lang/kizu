@@ -1,0 +1,154 @@
+// PEM (RFC 7468): the text form certificates and keys are handed around
+// in, one or more blocks of `-----BEGIN label-----`, base64 lines, and
+// `-----END label-----`. A block decodes to the DER `parse` and
+// `parse_private_key` read. A file may hold several blocks -- a chain is
+// the host's certificate followed by its issuers -- so blocks are found
+// one at a time.
+
+// A PemBlock is where one block lies in a text: its label, its base64
+// body, and where the next block search should start.
+pub struct PemBlock {
+    pub label_start: i64,
+    pub label_end: i64,
+    body_start: i64,
+    body_end: i64,
+    pub next: i64,
+}
+
+// next_pem_block finds the first block starting at or after `from`, or
+// nothing when there is none. Text outside blocks is skipped, as RFC
+// 7468 allows.
+pub fn next_pem_block(text: []u8, from: i64) -> ?std::crypto::x509::PemBlock {
+    let begin = "-----BEGIN ";
+    let dashes = "-----";
+    let length = std::mem::len(text);
+    var at = find_from(text, from, begin);
+    if at < 0 {
+        return null;
+    }
+    let label_start = at + std::mem::len(begin);
+    let label_end = find_from(text, label_start, dashes);
+    if label_end < 0 {
+        return null;
+    }
+    let body_start = label_end + std::mem::len(dashes);
+    let end_at = find_from(text, body_start, "-----END ");
+    if end_at < 0 {
+        return null;
+    }
+    let close = find_from(text, end_at + 9, dashes);
+    if close < 0 {
+        return null;
+    }
+    let _ = length;
+    return PemBlock {
+        label_start: label_start,
+        label_end: label_end,
+        body_start: body_start,
+        body_end: end_at,
+        next: close + std::mem::len(dashes),
+    };
+}
+
+// label is the block's label, such as `CERTIFICATE` or `PRIVATE KEY`.
+pub fn (self: &std::crypto::x509::PemBlock) label(text: []u8) -> []u8 {
+    return text[self.label_start..self.label_end];
+}
+
+// decode_pem_block decodes a block's body from base64 into a new
+// String. Line breaks and spaces are skipped; any other byte that is
+// not base64, or padding that does not close the last group, is
+// `Malformed`.
+pub fn decode_pem_block(
+    allocator: Allocator,
+    text: []u8,
+    block: &std::crypto::x509::PemBlock
+) -> std::crypto::x509::Failure!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    var held = 0;
+    var bits = 0;
+    var padding = 0;
+    for block.body_start..block.body_end |index| {
+        let byte = text[index];
+        if byte == 10 or byte == 13 or byte == 32 or byte == 9 {
+            continue;
+        }
+        if byte == 61 {
+            padding = padding + 1;
+            continue;
+        }
+        if padding > 0 {
+            return Error::Malformed;
+        }
+        let value = base64_value(byte);
+        if value < 0 {
+            return Error::Malformed;
+        }
+        held = (held << 6) | value;
+        bits = bits + 6;
+        if bits >= 8 {
+            bits = bits - 8;
+            try out.append_byte(allocator, cast<u8>((held >> bits) & 255));
+            held = held & ((1 << bits) - 1);
+        }
+    }
+    // What is left over must be the zero bits of a group the padding
+    // closed: 2 bits after 3 characters (one `=`), 4 after 2 (`==`).
+    if held != 0 or (bits == 2 and padding != 1) or (bits == 4 and padding != 2) or (bits == 0 and padding != 0) or bits == 6 {
+        return Error::Malformed;
+    }
+    return move out;
+}
+
+// decode_pem decodes the first block whose label is `label`, or the
+// first block of any label when `label` is empty; no such block is
+// `Malformed`.
+pub fn decode_pem(allocator: Allocator, text: []u8, label: []u8) -> std::crypto::x509::Failure!std::string::String {
+    var from = 0;
+    while next_pem_block(text, from) |block| {
+        let found = block.label(text);
+        if std::mem::len(label) == 0 or std::mem::equal_bytes(found, label) {
+            let decoded = try decode_pem_block(allocator, text, &block);
+            return move decoded;
+        }
+        from = block.next;
+    }
+    return Error::Malformed;
+}
+
+// base64_value is the value of a base64 character, or -1.
+fn base64_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 65 and value <= 90 {
+        return value - 65;
+    }
+    if value >= 97 and value <= 122 {
+        return value - 97 + 26;
+    }
+    if value >= 48 and value <= 57 {
+        return value - 48 + 52;
+    }
+    if value == 43 {
+        return 62;
+    }
+    if value == 47 {
+        return 63;
+    }
+    return -1;
+}
+
+// find_from is where `needle` first occurs in `text` at or after
+// `from`, or -1.
+fn find_from(text: []u8, from: i64, needle: []u8) -> i64 {
+    let length = std::mem::len(text);
+    let count = std::mem::len(needle);
+    var at = from;
+    while at + count <= length {
+        if std::mem::equal_bytes(text[at..at + count], needle) {
+            return at;
+        }
+        at = at + 1;
+    }
+    return -1;
+}

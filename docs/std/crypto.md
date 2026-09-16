@@ -144,8 +144,8 @@ public exponent、2 つの素数、それぞれの素数での指数、coefficie
 計算は CRT(2 つの素数で別々にべき乗して合成)で、結果を public exponent で
 検証してから返すので、部品が食い違う鍵や計算の fault で素数が漏れる署名は
 `InvalidKey` になります。PSS の salt は呼び手が `random_bytes` で引いた digest と
-同じ長さの bytes です(TLS 1.3 の形)。`signature` は modulus と同じ長さの view で、
-違う長さは trap します。
+同じ長さの bytes です(TLS 1.3 の形)。署名は `signature` の先頭に modulus と同じ
+長さだけ書き、それより短い view は trap します(ECDSA も同じで、64 / 96 byte)。
 
 算術は 32 bit limb を `u64` で持つ Montgomery 乗算で、limb 数は modulus から決まり
 (P-256 は 8 本、P-384 は 12 本、RSA は 4096 bit まで 128 本)、体 p、位数 n、RSA の
