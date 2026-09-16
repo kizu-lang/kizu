@@ -1,6 +1,7 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::fmt;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/wasm/memory.go: typed linear-memory loads,
@@ -94,13 +95,102 @@ fn (self: &var Emitter) write_load_value(
     return try self.fail("wasm error: type `%s` cannot be loaded from linear memory", Arg::Str(type_name));
 }
 
-/// Copies size bytes from src to dst.
+/// Returns the largest byte count a copy or a zeroing of a fixed size is
+/// written out as loads and stores, the Go `inlineCopyLimit`. memory.copy and
+/// memory.fill leave the engine's compiled code for a runtime routine, which
+/// costs more than the handful of word moves an aggregate of a few fields
+/// needs.
+fn inline_copy_limit() -> i64 {
+    return 64;
+}
+
+/// Copies size bytes from src to dst, the Go `writeMemoryCopy`. The two
+/// addresses of an aggregate copy never lie partly over each other: a value
+/// has a slot of its own, so the word-by-word copy reads what memory.copy
+/// would.
 fn (self: &var Emitter) write_memory_copy(dst: ir::Name, src: ir::Name, size: i64) -> !void {
     if size == 0 {
         return;
     }
-    return self.line3("            (memory.copy %s %s (i32.const %d))",
-        Arg::Str(dst), Arg::Str(src), Arg::Int(size));
+    if size > inline_copy_limit() or !self.is_plain_address(dst) or !self.is_plain_address(src) {
+        return self.line3("            (memory.copy %s %s (i32.const %d))",
+            Arg::Str(dst), Arg::Str(src), Arg::Int(size));
+    }
+    var offset = 0;
+    while offset < size {
+        let chunk = copy_chunk(size - offset);
+        let target = try self.address_at(dst, offset);
+        let source = try self.address_at(src, offset);
+        try self.line4("            (%s %s (%s %s))",
+            Arg::Lit(chunk.store), Arg::Str(target), Arg::Lit(chunk.load), Arg::Str(source));
+        offset = offset + chunk.width;
+    }
+    return;
+}
+
+/// Zeroes size bytes at a fixed-size address, the Go `writeMemoryZero`.
+fn (self: &var Emitter) write_memory_zero(dst: ir::Name, size: i64) -> !void {
+    if size == 0 {
+        return;
+    }
+    if size > inline_copy_limit() or !self.is_plain_address(dst) {
+        return self.line2("            (memory.fill %s (i32.const 0) (i32.const %d))",
+            Arg::Str(dst), Arg::Int(size));
+    }
+    var offset = 0;
+    while offset < size {
+        let chunk = copy_chunk(size - offset);
+        let target = try self.address_at(dst, offset);
+        var zero: []u8 = "(i64.const 0)";
+        if chunk.width < 8 {
+            zero = "(i32.const 0)";
+        }
+        try self.line3("            (%s %s %s)", Arg::Lit(chunk.store), Arg::Str(target), Arg::Lit(zero));
+        offset = offset + chunk.width;
+    }
+    return;
+}
+
+/// Is the widest word that fits in the bytes left to move, with the load and
+/// store that move it, the Go `copyChunk` results.
+struct CopyChunk {
+    width: i64,
+    load: []u8,
+    store: []u8,
+}
+
+/// Returns the widest word that fits in left bytes, the Go `copyChunk`.
+fn copy_chunk(left: i64) -> CopyChunk {
+    if left >= 8 {
+        return CopyChunk { width: 8, load: "i64.load", store: "i64.store" };
+    }
+    if left >= 4 {
+        return CopyChunk { width: 4, load: "i32.load", store: "i32.store" };
+    }
+    return CopyChunk { width: 1, load: "i32.load8_u", store: "i32.store8" };
+}
+
+/// Reports whether an address expression reads nothing but locals and
+/// constants, so writing it once per word neither repeats a memory read nor
+/// changes what a later word's copy addresses, the Go `isPlainAddress`.
+fn (self: &Emitter) is_plain_address(expr: ir::Name) -> bool {
+    let retained = ir::name_text(&self.names, expr);
+    let bytes = retained.as_bytes();
+    return !wasm_bytes_contain(bytes, "load") and !wasm_bytes_contain(bytes, "call") and
+        !wasm_bytes_contain(bytes, "global");
+}
+
+/// Reports whether needle occurs in haystack, the Go `strings.Contains`.
+fn wasm_bytes_contain(haystack: []u8, needle: []u8) -> bool {
+    let needle_len = mem::len(needle);
+    var start = 0;
+    while start + needle_len <= mem::len(haystack) {
+        if mem::equal_bytes(haystack[start..start + needle_len], needle) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
 }
 
 fn wasm_store_op(module: &ir::Module, typ: ir::Name) -> ?[]u8 {

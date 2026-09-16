@@ -2094,10 +2094,9 @@ fn default_native_output(allocator: Allocator, path: []u8, emit: []u8, out: &var
 /// Lowers a checked file or package and hands it to the native backend: the
 /// Go `emitNativeFile` for Build, `runFile` for Run and `testFile` for
 /// Test. Test loads package test files and replaces `main` with an entry
-/// that runs every test block; Build and Run expose the package main. The
-/// typed-SSA optimizer stays scoped to `build --emit-llvm --opt`, so no
-/// mode runs it; native `--opt` prunes unreachable functions and hands
-/// optimization to the toolchain.
+/// that runs every test block; Build and Run expose the package main. Build
+/// with `--opt` runs the typed-SSA optimizer before the toolchain's, the way
+/// `build --emit-llvm --opt` does.
 fn native_target(
     io: Io,
     allocator: Allocator,
@@ -2152,6 +2151,13 @@ fn native_target(
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
+                    }
+                    if command == NativeCommand::Build and options.opt {
+                        if try ir::optimize(allocator, &var lowerer.module) |failed| {
+                            defer failed.deinit(allocator);
+                            try report(io, allocator, &loader.sources, &failed);
+                            return 1;
+                        }
                     }
                     if command != NativeCommand::Test and package_name.len() > 0 {
                         var entry = string::new(allocator);

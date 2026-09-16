@@ -3,7 +3,6 @@ import compiler::internal::ir;
 import compiler::internal::typ;
 import std::float;
 import std::fmt;
-import std::map;
 import std::mem;
 import std::string;
 
@@ -13,18 +12,55 @@ import std::string;
 // prefix; here the operation is the ir::Op tag and the name it carries, so the
 // `binary.` / `call.` / `field.` prefixes become the tags that spell them.
 
-/// Writes a dispatch arm for one IR block, the Go `writeBlock`.
-fn (self: &var Emitter) write_block(
+/// Writes one block and everything it dominates, the Go `writeTree`: a loop
+/// header's code sits inside a `loop`, and the merge nodes it dominates are
+/// given their `block`s by `write_node_within`.
+fn (self: &var Emitter) write_tree(
     module: &ir::Module,
-    block: ir::Block,
-    index: &map::Map<[]u8, DispatchBlock>,
-    id: i64
+    node: &ir::FunctionNode,
+    s: &Structure,
+    index: i64
 ) -> !?diagnostic::Diagnostic {
-    try self.line1("        (if (i32.eq (local.get $pc) (i32.const %d))", Arg::Int(id));
-    try self.line("          (then");
-    let node = module.blocks.at(block.node);
+    let name = try self.own(module, module.block_name(node.blocks.get_or_panic(index)));
+    if s.is_loop_header(index) {
+        try self.line1("        (loop $loop.%s", Arg::Str(name));
+    }
+    if try self.write_node_within(module, node, s, index, 0) |failed| {
+        return move failed;
+    }
+    if s.is_loop_header(index) {
+        try self.line("        )");
+    }
+    return null;
+}
+
+/// Writes a block's code under the `block`s of the merge nodes it dominates
+/// from position `from` on, latest first so that the earliest is innermost,
+/// the Go `writeNodeWithin`.
+fn (self: &var Emitter) write_node_within(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    s: &Structure,
+    index: i64,
+    from: i64
+) -> !?diagnostic::Diagnostic {
+    var merge_index = -1;
+    if s.merge_children.at(index) |list| {
+        merge_index = list.get(from) orelse -1;
+    }
+    if merge_index >= 0 {
+        let merge_name = try self.own(module, module.block_name(node.blocks.get_or_panic(merge_index)));
+        try self.line1("        (block $block.%s", Arg::Str(merge_name));
+        if try self.write_node_within(module, node, s, index, from + 1) |failed| {
+            return move failed;
+        }
+        try self.line("        )");
+        return self.write_tree(module, node, s, merge_index);
+    }
+    let block = node.blocks.get_or_panic(index);
+    let block_node = module.blocks.at(block.node);
     var instr_index = 0;
-    while node.instrs.get(instr_index) |instr| {
+    while block_node.instrs.get(instr_index) |instr| {
         instr_index = instr_index + 1;
         if module.instr_op(instr) == ir::Op::Phi {
             continue;
@@ -33,12 +69,7 @@ fn (self: &var Emitter) write_block(
             return move failed;
         }
     }
-    if try self.write_terminator(module, block, index) |failed| {
-        return move failed;
-    }
-    try self.line("          )");
-    try self.line("        )");
-    return null;
+    return self.write_terminator(module, node, s, block);
 }
 
 /// Writes one WebAssembly instruction sequence, the Go `writeInstr`.
@@ -711,23 +742,23 @@ fn (self: &var Emitter) arg_expr(
     return info.expr;
 }
 
-/// Writes control transfer for one dispatch arm, the Go `writeTerminator`.
+/// Writes the control transfer at the end of a block, the Go
+/// `writeTerminator`.
 fn (self: &var Emitter) write_terminator(
     module: &ir::Module,
-    block: ir::Block,
-    index: &map::Map<[]u8, DispatchBlock>
+    node: &ir::FunctionNode,
+    s: &Structure,
+    block: ir::Block
 ) -> !?diagnostic::Diagnostic {
     let term = module.block_terminator(block);
     if term.op == ir::TermOp::Return {
         return self.write_return(module, term.value);
     }
     if term.op == ir::TermOp::Jump {
-        try self.write_jump(module, block, term.target, index);
-        return null;
+        return self.write_branch_to(module, node, s, module.block_name(block), term.target);
     }
     if term.op == ir::TermOp::Branch {
-        try self.write_branch(module, block, index);
-        return null;
+        return self.write_branch(module, node, s, block);
     }
     if term.op == ir::TermOp::Unreachable {
         try self.line("            (unreachable)");
@@ -755,7 +786,7 @@ fn (self: &var Emitter) write_return(
     value: ir::Value
 ) -> !?diagnostic::Diagnostic {
     if module.names.is(value.type_name, "void") {
-        try self.restore_frame(module);
+        try self.restore_frame();
         try self.line("            (br $exit)");
         return null;
     }
@@ -767,77 +798,92 @@ fn (self: &var Emitter) write_return(
             Layout(layout) => {
                 let result = try self.names.intern("(local.get $__kizu_result)");
                 try self.write_memory_copy(result, info.expr, layout.size);
-                try self.restore_frame(module);
+                try self.restore_frame();
                 try self.line("            (br $exit)");
                 return null;
             },
         }
     }
-    try self.restore_frame(module);
+    try self.restore_frame();
     try self.line1("            (return %s)", Arg::Str(info.expr));
     return null;
 }
 
 /// Releases this invocation's fixed frame before any return.
-fn (self: &var Emitter) restore_frame(module: &ir::Module) -> !void {
+fn (self: &var Emitter) restore_frame() -> !void {
     if self.frame_size > 0 {
-        if self.uses_allocator_runtime(module) {
-            return self.line1(
-                "            (call $__stack_free (local.get $__kizu_frame) (i32.const %d))",
-                Arg::Int(self.frame_size)
-            );
-        }
         return self.line("            (global.set $__stack_pointer (local.get $__kizu_frame))");
     }
     return;
 }
 
-/// Writes an unconditional dispatch jump, the Go `writeJump`.
-fn (self: &var Emitter) write_jump(
+/// Writes the edge from `source` to `target`, the Go `writeBranchTo`: the
+/// phi copies the edge carries, then a branch to the loop the target heads
+/// when the edge goes back, a branch to the target's block when it is a
+/// merge node, and otherwise the target's own code.
+fn (self: &var Emitter) write_branch_to(
     module: &ir::Module,
-    block: ir::Block,
-    target: ir::Name,
-    index: &map::Map<[]u8, DispatchBlock>
-) -> !void {
-    let source = module.block_name(block);
-    try self.write_phi_copies(module, source, target, index);
-    let id = block_index_of(module, index, target);
-    try self.line1("            (local.set $pc (i32.const %d))", Arg::Int(id));
-    return self.line("            (br $dispatch)");
+    node: &ir::FunctionNode,
+    s: &Structure,
+    source: ir::Name,
+    target: ir::Name
+) -> !?diagnostic::Diagnostic {
+    try self.write_phi_copies(module, node, s, source, target);
+    let source_index = s.index_of(module, source);
+    let target_index = s.index_of(module, target);
+    let label = try self.own(module, target);
+    if s.is_loop_header(target_index) and s.rpo_of(target_index) <= s.rpo_of(source_index) {
+        try self.line1("            (br $loop.%s)", Arg::Str(label));
+        return null;
+    }
+    if s.is_merge(target_index) {
+        try self.line1("            (br $block.%s)", Arg::Str(label));
+        return null;
+    }
+    return self.write_tree(module, node, s, target_index);
 }
 
-/// Writes a conditional dispatch jump, the Go `writeBranch`.
+/// Writes a conditional transfer as an `if` whose arms each take their
+/// edge, the Go `writeBranch`.
 fn (self: &var Emitter) write_branch(
     module: &ir::Module,
-    block: ir::Block,
-    index: &map::Map<[]u8, DispatchBlock>
-) -> !void {
+    node: &ir::FunctionNode,
+    s: &Structure,
+    block: ir::Block
+) -> !?diagnostic::Diagnostic {
     let term = module.block_terminator(block);
     let source = module.block_name(block);
     let info = try self.value_of(module, term.cond);
     try self.line1("            (if %s", Arg::Str(info.expr));
     try self.line("              (then");
-    try self.write_phi_copies(module, source, term.target, index);
-    let target_id = block_index_of(module, index, term.target);
-    try self.line1("                (local.set $pc (i32.const %d))", Arg::Int(target_id));
-    try self.line("                (br $dispatch))");
+    if try self.write_branch_to(module, node, s, source, term.target) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
     try self.line("              (else");
-    try self.write_phi_copies(module, source, term.else_target, index);
-    let else_id = block_index_of(module, index, term.else_target);
-    try self.line1("                (local.set $pc (i32.const %d))", Arg::Int(else_id));
-    return self.line("                (br $dispatch)))");
+    if try self.write_branch_to(module, node, s, source, term.else_target) |failed| {
+        return move failed;
+    }
+    try self.line("              )");
+    try self.line("            )");
+    return null;
 }
 
 /// Assigns target phi locals for an edge, the Go `writePhiCopies`. The edge
 /// stays inside one function, so the target is read out of that function's
-/// dispatch map.
+/// structure.
 fn (self: &var Emitter) write_phi_copies(
     module: &ir::Module,
+    function: &ir::FunctionNode,
+    s: &Structure,
     source: ir::Name,
-    target: ir::Name,
-    index: &map::Map<[]u8, DispatchBlock>
+    target: ir::Name
 ) -> !void {
-    let block = block_named(module, index, target) orelse return;
+    let target_index = s.index_of(module, target);
+    if target_index < 0 {
+        return;
+    }
+    let block = function.blocks.get_or_panic(target_index);
     let node = module.blocks.at(block.node);
     var instr_index = 0;
     while node.instrs.get(instr_index) |instr| {

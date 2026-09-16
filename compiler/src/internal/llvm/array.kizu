@@ -162,12 +162,11 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
         "%s = private unnamed_addr global %s zeroinitializer",
         Arg::Lit(array_empty_global()), Arg::Lit(array_header_type())
     );
-    try self.line("declare i1 @kizu_array_append(ptr, ptr, ptr, i64)");
+    try self.line("declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)");
     try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)");
     try self.line("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
     try self.line("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)");
     try self.line("declare ptr @kizu_array_pop(ptr, i64)");
-    try self.line("declare i1 @kizu_array_swap(ptr, i64, i64, i64)");
     try self.line("declare i1 @kizu_array_truncate(ptr, i64)");
     try self.line("declare void @kizu_array_clear(ptr)");
     try self.line("declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)");
@@ -195,7 +194,7 @@ fn (self: &var Emitter) array_field_addr(handle: ir::Name, field: i64, name: []u
     let synthetic = try self.next_synthetic_value(name);
     let addr = try self.percent(synthetic);
     try self.line4(
-        "  %s = getelementptr %s, ptr %s, i64 0, i32 %d",
+        "  %s = getelementptr inbounds %s, ptr %s, i64 0, i32 %d",
         Arg::Str(addr), Arg::Lit(array_header_type()), Arg::Str(handle), Arg::Int(field)
     );
     return addr;
@@ -246,7 +245,7 @@ fn (self: &var Emitter) array_element_addr_of(
     let elem_addr = try self.percent(elem_synthetic);
     try self.line2("  %s = load ptr, ptr %s", Arg::Str(data), Arg::Str(data_addr));
     try self.line4(
-        "  %s = getelementptr %s, ptr %s, i64 %s",
+        "  %s = getelementptr inbounds %s, ptr %s, i64 %s",
         Arg::Str(elem_addr), Arg::Str(elem_type), Arg::Str(data), Arg::Str(index)
     );
     return elem_addr;
@@ -404,15 +403,47 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
     }
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
+    let handle = try self.array_handle(array.operand);
     let left = try self.operand(module, node.args.get_or_panic(1));
     let right = try self.operand(module, node.args.get_or_panic(2));
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    let size = try self.element_size_operand_bytes(module, elem_bytes);
-    try self.line5(
-        "  %s = call i1 @kizu_array_swap(ptr %s, i64 %s, i64 %s, i64 %s)",
-        Arg::Str(ok_name), Arg::Str(array.operand), Arg::Str(left.operand),
-        Arg::Str(right.operand), Arg::Str(size)
+    let len_synthetic = try self.next_synthetic_value("array.swap.len");
+    let length = try self.percent(len_synthetic);
+    try self.array_load_field(handle, array_field_len(), "array.swap.len.addr", length);
+    let left_synthetic = try self.next_synthetic_value("array.swap.left_in");
+    let left_in = try self.percent(left_synthetic);
+    let right_synthetic = try self.next_synthetic_value("array.swap.right_in");
+    let right_in = try self.percent(right_synthetic);
+    let range_synthetic = try self.next_synthetic_value("array.swap.in_range");
+    let in_range = try self.percent(range_synthetic);
+    try self.line3("  %s = icmp ult i64 %s, %s", Arg::Str(left_in), Arg::Str(left.operand), Arg::Str(length));
+    try self.line3("  %s = icmp ult i64 %s, %s", Arg::Str(right_in), Arg::Str(right.operand), Arg::Str(length));
+    try self.line3("  %s = and i1 %s, %s", Arg::Str(in_range), Arg::Str(left_in), Arg::Str(right_in));
+    let swap_label = try self.helper_label_local(ok_name, "array.swap.move");
+    let skip_label = try self.helper_label_local(ok_name, "array.swap.skip");
+    let join_label = try self.helper_label_local(ok_name, "array.swap.join");
+    try self.mark_current_block_exit(module, join_label);
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(in_range), Arg::Str(swap_label), Arg::Str(skip_label));
+    try self.line1("%s:", Arg::Str(swap_label));
+    let elem_type = try self.llvm_type(module, elem_bytes);
+    let left_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, left.operand);
+    let right_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, right.operand);
+    let left_value_synthetic = try self.next_synthetic_value("array.swap.left");
+    let left_value = try self.percent(left_value_synthetic);
+    let right_value_synthetic = try self.next_synthetic_value("array.swap.right");
+    let right_value = try self.percent(right_value_synthetic);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(left_value), Arg::Str(elem_type), Arg::Str(left_addr));
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(right_value), Arg::Str(elem_type), Arg::Str(right_addr));
+    try self.line3("  store %s %s, ptr %s", Arg::Str(elem_type), Arg::Str(right_value), Arg::Str(left_addr));
+    try self.line3("  store %s %s, ptr %s", Arg::Str(elem_type), Arg::Str(left_value), Arg::Str(right_addr));
+    try self.line1("  br label %%%s", Arg::Str(join_label));
+    try self.line1("%s:", Arg::Str(skip_label));
+    try self.line1("  br label %%%s", Arg::Str(join_label));
+    try self.line1("%s:", Arg::Str(join_label));
+    try self.line3(
+        "  %s = phi i1 [ true, %%%s ], [ false, %%%s ]",
+        Arg::Str(ok_name), Arg::Str(swap_label), Arg::Str(skip_label)
     );
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArraySwap);
 }
@@ -481,70 +512,67 @@ fn (self: &var Emitter) write_array_append_paths(
     let length_addr = try self.array_field_addr(handle, array_field_len(), "array.append.len.addr");
     try self.line2("  %s = load i64, ptr %s", Arg::Str(length), Arg::Str(length_addr));
     try self.array_load_field(handle, array_field_capacity(), "array.append.cap", capacity);
+    let grown_synthetic = try self.next_synthetic_value("array.append.grown");
+    let grown = try self.percent(grown_synthetic);
+    try self.line2("  %s = add i64 %s, 1", Arg::Str(grown), Arg::Str(length));
     let fits_synthetic = try self.next_synthetic_value("array.append.fits");
     let fits = try self.percent(fits_synthetic);
     try self.line3("  %s = icmp slt i64 %s, %s", Arg::Str(fits), Arg::Str(length), Arg::Str(capacity));
     let fast_label = try self.helper_label_local(ok_name, "array.append.fast");
     let slow_label = try self.helper_label_local(ok_name, "array.append.slow");
+    let grow_label = try self.helper_label_local(ok_name, "array.append.grow");
+    let store_label = try self.helper_label_local(ok_name, "array.append.store");
     let join_label = try self.helper_label_local(ok_name, "array.append.join");
     try self.mark_current_block_exit(module, join_label);
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(fits), Arg::Str(fast_label), Arg::Str(slow_label));
-    try self.line1("%s:", Arg::Str(fast_label));
-    try self.write_array_append_fast(module, node, handle, length, length_addr, elem_bytes);
-    try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(slow_label));
-    let slow_ok = try self.write_array_append_slow(module, node, handle_operand, elem_bytes);
-    try self.line1("  br label %%%s", Arg::Str(join_label));
-    try self.line1("%s:", Arg::Str(join_label));
-    try self.line4(
-        "  %s = phi i1 [ true, %%%s ], [ %s, %%%s ]",
-        Arg::Str(ok_name), Arg::Str(fast_label), Arg::Str(slow_ok), Arg::Str(slow_label)
+    let null_synthetic = try self.next_synthetic_value("array.append.handle.null");
+    let is_null = try self.percent(null_synthetic);
+    try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(is_null), Arg::Str(handle_operand));
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(is_null), Arg::Str(join_label), Arg::Str(grow_label));
+    try self.line1("%s:", Arg::Str(grow_label));
+    let data_addr = try self.array_field_addr(handle, array_field_data(), "array.append.data.addr");
+    let data_synthetic = try self.next_synthetic_value("array.append.data");
+    let data = try self.percent(data_synthetic);
+    try self.line2("  %s = load ptr, ptr %s", Arg::Str(data), Arg::Str(data_addr));
+    let storage_synthetic = try self.next_synthetic_value("array.append.storage");
+    let storage = try self.percent(storage_synthetic);
+    let allocator = try self.operand(module, node.args.get_or_panic(1));
+    let size = try self.element_size_operand_bytes(module, elem_bytes);
+    try self.line6(
+        "  %s = call { ptr, i64 } @kizu_array_grow(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)",
+        Arg::Str(storage), Arg::Str(allocator.operand), Arg::Str(data),
+        Arg::Str(capacity), Arg::Str(grown), Arg::Str(size)
     );
-    return length;
-}
-
-/// Writes the value into the reserved tail and counts it, the fast half of the
-/// Go `writeArrayAppendPaths`.
-fn (self: &var Emitter) write_array_append_fast(
-    module: &ir::Module,
-    node: &ir::InstrNode,
-    handle: ir::Name,
-    length: ir::Name,
-    length_addr: ir::Name,
-    elem_bytes: []u8
-) -> !void {
+    let storage_data_synthetic = try self.next_synthetic_value("array.append.storage.data");
+    let storage_data = try self.percent(storage_data_synthetic);
+    let storage_cap_synthetic = try self.next_synthetic_value("array.append.storage.cap");
+    let storage_cap = try self.percent(storage_cap_synthetic);
+    let grew_synthetic = try self.next_synthetic_value("array.append.grew");
+    let grew = try self.percent(grew_synthetic);
+    try self.line2("  %s = extractvalue { ptr, i64 } %s, 0", Arg::Str(storage_data), Arg::Str(storage));
+    try self.line2("  %s = extractvalue { ptr, i64 } %s, 1", Arg::Str(storage_cap), Arg::Str(storage));
+    try self.line2("  %s = icmp sge i64 %s, 0", Arg::Str(grew), Arg::Str(storage_cap));
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(grew), Arg::Str(store_label), Arg::Str(join_label));
+    try self.line1("%s:", Arg::Str(store_label));
+    try self.line2("  store ptr %s, ptr %s", Arg::Str(storage_data), Arg::Str(data_addr));
+    let capacity_addr = try self.array_field_addr(handle, array_field_capacity(), "array.append.cap.addr");
+    try self.line2("  store i64 %s, ptr %s", Arg::Str(storage_cap), Arg::Str(capacity_addr));
+    try self.line1("  br label %%%s", Arg::Str(fast_label));
+    try self.line1("%s:", Arg::Str(fast_label));
     let value = node.args.get_or_panic(2);
     let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, length);
     let value_type = try self.llvm_type_of(module, value.type_name);
     let value_operand = try self.operand(module, value);
     try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr));
-    let grown_synthetic = try self.next_synthetic_value("array.append.grown");
-    let grown = try self.percent(grown_synthetic);
-    try self.line2("  %s = add i64 %s, 1", Arg::Str(grown), Arg::Str(length));
-    return self.line2("  store i64 %s, ptr %s", Arg::Str(grown), Arg::Str(length_addr));
-}
-
-/// Hands the append back to the runtime and returns the register holding what
-/// it answered, the slow half of the Go `writeArrayAppendPaths`.
-fn (self: &var Emitter) write_array_append_slow(
-    module: &ir::Module,
-    node: &ir::InstrNode,
-    handle_operand: ir::Name,
-    elem_bytes: []u8
-) -> !ir::Name {
-    let result_name = try self.local_name(module, node.result.name);
-    let elem_base = try self.suffixed(result_name, ".elem");
-    let elem_slot = try self.write_stack_value(module, elem_base, node.args.get_or_panic(2));
-    let slow_synthetic = try self.next_synthetic_value("array.append.slow.ok");
-    let slow_ok = try self.percent(slow_synthetic);
-    let size = try self.element_size_operand_bytes(module, elem_bytes);
-    let allocator = try self.operand(module, node.args.get_or_panic(1));
-    try self.line5(
-        "  %s = call i1 @kizu_array_append(ptr %s, ptr %s, ptr %s, i64 %s)",
-        Arg::Str(slow_ok), Arg::Str(allocator.operand), Arg::Str(handle_operand),
-        Arg::Str(elem_slot), Arg::Str(size)
+    try self.line2("  store i64 %s, ptr %s", Arg::Str(grown), Arg::Str(length_addr));
+    try self.line1("  br label %%%s", Arg::Str(join_label));
+    try self.line1("%s:", Arg::Str(join_label));
+    try self.line4(
+        "  %s = phi i1 [ true, %%%s ], [ false, %%%s ], [ false, %%%s ]",
+        Arg::Str(ok_name), Arg::Str(fast_label), Arg::Str(slow_label), Arg::Str(grow_label)
     );
-    return slow_ok;
+    return length;
 }
 
 /// Lowers Array.len(), the Go `writeArrayLen`.

@@ -315,14 +315,14 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Native --opt controls clang's native optimization. The typed-SSA optimizer
-	// remains scoped to `build --emit-llvm --opt` until it is package-scale safe.
-	const nativeIROpt = false
+	// Native --opt runs the typed-SSA optimizer before clang's: a body the IR
+	// inliner has already copied into its caller reaches clang as the loop it
+	// is part of, which older toolchains do not always reconstruct from a call.
 	var module *ir.Module
 	if isPackageRoot(options.Path) {
-		module, err = lowerPackage(options.Path, nativeIROpt)
+		module, err = lowerPackage(options.Path, options.Opt)
 	} else {
-		module, err = lowerFile(options.Path, nativeIROpt)
+		module, err = lowerFile(options.Path, options.Opt)
 	}
 	if err != nil {
 		return err

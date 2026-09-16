@@ -286,9 +286,6 @@ func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
 // multiple of 2^32, which no length reaches. So the range test the read was
 // already running answers both questions with the one comparison it already
 // had, and the failure arrives at the one null the trap already watches for.
-// The address is named after the result rather than synthesized, because
-// continuationLabel predicts the label the trap continues at from that name
-// before this block is written.
 func (e *emitter) arenaCheckedElement(instr *ir.Instr) (string, error) {
 	header := e.arenaHandle(e.value(instr.Args[0]).operand)
 	index := e.arenaIndexOf(header, e.value(instr.Args[1]).operand)

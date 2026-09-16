@@ -290,6 +290,10 @@ func (e *emitter) writeErrorCode(instr *ir.Instr) error {
 	if instr.Result.Type != errorType {
 		return fmt.Errorf("wasm error: error.code returns %s, got %s", errorType, instr.Result.Type)
 	}
+	if source := e.value(instr.Args[0]); source.flag != "" {
+		e.values[instr.Result.Name] = valueInfo{expr: fmt.Sprintf("(i64.const %d)", source.code)}
+		return nil
+	}
 	return e.writeLoadValue(instr.Result, e.value(instr.Args[0]).expr, offset)
 }
 
@@ -307,6 +311,11 @@ func (e *emitter) writeTaggedHas(instr *ir.Instr, op string) error {
 		return fmt.Errorf("wasm error: error.has expects !T, got %s", source.Type)
 	}
 	symbol := symbolName(instr.Result.Name)
+	if flag := e.value(source).flag; flag != "" {
+		fmt.Fprintf(&e.out, "            (local.set %s (local.get %s))\n", symbol, flag)
+		e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+		return nil
+	}
 	fmt.Fprintf(&e.out, "            (local.set %s (i64.ne (i64.load %s) (i64.const 0)))\n",
 		symbol, e.value(source).expr)
 	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
@@ -346,18 +355,27 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 		return fmt.Errorf("wasm error: error.try cannot propagate %s into %s",
 			source.Type, e.currentReturn)
 	}
-	sourceExpr := e.value(source).expr
-	e.out.WriteString("            (if (i64.eq (i64.load " + sourceExpr + ") (i64.const 0))\n")
+	sourceValue := e.value(source)
+	sourceExpr := sourceValue.expr
+	failed := "(i64.eq (i64.load " + sourceExpr + ") (i64.const 0))"
+	failureCode := "(i64.load " + addressAt(sourceExpr, sourceOffset) + ")"
+	if sourceValue.flag != "" {
+		failed = "(i32.eqz (local.get " + sourceValue.flag + "))"
+		failureCode = fmt.Sprintf("(i64.const %d)", sourceValue.code)
+	}
+	e.out.WriteString("            (if " + failed + "\n")
 	e.out.WriteString("              (then\n")
+	if err := e.writePendingLoads(instr.Cleanups); err != nil {
+		return err
+	}
 	for _, cleanup := range instr.Cleanups {
 		if err := e.writeCleanup(cleanup); err != nil {
 			return err
 		}
 	}
 	e.out.WriteString("                (i64.store (local.get $__kizu_result) (i64.const 0))\n")
-	fmt.Fprintf(&e.out, "                (i64.store %s (i64.load %s))\n",
-		addressAt("(local.get $__kizu_result)", targetOffset),
-		addressAt(sourceExpr, sourceOffset))
+	fmt.Fprintf(&e.out, "                (i64.store %s %s)\n",
+		addressAt("(local.get $__kizu_result)", targetOffset), failureCode)
 	e.restoreFrame()
 	e.out.WriteString("                (br $exit)))\n")
 	if success == "void" {
@@ -435,13 +453,7 @@ func (e *emitter) writeWASIStart() error {
 			return err
 		}
 	}
-	if e.usesAllocatorRuntime() {
-		fmt.Fprintf(&e.out,
-			"    (call $__stack_free (local.get $__kizu_main_result) (i32.const %d))\n",
-			layout.size)
-	} else {
-		e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_main_result))\n")
-	}
+	e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_main_result))\n")
 	e.out.WriteString("  )\n")
 	e.out.WriteString(")\n")
 	return nil
@@ -480,13 +492,7 @@ func (e *emitter) writeBrowserStart() error {
 			return err
 		}
 	}
-	if e.usesAllocatorRuntime() {
-		fmt.Fprintf(&e.out,
-			"    (call $__stack_free (local.get $__kizu_main_result) (i32.const %d))\n",
-			layout.size)
-	} else {
-		e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_main_result))\n")
-	}
+	e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_main_result))\n")
 	e.out.WriteString("    (local.get $__kizu_status)\n")
 	e.out.WriteString("  )\n)\n")
 	return nil

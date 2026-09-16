@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
 )
@@ -73,12 +74,70 @@ func (e *emitter) writeLoadValue(result ir.Value, base string, offset int) error
 	return nil
 }
 
-// writeMemoryCopy copies size bytes between addressed aggregate values.
+// inlineCopyLimit is the largest byte count a copy or a zeroing of a fixed
+// size is written out as loads and stores. memory.copy and memory.fill leave
+// the engine's compiled code for a runtime routine, which costs more than the
+// handful of word moves an aggregate of a few fields needs.
+const inlineCopyLimit = 64
+
+// writeMemoryCopy copies size bytes between addressed aggregate values. The
+// two addresses of an aggregate copy never lie partly over each other: a value
+// has a slot of its own, so the word-by-word copy reads what memory.copy would.
 func (e *emitter) writeMemoryCopy(dst string, src string, size int) {
 	if size == 0 {
 		return
 	}
-	fmt.Fprintf(&e.out, "            (memory.copy %s %s (i32.const %d))\n", dst, src, size)
+	if size > inlineCopyLimit || !isPlainAddress(dst) || !isPlainAddress(src) {
+		fmt.Fprintf(&e.out, "            (memory.copy %s %s (i32.const %d))\n", dst, src, size)
+		return
+	}
+	for offset := 0; offset < size; {
+		width, load, store := copyChunk(size - offset)
+		fmt.Fprintf(&e.out, "            (%s %s (%s %s))\n",
+			store, addressAt(dst, offset), load, addressAt(src, offset))
+		offset += width
+	}
+}
+
+// writeMemoryZero zeroes size bytes at a fixed-size address.
+func (e *emitter) writeMemoryZero(dst string, size int) {
+	if size == 0 {
+		return
+	}
+	if size > inlineCopyLimit || !isPlainAddress(dst) {
+		fmt.Fprintf(&e.out, "            (memory.fill %s (i32.const 0) (i32.const %d))\n", dst, size)
+		return
+	}
+	for offset := 0; offset < size; {
+		width, _, store := copyChunk(size - offset)
+		zero := "(i64.const 0)"
+		if width < 8 {
+			zero = "(i32.const 0)"
+		}
+		fmt.Fprintf(&e.out, "            (%s %s %s)\n", store, addressAt(dst, offset), zero)
+		offset += width
+	}
+}
+
+// copyChunk returns the widest word that fits in the bytes left to move, with
+// the load and store that move it.
+func copyChunk(left int) (int, string, string) {
+	switch {
+	case left >= 8:
+		return 8, "i64.load", "i64.store"
+	case left >= 4:
+		return 4, "i32.load", "i32.store"
+	default:
+		return 1, "i32.load8_u", "i32.store8"
+	}
+}
+
+// isPlainAddress reports whether an address expression reads nothing but
+// locals and constants, so writing it once per word neither repeats a memory
+// read nor changes what a later word's copy addresses.
+func isPlainAddress(expr string) bool {
+	return !strings.Contains(expr, "load") && !strings.Contains(expr, "call") &&
+		!strings.Contains(expr, "global")
 }
 
 // storeOp returns the width-correct WebAssembly store for typ.

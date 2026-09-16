@@ -12,7 +12,7 @@ func (e *emitter) writeBoxRuntimeDecls() {
 	if !e.usesBoxRuntime() {
 		return
 	}
-	e.out.WriteString("declare ptr @kizu_box_new(ptr, i64, ptr)\n")
+	e.out.WriteString("declare ptr @kizu_box_alloc(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_box_deinit(ptr, ptr, i64)\n\n")
 }
 
@@ -47,8 +47,10 @@ func (e *emitter) writeBoxInstr(instr *ir.Instr) error {
 }
 
 // writeBoxNew lowers std::mem::box<T>(allocator, value). The runtime hands
-// back the payload pointer or null, and the recoverable result is built
-// branch-free: the null test is the ok flag and selects the failure code.
+// back a cell or null, and the value is stored into the cell here, where its
+// type is known, rather than copied byte by byte behind a call. The
+// recoverable result is built from the null test: it is the ok flag and
+// selects the failure code.
 func (e *emitter) writeBoxNew(instr *ir.Instr) error {
 	success, ok := e.errorUnionSuccessType(instr.Result.Type)
 	if len(instr.Args) != 2 || !ok || !isBoxLLVMType(success) {
@@ -64,14 +66,22 @@ func (e *emitter) writeBoxNew(instr *ir.Instr) error {
 	}
 	allocator := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
-	valueSlot := e.writeStackValue(resultName+".value", instr.Args[1])
 	rawName := resultName + ".raw"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_box_new(ptr %s, i64 %s, ptr %s)\n",
-		rawName, allocator.operand, e.elementSizeOperand(elem), valueSlot)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_box_alloc(ptr %s, i64 %s)\n",
+		rawName, allocator.operand, e.elementSizeOperand(elem))
 	okName := resultName + ".is_ok"
+	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", okName, rawName)
+	storeLabel := helperLabel(resultName, "box.store")
+	joinLabel := helperLabel(resultName, "box.join")
+	e.markCurrentBlockExit(joinLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okName, storeLabel, joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", storeLabel)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		e.llvmType(instr.Args[1].Type), e.value(instr.Args[1]).operand, rawName)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
 	okByteName := resultName + ".ok.byte"
 	codeName := resultName + ".code"
-	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", okName, rawName)
 	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", okByteName, okName)
 	fmt.Fprintf(&e.out, "  %s = select i1 %s, i64 0, i64 %d\n", codeName, okName, code)
 	unionType := e.llvmType(instr.Result.Type)

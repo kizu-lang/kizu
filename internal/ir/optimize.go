@@ -8,6 +8,7 @@ import (
 // Optimize applies bounded local cleanup passes to a module. A pass rewrites
 // values in place, so what it produces is verified the same way lowering is.
 func Optimize(module *Module) error {
+	Inline(module)
 	ConstantFold(module)
 	CopyPropagate(module)
 	DeadCodeEliminate(module)
@@ -175,20 +176,33 @@ func keepLiveInstrs(instrs []*Instr, used map[string]bool) []*Instr {
 }
 
 // hasEffect reports whether an instruction must remain even if its result is
-// unused. Calls stay until the IR carries an effect summary: a callee may
-// mutate through a borrow, allocate, trap, or perform host I/O regardless of
-// its return type. An error.try keeps its failure return and cleanups even when
-// its success payload is discarded. A volatile load stays because the access
-// itself is the effect: device registers change state when read.
+// unused. Only an instruction known to do nothing but compute its result may
+// go: what a result's type says is no guide, since popping an element, storing
+// one, or failing a bounds check each return a value and do something as well.
+// Inline makes this matter, because an operation that was the body of a call
+// the caller discarded lands in the caller with its result unread.
 func hasEffect(instr *Instr) bool {
-	if strings.HasPrefix(instr.Op, "call.") {
+	return !isPureOp(instr.Op)
+}
+
+// isPureOp reports whether op only computes its result: it writes no memory,
+// calls nothing, allocates nothing and cannot fail on its own.
+func isPureOp(op string) bool {
+	switch op {
+	case "const", "id", "phi", "cast", "struct.new", "local.slot", "ref.load",
+		"opt.null", "opt.some", "opt.has", "opt.value",
+		"error.ok", "error.error", "error.has", "error.value", "error.code",
+		"union.new", "union.tag", "union.payload", "union.payload_ref", "union.load",
+		"slice.len", "slice.index", "slice.slice", "buffer.new", "buffer.as_bytes",
+		"float.bits", "float.from_bits", "box.borrow", "box.borrow_mut",
+		"array.new", "array.len", "array.capacity", "array.get", "array.at", "array.at_mut",
+		"array.as_bytes", "map.new", "map.len", "map.get", "map.contains", "map.at",
+		"map.at_mut", "map.key_at", "arena.new", "arena.len":
 		return true
 	}
-	switch instr.Op {
-	case "error.try", "arena.add", "arena.at", "volatile.load",
-		"box.new", "box.take":
-		return true
-	default:
-		return instr.Result.Type == "void"
+	if strings.HasPrefix(op, "field.ref.set.") {
+		return false
 	}
+	return strings.HasPrefix(op, "binary.") || strings.HasPrefix(op, "unary.") ||
+		strings.HasPrefix(op, "field.") || strings.HasPrefix(op, "func.addr.")
 }

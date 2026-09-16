@@ -687,8 +687,7 @@ func (e *emitter) writeMapNew(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (memory.fill %s (i32.const 0) (i32.const %d))\n",
-		slot, mapHeaderSize)
+	e.writeMemoryZero(slot, mapHeaderSize)
 	e.values[instr.Result.Name] = valueInfo{expr: slot}
 	return nil
 }

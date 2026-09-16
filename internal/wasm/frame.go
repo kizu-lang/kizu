@@ -29,7 +29,7 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 				return nil, err
 			}
 			if (e.isMemoryType(instr.Result.Type) || instr.Op == "buffer.new") &&
-				instr.Op != "phi" {
+				instr.Op != "phi" && !e.flagResults[instr.Result.Name] {
 				layout, err := e.typeLayout(instr.Result.Type)
 				if err != nil {
 					return nil, err
@@ -56,7 +56,7 @@ func (e *emitter) registerFrameValues(fn *ir.Function) error {
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			if (e.isMemoryType(instr.Result.Type) || instr.Op == "buffer.new") &&
-				instr.Op != "phi" {
+				instr.Op != "phi" && !e.flagResults[instr.Result.Name] {
 				slot, err := e.resultSlot(instr.Result)
 				if err != nil {
 					return err

@@ -140,8 +140,7 @@ func (e *emitter) writeArrayNew(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (memory.fill %s (i32.const 0) (i32.const %d))\n",
-		slot, arrayHeaderSize)
+	e.writeMemoryZero(slot, arrayHeaderSize)
 	e.values[instr.Result.Name] = valueInfo{expr: slot}
 	return nil
 }
@@ -162,7 +161,9 @@ func (e *emitter) writeArrayField(instr *ir.Instr, offset int, op string) error 
 	return nil
 }
 
-// writeArrayAppend reserves storage and appends one element on success.
+// writeArrayAppend appends one element: into the reserved tail when there is
+// room, the way the native backend does, and through the reserve helper --
+// a call and the allocator's dispatch -- only when the storage must grow.
 func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	if len(instr.Args) != 3 || instr.Args[1].Type != "Allocator" ||
 		instr.Result.Type != "std::mem::Error!void" {
@@ -180,24 +181,61 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	allocator := e.value(instr.Args[1]).expr
 	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
 	needed := fmt.Sprintf("(i64.add %s (i64.const 1))", length)
-	ok := fmt.Sprintf("(call $__array_reserve %s %s %s (i32.const %d))",
+	reserve := fmt.Sprintf("(call $__array_reserve %s %s %s (i32.const %d))",
 		allocator, array, needed, layout.size)
-	slot, err := e.writeArrayErrorResult(instr.Result, ok, "std::mem::Error", "OutOfMemory")
+	write := func() error {
+		destination := arrayElementAddress(array, length, layout.size)
+		if err := e.writeStoreValue(destination, 0, elem, e.value(instr.Args[2])); err != nil {
+			return err
+		}
+		fmt.Fprintf(&e.out, "                (i64.store %s %s)\n",
+			arrayFieldAddress(array, arrayLenOffset), needed)
+		return nil
+	}
+	return e.writeArrayAppendPaths(instr.Result, array, length, reserve, write)
+}
+
+// writeArrayAppendPaths writes the two ways an append ends: when the length
+// is below the capacity, `write` runs and the result is success; otherwise
+// `reserve` is called and `write` runs on its success. Both paths write the
+// error result the same way, so the result's slot reads the same after
+// either.
+func (e *emitter) writeArrayAppendPaths(
+	result ir.Value,
+	array string,
+	length string,
+	reserve string,
+	write func() error,
+) error {
+	capacity := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayCapacityOffset))
+	fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", length, capacity)
+	e.out.WriteString("              (then\n")
+	_, err := e.writeArrayErrorResult(result, "(i32.const 1)", "std::mem::Error", "OutOfMemory")
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (if (i32.wrap_i64 (i64.load %s))\n", slot)
-	e.out.WriteString("              (then\n")
-	destination := arrayElementAddress(array, length, layout.size)
-	if err := e.writeStoreValue(destination, 0, elem, e.value(instr.Args[2])); err != nil {
+	if err := write(); err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "                (i64.store %s %s)))\n",
-		arrayFieldAddress(array, arrayLenOffset), needed)
+	e.out.WriteString("              )\n")
+	e.out.WriteString("              (else\n")
+	grown, err := e.writeArrayErrorResult(result, reserve, "std::mem::Error", "OutOfMemory")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&e.out, "            (if %s\n", grown)
+	e.out.WriteString("              (then\n")
+	if err := write(); err != nil {
+		return err
+	}
+	e.out.WriteString("              ))\n")
+	e.out.WriteString("              )\n")
+	e.out.WriteString("            )\n")
 	return nil
 }
 
-// writeArrayAppendBytes appends one byte slice to an Array of bytes.
+// writeArrayAppendBytes appends one byte slice to an Array of bytes, into
+// the reserved tail when the run fits.
 func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
 	if len(instr.Args) != 3 || instr.Args[1].Type != "Allocator" ||
 		instr.Args[2].Type != "[]u8" || instr.Result.Type != "std::mem::Error!void" {
@@ -218,19 +256,43 @@ func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
 	byteLength32 := fmt.Sprintf("(i32.load %s)", addressAt(bytes, 4))
 	byteLength := fmt.Sprintf("(i64.extend_i32_u %s)", byteLength32)
 	needed := fmt.Sprintf("(i64.add %s %s)", length, byteLength)
-	ok := fmt.Sprintf("(call $__array_reserve %s %s %s (i32.const 1))",
+	reserve := fmt.Sprintf("(call $__array_reserve %s %s %s (i32.const 1))",
 		allocator, array, needed)
-	slot, err := e.writeArrayErrorResult(instr.Result, ok, "std::mem::Error", "OutOfMemory")
+	write := func() error {
+		destination := arrayElementAddress(array, length, 1)
+		fmt.Fprintf(&e.out, "                (memory.copy %s (i32.load %s) %s)\n",
+			destination, bytes, byteLength32)
+		fmt.Fprintf(&e.out, "                (i64.store %s %s)\n",
+			arrayFieldAddress(array, arrayLenOffset), needed)
+		return nil
+	}
+	// The tail fits when what is needed is within the capacity: the run may
+	// be a view of this same array, below its length, so the copy never
+	// overlaps what it writes.
+	capacity := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayCapacityOffset))
+	fmt.Fprintf(&e.out, "            (if (i64.le_u %s %s)\n", needed, capacity)
+	e.out.WriteString("              (then\n")
+	_, err = e.writeArrayErrorResult(instr.Result, "(i32.const 1)", "std::mem::Error", "OutOfMemory")
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (if (i32.wrap_i64 (i64.load %s))\n", slot)
+	if err := write(); err != nil {
+		return err
+	}
+	e.out.WriteString("              )\n")
+	e.out.WriteString("              (else\n")
+	grown, err := e.writeArrayErrorResult(instr.Result, reserve, "std::mem::Error", "OutOfMemory")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&e.out, "            (if %s\n", grown)
 	e.out.WriteString("              (then\n")
-	destination := arrayElementAddress(array, length, 1)
-	fmt.Fprintf(&e.out, "                (memory.copy %s (i32.load %s) %s)\n",
-		destination, bytes, byteLength32)
-	fmt.Fprintf(&e.out, "                (i64.store %s %s)))\n",
-		arrayFieldAddress(array, arrayLenOffset), needed)
+	if err := write(); err != nil {
+		return err
+	}
+	e.out.WriteString("              ))\n")
+	e.out.WriteString("              )\n")
+	e.out.WriteString("            )\n")
 	return nil
 }
 
@@ -436,11 +498,11 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 	index := e.value(instr.Args[1]).expr
 	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
 	ok := fmt.Sprintf("(i64.lt_u %s %s)", index, length)
-	slot, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
+	inBounds, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (if (i32.wrap_i64 (i64.load %s))\n", slot)
+	fmt.Fprintf(&e.out, "            (if %s\n", inBounds)
 	e.out.WriteString("              (then\n")
 	if err := e.writeStoreValue(arrayElementAddress(array, index, layout.size), 0,
 		elem, e.value(instr.Args[2])); err != nil {
@@ -457,15 +519,77 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 		return fmt.Errorf(
 			"wasm error: array.swap expects Array<T>, i64, i64 -> std::array::Error!void")
 	}
-	_, layout, err := e.arrayElementLayout(instr)
+	elem, layout, err := e.arrayElementLayout(instr)
 	if err != nil {
 		return err
 	}
-	ok := fmt.Sprintf("(call $__array_swap %s %s %s (i32.const %d))",
-		e.value(instr.Args[0]).expr, e.value(instr.Args[1]).expr,
-		e.value(instr.Args[2]).expr, layout.size)
-	_, err = e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
-	return err
+	array := e.value(instr.Args[0]).expr
+	left := e.value(instr.Args[1]).expr
+	right := e.value(instr.Args[2]).expr
+	if e.isMemoryType(elem) || !isPlainAddress(array) {
+		ok := fmt.Sprintf("(call $__array_swap %s %s %s (i32.const %d))",
+			array, left, right, layout.size)
+		_, err = e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
+		return err
+	}
+	// A scalar element is moved as the one word it is, through the swap
+	// local its type declares, instead of byte by byte in a helper.
+	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
+	ok := fmt.Sprintf("(i32.and (i64.lt_u %s %s) (i64.lt_u %s %s))", left, length, right, length)
+	inBounds, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
+	if err != nil {
+		return err
+	}
+	load, err := e.loadOp(elem)
+	if err != nil {
+		return err
+	}
+	store, err := e.storeOp(elem)
+	if err != nil {
+		return err
+	}
+	leftAddress := arrayElementAddress(array, left, layout.size)
+	rightAddress := arrayElementAddress(array, right, layout.size)
+	temp := swapLocal(e.wasmType(elem))
+	fmt.Fprintf(&e.out, "            (if %s\n", inBounds)
+	e.out.WriteString("              (then\n")
+	fmt.Fprintf(&e.out, "            (local.set %s (%s %s))\n", temp, load, leftAddress)
+	fmt.Fprintf(&e.out, "            (%s %s (%s %s))\n", store, leftAddress, load, rightAddress)
+	fmt.Fprintf(&e.out, "            (%s %s (local.get %s))\n", store, rightAddress, temp)
+	e.out.WriteString("              ))\n")
+	return nil
+}
+
+// swapLocal names the local an inline swap of one wasm value type holds the
+// left element in.
+func swapLocal(wasmType string) string {
+	return "$__kizu_swap_" + wasmType
+}
+
+// swapLocalTypes lists, in first-use order, the wasm value types fn's inline
+// swaps hold an element in, so each is declared once.
+func (e *emitter) swapLocalTypes(fn *ir.Function) []string {
+	types := []string{}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if instr.Op != "array.swap" || len(instr.Args) != 3 {
+				continue
+			}
+			elem, ok := arrayElementWasmType(instr.Args[0].Type)
+			if !ok || e.isMemoryType(elem) {
+				continue
+			}
+			wasmType := e.wasmType(elem)
+			seen := false
+			for _, existing := range types {
+				seen = seen || existing == wasmType
+			}
+			if !seen {
+				types = append(types, wasmType)
+			}
+		}
+	}
+	return types
 }
 
 // writeArrayTruncate shortens an Array to a validated length.
@@ -484,11 +608,11 @@ func (e *emitter) writeArrayTruncate(instr *ir.Instr) error {
 	length := fmt.Sprintf("(i64.load %s)", lengthAddress)
 	ok := fmt.Sprintf("(i32.and (i64.ge_s %s (i64.const 0)) (i64.le_s %s %s))",
 		want, want, length)
-	slot, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
+	inBounds, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (if (i32.wrap_i64 (i64.load %s))\n", slot)
+	fmt.Fprintf(&e.out, "            (if %s\n", inBounds)
 	fmt.Fprintf(&e.out, "              (then (i64.store %s %s)))\n", lengthAddress, want)
 	return nil
 }
@@ -548,8 +672,11 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 }
 
 // writeArrayErrorResult records a runtime boolean as an E!void tag and the
-// declaration-owned global error code. The tag alone selects which payload is
-// observed, so the failure code can be stored on both paths without branching.
+// declaration-owned global error code, and returns the expression that reads
+// the boolean back. The tag alone selects which payload is observed, so the
+// failure code can be stored on both paths without branching. A result only
+// error.try, error.has and error.code read is not stored at all: its boolean
+// is its local, and its code the constant (flagResults).
 func (e *emitter) writeArrayErrorResult(
 	result ir.Value,
 	ok string,
@@ -567,6 +694,12 @@ func (e *emitter) writeArrayErrorResult(
 	if success != "void" {
 		return "", fmt.Errorf("wasm error: array failure expects !void, got %s", result.Type)
 	}
+	if e.flagResults[result.Name] {
+		symbol := symbolName(result.Name)
+		fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, ok)
+		e.values[result.Name] = valueInfo{flag: symbol, code: code}
+		return "(local.get " + symbol + ")", nil
+	}
 	slot, err := e.resultSlot(result)
 	if err != nil {
 		return "", err
@@ -575,7 +708,46 @@ func (e *emitter) writeArrayErrorResult(
 	fmt.Fprintf(&e.out, "            (i64.store %s (i64.const %d))\n",
 		addressAt(slot, offset), code)
 	e.values[result.Name] = valueInfo{expr: slot}
-	return slot, nil
+	return "(i32.wrap_i64 (i64.load " + slot + "))", nil
+}
+
+// writesFlagResult reports whether op writes its E!void result through
+// writeArrayErrorResult, whose failure code is a constant of the operation.
+func writesFlagResult(op string) bool {
+	switch op {
+	case "array.append", "array.append_bytes", "array.reserve", "array.set",
+		"array.swap", "array.truncate", "map.insert":
+		return true
+	default:
+		return false
+	}
+}
+
+// flagResultsOf names the results of fn a flag local can hold: an operation
+// that writes its E!void result through writeArrayErrorResult, read only by
+// the instructions that ask for its tag or its code. Such a result is
+// never handed on, so nothing needs it at an address, and a success that is
+// tested where it was produced does not go through memory to be tested.
+func flagResultsOf(fn *ir.Function) map[string]bool {
+	flags := map[string]bool{}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if writesFlagResult(instr.Op) && strings.HasSuffix(instr.Result.Type, "!void") {
+				flags[instr.Result.Name] = true
+			}
+		}
+	}
+	if len(flags) == 0 {
+		return flags
+	}
+	forEachRead(fn, func(instr *ir.Instr, index int, value ir.Value) {
+		readsTag := instr != nil && index == 0 && (instr.Op == "error.try" ||
+			instr.Op == "error.has" || instr.Op == "error.code")
+		if !readsTag {
+			delete(flags, value.Name)
+		}
+	})
+	return flags
 }
 
 // writeArrayCopyValue copies one value from an element address into an

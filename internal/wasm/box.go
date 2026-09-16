@@ -92,13 +92,17 @@ func (e *emitter) writeBoxNew(instr *ir.Instr) error {
 		allocation = fmt.Sprintf("(call $__allocator_alloc %s (i32.const %d))",
 			e.value(instr.Args[0]).expr, layout.size)
 	}
-	fmt.Fprintf(&e.out, "            (i32.store %s %s)\n", cell, allocation)
+	// The cell is held in the result's own local while the payload is
+	// stored, so the store addresses a local rather than a load from the
+	// result slot.
+	pointer := "(local.get " + symbolName(instr.Result.Name) + ")"
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbolName(instr.Result.Name), allocation)
+	fmt.Fprintf(&e.out, "            (i32.store %s %s)\n", cell, pointer)
 	fmt.Fprintf(&e.out, "            (i64.store %s "+
-		"(i64.extend_i32_u (i32.ne (i32.load %s) (i32.const 0))))\n", slot, cell)
-	fmt.Fprintf(&e.out, "            (if (i32.load %s)\n", cell)
+		"(i64.extend_i32_u (i32.ne %s (i32.const 0))))\n", slot, pointer)
+	fmt.Fprintf(&e.out, "            (if %s\n", pointer)
 	e.out.WriteString("              (then\n")
-	if err := e.writeStoreValue("(i32.load "+cell+")", 0, elem,
-		e.value(instr.Args[1])); err != nil {
+	if err := e.writeStoreValue(pointer, 0, elem, e.value(instr.Args[1])); err != nil {
 		return err
 	}
 	e.out.WriteString("              )\n")

@@ -68,8 +68,13 @@ type dataRef struct {
 	length int
 }
 
+// valueInfo is how emitted code reaches one SSA value: the expression that
+// reads it, or, for a result flagResultsOf keeps out of memory, the local
+// holding its success and the failure code it carries.
 type valueInfo struct {
 	expr string
+	flag string
+	code int
 }
 
 type emitter struct {
@@ -86,6 +91,13 @@ type emitter struct {
 	// when a fallible main must report its uncaught error at the host boundary.
 	errorTable nameTable
 	values     map[string]valueInfo
+	// cleanupLoads are the current function's reads made only for a failing
+	// error.try's cleanups; pendingLoads holds those met but not yet written.
+	cleanupLoads map[string]bool
+	pendingLoads map[string]*ir.Instr
+	// flagResults are the current function's E!void results held as a
+	// success local instead of a frame slot (flagResultsOf).
+	flagResults map[string]bool
 	// panicKinds contains only the checked runtime failures this module uses.
 	// Their data, proc_exit import, and helpers are omitted otherwise.
 	panicKinds map[string]bool
@@ -279,16 +291,12 @@ func (e *emitter) writeHeader() {
 		e.writeFSImports()
 		e.writeCryptoImports()
 	}
-	pages := (e.dataEnd + 65535) / 65536
-	if pages < 1 {
-		pages = 1
-	}
+	pages := (e.dataEnd + stackSize + 65535) / 65536
 	fmt.Fprintf(&e.out, "  (memory (export \"memory\") %d)\n", pages)
+	fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
 	if e.usesAllocatorRuntime() {
-		fmt.Fprintf(&e.out, "  (global $__heap_end (mut i32) (i32.const %d))\n", e.dataEnd)
+		fmt.Fprintf(&e.out, "  (global $__heap_end (mut i32) (i32.const %d))\n", e.dataEnd+stackSize)
 		e.out.WriteString("  (global $__free_head (mut i32) (i32.const 0))\n")
-	} else {
-		fmt.Fprintf(&e.out, "  (global $__stack_pointer (mut i32) (i32.const %d))\n", e.dataEnd)
 	}
 	if e.usesArenaOriginRuntime() {
 		e.out.WriteString("  (global $__arena_instances (mut i64) (i64.const 0))\n")
@@ -387,39 +395,43 @@ func (e *emitter) writeRuntime() error {
 	return e.writeProcessRuntime()
 }
 
-// writeStackAllocHelper reserves one recursive-safe linear-memory frame,
-// growing memory by whole pages before a store can cross its end.
+// stackSize is the linear memory set aside for function frames, after the
+// static data and before the heap: the 8 MB a native thread's stack has by
+// default. A frame is a bump of the stack pointer, whoever else is in the
+// module; making frames heap allocations, as they once were when an
+// allocator was in play, cost a call into the allocator for every function
+// that has a frame, which is nearly all of them.
+const stackSize = 8 << 20
+
+// writeStackAllocHelper reserves one recursive-safe linear-memory frame and
+// traps when the frames would run past the stack's end -- the stack
+// overflow a native program dies of.
 func (e *emitter) writeStackAllocHelper() {
-	if e.usesAllocatorRuntime() {
-		e.out.WriteString("  (func $__stack_alloc (param $size i32) (result i32)\n")
-		e.out.WriteString("    (local $base i32)\n")
-		e.out.WriteString("    (local.set $base (call $__page_alloc (local.get $size)))\n")
-		e.out.WriteString("    (if (i32.eqz (local.get $base)) (then (unreachable)))\n")
-		e.out.WriteString("    (local.get $base)\n")
-		e.out.WriteString("  )\n\n")
-		e.out.WriteString("  (func $__stack_free (param $base i32) (param $size i32)\n")
-		e.out.WriteString("    (call $__page_free (local.get $base) (local.get $size))\n")
-		e.out.WriteString("  )\n\n")
-		return
-	}
 	e.out.WriteString("  (func $__stack_alloc (param $size i32) (result i32)\n")
-	e.out.WriteString("    (local $base i32) (local $end i32) (local $pages i32)\n")
+	e.out.WriteString("    (local $base i32) (local $end i32)\n")
 	e.out.WriteString("    (local.set $base (global.get $__stack_pointer))\n")
 	e.out.WriteString("    (local.set $end (i32.add (local.get $base) (local.get $size)))\n")
 	e.out.WriteString("    (if (i32.lt_u (local.get $end) (local.get $base)) (then (unreachable)))\n")
-	e.out.WriteString("    (if (i32.gt_u (local.get $end)\n")
-	e.out.WriteString("        (i32.shl (memory.size) (i32.const 16)))\n")
-	e.out.WriteString("      (then\n")
-	e.out.WriteString("        (local.set $pages\n")
-	e.out.WriteString("          (i32.sub\n")
-	e.out.WriteString("            (i32.shr_u (i32.add (local.get $end) " +
-		"(i32.const 65535)) (i32.const 16))\n")
-	e.out.WriteString("            (memory.size)))\n")
-	e.out.WriteString("        (if (i32.eq (memory.grow (local.get $pages)) (i32.const -1))\n")
-	e.out.WriteString("          (then (unreachable)))))\n")
+	fmt.Fprintf(&e.out, "    (if (i32.gt_u (local.get $end) (i32.const %d)) (then (unreachable)))\n",
+		e.dataEnd+stackSize)
 	e.out.WriteString("    (global.set $__stack_pointer (local.get $end))\n")
 	e.out.WriteString("    (local.get $base)\n")
 	e.out.WriteString("  )\n\n")
+}
+
+// writeFrameReserve bumps the stack pointer past one invocation's frame in
+// the function itself: a call to $__stack_alloc from every function that has
+// a frame costs more than the three instructions it performs. A frame is a
+// few hundred bytes and the stack ends far below the top of memory, so the
+// bump cannot wrap and one comparison with the stack's end is the whole check.
+func (e *emitter) writeFrameReserve(size int) {
+	e.out.WriteString("    (local.set $__kizu_frame (global.get $__stack_pointer))\n")
+	fmt.Fprintf(&e.out,
+		"    (global.set $__stack_pointer (i32.add (local.get $__kizu_frame) (i32.const %d)))\n",
+		size)
+	fmt.Fprintf(&e.out,
+		"    (if (i32.gt_u (global.get $__stack_pointer) (i32.const %d)) (then (unreachable)))\n",
+		e.dataEnd+stackSize)
 }
 
 // writeBytesHelper writes one byte range to a selected target stream.
@@ -488,9 +500,13 @@ func (e *emitter) writeIntLoop() {
 	e.out.WriteString("      (br_if $digits (i64.ne (local.get $n) (i64.const 0))))\n")
 }
 
-// writeFunction writes one user function with a dispatch loop for blocks.
+// writeFunction writes one user function, its blocks as structured control
+// flow (structure.go) inside a `block` that a void return leaves.
 func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
+	e.cleanupLoads = cleanupOnlyLoads(fn)
+	e.pendingLoads = map[string]*ir.Instr{}
+	e.flagResults = flagResultsOf(fn)
 	e.currentReturn = fn.Return
 	defer func() { e.currentReturn = "" }()
 	frame, err := e.planFrame(fn)
@@ -502,33 +518,30 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	if err := e.registerFrameValues(fn); err != nil {
 		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
 	}
+	s, err := analyze(fn)
+	if err != nil {
+		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
+	}
 	fmt.Fprintf(&e.out, "  (func $%s %s%s\n", fn.Name, params, e.functionResult(fn.Return))
 	e.writeLocals(fn)
+	for _, wasmType := range e.swapLocalTypes(fn) {
+		fmt.Fprintf(&e.out, "    (local %s %s)\n", swapLocal(wasmType), wasmType)
+	}
 	if frame.size > 0 {
 		e.out.WriteString("    (local $__kizu_frame i32)\n")
 	}
-	e.out.WriteString("    (local $pc i32)\n")
 	if frame.size > 0 {
-		fmt.Fprintf(&e.out,
-			"    (local.set $__kizu_frame (call $__stack_alloc (i32.const %d)))\n",
-			frame.size,
-		)
+		e.writeFrameReserve(frame.size)
 	}
 	e.out.WriteString("    (block $exit\n")
-	e.out.WriteString("      (loop $dispatch\n")
-	index := blockIndexes(fn)
-	for i, block := range fn.Blocks {
-		if err := e.writeBlock(block, index, i); err != nil {
+	if len(fn.Blocks) > 0 {
+		if err := e.writeTree(s, fn.Blocks[0].Name); err != nil {
 			return err
 		}
 	}
-	e.out.WriteString("        (br $exit)\n")
-	e.out.WriteString("      )\n")
 	e.out.WriteString("    )\n")
 	if frame.size > 0 {
-		if !e.usesAllocatorRuntime() {
-			e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_frame))\n")
-		}
+		e.out.WriteString("    (global.set $__stack_pointer (local.get $__kizu_frame))\n")
 	}
 	if fn.Return != "void" && !e.isMemoryType(fn.Return) {
 		e.out.WriteString("    (unreachable)\n")
@@ -576,23 +589,4 @@ func (e *emitter) writeLocals(fn *ir.Function) {
 func needsLocal(instr *ir.Instr) bool {
 	return instr.Result.Type != "" && instr.Result.Type != "void" &&
 		!(instr.Op == "const" && instr.Result.Type == "[]u8")
-}
-
-// dispatchBlock is the block one name reaches and the id its dispatch arm
-// tests for.
-type dispatchBlock struct {
-	block *ir.Block
-	id    int
-}
-
-// blockIndexes maps block names to their dispatch arms. The map is one
-// function's, because a block name is unique only inside the function that
-// declares it: lowering numbers each function's blocks from scratch, so
-// `entry` and `while.header.1` name a block in every function that has one.
-func blockIndexes(fn *ir.Function) map[string]dispatchBlock {
-	index := map[string]dispatchBlock{}
-	for i, block := range fn.Blocks {
-		index[block.Name] = dispatchBlock{block: block, id: i}
-	}
-	return index
 }

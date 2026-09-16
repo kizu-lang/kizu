@@ -1072,7 +1072,6 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     self.current_block = ir::empty_name();
     self.entry_param_loads.clear();
     self.wrote_param_loads = false;
-    try self.precompute_block_exit_labels(module, node);
     try self.precompute_niche_aliases(module, node);
     var return_type = try self.llvm_type_of(module, node.return_type);
     let return_text = ir::name_text(&module.names, node.return_type);
@@ -1123,9 +1122,13 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
             return try self.wrap("llvm error: function `%s` block `%s`", Arg::Str(fn_name), Arg::Str(block_name), move failed);
         }
     }
+    var resolved = string::new(self.allocator);
+    defer resolved.deinit(self.allocator);
+    try self.resolve_phi_predecessors(module, body_start, &var resolved);
     var hoisted = string::new(self.allocator);
     defer hoisted.deinit(self.allocator);
-    if try self.hoist_body(body_start, &var hoisted) |failed| {
+    let resolved_bytes = resolved.as_bytes();
+    if try hoist_allocas_to_entry(self.allocator, resolved_bytes, &var hoisted) |failed| {
         errdefer failed.deinit(self.allocator);
         let fn_name = try self.own(module, node.name);
         return try self.wrap("llvm error: function `%s`", Arg::Str(fn_name), Arg::None, move failed);
@@ -1140,13 +1143,6 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     self.entry_param_loads.clear();
     self.wrote_param_loads = false;
     return null;
-}
-
-/// Moves the allocas of the function body written since body_start into
-/// its entry block, the Go `hoistAllocasToEntry` call on `e.out`.
-fn (self: &Emitter) hoist_body(body_start: i64, out: &var string::String) -> !?diagnostic::Diagnostic {
-    let text = self.out.as_bytes();
-    return hoist_allocas_to_entry(self.allocator, text[body_start..mem::len(text)], out);
 }
 
 /// Returns the LLVM ABI parameter spelling for one Kizu value, the Go
@@ -1564,79 +1560,56 @@ fn (self: &var Emitter) write_cleanup(module: &ir::Module, cleanup: ir::Cleanup)
     return self.write_instr(module, &instr);
 }
 
-/// Returns the concrete LLVM label that reaches a successor, the Go
-/// `incomingBlockLabel`.
-fn (self: &var Emitter) incoming_block_label(module: &ir::Module, block: ir::Name) -> !ir::Name {
-    if self.block_exit_label.get(ir::name_id(block)) |exit| {
-        if exit.generation == self.generation {
-            return exit.label;
-        }
-    }
-    let retained = ir::name_text(&module.names, block);
-    let bytes = retained.as_bytes();
-    return self.names.intern(bytes);
+/// Returns what a phi names an incoming block by until the function's body
+/// is written, the Go `phiPredecessorMark`. A block's instructions can expand
+/// into helper blocks, so the label that branches to a successor is the last
+/// one its expansion opened; a loop header's phi is written before the latch
+/// block that feeds it, so that label is known only once the body is.
+fn phi_predecessor_mark() -> []u8 {
+    return "%kizu.phi.from.";
 }
 
-/// Records helper labels before phi nodes are emitted, the Go
-/// `precomputeBlockExitLabels`.
-fn (self: &var Emitter) precompute_block_exit_labels(module: &ir::Module, node: &ir::FunctionNode) -> !void {
-    var index = 0;
-    while node.blocks.get(index) |block| {
-        index = index + 1;
-        let block_node = module.blocks.at(block.node);
-        let label = try self.compute_block_exit_label(module, block_node);
-        if !ir::is_empty(label) {
-            try self.set_block_exit_label(block_node.name, label);
+/// Writes the function body written since body_start into out with each
+/// phi_predecessor_mark replaced by the label its block ended in, the Go
+/// `resolvePhiPredecessors`.
+fn (self: &var Emitter) resolve_phi_predecessors(module: &ir::Module, body_start: i64, out: &var string::String) -> !void {
+    let text = self.out.as_bytes();
+    let body = text[body_start..mem::len(text)];
+    let mark = phi_predecessor_mark();
+    let mark_len = mem::len(mark);
+    let length = mem::len(body);
+    var copied = 0;
+    var position = 0;
+    while position + mark_len <= length {
+        if !mem::equal_bytes(body[position..position + mark_len], mark) {
+            position = position + 1;
+            continue;
         }
+        try out.append_bytes(self.allocator, body[copied..position]);
+        let name_start = position + mark_len;
+        var name_end = name_start;
+        while name_end + 1 < length and !(body[name_end] == cast<u8>(32) and body[name_end + 1] == cast<u8>(93)) {
+            name_end = name_end + 1;
+        }
+        let block_bytes = body[name_start..name_end];
+        try out.append_byte(self.allocator, cast<u8>(37));
+        var label_written = false;
+        if module.names.lookup(block_bytes) |block| {
+            if self.block_exit_label.get(ir::name_id(block)) |exit| {
+                if exit.generation == self.generation {
+                    try self.names.append_to(out, exit.label);
+                    label_written = true;
+                }
+            }
+        }
+        if !label_written {
+            try out.append_bytes(self.allocator, block_bytes);
+        }
+        copied = name_end;
+        position = name_end;
     }
+    try out.append_bytes(self.allocator, body[copied..length]);
     return;
-}
-
-/// Returns the final helper label that continues one IR block, the Go
-/// `computeBlockExitLabel`; empty when no instruction continues it.
-fn (self: &var Emitter) compute_block_exit_label(module: &ir::Module, block_node: &ir::BlockNode) -> !ir::Name {
-    var label = ir::empty_name();
-    var index = 0;
-    while block_node.instrs.get(index) |instr| {
-        index = index + 1;
-        let instr_node = module.instrs.at(instr.node);
-        let next = try self.continuation_label(module, instr_node);
-        if !ir::is_empty(next) {
-            label = next;
-        }
-    }
-    return label;
-}
-
-/// Reports helper labels introduced by instruction expansion, the Go
-/// `continuationLabel`; empty for an instruction that introduces none.
-fn (self: &var Emitter) continuation_label(module: &ir::Module, node: &ir::InstrNode) -> !ir::Name {
-    match node.op {
-        ErrorTry => return self.helper_label(module, node.result.name, "try.ok"),
-        CondFail => return self.helper_label(module, node.args.get_or_panic(0).name, "pass"),
-        ArrayPop => return self.helper_label(module, node.result.name, "array.join"),
-        ArrayGet => return self.helper_label(module, node.result.name, "array.join"),
-        MapGet => return self.helper_label(module, node.result.name, "array.join"),
-        MapRemove => return self.helper_label(module, node.result.name, "array.join"),
-        ArrayGetOrPanic => return self.result_helper_label(module, node, ".ptr", "ok"),
-        MapTakeValueAt => return self.result_helper_label(module, node, ".ptr", "ok"),
-        ArenaAt => return self.result_helper_label(module, node, ".ptr", "ok"),
-        ArenaPopOrPanic => return self.result_helper_label(module, node, ".ptr", "ok"),
-        TestExpectEqual => return self.result_helper_label(module, node, ".ok", "ok"),
-        _ => return ir::empty_name(),
-    }
-}
-
-/// Returns the helper label Go derives from `localName(result) + suffix`.
-fn (self: &var Emitter) result_helper_label(
-    module: &ir::Module,
-    node: &ir::InstrNode,
-    suffix: []u8,
-    label_suffix: []u8
-) -> !ir::Name {
-    let result_name = try self.local_name(module, node.result.name);
-    let base = try self.suffixed(result_name, suffix);
-    return self.helper_label_local(base, label_suffix);
 }
 
 /// Records the concrete label where the current IR block continues, the Go

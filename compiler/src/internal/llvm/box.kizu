@@ -18,7 +18,7 @@ fn (self: &var Emitter) write_box_runtime_decls(module: &ir::Module) -> !void {
     if !self.uses_box_runtime(module) {
         return;
     }
-    try self.line("declare ptr @kizu_box_new(ptr, i64, ptr)");
+    try self.line("declare ptr @kizu_box_alloc(ptr, i64)");
     try self.line("declare void @kizu_box_deinit(ptr, ptr, i64)");
     return self.line("");
 }
@@ -84,8 +84,6 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
         Code(code) => {
             let allocator = try self.operand(module, node.args.get_or_panic(0));
             let result_name = try self.local_name(module, node.result.name);
-            let value_base = try self.suffixed(result_name, ".value");
-            let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(1));
             let raw_name = try self.suffixed(result_name, ".raw");
             var elem = string::new(self.allocator);
             defer elem.deinit(self.allocator);
@@ -94,14 +92,25 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
             }
             let elem_bytes = elem.as_bytes();
             let size = try self.element_size_operand_bytes(module, elem_bytes);
-            try self.line4(
-                "  %s = call ptr @kizu_box_new(ptr %s, i64 %s, ptr %s)",
-                Arg::Str(raw_name), Arg::Str(allocator.operand), Arg::Str(size), Arg::Str(value_slot)
+            try self.line3(
+                "  %s = call ptr @kizu_box_alloc(ptr %s, i64 %s)",
+                Arg::Str(raw_name), Arg::Str(allocator.operand), Arg::Str(size)
             );
             let ok_name = try self.suffixed(result_name, ".is_ok");
+            try self.line2("  %s = icmp ne ptr %s, null", Arg::Str(ok_name), Arg::Str(raw_name));
+            let store_label = try self.helper_label_local(result_name, "box.store");
+            let join_label = try self.helper_label_local(result_name, "box.join");
+            try self.mark_current_block_exit(module, join_label);
+            try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_name), Arg::Str(store_label), Arg::Str(join_label));
+            try self.line1("%s:", Arg::Str(store_label));
+            let payload = node.args.get_or_panic(1);
+            let payload_type = try self.llvm_type_of(module, payload.type_name);
+            let payload_value = try self.operand(module, payload);
+            try self.line3("  store %s %s, ptr %s", Arg::Str(payload_type), Arg::Str(payload_value.operand), Arg::Str(raw_name));
+            try self.line1("  br label %%%s", Arg::Str(join_label));
+            try self.line1("%s:", Arg::Str(join_label));
             let ok_byte_name = try self.suffixed(result_name, ".ok.byte");
             let code_name = try self.suffixed(result_name, ".code");
-            try self.line2("  %s = icmp ne ptr %s, null", Arg::Str(ok_name), Arg::Str(raw_name));
             try self.line2("  %s = zext i1 %s to i8", Arg::Str(ok_byte_name), Arg::Str(ok_name));
             try self.line3("  %s = select i1 %s, i64 0, i64 %d", Arg::Str(code_name), Arg::Str(ok_name), Arg::Int(code));
             let union_type = try self.llvm_type(module, result_type);

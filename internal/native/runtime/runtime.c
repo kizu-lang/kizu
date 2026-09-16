@@ -355,7 +355,6 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
 static KizuArray kizu_array_empty(void);
 _Bool kizu_array_append(void *allocator, void *handle, const void *elem, int64_t elem_size);
 _Bool kizu_array_append_bytes(void *allocator, void *handle, const void *bytes, int64_t length);
-_Bool kizu_array_swap(void *handle, int64_t left, int64_t right, int64_t elem_size);
 _Bool kizu_array_truncate(void *handle, int64_t len);
 static _Bool kizu_array_reserve_storage(
     void *allocator, KizuArray *array, int64_t needed, int64_t elem_size);
@@ -3454,16 +3453,14 @@ static KizuArray kizu_array_empty(void) {
  * naming it -- and a cell that kept a copy would spend a word on each. A Box
  * around two pointers would then ask malloc for more than it holds and land in
  * the next size class, which is the whole allocation doubling. */
-void *kizu_box_new(void *allocator, int64_t size, const void *value) {
-    if (size <= 0 || !value) {
+/* kizu_box_alloc returns the cell a Box's payload is stored into, or null. The
+ * compiler stores the value itself, since it knows the payload's type and the
+ * copy is then a move of a few words rather than a call to memcpy. */
+void *kizu_box_alloc(void *allocator, int64_t size) {
+    if (size <= 0) {
         return NULL;
     }
-    unsigned char *payload = (unsigned char *)kizu_rt_alloc(allocator, size);
-    if (!payload) {
-        return NULL;
-    }
-    memcpy(payload, value, (size_t)size);
-    return payload;
+    return kizu_rt_alloc(allocator, size);
 }
 
 void kizu_box_deinit(void *allocator, void *payload, int64_t size) {
@@ -3543,6 +3540,28 @@ static _Bool kizu_array_reserve_storage(
     return 1;
 }
 
+/* KizuArrayStorage is what growing an array's storage hands back: the data
+ * pointer and the capacity it now has, or a capacity of -1 when the allocator
+ * refused. The native backend calls kizu_array_grow with the header's words
+ * rather than the header's address, so the header never escapes the function
+ * appending to it and its length is not the runtime's to change. */
+typedef struct {
+    unsigned char *data;
+    int64_t cap;
+} KizuArrayStorage;
+
+KizuArrayStorage kizu_array_grow(
+    void *allocator, unsigned char *data, int64_t cap, int64_t needed, int64_t elem_size) {
+    KizuArray array = {data, 0, cap};
+    KizuArrayStorage grown = {data, -1};
+    if (!kizu_array_reserve_storage(allocator, &array, needed, elem_size)) {
+        return grown;
+    }
+    grown.data = array.data;
+    grown.cap = array.cap;
+    return grown;
+}
+
 _Bool kizu_array_append(void *allocator, void *handle, const void *elem, int64_t elem_size) {
     KizuArray *array = (KizuArray *)handle;
     if (!array || !elem ||
@@ -3605,24 +3624,6 @@ void *kizu_array_pop(void *handle, int64_t elem_size) {
     }
     array->len -= 1;
     return array->data + array->len * elem_size;
-}
-
-_Bool kizu_array_swap(void *handle, int64_t left, int64_t right, int64_t elem_size) {
-    KizuArray *array = (KizuArray *)handle;
-    if (!array || left < 0 || right < 0 || left >= array->len || right >= array->len) {
-        return 0;
-    }
-    if (left == right) {
-        return 1;
-    }
-    unsigned char *left_elem = array->data + left * elem_size;
-    unsigned char *right_elem = array->data + right * elem_size;
-    for (int64_t index = 0; index < elem_size; index++) {
-        unsigned char byte = left_elem[index];
-        left_elem[index] = right_elem[index];
-        right_elem[index] = byte;
-    }
-    return 1;
 }
 
 _Bool kizu_array_truncate(void *handle, int64_t len) {
