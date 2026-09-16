@@ -118,11 +118,16 @@ type kizuServer struct {
 	lines  strings.Builder
 }
 
-// startKizuServer runs the server program with the certificate and the
-// PKCS #8 key, reads the port it prints, and returns the process.
-func startKizuServer(t *testing.T, path string, der, pkcs8 []byte) (*kizuServer, int) {
+// startKizuServer runs the server program with the certificate, the
+// PKCS #8 key, and any further arguments, reads the port it prints, and
+// returns the process.
+func startKizuServer(
+	t *testing.T, path string, der, pkcs8 []byte, more ...string,
+) (*kizuServer, int) {
 	t.Helper()
-	cmd := kizuCommand("run", path, "--", hex.EncodeToString(der), hex.EncodeToString(pkcs8))
+	args := []string{"run", path, "--", hex.EncodeToString(der), hex.EncodeToString(pkcs8)}
+	args = append(args, more...)
+	cmd := kizuCommand(args...)
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
