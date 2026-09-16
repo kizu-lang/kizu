@@ -1,91 +1,8 @@
-// A TLS 1.3 client connection (RFC 8446): the handshake driven by the
-// table in handshake.kizu, keys from the schedule in key_schedule.kizu,
-// records sealed and opened by record.kizu, and the server's
-// certificates judged by std::crypto::x509. `connect` runs the whole
-// handshake and returns a connection that reads and writes application
-// data; a failure anywhere sends the alert the RFC names for it and
-// closes.
-
-// Alert descriptions (RFC 8446 §6.2).
-fn alert_close_notify() -> u8 {
-    return 0;
-}
-
-fn alert_unexpected_message() -> u8 {
-    return 10;
-}
-
-fn alert_bad_record_mac() -> u8 {
-    return 20;
-}
-
-fn alert_handshake_failure() -> u8 {
-    return 40;
-}
-
-fn alert_bad_certificate() -> u8 {
-    return 42;
-}
-
-fn alert_certificate_expired() -> u8 {
-    return 45;
-}
-
-fn alert_illegal_parameter() -> u8 {
-    return 47;
-}
-
-fn alert_unknown_ca() -> u8 {
-    return 48;
-}
-
-fn alert_decrypt_error() -> u8 {
-    return 51;
-}
-
-fn alert_internal_error() -> u8 {
-    return 80;
-}
-
-fn content_change_cipher_spec() -> u8 {
-    return 20;
-}
-
-// A Client is one connection to a server, after `connect` completed the
-// handshake. It owns the socket and the keys.
-pub struct Client {
-    stream: std::net::TcpStream,
-    state: std::tls::State,
-    suite: std::tls::CipherSuite,
-    // The handshake messages so far, laid end to end, for the transcript
-    // hash; emptied once the handshake is done.
-    transcript: std::string::String,
-    // Bytes read from the socket and not yet taken as records.
-    inbound: std::string::String,
-    inbound_at: i64,
-    // Handshake content opened from records and not yet taken as messages.
-    handshake: std::string::String,
-    handshake_at: i64,
-    // Application data opened from records and not yet handed out.
-    plain: std::string::String,
-    plain_at: i64,
-    // The secrets and keys of each direction; an empty read key is a
-    // handshake still in the clear.
-    read_secret: std::string::String,
-    read_key: std::string::String,
-    read_iv: std::string::String,
-    read_sequence: i64,
-    write_secret: std::string::String,
-    write_key: std::string::String,
-    write_iv: std::string::String,
-    write_sequence: i64,
-    handshake_secret: std::string::String,
-    // The server's public key, from the first certificate of its chain,
-    // and what kind it is.
-    peer_key: std::string::String,
-    peer_key_algorithm: std::crypto::x509::KeyAlgorithm,
-    certificate_requested: bool,
-}
+// The client side of the handshake (RFC 8446 §2): `connect` sends a
+// ClientHello, takes the server's messages in the order the client
+// machine in handshake.kizu allows, judges the server's certificates
+// with std::crypto::x509, and returns a connected `Connection`. A
+// failure anywhere sends the alert the RFC names for it and closes.
 
 // connect opens a TCP connection to `address` and completes a TLS 1.3
 // handshake with it as `host`: the server's chain must vouch for `host`
@@ -99,62 +16,17 @@ pub fn connect(
     host: []u8,
     roots: &std::array::Array<std::string::String>,
     now: i64
-) -> std::tls::Failure!std::tls::Client {
+) -> std::tls::Failure!std::tls::Connection {
     var stream = try std::net::tcp_connect(io, address);
-    var client = Client {
-        stream: move stream,
-        state: std::tls::State::WaitServerHello,
-        suite: std::tls::CipherSuite::Aes128GcmSha256,
-        transcript: std::string::new(allocator),
-        inbound: std::string::new(allocator),
-        inbound_at: 0,
-        handshake: std::string::new(allocator),
-        handshake_at: 0,
-        plain: std::string::new(allocator),
-        plain_at: 0,
-        read_secret: std::string::new(allocator),
-        read_key: std::string::new(allocator),
-        read_iv: std::string::new(allocator),
-        read_sequence: 0,
-        write_secret: std::string::new(allocator),
-        write_key: std::string::new(allocator),
-        write_iv: std::string::new(allocator),
-        write_sequence: 0,
-        handshake_secret: std::string::new(allocator),
-        peer_key: std::string::new(allocator),
-        peer_key_algorithm: std::crypto::x509::KeyAlgorithm::Unsupported,
-        certificate_requested: false,
-    };
+    var client = new_connection(allocator, move stream, Role::Client);
     errdefer client.deinit(allocator);
     try client.handshake(io, allocator, host, roots, now);
     return move client;
 }
 
-fn (self: std::tls::Client) deinit(allocator: Allocator) -> void {
-    self.stream.deinit();
-    self.transcript.deinit(allocator);
-    self.inbound.deinit(allocator);
-    self.handshake.deinit(allocator);
-    self.plain.deinit(allocator);
-    self.read_secret.deinit(allocator);
-    self.read_key.deinit(allocator);
-    self.read_iv.deinit(allocator);
-    self.write_secret.deinit(allocator);
-    self.write_key.deinit(allocator);
-    self.write_iv.deinit(allocator);
-    self.handshake_secret.deinit(allocator);
-    self.peer_key.deinit(allocator);
-    return;
-}
-
-// cipher_suite is the suite the server chose.
-pub fn (self: &std::tls::Client) cipher_suite() -> std::tls::CipherSuite {
-    return self.suite;
-}
-
 // handshake sends the ClientHello and takes the server's messages until
 // the connection is connected.
-fn (self: &var std::tls::Client) handshake(
+fn (self: &var std::tls::Connection) handshake(
     io: Io,
     allocator: Allocator,
     host: []u8,
@@ -176,7 +48,7 @@ fn (self: &var std::tls::Client) handshake(
     let hello_bytes = hello.as_bytes();
     try self.transcript.append_bytes(allocator, hello_bytes);
     try self.send(io, allocator, std::tls::content_handshake(), hello_bytes);
-    while self.state != std::tls::State::Connected {
+    while !self.connected() {
         var message = std::string::new(allocator);
         defer message.deinit(allocator);
         try self.next_handshake_message(io, allocator, &var message);
@@ -219,29 +91,9 @@ fn event_of(kind: u8, retry: bool) -> ?std::tls::Event {
     return null;
 }
 
-// advance_with moves the state machine by `event`, or sends the alert a
-// refusal calls for and fails.
-fn (self: &var std::tls::Client) advance_with(
-    io: Io,
-    allocator: Allocator,
-    event: std::tls::Event
-) -> std::tls::Failure!void {
-    let step = std::tls::advance(self.state, event);
-    self.state = step.state;
-    if step.outcome == std::tls::Outcome::Refused {
-        try self.fail(io, allocator, alert_unexpected_message());
-        return std::tls::Error::UnexpectedMessage;
-    }
-    if step.outcome == std::tls::Outcome::Unsupported {
-        try self.fail(io, allocator, alert_handshake_failure());
-        return std::tls::Error::Unsupported;
-    }
-    return;
-}
-
 // take_message handles one handshake message from the server. `secrets`
 // is the session id followed by the x25519 private key.
-fn (self: &var std::tls::Client) take_message(
+fn (self: &var std::tls::Connection) take_message(
     io: Io,
     allocator: Allocator,
     message: []u8,
@@ -283,7 +135,7 @@ fn (self: &var std::tls::Client) take_message(
 
 // take_server_hello reads the ServerHello, computes the shared secret,
 // and turns on the handshake keys.
-fn (self: &var std::tls::Client) take_server_hello(
+fn (self: &var std::tls::Connection) take_server_hello(
     io: Io,
     allocator: Allocator,
     message: []u8,
@@ -316,14 +168,7 @@ fn (self: &var std::tls::Client) take_server_hello(
     return;
 }
 
-// hash_transcript writes the hash of the handshake so far.
-fn (self: &std::tls::Client) hash_transcript(out: &var []u8) -> void {
-    let transcript = self.transcript.as_bytes();
-    std::tls::transcript_hash(transcript, out);
-    return;
-}
-
-fn (self: &var std::tls::Client) read_server_hello_or_alert(
+fn (self: &var std::tls::Connection) read_server_hello_or_alert(
     io: Io,
     allocator: Allocator,
     message: []u8,
@@ -337,120 +182,9 @@ fn (self: &var std::tls::Client) read_server_hello_or_alert(
     }
 }
 
-// agree_or_alert writes the x25519 shared secret, or alerts on a point
-// of low order.
-fn (self: &var std::tls::Client) agree_or_alert(
-    io: Io,
-    allocator: Allocator,
-    private_key: []u8,
-    point: []u8,
-    out: &var []u8
-) -> std::tls::Failure!void {
-    if std::crypto::x25519(private_key, point, out) {
-        return;
-    } else |err| {
-        try self.fail(io, allocator, alert_illegal_parameter());
-        return err;
-    }
-}
-
-// install_read_secret derives a read traffic secret and its keys.
-fn (self: &var std::tls::Client) install_read_secret(
-    allocator: Allocator,
-    base: []u8,
-    label: []u8,
-    hash: []u8
-) -> std::mem::Error!void {
-    var secret_buffer = [32]u8{};
-    let secret = secret_buffer.as_mut_bytes();
-    std::tls::derive_secret(base, label, hash, secret);
-    let secret_bytes = secret_buffer.as_bytes();
-    self.read_secret.clear();
-    try self.read_secret.append_bytes(allocator, secret_bytes);
-    try self.rekey_read(allocator);
-    return;
-}
-
-fn (self: &var std::tls::Client) install_write_secret(
-    allocator: Allocator,
-    base: []u8,
-    label: []u8,
-    hash: []u8
-) -> std::mem::Error!void {
-    var secret_buffer = [32]u8{};
-    let secret = secret_buffer.as_mut_bytes();
-    std::tls::derive_secret(base, label, hash, secret);
-    let secret_bytes = secret_buffer.as_bytes();
-    self.write_secret.clear();
-    try self.write_secret.append_bytes(allocator, secret_bytes);
-    try self.rekey_write(allocator);
-    return;
-}
-
-// rekey_read derives the read key and IV from the read secret and
-// starts the sequence over.
-fn (self: &var std::tls::Client) rekey_read(allocator: Allocator) -> std::mem::Error!void {
-    var key_buffer = [32]u8{};
-    var iv_buffer = [12]u8{};
-    let key = key_buffer.as_mut_bytes();
-    let iv = iv_buffer.as_mut_bytes();
-    self.derive_read_keys(key, iv);
-    let key_bytes = key_buffer.as_bytes();
-    let iv_bytes = iv_buffer.as_bytes();
-    self.read_key.clear();
-    try self.read_key.append_bytes(allocator, key_bytes[0..std::tls::key_length(self.suite)]);
-    self.read_iv.clear();
-    try self.read_iv.append_bytes(allocator, iv_bytes);
-    self.read_sequence = 0;
-    return;
-}
-
-fn (self: &var std::tls::Client) rekey_write(allocator: Allocator) -> std::mem::Error!void {
-    var key_buffer = [32]u8{};
-    var iv_buffer = [12]u8{};
-    let key = key_buffer.as_mut_bytes();
-    let iv = iv_buffer.as_mut_bytes();
-    self.derive_write_keys(key, iv);
-    let key_bytes = key_buffer.as_bytes();
-    let iv_bytes = iv_buffer.as_bytes();
-    self.write_key.clear();
-    try self.write_key.append_bytes(allocator, key_bytes[0..std::tls::key_length(self.suite)]);
-    self.write_iv.clear();
-    try self.write_iv.append_bytes(allocator, iv_bytes);
-    self.write_sequence = 0;
-    return;
-}
-
-fn (self: &std::tls::Client) derive_read_keys(key: &var []u8, iv: &var []u8) -> void {
-    let secret = self.read_secret.as_bytes();
-    derive_keys(self.suite, secret, key, iv);
-    return;
-}
-
-fn (self: &std::tls::Client) derive_write_keys(key: &var []u8, iv: &var []u8) -> void {
-    let secret = self.write_secret.as_bytes();
-    derive_keys(self.suite, secret, key, iv);
-    return;
-}
-
-// derive_keys is traffic_key with the key cut to the suite's length.
-fn derive_keys(suite: std::tls::CipherSuite, secret: []u8, key: &var []u8, iv: &var []u8) -> void {
-    if std::tls::key_length(suite) == 16 {
-        var short_buffer = [16]u8{};
-        let short = short_buffer.as_mut_bytes();
-        std::tls::traffic_key(secret, short, iv);
-        for 0..16 |index| {
-            key[index] = short[index];
-        }
-        return;
-    }
-    std::tls::traffic_key(secret, key, iv);
-    return;
-}
-
 // take_certificate reads the server's chain, verifies it for the host
 // under the roots, and keeps the server's public key.
-fn (self: &var std::tls::Client) take_certificate(
+fn (self: &var std::tls::Connection) take_certificate(
     io: Io,
     allocator: Allocator,
     message: []u8,
@@ -475,7 +209,7 @@ fn (self: &var std::tls::Client) take_certificate(
     return;
 }
 
-fn (self: &var std::tls::Client) read_chain_or_alert(
+fn (self: &var std::tls::Connection) read_chain_or_alert(
     io: Io,
     allocator: Allocator,
     message: []u8,
@@ -489,7 +223,7 @@ fn (self: &var std::tls::Client) read_chain_or_alert(
     }
 }
 
-fn (self: &var std::tls::Client) verify_chain_or_alert(
+fn (self: &var std::tls::Connection) verify_chain_or_alert(
     io: Io,
     allocator: Allocator,
     chain: &std::array::Array<std::string::String>,
@@ -516,7 +250,7 @@ fn certificate_alert(err: std::crypto::x509::Error) -> u8 {
 
 // take_certificate_verify checks the server's signature over the
 // transcript so far under the key its certificate carries.
-fn (self: &var std::tls::Client) take_certificate_verify(
+fn (self: &var std::tls::Connection) take_certificate_verify(
     io: Io,
     allocator: Allocator,
     message: []u8
@@ -528,24 +262,9 @@ fn (self: &var std::tls::Client) take_certificate_verify(
         return std::tls::Error::Unsupported;
     }
     let kind = scheme_hash(verify.scheme);
-    // The signed content: 64 spaces, the context string, a zero, and the
-    // transcript hash (RFC 8446 §4.4.3).
-    var signed = std::string::new(allocator);
-    defer signed.deinit(allocator);
-    for 0..64 |_| {
-        try signed.append_byte(allocator, 32);
-    }
-    try signed.append_bytes(allocator, "TLS 1.3, server CertificateVerify");
-    try signed.append_byte(allocator, 0);
-    var hash_buffer = [32]u8{};
-    let hash = hash_buffer.as_mut_bytes();
-    self.hash_transcript(hash);
-    let hash_bytes = hash_buffer.as_bytes();
-    try signed.append_bytes(allocator, hash_bytes);
     var digest_buffer = [64]u8{};
     let digest = digest_buffer.as_mut_bytes();
-    let signed_bytes = signed.as_bytes();
-    std::crypto::digest_of(kind, signed_bytes, digest);
+    try self.certificate_verify_digest(allocator, kind, digest);
     let digest_bytes = digest[0..std::crypto::digest_length(kind)];
     let valid = self.signature_valid(verify.scheme, digest_bytes, message[verify.signature_start..verify.signature_end]);
     if !valid {
@@ -559,7 +278,7 @@ fn (self: &var std::tls::Client) take_certificate_verify(
 // scheme_verifiable reports whether a CertificateVerify scheme is one
 // this client checks with the key the server's certificate holds: ECDSA
 // with the key on the scheme's curve, RSA-PSS with an RSA key.
-fn (self: &std::tls::Client) scheme_verifiable(scheme: i64) -> bool {
+fn (self: &std::tls::Connection) scheme_verifiable(scheme: i64) -> bool {
     if scheme == std::tls::signature_ecdsa_secp256r1_sha256() {
         return self.peer_key_algorithm == std::crypto::x509::KeyAlgorithm::EcdsaP256;
     }
@@ -574,21 +293,9 @@ fn (self: &std::tls::Client) scheme_verifiable(scheme: i64) -> bool {
     return false;
 }
 
-// scheme_hash is the hash a verifiable scheme signs over.
-fn scheme_hash(scheme: i64) -> std::crypto::Hash {
-    if scheme == std::tls::signature_rsa_pss_rsae_sha384()
-        or scheme == std::tls::signature_ecdsa_secp384r1_sha384() {
-        return std::crypto::Hash::Sha384;
-    }
-    if scheme == std::tls::signature_rsa_pss_rsae_sha512() {
-        return std::crypto::Hash::Sha512;
-    }
-    return std::crypto::Hash::Sha256;
-}
-
 // signature_valid checks a CertificateVerify signature over `digest`
 // under the server's key, as the scheme says.
-fn (self: &std::tls::Client) signature_valid(scheme: i64, digest: []u8, signature: []u8) -> bool {
+fn (self: &std::tls::Connection) signature_valid(scheme: i64, digest: []u8, signature: []u8) -> bool {
     let key = self.peer_key.as_bytes();
     if scheme == std::tls::signature_ecdsa_secp256r1_sha256()
         or scheme == std::tls::signature_ecdsa_secp384r1_sha384() {
@@ -597,7 +304,7 @@ fn (self: &std::tls::Client) signature_valid(scheme: i64, digest: []u8, signatur
     return std::crypto::x509::rsa_pss_signature_verifies(scheme_hash(scheme), key, digest, signature);
 }
 
-fn (self: &var std::tls::Client) read_certificate_verify_or_alert(
+fn (self: &var std::tls::Connection) read_certificate_verify_or_alert(
     io: Io,
     allocator: Allocator,
     message: []u8
@@ -612,7 +319,7 @@ fn (self: &var std::tls::Client) read_certificate_verify_or_alert(
 
 // take_finished checks the server's Finished, answers with the client's,
 // and turns on the application keys.
-fn (self: &var std::tls::Client) take_finished(
+fn (self: &var std::tls::Connection) take_finished(
     io: Io,
     allocator: Allocator,
     message: []u8
@@ -657,632 +364,5 @@ fn (self: &var std::tls::Client) take_finished(
     let client_secret_bytes = client_secret_buffer.as_bytes();
     try self.set_read_secret(allocator, server_secret_bytes);
     try self.set_write_secret(allocator, client_secret_bytes);
-    return;
-}
-
-fn (self: &var std::tls::Client) check_finished_shape(
-    io: Io,
-    allocator: Allocator,
-    message: []u8
-) -> std::tls::Failure!void {
-    if std::tls::read_finished(message) |_| {
-        return;
-    } else |err| {
-        try self.fail(io, allocator, alert_illegal_parameter());
-        return err;
-    }
-}
-
-// finished_matches reports whether the server's verify_data is what the
-// transcript so far calls for under its handshake secret.
-fn (self: &std::tls::Client) finished_matches(verify_data: []u8) -> bool {
-    var hash_buffer = [32]u8{};
-    let hash = hash_buffer.as_mut_bytes();
-    self.hash_transcript(hash);
-    let hash_bytes = hash_buffer.as_bytes();
-    var expected_buffer = [32]u8{};
-    let expected = expected_buffer.as_mut_bytes();
-    let read_secret = self.read_secret.as_bytes();
-    std::tls::finished_verify_data(read_secret, hash_bytes, expected);
-    let expected_bytes = expected_buffer.as_bytes();
-    return std::crypto::equal_constant_time(expected_bytes, verify_data);
-}
-
-// derive_application_secrets writes the server's and the client's
-// application traffic secrets from the master secret and the transcript
-// through the server's Finished.
-fn (self: &std::tls::Client) derive_application_secrets(server: &var []u8, client: &var []u8) -> void {
-    var master_buffer = [32]u8{};
-    let master = master_buffer.as_mut_bytes();
-    let handshake_secret = self.handshake_secret.as_bytes();
-    std::tls::master_secret(handshake_secret, master);
-    let master_bytes = master_buffer.as_bytes();
-    var hash_buffer = [32]u8{};
-    let hash = hash_buffer.as_mut_bytes();
-    self.hash_transcript(hash);
-    let hash_bytes = hash_buffer.as_bytes();
-    std::tls::derive_secret(master_bytes, "s ap traffic", hash_bytes, server);
-    std::tls::derive_secret(master_bytes, "c ap traffic", hash_bytes, client);
-    return;
-}
-
-// own_finished writes the client's verify_data over the transcript so
-// far under its handshake secret.
-fn (self: &std::tls::Client) own_finished(out: &var []u8) -> void {
-    var hash_buffer = [32]u8{};
-    let hash = hash_buffer.as_mut_bytes();
-    self.hash_transcript(hash);
-    let hash_bytes = hash_buffer.as_bytes();
-    let write_secret = self.write_secret.as_bytes();
-    std::tls::finished_verify_data(write_secret, hash_bytes, out);
-    return;
-}
-
-fn (self: &var std::tls::Client) set_read_secret(allocator: Allocator, secret: []u8) -> std::mem::Error!void {
-    self.read_secret.clear();
-    try self.read_secret.append_bytes(allocator, secret);
-    try self.rekey_read(allocator);
-    return;
-}
-
-fn (self: &var std::tls::Client) set_write_secret(allocator: Allocator, secret: []u8) -> std::mem::Error!void {
-    self.write_secret.clear();
-    try self.write_secret.append_bytes(allocator, secret);
-    try self.rekey_write(allocator);
-    return;
-}
-
-// take_key_update turns the read secret over (RFC 8446 §7.2) and, when
-// the server asked, does the same for the write secret after telling it.
-fn (self: &var std::tls::Client) take_key_update(
-    io: Io,
-    allocator: Allocator,
-    message: []u8
-) -> std::tls::Failure!void {
-    try self.advance_with(io, allocator, std::tls::Event::KeyUpdate);
-    let requested = try self.read_key_update_or_alert(io, allocator, message);
-    try self.update_read_secret(allocator);
-    if requested {
-        var update = std::string::new(allocator);
-        defer update.deinit(allocator);
-        try std::tls::write_key_update(allocator, &var update);
-        let update_bytes = update.as_bytes();
-        try self.send(io, allocator, std::tls::content_handshake(), update_bytes);
-        try self.update_write_secret(allocator);
-    }
-    return;
-}
-
-fn (self: &var std::tls::Client) read_key_update_or_alert(
-    io: Io,
-    allocator: Allocator,
-    message: []u8
-) -> std::tls::Failure!bool {
-    if std::tls::read_key_update(message) |requested| {
-        return requested;
-    } else |err| {
-        try self.fail(io, allocator, alert_illegal_parameter());
-        return err;
-    }
-}
-
-fn (self: &var std::tls::Client) update_read_secret(allocator: Allocator) -> std::mem::Error!void {
-    var next_buffer = [32]u8{};
-    let next = next_buffer.as_mut_bytes();
-    self.next_secret(true, next);
-    let next_bytes = next_buffer.as_bytes();
-    try self.set_read_secret(allocator, next_bytes);
-    return;
-}
-
-fn (self: &var std::tls::Client) update_write_secret(allocator: Allocator) -> std::mem::Error!void {
-    var next_buffer = [32]u8{};
-    let next = next_buffer.as_mut_bytes();
-    self.next_secret(false, next);
-    let next_bytes = next_buffer.as_bytes();
-    try self.set_write_secret(allocator, next_bytes);
-    return;
-}
-
-// next_secret writes the secret that follows the read or the write
-// secret in a key update (RFC 8446 §7.2).
-fn (self: &std::tls::Client) next_secret(read: bool, out: &var []u8) -> void {
-    if read {
-        let secret = self.read_secret.as_bytes();
-        std::tls::hkdf_expand_label(secret, "traffic upd", "", out);
-        return;
-    }
-    let secret = self.write_secret.as_bytes();
-    std::tls::hkdf_expand_label(secret, "traffic upd", "", out);
-    return;
-}
-
-// next_handshake_message takes records until one whole handshake
-// message is held and copies it to `out`.
-fn (self: &var std::tls::Client) next_handshake_message(
-    io: Io,
-    allocator: Allocator,
-    out: &var std::string::String
-) -> std::tls::Failure!void {
-    while true {
-        if self.pending_message_length() |length| {
-            try self.copy_pending(allocator, out, length);
-            self.handshake_at = self.handshake_at + length;
-            if self.handshake_at == self.handshake.len() {
-                self.handshake.clear();
-                self.handshake_at = 0;
-            }
-            return;
-        }
-        var content = std::string::new(allocator);
-        defer content.deinit(allocator);
-        let kind = try self.read_record(io, allocator, &var content);
-        let content_bytes = content.as_bytes();
-        if kind == std::tls::content_handshake() {
-            try self.handshake.append_bytes(allocator, content_bytes);
-        } else {
-            try self.take_other_record(io, allocator, kind, content_bytes);
-        }
-    }
-    return;
-}
-
-// pending_message_length is the length of the next whole handshake
-// message held, or null when none is whole yet.
-fn (self: &std::tls::Client) pending_message_length() -> ?i64 {
-    let held = self.handshake.as_bytes();
-    let pending = held[self.handshake_at..std::mem::len(held)];
-    return std::tls::message_length(pending);
-}
-
-// copy_pending appends the next `length` held handshake bytes to `out`.
-fn (self: &std::tls::Client) copy_pending(
-    allocator: Allocator,
-    out: &var std::string::String,
-    length: i64
-) -> std::mem::Error!void {
-    let held = self.handshake.as_bytes();
-    try out.append_bytes(allocator, held[self.handshake_at..self.handshake_at + length]);
-    return;
-}
-
-// take_other_record handles a record that is not handshake content: a
-// change_cipher_spec is ignored (RFC 8446 §5), an alert closes, and
-// application data before the handshake is done is out of order.
-fn (self: &var std::tls::Client) take_other_record(
-    io: Io,
-    allocator: Allocator,
-    kind: u8,
-    content: []u8
-) -> std::tls::Failure!void {
-    if kind == content_change_cipher_spec() {
-        if std::mem::len(content) != 1 or content[0] != 1 {
-            try self.fail(io, allocator, alert_unexpected_message());
-            return std::tls::Error::UnexpectedMessage;
-        }
-        return;
-    }
-    if kind == std::tls::content_alert() {
-        return self.take_alert(io, allocator, content);
-    }
-    if kind == std::tls::content_application_data() {
-        try self.advance_with(io, allocator, std::tls::Event::ApplicationData);
-        try self.plain.append_bytes(allocator, content);
-        return;
-    }
-    try self.fail(io, allocator, alert_unexpected_message());
-    return std::tls::Error::UnexpectedMessage;
-}
-
-// take_alert reads an alert: close_notify ends the connection cleanly
-// (`Error::Closed`), anything else is the peer's fatal alert.
-fn (self: &var std::tls::Client) take_alert(
-    io: Io,
-    allocator: Allocator,
-    content: []u8
-) -> std::tls::Failure!void {
-    if std::mem::len(content) != 2 {
-        try self.fail(io, allocator, alert_illegal_parameter());
-        return std::tls::Error::IllegalParameter;
-    }
-    if content[1] == alert_close_notify() {
-        try self.advance_with(io, allocator, std::tls::Event::CloseNotify);
-        return std::tls::Error::Closed;
-    }
-    try self.advance_with(io, allocator, std::tls::Event::FatalAlert);
-    return std::tls::Error::Alert;
-}
-
-// read_record takes one record off the socket, opens it when the keys
-// are on, appends its content to `out`, and returns its type.
-fn (self: &var std::tls::Client) read_record(
-    io: Io,
-    allocator: Allocator,
-    out: &var std::string::String
-) -> std::tls::Failure!u8 {
-    try self.fill(io, allocator, 5);
-    let kind = self.held_byte(0);
-    let length = (cast<i64>(self.held_byte(3)) << 8) | cast<i64>(self.held_byte(4));
-    if length > 16384 + 256 {
-        try self.fail(io, allocator, alert_bad_record_mac());
-        return std::tls::Error::BadRecord;
-    }
-    try self.fill(io, allocator, 5 + length);
-    if self.read_key.len() == 0 or kind == content_change_cipher_spec() {
-        if kind != std::tls::content_handshake() and kind != content_change_cipher_spec()
-            and kind != std::tls::content_alert() {
-            try self.fail(io, allocator, alert_unexpected_message());
-            return std::tls::Error::UnexpectedMessage;
-        }
-        try self.copy_held(allocator, out, 5, 5 + length);
-        self.consume(5 + length);
-        return kind;
-    }
-    if self.open_held(allocator, out, 5 + length) |opened| {
-        self.read_sequence = self.read_sequence + 1;
-        self.consume(5 + length);
-        return opened;
-    } else |err| {
-        try self.fail(io, allocator, alert_bad_record_mac());
-        return err;
-    }
-}
-
-// held_byte is byte `offset` of the record at the front of what is held.
-fn (self: &std::tls::Client) held_byte(offset: i64) -> u8 {
-    let held = self.inbound.as_bytes();
-    return held[self.inbound_at + offset];
-}
-
-// copy_held appends bytes `from` up to `to` of the record at the front.
-fn (self: &std::tls::Client) copy_held(
-    allocator: Allocator,
-    out: &var std::string::String,
-    from: i64,
-    to: i64
-) -> std::mem::Error!void {
-    let held = self.inbound.as_bytes();
-    try out.append_bytes(allocator, held[self.inbound_at + from..self.inbound_at + to]);
-    return;
-}
-
-// open_held opens the `length` bytes of record at the front under the
-// read keys and returns the content type.
-fn (self: &std::tls::Client) open_held(
-    allocator: Allocator,
-    out: &var std::string::String,
-    length: i64
-) -> std::tls::Failure!u8 {
-    let held = self.inbound.as_bytes();
-    let record = held[self.inbound_at..self.inbound_at + length];
-    let key = self.read_key.as_bytes();
-    let iv = self.read_iv.as_bytes();
-    let opened = try std::tls::open_record(allocator, self.suite, key, iv, self.read_sequence, record, out);
-    return opened;
-}
-
-// consume drops `count` bytes from the front of what is held.
-fn (self: &var std::tls::Client) consume(count: i64) -> void {
-    self.inbound_at = self.inbound_at + count;
-    if self.inbound_at == self.inbound.len() {
-        self.inbound.clear();
-        self.inbound_at = 0;
-    }
-    return;
-}
-
-// fill reads from the socket until `count` bytes are held past what
-// has been taken. The socket closing first is `Error::Closed`.
-fn (self: &var std::tls::Client) fill(io: Io, allocator: Allocator, count: i64) -> std::tls::Failure!void {
-    while self.inbound.len() - self.inbound_at < count {
-        let got = try self.stream.read_into(io, allocator, &var self.inbound, 16384 + 256 + 5);
-        if got == 0 {
-            self.state = std::tls::State::Closed;
-            return std::tls::Error::Closed;
-        }
-    }
-    return;
-}
-
-// fill_ready is `fill` for a caller that must not wait: false when the
-// bytes have not all arrived yet.
-fn (self: &var std::tls::Client) fill_ready(io: Io, allocator: Allocator, count: i64) -> std::tls::Failure!bool {
-    while self.inbound.len() - self.inbound_at < count {
-        let got = try self.stream.read_ready(io, allocator, &var self.inbound, 16384 + 256 + 5) orelse return false;
-        if got == 0 {
-            self.state = std::tls::State::Closed;
-            return std::tls::Error::Closed;
-        }
-    }
-    return true;
-}
-
-// read_record_ready is `read_record` for a caller that must not wait: null
-// when the record has not all arrived, its bytes so far kept.
-fn (self: &var std::tls::Client) read_record_ready(
-    io: Io,
-    allocator: Allocator,
-    out: &var std::string::String
-) -> std::tls::Failure!?u8 {
-    if !try self.fill_ready(io, allocator, 5) {
-        return null;
-    }
-    let length = (cast<i64>(self.held_byte(3)) << 8) | cast<i64>(self.held_byte(4));
-    if length > 16384 + 256 {
-        try self.fail(io, allocator, alert_bad_record_mac());
-        return std::tls::Error::BadRecord;
-    }
-    if !try self.fill_ready(io, allocator, 5 + length) {
-        return null;
-    }
-    let kind = try self.read_record(io, allocator, out);
-    return kind;
-}
-
-// send writes one record of `content`: in the clear before the keys are
-// on, sealed after.
-fn (self: &var std::tls::Client) send(
-    io: Io,
-    allocator: Allocator,
-    content_type: u8,
-    content: []u8
-) -> std::tls::Failure!void {
-    var record = std::string::new(allocator);
-    defer record.deinit(allocator);
-    if self.write_key.len() == 0 {
-        let length = std::mem::len(content);
-        try record.append_byte(allocator, content_type);
-        try record.append_byte(allocator, 3);
-        try record.append_byte(allocator, 1);
-        try record.append_byte(allocator, cast<u8>((length >> 8) & 255));
-        try record.append_byte(allocator, cast<u8>(length & 255));
-        try record.append_bytes(allocator, content);
-    } else {
-        try self.seal(allocator, content_type, content, &var record);
-        self.write_sequence = self.write_sequence + 1;
-    }
-    let record_bytes = record.as_bytes();
-    try self.stream.write_all(io, record_bytes);
-    return;
-}
-
-// seal appends one record of `content` sealed under the write keys.
-fn (self: &std::tls::Client) seal(
-    allocator: Allocator,
-    content_type: u8,
-    content: []u8,
-    out: &var std::string::String
-) -> std::mem::Error!void {
-    let key = self.write_key.as_bytes();
-    let iv = self.write_iv.as_bytes();
-    try std::tls::seal_record(allocator, self.suite, key, iv, self.write_sequence, content_type, content, out);
-    return;
-}
-
-// fail sends a fatal alert and closes the connection's state. What the
-// send itself fails with is not the failure being reported, and is not.
-fn (self: &var std::tls::Client) fail(io: Io, allocator: Allocator, description: u8) -> std::mem::Error!void {
-    if self.state == std::tls::State::Closed {
-        return;
-    }
-    self.state = std::tls::State::Closed;
-    var alert = [2]u8{};
-    let view = alert.as_mut_bytes();
-    view[0] = 2;
-    view[1] = description;
-    let alert_bytes = alert.as_bytes();
-    if self.send(io, allocator, std::tls::content_alert(), alert_bytes) {
-        return;
-    } else |_| {
-        return;
-    }
-}
-
-// write sends application data, one record per 16384 bytes.
-pub fn (self: &var std::tls::Client) write(io: Io, allocator: Allocator, bytes: []u8) -> std::tls::Failure!void {
-    if self.state != std::tls::State::Connected {
-        return std::tls::Error::Closed;
-    }
-    var at = 0;
-    let end = std::mem::len(bytes);
-    while at < end {
-        var take = end - at;
-        if take > 16384 {
-            take = 16384;
-        }
-        try self.send(io, allocator, std::tls::content_application_data(), bytes[at..at + take]);
-        at = at + take;
-    }
-    return;
-}
-
-// read_into appends up to `max` bytes of application data to `out` and
-// returns how many; zero is the server's close_notify, the clean end.
-// Session tickets and key updates from the server are taken on the way.
-pub fn (self: &var std::tls::Client) read_into(
-    io: Io,
-    allocator: Allocator,
-    out: &var std::string::String,
-    max: i64
-) -> std::tls::Failure!i64 {
-    while self.plain.len() == self.plain_at {
-        if self.state != std::tls::State::Connected {
-            return 0;
-        }
-        self.plain.clear();
-        self.plain_at = 0;
-        var content = std::string::new(allocator);
-        defer content.deinit(allocator);
-        let kind = try self.read_record(io, allocator, &var content);
-        let content_bytes = content.as_bytes();
-        if try self.take_record(io, allocator, kind, content_bytes) {
-            return 0;
-        }
-    }
-    let count = try self.take_plain(allocator, out, max);
-    return count;
-}
-
-// read_ready is `read_into` for a caller that must not wait: it appends the
-// application data a whole record that has already arrived holds, and
-// answers null when no whole record has; zero is still the close_notify.
-// The bytes of a record still arriving are kept for the next call.
-pub fn (self: &var std::tls::Client) read_ready(
-    io: Io,
-    allocator: Allocator,
-    out: &var std::string::String,
-    max: i64
-) -> std::tls::Failure!?i64 {
-    while self.plain.len() == self.plain_at {
-        if self.state != std::tls::State::Connected {
-            return 0;
-        }
-        self.plain.clear();
-        self.plain_at = 0;
-        var content = std::string::new(allocator);
-        defer content.deinit(allocator);
-        let kind = try self.read_record_ready(io, allocator, &var content) orelse return null;
-        let content_bytes = content.as_bytes();
-        if try self.take_record(io, allocator, kind, content_bytes) {
-            return 0;
-        }
-    }
-    let count = try self.take_plain(allocator, out, max);
-    return count;
-}
-
-// take_record keeps one opened record: application data is held for the
-// caller, handshake content is taken as post-handshake messages, and the
-// rest is judged; true is the server's close_notify.
-fn (self: &var std::tls::Client) take_record(
-    io: Io,
-    allocator: Allocator,
-    kind: u8,
-    content: []u8
-) -> std::tls::Failure!bool {
-    if kind == std::tls::content_application_data() {
-        try self.plain.append_bytes(allocator, content);
-        return false;
-    }
-    if kind == std::tls::content_handshake() {
-        try self.handshake.append_bytes(allocator, content);
-        try self.take_post_handshake(io, allocator);
-        return false;
-    }
-    if kind == std::tls::content_alert() and std::mem::len(content) == 2
-        and content[1] == alert_close_notify() {
-        try self.advance_with(io, allocator, std::tls::Event::CloseNotify);
-        return true;
-    }
-    try self.take_other_record(io, allocator, kind, content);
-    return false;
-}
-
-// take_plain hands out up to `max` of the application data held.
-fn (self: &var std::tls::Client) take_plain(
-    allocator: Allocator,
-    out: &var std::string::String,
-    max: i64
-) -> std::mem::Error!i64 {
-    var take = self.plain.len() - self.plain_at;
-    if take > max {
-        take = max;
-    }
-    try self.copy_plain(allocator, out, take);
-    self.plain_at = self.plain_at + take;
-    return take;
-}
-
-// copy_plain appends the next `count` bytes of application data held.
-fn (self: &std::tls::Client) copy_plain(
-    allocator: Allocator,
-    out: &var std::string::String,
-    count: i64
-) -> std::mem::Error!void {
-    let held = self.plain.as_bytes();
-    try out.append_bytes(allocator, held[self.plain_at..self.plain_at + count]);
-    return;
-}
-
-// take_post_handshake handles the handshake messages held after the
-// handshake: NewSessionTicket is taken and ignored, KeyUpdate applied.
-fn (self: &var std::tls::Client) take_post_handshake(io: Io, allocator: Allocator) -> std::tls::Failure!void {
-    while true {
-        let length = self.pending_message_length() orelse return;
-        var message = std::string::new(allocator);
-        defer message.deinit(allocator);
-        try self.copy_pending(allocator, &var message, length);
-        self.handshake_at = self.handshake_at + length;
-        if self.handshake_at == self.handshake.len() {
-            self.handshake.clear();
-            self.handshake_at = 0;
-        }
-        let message_bytes = message.as_bytes();
-        let kind = message_bytes[0];
-        if kind == std::tls::handshake_key_update() {
-            try self.take_key_update(io, allocator, message_bytes);
-        } else {
-            let event = event_of(kind, false) orelse std::tls::Event::FatalAlert;
-            if kind == std::tls::handshake_new_session_ticket() {
-                try self.advance_with(io, allocator, event);
-            } else {
-                try self.fail(io, allocator, alert_unexpected_message());
-                return std::tls::Error::UnexpectedMessage;
-            }
-        }
-    }
-    return;
-}
-
-// close sends close_notify and half-closes the socket; the server's own
-// close_notify, if it answers with one, is read as the end.
-// The socket underneath, for what a stream over it needs to say to the
-// socket itself: the deadlines a phase runs under, and a poller's watch.
-pub fn (self: &var std::tls::Client) set_read_deadline(at: i64) -> void {
-    self.stream.set_read_deadline(at);
-    return;
-}
-
-pub fn (self: &var std::tls::Client) set_write_deadline(at: i64) -> void {
-    self.stream.set_write_deadline(at);
-    return;
-}
-
-pub fn (self: &var std::tls::Client) clear_read_deadline() -> void {
-    self.stream.clear_read_deadline();
-    return;
-}
-
-pub fn (self: &var std::tls::Client) clear_write_deadline() -> void {
-    self.stream.clear_write_deadline();
-    return;
-}
-
-pub fn (self: &std::tls::Client) watch(
-    io: Io,
-    poller: &var std::net::Poller,
-    token: i64,
-    interest: std::net::Interest
-) -> std::tls::Failure!void {
-    try poller.watch_stream(io, &self.stream, token, interest);
-    return;
-}
-
-pub fn (self: &std::tls::Client) forget(io: Io, poller: &var std::net::Poller) -> std::tls::Failure!void {
-    try poller.forget(io, &self.stream);
-    return;
-}
-
-pub fn (self: &var std::tls::Client) close(io: Io, allocator: Allocator) -> std::tls::Failure!void {
-    if self.state == std::tls::State::Connected {
-        var alert = [2]u8{};
-        let view = alert.as_mut_bytes();
-        view[0] = 1;
-        view[1] = alert_close_notify();
-        let alert_bytes = alert.as_bytes();
-        try self.send(io, allocator, std::tls::content_alert(), alert_bytes);
-    }
-    self.state = std::tls::State::Closed;
-    self.stream.close_write();
     return;
 }

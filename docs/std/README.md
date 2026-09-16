@@ -32,7 +32,7 @@
 | [compress](compress.md) | deflate / gzip / zlib の展開と圧縮 |
 | [crypto](crypto.md) | SHA-2、HMAC、HKDF、AEAD、X25519、ECDSA / RSA の署名と検証、host の乱数 |
 | [crypto::x509](x509.md) | 証明書と鍵 file(DER / PEM)を読み、chain を検証し、鍵で署名する |
-| [tls](tls.md) | TLS 1.3 client の handshake 状態機械 |
+| [tls](tls.md) | TLS 1.3 の client と server、handshake 状態機械 |
 | [fs](fs.md) | `Io` 経由の file system 操作 |
 | [net](net.md) | `Io` 経由の TCP listener と stream |
 | [http](http.md) | HTTP/1 の server と client(https)、message、routing |
