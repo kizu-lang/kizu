@@ -1,8 +1,8 @@
-// The TLS 1.3 client handshake as a machine (RFC 8446 §A.1): the client
-// waits for the server's messages in one order and no other, and a
+// The TLS 1.3 handshake as two machines (RFC 8446 §A.1 and §A.2): each
+// side waits for the other's messages in one order and no other, and a
 // message out of that order ends the connection with an
 // `unexpected_message` alert. `spec/Tls.lean` is the specification of
-// this table, with the proofs that a closed connection stays closed,
+// both tables, with the proofs that a closed connection stays closed,
 // that only the awaited `Finished` connects, that application data is
 // taken only once connected, and that a `CertificateVerify` follows a
 // `Certificate`; `examples/tls_conformance.kizu` replays its traces
@@ -11,7 +11,9 @@
 // The client offers no pre-shared key and no early data, and holds no
 // certificate of its own, so the server's `CertificateRequest` is
 // acknowledged with an empty `Certificate`, and `HelloRetryRequest` is
-// not handled: the client answers `handshake_failure` and closes.
+// not handled: the client answers `handshake_failure` and closes. The
+// server asks for no certificate and sends its whole flight on the
+// ClientHello, so it waits for the client's `Finished` and nothing else.
 
 // State is where the client is in the handshake, named as RFC 8446 §A.1
 // names them. A connection starts in `WaitServerHello`, its ClientHello
@@ -111,6 +113,78 @@ fn table(state: std::tls::State, event: std::tls::Event) -> ?std::tls::State {
             NewSessionTicket => return State::Connected,
             KeyUpdate => return State::Connected,
             ApplicationData => return State::Connected,
+            _ => {},
+        },
+        Closed => {},
+    }
+    return null;
+}
+
+// ServerState is where the server is in the handshake (RFC 8446 §A.2).
+// A connection starts in `WaitClientHello`; on the ClientHello the
+// server sends everything through its Finished and waits in
+// `WaitFinished` for the client's.
+pub enum ServerState {
+    WaitClientHello,
+    WaitFinished,
+    Connected,
+    Closed,
+}
+
+// ServerEvent is what arrives from the client: one of the handshake
+// messages a client can send, application data, or an alert.
+pub enum ServerEvent {
+    ClientHello,
+    EndOfEarlyData,
+    Certificate,
+    CertificateVerify,
+    Finished,
+    KeyUpdate,
+    ApplicationData,
+    CloseNotify,
+    FatalAlert,
+}
+
+// A ServerTransition is the server's state after a message and what was
+// done with it; the outcomes are `Outcome`'s, and `Unsupported` never
+// happens on this side.
+pub struct ServerTransition {
+    pub state: std::tls::ServerState,
+    pub outcome: std::tls::Outcome,
+}
+
+// advance_server applies one message from the client to the server's
+// state.
+pub fn advance_server(state: std::tls::ServerState, event: std::tls::ServerEvent) -> std::tls::ServerTransition {
+    if state == ServerState::Closed {
+        return ServerTransition { state: ServerState::Closed, outcome: Outcome::Refused };
+    }
+    if server_table(state, event) |next| {
+        return ServerTransition { state: next, outcome: Outcome::Applied };
+    }
+    return ServerTransition { state: ServerState::Closed, outcome: Outcome::Refused };
+}
+
+// server_table is the server's transition table of spec/Tls.lean; null
+// is a refusal. The client's Certificate and CertificateVerify are
+// refused since none was asked for, and EndOfEarlyData since no early
+// data was accepted.
+fn server_table(state: std::tls::ServerState, event: std::tls::ServerEvent) -> ?std::tls::ServerState {
+    if event == ServerEvent::CloseNotify or event == ServerEvent::FatalAlert {
+        return ServerState::Closed;
+    }
+    match state {
+        WaitClientHello => match event {
+            ClientHello => return ServerState::WaitFinished,
+            _ => {},
+        },
+        WaitFinished => match event {
+            Finished => return ServerState::Connected,
+            _ => {},
+        },
+        Connected => match event {
+            KeyUpdate => return ServerState::Connected,
+            ApplicationData => return ServerState::Connected,
             _ => {},
         },
         Closed => {},

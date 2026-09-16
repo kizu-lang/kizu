@@ -613,3 +613,186 @@ test "the RFC 8448 Certificate, CertificateVerify and Finished read back" {
     let verify_data = try tls::read_finished(finished_bytes);
     try expect_hex(allocator, server_finished_data(), verify_data);
 }
+
+test "the RFC 8448 ClientHello reads as what the server can take" {
+    let allocator = mem::page_allocator();
+    let hello = try bytes_of_hex(allocator, client_hello());
+    defer hello.deinit(allocator);
+    let bytes = hello.as_bytes();
+    let read = try tls::read_client_hello(bytes);
+    testing::expect(read.session_id_end == read.session_id_start);
+    testing::expect(read.aes and read.chacha);
+    let share = bytes[read.key_share_start..read.key_share_end];
+    try expect_hex(allocator, client_public(), share);
+    let name = bytes[read.server_name_start..read.server_name_end];
+    testing::expect(mem::equal_bytes(name, "server"));
+    // The RFC's client offers every scheme this server signs with.
+    testing::expect(read.schemes & tls::scheme_bit(tls::signature_ecdsa_secp256r1_sha256()) != 0);
+    testing::expect(read.schemes & tls::scheme_bit(tls::signature_ecdsa_secp384r1_sha384()) != 0);
+    testing::expect(read.schemes & tls::scheme_bit(tls::signature_rsa_pss_rsae_sha256()) != 0);
+    testing::expect(read.schemes & tls::scheme_bit(tls::signature_rsa_pss_rsae_sha512()) != 0);
+    testing::expect(tls::scheme_bit(tls::signature_rsa_pkcs1_sha256()) == 0);
+    // Cut short, it is malformed; without supported_versions, unsupported.
+    let count = mem::len(bytes);
+    if tls::read_client_hello(bytes[0..count - 1]) |_| {
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == tls::Error::IllegalParameter);
+    }
+    var old = try bytes_of_hex(allocator, client_hello());
+    defer old.deinit(allocator);
+    hide_supported_versions(&var old);
+    let old_bytes = old.as_bytes();
+    if tls::read_client_hello(old_bytes) |_| {
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == tls::Error::Unsupported);
+    }
+}
+
+// hide_supported_versions turns a hello's supported_versions extension
+// (type 002b, 3 bytes) into one of an unknown type.
+fn hide_supported_versions(hello: &var string::String) -> void {
+    let view = hello.as_mut_bytes();
+    let count = mem::len(view);
+    for 0..count - 3 |index| {
+        if view[index] == 0 and view[index + 1] == 43 and view[index + 2] == 0 and view[index + 3] == 3 {
+            view[index + 1] = 255;
+        }
+    }
+    return;
+}
+
+test "the server writes the RFC 8448 ServerHello and Certificate byte for byte" {
+    let allocator = mem::page_allocator();
+    let random = try bytes_of_hex(allocator, "a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e26928");
+    defer random.deinit(allocator);
+    let share = try bytes_of_hex(allocator, server_public());
+    defer share.deinit(allocator);
+    let random_bytes = random.as_bytes();
+    let share_bytes = share.as_bytes();
+    var hello = string::new(allocator);
+    defer hello.deinit(allocator);
+    try tls::write_server_hello(allocator, &var hello, random_bytes, "", tls::CipherSuite::Aes128GcmSha256, share_bytes);
+    let hello_bytes = hello.as_bytes();
+    try expect_hex(allocator, server_hello(), hello_bytes);
+
+    let message = try bytes_of_hex(allocator, certificate());
+    defer message.deinit(allocator);
+    let message_bytes = message.as_bytes();
+    var chain = array::new<string::String>(allocator);
+    defer chain.deinit(allocator);
+    // The one certificate: after the header, the empty context, the
+    // list length, and its own length.
+    let der = message_bytes[11..mem::len(message_bytes) - 2];
+    let copy = try string::from_bytes(allocator, der);
+    try chain.append(allocator, move copy);
+    var written = string::new(allocator);
+    defer written.deinit(allocator);
+    try tls::write_certificate(allocator, &var written, &chain);
+    let written_bytes = written.as_bytes();
+    try expect_hex(allocator, certificate(), written_bytes);
+
+    var extensions = string::new(allocator);
+    defer extensions.deinit(allocator);
+    try tls::write_encrypted_extensions(allocator, &var extensions);
+    let extensions_bytes = extensions.as_bytes();
+    try expect_hex(allocator, "080000020000", extensions_bytes);
+
+    var verify = string::new(allocator);
+    defer verify.deinit(allocator);
+    try tls::write_certificate_verify(allocator, &var verify, tls::signature_ecdsa_secp256r1_sha256(), "sig");
+    let verify_bytes = verify.as_bytes();
+    try expect_hex(allocator, "0f00000704030003736967", verify_bytes);
+    let read = try tls::read_certificate_verify(verify_bytes);
+    testing::expect(read.scheme == tls::signature_ecdsa_secp256r1_sha256());
+    testing::expect(mem::equal_bytes(verify_bytes[read.signature_start..read.signature_end], "sig"));
+}
+
+fn server_state_at(index: i64) -> tls::ServerState {
+    if index == 0 {
+        return tls::ServerState::WaitClientHello;
+    }
+    if index == 1 {
+        return tls::ServerState::WaitFinished;
+    }
+    if index == 2 {
+        return tls::ServerState::Connected;
+    }
+    return tls::ServerState::Closed;
+}
+
+fn server_event_at(index: i64) -> tls::ServerEvent {
+    if index == 0 {
+        return tls::ServerEvent::ClientHello;
+    }
+    if index == 1 {
+        return tls::ServerEvent::EndOfEarlyData;
+    }
+    if index == 2 {
+        return tls::ServerEvent::Certificate;
+    }
+    if index == 3 {
+        return tls::ServerEvent::CertificateVerify;
+    }
+    if index == 4 {
+        return tls::ServerEvent::Finished;
+    }
+    if index == 5 {
+        return tls::ServerEvent::KeyUpdate;
+    }
+    if index == 6 {
+        return tls::ServerEvent::ApplicationData;
+    }
+    if index == 7 {
+        return tls::ServerEvent::CloseNotify;
+    }
+    return tls::ServerEvent::FatalAlert;
+}
+
+// server_listed says which state an event moves the server to from a
+// state, as spec/Tls.lean lists it; null is a refusal.
+fn server_listed(state: tls::ServerState, event: tls::ServerEvent) -> ?tls::ServerState {
+    if state == tls::ServerState::Closed {
+        return null;
+    }
+    if event == tls::ServerEvent::CloseNotify or event == tls::ServerEvent::FatalAlert {
+        return tls::ServerState::Closed;
+    }
+    if state == tls::ServerState::WaitClientHello and event == tls::ServerEvent::ClientHello {
+        return tls::ServerState::WaitFinished;
+    }
+    if state == tls::ServerState::WaitFinished and event == tls::ServerEvent::Finished {
+        return tls::ServerState::Connected;
+    }
+    if state == tls::ServerState::Connected
+        and (event == tls::ServerEvent::KeyUpdate or event == tls::ServerEvent::ApplicationData) {
+        return tls::ServerState::Connected;
+    }
+    return null;
+}
+
+test "the server machine applies what its table lists and closes on everything else" {
+    var applied = 0;
+    for 0..4 |s| {
+        for 0..9 |e| {
+            let state = server_state_at(s);
+            let event = server_event_at(e);
+            let step = tls::advance_server(state, event);
+            if server_listed(state, event) |next| {
+                testing::expect(step.outcome == tls::Outcome::Applied);
+                testing::expect(step.state == next);
+                applied = applied + 1;
+            } else {
+                testing::expect(step.outcome == tls::Outcome::Refused);
+                testing::expect(step.state == tls::ServerState::Closed);
+            }
+            // Connected is reached only by the Finished the server waits for.
+            if step.state == tls::ServerState::Connected {
+                testing::expect(state == tls::ServerState::Connected
+                    or (state == tls::ServerState::WaitFinished and event == tls::ServerEvent::Finished));
+            }
+        }
+    }
+    testing::expect_equal<i64>(10, applied);
+}

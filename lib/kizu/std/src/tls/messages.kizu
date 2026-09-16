@@ -1,9 +1,10 @@
-// The handshake messages a client writes and reads (RFC 8446 §4): a
-// ClientHello built from what the client offers, and the server's
-// messages read into where their parts are. A message is its four-byte
-// header -- the type and a 24-bit length -- and its body; what is read
-// is left in the message's bytes and named by offsets, the way
-// std::crypto::x509 leaves a certificate in its DER.
+// The handshake messages each side writes and reads (RFC 8446 §4): a
+// ClientHello built from what the client offers and read by the server
+// for what it can take, the server's messages built from what it chose
+// and read by the client. A message is its four-byte header -- the type
+// and a 24-bit length -- and its body; what is read is left in the
+// message's bytes and named by offsets, the way std::crypto::x509
+// leaves a certificate in its DER.
 
 // Handshake message types (RFC 8446 §4).
 pub fn handshake_client_hello() -> u8 {
@@ -394,6 +395,310 @@ pub fn read_certificate_verify(message: []u8) -> std::tls::Error!std::tls::Certi
         return std::tls::Error::IllegalParameter;
     }
     return CertificateVerify { scheme: scheme, signature_start: 8, signature_end: length };
+}
+
+// A ClientHello, read by a server: what the client offered that this
+// server can take. `session_id` is echoed; `key_share` is the x25519
+// share, or empty when none was offered; `schemes` is the signature
+// schemes the client accepts, as a bit per scheme `scheme_bit` names;
+// `server_name` is the host the client asked for, or empty.
+pub struct ClientHello {
+    pub session_id_start: i64,
+    pub session_id_end: i64,
+    pub aes: bool,
+    pub chacha: bool,
+    pub key_share_start: i64,
+    pub key_share_end: i64,
+    pub schemes: i64,
+    pub server_name_start: i64,
+    pub server_name_end: i64,
+}
+
+// scheme_bit is the bit of `ClientHello.schemes` for a signature scheme
+// a server can sign with, or 0 for one it cannot.
+pub fn scheme_bit(scheme: i64) -> i64 {
+    if scheme == signature_ecdsa_secp256r1_sha256() {
+        return 1;
+    }
+    if scheme == signature_ecdsa_secp384r1_sha384() {
+        return 2;
+    }
+    if scheme == signature_rsa_pss_rsae_sha256() {
+        return 4;
+    }
+    if scheme == signature_rsa_pss_rsae_sha384() {
+        return 8;
+    }
+    if scheme == signature_rsa_pss_rsae_sha512() {
+        return 16;
+    }
+    return 0;
+}
+
+// read_client_hello reads a ClientHello (RFC 8446 §4.1.2). A message
+// that does not fit the shape is `IllegalParameter`; one that offers
+// no TLS 1.3, no suite this server has, no x25519 share, or no scheme
+// the server signs with is read all the same, and the server decides
+// from what it holds.
+pub fn read_client_hello(message: []u8) -> std::tls::Error!std::tls::ClientHello {
+    let length = std::mem::len(message);
+    if length < 4 + 2 + 32 + 1 or message[0] != handshake_client_hello() or read_u24(message, 1) != length - 4 {
+        return std::tls::Error::IllegalParameter;
+    }
+    if read_u16(message, 4) != 0x0303 {
+        return std::tls::Error::IllegalParameter;
+    }
+    var at = 38;
+    let id_length = cast<i64>(message[at]);
+    at = at + 1;
+    if id_length > 32 or at + id_length + 2 > length {
+        return std::tls::Error::IllegalParameter;
+    }
+    var hello = ClientHello {
+        session_id_start: at,
+        session_id_end: at + id_length,
+        aes: false,
+        chacha: false,
+        key_share_start: 0,
+        key_share_end: 0,
+        schemes: 0,
+        server_name_start: 0,
+        server_name_end: 0,
+    };
+    at = at + id_length;
+    let suites_length = read_u16(message, at);
+    at = at + 2;
+    if suites_length & 1 == 1 or at + suites_length + 1 > length {
+        return std::tls::Error::IllegalParameter;
+    }
+    for 0..suites_length / 2 |index| {
+        let code = read_u16(message, at + index * 2);
+        if code == 0x1301 {
+            hello.aes = true;
+        }
+        if code == 0x1303 {
+            hello.chacha = true;
+        }
+    }
+    at = at + suites_length;
+    // Compression methods: at least null.
+    let compressions = cast<i64>(message[at]);
+    at = at + 1;
+    if compressions == 0 or at + compressions > length {
+        return std::tls::Error::IllegalParameter;
+    }
+    at = at + compressions;
+    if at + 2 > length {
+        return std::tls::Error::IllegalParameter;
+    }
+    let extensions_length = read_u16(message, at);
+    at = at + 2;
+    if at + extensions_length != length {
+        return std::tls::Error::IllegalParameter;
+    }
+    var version_seen = false;
+    while at < length {
+        if at + 4 > length {
+            return std::tls::Error::IllegalParameter;
+        }
+        let kind = read_u16(message, at);
+        let size = read_u16(message, at + 2);
+        let body = at + 4;
+        if body + size > length {
+            return std::tls::Error::IllegalParameter;
+        }
+        if kind == 0 {
+            try read_server_name(message, body, body + size, &var hello);
+        }
+        if kind == 13 {
+            hello.schemes = try read_schemes(message, body, body + size);
+        }
+        if kind == 43 {
+            version_seen = try read_versions(message, body, body + size);
+        }
+        if kind == 51 {
+            try read_key_shares(message, body, body + size, &var hello);
+        }
+        at = body + size;
+    }
+    if !version_seen {
+        return std::tls::Error::Unsupported;
+    }
+    return hello;
+}
+
+// read_server_name notes the host_name entry of a server_name extension
+// (RFC 6066 §3).
+fn read_server_name(message: []u8, start: i64, end: i64, hello: &var std::tls::ClientHello) -> std::tls::Error!void {
+    if end - start < 2 or start + 2 + read_u16(message, start) != end {
+        return std::tls::Error::IllegalParameter;
+    }
+    var at = start + 2;
+    while at < end {
+        if at + 3 > end {
+            return std::tls::Error::IllegalParameter;
+        }
+        let kind = message[at];
+        let size = read_u16(message, at + 1);
+        at = at + 3;
+        if at + size > end {
+            return std::tls::Error::IllegalParameter;
+        }
+        if kind == 0 {
+            hello.server_name_start = at;
+            hello.server_name_end = at + size;
+        }
+        at = at + size;
+    }
+    return;
+}
+
+// read_schemes folds a signature_algorithms extension into scheme bits.
+fn read_schemes(message: []u8, start: i64, end: i64) -> std::tls::Error!i64 {
+    if end - start < 2 or start + 2 + read_u16(message, start) != end or (end - start) & 1 == 1 {
+        return std::tls::Error::IllegalParameter;
+    }
+    var bits = 0;
+    var at = start + 2;
+    while at < end {
+        bits = bits | scheme_bit(read_u16(message, at));
+        at = at + 2;
+    }
+    return bits;
+}
+
+// read_versions reports whether a supported_versions extension offers
+// TLS 1.3.
+fn read_versions(message: []u8, start: i64, end: i64) -> std::tls::Error!bool {
+    if end - start < 1 or start + 1 + cast<i64>(message[start]) != end or (end - start - 1) & 1 == 1 {
+        return std::tls::Error::IllegalParameter;
+    }
+    var at = start + 1;
+    while at < end {
+        if read_u16(message, at) == 0x0304 {
+            return true;
+        }
+        at = at + 2;
+    }
+    return false;
+}
+
+// read_key_shares notes the x25519 entry of a key_share extension.
+fn read_key_shares(message: []u8, start: i64, end: i64, hello: &var std::tls::ClientHello) -> std::tls::Error!void {
+    if end - start < 2 or start + 2 + read_u16(message, start) != end {
+        return std::tls::Error::IllegalParameter;
+    }
+    var at = start + 2;
+    while at < end {
+        if at + 4 > end {
+            return std::tls::Error::IllegalParameter;
+        }
+        let group = read_u16(message, at);
+        let size = read_u16(message, at + 2);
+        at = at + 4;
+        if at + size > end {
+            return std::tls::Error::IllegalParameter;
+        }
+        if group == group_x25519() {
+            if size != 32 {
+                return std::tls::Error::IllegalParameter;
+            }
+            hello.key_share_start = at;
+            hello.key_share_end = at + 32;
+        }
+        at = at + size;
+    }
+    return;
+}
+
+// write_server_hello appends a ServerHello (RFC 8446 §4.1.3): the
+// client's session id echoed, the suite chosen, and supported_versions
+// and key_share with the server's x25519 share.
+pub fn write_server_hello(
+    allocator: Allocator,
+    out: &var std::string::String,
+    random: []u8,
+    session_id: []u8,
+    suite: std::tls::CipherSuite,
+    key_share: []u8
+) -> std::mem::Error!void {
+    let start = out.len();
+    try append_u8(allocator, out, handshake_server_hello());
+    try append_u24(allocator, out, 0);
+    try append_u16(allocator, out, 0x0303);
+    try out.append_bytes(allocator, random);
+    try append_u8(allocator, out, cast<u8>(std::mem::len(session_id)));
+    try out.append_bytes(allocator, session_id);
+    try append_u16(allocator, out, suite_code(suite));
+    try append_u8(allocator, out, 0);
+    try append_u16(allocator, out, 46);
+    // key_share: the x25519 share.
+    try append_u16(allocator, out, 51);
+    try append_u16(allocator, out, 36);
+    try append_u16(allocator, out, group_x25519());
+    try append_u16(allocator, out, 32);
+    try out.append_bytes(allocator, key_share);
+    // supported_versions: 1.3.
+    try append_u16(allocator, out, 43);
+    try append_u16(allocator, out, 2);
+    try append_u16(allocator, out, 0x0304);
+    let end = out.len();
+    set_u24(out, start + 1, end - start - 4);
+    return;
+}
+
+// write_encrypted_extensions appends an EncryptedExtensions with no
+// extensions: this server negotiates nothing after the hello.
+pub fn write_encrypted_extensions(allocator: Allocator, out: &var std::string::String) -> std::mem::Error!void {
+    try append_u8(allocator, out, handshake_encrypted_extensions());
+    try append_u24(allocator, out, 2);
+    try append_u16(allocator, out, 0);
+    return;
+}
+
+// write_certificate appends a Certificate (RFC 8446 §4.4.2) carrying
+// `chain`, the server's own first, each with no extensions, under an
+// empty request context.
+pub fn write_certificate(
+    allocator: Allocator,
+    out: &var std::string::String,
+    chain: &std::array::Array<std::string::String>
+) -> std::mem::Error!void {
+    let start = out.len();
+    try append_u8(allocator, out, handshake_certificate());
+    try append_u24(allocator, out, 0);
+    try append_u8(allocator, out, 0);
+    let list_at = out.len();
+    try append_u24(allocator, out, 0);
+    var index = 0;
+    while chain.at(index) |der| {
+        let bytes = der.as_bytes();
+        try append_u24(allocator, out, std::mem::len(bytes));
+        try out.append_bytes(allocator, bytes);
+        try append_u16(allocator, out, 0);
+        index = index + 1;
+    }
+    let end = out.len();
+    set_u24(out, list_at, end - list_at - 3);
+    set_u24(out, start + 1, end - start - 4);
+    return;
+}
+
+// write_certificate_verify appends a CertificateVerify (RFC 8446 §4.4.3)
+// with `signature` under `scheme`.
+pub fn write_certificate_verify(
+    allocator: Allocator,
+    out: &var std::string::String,
+    scheme: i64,
+    signature: []u8
+) -> std::mem::Error!void {
+    let length = std::mem::len(signature);
+    try append_u8(allocator, out, handshake_certificate_verify());
+    try append_u24(allocator, out, 4 + length);
+    try append_u16(allocator, out, scheme);
+    try append_u16(allocator, out, length);
+    try out.append_bytes(allocator, signature);
+    return;
 }
 
 // read_finished checks a Finished message's shape and returns its 32

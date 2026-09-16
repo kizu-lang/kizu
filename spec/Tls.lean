@@ -1,21 +1,27 @@
 import Lean
 /-!
-# TLS 1.3 client handshake
+# TLS 1.3 handshake
 
 A TLS 1.3 client (RFC 8446 §A.1) is a machine that waits for the server's
-messages in one order and no other. The transition table below is the whole
-of what the client may do with a message from the server: a message the
-table does not list for the current state is an `unexpected_message` alert,
-and the connection is closed. Pre-shared keys, early data and client
-certificates are not modelled: the client offers none of them, so the
-server's `CertificateRequest` is acknowledged and the client's own
-`Certificate` is empty.
+messages in one order and no other, and a server (§A.2) one that waits for
+the client's. The transition tables below are the whole of what each side
+may do with a message from the other: a message the table does not list
+for the current state is an `unexpected_message` alert, and the connection
+is closed. Pre-shared keys, early data and client certificates are not
+modelled: the client offers none of them, so the server's
+`CertificateRequest` is acknowledged and the client's own `Certificate` is
+empty; the server asks for none, sends its whole flight on the
+ClientHello, and refuses a client's `Certificate`, `CertificateVerify` and
+`EndOfEarlyData`.
 
-This file is the specification. `table` is the transition table, `post`
-applies one message. `closed_absorbing`, `connected_only_by_finished`,
-`data_needs_connection`, `verify_needs_certificate` and `refusal_closes`
-are the properties every implementation has to keep. `main` writes traces
-that `examples/tls_conformance.kizu` replays against `std::tls`.
+This file is the specification. `table` is the client's transition table
+and `post` applies one message to it; `ServerState`, `ServerEvent`,
+`serverTable` and `serverPost` are the server's. `closed_absorbing`,
+`connected_only_by_finished`, `data_needs_connection`,
+`verify_needs_certificate` and `refusal_closes` are the properties every
+implementation has to keep, and the server has its own of each. `main`
+writes traces of the client that `examples/tls_conformance.kizu` replays
+against `std::tls`.
 -/
 open Lean (Json toJson)
 
@@ -138,6 +144,86 @@ theorem finished_needs_verify (s : State) (h : (post s .finished).2 = .applied) 
 theorem wait_finished_by_verify (s : State) (e : Event) (h : (post s e).1 = .waitFinished) :
     s = .waitCertificateVerify ∧ e = .certificateVerify := by
   cases s <;> cases e <;> simp_all [post, table]
+
+/-! ## The server -/
+
+/-- The server's states, as RFC 8446 §A.2 names them, less what it never
+does: it sends its whole flight on the ClientHello and then waits for the
+client's `Finished`. -/
+inductive ServerState
+  | waitClientHello
+  | waitFinished
+  | connected
+  | closed
+deriving Repr, DecidableEq
+
+/-- What arrives from the client: one of the handshake messages a client
+can send, application data, or an alert. -/
+inductive ServerEvent
+  | clientHello
+  | endOfEarlyData
+  | certificate
+  | certificateVerify
+  | finished
+  | keyUpdate
+  | applicationData
+  | closeNotify
+  | fatalAlert
+deriving Repr, DecidableEq
+
+/-- The server's transition table: `none` is a refusal. A `Certificate` or
+`CertificateVerify` is refused since none was asked for, and
+`EndOfEarlyData` since no early data was accepted. -/
+def serverTable : ServerState → ServerEvent → Option ServerState
+  | .waitClientHello, .clientHello => some .waitFinished
+  | .waitFinished, .finished => some .connected
+  | .connected, .keyUpdate => some .connected
+  | .connected, .applicationData => some .connected
+  | .closed, _ => none
+  | _, .closeNotify => some .closed
+  | _, .fatalAlert => some .closed
+  | _, _ => none
+
+def serverPost (s : ServerState) (e : ServerEvent) : ServerState × Outcome :=
+  match serverTable s e with
+  | some next => (next, .applied)
+  | none => (.closed, .refused)
+
+theorem server_closed_absorbing (e : ServerEvent) :
+    serverPost .closed e = (.closed, .refused) := by
+  cases e <;> rfl
+
+/-- The server is connected only because the client's `Finished` arrived
+where it was waited for, or was connected already. -/
+theorem server_connected_only_by_finished (s : ServerState) (e : ServerEvent)
+    (h : (serverPost s e).1 = .connected) :
+    s = .connected ∨ (s = .waitFinished ∧ e = .finished) := by
+  cases s <;> cases e <;> simp_all [serverPost, serverTable]
+
+theorem server_data_needs_connection (s : ServerState)
+    (h : (serverPost s .applicationData).2 = .applied) : s = .connected := by
+  cases s <;> simp_all [serverPost, serverTable]
+
+/-- The client's `Finished` is taken only after the server sent its own
+flight, which is what `waitFinished` means, and that state is reached only
+by a `ClientHello`. -/
+theorem server_finished_needs_hello (s : ServerState)
+    (h : (serverPost s .finished).2 = .applied) : s = .waitFinished := by
+  cases s <;> simp_all [serverPost, serverTable]
+
+theorem server_wait_finished_by_hello (s : ServerState) (e : ServerEvent)
+    (h : (serverPost s e).1 = .waitFinished) :
+    s = .waitClientHello ∧ e = .clientHello := by
+  cases s <;> cases e <;> simp_all [serverPost, serverTable]
+
+/-- A client's certificate is never taken: the server asked for none. -/
+theorem server_takes_no_certificate (s : ServerState) :
+    (serverPost s .certificate).2 = .refused := by
+  cases s <;> rfl
+
+theorem server_refusal_closes (s : ServerState) (e : ServerEvent)
+    (h : (serverPost s e).2 ≠ .applied) : (serverPost s e).1 = .closed := by
+  cases s <;> cases e <;> simp_all [serverPost, serverTable]
 
 /-! ## Traces for implementations -/
 

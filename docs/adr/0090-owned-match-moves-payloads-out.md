@@ -62,7 +62,7 @@ owned scrutinee は次の 2 つ。
 struct / union と deinit を持つ型の payload を、その場所への `&var` borrow
 として束縛する。arm の間その place は mutably borrowed になる(`&var` 引数と
 同じ排他)。これが無いと union に入れた owner を取り出さずに変更する手段が
-無く、`union Stream { Plain(TcpStream), Secure(tls::Client) }` のような
+無く、`union Stream { Plain(TcpStream), Secure(tls::Connection) }` のような
 stream の抽象が書けない。lowering は payload の address(`union.payload_ref`)
 を束縛する。
 
