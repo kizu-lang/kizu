@@ -1,9 +1,26 @@
-// RSA signatures, as a TLS 1.3 client meets them: PKCS #1 v1.5 on a
-// certificate, and PSS on a certificate or on the handshake transcript
-// (RFC 8017 §8). Only verifying is here; signing needs a private key,
-// which has no place in a client yet. A public key is its modulus and
-// exponent as big-endian bytes, as a certificate's SubjectPublicKeyInfo
-// carries them; a modulus is at most 4096 bits.
+// RSA signatures, as TLS 1.3 meets them: PKCS #1 v1.5 on a certificate,
+// and PSS on a certificate or on the handshake transcript (RFC 8017 §8),
+// checked by a client and made by a server. A public key is its modulus
+// and exponent as big-endian bytes, as a certificate's
+// SubjectPublicKeyInfo carries them; a private key is `RsaPrivateKey`,
+// the parts of an RSAPrivateKey (RFC 8017 §A.1.2) the Chinese remainder
+// form of signing needs. A modulus is at most 4096 bits.
+
+// RsaPrivateKey is an RSA private key as its parts, each big-endian
+// bytes: the modulus n and public exponent e, the primes p and q,
+// the exponents dP = d mod (p - 1) and dQ = d mod (q - 1), and the
+// coefficient q^-1 mod p. These are what an RSAPrivateKey holds, in
+// its order and under its names. The struct holds views of the caller's
+// bytes and is tied to them.
+pub struct RsaPrivateKey {
+    pub modulus: []u8,
+    pub public_exponent: []u8,
+    pub prime1: []u8,
+    pub prime2: []u8,
+    pub exponent1: []u8,
+    pub exponent2: []u8,
+    pub coefficient: []u8,
+}
 
 // rsa_pkcs1_verify reports whether `signature` is a valid
 // RSASSA-PKCS1-v1_5 signature, for the key `modulus` and `exponent`,
@@ -45,6 +62,289 @@ pub fn rsa_pss_verify(hash: Hash, modulus: []u8, exponent: []u8, digest: []u8, s
     let message = encoded[0..length];
     let modulus_bits = bit_length_of_bytes(modulus);
     return pss_encoded(message, modulus_bits, hash, digest);
+}
+
+// rsa_pkcs1_sign writes the RSASSA-PKCS1-v1_5 signature (RFC 8017
+// §8.2.1) under `key` of a message whose digest under `hash` is
+// `digest` to `signature`, which must be as long as the modulus. The
+// same key and digest always make the same signature. A key whose
+// modulus is even, wider than 4096 bits, or too narrow for the padding,
+// whose primes, exponents, or coefficient do not fit half the modulus,
+// or whose parts disagree (the signature does not verify under the
+// public exponent) is `InvalidKey`. A digest that is not as long as
+// `hash` makes, or a signature view that is not as long as the modulus,
+// is the caller's mistake and traps. The time taken does not depend on
+// the private parts of the key.
+pub fn rsa_pkcs1_sign(hash: Hash, key: &RsaPrivateKey, digest: []u8, signature: &var []u8) -> Error!void {
+    if std::mem::len(digest) != digest_length(hash) {
+        std::internal::builtin::panic("crypto rsa_pkcs1_sign: digest length does not match the hash");
+    }
+    let n_bytes = without_leading_zeros(key.modulus);
+    let length = std::mem::len(n_bytes);
+    if std::mem::len(signature) != length {
+        std::internal::builtin::panic("crypto rsa_pkcs1_sign: signature must be as long as the modulus");
+    }
+    var encoded_buffer = [512]u8{};
+    let encoded = encoded_buffer.as_mut_bytes();
+    if length == 0 or length > 512 or !pkcs1_encode(encoded, length, hash, digest) {
+        return Error::InvalidKey;
+    }
+    let message = encoded[0..length];
+    try sign_encoded(key, n_bytes, message, signature);
+    return;
+}
+
+// rsa_pss_sign writes the RSASSA-PSS signature (RFC 8017 §8.1.1) under
+// `key` of a message whose digest under `hash` is `digest`, with the
+// `salt` the caller drew (as long as the digest, from `random_bytes`),
+// MGF1 over the same hash, which is what TLS 1.3 uses. What is refused
+// is as for `rsa_pkcs1_sign`; a salt that is not as long as the digest
+// is the caller's mistake and traps.
+pub fn rsa_pss_sign(hash: Hash, key: &RsaPrivateKey, digest: []u8, salt: []u8, signature: &var []u8) -> Error!void {
+    if std::mem::len(digest) != digest_length(hash) {
+        std::internal::builtin::panic("crypto rsa_pss_sign: digest length does not match the hash");
+    }
+    if std::mem::len(salt) != digest_length(hash) {
+        std::internal::builtin::panic("crypto rsa_pss_sign: salt must be as long as the digest");
+    }
+    let n_bytes = without_leading_zeros(key.modulus);
+    let length = std::mem::len(n_bytes);
+    if std::mem::len(signature) != length {
+        std::internal::builtin::panic("crypto rsa_pss_sign: signature must be as long as the modulus");
+    }
+    var encoded_buffer = [512]u8{};
+    let encoded = encoded_buffer.as_mut_bytes();
+    let modulus_bits = bit_length_of_bytes(n_bytes);
+    if length == 0 or length > 512 or !pss_encode(encoded, length, modulus_bits, hash, digest, salt) {
+        return Error::InvalidKey;
+    }
+    let message = encoded[0..length];
+    try sign_encoded(key, n_bytes, message, signature);
+    return;
+}
+
+// sign_encoded writes encoded^d mod n, by the Chinese remainder theorem
+// (RFC 8017 §5.2.1 b): m^dP mod p and m^dQ mod q, joined with the
+// coefficient. Each part is `half` limbs, half the modulus rounded up.
+// The private exponents are raised with `mont_pow_secret`, so the time
+// does not depend on them. The result is checked against the public
+// exponent before it is written: a key whose parts disagree, or a fault
+// in the arithmetic, would otherwise hand out a signature that leaks
+// the primes.
+fn sign_encoded(key: &RsaPrivateKey, n_bytes: []u8, encoded: []u8, signature: &var []u8) -> Error!void {
+    let length = std::mem::len(n_bytes);
+    if n_bytes[length - 1] & 1 == 0 {
+        return Error::InvalidKey;
+    }
+    let count = (length + 3) / 4;
+    let half = (count + 1) / 2;
+    let e_bytes = without_leading_zeros(key.public_exponent);
+    let e_length = std::mem::len(e_bytes);
+    if e_length == 0 or e_length > 4 or e_bytes[e_length - 1] & 1 == 0 {
+        return Error::InvalidKey;
+    }
+    let p_bytes = without_leading_zeros(key.prime1);
+    let q_bytes = without_leading_zeros(key.prime2);
+    let dp_bytes = without_leading_zeros(key.exponent1);
+    let dq_bytes = without_leading_zeros(key.exponent2);
+    let qinv_bytes = without_leading_zeros(key.coefficient);
+    if !fits_half(p_bytes, half) or !fits_half(q_bytes, half) or !fits_half(qinv_bytes, half) {
+        return Error::InvalidKey;
+    }
+    if std::mem::len(dp_bytes) > half * 4 or std::mem::len(dq_bytes) > half * 4 {
+        return Error::InvalidKey;
+    }
+    if p_bytes[std::mem::len(p_bytes) - 1] & 1 == 0 or q_bytes[std::mem::len(q_bytes) - 1] & 1 == 0 {
+        return Error::InvalidKey;
+    }
+
+    var m_buffer = [130]u64{};
+    var p_buffer = [130]u64{};
+    var q_buffer = [130]u64{};
+    let m = m_buffer.as_mut_slice();
+    let p = p_buffer.as_mut_slice();
+    let q = q_buffer.as_mut_slice();
+    limbs_of_padded_bytes(m, encoded, half * 2);
+    limbs_of_padded_bytes(p, p_bytes, half);
+    limbs_of_padded_bytes(q, q_bytes, half);
+    let m_wide = m[0..half * 2];
+    let p_view = p[0..half];
+    let q_view = q[0..half];
+    var mp_buffer = [131]u64{};
+    var mq_buffer = [131]u64{};
+    let mp = mp_buffer.as_mut_slice();
+    let mq = mq_buffer.as_mut_slice();
+    fill_modulus(mp, p_view);
+    fill_modulus(mq, q_view);
+    let mp_view = mp[0..half * 2 + 1];
+    let mq_view = mq[0..half * 2 + 1];
+
+    var xp_buffer = [130]u64{};
+    var xq_buffer = [130]u64{};
+    let xp = xp_buffer.as_mut_slice();
+    let xq = xq_buffer.as_mut_slice();
+    power_of_wide(xp, m_wide, dp_bytes, mp_view);
+    power_of_wide(xq, m_wide, dq_bytes, mq_view);
+
+    // h = qInv (xp - xq) mod p, with xq brought below p first.
+    var t_buffer = [130]u64{};
+    var u_buffer = [130]u64{};
+    var h_buffer = [130]u64{};
+    let t = t_buffer.as_mut_slice();
+    let u = u_buffer.as_mut_slice();
+    let h = h_buffer.as_mut_slice();
+    for half..half * 2 |index| {
+        xq[index] = 0;
+    }
+    let xq_wide = xq[0..half * 2];
+    reduce_wide(t, xq_wide, mp_view);
+    to_mont(u, t, mp_view);
+    let xp_view = xp[0..half];
+    to_mont(t, xp_view, mp_view);
+    mod_sub(h, t, u, mp_view);
+    var qinv_buffer = [130]u64{};
+    let qinv = qinv_buffer.as_mut_slice();
+    limbs_of_padded_bytes(qinv, qinv_bytes, half);
+    let qinv_view = qinv[0..half];
+    to_mont(t, qinv_view, mp_view);
+    mont_mul(u, h, t, mp_view);
+    from_mont(h, u, mp_view);
+
+    // s = xq + h q, which is below n.
+    var s_buffer = [130]u64{};
+    let s = s_buffer.as_mut_slice();
+    let h_view = h[0..half];
+    mul_limbs_wide(s, h_view, q_view, half);
+    add_in_place(s, xq_wide);
+
+    // The check: s^e mod n must be the encoded message.
+    var n_buffer = [130]u64{};
+    let n = n_buffer.as_mut_slice();
+    limbs_of_padded_bytes(n, n_bytes, count);
+    let n_view = n[0..count];
+    var mn_buffer = [257]u64{};
+    let mn = mn_buffer.as_mut_slice();
+    fill_modulus(mn, n_view);
+    let mn_view = mn[0..count * 2 + 1];
+    let s_view = s[0..count];
+    if !less_than(s_view, n_view) {
+        return Error::InvalidKey;
+    }
+    to_mont(t, s_view, mn_view);
+    mont_pow(u, t, e_bytes, mn_view);
+    from_mont(t, u, mn_view);
+    let back = t[0..count];
+    let m_view = m[0..count];
+    if !equal_limbs(back, m_view) {
+        return Error::InvalidKey;
+    }
+    var padded_buffer = [520]u8{};
+    let padded = padded_buffer.as_mut_bytes();
+    bytes_of_limbs(padded, s_view);
+    let skip = count * 4 - length;
+    for 0..length |index| {
+        signature[index] = padded[skip + index];
+    }
+    return;
+}
+
+fn fits_half(bytes: []u8, half: i64) -> bool {
+    let length = std::mem::len(bytes);
+    return length > 0 and length <= half * 4;
+}
+
+// power_of_wide writes (a mod m)^e mod m for `a` of twice the modulus
+// width and a secret exponent `e`.
+fn power_of_wide(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
+    var t_buffer = [130]u64{};
+    var u_buffer = [130]u64{};
+    let t = t_buffer.as_mut_slice();
+    let u = u_buffer.as_mut_slice();
+    reduce_wide(t, a, m);
+    to_mont(u, t, m);
+    mont_pow_secret(t, u, e, m);
+    from_mont(o, t, m);
+    return;
+}
+
+// pkcs1_encode writes the EMSA-PKCS1-v1_5 encoding of `digest` (RFC
+// 8017 §9.2) as `length` bytes: 00 01, ff to fill, 00, the DER
+// DigestInfo naming the hash, and the digest. It reports false when
+// the length leaves fewer than eight ff.
+fn pkcs1_encode(out: &var []u8, length: i64, hash: Hash, digest: []u8) -> bool {
+    let prefix = digest_info(hash);
+    let prefix_length = std::mem::len(prefix) / 2;
+    let trailer = prefix_length + std::mem::len(digest);
+    if length < trailer + 11 {
+        return false;
+    }
+    out[0] = 0;
+    out[1] = 1;
+    for 2..length - trailer - 1 |index| {
+        out[index] = 255;
+    }
+    out[length - trailer - 1] = 0;
+    for 0..prefix_length |index| {
+        let high = hex_digit(prefix[index * 2]);
+        let low = hex_digit(prefix[index * 2 + 1]);
+        out[length - trailer + index] = cast<u8>(high * 16 + low);
+    }
+    for 0..std::mem::len(digest) |index| {
+        out[length - std::mem::len(digest) + index] = digest[index];
+    }
+    return true;
+}
+
+// pss_encode writes the EMSA-PSS encoding of `digest` with `salt` (RFC
+// 8017 §9.1.1) as `length` bytes: the encoded message is one bit
+// narrower than the modulus and sits at the low end, zeros before it.
+// H is the hash of eight zeros, the digest, and the salt; the data
+// block is zeros, 01, and the salt, masked with MGF1 over H; then H and
+// bc. It reports false when the modulus is too narrow.
+fn pss_encode(out: &var []u8, length: i64, modulus_bits: i64, hash: Hash, digest: []u8, salt: []u8) -> bool {
+    let hash_length = std::mem::len(digest);
+    let salt_length = std::mem::len(salt);
+    let bits = modulus_bits - 1;
+    let encoded_length = (bits + 7) / 8;
+    if encoded_length > length or encoded_length < hash_length + salt_length + 2 {
+        return false;
+    }
+    var prime_buffer = [136]u8{};
+    let prime = prime_buffer.as_mut_bytes();
+    for 0..hash_length |index| {
+        prime[8 + index] = digest[index];
+    }
+    for 0..salt_length |index| {
+        prime[8 + hash_length + index] = salt[index];
+    }
+    var h_buffer = [64]u8{};
+    let h = h_buffer.as_mut_bytes();
+    let prime_view = prime[0..8 + hash_length + salt_length];
+    digest_of(hash, prime_view, h);
+    let block_length = encoded_length - hash_length - 1;
+    var block_buffer = [512]u8{};
+    let block = block_buffer.as_mut_bytes();
+    let h_view = h[0..hash_length];
+    mgf1(hash, h_view, block, block_length);
+    let salt_at = block_length - salt_length;
+    block[salt_at - 1] = block[salt_at - 1] ^ 1;
+    for 0..salt_length |index| {
+        block[salt_at + index] = block[salt_at + index] ^ salt[index];
+    }
+    let spare = cast<u8>(encoded_length * 8 - bits);
+    block[0] = block[0] & (cast<u8>(255) >> spare);
+    let lead = length - encoded_length;
+    for 0..lead |index| {
+        out[index] = 0;
+    }
+    for 0..block_length |index| {
+        out[lead + index] = block[index];
+    }
+    for 0..hash_length |index| {
+        out[lead + block_length + index] = h[index];
+    }
+    out[length - 1] = 188;
+    return true;
 }
 
 // recover_encoded writes the encoded message a signature stands for,
@@ -104,7 +404,7 @@ fn recover_encoded(modulus: []u8, exponent: []u8, signature: []u8, out: &var []u
 // limbs_of_padded_bytes reads big-endian bytes into `count` limbs,
 // taking the bytes as the low end of 4 count.
 fn limbs_of_padded_bytes(o: &var []u64, bytes: []u8, count: i64) -> void {
-    var padded_buffer = [512]u8{};
+    var padded_buffer = [520]u8{};
     let padded = padded_buffer.as_mut_bytes();
     let skip = count * 4 - std::mem::len(bytes);
     for 0..std::mem::len(bytes) |index| {

@@ -1,8 +1,9 @@
-// ECDSA over P-256 with SHA-256 and over P-384 with SHA-384, as a TLS
-// 1.3 client meets them: the signature on a certificate, or on the
-// handshake transcript, checked against a public key. Only verifying is
-// here. Signing needs a private key and a nonce that must never repeat,
-// and neither has a place in a client yet.
+// ECDSA over P-256 with SHA-256 and over P-384 with SHA-384, as TLS
+// 1.3 meets them: the signature on a certificate, or on the handshake
+// transcript, checked against a public key by a client and made with a
+// private key by a server. The nonce a signature needs is derived from
+// the key and the digest as RFC 6979 says, so no signature ever repeats
+// a nonce and none needs a source of randomness.
 
 // ecdsa_p256_verify reports whether `signature` is a valid signature of
 // `digest` under `public_key` (FIPS 186-4 §6.4.2). The key is the 65
@@ -135,4 +136,240 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
         return equal_limbs(reduced_view, r_view);
     }
     return equal_limbs(rx_view, r_view);
+}
+
+// ecdsa_p256_sign writes the 64-byte signature of `digest` under
+// `private_key` to `signature`: r then s, 32 big-endian bytes each,
+// which is what `ecdsa_p256_verify` reads. The key is the 32-byte
+// scalar, as a PKCS #8 or SEC 1 key file carries it; the digest is the
+// 32 bytes of SHA-256. A key of another length, or that is zero or at
+// least the group order, is `InvalidKey`. A digest that is not 32 bytes,
+// or a signature view that is not 64, is the caller's mistake and traps.
+// The nonce is RFC 6979's, derived with HMAC-SHA256 from the key and the
+// digest; the same key and digest always make the same signature, and
+// the time taken does not depend on the key.
+pub fn ecdsa_p256_sign(private_key: []u8, digest: []u8, signature: &var []u8) -> Error!void {
+    if std::mem::len(digest) != 32 {
+        std::internal::builtin::panic("crypto ecdsa_p256_sign: digest must be 32 bytes");
+    }
+    if std::mem::len(signature) != 64 {
+        std::internal::builtin::panic("crypto ecdsa_p256_sign: signature must be 64 bytes");
+    }
+    try ecdsa_sign(Curve::P256, Hash::Sha256, private_key, digest, signature);
+    return;
+}
+
+// ecdsa_p384_sign is `ecdsa_p256_sign` for P-384: the key is 48 bytes,
+// the digest the 48 bytes of SHA-384, the signature 96 bytes, and the
+// nonce is derived with HMAC-SHA384.
+pub fn ecdsa_p384_sign(private_key: []u8, digest: []u8, signature: &var []u8) -> Error!void {
+    if std::mem::len(digest) != 48 {
+        std::internal::builtin::panic("crypto ecdsa_p384_sign: digest must be 48 bytes");
+    }
+    if std::mem::len(signature) != 96 {
+        std::internal::builtin::panic("crypto ecdsa_p384_sign: signature must be 96 bytes");
+    }
+    try ecdsa_sign(Curve::P384, Hash::Sha384, private_key, digest, signature);
+    return;
+}
+
+// ecdsa_sign is FIPS 186-4 §6.4.1 with the nonce of RFC 6979 §3.2. The
+// digest is as long as the order, so bits2int of it is the number it
+// spells, and one HMAC output is one candidate nonce. A candidate
+// outside 1..n-1, or one that makes r or s zero, is passed over as the
+// RFC says, by stirring the HMAC state once more.
+fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signature: &var []u8) -> Error!void {
+    let bytes = curve_bytes(curve);
+    let count = bytes / 4;
+    if std::mem::len(private_key) != bytes {
+        return Error::InvalidKey;
+    }
+    var field_buffer = [25]u64{};
+    var order_buffer = [25]u64{};
+    let field = field_buffer.as_mut_slice();
+    let order = order_buffer.as_mut_slice();
+    fill_field(field, curve);
+    fill_order(order, curve);
+    let field_view = field[0..count * 2 + 1];
+    let order_view = order[0..count * 2 + 1];
+    let n = modulus_of(order_view);
+
+    var d_buffer = [12]u64{};
+    var e_buffer = [12]u64{};
+    let d = d_buffer.as_mut_slice();
+    let e = e_buffer.as_mut_slice();
+    limbs_of_bytes(d, private_key);
+    let d_view = d[0..count];
+    if is_zero(d_view) or !less_than(d_view, n) {
+        return Error::InvalidKey;
+    }
+    limbs_of_bytes(e, digest);
+    reduce_below_order(e, n, count);
+    let e_view = e[0..count];
+
+    // The HMAC state: V of ones, K of zeros, then K and V stirred with
+    // the key and the digest under separators 00 and 01.
+    var v_buffer = [48]u8{};
+    var k_buffer = [48]u8{};
+    var tail_buffer = [97]u8{};
+    var e_bytes_buffer = [48]u8{};
+    let v = v_buffer.as_mut_bytes();
+    let k = k_buffer.as_mut_bytes();
+    let tail = tail_buffer.as_mut_bytes();
+    let e_bytes = e_bytes_buffer.as_mut_bytes();
+    for 0..bytes |index| {
+        v[index] = 1;
+        k[index] = 0;
+    }
+    bytes_of_limbs(e_bytes, e_view);
+    tail[0] = 0;
+    for 0..bytes |index| {
+        tail[1 + index] = private_key[index];
+        tail[1 + bytes + index] = e_bytes[index];
+    }
+    let tail_view = tail[0..1 + bytes * 2];
+    stir(hash, k, v, bytes, tail_view);
+    tail[0] = 1;
+    stir(hash, k, v, bytes, tail_view);
+
+    var nonce_buffer = [12]u64{};
+    var r_buffer = [12]u64{};
+    var s_buffer = [12]u64{};
+    let nonce = nonce_buffer.as_mut_slice();
+    let r = r_buffer.as_mut_slice();
+    let s = s_buffer.as_mut_slice();
+    var next_buffer = [48]u8{};
+    var zero_buffer = [1]u8{};
+    let next = next_buffer.as_mut_bytes();
+    let zero = zero_buffer.as_bytes();
+    var found = false;
+    while !found {
+        // T = HMAC_K(V) is one candidate, since the digest is as long
+        // as the order.
+        hmac_kv(hash, k, v, bytes, "", next);
+        for 0..bytes |index| {
+            v[index] = next[index];
+        }
+        let candidate = next[0..bytes];
+        limbs_of_bytes(nonce, candidate);
+        let nonce_view = nonce[0..count];
+        if !is_zero(nonce_view) and less_than(nonce_view, n) {
+            signature_parts(curve, nonce_view, d_view, e_view, field_view, order_view, r, s);
+            let r_view = r[0..count];
+            let s_view = s[0..count];
+            if !is_zero(r_view) and !is_zero(s_view) {
+                found = true;
+            }
+        }
+        if !found {
+            stir(hash, k, v, bytes, zero);
+        }
+    }
+    var r_bytes_buffer = [48]u8{};
+    var s_bytes_buffer = [48]u8{};
+    let r_bytes = r_bytes_buffer.as_mut_bytes();
+    let s_bytes = s_bytes_buffer.as_mut_bytes();
+    let r_done = r[0..count];
+    let s_done = s[0..count];
+    bytes_of_limbs(r_bytes, r_done);
+    bytes_of_limbs(s_bytes, s_done);
+    for 0..bytes |index| {
+        signature[index] = r_bytes[index];
+        signature[bytes + index] = s_bytes[index];
+    }
+    return;
+}
+
+// stir is one round of RFC 6979 §3.2 steps d through g, and of step h
+// when a candidate is passed over: K becomes the HMAC under K of V and
+// `tail` (a separator and key material, or one 00 byte when a candidate
+// is passed over), and V becomes the HMAC under the new K of V. K and V
+// are the first `length` bytes of their buffers.
+fn stir(hash: Hash, k: &var []u8, v: &var []u8, length: i64, tail: []u8) -> void {
+    var next_buffer = [48]u8{};
+    let next = next_buffer.as_mut_bytes();
+    hmac_kv(hash, k, v, length, tail, next);
+    for 0..length |index| {
+        k[index] = next[index];
+    }
+    hmac_kv(hash, k, v, length, "", next);
+    for 0..length |index| {
+        v[index] = next[index];
+    }
+    return;
+}
+
+// hmac_kv writes HMAC_K(V || tail) to the front of `out`, with K and V
+// the first `length` bytes of their buffers.
+fn hmac_kv(hash: Hash, k: []u8, v: []u8, length: i64, tail: []u8, out: &var []u8) -> void {
+    let k_key = k[0..length];
+    let v_message = v[0..length];
+    hmac_parts(hash, k_key, v_message, tail, "", out);
+    return;
+}
+
+// signature_parts writes r = x(k G) mod n and s = (e + r d) / k mod n
+// for the nonce k, the key d, and the digest e, all below n. Either
+// may be zero, which the caller passes over.
+fn signature_parts(
+    curve: Curve,
+    nonce: []u64,
+    d: []u64,
+    e: []u64,
+    field: []u64,
+    order: []u64,
+    r: &var []u64,
+    s: &var []u64
+) -> void {
+    let count = count_of(field);
+    let n = modulus_of(order);
+    var generator_buffer = [36]u64{};
+    var result_buffer = [36]u64{};
+    let generator = generator_buffer.as_mut_slice();
+    let result = result_buffer.as_mut_slice();
+    var gx_buffer = [12]u64{};
+    var gy_buffer = [12]u64{};
+    let gx = gx_buffer.as_mut_slice();
+    let gy = gy_buffer.as_mut_slice();
+    limbs_of_hex(gx, 0, generator_x(curve));
+    limbs_of_hex(gy, 0, generator_y(curve));
+    point_from_affine(generator, gx, gy, field);
+    scalar_mul_secret(result, nonce, generator, field, order);
+    affine_x(r, result, field);
+    reduce_below_order(r, n, count);
+    // s = (e + r d) / k, in Montgomery form mod n.
+    var km_buffer = [12]u64{};
+    var inverse_buffer = [12]u64{};
+    var dm_buffer = [12]u64{};
+    var rm_buffer = [12]u64{};
+    var em_buffer = [12]u64{};
+    var t_buffer = [12]u64{};
+    let km = km_buffer.as_mut_slice();
+    let inverse = inverse_buffer.as_mut_slice();
+    let dm = dm_buffer.as_mut_slice();
+    let rm = rm_buffer.as_mut_slice();
+    let em = em_buffer.as_mut_slice();
+    let t = t_buffer.as_mut_slice();
+    to_mont(km, nonce, order);
+    mont_inverse(inverse, km, order);
+    to_mont(dm, d, order);
+    to_mont(rm, r, order);
+    mont_mul(t, rm, dm, order);
+    to_mont(em, e, order);
+    mod_add(rm, t, em, order);
+    mont_mul(t, inverse, rm, order);
+    from_mont(s, t, order);
+    return;
+}
+
+// reduce_below_order brings a number below 2n below n, choosing by mask
+// whether n comes off.
+fn reduce_below_order(o: &var []u64, n: []u64, count: i64) -> void {
+    var less_buffer = [12]u64{};
+    let less = less_buffer.as_mut_slice();
+    let o_view = o[0..count];
+    let borrow = subtract_limbs(less, o_view, n);
+    let less_view = less[0..count];
+    select_limbs(o, o_view, less_view, mask_of(borrow), count);
+    return;
 }

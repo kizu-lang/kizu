@@ -1,14 +1,16 @@
 // The NIST curves P-256 and P-384 (FIPS 186-4 §D.1.2, SEC 2 secp256r1
-// and secp384r1), as far as verifying a signature needs them: each
+// and secp384r1), as far as a signature needs them: each
 // curve's field prime p and group order n as moduli for the arithmetic
 // in limbs.kizu, its constant b and generator G, and point addition and
 // doubling in Jacobian coordinates, which take the modulus view of p
 // and read their width from it -- eight limbs for P-256, twelve for
 // P-384. Both curves have a = -3, so one set of formulas serves.
 //
-// Everything here works on public data -- a certificate's key, a
-// signature, a digest -- so it branches on values and compares them
-// early; nothing here handles a private key.
+// Verifying works on public data -- a certificate's key, a signature,
+// a digest -- and `point_add` and `scalar_mul_add` branch on values
+// freely. Signing multiplies the generator by a secret nonce, and
+// `scalar_mul_secret` with `point_add_secret` take the same time and
+// touch the same addresses whatever the nonce is.
 
 // Curve names one of the two curves.
 enum Curve {
@@ -192,6 +194,54 @@ fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
         copy_point(o, p, count);
         return;
     }
+    let flags = point_add_general(o, p, q, m);
+    if flags & 1 == 1 {
+        if flags & 2 == 2 {
+            point_double(o, p, m);
+        } else {
+            for 0..count * 3 |index| {
+                o[index] = 0;
+            }
+        }
+    }
+    return;
+}
+
+// point_add_secret is `point_add` for points that are secrets: the
+// general formula, the doubling, and infinity are all computed, and the
+// masks of the cases pick which is written.
+fn point_add_secret(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
+    let count = count_of(m);
+    var general_buffer = [36]u64{};
+    var doubled_buffer = [36]u64{};
+    var infinity_buffer = [36]u64{};
+    let general = general_buffer.as_mut_slice();
+    let doubled = doubled_buffer.as_mut_slice();
+    let infinity = infinity_buffer.as_mut_slice();
+    let flags = point_add_general(general, p, q, m);
+    point_double(doubled, p, m);
+    let same_x = mask_of(flags & 1);
+    let same_y = mask_of((flags >> 1) & 1);
+    let p_z = point_z(p, count);
+    let q_z = point_z(q, count);
+    let p_infinite = zero_mask(p_z);
+    let q_infinite = zero_mask(q_z);
+    // Same x and y: double. Same x, other y: infinity. Either infinite:
+    // the other. The later choices override the earlier.
+    select_limbs(o, doubled, general, same_x & same_y, count * 3);
+    select_limbs(general, infinity, o, same_x & (same_y ^ all_ones()), count * 3);
+    select_limbs(o, p, general, q_infinite, count * 3);
+    select_limbs(general, q, o, p_infinite, count * 3);
+    copy_point(o, general, count);
+    return;
+}
+
+// point_add_general writes what the addition formula makes of P and Q,
+// which is P + Q unless they share an x or either is infinity, and
+// reports what it met: bit 0 is set when H = 0 (same x), bit 1 when
+// r = 0 (same y). It never branches on the coordinates.
+fn point_add_general(o: &var []u64, p: []u64, q: []u64, m: []u64) -> u64 {
+    let count = count_of(m);
     let x1 = point_x(p, count);
     let y1 = point_y(p, count);
     let z1 = point_z(p, count);
@@ -236,16 +286,9 @@ fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     mont_mul(s2, y2, t1, m);
     mod_sub(h, u2, u1, m);
     mod_sub(t1, s2, s1, m);
-    if is_zero(h) {
-        if is_zero(t1) {
-            point_double(o, p, m);
-        } else {
-            for 0..count * 3 |index| {
-                o[index] = 0;
-            }
-        }
-        return;
-    }
+    let h_view = h[0..count];
+    let t1_view = t1[0..count];
+    let flags = (zero_mask(h_view) & 1) | (zero_mask(t1_view) & 2);
     mod_add(r, t1, t1, m);
     mod_add(t1, h, h, m);
     mont_mul(i, t1, t1, m);
@@ -271,7 +314,7 @@ fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     mod_sub(t2, t1, z2z2, m);
     mont_mul(t1, t2, h, m);
     copy_limbs(o, count * 2, t1, count);
-    return;
+    return flags;
 }
 
 // point_from_affine writes the Jacobian point for affine (x, y) given as
@@ -345,6 +388,56 @@ fn scalar_mul_add(o: &var []u64, k1: []u64, p1: []u64, k2: []u64, p2: []u64, m: 
         bit = bit - 1;
     }
     copy_point(o, acc, count);
+    return;
+}
+
+// scalar_mul_secret writes k P for a secret scalar k below the order n,
+// taking the same time and touching the same addresses whatever k is.
+// The scalar is first made k + n or k + 2n, whichever has one bit more
+// than n, so the ladder runs a fixed number of steps from a top bit that
+// is set. The ladder (Montgomery's) keeps R0 and R1 = R0 + P, and each
+// bit adds them and doubles one; which one is chosen by swapping under
+// the bit's mask before and after. `order` is the modulus view of n.
+fn scalar_mul_secret(o: &var []u64, k: []u64, p: []u64, m: []u64, order: []u64) -> void {
+    let count = count_of(m);
+    let n = modulus_of(order);
+    var k1_buffer = [13]u64{};
+    var k2_buffer = [13]u64{};
+    let k1 = k1_buffer.as_mut_slice();
+    let k2 = k2_buffer.as_mut_slice();
+    let k_view = k[0..count];
+    k1[count] = add_limbs(k1, k_view, n);
+    let k1_low = k1[0..count];
+    k2[count] = add_limbs(k2, k1_low, n) + k1[count];
+    let k1_full = k1[0..count + 1];
+    let k2_full = k2[0..count + 1];
+    var scalar_buffer = [13]u64{};
+    let scalar = scalar_buffer.as_mut_slice();
+    select_limbs(scalar, k1_full, k2_full, mask_of(k1[count] & 1), count + 1);
+    var r0_buffer = [36]u64{};
+    var r1_buffer = [36]u64{};
+    var sum_buffer = [36]u64{};
+    var double_buffer = [36]u64{};
+    let r0 = r0_buffer.as_mut_slice();
+    let r1 = r1_buffer.as_mut_slice();
+    let sum = sum_buffer.as_mut_slice();
+    let double = double_buffer.as_mut_slice();
+    copy_point(r0, p, count);
+    point_double(r1, p, m);
+    var bit = count * 32 - 1;
+    while bit >= 0 {
+        let limb = bit >> 5;
+        let shift = cast<u64>(bit & 31);
+        let mask = mask_of((scalar[limb] >> shift) & 1);
+        swap_limbs(r0, r1, mask, count * 3);
+        point_add_secret(sum, r0, r1, m);
+        point_double(double, r0, m);
+        copy_point(r0, double, count);
+        copy_point(r1, sum, count);
+        swap_limbs(r0, r1, mask, count * 3);
+        bit = bit - 1;
+    }
+    copy_point(o, r0, count);
     return;
 }
 
