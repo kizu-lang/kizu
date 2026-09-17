@@ -81,7 +81,24 @@ func (e *emitter) arrayFieldAddr(handle string, field int, name string) string {
 // arrayLoadField loads one i64 header field into the named register.
 func (e *emitter) arrayLoadField(handle string, field int, name string, into string) {
 	addr := e.arrayFieldAddr(handle, field, name)
-	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", into, addr)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s%s\n", into, addr, e.tbaaTag(tbaaCount))
+}
+
+// arrayData loads the header's storage pointer.
+func (e *emitter) arrayData(handle string) string {
+	dataAddr := e.arrayFieldAddr(handle, arrayFieldData, "array.data.addr")
+	data := "%" + e.nextSyntheticValue("array.data")
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s%s\n", data, dataAddr, e.tbaaTag(tbaaPointer))
+	return data
+}
+
+// arrayElementAt returns the address of the element at index of the storage
+// data points at.
+func (e *emitter) arrayElementAt(data string, elem string, index string) string {
+	elemAddr := "%" + e.nextSyntheticValue("array.elem")
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
+		elemAddr, e.llvmType(elem), data, index)
+	return elemAddr
 }
 
 // arrayElementAddr returns the address of the element at index. The stride is
@@ -91,13 +108,7 @@ func (e *emitter) arrayLoadField(handle string, field int, name string, into str
 // is what lets the optimizer treat an index walk as a pointer walk that does
 // not wrap.
 func (e *emitter) arrayElementAddr(handle string, elem string, index string) string {
-	dataAddr := e.arrayFieldAddr(handle, arrayFieldData, "array.data.addr")
-	data := "%" + e.nextSyntheticValue("array.data")
-	elemAddr := "%" + e.nextSyntheticValue("array.elem")
-	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", data, dataAddr)
-	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
-		elemAddr, e.llvmType(elem), data, index)
-	return elemAddr
+	return e.arrayElementAt(e.arrayData(handle), elem, index)
 }
 
 // arrayCheckedElement returns the address of the element at index, or null when
@@ -228,6 +239,7 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	okName := localName(instr.Result.Name) + ".ok"
 	length := "%" + e.nextSyntheticValue("array.swap.len")
 	e.arrayLoadField(handle, arrayFieldLen, "array.swap.len.addr", length)
+	data := e.arrayData(handle)
 	leftIn := "%" + e.nextSyntheticValue("array.swap.left_in")
 	rightIn := "%" + e.nextSyntheticValue("array.swap.right_in")
 	inRange := "%" + e.nextSyntheticValue("array.swap.in_range")
@@ -241,14 +253,15 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", inRange, swapLabel, skipLabel)
 	fmt.Fprintf(&e.out, "%s:\n", swapLabel)
 	elemType := e.llvmType(elem)
-	leftAddr := e.arrayElementAddr(handle, elem, left)
-	rightAddr := e.arrayElementAddr(handle, elem, right)
+	tag := e.valueTag(elemType)
+	leftAddr := e.arrayElementAt(data, elem, left)
+	rightAddr := e.arrayElementAt(data, elem, right)
 	leftValue := "%" + e.nextSyntheticValue("array.swap.left")
 	rightValue := "%" + e.nextSyntheticValue("array.swap.right")
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", leftValue, elemType, leftAddr)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", rightValue, elemType, rightAddr)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", elemType, rightValue, leftAddr)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", elemType, leftValue, rightAddr)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n", leftValue, elemType, leftAddr, tag)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n", rightValue, elemType, rightAddr, tag)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n", elemType, rightValue, leftAddr, tag)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n", elemType, leftValue, rightAddr, tag)
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", skipLabel)
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
@@ -312,7 +325,7 @@ func (e *emitter) writeArrayAppendPaths(
 	length := "%" + e.nextSyntheticValue("array.append.len")
 	capacity := "%" + e.nextSyntheticValue("array.append.cap")
 	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append.len.addr")
-	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", length, lengthAddr)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s%s\n", length, lengthAddr, e.tbaaTag(tbaaCount))
 	e.arrayLoadField(handle, arrayFieldCapacity, "array.append.cap", capacity)
 	grown := "%" + e.nextSyntheticValue("array.append.grown")
 	fmt.Fprintf(&e.out, "  %s = add i64 %s, 1\n", grown, length)
@@ -333,9 +346,10 @@ func (e *emitter) writeArrayAppendPaths(
 	e.writeArrayGrowth(instr, elem, handle, capacity, grown, fastLabel, storeLabel, joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", fastLabel)
 	elemAddr := e.arrayElementAddr(handle, elem, length)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
-		e.llvmType(instr.Args[2].Type), e.value(instr.Args[2]).operand, elemAddr)
-	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s\n", grown, lengthAddr)
+	valueType := e.llvmType(instr.Args[2].Type)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
+		valueType, e.value(instr.Args[2]).operand, elemAddr, e.valueTag(valueType))
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", grown, lengthAddr, e.tbaaTag(tbaaCount))
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
 	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ false, %%%s ], [ false, %%%s ]\n",
@@ -359,7 +373,7 @@ func (e *emitter) writeArrayGrowth(
 ) {
 	dataAddr := e.arrayFieldAddr(handle, arrayFieldData, "array.append.data.addr")
 	data := "%" + e.nextSyntheticValue("array.append.data")
-	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", data, dataAddr)
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s%s\n", data, dataAddr, e.tbaaTag(tbaaPointer))
 	storage := "%" + e.nextSyntheticValue("array.append.storage")
 	fmt.Fprintf(&e.out,
 		"  %s = call { ptr, i64 } @kizu_array_grow(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)\n",
@@ -373,9 +387,9 @@ func (e *emitter) writeArrayGrowth(
 	fmt.Fprintf(&e.out, "  %s = icmp sge i64 %s, 0\n", grew, storageCap)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", grew, storeLabel, joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", storeLabel)
-	fmt.Fprintf(&e.out, "  store ptr %s, ptr %s\n", storageData, dataAddr)
+	fmt.Fprintf(&e.out, "  store ptr %s, ptr %s%s\n", storageData, dataAddr, e.tbaaTag(tbaaPointer))
 	capacityAddr := e.arrayFieldAddr(handle, arrayFieldCapacity, "array.append.cap.addr")
-	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s\n", storageCap, capacityAddr)
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", storageCap, capacityAddr, e.tbaaTag(tbaaCount))
 	fmt.Fprintf(&e.out, "  br label %%%s\n", fastLabel)
 }
 
@@ -443,7 +457,7 @@ func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
 	length := "%" + e.nextSyntheticValue("array.append_bytes.held")
 	capacity := "%" + e.nextSyntheticValue("array.append_bytes.cap")
 	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append_bytes.held.addr")
-	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", length, lengthAddr)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s%s\n", length, lengthAddr, e.tbaaTag(tbaaCount))
 	e.arrayLoadField(handle, arrayFieldCapacity, "array.append_bytes.cap", capacity)
 	needed := "%" + e.nextSyntheticValue("array.append_bytes.needed")
 	fmt.Fprintf(&e.out, "  %s = add i64 %s, %s\n", needed, length, lenName)
@@ -458,7 +472,7 @@ func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
 	tailAddr := e.arrayElementAddr(handle, "u8", length)
 	fmt.Fprintf(&e.out, "  call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
 		tailAddr, ptrName, lenName)
-	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s\n", needed, lengthAddr)
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", needed, lengthAddr, e.tbaaTag(tbaaCount))
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", slowLabel)
 	slowOk := "%" + e.nextSyntheticValue("array.append_bytes.slow.ok")
@@ -524,8 +538,9 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 		ptrName, array.operand, e.elementSizeOperand(elem))
 	e.writeNullFailure(instr, ptrName, "array.pop.panic", "array_empty")
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
-		resultName, e.llvmType(instr.Result.Type), ptrName)
+	resultType := e.llvmType(instr.Result.Type)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
+		resultName, resultType, ptrName, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -557,11 +572,16 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	index := e.value(instr.Args[1])
 	lenName := "%" + e.nextSyntheticValue("array.get.panic.len")
 	e.arrayLoadField(handle, arrayFieldLen, "array.get.panic.len", lenName)
+	// The storage pointer is read before the check, beside the length: a
+	// loop that checks every element then reads both where the loop is
+	// sure to, and they move out of it together.
+	data := e.arrayData(handle)
 	e.writeBoundsFailure(instr, index.operand, lenName)
-	elemAddr := e.arrayElementAddr(handle, elem, index.operand)
+	elemAddr := e.arrayElementAt(data, elem, index.operand)
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
-		resultName, e.llvmType(instr.Result.Type), elemAddr)
+	resultType := e.llvmType(instr.Result.Type)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
+		resultName, resultType, elemAddr, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -610,6 +630,7 @@ func (e *emitter) writeArrayCheckedStore(
 ) {
 	length := "%" + e.nextSyntheticValue("array.set.len")
 	e.arrayLoadField(handle, arrayFieldLen, "array.set.len", length)
+	data := e.arrayData(handle)
 	inRange := "%" + e.nextSyntheticValue("array.set.in_range")
 	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
 	storeLabel := helperLabel(okName, "array.set.store")
@@ -618,9 +639,10 @@ func (e *emitter) writeArrayCheckedStore(
 	e.markCurrentBlockExit(joinLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", inRange, storeLabel, skipLabel)
 	fmt.Fprintf(&e.out, "%s:\n", storeLabel)
-	elemAddr := e.arrayElementAddr(handle, elem, index)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
-		e.llvmType(value.Type), e.value(value).operand, elemAddr)
+	elemAddr := e.arrayElementAt(data, elem, index)
+	valueType := e.llvmType(value.Type)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
+		valueType, e.value(value).operand, elemAddr, e.valueTag(valueType))
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", skipLabel)
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
@@ -737,8 +759,9 @@ func (e *emitter) writeArrayOptionalLoadResult(
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	valueName := resultName + ".value"
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
-		valueName, e.llvmType(elem), ptrName, alignSuffix(loadAlign))
+	elemType := e.llvmType(elem)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s%s\n",
+		valueName, elemType, ptrName, alignSuffix(loadAlign), e.valueTag(elemType))
 	// A niche element is already the optional, so the element the ok path
 	// loaded is what the join hands back and the null path spells absence
 	// with the zero the niche reserves (ADR-0133).

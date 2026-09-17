@@ -152,6 +152,10 @@ func (e *emitter) writeOptionalNull(instr *ir.Instr) error {
 	if _, ok := optionalElemWasm(instr.Result.Type); !ok || len(instr.Args) != 0 {
 		return fmt.Errorf("wasm error: opt.null expects no args and a `?T` result")
 	}
+	if e.optionLocals[instr.Result.Name] {
+		e.writeOptionLocals(instr.Result, "(i32.const 0)", "")
+		return nil
+	}
 	return e.writeTaggedResult(instr.Result, 0)
 }
 
@@ -166,6 +170,10 @@ func (e *emitter) writeOptionalSome(instr *ir.Instr) error {
 	}
 	if instr.Args[0].Type != elem {
 		return fmt.Errorf("wasm error: opt.some expects %s, got %s", elem, instr.Args[0].Type)
+	}
+	if e.optionLocals[instr.Result.Name] {
+		e.writeOptionLocals(instr.Result, "(i32.const 1)", e.value(instr.Args[0]).expr)
+		return nil
 	}
 	if err := e.writeTaggedResult(instr.Result, 1); err != nil {
 		return err
@@ -184,6 +192,9 @@ func (e *emitter) writeOptionalValue(instr *ir.Instr) error {
 	}
 	if instr.Result.Type != elem {
 		return fmt.Errorf("wasm error: opt.value returns %s, got %s", elem, instr.Result.Type)
+	}
+	if source := e.value(instr.Args[0]); source.payload != "" {
+		return e.writeScalarResult(instr.Result, "(local.get "+source.payload+")")
 	}
 	return e.writeLoadValue(instr.Result, e.value(instr.Args[0]).expr, offset)
 }
@@ -320,6 +331,71 @@ func (e *emitter) writeTaggedHas(instr *ir.Instr, op string) error {
 		symbol, e.value(source).expr)
 	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
 	return nil
+}
+
+// optionLocalsOf names the optionals of fn a presence local and a payload
+// local can hold: a scalar optional an operation that can write it that way
+// produces, read only by the instructions that ask for its presence or its
+// payload. Such a value is never handed on, so nothing needs it at an
+// address, and an engine keeps two locals in registers where a tag and a
+// payload written to the frame are written and read back through memory.
+func (e *emitter) optionLocalsOf(fn *ir.Function) map[string]bool {
+	options := map[string]bool{}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			elem, ok := optionalElemWasm(instr.Result.Type)
+			if !ok || e.isMemoryType(elem) {
+				continue
+			}
+			switch instr.Op {
+			case "opt.some", "opt.null", "array.at", "array.at_mut", "array.get",
+				"map.at", "map.at_mut", "map.get":
+				options[instr.Result.Name] = true
+			}
+		}
+	}
+	if len(options) == 0 {
+		return options
+	}
+	forEachRead(fn, func(instr *ir.Instr, index int, value ir.Value) {
+		readsPart := instr != nil && index == 0 && (instr.Op == "opt.has" || instr.Op == "opt.value")
+		if !readsPart {
+			delete(options, value.Name)
+		}
+	})
+	return options
+}
+
+// writeOptionPayloadDecls declares the payload local of each of fn's
+// optionals held in locals; the presence is the result's own local.
+func (e *emitter) writeOptionPayloadDecls(fn *ir.Function) {
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if !e.optionLocals[instr.Result.Name] {
+				continue
+			}
+			elem, _ := optionalElemWasm(instr.Result.Type)
+			fmt.Fprintf(&e.out, "    (local %s %s)\n",
+				optionPayloadLocal(instr.Result.Name), e.wasmType(elem))
+		}
+	}
+}
+
+// optionPayloadLocal names the local an optional held in locals keeps its
+// payload in.
+func optionPayloadLocal(name string) string {
+	return symbolName(name) + ".payload"
+}
+
+// writeOptionLocals sets an optional held in locals: its presence, and its
+// payload unless payload is empty.
+func (e *emitter) writeOptionLocals(result ir.Value, present string, payload string) {
+	symbol := symbolName(result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, present)
+	if payload != "" {
+		fmt.Fprintf(&e.out, "            (local.set %s %s)\n", optionPayloadLocal(result.Name), payload)
+	}
+	e.values[result.Name] = valueInfo{flag: symbol, payload: optionPayloadLocal(result.Name)}
 }
 
 // writeTaggedResult stores one tag in the result's fixed frame slot.

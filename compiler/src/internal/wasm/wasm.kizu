@@ -115,7 +115,10 @@ fn emit_format(
         browser_import_index: map::new<[]u8, i64>(allocator),
         cleanup_loads: map::new<i64, i64>(allocator),
         pending_loads: map::new<i64, PendingLoad>(allocator),
-        flag_results: map::new<i64, i64>(allocator)
+        flag_results: map::new<i64, i64>(allocator),
+        option_locals: map::new<i64, i64>(allocator),
+        loop_hoists: array::new<LoopHoist>(allocator),
+        hoisted: map::new<i64, LoopHoist>(allocator)
     };
     defer emitter.deinit(allocator);
     var function_index = 0;
@@ -175,9 +178,12 @@ struct ValueInfo {
     generation: i64,
     // flag is the local holding the success of a result flag_results_of
     // keeps out of memory, and code the failure code it carries; flag is
-    // empty for every other value.
+    // empty for every other value. An optional option_locals_of keeps out of
+    // memory has its presence in flag and its payload in the local payload
+    // names.
     flag: ir::Name,
     code: i64,
+    payload: ir::Name,
 }
 
 /// Is a read held back for the cleanups of a failing error.try, the Go
@@ -240,6 +246,15 @@ struct Emitter {
     cleanup_loads: map::Map<i64, i64>,
     pending_loads: map::Map<i64, PendingLoad>,
     flag_results: map::Map<i64, i64>,
+    // option_locals are the current function's optionals held as a presence
+    // local and a payload local instead of a frame slot (option_locals_of),
+    // keyed and filed the way flag_results are.
+    option_locals: map::Map<i64, i64>,
+    // loop_hoists are the current function's loops' hoisted reads, in the
+    // order their loops are reached (plan_loop_hoists); hoisted holds those
+    // of the loops being written, keyed by the module name id of the value.
+    loop_hoists: array::Array<LoopHoist>,
+    hoisted: map::Map<i64, LoopHoist>,
 }
 
 /// Is one value a format interpolates, the argument of a Go `fmt.Fprintf`:
@@ -961,10 +976,17 @@ fn (self: &var Emitter) write_function(
     self.current_return = node.return_type;
     try self.cleanup_only_loads(module, node);
     try self.flag_results_of(module, node);
+    try self.option_locals_of(module, node);
     let symbol = try self.own(module, node.name);
     if try self.plan_frame(module, node) |failed| {
         return try self.wrap("wasm error: function `%s`", Arg::Str(symbol), move failed);
     }
+    var structure = structure_new(self.allocator);
+    defer structure.deinit(self.allocator);
+    if try self.analyze(module, node, &var structure) |failed| {
+        return try self.wrap("wasm error: function `%s`", Arg::Str(symbol), move failed);
+    }
+    try self.plan_loop_hoists(module, node, &structure);
     if try self.register_frame_values(module, node) |failed| {
         return try self.wrap("wasm error: function `%s`", Arg::Str(symbol), move failed);
     }
@@ -976,13 +998,12 @@ fn (self: &var Emitter) write_function(
     try self.append_function_result(module, &var result, node.return_type);
     try self.line3("  (func $%s %s%s",
         Arg::Str(symbol), Arg::Owned(move params), Arg::Owned(move result));
-    var structure = structure_new(self.allocator);
-    defer structure.deinit(self.allocator);
-    if try self.analyze(module, node, &var structure) |failed| {
-        return try self.wrap("wasm error: function `%s`", Arg::Str(symbol), move failed);
-    }
     try self.write_locals(module, node);
     try self.write_swap_locals(module, node);
+    try self.write_option_payload_decls(module, node);
+    try self.write_phi_temp_locals(module, node);
+    try self.write_loop_hoist_locals();
+    try self.write_map_word_locals(module, node);
     if self.frame_size > 0 {
         try self.line("    (local $__kizu_frame i32)");
     }
@@ -1117,7 +1138,8 @@ fn (self: &var Emitter) set_value(
         expr: expr,
         generation: self.generation,
         flag: ir::empty_name(),
-        code: 0
+        code: 0,
+        payload: ir::empty_name()
     });
 }
 
@@ -1142,7 +1164,8 @@ fn (self: &var Emitter) value_of(module: &ir::Module, value: ir::Value) -> !Valu
             expr: constant,
             generation: self.generation,
             flag: ir::empty_name(),
-            code: 0
+            code: 0,
+            payload: ir::empty_name()
         };
     }
     let local = try self.local_expr(bytes);
@@ -1150,7 +1173,8 @@ fn (self: &var Emitter) value_of(module: &ir::Module, value: ir::Value) -> !Valu
         expr: local,
         generation: self.generation,
         flag: ir::empty_name(),
-        code: 0
+        code: 0,
+        payload: ir::empty_name()
     };
 }
 

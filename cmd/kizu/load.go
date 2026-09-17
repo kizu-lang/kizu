@@ -111,7 +111,7 @@ func lowerFileForTarget(
 		return nil, err
 	}
 	if opt {
-		if err := ir.Optimize(module); err != nil {
+		if err := ir.Optimize(module, target); err != nil {
 			return nil, err
 		}
 	}
@@ -164,7 +164,7 @@ func lowerPackageModeForTarget(
 		return nil, err
 	}
 	if opt {
-		if err := ir.Optimize(module); err != nil {
+		if err := ir.Optimize(module, target); err != nil {
 			return nil, err
 		}
 	}

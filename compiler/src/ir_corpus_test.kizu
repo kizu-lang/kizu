@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::ir;
 import compiler::internal::ownership;
 import compiler::internal::project;
+import compiler::internal::stdtarget;
 import compiler::internal::types;
 import std::fs;
 import std::io;
@@ -11,8 +12,9 @@ import std::testing;
 
 // The IR corpus in compiler/tests/ir is shared with the Go lowering, which
 // generates each case's expectation block: the rendered module after
-// lowering (`// lower:`) and after the optimize passes (`// opt:`), or the
-// failure either stage reports. The std functions a case pulls in are not
+// lowering (`// lower:`), after the optimize passes (`// opt:`) and after the
+// module is also reshaped for a wasm engine (`// opt wasm:`), or the failure
+// a stage reports. The std functions a case pulls in are not
 // listed (they would be most of every block); the selfhost test compares
 // them through the `ir` command. This runner loads every case through this
 // loader, type- and ownership-checks it, lowers it with this module, and
@@ -79,9 +81,10 @@ fn append_rendered(allocator: Allocator, out: &var string::String, rendered: []u
 /// Renders the expectation block of one case: `// lower:` with the module
 /// as lowered, then `// opt:` with the same module after the optimizer,
 /// the way the llvm corpus renders its two sections -- the front end, the
-/// costly half, runs once. A program the front end or the lowerer rejects
-/// yields the same line under both headers; one the optimizer rejects
-/// yields its message under `// opt:` alone.
+/// costly half, runs once -- and `// opt wasm:` with the module after it is
+/// also reshaped for a wasm engine. A program the front end or the lowerer
+/// rejects yields the same line under both headers; one the optimizer
+/// rejects yields its message under `// opt:` alone.
 fn render_ir_case(
     io: Io,
     allocator: Allocator,
@@ -139,7 +142,20 @@ fn render_ir_case(
             try append_module(allocator, &var out, &lowerer.module);
             try out.append_bytes(allocator, "// opt:");
             try out.append_byte(allocator, cast<u8>(10));
-            if try ir::optimize(allocator, &var lowerer.module) |failed| {
+            if try ir::optimize(allocator, &var lowerer.module, stdtarget::Target::Native) |failed| {
+                defer failed.deinit(allocator);
+                try out.append_bytes(allocator, "// ");
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                let bytes = text.as_bytes();
+                try append_folded(allocator, &var out, bytes);
+                return move out;
+            }
+            try append_module(allocator, &var out, &lowerer.module);
+            try out.append_bytes(allocator, "// opt wasm:");
+            try out.append_byte(allocator, cast<u8>(10));
+            try ir::reshape_for_engine(allocator, &var lowerer.module);
+            if try ir::verify(allocator, &lowerer.module) |failed| {
                 defer failed.deinit(allocator);
                 try out.append_bytes(allocator, "// ");
                 let text = try failed.error(allocator, &loader.sources);

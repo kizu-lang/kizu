@@ -1,0 +1,435 @@
+import std::array;
+import std::map;
+
+// Mechanical port of internal/ir/forward.go: forwarding what is known to be
+// in a struct field to a later read of it. Go keys its facts by a struct of
+// the reference, struct and field strings and the scalar flag, and clears or
+// deletes map entries as writes forget them. Here a function numbers each
+// reference and struct pair it meets and packs that number with the field's
+// name id into one integer (FieldKeys); the flag is left out, since only a
+// scalar field is ever stored or looked up. A std map cannot be cleared or
+// lose keys cheaply, so a fact set files each key once and lists which of its
+// entries hold a value now (FieldFacts): forgetting marks entries empty, the
+// way Go's delete and clear drop them.
+
+/// Returns how many blocks forward_field_loads walks back from a merge block
+/// to find what the paths into it may have written, the Go
+/// `forwardVisitLimit`. A merge whose paths reach further starts with nothing
+/// known.
+fn forward_visit_limit() -> i64 {
+    return 64;
+}
+
+/// Replaces a read of a struct field through a reference with the value
+/// already known to be there, the Go `ForwardFieldLoads`: the value an earlier
+/// write through the same reference stored, or what an earlier read of it
+/// returned, when nothing between them could have changed the field. A
+/// backend that writes a field and reads it back goes through memory twice,
+/// and an engine that compiles wasm keeps both, since it cannot tell a store
+/// to an element from a store to the field.
+///
+/// A write to a field forgets what is known of that field through every
+/// reference to a struct of the same type, since two references can reach one
+/// struct; a store through a reference, a call, and any other instruction that
+/// is not pure forget everything. Knowledge flows down the dominator tree: a
+/// block starts with what its immediate dominator ended with, less what any
+/// path from there to it may have written.
+pub fn forward_field_loads(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try forward_field_loads_in(allocator, module, function);
+    }
+    return;
+}
+
+/// Numbers the reference and struct pairs field keys are made of, in the
+/// order one function first uses them, so a key of three names fits one
+/// integer: an id or a count of entries stays below 2^32.
+struct FieldKeys {
+    pairs: map::Map<i64, i64>,
+}
+
+fn (self: FieldKeys) deinit(allocator: Allocator) -> void {
+    self.pairs.deinit(allocator);
+    return;
+}
+
+/// Returns the key of one field reached through one reference, the Go
+/// `fieldKey` less its scalar flag.
+fn (self: &var FieldKeys) key(allocator: Allocator, reference: Name, strct: Name, field: Name) -> !i64 {
+    let pair = name_id(reference) * 4294967296 + name_id(strct);
+    var number = self.pairs.len();
+    if self.pairs.get(pair) |known| {
+        number = known;
+    } else {
+        try self.pairs.insert(allocator, pair, number);
+    }
+    return number * 4294967296 + name_id(field);
+}
+
+/// Is one key a fact set has filed: the struct and field it names, for the
+/// write that forgets them, and the value known there while known is set.
+struct FieldFact {
+    key: i64,
+    strct: Name,
+    field: Name,
+    value: Value,
+    known: bool,
+}
+
+/// Maps a field reachable through a reference to the value it is known to
+/// hold, the Go `fieldFacts`.
+struct FieldFacts {
+    slots: map::Map<i64, i64>,
+    entries: array::Array<FieldFact>,
+    live: array::Array<i64>,
+}
+
+fn new_field_facts(allocator: Allocator) -> FieldFacts {
+    return FieldFacts {
+        slots: map::new<i64, i64>(allocator),
+        entries: array::new<FieldFact>(allocator),
+        live: array::new<i64>(allocator)
+    };
+}
+
+fn (self: FieldFacts) deinit(allocator: Allocator) -> void {
+    self.slots.deinit(allocator);
+    self.entries.deinit(allocator);
+    self.live.deinit(allocator);
+    return;
+}
+
+/// Returns how many fields are known, the Go `len(facts)`.
+fn (self: &FieldFacts) count() -> i64 {
+    return self.live.len();
+}
+
+/// Returns the value known for a key, the Go `facts[key]` read with its ok
+/// flag.
+fn (self: &FieldFacts) get(key: i64) -> ?Value {
+    let slot = self.slots.get(key) orelse return null;
+    let entry = self.entries.get_or_panic(slot);
+    if !entry.known {
+        return null;
+    }
+    return entry.value;
+}
+
+/// Records the value known for a key, the Go `facts[key] = value`.
+fn (self: &var FieldFacts) set(allocator: Allocator, key: i64, strct: Name, field: Name, value: Value) -> !void {
+    if self.slots.get(key) |slot| {
+        var was_known = false;
+        if self.entries.at_mut(slot) |entry| {
+            was_known = entry.known;
+            entry.value = value;
+            entry.known = true;
+        }
+        if !was_known {
+            try self.live.append(allocator, slot);
+        }
+        return;
+    }
+    let slot = self.entries.len();
+    try self.entries.append(allocator, FieldFact { key: key, strct: strct, field: field, value: value, known: true });
+    try self.slots.insert(allocator, key, slot);
+    return self.live.append(allocator, slot);
+}
+
+/// Forgets every field, the Go `clear(facts)`.
+fn (self: &var FieldFacts) forget_all(allocator: Allocator) -> void {
+    var index = 0;
+    while self.live.get(index) |slot| {
+        index = index + 1;
+        if self.entries.at_mut(slot) |entry| {
+            entry.known = false;
+        }
+    }
+    self.live.clear(allocator);
+    return;
+}
+
+/// Forgets one field of every struct of one type, the Go loop deleting each
+/// key whose struct and field match.
+fn (self: &var FieldFacts) forget_field(allocator: Allocator, strct: Name, field: Name) -> !void {
+    var write = 0;
+    var read = 0;
+    while self.live.get(read) |slot| {
+        read = read + 1;
+        var forgotten = false;
+        if self.entries.at_mut(slot) |entry| {
+            if same_name(entry.strct, strct) and same_name(entry.field, field) {
+                entry.known = false;
+                forgotten = true;
+            }
+        }
+        if !forgotten {
+            try self.live.set(write, slot);
+            write = write + 1;
+        }
+    }
+    return self.live.truncate(allocator, write);
+}
+
+/// Copies every known field of another fact set into this empty one, the Go
+/// `for key, value := range from { facts[key] = value }`.
+fn (self: &var FieldFacts) copy_from(allocator: Allocator, from: &FieldFacts) -> !void {
+    var index = 0;
+    while from.live.get(index) |slot| {
+        index = index + 1;
+        let entry = from.entries.get_or_panic(slot);
+        try self.set(allocator, entry.key, entry.strct, entry.field, entry.value);
+    }
+    return;
+}
+
+/// Rewrites the field reads of one function, the Go `forwardFieldLoadsIn`.
+fn forward_field_loads_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    if function_block_count(module, function) == 0 {
+        return;
+    }
+    var blocks = try block_index(allocator, module, function);
+    defer blocks.deinit(allocator);
+    var preds = try block_predecessors(allocator, module, function, &blocks);
+    defer preds.deinit(allocator);
+    var tree = try build_dominator_tree(allocator, module, function, &blocks, &preds);
+    defer tree.deinit(allocator);
+    var order = try reverse_postorder(allocator, module, function, &blocks);
+    defer order.deinit(allocator);
+    var keys = FieldKeys { pairs: map::new<i64, i64>(allocator) };
+    defer keys.deinit(allocator);
+    var ends = map::new<i64, FieldFacts>(allocator);
+    defer ends.deinit(allocator);
+    var replacements = map::new<i64, Value>(allocator);
+    defer replacements.deinit(allocator);
+    var index = 0;
+    while order.get(index) |position| {
+        var facts = new_field_facts(allocator);
+        errdefer facts.deinit(allocator);
+        if index > 0 {
+            let idom = order.get_or_panic(tree.idom.get_or_panic(index));
+            if ends.at(idom) |from| {
+                try inherit_facts(allocator, module, &blocks, &preds, position, idom, from, &var facts);
+            }
+        }
+        index = index + 1;
+        let block = blocks.block_at(position);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            try forward_instr(allocator, module, &var keys, instr, &var facts, &var replacements);
+        }
+        try ends.insert(allocator, position, move facts);
+    }
+    if replacements.len() > 0 {
+        try replace_function_values(allocator, module, function, &replacements);
+    }
+    return;
+}
+
+/// Fills facts with what a block starts with, the Go `inheritedFacts`: its
+/// immediate dominator's end, less what the blocks on the paths from there may
+/// have written. A block the dominator jumps to directly inherits everything.
+fn inherit_facts(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    preds: &array::Array<array::Array<i64>>,
+    position: i64,
+    idom: i64,
+    from: &FieldFacts,
+    facts: &var FieldFacts
+) -> !void {
+    if from.count() == 0 {
+        return;
+    }
+    try facts.copy_from(allocator, from);
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    if preds.at(position) |into| {
+        if into.len() == 1 and into.get_or_panic(0) == idom {
+            return;
+        }
+        var pred_index = 0;
+        while into.get(pred_index) |pred| {
+            pred_index = pred_index + 1;
+            try stack.append(allocator, pred);
+        }
+    }
+    var visited = map::new<i64, bool>(allocator);
+    defer visited.deinit(allocator);
+    while stack.pop() |block| {
+        if block == idom or visited.contains(block) {
+            continue;
+        }
+        try visited.insert(allocator, block, true);
+        if visited.len() > forward_visit_limit() {
+            facts.forget_all(allocator);
+            return;
+        }
+        var instr_index = 0;
+        while block_instr_at(module, blocks.block_at(block), instr_index) |instr| {
+            instr_index = instr_index + 1;
+            try forget_writes(allocator, module, instr, facts);
+            if facts.count() == 0 {
+                return;
+            }
+        }
+        if block != position {
+            if preds.at(block) |into| {
+                var pred_index = 0;
+                while into.get(pred_index) |pred| {
+                    pred_index = pred_index + 1;
+                    try stack.append(allocator, pred);
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Is what one instruction does to the facts, the prefix switch of the Go
+/// `forwardInstr` and `forgetWrites`: a write through a reference to a field,
+/// a read of one, or neither. A `field.ref.set.` op of one argument reads as a
+/// `field.ref.` op of a field named `set.<name>`, the way the Go prefix test
+/// finds it.
+struct FieldAccess {
+    kind: FieldAccessKind,
+    reference: Value,
+    field: Name,
+    stored: Value,
+    result: Value,
+}
+
+enum FieldAccessKind {
+    Write,
+    Read,
+    Other,
+}
+
+/// Returns what one instruction does to the facts.
+fn field_access(module: &var Module, instr: Instr) -> !FieldAccess {
+    let shape = field_shape(module, instr);
+    var kind = FieldAccessKind::Other;
+    var field = shape.operand;
+    if shape.op == Op::FieldRefSet and shape.count == 2 {
+        kind = FieldAccessKind::Write;
+    }
+    if shape.op == Op::FieldRef and shape.count == 1 {
+        kind = FieldAccessKind::Read;
+    }
+    if shape.op == Op::FieldRefSet and shape.count == 1 {
+        kind = FieldAccessKind::Read;
+        field = try module.names.prefixed("set.", shape.operand);
+    }
+    return FieldAccess {
+        kind: kind,
+        reference: shape.reference,
+        field: field,
+        stored: shape.stored,
+        result: shape.result
+    };
+}
+
+/// Is what the field passes read of one instruction: its op and the name it
+/// carries, how many arguments it has, the first two, and its result.
+struct FieldShape {
+    op: Op,
+    operand: Name,
+    count: i64,
+    reference: Value,
+    stored: Value,
+    result: Value,
+}
+
+/// Reads the shape of one instruction.
+fn field_shape(module: &Module, instr: Instr) -> FieldShape {
+    let node = module.instrs.at(instr.node);
+    let count = node.args.len();
+    var reference = empty_value();
+    var stored = empty_value();
+    if count > 0 {
+        reference = node.args.get_or_panic(0);
+    }
+    if count > 1 {
+        stored = node.args.get_or_panic(1);
+    }
+    return FieldShape {
+        op: node.op,
+        operand: node.operand,
+        count: count,
+        reference: reference,
+        stored: stored,
+        result: node.result
+    };
+}
+
+/// Applies one instruction to the facts, the Go `forwardInstr`: a read either
+/// finds its value known and is replaced, or becomes known; a write makes its
+/// value known after forgetting what it may have changed.
+fn forward_instr(
+    allocator: Allocator,
+    module: &var Module,
+    keys: &var FieldKeys,
+    instr: Instr,
+    facts: &var FieldFacts,
+    replacements: &var map::Map<i64, Value>
+) -> !void {
+    let access = try field_access(module, instr);
+    match access.kind {
+        Write => {
+            try forget_writes(allocator, module, instr, facts);
+            let strct = try module.names.deref_type(access.reference.type_name);
+            if is_forward_scalar(module, access.stored.type_name) {
+                let key = try keys.key(allocator, access.reference.name, strct, access.field);
+                try facts.set(allocator, key, strct, access.field, resolve_replacement(replacements, access.stored));
+            }
+            return;
+        },
+        Read => {
+            let strct = try module.names.deref_type(access.reference.type_name);
+            if !is_forward_scalar(module, access.result.type_name) {
+                return;
+            }
+            let key = try keys.key(allocator, access.reference.name, strct, access.field);
+            if facts.get(key) |known| {
+                if same_name(known.type_name, access.result.type_name) {
+                    try replacements.insert(allocator, name_id(access.result.name), known);
+                    return;
+                }
+            }
+            return facts.set(allocator, key, strct, access.field, access.result);
+        },
+        Other => {},
+    }
+    return forget_writes(allocator, module, instr, facts);
+}
+
+/// Removes from facts what an instruction may change, the Go `forgetWrites`.
+/// A field write forgets that field of every struct of its type, and of every
+/// struct at all when the field holds more than a scalar, since a struct
+/// stored whole can reach others; any other instruction that is not pure
+/// forgets everything.
+fn forget_writes(allocator: Allocator, module: &var Module, instr: Instr, facts: &var FieldFacts) -> !void {
+    let shape = field_shape(module, instr);
+    if shape.op == Op::FieldRefSet and shape.count == 2 {
+        if !is_forward_scalar(module, shape.stored.type_name) {
+            facts.forget_all(allocator);
+            return;
+        }
+        let strct = try module.names.deref_type(shape.reference.type_name);
+        return facts.forget_field(allocator, strct, shape.operand);
+    }
+    if !is_pure_op(shape.op) {
+        facts.forget_all(allocator);
+    }
+    return;
+}
+
+/// Reports whether a field of a type is one value a later read can be
+/// replaced with, the Go `isForwardScalar`.
+fn is_forward_scalar(module: &Module, type_name: Name) -> bool {
+    return module.names.is(type_name, "bool") or module.names.is(type_name, "f32") or
+        module.names.is(type_name, "f64") or is_wrapping_integer(module, type_name);
+}

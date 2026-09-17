@@ -47,8 +47,8 @@ Python は dict 3.7 で下している。
 ### 2. 実装は entries 配列 + index table である
 
 ```c
-KizuMapEntry *entries;  /* 挿入順。反復と順序はここから来る */
-int64_t *index;         /* 開番地法。hash から entries の添字へ */
+unsigned char *entries; /* 挿入順。反復と順序はここから来る */
+unsigned char *index;   /* 開番地法。hash の上位 7 bit と entries の添字 */
 ```
 
 順序のために何かを足すのではない。O(1) 化の自然な形が順序を保つので、

@@ -77,7 +77,7 @@ func (e *emitter) writeArenaRuntime() {
 	fmt.Fprintf(&e.out, "    (if (i64.ge_u (global.get $__arena_instances) "+
 		"(i64.const %d))\n", arenaMaxInstances)
 	e.out.WriteString("      (then (call $__panic_arena_instances " +
-		"(i64.const 0) (i64.const 0))))\n")
+		"(i64.const 0) (i64.const 0)) (unreachable)))\n")
 	e.out.WriteString("    (global.set $__arena_instances\n")
 	e.out.WriteString("      (i64.add (global.get $__arena_instances) (i64.const 1)))\n")
 	e.out.WriteString("    (i64.add\n")
@@ -180,7 +180,7 @@ func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "            (if (i64.ge_u %s (i64.const %d))\n",
 		length, arenaMaxLen)
 	fmt.Fprintf(&e.out, "              (then (call $__panic_arena_full "+
-		"(i64.const %d) (i64.const %d))))\n",
+		"(i64.const %d) (i64.const %d)) (unreachable)))\n",
 		instr.Span.Start.Line, instr.Span.Start.Column)
 	needed := fmt.Sprintf("(i64.add %s (i64.const 1))", length)
 	okExpr := fmt.Sprintf("(call $__array_reserve %s %s %s (i32.const %d))",
@@ -242,7 +242,7 @@ func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(arena, arrayLenOffset))
 	fmt.Fprintf(&e.out, "            (if (i64.ge_u %s %s)\n", index, length)
 	fmt.Fprintf(&e.out, "              (then (call $__panic_arena_handle "+
-		"(i64.const %d) (i64.const %d))))\n",
+		"(i64.const %d) (i64.const %d)) (unreachable)))\n",
 		instr.Span.Start.Line, instr.Span.Start.Column)
 	address := arrayElementAddress(arena, index, layout.size)
 	if isReferenceType(instr.Result.Type) {
@@ -314,7 +314,7 @@ func (e *emitter) writeArenaPopOrPanic(instr *ir.Instr) error {
 	length := fmt.Sprintf("(i64.load %s)", lengthAddress)
 	fmt.Fprintf(&e.out, "            (if (i64.eqz %s)\n", length)
 	fmt.Fprintf(&e.out, "              (then (call $__panic_arena_empty "+
-		"(i64.const %d) (i64.const %d))))\n",
+		"(i64.const %d) (i64.const %d)) (unreachable)))\n",
 		instr.Span.Start.Line, instr.Span.Start.Column)
 	fmt.Fprintf(&e.out, "            (i64.store %s (i64.sub %s (i64.const 1)))\n",
 		lengthAddress, length)

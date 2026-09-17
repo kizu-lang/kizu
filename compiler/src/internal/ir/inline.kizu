@@ -32,13 +32,136 @@ pub fn inline_calls(allocator: Allocator, module: &var Module) -> !void {
     while module.functions.get(index) |function| {
         index = index + 1;
         try functions.insert(allocator, name_id(module.function_name(function)), function);
+        return_tried_unions(module, function);
     }
+    var order = try callee_first_order(allocator, module, &functions);
+    defer order.deinit(allocator);
     index = 0;
-    while module.functions.get(index) |function| {
+    while order.get(index) |function| {
         index = index + 1;
         try inline_into(allocator, module, function, &functions);
     }
     return;
+}
+
+/// One function whose callees callee_first_order is visiting: its callees
+/// are pending[start..end], and next is the position of the one to visit next.
+struct OrderFrame {
+    function: Function,
+    start: i64,
+    next: i64,
+}
+
+/// Lists the module's functions so that each comes after the functions it
+/// calls, other than along a cycle of calls, which is entered where module
+/// order first reaches it, the Go `calleeFirstOrder`.
+fn callee_first_order(
+    allocator: Allocator,
+    module: &Module,
+    functions: &map::Map<i64, Function>
+) -> !array::Array<Function> {
+    var order = array::new<Function>(allocator);
+    errdefer order.deinit(allocator);
+    var seen = map::new<i64, bool>(allocator);
+    defer seen.deinit(allocator);
+    var pending = array::new<Name>(allocator);
+    defer pending.deinit(allocator);
+    var stack = array::new<OrderFrame>(allocator);
+    defer stack.deinit(allocator);
+    var root_index = 0;
+    while module.functions.get(root_index) |root| {
+        root_index = root_index + 1;
+        if seen.contains(name_id(module.function_name(root))) {
+            continue;
+        }
+        try seen.insert(allocator, name_id(module.function_name(root)), true);
+        try push_order_frame(allocator, module, root, &var pending, &var stack);
+        while stack.pop() |top| {
+            if pending.get(top.next) |callee_name| {
+                var advanced = top;
+                advanced.next = top.next + 1;
+                try stack.append(allocator, advanced);
+                if functions.get(name_id(callee_name)) |callee| {
+                    if !seen.contains(name_id(callee_name)) {
+                        try seen.insert(allocator, name_id(callee_name), true);
+                        try push_order_frame(allocator, module, callee, &var pending, &var stack);
+                    }
+                }
+                continue;
+            }
+            try order.append(allocator, top.function);
+            while pending.len() > top.start {
+                let _ = pending.pop();
+            }
+        }
+    }
+    return move order;
+}
+
+/// Pushes a frame for function, with its direct callees at the end of pending.
+fn push_order_frame(
+    allocator: Allocator,
+    module: &Module,
+    function: Function,
+    pending: &var array::Array<Name>,
+    stack: &var array::Array<OrderFrame>
+) -> !void {
+    let start = pending.len();
+    var callees = try direct_callees(allocator, module, function);
+    defer callees.deinit(allocator);
+    var index = 0;
+    while callees.get(index) |callee| {
+        index = index + 1;
+        try pending.append(allocator, callee);
+    }
+    return stack.append(allocator, OrderFrame { function: function, start: start, next: start });
+}
+
+/// Makes a block that tries a union of the function's own result type and
+/// then returns success return the union instead, the Go
+/// `returnTriedUnions`: `try` passes a failure on as it is when the types
+/// agree, and success is what the block returned anyway. A function that only
+/// passes a failure on then holds no `try`, and can be copied into its callers.
+fn return_tried_unions(module: &var Module, function: Function) -> void {
+    let return_type = module.function_return(function);
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        if tried_return(module, block, return_type) |passed| {
+            if module.blocks.at_mut(block.node) |node| {
+                let _ = node.instrs.pop();
+                let _ = node.instrs.pop();
+            }
+            var returned = module.block_terminator(block);
+            returned.value = passed;
+            module.set_terminator(block, returned);
+        }
+    }
+    return;
+}
+
+/// Returns the union a block tries just before it returns success, when the
+/// union is of return_type and the try runs no cleanup.
+fn tried_return(module: &Module, block: Block, return_type: Name) -> ?Value {
+    let terminator = module.block_terminator(block);
+    let node = module.blocks.at(block.node);
+    let count = node.instrs.len();
+    if terminator.op != TermOp::Return or count < 2 {
+        return null;
+    }
+    let tried = module.instrs.at(node.instrs.get_or_panic(count - 2).node);
+    let succeeded = module.instrs.at(node.instrs.get_or_panic(count - 1).node);
+    if succeeded.op != Op::ErrorOk or succeeded.args.len() != 0 or
+        !same_name(succeeded.result.name, terminator.value.name) or
+        tried.op != Op::ErrorTry or tried.args.len() != 1 or tried.cleanups.len() != 0 or
+        !module.names.is(tried.result.type_name, "void") {
+        return null;
+    }
+    let passed = tried.args.get_or_panic(0);
+    if !same_name(passed.type_name, return_type) {
+        return null;
+    }
+    return passed;
 }
 
 /// Copies each inlinable callee of function into it, the Go `inlineInto`. A

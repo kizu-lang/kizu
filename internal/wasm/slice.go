@@ -62,12 +62,12 @@ func viewElem(typ string) (string, bool) {
 
 // elementAddress spells the address of element `index` of a view: the
 // pointer word plus the index scaled by the cell width.
-func elementAddress(descriptor string, index string, size int) string {
+func elementAddress(pointer string, index string, size int) string {
 	offset := fmt.Sprintf("(i32.wrap_i64 %s)", index)
 	if size != 1 {
 		offset = fmt.Sprintf("(i32.mul %s (i32.const %d))", offset, size)
 	}
-	return fmt.Sprintf("(i32.add (i32.load %s) %s)", descriptor, offset)
+	return fmt.Sprintf("(i32.add %s %s)", pointer, offset)
 }
 
 // writeSliceLen reads the length word from a view descriptor.
@@ -76,8 +76,7 @@ func (e *emitter) writeSliceLen(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || !ok || instr.Result.Type != "i64" {
 		return fmt.Errorf("wasm error: slice.len expects []T -> i64")
 	}
-	descriptor := e.value(instr.Args[0]).expr
-	expr := fmt.Sprintf("(i64.extend_i32_u (i32.load %s))", addressAt(descriptor, 4))
+	expr := fmt.Sprintf("(i64.extend_i32_u %s)", e.viewLength(instr.Args[0]))
 	return e.writeScalarResult(instr.Result, expr)
 }
 
@@ -89,9 +88,8 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 		instr.Args[1].Type != "i64" || instr.Result.Type != elem {
 		return fmt.Errorf("wasm error: slice.index expects []T, i64 -> T")
 	}
-	descriptor := e.value(instr.Args[0]).expr
 	index := e.value(instr.Args[1]).expr
-	address := elementAddress(descriptor, index, size)
+	address := elementAddress(e.viewPointer(instr.Args[0]), index, size)
 	return e.writeScalarResult(instr.Result, "("+load+" "+address+")")
 }
 
@@ -104,10 +102,9 @@ func (e *emitter) writeSliceStore(instr *ir.Instr) error {
 		instr.Result.Type != "void" {
 		return fmt.Errorf("wasm error: slice.store expects []T, i64, T -> void")
 	}
-	descriptor := e.value(instr.Args[0]).expr
 	index := e.value(instr.Args[1]).expr
 	value := e.value(instr.Args[2]).expr
-	address := elementAddress(descriptor, index, size)
+	address := elementAddress(e.viewPointer(instr.Args[0]), index, size)
 	fmt.Fprintf(&e.out, "            (%s %s %s)\n", store, address, value)
 	return nil
 }
@@ -121,7 +118,6 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 		instr.Result.Type != instr.Args[0].Type {
 		return fmt.Errorf("wasm error: slice.slice expects []T, i64, i64 -> []T")
 	}
-	descriptor := e.value(instr.Args[0]).expr
 	start := e.value(instr.Args[1]).expr
 	end := e.value(instr.Args[2]).expr
 	slot, err := e.resultSlot(instr.Result)
@@ -129,7 +125,7 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 		return err
 	}
 	fmt.Fprintf(&e.out, "            (i32.store %s %s)\n",
-		slot, elementAddress(descriptor, start, size))
+		slot, elementAddress(e.viewPointer(instr.Args[0]), start, size))
 	fmt.Fprintf(&e.out, "            (i32.store %s (i32.wrap_i64 (i64.sub %s %s)))\n",
 		addressAt(slot, 4), end, start)
 	e.values[instr.Result.Name] = valueInfo{expr: slot}

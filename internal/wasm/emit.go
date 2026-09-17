@@ -70,11 +70,14 @@ type dataRef struct {
 
 // valueInfo is how emitted code reaches one SSA value: the expression that
 // reads it, or, for a result flagResultsOf keeps out of memory, the local
-// holding its success and the failure code it carries.
+// holding its success and the failure code it carries. An optional
+// optionLocalsOf keeps out of memory has its presence in flag and its payload
+// in the local payload names.
 type valueInfo struct {
-	expr string
-	flag string
-	code int
+	expr    string
+	flag    string
+	code    int
+	payload string
 }
 
 type emitter struct {
@@ -98,6 +101,13 @@ type emitter struct {
 	// flagResults are the current function's E!void results held as a
 	// success local instead of a frame slot (flagResultsOf).
 	flagResults map[string]bool
+	// optionLocals are the current function's optionals held as a presence
+	// local and a payload local instead of a frame slot (optionLocalsOf).
+	optionLocals map[string]bool
+	// loopHoists are the current function's loops' hoisted reads, by loop
+	// header (planLoopHoists); hoisted holds those of the loops being written.
+	loopHoists map[string][]loopHoist
+	hoisted    map[string]loopHoist
 	// panicKinds contains only the checked runtime failures this module uses.
 	// Their data, proc_exit import, and helpers are omitted otherwise.
 	panicKinds map[string]bool
@@ -507,6 +517,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.cleanupLoads = cleanupOnlyLoads(fn)
 	e.pendingLoads = map[string]*ir.Instr{}
 	e.flagResults = flagResultsOf(fn)
+	e.optionLocals = e.optionLocalsOf(fn)
 	e.currentReturn = fn.Return
 	defer func() { e.currentReturn = "" }()
 	frame, err := e.planFrame(fn)
@@ -514,19 +525,19 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
 	}
 	e.frame = frame
-	params := e.functionParams(fn)
-	if err := e.registerFrameValues(fn); err != nil {
-		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
-	}
 	s, err := analyze(fn)
 	if err != nil {
 		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
 	}
+	e.loopHoists = planLoopHoists(fn, s)
+	e.hoisted = map[string]loopHoist{}
+	params := e.functionParams(fn)
+	if err := e.registerFrameValues(fn); err != nil {
+		return fmt.Errorf("wasm error: function `%s`: %w", fn.Name, err)
+	}
 	fmt.Fprintf(&e.out, "  (func $%s %s%s\n", fn.Name, params, e.functionResult(fn.Return))
 	e.writeLocals(fn)
-	for _, wasmType := range e.swapLocalTypes(fn) {
-		fmt.Fprintf(&e.out, "    (local %s %s)\n", swapLocal(wasmType), wasmType)
-	}
+	e.writeWorkLocals(fn, s)
 	if frame.size > 0 {
 		e.out.WriteString("    (local $__kizu_frame i32)\n")
 	}
@@ -549,6 +560,24 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.out.WriteString("  )\n\n")
 	e.frame = nil
 	return nil
+}
+
+// writeWorkLocals declares the locals fn's instructions work in beside the
+// ones that hold its values: swaps, option payloads, phi copies, loop hoists
+// and map lookups.
+func (e *emitter) writeWorkLocals(fn *ir.Function, s *structure) {
+	for _, wasmType := range e.swapLocalTypes(fn) {
+		fmt.Fprintf(&e.out, "    (local %s %s)\n", swapLocal(wasmType), wasmType)
+	}
+	e.writeOptionPayloadDecls(fn)
+	for _, wasmType := range e.phiTempTypes(fn) {
+		fmt.Fprintf(&e.out, "    (local %s %s)\n", phiTempLocal(wasmType), wasmType)
+	}
+	for _, hoists := range e.loopHoistsInOrder(s) {
+		fmt.Fprintf(&e.out, "    (local %s i32) (local %s %s)\n",
+			hoists.data, hoists.length, hoists.lengthType())
+	}
+	e.writeMapWordLocals(fn)
 }
 
 // functionParams writes WebAssembly parameters and records their values.

@@ -46,11 +46,11 @@ fn (self: &var Emitter) write_map_runtime_decls(module: &ir::Module) -> !void {
         return self.line("");
     }
     try self.line("declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)");
-    try self.line("declare ptr @kizu_map_get(ptr, ptr, i64)");
+    try self.line("declare ptr @kizu_map_get(ptr, ptr, i64, i64)");
     try self.line("declare i1 @kizu_map_remove(ptr, ptr, ptr, i64, ptr, i64)");
-    try self.line("declare ptr @kizu_map_value_at(ptr, i64)");
-    try self.line("declare void @kizu_map_key_at(ptr, ptr, i64)");
-    try self.line("declare i1 @kizu_map_contains(ptr, ptr, i64)");
+    try self.line("declare ptr @kizu_map_value_at(ptr, i64, i64)");
+    try self.line("declare void @kizu_map_key_at(ptr, ptr, i64, i64)");
+    try self.line("declare i1 @kizu_map_contains(ptr, ptr, i64, i64)");
     try self.line("declare i64 @kizu_map_len(ptr)");
     try self.line("declare void @kizu_map_deinit(ptr, ptr, i64)");
     return self.line("");
@@ -202,11 +202,19 @@ fn (self: &var Emitter) write_map_insert(module: &ir::Module, node: &ir::InstrNo
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::MapInsert);
 }
 
-/// Lowers Map.get(key), the Go `writeMapGet`.
+/// Lowers Map.get(key), the Go `writeMapGet`. Every lookup names the value's
+/// width, which is what an entry's width follows from (runtime.c).
 fn (self: &var Emitter) write_map_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 {
         return try self.fail0("llvm error: map.get expects Map, K -> ?V");
     }
+    var value_type = string::new(self.allocator);
+    defer value_type.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var value_type) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let value_bytes = value_type.as_bytes();
     let map_value = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
     let key_base = try self.suffixed(result_name, ".key");
@@ -215,9 +223,10 @@ fn (self: &var Emitter) write_map_get(module: &ir::Module, node: &ir::InstrNode)
         return move failed;
     }
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    try self.line4(
-        "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
-        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+    let size = try self.element_size_operand_bytes(module, value_bytes);
+    try self.line5(
+        "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(size)
     );
     return self.write_array_optional_load_result(module, node, ptr_name);
 }
@@ -272,6 +281,13 @@ fn (self: &var Emitter) write_map_at(module: &ir::Module, node: &ir::InstrNode) 
         let op = try self.op_name(module, node);
         return try self.fail1("llvm error: %s expects Map, K -> ?&V", Arg::Str(op));
     }
+    var value_type = string::new(self.allocator);
+    defer value_type.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var value_type) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let value_bytes = value_type.as_bytes();
     let map_value = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
     let key_base = try self.suffixed(result_name, ".key");
@@ -280,9 +296,10 @@ fn (self: &var Emitter) write_map_at(module: &ir::Module, node: &ir::InstrNode) 
         return move failed;
     }
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    try self.line4(
-        "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
-        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+    let size = try self.element_size_operand_bytes(module, value_bytes);
+    try self.line5(
+        "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(size)
     );
     return self.write_borrow_optional_result(module, node, ptr_name);
 }
@@ -302,9 +319,10 @@ fn (self: &var Emitter) write_map_take_value_at(module: &ir::Module, node: &ir::
     let len_synthetic = try self.next_synthetic_value("map.take.panic.len");
     let len_name = try self.percent(len_synthetic);
     try self.line2("  %s = call i64 @kizu_map_len(ptr %s)", Arg::Str(len_name), Arg::Str(map_value.operand));
-    try self.line3(
-        "  %s = call ptr @kizu_map_value_at(ptr %s, i64 %s)",
-        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(index.operand)
+    let size = try self.element_size_operand(module, node.result.type_name);
+    try self.line4(
+        "  %s = call ptr @kizu_map_value_at(ptr %s, i64 %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(index.operand), Arg::Str(size)
     );
     var args = self.no_names();
     defer args.deinit(self.allocator);
@@ -337,6 +355,13 @@ fn (self: &var Emitter) write_map_key_at(module: &ir::Module, node: &ir::InstrNo
         !keyed {
         return try self.fail0("llvm error: map.key_at expects Map, i64 -> ?K");
     }
+    var value_type = string::new(self.allocator);
+    defer value_type.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var value_type) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let value_bytes = value_type.as_bytes();
     let map_value = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
@@ -350,9 +375,10 @@ fn (self: &var Emitter) write_map_key_at(module: &ir::Module, node: &ir::InstrNo
         slot_type = try self.llvm_optional_type_name(module, result_type);
     }
     try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(slot_type));
-    try self.line3(
-        "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s)",
-        Arg::Str(slot_name), Arg::Str(map_value.operand), Arg::Str(index.operand)
+    let size = try self.element_size_operand_bytes(module, value_bytes);
+    try self.line4(
+        "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s, i64 %s)",
+        Arg::Str(slot_name), Arg::Str(map_value.operand), Arg::Str(index.operand), Arg::Str(size)
     );
     if !scalar_key {
         try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(slot_type), Arg::Str(slot_name));
@@ -399,6 +425,13 @@ fn (self: &var Emitter) write_map_contains(module: &ir::Module, node: &ir::Instr
     if node.args.len() != 2 or !module.names.is(node.result.type_name, "bool") {
         return try self.fail0("llvm error: map.contains expects Map, K -> bool");
     }
+    var value_type = string::new(self.allocator);
+    defer value_type.deinit(self.allocator);
+    if !try self.instr_element_type(module, node, &var value_type) {
+        return try self.fail0(
+            "llvm error: emitter bug: instruction measures an element but was handed no container");
+    }
+    let value_bytes = value_type.as_bytes();
     let map_value = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
     let key_base = try self.suffixed(result_name, ".key");
@@ -406,9 +439,10 @@ fn (self: &var Emitter) write_map_contains(module: &ir::Module, node: &ir::Instr
     if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(1), &var key_parts) |failed| {
         return move failed;
     }
-    try self.line4(
-        "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s)",
-        Arg::Str(result_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+    let size = try self.element_size_operand_bytes(module, value_bytes);
+    try self.line5(
+        "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s, i64 %s)",
+        Arg::Str(result_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(size)
     );
     try self.set_value(module, node.result, result_name);
     return null;

@@ -14,6 +14,8 @@ import (
 // writeNodeWithin.
 func (e *emitter) writeTree(s *structure, name string) error {
 	if s.loopHeaders[name] {
+		started := e.writeLoopHoists(name)
+		defer e.endLoopHoists(started)
 		fmt.Fprintf(&e.out, "        (loop %s\n", loopLabel(name))
 	}
 	if err := e.writeNodeWithin(s, name, s.mergeChildren[name]); err != nil {
@@ -632,6 +634,9 @@ func (e *emitter) writeBranchTo(s *structure, source string, target string) erro
 // take their edge.
 func (e *emitter) writeBranch(s *structure, block *ir.Block) error {
 	term := block.Terminator
+	if written, err := e.writeLoopBranch(s, block); written || err != nil {
+		return err
+	}
 	e.out.WriteString("            (if " + e.value(term.Cond).expr + "\n")
 	e.out.WriteString("              (then\n")
 	if err := e.writeBranchTo(s, block.Name, term.Target); err != nil {
@@ -647,30 +652,274 @@ func (e *emitter) writeBranch(s *structure, block *ir.Block) error {
 	return nil
 }
 
+// writeLoopBranch writes a branch with one arm back to a loop header as that
+// arm's phi copies followed by a `br_if` back, and then the other arm. An `if`
+// puts the copies and the branch back on an edge of their own, which an engine
+// compiles into a block that each iteration jumps through; the copies go ahead
+// of the test instead when the other arm cannot tell: neither the condition,
+// nor the copies the other arm makes, nor any code written for it reads a phi
+// the back edge assigns. It reports whether it wrote the branch.
+func (e *emitter) writeLoopBranch(s *structure, block *ir.Block) (bool, error) {
+	term := block.Terminator
+	back, other, negate := term.Target, term.Else, false
+	if !e.isBackEdge(s, block.Name, back) {
+		back, other, negate = term.Else, term.Target, true
+	}
+	if back == other || !e.isBackEdge(s, block.Name, back) {
+		return false, nil
+	}
+	if !e.isBackEdge(s, block.Name, other) && !s.merges[other] &&
+		readsPhisBelow(s, other, s.blocks[back]) {
+		return false, nil
+	}
+	cond := e.value(term.Cond).expr
+	if e.edgeReadsPhis(s, block.Name, other, s.blocks[back], cond) {
+		return false, nil
+	}
+	e.writePhiCopies(block.Name, back, s)
+	if negate {
+		cond = "(i32.eqz " + cond + ")"
+	}
+	fmt.Fprintf(&e.out, "            (br_if %s %s)\n", loopLabel(back), cond)
+	return true, e.writeBranchTo(s, block.Name, other)
+}
+
+// edgeReadsPhis reports whether the condition, or a copy the edge from source
+// to target makes, reads a local a phi of header is held in.
+func (e *emitter) edgeReadsPhis(
+	s *structure,
+	source string,
+	target string,
+	header *ir.Block,
+	cond string,
+) bool {
+	reads := []string{cond}
+	for _, instr := range s.blocks[target].Instrs {
+		if instr.Op != "phi" {
+			continue
+		}
+		for _, incoming := range instr.Incoming {
+			if incoming.Block == source {
+				reads = append(reads, e.value(incoming.Value).expr)
+			}
+		}
+	}
+	for _, instr := range header.Instrs {
+		if instr.Op != "phi" {
+			continue
+		}
+		assigned := "(local.get " + symbolName(instr.Result.Name) + ")"
+		for _, read := range reads {
+			if strings.Contains(read, assigned) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// branchSubtreeLimit is how many blocks readsPhisBelow looks through before it
+// assumes a read.
+const branchSubtreeLimit = 64
+
+// readsPhisBelow reports whether the code written for the block named top --
+// every block it dominates, and the phi copies on edges leaving them -- may
+// read a phi of header. A cast is written as an expression over what it
+// casts, so reading a cast of a phi reads the phi.
+func readsPhisBelow(s *structure, top string, header *ir.Block) bool {
+	phis := phisAndCasts(s, header)
+	below := map[string]bool{}
+	for _, name := range s.order {
+		if s.dominates(top, name) {
+			below[name] = true
+		}
+	}
+	if len(below) > branchSubtreeLimit {
+		return true
+	}
+	return readsNamesBelow(s, below, phis)
+}
+
+// phisAndCasts names the phis of header and every cast of one of them, the
+// values whose reads read a phi's local.
+func phisAndCasts(s *structure, header *ir.Block) map[string]bool {
+	phis := map[string]bool{}
+	for _, instr := range header.Instrs {
+		if instr.Op == "phi" {
+			phis[instr.Result.Name] = true
+		}
+	}
+	for grown := true; grown; {
+		grown = false
+		for _, block := range s.blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == "cast" && len(instr.Args) == 1 && phis[instr.Args[0].Name] &&
+					!phis[instr.Result.Name] {
+					phis[instr.Result.Name] = true
+					grown = true
+				}
+			}
+		}
+	}
+	return phis
+}
+
+// readsNamesBelow reports whether a block in below reads one of names, or an
+// edge leaving one carries one into a phi.
+func readsNamesBelow(s *structure, below map[string]bool, names map[string]bool) bool {
+	phis := names
+	for _, block := range s.blocks {
+		for _, instr := range block.Instrs {
+			for _, incoming := range instr.Incoming {
+				if below[incoming.Block] && phis[incoming.Value.Name] {
+					return true
+				}
+			}
+			if !below[block.Name] || instr.Op == "phi" {
+				continue
+			}
+			found := false
+			visitInstrReads(instr, func(value ir.Value) { found = found || phis[value.Name] })
+			if found {
+				return true
+			}
+		}
+		if below[block.Name] && (phis[block.Terminator.Value.Name] || phis[block.Terminator.Cond.Name]) {
+			return true
+		}
+	}
+	return false
+}
+
+// visitInstrReads calls visit with each value an instruction reads besides its
+// phi incoming.
+func visitInstrReads(instr *ir.Instr, visit func(ir.Value)) {
+	for _, arg := range instr.Args {
+		visit(arg)
+	}
+	for _, field := range instr.Fields {
+		visit(field.Value)
+	}
+	for _, cleanup := range instr.Cleanups {
+		for _, arg := range cleanup.Args {
+			visit(arg)
+		}
+	}
+}
+
+// isBackEdge reports whether the edge from source to target goes back to the
+// header of a loop.
+func (e *emitter) isBackEdge(s *structure, source string, target string) bool {
+	return s.loopHeaders[target] && s.rpo[target] <= s.rpo[source]
+}
+
 // writePhiCopies assigns target phi locals for an edge. The edge stays inside
 // one function, so the target is read out of that function's structure.
+//
+// The phis of one block take their values at once, so a copy that reads
+// another phi of the block has to read it before that phi is assigned. Copies
+// are written once nothing still waiting reads what they assign; a cycle of
+// them, a pair of phis trading values, parks one phi's value in the temporary
+// phiTempLocal declares for its type first.
 func (e *emitter) writePhiCopies(source string, target string, s *structure) {
 	block := s.blocks[target]
 	if block == nil {
 		return
 	}
+	pending := []phiCopy{}
 	for _, instr := range block.Instrs {
 		if instr.Op != "phi" {
 			continue
 		}
 		for _, incoming := range instr.Incoming {
 			if incoming.Block == source {
-				e.writeLocalCopy(instr.Result, incoming.Value, "            ")
+				pending = append(pending, phiCopy{dst: instr.Result, src: e.value(incoming.Value).expr})
 			}
 		}
 	}
+	for len(pending) > 0 {
+		ready := -1
+		for index := range pending {
+			if !phiCopyRead(pending, index) {
+				ready = index
+				break
+			}
+		}
+		if ready < 0 {
+			parked := pending[0].dst
+			temp := phiTempLocal(e.wasmType(parked.Type))
+			read := "(local.get " + symbolName(parked.Name) + ")"
+			fmt.Fprintf(&e.out, "            (local.set %s %s)\n", temp, read)
+			for index := range pending {
+				if pending[index].src == read {
+					pending[index].src = "(local.get " + temp + ")"
+				}
+			}
+			continue
+		}
+		next := pending[ready]
+		fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbolName(next.dst.Name), next.src)
+		e.values[next.dst.Name] = valueInfo{expr: "(local.get " + symbolName(next.dst.Name) + ")"}
+		pending = append(pending[:ready], pending[ready+1:]...)
+	}
 }
 
-// writeLocalCopy copies one value into a local.
-func (e *emitter) writeLocalCopy(dst ir.Value, src ir.Value, indent string) {
-	value := e.value(src)
-	fmt.Fprintf(&e.out, "%s(local.set %s %s)\n", indent, symbolName(dst.Name), value.expr)
-	e.values[dst.Name] = valueInfo{expr: "(local.get " + symbolName(dst.Name) + ")"}
+// phiCopy is one assignment an edge makes to a phi of the block it enters.
+type phiCopy struct {
+	dst ir.Value
+	src string
+}
+
+// phiCopyRead reports whether a copy other than the one at index still reads
+// the phi that copy assigns.
+func phiCopyRead(pending []phiCopy, index int) bool {
+	read := "(local.get " + symbolName(pending[index].dst.Name) + ")"
+	for other, candidate := range pending {
+		if other != index && strings.Contains(candidate.src, read) {
+			return true
+		}
+	}
+	return false
+}
+
+// phiTempLocal names the local a cycle of phi copies parks one value of a wasm
+// type in.
+func phiTempLocal(wasmType string) string {
+	return "$__kizu_phi_" + wasmType
+}
+
+// phiTempTypes lists, in first-use order, the wasm types of the phis of fn
+// that read another phi of their own block, the ones a cycle of copies can
+// hold, so each type's temporary is declared once.
+func (e *emitter) phiTempTypes(fn *ir.Function) []string {
+	types := []string{}
+	for _, block := range fn.Blocks {
+		phis := map[string]bool{}
+		for _, instr := range block.Instrs {
+			if instr.Op == "phi" {
+				phis[instr.Result.Name] = true
+			}
+		}
+		for _, instr := range block.Instrs {
+			if instr.Op != "phi" {
+				continue
+			}
+			for _, incoming := range instr.Incoming {
+				if !phis[incoming.Value.Name] || incoming.Value.Name == instr.Result.Name {
+					continue
+				}
+				wasmType := e.wasmType(incoming.Value.Type)
+				seen := false
+				for _, existing := range types {
+					seen = seen || existing == wasmType
+				}
+				if !seen {
+					types = append(types, wasmType)
+				}
+			}
+		}
+	}
+	return types
 }
 
 // value resolves a typed IR value to a WebAssembly expression.

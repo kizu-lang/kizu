@@ -12,6 +12,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -121,7 +122,7 @@ func lowerCorpusInput(input string, opt bool) (*ir.Module, error) {
 		return nil, err
 	}
 	if opt {
-		if err := ir.Optimize(module); err != nil {
+		if err := ir.Optimize(module, stdtarget.Native); err != nil {
 			return nil, err
 		}
 	}

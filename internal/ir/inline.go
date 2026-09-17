@@ -12,17 +12,76 @@ import (
 const inlineLimit = 8
 
 // Inline replaces direct calls to small functions with a copy of the callee's
-// body. A callee is copied as it stands when its caller is reached, in module
-// order, and the copy is not searched again, so a chain of calls is flattened
-// no deeper than the order the functions are declared in allows, and a
+// body. Functions are visited callee first, so a callee has had its own small
+// calls copied in by the time it is copied, and a chain of wrappers flattens
+// into the outermost caller; the copy is not searched again. Along a cycle of
+// calls one function is necessarily visited before a function it calls, and a
 // recursive callee is never copied into itself.
 func Inline(module *Module) {
 	functions := make(map[string]*Function, len(module.Functions))
 	for _, fn := range module.Functions {
 		functions[fn.Name] = fn
+		returnTriedUnions(fn)
 	}
-	for _, fn := range module.Functions {
+	for _, fn := range calleeFirstOrder(module, functions) {
 		inlineInto(fn, functions)
+	}
+}
+
+// calleeFirstOrder lists module's functions so that each comes after the
+// functions it calls, other than along a cycle of calls, which is entered
+// where module order first reaches it.
+func calleeFirstOrder(module *Module, functions map[string]*Function) []*Function {
+	type frame struct {
+		fn    *Function
+		calls []string
+	}
+	order := make([]*Function, 0, len(module.Functions))
+	seen := make(map[*Function]bool, len(module.Functions))
+	for _, root := range module.Functions {
+		if seen[root] {
+			continue
+		}
+		seen[root] = true
+		stack := []frame{{fn: root, calls: directCallees(root)}}
+		for len(stack) > 0 {
+			top := &stack[len(stack)-1]
+			if len(top.calls) == 0 {
+				order = append(order, top.fn)
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			next := functions[top.calls[0]]
+			top.calls = top.calls[1:]
+			if next != nil && !seen[next] {
+				seen[next] = true
+				stack = append(stack, frame{fn: next, calls: directCallees(next)})
+			}
+		}
+	}
+	return order
+}
+
+// returnTriedUnions makes a block that tries a union of fn's own result type
+// and then returns success return the union instead: `try` passes a failure
+// on as it is when the types agree, and success is what the block returned
+// anyway. A function that only passes a failure on then holds no `try`, and
+// can be copied into its callers.
+func returnTriedUnions(fn *Function) {
+	for _, block := range fn.Blocks {
+		count := len(block.Instrs)
+		if block.Terminator.Op != "return" || count < 2 {
+			continue
+		}
+		tried, succeeded := block.Instrs[count-2], block.Instrs[count-1]
+		if succeeded.Op != "error.ok" || len(succeeded.Args) != 0 ||
+			succeeded.Result.Name != block.Terminator.Value.Name ||
+			tried.Op != "error.try" || len(tried.Args) != 1 || len(tried.Cleanups) > 0 ||
+			tried.Result.Type != "void" || tried.Args[0].Type != fn.Return {
+			continue
+		}
+		block.Instrs = block.Instrs[:count-2]
+		block.Terminator.Value = tried.Args[0]
 	}
 }
 

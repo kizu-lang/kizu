@@ -1,0 +1,386 @@
+import std::array;
+import std::fmt;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/ir/tailcall.go: turning a function's tail calls
+// to itself into jumps back to its start. Go names a site's block and call by
+// pointer and its accumulator operation by the op string; here a site keeps
+// the block's handle and position, the call's handle, and the operator the
+// `binary.` op carries, empty for a call returned as it is.
+
+/// Turns a function's calls to itself in tail position into jumps back to
+/// its start, the Go `EliminateTailRecursion`. A call whose result the
+/// function returns as it is becomes a jump with the call's arguments as the
+/// new parameters. A call whose result is combined with another value by one
+/// integer operation that is associative and commutative -- `+`, `*`, `|` or
+/// `^`, which wrap -- and then returned becomes a jump too, with the other
+/// value folded into an accumulator that every other return combines with
+/// what it returns: the operation gives the same bits in either order, so
+/// `fib(n - 1) + fib(n - 2)` can run the second call as the next iteration of
+/// a loop.
+///
+/// The calls the function makes run in the order they did, and a recursion
+/// that used one frame per level runs in one; nothing else about what the
+/// function does changes. A function is left alone unless every parameter is
+/// a scalar a phi can carry, since a parameter at an address would be read
+/// from the frame the loop keeps writing.
+pub fn eliminate_tail_recursion(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try eliminate_tail_recursion_in(allocator, module, function);
+    }
+    return;
+}
+
+/// Is one return a tail call ends in, the Go `tailSite`: the block, the call,
+/// and for an accumulated call the operator and the value it combines the
+/// result with.
+struct TailSite {
+    block: Block,
+    position: i64,
+    call: Instr,
+    op: Name,
+    other: Value,
+}
+
+/// Returns the constant an accumulator operator starts from, the Go
+/// `accumulatorOps`: null for an operator that is not one.
+fn accumulator_identity(module: &Module, operator: Name) -> ?i64 {
+    if module.names.is(operator, "+") {
+        return 0;
+    }
+    if module.names.is(operator, "*") {
+        return 1;
+    }
+    if module.names.is(operator, "|") {
+        return 0;
+    }
+    if module.names.is(operator, "^") {
+        return 0;
+    }
+    return null;
+}
+
+/// Rewrites a function when it has a tail call to itself, the Go
+/// `eliminateTailRecursionIn`.
+fn eliminate_tail_recursion_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    let node = module.function_nodes.at(function.node);
+    if node.blocks.len() == 0 or module.names.is(node.name, "main") or !is_empty(node.export_abi) {
+        return;
+    }
+    var param_index = 0;
+    while node.params.get(param_index) |param| {
+        param_index = param_index + 1;
+        if param.passing != Passing::Value or !is_loop_scalar(module, param.type_name) {
+            return;
+        }
+    }
+    let return_type = node.return_type;
+    var sites = array::new<TailSite>(allocator);
+    defer sites.deinit(allocator);
+    var op = empty_name();
+    var position = 0;
+    while function_block_at(module, function, position) |block| {
+        let at = position;
+        position = position + 1;
+        let site = tail_site_of(module, function, block, at) orelse continue;
+        if !is_empty(site.op) {
+            if !is_empty(op) and !same_name(op, site.op) {
+                return;
+            }
+            op = site.op;
+        }
+        try sites.append(allocator, site);
+    }
+    if sites.len() == 0 {
+        return;
+    }
+    if !is_empty(op) and !is_wrapping_integer(module, return_type) {
+        return;
+    }
+    return rewrite_tail_recursion(allocator, module, function, &sites, op);
+}
+
+/// Reports whether a value of a type is one register a loop phi can carry on
+/// every backend, the Go `isLoopScalar`.
+fn is_loop_scalar(module: &Module, type_name: Name) -> bool {
+    return module.names.is(type_name, "bool") or module.names.is(type_name, "f32") or
+        module.names.is(type_name, "f64") or is_wrapping_integer(module, type_name);
+}
+
+/// Reports whether a type is an integer type, whose `+`, `*` and bitwise
+/// operations wrap, the Go `isWrappingInteger`.
+fn is_wrapping_integer(module: &Module, type_name: Name) -> bool {
+    let names = &module.names;
+    return names.is(type_name, "i8") or names.is(type_name, "i16") or names.is(type_name, "i32") or
+        names.is(type_name, "i64") or names.is(type_name, "u8") or names.is(type_name, "u16") or
+        names.is(type_name, "u32") or names.is(type_name, "u64") or names.is(type_name, "isize") or
+        names.is(type_name, "usize");
+}
+
+/// Returns the tail call a block ends in, the Go `tailSiteOf`: a return of a
+/// call to the function, or of one accumulator operation on such a call and a
+/// value that does not depend on it. Only pure instructions may stand between
+/// the call and the return.
+fn tail_site_of(module: &Module, function: Function, block: Block, position: i64) -> ?TailSite {
+    let function_node = module.function_nodes.at(function.node);
+    let block_node = module.blocks.at(block.node);
+    let term = block_node.terminator;
+    if term.op != TermOp::Return or !same_name(term.value.type_name, function_node.return_type) or
+        module.names.is(function_node.return_type, "void") {
+        return null;
+    }
+    var index = block_node.instrs.len() - 1;
+    while index >= 0 {
+        let call = block_node.instrs.get_or_panic(index);
+        let call_node = module.instrs.at(call.node);
+        if call_node.op != Op::Call or !same_name(call_node.operand, function_node.name) {
+            index = index - 1;
+            continue;
+        }
+        if !is_empty(call_node.extern_abi) or call_node.args.len() != function_node.params.len() or
+            call_node.cleanups.len() > 0 {
+            return null;
+        }
+        if index + 1 == block_node.instrs.len() {
+            if !same_name(term.value.name, call_node.result.name) {
+                return null;
+            }
+            return TailSite { block: block, position: position, call: call, op: empty_name(), other: empty_value() };
+        }
+        return accumulated_site(module, block, position, call, index + 1);
+    }
+    return null;
+}
+
+/// Returns the site a call makes when what follows it in its block, from
+/// `after` on, is pure instructions that do not read its result, then one
+/// accumulator operation on the result and another value that the block
+/// returns, the Go `accumulatedSite`.
+fn accumulated_site(module: &Module, block: Block, position: i64, call: Instr, after: i64) -> ?TailSite {
+    let block_node = module.blocks.at(block.node);
+    let last = block_node.instrs.len() - 1;
+    let combine = block_node.instrs.get_or_panic(last);
+    let combine_node = module.instrs.at(combine.node);
+    let call_result = module.instr_result(call);
+    if !same_name(combine_node.result.name, block_node.terminator.value.name) or combine_node.args.len() != 2 {
+        return null;
+    }
+    if combine_node.op != Op::Binary {
+        return null;
+    }
+    if accumulator_identity(module, combine_node.operand) |_| {} else {
+        return null;
+    }
+    var other = combine_node.args.get_or_panic(0);
+    if same_name(other.name, call_result.name) {
+        other = combine_node.args.get_or_panic(1);
+    } else {
+        let second = combine_node.args.get_or_panic(1);
+        if !same_name(second.name, call_result.name) {
+            return null;
+        }
+    }
+    if same_name(other.name, call_result.name) {
+        return null;
+    }
+    var index = after;
+    while index < last {
+        let instr = block_node.instrs.get_or_panic(index);
+        index = index + 1;
+        if !is_pure_op(module.instr_op(instr)) or reads_value(module, instr, call_result.name) {
+            return null;
+        }
+    }
+    return TailSite { block: block, position: position, call: call, op: combine_node.operand, other: other };
+}
+
+/// Reports whether an instruction reads the value a name names, the Go
+/// `readsValue`.
+fn reads_value(module: &Module, instr: Instr, name: Name) -> bool {
+    var slot = 0;
+    while instr_read_at(module, instr, slot) |value| {
+        slot = slot + 1;
+        if same_name(value.name, name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Puts a new entry block before the function's body, turns the old entry
+/// into a loop header whose phis stand for the parameters and the
+/// accumulator, and turns each site into a jump to it, the Go
+/// `rewriteTailRecursion`. A parameter's phi is named after it, and a
+/// parameter's name is an identifier, which holds no dot, so the accumulator's
+/// values are named under `%tre.acc.` where no parameter's phi can be.
+fn rewrite_tail_recursion(
+    allocator: Allocator,
+    module: &var Module,
+    function: Function,
+    sites: &array::Array<TailSite>,
+    op: Name
+) -> !void {
+    let start = function_block_at(module, function, 0) orelse return;
+    let start_name = module.block_name(start);
+    let return_type = module.function_return(function);
+    let entry_name = try module.names.intern("tre.entry");
+    let entry = try new_detached_block(allocator, module, entry_name);
+    module.set_terminator(entry, jump_terminator(start_name));
+    var params = map::new<i64, Value>(allocator);
+    defer params.deinit(allocator);
+    var phis = array::new<Instr>(allocator);
+    defer phis.deinit(allocator);
+    var param_index = 0;
+    while module.function_param(function, param_index) |param| {
+        param_index = param_index + 1;
+        let trimmed = try module.names.trim_prefix(param.name, "%");
+        let phi_name = try module.names.prefixed("%tre.", trimmed);
+        let result = Value { name: phi_name, type_name: param.type_name };
+        var phi = module.blank_instr(result, Op::Phi, empty_name(), empty_name());
+        errdefer phi.deinit(allocator);
+        try phi.incoming.append(allocator, Incoming { block: entry_name, value: param.value() });
+        let handle = Instr { node: try module.instrs.add(allocator, move phi) };
+        try params.insert(allocator, name_id(param.name), result);
+        try phis.append(allocator, handle);
+    }
+    try replace_function_values(allocator, module, function, &params);
+    var acc: ?Instr = null;
+    if !is_empty(op) {
+        let identity_value = accumulator_identity(module, op) orelse 0;
+        let identity_immediate = try module.names.intern_i64(identity_value);
+        let identity_name = try module.names.intern("%tre.acc.identity");
+        let identity_result = Value { name: identity_name, type_name: return_type };
+        let identity = module.blank_instr(identity_result, Op::Const, empty_name(), identity_immediate);
+        let _ = try module.add_instr(allocator, entry, move identity);
+        let acc_name = try module.names.intern("%tre.acc.phi");
+        let acc_result = Value { name: acc_name, type_name: return_type };
+        var acc_phi = module.blank_instr(acc_result, Op::Phi, empty_name(), empty_name());
+        errdefer acc_phi.deinit(allocator);
+        try acc_phi.incoming.append(allocator, Incoming { block: entry_name, value: identity_result });
+        let acc_handle = Instr { node: try module.instrs.add(allocator, move acc_phi) };
+        try phis.append(allocator, acc_handle);
+        acc = acc_handle;
+    }
+    var is_site = map::new<i64, bool>(allocator);
+    defer is_site.deinit(allocator);
+    var index = 0;
+    while sites.get(index) |site| {
+        try is_site.insert(allocator, site.position, true);
+        var rewritten = site;
+        if params.get(name_id(site.other.name)) |param| {
+            rewritten.other = param;
+        }
+        try rewrite_tail_site(allocator, module, rewritten, index, start_name, &phis, acc);
+        index = index + 1;
+    }
+    if acc |acc_instr| {
+        let acc_result = module.instr_result(acc_instr);
+        var position = 0;
+        while function_block_at(module, function, position) |block| {
+            let term = module.block_terminator(block);
+            if is_site.contains(position) or term.op != TermOp::Return {
+                position = position + 1;
+                continue;
+            }
+            var spelled_name = try string::from_bytes(allocator, "%tre.acc.ret");
+            errdefer spelled_name.deinit(allocator);
+            try fmt::append_i64(allocator, &var spelled_name, position);
+            let combined_name = try module.names.intern_owned(move spelled_name);
+            let combined_result = Value { name: combined_name, type_name: return_type };
+            var combined = module.blank_instr(combined_result, Op::Binary, op, empty_name());
+            errdefer combined.deinit(allocator);
+            try combined.args.append(allocator, acc_result);
+            try combined.args.append(allocator, term.value);
+            let _ = try module.add_instr(allocator, block, move combined);
+            var returned = term;
+            returned.value = combined_result;
+            module.set_terminator(block, returned);
+            position = position + 1;
+        }
+    }
+    var start_instrs = array::new<Instr>(allocator);
+    defer start_instrs.deinit(allocator);
+    index = 0;
+    while phis.get(index) |phi| {
+        index = index + 1;
+        try start_instrs.append(allocator, phi);
+    }
+    index = 0;
+    while block_instr_at(module, start, index) |instr| {
+        index = index + 1;
+        try start_instrs.append(allocator, instr);
+    }
+    try set_block_instrs(allocator, module, start, &start_instrs);
+    var blocks = array::new<Block>(allocator);
+    defer blocks.deinit(allocator);
+    try blocks.append(allocator, entry);
+    index = 0;
+    while function_block_at(module, function, index) |block| {
+        index = index + 1;
+        try blocks.append(allocator, block);
+    }
+    return set_function_blocks(allocator, module, function, &blocks);
+}
+
+/// Replaces one site's call, and its accumulator operation, by a jump to the
+/// loop header feeding the header's phis, the Go `rewriteTailSite`.
+fn rewrite_tail_site(
+    allocator: Allocator,
+    module: &var Module,
+    site: TailSite,
+    index: i64,
+    header: Name,
+    phis: &array::Array<Instr>,
+    acc: ?Instr
+) -> !void {
+    let block = site.block;
+    let block_name = module.block_name(block);
+    let term = module.block_terminator(block);
+    var kept = array::new<Instr>(allocator);
+    defer kept.deinit(allocator);
+    var instr_index = 0;
+    while block_instr_at(module, block, instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let result = module.instr_result(instr);
+        if instr.node == site.call.node or same_name(result.name, term.value.name) {
+            continue;
+        }
+        try kept.append(allocator, instr);
+    }
+    try set_block_instrs(allocator, module, block, &kept);
+    var arg_index = 0;
+    while call_arg_at(module, site.call, arg_index) |arg| {
+        let phi = phis.get_or_panic(arg_index);
+        arg_index = arg_index + 1;
+        try module.add_incoming(allocator, phi, block_name, arg);
+    }
+    if acc |acc_instr| {
+        let acc_result = module.instr_result(acc_instr);
+        var next = acc_result;
+        if !is_empty(site.op) {
+            var spelled_name = try string::from_bytes(allocator, "%tre.acc.site");
+            errdefer spelled_name.deinit(allocator);
+            try fmt::append_i64(allocator, &var spelled_name, index);
+            let folded_name = try module.names.intern_owned(move spelled_name);
+            let folded_result = Value { name: folded_name, type_name: acc_result.type_name };
+            var folded = module.blank_instr(folded_result, Op::Binary, site.op, empty_name());
+            errdefer folded.deinit(allocator);
+            try folded.args.append(allocator, acc_result);
+            try folded.args.append(allocator, site.other);
+            let _ = try module.add_instr(allocator, block, move folded);
+            next = folded_result;
+        }
+        try module.add_incoming(allocator, acc_instr, block_name, next);
+    }
+    module.set_terminator(block, jump_terminator(header));
+    return;
+}
+
+/// Returns the argument at index of an instruction, null past the last.
+fn call_arg_at(module: &Module, instr: Instr, index: i64) -> ?Value {
+    let node = module.instrs.at(instr.node);
+    return node.args.get(index);
+}

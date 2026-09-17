@@ -1,0 +1,441 @@
+import compiler::internal::ir;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/hoist.go. A loop that reads an Array's
+// storage pointer and length, or a view's pointer and length, reads them
+// through memory on every iteration, and an engine keeps them there: a store
+// to an element could have changed them as far as it can tell. Where no
+// instruction the loop contains can change them, they are read once into
+// locals before the loop is entered and the loop reads the locals.
+//
+// A view is an immutable SSA value, so nothing changes its descriptor. An
+// Array's header changes only through an operation that names it, and a loop
+// whose every use of the Array is a read of the header, or a write of an
+// element, leaves the header as it found it: another reference that could
+// change the same header cannot be alive beside the one the loop reads.
+//
+// Go files the plans under the header's name; here a plan carries the
+// position of its header block and the function generation it was made in,
+// and the plans of one function sit in one list in the order their loops are
+// reached.
+
+/// Is one value whose pointer and length a loop reads from locals, the Go
+/// `loopHoist`.
+struct LoopHoist {
+    header: i64,
+    generation: i64,
+    value: ir::Value,
+    // view is set for a `[]T` descriptor, whose length is an i32 word; an
+    // Array header's length is an i64.
+    view: bool,
+    data: ir::Name,
+    length: ir::Name,
+}
+
+/// Returns the wasm type of a hoist's length local, the Go `lengthType`.
+fn loop_hoist_length_type(hoist: LoopHoist) -> []u8 {
+    if hoist.view {
+        return "i32";
+    }
+    return "i64";
+}
+
+/// Decides, for each loop header of a function, which values the loop reads
+/// through locals set before it, the Go `planLoopHoists`. A loop is taken to
+/// be every block its header dominates, the blocks written inside its
+/// `loop`, so the exit paths written there are held to the same rule as the
+/// body.
+fn (self: &var Emitter) plan_loop_hoists(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    s: &Structure
+) -> !void {
+    self.loop_hoists.clear(self.allocator);
+    var defined = map::new<i64, i64>(self.allocator);
+    defer defined.deinit(self.allocator);
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        let position = block_index;
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if !ir::is_empty(instr_node.result.name) {
+                try defined.insert(self.allocator, ir::name_id(instr_node.result.name), position);
+            }
+        }
+    }
+    var found = array::new<ir::Value>(self.allocator);
+    defer found.deinit(self.allocator);
+    // changed files a name under the header whose loop may change it, so
+    // one map serves every loop.
+    var changed = map::new<i64, i64>(self.allocator);
+    defer changed.deinit(self.allocator);
+    var count = 0;
+    var order_index = 0;
+    while s.order.get(order_index) |header| {
+        order_index = order_index + 1;
+        if !s.is_loop_header(header) {
+            continue;
+        }
+        found.clear(self.allocator);
+        try self.loop_hoist_candidates(module, node, s, header, &defined, &var found, &var changed);
+        var found_index = 0;
+        while found.get(found_index) |value| {
+            found_index = found_index + 1;
+            if (changed.get(ir::name_id(value.name)) orelse -1) == header {
+                continue;
+            }
+            count = count + 1;
+            let type_text = ir::name_text(&module.names, value.type_name);
+            let type_bytes = type_text.as_bytes();
+            let view = mem::starts_with(type_bytes, "[]");
+            let data = try self.hoist_local_name(count, "_data");
+            let length = try self.hoist_local_name(count, "_len");
+            try self.loop_hoists.append(self.allocator, LoopHoist {
+                header: header,
+                generation: self.generation,
+                value: value,
+                view: view,
+                data: data,
+                length: length
+            });
+        }
+    }
+    return;
+}
+
+/// Names the local `$__kizu_hoist<count><suffix>`.
+fn (self: &var Emitter) hoist_local_name(count: i64, suffix: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "$__kizu_hoist");
+    errdefer out.deinit(self.allocator);
+    try fmt::append_i64(self.allocator, &var out, count);
+    try out.append_bytes(self.allocator, suffix);
+    return self.names.intern_owned(move out);
+}
+
+/// Lists, in the order the loop headed by header first reads them, the Arrays
+/// and views defined outside that loop whose pointer and length it reads, and
+/// files under header the Arrays it may change, the Go
+/// `loopHoistCandidates`.
+fn (self: &var Emitter) loop_hoist_candidates(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    s: &Structure,
+    header: i64,
+    defined: &map::Map<i64, i64>,
+    found: &var array::Array<ir::Value>,
+    changed: &var map::Map<i64, i64>
+) -> !void {
+    var inside = array::new<bool>(self.allocator);
+    defer inside.deinit(self.allocator);
+    for 0..node.blocks.len() |_| {
+        try inside.append(self.allocator, false);
+    }
+    var position = 0;
+    while s.order.get(position) |index| {
+        position = position + 1;
+        if s.dominates(header, index) {
+            try inside.set(index, true);
+        }
+    }
+    var seen = map::new<i64, bool>(self.allocator);
+    defer seen.deinit(self.allocator);
+    position = 0;
+    while s.order.get(position) |index| {
+        position = position + 1;
+        if !(inside.get(index) orelse false) {
+            continue;
+        }
+        let block = node.blocks.get_or_panic(index);
+        let block_node = module.blocks.at(block.node);
+        try self.visit_block_reads(
+            module,
+            block_node,
+            header,
+            &inside,
+            defined,
+            &var seen,
+            found,
+            changed
+        );
+    }
+    return;
+}
+
+/// Visits every value one block reads, the way flag_results_of does for a
+/// whole function, the Go `visitBlockReads` called with the closure
+/// loopHoistCandidates makes; the state that closure captures is handed on.
+fn (self: &var Emitter) visit_block_reads(
+    module: &ir::Module,
+    block_node: &ir::BlockNode,
+    header: i64,
+    inside: &array::Array<bool>,
+    defined: &map::Map<i64, i64>,
+    seen: &var map::Map<i64, bool>,
+    found: &var array::Array<ir::Value>,
+    changed: &var map::Map<i64, i64>
+) -> !void {
+    var instr_index = 0;
+    while block_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        let op = instr_node.op;
+        var index = 0;
+        while instr_node.args.get(index) |arg| {
+            try self.visit_hoist_read(module, op, index, arg, header, inside, defined, seen, found, changed);
+            index = index + 1;
+        }
+        index = 0;
+        while instr_node.incoming.get(index) |incoming| {
+            index = index + 1;
+            try self.visit_hoist_read(
+                module,
+                op,
+                -1,
+                incoming.value,
+                header,
+                inside,
+                defined,
+                seen,
+                found,
+                changed
+            );
+        }
+        index = 0;
+        while instr_node.fields.get(index) |field| {
+            index = index + 1;
+            try self.visit_hoist_read(module, op, -1, field.value, header, inside, defined, seen, found, changed);
+        }
+        index = 0;
+        while instr_node.cleanups.get(index) |cleanup| {
+            index = index + 1;
+            try self.visit_hoist_read(module, op, -1, cleanup.arg, header, inside, defined, seen, found, changed);
+            if !ir::is_empty(cleanup.allocator.name) {
+                try self.visit_hoist_read(
+                    module,
+                    op,
+                    -1,
+                    cleanup.allocator,
+                    header,
+                    inside,
+                    defined,
+                    seen,
+                    found,
+                    changed
+                );
+            }
+        }
+    }
+    try self.visit_hoist_terminator_read(module, block_node.terminator.value, header, changed);
+    return self.visit_hoist_terminator_read(module, block_node.terminator.cond, header, changed);
+}
+
+/// Visits one read an instruction makes, at argument index or -1, the body of
+/// the Go closure `visit` in loopHoistCandidates.
+fn (self: &var Emitter) visit_hoist_read(
+    module: &ir::Module,
+    op: ir::Op,
+    index: i64,
+    value: ir::Value,
+    header: i64,
+    inside: &array::Array<bool>,
+    defined: &map::Map<i64, i64>,
+    seen: &var map::Map<i64, bool>,
+    found: &var array::Array<ir::Value>,
+    changed: &var map::Map<i64, i64>
+) -> !void {
+    let type_text = ir::name_text(&module.names, value.type_name);
+    let type_bytes = type_text.as_bytes();
+    let direct = deref_wasm_type(type_bytes);
+    if is_array_wasm_type(direct) {
+        if index != 0 or !reads_array_header_only(op) {
+            return changed.insert(self.allocator, ir::name_id(value.name), header);
+        }
+    } else {
+        if !mem::starts_with(type_bytes, "[]") or index != 0 or !is_slice_op(op) {
+            return;
+        }
+    }
+    let id = ir::name_id(value.name);
+    let defined_in = defined.get(id) orelse -1;
+    let defined_inside = defined_in >= 0 and (inside.get(defined_in) orelse false);
+    if seen.contains(id) or defined_inside {
+        return;
+    }
+    try seen.insert(self.allocator, id, true);
+    return found.append(self.allocator, value);
+}
+
+/// Visits one read a terminator makes, the Go closure `visit` called with no
+/// instruction: an Array it reads may change, and a view it reads is not a
+/// read of the view's pointer or length.
+fn (self: &var Emitter) visit_hoist_terminator_read(
+    module: &ir::Module,
+    value: ir::Value,
+    header: i64,
+    changed: &var map::Map<i64, i64>
+) -> !void {
+    let type_text = ir::name_text(&module.names, value.type_name);
+    let type_bytes = type_text.as_bytes();
+    let direct = deref_wasm_type(type_bytes);
+    if is_array_wasm_type(direct) {
+        return changed.insert(self.allocator, ir::name_id(value.name), header);
+    }
+    return;
+}
+
+/// Reports whether an operation is one of the view operations, the Go
+/// `strings.HasPrefix(instr.Op, "slice.")`.
+fn is_slice_op(op: ir::Op) -> bool {
+    return match op {
+        SliceLen => true,
+        SliceIndex => true,
+        SliceStore => true,
+        SliceSlice => true,
+        _ => false,
+    };
+}
+
+/// Reports whether an Array operation leaves the header of the Array it is
+/// handed as it was, the Go `readsArrayHeaderOnly`: it reads the header, and
+/// at most writes an element or copies the whole value out.
+fn reads_array_header_only(op: ir::Op) -> bool {
+    return match op {
+        ArrayLen => true,
+        ArrayCapacity => true,
+        ArrayGet => true,
+        ArrayGetOrPanic => true,
+        ArrayAt => true,
+        ArrayAtMut => true,
+        ArraySet => true,
+        ArraySwap => true,
+        ArrayAsBytes => true,
+        RefLoad => true,
+        _ => false,
+    };
+}
+
+/// Declares the locals of every planned hoist of the current function in the
+/// order its loop is reached, the Go `loopHoistsInOrder` and the declaration
+/// loop writeFunction runs over it.
+fn (self: &var Emitter) write_loop_hoist_locals() -> !void {
+    var index = 0;
+    while self.loop_hoists.get(index) |hoist| {
+        index = index + 1;
+        try self.line3(
+            "    (local %s i32) (local %s %s)",
+            Arg::Str(hoist.data),
+            Arg::Str(hoist.length),
+            Arg::Lit(loop_hoist_length_type(hoist))
+        );
+    }
+    return;
+}
+
+/// Returns the hoist a value is read through in the loops being written.
+fn (self: &Emitter) hoisted_of(name: ir::Name) -> ?LoopHoist {
+    if self.hoisted.get(ir::name_id(name)) |hoist| {
+        if hoist.generation == self.generation {
+            return hoist;
+        }
+    }
+    return null;
+}
+
+/// Reads, before the loop headed by header is entered, what that loop reads
+/// through locals, and makes those locals what its reads use, the Go
+/// `writeLoopHoists`. A value an enclosing loop already reads through locals
+/// keeps them. The values it made current go to started, for
+/// end_loop_hoists.
+fn (self: &var Emitter) write_loop_hoists(
+    module: &ir::Module,
+    header: i64,
+    started: &var array::Array<i64>
+) -> !void {
+    var index = 0;
+    while self.loop_hoists.get(index) |hoist| {
+        index = index + 1;
+        if hoist.header != header or hoist.generation != self.generation {
+            continue;
+        }
+        if self.hoisted_of(hoist.value.name) |_| {
+            continue;
+        }
+        let base = try self.value_of(module, hoist.value);
+        if hoist.view {
+            try self.line2(
+                "            (local.set %s (i32.load %s))",
+                Arg::Str(hoist.data),
+                Arg::Str(base.expr)
+            );
+            let length_address = try self.address_at(base.expr, 4);
+            try self.line2(
+                "            (local.set %s (i32.load %s))",
+                Arg::Str(hoist.length),
+                Arg::Str(length_address)
+            );
+        } else {
+            let data_address = try self.array_field_address(base.expr, array_data_offset());
+            try self.line2(
+                "            (local.set %s (i32.load %s))",
+                Arg::Str(hoist.data),
+                Arg::Str(data_address)
+            );
+            let length_address = try self.array_field_address(base.expr, array_len_offset());
+            try self.line2(
+                "            (local.set %s (i64.load %s))",
+                Arg::Str(hoist.length),
+                Arg::Str(length_address)
+            );
+        }
+        let id = ir::name_id(hoist.value.name);
+        try self.hoisted.insert(self.allocator, id, hoist);
+        try started.append(self.allocator, id);
+    }
+    return;
+}
+
+/// Stops the reads write_loop_hoists started from using locals once their
+/// loop is written, the Go `endLoopHoists`.
+fn (self: &var Emitter) end_loop_hoists(started: &array::Array<i64>) -> void {
+    var index = 0;
+    while started.get(index) |id| {
+        index = index + 1;
+        let _ = self.hoisted.remove(self.allocator, id);
+    }
+    return;
+}
+
+/// Reads the element pointer of a view descriptor, the Go `viewPointer`.
+fn (self: &var Emitter) view_pointer(module: &ir::Module, value: ir::Value) -> !ir::Name {
+    if self.hoisted_of(value.name) |hoist| {
+        return self.local_get_expr(hoist.data);
+    }
+    let info = try self.value_of(module, value);
+    var out = try string::from_bytes(self.allocator, "(i32.load ");
+    errdefer out.deinit(self.allocator);
+    try self.names.append_to(&var out, info.expr);
+    try out.append_bytes(self.allocator, ")");
+    return self.names.intern_owned(move out);
+}
+
+/// Reads the i32 length word of a view descriptor, the Go `viewLength`.
+fn (self: &var Emitter) view_length(module: &ir::Module, value: ir::Value) -> !ir::Name {
+    if self.hoisted_of(value.name) |hoist| {
+        return self.local_get_expr(hoist.length);
+    }
+    let info = try self.value_of(module, value);
+    let address = try self.address_at(info.expr, 4);
+    var out = try string::from_bytes(self.allocator, "(i32.load ");
+    errdefer out.deinit(self.allocator);
+    try self.names.append_to(&var out, address);
+    try out.append_bytes(self.allocator, ")");
+    return self.names.intern_owned(move out);
+}

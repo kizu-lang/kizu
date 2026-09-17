@@ -1013,7 +1013,7 @@ func i64ArithmeticOpcode(op string) (byte, bool) {
 	}
 }
 
-// i64BitOpcode maps 64-bit bitwise, shift, and rotate operations.
+// i64BitOpcode maps 64-bit bitwise, shift, rotate, and bit-count operations.
 func i64BitOpcode(op string) (byte, bool) {
 	switch op {
 	case "i64.and":
@@ -1032,6 +1032,8 @@ func i64BitOpcode(op string) (byte, bool) {
 		return 0x89, true
 	case "i64.rotr":
 		return 0x8a, true
+	case "i64.ctz":
+		return 0x7a, true
 	default:
 		return 0, false
 	}

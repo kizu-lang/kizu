@@ -1,0 +1,364 @@
+import std::array;
+import std::map;
+
+// Mechanical port of internal/ir/simplify.go: folding branches whose arm is
+// already decided. Go keys its known conditions, dead blocks and live blocks
+// by the Go string of a name; here they are keyed by the id of the interned
+// Name, which names the same text. Go filters an instruction or incoming
+// slice into its own backing array; here the kept entries are written back
+// over the list and the rest truncated.
+
+/// Turns each branch on a constant condition into a jump to the arm it
+/// takes, and each branch with an arm that holds nothing but `unreachable`
+/// into a jump to the other arm, the Go `SimplifyBranches`: control never
+/// takes that arm, so its test decides nothing. An exhaustive match lowers its
+/// last check that way, and a backend given the check spends a comparison on
+/// every dispatch, or, with one more case than it needs, a jump table. It then
+/// removes the blocks no path reaches any more and the incoming their phis
+/// took from a block that no longer jumps to them. A phi left with one value,
+/// or with one value besides itself, becomes that value.
+pub fn simplify_branches(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try simplify_branches_in(allocator, module, function);
+    }
+    return;
+}
+
+/// Simplifies one function, the Go `simplifyBranchesIn`.
+fn simplify_branches_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    if function_block_count(module, function) == 0 {
+        return;
+    }
+    try fold_known_results(allocator, module, function);
+    var known = map::new<i64, bool>(allocator);
+    defer known.deinit(allocator);
+    var dead = map::new<i64, bool>(allocator);
+    defer dead.deinit(allocator);
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            if node.op == Op::Const and module.names.is(node.result.type_name, "bool") {
+                try known.insert(allocator, name_id(node.result.name), module.names.is(node.immediate, "true"));
+            }
+        }
+        if block_node.instrs.len() == 0 and block_node.terminator.op == TermOp::Unreachable {
+            try dead.insert(allocator, name_id(block_node.name), true);
+        }
+    }
+    var changed = false;
+    block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        let term = module.block_terminator(block);
+        let taken = branch_taken(term, &known, &dead) orelse continue;
+        var target = term.target;
+        var dropped = term.else_target;
+        if !taken {
+            target = term.else_target;
+            dropped = term.target;
+        }
+        module.set_terminator(block, jump_terminator(target));
+        try drop_incoming(allocator, module, function, dropped, module.block_name(block));
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    try remove_unreachable_blocks(allocator, module, function);
+    return fold_trivial_phis(allocator, module, function);
+}
+
+/// Returns how many blocks a function holds.
+fn function_block_count(module: &Module, function: Function) -> i64 {
+    let node = module.function_nodes.at(function.node);
+    return node.blocks.len();
+}
+
+/// Reports which arm a branch always takes, the Go `branchTaken`: the arm its
+/// constant condition names, or the arm opposite one that holds nothing but
+/// `unreachable`; null when neither decides it.
+fn branch_taken(term: Terminator, known: &map::Map<i64, bool>, dead: &map::Map<i64, bool>) -> ?bool {
+    if term.op != TermOp::Branch {
+        return null;
+    }
+    if known.get(name_id(term.cond.name)) |taken| {
+        return taken;
+    }
+    let else_dead = dead.contains(name_id(term.else_target));
+    let target_dead = dead.contains(name_id(term.target));
+    if else_dead and !target_dead {
+        return true;
+    }
+    if target_dead and !else_dead {
+        return false;
+    }
+    return null;
+}
+
+/// Removes one incoming from block from each phi of the block named target,
+/// the Go `dropIncoming`.
+fn drop_incoming(allocator: Allocator, module: &var Module, function: Function, target: Name, from: Name) -> !void {
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        if !same_name(module.block_name(block), target) {
+            continue;
+        }
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if module.instrs.at_mut(instr.node) |node| {
+                if node.op != Op::Phi {
+                    continue;
+                }
+                var index = 0;
+                var found = -1;
+                while node.incoming.get(index) |incoming| {
+                    if same_name(incoming.block, from) {
+                        found = index;
+                        break;
+                    }
+                    index = index + 1;
+                }
+                if found >= 0 {
+                    try remove_incoming_at(allocator, &var node.incoming, found);
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Removes the incoming at position from a phi's list, keeping the order of
+/// the rest.
+fn remove_incoming_at(allocator: Allocator, list: &var array::Array<Incoming>, position: i64) -> !void {
+    var index = position + 1;
+    while list.get(index) |incoming| {
+        try list.set(index - 1, incoming);
+        index = index + 1;
+    }
+    return list.truncate(allocator, list.len() - 1);
+}
+
+/// Keeps the blocks reachable from the entry, and the phi incoming that
+/// arrive from them, the Go `removeUnreachableBlocks`.
+fn remove_unreachable_blocks(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    var blocks = try block_index(allocator, module, function);
+    defer blocks.deinit(allocator);
+    var reached = try flags(allocator, blocks.len());
+    defer reached.deinit(allocator);
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    try stack.append(allocator, 0);
+    while stack.pop() |position| {
+        if reached.get_or_panic(position) {
+            continue;
+        }
+        try reached.set(position, true);
+        let term = module.block_terminator(blocks.block_at(position));
+        var successor = 0;
+        while term.successor(successor) |target| {
+            successor = successor + 1;
+            if blocks.position_of(module, target) |next| {
+                if !reached.get_or_panic(next) {
+                    try stack.append(allocator, next);
+                }
+            }
+        }
+    }
+    var live = map::new<i64, bool>(allocator);
+    defer live.deinit(allocator);
+    var kept = array::new<Block>(allocator);
+    defer kept.deinit(allocator);
+    var position = 0;
+    while position < blocks.len() {
+        if reached.get_or_panic(position) {
+            let block = blocks.block_at(position);
+            try kept.append(allocator, block);
+            try live.insert(allocator, name_id(module.block_name(block)), true);
+        }
+        position = position + 1;
+    }
+    try set_function_blocks(allocator, module, function, &kept);
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if module.instrs.at_mut(instr.node) |node| {
+                if node.op != Op::Phi {
+                    continue;
+                }
+                var write = 0;
+                var read = 0;
+                while node.incoming.get(read) |edge| {
+                    read = read + 1;
+                    if live.contains(name_id(edge.block)) {
+                        try node.incoming.set(write, edge);
+                        write = write + 1;
+                    }
+                }
+                try node.incoming.truncate(allocator, write);
+            }
+        }
+    }
+    return;
+}
+
+/// Writes blocks over a function's block list.
+fn set_function_blocks(allocator: Allocator, module: &var Module, function: Function, blocks: &array::Array<Block>) -> !void {
+    if module.function_nodes.at_mut(function.node) |node| {
+        while node.blocks.pop() |_| {}
+        var index = 0;
+        while blocks.get(index) |block| {
+            index = index + 1;
+            try node.blocks.append(allocator, block);
+        }
+    }
+    return;
+}
+
+/// Replaces each phi whose incoming are one value, apart from the phi itself,
+/// with that value, until no such phi is left, the Go `foldTrivialPhis`.
+fn fold_trivial_phis(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    while true {
+        var replacements = map::new<i64, Value>(allocator);
+        defer replacements.deinit(allocator);
+        var block_index = 0;
+        while function_block_at(module, function, block_index) |block| {
+            block_index = block_index + 1;
+            var kept = array::new<Instr>(allocator);
+            defer kept.deinit(allocator);
+            var instr_index = 0;
+            while block_instr_at(module, block, instr_index) |instr| {
+                instr_index = instr_index + 1;
+                if trivial_phi_value(module, instr) |value| {
+                    let result = module.instr_result(instr);
+                    try replacements.insert(allocator, name_id(result.name), value);
+                    continue;
+                }
+                try kept.append(allocator, instr);
+            }
+            try set_block_instrs(allocator, module, block, &kept);
+        }
+        if replacements.len() == 0 {
+            return;
+        }
+        try replace_function_values(allocator, module, function, &replacements);
+    }
+    return;
+}
+
+/// Returns the one value a phi merges besides itself, the Go
+/// `trivialPhiValue`: the last incoming that is not the phi, when every such
+/// incoming names one value.
+fn trivial_phi_value(module: &Module, instr: Instr) -> ?Value {
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Phi or node.incoming.len() == 0 {
+        return null;
+    }
+    var found = false;
+    var only = empty_value();
+    var index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        let value = incoming.value;
+        if same_name(value.name, node.result.name) {
+            continue;
+        }
+        if found and !same_name(only.name, value.name) {
+            return null;
+        }
+        found = true;
+        only = value;
+    }
+    if !found {
+        return null;
+    }
+    return only;
+}
+
+/// Answers the error.try and error.has of results an error.ok with no
+/// payload made, the Go `foldKnownResults`: the try cannot fail and goes, and
+/// the test is true. Go reports whether anything changed, which no caller
+/// reads.
+fn fold_known_results(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    var succeeded = map::new<i64, bool>(allocator);
+    defer succeeded.deinit(allocator);
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            if node.op == Op::ErrorOk and node.args.len() == 0 {
+                try succeeded.insert(allocator, name_id(node.result.name), true);
+            }
+        }
+    }
+    if succeeded.len() == 0 {
+        return;
+    }
+    let truth = try module.names.intern("true");
+    block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var kept = array::new<Instr>(allocator);
+        defer kept.deinit(allocator);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let answer = known_result(module, instr, &succeeded);
+            if answer == KnownResult::Dropped {
+                continue;
+            }
+            if answer == KnownResult::True {
+                if module.instrs.at_mut(instr.node) |known| {
+                    known.op = Op::Const;
+                    known.operand = empty_name();
+                    while known.args.pop() |_| {}
+                    known.immediate = truth;
+                }
+            }
+            try kept.append(allocator, instr);
+        }
+        try set_block_instrs(allocator, module, block, &kept);
+    }
+    return;
+}
+
+/// Is what fold_known_results does with one instruction.
+enum KnownResult {
+    Kept,
+    Dropped,
+    True,
+}
+
+/// Returns what an instruction reading a result an error.ok with no payload
+/// made becomes: an error.try of no value goes, an error.has is true.
+fn known_result(module: &Module, instr: Instr, succeeded: &map::Map<i64, bool>) -> KnownResult {
+    let node = module.instrs.at(instr.node);
+    if node.args.len() != 1 {
+        return KnownResult::Kept;
+    }
+    let arg = node.args.get_or_panic(0);
+    if !succeeded.contains(name_id(arg.name)) {
+        return KnownResult::Kept;
+    }
+    if node.op == Op::ErrorTry and module.names.is(node.result.type_name, "void") {
+        return KnownResult::Dropped;
+    }
+    if node.op == Op::ErrorHas {
+        return KnownResult::True;
+    }
+    return KnownResult::Kept;
+}

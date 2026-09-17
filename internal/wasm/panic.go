@@ -243,7 +243,7 @@ func (e *emitter) writeCondFail(instr *ir.Instr) error {
 	)
 	fmt.Fprintf(&e.out, "            (if %s\n", cond)
 	e.out.WriteString("              (then\n")
-	fmt.Fprintf(&e.out, "                (call $%s %s)))\n",
+	fmt.Fprintf(&e.out, "                (call $%s %s) (unreachable)))\n",
 		spec.helper, strings.Join(args, " "))
 	return nil
 }

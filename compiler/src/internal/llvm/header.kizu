@@ -60,9 +60,13 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.write_float_cast_decls(module);
     // Large frames touch each page before they can cross a coroutine guard;
     // LLVM emits no added instructions for small frames.
+    // Darwin's arm64 ABI has every function that calls keep a frame record,
+    // which is what its unwinders and profilers walk; its compilers keep one
+    // by default, and code without one also runs a call-heavy recursion
+    // measurably slower there.
     if self.darwin_stack_probe {
         try self.line(
-            \\attributes #0 = { "probe-stack"="__chkstk_darwin" "stack-probe-size"="4096" }
+            \\attributes #0 = { "frame-pointer"="non-leaf" "probe-stack"="__chkstk_darwin" "stack-probe-size"="4096" }
         );
     } else {
         try self.line(
@@ -805,9 +809,13 @@ fn (self: &var Emitter) write_struct_types(module: &ir::Module) -> !void {
 }
 
 /// Writes the #991 `tag + inline payload storage` layout for each declared
-/// tagged union, the Go `writeUnionTypes`: `{ i64, [N x i8] }`, where N is
-/// the byte capacity of the largest variant payload. Payload shapes are
-/// validated in validate_module_types, so the capacity is known here.
+/// tagged union, the Go `writeUnionTypes`: `{ i64, [W x i64] }`, where W is
+/// the number of words the largest variant payload fills. A payload aligns to
+/// at most 8, so words hold it at the size and alignment bytes would; an
+/// optimizer that splits a union copy into its elements then moves the
+/// payload as words, where bytes would have it rebuilt one byte at a time.
+/// Payload shapes are validated in validate_module_types, so the capacity is
+/// known here.
 fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
     var names = try sorted_union_names(self.allocator, module);
     defer names.deinit(self.allocator);
@@ -824,7 +832,8 @@ fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
             Error(failed) => failed.deinit(self.allocator),
         }
         let union_name = try self.llvm_union_type_name(name_bytes);
-        try self.line2("%s = type { i64, [%d x i8] }", Arg::Str(union_name), Arg::Int(capacity));
+        let words = round_up(capacity, max_inline_payload_align()) / max_inline_payload_align();
+        try self.line2("%s = type { i64, [%d x i64] }", Arg::Str(union_name), Arg::Int(words));
     }
     if names.len() > 0 {
         try self.line("");
