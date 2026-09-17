@@ -29,13 +29,6 @@ const (
 	arrayFieldCapacity = 2
 )
 
-// arrayEmptyGlobal is the header read in place of a null handle. The runtime
-// hands back null when the header itself could not be allocated, and answered
-// every read on it from its own null checks; an all-zero header answers them
-// the same way. It holds no capacity, so an append still goes back to the
-// runtime and comes back as the failure.
-const arrayEmptyGlobal = "@kizu.array.empty"
-
 // writeArrayRuntimeDecls writes declarations for the hosted Array runtime.
 func (e *emitter) writeArrayRuntimeDecls() {
 	if !e.usesArrayHeader() {
@@ -46,8 +39,6 @@ func (e *emitter) writeArrayRuntimeDecls() {
 		e.out.WriteByte('\n')
 		return
 	}
-	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
-		arrayEmptyGlobal, arrayHeaderType)
 	e.out.WriteString("declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)\n")
 	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
@@ -59,18 +50,9 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	e.out.WriteString("declare void @kizu_array_deinit(ptr, ptr, i64)\n\n")
 }
 
-// arrayHandle returns an operand that always points at a readable header.
-func (e *emitter) arrayHandle(operand string) string {
-	nullName := "%" + e.nextSyntheticValue("array.handle.null")
-	handleName := "%" + e.nextSyntheticValue("array.handle")
-	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, operand)
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr %s\n",
-		handleName, nullName, arrayEmptyGlobal, operand)
-	return handleName
-}
-
-// arrayFieldAddr returns the address of one header field. The handle always
-// points at a header (arrayHandle), so the address is inbounds.
+// arrayFieldAddr returns the address of one header field. An array is the
+// header, so what a handle names is always the address of one, never null, and
+// the field address is inbounds.
 func (e *emitter) arrayFieldAddr(handle string, field int, name string) string {
 	addr := "%" + e.nextSyntheticValue(name)
 	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 0, i32 %d\n",
@@ -233,7 +215,7 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	left := e.value(instr.Args[1]).operand
 	right := e.value(instr.Args[2]).operand
 	okName := localName(instr.Result.Name) + ".ok"
@@ -297,7 +279,7 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 		return err
 	}
 	array := e.value(instr.Args[0])
-	handle := e.arrayHandle(array.operand)
+	handle := array.operand
 	okName := localName(instr.Result.Name) + ".ok"
 	e.writeArrayAppendPaths(instr, elem, array.operand, handle, okName)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_append")
@@ -308,8 +290,7 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 // pointer and capacity and hands back the new ones, never the header itself,
 // so the header stays a local the optimizer can keep in registers, and the
 // length the append ends at is one value computed before the paths part,
-// which is what lets a loop of appends be counted. A null handle still comes
-// back as the failure it is.
+// which is what lets a loop of appends be counted.
 //
 // It returns the length the append started from, the index the element lands
 // at. An array has no use for it; an arena hands it back as the handle that
@@ -412,7 +393,7 @@ func (e *emitter) writeArrayLen(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: array.len expects Array<T> -> i64")
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	resultName := localName(instr.Result.Name)
 	e.arrayLoadField(handle, arrayFieldLen, "array.len", resultName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
@@ -424,7 +405,7 @@ func (e *emitter) writeArrayCapacity(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: array.capacity expects Array<T> -> i64")
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	resultName := localName(instr.Result.Name)
 	e.arrayLoadField(handle, arrayFieldCapacity, "array.capacity", resultName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
@@ -453,7 +434,7 @@ func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
 	// The bytes may be a view of this same array, but a view covers
 	// initialized bytes and the tail lies above them, so the copy never
 	// overlaps its source.
-	handle := e.arrayHandle(array.operand)
+	handle := array.operand
 	length := "%" + e.nextSyntheticValue("array.append_bytes.held")
 	capacity := "%" + e.nextSyntheticValue("array.append_bytes.cap")
 	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append_bytes.held.addr")
@@ -550,7 +531,7 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
 		return fmt.Errorf("llvm error: array.get expects Array<T>, i64 -> ?T")
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	index := e.value(instr.Args[1])
 	checked, err := e.arrayCheckedElement(instr, handle, index.operand, "")
 	if err != nil {
@@ -568,7 +549,7 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	index := e.value(instr.Args[1])
 	lenName := "%" + e.nextSyntheticValue("array.get.panic.len")
 	e.arrayLoadField(handle, arrayFieldLen, "array.get.panic.len", lenName)
@@ -593,7 +574,7 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
 		return fmt.Errorf("llvm error: array.at expects Array<T>, i64 -> ?&T")
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	index := e.value(instr.Args[1])
 	checked, err := e.arrayCheckedElement(instr, handle, index.operand, "")
 	if err != nil {
@@ -612,7 +593,7 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	index := e.value(instr.Args[1])
 	okName := localName(instr.Result.Name) + ".ok"
 	e.writeArrayCheckedStore(handle, elem, index.operand, instr.Args[2], okName)
@@ -701,6 +682,11 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 // the data pointer, measured by the capacity it was sized at. Array.deinit and
 // Arena.deinit are both this, since the two are the same header and whatever
 // owners the elements held are already gone by the time either runs.
+//
+// A container that never grew owns no bytes, and releasing it asks nothing of
+// the allocator, so that test is written here rather than behind the call: a
+// scratch array a function declares and deinits on every call, and mostly
+// leaves empty, otherwise pays a call into the runtime for each.
 func (e *emitter) writeContainerStorageRelease(instr *ir.Instr, what string) error {
 	container := e.value(instr.Args[0])
 	// A cleanup carries no immediate, so the element the release measures is
@@ -719,8 +705,17 @@ func (e *emitter) writeContainerStorageRelease(instr *ir.Instr, what string) err
 	bytes := "%" + e.nextSyntheticValue(what+".bytes")
 	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n",
 		bytes, capacity, e.elementSizeOperand(elem))
+	owns := "%" + e.nextSyntheticValue(what+".owns")
+	releaseLabel := helperLabel(owns, "release")
+	doneLabel := helperLabel(owns, "done")
+	e.markCurrentBlockExit(doneLabel)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i64 %s, 0\n", owns, bytes)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", owns, releaseLabel, doneLabel)
+	fmt.Fprintf(&e.out, "%s:\n", releaseLabel)
 	fmt.Fprintf(&e.out, "  call void @kizu_array_deinit(ptr %s, ptr %s, i64 %s)\n",
 		allocator.operand, data, bytes)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", doneLabel)
+	fmt.Fprintf(&e.out, "%s:\n", doneLabel)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }

@@ -131,7 +131,7 @@ func (e *emitter) validateForeignBoundary() error {
 // taskInvokeStateTypes returns the concrete struct types moved into TaskSet
 // workers. The hosted runtime calls every worker through one C-shaped pointer
 // ABI; one small thunk per state type adapts that pointer to Kizu's explicit
-// byval struct ABI.
+// struct ABI.
 func (e *emitter) taskInvokeStateTypes() []string {
 	seen := map[string]bool{}
 	for _, fn := range e.module.Functions {
@@ -162,7 +162,9 @@ func taskInvokeThunkName(typeName string) string {
 // Calling a Kizu `fn(Io, Allocator, A)` as a C `void (*)(void *, void *,
 // void *)` is not portable: targets choose aggregate argument registers from
 // A's shape. The thunk keeps the runtime untyped while making that one call
-// with A's declared byval ABI.
+// with A's declared ABI. The worker's parameter promises no one else touches
+// the slot while it runs, and the state is the runtime's, so the thunk hands
+// over a copy of its own.
 func (e *emitter) writeTaskInvokeThunks() {
 	for _, typeName := range e.taskInvokeStateTypes() {
 		llvmType := e.llvmType(typeName)
@@ -172,11 +174,11 @@ func (e *emitter) writeTaskInvokeThunks() {
 			taskInvokeThunkName(typeName),
 		)
 		e.out.WriteString("entry:\n")
-		fmt.Fprintf(&e.out,
-			"  call void %%kizu.entry("+
-				"ptr %%kizu.io, ptr %%kizu.allocator, ptr byval(%s) %%kizu.state)\n",
-			llvmType,
-		)
+		fmt.Fprintf(&e.out, "  %%kizu.state.copy = alloca %s\n", llvmType)
+		fmt.Fprintf(&e.out, "  %%kizu.state.value = load %s, ptr %%kizu.state\n", llvmType)
+		fmt.Fprintf(&e.out, "  store %s %%kizu.state.value, ptr %%kizu.state.copy\n", llvmType)
+		e.out.WriteString("  call void %kizu.entry(" +
+			"ptr %kizu.io, ptr %kizu.allocator, ptr %kizu.state.copy)\n")
 		e.out.WriteString("  ret void\n}\n\n")
 	}
 }
@@ -973,6 +975,13 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 }
 
 // functionParamABI returns the LLVM ABI parameter spelling for one Kizu value.
+//
+// A struct arrives as the address of a slot the caller filled for this call
+// alone, and the body loads it once on entry. Nothing else holds that slot and
+// nothing writes it while the callee runs, which is what the attributes say.
+// `byval` said the same thing to the code generator only: the copy it asks for
+// is made below the optimizer, at every call, so a struct handed down a
+// recursion was copied once per call even when no one ever read it.
 func (e *emitter) functionParamABI(param ir.Param) string {
 	paramType := e.llvmType(param.Type)
 	paramName := localName(param.Name)
@@ -984,7 +993,7 @@ func (e *emitter) functionParamABI(param ir.Param) string {
 		e.entryParamLoads,
 		fmt.Sprintf("  %s = load %s, ptr %s\n", paramName, paramType, addrName),
 	)
-	return fmt.Sprintf("ptr byval(%s) %s", paramType, addrName)
+	return "ptr noalias nocapture readonly " + addrName
 }
 
 // registerForwardedValues resolves every result that never becomes an LLVM
@@ -1719,7 +1728,7 @@ func functionLinkage(name string) string {
 }
 
 // writeInternalCall adapts module-local struct values to Kizu's explicit
-// byval pointer ABI, avoiding target-dependent aggregate argument lowering.
+// pointer ABI, avoiding target-dependent aggregate argument lowering.
 func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 	args := make([]string, 0, len(instr.Args))
 	params := e.functionParams[name]
@@ -1772,7 +1781,7 @@ func (e *emitter) internalCallArg(arg ir.Value, param ir.Param, index int) (stri
 	slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, argType)
 	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, value.operand, slotName)
-	return fmt.Sprintf("ptr byval(%s) %s", argType, slotName), nil
+	return "ptr " + slotName, nil
 }
 
 // usesHostedRuntimeABI reports whether a std hosted runtime call uses the
@@ -2646,7 +2655,6 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	okBool := okValue + ".bool"
 	okLabel := helperLabel(instr.Result.Name, "try.ok")
 	errLabel := helperLabel(instr.Result.Name, "try.err")
-	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okValue, sourceType, sourceValue.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBool, okValue)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
@@ -2659,6 +2667,9 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	if err := e.writeErrorFailureReturn(source); err != nil {
 		return err
 	}
+	// Marked after the cleanups: one that opens blocks of its own marks
+	// where it ends, and the block continues past the try, not past them.
+	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	if success == "void" {
 		return nil

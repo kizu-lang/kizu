@@ -80,7 +80,7 @@ func (e *emitter) llvmType(typ string) string {
 }
 
 // usesIndirectStructParamABI reports whether module-local functions pass a
-// value through an explicit byval pointer instead of target aggregate lowering.
+// value through an explicit pointer instead of target aggregate lowering.
 func (e *emitter) usesIndirectStructParamABI(typ string) bool {
 	_, ok := e.module.Structs[typ]
 	return ok

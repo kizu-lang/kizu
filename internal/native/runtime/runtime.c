@@ -3503,11 +3503,13 @@ static int64_t kizu_array_init_capacity(int64_t elem_size) {
     return fits > least ? fits : least;
 }
 
-/* Grow by half again plus the initial capacity, following Zig's
- * ArrayList.growCapacity. A factor below the golden ratio lets a later
- * allocation reuse blocks freed by earlier ones; doubling never can. */
+/* Double, the way Rust's Vec grows. Growing by half again (Zig's
+ * ArrayList.growCapacity) leaves room for an allocator to reuse the blocks
+ * earlier growth freed, but the system allocators realloc in place or move
+ * pages rather than reuse them, and the extra steps are paid in copies: a
+ * constraint solver and a loop finder that build lists as they go spent 4% of
+ * their time more in memmove, realloc and the madvise of freed blocks. */
 static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size) {
-    int64_t half = minimum / 2;
     int64_t init = kizu_array_init_capacity(elem_size);
     /* The pad stops a growing collection reallocating early, and is worth at
        most a few times what was asked for: a one-element list does not need a
@@ -3515,10 +3517,10 @@ static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size) {
     if (init > minimum * 4) {
         init = minimum * 4;
     }
-    if (minimum > INT64_MAX - half - init) {
+    if (minimum > INT64_MAX / 2) {
         return INT64_MAX;
     }
-    return minimum + half + init;
+    return minimum * 2 > init ? minimum * 2 : init;
 }
 
 static _Bool kizu_array_reserve_storage(

@@ -114,15 +114,6 @@ fn array_header_type() -> []u8 {
     return "%kizu.array";
 }
 
-/// The header read in place of a null handle, the Go `arrayEmptyGlobal`. The
-/// runtime hands back null when the header itself could not be allocated, and
-/// answered every read on it from its own null checks; an all-zero header
-/// answers them the same way. It holds no capacity, so an append still goes
-/// back to the runtime and comes back as the failure.
-fn array_empty_global() -> []u8 {
-    return "@kizu.array.empty";
-}
-
 /// The field index of the element storage.
 fn array_field_data() -> i64 {
     return 0;
@@ -158,10 +149,6 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
     if !self.uses_array_runtime(module) {
         return self.line("");
     }
-    try self.line2(
-        "%s = private unnamed_addr global %s zeroinitializer",
-        Arg::Lit(array_empty_global()), Arg::Lit(array_header_type())
-    );
     try self.line("declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)");
     try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)");
     try self.line("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
@@ -174,22 +161,9 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
     return self.line("");
 }
 
-/// Returns an operand that always points at a readable header, the Go
-/// `arrayHandle`.
-fn (self: &var Emitter) array_handle(operand: ir::Name) -> !ir::Name {
-    let null_synthetic = try self.next_synthetic_value("array.handle.null");
-    let null_name = try self.percent(null_synthetic);
-    let handle_synthetic = try self.next_synthetic_value("array.handle");
-    let handle_name = try self.percent(handle_synthetic);
-    try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(null_name), Arg::Str(operand));
-    try self.line4(
-        "  %s = select i1 %s, ptr %s, ptr %s",
-        Arg::Str(handle_name), Arg::Str(null_name), Arg::Lit(array_empty_global()), Arg::Str(operand)
-    );
-    return handle_name;
-}
-
-/// Returns the address of one header field, the Go `arrayFieldAddr`.
+/// Returns the address of one header field, the Go `arrayFieldAddr`. An array
+/// is the header, so what a handle names is always the address of one, never
+/// null, and the field address is inbounds.
 fn (self: &var Emitter) array_field_addr(handle: ir::Name, field: i64, name: []u8) -> !ir::Name {
     let synthetic = try self.next_synthetic_value(name);
     let addr = try self.percent(synthetic);
@@ -417,7 +391,7 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
     }
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let left = try self.operand(module, node.args.get_or_panic(1));
     let right = try self.operand(module, node.args.get_or_panic(2));
     let result_name = try self.local_name(module, node.result.name);
@@ -496,7 +470,7 @@ fn (self: &var Emitter) write_array_append(module: &ir::Module, node: &ir::Instr
     }
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
     try self.write_array_append_paths(module, node, array.operand, handle, ok_name, elem_bytes);
@@ -603,7 +577,7 @@ fn (self: &var Emitter) write_array_len(module: &ir::Module, node: &ir::InstrNod
         return try self.fail0("llvm error: array.len expects Array<T> -> i64");
     }
     let array = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let result_name = try self.local_name(module, node.result.name);
     try self.array_load_field(handle, array_field_len(), "array.len", result_name);
     try self.set_value(module, node.result, result_name);
@@ -616,7 +590,7 @@ fn (self: &var Emitter) write_array_capacity(module: &ir::Module, node: &ir::Ins
         return try self.fail0("llvm error: array.capacity expects Array<T> -> i64");
     }
     let array = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let result_name = try self.local_name(module, node.result.name);
     try self.array_load_field(handle, array_field_capacity(), "array.capacity", result_name);
     try self.set_value(module, node.result, result_name);
@@ -671,7 +645,7 @@ fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir:
     try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(len_name), Arg::Str(slice.operand));
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let held_synthetic = try self.next_synthetic_value("array.append_bytes.held");
     let length = try self.percent(held_synthetic);
     let cap_synthetic = try self.next_synthetic_value("array.append_bytes.cap");
@@ -784,7 +758,7 @@ fn (self: &var Emitter) write_array_get(module: &ir::Module, node: &ir::InstrNod
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes, null);
     return self.write_array_optional_load_result(module, node, checked);
 }
@@ -803,7 +777,7 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let len_synthetic = try self.next_synthetic_value("array.get.panic.len");
     let len_name = try self.percent(len_synthetic);
     try self.array_load_field(handle, array_field_len(), "array.get.panic.len", len_name);
@@ -838,7 +812,7 @@ fn (self: &var Emitter) write_array_at(module: &ir::Module, node: &ir::InstrNode
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let checked = try self.array_checked_element(module, node, handle, index.operand, elem_bytes, null);
     return self.write_borrow_optional_result(module, node, checked);
 }
@@ -859,7 +833,7 @@ fn (self: &var Emitter) write_array_set(module: &ir::Module, node: &ir::InstrNod
     let elem_bytes = elem.as_bytes();
     let array = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
-    let handle = try self.array_handle(array.operand);
+    let handle = array.operand;
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
     try self.write_array_checked_store(module, node, handle, index.operand, ok_name, elem_bytes);
@@ -961,6 +935,11 @@ fn (self: &var Emitter) write_array_deinit(module: &ir::Module, node: &ir::Instr
 /// Array.deinit and Arena.deinit are both this, since the two are the same
 /// header and whatever owners the elements held are already gone by the time
 /// either runs.
+///
+/// A container that never grew owns no bytes, and releasing it asks nothing of
+/// the allocator, so that test is written here rather than behind the call: a
+/// scratch array a function declares and deinits on every call, and mostly
+/// leaves empty, otherwise pays a call into the runtime for each.
 fn (self: &var Emitter) write_container_storage_release(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -1007,10 +986,27 @@ fn (self: &var Emitter) write_container_storage_release(
         "  %s = mul i64 %s, %s",
         Arg::Str(bytes), Arg::Str(capacity), Arg::Str(elem_size)
     );
+    var owns_name = try string::from_bytes(self.allocator, what);
+    defer owns_name.deinit(self.allocator);
+    try owns_name.append_bytes(self.allocator, ".owns");
+    let owns_label = owns_name.as_bytes();
+    let owns_synthetic = try self.next_synthetic_value(owns_label);
+    let owns = try self.percent(owns_synthetic);
+    let release_label = try self.helper_label_local(owns, "release");
+    let done_label = try self.helper_label_local(owns, "done");
+    try self.mark_current_block_exit(module, done_label);
+    try self.line2("  %s = icmp ne i64 %s, 0", Arg::Str(owns), Arg::Str(bytes));
+    try self.line3(
+        "  br i1 %s, label %%%s, label %%%s",
+        Arg::Str(owns), Arg::Str(release_label), Arg::Str(done_label)
+    );
+    try self.line1("%s:", Arg::Str(release_label));
     try self.line3(
         "  call void @kizu_array_deinit(ptr %s, ptr %s, i64 %s)",
         Arg::Str(allocator.operand), Arg::Str(data), Arg::Str(bytes)
     );
+    try self.line1("  br label %%%s", Arg::Str(done_label));
+    try self.line1("%s:", Arg::Str(done_label));
     try self.set_void_value(module, node.result);
     return null;
 }
