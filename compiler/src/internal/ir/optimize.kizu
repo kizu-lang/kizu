@@ -1,4 +1,5 @@
 import compiler::internal::diagnostic;
+import compiler::internal::stdtarget;
 import std::array;
 import std::map;
 import std::mem;
@@ -6,34 +7,81 @@ import std::mem;
 // Mechanical port of internal/ir/optimize.go: the bounded local cleanup
 // passes. Go keys the constants, copies and used-value sets by the Go string
 // of an SSA value name; here they are keyed by the bytes of the interned
-// Name. Go rewrites an instruction through its pointer; here the rewrite
-// goes through the module's instruction arena.
+// Name, or by its id where the pass only asks whether two names are one.
+// Go rewrites an instruction through its pointer; here the rewrite goes
+// through the module's instruction arena.
 
 /// Applies bounded local cleanup passes to a module, the Go `Optimize`. A
 /// pass rewrites values in place, so what it produces is verified the same
-/// way lowering is.
-pub fn optimize(allocator: Allocator, module: &var Module) -> !?diagnostic::Diagnostic {
+/// way lowering is. A wasm target's module is then reshaped for the engine
+/// (reshape_for_engine).
+pub fn optimize(allocator: Allocator, module: &var Module, target: stdtarget::Target) -> !?diagnostic::Diagnostic {
     try inline_calls(allocator, module);
+    try eliminate_tail_recursion(allocator, module);
     try constant_fold(allocator, module);
     try copy_propagate(allocator, module);
+    try forward_field_loads(allocator, module);
+    try eliminate_bounds_checks(allocator, module);
+    try simplify_branches(allocator, module);
     try dead_code_eliminate(allocator, module);
+    if target != stdtarget::Target::Native {
+        try reshape_for_engine(allocator, module);
+    }
     return verify(allocator, module);
 }
 
-/// Folds binary instructions with integer constants, the Go `ConstantFold`.
+/// Applies the passes an optimized module gets for a wasm target, the Go
+/// `ReshapeForEngine`: merging repeated computations, which lets more index
+/// checks be answered, versioning loops and rotating them. An engine
+/// compiling wasm as it reads it runs code in the shape it is given; LLVM
+/// numbers values, moves checks out of loops and rotates them itself, and its
+/// own passes read code in the shape lowering gives better than code already
+/// reshaped.
+pub fn reshape_for_engine(allocator: Allocator, module: &var Module) -> !void {
+    try eliminate_common_subexpressions(allocator, module);
+    try eliminate_bounds_checks(allocator, module);
+    try simplify_branches(allocator, module);
+    try version_loops_for_bounds(allocator, module);
+    try simplify_branches(allocator, module);
+    try rotate_loops(allocator, module);
+    try constant_fold(allocator, module);
+    try simplify_branches(allocator, module);
+    return dead_code_eliminate(allocator, module);
+}
+
+/// Folds integer arithmetic and comparisons whose operands are constants,
+/// the Go `ConstantFold`. A constant is an SSA value, so one defined anywhere
+/// in a function is the same wherever it is read; a value named by its digits
+/// is a constant too. Folding repeats until a pass folds nothing, since a
+/// block can read a value a later block defines.
 fn constant_fold(allocator: Allocator, module: &var Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
+        var consts = map::new<i64, i64>(allocator);
+        defer consts.deinit(allocator);
         var block_index = 0;
         while function_block_at(module, function, block_index) |block| {
             block_index = block_index + 1;
-            var consts = try constants_in(allocator, module, block);
-            defer consts.deinit(allocator);
             var instr_index = 0;
             while block_instr_at(module, block, instr_index) |instr| {
                 instr_index = instr_index + 1;
-                try fold_instr(allocator, module, instr, &var consts);
+                try record_constant(allocator, module, instr, &var consts);
+            }
+        }
+        var changed = true;
+        while changed {
+            changed = false;
+            block_index = 0;
+            while function_block_at(module, function, block_index) |block| {
+                block_index = block_index + 1;
+                var instr_index = 0;
+                while block_instr_at(module, block, instr_index) |instr| {
+                    instr_index = instr_index + 1;
+                    if try fold_instr(allocator, module, instr, &var consts) {
+                        changed = true;
+                    }
+                }
             }
         }
     }
@@ -106,28 +154,18 @@ fn block_instr_at(module: &Module, block: Block, index: i64) -> ?Instr {
     return node.instrs.get(index);
 }
 
-/// Returns integer constants already emitted in a block, the Go
-/// `constantsIn`.
-fn constants_in(allocator: Allocator, module: &Module, block: Block) -> !map::Map<[]u8, i64> {
-    var consts = map::new<[]u8, i64>(allocator);
-    errdefer consts.deinit(allocator);
-    let block_node = module.blocks.at(block.node);
-    var index = 0;
-    while block_node.instrs.get(index) |instr| {
-        index = index + 1;
-        let node = module.instrs.at(instr.node);
-        if node.op != Op::Const or !module.names.is(node.result.type_name, "i64") {
-            continue;
-        }
-        let immediate_text = name_text(&module.names, node.immediate);
-        let immediate_bytes = immediate_text.as_bytes();
-        if parse_i64(immediate_bytes) |value| {
-            let result_text = name_text(&module.names, node.result.name);
-            let result_bytes = result_text.as_bytes();
-            try consts.insert(allocator, result_bytes, value);
-        }
+/// Notes an i64 constant instruction's value, the Go `recordConstant`.
+fn record_constant(allocator: Allocator, module: &Module, instr: Instr, consts: &var map::Map<i64, i64>) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Const or !module.names.is(node.result.type_name, "i64") {
+        return;
     }
-    return move consts;
+    let immediate_text = name_text(&module.names, node.immediate);
+    let immediate_bytes = immediate_text.as_bytes();
+    if parse_i64(immediate_bytes) |value| {
+        try consts.insert(allocator, name_id(node.result.name), value);
+    }
+    return;
 }
 
 /// Reads a decimal integer with an optional sign, the Go
@@ -168,37 +206,58 @@ fn parse_i64(text: []u8) -> ?i64 {
     return -value;
 }
 
-/// Folds one instruction when both operands are known constants, the Go
-/// `foldInstr`.
-fn fold_instr(allocator: Allocator, module: &var Module, instr: Instr, consts: &var map::Map<[]u8, i64>) -> !void {
+/// Returns the value of an i64 operand known to be constant, the Go
+/// `integerConstant`: one a constant instruction defines, or one named by its
+/// digits.
+fn integer_constant(module: &Module, value: Value, consts: &map::Map<i64, i64>) -> ?i64 {
+    if !module.names.is(value.type_name, "i64") {
+        return null;
+    }
+    if consts.get(name_id(value.name)) |known| {
+        return known;
+    }
+    let text = name_text(&module.names, value.name);
+    let bytes = text.as_bytes();
+    return parse_i64(bytes);
+}
+
+/// Folds one instruction when both operands are known constants, and reports
+/// whether it did, the Go `foldInstr`.
+fn fold_instr(allocator: Allocator, module: &var Module, instr: Instr, consts: &var map::Map<i64, i64>) -> !bool {
     let node = module.instrs.at(instr.node);
-    if node.args.len() != 2 or !module.names.is(node.result.type_name, "i64") {
-        return;
+    if node.args.len() != 2 or node.op == Op::Const {
+        return false;
     }
     let left_arg = node.args.get_or_panic(0);
     let right_arg = node.args.get_or_panic(1);
-    let left = constant_of(&module.names, consts, left_arg.name) orelse return;
-    let right = constant_of(&module.names, consts, right_arg.name) orelse return;
-    let value = fold_binary(module, node.op, node.operand, left, right) orelse return;
-    let result_name = node.result.name;
-    let immediate = try module.names.intern_i64(value);
+    let left = integer_constant(module, left_arg, consts) orelse return false;
+    let right = integer_constant(module, right_arg, consts) orelse return false;
+    let result = node.result;
+    let op = node.op;
+    let operand = node.operand;
+    var immediate = empty_name();
+    if module.names.is(result.type_name, "i64") {
+        let value = fold_binary(module, op, operand, left, right) orelse return false;
+        immediate = try module.names.intern_i64(value);
+        try consts.insert(allocator, name_id(result.name), value);
+    } else {
+        if !module.names.is(result.type_name, "bool") {
+            return false;
+        }
+        let holds = fold_comparison(module, op, operand, left, right) orelse return false;
+        if holds {
+            immediate = try module.names.intern("true");
+        } else {
+            immediate = try module.names.intern("false");
+        }
+    }
     if module.instrs.at_mut(instr.node) |folded| {
         folded.op = Op::Const;
         folded.operand = empty_name();
         while folded.args.pop() |_| {}
         folded.immediate = immediate;
     }
-    let result_text = name_text(&module.names, result_name);
-    let result_bytes = result_text.as_bytes();
-    return consts.insert(allocator, result_bytes, value);
-}
-
-/// Returns the constant a value name is known to hold, the Go
-/// `consts[name]` read with its ok flag.
-fn constant_of(names: &NameTable, consts: &map::Map<[]u8, i64>, name: Name) -> ?i64 {
-    let retained = name_text(names, name);
-    let bytes = retained.as_bytes();
-    return consts.get(bytes);
+    return true;
 }
 
 /// Computes supported integer binary operations, the Go `foldBinary`: null
@@ -215,6 +274,42 @@ fn fold_binary(module: &Module, op: Op, operand: Name, left: i64, right: i64) ->
     }
     if module.names.is(operand, "*") {
         return left * right;
+    }
+    if module.names.is(operand, "&") {
+        return left & right;
+    }
+    if module.names.is(operand, "|") {
+        return left | right;
+    }
+    if module.names.is(operand, "^") {
+        return left ^ right;
+    }
+    return null;
+}
+
+/// Computes a signed comparison of two i64 constants, the Go
+/// `foldComparison`: null for every op that is not one.
+fn fold_comparison(module: &Module, op: Op, operand: Name, left: i64, right: i64) -> ?bool {
+    if op != Op::Binary {
+        return null;
+    }
+    if module.names.is(operand, "<") {
+        return left < right;
+    }
+    if module.names.is(operand, "<=") {
+        return left <= right;
+    }
+    if module.names.is(operand, ">") {
+        return left > right;
+    }
+    if module.names.is(operand, ">=") {
+        return left >= right;
+    }
+    if module.names.is(operand, "==") {
+        return left == right;
+    }
+    if module.names.is(operand, "!=") {
+        return left != right;
     }
     return null;
 }

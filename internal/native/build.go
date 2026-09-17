@@ -278,18 +278,25 @@ func clangFlags(options Options) []string {
 	if options.Triple != "" {
 		flags = append(flags, "-target", options.Triple)
 	}
-	return append(flags, clangOptimizationFlag(options.Opt))
+	return append(flags, clangOptimizationFlags(options.Opt)...)
 }
 
-// clangOptimizationFlag selects the native toolchain optimization level.
+// clangOptimizationFlags select the native toolchain optimization level.
 // `--opt` is asked for when the binary's own speed is what matters, so it asks
 // for the most the toolchain offers: on the compiler itself -O3 is 1.4% faster
 // and 1.1% smaller in peak memory than -O2, for 4.6% more time spent building.
-func clangOptimizationFlag(opt bool) string {
+//
+// It also keeps the code generator from merging identical instruction tails
+// of blocks that jump to one successor. Arms of a dispatch loop that end in
+// the same store and step are otherwise merged into one shared tail, and
+// every iteration of those arms takes a jump into it; with LLVM 16 a
+// tagged-union interpreter loop runs 9% slower for it, and none of the
+// programs it was measured on runs slower without the merge.
+func clangOptimizationFlags(opt bool) []string {
 	if opt {
-		return "-O3"
+		return []string{"-O3", "-Xclang", "-mllvm", "-Xclang", "-enable-tail-merge=false"}
 	}
-	return "-O0"
+	return []string{"-O0"}
 }
 
 // Metadata records explicit native build inputs next to the output artifact.

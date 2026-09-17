@@ -539,7 +539,10 @@ fn (self: &var Emitter) write_field_ref(module: &ir::Module, node: &ir::InstrNod
                 Arg::Str(ptr_name), Arg::Str(llvm_struct), Arg::Str(value.operand), Arg::Int(index)
             );
             let result_type = try self.llvm_type_of(module, node.result.type_name);
-            try self.line3("  %s = load %s, ptr %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(ptr_name));
+            let tag = self.value_tag(result_type);
+            try self.line4(
+                "  %s = load %s, ptr %s%s", Arg::Str(name), Arg::Str(result_type), Arg::Str(ptr_name), Arg::Lit(tag)
+            );
             try self.set_value(module, node.result, name);
             return null;
         }
@@ -667,7 +670,10 @@ fn (self: &var Emitter) write_field_ref_set(module: &ir::Module, node: &ir::Inst
             );
             let value_type = try self.llvm_type_of(module, new_value.type_name);
             let value = try self.operand(module, new_value);
-            try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(value.operand), Arg::Str(ptr_name));
+            let tag = self.value_tag(value_type);
+            try self.line4(
+                "  store %s %s, ptr %s%s", Arg::Str(value_type), Arg::Str(value.operand), Arg::Str(ptr_name), Arg::Lit(tag)
+            );
             try self.set_void_value(module, node.result);
             return null;
         }
@@ -703,9 +709,10 @@ fn (self: &var Emitter) write_ref_store(module: &ir::Module, node: &ir::InstrNod
     let value_type = try self.llvm_type_of(module, new_value.type_name);
     let value = try self.operand(module, new_value);
     let receiver_value = try self.operand(module, receiver);
-    try self.line4(
-        "  store %s%s %s, ptr %s",
-        Arg::Lit(keyword), Arg::Str(value_type), Arg::Str(value.operand), Arg::Str(receiver_value.operand)
+    let tag = self.reference_tag(module, node.op, receiver.type_name, value_type);
+    try self.line5(
+        "  store %s%s %s, ptr %s%s",
+        Arg::Lit(keyword), Arg::Str(value_type), Arg::Str(value.operand), Arg::Str(receiver_value.operand), Arg::Lit(tag)
     );
     try self.set_void_value(module, node.result);
     return null;
@@ -773,9 +780,10 @@ fn (self: &var Emitter) write_ref_load(module: &ir::Module, node: &ir::InstrNode
     let keyword = volatile_keyword(node.op);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let receiver_value = try self.operand(module, receiver);
-    try self.line4(
-        "  %s = load %s%s, ptr %s",
-        Arg::Str(result_name), Arg::Lit(keyword), Arg::Str(result_type), Arg::Str(receiver_value.operand)
+    let tag = self.reference_tag(module, node.op, receiver.type_name, result_type);
+    try self.line5(
+        "  %s = load %s%s, ptr %s%s",
+        Arg::Str(result_name), Arg::Lit(keyword), Arg::Str(result_type), Arg::Str(receiver_value.operand), Arg::Lit(tag)
     );
     try self.set_value(module, node.result, result_name);
     return null;
@@ -1022,8 +1030,12 @@ fn (self: &var Emitter) write_cond_fail(module: &ir::Module, node: &ir::InstrNod
         }
         let position = try self.panic_position(node.span);
         try typed.append(self.allocator, try self.names.copy(position));
-        let fail_label = try self.helper_label(module, cond_value.name, "fail");
-        let ok_label = try self.helper_label(module, cond_value.name, "pass");
+        // The labels are the check's own: two checks can test one condition, a
+        // shared comparison an optimizer left to both.
+        let check_synthetic = try self.next_synthetic_value("check");
+        let check = try self.percent(check_synthetic);
+        let fail_label = try self.helper_label_local(check, "fail");
+        let ok_label = try self.helper_label_local(check, "pass");
         try self.mark_current_block_exit(module, ok_label);
         try self.line3(
             "  br i1 %s, label %%%s, label %%%s", Arg::Str(cond.operand), Arg::Str(fail_label), Arg::Str(ok_label)
@@ -1064,12 +1076,22 @@ fn (self: &var Emitter) write_phi(module: &ir::Module, node: &ir::InstrNode) -> 
     var index = 0;
     while node.incoming.get(index) |incoming| {
         index = index + 1;
-        let value = try self.operand(module, incoming.value);
+        // A value whose block is written after this one is named by its
+        // mark until the body is written (phi_value_mark).
+        var operand = ir::empty_name();
+        if self.value_written(incoming.value.name) {
+            let value = try self.operand(module, incoming.value);
+            operand = value.operand;
+        } else {
+            let spelled = try self.own(module, incoming.value.name);
+            operand = try self.names.wrapped(phi_value_mark(), spelled, "");
+            self.wrote_phi_value_mark = true;
+        }
         let block_text = ir::name_text(&module.names, incoming.block);
         let block_bytes = block_text.as_bytes();
         let block = try self.names.intern(block_bytes);
         try parts.append(self.allocator, try self.sprint3(
-            "[ %s, %s%s ]", Arg::Str(value.operand), Arg::Lit(phi_predecessor_mark()), Arg::Str(block)
+            "[ %s, %s%s ]", Arg::Str(operand), Arg::Lit(phi_predecessor_mark()), Arg::Str(block)
         ));
     }
     let name = try self.local_name(module, node.result.name);

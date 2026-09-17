@@ -1,0 +1,1143 @@
+import std::array;
+import std::fmt;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/ir/version.go: keeping a second copy of a
+// counted loop without the index checks every iteration answers the same
+// way. Go keys the loop's blocks, definitions and hoisted values by the Go
+// string of a name; here they are keyed by the id of the interned Name. Go
+// names the checks a copy leaves out by instruction pointer; here by the
+// position of the block and of the instruction in it, which nothing moves
+// before the copy is made. Go keeps the counter's phi; only its name is read,
+// so that is what is kept. Go's closures (begin, finish, nonNegative, add,
+// join) are functions taking what they close over.
+
+/// Returns how many instructions a loop may hold for
+/// version_loops_for_bounds to keep a second copy of it, the Go
+/// `versionLimit`.
+fn version_limit() -> i64 {
+    return 64;
+}
+
+/// Gives a counted loop whose index checks every iteration answers the same
+/// way a second copy without those checks, and a test before the loop that
+/// picks the copy, the Go `VersionLoopsForBounds`. A loop `while i < limit`
+/// whose counter steps by one from start reads indexes `base + i` for bases
+/// that do not change in it; when start and every base are not negative and
+/// limit is no more than each length less its base, every index the loop can
+/// read is in bounds, and the copy runs. Otherwise the loop runs as it was,
+/// checks and all, and fails where it would have.
+///
+/// A loop qualifies when nothing in it can change an Array header, it leaves
+/// only through its header's test, and it is small: the copy doubles its code.
+pub fn version_loops_for_bounds(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try version_loops_in(allocator, module, function);
+    }
+    return;
+}
+
+/// Versions every qualifying loop of a function, reading the function's shape
+/// again after each, since a version adds blocks, the Go `versionLoopsIn`. A
+/// loop is looked at once, and so is the copy a version makes.
+fn version_loops_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    var seen = map::new<i64, bool>(allocator);
+    defer seen.deinit(allocator);
+    var site = 1;
+    while function_block_count(module, function) > 0 {
+        var blocks = try block_index(allocator, module, function);
+        defer blocks.deinit(allocator);
+        var preds = try block_predecessors(allocator, module, function, &blocks);
+        defer preds.deinit(allocator);
+        var tree = try build_dominator_tree(allocator, module, function, &blocks, &preds);
+        defer tree.deinit(allocator);
+        var versioned = false;
+        var position = 0;
+        while position < blocks.len() {
+            let at = position;
+            position = position + 1;
+            let name = blocks.name_at(at);
+            if seen.contains(name_id(name)) {
+                continue;
+            }
+            try seen.insert(allocator, name_id(name), true);
+            if try versionable_loop(allocator, module, function, &blocks, &preds, &tree, at) |loop| {
+                defer loop.deinit(allocator);
+                var spelled = try string::from_bytes(allocator, "ver");
+                errdefer spelled.deinit(allocator);
+                try fmt::append_i64(allocator, &var spelled, site);
+                try spelled.append_byte(allocator, cast<u8>(46));
+                let prefix = try module.names.intern_owned(move spelled);
+                let copy_header = try module.names.joined(prefix, "", name);
+                try seen.insert(allocator, name_id(copy_header), true);
+                try loop.version(allocator, module, &blocks, prefix, copy_header);
+                versioned = true;
+                break;
+            }
+        }
+        if !versioned {
+            return;
+        }
+        site = site + 1;
+    }
+    return;
+}
+
+/// Is one bound the test before the loop establishes, the Go `boundedCheck`:
+/// base is at least zero, and, when there is a container, the counter's limit
+/// is no more than the container's length less base.
+struct BoundedCheck {
+    container: Value,
+    base: Value,
+    view: bool,
+}
+
+/// Is one loop version_loops_for_bounds can version, the Go `versionedLoop`.
+/// inside names the loop's blocks, and defined the values they define;
+/// answered are the checks the copy leaves out: Array operations it writes
+/// unchecked and view checks it drops.
+struct VersionedLoop {
+    function: Function,
+    header: i64,
+    pre: i64,
+    latch: i64,
+    exit: Name,
+    inside: map::Map<i64, bool>,
+    defined: map::Map<i64, bool>,
+    defs: map::Map<i64, Instr>,
+    counter: Name,
+    start: Value,
+    limit: Value,
+    checks: array::Array<BoundedCheck>,
+    answered: map::Map<i64, bool>,
+}
+
+fn (self: VersionedLoop) deinit(allocator: Allocator) -> void {
+    self.inside.deinit(allocator);
+    self.defined.deinit(allocator);
+    self.defs.deinit(allocator);
+    self.checks.deinit(allocator);
+    self.answered.deinit(allocator);
+    return;
+}
+
+/// Returns the loop headed by the block at position when it can be versioned,
+/// the Go `versionableLoop`.
+fn versionable_loop(
+    allocator: Allocator,
+    module: &Module,
+    function: Function,
+    blocks: &BlockIndex,
+    preds: &array::Array<array::Array<i64>>,
+    tree: &DominatorTree,
+    position: i64
+) -> !?VersionedLoop {
+    let term = module.block_terminator(blocks.block_at(position));
+    if position == 0 or term.op != TermOp::Branch or same_name(term.target, term.else_target) {
+        return null;
+    }
+    var entries = 0;
+    if preds.at(position) |into| {
+        entries = into.len();
+    }
+    if entries != 2 {
+        return null;
+    }
+    var loop = VersionedLoop {
+        function: function,
+        header: position,
+        pre: -1,
+        latch: -1,
+        exit: term.else_target,
+        inside: map::new<i64, bool>(allocator),
+        defined: map::new<i64, bool>(allocator),
+        defs: map::new<i64, Instr>(allocator),
+        counter: empty_name(),
+        start: empty_value(),
+        limit: empty_value(),
+        checks: array::new<BoundedCheck>(allocator),
+        answered: map::new<i64, bool>(allocator)
+    };
+    errdefer loop.deinit(allocator);
+    if !try loop.qualifies(allocator, module, blocks, preds, tree, term) {
+        loop.deinit(allocator);
+        return null;
+    }
+    return move loop;
+}
+
+/// Reports whether the loop can be versioned, filling in what the version
+/// reads: the rest of the Go `versionableLoop`.
+fn (self: &var VersionedLoop) qualifies(
+    allocator: Allocator,
+    module: &Module,
+    blocks: &BlockIndex,
+    preds: &array::Array<array::Array<i64>>,
+    tree: &DominatorTree,
+    term: Terminator
+) -> !bool {
+    let body = self.split_entries(module, blocks, preds, tree, term) orelse return false;
+    if !try self.collect_blocks(allocator, module, blocks, tree, body) or !self.leaves_only_through_header(module, blocks) or
+        !try self.read_definitions(allocator, module, blocks) or !self.find_counter(module, blocks) {
+        return false;
+    }
+    try self.find_checks(allocator, module, blocks);
+    return self.answered.len() > 0;
+}
+
+/// Finds the header's one preheader and one latch, each a jump, and returns
+/// the body, the Go `versionedLoop.splitEntries`: the header's first arm,
+/// entered only from it, dominating the latch and not the exit.
+fn (self: &var VersionedLoop) split_entries(
+    module: &Module,
+    blocks: &BlockIndex,
+    preds: &array::Array<array::Array<i64>>,
+    tree: &DominatorTree,
+    term: Terminator
+) -> ?i64 {
+    if preds.at(self.header) |into| {
+        var index = 0;
+        while into.get(index) |pred| {
+            index = index + 1;
+            let pred_term = module.block_terminator(blocks.block_at(pred));
+            if pred_term.op != TermOp::Jump {
+                return null;
+            }
+            if tree.dominates(self.header, pred) {
+                self.latch = pred;
+            } else {
+                self.pre = pred;
+            }
+        }
+    }
+    let body = blocks.position_of(module, term.target) orelse return null;
+    let exit = blocks.position_of(module, term.else_target) orelse return null;
+    if self.latch < 0 or self.pre < 0 {
+        return null;
+    }
+    if entered_only_from(preds, body, self.header) and tree.dominates(body, self.latch) and
+        !tree.dominates(body, exit) {
+        return body;
+    }
+    return null;
+}
+
+/// Records the header and every block the body dominates as the loop's, and
+/// reports whether they hold at most version_limit instructions, the Go
+/// `versionedLoop.collectBlocks`.
+fn (self: &var VersionedLoop) collect_blocks(
+    allocator: Allocator,
+    module: &Module,
+    blocks: &BlockIndex,
+    tree: &DominatorTree,
+    body: i64
+) -> !bool {
+    let header = blocks.block_at(self.header);
+    try self.inside.insert(allocator, name_id(module.block_name(header)), true);
+    var count = block_instr_count(module, header);
+    var index = 0;
+    while index < blocks.len() {
+        if tree.dominates(body, index) {
+            let block = blocks.block_at(index);
+            try self.inside.insert(allocator, name_id(module.block_name(block)), true);
+            count = count + block_instr_count(module, block);
+        }
+        index = index + 1;
+    }
+    return count <= version_limit();
+}
+
+/// Returns how many instructions a block holds.
+fn block_instr_count(module: &Module, block: Block) -> i64 {
+    let node = module.blocks.at(block.node);
+    return node.instrs.len();
+}
+
+/// Reports whether a block name is one of the loop's.
+fn (self: &VersionedLoop) is_inside(name: Name) -> bool {
+    return self.inside.contains(name_id(name));
+}
+
+/// Reports whether a value is one the loop defines.
+fn (self: &VersionedLoop) defines(name: Name) -> bool {
+    return self.defined.contains(name_id(name));
+}
+
+/// Reports whether every edge out of the loop leaves from the header to the
+/// exit, and the latch is the one block jumping back, the Go
+/// `versionedLoop.leavesOnlyThroughHeader`.
+fn (self: &VersionedLoop) leaves_only_through_header(module: &Module, blocks: &BlockIndex) -> bool {
+    let header = blocks.name_at(self.header);
+    var position = 0;
+    while position < blocks.len() {
+        let at = position;
+        position = position + 1;
+        if !self.is_inside(blocks.name_at(at)) {
+            continue;
+        }
+        let term = module.block_terminator(blocks.block_at(at));
+        var successor = 0;
+        while term.successor(successor) |target| {
+            successor = successor + 1;
+            if same_name(target, header) {
+                if at != self.latch {
+                    return false;
+                }
+                continue;
+            }
+            if same_name(target, self.exit) and at == self.header {
+                continue;
+            }
+            if !self.is_inside(target) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Records every definition of the function and those of the loop, and
+/// reports whether each instruction of the loop leaves Array headers as they
+/// are, the Go `versionedLoop.readDefinitions`.
+fn (self: &var VersionedLoop) read_definitions(allocator: Allocator, module: &Module, blocks: &BlockIndex) -> !bool {
+    var position = 0;
+    while position < blocks.len() {
+        let block = blocks.block_at(position);
+        let inside = self.is_inside(blocks.name_at(position));
+        position = position + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let result = module.instr_result(instr);
+            if !is_empty(result.name) {
+                try self.defs.insert(allocator, name_id(result.name), instr);
+            }
+            if !inside {
+                continue;
+            }
+            if !is_empty(result.name) {
+                try self.defined.insert(allocator, name_id(result.name), true);
+            }
+            if !instr_leaves_headers(module, instr) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Reports whether one instruction cannot change an Array header, the Go
+/// `instrLeavesHeaders`: leaves_headers says so of its operation, or it
+/// stores a scalar through a reference, which no header field is.
+fn instr_leaves_headers(module: &Module, instr: Instr) -> bool {
+    let node = module.instrs.at(instr.node);
+    if leaves_headers(node.op) {
+        return true;
+    }
+    if node.op != Op::RefStore or node.args.len() != 2 {
+        return false;
+    }
+    let reference = node.args.get_or_panic(0);
+    let stored = node.args.get_or_panic(1);
+    return module.names.starts_with(reference.type_name, "&") and is_forward_scalar(module, stored.type_name);
+}
+
+/// Reads the header's test as `counter < limit`, the Go
+/// `versionedLoop.findCounter`: a counter phi of the header that starts from
+/// the preheader and steps by one from the latch, a start from outside the
+/// loop and a limit the loop does not change.
+fn (self: &var VersionedLoop) find_counter(module: &Module, blocks: &BlockIndex) -> bool {
+    let header_term = module.block_terminator(blocks.block_at(self.header));
+    let cond = self.defs.get(name_id(header_term.cond.name)) orelse return false;
+    let cond_node = module.instrs.at(cond.node);
+    if cond_node.op != Op::Binary or !module.names.is(cond_node.operand, "<") or cond_node.args.len() != 2 {
+        return false;
+    }
+    let counted = cond_node.args.get_or_panic(0);
+    let limit = cond_node.args.get_or_panic(1);
+    if !module.names.is(counted.type_name, "i64") {
+        return false;
+    }
+    let counter = self.defs.get(name_id(counted.name)) orelse return false;
+    let counter_node = module.instrs.at(counter.node);
+    if counter_node.op != Op::Phi or !self.defines(counter_node.result.name) or !self.invariant(module, limit) {
+        return false;
+    }
+    let pre = blocks.name_at(self.pre);
+    let latch = blocks.name_at(self.latch);
+    var index = 0;
+    while counter_node.incoming.get(index) |incoming| {
+        index = index + 1;
+        if same_name(incoming.block, pre) {
+            self.start = incoming.value;
+            continue;
+        }
+        if same_name(incoming.block, latch) {
+            let from = step_of(module, &self.defs, incoming.value) orelse return false;
+            if !same_name(from, counter_node.result.name) {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    self.counter = counter_node.result.name;
+    self.limit = limit;
+    return !is_empty(self.start.name) and !self.defines(self.start.name);
+}
+
+/// Reports whether a value is the same on every iteration, the Go
+/// `versionedLoop.invariant`: defined outside the loop, or computed inside it
+/// by arithmetic, a cast, a constant or a view's length from values that are.
+fn (self: &VersionedLoop) invariant(module: &Module, value: Value) -> bool {
+    if !self.defines(value.name) {
+        return true;
+    }
+    let instr = self.defs.get(name_id(value.name)) orelse return false;
+    let node = module.instrs.at(instr.node);
+    var computes = false;
+    match node.op {
+        Const => return true,
+        Binary => {
+            computes = module.names.is(node.operand, "+") or module.names.is(node.operand, "-") or
+                module.names.is(node.operand, "*");
+        },
+        Cast => {
+            computes = true;
+        },
+        SliceLen => {
+            computes = true;
+        },
+        _ => {},
+    }
+    if !computes {
+        return false;
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        if !self.invariant(module, arg) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Reads index as `counter + base` for a base the loop does not change, or
+/// as the counter itself, whose base is empty, the Go
+/// `versionedLoop.indexBase`.
+fn (self: &VersionedLoop) index_base(module: &Module, index: Value) -> ?Value {
+    if same_name(index.name, self.counter) {
+        return empty_value();
+    }
+    let instr = self.defs.get(name_id(index.name)) orelse return null;
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Binary or !module.names.is(node.operand, "+") or node.args.len() != 2 or
+        !module.names.is(node.result.type_name, "i64") {
+        return null;
+    }
+    let first = node.args.get_or_panic(0);
+    let second = node.args.get_or_panic(1);
+    if same_name(first.name, self.counter) and self.invariant(module, second) {
+        return second;
+    }
+    if same_name(second.name, self.counter) and self.invariant(module, first) {
+        return first;
+    }
+    return null;
+}
+
+/// Records one check the copy answers, and the bound it needs once, the Go
+/// `add` closure of `findChecks`.
+fn (self: &var VersionedLoop) add_check(allocator: Allocator, check: BoundedCheck, key: i64) -> !void {
+    try self.answered.insert(allocator, key, true);
+    var index = 0;
+    while self.checks.get(index) |known| {
+        index = index + 1;
+        if same_value(known.container, check.container) and same_value(known.base, check.base) and
+            known.view == check.view {
+            return;
+        }
+    }
+    return self.checks.append(allocator, check);
+}
+
+/// Records the checks of the loop whose index the counter walks, the Go
+/// `versionedLoop.findChecks`: an Array read or store through a reference
+/// from outside the loop, and a view's two bounds checks.
+fn (self: &var VersionedLoop) find_checks(allocator: Allocator, module: &Module, blocks: &BlockIndex) -> !void {
+    var position = 0;
+    while position < blocks.len() {
+        let at = position;
+        position = position + 1;
+        if !self.is_inside(blocks.name_at(at)) {
+            continue;
+        }
+        let block = blocks.block_at(at);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            let key = instr_key(at, instr_index);
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            if node.op == Op::ArrayGetOrPanic or node.op == Op::ArraySet {
+                let container = node.args.get_or_panic(0);
+                if !module.names.starts_with(container.type_name, "&") or self.defines(container.name) {
+                    continue;
+                }
+                let index = node.args.get_or_panic(1);
+                if self.index_base(module, index) |base| {
+                    try self.add_check(allocator, BoundedCheck { container: container, base: base, view: false }, key);
+                }
+                continue;
+            }
+            if node.op == Op::CondFail {
+                try self.find_view_check(allocator, module, instr, key);
+            }
+        }
+    }
+    return;
+}
+
+/// Records a view bounds check `index < 0` or `index >= len` whose index the
+/// counter walks, the Go `versionedLoop.findViewCheck`.
+fn (self: &var VersionedLoop) find_view_check(allocator: Allocator, module: &Module, instr: Instr, key: i64) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.args.len() == 0 or !module.names.is(node.immediate, "bounds") {
+        return;
+    }
+    let tested = node.args.get_or_panic(0);
+    let cond = self.defs.get(name_id(tested.name)) orelse return;
+    let cond_node = module.instrs.at(cond.node);
+    if cond_node.args.len() != 2 {
+        return;
+    }
+    let left = cond_node.args.get_or_panic(0);
+    let right = cond_node.args.get_or_panic(1);
+    let base = self.index_base(module, left) orelse return;
+    if cond_node.op != Op::Binary {
+        return;
+    }
+    if module.names.is(cond_node.operand, "<") {
+        if constant_value(module, right, &self.defs) |zero| {
+            if zero == 0 {
+                try self.add_check(allocator, BoundedCheck { container: empty_value(), base: base, view: false }, key);
+            }
+        }
+        return;
+    }
+    if module.names.is(cond_node.operand, ">=") {
+        let length = self.defs.get(name_id(right.name)) orelse return;
+        let length_node = module.instrs.at(length.node);
+        if length_node.op == Op::SliceLen and self.invariant(module, right) {
+            let viewed = length_node.args.get_or_panic(0);
+            try self.add_check(allocator, BoundedCheck { container: viewed, base: base, view: true }, key);
+        }
+    }
+    return;
+}
+
+/// Writes the instructions one version adds, the Go `versionWriter`.
+struct VersionWriter {
+    prefix: Name,
+    hoisted: map::Map<i64, Value>,
+    next: i64,
+}
+
+fn (self: VersionWriter) deinit(allocator: Allocator) -> void {
+    self.hoisted.deinit(allocator);
+    return;
+}
+
+/// Makes the copy and the test that picks it, the Go `versionedLoop.version`.
+fn (self: &VersionedLoop) version(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    prefix: Name,
+    copy_header: Name
+) -> !void {
+    let header = blocks.block_at(self.header);
+    let header_name = module.block_name(header);
+    let pre = blocks.block_at(self.pre);
+    let pre_name = module.block_name(pre);
+    var w = VersionWriter { prefix: prefix, hoisted: map::new<i64, Value>(allocator), next: 0 };
+    defer w.deinit(allocator);
+    var checks = array::new<Block>(allocator);
+    defer checks.deinit(allocator);
+    try w.write_checks(allocator, module, self, header_name, copy_header, &var checks);
+    var pre_term = module.block_terminator(pre);
+    pre_term.target = module.block_name(checks.get_or_panic(0));
+    module.set_terminator(pre, pre_term);
+    var copies = array::new<Block>(allocator);
+    defer copies.deinit(allocator);
+    let last_check = module.block_name(checks.get_or_panic(checks.len() - 1));
+    try w.copy_loop(allocator, module, self, blocks, last_check, pre_name, &var copies);
+    try self.redirect_header_phis(allocator, module, header, pre_name, &checks);
+    try self.join_exit(allocator, module, blocks, &w, copy_header);
+    var ordered = array::new<Block>(allocator);
+    defer ordered.deinit(allocator);
+    var position = 0;
+    while position < blocks.len() {
+        if position == self.header {
+            var index = 0;
+            while checks.get(index) |check| {
+                index = index + 1;
+                try ordered.append(allocator, check);
+            }
+        }
+        try ordered.append(allocator, blocks.block_at(position));
+        position = position + 1;
+    }
+    var index = 0;
+    while copies.get(index) |copied| {
+        index = index + 1;
+        try ordered.append(allocator, copied);
+    }
+    return set_function_blocks(allocator, module, self.function, &ordered);
+}
+
+/// Names a value the test before the loop defines, the Go
+/// `versionWriter.fresh`.
+fn (self: &var VersionWriter) fresh(allocator: Allocator, module: &var Module, role: []u8, type_text: []u8) -> !Value {
+    self.next = self.next + 1;
+    var out = try string::from_bytes(allocator, "%");
+    errdefer out.deinit(allocator);
+    try module.names.append_to(&var out, self.prefix);
+    try out.append_bytes(allocator, "check.");
+    try out.append_bytes(allocator, role);
+    try fmt::append_i64(allocator, &var out, self.next);
+    let name = try module.names.intern_owned(move out);
+    return Value { name: name, type_name: try module.names.intern(type_text) };
+}
+
+/// Appends a new block of the test before the loop, the Go `begin` closure of
+/// `writeChecks`.
+fn (self: &VersionWriter) begin_check(allocator: Allocator, module: &var Module, checks: &var array::Array<Block>) -> !Block {
+    var spelled = string::new(allocator);
+    errdefer spelled.deinit(allocator);
+    try module.names.append_to(&var spelled, self.prefix);
+    try spelled.append_bytes(allocator, "check");
+    try fmt::append_i64(allocator, &var spelled, checks.len());
+    let name = try module.names.intern_owned(move spelled);
+    let block = try new_detached_block(allocator, module, name);
+    try checks.append(allocator, block);
+    return block;
+}
+
+/// Returns the blocks of the test before the loop, the Go
+/// `versionWriter.writeChecks`: each block computes one condition and branches
+/// to the next, or to the original loop when the condition fails; the last
+/// passes to the copy.
+fn (self: &var VersionWriter) write_checks(
+    allocator: Allocator,
+    module: &var Module,
+    loop: &VersionedLoop,
+    slow: Name,
+    fast: Name,
+    checks: &var array::Array<Block>
+) -> !void {
+    try self.check_non_negative(allocator, module, loop, loop.start, slow, checks);
+    var index = 0;
+    while loop.checks.get(index) |check| {
+        index = index + 1;
+        if !is_empty(check.base.name) {
+            try self.check_non_negative(allocator, module, loop, check.base, slow, checks);
+        }
+    }
+    index = 0;
+    while loop.checks.get(index) |check| {
+        index = index + 1;
+        if is_empty(check.container.name) {
+            continue;
+        }
+        let current = try self.begin_check(allocator, module, checks);
+        let length = try self.fresh(allocator, module, "len", "i64");
+        var length_op = Op::ArrayLen;
+        if check.view {
+            length_op = Op::SliceLen;
+        }
+        let container = try self.hoist(allocator, module, loop, current, check.container);
+        try add_new_instr(allocator, module, current, length, length_op, empty_name(), empty_name(), 1, container, empty_value());
+        var room = length;
+        if !is_empty(check.base.name) {
+            room = try self.fresh(allocator, module, "room", "i64");
+            let base = try self.hoist(allocator, module, loop, current, check.base);
+            let minus = try module.names.intern("-");
+            try add_new_instr(allocator, module, current, room, Op::Binary, minus, empty_name(), 2, length, base);
+        }
+        let fits = try self.fresh(allocator, module, "fits", "bool");
+        let limit = try self.hoist(allocator, module, loop, current, loop.limit);
+        let at_most = try module.names.intern("<=");
+        try add_new_instr(allocator, module, current, fits, Op::Binary, at_most, empty_name(), 2, limit, room);
+        module.set_terminator(current, branch_terminator(fits, empty_name(), slow));
+    }
+    if checks.len() == 0 {
+        let current = try self.begin_check(allocator, module, checks);
+        module.set_terminator(current, jump_terminator(fast));
+        return;
+    }
+    index = 0;
+    while checks.get(index) |block| {
+        var term = module.block_terminator(block);
+        term.target = fast;
+        if index + 1 < checks.len() {
+            term.target = module.block_name(checks.get_or_panic(index + 1));
+        }
+        module.set_terminator(block, term);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Adds a block of the test that a value is not negative, unless it is a
+/// constant that is not, the Go `nonNegative` closure of `writeChecks`.
+fn (self: &var VersionWriter) check_non_negative(
+    allocator: Allocator,
+    module: &var Module,
+    loop: &VersionedLoop,
+    value: Value,
+    slow: Name,
+    checks: &var array::Array<Block>
+) -> !void {
+    if non_negative_constant(module, value, &loop.defs) {
+        return;
+    }
+    let current = try self.begin_check(allocator, module, checks);
+    let zero = try self.fresh(allocator, module, "zero", "i64");
+    let test = try self.fresh(allocator, module, "nonneg", "bool");
+    // Go appends the constant and the test in one statement whose hoist runs
+    // before the append reads the block, so what hoist adds comes first.
+    let hoisted = try self.hoist(allocator, module, loop, current, value);
+    let zero_text = try module.names.intern("0");
+    try add_new_instr(allocator, module, current, zero, Op::Const, empty_name(), zero_text, 0, empty_value(), empty_value());
+    let at_least = try module.names.intern(">=");
+    try add_new_instr(allocator, module, current, test, Op::Binary, at_least, empty_name(), 2, hoisted, zero);
+    module.set_terminator(current, branch_terminator(test, empty_name(), slow));
+    return;
+}
+
+/// Retains a new instruction reading the first count of two values and
+/// appends it to a block.
+fn add_new_instr(
+    allocator: Allocator,
+    module: &var Module,
+    block: Block,
+    result: Value,
+    op: Op,
+    operand: Name,
+    immediate: Name,
+    count: i64,
+    first: Value,
+    second: Value
+) -> !void {
+    var node = module.blank_instr(result, op, operand, immediate);
+    errdefer node.deinit(allocator);
+    if count > 0 {
+        try node.args.append(allocator, first);
+    }
+    if count > 1 {
+        try node.args.append(allocator, second);
+    }
+    let _ = try module.add_instr(allocator, block, move node);
+    return;
+}
+
+/// Returns a value as the test before the loop reads it, the Go
+/// `versionWriter.hoist`: as it is when the loop does not define it, or
+/// recomputed there, once, from what the loop computes it from.
+fn (self: &var VersionWriter) hoist(
+    allocator: Allocator,
+    module: &var Module,
+    loop: &VersionedLoop,
+    block: Block,
+    value: Value
+) -> !Value {
+    if !loop.defines(value.name) {
+        return value;
+    }
+    if self.hoisted.get(name_id(value.name)) |known| {
+        return known;
+    }
+    let instr = loop.defs.get(name_id(value.name)) orelse return value;
+    let name = try percent_prefixed(allocator, module, self.prefix, "pre.", value.name);
+    let result = Value { name: name, type_name: value.type_name };
+    var args = array::new<Value>(allocator);
+    defer args.deinit(allocator);
+    var index = 0;
+    while call_arg_at(module, instr, index) |arg| {
+        index = index + 1;
+        try args.append(allocator, try self.hoist(allocator, module, loop, block, arg));
+    }
+    var node = try copy_instr_node(allocator, module, instr, result);
+    errdefer node.deinit(allocator);
+    while node.args.pop() |_| {}
+    index = 0;
+    while args.get(index) |arg| {
+        index = index + 1;
+        try node.args.append(allocator, arg);
+    }
+    let _ = try module.add_instr(allocator, block, move node);
+    try self.hoisted.insert(allocator, name_id(value.name), result);
+    return result;
+}
+
+/// Copies every part of an instruction into a new record under a new result,
+/// the Go `copied := *instr`.
+fn copy_instr_node(allocator: Allocator, module: &Module, instr: Instr, result: Value) -> !InstrNode {
+    let source = module.instrs.at(instr.node);
+    var node = module.blank_instr(result, source.op, source.operand, source.immediate);
+    errdefer node.deinit(allocator);
+    node.extern_abi = source.extern_abi;
+    node.extern_name = source.extern_name;
+    node.span = source.span;
+    var index = 0;
+    while source.args.get(index) |arg| {
+        index = index + 1;
+        try node.args.append(allocator, arg);
+    }
+    index = 0;
+    while source.call_params.get(index) |param| {
+        index = index + 1;
+        try node.call_params.append(allocator, param);
+    }
+    index = 0;
+    while source.fields.get(index) |field| {
+        index = index + 1;
+        try node.fields.append(allocator, field);
+    }
+    index = 0;
+    while source.incoming.get(index) |incoming| {
+        index = index + 1;
+        try node.incoming.append(allocator, incoming);
+    }
+    index = 0;
+    while source.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        try node.cleanups.append(allocator, cleanup);
+    }
+    return move node;
+}
+
+/// Gives the original header's phis the incoming they took from the
+/// preheader from each block of the test that falls back to them, the Go
+/// `versionedLoop.redirectHeaderPhis`.
+fn (self: &VersionedLoop) redirect_header_phis(
+    allocator: Allocator,
+    module: &var Module,
+    header: Block,
+    pre: Name,
+    checks: &array::Array<Block>
+) -> !void {
+    var instr_index = 0;
+    while block_instr_at(module, header, instr_index) |instr| {
+        instr_index = instr_index + 1;
+        if module.instr_op(instr) != Op::Phi {
+            continue;
+        }
+        var incoming = array::new<Incoming>(allocator);
+        defer incoming.deinit(allocator);
+        var index = 0;
+        while phi_incoming_at(module, instr, index) |edge| {
+            index = index + 1;
+            if !same_name(edge.block, pre) {
+                try incoming.append(allocator, edge);
+                continue;
+            }
+            var check_index = 0;
+            while checks.get(check_index) |check| {
+                check_index = check_index + 1;
+                let term = module.block_terminator(check);
+                if term.op == TermOp::Branch {
+                    try incoming.append(allocator, Incoming { block: module.block_name(check), value: edge.value });
+                }
+            }
+        }
+        try set_phi_incoming(allocator, module, instr, &incoming);
+    }
+    return;
+}
+
+/// Writes incoming over a phi's list.
+fn set_phi_incoming(allocator: Allocator, module: &var Module, instr: Instr, incoming: &array::Array<Incoming>) -> !void {
+    if module.instrs.at_mut(instr.node) |node| {
+        node.incoming.clear(allocator);
+        var index = 0;
+        while incoming.get(index) |edge| {
+            index = index + 1;
+            try node.incoming.append(allocator, edge);
+        }
+    }
+    return;
+}
+
+/// Returns the name the copy gives a value the loop defines, the Go
+/// `versionWriter.renamed`.
+fn (self: &VersionWriter) renamed(allocator: Allocator, module: &var Module, loop: &VersionedLoop, value: Value) -> !Value {
+    if !loop.defines(value.name) {
+        return value;
+    }
+    let name = try percent_prefixed(allocator, module, self.prefix, "", value.name);
+    return Value { name: name, type_name: value.type_name };
+}
+
+/// Returns the copy's name for a block the loop holds, and any other block's
+/// own name.
+fn (self: &VersionWriter) copied_block(module: &var Module, loop: &VersionedLoop, name: Name) -> !Name {
+    if loop.is_inside(name) {
+        return module.names.joined(self.prefix, "", name);
+    }
+    return name;
+}
+
+/// Appends the copy of the loop's blocks to copies, entered from the last
+/// block of the test in place of the preheader, with its answered checks left
+/// out, the Go `versionWriter.copyLoop`.
+fn (self: &VersionWriter) copy_loop(
+    allocator: Allocator,
+    module: &var Module,
+    loop: &VersionedLoop,
+    blocks: &BlockIndex,
+    entry: Name,
+    pre: Name,
+    copies: &var array::Array<Block>
+) -> !void {
+    var site = 0;
+    var position = 0;
+    while position < blocks.len() {
+        let at = position;
+        position = position + 1;
+        let block = blocks.block_at(at);
+        let block_name = module.block_name(block);
+        if !loop.is_inside(block_name) {
+            continue;
+        }
+        let copied_name = try module.names.joined(self.prefix, "", block_name);
+        let copied = try new_detached_block(allocator, module, copied_name);
+        var instrs = array::new<Instr>(allocator);
+        defer instrs.deinit(allocator);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            let answered = loop.answered.contains(instr_key(at, instr_index));
+            instr_index = instr_index + 1;
+            if answered and module.instr_op(instr) == Op::CondFail {
+                continue;
+            }
+            let clone = try self.copy_instr(allocator, module, loop, instr, entry, pre);
+            if answered {
+                site = site + 1;
+                var present = map::new<i64, bool>(allocator);
+                defer present.deinit(allocator);
+                var spelled = try string::from_bytes(allocator, "%");
+                errdefer spelled.deinit(allocator);
+                try module.names.append_to(&var spelled, self.prefix);
+                try spelled.append_bytes(allocator, "unchecked");
+                try fmt::append_i64(allocator, &var spelled, site);
+                try spelled.append_byte(allocator, cast<u8>(46));
+                let unchecked = try module.names.intern_owned(move spelled);
+                try answered_access(allocator, module, clone, unchecked, &var present, &var instrs);
+                continue;
+            }
+            try instrs.append(allocator, clone);
+        }
+        try set_block_instrs(allocator, module, copied, &instrs);
+        let source_term = module.block_terminator(block);
+        let term = try self.copy_terminator(allocator, module, loop, source_term);
+        module.set_terminator(copied, term);
+        try copies.append(allocator, copied);
+    }
+    return;
+}
+
+/// Copies one instruction under the copy's names, the Go
+/// `versionWriter.copyInstr`.
+fn (self: &VersionWriter) copy_instr(
+    allocator: Allocator,
+    module: &var Module,
+    loop: &VersionedLoop,
+    instr: Instr,
+    entry: Name,
+    pre: Name
+) -> !Instr {
+    let source_result = module.instr_result(instr);
+    let result = try self.renamed(allocator, module, loop, source_result);
+    var node = try copy_instr_node(allocator, module, instr, result);
+    errdefer node.deinit(allocator);
+    var index = 0;
+    while node.args.get(index) |arg| {
+        try node.args.set(index, try self.renamed(allocator, module, loop, arg));
+        index = index + 1;
+    }
+    index = 0;
+    while node.fields.get(index) |field| {
+        let value = try self.renamed(allocator, module, loop, field.value);
+        if node.fields.at_mut(index) |slot| {
+            slot.value = value;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while node.incoming.get(index) |incoming| {
+        var block = incoming.block;
+        if same_name(block, pre) {
+            block = entry;
+        } else {
+            if loop.is_inside(block) {
+                block = try module.names.joined(self.prefix, "", block);
+            }
+        }
+        let value = try self.renamed(allocator, module, loop, incoming.value);
+        if node.incoming.at_mut(index) |slot| {
+            slot.block = block;
+            slot.value = value;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while node.cleanups.get(index) |cleanup| {
+        let arg = try self.renamed(allocator, module, loop, cleanup.arg);
+        let cleanup_allocator = try self.renamed(allocator, module, loop, cleanup.allocator);
+        if node.cleanups.at_mut(index) |slot| {
+            slot.arg = arg;
+            slot.allocator = cleanup_allocator;
+        }
+        index = index + 1;
+    }
+    return Instr { node: try module.instrs.add(allocator, move node) };
+}
+
+/// Copies a terminator under the copy's names, the Go
+/// `versionWriter.copyTerminator`.
+fn (self: &VersionWriter) copy_terminator(allocator: Allocator, module: &var Module, loop: &VersionedLoop, term: Terminator) -> !Terminator {
+    var copied = term;
+    copied.value = try self.renamed(allocator, module, loop, term.value);
+    copied.cond = try self.renamed(allocator, module, loop, term.cond);
+    copied.target = try self.copied_block(module, loop, term.target);
+    copied.else_target = try self.copied_block(module, loop, term.else_target);
+    return copied;
+}
+
+/// Gives each phi of the exit the incoming from the copy's header that it
+/// takes from the header, under the copy's names, the Go
+/// `versionWriter.extendExitPhis`.
+fn (self: &VersionWriter) extend_exit_phis(
+    allocator: Allocator,
+    module: &var Module,
+    loop: &VersionedLoop,
+    exit: Block,
+    header: Name,
+    copy_header: Name
+) -> !void {
+    var instr_index = 0;
+    while block_instr_at(module, exit, instr_index) |instr| {
+        instr_index = instr_index + 1;
+        if module.instr_op(instr) != Op::Phi {
+            continue;
+        }
+        var index = 0;
+        while phi_incoming_at(module, instr, index) |incoming| {
+            index = index + 1;
+            if same_name(incoming.block, header) {
+                let value = try self.renamed(allocator, module, loop, incoming.value);
+                try module.add_incoming(allocator, instr, copy_header, value);
+                break;
+            }
+        }
+    }
+    return;
+}
+
+/// Makes the exit a join of the two loops, the Go `versionedLoop.joinExit`:
+/// each phi there takes from the copy's header what it took from the header,
+/// and a read after the loop of a value the header defines reads a phi of
+/// both.
+fn (self: &VersionedLoop) join_exit(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    w: &VersionWriter,
+    copy_header: Name
+) -> !void {
+    let header = blocks.name_at(self.header);
+    var exit_position = -1;
+    var position = 0;
+    while position < blocks.len() {
+        if same_name(blocks.name_at(position), self.exit) {
+            exit_position = position;
+        }
+        position = position + 1;
+    }
+    let exit = blocks.block_at(exit_position);
+    try w.extend_exit_phis(allocator, module, self, exit, header, copy_header);
+    var joins = map::new<i64, Value>(allocator);
+    defer joins.deinit(allocator);
+    var added = array::new<Instr>(allocator);
+    defer added.deinit(allocator);
+    position = 0;
+    while position < blocks.len() {
+        let block = blocks.block_at(position);
+        position = position + 1;
+        if self.is_inside(module.block_name(block)) {
+            continue;
+        }
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if module.instr_op(instr) == Op::Phi {
+                var index = 0;
+                while phi_incoming_at(module, instr, index) |incoming| {
+                    if !self.is_inside(incoming.block) and !same_name(incoming.block, copy_header) {
+                        let joined = try self.join(allocator, module, w, header, copy_header, &var joins, &var added, incoming.value);
+                        set_incoming_value(module, instr, index, joined);
+                    }
+                    index = index + 1;
+                }
+                continue;
+            }
+            var slot = 0;
+            while instr_read_at(module, instr, slot) |read| {
+                let joined = try self.join(allocator, module, w, header, copy_header, &var joins, &var added, read);
+                try set_instr_read(module, instr, slot, joined);
+                slot = slot + 1;
+            }
+        }
+        var term = module.block_terminator(block);
+        term.value = try self.join(allocator, module, w, header, copy_header, &var joins, &var added, term.value);
+        term.cond = try self.join(allocator, module, w, header, copy_header, &var joins, &var added, term.cond);
+        module.set_terminator(block, term);
+    }
+    return prepend_instrs(allocator, module, exit, &added);
+}
+
+/// Returns the value a read after the loop takes for value, the Go `join`
+/// closure of `joinExit`: a phi of the header's value and the copy's.
+fn (self: &VersionedLoop) join(
+    allocator: Allocator,
+    module: &var Module,
+    w: &VersionWriter,
+    header: Name,
+    copy_header: Name,
+    joins: &var map::Map<i64, Value>,
+    added: &var array::Array<Instr>,
+    value: Value
+) -> !Value {
+    if !self.defines(value.name) {
+        return value;
+    }
+    if joins.get(name_id(value.name)) |phi| {
+        return phi;
+    }
+    let name = try percent_prefixed(allocator, module, w.prefix, "x.", value.name);
+    let result = Value { name: name, type_name: value.type_name };
+    let copied = try w.renamed(allocator, module, self, value);
+    var node = module.blank_instr(result, Op::Phi, empty_name(), empty_name());
+    errdefer node.deinit(allocator);
+    try node.incoming.append(allocator, Incoming { block: header, value: value });
+    try node.incoming.append(allocator, Incoming { block: copy_header, value: copied });
+    let phi = Instr { node: try module.instrs.add(allocator, move node) };
+    try joins.insert(allocator, name_id(value.name), result);
+    try added.append(allocator, phi);
+    return result;
+}

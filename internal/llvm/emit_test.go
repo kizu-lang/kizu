@@ -490,7 +490,7 @@ func TestEmitTrySuccessLabelFeedsFollowingPhi(t *testing.T) {
 // aligned after bounds-check helper labels are emitted inside an IR block.
 func TestEmitCheckedSliceLabelFeedsFollowingPhi(t *testing.T) {
 	got := emitTestModule(t, checkedSlicePhiModule())
-	want := "%kizu.result = phi i1 [ %kizu.ok, %kizu.bad.pass ], [ false, %logical.const ]"
+	want := "%kizu.result = phi i1 [ %kizu.ok, %kizu.check.1.pass ], [ false, %logical.const ]"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring %q", got, want)
 	}
@@ -805,8 +805,8 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 	for _, want := range []string{
 		"declare void @kizu_panic_bounds(i64, i64, i64, i64)",
 		"declare void @kizu_panic_range(i64, i64, i64, i64, i64)",
-		"br i1 %kizu.5, label %kizu.5.fail, label %kizu.5.pass",
-		"kizu.5.fail:\n  call void @kizu_panic_bounds(i64 1, i64 %kizu.3, i64 3, i64 21)\n" +
+		"br i1 %kizu.5, label %kizu.check.2.fail, label %kizu.check.2.pass",
+		"kizu.check.2.fail:\n  call void @kizu_panic_bounds(i64 1, i64 %kizu.3, i64 3, i64 21)\n" +
 			"  unreachable",
 		"%kizu.6 = load i8, ptr %kizu.6.elem.ptr",
 		"%kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 %kizu.13.len, 1",
@@ -880,7 +880,7 @@ func TestEmitUnionInlinePayloadLayout(t *testing.T) {
 	for _, want := range []string{
 		// Layout is tag + a fixed inline byte array sized for the largest
 		// payload ([]u8 is 16 bytes), not a tag-plus-pointer or mega record.
-		"%kizu.union.Shape = type { i64, [16 x i8] }",
+		"%kizu.union.Shape = type { i64, [2 x i64] }",
 		// Construction stores the active tag and only the active payload.
 		"%kizu.2.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.2.slot, i32 0, i32 0",
 		"store i64 1, ptr %kizu.2.tag.ptr, align 8",
@@ -1194,7 +1194,7 @@ const sliceAccessSource = `fn main() {
 
 const helloLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+%kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
 %kizu.struct.std__float__Big = type { %kizu.array }
 %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
@@ -1230,7 +1230,7 @@ entry:
 
 const functionsLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+%kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
 %kizu.struct.std__float__Big = type { %kizu.array }
 %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
@@ -1268,7 +1268,7 @@ entry:
 
 const variablesLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+%kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
 %kizu.struct.std__float__Big = type { %kizu.array }
 %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
@@ -1307,7 +1307,7 @@ entry:
 
 const ifLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+%kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
 %kizu.struct.std__float__Big = type { %kizu.array }
 %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
@@ -1355,7 +1355,7 @@ if.end.3:
 
 const whileLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+%kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
 %kizu.struct.std__float__Big = type { %kizu.array }
 %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
@@ -1395,7 +1395,7 @@ while.end.3:
 
 const structLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+%kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
 %kizu.struct.User = type { i64 }
 %kizu.struct.std__float__Big = type { %kizu.array }
@@ -1433,7 +1433,7 @@ const errorUnionLLVM = `; Kizu LLVM IR
 %kizu.error.i64 = type { i8, i64, i64 }
 %kizu.error.void = type { i8, i64 }
 
-%kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+%kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
 %kizu.struct.std__float__Big = type { %kizu.array }
 %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }

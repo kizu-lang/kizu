@@ -1,0 +1,887 @@
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/ir/rotate.go: moving the test of each `while`
+// loop to the end of its body. Go keys the header's definitions and the phis
+// that stand for them by the Go string of a value name; here they are keyed
+// by the id of the interned Name. Go passes a renaming function to the walk
+// over an instruction's reads; here the reads are addressed one slot at a
+// time (instr_read_at, set_instr_read) and each caller renames in place, and
+// the region a read is renamed through is a tag rather than a closure.
+
+/// Returns how many instructions besides its phis a loop header may hold for
+/// rotate_loops to copy them to the end of each iteration, the Go
+/// `rotateLimit`.
+fn rotate_limit() -> i64 {
+    return 8;
+}
+
+/// Moves the test of each `while` loop to the end of its body, the Go
+/// `RotateLoops`. A loop whose header tests and then branches into the body
+/// or out runs two branches an iteration, the test and the jump back to it;
+/// with a copy of the header's test at the end of the body, the header runs
+/// once as a guard and each iteration ends in the one branch that decides
+/// whether there is another. An engine that compiles a wasm function as it
+/// reads it, without rotating loops itself, runs the rotated shape as it is
+/// written.
+///
+/// The header's instructions run as many times as before: once for the guard
+/// and once at the end of every iteration, in place of once at the top of
+/// every iteration and once more on the way out.
+pub fn rotate_loops(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try rotate_loops_in(allocator, module, function);
+    }
+    return;
+}
+
+/// Rotates every loop of a function that rotatable_loop accepts, the Go
+/// `rotateLoopsIn`. Rotating one loop leaves every block's immediate
+/// dominator where it was -- the edges it adds leave blocks the loop body
+/// already dominates -- so one dominator tree serves the whole function,
+/// while predecessors are read again after each loop.
+fn rotate_loops_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    if function_block_count(module, function) == 0 {
+        return;
+    }
+    var blocks = try block_index(allocator, module, function);
+    defer blocks.deinit(allocator);
+    var preds = try block_predecessors(allocator, module, function, &blocks);
+    defer preds.deinit(allocator);
+    var tree = try build_dominator_tree(allocator, module, function, &blocks, &preds);
+    defer tree.deinit(allocator);
+    var site = 0;
+    let count = blocks.len();
+    var position = 0;
+    while position < count {
+        let at = position;
+        position = position + 1;
+        if try rotatable_loop(allocator, module, &blocks, &preds, &tree, at) |loop| {
+            errdefer loop.deinit(allocator);
+            site = site + 1;
+            var spelled = try string::from_bytes(allocator, "rot");
+            errdefer spelled.deinit(allocator);
+            try fmt::append_i64(allocator, &var spelled, site);
+            try spelled.append_byte(allocator, cast<u8>(46));
+            let prefix = try module.names.intern_owned(move spelled);
+            try rotate_loop(allocator, module, function, &blocks, &tree, move loop, prefix);
+            var next_preds = try block_predecessors(allocator, module, function, &blocks);
+            defer next_preds.deinit(allocator);
+            try replace_predecessors(allocator, &var preds, &next_preds);
+        }
+    }
+    return;
+}
+
+/// Overwrites every predecessor list with the one read again, the Go
+/// `preds = blockPredecessors(fn, at)`.
+fn replace_predecessors(
+    allocator: Allocator,
+    preds: &var array::Array<array::Array<i64>>,
+    next: &array::Array<array::Array<i64>>
+) -> !void {
+    var index = 0;
+    while next.at(index) |list| {
+        if preds.at_mut(index) |target| {
+            target.clear(allocator);
+            var item = 0;
+            while list.get(item) |pred| {
+                item = item + 1;
+                try target.append(allocator, pred);
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Names the blocks one loop rotation reads and rewrites, by their position
+/// in the function's blocks, the Go `rotation`.
+struct Rotation {
+    header: i64,
+    body: i64,
+    exit: i64,
+    latches: array::Array<i64>,
+    outside: array::Array<i64>,
+}
+
+fn (self: Rotation) deinit(allocator: Allocator) -> void {
+    self.latches.deinit(allocator);
+    self.outside.deinit(allocator);
+    return;
+}
+
+/// Returns the loop headed by the block at position when it can be rotated,
+/// the Go `rotatableLoop`: the header branches to a body that only it enters
+/// and to an exit, every back edge is a jump from a block the body dominates,
+/// the loop is entered from outside, and the header holds at most
+/// rotate_limit instructions besides its phis, each of which only computes
+/// its result.
+fn rotatable_loop(
+    allocator: Allocator,
+    module: &Module,
+    blocks: &BlockIndex,
+    preds: &array::Array<array::Array<i64>>,
+    tree: &DominatorTree,
+    position: i64
+) -> !?Rotation {
+    let header = blocks.block_at(position);
+    let term = module.block_terminator(header);
+    if position == 0 or term.op != TermOp::Branch or same_name(term.target, term.else_target) {
+        return null;
+    }
+    var latches = array::new<i64>(allocator);
+    defer latches.deinit(allocator);
+    var outside = array::new<i64>(allocator);
+    defer outside.deinit(allocator);
+    if preds.at(position) |into| {
+        var index = 0;
+        while into.get(index) |pred| {
+            index = index + 1;
+            if !tree.dominates(position, pred) {
+                try outside.append(allocator, pred);
+                continue;
+            }
+            let pred_term = module.block_terminator(blocks.block_at(pred));
+            if pred_term.op != TermOp::Jump {
+                return null;
+            }
+            try latches.append(allocator, pred);
+        }
+    }
+    if latches.len() == 0 or outside.len() == 0 {
+        return null;
+    }
+    let arms = find_body(module, blocks, preds, tree, term, position, &latches) orelse return null;
+    if !repeatable_header(module, header) {
+        return null;
+    }
+    var kept_latches = try latches.clone(allocator);
+    errdefer kept_latches.deinit(allocator);
+    let kept_outside = try outside.clone(allocator);
+    return Rotation {
+        header: position,
+        body: arms.body,
+        exit: arms.exit,
+        latches: move kept_latches,
+        outside: move kept_outside
+    };
+}
+
+/// Is the body and the exit find_body picks.
+struct LoopArms {
+    body: i64,
+    exit: i64,
+}
+
+/// Picks, of the header's two arms, the body: the one only the header
+/// enters, dominating every latch, the Go `rotation.findBody`. The other is
+/// the exit. Null when neither arm is a body, or either is the header.
+fn find_body(
+    module: &Module,
+    blocks: &BlockIndex,
+    preds: &array::Array<array::Array<i64>>,
+    tree: &DominatorTree,
+    term: Terminator,
+    header: i64,
+    latches: &array::Array<i64>
+) -> ?LoopArms {
+    let target = blocks.position_of(module, term.target) orelse return null;
+    let other = blocks.position_of(module, term.else_target) orelse return null;
+    var arms = LoopArms { body: target, exit: other };
+    if entered_only_from(preds, target, header) and dominates_all(tree, target, latches) {
+        arms = LoopArms { body: target, exit: other };
+    } else {
+        if entered_only_from(preds, other, header) and dominates_all(tree, other, latches) {
+            arms = LoopArms { body: other, exit: target };
+        } else {
+            return null;
+        }
+    }
+    if arms.body == header or arms.exit == header {
+        return null;
+    }
+    return arms;
+}
+
+/// Reports whether a header holds at most rotate_limit instructions besides
+/// its phis, each of which can be copied to the latches, the Go
+/// `repeatableHeader`.
+fn repeatable_header(module: &Module, header: Block) -> bool {
+    let node = module.blocks.at(header.node);
+    var count = 0;
+    var index = 0;
+    while node.instrs.get(index) |instr| {
+        index = index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op == Op::Phi {
+            continue;
+        }
+        count = count + 1;
+        if count > rotate_limit() or !is_repeatable_op(instr_node.op) or instr_node.cleanups.len() > 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Reports whether a header instruction can be copied to the latches, the Go
+/// `isRepeatableOp`: it only computes its result, and the result is no
+/// address of storage the instruction itself sets aside, which a copy would
+/// set aside again somewhere else.
+fn is_repeatable_op(op: Op) -> bool {
+    return is_pure_op(op) and op != Op::LocalSlot and op != Op::BufferNew;
+}
+
+/// Reports whether the block at position has from as its one predecessor,
+/// the Go `enteredOnlyFrom`.
+fn entered_only_from(preds: &array::Array<array::Array<i64>>, position: i64, from: i64) -> bool {
+    if preds.at(position) |into| {
+        return into.len() == 1 and into.get_or_panic(0) == from;
+    }
+    return false;
+}
+
+/// Reports whether the block at dominator dominates every block in blocks,
+/// the Go `dominatesAll`.
+fn dominates_all(tree: &DominatorTree, dominator: i64, blocks: &array::Array<i64>) -> bool {
+    var index = 0;
+    while blocks.get(index) |block| {
+        index = index + 1;
+        if !tree.dominates(dominator, block) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Is how a read at the end of one block sees a header value, the Go
+/// `rotator.region`: as it stands, through the body, or through the exit.
+enum Region {
+    Same,
+    Body,
+    Exit,
+}
+
+/// Carries one rotation's renaming, the Go `rotator`. A value the header
+/// defines is read after the rotation as one of three values: the header's
+/// own on the guard, a phi at the top of the body inside the loop, and a phi
+/// at the exit after it. Each latch computes the header's instructions again
+/// under names of its own. latch is keyed by the latch's index and the value
+/// name's id together; added_for and exit_for name, beside each phi, the
+/// header value it stands for, which Go finds again by searching the map.
+struct Rotator {
+    function: Function,
+    loop: Rotation,
+    prefix: Name,
+    defined: map::Map<i64, Instr>,
+    latch: map::Map<i64, Value>,
+    body_phi: map::Map<i64, Instr>,
+    exit_phi: map::Map<i64, Instr>,
+    added: array::Array<Instr>,
+    added_for: array::Array<Name>,
+    exit_add: array::Array<Instr>,
+    exit_for: array::Array<Name>,
+}
+
+fn (self: Rotator) deinit(allocator: Allocator) -> void {
+    self.loop.deinit(allocator);
+    self.defined.deinit(allocator);
+    self.latch.deinit(allocator);
+    self.body_phi.deinit(allocator);
+    self.exit_phi.deinit(allocator);
+    self.added.deinit(allocator);
+    self.added_for.deinit(allocator);
+    self.exit_add.deinit(allocator);
+    self.exit_for.deinit(allocator);
+    return;
+}
+
+/// Returns the key the latch at index files a header value's name under.
+fn latch_key(index: i64, name: Name) -> i64 {
+    return index * 4294967296 + name_id(name);
+}
+
+/// Rewrites one loop rotatable_loop accepted, the Go `rotateLoop`.
+fn rotate_loop(
+    allocator: Allocator,
+    module: &var Module,
+    function: Function,
+    blocks: &BlockIndex,
+    tree: &DominatorTree,
+    loop: Rotation,
+    prefix: Name
+) -> !void {
+    var r = Rotator {
+        function: function,
+        loop: move loop,
+        prefix: prefix,
+        defined: map::new<i64, Instr>(allocator),
+        latch: map::new<i64, Value>(allocator),
+        body_phi: map::new<i64, Instr>(allocator),
+        exit_phi: map::new<i64, Instr>(allocator),
+        added: array::new<Instr>(allocator),
+        added_for: array::new<Name>(allocator),
+        exit_add: array::new<Instr>(allocator),
+        exit_for: array::new<Name>(allocator)
+    };
+    defer r.deinit(allocator);
+    let header = blocks.block_at(r.loop.header);
+    var index = 0;
+    while block_instr_at(module, header, index) |instr| {
+        index = index + 1;
+        let result = module.instr_result(instr);
+        try r.defined.insert(allocator, name_id(result.name), instr);
+    }
+    var latch_index = 0;
+    while latch_index < r.loop.latches.len() {
+        index = 0;
+        while block_instr_at(module, header, index) |instr| {
+            index = index + 1;
+            if module.instr_op(instr) != Op::Phi {
+                let result = module.instr_result(instr);
+                let renamed = try r.latch_renamed(allocator, module, latch_index, result);
+                try r.latch.insert(allocator, latch_key(latch_index, result.name), renamed);
+            }
+        }
+        latch_index = latch_index + 1;
+    }
+    try r.rename_uses(allocator, module, blocks, tree);
+    try r.extend_phis(allocator, module, blocks, r.loop.body);
+    try r.extend_phis(allocator, module, blocks, r.loop.exit);
+    latch_index = 0;
+    while r.loop.latches.get(latch_index) |latch| {
+        try r.copy_header_into(allocator, module, blocks, latch_index, blocks.block_at(latch));
+        latch_index = latch_index + 1;
+    }
+    try r.fill_exit_phis(allocator, module, blocks, tree);
+    try r.fill_body_phis(allocator, module, blocks);
+    try r.drop_latch_incoming(allocator, module, blocks);
+    try prepend_instrs(allocator, module, blocks.block_at(r.loop.body), &r.added);
+    try prepend_instrs(allocator, module, blocks.block_at(r.loop.exit), &r.exit_add);
+    return r.fold_guard_phis(allocator, module, blocks);
+}
+
+/// Puts instrs before a block's own instructions, the Go
+/// `block.Instrs = append(append([]*Instr{}, instrs...), block.Instrs...)`.
+fn prepend_instrs(allocator: Allocator, module: &var Module, block: Block, instrs: &array::Array<Instr>) -> !void {
+    var out = array::new<Instr>(allocator);
+    defer out.deinit(allocator);
+    var index = 0;
+    while instrs.get(index) |instr| {
+        index = index + 1;
+        try out.append(allocator, instr);
+    }
+    index = 0;
+    while block_instr_at(module, block, index) |instr| {
+        index = index + 1;
+        try out.append(allocator, instr);
+    }
+    return set_block_instrs(allocator, module, block, &out);
+}
+
+/// Names a value the rotation defines under this rotation's prefix and a
+/// role, the Go `rotator.renamed`.
+fn (self: &Rotator) renamed(allocator: Allocator, module: &var Module, role: []u8, value: Value) -> !Value {
+    let name = try percent_prefixed(allocator, module, self.prefix, role, value.name);
+    return Value { name: name, type_name: value.type_name };
+}
+
+/// Names a value the latch at index computes again, the Go
+/// `r.renamed(fmt.Sprintf("l%d.", index), value)`.
+fn (self: &Rotator) latch_renamed(allocator: Allocator, module: &var Module, index: i64, value: Value) -> !Value {
+    var out = try string::from_bytes(allocator, "%");
+    errdefer out.deinit(allocator);
+    try module.names.append_to(&var out, self.prefix);
+    try out.append_byte(allocator, cast<u8>(108));
+    try fmt::append_i64(allocator, &var out, index);
+    try out.append_byte(allocator, cast<u8>(46));
+    try append_trimmed_percent(allocator, module, &var out, value.name);
+    let name = try module.names.intern_owned(move out);
+    return Value { name: name, type_name: value.type_name };
+}
+
+/// Appends a name less its leading `%`, the Go `strings.TrimPrefix(name, "%")`.
+fn append_trimmed_percent(allocator: Allocator, module: &Module, out: &var string::String, name: Name) -> !void {
+    let text = name_text(&module.names, name);
+    let bytes = text.as_bytes();
+    if mem::starts_with(bytes, "%") {
+        return out.append_bytes(allocator, bytes[1..mem::len(bytes)]);
+    }
+    return out.append_bytes(allocator, bytes);
+}
+
+/// Names `%`, then prefix, role and name less its leading `%`, the Go
+/// `"%" + prefix + role + strings.TrimPrefix(name, "%")`.
+fn percent_prefixed(allocator: Allocator, module: &var Module, prefix: Name, role: []u8, name: Name) -> !Name {
+    var out = try string::from_bytes(allocator, "%");
+    errdefer out.deinit(allocator);
+    try module.names.append_to(&var out, prefix);
+    try out.append_bytes(allocator, role);
+    try append_trimmed_percent(allocator, module, &var out, name);
+    return module.names.intern_owned(move out);
+}
+
+/// Returns the value a read inside the loop body takes for value, the Go
+/// `rotator.inBody`.
+fn (self: &var Rotator) in_body(allocator: Allocator, module: &var Module, value: Value) -> !Value {
+    if !self.defined.contains(name_id(value.name)) {
+        return value;
+    }
+    if self.body_phi.get(name_id(value.name)) |phi| {
+        return module.instr_result(phi);
+    }
+    let result = try self.renamed(allocator, module, "b.", value);
+    let node = module.blank_instr(result, Op::Phi, empty_name(), empty_name());
+    let phi = Instr { node: try module.instrs.add(allocator, move node) };
+    try self.body_phi.insert(allocator, name_id(value.name), phi);
+    try self.added.append(allocator, phi);
+    try self.added_for.append(allocator, value.name);
+    return result;
+}
+
+/// Returns the value a read the loop's exit dominates takes for value, the Go
+/// `rotator.inExit`.
+fn (self: &var Rotator) in_exit(allocator: Allocator, module: &var Module, value: Value) -> !Value {
+    if !self.defined.contains(name_id(value.name)) {
+        return value;
+    }
+    if self.exit_phi.get(name_id(value.name)) |phi| {
+        return module.instr_result(phi);
+    }
+    let result = try self.renamed(allocator, module, "x.", value);
+    let node = module.blank_instr(result, Op::Phi, empty_name(), empty_name());
+    let phi = Instr { node: try module.instrs.add(allocator, move node) };
+    try self.exit_phi.insert(allocator, name_id(value.name), phi);
+    try self.exit_add.append(allocator, phi);
+    try self.exit_for.append(allocator, value.name);
+    return result;
+}
+
+/// Returns the value the latch at index holds for value at its end, where
+/// the copied header runs, the Go `rotator.atLatch`.
+fn (self: &var Rotator) at_latch(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    index: i64,
+    value: Value
+) -> !Value {
+    let instr = self.defined.get(name_id(value.name)) orelse return value;
+    if module.instr_op(instr) != Op::Phi {
+        return self.latch.get(latch_key(index, value.name)) orelse empty_value();
+    }
+    let latch = blocks.name_at(self.loop.latches.get_or_panic(index));
+    let node = module.instrs.at(instr.node);
+    var found = false;
+    var incoming_value = empty_value();
+    var position = 0;
+    while node.incoming.get(position) |incoming| {
+        position = position + 1;
+        if same_name(incoming.block, latch) {
+            found = true;
+            incoming_value = incoming.value;
+            break;
+        }
+    }
+    if found {
+        return self.in_body(allocator, module, incoming_value);
+    }
+    return value;
+}
+
+/// Returns how a read at the end of the block at position sees a header
+/// value, the Go `rotator.region`: through the body, through the exit, or as
+/// it stands.
+fn (self: &Rotator) region(tree: &DominatorTree, position: i64) -> Region {
+    if position == self.loop.header {
+        return Region::Same;
+    }
+    if tree.dominates(self.loop.body, position) {
+        return Region::Body;
+    }
+    if tree.dominates(self.loop.exit, position) {
+        return Region::Exit;
+    }
+    return Region::Same;
+}
+
+/// Renames one read through a region.
+fn (self: &var Rotator) in_region(allocator: Allocator, module: &var Module, region: Region, value: Value) -> !Value {
+    return match region {
+        Same => value,
+        Body => try self.in_body(allocator, module, value),
+        Exit => try self.in_exit(allocator, module, value),
+    };
+}
+
+/// Points every read of a header value outside the header at the value its
+/// region takes, the Go `rotator.renameUses`. A phi's operand is read at the
+/// end of the block it arrives from, so that block's region decides.
+fn (self: &var Rotator) rename_uses(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    tree: &DominatorTree
+) -> !void {
+    var position = 0;
+    while function_block_at(module, self.function, position) |block| {
+        let at = position;
+        position = position + 1;
+        if at == self.loop.header {
+            continue;
+        }
+        let region = self.region(tree, at);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if module.instr_op(instr) == Op::Phi {
+                var incoming_index = 0;
+                while phi_incoming_at(module, instr, incoming_index) |incoming| {
+                    if blocks.position_of(module, incoming.block) |from| {
+                        let renamed = try self.in_region(allocator, module, self.region(tree, from), incoming.value);
+                        set_incoming_value(module, instr, incoming_index, renamed);
+                    }
+                    incoming_index = incoming_index + 1;
+                }
+                continue;
+            }
+            var slot = 0;
+            while instr_read_at(module, instr, slot) |read| {
+                let renamed = try self.in_region(allocator, module, region, read);
+                try set_instr_read(module, instr, slot, renamed);
+                slot = slot + 1;
+            }
+        }
+        var term = module.block_terminator(block);
+        term.value = try self.in_region(allocator, module, region, term.value);
+        term.cond = try self.in_region(allocator, module, region, term.cond);
+        module.set_terminator(block, term);
+    }
+    return;
+}
+
+/// Returns the phi incoming at index of an instruction, null past the last.
+fn phi_incoming_at(module: &Module, instr: Instr, index: i64) -> ?Incoming {
+    let node = module.instrs.at(instr.node);
+    return node.incoming.get(index);
+}
+
+/// Replaces the value of the phi incoming at index of an instruction.
+fn set_incoming_value(module: &var Module, instr: Instr, index: i64, value: Value) -> void {
+    if module.instrs.at_mut(instr.node) |node| {
+        if node.incoming.at_mut(index) |incoming| {
+            incoming.value = value;
+        }
+    }
+    return;
+}
+
+/// Returns the value at slot among the ones an instruction reads besides phi
+/// incoming, in the order the Go `renameInstrReads` visits them: arguments,
+/// field values, then each cleanup's receiver and, when it names one, its
+/// allocator -- the Go `Cleanup.Args`. Null past the last.
+fn instr_read_at(module: &Module, instr: Instr, slot: i64) -> ?Value {
+    let node = module.instrs.at(instr.node);
+    let args = node.args.len();
+    if slot < args {
+        return node.args.get(slot);
+    }
+    let fields = node.fields.len();
+    if slot < args + fields {
+        let field = node.fields.get_or_panic(slot - args);
+        return field.value;
+    }
+    var at = args + fields;
+    var index = 0;
+    while node.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        if slot == at {
+            return cleanup.arg;
+        }
+        at = at + 1;
+        if !is_empty(cleanup.allocator.name) {
+            if slot == at {
+                return cleanup.allocator;
+            }
+            at = at + 1;
+        }
+    }
+    return null;
+}
+
+/// Replaces the value at slot among the ones an instruction reads, the slot
+/// instr_read_at numbers.
+fn set_instr_read(module: &var Module, instr: Instr, slot: i64, value: Value) -> !void {
+    if module.instrs.at_mut(instr.node) |node| {
+        let args = node.args.len();
+        if slot < args {
+            return node.args.set(slot, value);
+        }
+        let fields = node.fields.len();
+        if slot < args + fields {
+            if node.fields.at_mut(slot - args) |field| {
+                field.value = value;
+            }
+            return;
+        }
+        var at = args + fields;
+        var index = 0;
+        while node.cleanups.at_mut(index) |cleanup| {
+            index = index + 1;
+            if slot == at {
+                cleanup.arg = value;
+                return;
+            }
+            at = at + 1;
+            if !is_empty(cleanup.allocator.name) {
+                if slot == at {
+                    cleanup.allocator = value;
+                    return;
+                }
+                at = at + 1;
+            }
+        }
+    }
+    return;
+}
+
+/// Gives each phi already standing in the block at position an incoming for
+/// every latch, which now branches there, the Go `rotator.extendPhis`: the
+/// value the phi took from the header, as that latch holds it.
+fn (self: &var Rotator) extend_phis(allocator: Allocator, module: &var Module, blocks: &BlockIndex, position: i64) -> !void {
+    let header = blocks.name_at(self.loop.header);
+    let block = blocks.block_at(position);
+    var instr_index = 0;
+    while block_instr_at(module, block, instr_index) |instr| {
+        instr_index = instr_index + 1;
+        if module.instr_op(instr) != Op::Phi {
+            continue;
+        }
+        let node = module.instrs.at(instr.node);
+        var found = false;
+        var value = empty_value();
+        var index = 0;
+        while node.incoming.get(index) |incoming| {
+            index = index + 1;
+            if same_name(incoming.block, header) {
+                found = true;
+                value = incoming.value;
+            }
+        }
+        if !found {
+            continue;
+        }
+        var latch_index = 0;
+        while self.loop.latches.get(latch_index) |latch| {
+            let latch_name = blocks.name_at(latch);
+            let incoming_value = try self.at_latch(allocator, module, blocks, latch_index, value);
+            try module.add_incoming(allocator, instr, latch_name, incoming_value);
+            latch_index = latch_index + 1;
+        }
+    }
+    return;
+}
+
+/// Appends the header's instructions and branch to the latch at index, in
+/// place of its jump back to the header, the Go `rotator.copyHeaderInto`.
+fn (self: &var Rotator) copy_header_into(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    index: i64,
+    block: Block
+) -> !void {
+    let header = blocks.block_at(self.loop.header);
+    var instr_index = 0;
+    while block_instr_at(module, header, instr_index) |instr| {
+        instr_index = instr_index + 1;
+        if module.instr_op(instr) == Op::Phi {
+            continue;
+        }
+        let source_result = module.instr_result(instr);
+        let result = self.latch.get(latch_key(index, source_result.name)) orelse empty_value();
+        let copied = try copy_instr_reads(allocator, module, instr, result);
+        var slot = 0;
+        while instr_read_at(module, copied, slot) |read| {
+            let renamed = try self.at_latch(allocator, module, blocks, index, read);
+            try set_instr_read(module, copied, slot, renamed);
+            slot = slot + 1;
+        }
+        try append_block_instr(allocator, module, block, copied);
+    }
+    let header_term = module.block_terminator(header);
+    let cond = try self.at_latch(allocator, module, blocks, index, header_term.cond);
+    module.set_terminator(block, branch_terminator(cond, header_term.target, header_term.else_target));
+    return;
+}
+
+/// Appends an instruction already retained to a block.
+fn append_block_instr(allocator: Allocator, module: &var Module, block: Block, instr: Instr) -> !void {
+    if module.blocks.at_mut(block.node) |node| {
+        try node.instrs.append(allocator, instr);
+    }
+    return;
+}
+
+/// Copies an instruction under a new result, keeping its arguments, fields
+/// and indirect-call parameters and dropping its phi incoming and cleanups,
+/// the Go `copied := *instr` of `copyHeaderInto`.
+fn copy_instr_reads(allocator: Allocator, module: &var Module, instr: Instr, result: Value) -> !Instr {
+    var node = try copy_instr_node(allocator, module, instr, result);
+    errdefer node.deinit(allocator);
+    node.incoming.clear(allocator);
+    node.cleanups.clear(allocator);
+    return Instr { node: try module.instrs.add(allocator, move node) };
+}
+
+/// Gives each body phi its incoming, the Go `rotator.fillBodyPhis`: the
+/// header's value from the guard and the latch's own from each latch. Filling
+/// one can ask for another body phi, which is filled in turn.
+fn (self: &var Rotator) fill_body_phis(allocator: Allocator, module: &var Module, blocks: &BlockIndex) -> !void {
+    let header = blocks.name_at(self.loop.header);
+    var filled = 0;
+    while filled < self.added.len() {
+        let phi = self.added.get_or_panic(filled);
+        let value = self.defined_value(module, self.added_for.get_or_panic(filled));
+        filled = filled + 1;
+        if module.instrs.at_mut(phi.node) |node| {
+            node.incoming.clear(allocator);
+        }
+        try module.add_incoming(allocator, phi, header, value);
+        var latch_index = 0;
+        while self.loop.latches.get(latch_index) |latch| {
+            let latch_name = blocks.name_at(latch);
+            let incoming_value = try self.at_latch(allocator, module, blocks, latch_index, value);
+            try module.add_incoming(allocator, phi, latch_name, incoming_value);
+            latch_index = latch_index + 1;
+        }
+    }
+    return;
+}
+
+/// Gives each exit phi one incoming per edge into the exit, the Go
+/// `rotator.fillExitPhis`. Go ranges over the exit phis as they stood when
+/// the fill began.
+fn (self: &var Rotator) fill_exit_phis(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    tree: &DominatorTree
+) -> !void {
+    let exit = blocks.name_at(self.loop.exit);
+    let header = blocks.name_at(self.loop.header);
+    var latch_index = map::new<i64, i64>(allocator);
+    defer latch_index.deinit(allocator);
+    var index = 0;
+    while self.loop.latches.get(index) |latch| {
+        try latch_index.insert(allocator, name_id(blocks.name_at(latch)), index);
+        index = index + 1;
+    }
+    let count = self.exit_add.len();
+    var phi_index = 0;
+    while phi_index < count {
+        let phi = self.exit_add.get_or_panic(phi_index);
+        let value = self.defined_value(module, self.exit_for.get_or_panic(phi_index));
+        phi_index = phi_index + 1;
+        var position = 0;
+        while function_block_at(module, self.function, position) |block| {
+            let at = position;
+            position = position + 1;
+            let block_name = module.block_name(block);
+            let term = module.block_terminator(block);
+            var successor = 0;
+            while term.successor(successor) |target| {
+                successor = successor + 1;
+                if !same_name(target, exit) {
+                    continue;
+                }
+                var incoming = value;
+                if latch_index.get(name_id(block_name)) |latch| {
+                    incoming = try self.at_latch(allocator, module, blocks, latch, value);
+                } else {
+                    if !same_name(block_name, header) {
+                        incoming = try self.in_region(allocator, module, self.region(tree, at), value);
+                    }
+                }
+                try module.add_incoming(allocator, phi, block_name, incoming);
+            }
+        }
+    }
+    return;
+}
+
+/// Returns the header value a body or exit phi stands for, the Go
+/// `rotator.definedValue`.
+fn (self: &Rotator) defined_value(module: &Module, name: Name) -> Value {
+    let instr = self.defined.get(name_id(name)) orelse return empty_value();
+    return module.instr_result(instr);
+}
+
+/// Removes the incoming the header's phis took from the latches, which no
+/// longer jump to it, the Go `rotator.dropLatchIncoming`.
+fn (self: &Rotator) drop_latch_incoming(allocator: Allocator, module: &var Module, blocks: &BlockIndex) -> !void {
+    var latches = map::new<i64, bool>(allocator);
+    defer latches.deinit(allocator);
+    var index = 0;
+    while self.loop.latches.get(index) |latch| {
+        index = index + 1;
+        try latches.insert(allocator, name_id(blocks.name_at(latch)), true);
+    }
+    let header = blocks.block_at(self.loop.header);
+    var instr_index = 0;
+    while block_instr_at(module, header, instr_index) |instr| {
+        instr_index = instr_index + 1;
+        if module.instrs.at_mut(instr.node) |node| {
+            if node.op != Op::Phi {
+                continue;
+            }
+            var write = 0;
+            var read = 0;
+            while node.incoming.get(read) |incoming| {
+                read = read + 1;
+                if !latches.contains(name_id(incoming.block)) {
+                    try node.incoming.set(write, incoming);
+                    write = write + 1;
+                }
+            }
+            try node.incoming.truncate(allocator, write);
+        }
+    }
+    return;
+}
+
+/// Replaces the header's phis by their one incoming when the loop is entered
+/// from one block, which then dominates every read of them, the Go
+/// `rotator.foldGuardPhis`.
+fn (self: &Rotator) fold_guard_phis(allocator: Allocator, module: &var Module, blocks: &BlockIndex) -> !void {
+    if self.loop.outside.len() != 1 {
+        return;
+    }
+    let header = blocks.block_at(self.loop.header);
+    var replacements = map::new<i64, Value>(allocator);
+    defer replacements.deinit(allocator);
+    var kept = array::new<Instr>(allocator);
+    defer kept.deinit(allocator);
+    var index = 0;
+    while block_instr_at(module, header, index) |instr| {
+        index = index + 1;
+        let node = module.instrs.at(instr.node);
+        if node.op == Op::Phi and node.incoming.len() == 1 {
+            let only = node.incoming.get_or_panic(0);
+            try replacements.insert(allocator, name_id(node.result.name), only.value);
+            continue;
+        }
+        try kept.append(allocator, instr);
+    }
+    try set_block_instrs(allocator, module, header, &kept);
+    if replacements.len() > 0 {
+        try replace_function_values(allocator, module, self.function, &replacements);
+    }
+    return;
+}

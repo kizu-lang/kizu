@@ -49,19 +49,22 @@ func emit(module *ir.Module, stackProbeMethod string) (string, error) {
 }
 
 type emitter struct {
-	module           *ir.Module
-	types            *typ.Table
-	out              bytes.Buffer
-	strings          map[string]string
-	values           map[string]valueInfo
-	functionNames    map[string]bool
-	functionParams   map[string][]ir.Param
-	currentReturn    string
-	mainReturnsInt   bool
-	nextLabel        int
-	currentBlock     string
-	blockExitLabel   map[string]string
-	niches           map[string]ir.Value
+	module         *ir.Module
+	types          *typ.Table
+	out            bytes.Buffer
+	strings        map[string]string
+	values         map[string]valueInfo
+	functionNames  map[string]bool
+	functionParams map[string][]ir.Param
+	currentReturn  string
+	mainReturnsInt bool
+	nextLabel      int
+	currentBlock   string
+	blockExitLabel map[string]string
+	niches         map[string]ir.Value
+	// tbaaUsed records that a load or store named a type-based alias tag,
+	// so the module ends with the tag table (tbaa.go).
+	tbaaUsed         bool
 	entryParamLoads  []string
 	wroteParamLoads  bool
 	stackProbeMethod string
@@ -89,6 +92,7 @@ func (e *emitter) emit() error {
 			return err
 		}
 	}
+	e.writeTBAATable()
 	return nil
 }
 
@@ -238,10 +242,18 @@ func (e *emitter) writeHeader() {
 	e.writeFloatCastDecls()
 	// The shared attribute makes large frames touch each page before they can
 	// cross a coroutine guard. Small frames receive no added instructions.
+	// Darwin's arm64 ABI has every function that calls keep a frame record,
+	// which is what its unwinders and profilers walk; its compilers keep one
+	// by default, and code without one also runs a call-heavy recursion
+	// measurably slower there.
+	framePointer := ""
+	if e.stackProbeMethod == "__chkstk_darwin" {
+		framePointer = "\"frame-pointer\"=\"non-leaf\" "
+	}
 	fmt.Fprintf(&e.out,
-		"attributes #0 = { \"probe-stack\"=\"%s\" "+
+		"attributes #0 = { %s\"probe-stack\"=\"%s\" "+
 			"\"stack-probe-size\"=\"4096\" }\n\n",
-		e.stackProbeMethod,
+		framePointer, e.stackProbeMethod,
 	)
 }
 
@@ -668,14 +680,18 @@ func (e *emitter) writeStructTypes() {
 }
 
 // writeUnionTypes writes the #991 `tag + inline payload storage` layout for
-// each declared tagged union: `{ i64, [N x i8] }`, where N is the byte capacity
-// of the largest variant payload. Payload shapes are validated in
-// validateModuleTypes, so the capacity is known here.
+// each declared tagged union: `{ i64, [W x i64] }`, where W is the number of
+// words the largest variant payload fills. A payload aligns to at most 8, so
+// words hold it at the size and alignment bytes would; an optimizer that
+// splits a union copy into its elements then moves the payload as words,
+// where bytes would have it rebuilt one byte at a time. Payload shapes are
+// validated in validateModuleTypes, so the capacity is known here.
 func (e *emitter) writeUnionTypes() {
 	names := e.sortedUnionNames()
 	for _, name := range names {
 		capacity, _ := e.unionPayloadCapacity(name)
-		fmt.Fprintf(&e.out, "%s = type { i64, [%d x i8] }\n", llvmUnionTypeName(name), capacity)
+		fmt.Fprintf(&e.out, "%s = type { i64, [%d x i64] }\n",
+			llvmUnionTypeName(name), roundUp(capacity, maxInlinePayloadAlign)/maxInlinePayloadAlign)
 	}
 	if len(names) > 0 {
 		e.out.WriteByte('\n')
@@ -2135,9 +2151,11 @@ func (e *emitter) writeFieldRef(instr *ir.Instr) error {
 	value := e.value(receiver)
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	name := localName(instr.Result.Name)
+	resultType := e.llvmType(instr.Result.Type)
 	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
 		ptrName, e.llvmType(structType), value.operand, index)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", name, e.llvmType(instr.Result.Type), ptrName)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
+		name, resultType, ptrName, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
@@ -2256,10 +2274,11 @@ func (e *emitter) writeFieldRefSet(instr *ir.Instr) error {
 			instr.Result.Type)
 	}
 	ptrName := localName(instr.Result.Name) + ".ptr"
+	fieldType := e.llvmType(instr.Args[1].Type)
 	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
 		ptrName, e.llvmType(structType), e.value(receiver).operand, index)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
-		e.llvmType(instr.Args[1].Type), e.value(instr.Args[1]).operand, ptrName)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
+		fieldType, e.value(instr.Args[1]).operand, ptrName, e.valueTag(fieldType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }
@@ -2278,11 +2297,13 @@ func (e *emitter) writeRefStore(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: dereference write returns void, got %s",
 			instr.Result.Type)
 	}
-	fmt.Fprintf(&e.out, "  store %s%s %s, ptr %s\n",
+	valueType := e.llvmType(instr.Args[1].Type)
+	fmt.Fprintf(&e.out, "  store %s%s %s, ptr %s%s\n",
 		volatileKeyword(instr.Op),
-		e.llvmType(instr.Args[1].Type),
+		valueType,
 		e.value(instr.Args[1]).operand,
 		e.value(receiver).operand,
+		e.referenceTag(instr.Op, receiver.Type, valueType),
 	)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
@@ -2330,9 +2351,10 @@ func (e *emitter) writeRefLoad(instr *ir.Instr) error {
 			receiver.Type, want, instr.Result.Type)
 	}
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = load %s%s, ptr %s\n",
-		resultName, volatileKeyword(instr.Op), e.llvmType(instr.Result.Type),
-		e.value(receiver).operand)
+	resultType := e.llvmType(instr.Result.Type)
+	fmt.Fprintf(&e.out, "  %s = load %s%s, ptr %s%s\n",
+		resultName, volatileKeyword(instr.Op), resultType,
+		e.value(receiver).operand, e.referenceTag(instr.Op, receiver.Type, resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -2479,8 +2501,11 @@ func (e *emitter) writeCondFail(instr *ir.Instr) error {
 		args = append(args, spec.params[i]+" "+e.value(arg).operand)
 	}
 	args = append(args, panicPosition(instr.Span)...)
-	failLabel := helperLabel(instr.Args[0].Name, "fail")
-	okLabel := helperLabel(instr.Args[0].Name, "pass")
+	// The labels are the check's own: two checks can test one condition, a
+	// shared comparison an optimizer left to both.
+	check := "%" + e.nextSyntheticValue("check")
+	failLabel := helperLabel(check, "fail")
+	okLabel := helperLabel(check, "pass")
 	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n",
 		cond.operand, failLabel, okLabel)
@@ -2690,10 +2715,13 @@ func (e *emitter) runtimeIntegerOperand(typ string, operand string) string {
 func (e *emitter) writePhi(instr *ir.Instr) error {
 	parts := make([]string, 0, len(instr.Incoming))
 	for _, incoming := range instr.Incoming {
-		value := e.value(incoming.Value)
+		operand := phiValueMark + incoming.Value.Name
+		if _, written := e.values[incoming.Value.Name]; written {
+			operand = e.value(incoming.Value).operand
+		}
 		parts = append(parts, fmt.Sprintf(
 			"[ %s, %s%s ]",
-			value.operand,
+			operand,
 			phiPredecessorMark,
 			incoming.Block,
 		))
@@ -2712,31 +2740,51 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 // that feeds it, so that label is known only once the body is.
 const phiPredecessorMark = "%kizu.phi.from."
 
+// phiValueMark is what a phi names an incoming value by when the value's
+// block is written after the phi's, as a latch's is after its loop header.
+// What operand a value is written as is known once its instruction is: a
+// constant is its literal and a niche optional the pointer it wraps, so the
+// operand is filled in once the body is.
+const phiValueMark = "%kizu.phi.value."
+
 // resolvePhiPredecessors replaces each phiPredecessorMark in a written body
-// with the label its block ended in.
+// with the label its block ended in, and each phiValueMark with the operand
+// its value was written as.
 func (e *emitter) resolvePhiPredecessors(body string) string {
 	if !strings.Contains(body, phiPredecessorMark) {
+		return body
+	}
+	body = resolveMarks(body, phiValueMark, ", ", func(name string) string {
+		return e.value(ir.Value{Name: name}).operand
+	})
+	return resolveMarks(body, phiPredecessorMark, " ]", func(block string) string {
+		if exit, ok := e.blockExitLabel[block]; ok {
+			return "%" + exit
+		}
+		return "%" + block
+	})
+}
+
+// resolveMarks replaces every mark in body, and the text after it up to end,
+// with what resolve gives for that text.
+func resolveMarks(body string, mark string, end string, resolve func(string) string) string {
+	if !strings.Contains(body, mark) {
 		return body
 	}
 	var out strings.Builder
 	out.Grow(len(body))
 	rest := body
 	for {
-		index := strings.Index(rest, phiPredecessorMark)
+		index := strings.Index(rest, mark)
 		if index < 0 {
 			out.WriteString(rest)
 			return out.String()
 		}
 		out.WriteString(rest[:index])
-		rest = rest[index+len(phiPredecessorMark):]
-		end := strings.Index(rest, " ]")
-		block := rest[:end]
-		label := block
-		if exit, ok := e.blockExitLabel[block]; ok {
-			label = exit
-		}
-		out.WriteString("%" + label)
-		rest = rest[end:]
+		rest = rest[index+len(mark):]
+		stop := strings.Index(rest, end)
+		out.WriteString(resolve(rest[:stop]))
+		rest = rest[stop:]
 	}
 }
 

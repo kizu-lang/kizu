@@ -334,9 +334,16 @@ fn append_toolchain_key(allocator: Allocator,
         try out.append_bytes(allocator, "/-target/");
         try out.append_string(allocator, &options.triple);
     }
-    try out.append_byte(allocator, cast<u8>(47));
-    let level = clang_optimization_flag(options.opt);
-    return out.append_bytes(allocator, level);
+    var flags = array::new<string::String>(allocator);
+    defer flags.deinit(allocator);
+    try clang_optimization_flags(allocator, options.opt, &var flags);
+    var index = 0;
+    while flags.at(index) |flag| {
+        index = index + 1;
+        try out.append_byte(allocator, cast<u8>(47));
+        try out.append_string(allocator, flag);
+    }
+    return;
 }
 
 /// Removes the transient inputs a build wrote into one claimed temporary
@@ -346,6 +353,7 @@ fn append_toolchain_key(allocator: Allocator,
 pub fn clean_build_dir(io: Io, allocator: Allocator, dir: []u8) -> !void {
     try remove_temp_file(io, allocator, dir, "runtime.c");
     try remove_temp_file(io, allocator, dir, "main.ll");
+    try remove_temp_file(io, allocator, dir, "clang.args");
     try remove_temp_file(io, allocator, dir, "uname.txt");
     let found = try fs::exists(io, dir);
     if found {
@@ -384,7 +392,7 @@ fn link(
     let ir_bytes = ir_path.as_bytes();
     let text = llvm_ir.as_bytes();
     try fs::write_file(io, ir_bytes, text);
-    return run_clang(allocator, options, ir_bytes, runtime_path, output, command);
+    return run_clang(io, allocator, dir, options, ir_bytes, runtime_path, output, command);
 }
 
 /// Rejects native build modes that do not have a concrete backend yet, the
@@ -477,9 +485,7 @@ fn runtime_object(
 }
 
 /// Compiles the runtime source into one object file, the Go
-/// `compileRuntime`. The toolchain is spawned with the views already in
-/// hand: `clang [-target T] -O<n> -c runtime.c -o runtime.o` fits the
-/// eight-argument shape of std::process::spawn_wait8 exactly.
+/// `compileRuntime`.
 fn compile_runtime(
     io: Io,
     allocator: Allocator,
@@ -493,26 +499,73 @@ fn compile_runtime(
     let source_bytes = source_path.as_bytes();
     let text = source.as_bytes();
     try fs::write_file(io, source_bytes, text);
-    return spawn_clang(allocator, options, "-c", source_bytes, object);
+    var command = array::new<string::String>(allocator);
+    defer command.deinit(allocator);
+    let linker = options.linker.as_bytes();
+    try append_copy(allocator, &var command, linker);
+    try clang_flags(allocator, options, &var command);
+    try append_copy(allocator, &var command, "-c");
+    try append_copy(allocator, &var command, source_bytes);
+    try append_copy(allocator, &var command, "-o");
+    try append_copy(allocator, &var command, object);
+    return spawn_clang(io, allocator, dir, options, &command);
 }
 
-/// Spawns the toolchain in its two spellings, the exec of `runClang` and
-/// `compileRuntime`: `clang [-target T] -O<n> <a> <b> -o <output>` is at
-/// most eight arguments, the fixed shape std::process::spawn_wait8 takes.
-fn spawn_clang(allocator: Allocator, options: &Options, a: []u8, b: []u8, output: []u8) -> !?diagnostic::Diagnostic {
-    let linker = options.linker.as_bytes();
-    let level = clang_optimization_flag(options.opt);
-    var code = 0;
-    if options.triple.len() > 0 {
-        let triple = options.triple.as_bytes();
-        code = try process::spawn_wait8(8, linker, "-target", triple, level, a, b, "-o", output);
-    } else {
-        code = try process::spawn_wait8(6, linker, level, a, b, "-o", output, "", "");
+/// Runs one toolchain command line, the exec of `runClang` and
+/// `compileRuntime`. std::process::spawn_wait8 carries eight arguments at
+/// most, and an optimized build hands clang more than that
+/// (`clang [-target T] -O3 -Xclang -mllvm -Xclang -enable-tail-merge=false
+/// <a> <b> -o <output>`), so the arguments after the toolchain go to a
+/// response file in the build's temporary directory, one quoted word each,
+/// and clang reads them from `@file` exactly as the command records them.
+fn spawn_clang(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    options: &Options,
+    command: &array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    var words = string::new(allocator);
+    defer words.deinit(allocator);
+    var index = 1;
+    while command.at(index) |part| {
+        index = index + 1;
+        let bytes = part.as_bytes();
+        try append_quoted_word(allocator, &var words, bytes);
+        try words.append_byte(allocator, cast<u8>(10));
     }
+    let args_path = try path::join(allocator, dir, "clang.args");
+    defer args_path.deinit(allocator);
+    let args_bytes = args_path.as_bytes();
+    let words_bytes = words.as_bytes();
+    try fs::write_file(io, args_bytes, words_bytes);
+    var response = try string::from_bytes(allocator, "@");
+    defer response.deinit(allocator);
+    try response.append_bytes(allocator, args_bytes);
+    let linker = options.linker.as_bytes();
+    let response_bytes = response.as_bytes();
+    let code = try process::spawn_wait8(2, linker, response_bytes, "", "", "", "", "", "");
     if code != 0 {
         return try fail_linker(allocator, options, code);
     }
     return null;
+}
+
+/// Appends one argument as a single-quoted response-file word: a quote inside
+/// it closes the word, is written escaped, and opens the word again.
+fn append_quoted_word(allocator: Allocator, out: &var string::String, bytes: []u8) -> !void {
+    try out.append_byte(allocator, cast<u8>(39));
+    var index = 0;
+    while index < mem::len(bytes) {
+        let byte = bytes[index];
+        index = index + 1;
+        if byte == cast<u8>(39) {
+            try out.append_bytes(allocator, "'\''");
+        } else {
+            try out.append_byte(allocator, byte);
+        }
+    }
+    return out.append_byte(allocator, cast<u8>(39));
 }
 
 /// Names the sets the runtime reports its failures with, the Go
@@ -671,11 +724,10 @@ fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
 
 /// Invokes the configured C/LLVM toolchain with explicit inputs, the Go
 /// `runClang`, and leaves the command it ran in command for the caller.
-/// The spawn passes the same views the command records:
-/// `clang [-target T] -O<n> main.ll runtime.o -o output` is eight
-/// arguments at most, the shape std::process::spawn_wait8 carries.
 fn run_clang(
+    io: Io,
     allocator: Allocator,
+    dir: []u8,
     options: &Options,
     ir_path: []u8,
     runtime_path: []u8,
@@ -689,7 +741,7 @@ fn run_clang(
     try append_copy(allocator, command, runtime_path);
     try append_copy(allocator, command, "-o");
     try append_copy(allocator, command, output);
-    return spawn_clang(allocator, options, ir_path, runtime_path, output);
+    return spawn_clang(io, allocator, dir, options, command);
 }
 
 /// Spells what the toolchain is asked to produce, the Go `clangFlags`.
@@ -703,18 +755,30 @@ fn clang_flags(
         let triple = options.triple.as_bytes();
         try append_copy(allocator, out, triple);
     }
-    let level = clang_optimization_flag(options.opt);
-    return append_copy(allocator, out, level);
+    return clang_optimization_flags(allocator, options.opt, out);
 }
 
 /// Selects the native toolchain optimization level, the Go
-/// `clangOptimizationFlag`. `--opt` is asked for when the binary's own speed
+/// `clangOptimizationFlags`. `--opt` is asked for when the binary's own speed
 /// is what matters, so it asks for the most the toolchain offers.
-fn clang_optimization_flag(opt: bool) -> []u8 {
+///
+/// It also keeps the code generator from merging identical instruction tails
+/// of blocks that jump to one successor. Arms of a dispatch loop that end in
+/// the same store and step are otherwise merged into one shared tail, and
+/// every iteration of those arms takes a jump into it.
+fn clang_optimization_flags(
+    allocator: Allocator,
+    opt: bool,
+    out: &var array::Array<string::String>
+) -> !void {
     if opt {
-        return "-O3";
+        try append_copy(allocator, out, "-O3");
+        try append_copy(allocator, out, "-Xclang");
+        try append_copy(allocator, out, "-mllvm");
+        try append_copy(allocator, out, "-Xclang");
+        return append_copy(allocator, out, "-enable-tail-merge=false");
     }
-    return "-O0";
+    return append_copy(allocator, out, "-O0");
 }
 
 /// Appends one owned copy of bytes to a command line.

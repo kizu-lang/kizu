@@ -11,6 +11,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -66,7 +67,8 @@ func TestIRCorpus(t *testing.T) {
 // expectation block: `// lower:` with one line per line of the lowered
 // module's dump, then `// opt:` with the dump of the same module after
 // Optimize, the way the llvm corpus renders its two sections -- the front
-// end, the costly half, runs once. A program the front end or the lowerer
+// end, the costly half, runs once -- and `// opt wasm:` with the dump after
+// the module is also reshaped for a wasm engine. A program the front end or the lowerer
 // rejects yields the same line under both headers; one Optimize rejects
 // yields its message under `// opt:` alone. Std functions are lowered but
 // not listed, the way the check corpus lists no std declaration: an
@@ -86,7 +88,15 @@ func renderIRCase(input string) string {
 	out.WriteString("// lower:\n")
 	writeIRDump(&out, module)
 	out.WriteString("// opt:\n")
-	if err := Optimize(module); err != nil {
+	if err := Optimize(module, stdtarget.Native); err != nil {
+		out.WriteString("// ")
+		writeFoldedLine(&out, err.Error())
+		return out.String()
+	}
+	writeIRDump(&out, module)
+	out.WriteString("// opt wasm:\n")
+	ReshapeForEngine(module)
+	if err := Verify(module); err != nil {
 		out.WriteString("// ")
 		writeFoldedLine(&out, err.Error())
 		return out.String()

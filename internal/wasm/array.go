@@ -127,6 +127,58 @@ func arrayElementAddress(array string, index string, size int) string {
 		arrayFieldAddress(array, arrayDataOffset), index, size)
 }
 
+// arrayHeader is how an operation reaches the `{data, len, cap}` header of the
+// Array it works on: at an address in linear memory, with the storage pointer
+// and length read from locals instead when the loop being written hoisted
+// those reads (planLoopHoists).
+type arrayHeader struct {
+	address string
+	hoist   *loopHoist
+}
+
+// arrayHeaderOf returns how the Array value reaches its header.
+func (e *emitter) arrayHeaderOf(value ir.Value) arrayHeader {
+	h := arrayHeader{address: e.value(value).expr}
+	if hoist, ok := e.hoisted[value.Name]; ok {
+		h.hoist = &hoist
+	}
+	return h
+}
+
+// data reads the header's storage pointer.
+func (h arrayHeader) data() string {
+	if h.hoist != nil {
+		return "(local.get " + h.hoist.data + ")"
+	}
+	return "(i32.load " + arrayFieldAddress(h.address, arrayDataOffset) + ")"
+}
+
+// length reads the header's element count.
+func (h arrayHeader) length() string {
+	if h.hoist != nil {
+		return "(local.get " + h.hoist.length + ")"
+	}
+	return "(i64.load " + arrayFieldAddress(h.address, arrayLenOffset) + ")"
+}
+
+// capacity reads the header's reserved element count.
+func (h arrayHeader) capacity() string {
+	return "(i64.load " + arrayFieldAddress(h.address, arrayCapacityOffset) + ")"
+}
+
+// element returns the storage address of the element at a checked index.
+func (h arrayHeader) element(index string, size int) string {
+	return fmt.Sprintf("(i32.add %s (i32.wrap_i64 (i64.mul %s (i64.const %d))))",
+		h.data(), index, size)
+}
+
+// writeArrayLength sets the header's element count. A loop that writes it
+// hoists no read of it, so the count is always stored where it lives.
+func (e *emitter) writeArrayLength(h arrayHeader, value string) {
+	fmt.Fprintf(&e.out, "                (i64.store %s %s)\n",
+		arrayFieldAddress(h.address, arrayLenOffset), value)
+}
+
 // writeArrayNew initializes an empty inline Array header.
 func (e *emitter) writeArrayNew(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Args[0].Type != "Allocator" ||
@@ -153,10 +205,13 @@ func (e *emitter) writeArrayField(instr *ir.Instr, offset int, op string) error 
 	if _, ok := arrayElementWasmType(instr.Args[0].Type); !ok {
 		return fmt.Errorf("wasm error: %s expects Array<T> -> i64", op)
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
+	field := h.length()
+	if offset == arrayCapacityOffset {
+		field = h.capacity()
+	}
 	symbol := symbolName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "            (local.set %s (i64.load %s))\n",
-		symbol, arrayFieldAddress(array, offset))
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, field)
 	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
 	return nil
 }
@@ -177,22 +232,21 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	if instr.Args[2].Type != elem {
 		return fmt.Errorf("wasm error: array.append expects %s, got %s", elem, instr.Args[2].Type)
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	allocator := e.value(instr.Args[1]).expr
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
+	length := h.length()
 	needed := fmt.Sprintf("(i64.add %s (i64.const 1))", length)
 	reserve := fmt.Sprintf("(call $__array_reserve %s %s %s (i32.const %d))",
-		allocator, array, needed, layout.size)
+		allocator, h.address, needed, layout.size)
 	write := func() error {
-		destination := arrayElementAddress(array, length, layout.size)
+		destination := h.element(length, layout.size)
 		if err := e.writeStoreValue(destination, 0, elem, e.value(instr.Args[2])); err != nil {
 			return err
 		}
-		fmt.Fprintf(&e.out, "                (i64.store %s %s)\n",
-			arrayFieldAddress(array, arrayLenOffset), needed)
+		e.writeArrayLength(h, needed)
 		return nil
 	}
-	return e.writeArrayAppendPaths(instr.Result, array, length, reserve, write)
+	return e.writeArrayAppendPaths(instr.Result, h, reserve, write)
 }
 
 // writeArrayAppendPaths writes the two ways an append ends: when the length
@@ -202,13 +256,11 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 // either.
 func (e *emitter) writeArrayAppendPaths(
 	result ir.Value,
-	array string,
-	length string,
+	h arrayHeader,
 	reserve string,
 	write func() error,
 ) error {
-	capacity := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayCapacityOffset))
-	fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", length, capacity)
+	fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", h.length(), h.capacity())
 	e.out.WriteString("              (then\n")
 	_, err := e.writeArrayErrorResult(result, "(i32.const 1)", "std::mem::Error", "OutOfMemory")
 	if err != nil {
@@ -249,28 +301,26 @@ func (e *emitter) writeArrayAppendBytes(instr *ir.Instr) error {
 	if elem != "u8" {
 		return fmt.Errorf("wasm error: array.append_bytes expects Array<u8>")
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	allocator := e.value(instr.Args[1]).expr
 	bytes := e.value(instr.Args[2]).expr
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
+	length := h.length()
 	byteLength32 := fmt.Sprintf("(i32.load %s)", addressAt(bytes, 4))
 	byteLength := fmt.Sprintf("(i64.extend_i32_u %s)", byteLength32)
 	needed := fmt.Sprintf("(i64.add %s %s)", length, byteLength)
 	reserve := fmt.Sprintf("(call $__array_reserve %s %s %s (i32.const 1))",
-		allocator, array, needed)
+		allocator, h.address, needed)
 	write := func() error {
-		destination := arrayElementAddress(array, length, 1)
+		destination := h.element(length, 1)
 		fmt.Fprintf(&e.out, "                (memory.copy %s (i32.load %s) %s)\n",
 			destination, bytes, byteLength32)
-		fmt.Fprintf(&e.out, "                (i64.store %s %s)\n",
-			arrayFieldAddress(array, arrayLenOffset), needed)
+		e.writeArrayLength(h, needed)
 		return nil
 	}
 	// The tail fits when what is needed is within the capacity: the run may
 	// be a view of this same array, below its length, so the copy never
 	// overlaps what it writes.
-	capacity := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayCapacityOffset))
-	fmt.Fprintf(&e.out, "            (if (i64.le_u %s %s)\n", needed, capacity)
+	fmt.Fprintf(&e.out, "            (if (i64.le_u %s %s)\n", needed, h.capacity())
 	e.out.WriteString("              (then\n")
 	_, err = e.writeArrayErrorResult(instr.Result, "(i32.const 1)", "std::mem::Error", "OutOfMemory")
 	if err != nil {
@@ -307,14 +357,13 @@ func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	allocator := e.value(instr.Args[1]).expr
 	additional := e.value(instr.Args[2]).expr
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
-	needed := fmt.Sprintf("(i64.add %s %s)", length, additional)
+	needed := fmt.Sprintf("(i64.add %s %s)", h.length(), additional)
 	ok := fmt.Sprintf("(i32.and (i64.ge_s %s (i64.const 0)) "+
 		"(call $__array_reserve %s %s %s (i32.const %d)))",
-		additional, allocator, array, needed, layout.size)
+		additional, allocator, h.address, needed, layout.size)
 	_, err = e.writeArrayErrorResult(instr.Result, ok, "std::mem::Error", "OutOfMemory")
 	return err
 }
@@ -332,13 +381,11 @@ func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	if err != nil || want != elem {
 		return fmt.Errorf("wasm error: array.pop expects Array<T> -> ?T")
 	}
-	array := e.value(instr.Args[0]).expr
-	lengthAddress := arrayFieldAddress(array, arrayLenOffset)
-	length := fmt.Sprintf("(i64.load %s)", lengthAddress)
+	h := e.arrayHeaderOf(instr.Args[0])
+	length := h.length()
 	fmt.Fprintf(&e.out, "            (if (i64.gt_s %s (i64.const 0))\n", length)
 	e.out.WriteString("              (then\n")
-	fmt.Fprintf(&e.out, "                (i64.store %s (i64.sub %s (i64.const 1)))\n",
-		lengthAddress, length)
+	e.writeArrayLength(h, fmt.Sprintf("(i64.sub %s (i64.const 1))", length))
 	if err := e.writeTaggedResult(instr.Result, 1); err != nil {
 		return err
 	}
@@ -346,7 +393,7 @@ func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	source := arrayElementAddress(array, fmt.Sprintf("(i64.load %s)", lengthAddress), layout.size)
+	source := h.element(h.length(), layout.size)
 	if err := e.writeArrayCopyValue(addressAt(slot, payloadOffset), source, elem); err != nil {
 		return err
 	}
@@ -371,17 +418,14 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 	if instr.Result.Type != elem {
 		return fmt.Errorf("wasm error: array.pop_or_panic expects Array<T> -> T")
 	}
-	array := e.value(instr.Args[0]).expr
-	lengthAddress := arrayFieldAddress(array, arrayLenOffset)
-	length := fmt.Sprintf("(i64.load %s)", lengthAddress)
+	h := e.arrayHeaderOf(instr.Args[0])
+	length := h.length()
 	fmt.Fprintf(&e.out, "            (if (i64.eqz %s)\n", length)
 	fmt.Fprintf(&e.out, "              (then (call $__panic_array_empty "+
-		"(i64.const %d) (i64.const %d))))\n",
+		"(i64.const %d) (i64.const %d)) (unreachable)))\n",
 		instr.Span.Start.Line, instr.Span.Start.Column)
-	fmt.Fprintf(&e.out, "            (i64.store %s (i64.sub %s (i64.const 1)))\n",
-		lengthAddress, length)
-	source := arrayElementAddress(array, fmt.Sprintf("(i64.load %s)", lengthAddress), layout.size)
-	return e.writeLoadValue(instr.Result, source, 0)
+	e.writeArrayLength(h, fmt.Sprintf("(i64.sub %s (i64.const 1))", length))
+	return e.writeLoadValue(instr.Result, h.element(h.length(), layout.size), 0)
 }
 
 // writeArrayGet copies an in-bounds element into an optional result.
@@ -397,10 +441,23 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	if err != nil || want != elem {
 		return fmt.Errorf("wasm error: array.get expects Array<T>, i64 -> ?T")
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	index := e.value(instr.Args[1]).expr
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
-	fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", index, length)
+	if e.optionLocals[instr.Result.Name] {
+		load, err := e.loadExpr(h.element(index, layout.size), 0, elem)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", index, h.length())
+		e.out.WriteString("              (then\n")
+		e.writeOptionLocals(instr.Result, "(i32.const 1)", load)
+		e.out.WriteString("              )\n")
+		e.out.WriteString("              (else\n")
+		e.writeOptionLocals(instr.Result, "(i32.const 0)", "")
+		e.out.WriteString("              ))\n")
+		return nil
+	}
+	fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", index, h.length())
 	e.out.WriteString("              (then\n")
 	if err := e.writeTaggedResult(instr.Result, 1); err != nil {
 		return err
@@ -409,7 +466,7 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	source := arrayElementAddress(array, index, layout.size)
+	source := h.element(index, layout.size)
 	if err := e.writeArrayCopyValue(addressAt(slot, payloadOffset), source, elem); err != nil {
 		return err
 	}
@@ -434,14 +491,14 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	if instr.Result.Type != elem {
 		return fmt.Errorf("wasm error: array.get_or_panic expects Array<T>, i64 -> T")
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	index := e.value(instr.Args[1]).expr
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
+	length := h.length()
 	fmt.Fprintf(&e.out, "            (if (i64.ge_u %s %s)\n", index, length)
 	fmt.Fprintf(&e.out, "              (then (call $__panic_bounds %s %s "+
-		"(i64.const %d) (i64.const %d))))\n",
+		"(i64.const %d) (i64.const %d)) (unreachable)))\n",
 		index, length, instr.Span.Start.Line, instr.Span.Start.Column)
-	return e.writeLoadValue(instr.Result, arrayElementAddress(array, index, layout.size), 0)
+	return e.writeLoadValue(instr.Result, h.element(index, layout.size), 0)
 }
 
 // writeArrayAt returns an optional borrow into Array storage.
@@ -457,10 +514,16 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	if err != nil {
 		return fmt.Errorf("wasm error: array.at expects Array<T>, i64 -> ?&T")
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	index := e.value(instr.Args[1]).expr
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
-	fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", index, length)
+	if e.optionLocals[instr.Result.Name] {
+		// The address is only an add: working it out for an index past the
+		// end reads nothing, so presence and payload are set without a branch.
+		present := fmt.Sprintf("(i64.lt_u %s %s)", index, h.length())
+		e.writeOptionLocals(instr.Result, present, h.element(index, layout.size))
+		return nil
+	}
+	fmt.Fprintf(&e.out, "            (if (i64.lt_u %s %s)\n", index, h.length())
 	e.out.WriteString("              (then\n")
 	if err := e.writeTaggedResult(instr.Result, 1); err != nil {
 		return err
@@ -470,7 +533,7 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 		return err
 	}
 	fmt.Fprintf(&e.out, "                (i32.store %s %s)\n",
-		addressAt(slot, payloadOffset), arrayElementAddress(array, index, layout.size))
+		addressAt(slot, payloadOffset), h.element(index, layout.size))
 	e.out.WriteString("              )\n")
 	e.out.WriteString("              (else\n")
 	if err := e.writeTaggedResult(instr.Result, 0); err != nil {
@@ -494,17 +557,16 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 	if instr.Args[2].Type != elem {
 		return fmt.Errorf("wasm error: array.set expects %s, got %s", elem, instr.Args[2].Type)
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	index := e.value(instr.Args[1]).expr
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
-	ok := fmt.Sprintf("(i64.lt_u %s %s)", index, length)
+	ok := fmt.Sprintf("(i64.lt_u %s %s)", index, h.length())
 	inBounds, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(&e.out, "            (if %s\n", inBounds)
 	e.out.WriteString("              (then\n")
-	if err := e.writeStoreValue(arrayElementAddress(array, index, layout.size), 0,
+	if err := e.writeStoreValue(h.element(index, layout.size), 0,
 		elem, e.value(instr.Args[2])); err != nil {
 		return err
 	}
@@ -523,18 +585,18 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	left := e.value(instr.Args[1]).expr
 	right := e.value(instr.Args[2]).expr
-	if e.isMemoryType(elem) || !isPlainAddress(array) {
+	if e.isMemoryType(elem) || (h.hoist == nil && !isPlainAddress(h.address)) {
 		ok := fmt.Sprintf("(call $__array_swap %s %s %s (i32.const %d))",
-			array, left, right, layout.size)
+			h.address, left, right, layout.size)
 		_, err = e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
 		return err
 	}
 	// A scalar element is moved as the one word it is, through the swap
 	// local its type declares, instead of byte by byte in a helper.
-	length := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayLenOffset))
+	length := h.length()
 	ok := fmt.Sprintf("(i32.and (i64.lt_u %s %s) (i64.lt_u %s %s))", left, length, right, length)
 	inBounds, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
 	if err != nil {
@@ -548,8 +610,8 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	leftAddress := arrayElementAddress(array, left, layout.size)
-	rightAddress := arrayElementAddress(array, right, layout.size)
+	leftAddress := h.element(left, layout.size)
+	rightAddress := h.element(right, layout.size)
 	temp := swapLocal(e.wasmType(elem))
 	fmt.Fprintf(&e.out, "            (if %s\n", inBounds)
 	e.out.WriteString("              (then\n")
@@ -602,18 +664,18 @@ func (e *emitter) writeArrayTruncate(instr *ir.Instr) error {
 	if _, _, err := e.arrayElementLayout(instr); err != nil {
 		return err
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	want := e.value(instr.Args[1]).expr
-	lengthAddress := arrayFieldAddress(array, arrayLenOffset)
-	length := fmt.Sprintf("(i64.load %s)", lengthAddress)
 	ok := fmt.Sprintf("(i32.and (i64.ge_s %s (i64.const 0)) (i64.le_s %s %s))",
-		want, want, length)
+		want, want, h.length())
 	inBounds, err := e.writeArrayErrorResult(instr.Result, ok, "std::array::Error", "OutOfBounds")
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(&e.out, "            (if %s\n", inBounds)
-	fmt.Fprintf(&e.out, "              (then (i64.store %s %s)))\n", lengthAddress, want)
+	e.out.WriteString("              (then\n")
+	e.writeArrayLength(h, want)
+	e.out.WriteString("              ))\n")
 	return nil
 }
 
@@ -625,8 +687,7 @@ func (e *emitter) writeArrayClear(instr *ir.Instr) error {
 	if _, ok := arrayElementWasmType(instr.Args[0].Type); !ok {
 		return fmt.Errorf("wasm error: array.clear expects Array<T> -> void")
 	}
-	fmt.Fprintf(&e.out, "            (i64.store %s (i64.const 0))\n",
-		arrayFieldAddress(e.value(instr.Args[0]).expr, arrayLenOffset))
+	e.writeArrayLength(e.arrayHeaderOf(instr.Args[0]), "(i64.const 0)")
 	return nil
 }
 
@@ -639,16 +700,14 @@ func (e *emitter) writeArrayAsBytes(instr *ir.Instr) error {
 	if !ok || elem != "u8" {
 		return fmt.Errorf("wasm error: array.as_bytes expects Array<u8> -> []u8")
 	}
-	array := e.value(instr.Args[0]).expr
+	h := e.arrayHeaderOf(instr.Args[0])
 	slot, err := e.resultSlot(instr.Result)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "            (i32.store %s (i32.load %s))\n",
-		slot, arrayFieldAddress(array, arrayDataOffset))
-	fmt.Fprintf(&e.out, "            (i32.store %s "+
-		"(i32.wrap_i64 (i64.load %s)))\n",
-		addressAt(slot, 4), arrayFieldAddress(array, arrayLenOffset))
+	fmt.Fprintf(&e.out, "            (i32.store %s %s)\n", slot, h.data())
+	fmt.Fprintf(&e.out, "            (i32.store %s (i32.wrap_i64 %s))\n",
+		addressAt(slot, 4), h.length())
 	e.values[instr.Result.Name] = valueInfo{expr: slot}
 	return nil
 }
@@ -663,11 +722,10 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	array := e.value(instr.Args[0]).expr
-	capacity := fmt.Sprintf("(i64.load %s)", arrayFieldAddress(array, arrayCapacityOffset))
-	bytes := fmt.Sprintf("(i32.wrap_i64 (i64.mul %s (i64.const %d)))", capacity, layout.size)
-	fmt.Fprintf(&e.out, "            (call $__allocator_free %s (i32.load %s) %s)\n",
-		e.value(instr.Args[1]).expr, arrayFieldAddress(array, arrayDataOffset), bytes)
+	h := e.arrayHeaderOf(instr.Args[0])
+	bytes := fmt.Sprintf("(i32.wrap_i64 (i64.mul %s (i64.const %d)))", h.capacity(), layout.size)
+	fmt.Fprintf(&e.out, "            (call $__allocator_free %s %s %s)\n",
+		e.value(instr.Args[1]).expr, h.data(), bytes)
 	return nil
 }
 

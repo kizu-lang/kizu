@@ -1,0 +1,203 @@
+import std::array;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/ir/cse.go: merging instructions that compute
+// the same result from the same values. Go keys the available expressions by
+// the string expressionKey spells and deletes a block's keys once its subtree
+// is done; here the same spelling keys a slot, and leaving a block marks its
+// slots empty, since a std map cannot lose keys cheaply. Go walks the
+// dominator tree by recursion; here by an explicit stack of the same visits,
+// so a long chain of blocks does not grow the native stack.
+
+/// Replaces an instruction with an earlier one that computes the same result
+/// from the same values, the Go `EliminateCommonSubexpressions`: an
+/// arithmetic, comparison, cast or bitwise operation, a field of a struct
+/// value, a constant, or the tag or payload of a union value. None of these
+/// reads memory, and an SSA value does not change, so an earlier result is the
+/// same wherever it dominates.
+///
+/// Two reads of one field become one value, which is what lets a later pass
+/// see that `set(reg)` indexes where `get(reg)` just checked.
+pub fn eliminate_common_subexpressions(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try eliminate_common_subexpressions_in(allocator, module, function);
+    }
+    return;
+}
+
+/// Is the expressions the walk has available: each key spelled once, the
+/// result filed at its slot, and whether the slot holds one now.
+struct Expressions {
+    slots: map::Map<[]u8, i64>,
+    results: array::Array<Value>,
+    held: array::Array<bool>,
+}
+
+fn (self: Expressions) deinit(allocator: Allocator) -> void {
+    self.slots.deinit(allocator);
+    self.results.deinit(allocator);
+    self.held.deinit(allocator);
+    return;
+}
+
+/// Is one step of the walk down the dominator tree: entering the block at
+/// position, or leaving it and emptying the slots filed from mark on.
+struct ExpressionVisit {
+    position: i64,
+    mark: i64,
+    leave: bool,
+}
+
+/// Walks one function's dominator tree with the results each block's
+/// dominators computed, the Go `eliminateCommonSubexpressionsIn`.
+fn eliminate_common_subexpressions_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    if function_block_count(module, function) == 0 {
+        return;
+    }
+    var blocks = try block_index(allocator, module, function);
+    defer blocks.deinit(allocator);
+    var preds = try block_predecessors(allocator, module, function, &blocks);
+    defer preds.deinit(allocator);
+    var tree = try build_dominator_tree(allocator, module, function, &blocks, &preds);
+    defer tree.deinit(allocator);
+    var order = try reverse_postorder(allocator, module, function, &blocks);
+    defer order.deinit(allocator);
+    var children = array::new<array::Array<i64>>(allocator);
+    defer children.deinit(allocator);
+    var position = 0;
+    while position < blocks.len() {
+        try children.append(allocator, array::new<i64>(allocator));
+        position = position + 1;
+    }
+    var index = 1;
+    while order.get(index) |child| {
+        let parent = order.get_or_panic(tree.idom.get_or_panic(index));
+        if children.at_mut(parent) |list| {
+            try list.append(allocator, child);
+        }
+        index = index + 1;
+    }
+    var replacements = map::new<i64, Value>(allocator);
+    defer replacements.deinit(allocator);
+    var available = Expressions {
+        slots: map::new<[]u8, i64>(allocator),
+        results: array::new<Value>(allocator),
+        held: array::new<bool>(allocator)
+    };
+    defer available.deinit(allocator);
+    var added = array::new<i64>(allocator);
+    defer added.deinit(allocator);
+    var key = string::new(allocator);
+    defer key.deinit(allocator);
+    var visits = array::new<ExpressionVisit>(allocator);
+    defer visits.deinit(allocator);
+    try visits.append(allocator, ExpressionVisit { position: order.get_or_panic(0), mark: 0, leave: false });
+    while visits.pop() |visit| {
+        if visit.leave {
+            while added.len() > visit.mark {
+                let slot = added.pop_or_panic();
+                try available.held.set(slot, false);
+            }
+            continue;
+        }
+        let mark = added.len();
+        let block = blocks.block_at(visit.position);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            var slot = 0;
+            while instr_read_at(module, instr, slot) |read| {
+                try set_instr_read(module, instr, slot, resolve_replacement(&replacements, read));
+                slot = slot + 1;
+            }
+            key.clear();
+            if !try expression_key(allocator, module, instr, &var key) {
+                continue;
+            }
+            let result = module.instr_result(instr);
+            let key_bytes = key.as_bytes();
+            if available.slots.get(key_bytes) |known| {
+                if available.held.get_or_panic(known) {
+                    try replacements.insert(allocator, name_id(result.name), available.results.get_or_panic(known));
+                    continue;
+                }
+                try available.results.set(known, result);
+                try available.held.set(known, true);
+                try added.append(allocator, known);
+                continue;
+            }
+            let filed = available.results.len();
+            try available.results.append(allocator, result);
+            try available.held.append(allocator, true);
+            try available.slots.insert(allocator, key_bytes, filed);
+            try added.append(allocator, filed);
+        }
+        try visits.append(allocator, ExpressionVisit { position: visit.position, mark: mark, leave: true });
+        if children.at(visit.position) |list| {
+            var child_index = list.len() - 1;
+            while child_index >= 0 {
+                let child = list.get_or_panic(child_index);
+                try visits.append(allocator, ExpressionVisit { position: child, mark: 0, leave: false });
+                child_index = child_index - 1;
+            }
+        }
+    }
+    if replacements.len() > 0 {
+        try replace_function_values(allocator, module, function, &replacements);
+    }
+    return;
+}
+
+/// Reports whether an instruction's result follows from its operands alone,
+/// the Go `computesFromOperands`. Bytes compared through a view are read where
+/// the view points, and what is there can change between two comparisons. A
+/// field read is one whose op spelling has no `field.ref` prefix, so a field
+/// whose name starts with `ref` is left out as the Go prefix test leaves it.
+fn computes_from_operands(module: &Module, node: &InstrNode) -> bool {
+    match node.op {
+        Const => return true,
+        Cast => return true,
+        UnionTag => return true,
+        UnionPayload => return true,
+        Unary => return true,
+        Binary => {
+            var index = 0;
+            while node.args.get(index) |arg| {
+                index = index + 1;
+                if module.names.starts_with(arg.type_name, "[]") {
+                    return false;
+                }
+            }
+            return true;
+        },
+        Field => return !module.names.starts_with(node.operand, "ref"),
+        _ => return false,
+    }
+}
+
+/// Spells what an instruction computes into key, when it computes it from its
+/// operands alone, and reports whether it does, the Go `expressionKey`.
+fn expression_key(allocator: Allocator, module: &Module, instr: Instr, key: &var string::String) -> !bool {
+    let node = module.instrs.at(instr.node);
+    if is_empty(node.result.name) or module.names.is(node.result.type_name, "void") or
+        node.cleanups.len() > 0 or !computes_from_operands(module, node) {
+        return false;
+    }
+    try append_op(allocator, key, &module.names, node.op, node.operand);
+    try key.append_byte(allocator, cast<u8>(124));
+    try module.names.append_to(key, node.immediate);
+    try key.append_byte(allocator, cast<u8>(124));
+    try module.names.append_to(key, node.result.type_name);
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        try key.append_byte(allocator, cast<u8>(124));
+        try module.names.append_to(key, arg.name);
+        try key.append_byte(allocator, cast<u8>(58));
+        try module.names.append_to(key, arg.type_name);
+    }
+    return true;
+}

@@ -204,7 +204,30 @@ fn (self: &var Emitter) array_field_addr(handle: ir::Name, field: i64, name: []u
 /// `arrayLoadField`.
 fn (self: &var Emitter) array_load_field(handle: ir::Name, field: i64, name: []u8, into: ir::Name) -> !void {
     let addr = try self.array_field_addr(handle, field, name);
-    return self.line2("  %s = load i64, ptr %s", Arg::Str(into), Arg::Str(addr));
+    let tag = self.tbaa_tag(TbaaKind::Count);
+    return self.line3("  %s = load i64, ptr %s%s", Arg::Str(into), Arg::Str(addr), Arg::Lit(tag));
+}
+
+/// Loads the header's storage pointer, the Go `arrayData`.
+fn (self: &var Emitter) array_data(handle: ir::Name) -> !ir::Name {
+    let data_addr = try self.array_field_addr(handle, array_field_data(), "array.data.addr");
+    let data_synthetic = try self.next_synthetic_value("array.data");
+    let data = try self.percent(data_synthetic);
+    let tag = self.tbaa_tag(TbaaKind::Pointer);
+    try self.line3("  %s = load ptr, ptr %s%s", Arg::Str(data), Arg::Str(data_addr), Arg::Lit(tag));
+    return data;
+}
+
+/// Returns the address of the element at index of the storage data points
+/// at, the Go `arrayElementAt`, given the lowered element type.
+fn (self: &var Emitter) array_element_at(data: ir::Name, elem_type: ir::Name, index: ir::Name) -> !ir::Name {
+    let elem_synthetic = try self.next_synthetic_value("array.elem");
+    let elem_addr = try self.percent(elem_synthetic);
+    try self.line4(
+        "  %s = getelementptr inbounds %s, ptr %s, i64 %s",
+        Arg::Str(elem_addr), Arg::Str(elem_type), Arg::Str(data), Arg::Str(index)
+    );
+    return elem_addr;
 }
 
 /// Returns the address of the element at index, the Go `arrayElementAddr`. The
@@ -238,17 +261,8 @@ fn (self: &var Emitter) array_element_addr_of(
     elem_type: ir::Name,
     index: ir::Name
 ) -> !ir::Name {
-    let data_addr = try self.array_field_addr(handle, array_field_data(), "array.data.addr");
-    let data_synthetic = try self.next_synthetic_value("array.data");
-    let data = try self.percent(data_synthetic);
-    let elem_synthetic = try self.next_synthetic_value("array.elem");
-    let elem_addr = try self.percent(elem_synthetic);
-    try self.line2("  %s = load ptr, ptr %s", Arg::Str(data), Arg::Str(data_addr));
-    try self.line4(
-        "  %s = getelementptr inbounds %s, ptr %s, i64 %s",
-        Arg::Str(elem_addr), Arg::Str(elem_type), Arg::Str(data), Arg::Str(index)
-    );
-    return elem_addr;
+    let data = try self.array_data(handle);
+    return self.array_element_at(data, elem_type, index);
 }
 
 /// Returns the address of the element at index, or null when index is outside
@@ -411,6 +425,7 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
     let len_synthetic = try self.next_synthetic_value("array.swap.len");
     let length = try self.percent(len_synthetic);
     try self.array_load_field(handle, array_field_len(), "array.swap.len.addr", length);
+    let data = try self.array_data(handle);
     let left_synthetic = try self.next_synthetic_value("array.swap.left_in");
     let left_in = try self.percent(left_synthetic);
     let right_synthetic = try self.next_synthetic_value("array.swap.right_in");
@@ -427,16 +442,17 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(in_range), Arg::Str(swap_label), Arg::Str(skip_label));
     try self.line1("%s:", Arg::Str(swap_label));
     let elem_type = try self.llvm_type(module, elem_bytes);
-    let left_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, left.operand);
-    let right_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, right.operand);
+    let tag = self.value_tag(elem_type);
+    let left_addr = try self.array_element_at(data, elem_type, left.operand);
+    let right_addr = try self.array_element_at(data, elem_type, right.operand);
     let left_value_synthetic = try self.next_synthetic_value("array.swap.left");
     let left_value = try self.percent(left_value_synthetic);
     let right_value_synthetic = try self.next_synthetic_value("array.swap.right");
     let right_value = try self.percent(right_value_synthetic);
-    try self.line3("  %s = load %s, ptr %s", Arg::Str(left_value), Arg::Str(elem_type), Arg::Str(left_addr));
-    try self.line3("  %s = load %s, ptr %s", Arg::Str(right_value), Arg::Str(elem_type), Arg::Str(right_addr));
-    try self.line3("  store %s %s, ptr %s", Arg::Str(elem_type), Arg::Str(right_value), Arg::Str(left_addr));
-    try self.line3("  store %s %s, ptr %s", Arg::Str(elem_type), Arg::Str(left_value), Arg::Str(right_addr));
+    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(left_value), Arg::Str(elem_type), Arg::Str(left_addr), Arg::Lit(tag));
+    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(right_value), Arg::Str(elem_type), Arg::Str(right_addr), Arg::Lit(tag));
+    try self.line4("  store %s %s, ptr %s%s", Arg::Str(elem_type), Arg::Str(right_value), Arg::Str(left_addr), Arg::Lit(tag));
+    try self.line4("  store %s %s, ptr %s%s", Arg::Str(elem_type), Arg::Str(left_value), Arg::Str(right_addr), Arg::Lit(tag));
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(skip_label));
     try self.line1("  br label %%%s", Arg::Str(join_label));
@@ -510,7 +526,8 @@ fn (self: &var Emitter) write_array_append_paths(
     let cap_synthetic = try self.next_synthetic_value("array.append.cap");
     let capacity = try self.percent(cap_synthetic);
     let length_addr = try self.array_field_addr(handle, array_field_len(), "array.append.len.addr");
-    try self.line2("  %s = load i64, ptr %s", Arg::Str(length), Arg::Str(length_addr));
+    let length_tag = self.tbaa_tag(TbaaKind::Count);
+    try self.line3("  %s = load i64, ptr %s%s", Arg::Str(length), Arg::Str(length_addr), Arg::Lit(length_tag));
     try self.array_load_field(handle, array_field_capacity(), "array.append.cap", capacity);
     let grown_synthetic = try self.next_synthetic_value("array.append.grown");
     let grown = try self.percent(grown_synthetic);
@@ -534,7 +551,8 @@ fn (self: &var Emitter) write_array_append_paths(
     let data_addr = try self.array_field_addr(handle, array_field_data(), "array.append.data.addr");
     let data_synthetic = try self.next_synthetic_value("array.append.data");
     let data = try self.percent(data_synthetic);
-    try self.line2("  %s = load ptr, ptr %s", Arg::Str(data), Arg::Str(data_addr));
+    let data_tag = self.tbaa_tag(TbaaKind::Pointer);
+    try self.line3("  %s = load ptr, ptr %s%s", Arg::Str(data), Arg::Str(data_addr), Arg::Lit(data_tag));
     let storage_synthetic = try self.next_synthetic_value("array.append.storage");
     let storage = try self.percent(storage_synthetic);
     let allocator = try self.operand(module, node.args.get_or_panic(1));
@@ -555,17 +573,21 @@ fn (self: &var Emitter) write_array_append_paths(
     try self.line2("  %s = icmp sge i64 %s, 0", Arg::Str(grew), Arg::Str(storage_cap));
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(grew), Arg::Str(store_label), Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(store_label));
-    try self.line2("  store ptr %s, ptr %s", Arg::Str(storage_data), Arg::Str(data_addr));
+    try self.line3("  store ptr %s, ptr %s%s", Arg::Str(storage_data), Arg::Str(data_addr), Arg::Lit(data_tag));
     let capacity_addr = try self.array_field_addr(handle, array_field_capacity(), "array.append.cap.addr");
-    try self.line2("  store i64 %s, ptr %s", Arg::Str(storage_cap), Arg::Str(capacity_addr));
+    try self.line3("  store i64 %s, ptr %s%s", Arg::Str(storage_cap), Arg::Str(capacity_addr), Arg::Lit(length_tag));
     try self.line1("  br label %%%s", Arg::Str(fast_label));
     try self.line1("%s:", Arg::Str(fast_label));
     let value = node.args.get_or_panic(2);
     let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, length);
     let value_type = try self.llvm_type_of(module, value.type_name);
     let value_operand = try self.operand(module, value);
-    try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr));
-    try self.line2("  store i64 %s, ptr %s", Arg::Str(grown), Arg::Str(length_addr));
+    let stored_tag = self.value_tag(value_type);
+    try self.line4(
+        "  store %s %s, ptr %s%s",
+        Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr), Arg::Lit(stored_tag)
+    );
+    try self.line3("  store i64 %s, ptr %s%s", Arg::Str(grown), Arg::Str(length_addr), Arg::Lit(length_tag));
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(join_label));
     try self.line4(
@@ -655,7 +677,8 @@ fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir:
     let cap_synthetic = try self.next_synthetic_value("array.append_bytes.cap");
     let capacity = try self.percent(cap_synthetic);
     let length_addr = try self.array_field_addr(handle, array_field_len(), "array.append_bytes.held.addr");
-    try self.line2("  %s = load i64, ptr %s", Arg::Str(length), Arg::Str(length_addr));
+    let length_tag = self.tbaa_tag(TbaaKind::Count);
+    try self.line3("  %s = load i64, ptr %s%s", Arg::Str(length), Arg::Str(length_addr), Arg::Lit(length_tag));
     try self.array_load_field(handle, array_field_capacity(), "array.append_bytes.cap", capacity);
     let needed_synthetic = try self.next_synthetic_value("array.append_bytes.needed");
     let needed = try self.percent(needed_synthetic);
@@ -674,7 +697,7 @@ fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir:
         "  call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)",
         Arg::Str(tail_addr), Arg::Str(ptr_name), Arg::Str(len_name)
     );
-    try self.line2("  store i64 %s, ptr %s", Arg::Str(needed), Arg::Str(length_addr));
+    try self.line3("  store i64 %s, ptr %s%s", Arg::Str(needed), Arg::Str(length_addr), Arg::Lit(length_tag));
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(slow_label));
     let slow_synthetic = try self.next_synthetic_value("array.append_bytes.slow.ok");
@@ -741,7 +764,8 @@ fn (self: &var Emitter) write_array_pop_or_panic(module: &ir::Module, node: &ir:
     defer none.deinit(self.allocator);
     try self.write_null_failure(module, node, ptr_name, "array.pop.panic", PanicKey::ArrayEmpty, &none);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
-    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
+    let tag = self.value_tag(result_type);
+    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name), Arg::Lit(tag));
     try self.set_value(module, node.result, result_name);
     return null;
 }
@@ -783,11 +807,17 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     let len_synthetic = try self.next_synthetic_value("array.get.panic.len");
     let len_name = try self.percent(len_synthetic);
     try self.array_load_field(handle, array_field_len(), "array.get.panic.len", len_name);
+    // The storage pointer is read before the check, beside the length: a
+    // loop that checks every element then reads both where the loop is
+    // sure to, and they move out of it together.
+    let data = try self.array_data(handle);
     try self.write_bounds_failure(module, node, index.operand, len_name);
-    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, index.operand);
+    let elem_type = try self.llvm_type(module, elem_bytes);
+    let elem_addr = try self.array_element_at(data, elem_type, index.operand);
     let result_name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
-    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(elem_addr));
+    let tag = self.value_tag(result_type);
+    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(elem_addr), Arg::Lit(tag));
     try self.set_value(module, node.result, result_name);
     return null;
 }
@@ -849,6 +879,7 @@ fn (self: &var Emitter) write_array_checked_store(
     let len_synthetic = try self.next_synthetic_value("array.set.len");
     let length = try self.percent(len_synthetic);
     try self.array_load_field(handle, array_field_len(), "array.set.len", length);
+    let data = try self.array_data(handle);
     let range_synthetic = try self.next_synthetic_value("array.set.in_range");
     let in_range = try self.percent(range_synthetic);
     try self.line3("  %s = icmp ult i64 %s, %s", Arg::Str(in_range), Arg::Str(index), Arg::Str(length));
@@ -859,10 +890,14 @@ fn (self: &var Emitter) write_array_checked_store(
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(in_range), Arg::Str(store_label), Arg::Str(skip_label));
     try self.line1("%s:", Arg::Str(store_label));
     let value = node.args.get_or_panic(2);
-    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, index);
+    let elem_type = try self.llvm_type(module, elem_bytes);
+    let elem_addr = try self.array_element_at(data, elem_type, index);
     let value_type = try self.llvm_type_of(module, value.type_name);
     let value_operand = try self.operand(module, value);
-    try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr));
+    let tag = self.value_tag(value_type);
+    try self.line4(
+        "  store %s %s, ptr %s%s", Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr), Arg::Lit(tag)
+    );
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(skip_label));
     try self.line1("  br label %%%s", Arg::Str(join_label));

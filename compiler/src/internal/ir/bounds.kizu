@@ -1,0 +1,1046 @@
+import std::array;
+import std::fmt;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/ir/bounds.go: removing the index checks a
+// function has already answered. Go keys its facts by the Go string of a
+// value name, or by an array of two; here a name is keyed by the id of the
+// interned Name, and a pair by the two ids packed in one integer (an id stays
+// below 2^32). Go names the instructions a plan drops or rewrites by pointer;
+// here by the position of the block and of the instruction in it, which no
+// walk moves. Go clears the Array header facts in place; a std map cannot be
+// cleared cheaply, so each header fact carries the number of times the
+// headers had been forgotten when it was learned, and holds only while that
+// is still the count. Go asks whether a value has an upper bound by walking
+// every pair it knows; here the left names of those pairs are kept as a set
+// beside them, which answers the same.
+
+/// Removes the index checks a function has already answered, the Go
+/// `EliminateBoundsChecks`. A check is answered when the index is known not to
+/// be negative and known to be below a value equal to the length it is
+/// checked against: the index was compared with that length on the way in, or
+/// the same index of the same Array was checked since its header last could
+/// change.
+///
+/// A check on a view is its own cond_fail and goes. An Array operation carries
+/// its check inside, so an answered one is written as the borrow its check
+/// would give and a read or store through it: `get_or_panic` becomes `at`,
+/// `opt.value` and a load, and `set` becomes `at_mut`, `opt.value`, a store and
+/// a success. A backend works out an address whose presence nothing reads
+/// without a branch, and an engine drops the unread comparison. What is known
+/// of a value holds wherever its definition dominates, since an SSA value does
+/// not change; what is known of an Array's length holds until an instruction
+/// that could change the header.
+///
+/// An index is known not to be negative when it is a constant, a length, or a
+/// loop counter that starts at a constant that is not negative and steps by
+/// one. The step cannot wrap where it is taken below a known bound, so a
+/// counter is trusted only when every step is; otherwise the function is walked
+/// again without it.
+pub fn eliminate_bounds_checks(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try eliminate_bounds_checks_in(allocator, module, function);
+    }
+    return;
+}
+
+/// Returns the key two names are filed under as a pair.
+fn pair_key(left: Name, right: Name) -> i64 {
+    return name_id(left) * 4294967296 + name_id(right);
+}
+
+/// Returns the key the instruction at instr_index of the block at position is
+/// filed under.
+fn instr_key(position: i64, instr_index: i64) -> i64 {
+    return position * 4294967296 + instr_index;
+}
+
+/// Is a value equal to an Array's length and the header count it was learned
+/// at.
+struct LengthFact {
+    value: Value,
+    headers: i64,
+}
+
+/// Is what is known at one point of a function, the Go `boundsFacts`.
+struct BoundsFacts {
+    // less holds pairs {x, y} with x < y as signed integers, and less_left
+    // the x of each.
+    less: map::Map<i64, bool>,
+    less_left: map::Map<i64, bool>,
+    // nonneg holds values known not to be negative.
+    nonneg: map::Map<i64, bool>,
+    // length maps an Array reference to a value equal to its current length.
+    length: map::Map<i64, LengthFact>,
+    // view_length maps a view to its length, which nothing changes.
+    view_length: map::Map<i64, Value>,
+    // checked holds pairs {array, index} whose check has passed since the
+    // header last could change, with the header count it passed at.
+    checked: map::Map<i64, i64>,
+    // headers counts the times what is known of Array headers was forgotten.
+    headers: i64,
+}
+
+/// Returns an empty fact set, the Go `newBoundsFacts`.
+fn new_bounds_facts(allocator: Allocator) -> BoundsFacts {
+    return BoundsFacts {
+        less: map::new<i64, bool>(allocator),
+        less_left: map::new<i64, bool>(allocator),
+        nonneg: map::new<i64, bool>(allocator),
+        length: map::new<i64, LengthFact>(allocator),
+        view_length: map::new<i64, Value>(allocator),
+        checked: map::new<i64, i64>(allocator),
+        headers: 0
+    };
+}
+
+fn (self: BoundsFacts) deinit(allocator: Allocator) -> void {
+    self.less.deinit(allocator);
+    self.less_left.deinit(allocator);
+    self.nonneg.deinit(allocator);
+    self.length.deinit(allocator);
+    self.view_length.deinit(allocator);
+    self.checked.deinit(allocator);
+    return;
+}
+
+/// Returns an independent copy of the facts, the Go `copyFacts`.
+fn (self: &BoundsFacts) copy_facts(allocator: Allocator) -> !BoundsFacts {
+    var out = new_bounds_facts(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    while self.less.key_at(index) |key| {
+        index = index + 1;
+        try out.less.insert(allocator, key, true);
+    }
+    index = 0;
+    while self.less_left.key_at(index) |key| {
+        index = index + 1;
+        try out.less_left.insert(allocator, key, true);
+    }
+    index = 0;
+    while self.nonneg.key_at(index) |key| {
+        index = index + 1;
+        try out.nonneg.insert(allocator, key, true);
+    }
+    index = 0;
+    while self.length.key_at(index) |key| {
+        index = index + 1;
+        if self.length.get(key) |fact| {
+            if fact.headers == self.headers {
+                try out.length.insert(allocator, key, LengthFact { value: fact.value, headers: 0 });
+            }
+        }
+    }
+    index = 0;
+    while self.view_length.key_at(index) |key| {
+        index = index + 1;
+        if self.view_length.get(key) |value| {
+            try out.view_length.insert(allocator, key, value);
+        }
+    }
+    index = 0;
+    while self.checked.key_at(index) |key| {
+        index = index + 1;
+        if self.checked.get(key) |headers| {
+            if headers == self.headers {
+                try out.checked.insert(allocator, key, 0);
+            }
+        }
+    }
+    return move out;
+}
+
+/// Drops what is known of Array headers, the Go `forgetHeaders`.
+fn (self: &var BoundsFacts) forget_headers() -> void {
+    self.headers = self.headers + 1;
+    return;
+}
+
+/// Records left < right.
+fn (self: &var BoundsFacts) add_less(allocator: Allocator, left: Name, right: Name) -> !void {
+    try self.less.insert(allocator, pair_key(left, right), true);
+    return self.less_left.insert(allocator, name_id(left), true);
+}
+
+/// Returns the value known equal to an Array's length, the Go
+/// `length[container]` read with its ok flag.
+fn (self: &BoundsFacts) length_of(container: Name) -> ?Value {
+    let fact = self.length.get(name_id(container)) orelse return null;
+    if fact.headers != self.headers {
+        return null;
+    }
+    return fact.value;
+}
+
+/// Records the value known equal to an Array's length.
+fn (self: &var BoundsFacts) set_length(allocator: Allocator, container: Name, value: Value) -> !void {
+    return self.length.insert(allocator, name_id(container), LengthFact { value: value, headers: self.headers });
+}
+
+/// Reports whether an {array, index} check has passed since the header last
+/// could change.
+fn (self: &BoundsFacts) is_checked(pair: i64) -> bool {
+    let headers = self.checked.get(pair) orelse return false;
+    return headers == self.headers;
+}
+
+/// Reports whether a value a step adds one to is known to be below some
+/// value, so the step cannot wrap, the Go `hasUpperBound`.
+fn (self: &BoundsFacts) has_upper_bound(name: Name) -> bool {
+    return self.less_left.contains(name_id(name));
+}
+
+/// Is what one walk of a function decided, the Go `boundsPlan`.
+struct BoundsPlan {
+    // drops are the cond_fail instructions an answered check made.
+    drops: map::Map<i64, bool>,
+    // answered are the Array operations whose check is answered.
+    answered: map::Map<i64, bool>,
+    // aliases replaces a length read with an equal one read before it.
+    aliases: map::Map<i64, Value>,
+    // unsafe_steps are the counters a step was taken for without a bound.
+    unsafe_steps: map::Map<i64, bool>,
+}
+
+fn new_bounds_plan(allocator: Allocator) -> BoundsPlan {
+    return BoundsPlan {
+        drops: map::new<i64, bool>(allocator),
+        answered: map::new<i64, bool>(allocator),
+        aliases: map::new<i64, Value>(allocator),
+        unsafe_steps: map::new<i64, bool>(allocator)
+    };
+}
+
+fn (self: BoundsPlan) deinit(allocator: Allocator) -> void {
+    self.drops.deinit(allocator);
+    self.answered.deinit(allocator);
+    self.aliases.deinit(allocator);
+    self.unsafe_steps.deinit(allocator);
+    return;
+}
+
+/// Follows the length aliases the walk has made, the Go `resolvedName`.
+fn (self: &BoundsPlan) resolved_name(name: Name) -> Name {
+    var current = name;
+    while self.aliases.get(name_id(current)) |next| {
+        current = next.name;
+    }
+    return current;
+}
+
+/// Is the loop counters one walk trusts and the steps that feed them, the Go
+/// `boundsWalker.counter` and `steps`. A counter dropped from the candidates
+/// stays filed as false.
+struct LoopCounters {
+    counter: map::Map<i64, bool>,
+    // steps maps a step's result to the counters it feeds.
+    steps: map::Map<i64, array::Array<Name>>,
+}
+
+fn (self: LoopCounters) deinit(allocator: Allocator) -> void {
+    self.counter.deinit(allocator);
+    self.steps.deinit(allocator);
+    return;
+}
+
+/// Reports whether a name is a trusted counter.
+fn (self: &LoopCounters) is_counter(name: Name) -> bool {
+    return self.counter.get(name_id(name)) orelse false;
+}
+
+/// Carries the function-wide tables one walk reads, the Go `boundsWalker`:
+/// every definition by name, and the function's blocks, predecessors,
+/// dominator tree and reverse postorder, which no walk changes.
+struct BoundsWalker {
+    function: Function,
+    defs: map::Map<i64, Instr>,
+    blocks: BlockIndex,
+    preds: array::Array<array::Array<i64>>,
+    tree: DominatorTree,
+    order: array::Array<i64>,
+}
+
+fn (self: BoundsWalker) deinit(allocator: Allocator) -> void {
+    self.defs.deinit(allocator);
+    self.blocks.deinit(allocator);
+    self.preds.deinit(allocator);
+    self.tree.deinit(allocator);
+    self.order.deinit(allocator);
+    return;
+}
+
+/// Plans and applies the removals for one function, the Go
+/// `eliminateBoundsChecksIn`.
+fn eliminate_bounds_checks_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    if function_block_count(module, function) == 0 {
+        return;
+    }
+    var defs = try instr_definitions(allocator, module, function);
+    errdefer defs.deinit(allocator);
+    var blocks = try block_index(allocator, module, function);
+    errdefer blocks.deinit(allocator);
+    var preds = try block_predecessors(allocator, module, function, &blocks);
+    errdefer preds.deinit(allocator);
+    var tree = try build_dominator_tree(allocator, module, function, &blocks, &preds);
+    errdefer tree.deinit(allocator);
+    let order = try reverse_postorder(allocator, module, function, &blocks);
+    var w = BoundsWalker {
+        function: function,
+        defs: move defs,
+        blocks: move blocks,
+        preds: move preds,
+        tree: move tree,
+        order: move order
+    };
+    defer w.deinit(allocator);
+    var excluded = map::new<i64, bool>(allocator);
+    defer excluded.deinit(allocator);
+    while true {
+        var counters = try loop_counters(allocator, module, function, &w.defs, &excluded);
+        defer counters.deinit(allocator);
+        var plan = try w.walk(allocator, module, &counters);
+        defer plan.deinit(allocator);
+        if plan.unsafe_steps.len() == 0 {
+            if plan.drops.len() == 0 and plan.answered.len() == 0 and plan.aliases.len() == 0 {
+                return;
+            }
+            return apply_bounds_plan(allocator, module, function, &plan);
+        }
+        var index = 0;
+        while plan.unsafe_steps.key_at(index) |name| {
+            index = index + 1;
+            try excluded.insert(allocator, name, true);
+        }
+    }
+    return;
+}
+
+/// Maps every instruction result of a function to its instruction, the Go
+/// `defs` a walk and a version read.
+fn instr_definitions(allocator: Allocator, module: &Module, function: Function) -> !map::Map<i64, Instr> {
+    var defs = map::new<i64, Instr>(allocator);
+    errdefer defs.deinit(allocator);
+    var block_index_at = 0;
+    while function_block_at(module, function, block_index_at) |block| {
+        block_index_at = block_index_at + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let result = module.instr_result(instr);
+            if !is_empty(result.name) {
+                try defs.insert(allocator, name_id(result.name), instr);
+            }
+        }
+    }
+    return move defs;
+}
+
+/// Finds the i64 phis each of whose incoming is a constant that is not
+/// negative or a step of one from such a phi, and the steps that feed them,
+/// the Go `loopCounters`. Every phi not excluded starts as a candidate and
+/// loses its place when an incoming is neither, until none does.
+fn loop_counters(
+    allocator: Allocator,
+    module: &Module,
+    function: Function,
+    defs: &map::Map<i64, Instr>,
+    excluded: &map::Map<i64, bool>
+) -> !LoopCounters {
+    var counters = LoopCounters {
+        counter: map::new<i64, bool>(allocator),
+        steps: map::new<i64, array::Array<Name>>(allocator)
+    };
+    errdefer counters.deinit(allocator);
+    var block_at = 0;
+    while function_block_at(module, function, block_at) |block| {
+        block_at = block_at + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            if node.op == Op::Phi and module.names.is(node.result.type_name, "i64") and
+                !excluded.contains(name_id(node.result.name)) {
+                try counters.counter.insert(allocator, name_id(node.result.name), true);
+            }
+        }
+    }
+    var changed = true;
+    while changed {
+        changed = try drop_counters(allocator, module, function, defs, &var counters);
+    }
+    block_at = 0;
+    while function_block_at(module, function, block_at) |block| {
+        block_at = block_at + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let result = module.instr_result(instr);
+            if !counters.is_counter(result.name) {
+                continue;
+            }
+            var incoming_index = 0;
+            while phi_incoming_at(module, instr, incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                if step_of(module, defs, incoming.value) |_| {
+                    try add_step(allocator, &var counters.steps, incoming.value.name, result.name);
+                }
+            }
+        }
+    }
+    return move counters;
+}
+
+/// Records that a step feeds a counter, the Go
+/// `steps[step] = append(steps[step], counter)`.
+fn add_step(allocator: Allocator, steps: &var map::Map<i64, array::Array<Name>>, step: Name, counter: Name) -> !void {
+    if steps.at_mut(name_id(step)) |fed| {
+        return fed.append(allocator, counter);
+    }
+    var fed = array::new<Name>(allocator);
+    errdefer fed.deinit(allocator);
+    try fed.append(allocator, counter);
+    return steps.insert(allocator, name_id(step), move fed);
+}
+
+/// Removes each candidate with an incoming that is neither a constant that is
+/// not negative nor a step of one from a candidate, and reports whether it
+/// removed any, the Go `dropCounters`.
+fn drop_counters(
+    allocator: Allocator,
+    module: &Module,
+    function: Function,
+    defs: &map::Map<i64, Instr>,
+    counters: &var LoopCounters
+) -> !bool {
+    var changed = false;
+    var block_at = 0;
+    while function_block_at(module, function, block_at) |block| {
+        block_at = block_at + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let result = module.instr_result(instr);
+            if counters.is_counter(result.name) and !counts_up(module, instr, defs, counters) {
+                try counters.counter.insert(allocator, name_id(result.name), false);
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+/// Reports whether every incoming of a phi is a constant that is not negative
+/// or a step of one from a candidate counter, the Go `countsUp`.
+fn counts_up(module: &Module, phi: Instr, defs: &map::Map<i64, Instr>, counters: &LoopCounters) -> bool {
+    let node = module.instrs.at(phi.node);
+    var index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        if non_negative_constant(module, incoming.value, defs) {
+            continue;
+        }
+        if step_of(module, defs, incoming.value) |from| {
+            if counters.is_counter(from) {
+                continue;
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+/// Reports whether a value is an i64 constant that is not negative, the Go
+/// `nonNegativeConstant`.
+fn non_negative_constant(module: &Module, value: Value, defs: &map::Map<i64, Instr>) -> bool {
+    if constant_value(module, value, defs) |number| {
+        return number >= 0;
+    }
+    return false;
+}
+
+/// Returns the i64 a constant value holds, the Go `constantValue`.
+fn constant_value(module: &Module, value: Value, defs: &map::Map<i64, Instr>) -> ?i64 {
+    if !module.names.is(value.type_name, "i64") {
+        return null;
+    }
+    if defs.get(name_id(value.name)) |instr| {
+        let node = module.instrs.at(instr.node);
+        if node.op != Op::Const {
+            return null;
+        }
+        let immediate = name_text(&module.names, node.immediate);
+        let immediate_bytes = immediate.as_bytes();
+        return parse_i64(immediate_bytes);
+    }
+    let text = name_text(&module.names, value.name);
+    let bytes = text.as_bytes();
+    return parse_i64(bytes);
+}
+
+/// Returns the value a `+ 1` step adds one to, the Go `stepOf`.
+fn step_of(module: &Module, defs: &map::Map<i64, Instr>, value: Value) -> ?Name {
+    let instr = defs.get(name_id(value.name)) orelse return null;
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Binary or !module.names.is(node.operand, "+") or node.args.len() != 2 or
+        !module.names.is(node.result.type_name, "i64") {
+        return null;
+    }
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    if constant_value(module, right, defs) |one| {
+        if one == 1 {
+            return left.name;
+        }
+    }
+    if constant_value(module, left, defs) |one| {
+        if one == 1 {
+            return right.name;
+        }
+    }
+    return null;
+}
+
+/// Visits the blocks down the dominator tree and returns a fresh plan, the Go
+/// `boundsWalker.walk`.
+fn (self: &BoundsWalker) walk(allocator: Allocator, module: &Module, counters: &LoopCounters) -> !BoundsPlan {
+    var plan = new_bounds_plan(allocator);
+    errdefer plan.deinit(allocator);
+    var ends = map::new<i64, BoundsFacts>(allocator);
+    defer ends.deinit(allocator);
+    var index = 0;
+    while self.order.get(index) |position| {
+        let block = self.blocks.block_at(position);
+        var facts = try self.starting_facts(allocator, module, &plan, &ends, index, position);
+        errdefer facts.deinit(allocator);
+        index = index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            try self.visit(allocator, module, counters, &var plan, &var facts, instr, instr_key(position, instr_index));
+            instr_index = instr_index + 1;
+        }
+        try ends.insert(allocator, position, move facts);
+    }
+    return move plan;
+}
+
+/// Returns what the block at position of the walk's order starts with: nothing
+/// for the entry, else a copy of its immediate dominator's end with what the
+/// edge in says, or less the headers when a path from the dominator may write
+/// one.
+fn (self: &BoundsWalker) starting_facts(
+    allocator: Allocator,
+    module: &Module,
+    plan: &BoundsPlan,
+    ends: &map::Map<i64, BoundsFacts>,
+    index: i64,
+    position: i64
+) -> !BoundsFacts {
+    if index == 0 {
+        return new_bounds_facts(allocator);
+    }
+    let idom = self.order.get_or_panic(self.tree.idom.get_or_panic(index));
+    if ends.at(idom) |from| {
+        var facts = try from.copy_facts(allocator);
+        errdefer facts.deinit(allocator);
+        var direct = false;
+        if self.preds.at(position) |into| {
+            direct = into.len() == 1 and into.get_or_panic(0) == idom;
+        }
+        if direct {
+            let term = module.block_terminator(self.blocks.block_at(idom));
+            try self.learn_edge(allocator, module, plan, &var facts, term, self.blocks.name_at(position));
+        } else {
+            if try self.paths_may_write_headers(allocator, module, position, idom) {
+                facts.forget_headers();
+            }
+        }
+        return move facts;
+    }
+    return new_bounds_facts(allocator);
+}
+
+/// Reports whether a block on a path from idom to the block at position holds
+/// an instruction that could change an Array header, the Go
+/// `pathsMayWriteHeaders`.
+fn (self: &BoundsWalker) paths_may_write_headers(allocator: Allocator, module: &Module, position: i64, idom: i64) -> !bool {
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    if self.preds.at(position) |into| {
+        var pred_index = 0;
+        while into.get(pred_index) |pred| {
+            pred_index = pred_index + 1;
+            try stack.append(allocator, pred);
+        }
+    }
+    var visited = map::new<i64, bool>(allocator);
+    defer visited.deinit(allocator);
+    while stack.pop() |block| {
+        if block == idom or visited.contains(block) {
+            continue;
+        }
+        try visited.insert(allocator, block, true);
+        if visited.len() > forward_visit_limit() {
+            return true;
+        }
+        var instr_index = 0;
+        while block_instr_at(module, self.blocks.block_at(block), instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if !leaves_headers(module.instr_op(instr)) {
+                return true;
+            }
+        }
+        if block != position {
+            if self.preds.at(block) |into| {
+                var pred_index = 0;
+                while into.get(pred_index) |pred| {
+                    pred_index = pred_index + 1;
+                    try stack.append(allocator, pred);
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Reports whether an instruction cannot change an Array header, the Go
+/// `leavesHeaders`: it only computes its result, or it checks, reads or
+/// writes an element or a field.
+fn leaves_headers(op: Op) -> bool {
+    return match op {
+        CondFail => true,
+        ArraySet => true,
+        ArraySwap => true,
+        ArrayGetOrPanic => true,
+        SliceStore => true,
+        FieldRefSet => true,
+        _ => is_pure_op(op),
+    };
+}
+
+/// Adds what taking the edge from term to target says about its condition,
+/// the Go `learnEdge`.
+fn (self: &BoundsWalker) learn_edge(
+    allocator: Allocator,
+    module: &Module,
+    plan: &BoundsPlan,
+    facts: &var BoundsFacts,
+    term: Terminator,
+    target: Name
+) -> !void {
+    if term.op != TermOp::Branch or same_name(term.target, term.else_target) {
+        return;
+    }
+    return self.learn_condition(allocator, module, plan, facts, term.cond, same_name(term.target, target));
+}
+
+/// Is an ordering a comparison instruction tests, or none.
+enum Ordering {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    None,
+}
+
+/// Returns the ordering an op tests.
+fn ordering_of(module: &Module, op: Op, operand: Name) -> Ordering {
+    if op != Op::Binary {
+        return Ordering::None;
+    }
+    if module.names.is(operand, "<") {
+        return Ordering::Less;
+    }
+    if module.names.is(operand, "<=") {
+        return Ordering::LessEqual;
+    }
+    if module.names.is(operand, ">") {
+        return Ordering::Greater;
+    }
+    if module.names.is(operand, ">=") {
+        return Ordering::GreaterEqual;
+    }
+    return Ordering::None;
+}
+
+/// Returns the comparison that holds when an ordering does not, the Go
+/// `negatedComparison`.
+fn negated_ordering(ordering: Ordering) -> Ordering {
+    return match ordering {
+        Less => Ordering::GreaterEqual,
+        GreaterEqual => Ordering::Less,
+        Greater => Ordering::LessEqual,
+        LessEqual => Ordering::Greater,
+        None => Ordering::None,
+    };
+}
+
+/// Adds what a comparison being holds or truth says, the Go
+/// `learnCondition`.
+fn (self: &BoundsWalker) learn_condition(
+    allocator: Allocator,
+    module: &Module,
+    plan: &BoundsPlan,
+    facts: &var BoundsFacts,
+    cond: Value,
+    holds: bool
+) -> !void {
+    let instr = self.defs.get(name_id(cond.name)) orelse return;
+    let node = module.instrs.at(instr.node);
+    if node.args.len() != 2 {
+        return;
+    }
+    let left_arg = node.args.get_or_panic(0);
+    let right_arg = node.args.get_or_panic(1);
+    if !module.names.is(left_arg.type_name, "i64") {
+        return;
+    }
+    let left = plan.resolved_name(left_arg.name);
+    let right = plan.resolved_name(right_arg.name);
+    var ordering = ordering_of(module, node.op, node.operand);
+    if !holds {
+        ordering = negated_ordering(ordering);
+    }
+    match ordering {
+        Less => return facts.add_less(allocator, left, right),
+        Greater => return facts.add_less(allocator, right, left),
+        GreaterEqual => {
+            if constant_value(module, right_arg, &self.defs) |zero| {
+                if zero >= 0 {
+                    try facts.nonneg.insert(allocator, name_id(left), true);
+                }
+            }
+        },
+        LessEqual => {
+            if constant_value(module, left_arg, &self.defs) |zero| {
+                if zero >= 0 {
+                    try facts.nonneg.insert(allocator, name_id(right), true);
+                }
+            }
+        },
+        None => {},
+    }
+    return;
+}
+
+/// Records what one instruction answers and learns, the Go
+/// `boundsWalker.visit`.
+fn (self: &BoundsWalker) visit(
+    allocator: Allocator,
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &var BoundsPlan,
+    facts: &var BoundsFacts,
+    instr: Instr,
+    key: i64
+) -> !void {
+    let op = module.instr_op(instr);
+    match op {
+        CondFail => return self.visit_cond_fail(allocator, module, counters, plan, facts, instr, key),
+        ArrayLen => return visit_length(allocator, module, plan, facts, instr),
+        SliceLen => return visit_length(allocator, module, plan, facts, instr),
+        ArrayGetOrPanic => return self.visit_array_check(allocator, module, counters, plan, facts, instr, key),
+        ArraySet => return self.visit_array_check(allocator, module, counters, plan, facts, instr, key),
+        ArrayAt => return self.visit_array_check(allocator, module, counters, plan, facts, instr, key),
+        ArrayAtMut => return self.visit_array_check(allocator, module, counters, plan, facts, instr, key),
+        Binary => try self.visit_step(allocator, module, counters, plan, facts, instr),
+        _ => {},
+    }
+    if !leaves_headers(op) {
+        facts.forget_headers();
+    }
+    return;
+}
+
+/// Marks the counters a `+` step feeds as unsafe when the value it adds one
+/// to has no known upper bound, the `binary.+` case of the Go
+/// `boundsWalker.visit`.
+fn (self: &BoundsWalker) visit_step(
+    allocator: Allocator,
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &var BoundsPlan,
+    facts: &BoundsFacts,
+    instr: Instr
+) -> !void {
+    let node = module.instrs.at(instr.node);
+    if !module.names.is(node.operand, "+") {
+        return;
+    }
+    let result = node.result;
+    if counters.steps.at(name_id(result.name)) |fed| {
+        if fed.len() == 0 {
+            return;
+        }
+        let from = step_of(module, &self.defs, result) orelse empty_name();
+        if !facts.has_upper_bound(from) {
+            var index = 0;
+            while fed.get(index) |counter| {
+                index = index + 1;
+                try plan.unsafe_steps.insert(allocator, name_id(counter), true);
+            }
+        }
+    }
+    return;
+}
+
+/// Drops a bounds check whose failing condition cannot hold, and learns that
+/// it does not from one that stays, the Go `visitCondFail`.
+fn (self: &BoundsWalker) visit_cond_fail(
+    allocator: Allocator,
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &var BoundsPlan,
+    facts: &var BoundsFacts,
+    instr: Instr,
+    key: i64
+) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.args.len() == 0 {
+        return;
+    }
+    let tested = node.args.get_or_panic(0);
+    if self.defs.get(name_id(tested.name)) |cond| {
+        let cond_node = module.instrs.at(cond.node);
+        if cond_node.args.len() == 2 {
+            let left = cond_node.args.get_or_panic(0);
+            let right = cond_node.args.get_or_panic(1);
+            if module.names.is(left.type_name, "i64") and cond_node.op == Op::Binary {
+                if module.names.is(cond_node.operand, "<") {
+                    if constant_value(module, right, &self.defs) |zero| {
+                        if zero == 0 and self.non_negative(module, counters, plan, facts, left) {
+                            return plan.drops.insert(allocator, key, true);
+                        }
+                    }
+                }
+                if module.names.is(cond_node.operand, ">=") {
+                    let pair = pair_key(plan.resolved_name(left.name), plan.resolved_name(right.name));
+                    if facts.less.contains(pair) {
+                        return plan.drops.insert(allocator, key, true);
+                    }
+                }
+            }
+        }
+    }
+    return self.learn_condition(allocator, module, plan, facts, tested, false);
+}
+
+/// Reports whether a value is known not to be negative, the Go
+/// `nonNegative`.
+fn (self: &BoundsWalker) non_negative(
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    facts: &BoundsFacts,
+    value: Value
+) -> bool {
+    let name = plan.resolved_name(value.name);
+    if facts.nonneg.contains(name_id(name)) or counters.is_counter(name) or
+        non_negative_constant(module, value, &self.defs) {
+        return true;
+    }
+    let instr = self.defs.get(name_id(name)) orelse return false;
+    let op = module.instr_op(instr);
+    return op == Op::ArrayLen or op == Op::SliceLen;
+}
+
+/// Makes a length read stand for the equal one read before it, or the length
+/// known from now on, the Go `visitLength`.
+fn visit_length(
+    allocator: Allocator,
+    module: &Module,
+    plan: &var BoundsPlan,
+    facts: &var BoundsFacts,
+    instr: Instr
+) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.args.len() != 1 {
+        return;
+    }
+    let container = node.args.get_or_panic(0);
+    let result = node.result;
+    if node.op == Op::SliceLen {
+        if facts.view_length.get(name_id(container.name)) |known| {
+            if same_name(known.type_name, result.type_name) {
+                return plan.aliases.insert(allocator, name_id(result.name), known);
+            }
+        }
+        return facts.view_length.insert(allocator, name_id(container.name), result);
+    }
+    if facts.length_of(container.name) |known| {
+        if same_name(known.type_name, result.type_name) {
+            return plan.aliases.insert(allocator, name_id(result.name), known);
+        }
+    }
+    return facts.set_length(allocator, container.name, result);
+}
+
+/// Answers an Array operation's check when it can, and learns that the index
+/// is in bounds from one that stays, the Go `visitArrayCheck`.
+fn (self: &BoundsWalker) visit_array_check(
+    allocator: Allocator,
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &var BoundsPlan,
+    facts: &var BoundsFacts,
+    instr: Instr,
+    key: i64
+) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.args.len() < 2 {
+        return;
+    }
+    let container = node.args.get_or_panic(0);
+    let index = node.args.get_or_panic(1);
+    let pair = pair_key(container.name, index.name);
+    var answered = facts.is_checked(pair);
+    if !answered and self.non_negative(module, counters, plan, facts, index) {
+        if facts.length_of(container.name) |length| {
+            answered = facts.less.contains(pair_key(plan.resolved_name(index.name), plan.resolved_name(length.name)));
+        }
+    }
+    if answered and module.names.starts_with(container.type_name, "&") {
+        try plan.answered.insert(allocator, key, true);
+    }
+    if node.op == Op::ArrayGetOrPanic or node.op == Op::ArraySet {
+        try facts.checked.insert(allocator, pair, facts.headers);
+    }
+    return;
+}
+
+/// Rewrites the function the way a walk planned, the Go `applyBoundsPlan`.
+fn apply_bounds_plan(allocator: Allocator, module: &var Module, function: Function, plan: &BoundsPlan) -> !void {
+    if plan.aliases.len() > 0 {
+        try replace_function_values(allocator, module, function, &plan.aliases);
+    }
+    var site = 0;
+    var present = map::new<i64, bool>(allocator);
+    defer present.deinit(allocator);
+    var position = 0;
+    while function_block_at(module, function, position) |block| {
+        var out = array::new<Instr>(allocator);
+        defer out.deinit(allocator);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            let key = instr_key(position, instr_index);
+            instr_index = instr_index + 1;
+            if plan.drops.contains(key) {
+                continue;
+            }
+            if !plan.answered.contains(key) {
+                try out.append(allocator, instr);
+                continue;
+            }
+            site = site + 1;
+            var spelled = try string::from_bytes(allocator, "%bce");
+            errdefer spelled.deinit(allocator);
+            try fmt::append_i64(allocator, &var spelled, site);
+            try spelled.append_byte(allocator, cast<u8>(46));
+            let prefix = try module.names.intern_owned(move spelled);
+            try answered_access(allocator, module, instr, prefix, &var present, &var out);
+        }
+        try set_block_instrs(allocator, module, block, &out);
+        position = position + 1;
+    }
+    if present.len() == 0 {
+        return;
+    }
+    let truth = try module.names.intern("true");
+    position = 0;
+    while function_block_at(module, function, position) |block| {
+        position = position + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if known_present(module, instr, &present) {
+                if module.instrs.at_mut(instr.node) |node| {
+                    node.op = Op::Const;
+                    node.operand = empty_name();
+                    while node.args.pop() |_| {}
+                    node.immediate = truth;
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Reports whether an instruction is an opt.has of a borrow known present.
+fn known_present(module: &Module, instr: Instr, present: &map::Map<i64, bool>) -> bool {
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::OptHas or node.args.len() != 1 {
+        return false;
+    }
+    let arg = node.args.get_or_panic(0);
+    return present.contains(name_id(arg.name));
+}
+
+/// Appends the instructions an Array operation with an answered check becomes,
+/// and marks the borrow optionals known to be present, the Go
+/// `answeredAccess`.
+fn answered_access(
+    allocator: Allocator,
+    module: &var Module,
+    instr: Instr,
+    prefix: Name,
+    present: &var map::Map<i64, bool>,
+    out: &var array::Array<Instr>
+) -> !void {
+    let shape = field_shape(module, instr);
+    let container = shape.reference;
+    let index = shape.stored;
+    let deref = try module.names.deref_type(container.type_name);
+    let unprefixed = try module.names.trim_prefix(deref, "std::array::Array<");
+    var elem = unprefixed;
+    if module.names.ends_with(unprefixed, ">") {
+        elem = try module.names.intern_slice(unprefixed, 0, module.names.len(unprefixed) - 1);
+    }
+    if shape.op == Op::ArrayAt or shape.op == Op::ArrayAtMut {
+        try present.insert(allocator, name_id(shape.result.name), true);
+        return out.append(allocator, instr);
+    }
+    let borrow_name = try module.names.wrapped("", prefix, "at");
+    let ref_name = try module.names.wrapped("", prefix, "ref");
+    if shape.op == Op::ArrayGetOrPanic {
+        let borrow = Value { name: borrow_name, type_name: try module.names.prefixed("?&", elem) };
+        let reference = Value { name: ref_name, type_name: try module.names.prefixed("&", elem) };
+        try append_new_instr(allocator, module, out, borrow, Op::ArrayAt, 2, container, index);
+        try append_new_instr(allocator, module, out, reference, Op::OptValue, 1, borrow, empty_value());
+        return append_new_instr(allocator, module, out, shape.result, Op::RefLoad, 1, reference, empty_value());
+    }
+    let borrow = Value { name: borrow_name, type_name: try module.names.prefixed("?&var ", elem) };
+    let reference = Value { name: ref_name, type_name: try module.names.prefixed("&var ", elem) };
+    let stored = call_arg_at(module, instr, 2) orelse empty_value();
+    try append_new_instr(allocator, module, out, borrow, Op::ArrayAtMut, 2, container, index);
+    try append_new_instr(allocator, module, out, reference, Op::OptValue, 1, borrow, empty_value());
+    let stored_result = Value { name: empty_name(), type_name: try module.names.intern("void") };
+    try append_new_instr(allocator, module, out, stored_result, Op::RefStore, 2, reference, stored);
+    return append_new_instr(allocator, module, out, shape.result, Op::ErrorOk, 0, empty_value(), empty_value());
+}
+
+/// Retains a new instruction reading the first count of two values, and
+/// appends it to out.
+fn append_new_instr(
+    allocator: Allocator,
+    module: &var Module,
+    out: &var array::Array<Instr>,
+    result: Value,
+    op: Op,
+    count: i64,
+    first: Value,
+    second: Value
+) -> !void {
+    var node = module.blank_instr(result, op, empty_name(), empty_name());
+    errdefer node.deinit(allocator);
+    if count > 0 {
+        try node.args.append(allocator, first);
+    }
+    if count > 1 {
+        try node.args.append(allocator, second);
+    }
+    let handle = Instr { node: try module.instrs.add(allocator, move node) };
+    return out.append(allocator, handle);
+}

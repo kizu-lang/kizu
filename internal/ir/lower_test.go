@@ -8,6 +8,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/types"
 )
@@ -61,7 +62,7 @@ func TestOptimizePasses(t *testing.T) {
 		{Result: dead, Op: "const", Immediate: "99"},
 	}
 	block.Terminator = Terminator{Op: "return", Value: copyValue}
-	if err := Optimize(module); err != nil {
+	if err := Optimize(module, stdtarget.Native); err != nil {
 		t.Fatalf("optimize failed: %v", err)
 	}
 	got := Dump(module)
@@ -90,7 +91,7 @@ func TestOptimizeKeepsUnusedVolatileLoad(t *testing.T) {
 		{Result: unused, Op: "volatile.load", Args: []Value{pointer}},
 	}
 	block.Terminator = Terminator{Op: "return"}
-	if err := Optimize(module); err != nil {
+	if err := Optimize(module, stdtarget.Native); err != nil {
 		t.Fatalf("optimize failed: %v", err)
 	}
 	kept := false
@@ -131,7 +132,7 @@ func TestOptimizeKeepsStructFieldAndCleanupOperandsLive(t *testing.T) {
 	}
 	block.Terminator = Terminator{Op: "return", Value: holder}
 
-	if err := Optimize(module); err != nil {
+	if err := Optimize(module, stdtarget.Native); err != nil {
 		t.Fatalf("optimize failed: %v", err)
 	}
 

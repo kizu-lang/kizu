@@ -168,6 +168,80 @@ fn (self: &var Emitter) array_element_address(
     );
 }
 
+/// Is how an operation reaches the `{data, len, cap}` header of the Array it
+/// works on, the Go `arrayHeader`: at an address in linear memory, with the
+/// storage pointer and length read from locals instead when the loop being
+/// written hoisted those reads (plan_loop_hoists).
+struct ArrayHeader {
+    address: ir::Name,
+    hoisted: bool,
+    data: ir::Name,
+    length: ir::Name,
+}
+
+/// Returns how the Array value reaches its header, the Go `arrayHeaderOf`.
+fn (self: &var Emitter) array_header_of(module: &ir::Module, value: ir::Value) -> !ArrayHeader {
+    let info = try self.value_of(module, value);
+    if self.hoisted_of(value.name) |hoist| {
+        return ArrayHeader {
+            address: info.expr,
+            hoisted: true,
+            data: hoist.data,
+            length: hoist.length
+        };
+    }
+    return ArrayHeader {
+        address: info.expr,
+        hoisted: false,
+        data: ir::empty_name(),
+        length: ir::empty_name()
+    };
+}
+
+/// Reads the header's storage pointer, the Go `arrayHeader.data`.
+fn (self: &var Emitter) header_data(h: ArrayHeader) -> !ir::Name {
+    if h.hoisted {
+        return self.local_get_expr(h.data);
+    }
+    let address = try self.array_field_address(h.address, array_data_offset());
+    return self.array_expr1("(i32.load %s)", Arg::Str(address));
+}
+
+/// Reads the header's element count, the Go `arrayHeader.length`.
+fn (self: &var Emitter) header_length(h: ArrayHeader) -> !ir::Name {
+    if h.hoisted {
+        return self.local_get_expr(h.length);
+    }
+    let address = try self.array_field_address(h.address, array_len_offset());
+    return self.array_expr1("(i64.load %s)", Arg::Str(address));
+}
+
+/// Reads the header's reserved element count, the Go `arrayHeader.capacity`.
+fn (self: &var Emitter) header_capacity(h: ArrayHeader) -> !ir::Name {
+    let address = try self.array_field_address(h.address, array_capacity_offset());
+    return self.array_expr1("(i64.load %s)", Arg::Str(address));
+}
+
+/// Returns the storage address of the element at a checked index, the Go
+/// `arrayHeader.element`.
+fn (self: &var Emitter) header_element(h: ArrayHeader, index: ir::Name, size: i64) -> !ir::Name {
+    let data = try self.header_data(h);
+    return self.array_expr3(
+        "(i32.add %s (i32.wrap_i64 (i64.mul %s (i64.const %d))))",
+        Arg::Str(data),
+        Arg::Str(index),
+        Arg::Int(size)
+    );
+}
+
+/// Sets the header's element count, the Go `writeArrayLength`. A loop that
+/// writes it hoists no read of it, so the count is always stored where it
+/// lives.
+fn (self: &var Emitter) write_array_length(h: ArrayHeader, value: ir::Name) -> !void {
+    let address = try self.array_field_address(h.address, array_len_offset());
+    return self.line2("                (i64.store %s %s)", Arg::Str(address), Arg::Str(value));
+}
+
 fn (self: &var Emitter) write_array_instr(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -244,10 +318,12 @@ fn (self: &var Emitter) write_array_field(
     if array_element_wasm_type(type_name) |_| {} else {
         return try self.fail("wasm error: %s expects Array<T> -> i64", Arg::Lit(op));
     }
-    let info = try self.value_of(module, first);
-    let address = try self.array_field_address(info.expr, offset);
-    let loaded = try self.array_expr1("(i64.load %s)", Arg::Str(address));
-    return self.write_scalar_result(module, node.result, loaded);
+    let h = try self.array_header_of(module, first);
+    var field = try self.header_length(h);
+    if offset == array_capacity_offset() {
+        field = try self.header_capacity(h);
+    }
+    return self.write_scalar_result(module, node.result, field);
 }
 
 /// Appends one element, the Go `writeArrayAppend`: into the reserved tail
@@ -285,27 +361,25 @@ fn (self: &var Emitter) write_array_append(
             Arg::Str(got)
         );
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let allocator = try self.value_of(module, node.args.get_or_panic(1));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let length = try self.header_length(h);
     let needed = try self.array_expr1("(i64.add %s (i64.const 1))", Arg::Str(length));
     let reserve = try self.array_expr4(
         "(call $__array_reserve %s %s %s (i32.const %d))",
         Arg::Str(allocator.expr),
-        Arg::Str(array.expr),
+        Arg::Str(h.address),
         Arg::Str(needed),
         Arg::Int(layout.size)
     );
-    let capacity_address = try self.array_field_address(array.expr, array_capacity_offset());
-    let capacity = try self.array_expr1("(i64.load %s)", Arg::Str(capacity_address));
+    let capacity = try self.header_capacity(h);
     try self.line2("            (if (i64.lt_u %s %s)", Arg::Str(length), Arg::Str(capacity));
     try self.line("              (then");
     let ok = try self.names.intern("(i32.const 1)");
     if try self.write_array_error_slot(module, node.result, ok) |failed| {
         return move failed;
     }
-    if try self.write_array_append_element(module, node, array.expr, length, needed, layout.size) |failed| {
+    if try self.write_array_append_element(module, node, h, length, needed, layout.size) |failed| {
         return move failed;
     }
     try self.line("              )");
@@ -326,7 +400,7 @@ fn (self: &var Emitter) write_array_append(
     }
     try self.line1("            (if %s", Arg::Str(grown));
     try self.line("              (then");
-    if try self.write_array_append_element(module, node, array.expr, length, needed, layout.size) |failed| {
+    if try self.write_array_append_element(module, node, h, length, needed, layout.size) |failed| {
         return move failed;
     }
     try self.line("              ))");
@@ -355,19 +429,18 @@ fn (self: &var Emitter) write_array_error_slot(
 fn (self: &var Emitter) write_array_append_element(
     module: &ir::Module,
     node: &ir::InstrNode,
-    array_expr: ir::Name,
+    h: ArrayHeader,
     length: ir::Name,
     needed: ir::Name,
     size: i64
 ) -> !?diagnostic::Diagnostic {
     let value = node.args.get_or_panic(2);
-    let length_address = try self.array_field_address(array_expr, array_len_offset());
-    let destination = try self.array_element_address(array_expr, length, size);
+    let destination = try self.header_element(h, length, size);
     let value_info = try self.value_of(module, value);
     if try self.write_store_value(module, destination, 0, value.type_name, value_info) |failed| {
         return move failed;
     }
-    try self.line2("                (i64.store %s %s)", Arg::Str(length_address), Arg::Str(needed));
+    try self.write_array_length(h, needed);
     return null;
 }
 
@@ -396,11 +469,10 @@ fn (self: &var Emitter) write_array_append_bytes(
     if !mem::equal_bytes(elem_bytes, "u8") {
         return try self.fail0("wasm error: array.append_bytes expects Array<u8>");
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let allocator = try self.value_of(module, node.args.get_or_panic(1));
     let bytes = try self.value_of(module, node.args.get_or_panic(2));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let length = try self.header_length(h);
     let byte_length_address = try self.address_at(bytes.expr, 4);
     let byte_length_32 = try self.array_expr1("(i32.load %s)", Arg::Str(byte_length_address));
     let byte_length = try self.array_expr1(
@@ -415,18 +487,17 @@ fn (self: &var Emitter) write_array_append_bytes(
     let reserve = try self.array_expr3(
         "(call $__array_reserve %s %s %s (i32.const 1))",
         Arg::Str(allocator.expr),
-        Arg::Str(array.expr),
+        Arg::Str(h.address),
         Arg::Str(needed)
     );
-    let capacity_address = try self.array_field_address(array.expr, array_capacity_offset());
-    let capacity = try self.array_expr1("(i64.load %s)", Arg::Str(capacity_address));
+    let capacity = try self.header_capacity(h);
     try self.line2("            (if (i64.le_u %s %s)", Arg::Str(needed), Arg::Str(capacity));
     try self.line("              (then");
     let ok = try self.names.intern("(i32.const 1)");
     if try self.write_array_error_slot(module, node.result, ok) |failed| {
         return move failed;
     }
-    try self.write_array_append_run(array.expr, bytes.expr, length, needed, byte_length_32);
+    try self.write_array_append_run(h, bytes.expr, length, needed, byte_length_32);
     try self.line("              )");
     try self.line("              (else");
     let slot_outcome = try self.write_array_error_result(
@@ -445,7 +516,7 @@ fn (self: &var Emitter) write_array_append_bytes(
     }
     try self.line1("            (if %s", Arg::Str(grown));
     try self.line("              (then");
-    try self.write_array_append_run(array.expr, bytes.expr, length, needed, byte_length_32);
+    try self.write_array_append_run(h, bytes.expr, length, needed, byte_length_32);
     try self.line("              ))");
     try self.line("              )");
     try self.line("            )");
@@ -455,21 +526,20 @@ fn (self: &var Emitter) write_array_append_bytes(
 /// Copies the run to the tail and counts it, the `write` closure of the Go
 /// `writeArrayAppendBytes`.
 fn (self: &var Emitter) write_array_append_run(
-    array_expr: ir::Name,
+    h: ArrayHeader,
     bytes_expr: ir::Name,
     length: ir::Name,
     needed: ir::Name,
     byte_length_32: ir::Name
 ) -> !void {
-    let length_address = try self.array_field_address(array_expr, array_len_offset());
-    let destination = try self.array_element_address(array_expr, length, 1);
+    let destination = try self.header_element(h, length, 1);
     try self.line3(
         "                (memory.copy %s (i32.load %s) %s)",
         Arg::Str(destination),
         Arg::Str(bytes_expr),
         Arg::Str(byte_length_32)
     );
-    return self.line2("                (i64.store %s %s)", Arg::Str(length_address), Arg::Str(needed));
+    return self.write_array_length(h, needed);
 }
 
 fn (self: &var Emitter) write_array_reserve(
@@ -494,11 +564,10 @@ fn (self: &var Emitter) write_array_reserve(
             layout = found;
         },
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let allocator = try self.value_of(module, node.args.get_or_panic(1));
     let additional = try self.value_of(module, node.args.get_or_panic(2));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let length = try self.header_length(h);
     let needed = try self.array_expr2(
         "(i64.add %s %s)",
         Arg::Str(length),
@@ -507,7 +576,7 @@ fn (self: &var Emitter) write_array_reserve(
     let reserve = try self.array_expr4(
         "(call $__array_reserve %s %s %s (i32.const %d))",
         Arg::Str(allocator.expr),
-        Arg::Str(array.expr),
+        Arg::Str(h.address),
         Arg::Str(needed),
         Arg::Int(layout.size)
     );
@@ -564,26 +633,22 @@ fn (self: &var Emitter) write_array_pop(
             payload_offset = found;
         },
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
+    let length = try self.header_length(h);
     try self.line1(
         "            (if (i64.gt_s %s (i64.const 0))",
         Arg::Str(length)
     );
     try self.line("              (then");
-    try self.line2(
-        "                (i64.store %s (i64.sub %s (i64.const 1)))",
-        Arg::Str(length_address),
-        Arg::Str(length)
-    );
+    let shortened = try self.array_expr1("(i64.sub %s (i64.const 1))", Arg::Str(length));
+    try self.write_array_length(h, shortened);
     if try self.write_tagged_result(module, node.result, 1) |failed| {
         return move failed;
     }
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for array.pop result");
-    let new_length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
-    let source = try self.array_element_address(array.expr, new_length, layout.size);
+    let new_length = try self.header_length(h);
+    let source = try self.header_element(h, new_length, layout.size);
     let destination = try self.address_at(slot, payload_offset);
     if try self.write_array_copy_value(
         module,
@@ -624,22 +689,18 @@ fn (self: &var Emitter) write_array_pop_or_panic(
     if !module.names.is(node.result.type_name, elem_bytes) {
         return try self.fail0("wasm error: array.pop_or_panic expects Array<T> -> T");
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
+    let length = try self.header_length(h);
     try self.line1("            (if (i64.eqz %s)", Arg::Str(length));
     try self.line2(
-        "              (then (call $__panic_array_empty (i64.const %d) (i64.const %d))))",
+        "              (then (call $__panic_array_empty (i64.const %d) (i64.const %d)) (unreachable)))",
         Arg::Int(node.span.start.line),
         Arg::Int(node.span.start.column)
     );
-    try self.line2(
-        "            (i64.store %s (i64.sub %s (i64.const 1)))",
-        Arg::Str(length_address),
-        Arg::Str(length)
-    );
-    let new_length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
-    let source = try self.array_element_address(array.expr, new_length, layout.size);
+    let shortened = try self.array_expr1("(i64.sub %s (i64.const 1))", Arg::Str(length));
+    try self.write_array_length(h, shortened);
+    let new_length = try self.header_length(h);
+    let source = try self.header_element(h, new_length, layout.size);
     return self.write_load_value(module, node.result, source, 0);
 }
 
@@ -679,10 +740,38 @@ fn (self: &var Emitter) write_array_get(
             payload_offset = found;
         },
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let index = try self.value_of(module, node.args.get_or_panic(1));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    if self.is_option_local(node.result.name) {
+        let element = try self.header_element(h, index.expr, layout.size);
+        var load = ir::empty_name();
+        if wasm_load_op_bytes(module, elem_bytes) |op| {
+            let op_name = try self.names.intern(op);
+            load = try self.array_expr2("(%s %s)", Arg::Str(op_name), Arg::Str(element));
+        } else {
+            let shown = try self.names.intern(elem_bytes);
+            return try self.fail(
+                "wasm error: type `%s` cannot be loaded from linear memory",
+                Arg::Str(shown)
+            );
+        }
+        let length = try self.header_length(h);
+        try self.line2(
+            "            (if (i64.lt_u %s %s)",
+            Arg::Str(index.expr),
+            Arg::Str(length)
+        );
+        try self.line("              (then");
+        let present = try self.names.intern("(i32.const 1)");
+        try self.write_option_locals(module, node.result, present, load);
+        try self.line("              )");
+        try self.line("              (else");
+        let absent = try self.names.intern("(i32.const 0)");
+        try self.write_option_locals(module, node.result, absent, ir::empty_name());
+        try self.line("              ))");
+        return null;
+    }
+    let length = try self.header_length(h);
     try self.line2(
         "            (if (i64.lt_u %s %s)",
         Arg::Str(index.expr),
@@ -694,7 +783,7 @@ fn (self: &var Emitter) write_array_get(
     }
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for array.get result");
-    let source = try self.array_element_address(array.expr, index.expr, layout.size);
+    let source = try self.header_element(h, index.expr, layout.size);
     let destination = try self.address_at(slot, payload_offset);
     if try self.write_array_copy_value(
         module,
@@ -736,23 +825,22 @@ fn (self: &var Emitter) write_array_get_or_panic(
     if !module.names.is(node.result.type_name, elem_bytes) {
         return try self.fail0("wasm error: array.get_or_panic expects Array<T>, i64 -> T");
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let index = try self.value_of(module, node.args.get_or_panic(1));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let length = try self.header_length(h);
     try self.line2(
         "            (if (i64.ge_u %s %s)",
         Arg::Str(index.expr),
         Arg::Str(length)
     );
     try self.line4(
-        "              (then (call $__panic_bounds %s %s (i64.const %d) (i64.const %d))))",
+        "              (then (call $__panic_bounds %s %s (i64.const %d) (i64.const %d)) (unreachable)))",
         Arg::Str(index.expr),
         Arg::Str(length),
         Arg::Int(node.span.start.line),
         Arg::Int(node.span.start.column)
     );
-    let source = try self.array_element_address(array.expr, index.expr, layout.size);
+    let source = try self.header_element(h, index.expr, layout.size);
     return self.write_load_value(module, node.result, source, 0);
 }
 
@@ -791,10 +879,22 @@ fn (self: &var Emitter) write_array_at(
     if !is_optional {
         return try self.fail0("wasm error: array.at expects Array<T>, i64 -> ?&T");
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let index = try self.value_of(module, node.args.get_or_panic(1));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    if self.is_option_local(node.result.name) {
+        // The address is only an add: working it out for an index past the
+        // end reads nothing, so presence and payload are set without a branch.
+        let bound = try self.header_length(h);
+        let present = try self.array_expr2(
+            "(i64.lt_u %s %s)",
+            Arg::Str(index.expr),
+            Arg::Str(bound)
+        );
+        let element = try self.header_element(h, index.expr, layout.size);
+        try self.write_option_locals(module, node.result, present, element);
+        return null;
+    }
+    let length = try self.header_length(h);
     try self.line2(
         "            (if (i64.lt_u %s %s)",
         Arg::Str(index.expr),
@@ -807,7 +907,7 @@ fn (self: &var Emitter) write_array_at(
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for array.at result");
     let destination = try self.address_at(slot, payload_offset);
-    let source = try self.array_element_address(array.expr, index.expr, layout.size);
+    let source = try self.header_element(h, index.expr, layout.size);
     try self.line2(
         "                (i32.store %s %s)",
         Arg::Str(destination),
@@ -854,10 +954,9 @@ fn (self: &var Emitter) write_array_set(
             Arg::Str(got)
         );
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let index = try self.value_of(module, node.args.get_or_panic(1));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let length = try self.header_length(h);
     let ok = try self.array_expr2(
         "(i64.lt_u %s %s)",
         Arg::Str(index.expr),
@@ -882,7 +981,7 @@ fn (self: &var Emitter) write_array_set(
         Arg::Str(in_bounds)
     );
     try self.line("              (then");
-    let destination = try self.array_element_address(array.expr, index.expr, layout.size);
+    let destination = try self.header_element(h, index.expr, layout.size);
     let value_info = try self.value_of(module, value);
     if try self.write_store_value(
         module,
@@ -919,16 +1018,16 @@ fn (self: &var Emitter) write_array_swap(
             layout = found;
         },
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let left = try self.value_of(module, node.args.get_or_panic(1));
     let right = try self.value_of(module, node.args.get_or_panic(2));
     let elem_bytes = elem.as_bytes();
     let module_elem = module.names.lookup(elem_bytes) orelse ir::empty_name();
     if ir::is_empty(module_elem) or try self.is_memory_type(module, module_elem) or
-        !self.is_plain_address(array.expr) {
+        (!h.hoisted and !self.is_plain_address(h.address)) {
         let ok = try self.array_expr4(
             "(call $__array_swap %s %s %s (i32.const %d))",
-            Arg::Str(array.expr),
+            Arg::Str(h.address),
             Arg::Str(left.expr),
             Arg::Str(right.expr),
             Arg::Int(layout.size)
@@ -947,8 +1046,7 @@ fn (self: &var Emitter) write_array_swap(
     }
     // A scalar element is moved as the one word it is, through the swap
     // local its type declares, instead of byte by byte in a helper.
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let length = try self.header_length(h);
     let ok = try self.array_expr4(
         "(i32.and (i64.lt_u %s %s) (i64.lt_u %s %s))",
         Arg::Str(left.expr),
@@ -970,8 +1068,8 @@ fn (self: &var Emitter) write_array_swap(
             in_bounds = found;
         },
     }
-    let left_address = try self.array_element_address(array.expr, left.expr, layout.size);
-    let right_address = try self.array_element_address(array.expr, right.expr, layout.size);
+    let left_address = try self.header_element(h, left.expr, layout.size);
+    let right_address = try self.header_element(h, right.expr, layout.size);
     let temp = try self.swap_local(wasm_type(module, module_elem));
     if wasm_load_op(module, module_elem) |load_op| {
         if wasm_store_op(module, module_elem) |store_op| {
@@ -1068,10 +1166,9 @@ fn (self: &var Emitter) write_array_truncate(
         Error(failed) => return move failed,
         Layout(_) => {},
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let want = try self.value_of(module, node.args.get_or_panic(1));
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    let length = try self.array_expr1("(i64.load %s)", Arg::Str(length_address));
+    let length = try self.header_length(h);
     let ok = try self.array_expr3(
         "(i32.and (i64.ge_s %s (i64.const 0)) (i64.le_s %s %s))",
         Arg::Str(want.expr),
@@ -1096,11 +1193,9 @@ fn (self: &var Emitter) write_array_truncate(
         "            (if %s",
         Arg::Str(in_bounds)
     );
-    try self.line2(
-        "              (then (i64.store %s %s)))",
-        Arg::Str(length_address),
-        Arg::Str(want.expr)
-    );
+    try self.line("              (then");
+    try self.write_array_length(h, want.expr);
+    try self.line("              ))");
     return null;
 }
 
@@ -1117,12 +1212,9 @@ fn (self: &var Emitter) write_array_clear(
     if array_element_wasm_type(type_name) |_| {} else {
         return try self.fail0("wasm error: array.clear expects Array<T> -> void");
     }
-    let array = try self.value_of(module, array_value);
-    let length_address = try self.array_field_address(array.expr, array_len_offset());
-    try self.line1(
-        "            (i64.store %s (i64.const 0))",
-        Arg::Str(length_address)
-    );
+    let h = try self.array_header_of(module, array_value);
+    let zero = try self.names.intern("(i64.const 0)");
+    try self.write_array_length(h, zero);
     return null;
 }
 
@@ -1143,19 +1235,19 @@ fn (self: &var Emitter) write_array_as_bytes(
     if !has_byte_element {
         return try self.fail0("wasm error: array.as_bytes expects Array<u8> -> []u8");
     }
-    let array = try self.value_of(module, array_value);
+    let h = try self.array_header_of(module, array_value);
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for Array byte view");
-    let data = try self.array_field_address(array.expr, array_data_offset());
+    let data = try self.header_data(h);
     try self.line2(
-        "            (i32.store %s (i32.load %s))",
+        "            (i32.store %s %s)",
         Arg::Str(slot),
         Arg::Str(data)
     );
     let descriptor_length = try self.address_at(slot, 4);
-    let array_length = try self.array_field_address(array.expr, array_len_offset());
+    let array_length = try self.header_length(h);
     try self.line2(
-        "            (i32.store %s (i32.wrap_i64 (i64.load %s)))",
+        "            (i32.store %s (i32.wrap_i64 %s))",
         Arg::Str(descriptor_length),
         Arg::Str(array_length)
     );
@@ -1182,18 +1274,17 @@ fn (self: &var Emitter) write_array_deinit(
             layout = found;
         },
     }
-    let array = try self.value_of(module, node.args.get_or_panic(0));
+    let h = try self.array_header_of(module, node.args.get_or_panic(0));
     let allocator = try self.value_of(module, node.args.get_or_panic(1));
-    let capacity_address = try self.array_field_address(array.expr, array_capacity_offset());
-    let capacity = try self.array_expr1("(i64.load %s)", Arg::Str(capacity_address));
+    let capacity = try self.header_capacity(h);
     let bytes = try self.array_expr2(
         "(i32.wrap_i64 (i64.mul %s (i64.const %d)))",
         Arg::Str(capacity),
         Arg::Int(layout.size)
     );
-    let data = try self.array_field_address(array.expr, array_data_offset());
+    let data = try self.header_data(h);
     try self.line3(
-        "            (call $__allocator_free %s (i32.load %s) %s)",
+        "            (call $__allocator_free %s %s %s)",
         Arg::Str(allocator.expr),
         Arg::Str(data),
         Arg::Str(bytes)
@@ -1259,7 +1350,8 @@ fn (self: &var Emitter) write_array_error_result(
             expr: ir::empty_name(),
             generation: self.generation,
             flag: symbol,
-            code: code
+            code: code,
+            payload: ir::empty_name()
         });
         let local = try self.local_expr(bytes);
         return WasmNameResult::Name(local);
@@ -1409,7 +1501,13 @@ fn (self: &var Emitter) write_array_copy_value(
     if wasm_load_op(module, module_elem) |op| {
         let op_name = try self.names.intern(op);
         let loaded = try self.array_expr2("(%s %s)", Arg::Str(op_name), Arg::Str(source));
-        let info = ValueInfo { expr: loaded, generation: self.generation, flag: ir::empty_name(), code: 0 };
+        let info = ValueInfo {
+            expr: loaded,
+            generation: self.generation,
+            flag: ir::empty_name(),
+            code: 0,
+            payload: ir::empty_name()
+        };
         return self.write_store_value(module, destination, 0, module_elem, info);
     }
     return try self.fail(

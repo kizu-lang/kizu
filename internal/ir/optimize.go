@@ -3,25 +3,67 @@ package ir
 import (
 	"strconv"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 )
 
 // Optimize applies bounded local cleanup passes to a module. A pass rewrites
 // values in place, so what it produces is verified the same way lowering is.
-func Optimize(module *Module) error {
+// A wasm target's module is then reshaped for the engine (ReshapeForEngine).
+func Optimize(module *Module, target stdtarget.Target) error {
 	Inline(module)
+	EliminateTailRecursion(module)
 	ConstantFold(module)
 	CopyPropagate(module)
+	ForwardFieldLoads(module)
+	EliminateBoundsChecks(module)
+	SimplifyBranches(module)
 	DeadCodeEliminate(module)
+	if target != stdtarget.Native {
+		ReshapeForEngine(module)
+	}
 	return Verify(module)
 }
 
-// ConstantFold folds binary instructions with integer constants.
+// ReshapeForEngine applies the passes an optimized module gets for a wasm
+// target: merging repeated computations, which lets more index checks be
+// answered, versioning loops and rotating them. An engine compiling wasm as it
+// reads it runs code in the shape it is given; LLVM numbers values, moves
+// checks out of loops and rotates them itself, and its own passes read code
+// in the shape lowering gives better than code already reshaped.
+func ReshapeForEngine(module *Module) {
+	EliminateCommonSubexpressions(module)
+	EliminateBoundsChecks(module)
+	SimplifyBranches(module)
+	VersionLoopsForBounds(module)
+	SimplifyBranches(module)
+	RotateLoops(module)
+	ConstantFold(module)
+	SimplifyBranches(module)
+	DeadCodeEliminate(module)
+}
+
+// ConstantFold folds integer arithmetic and comparisons whose operands are
+// constants. A constant is an SSA value, so one defined anywhere in a function
+// is the same wherever it is read; a value named by its digits is a constant
+// too. Folding repeats until a pass folds nothing, since a block can read a
+// value a later block defines.
 func ConstantFold(module *Module) {
 	for _, fn := range module.Functions {
+		consts := map[string]int64{}
 		for _, block := range fn.Blocks {
-			consts := constantsIn(block)
 			for _, instr := range block.Instrs {
-				foldInstr(instr, consts)
+				recordConstant(instr, consts)
+			}
+		}
+		for changed := true; changed; {
+			changed = false
+			for _, block := range fn.Blocks {
+				for _, instr := range block.Instrs {
+					if foldInstr(instr, consts) {
+						changed = true
+					}
+				}
 			}
 		}
 	}
@@ -53,39 +95,60 @@ func DeadCodeEliminate(module *Module) {
 	}
 }
 
-// constantsIn returns integer constants already emitted in a block.
-func constantsIn(block *Block) map[string]int64 {
-	consts := map[string]int64{}
-	for _, instr := range block.Instrs {
-		if instr.Op != "const" || instr.Result.Type != "i64" {
-			continue
-		}
-		value, err := strconv.ParseInt(instr.Immediate, 10, 64)
-		if err == nil {
-			consts[instr.Result.Name] = value
-		}
+// recordConstant notes an i64 constant instruction's value.
+func recordConstant(instr *Instr, consts map[string]int64) {
+	if instr.Op != "const" || instr.Result.Type != "i64" {
+		return
 	}
-	return consts
+	value, err := strconv.ParseInt(instr.Immediate, 10, 64)
+	if err == nil {
+		consts[instr.Result.Name] = value
+	}
 }
 
-// foldInstr folds one instruction when both operands are known constants.
-func foldInstr(instr *Instr, consts map[string]int64) {
-	if len(instr.Args) != 2 || instr.Result.Type != "i64" {
-		return
+// integerConstant returns the value of an i64 operand known to be constant.
+func integerConstant(value Value, consts map[string]int64) (int64, bool) {
+	if value.Type != "i64" {
+		return 0, false
 	}
-	left, okLeft := consts[instr.Args[0].Name]
-	right, okRight := consts[instr.Args[1].Name]
+	if known, ok := consts[value.Name]; ok {
+		return known, true
+	}
+	literal, err := strconv.ParseInt(value.Name, 10, 64)
+	return literal, err == nil
+}
+
+// foldInstr folds one instruction when both operands are known constants, and
+// reports whether it did.
+func foldInstr(instr *Instr, consts map[string]int64) bool {
+	if len(instr.Args) != 2 || instr.Op == "const" {
+		return false
+	}
+	left, okLeft := integerConstant(instr.Args[0], consts)
+	right, okRight := integerConstant(instr.Args[1], consts)
 	if !okLeft || !okRight {
-		return
+		return false
 	}
-	value, ok := foldBinary(instr.Op, left, right)
-	if !ok {
-		return
+	switch instr.Result.Type {
+	case "i64":
+		value, ok := foldBinary(instr.Op, left, right)
+		if !ok {
+			return false
+		}
+		instr.Immediate = strconv.FormatInt(value, 10)
+		consts[instr.Result.Name] = value
+	case "bool":
+		value, ok := foldComparison(instr.Op, left, right)
+		if !ok {
+			return false
+		}
+		instr.Immediate = strconv.FormatBool(value)
+	default:
+		return false
 	}
 	instr.Op = "const"
 	instr.Args = nil
-	instr.Immediate = strconv.FormatInt(value, 10)
-	consts[instr.Result.Name] = value
+	return true
 }
 
 // foldBinary computes supported integer binary operations.
@@ -97,8 +160,34 @@ func foldBinary(op string, left int64, right int64) (int64, bool) {
 		return left - right, true
 	case "binary.*":
 		return left * right, true
+	case "binary.&":
+		return left & right, true
+	case "binary.|":
+		return left | right, true
+	case "binary.^":
+		return left ^ right, true
 	default:
 		return 0, false
+	}
+}
+
+// foldComparison computes a signed comparison of two i64 constants.
+func foldComparison(op string, left int64, right int64) (bool, bool) {
+	switch op {
+	case "binary.<":
+		return left < right, true
+	case "binary.<=":
+		return left <= right, true
+	case "binary.>":
+		return left > right, true
+	case "binary.>=":
+		return left >= right, true
+	case "binary.==":
+		return left == right, true
+	case "binary.!=":
+		return left != right, true
+	default:
+		return false, false
 	}
 }
 

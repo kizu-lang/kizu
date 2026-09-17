@@ -83,22 +83,22 @@ fn view_cell(elem: []u8) -> i64 {
     return layout.size;
 }
 
-/// Spells the address of element `index` of a view: the pointer word plus
-/// the index scaled by the cell width.
+/// Spells the address of element `index` of a view, the Go `elementAddress`:
+/// the pointer word plus the index scaled by the cell width.
 fn (self: &var Emitter) element_address(
-    descriptor: ir::Name,
+    pointer: ir::Name,
     index: ir::Name,
     cell: i64
 ) -> !ir::Name {
-    var address = try string::from_bytes(self.allocator, "(i32.add (i32.load ");
+    var address = try string::from_bytes(self.allocator, "(i32.add ");
     errdefer address.deinit(self.allocator);
-    try self.names.append_to(&var address, descriptor);
+    try self.names.append_to(&var address, pointer);
     if cell == 1 {
-        try address.append_bytes(self.allocator, ") (i32.wrap_i64 ");
+        try address.append_bytes(self.allocator, " (i32.wrap_i64 ");
         try self.names.append_to(&var address, index);
         try address.append_bytes(self.allocator, "))");
     } else {
-        try address.append_bytes(self.allocator, ") (i32.mul (i32.wrap_i64 ");
+        try address.append_bytes(self.allocator, " (i32.mul (i32.wrap_i64 ");
         try self.names.append_to(&var address, index);
         try address.append_bytes(self.allocator, ") (i32.const ");
         try fmt::append_i64(self.allocator, &var address, cell);
@@ -116,12 +116,11 @@ fn (self: &var Emitter) write_slice_len(
         !module.names.is(node.result.type_name, "i64") {
         return try self.fail0("wasm error: slice.len expects []T -> i64");
     }
-    let descriptor = try self.value_of(module, arg);
-    let length_address = try self.address_at(descriptor.expr, 4);
-    var out = try string::from_bytes(self.allocator, "(i64.extend_i32_u (i32.load ");
+    let length = try self.view_length(module, arg);
+    var out = try string::from_bytes(self.allocator, "(i64.extend_i32_u ");
     errdefer out.deinit(self.allocator);
-    try self.names.append_to(&var out, length_address);
-    try out.append_bytes(self.allocator, "))");
+    try self.names.append_to(&var out, length);
+    try out.append_bytes(self.allocator, ")");
     let expr = try self.names.intern_owned(move out);
     return self.write_scalar_result(module, node.result, expr);
 }
@@ -145,9 +144,9 @@ fn (self: &var Emitter) write_slice_index(
         return try self.fail0("wasm error: slice.index expects []T, i64 -> T");
     }
     let load = view_load(elem);
-    let descriptor = try self.value_of(module, slice);
     let index = try self.value_of(module, at);
-    let address_name = try self.element_address(descriptor.expr, index.expr, cell);
+    let pointer = try self.view_pointer(module, slice);
+    let address_name = try self.element_address(pointer, index.expr, cell);
     var loaded = try string::from_bytes(self.allocator, "(");
     errdefer loaded.deinit(self.allocator);
     try loaded.append_bytes(self.allocator, load);
@@ -180,10 +179,10 @@ fn (self: &var Emitter) write_slice_store(
     }
     let store_text = view_store(elem);
     let store = try self.names.intern(store_text);
-    let descriptor = try self.value_of(module, slice);
     let index = try self.value_of(module, at);
     let value = try self.value_of(module, stored);
-    let address_name = try self.element_address(descriptor.expr, index.expr, cell);
+    let pointer = try self.view_pointer(module, slice);
+    let address_name = try self.element_address(pointer, index.expr, cell);
     try self.line3("            (%s %s %s)",
         Arg::Str(store), Arg::Str(address_name), Arg::Str(value.expr));
     return null;
@@ -208,12 +207,12 @@ fn (self: &var Emitter) write_slice_slice(
         !ir::same_name(node.result.type_name, slice.type_name) {
         return try self.fail0("wasm error: slice.slice expects []T, i64, i64 -> []T");
     }
-    let descriptor = try self.value_of(module, slice);
     let start = try self.value_of(module, from);
     let end = try self.value_of(module, to);
     let slot = try self.result_slot(module, node.result) orelse
         return try self.fail0("wasm error: no frame slot for slice result");
-    let pointer_expr = try self.element_address(descriptor.expr, start.expr, cell);
+    let pointer = try self.view_pointer(module, slice);
+    let pointer_expr = try self.element_address(pointer, start.expr, cell);
     try self.line2("            (i32.store %s %s)", Arg::Str(slot), Arg::Str(pointer_expr));
     var length = try string::from_bytes(self.allocator, "(i32.wrap_i64 (i64.sub ");
     errdefer length.deinit(self.allocator);

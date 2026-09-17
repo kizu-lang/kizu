@@ -144,6 +144,11 @@ fn (self: &var Emitter) write_optional_null(
     let result_type = result_text.as_bytes();
     if typ::optional_elem(result_type) |_| {
         if node.args.len() == 0 {
+            if self.is_option_local(node.result.name) {
+                let absent = try self.names.intern("(i32.const 0)");
+                try self.write_option_locals(module, node.result, absent, ir::empty_name());
+                return null;
+            }
             return self.write_tagged_result(module, node.result, 0);
         }
     }
@@ -175,6 +180,12 @@ fn (self: &var Emitter) write_optional_some(
         match offset_outcome {
             Error(failed) => return move failed,
             Offset(offset) => {
+                if self.is_option_local(node.result.name) {
+                    let present = try self.names.intern("(i32.const 1)");
+                    let payload = try self.value_of(module, value);
+                    try self.write_option_locals(module, node.result, present, payload.expr);
+                    return null;
+                }
                 if try self.write_tagged_result(module, node.result, 1) |failed| {
                     return move failed;
                 }
@@ -214,6 +225,10 @@ fn (self: &var Emitter) write_optional_value(
             Error(failed) => return move failed,
             Offset(offset) => {
                 let info = try self.value_of(module, source);
+                if !ir::is_empty(info.payload) {
+                    let payload = try self.local_get_expr(info.payload);
+                    return self.write_scalar_result(module, node.result, payload);
+                }
                 return self.write_load_value(module, node.result, info.expr, offset);
             },
         }
@@ -488,6 +503,199 @@ fn (self: &var Emitter) write_tagged_has(
     let local = try self.local_expr(bytes);
     try self.set_value(module, node.result, local);
     return null;
+}
+
+/// Names the optionals of a function a presence local and a payload local can
+/// hold, the Go `optionLocalsOf`: a scalar optional an operation that can
+/// write it that way produces, read only by the instructions that ask for its
+/// presence or its payload. Such a value is never handed on, so nothing needs
+/// it at an address, and an engine keeps two locals in registers where a tag
+/// and a payload written to the frame are written and read back through
+/// memory.
+fn (self: &var Emitter) option_locals_of(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var found = false;
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if !writes_option_locals(instr_node.op) {
+                continue;
+            }
+            let result_text = ir::name_text(&module.names, instr_node.result.type_name);
+            let result_type = result_text.as_bytes();
+            if typ::optional_elem(result_type) |elem| {
+                if !try self.is_memory_type_bytes(module, elem) {
+                    try self.option_locals.insert(
+                        self.allocator,
+                        ir::name_id(instr_node.result.name),
+                        self.generation
+                    );
+                    found = true;
+                }
+            }
+        }
+    }
+    if !found {
+        return;
+    }
+    block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            var index = 0;
+            while instr_node.args.get(index) |arg| {
+                let reads_part = index == 0 and
+                    (instr_node.op == ir::Op::OptHas or instr_node.op == ir::Op::OptValue);
+                index = index + 1;
+                if !reads_part {
+                    try self.drop_option_local(arg.name);
+                }
+            }
+            index = 0;
+            while instr_node.incoming.get(index) |incoming| {
+                index = index + 1;
+                try self.drop_option_local(incoming.value.name);
+            }
+            index = 0;
+            while instr_node.fields.get(index) |field| {
+                index = index + 1;
+                try self.drop_option_local(field.value.name);
+            }
+            index = 0;
+            while instr_node.cleanups.get(index) |cleanup| {
+                index = index + 1;
+                try self.drop_option_local(cleanup.arg.name);
+                if !ir::is_empty(cleanup.allocator.name) {
+                    try self.drop_option_local(cleanup.allocator.name);
+                }
+            }
+        }
+        try self.drop_option_local(block_node.terminator.value.name);
+        try self.drop_option_local(block_node.terminator.cond.name);
+    }
+    return;
+}
+
+/// Reports whether op can write its optional result into a presence local
+/// and a payload local, the operations option_locals_of considers.
+fn writes_option_locals(op: ir::Op) -> bool {
+    return match op {
+        OptSome => true,
+        OptNull => true,
+        ArrayAt => true,
+        ArrayAtMut => true,
+        ArrayGet => true,
+        MapAt => true,
+        MapAtMut => true,
+        MapGet => true,
+        _ => false,
+    };
+}
+
+/// Reports whether a result is an optional held in locals in this function.
+fn (self: &Emitter) is_option_local(name: ir::Name) -> bool {
+    if self.option_locals.get(ir::name_id(name)) |filed| {
+        return filed == self.generation;
+    }
+    return false;
+}
+
+/// Takes an optional read as a whole back out of the option-local set.
+fn (self: &var Emitter) drop_option_local(name: ir::Name) -> !void {
+    if self.is_option_local(name) {
+        try self.option_locals.insert(self.allocator, ir::name_id(name), -1);
+    }
+    return;
+}
+
+/// Declares the payload local of each of a function's optionals held in
+/// locals, the Go `writeOptionPayloadDecls`; the presence is the result's
+/// own local.
+fn (self: &var Emitter) write_option_payload_decls(
+    module: &ir::Module,
+    node: &ir::FunctionNode
+) -> !void {
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if !self.is_option_local(instr_node.result.name) {
+                continue;
+            }
+            let name_text = ir::name_text(&module.names, instr_node.result.name);
+            let name_bytes = name_text.as_bytes();
+            let payload = try self.option_payload_local(name_bytes);
+            let result_text = ir::name_text(&module.names, instr_node.result.type_name);
+            let result_type = result_text.as_bytes();
+            if typ::optional_elem(result_type) |elem| {
+                let value_type = wasm_type_bytes(module, elem);
+                let value_type_name = try self.names.intern(value_type);
+                try self.line2(
+                    "    (local %s %s)",
+                    Arg::Str(payload),
+                    Arg::Str(value_type_name)
+                );
+            }
+        }
+    }
+    return;
+}
+
+/// Names the local an optional held in locals keeps its payload in, the Go
+/// `optionPayloadLocal`.
+fn (self: &var Emitter) option_payload_local(name: []u8) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    try append_symbol_name(self.allocator, &var out, name);
+    try out.append_bytes(self.allocator, ".payload");
+    return self.names.intern_owned(move out);
+}
+
+/// Names the `(local.get local)` expression that reads a local the emitter
+/// named.
+fn (self: &var Emitter) local_get_expr(local: ir::Name) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "(local.get ");
+    errdefer out.deinit(self.allocator);
+    try self.names.append_to(&var out, local);
+    try out.append_bytes(self.allocator, ")");
+    return self.names.intern_owned(move out);
+}
+
+/// Sets an optional held in locals, the Go `writeOptionLocals`: its presence,
+/// and its payload unless payload is empty.
+fn (self: &var Emitter) write_option_locals(
+    module: &ir::Module,
+    result: ir::Value,
+    present: ir::Name,
+    payload: ir::Name
+) -> !void {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    let symbol = try self.symbol_name_of(bytes);
+    let payload_local = try self.option_payload_local(bytes);
+    try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(present));
+    if !ir::is_empty(payload) {
+        try self.line2("            (local.set %s %s)", Arg::Str(payload_local), Arg::Str(payload));
+    }
+    return self.values.insert(self.allocator, bytes, ValueInfo {
+        expr: ir::empty_name(),
+        generation: self.generation,
+        flag: symbol,
+        code: 0,
+        payload: payload_local
+    });
 }
 
 /// Stores one tag in the result's fixed frame slot.

@@ -34,11 +34,11 @@ func (e *emitter) writeMapRuntimeDecls() {
 		return
 	}
 	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, ptr, i64, ptr, i64)\n")
-	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64)\n")
+	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_remove(ptr, ptr, ptr, i64, ptr, i64)\n")
-	e.out.WriteString("declare ptr @kizu_map_value_at(ptr, i64)\n")
-	e.out.WriteString("declare void @kizu_map_key_at(ptr, ptr, i64)\n")
-	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64)\n")
+	e.out.WriteString("declare ptr @kizu_map_value_at(ptr, i64, i64)\n")
+	e.out.WriteString("declare void @kizu_map_key_at(ptr, ptr, i64, i64)\n")
+	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64, i64)\n")
 	e.out.WriteString("declare i64 @kizu_map_len(ptr)\n")
 	e.out.WriteString("declare void @kizu_map_deinit(ptr, ptr, i64)\n\n")
 }
@@ -136,10 +136,15 @@ func (e *emitter) writeMapInsert(instr *ir.Instr) error {
 	return e.writeArrayBoolResult(instr.Result, okName, "map_insert")
 }
 
-// writeMapGet lowers Map.get(key).
+// writeMapGet lowers Map.get(key). Every lookup names the value's width, which
+// is what an entry's width follows from (runtime.c).
 func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	if len(instr.Args) != 2 {
 		return fmt.Errorf("llvm error: map.get expects Map, K -> ?V")
+	}
+	value, err := e.instrElementType(instr)
+	if err != nil {
+		return err
 	}
 	mapValue := e.value(instr.Args[0])
 	keyPtr, keyLen, err := e.writeMapKeyParts(
@@ -148,8 +153,8 @@ func (e *emitter) writeMapGet(instr *ir.Instr) error {
 		return err
 	}
 	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
-		ptrName, mapValue.operand, keyPtr, keyLen)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s, i64 %s)\n",
+		ptrName, mapValue.operand, keyPtr, keyLen, e.elementSizeOperand(value))
 	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
 }
 
@@ -190,6 +195,10 @@ func (e *emitter) writeMapAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 {
 		return fmt.Errorf("llvm error: %s expects Map, K -> ?&V", instr.Op)
 	}
+	value, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	mapValue := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
 	keyPtr, keyLen, err := e.writeMapKeyParts(resultName+".key", instr.Args[1])
@@ -197,8 +206,8 @@ func (e *emitter) writeMapAt(instr *ir.Instr) error {
 		return err
 	}
 	ptrName := resultName + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
-		ptrName, mapValue.operand, keyPtr, keyLen)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s, i64 %s)\n",
+		ptrName, mapValue.operand, keyPtr, keyLen, e.elementSizeOperand(value))
 	return e.writeBorrowOptionalResult(instr, ptrName)
 }
 
@@ -215,8 +224,8 @@ func (e *emitter) writeMapTakeValueAt(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	lenName := "%" + e.nextSyntheticValue("map.take.panic.len")
 	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_map_len(ptr %s)\n", lenName, mapValue.operand)
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_value_at(ptr %s, i64 %s)\n",
-		ptrName, mapValue.operand, index.operand)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_value_at(ptr %s, i64 %s, i64 %s)\n",
+		ptrName, mapValue.operand, index.operand, e.elementSizeOperand(instr.Result.Type))
 	e.writeNullFailure(instr, ptrName, "map.take.panic", "bounds", index.operand, lenName)
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
@@ -236,6 +245,10 @@ func (e *emitter) writeMapKeyAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" || !ok || !typ.IsMapKey(keyType) {
 		return fmt.Errorf("llvm error: map.key_at expects Map, i64 -> ?K")
 	}
+	value, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	mapValue := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
 	resultName := localName(instr.Result.Name)
@@ -249,8 +262,8 @@ func (e *emitter) writeMapKeyAt(instr *ir.Instr) error {
 		slotType = e.llvmOptionalTypeName(instr.Result.Type)
 	}
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, slotType)
-	fmt.Fprintf(&e.out, "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s)\n",
-		slotName, mapValue.operand, index.operand)
+	fmt.Fprintf(&e.out, "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s, i64 %s)\n",
+		slotName, mapValue.operand, index.operand, e.elementSizeOperand(value))
 	if keyType == "[]u8" {
 		fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, slotType, slotName)
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
@@ -306,14 +319,18 @@ func (e *emitter) writeMapContains(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Result.Type != "bool" {
 		return fmt.Errorf("llvm error: map.contains expects Map, K -> bool")
 	}
+	value, err := e.instrElementType(instr)
+	if err != nil {
+		return err
+	}
 	mapValue := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
 	keyPtr, keyLen, err := e.writeMapKeyParts(resultName+".key", instr.Args[1])
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s)\n",
-		resultName, mapValue.operand, keyPtr, keyLen)
+	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s, i64 %s)\n",
+		resultName, mapValue.operand, keyPtr, keyLen, e.elementSizeOperand(value))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

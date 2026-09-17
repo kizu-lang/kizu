@@ -147,7 +147,6 @@ runtime error: expected 4, got 3
 
 ## まだやっていないこと
 
-- 検査の巻き上げとマージは `ir.Optimize` に置ける。今は入れていない。
 - span を持つのは `ast.IndexExpr` だけである。`Array` の method 失敗や
   `std::testing` の失敗はまだ位置を出せない。`ast.CallExpr` と `ast.FieldExpr`
   が span を持てば、同じ経路で出るようになる。

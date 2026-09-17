@@ -1,8 +1,10 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
+import std::array;
 import std::float;
 import std::fmt;
+import std::map;
 import std::mem;
 import std::string;
 
@@ -13,9 +15,32 @@ import std::string;
 // `binary.` / `call.` / `field.` prefixes become the tags that spell them.
 
 /// Writes one block and everything it dominates, the Go `writeTree`: a loop
-/// header's code sits inside a `loop`, and the merge nodes it dominates are
-/// given their `block`s by `write_node_within`.
+/// header's code sits inside a `loop`, after the reads the loop hoists
+/// (write_loop_hoists), and the merge nodes it dominates are given their
+/// `block`s by `write_node_within`.
 fn (self: &var Emitter) write_tree(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    s: &Structure,
+    index: i64
+) -> !?diagnostic::Diagnostic {
+    if !s.is_loop_header(index) {
+        return self.write_tree_node(module, node, s, index);
+    }
+    var started = array::new<i64>(self.allocator);
+    defer started.deinit(self.allocator);
+    try self.write_loop_hoists(module, index, &var started);
+    if try self.write_tree_node(module, node, s, index) |failed| {
+        self.end_loop_hoists(&started);
+        return move failed;
+    }
+    self.end_loop_hoists(&started);
+    return null;
+}
+
+/// Writes one block and everything it dominates once the reads its loop
+/// hoists are made, the rest of the Go `writeTree`.
+fn (self: &var Emitter) write_tree_node(
     module: &ir::Module,
     node: &ir::FunctionNode,
     s: &Structure,
@@ -844,13 +869,20 @@ fn (self: &var Emitter) write_branch_to(
 }
 
 /// Writes a conditional transfer as an `if` whose arms each take their
-/// edge, the Go `writeBranch`.
+/// edge, the Go `writeBranch`, unless write_loop_branch writes it.
 fn (self: &var Emitter) write_branch(
     module: &ir::Module,
     node: &ir::FunctionNode,
     s: &Structure,
     block: ir::Block
 ) -> !?diagnostic::Diagnostic {
+    var written = false;
+    if try self.write_loop_branch(module, node, s, block, &var written) |failed| {
+        return move failed;
+    }
+    if written {
+        return null;
+    }
     let term = module.block_terminator(block);
     let source = module.block_name(block);
     let info = try self.value_of(module, term.cond);
@@ -869,9 +901,299 @@ fn (self: &var Emitter) write_branch(
     return null;
 }
 
+/// Writes a branch with one arm back to a loop header as that arm's phi
+/// copies followed by a `br_if` back, and then the other arm, the Go
+/// `writeLoopBranch`. An `if` puts the copies and the branch back on an edge
+/// of their own, which an engine compiles into a block that each iteration
+/// jumps through; the copies go ahead of the test instead when the other arm
+/// cannot tell: neither the condition, nor the copies the other arm makes, nor
+/// any code written for it reads a phi the back edge assigns. written reports
+/// whether it wrote the branch.
+fn (self: &var Emitter) write_loop_branch(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    s: &Structure,
+    block: ir::Block,
+    written: &var bool
+) -> !?diagnostic::Diagnostic {
+    let term = module.block_terminator(block);
+    let source = module.block_name(block);
+    let source_index = s.index_of(module, source);
+    var back = term.target;
+    var other = term.else_target;
+    var negate = false;
+    if !s.is_back_edge(source_index, s.index_of(module, back)) {
+        back = term.else_target;
+        other = term.target;
+        negate = true;
+    }
+    let back_index = s.index_of(module, back);
+    let other_index = s.index_of(module, other);
+    if ir::same_name(back, other) or !s.is_back_edge(source_index, back_index) {
+        return null;
+    }
+    if !s.is_back_edge(source_index, other_index) and !s.is_merge(other_index) and
+        try self.reads_phis_below(module, node, s, other_index, back_index) {
+        return null;
+    }
+    let info = try self.value_of(module, term.cond);
+    if try self.edge_reads_phis(module, node, s, source, other_index, back_index, info.expr) {
+        return null;
+    }
+    try self.write_phi_copies(module, node, s, source, back);
+    var cond = info.expr;
+    if negate {
+        var negated = try string::from_bytes(self.allocator, "(i32.eqz ");
+        errdefer negated.deinit(self.allocator);
+        try self.names.append_to(&var negated, info.expr);
+        try negated.append_bytes(self.allocator, ")");
+        cond = try self.names.intern_owned(move negated);
+    }
+    let label = try self.own(module, back);
+    try self.line2("            (br_if $loop.%s %s)", Arg::Str(label), Arg::Str(cond));
+    written.* = true;
+    return self.write_branch_to(module, node, s, source, other);
+}
+
+/// Reports whether the condition, or a copy the edge from source to the
+/// block at target makes, reads a local a phi of the header block is held
+/// in, the Go `edgeReadsPhis`.
+fn (self: &var Emitter) edge_reads_phis(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    s: &Structure,
+    source: ir::Name,
+    target: i64,
+    header: i64,
+    cond: ir::Name
+) -> !bool {
+    var reads = array::new<ir::Name>(self.allocator);
+    defer reads.deinit(self.allocator);
+    try reads.append(self.allocator, cond);
+    let target_block = function.blocks.get_or_panic(target);
+    let target_node = module.blocks.at(target_block.node);
+    var instr_index = 0;
+    while target_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op != ir::Op::Phi {
+            continue;
+        }
+        var incoming_index = 0;
+        while instr_node.incoming.get(incoming_index) |incoming| {
+            incoming_index = incoming_index + 1;
+            if ir::same_name(incoming.block, source) {
+                let info = try self.value_of(module, incoming.value);
+                try reads.append(self.allocator, info.expr);
+            }
+        }
+    }
+    let header_block = function.blocks.get_or_panic(header);
+    let header_node = module.blocks.at(header_block.node);
+    instr_index = 0;
+    while header_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op != ir::Op::Phi {
+            continue;
+        }
+        let name_text = ir::name_text(&module.names, instr_node.result.name);
+        let name_bytes = name_text.as_bytes();
+        let assigned = try self.local_expr(name_bytes);
+        var read_index = 0;
+        while reads.get(read_index) |read| {
+            read_index = read_index + 1;
+            if self.name_contains(read, assigned) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Reports whether the text of one emitter name occurs in another's, the Go
+/// `strings.Contains` over two expressions.
+fn (self: &Emitter) name_contains(haystack: ir::Name, needle: ir::Name) -> bool {
+    let haystack_text = ir::name_text(&self.names, haystack);
+    let haystack_bytes = haystack_text.as_bytes();
+    let needle_text = ir::name_text(&self.names, needle);
+    let needle_bytes = needle_text.as_bytes();
+    return wasm_bytes_contain(haystack_bytes, needle_bytes);
+}
+
+/// Is how many blocks reads_phis_below looks through before it assumes a
+/// read, the Go `branchSubtreeLimit`.
+fn branch_subtree_limit() -> i64 {
+    return 64;
+}
+
+/// Reports whether the code written for the block at top -- every block it
+/// dominates, and the phi copies on edges leaving them -- may read a phi of
+/// the header block, the Go `readsPhisBelow`. A cast is written as an
+/// expression over what it casts, so reading a cast of a phi reads the phi.
+fn (self: &var Emitter) reads_phis_below(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    s: &Structure,
+    top: i64,
+    header: i64
+) -> !bool {
+    var phis = map::new<i64, bool>(self.allocator);
+    defer phis.deinit(self.allocator);
+    try self.phis_and_casts(module, function, header, &var phis);
+    var below = array::new<bool>(self.allocator);
+    defer below.deinit(self.allocator);
+    for 0..function.blocks.len() |_| {
+        try below.append(self.allocator, false);
+    }
+    var count = 0;
+    var position = 0;
+    while s.order.get(position) |index| {
+        position = position + 1;
+        if s.dominates(top, index) {
+            try below.set(index, true);
+            count = count + 1;
+        }
+    }
+    if count > branch_subtree_limit() {
+        return true;
+    }
+    return reads_names_below(module, function, s, &below, &phis);
+}
+
+/// Names the phis of the header block and every cast of one of them, the
+/// values whose reads read a phi's local, the Go `phisAndCasts`.
+fn (self: &var Emitter) phis_and_casts(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    header: i64,
+    phis: &var map::Map<i64, bool>
+) -> !void {
+    let header_block = function.blocks.get_or_panic(header);
+    let header_node = module.blocks.at(header_block.node);
+    var instr_index = 0;
+    while header_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op == ir::Op::Phi {
+            try phis.insert(self.allocator, ir::name_id(instr_node.result.name), true);
+        }
+    }
+    var grown = true;
+    while grown {
+        grown = false;
+        var block_index = 0;
+        while function.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op != ir::Op::Cast or instr_node.args.len() != 1 {
+                    continue;
+                }
+                let source = instr_node.args.get_or_panic(0);
+                if phis.contains(ir::name_id(source.name)) and
+                    !phis.contains(ir::name_id(instr_node.result.name)) {
+                    try phis.insert(self.allocator, ir::name_id(instr_node.result.name), true);
+                    grown = true;
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Reports whether a block in below reads one of names, or an edge leaving
+/// one carries one into a phi, the Go `readsNamesBelow`.
+fn reads_names_below(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    s: &Structure,
+    below: &array::Array<bool>,
+    names: &map::Map<i64, bool>
+) -> bool {
+    var block_index = 0;
+    while function.blocks.get(block_index) |block| {
+        let in_below = below.get(block_index) orelse false;
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            var index = 0;
+            while instr_node.incoming.get(index) |incoming| {
+                index = index + 1;
+                let from = s.index_of(module, incoming.block);
+                if from >= 0 and (below.get(from) orelse false) and
+                    names.contains(ir::name_id(incoming.value.name)) {
+                    return true;
+                }
+            }
+            if !in_below or instr_node.op == ir::Op::Phi {
+                continue;
+            }
+            if instr_reads_names(instr_node, names) {
+                return true;
+            }
+        }
+        if in_below and (names.contains(ir::name_id(block_node.terminator.value.name)) or
+            names.contains(ir::name_id(block_node.terminator.cond.name))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether an instruction reads one of names besides its phi
+/// incoming, the Go `visitInstrReads` with the visit readsNamesBelow makes.
+fn instr_reads_names(node: &ir::InstrNode, names: &map::Map<i64, bool>) -> bool {
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        if names.contains(ir::name_id(arg.name)) {
+            return true;
+        }
+    }
+    index = 0;
+    while node.fields.get(index) |field| {
+        index = index + 1;
+        if names.contains(ir::name_id(field.value.name)) {
+            return true;
+        }
+    }
+    index = 0;
+    while node.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        if names.contains(ir::name_id(cleanup.arg.name)) {
+            return true;
+        }
+        if !ir::is_empty(cleanup.allocator.name) and names.contains(ir::name_id(cleanup.allocator.name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Is one assignment an edge makes to a phi of the block it enters, the Go
+/// `phiCopy`; done marks one already written.
+struct PhiCopy {
+    dst: ir::Value,
+    src: ir::Name,
+    done: bool,
+}
+
 /// Assigns target phi locals for an edge, the Go `writePhiCopies`. The edge
 /// stays inside one function, so the target is read out of that function's
 /// structure.
+///
+/// The phis of one block take their values at once, so a copy that reads
+/// another phi of the block has to read it before that phi is assigned.
+/// Copies are written once nothing still waiting reads what they assign; a
+/// cycle of them, a pair of phis trading values, parks one phi's value in the
+/// temporary phi_temp_local names for its type first.
 fn (self: &var Emitter) write_phi_copies(
     module: &ir::Module,
     function: &ir::FunctionNode,
@@ -885,6 +1207,8 @@ fn (self: &var Emitter) write_phi_copies(
     }
     let block = function.blocks.get_or_panic(target_index);
     let node = module.blocks.at(block.node);
+    var pending = array::new<PhiCopy>(self.allocator);
+    defer pending.deinit(self.allocator);
     var instr_index = 0;
     while node.instrs.get(instr_index) |instr| {
         instr_index = instr_index + 1;
@@ -898,26 +1222,147 @@ fn (self: &var Emitter) write_phi_copies(
             if !ir::same_name(incoming.block, source) {
                 continue;
             }
-            try self.write_local_copy(module, instr_node.result, incoming.value, "            ");
+            let info = try self.value_of(module, incoming.value);
+            try pending.append(self.allocator, PhiCopy {
+                dst: instr_node.result,
+                src: info.expr,
+                done: false
+            });
         }
+    }
+    var remaining = pending.len();
+    while remaining > 0 {
+        var ready = -1;
+        var index = 0;
+        while pending.get(index) |candidate| {
+            if !candidate.done and !try self.phi_copy_read(module, &pending, index) {
+                ready = index;
+                break;
+            }
+            index = index + 1;
+        }
+        if ready < 0 {
+            var first = 0;
+            while pending.get(first) |candidate| {
+                if !candidate.done {
+                    break;
+                }
+                first = first + 1;
+            }
+            let parked_copy = pending.get_or_panic(first);
+            let parked = parked_copy.dst;
+            let temp = try self.phi_temp_local(wasm_type(module, parked.type_name));
+            let parked_text = ir::name_text(&module.names, parked.name);
+            let parked_bytes = parked_text.as_bytes();
+            let read = try self.local_expr(parked_bytes);
+            try self.line2("            (local.set %s %s)", Arg::Str(temp), Arg::Str(read));
+            let temp_read = try self.local_get_expr(temp);
+            index = 0;
+            while pending.get(index) |candidate| {
+                if !candidate.done and ir::same_name(candidate.src, read) {
+                    try pending.set(index, PhiCopy { dst: candidate.dst, src: temp_read, done: false });
+                }
+                index = index + 1;
+            }
+            continue;
+        }
+        let next = pending.get_or_panic(ready);
+        let dst_text = ir::name_text(&module.names, next.dst.name);
+        let dst_bytes = dst_text.as_bytes();
+        let symbol = try self.symbol_name_of(dst_bytes);
+        try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(next.src));
+        let expr = try self.local_expr(dst_bytes);
+        try self.set_value(module, next.dst, expr);
+        try pending.set(ready, PhiCopy { dst: next.dst, src: next.src, done: true });
+        remaining = remaining - 1;
     }
     return;
 }
 
-/// Copies one value into a local, the Go `writeLocalCopy`.
-fn (self: &var Emitter) write_local_copy(
+/// Reports whether a copy other than the one at index, among those still
+/// waiting, reads the phi that copy assigns, the Go `phiCopyRead`.
+fn (self: &var Emitter) phi_copy_read(
     module: &ir::Module,
-    dst: ir::Value,
-    src: ir::Value,
-    indent: []u8
-) -> !void {
-    let info = try self.value_of(module, src);
-    let dst_retained = ir::name_text(&module.names, dst.name);
-    let dst_bytes = dst_retained.as_bytes();
-    let symbol = try self.symbol_name_of(dst_bytes);
-    try self.line3("%s(local.set %s %s)", Arg::Lit(indent), Arg::Str(symbol), Arg::Str(info.expr));
-    let expr = try self.local_expr(dst_bytes);
-    return self.set_value(module, dst, expr);
+    pending: &array::Array<PhiCopy>,
+    index: i64
+) -> !bool {
+    let copy = pending.get_or_panic(index);
+    let dst_text = ir::name_text(&module.names, copy.dst.name);
+    let dst_bytes = dst_text.as_bytes();
+    let read = try self.local_expr(dst_bytes);
+    var other = 0;
+    while pending.get(other) |candidate| {
+        if other != index and !candidate.done and self.name_contains(candidate.src, read) {
+            return true;
+        }
+        other = other + 1;
+    }
+    return false;
+}
+
+/// Names the local a cycle of phi copies parks one value of a wasm type in,
+/// the Go `phiTempLocal`.
+fn (self: &var Emitter) phi_temp_local(wasm_value_type: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "$__kizu_phi_");
+    errdefer out.deinit(self.allocator);
+    try out.append_bytes(self.allocator, wasm_value_type);
+    return self.names.intern_owned(move out);
+}
+
+/// Declares, in first-use order, a temporary for each wasm type of the phis
+/// of a function that read another phi of their own block, the ones a cycle
+/// of copies can hold, the Go `phiTempTypes` and its declaration loop.
+fn (self: &var Emitter) write_phi_temp_locals(module: &ir::Module, function: &ir::FunctionNode) -> !void {
+    var declared = array::new<ir::Name>(self.allocator);
+    defer declared.deinit(self.allocator);
+    // phis files each phi result under the position of its block, so one map
+    // serves every block.
+    var phis = map::new<i64, i64>(self.allocator);
+    defer phis.deinit(self.allocator);
+    var block_index = 0;
+    while function.blocks.get(block_index) |block| {
+        let position = block_index;
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::Phi {
+                try phis.insert(self.allocator, ir::name_id(instr_node.result.name), position);
+            }
+        }
+        instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != ir::Op::Phi {
+                continue;
+            }
+            var incoming_index = 0;
+            while instr_node.incoming.get(incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                let filed = phis.get(ir::name_id(incoming.value.name)) orelse -1;
+                if filed != position or ir::same_name(incoming.value.name, instr_node.result.name) {
+                    continue;
+                }
+                let value_type = wasm_type(module, incoming.value.type_name);
+                let value_type_name = try self.names.intern(value_type);
+                var seen = false;
+                var index = 0;
+                while declared.get(index) |existing| {
+                    index = index + 1;
+                    seen = seen or ir::same_name(existing, value_type_name);
+                }
+                if !seen {
+                    try declared.append(self.allocator, value_type_name);
+                    let temp = try self.phi_temp_local(value_type);
+                    try self.line2("    (local %s %s)", Arg::Str(temp), Arg::Str(value_type_name));
+                }
+            }
+        }
+    }
+    return;
 }
 
 /// Maps bool constants to WebAssembly i32 constants, the Go `wasmBool`.

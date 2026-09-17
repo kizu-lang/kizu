@@ -72,7 +72,9 @@ fn emit_for_native_target(
         entry_param_loads: string::new(allocator),
         wrote_param_loads: false,
         generation: 0,
-        darwin_stack_probe: darwin
+        darwin_stack_probe: darwin,
+        tbaa_used: false,
+        wrote_phi_value_mark: false
     };
     defer emitter.deinit(allocator);
     if try emitter.emit_module(module) |failed| {
@@ -139,6 +141,12 @@ struct Emitter {
     wrote_param_loads: bool,
     generation: i64,
     darwin_stack_probe: bool,
+    // Records that a load or store named a type-based alias tag, so the
+    // module ends with the tag table (tbaa.kizu), the Go `tbaaUsed`.
+    tbaa_used: bool,
+    // Records that the function being written named a phi value by its mark,
+    // so only a body that holds one is walked for it; Go searches the body.
+    wrote_phi_value_mark: bool,
 }
 
 /// Is what the emitter knows about one SSA value, the Go `valueInfo`: its
@@ -677,6 +685,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
             return move failed;
         }
     }
+    try self.write_tbaa_table();
     return null;
 }
 
@@ -1072,6 +1081,7 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     self.current_block = ir::empty_name();
     self.entry_param_loads.clear();
     self.wrote_param_loads = false;
+    self.wrote_phi_value_mark = false;
     try self.precompute_niche_aliases(module, node);
     var return_type = try self.llvm_type_of(module, node.return_type);
     let return_text = ir::name_text(&module.names, node.return_type);
@@ -1569,12 +1579,86 @@ fn phi_predecessor_mark() -> []u8 {
     return "%kizu.phi.from.";
 }
 
+/// Returns what a phi names an incoming value by when the value's block is
+/// written after the phi's, as a latch's is after its loop header, the Go
+/// `phiValueMark`. What operand a value is written as is known once its
+/// instruction is: a constant is its literal and a niche optional the pointer
+/// it wraps, so the operand is filled in once the body is.
+fn phi_value_mark() -> []u8 {
+    return "%kizu.phi.value.";
+}
+
 /// Writes the function body written since body_start into out with each
-/// phi_predecessor_mark replaced by the label its block ended in, the Go
-/// `resolvePhiPredecessors`.
+/// phi_value_mark replaced by the operand its value was written as and each
+/// phi_predecessor_mark by the label its block ended in, the Go
+/// `resolvePhiPredecessors`. The value marks are resolved first, into a copy
+/// of the body, since resolving one can name what the emitter has not spelled
+/// yet; a body that holds none is read in place.
 fn (self: &var Emitter) resolve_phi_predecessors(module: &ir::Module, body_start: i64, out: &var string::String) -> !void {
+    if !self.wrote_phi_value_mark {
+        let text = self.out.as_bytes();
+        return self.resolve_predecessor_marks(module, text[body_start..mem::len(text)], out);
+    }
+    var body = try self.copy_body(body_start);
+    defer body.deinit(self.allocator);
+    var valued = string::new(self.allocator);
+    defer valued.deinit(self.allocator);
+    let body_bytes = body.as_bytes();
+    try self.resolve_value_marks(module, body_bytes, &var valued);
+    let valued_bytes = valued.as_bytes();
+    return self.resolve_predecessor_marks(module, valued_bytes, out);
+}
+
+/// Copies the function body written since body_start.
+fn (self: &Emitter) copy_body(body_start: i64) -> !string::String {
     let text = self.out.as_bytes();
-    let body = text[body_start..mem::len(text)];
+    return string::from_bytes(self.allocator, text[body_start..mem::len(text)]);
+}
+
+/// Writes body into out with each phi_value_mark, and the value name after it
+/// up to `, `, replaced by the operand that value was written as, the Go
+/// `resolveMarks` with phiValueMark.
+fn (self: &var Emitter) resolve_value_marks(module: &ir::Module, body: []u8, out: &var string::String) -> !void {
+    let mark = phi_value_mark();
+    let mark_len = mem::len(mark);
+    let length = mem::len(body);
+    var copied = 0;
+    var position = 0;
+    while position + mark_len <= length {
+        if !mem::equal_bytes(body[position..position + mark_len], mark) {
+            position = position + 1;
+            continue;
+        }
+        try out.append_bytes(self.allocator, body[copied..position]);
+        let name_start = position + mark_len;
+        var name_end = name_start;
+        while name_end + 1 < length and !(body[name_end] == cast<u8>(44) and body[name_end + 1] == cast<u8>(32)) {
+            name_end = name_end + 1;
+        }
+        let name_bytes = body[name_start..name_end];
+        if module.names.lookup(name_bytes) |name| {
+            let operand = try self.name_operand(module, name);
+            try self.names.append_to(out, operand);
+        } else {
+            // A name the module does not hold was never written, so it is
+            // spelled the way local_name spells one.
+            if mem::starts_with(name_bytes, "%") {
+                try out.append_bytes(self.allocator, "%kizu.");
+                try out.append_bytes(self.allocator, name_bytes[1..mem::len(name_bytes)]);
+            } else {
+                try out.append_bytes(self.allocator, name_bytes);
+            }
+        }
+        copied = name_end;
+        position = name_end;
+    }
+    return out.append_bytes(self.allocator, body[copied..length]);
+}
+
+/// Writes body into out with each phi_predecessor_mark, and the block name
+/// after it up to ` ]`, replaced by the label that block ended in, the Go
+/// `resolveMarks` with phiPredecessorMark.
+fn (self: &Emitter) resolve_predecessor_marks(module: &ir::Module, body: []u8, out: &var string::String) -> !void {
     let mark = phi_predecessor_mark();
     let mark_len = mem::len(mark);
     let length = mem::len(body);
@@ -1608,8 +1692,7 @@ fn (self: &var Emitter) resolve_phi_predecessors(module: &ir::Module, body_start
         copied = name_end;
         position = name_end;
     }
-    try out.append_bytes(self.allocator, body[copied..length]);
-    return;
+    return out.append_bytes(self.allocator, body[copied..length]);
 }
 
 /// Records the concrete label where the current IR block continues, the Go
@@ -1792,6 +1875,31 @@ fn (self: &var Emitter) operand(module: &ir::Module, value: ir::Value) -> !Value
     }
     let local = try self.local_name(module, value.name);
     return ValueInfo { typ: typ_name, operand: local, generation: self.generation };
+}
+
+/// Reports whether the value a name stands for was written in this function,
+/// the Go `_, written := e.values[name]`.
+fn (self: &Emitter) value_written(name: ir::Name) -> bool {
+    if self.values.get(ir::name_id(name)) |found| {
+        return found.generation == self.generation;
+    }
+    return false;
+}
+
+/// Resolves the SSA value a name stands for to its LLVM operand, the Go
+/// `value(ir.Value{Name: name}).operand`, for a phi value mark, which carries
+/// the name alone.
+fn (self: &var Emitter) name_operand(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    if self.values.get(ir::name_id(name)) |found| {
+        if found.generation == self.generation {
+            return found.operand;
+        }
+    }
+    if self.niche_alias_source(name) |source| {
+        let carried = try self.operand(module, source);
+        return carried.operand;
+    }
+    return self.local_name(module, name);
 }
 
 /// Follows a niche optional's result back to the value it is, the Go
@@ -2225,13 +2333,17 @@ fn (self: &var Emitter) write_optional_load_result(
         try self.line1("%s:", Arg::Str(labels.ok));
         let value_name = try self.suffixed(result_name, ".value");
         let elem_type = try self.llvm_type(module, elem);
+        let tag = self.value_tag(elem_type);
         if load_align > 0 {
-            try self.line4(
-                "  %s = load %s, ptr %s, align %d",
-                Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name), Arg::Int(load_align)
+            try self.line5(
+                "  %s = load %s, ptr %s, align %d%s",
+                Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name), Arg::Int(load_align), Arg::Lit(tag)
             );
         } else {
-            try self.line3("  %s = load %s, ptr %s", Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name));
+            try self.line4(
+                "  %s = load %s, ptr %s%s",
+                Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name), Arg::Lit(tag)
+            );
         }
         // A niche element is already the optional, so the element the ok path
         // loaded is what the join hands back and the null path spells absence

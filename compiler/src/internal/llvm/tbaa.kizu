@@ -1,0 +1,91 @@
+import compiler::internal::ir;
+import std::mem;
+
+// Mechanical port of internal/llvm/tbaa.go: the type-based alias tags some
+// loads and stores carry. Go spells a tag as `fmt.Sprintf` of the kind's
+// metadata number; here each kind's suffix is a static text, the same text.
+//
+// Type-based alias tags let the optimizer keep an Array's length and storage
+// pointer in registers across a loop that writes elements. Without them, a
+// store of an i64 element could, as far as LLVM can tell, have written the
+// i64 length of the header the loop reads, so every iteration reads the
+// header again.
+//
+// Three types hang off one root: the header's counts, the header's storage
+// pointer, and every other scalar a load or store names. The first two are
+// only ever read or written as themselves -- a header field is reached through
+// the Array operations that name it and through whole-header copies, which
+// carry no tag and so may overlap anything -- and no reference a program can
+// hold points into a header, so an element, a field, or a value behind a
+// borrow is never a header field. What carries no tag, aggregates and raw
+// pointers among it, is still taken to overlap everything.
+
+/// Names the three tagged types, the Go `tbaaCount`, `tbaaPointer` and
+/// `tbaaValue`.
+enum TbaaKind {
+    Count,
+    Pointer,
+    Value,
+}
+
+/// Returns the suffix that tags a load or store with one kind, the Go
+/// `tbaaTag`. The access tag of Count is metadata !4, the Go
+/// `tbaaFirstAccessTag`, and the table write_tbaa_table writes puts the tags
+/// of the other kinds after it.
+fn (self: &var Emitter) tbaa_tag(kind: TbaaKind) -> []u8 {
+    self.tbaa_used = true;
+    return match kind {
+        Count => ", !tbaa !4",
+        Pointer => ", !tbaa !5",
+        Value => ", !tbaa !6",
+    };
+}
+
+/// Tags a load or store of llvm_type as a value when the type is a scalar,
+/// the Go `valueTag`; an aggregate stays untagged.
+fn (self: &var Emitter) value_tag(llvm_type: ir::Name) -> []u8 {
+    if self.names.starts_with(llvm_type, "%") or self.names.starts_with(llvm_type, "{") or
+        self.names.starts_with(llvm_type, "[") or self.names.is(llvm_type, "void") {
+        return "";
+    }
+    return self.tbaa_tag(TbaaKind::Value);
+}
+
+/// Tags a load or store through a borrow as a value, the Go `referenceTag`.
+/// A raw pointer can be made to point anywhere, a header among it, and a
+/// volatile access names a device register, so neither is tagged.
+fn (self: &var Emitter) reference_tag(
+    module: &ir::Module,
+    op: ir::Op,
+    receiver_type: ir::Name,
+    llvm_type: ir::Name
+) -> []u8 {
+    let keyword = volatile_keyword(op);
+    if mem::len(keyword) != 0 or !module.names.starts_with(receiver_type, "&") {
+        return "";
+    }
+    return self.value_tag(llvm_type);
+}
+
+/// Writes the type table the tags name, when a tag was written, the Go
+/// `writeTBAATable`.
+fn (self: &var Emitter) write_tbaa_table() -> !void {
+    if !self.tbaa_used {
+        return;
+    }
+    try self.line(
+        \\!0 = !{!"kizu tbaa"}
+    );
+    try self.line(
+        \\!1 = !{!"kizu array count", !0, i64 0}
+    );
+    try self.line(
+        \\!2 = !{!"kizu array data", !0, i64 0}
+    );
+    try self.line(
+        \\!3 = !{!"kizu value", !0, i64 0}
+    );
+    try self.line("!4 = !{!1, !1, i64 0}");
+    try self.line("!5 = !{!2, !2, i64 0}");
+    return self.line("!6 = !{!3, !3, i64 0}");
+}
