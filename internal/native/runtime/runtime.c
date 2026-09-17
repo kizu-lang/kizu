@@ -369,7 +369,7 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
 static KizuArray kizu_array_empty(void);
 _Bool kizu_array_append(void *allocator, void *handle, const void *elem, int64_t elem_size);
 _Bool kizu_array_append_bytes(void *allocator, void *handle, const void *bytes, int64_t length);
-_Bool kizu_array_truncate(void *handle, int64_t len);
+static _Bool kizu_array_truncate(void *handle, int64_t len);
 static _Bool kizu_array_reserve_storage(
     void *allocator, KizuArray *array, int64_t needed, int64_t elem_size);
 static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size);
@@ -3633,37 +3633,16 @@ _Bool kizu_array_reserve(
     return kizu_array_reserve_storage(allocator, array, array->len + additional, elem_size);
 }
 
-void *kizu_array_pop(void *handle, int64_t elem_size) {
-    KizuArray *array = (KizuArray *)handle;
-    if (!array || array->len <= 0) {
-        return NULL;
-    }
-    array->len -= 1;
-    return array->data + array->len * elem_size;
-}
-
-_Bool kizu_array_truncate(void *handle, int64_t len) {
+/* Only the runtime's own stream readers truncate through a call: a program's
+   truncate, clear, pop and as_bytes are written where they are, since each is
+   a load, a test and a store the optimizer can see the length change through. */
+static _Bool kizu_array_truncate(void *handle, int64_t len) {
     KizuArray *array = (KizuArray *)handle;
     if (!array || len < 0 || len > array->len) {
         return 0;
     }
     array->len = len;
     return 1;
-}
-
-void kizu_array_clear(void *handle) {
-    KizuArray *array = (KizuArray *)handle;
-    if (array) {
-        array->len = 0;
-    }
-}
-
-KizuSliceU8 kizu_array_as_bytes(void *handle) {
-    KizuArray *array = (KizuArray *)handle;
-    KizuSliceU8 result;
-    result.ptr = array ? array->data : NULL;
-    result.len = array ? array->len : 0;
-    return result;
 }
 
 /* kizu_map_read8 and kizu_map_read_tail read a key eight bytes at a time and

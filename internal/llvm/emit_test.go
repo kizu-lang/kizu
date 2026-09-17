@@ -162,7 +162,7 @@ fn main() {}`)
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, fragment := range []string{
-		"call ptr @kizu_array_pop(",
+		"icmp sgt i64",
 		"icmp eq ptr",
 		"call void @kizu_panic_array_empty(i64 0, i64 0)",
 		"load i64, ptr",
