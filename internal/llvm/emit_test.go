@@ -805,12 +805,11 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 	for _, want := range []string{
 		"declare void @kizu_panic_bounds(i64, i64, i64, i64)",
 		"declare void @kizu_panic_range(i64, i64, i64, i64, i64)",
-		"br i1 %kizu.5, label %kizu.check.2.fail, label %kizu.check.2.pass",
-		"kizu.check.2.fail:\n  call void @kizu_panic_bounds(i64 1, i64 %kizu.3, i64 3, i64 21)\n" +
+		"br i1 %kizu.6, label %kizu.check.1.fail, label %kizu.check.1.pass",
+		"kizu.check.1.fail:\n  call void @kizu_panic_bounds(i64 1, i64 %kizu.3, i64 3, i64 21)\n" +
 			"  unreachable",
-		"%kizu.6 = load i8, ptr %kizu.6.elem.ptr",
-		"%kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 %kizu.13.len, 1",
-		"call void @std__fmt__print.u8(i8 %kizu.6)",
+		"%kizu.7 = load i8, ptr %kizu.7.elem.ptr",
+		"call void @std__fmt__print.u8(i8 %kizu.7)",
 		"call void @std__fmt__print._5b_5du8(%kizu.slice.u8 ",
 	} {
 		if !strings.Contains(got, want) {

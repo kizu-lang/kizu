@@ -379,13 +379,13 @@ func TestLowerByteSliceAccess(t *testing.T) {
 }`)
 	got := Dump(module)
 	for _, want := range []string{
-		"  cond_fail %4: bool, bounds(%2: i64, %3: i64)\n",
-		"  cond_fail %5: bool, bounds(%2: i64, %3: i64)\n",
-		"  %6: u8 = slice.index %1: []u8, %2: i64\n",
-		"  cond_fail %12: bool, range(%7: i64, %8: i64, %9: i64)\n",
-		"  %13: []u8 = slice.slice %1: []u8, %7: i64, %8: i64\n",
-		"  call.std::fmt::print.u8 %6: u8\n",
-		"  call.std::fmt::print._5b_5du8 %13: []u8\n",
+		"  cond_fail %6: bool, bounds(%2: i64, %3: i64)\n",
+		"  %7: u8 = slice.index %1: []u8, %2: i64\n",
+		"  cond_fail %14: bool, range(%8: i64, %9: i64, %10: i64)\n",
+		"  cond_fail %15: bool, range(%8: i64, %9: i64, %10: i64)\n",
+		"  %16: []u8 = slice.slice %1: []u8, %8: i64, %9: i64\n",
+		"  call.std::fmt::print.u8 %7: u8\n",
+		"  call.std::fmt::print._5b_5du8 %16: []u8\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)

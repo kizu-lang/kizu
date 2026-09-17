@@ -1470,8 +1470,7 @@ func (l *lowerer) lowerIndexAssign(target *ast.IndexExpr, value Value) error {
 		return err
 	}
 	length := l.emit("slice.len", "i64", []Value{slice}, "")
-	l.condFail(target.Span, "binary.<", index, zeroIndex, "bounds", index, length)
-	l.condFail(target.Span, "binary.>=", index, length, "bounds", index, length)
+	l.checkIndexInRange(target.Span, index, length)
 	l.emit("slice.store", "void", []Value{slice, index, value}, "")
 	return nil
 }
@@ -3346,8 +3345,7 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 			return Value{}, err
 		}
 		length := l.emit("slice.len", "i64", []Value{target}, "")
-		l.condFail(expr.Span, "binary.<", index, zeroIndex, "bounds", index, length)
-		l.condFail(expr.Span, "binary.>=", index, length, "bounds", index, length)
+		l.checkIndexInRange(expr.Span, index, length)
 		elem := strings.TrimPrefix(target.Type, "[]")
 		return l.emit("slice.index", elem, []Value{target, index}, ""), nil
 	}
@@ -3360,13 +3358,37 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 		return Value{}, err
 	}
 	length := l.emit("slice.len", "i64", []Value{target}, "")
-	l.condFail(expr.Span, "binary.<", start, zeroIndex, "range", start, end, length)
-	l.condFail(expr.Span, "binary.>", start, end, "range", start, end, length)
-	l.condFail(expr.Span, "binary.>", end, length, "range", start, end, length)
+	// Read unsigned, a bound below zero is past every length, so the two
+	// comparisons a sub-slice needs -- start no later than end, end no later
+	// than the length -- answer the third as well.
+	unsignedStart := l.unsigned(start)
+	unsignedEnd := l.unsigned(end)
+	unsignedLength := l.unsigned(length)
+	l.condFail(expr.Span, "binary.>", unsignedStart, unsignedEnd, "range", start, end, length)
+	l.condFail(expr.Span, "binary.>", unsignedEnd, unsignedLength, "range", start, end, length)
 	return l.emit("slice.slice", target.Type, []Value{target, start, end}, ""), nil
 }
 
-// zeroIndex is the constant a negative bound is tested against.
+// checkIndexInRange traps an index that does not name an element. Read
+// unsigned, a negative index is past every length, so one comparison answers
+// both halves of the question -- which is what an Array element access has
+// always done, and what lets an index walk cost one branch rather than two.
+func (l *lowerer) checkIndexInRange(span ast.Span, index Value, length Value) {
+	l.condFail(span, "binary.>=", l.unsigned(index), l.unsigned(length),
+		"bounds", index, length)
+}
+
+// unsigned reads a signed index or length as the unsigned number of the same
+// bits. The two are the same register, so the cast is a name rather than an
+// instruction, and only the comparison that reads it changes.
+func (l *lowerer) unsigned(value Value) Value {
+	if !isSignedIntegerTypeName(value.Type) {
+		return value
+	}
+	return l.emit("cast", "u64", []Value{value}, "u64")
+}
+
+// zeroIndex is the constant a bound defaults to when a sub-slice leaves it out.
 var zeroIndex = Value{Name: "0", Type: "i64"}
 
 // condFail emits a comparison and aborts with the named failure when it holds.
