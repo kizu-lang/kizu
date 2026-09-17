@@ -45,11 +45,6 @@ const arenaHeaderSize = 32
 // arenaFieldOrigin is where arenaHeaderType keeps that number.
 const arenaFieldOrigin = 3
 
-// arenaEmptyGlobal is the arena's counterpart to arrayEmptyGlobal: the header
-// read in place of a null one. It counts from zero, which no arena does, so a
-// handle read against it fails the way any other handle from elsewhere does.
-const arenaEmptyGlobal = "@kizu.arena.empty"
-
 // arenaIndexBits is how much of a handle the index gets. An arena holding more
 // elements than that would let a handle from another one land inside it, so
 // arenaMaxLen is where an add stops.
@@ -114,8 +109,6 @@ func (e *emitter) writeArenaRuntimeDecls() {
 		e.out.WriteByte('\n')
 		return
 	}
-	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
-		arenaEmptyGlobal, arenaHeaderType)
 	e.out.WriteString("declare i64 @kizu_arena_origin()\n\n")
 }
 
@@ -140,17 +133,6 @@ func (e *emitter) usesArenaRuntime() bool {
 		}
 	}
 	return false
-}
-
-// arenaHandle returns an operand that always points at a readable arena
-// header, the way arrayHandle does for an array's.
-func (e *emitter) arenaHandle(operand string) string {
-	nullName := "%" + e.nextSyntheticValue("arena.handle.null")
-	handleName := "%" + e.nextSyntheticValue("arena.header")
-	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, operand)
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr %s\n",
-		handleName, nullName, arenaEmptyGlobal, operand)
-	return handleName
 }
 
 // arenaOrigin reads the number an arena's handles count from.
@@ -180,7 +162,7 @@ func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
 		return err
 	}
 	arena := e.value(instr.Args[0])
-	header := e.arenaHandle(arena.operand)
+	header := arena.operand
 	e.writeArenaFullFailure(instr, header)
 	okName := localName(instr.Result.Name) + ".ok"
 	index := e.writeArrayAppendPaths(instr, elem, arena.operand, header, okName)
@@ -213,7 +195,7 @@ func (e *emitter) writeArenaLen(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: arena.len expects Arena<T> -> i64")
 	}
-	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
+	handle := e.value(instr.Args[0]).operand
 	resultName := localName(instr.Result.Name)
 	e.arrayLoadField(handle, arrayFieldLen, "arena.len", resultName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
@@ -287,7 +269,7 @@ func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
 // already running answers both questions with the one comparison it already
 // had, and the failure arrives at the one null the trap already watches for.
 func (e *emitter) arenaCheckedElement(instr *ir.Instr) (string, error) {
-	header := e.arenaHandle(e.value(instr.Args[0]).operand)
+	header := e.value(instr.Args[0]).operand
 	index := e.arenaIndexOf(header, e.value(instr.Args[1]).operand)
 	return e.arrayCheckedElement(instr, header, index,
 		localName(instr.Result.Name)+".ptr")

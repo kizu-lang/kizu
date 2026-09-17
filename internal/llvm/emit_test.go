@@ -369,19 +369,19 @@ func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
 	}
 }
 
-// TestEmitStructParamsUseByValPointerABI keeps module-local struct arguments
+// TestEmitStructParamsUsePointerABI keeps module-local struct arguments
 // out of target-dependent aggregate register/stack lowering.
-func TestEmitStructParamsUseByValPointerABI(t *testing.T) {
+func TestEmitStructParamsUsePointerABI(t *testing.T) {
 	got := emitTestModule(t, structParamABIModule())
 	for _, want := range []string{
-		"define internal i64 @read(ptr byval(%kizu.struct.Big) %kizu.big.addr, " +
-			"ptr byval(%kizu.struct.Id) %kizu.id.addr)",
+		"define internal i64 @read(ptr noalias nocapture readonly %kizu.big.addr, " +
+			"ptr noalias nocapture readonly %kizu.id.addr)",
 		"%kizu.big = load %kizu.struct.Big, ptr %kizu.big.addr",
 		"%kizu.id = load %kizu.struct.Id, ptr %kizu.id.addr",
 		"%kizu.arg.0.",
 		"store %kizu.struct.Big %kizu.big, ptr %kizu.arg.0.",
-		"call i64 @read(ptr byval(%kizu.struct.Big) %kizu.arg.0.",
-		"ptr byval(%kizu.struct.Id) %kizu.arg.1.",
+		"call i64 @read(ptr %kizu.arg.0.",
+		"ptr %kizu.arg.1.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)

@@ -49,14 +49,6 @@ fn arena_field_origin() -> i64 {
     return 3;
 }
 
-/// The arena's counterpart to array_empty_global, the Go `arenaEmptyGlobal`:
-/// the header read in place of a null one. It counts from zero, which no arena
-/// does, so a handle read against it fails the way any other handle from
-/// elsewhere does.
-fn arena_empty_global() -> []u8 {
-    return "@kizu.arena.empty";
-}
-
 /// The length an add refuses to pass, the Go `arenaMaxLen`. An arena holding
 /// more elements than an index's half of a handle can name would let a handle
 /// from another one land inside it.
@@ -120,10 +112,6 @@ fn (self: &var Emitter) write_arena_runtime_decls(module: &ir::Module) -> !void 
     if !self.uses_arena_runtime(module) {
         return self.line("");
     }
-    try self.line2(
-        "%s = private unnamed_addr global %s zeroinitializer",
-        Arg::Lit(arena_empty_global()), Arg::Lit(arena_header_type())
-    );
     try self.line("declare i64 @kizu_arena_origin()");
     return self.line("");
 }
@@ -161,21 +149,6 @@ fn (self: &Emitter) uses_arena_runtime(module: &ir::Module) -> bool {
         }
     }
     return false;
-}
-
-/// Returns an operand that always points at a readable arena header, the way
-/// array_handle does for an array's, the Go `arenaHandle`.
-fn (self: &var Emitter) arena_handle(operand: ir::Name) -> !ir::Name {
-    let null_synthetic = try self.next_synthetic_value("arena.handle.null");
-    let null_name = try self.percent(null_synthetic);
-    let header_synthetic = try self.next_synthetic_value("arena.header");
-    let header_name = try self.percent(header_synthetic);
-    try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(null_name), Arg::Str(operand));
-    try self.line4(
-        "  %s = select i1 %s, ptr %s, ptr %s",
-        Arg::Str(header_name), Arg::Str(null_name), Arg::Lit(arena_empty_global()), Arg::Str(operand)
-    );
-    return header_name;
 }
 
 /// Reads the number an arena's handles count from, the Go `arenaOrigin`.
@@ -231,7 +204,7 @@ fn (self: &var Emitter) write_arena_add(module: &ir::Module, node: &ir::InstrNod
     }
     let elem_bytes = elem.as_bytes();
     let arena = try self.operand(module, node.args.get_or_panic(0));
-    let header = try self.arena_handle(arena.operand);
+    let header = arena.operand;
     try self.write_arena_full_failure(module, node, header);
     let result_name = try self.local_name(module, node.result.name);
     let ok_name = try self.suffixed(result_name, ".ok");
@@ -312,7 +285,7 @@ fn (self: &var Emitter) write_arena_len(module: &ir::Module, node: &ir::InstrNod
         return try self.fail0("llvm error: arena.len expects Arena<T> -> i64");
     }
     let arena = try self.operand(module, node.args.get_or_panic(0));
-    let handle = try self.array_handle(arena.operand);
+    let handle = arena.operand;
     let result_name = try self.local_name(module, node.result.name);
     try self.array_load_field(handle, array_field_len(), "arena.len", result_name);
     try self.set_value(module, node.result, result_name);
@@ -407,7 +380,7 @@ fn (self: &var Emitter) arena_checked_element(
     let elem_bytes = elem.as_bytes();
     let arena = try self.operand(module, node.args.get_or_panic(0));
     let carried = try self.operand(module, node.args.get_or_panic(1));
-    let header = try self.arena_handle(arena.operand);
+    let header = arena.operand;
     let index = try self.arena_index_of(header, carried.operand);
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");

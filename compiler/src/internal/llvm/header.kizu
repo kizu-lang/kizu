@@ -112,7 +112,9 @@ fn (self: &var Emitter) task_invoke_state_types(
 
 /// Emits the typed side of the TaskSet callback ABI, the Go
 /// `writeTaskInvokeThunks`. The runtime keeps a C-shaped pointer call while
-/// this thunk calls the worker with Kizu's declared byval struct ABI.
+/// this thunk calls the worker with Kizu's declared struct ABI. The worker's
+/// parameter promises no one else touches the slot while it runs, and the
+/// state is the runtime's, so the thunk hands over a copy of its own.
 fn (self: &var Emitter) write_task_invoke_thunks(module: &ir::Module) -> !void {
     var types = try self.task_invoke_state_types(module);
     defer types.deinit(self.allocator);
@@ -127,9 +129,11 @@ fn (self: &var Emitter) write_task_invoke_thunks(module: &ir::Module) -> !void {
             Arg::Str(invoke)
         );
         try self.line("entry:");
-        try self.line1(
-            "  call void %%kizu.entry(ptr %%kizu.io, ptr %%kizu.allocator, ptr byval(%s) %%kizu.state)",
-            Arg::Str(llvm_type)
+        try self.line1("  %%kizu.state.copy = alloca %s", Arg::Str(llvm_type));
+        try self.line1("  %%kizu.state.value = load %s, ptr %%kizu.state", Arg::Str(llvm_type));
+        try self.line1("  store %s %%kizu.state.value, ptr %%kizu.state.copy", Arg::Str(llvm_type));
+        try self.line(
+            "  call void %kizu.entry(ptr %kizu.io, ptr %kizu.allocator, ptr %kizu.state.copy)"
         );
         try self.line("  ret void");
         try self.line("}");
