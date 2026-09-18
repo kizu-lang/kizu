@@ -1,0 +1,755 @@
+import compiler::internal::ir;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/llvm/phi.go: the passes over one function's
+// body text that keep an optional or an error union from reaching LLVM as a
+// phi of the whole aggregate. Go splits the body into a slice of lines and
+// joins them back; here the lines are offsets into the body, the pieces of a
+// line are offsets too, and the result is written straight to the caller's
+// String through a LineWriter that puts the newline Go's join would.
+
+/// Writes lines the way Go's `strings.Join(lines, "\n")` joins them: a newline
+/// before every line but the first. A text holding newlines of its own is
+/// several lines written at once.
+struct LineWriter {
+    wrote: bool,
+}
+
+fn (self: &var LineWriter) line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    if self.wrote {
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    self.wrote = true;
+    return out.append_bytes(allocator, text);
+}
+
+/// Is one `[ value, %block ]` arm of a phi, as offsets into the line it was
+/// read from, the Go `phiArm`.
+struct PhiArm {
+    value_start: i64,
+    value_end: i64,
+    block_start: i64,
+    block_end: i64,
+}
+
+/// Is a phi line taken apart, the Go `phiParts` results, as offsets into the
+/// line.
+struct PhiParts {
+    result_end: i64,
+    type_start: i64,
+    type_end: i64,
+    arms_start: i64,
+}
+
+/// The longest body whose returns are gathered, the Go `inlinableBodyLines`.
+fn inlinable_body_lines() -> i64 {
+    return 100;
+}
+
+/// The block every return of an aggregate goes through once the returns are
+/// gathered into one, the Go `returnJoinLabel`.
+fn return_join_label() -> []u8 {
+    return "kizu.return.join";
+}
+
+/// Returns the offset of needle in text at or after from, the Go
+/// `strings.Index` on a suffix. A body is tens of kilobytes and is searched
+/// once per function, so the first byte is what rules a position out.
+fn find_bytes(text: []u8, needle: []u8, from: i64) -> ?i64 {
+    let length = mem::len(needle);
+    let size = mem::len(text);
+    if length == 0 {
+        return from;
+    }
+    let first = needle[0];
+    var index = from;
+    while index + length <= size {
+        if text[index] == first {
+            if mem::equal_bytes(text[index..index + length], needle) {
+                return index;
+            }
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Reports whether text holds more than limit newlines, the Go
+/// `strings.Count(text, "\n") > limit`, stopping at the first one past it.
+fn more_lines_than(text: []u8, limit: i64) -> bool {
+    var count = 0;
+    var index = 0;
+    let size = mem::len(text);
+    while index < size {
+        if text[index] == cast<u8>(10) {
+            count = count + 1;
+            if count > limit {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Reports whether a body line is a phi, the Go `phiParts` ok result.
+fn is_phi_line(line: []u8) -> bool {
+    if phi_parts(line) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Counts the lines past the first that start with prefix, the Go
+/// `strings.Count(text, "\n"+prefix)`: a line past the first is what follows
+/// a newline.
+fn count_lines_after_first_starting_with(text: []u8, prefix: []u8) -> i64 {
+    var count = 0;
+    var start = line_end(text, 0) + 1;
+    while start <= mem::len(text) {
+        let end = line_end(text, start);
+        if mem::starts_with(text[start..end], prefix) {
+            count = count + 1;
+        }
+        start = end + 1;
+    }
+    return count;
+}
+
+/// Reports whether a body line opens a block, the Go `isBlockLabel`.
+fn is_label_line(line: []u8) -> bool {
+    let length = mem::len(line);
+    return length > 0 and line[length - 1] == cast<u8>(58) and !mem::starts_with(line, " ");
+}
+
+/// Reports whether a body line is the instruction a block ends with, the Go
+/// `isBlockTerminator`.
+fn is_terminator_line(line: []u8) -> bool {
+    return mem::starts_with(line, "  br ") or mem::starts_with(line, "  ret ") or
+        mem::starts_with(line, "  switch ") or mem::starts_with(line, "  indirectbr ") or
+        mem::equal_bytes(line, "  unreachable");
+}
+
+/// Splits a phi line into its result, its type and the text of its arms, the
+/// Go `phiParts`; null for a line that is not a phi.
+fn phi_parts(line: []u8) -> ?PhiParts {
+    if !mem::starts_with(line, "  %") {
+        return null;
+    }
+    let marker = find_bytes(line, " = phi ", 0) orelse return null;
+    let type_start = marker + 7;
+    let space = find_bytes(line, " ", type_start) orelse return null;
+    return PhiParts { result_end: marker, type_start: type_start, type_end: space, arms_start: space + 1 };
+}
+
+/// Reads the arms of a phi from the text after its type, the Go
+/// `parsePhiArms`. The offsets are into line.
+fn parse_phi_arms(allocator: Allocator, line: []u8, start: i64, arms: &var array::Array<PhiArm>) -> !void {
+    var at = start;
+    while true {
+        let open = find_bytes(line, "[ ", at) orelse return;
+        let value_start = open + 2;
+        let comma = find_bytes(line, ", %", value_start) orelse return;
+        let closing = find_bytes(line, " ]", value_start) orelse return;
+        if closing < comma {
+            return;
+        }
+        try arms.append(allocator, PhiArm {
+            value_start: value_start,
+            value_end: comma,
+            block_start: comma + 3,
+            block_end: closing,
+        });
+        at = closing + 2;
+    }
+    return;
+}
+
+/// Collects the lines of a body, the Go `strings.Split(body, "\n")`.
+fn body_lines(allocator: Allocator, body: []u8, lines: &var array::Array<LineSpan>) -> !void {
+    var start = 0;
+    while start <= mem::len(body) {
+        let end = line_end(body, start);
+        try lines.append(allocator, LineSpan { start: start, end: end });
+        start = end + 1;
+    }
+    return;
+}
+
+/// Reports whether some block goes on after it has trapped, the Go
+/// `hasUnreachableTail`.
+fn has_unreachable_tail(body: []u8) -> bool {
+    // Go searches for the trap between two newlines; the line after it is
+    // what says whether the block went on. No instruction but the trap starts
+    // with `u`, so a line is ruled out by its third byte.
+    let size = mem::len(body);
+    var index = 0;
+    while index < size {
+        if body[index] == cast<u8>(10) and index + 3 < size and body[index + 3] == cast<u8>(117) {
+            let start = index + 1;
+            let end = line_end(body, start);
+            if end < size and mem::equal_bytes(body[start..end], "  unreachable") {
+                let next = body[end + 1..line_end(body, end + 1)];
+                if mem::len(next) > 0 and !is_label_line(next) {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Removes what a block says after it has trapped, and the phi arms that
+/// named it, the Go `dropUnreachableTails`. A trap ends the block -- the
+/// instructions the source wrote after a panic cannot run, and a jump that
+/// cannot be taken is not an edge -- so a phi that still names the block
+/// claims a predecessor the block no longer is.
+fn drop_unreachable_tails(allocator: Allocator, body: []u8, out: &var string::String) -> !void {
+    if !has_unreachable_tail(body) {
+        return out.append_bytes(allocator, body);
+    }
+    var lines = array::new<LineSpan>(allocator);
+    defer lines.deinit(allocator);
+    try body_lines(allocator, body, &var lines);
+    var trapped = map::new<[]u8, bool>(allocator);
+    defer trapped.deinit(allocator);
+    var kept = array::new<LineSpan>(allocator);
+    defer kept.deinit(allocator);
+    var block_start = 0;
+    var block_end = 0;
+    var dead = false;
+    var index = 0;
+    while lines.get(index) |span| {
+        index = index + 1;
+        let line = body[span.start..span.end];
+        if is_label_line(line) {
+            block_start = span.start;
+            block_end = span.end - 1;
+            dead = false;
+        } else {
+            // The empty line is the body's last newline, not an instruction.
+            if dead and mem::len(line) > 0 {
+                continue;
+            }
+        }
+        try kept.append(allocator, span);
+        if mem::equal_bytes(line, "  unreachable") {
+            let block = body[block_start..block_end];
+            if !trapped.contains(block) {
+                try trapped.insert(allocator, block, true);
+            }
+            dead = true;
+        }
+    }
+    var writer = LineWriter { wrote: false };
+    var arms = array::new<PhiArm>(allocator);
+    defer arms.deinit(allocator);
+    index = 0;
+    while kept.get(index) |span| {
+        index = index + 1;
+        let line = body[span.start..span.end];
+        if !is_phi_line(line) {
+            try writer.line(allocator, out, line);
+            continue;
+        }
+        let parts = phi_parts(line) orelse continue;
+        arms.clear(allocator);
+        try parse_phi_arms(allocator, line, parts.arms_start, &var arms);
+        var live = 0;
+        var arm_index = 0;
+        while arms.get(arm_index) |arm| {
+            arm_index = arm_index + 1;
+            if !trapped.contains(line[arm.block_start..arm.block_end]) {
+                live = live + 1;
+            }
+        }
+        // A phi with no arm left is in a block nothing reaches; it keeps what
+        // it said.
+        if live == 0 or live == arms.len() {
+            try writer.line(allocator, out, line);
+            continue;
+        }
+        var rebuilt = try string::from_bytes(allocator, "  ");
+        defer rebuilt.deinit(allocator);
+        try rebuilt.append_bytes(allocator, line[2..parts.result_end]);
+        try rebuilt.append_bytes(allocator, " = phi ");
+        try rebuilt.append_bytes(allocator, line[parts.type_start..parts.type_end]);
+        try rebuilt.append_bytes(allocator, " ");
+        var first = true;
+        arm_index = 0;
+        while arms.get(arm_index) |arm| {
+            arm_index = arm_index + 1;
+            if trapped.contains(line[arm.block_start..arm.block_end]) {
+                continue;
+            }
+            if !first {
+                try rebuilt.append_bytes(allocator, ", ");
+            }
+            first = false;
+            try rebuilt.append_bytes(allocator, "[ ");
+            try rebuilt.append_bytes(allocator, line[arm.value_start..arm.value_end]);
+            try rebuilt.append_bytes(allocator, ", %");
+            try rebuilt.append_bytes(allocator, line[arm.block_start..arm.block_end]);
+            try rebuilt.append_bytes(allocator, " ]");
+        }
+        let rebuilt_bytes = rebuilt.as_bytes();
+        try writer.line(allocator, out, rebuilt_bytes);
+    }
+    return;
+}
+
+/// Reports whether a payload type has no bytes, the Go `occupiesNothing`. A
+/// phi of a type with no bytes is one the code generator at -O0 does not
+/// lower, and a field that carries nothing is no reason to split the value it
+/// is in, so an aggregate holding one is left whole.
+fn (self: &Emitter) occupies_nothing(module: &ir::Module, typ_name: []u8) -> !bool {
+    if try self.type_layout(module, typ_name) |layout| {
+        return layout.size == 0;
+    }
+    return false;
+}
+
+/// Records the field types one declared aggregate holds, the Go
+/// `rememberAggregate`: a tag, then a payload when middle is not empty, then
+/// last when it is not empty. They are kept as the text between the braces of
+/// the declaration, which is what splitting it along ", " gives back.
+fn (self: &var Emitter) remember_aggregate_name(name: ir::Name, first: []u8, middle: ir::Name, last: []u8) -> !void {
+    var key = try self.names.copy(name);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    if self.aggregates.contains(key_bytes) {
+        return;
+    }
+    var fields = try string::from_bytes(self.allocator, first);
+    defer fields.deinit(self.allocator);
+    if !ir::is_empty(middle) {
+        var payload = try self.names.copy(middle);
+        defer payload.deinit(self.allocator);
+        try fields.append_bytes(self.allocator, ", ");
+        let payload_bytes = payload.as_bytes();
+        try fields.append_bytes(self.allocator, payload_bytes);
+    }
+    if mem::len(last) > 0 {
+        try fields.append_bytes(self.allocator, ", ");
+        try fields.append_bytes(self.allocator, last);
+    }
+    let fields_bytes = fields.as_bytes();
+    let interned = try self.names.intern(fields_bytes);
+    return self.aggregates.insert(self.allocator, key_bytes, interned);
+}
+
+/// Appends the field types of a declared aggregate to fields, the Go
+/// `aggregateFields`; false when the type is not one.
+fn (self: &Emitter) aggregate_fields(name: []u8, fields: &var array::Array<LineSpan>, text: &var string::String) -> !bool {
+    let interned = self.aggregates.get(name) orelse return false;
+    let retained = ir::name_text(&self.names, interned);
+    let bytes = retained.as_bytes();
+    text.clear();
+    try text.append_bytes(self.allocator, bytes);
+    fields.clear(self.allocator);
+    let joined = text.as_bytes();
+    var start = 0;
+    while find_bytes(joined, ", ", start) |at| {
+        try fields.append(self.allocator, LineSpan { start: start, end: at });
+        start = at + 2;
+    }
+    try fields.append(self.allocator, LineSpan { start: start, end: mem::len(joined) });
+    return true;
+}
+
+/// Gathers the returns of a function that answers an optional or error union
+/// from more than one place into one return, built from one phi per field,
+/// the Go `unifyAggregateReturns`.
+fn (self: &var Emitter) unify_aggregate_returns(body: []u8, return_type: []u8, out: &var string::String) -> !void {
+    var fields = array::new<LineSpan>(self.allocator);
+    defer fields.deinit(self.allocator);
+    var field_text = string::new(self.allocator);
+    defer field_text.deinit(self.allocator);
+    let known = try self.aggregate_fields(return_type, &var fields, &var field_text);
+    if !known or more_lines_than(body, inlinable_body_lines()) {
+        return out.append_bytes(self.allocator, body);
+    }
+    var prefix = try string::from_bytes(self.allocator, "  ret ");
+    defer prefix.deinit(self.allocator);
+    try prefix.append_bytes(self.allocator, return_type);
+    try prefix.append_bytes(self.allocator, " ");
+    let prefix_bytes = prefix.as_bytes();
+    if count_lines_after_first_starting_with(body, prefix_bytes) < 2 {
+        return out.append_bytes(self.allocator, body);
+    }
+    let allocator = self.allocator;
+    let field_bytes = field_text.as_bytes();
+    let join = return_join_label();
+    var lines = array::new<LineSpan>(allocator);
+    defer lines.deinit(allocator);
+    try body_lines(allocator, body, &var lines);
+    // Go drops a last empty line before the join is written; the lines are
+    // written as they come, so the one that would be dropped is held back.
+    var last = lines.len();
+    if lines.get(last - 1) |span| {
+        if span.start == span.end {
+            last = last - 1;
+        }
+    }
+    var arm_blocks = array::new<LineSpan>(allocator);
+    defer arm_blocks.deinit(allocator);
+    var writer = LineWriter { wrote: false };
+    var block = LineSpan { start: 0, end: 0 };
+    var index = 0;
+    while index < last {
+        let span = lines.get_or_panic(index);
+        index = index + 1;
+        let line = body[span.start..span.end];
+        if is_label_line(line) {
+            block = LineSpan { start: span.start, end: span.end - 1 };
+        }
+        if !mem::starts_with(line, prefix_bytes) {
+            try writer.line(allocator, out, line);
+            continue;
+        }
+        let arm = arm_blocks.len();
+        let value = line[mem::len(prefix_bytes)..mem::len(line)];
+        var field = 0;
+        while fields.get(field) |_| {
+            var read = try string::from_bytes(allocator, "  %");
+            defer read.deinit(allocator);
+            try read.append_bytes(allocator, join);
+            try read.append_bytes(allocator, ".arm");
+            try fmt::append_i64(allocator, &var read, arm);
+            try read.append_bytes(allocator, ".f");
+            try fmt::append_i64(allocator, &var read, field);
+            try read.append_bytes(allocator, " = extractvalue ");
+            try read.append_bytes(allocator, return_type);
+            try read.append_bytes(allocator, " ");
+            try read.append_bytes(allocator, value);
+            try read.append_bytes(allocator, ", ");
+            try fmt::append_i64(allocator, &var read, field);
+            let read_bytes = read.as_bytes();
+            try writer.line(allocator, out, read_bytes);
+            field = field + 1;
+        }
+        var jump = try string::from_bytes(allocator, "  br label %");
+        defer jump.deinit(allocator);
+        try jump.append_bytes(allocator, join);
+        let jump_bytes = jump.as_bytes();
+        try writer.line(allocator, out, jump_bytes);
+        try arm_blocks.append(allocator, block);
+    }
+    var label = try string::from_bytes(allocator, join);
+    defer label.deinit(allocator);
+    try label.append_bytes(allocator, ":");
+    let label_bytes = label.as_bytes();
+    try writer.line(allocator, out, label_bytes);
+    var field = 0;
+    while fields.get(field) |field_span| {
+        var phi = try string::from_bytes(allocator, "  %");
+        defer phi.deinit(allocator);
+        try phi.append_bytes(allocator, join);
+        try phi.append_bytes(allocator, ".f");
+        try fmt::append_i64(allocator, &var phi, field);
+        try phi.append_bytes(allocator, " = phi ");
+        let field_type = field_bytes[field_span.start..field_span.end];
+        if mem::starts_with(field_type, "%kizu.opt.") or mem::starts_with(field_type, "%kizu.error.") {
+            self.wrote_aggregate_phi = true;
+        }
+        try phi.append_bytes(allocator, field_type);
+        try phi.append_bytes(allocator, " ");
+        var arm = 0;
+        while arm_blocks.get(arm) |arm_block| {
+            if arm > 0 {
+                try phi.append_bytes(allocator, ", ");
+            }
+            try phi.append_bytes(allocator, "[ %");
+            try phi.append_bytes(allocator, join);
+            try phi.append_bytes(allocator, ".arm");
+            try fmt::append_i64(allocator, &var phi, arm);
+            try phi.append_bytes(allocator, ".f");
+            try fmt::append_i64(allocator, &var phi, field);
+            try phi.append_bytes(allocator, ", %");
+            try phi.append_bytes(allocator, body[arm_block.start..arm_block.end]);
+            try phi.append_bytes(allocator, " ]");
+            arm = arm + 1;
+        }
+        let phi_bytes = phi.as_bytes();
+        try writer.line(allocator, out, phi_bytes);
+        field = field + 1;
+    }
+    var assembled = try string::from_bytes(allocator, "zeroinitializer");
+    defer assembled.deinit(allocator);
+    field = 0;
+    while fields.get(field) |field_span| {
+        var next = try string::from_bytes(allocator, "%");
+        defer next.deinit(allocator);
+        try next.append_bytes(allocator, join);
+        try next.append_bytes(allocator, ".built");
+        try fmt::append_i64(allocator, &var next, field);
+        var build = try string::from_bytes(allocator, "  ");
+        defer build.deinit(allocator);
+        let next_bytes = next.as_bytes();
+        try build.append_bytes(allocator, next_bytes);
+        try build.append_bytes(allocator, " = insertvalue ");
+        try build.append_bytes(allocator, return_type);
+        try build.append_bytes(allocator, " ");
+        let assembled_bytes = assembled.as_bytes();
+        try build.append_bytes(allocator, assembled_bytes);
+        try build.append_bytes(allocator, ", ");
+        try build.append_bytes(allocator, field_bytes[field_span.start..field_span.end]);
+        try build.append_bytes(allocator, " %");
+        try build.append_bytes(allocator, join);
+        try build.append_bytes(allocator, ".f");
+        try fmt::append_i64(allocator, &var build, field);
+        try build.append_bytes(allocator, ", ");
+        try fmt::append_i64(allocator, &var build, field);
+        let build_bytes = build.as_bytes();
+        try writer.line(allocator, out, build_bytes);
+        assembled.clear();
+        try assembled.append_bytes(allocator, next_bytes);
+        field = field + 1;
+    }
+    var ret = try string::from_bytes(allocator, "  ret ");
+    defer ret.deinit(allocator);
+    try ret.append_bytes(allocator, return_type);
+    try ret.append_bytes(allocator, " ");
+    let assembled_bytes = assembled.as_bytes();
+    try ret.append_bytes(allocator, assembled_bytes);
+    let ret_bytes = ret.as_bytes();
+    try writer.line(allocator, out, ret_bytes);
+    return writer.line(allocator, out, "");
+}
+
+/// Is what one phi of an aggregate becomes, the Go `splitPhi`: the line it was
+/// on, the phis per field and the instructions that put the fields back
+/// together after the block's phis, both as spans of the pass's shared text.
+struct SplitPhi {
+    line: i64,
+    phis: LineSpan,
+    builds: LineSpan,
+}
+
+/// Is one field read an arm of a split phi needs at the end of the block it
+/// arrives from, the Go `reads[block]` entries: the block as a span of the
+/// body and the instruction as a span of the pass's shared text.
+struct FieldRead {
+    block: LineSpan,
+    text: LineSpan,
+}
+
+/// Rewrites every phi of an optional or error union in one function body
+/// into one phi per field and an assembly of the result, the Go
+/// `splitAggregatePhis`.
+fn (self: &var Emitter) split_aggregate_phis(body: []u8, out: &var string::String) -> !void {
+    let allocator = self.allocator;
+    // Go searches the body for a phi of either; the emitter records writing
+    // one, which answers the same question without the search.
+    if !self.wrote_aggregate_phi {
+        return out.append_bytes(allocator, body);
+    }
+    var lines = array::new<LineSpan>(allocator);
+    defer lines.deinit(allocator);
+    try body_lines(allocator, body, &var lines);
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    var reads = array::new<FieldRead>(allocator);
+    defer reads.deinit(allocator);
+    var splits = array::new<SplitPhi>(allocator);
+    defer splits.deinit(allocator);
+    var fields = array::new<LineSpan>(allocator);
+    defer fields.deinit(allocator);
+    var field_text = string::new(allocator);
+    defer field_text.deinit(allocator);
+    var arms = array::new<PhiArm>(allocator);
+    defer arms.deinit(allocator);
+    var index = 0;
+    while lines.get(index) |span| {
+        let line_index = index;
+        index = index + 1;
+        let line = body[span.start..span.end];
+        let parts = phi_parts(line) orelse continue;
+        let type_name = line[parts.type_start..parts.type_end];
+        if !try self.aggregate_fields(type_name, &var fields, &var field_text) {
+            continue;
+        }
+        arms.clear(allocator);
+        try parse_phi_arms(allocator, line, parts.arms_start, &var arms);
+        if arms.len() == 0 {
+            continue;
+        }
+        let split = splits.len();
+        let field_bytes = field_text.as_bytes();
+        let result = line[3..parts.result_end];
+        let phis_start = text.len();
+        var field = 0;
+        while fields.get(field) |field_span| {
+            if field > 0 {
+                try text.append_byte(allocator, cast<u8>(10));
+            }
+            try text.append_bytes(allocator, "  %");
+            try text.append_bytes(allocator, result);
+            try append_split_name(allocator, &var text, split, ".f", field);
+            try text.append_bytes(allocator, " = phi ");
+            try text.append_bytes(allocator, field_bytes[field_span.start..field_span.end]);
+            try text.append_bytes(allocator, " ");
+            var arm = 0;
+            while arms.get(arm) |from| {
+                if arm > 0 {
+                    try text.append_bytes(allocator, ", ");
+                }
+                try text.append_bytes(allocator, "[ %");
+                try text.append_bytes(allocator, result);
+                try append_arm_name(allocator, &var text, split, arm, field);
+                try text.append_bytes(allocator, ", %");
+                try text.append_bytes(allocator, line[from.block_start..from.block_end]);
+                try text.append_bytes(allocator, " ]");
+                arm = arm + 1;
+            }
+            field = field + 1;
+        }
+        let phis_end = text.len();
+        let builds_start = text.len();
+        field = 0;
+        while fields.get(field) |field_span| {
+            if field > 0 {
+                try text.append_byte(allocator, cast<u8>(10));
+            }
+            try text.append_bytes(allocator, "  ");
+            if field + 1 == fields.len() {
+                try text.append_bytes(allocator, line[2..parts.result_end]);
+            } else {
+                try text.append_bytes(allocator, "%");
+                try text.append_bytes(allocator, result);
+                try append_split_name(allocator, &var text, split, ".built", field);
+            }
+            try text.append_bytes(allocator, " = insertvalue ");
+            try text.append_bytes(allocator, type_name);
+            try text.append_bytes(allocator, " ");
+            if field == 0 {
+                try text.append_bytes(allocator, "zeroinitializer");
+            } else {
+                try text.append_bytes(allocator, "%");
+                try text.append_bytes(allocator, result);
+                try append_split_name(allocator, &var text, split, ".built", field - 1);
+            }
+            try text.append_bytes(allocator, ", ");
+            try text.append_bytes(allocator, field_bytes[field_span.start..field_span.end]);
+            try text.append_bytes(allocator, " %");
+            try text.append_bytes(allocator, result);
+            try append_split_name(allocator, &var text, split, ".f", field);
+            try text.append_bytes(allocator, ", ");
+            try fmt::append_i64(allocator, &var text, field);
+            field = field + 1;
+        }
+        let builds_end = text.len();
+        // The reads follow the order Go appends them in: every arm of the
+        // first field, then every arm of the next.
+        field = 0;
+        while fields.get(field) |_| {
+            var arm = 0;
+            while arms.get(arm) |from| {
+                let read_start = text.len();
+                try text.append_bytes(allocator, "  %");
+                try text.append_bytes(allocator, result);
+                try append_arm_name(allocator, &var text, split, arm, field);
+                try text.append_bytes(allocator, " = extractvalue ");
+                try text.append_bytes(allocator, type_name);
+                try text.append_bytes(allocator, " ");
+                try text.append_bytes(allocator, line[from.value_start..from.value_end]);
+                try text.append_bytes(allocator, ", ");
+                try fmt::append_i64(allocator, &var text, field);
+                try reads.append(allocator, FieldRead {
+                    block: LineSpan { start: span.start + from.block_start, end: span.start + from.block_end },
+                    text: LineSpan { start: read_start, end: text.len() },
+                });
+                arm = arm + 1;
+            }
+            field = field + 1;
+        }
+        try splits.append(allocator, SplitPhi {
+            line: line_index,
+            phis: LineSpan { start: phis_start, end: phis_end },
+            builds: LineSpan { start: builds_start, end: builds_end },
+        });
+    }
+    if splits.len() == 0 {
+        return out.append_bytes(allocator, body);
+    }
+    let shared = text.as_bytes();
+    var writer = LineWriter { wrote: false };
+    var block = LineSpan { start: 0, end: 0 };
+    // The phis have to lead their block, so what assembles a split one waits
+    // until the block's last phi has been written.
+    var pending = array::new<LineSpan>(allocator);
+    defer pending.deinit(allocator);
+    var next_split = 0;
+    index = 0;
+    while lines.get(index) |span| {
+        let line_index = index;
+        index = index + 1;
+        let line = body[span.start..span.end];
+        if is_label_line(line) {
+            block = LineSpan { start: span.start, end: span.end - 1 };
+        }
+        if splits.get(next_split) |split| {
+            if split.line == line_index {
+                next_split = next_split + 1;
+                try writer.line(allocator, out, shared[split.phis.start..split.phis.end]);
+                try pending.append(allocator, split.builds);
+                continue;
+            }
+        }
+        if !is_phi_line(line) and pending.len() > 0 {
+            var pending_index = 0;
+            while pending.get(pending_index) |builds| {
+                try writer.line(allocator, out, shared[builds.start..builds.end]);
+                pending_index = pending_index + 1;
+            }
+            pending.clear(allocator);
+        }
+        if is_terminator_line(line) {
+            let block_name = body[block.start..block.end];
+            var read_index = 0;
+            while reads.get(read_index) |read| {
+                read_index = read_index + 1;
+                if mem::equal_bytes(body[read.block.start..read.block.end], block_name) {
+                    try writer.line(allocator, out, shared[read.text.start..read.text.end]);
+                }
+            }
+        }
+        try writer.line(allocator, out, line);
+    }
+    return;
+}
+
+/// Appends `.split<n><suffix><field>` to a split phi's result name.
+fn append_split_name(allocator: Allocator, text: &var string::String, split: i64, suffix: []u8, field: i64) -> !void {
+    try text.append_bytes(allocator, ".split");
+    try fmt::append_i64(allocator, text, split);
+    try text.append_bytes(allocator, suffix);
+    return fmt::append_i64(allocator, text, field);
+}
+
+/// Appends `.split<n>.arm<arm>.f<field>` to a split phi's result name.
+fn append_arm_name(allocator: Allocator, text: &var string::String, split: i64, arm: i64, field: i64) -> !void {
+    try text.append_bytes(allocator, ".split");
+    try fmt::append_i64(allocator, text, split);
+    try text.append_bytes(allocator, ".arm");
+    try fmt::append_i64(allocator, text, arm);
+    try text.append_bytes(allocator, ".f");
+    return fmt::append_i64(allocator, text, field);
+}
+
+/// Records that the phi about to be written is of an optional or error union,
+/// the question splitAggregatePhis asks of the body in Go.
+fn (self: &var Emitter) note_phi_type(phi_type: ir::Name) -> !void {
+    var spelled = try self.names.copy(phi_type);
+    defer spelled.deinit(self.allocator);
+    let bytes = spelled.as_bytes();
+    if mem::starts_with(bytes, "%kizu.opt.") or mem::starts_with(bytes, "%kizu.error.") {
+        self.wrote_aggregate_phi = true;
+    }
+    return;
+}
