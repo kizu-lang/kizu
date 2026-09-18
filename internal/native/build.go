@@ -292,9 +292,18 @@ func clangFlags(options Options) []string {
 // every iteration of those arms takes a jump into it; with LLVM 16 a
 // tagged-union interpreter loop runs 9% slower for it, and none of the
 // programs it was measured on runs slower without the merge.
+//
+// And it starts every loop on a 32-byte boundary. The arm64 code generator
+// aligns none by default, so where a hot loop falls depends on how much code
+// precedes it, runtime included: a change to the runtime that moved the
+// entry point by 92 bytes made a loop over two million doubles 14% slower,
+// with not one instruction of the loop changed. Aligned, the loop is where it
+// was in either build.
 func clangOptimizationFlags(opt bool) []string {
 	if opt {
-		return []string{"-O3", "-Xclang", "-mllvm", "-Xclang", "-enable-tail-merge=false"}
+		return []string{
+			"-O3", "-falign-loops=32", "-Xclang", "-mllvm", "-Xclang", "-enable-tail-merge=false",
+		}
 	}
 	return []string{"-O0"}
 }

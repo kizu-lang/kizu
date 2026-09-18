@@ -3505,7 +3505,17 @@ static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size) {
     if (minimum > INT64_MAX / 2) {
         return INT64_MAX;
     }
-    return minimum * 2 > init ? minimum * 2 : init;
+    int64_t next = minimum * 2 > init ? minimum * 2 : init;
+    /* The system allocators hand out blocks in steps of 16 bytes, so a
+       capacity that stops short of the block it lands in leaves room the
+       array paid for and cannot use: a string built a byte at a time would
+       ask for 4 bytes, get 16, and move to a new block at its fifth byte.
+       The capacity is what the whole block holds. */
+    if (elem_size > 0 && next <= (INT64_MAX - 15) / elem_size) {
+        int64_t bytes = (next * elem_size + 15) & ~(int64_t)15;
+        next = bytes / elem_size;
+    }
+    return next;
 }
 
 static _Bool kizu_array_reserve_storage(
