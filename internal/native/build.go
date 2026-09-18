@@ -1,7 +1,9 @@
 package native
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,14 +46,22 @@ func Build(options Options) error {
 	if err := validateOptions(options); err != nil {
 		return err
 	}
-	runtimePath, err := runtimeObject(options)
+	source, err := runtimeSourceFor(options)
+	if err != nil {
+		return err
+	}
+	version, err := linkerVersion(options)
+	if err != nil {
+		return err
+	}
+	runtimePath, err := runtimeObject(source, version, options)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(options.Output), 0o755); err != nil {
 		return err
 	}
-	command, err := link(runtimePath, options.Output, options)
+	command, err := link(runtimePath, options.Output, options, version)
 	if err != nil {
 		return err
 	}
@@ -63,12 +73,14 @@ func Build(options Options) error {
 // than a file at a name they chose, and the same IR linked against the same
 // runtime by the same toolchain is the same executable however often it is
 // asked for. Keeping it also keeps its identity on disk, which is what lets a
-// system that inspects a binary the first time it runs do that once.
+// system that inspects a binary the first time it runs do that once. The
+// toolchain is asked nothing until there is something to build: a run that
+// finds its executable already made needs no C toolchain at all.
 func Executable(options Options) (string, error) {
 	if err := validateOptions(options); err != nil {
 		return "", err
 	}
-	runtimePath, err := runtimeObject(options)
+	source, err := runtimeSourceFor(options)
 	if err != nil {
 		return "", err
 	}
@@ -78,10 +90,18 @@ func Executable(options Options) (string, error) {
 	}
 	return cache.GetOrBuildArtifact(
 		"native-exe",
-		executableCacheTarget(options, runtimePath),
+		executableCacheTarget(options, source),
 		[]byte(options.LLVMIR),
 		func(output string) error {
-			_, err := link(runtimePath, output, options)
+			version, err := linkerVersion(options)
+			if err != nil {
+				return err
+			}
+			runtimePath, err := runtimeObject(source, version, options)
+			if err != nil {
+				return err
+			}
+			_, err = link(runtimePath, output, options, version)
 			return err
 		},
 	)
@@ -90,16 +110,13 @@ func Executable(options Options) (string, error) {
 // link writes the IR where the toolchain can read it and links it with the
 // runtime into output. The IR is transient because the executable is what is
 // worth keeping: it is the thing that is expensive to make and cheap to name.
-func link(runtimePath string, output string, options Options) ([]string, error) {
+func link(runtimePath string, output string, options Options, version string) ([]string, error) {
 	tmp, err := os.MkdirTemp("", "kizu-native-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	llvmIR, err := moduleForLinker(options)
-	if err != nil {
-		return nil, err
-	}
+	llvmIR := moduleForLinker(options, version)
 	irPath := filepath.Join(tmp, "main.ll")
 	if err := os.WriteFile(irPath, []byte(llvmIR), 0o644); err != nil {
 		return nil, err
@@ -121,22 +138,28 @@ const (
 )
 
 // moduleForLinker returns the module as the linker is to compile it: with
-// Apple's stack probe when Apple's clang links a Darwin target. The choice
-// waits until the link so that the module, and the executable cache keyed by
-// it, is the same whichever clang links it, and a run that finds its
-// executable already made has no toolchain to ask.
-func moduleForLinker(options Options) (string, error) {
-	if !TargetIsDarwin(options.Triple) {
-		return options.LLVMIR, nil
+// Apple's stack probe when Apple's clang, named by its version line, links a
+// Darwin target. The choice waits until the link so that the module, and the
+// executable cache keyed by it, is the same whichever clang links it.
+func moduleForLinker(options Options, version string) string {
+	if !TargetIsDarwin(options.Triple) || !strings.Contains(version, "Apple clang") {
+		return options.LLVMIR
 	}
+	return strings.Replace(options.LLVMIR, inlineStackProbe, appleStackProbe, 1)
+}
+
+// linkerVersion returns the line the linker names itself with, the first of
+// its `--version` output: `Apple clang version 17.0.0 (clang-1700.0.13.3)`,
+// `clang version 21.1.8`. It is what tells one clang from another where the
+// path and flags are the same: the runtime object is keyed by it, and the
+// Darwin stack probe is chosen by it.
+func linkerVersion(options Options) (string, error) {
 	out, err := exec.Command(options.Linker, "--version").Output()
 	if err != nil {
 		return "", fmt.Errorf("native error: %s --version failed: %w", options.Linker, err)
 	}
-	if !strings.Contains(string(out), "Apple clang") {
-		return options.LLVMIR, nil
-	}
-	return strings.Replace(options.LLVMIR, inlineStackProbe, appleStackProbe, 1), nil
+	line, _, _ := strings.Cut(string(out), "\n")
+	return strings.Trim(line, " \t\r"), nil
 }
 
 // TargetIsDarwin reports whether a native target triple names Darwin. An
@@ -173,43 +196,53 @@ func validateOptions(options Options) error {
 	return nil
 }
 
-// runtimeObject returns the compiled runtime to link, compiling it only when
-// nothing has it yet. The runtime is part of the compiler, not part of the
-// program: its source is a constant of this binary and the numbers it names
-// failures with are read from std, so compiling it once per program is the same
-// work reaching the same answer every time.
-func runtimeObject(options Options) (string, error) {
+// runtimeSourceFor returns the runtime C source a program is linked with. The
+// runtime is part of the compiler, not part of the program: its source is a
+// constant of this binary and the numbers it names failures with are read from
+// std.
+func runtimeSourceFor(options Options) (string, error) {
 	if err := requireRuntimeErrorSets(options.ErrorSets); err != nil {
 		return "", err
 	}
-	source := errorSetConstants(options.ErrorSets) + runtimeSource
+	return errorSetConstants(options.ErrorSets) + runtimeSource, nil
+}
+
+// runtimeObject returns the compiled runtime to link, compiling it only when
+// nothing has it yet. Compiling the same source with the same clang once per
+// program is the same work reaching the same answer every time.
+func runtimeObject(source string, version string, options Options) (string, error) {
 	cache, err := buildcache.New()
 	if err != nil {
 		return "", err
 	}
 	return cache.GetOrBuildArtifact(
 		"native-runtime.c",
-		runtimeCacheTarget(options),
+		runtimeCacheTarget(options, version),
 		[]byte(source),
 		func(output string) error { return compileRuntime(source, output, options) },
 	)
 }
 
 // runtimeCacheTarget spells what changes the object but is not in its source:
-// the toolchain that builds it, the machine it is built for, and what it is
-// asked to produce.
-func runtimeCacheTarget(options Options) string {
-	return strings.Join(append([]string{"native-runtime"}, toolchainKey(options)...), "/")
+// the toolchain that builds it, the machine it is built for, what it is asked
+// to produce, and which clang it is. The clang is named by its version line
+// because the path and flags stay the same across an upgrade, and an object
+// the old clang made must not be linked into what the new one builds.
+func runtimeCacheTarget(options Options, version string) string {
+	key := append([]string{"native-runtime"}, toolchainKey(options)...)
+	return strings.Join(append(key, version), "/")
 }
 
 // executableCacheTarget spells what the executable is made of besides the IR:
-// the same toolchain the runtime is keyed by, and the runtime object itself.
-// That object is stored under a name that is its own key, so naming it here
-// makes a program built against an older runtime a different artifact rather
-// than the same one.
-func executableCacheTarget(options Options, runtimePath string) string {
+// the same driver and flags the runtime is keyed by, and the runtime source
+// it is linked with, by hash, so a program built against an older runtime is
+// a different artifact rather than the same one. The clang's version is not
+// part of it: an executable already made was linked whole by one clang, and
+// asking which one would cost every run the toolchain it does not need.
+func executableCacheTarget(options Options, runtimeSource string) string {
 	key := append([]string{"native-exe"}, toolchainKey(options)...)
-	return strings.Join(append(key, filepath.Base(runtimePath)), "/")
+	sum := sha256.Sum256([]byte(runtimeSource))
+	return strings.Join(append(key, hex.EncodeToString(sum[:])), "/")
 }
 
 // toolchainKey spells what builds an artifact rather than what it is built
