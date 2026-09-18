@@ -43,10 +43,6 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)\n")
 	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
 	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)\n")
-	e.out.WriteString("declare ptr @kizu_array_pop(ptr, i64)\n")
-	e.out.WriteString("declare i1 @kizu_array_truncate(ptr, i64)\n")
-	e.out.WriteString("declare void @kizu_array_clear(ptr)\n")
-	e.out.WriteString("declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)\n")
 	e.out.WriteString("declare void @kizu_array_deinit(ptr, ptr, i64)\n\n")
 }
 
@@ -488,19 +484,42 @@ func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
 	return e.writeArrayBoolResult(instr.Result, okName, "array_reserve")
 }
 
+// arrayPopElement shortens the array by one and returns the address of the
+// element that left it, or null when there was none. The length is written
+// either way -- an empty array is written the length it already had -- so the
+// path a pop takes is two loads, a compare and a store rather than a call the
+// optimizer cannot see the length change through.
+func (e *emitter) arrayPopElement(instr *ir.Instr, into string) (string, error) {
+	elem, err := e.instrElementType(instr)
+	if err != nil {
+		return "", err
+	}
+	handle := e.value(instr.Args[0]).operand
+	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.pop.len.addr")
+	length := "%" + e.nextSyntheticValue("array.pop.len")
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s%s\n", length, lengthAddr, e.tbaaTag(tbaaCount))
+	held := "%" + e.nextSyntheticValue("array.pop.held")
+	fmt.Fprintf(&e.out, "  %s = icmp sgt i64 %s, 0\n", held, length)
+	shorter := "%" + e.nextSyntheticValue("array.pop.shorter")
+	fmt.Fprintf(&e.out, "  %s = sub i64 %s, 1\n", shorter, length)
+	kept := "%" + e.nextSyntheticValue("array.pop.kept")
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, i64 %s, i64 %s\n", kept, held, shorter, length)
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", kept, lengthAddr, e.tbaaTag(tbaaCount))
+	elemAddr := e.arrayElementAddr(handle, elem, kept)
+	ptrName := into
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", ptrName, held, elemAddr)
+	return ptrName, nil
+}
+
 // writeArrayPop lowers Array.pop().
 func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: array.pop expects Array<T> -> ?T")
 	}
-	elem, err := e.instrElementType(instr)
+	ptrName, err := e.arrayPopElement(instr, localName(instr.Result.Name)+".ptr")
 	if err != nil {
 		return err
 	}
-	array := e.value(instr.Args[0])
-	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
-		ptrName, array.operand, e.elementSizeOperand(elem))
 	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
 }
 
@@ -509,14 +528,10 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: array.pop_or_panic expects Array<T> -> T")
 	}
-	elem, err := e.instrElementType(instr)
+	ptrName, err := e.arrayPopElement(instr, localName(instr.Result.Name)+".ptr")
 	if err != nil {
 		return err
 	}
-	array := e.value(instr.Args[0])
-	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
-		ptrName, array.operand, e.elementSizeOperand(elem))
 	e.writeNullFailure(instr, ptrName, "array.pop.panic", "array_empty")
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
@@ -638,11 +653,19 @@ func (e *emitter) writeArrayTruncate(instr *ir.Instr) error {
 		instr.Result.Type != "std::array::Error!void" {
 		return fmt.Errorf("llvm error: array.truncate expects Array<T>, i64 -> std::array::Error!void")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.value(instr.Args[0]).operand
 	length := e.value(instr.Args[1])
+	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.truncate.len.addr")
+	held := "%" + e.nextSyntheticValue("array.truncate.held")
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s%s\n", held, lengthAddr, e.tbaaTag(tbaaCount))
+	// An unsigned compare answers both halves of "between zero and the length"
+	// with one test, the way a checked element access answers its index.
 	okName := localName(instr.Result.Name) + ".ok"
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_truncate(ptr %s, i64 %s)\n",
-		okName, array.operand, length.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp ule i64 %s, %s\n", okName, length.operand, held)
+	kept := "%" + e.nextSyntheticValue("array.truncate.kept")
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, i64 %s, i64 %s\n",
+		kept, okName, length.operand, held)
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", kept, lengthAddr, e.tbaaTag(tbaaCount))
 	return e.writeArrayBoolResult(instr.Result, okName, "array_truncate")
 }
 
@@ -651,8 +674,9 @@ func (e *emitter) writeArrayClear(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "void" {
 		return fmt.Errorf("llvm error: array.clear expects Array<T> -> void")
 	}
-	array := e.value(instr.Args[0])
-	fmt.Fprintf(&e.out, "  call void @kizu_array_clear(ptr %s)\n", array.operand)
+	handle := e.value(instr.Args[0]).operand
+	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.clear.len.addr")
+	fmt.Fprintf(&e.out, "  store i64 0, ptr %s%s\n", lengthAddr, e.tbaaTag(tbaaCount))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }
@@ -662,10 +686,16 @@ func (e *emitter) writeArrayAsBytes(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "[]u8" {
 		return fmt.Errorf("llvm error: array.as_bytes expects Array<u8> -> []u8")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.value(instr.Args[0]).operand
+	data := e.arrayData(handle)
+	length := "%" + e.nextSyntheticValue("array.as_bytes.len")
+	e.arrayLoadField(handle, arrayFieldLen, "array.as_bytes.len.addr", length)
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call %%kizu.slice.u8 @kizu_array_as_bytes(ptr %s)\n",
-		resultName, array.operand)
+	withPtr := "%" + e.nextSyntheticValue("array.as_bytes.ptr")
+	fmt.Fprintf(&e.out,
+		"  %s = insertvalue %%kizu.slice.u8 undef, ptr %s, 0\n", withPtr, data)
+	fmt.Fprintf(&e.out,
+		"  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n", resultName, withPtr, length)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

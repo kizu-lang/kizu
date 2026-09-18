@@ -1,4 +1,5 @@
 import std::array;
+import std::fmt;
 import std::mem;
 import std::sort;
 import std::string;
@@ -49,6 +50,101 @@ test "sort strings accepts empty and single arrays" {
     try single.append(allocator, try string::from_bytes(allocator, "only"));
     try sort::strings(&var single);
     expect_name(&single, 0, "only");
+}
+
+// fill appends count strings built from the pattern, so one test can hand the
+// sort the inputs a quicksort pivot is chosen badly for: already sorted,
+// reversed, all equal, and repeated keys drawn at random.
+fn fill(
+    allocator: Allocator,
+    names: &var array::Array<string::String>,
+    count: i64,
+    pattern: i64
+) -> !void {
+    var state = 12345;
+    var index = 0;
+    while index < count {
+        var key = index;
+        if pattern == 1 {
+            key = count - index;
+        }
+        if pattern == 2 {
+            key = 7;
+        }
+        if pattern == 3 {
+            state = (state * 1103515245 + 12345) % 2147483648;
+            key = state % 64;
+        }
+        var text = string::new(allocator);
+        errdefer text.deinit(allocator);
+        try text.append_bytes(allocator, "key");
+        try fmt::append_i64(allocator, &var text, key);
+        try names.append(allocator, move text);
+        index = index + 1;
+    }
+    return;
+}
+
+// checksum answers what the array holds without regard to order, so a sort
+// that dropped or duplicated an element is caught as well as one that left the
+// elements out of order.
+fn checksum(names: &array::Array<string::String>) -> i64 {
+    var total = 0;
+    var index = 0;
+    while names.at(index) |name| {
+        let bytes = name.as_bytes();
+        var byte_index = 0;
+        var hash = 17;
+        while byte_index < mem::len(bytes) {
+            hash = (hash * 31 + cast<i64>(bytes[byte_index])) % 1000003;
+            byte_index = byte_index + 1;
+        }
+        total = total + hash;
+        index = index + 1;
+    }
+    return total;
+}
+
+fn before_bytes(left: []u8, right: []u8) -> bool {
+    var index = 0;
+    while index < mem::len(left) and index < mem::len(right) {
+        if left[index] != right[index] {
+            return left[index] < right[index];
+        }
+        index = index + 1;
+    }
+    return mem::len(left) < mem::len(right);
+}
+
+fn is_sorted(names: &array::Array<string::String>) -> bool {
+    var index = 1;
+    while names.at(index) |name| {
+        if names.at(index - 1) |earlier| {
+            let left = earlier.as_bytes();
+            let right = name.as_bytes();
+            if before_bytes(right, left) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+test "sort strings orders every input shape without losing an element" {
+    let allocator = mem::page_allocator();
+    var pattern = 0;
+    while pattern < 4 {
+        var names = array::new<string::String>(allocator);
+        defer names.deinit(allocator);
+        try fill(allocator, &var names, 2000, pattern);
+        let before = checksum(&names);
+        try sort::strings(&var names);
+        testing::expect_equal<i64>(2000, names.len());
+        testing::expect_equal<bool>(true, is_sorted(&names));
+        testing::expect_equal<i64>(before, checksum(&names));
+        pattern = pattern + 1;
+    }
 }
 
 // test

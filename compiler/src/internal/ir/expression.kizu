@@ -790,8 +790,7 @@ fn (self: &var Lowerer) lower_index_expr(
         }
         let length = try self.emit1(Op::SliceLen, self.common.i64_type, target);
         let bounds = try self.name("bounds");
-        try self.cond_fail2(index.span, "<", position, self.common.zero_index, bounds, position, length);
-        try self.cond_fail2(index.span, ">=", position, length, bounds, position, length);
+        try self.check_index_in_range(index.span, position, length, bounds);
         let elem = try self.module.names.view_elem(target.type_name);
         out.* = try self.emit2(Op::SliceIndex, elem, target, position);
         return null;
@@ -812,9 +811,14 @@ fn (self: &var Lowerer) lower_index_expr(
     }
     let length = try self.emit1(Op::SliceLen, self.common.i64_type, target);
     let range = try self.name("range");
-    try self.cond_fail3(index.span, "<", start, self.common.zero_index, range, start, end, length);
-    try self.cond_fail3(index.span, ">", start, end, range, start, end, length);
-    try self.cond_fail3(index.span, ">", end, length, range, start, end, length);
+    // Read unsigned, a bound below zero is past every length, so the two
+    // comparisons a sub-slice needs -- start no later than end, end no later
+    // than the length -- answer the third as well.
+    let unsigned_start = try self.unsigned(start);
+    let unsigned_end = try self.unsigned(end);
+    let unsigned_length = try self.unsigned(length);
+    try self.cond_fail3(index.span, ">", unsigned_start, unsigned_end, range, start, end, length);
+    try self.cond_fail3(index.span, ">", unsigned_end, unsigned_length, range, start, end, length);
     out.* = try self.emit3(Op::SliceSlice, target.type_name, target, start, end);
     return null;
 }
@@ -840,6 +844,33 @@ fn (self: &var Lowerer) cond_fail0(
 /// Emits a comparison and aborts with the named failure when it holds, the
 /// Go `condFail` with two reported values. The values a failure reports
 /// travel with it, so the wording lives in the runtime rather than here.
+/// Traps an index that does not name an element, the Go `checkIndexInRange`.
+/// Read unsigned, a negative index is past every length, so one comparison
+/// answers both halves of the question -- which is what an Array element
+/// access has always done, and what lets an index walk cost one branch rather
+/// than two.
+fn (self: &var Lowerer) check_index_in_range(
+    span: ast::Span,
+    index: Value,
+    length: Value,
+    kind: Name
+) -> !void {
+    let unsigned_index = try self.unsigned(index);
+    let unsigned_length = try self.unsigned(length);
+    return self.cond_fail2(span, ">=", unsigned_index, unsigned_length, kind, index, length);
+}
+
+/// Reads a signed index or length as the unsigned number of the same bits, the
+/// Go `unsigned`. The two are the same register, so the cast is a name rather
+/// than an instruction, and only the comparison that reads it changes.
+fn (self: &var Lowerer) unsigned(value: Value) -> !Value {
+    if !self.is_signed_integer_type_name(value.type_name) {
+        return value;
+    }
+    let u64_type = try self.module.names.intern("u64");
+    return self.emit_imm1(Op::Cast, u64_type, u64_type, value);
+}
+
 fn (self: &var Lowerer) cond_fail2(
     span: ast::Span,
     operator: []u8,

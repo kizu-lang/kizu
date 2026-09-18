@@ -207,14 +207,10 @@ func (e *emitter) writeArenaPopOrPanic(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: arena.pop_or_panic expects Arena<T> -> T")
 	}
-	elem, err := e.instrElementType(instr)
+	ptrName, err := e.arrayPopElement(instr, localName(instr.Result.Name)+".ptr")
 	if err != nil {
 		return err
 	}
-	arena := e.value(instr.Args[0])
-	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s, i64 %s)\n",
-		ptrName, arena.operand, e.elementSizeOperand(elem))
 	e.writeNullFailure(instr, ptrName, "arena.pop.panic", "arena_empty")
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",

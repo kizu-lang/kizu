@@ -2,27 +2,176 @@ import std::array;
 import std::mem;
 import std::string;
 
-// strings sorts owned strings in ascending byte-lexical order. Heapsort keeps
-// the operation in place and allocation-free while guaranteeing O(n log n).
+// strings sorts owned strings in ascending byte-lexical order. The work is an
+// introsort: a three-way quicksort down to short ranges, insertion sort for
+// those, and heapsort for a range the partitions have failed to halve often
+// enough. Quicksort is what makes the comparisons cheap -- it walks each range
+// in one direction, where heapsort jumps by halves and reads a cold string
+// every time -- and the other two are what keep the worst case O(n log n)
+// without allocating: the three-way split answers repeated keys in one pass,
+// and the depth limit answers an input chosen to defeat the pivot.
 pub fn strings(values: &var array::Array<string::String>) -> std::array::Error!void {
     let length = values.len();
+    if length < 2 {
+        return;
+    }
+    return quicksort(values, 0, length, depth_limit(length));
+}
+
+// short is the range length below which insertion sort does the rest. A
+// partition of a range this small costs more in pivot choice than the moves it
+// saves.
+fn short() -> i64 {
+    return 16;
+}
+
+// depth_limit is twice the depth a balanced split reaches, the point where a
+// range is handed to heapsort instead of partitioned again.
+fn depth_limit(length: i64) -> i64 {
+    var levels = 0;
+    var rest = length;
+    while rest > 1 {
+        rest = rest / 2;
+        levels = levels + 1;
+    }
+    return levels * 2;
+}
+
+// quicksort sorts values[start..end). It recurses into the shorter side and
+// loops on the longer one, so the recursion is as deep as the depth limit
+// allows rather than as deep as the range is long.
+fn quicksort(
+    values: &var array::Array<string::String>,
+    start: i64,
+    end: i64,
+    depth: i64
+) -> std::array::Error!void {
+    var low = start;
+    var high = end;
+    var left = depth;
+    while high - low > short() {
+        if left == 0 {
+            return heapsort(values, low, high);
+        }
+        left = left - 1;
+        try move_median_to_front(values, low, high);
+        let split = try partition(values, low, high);
+        if split.first - low < high - split.second {
+            try quicksort(values, low, split.first, left);
+            low = split.second;
+        } else {
+            try quicksort(values, split.second, high, left);
+            high = split.first;
+        }
+    }
+    return insertion_sort(values, low, high);
+}
+
+// Split names the two edges of the middle of a three-way partition: the
+// elements in values[first..second) all compare equal to the pivot, so neither
+// side has to look at them again.
+struct Split {
+    first: i64,
+    second: i64,
+}
+
+// partition splits values[low..high) around the pivot the caller left at low.
+// Elements equal to the pivot gather in the middle, which is what keeps a run
+// of one repeated key from becoming a quadratic chain of one-sided splits.
+fn partition(
+    values: &var array::Array<string::String>,
+    low: i64,
+    high: i64
+) -> std::array::Error!Split {
+    var pivot = low;
+    var index = low + 1;
+    var greater = high;
+    while index < greater {
+        let order = compare_at(values, index, pivot);
+        if order < 0 {
+            try values.swap(index, pivot);
+            pivot = pivot + 1;
+            index = index + 1;
+        } else {
+            if order > 0 {
+                greater = greater - 1;
+                try values.swap(index, greater);
+            } else {
+                index = index + 1;
+            }
+        }
+    }
+    return Split { first: pivot, second: index };
+}
+
+// move_median_to_front puts the median of the first, middle and last element
+// where partition reads the pivot from. A sorted or reversed range is the
+// input a first-element pivot splits worst, and those are the ranges a program
+// sorts most often.
+fn move_median_to_front(
+    values: &var array::Array<string::String>,
+    low: i64,
+    high: i64
+) -> std::array::Error!void {
+    let last = high - 1;
+    let middle = low + (high - low) / 2;
+    if less_at(values, middle, low) {
+        try values.swap(middle, low);
+    }
+    if less_at(values, last, middle) {
+        try values.swap(last, middle);
+        if less_at(values, middle, low) {
+            try values.swap(middle, low);
+        }
+    }
+    return values.swap(low, middle);
+}
+
+// insertion_sort sorts values[low..high) by walking each element back over the
+// elements that follow it in order.
+fn insertion_sort(
+    values: &var array::Array<string::String>,
+    low: i64,
+    high: i64
+) -> std::array::Error!void {
+    var index = low + 1;
+    while index < high {
+        var slot = index;
+        while slot > low and less_at(values, slot, slot - 1) {
+            try values.swap(slot, slot - 1);
+            slot = slot - 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// heapsort sorts values[low..high) in place, and is where a range goes whose
+// partitions stopped halving it.
+fn heapsort(
+    values: &var array::Array<string::String>,
+    low: i64,
+    high: i64
+) -> std::array::Error!void {
+    let length = high - low;
     var start = length / 2;
     while start > 0 {
         start = start - 1;
-        try sift_down(values, start, length);
+        try sift_down(values, low, start, length);
     }
 
     var end = length;
     while end > 1 {
         end = end - 1;
-        try values.swap(0, end);
-        try sift_down(values, 0, end);
+        try values.swap(low, low + end);
+        try sift_down(values, low, 0, end);
     }
     return;
 }
 
 fn sift_down(
     values: &var array::Array<string::String>,
+    low: i64,
     start: i64,
     end: i64
 ) -> std::array::Error!void {
@@ -30,13 +179,13 @@ fn sift_down(
     while root < end / 2 {
         let child = root * 2 + 1;
         var larger = child;
-        if child + 1 < end and less_at(values, child, child + 1) {
+        if child + 1 < end and less_at(values, low + child, low + child + 1) {
             larger = child + 1;
         }
-        if !less_at(values, root, larger) {
+        if !less_at(values, low + root, low + larger) {
             return;
         }
-        try values.swap(root, larger);
+        try values.swap(low + root, low + larger);
         root = larger;
     }
     return;
@@ -47,18 +196,29 @@ fn less_at(
     left: i64,
     right: i64
 ) -> bool {
+    return compare_at(values, left, right) < 0;
+}
+
+// compare_at answers which of two elements comes first, and whether they are
+// equal, in one read of each. A partition asks all three questions about every
+// element it moves.
+fn compare_at(
+    values: &array::Array<string::String>,
+    left: i64,
+    right: i64
+) -> i64 {
     if values.at(left) |left_value| {
         if values.at(right) |right_value| {
             let left_bytes = left_value.as_bytes();
             let right_bytes = right_value.as_bytes();
-            return bytes_less(left_bytes, right_bytes);
+            return compare_bytes(left_bytes, right_bytes);
         }
     }
-    std::internal::builtin::panic("sort strings: heap index out of bounds");
-    return false;
+    std::internal::builtin::panic("sort strings: index out of bounds");
+    return 0;
 }
 
-fn bytes_less(left: []u8, right: []u8) -> bool {
+fn compare_bytes(left: []u8, right: []u8) -> i64 {
     let common = if mem::len(left) < mem::len(right) {
         mem::len(left)
     } else {
@@ -67,12 +227,18 @@ fn bytes_less(left: []u8, right: []u8) -> bool {
     var index = 0;
     while index < common {
         if left[index] < right[index] {
-            return true;
+            return -1;
         }
         if left[index] > right[index] {
-            return false;
+            return 1;
         }
         index = index + 1;
     }
-    return mem::len(left) < mem::len(right);
+    if mem::len(left) < mem::len(right) {
+        return -1;
+    }
+    if mem::len(left) > mem::len(right) {
+        return 1;
+    }
+    return 0;
 }
