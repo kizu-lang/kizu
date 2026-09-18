@@ -19,6 +19,8 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 		return e.writeSliceStore(instr)
 	case "slice.slice":
 		return e.writeSliceSlice(instr)
+	case "slice.compare":
+		return e.writeSliceCompare(instr)
 	default:
 		return fmt.Errorf("wasm error: unsupported slice instruction `%s`", instr.Op)
 	}

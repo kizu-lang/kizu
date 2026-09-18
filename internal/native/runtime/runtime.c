@@ -117,27 +117,26 @@ _Static_assert(offsetof(KizuFsDirEntry, is_dir) == 48,
 _Static_assert(sizeof(KizuFsDirEntry) == 56,
                "KizuFsDirEntry matches std::fs::DirEntry");
 
+/* An error union is its failure code and then its payload, and a code of zero
+   is a success: codes start at one. The native backend spells the same layout
+   (`%kizu.error.*` in internal/llvm/emit.go). */
 typedef struct {
-    _Bool ok;
     int64_t error;
 } KizuErrorVoid;
 
 typedef struct {
-    _Bool ok;
-    _Bool value;
     int64_t error;
+    _Bool value;
 } KizuErrorBool;
 
 typedef struct {
-    _Bool ok;
-    int64_t value;
     int64_t error;
+    int64_t value;
 } KizuErrorI64;
 
 typedef struct {
-    _Bool ok;
-    KizuSliceU8 value;
     int64_t error;
+    KizuSliceU8 value;
 } KizuErrorSliceU8;
 
 typedef struct {
@@ -146,15 +145,13 @@ typedef struct {
 } KizuOptSliceU8;
 
 typedef struct {
-    _Bool ok;
-    KizuFsMetadata value;
     int64_t error;
+    KizuFsMetadata value;
 } KizuErrorFsMetadata;
 
 typedef struct {
-    _Bool ok;
-    KizuArray value;
     int64_t error;
+    KizuArray value;
 } KizuErrorArray;
 
 /* A map is an array of entries in the order they were first inserted, plus an
@@ -420,21 +417,18 @@ static int64_t kizu_errno_failure(int code) {
 
 static KizuErrorVoid kizu_ok_void(void) {
     KizuErrorVoid out;
-    out.ok = 1;
     out.error = 0;
     return out;
 }
 
 static KizuErrorVoid kizu_err_void(int64_t failure) {
     KizuErrorVoid out;
-    out.ok = 0;
     out.error = failure;
     return out;
 }
 
 static KizuErrorBool kizu_ok_bool(_Bool value) {
     KizuErrorBool out;
-    out.ok = 1;
     out.value = value;
     out.error = 0;
     return out;
@@ -442,7 +436,6 @@ static KizuErrorBool kizu_ok_bool(_Bool value) {
 
 static KizuErrorBool kizu_err_bool(int64_t failure) {
     KizuErrorBool out;
-    out.ok = 0;
     out.value = 0;
     out.error = failure;
     return out;
@@ -450,7 +443,6 @@ static KizuErrorBool kizu_err_bool(int64_t failure) {
 
 static KizuErrorI64 kizu_ok_i64(int64_t value) {
     KizuErrorI64 out;
-    out.ok = 1;
     out.value = value;
     out.error = 0;
     return out;
@@ -458,7 +450,6 @@ static KizuErrorI64 kizu_ok_i64(int64_t value) {
 
 static KizuErrorI64 kizu_err_i64(int64_t failure) {
     KizuErrorI64 out;
-    out.ok = 0;
     out.value = 1;
     out.error = failure;
     return out;
@@ -466,7 +457,6 @@ static KizuErrorI64 kizu_err_i64(int64_t failure) {
 
 static KizuErrorSliceU8 kizu_ok_slice(KizuSliceU8 value) {
     KizuErrorSliceU8 out;
-    out.ok = 1;
     out.value = value;
     out.error = 0;
     return out;
@@ -474,7 +464,6 @@ static KizuErrorSliceU8 kizu_ok_slice(KizuSliceU8 value) {
 
 static KizuErrorSliceU8 kizu_err_slice(int64_t failure) {
     KizuErrorSliceU8 out;
-    out.ok = 0;
     out.value = kizu_slice_from_cstr("");
     out.error = failure;
     return out;
@@ -496,7 +485,6 @@ static KizuOptSliceU8 kizu_opt_null_slice(void) {
 
 static KizuErrorFsMetadata kizu_ok_metadata(KizuFsMetadata value) {
     KizuErrorFsMetadata out;
-    out.ok = 1;
     out.value = value;
     out.error = 0;
     return out;
@@ -504,7 +492,6 @@ static KizuErrorFsMetadata kizu_ok_metadata(KizuFsMetadata value) {
 
 static KizuErrorFsMetadata kizu_err_metadata(int64_t failure) {
     KizuErrorFsMetadata out;
-    out.ok = 0;
     out.value.size = 0;
     out.value.is_dir = 0;
     out.error = failure;
@@ -513,7 +500,6 @@ static KizuErrorFsMetadata kizu_err_metadata(int64_t failure) {
 
 static KizuErrorArray kizu_ok_array(KizuArray value) {
     KizuErrorArray out;
-    out.ok = 1;
     out.value = value;
     out.error = 0;
     return out;
@@ -521,7 +507,6 @@ static KizuErrorArray kizu_ok_array(KizuArray value) {
 
 static KizuErrorArray kizu_err_array(int64_t failure) {
     KizuErrorArray out;
-    out.ok = 0;
     out.value = kizu_array_empty();
     out.error = failure;
     return out;

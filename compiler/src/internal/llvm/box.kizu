@@ -64,8 +64,7 @@ fn (self: &var Emitter) write_box_instr(module: &ir::Module, node: &ir::InstrNod
 
 /// Lowers std::mem::box<T>(allocator, value), the Go `writeBoxNew`. The
 /// runtime hands back the payload pointer or null, and the recoverable
-/// result is built branch-free: the null test is the ok flag and selects the
-/// failure code.
+/// result is built branch-free: the null test selects the failure code.
 fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -109,25 +108,17 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
             try self.line3("  store %s %s, ptr %s", Arg::Str(payload_type), Arg::Str(payload_value.operand), Arg::Str(raw_name));
             try self.line1("  br label %%%s", Arg::Str(join_label));
             try self.line1("%s:", Arg::Str(join_label));
-            let ok_byte_name = try self.suffixed(result_name, ".ok.byte");
             let code_name = try self.suffixed(result_name, ".code");
-            try self.line2("  %s = zext i1 %s to i8", Arg::Str(ok_byte_name), Arg::Str(ok_name));
             try self.line3("  %s = select i1 %s, i64 0, i64 %d", Arg::Str(code_name), Arg::Str(ok_name), Arg::Int(code));
             let union_type = try self.llvm_type(module, result_type);
             let base_name = try self.suffixed(result_name, ".base");
-            let payload_name = try self.suffixed(result_name, ".payload");
             try self.line3(
-                "  %s = insertvalue %s zeroinitializer, i8 %s, 0",
-                Arg::Str(base_name), Arg::Str(union_type), Arg::Str(ok_byte_name)
+                "  %s = insertvalue %s zeroinitializer, i64 %s, 0",
+                Arg::Str(base_name), Arg::Str(union_type), Arg::Str(code_name)
             );
             try self.line4(
                 "  %s = insertvalue %s %s, ptr %s, 1",
-                Arg::Str(payload_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Str(raw_name)
-            );
-            let failure_index = try self.error_union_failure_index(result_type);
-            try self.line5(
-                "  %s = insertvalue %s %s, i64 %s, %d",
-                Arg::Str(result_name), Arg::Str(union_type), Arg::Str(payload_name), Arg::Str(code_name), Arg::Int(failure_index)
+                Arg::Str(result_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Str(raw_name)
             );
             try self.set_value(module, node.result, result_name);
             return null;

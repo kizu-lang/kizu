@@ -3,13 +3,13 @@ import std::mem;
 import std::string;
 
 // strings sorts owned strings in ascending byte-lexical order. The work is an
-// introsort: a three-way quicksort down to short ranges, insertion sort for
-// those, and heapsort for a range the partitions have failed to halve often
-// enough. Quicksort is what makes the comparisons cheap -- it walks each range
-// in one direction, where heapsort jumps by halves and reads a cold string
-// every time -- and the other two are what keep the worst case O(n log n)
-// without allocating: the three-way split answers repeated keys in one pass,
-// and the depth limit answers an input chosen to defeat the pivot.
+// introsort: quicksort down to short ranges, insertion sort for those, and
+// heapsort for a range the partitions have failed to halve often enough.
+// Quicksort is what makes the comparisons cheap -- it walks each range in one
+// direction, where heapsort jumps by halves and reads a cold string every time
+// -- and the other two are what keep the worst case O(n log n) without
+// allocating: a run of one repeated key is gathered in one pass, and the depth
+// limit answers an input chosen to defeat the pivot.
 pub fn strings(values: &var array::Array<string::String>) -> std::array::Error!void {
     let length = values.len();
     if length < 2 {
@@ -55,53 +55,53 @@ fn quicksort(
         }
         left = left - 1;
         try move_median_to_front(values, low, high);
-        let split = try partition(values, low, high);
-        if split.first - low < high - split.second {
-            try quicksort(values, low, split.first, left);
-            low = split.second;
+        // Nothing in this range orders before values[low - 1], a pivot an
+        // earlier partition left in place. A pivot equal to it means the range
+        // starts with a run of that key: the run is gathered on the left,
+        // where it is already in order, and the sort goes on after it. This
+        // is what keeps a range of one repeated key from splitting one
+        // element at a time.
+        if low > 0 and compare_at(values, low - 1, low) == 0 {
+            low = try partition(values, low, high, 1) + 1;
+            continue;
+        }
+        let split = try partition(values, low, high, 0);
+        if split - low < high - split {
+            try quicksort(values, low, split, left);
+            low = split + 1;
         } else {
-            try quicksort(values, split.second, high, left);
-            high = split.first;
+            try quicksort(values, split + 1, high, left);
+            high = split;
         }
     }
     return insertion_sort(values, low, high);
 }
 
-// Split names the two edges of the middle of a three-way partition: the
-// elements in values[first..second) all compare equal to the pivot, so neither
-// side has to look at them again.
-struct Split {
-    first: i64,
-    second: i64,
-}
-
-// partition splits values[low..high) around the pivot the caller left at low.
-// Elements equal to the pivot gather in the middle, which is what keeps a run
-// of one repeated key from becoming a quadratic chain of one-sided splits.
+// partition splits values[low..high) around the pivot the caller left at low,
+// puts the pivot where it belongs and answers that position. An element goes
+// before the pivot when compare_at answers less than `limit` for it: 0 sends
+// the elements that order before the pivot, 1 sends the equal ones as well.
+//
+// Every element is swapped whichever side it goes to, and the side only moves
+// the edge. Which side a string goes to is as good as a coin toss to the
+// processor, so a branch on it is mispredicted half the time; here nothing
+// branches on it.
 fn partition(
     values: &var array::Array<string::String>,
     low: i64,
-    high: i64
-) -> std::array::Error!Split {
-    var pivot = low;
+    high: i64,
+    limit: i64
+) -> std::array::Error!i64 {
+    var edge = low + 1;
     var index = low + 1;
-    var greater = high;
-    while index < greater {
-        let order = compare_at(values, index, pivot);
-        if order < 0 {
-            try values.swap(index, pivot);
-            pivot = pivot + 1;
-            index = index + 1;
-        } else {
-            if order > 0 {
-                greater = greater - 1;
-                try values.swap(index, greater);
-            } else {
-                index = index + 1;
-            }
-        }
+    while index < high {
+        let before = compare_at(values, index, low) < limit;
+        try values.swap(index, edge);
+        edge = edge + if before { 1 } else { 0 };
+        index = index + 1;
     }
-    return Split { first: pivot, second: index };
+    try values.swap(low, edge - 1);
+    return edge - 1;
 }
 
 // move_median_to_front puts the median of the first, middle and last element
@@ -211,34 +211,9 @@ fn compare_at(
         if values.at(right) |right_value| {
             let left_bytes = left_value.as_bytes();
             let right_bytes = right_value.as_bytes();
-            return compare_bytes(left_bytes, right_bytes);
+            return mem::compare(left_bytes, right_bytes);
         }
     }
     std::internal::builtin::panic("sort strings: index out of bounds");
-    return 0;
-}
-
-fn compare_bytes(left: []u8, right: []u8) -> i64 {
-    let common = if mem::len(left) < mem::len(right) {
-        mem::len(left)
-    } else {
-        mem::len(right)
-    };
-    var index = 0;
-    while index < common {
-        if left[index] < right[index] {
-            return -1;
-        }
-        if left[index] > right[index] {
-            return 1;
-        }
-        index = index + 1;
-    }
-    if mem::len(left) < mem::len(right) {
-        return -1;
-    }
-    if mem::len(left) > mem::len(right) {
-        return 1;
-    }
     return 0;
 }

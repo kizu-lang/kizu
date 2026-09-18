@@ -32,7 +32,7 @@ union を宣言することになり、原理 10(定型の量産)に反する。
 4. **消費は 3 形だけ**: `if opt |v| {} else {}`、`while opt |v| {}`、
    `opt orelse default`。presence を確かめない取り出しは存在しない。
    capture の綴りと意味は for-loop の `|i|` と同一。
-5. **表現**は error union と同じ tagged payload(`{ i8, T }`)。IR は
+5. **表現**は tag と payload(`{ i8, T }`)。IR は
    opt.some / opt.null / opt.has / opt.value の 4 命令。
 
 ## 却下した代替案

@@ -42,7 +42,7 @@ fn (self: &var Emitter) write_error_ok(module: &ir::Module, node: &ir::InstrNode
             if node.args.len() != 0 {
                 return try self.fail0("llvm error: error.ok !void expects 0 args");
             }
-            try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(result_name), Arg::Str(union_type));
+            try self.line2("  %s = insertvalue %s zeroinitializer, i64 0, 0", Arg::Str(result_name), Arg::Str(union_type));
             try self.set_value(module, node.result, result_name);
             return null;
         }
@@ -56,13 +56,11 @@ fn (self: &var Emitter) write_error_ok(module: &ir::Module, node: &ir::InstrNode
             let got = try self.own(module, value.type_name);
             return try self.fail2("llvm error: error.ok expects %s, got %s", Arg::Str(success_shown), Arg::Str(got));
         }
-        let ok_name = try self.suffixed(result_name, ".ok");
         let arg_info = try self.operand(module, value);
-        try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(ok_name), Arg::Str(union_type));
         let success_type = try self.llvm_type(module, success_bytes);
-        try self.line5(
-            "  %s = insertvalue %s %s, %s %s, 1",
-            Arg::Str(result_name), Arg::Str(union_type), Arg::Str(ok_name), Arg::Str(success_type), Arg::Str(arg_info.operand)
+        try self.line4(
+            "  %s = insertvalue %s zeroinitializer, %s %s, 1",
+            Arg::Str(result_name), Arg::Str(union_type), Arg::Str(success_type), Arg::Str(arg_info.operand)
         );
         try self.set_value(module, node.result, result_name);
         return null;
@@ -127,11 +125,9 @@ fn (self: &var Emitter) write_error_has(module: &ir::Module, node: &ir::InstrNod
     if try self.error_union_parts(source_type) |parts| {
         defer parts.deinit(self.allocator);
         let result_name = try self.local_name(module, node.result.name);
-        let tag_name = try self.suffixed(result_name, ".tag");
         let union_type = try self.llvm_type(module, source_type);
         let info = try self.operand(module, source);
-        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(tag_name), Arg::Str(union_type), Arg::Str(info.operand));
-        try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(result_name), Arg::Str(tag_name));
+        try self.write_error_succeeded(result_name, union_type, info.operand);
         try self.set_value(module, node.result, result_name);
         return null;
     }
@@ -200,11 +196,7 @@ fn (self: &var Emitter) write_error_code(module: &ir::Module, node: &ir::InstrNo
         let result_name = try self.local_name(module, node.result.name);
         let union_type = try self.llvm_type(module, source_type);
         let info = try self.operand(module, source);
-        let failure_index = try self.error_union_failure_index(source_type);
-        try self.line4(
-            "  %s = extractvalue %s %s, %d",
-            Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand), Arg::Int(failure_index)
-        );
+        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand));
         try self.set_value(module, node.result, result_name);
         return null;
     }
@@ -221,13 +213,18 @@ fn (self: &var Emitter) write_error_failure_code(
     code_operand: ir::Name
 ) -> !void {
     let union_type = try self.llvm_type(module, result_type);
-    let base_name = try self.suffixed(result_name, ".base");
-    try self.line2("  %s = insertvalue %s zeroinitializer, i8 0, 0", Arg::Str(base_name), Arg::Str(union_type));
-    let failure_index = try self.error_union_failure_index(result_type);
-    return self.line5(
-        "  %s = insertvalue %s %s, i64 %s, %d",
-        Arg::Str(result_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Str(code_operand), Arg::Int(failure_index)
+    return self.line3(
+        "  %s = insertvalue %s zeroinitializer, i64 %s, 0",
+        Arg::Str(result_name), Arg::Str(union_type), Arg::Str(code_operand)
     );
+}
+
+/// Names whether an error union holds a success, the Go
+/// `writeErrorSucceeded`: its code is zero.
+fn (self: &var Emitter) write_error_succeeded(name: ir::Name, union_type: ir::Name, operand: ir::Name) -> !void {
+    let code_name = try self.suffixed(name, ".code");
+    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(code_name), Arg::Str(union_type), Arg::Str(operand));
+    return self.line2("  %s = icmp eq i64 %s, 0", Arg::Str(name), Arg::Str(code_name));
 }
 
 /// Unwraps success or returns failure from the current function, the Go
@@ -270,13 +267,18 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
         let source_value = try self.operand(module, source);
         let source_llvm = try self.llvm_type(module, source_type);
         let result_name = try self.local_name(module, node.result.name);
-        let ok_value = try self.suffixed(result_name, ".ok");
-        let ok_bool = try self.suffixed(ok_value, ".bool");
+        let ok_bool = try self.suffixed(result_name, ".ok");
         let ok_label = try self.helper_label(module, node.result.name, "try.ok");
         let err_label = try self.helper_label(module, node.result.name, "try.err");
-        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(ok_value), Arg::Str(source_llvm), Arg::Str(source_value.operand));
-        try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(ok_bool), Arg::Str(ok_value));
-        try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool), Arg::Str(ok_label), Arg::Str(err_label));
+        try self.write_error_succeeded(ok_bool, source_llvm, source_value.operand);
+        // A `try` passes a failure on rather than handling it, so the failure
+        // is the rare edge. Said outright because the optimizer's own guess
+        // reads `code == 0` as the unlikely side -- most values it meets are
+        // not zero -- and a call it takes for rare is one it no longer
+        // inlines.
+        let expected = try self.suffixed(ok_bool, ".expected");
+        try self.line2("  %s = call i1 @llvm.expect.i1(i1 %s, i1 true)", Arg::Str(expected), Arg::Str(ok_bool));
+        try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(expected), Arg::Str(ok_label), Arg::Str(err_label));
         try self.line1("%s:", Arg::Str(err_label));
         var index = 0;
         while node.cleanups.get(index) |cleanup| {
@@ -578,12 +580,10 @@ fn (self: &var Emitter) write_absorbed_error_union_return(module: &ir::Module, v
     let source = try self.operand(module, value);
     let source_type = try self.llvm_type(module, value_type);
     let ok_synthetic = try self.next_synthetic_value("absorb.ok");
-    let ok_name = try self.percent(ok_synthetic);
-    let ok_bool = try self.suffixed(ok_name, ".bool");
+    let ok_bool = try self.percent(ok_synthetic);
     let ok_label = try self.next_synthetic_value("absorb.ok.block");
     let err_label = try self.next_synthetic_value("absorb.err.block");
-    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(ok_name), Arg::Str(source_type), Arg::Str(source.operand));
-    try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(ok_bool), Arg::Str(ok_name));
+    try self.write_error_succeeded(ok_bool, source_type, source.operand);
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool), Arg::Str(ok_label), Arg::Str(err_label));
     try self.line1("%s:", Arg::Str(err_label));
     if try self.write_error_failure_return(module, value) |failed| {
@@ -612,17 +612,14 @@ fn (self: &var Emitter) write_success_return(module: &ir::Module, value_type: []
     let return_bytes = return_text.as_bytes();
     let union_type = try self.llvm_type(module, return_bytes);
     if mem::equal_bytes(value_type, "void") {
-        try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(name), Arg::Str(union_type));
+        try self.line2("  %s = insertvalue %s zeroinitializer, i64 0, 0", Arg::Str(name), Arg::Str(union_type));
         try self.line2("  ret %s %s", Arg::Str(union_type), Arg::Str(name));
         return null;
     }
-    let ok_synthetic = try self.next_synthetic_value("return.ok.flag");
-    let ok_name = try self.percent(ok_synthetic);
-    try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(ok_name), Arg::Str(union_type));
     let value_llvm = try self.llvm_type(module, value_type);
-    try self.line5(
-        "  %s = insertvalue %s %s, %s %s, 1",
-        Arg::Str(name), Arg::Str(union_type), Arg::Str(ok_name), Arg::Str(value_llvm), Arg::Str(operand)
+    try self.line4(
+        "  %s = insertvalue %s zeroinitializer, %s %s, 1",
+        Arg::Str(name), Arg::Str(union_type), Arg::Str(value_llvm), Arg::Str(operand)
     );
     try self.line2("  ret %s %s", Arg::Str(union_type), Arg::Str(name));
     return null;
@@ -636,15 +633,13 @@ fn (self: &var Emitter) write_main_error_union_return(module: &ir::Module, value
     let info = try self.operand(module, value);
     let union_type = try self.llvm_type(module, value_type);
     let ok_synthetic = try self.next_synthetic_value("main.ok");
-    let ok_name = try self.percent(ok_synthetic);
-    let ok_bool_name = try self.suffixed(ok_name, ".bool");
+    let ok_bool_name = try self.percent(ok_synthetic);
     let code_synthetic = try self.next_synthetic_value("main.code");
     let code_name = try self.percent(code_synthetic);
     let success = try self.error_union_success_type(value_type) orelse string::new(self.allocator);
     defer success.deinit(self.allocator);
     let success_bytes = success.as_bytes();
-    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(ok_name), Arg::Str(union_type), Arg::Str(info.operand));
-    try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(ok_bool_name), Arg::Str(ok_name));
+    try self.write_error_succeeded(ok_bool_name, union_type, info.operand);
     let ok_label = try self.next_synthetic_value("main.exit.ok");
     let fail_label = try self.next_synthetic_value("main.exit.fail");
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool_name), Arg::Str(ok_label), Arg::Str(fail_label));
@@ -809,12 +804,6 @@ fn (self: &var Emitter) write_error_failure_return(module: &ir::Module, source: 
 fn (self: &var Emitter) failure_code(module: &ir::Module, result_name: ir::Name, source: ir::Value) -> !ir::Name {
     let source_llvm = try self.llvm_type_of(module, source.type_name);
     let info = try self.operand(module, source);
-    let source_text = ir::name_text(&module.names, source.type_name);
-    let source_type = source_text.as_bytes();
-    let failure_index = try self.error_union_failure_index(source_type);
-    try self.line4(
-        "  %s = extractvalue %s %s, %d",
-        Arg::Str(result_name), Arg::Str(source_llvm), Arg::Str(info.operand), Arg::Int(failure_index)
-    );
+    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(result_name), Arg::Str(source_llvm), Arg::Str(info.operand));
     return result_name;
 }

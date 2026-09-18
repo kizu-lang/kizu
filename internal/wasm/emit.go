@@ -387,6 +387,9 @@ func (e *emitter) writeRuntime() error {
 	if e.usesByteEqualityRuntime() {
 		e.writeByteEqualityHelper()
 	}
+	if e.usesByteOrderRuntime() {
+		e.writeByteOrderHelper()
+	}
 	if err := e.writeIORuntime(); err != nil {
 		return err
 	}

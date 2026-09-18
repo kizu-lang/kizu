@@ -1,0 +1,107 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+
+// Mechanical port of internal/llvm/compare.go. Two byte slices are ordered by
+// memcmp over the bytes they share and then by length. The comparison is a
+// call LLVM knows by name rather than a loop it has to read: it compares a
+// word at a time where a loop compares a byte, and a comparison whose result
+// is only tested against zero -- an equality -- becomes a bcmp, which for a
+// length known at the call is a few loads and no call.
+
+/// Reports whether some instruction of this module is op, the Go `usesOp`.
+fn uses_op(module: &ir::Module, op: ir::Op) -> bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                if module.instrs.at(instr.node).op == op {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Declares memcmp for a module that compares slices, the Go
+/// `writeSliceCompareDecls`.
+fn (self: &var Emitter) write_slice_compare_decls(module: &ir::Module) -> !void {
+    if uses_op(module, ir::Op::SliceCompare) {
+        try self.line("declare i32 @memcmp(ptr, ptr, i64)");
+        try self.line("");
+    }
+    return;
+}
+
+/// Declares what a `try` marks its likely edge with, the Go `writeTryDecls`.
+fn (self: &var Emitter) write_try_decls(module: &ir::Module) -> !void {
+    if uses_op(module, ir::Op::ErrorTry) {
+        try self.line("declare i1 @llvm.expect.i1(i1, i1)");
+        try self.line("");
+    }
+    return;
+}
+
+/// Answers -1, 0 or 1 as left orders before, with or after right, the Go
+/// `writeSliceCompare`.
+fn (self: &var Emitter) write_slice_compare(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("llvm error: slice.compare expects []u8, []u8 -> i64");
+    }
+    let left = try self.operand(module, node.args.get_or_panic(0));
+    let right = try self.operand(module, node.args.get_or_panic(1));
+    let result = try self.local_name(module, node.result.name);
+    let p = try self.suffixed(result, ".cmp");
+    let left_ptr = try self.suffixed(p, ".left.ptr");
+    let left_len = try self.suffixed(p, ".left.len");
+    let right_ptr = try self.suffixed(p, ".right.ptr");
+    let right_len = try self.suffixed(p, ".right.len");
+    let shorter = try self.suffixed(p, ".shorter");
+    let shared = try self.suffixed(p, ".shared");
+    let bytes = try self.suffixed(p, ".bytes");
+    let bytes_wide = try self.suffixed(p, ".bytes.wide");
+    let lengths = try self.suffixed(p, ".lengths");
+    let tied = try self.suffixed(p, ".tied");
+    let order = try self.suffixed(p, ".order");
+    let after = try self.suffixed(p, ".after");
+    let before = try self.suffixed(p, ".before");
+    let after_wide = try self.suffixed(p, ".after.wide");
+    let before_wide = try self.suffixed(p, ".before.wide");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(left_ptr), Arg::Str(left.operand));
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(left_len), Arg::Str(left.operand));
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(right_ptr), Arg::Str(right.operand));
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(right_len), Arg::Str(right.operand));
+    try self.line3("  %s = icmp slt i64 %s, %s", Arg::Str(shorter), Arg::Str(left_len), Arg::Str(right_len));
+    try self.line4(
+        "  %s = select i1 %s, i64 %s, i64 %s",
+        Arg::Str(shared), Arg::Str(shorter), Arg::Str(left_len), Arg::Str(right_len)
+    );
+    try self.line4(
+        "  %s = call i32 @memcmp(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(bytes), Arg::Str(left_ptr), Arg::Str(right_ptr), Arg::Str(shared)
+    );
+    try self.line2("  %s = sext i32 %s to i64", Arg::Str(bytes_wide), Arg::Str(bytes));
+    try self.line3("  %s = sub i64 %s, %s", Arg::Str(lengths), Arg::Str(left_len), Arg::Str(right_len));
+    try self.line2("  %s = icmp eq i32 %s, 0", Arg::Str(tied), Arg::Str(bytes));
+    try self.line4(
+        "  %s = select i1 %s, i64 %s, i64 %s",
+        Arg::Str(order), Arg::Str(tied), Arg::Str(lengths), Arg::Str(bytes_wide)
+    );
+    try self.line2("  %s = icmp sgt i64 %s, 0", Arg::Str(after), Arg::Str(order));
+    try self.line2("  %s = icmp slt i64 %s, 0", Arg::Str(before), Arg::Str(order));
+    try self.line2("  %s = zext i1 %s to i64", Arg::Str(after_wide), Arg::Str(after));
+    try self.line2("  %s = zext i1 %s to i64", Arg::Str(before_wide), Arg::Str(before));
+    try self.line3("  %s = sub i64 %s, %s", Arg::Str(result), Arg::Str(after_wide), Arg::Str(before_wide));
+    try self.set_value(module, node.result, result);
+    return null;
+}

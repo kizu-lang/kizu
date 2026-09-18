@@ -245,6 +245,8 @@ func (e *emitter) writeHeader() {
 	e.writeExternalCallDecls()
 	e.writePanicDecls()
 	e.writeFloatCastDecls()
+	e.writeSliceCompareDecls()
+	e.writeTryDecls()
 	// The shared attribute makes large frames touch each page before they can
 	// cross a coroutine guard. Small frames receive no added instructions.
 	// Darwin's arm64 ABI has every function that calls keep a frame record,
@@ -471,18 +473,15 @@ func (e *emitter) writeErrorUnionTypes() {
 	names := e.sortedErrorUnionNames()
 	for _, name := range names {
 		_, success, _ := e.errorUnionParts(name)
-		failureType := "i64"
 		if success == "void" {
-			fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
-				e.llvmErrorUnionTypeName(name), failureType)
-			e.rememberAggregate(e.llvmErrorUnionTypeName(name), "i8", failureType)
+			fmt.Fprintf(&e.out, "%s = type { i64 }\n", e.llvmErrorUnionTypeName(name))
+			e.rememberAggregate(e.llvmErrorUnionTypeName(name), "i64")
 			continue
 		}
-		fmt.Fprintf(&e.out, "%s = type { i8, %s, %s }\n",
-			e.llvmErrorUnionTypeName(name), e.llvmType(success), failureType)
+		fmt.Fprintf(&e.out, "%s = type { i64, %s }\n",
+			e.llvmErrorUnionTypeName(name), e.llvmType(success))
 		if !e.occupiesNothing(success) {
-			e.rememberAggregate(
-				e.llvmErrorUnionTypeName(name), "i8", e.llvmType(success), failureType)
+			e.rememberAggregate(e.llvmErrorUnionTypeName(name), "i64", e.llvmType(success))
 		}
 	}
 	if len(names) > 0 {
@@ -1353,10 +1352,7 @@ func (e *emitter) writeErrorHas(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: error.has expects !T, got %s", source.Type)
 	}
 	resultName := localName(instr.Result.Name)
-	tagName := resultName + ".tag"
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
-		tagName, e.llvmType(source.Type), e.value(source).operand)
-	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", resultName, tagName)
+	e.writeErrorSucceeded(resultName, e.llvmType(source.Type), e.value(source).operand)
 	e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
 	return nil
 }
@@ -1404,7 +1400,7 @@ func (e *emitter) writeErrorCode(instr *ir.Instr) error {
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
 		resultName, e.llvmType(source.Type), e.value(source).operand,
-		e.errorUnionFailureIndex(source.Type))
+		errorCodeField)
 	e.values[instr.Result.Name] = valueInfo{typ: errorName, operand: resultName}
 	return nil
 }
@@ -1420,6 +1416,8 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 		return e.writeSliceStore(instr)
 	case "slice.slice":
 		return e.writeSliceSlice(instr)
+	case "slice.compare":
+		return e.writeSliceCompare(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported slice instruction `%s`", instr.Op)
 	}
@@ -2058,7 +2056,7 @@ func (e *emitter) failureCode(resultName string, source ir.Value) string {
 		resultName,
 		e.llvmType(source.Type),
 		e.value(source).operand,
-		e.errorUnionFailureIndex(source.Type),
+		errorCodeField,
 	)
 	return resultName
 }
@@ -2566,8 +2564,8 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 		if len(instr.Args) != 0 {
 			return fmt.Errorf("llvm error: error.ok !void expects 0 args")
 		}
-		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
-			resultName, unionType)
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i64 0, %d\n",
+			resultName, unionType, errorCodeField)
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 		return nil
 	}
@@ -2578,12 +2576,9 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 	if value.Type != success {
 		return fmt.Errorf("llvm error: error.ok expects %s, got %s", success, value.Type)
 	}
-	okName := resultName + ".ok"
 	argInfo := e.value(value)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
-		okName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
-		resultName, unionType, okName, e.llvmType(success), argInfo.operand)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, %s %s, %d\n",
+		resultName, unionType, e.llvmType(success), argInfo.operand, errorPayloadField)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -2625,13 +2620,8 @@ func (e *emitter) writeErrorFailureCode(
 	resultType string,
 	codeOperand string,
 ) {
-	unionType := e.llvmType(resultType)
-	baseName := resultName + ".base"
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
-		baseName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %s, %d\n",
-		resultName, unionType, baseName, codeOperand,
-		e.errorUnionFailureIndex(resultType))
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i64 %s, %d\n",
+		resultName, e.llvmType(resultType), codeOperand, errorCodeField)
 }
 
 // writeErrorTry unwraps success or returns failure from the current function.
@@ -2663,13 +2653,17 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	}
 	sourceValue := e.value(source)
 	sourceType := e.llvmType(source.Type)
-	okValue := localName(instr.Result.Name) + ".ok"
-	okBool := okValue + ".bool"
+	okBool := localName(instr.Result.Name) + ".ok"
 	okLabel := helperLabel(instr.Result.Name, "try.ok")
 	errLabel := helperLabel(instr.Result.Name, "try.err")
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okValue, sourceType, sourceValue.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBool, okValue)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
+	e.writeErrorSucceeded(okBool, sourceType, sourceValue.operand)
+	// A `try` passes a failure on rather than handling it, so the failure is
+	// the rare edge. Said outright because the optimizer's own guess reads
+	// `code == 0` as the unlikely side -- most values it meets are not zero --
+	// and a call it takes for rare is one it no longer inlines.
+	expected := okBool + ".expected"
+	fmt.Fprintf(&e.out, "  %s = call i1 @llvm.expect.i1(i1 %s, i1 true)\n", expected, okBool)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", expected, okLabel, errLabel)
 	fmt.Fprintf(&e.out, "%s:\n", errLabel)
 	for _, cleanup := range instr.Cleanups {
 		if err := e.writeCleanup(cleanup); err != nil {
@@ -2687,7 +2681,8 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 		return nil
 	}
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", resultName, sourceType, sourceValue.operand)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		resultName, sourceType, sourceValue.operand, errorPayloadField)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -2917,12 +2912,10 @@ func (e *emitter) writeAbsorbedErrorUnionReturn(value ir.Value) error {
 	_, success, _ := e.errorUnionParts(value.Type)
 	source := e.value(value)
 	sourceType := e.llvmType(value.Type)
-	okName := "%" + e.nextSyntheticValue("absorb.ok")
-	okBool := okName + ".bool"
+	okBool := "%" + e.nextSyntheticValue("absorb.ok")
 	okLabel := e.nextSyntheticValue("absorb.ok.block")
 	errLabel := e.nextSyntheticValue("absorb.err.block")
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, sourceType, source.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBool, okName)
+	e.writeErrorSucceeded(okBool, sourceType, source.operand)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
 	fmt.Fprintf(&e.out, "%s:\n", errLabel)
 	if err := e.writeErrorFailureReturn(value); err != nil {
@@ -2933,7 +2926,8 @@ func (e *emitter) writeAbsorbedErrorUnionReturn(value ir.Value) error {
 		return e.writeSuccessReturn(ir.Value{Name: value.Name, Type: "void"})
 	}
 	successName := "%" + e.nextSyntheticValue("absorb.value")
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, sourceType, source.operand)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		successName, sourceType, source.operand, errorPayloadField)
 	e.values[successName] = valueInfo{typ: success, operand: successName}
 	return e.writeSuccessReturn(ir.Value{Name: successName, Type: success})
 }
@@ -2946,17 +2940,14 @@ func (e *emitter) writeSuccessReturn(value ir.Value) error {
 	name := "%" + e.nextSyntheticValue("return.ok")
 	unionType := e.llvmType(e.currentReturn)
 	if value.Type == "void" {
-		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
-			name, unionType)
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i64 0, %d\n",
+			name, unionType, errorCodeField)
 		fmt.Fprintf(&e.out, "  ret %s %s\n", unionType, name)
 		return nil
 	}
-	okName := "%" + e.nextSyntheticValue("return.ok.flag")
 	valueInfo := e.value(value)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
-		okName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
-		name, unionType, okName, e.llvmType(value.Type), valueInfo.operand)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, %s %s, %d\n",
+		name, unionType, e.llvmType(value.Type), valueInfo.operand, errorPayloadField)
 	fmt.Fprintf(&e.out, "  ret %s %s\n", unionType, name)
 	return nil
 }
@@ -2965,12 +2956,10 @@ func (e *emitter) writeSuccessReturn(value ir.Value) error {
 func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	valueInfo := e.value(value)
 	unionType := e.llvmType(value.Type)
-	okName := "%" + e.nextSyntheticValue("main.ok")
-	okBoolName := okName + ".bool"
+	okBoolName := "%" + e.nextSyntheticValue("main.ok")
 	codeName := "%" + e.nextSyntheticValue("main.code")
 	_, success, _ := e.errorUnionParts(value.Type)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, unionType, valueInfo.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBoolName, okName)
+	e.writeErrorSucceeded(okBoolName, unionType, valueInfo.operand)
 	okLabel := e.nextSyntheticValue("main.exit.ok")
 	failLabel := e.nextSyntheticValue("main.exit.fail")
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBoolName, okLabel, failLabel)
@@ -2985,7 +2974,8 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	}
 	if success == "i64" {
 		successName := "%" + e.nextSyntheticValue("main.success")
-		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, unionType, valueInfo.operand)
+		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+			successName, unionType, valueInfo.operand, errorPayloadField)
 		fmt.Fprintf(&e.out, "  %s = trunc i64 %s to i32\n", codeName, successName)
 		fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
 		return nil
@@ -3146,13 +3136,28 @@ func (e *emitter) errorSetFits(source string, target string) bool {
 	return true
 }
 
-// errorUnionFailureIndex returns the field index of the failure payload.
-func (e *emitter) errorUnionFailureIndex(typ string) int {
-	success, ok := e.errorUnionSuccessType(typ)
-	if ok && success == "void" {
-		return 1
+// An error union is its failure code and then its payload, `{ i64, T }`, and
+// `!void` is the code alone. Codes start at one, so a code of zero is what a
+// success holds: one field says which half is live and, for a failure, which
+// member it is, where a separate success flag would be one more field to build
+// at every return and test at every `try`.
+const (
+	errorCodeField    = 0
+	errorPayloadField = 1
+)
+
+// writeTryDecls declares what a `try` marks its likely edge with.
+func (e *emitter) writeTryDecls() {
+	if e.usesOp("error.try") {
+		e.out.WriteString("declare i1 @llvm.expect.i1(i1, i1)\n\n")
 	}
-	return 2
+}
+
+// writeErrorSucceeded names whether an error union holds a success.
+func (e *emitter) writeErrorSucceeded(name string, unionType string, operand string) {
+	fmt.Fprintf(&e.out, "  %s.code = extractvalue %s %s, %d\n",
+		name, unionType, operand, errorCodeField)
+	fmt.Fprintf(&e.out, "  %s = icmp eq i64 %s.code, 0\n", name, name)
 }
 
 // nextSyntheticValue returns a unique helper value name without a leading percent.
