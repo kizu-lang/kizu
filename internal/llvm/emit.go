@@ -66,6 +66,8 @@ type emitter struct {
 	// aggregates names the field types of each optional and error union the
 	// module declares, which is what a phi of one is split along.
 	aggregates map[string][]string
+	// references counts the places that name each function (phi.go).
+	references map[string]int
 }
 
 type valueInfo struct {
@@ -79,6 +81,7 @@ func (e *emitter) emit() error {
 		return err
 	}
 	e.collectFunctionNames()
+	e.countReferences()
 	e.collectStrings()
 	if err := e.validateModuleTypes(); err != nil {
 		return err
@@ -967,7 +970,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	// the module written so far, so taking one function body that way costs
 	// the module size once per function.
 	body := dropUnreachableTails(e.resolvePhiPredecessors(string(e.out.Bytes()[bodyStart:])))
-	body = e.splitAggregatePhis(e.unifyAggregateReturns(body, returnType))
+	body = e.splitAggregatePhis(e.unifyAggregateReturns(body, fn.Name, returnType))
 	hoisted, err := hoistAllocasToEntry(body)
 	if err != nil {
 		return fmt.Errorf("llvm error: function `%s`: %w", fn.Name, err)
