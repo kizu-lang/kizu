@@ -1237,10 +1237,10 @@ fn main() -> !void {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
-		"%kizu.error.i64 = type { i8, i64, i64 }",
+		"%kizu.error.i64 = type { i64, i64 }",
 		"define internal %kizu.error.i64 @read()",
-		"insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0",
-		"br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err",
+		"insertvalue %kizu.error.i64 zeroinitializer, i64 1, 1",
+		"br i1 %kizu.2.ok.expected, label %kizu.2.try.ok, label %kizu.2.try.err",
 		// A failed try in main reports its message before exiting 1 instead of
 		// failing silently.
 		"call void @kizu_main_error_message(",
@@ -1281,7 +1281,7 @@ fn main() -> !void {
 	}
 	for _, want := range []string{
 		"%kizu.slice.u8 = type { ptr, i64 }",
-		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, i64 }",
+		"%kizu.error.slice.u8 = type { i64, %kizu.slice.u8 }",
 		"define internal %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.value)",
 		"define internal %kizu.error.slice.u8 @read()",
 		"call %kizu.slice.u8 @identity(%kizu.slice.u8",

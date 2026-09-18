@@ -1562,6 +1562,7 @@ fn (self: &var Emitter) write_runtime_instr(module: &ir::Module, node: &ir::Inst
         SliceIndex => return self.write_slice_instr(module, node),
         SliceStore => return self.write_slice_instr(module, node),
         SliceSlice => return self.write_slice_instr(module, node),
+        SliceCompare => return self.write_slice_instr(module, node),
         ErrorOk => return self.write_error_instr(module, node),
         ErrorError => return self.write_error_instr(module, node),
         ErrorTry => return self.write_error_instr(module, node),
@@ -1867,19 +1868,6 @@ fn struct_field_index(declared: &ir::Struct, name: ir::Name) -> ?i64 {
         index = index + 1;
     }
     return null;
-}
-
-/// Returns the field index of the failure payload, the Go
-/// `errorUnionFailureIndex`.
-fn (self: &var Emitter) error_union_failure_index(typ_name: []u8) -> !i64 {
-    if try self.error_union_success_type(typ_name) |success| {
-        defer success.deinit(self.allocator);
-        let success_bytes = success.as_bytes();
-        if mem::equal_bytes(success_bytes, "void") {
-            return 1;
-        }
-    }
-    return 2;
 }
 
 /// Returns a unique helper value name without a leading percent, the Go
@@ -2266,9 +2254,9 @@ fn (self: &var Emitter) write_array_bool_result(
 }
 
 /// Builds the error union a runtime boolean stands for, the Go
-/// `writeErrorUnionFromBool`: the tag says whether it succeeded, the payload is
-/// what it produced, and the failure code is written unconditionally because
-/// only the tag decides which half is read. A null payload is the `!void` case.
+/// `writeErrorUnionFromBool`: the code is zero when it succeeded and the named
+/// failure when it did not, and the payload is what it produced. A null
+/// payload is the `!void` case.
 fn (self: &var Emitter) write_error_union_from_bool(
     module: &ir::Module,
     result: ir::Value,
@@ -2285,24 +2273,25 @@ fn (self: &var Emitter) write_error_union_from_bool(
             let result_text = ir::name_text(&module.names, result.type_name);
             let result_type = result_text.as_bytes();
             let union_type = try self.llvm_type(module, result_type);
-            let failure_index = try self.error_union_failure_index(result_type);
-            var base_name = try self.suffixed(result_name, ".base");
-            let ok_byte_name = try self.suffixed(result_name, ".ok.byte");
-            try self.line2("  %s = zext i1 %s to i8", Arg::Str(ok_byte_name), Arg::Str(ok_operand));
-            try self.line3("  %s = insertvalue %s zeroinitializer, i8 %s, 0", Arg::Str(base_name), Arg::Str(union_type), Arg::Str(ok_byte_name));
+            let code_name = try self.suffixed(result_name, ".code");
+            try self.line3("  %s = select i1 %s, i64 0, i64 %d", Arg::Str(code_name), Arg::Str(ok_operand), Arg::Int(code));
             if payload |carried| {
-                let payload_name = try self.suffixed(result_name, ".payload");
+                let base_name = try self.suffixed(result_name, ".base");
+                try self.line3(
+                    "  %s = insertvalue %s zeroinitializer, i64 %s, 0",
+                    Arg::Str(base_name), Arg::Str(union_type), Arg::Str(code_name)
+                );
                 try self.line5(
                     "  %s = insertvalue %s %s, %s %s, 1",
-                    Arg::Str(payload_name), Arg::Str(union_type), Arg::Str(base_name),
+                    Arg::Str(result_name), Arg::Str(union_type), Arg::Str(base_name),
                     Arg::Lit(payload_type), Arg::Str(carried)
                 );
-                base_name = payload_name;
+            } else {
+                try self.line3(
+                    "  %s = insertvalue %s zeroinitializer, i64 %s, 0",
+                    Arg::Str(result_name), Arg::Str(union_type), Arg::Str(code_name)
+                );
             }
-            try self.line5(
-                "  %s = insertvalue %s %s, i64 %d, %d",
-                Arg::Str(result_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Int(code), Arg::Int(failure_index)
-            );
             try self.set_value(module, result, result_name);
             return null;
         },

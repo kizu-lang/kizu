@@ -282,7 +282,7 @@ func isPureOp(op string) bool {
 		"opt.null", "opt.some", "opt.has", "opt.value",
 		"error.ok", "error.error", "error.has", "error.value", "error.code",
 		"union.new", "union.tag", "union.payload", "union.payload_ref", "union.load",
-		"slice.len", "slice.index", "slice.slice", "buffer.new", "buffer.as_bytes",
+		"slice.len", "slice.index", "slice.compare", "slice.slice", "buffer.new", "buffer.as_bytes",
 		"float.bits", "float.from_bits", "box.borrow", "box.borrow_mut",
 		"array.new", "array.len", "array.capacity", "array.get", "array.at", "array.at_mut",
 		"array.as_bytes", "map.new", "map.len", "map.get", "map.contains", "map.at",

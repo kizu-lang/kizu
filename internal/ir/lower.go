@@ -2384,17 +2384,8 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 // lowerCoreBuiltinCall lowers the std::internal::builtin calls that are one
 // instruction rather than a runtime call, and reports whether name was one.
 func (l *lowerer) lowerCoreBuiltinCall(name string, args []Value) (Value, bool, error) {
-	if name == "std::internal::builtin::print_line" {
-		if len(args) != 1 || args[0].Type != "[]u8" {
-			return Value{}, true, fmt.Errorf("ir error: std::internal::builtin::print_line expects []u8")
-		}
-		return l.emit("print.line", "void", args, ""), true, nil
-	}
-	if name == "std::internal::builtin::mem_len" {
-		if len(args) != 1 {
-			return Value{}, true, fmt.Errorf("ir error: std::internal::builtin::mem_len expects 1 arg")
-		}
-		return l.emit("slice.len", "i64", args, ""), true, nil
+	if value, handled, err := l.lowerViewBuiltinCall(name, args); handled {
+		return value, true, err
 	}
 	if name == "std::internal::builtin::f64_bits" {
 		if len(args) != 1 {
@@ -2413,6 +2404,29 @@ func (l *lowerer) lowerCoreBuiltinCall(name string, args []Value) (Value, bool, 
 	}
 	if name == "std::internal::builtin::panic" {
 		return l.emit("panic.fail", "void", args, ""), true, nil
+	}
+	return Value{}, false, nil
+}
+
+// lowerViewBuiltinCall lowers the primitives that read views: printing one,
+// measuring one and ordering two.
+func (l *lowerer) lowerViewBuiltinCall(name string, args []Value) (Value, bool, error) {
+	switch name {
+	case "std::internal::builtin::print_line":
+		if len(args) != 1 || args[0].Type != "[]u8" {
+			return Value{}, true, fmt.Errorf("ir error: %s expects []u8", name)
+		}
+		return l.emit("print.line", "void", args, ""), true, nil
+	case "std::internal::builtin::mem_len":
+		if len(args) != 1 {
+			return Value{}, true, fmt.Errorf("ir error: %s expects 1 arg", name)
+		}
+		return l.emit("slice.len", "i64", args, ""), true, nil
+	case "std::internal::builtin::mem_compare":
+		if len(args) != 2 || args[0].Type != "[]u8" || args[1].Type != "[]u8" {
+			return Value{}, true, fmt.Errorf("ir error: %s expects []u8, []u8", name)
+		}
+		return l.emit("slice.compare", "i64", args, ""), true, nil
 	}
 	return Value{}, false, nil
 }

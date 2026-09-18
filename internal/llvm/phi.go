@@ -6,8 +6,8 @@ import (
 )
 
 // A phi whose type is an optional or an error union carries several values at
-// once: an optional's presence and payload, an error union's tag, payload and
-// code. LLVM keeps such a phi whole -- it splits aggregates held in memory,
+// once: an optional's presence and payload, an error union's code and
+// payload. LLVM keeps such a phi whole -- it splits aggregates held in memory,
 // never ones held in registers -- and everything downstream stops folding
 // with it: an `if` chain that answers with `?i64` becomes an indirect jump
 // through a table of blocks rather than one load from a table of values, and a

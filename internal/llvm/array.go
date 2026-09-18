@@ -832,9 +832,8 @@ func (e *emitter) writeArrayBoolResult(
 }
 
 // writeErrorUnionFromBool builds the error union a runtime boolean stands for:
-// the tag says whether it succeeded, the payload is what it produced, and the
-// failure code is written unconditionally because only the tag decides which
-// half is read. A payload of "" is the `!void` case.
+// the code is zero when it succeeded and the named failure when it did not,
+// and the payload is what it produced. A payload of "" is the `!void` case.
 func (e *emitter) writeErrorUnionFromBool(
 	result ir.Value,
 	okOperand string,
@@ -848,19 +847,19 @@ func (e *emitter) writeErrorUnionFromBool(
 	}
 	resultName := localName(result.Name)
 	unionType := e.llvmType(result.Type)
-	baseName := resultName + ".base"
-	okByteName := resultName + ".ok.byte"
-	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", okByteName, okOperand)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
-		baseName, unionType, okByteName)
-	if payload != "" {
-		payloadName := resultName + ".payload"
-		fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
-			payloadName, unionType, baseName, payloadType, payload)
-		baseName = payloadName
+	codeName := resultName + ".code"
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, i64 0, i64 %d\n", codeName, okOperand, code)
+	if payload == "" {
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i64 %s, %d\n",
+			resultName, unionType, codeName, errorCodeField)
+		e.values[result.Name] = valueInfo{typ: result.Type, operand: resultName}
+		return nil
 	}
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %d, %d\n",
-		resultName, unionType, baseName, code, e.errorUnionFailureIndex(result.Type))
+	baseName := resultName + ".base"
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i64 %s, %d\n",
+		baseName, unionType, codeName, errorCodeField)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
+		resultName, unionType, baseName, payloadType, payload, errorPayloadField)
 	e.values[result.Name] = valueInfo{typ: result.Type, operand: resultName}
 	return nil
 }

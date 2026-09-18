@@ -25,6 +25,7 @@ box.deinit(allocator: Allocator) -> void
 std::mem::len(bytes: []u8) -> i64
 std::mem::count<T>(view: []T) -> i64
 std::mem::byte_at(bytes: []u8, index: i64) -> ?u8
+std::mem::compare(left: []u8, right: []u8) -> i64
 std::mem::equal_bytes(left: []u8, right: []u8) -> bool
 std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool
 std::mem::slice(bytes: []u8, start: i64, end: i64) -> ?[]u8
@@ -32,6 +33,10 @@ std::mem::trim_ascii(bytes: []u8) -> []u8
 std::mem::bytes_iter(bytes: []u8) -> std::mem::BytesIter
 bytes_iter.next() -> ?u8
 ```
+
+`std::mem::compare` は 2 つの byte 列を辞書順に比べ、`left` が前なら `-1`、
+等しければ `0`、後なら `1` を返します。byte は符号なしで比べ、一方が他方の
+prefix なら短い方が前です。native では memcmp 1 回と長さの比較になります。
 
 `std::mem::bytes_iter` は iterator protocol(§6.10)の std 綴りです。
 `next() -> ?u8` が `while it.next() |byte|` を終端まで駆動し、終端は

@@ -743,8 +743,8 @@ func TestEmitErrorUnionFailure(t *testing.T) {
 	}
 	for _, want := range []string{
 		"define internal %kizu.error.i64 @read()",
-		"%kizu.error.i64 = type { i8, i64, i64 }",
-		"= insertvalue %kizu.error.i64 %kizu.2.base, i64 ",
+		"%kizu.error.i64 = type { i64, i64 }",
+		"%kizu.2 = insertvalue %kizu.error.i64 zeroinitializer, i64 ",
 		"ret %kizu.error.i64 %kizu.2",
 		// A failed try in main names the error before exiting 1.
 		"kizu.2.try.err:\n  %kizu.main.err.code",
@@ -764,8 +764,8 @@ func TestEmitErrorUnionSliceSuccess(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, i64 }",
-		"%kizu.2 = insertvalue %kizu.error.slice.u8 %kizu.2.ok, %kizu.slice.u8 %kizu.1, 1",
+		"%kizu.error.slice.u8 = type { i64, %kizu.slice.u8 }",
+		"%kizu.2 = insertvalue %kizu.error.slice.u8 zeroinitializer, %kizu.slice.u8 %kizu.1, 1",
 		"%kizu.2 = extractvalue %kizu.error.slice.u8 %kizu.1, 1",
 		"call void @std__fmt__print._5b_5du8(%kizu.slice.u8 ",
 	} {
@@ -827,10 +827,8 @@ func TestEmitErrorUnionPropagatesCode(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"= extractvalue %kizu.error.i64 %kizu.1, 2",
-		"= insertvalue %kizu.error.void zeroinitializer, i8 0, 0",
-		"= insertvalue %kizu.error.void %kizu.try.err.",
-		"i64 %kizu.try.err.",
+		"= extractvalue %kizu.error.i64 %kizu.1, 0",
+		"= insertvalue %kizu.error.void zeroinitializer, i64 %kizu.try.err.",
 		"= extractvalue %kizu.error.void %kizu.try.err.",
 	} {
 		if !strings.Contains(got, want) {
@@ -1430,8 +1428,8 @@ entry:
 //nolint:lll // snapshot text matches emitter output byte for byte
 const errorUnionLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.error.i64 = type { i8, i64, i64 }
-%kizu.error.void = type { i8, i64 }
+%kizu.error.i64 = type { i64, i64 }
+%kizu.error.void = type { i64 }
 
 %kizu.union.std__mem__Limit = type { i64, [1 x i64] }
 
@@ -1455,12 +1453,13 @@ declare void @kizu_runtime_init_args(i32, ptr)
 
 declare void @std__fmt__print.i64(i64)
 
+declare i1 @llvm.expect.i1(i1, i1)
+
 attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
 
 define internal %kizu.error.i64 @read() #0 {
 entry:
-  %kizu.2.ok = insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0
-  %kizu.2 = insertvalue %kizu.error.i64 %kizu.2.ok, i64 1, 1
+  %kizu.2 = insertvalue %kizu.error.i64 zeroinitializer, i64 1, 1
   ret %kizu.error.i64 %kizu.2
 }
 
@@ -1468,11 +1467,12 @@ define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
 entry:
   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.1 = call %kizu.error.i64 @read()
-  %kizu.2.ok = extractvalue %kizu.error.i64 %kizu.1, 0
-  %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
-  br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
+  %kizu.2.ok.code = extractvalue %kizu.error.i64 %kizu.1, 0
+  %kizu.2.ok = icmp eq i64 %kizu.2.ok.code, 0
+  %kizu.2.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.2.ok, i1 true)
+  br i1 %kizu.2.ok.expected, label %kizu.2.try.ok, label %kizu.2.try.err
 kizu.2.try.err:
-  %kizu.main.err.code.1 = extractvalue %kizu.error.i64 %kizu.1, 2
+  %kizu.main.err.code.1 = extractvalue %kizu.error.i64 %kizu.1, 0
   %kizu.main.err.name.2.row = getelementptr [1 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.1
   %kizu.main.err.name.2.ptr = load ptr, ptr %kizu.main.err.name.2.row
   %kizu.main.err.name.2.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.2.row, i64 0, i32 1
@@ -1482,12 +1482,12 @@ kizu.2.try.err:
 kizu.2.try.ok:
   %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
   call void @std__fmt__print.i64(i64 %kizu.2)
-  %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-  %kizu.main.ok.3 = extractvalue %kizu.error.void %kizu.4, 0
-  %kizu.main.ok.3.bool = icmp ne i8 %kizu.main.ok.3, 0
-  br i1 %kizu.main.ok.3.bool, label %kizu.main.exit.ok.5, label %kizu.main.exit.fail.6
+  %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i64 0, 0
+  %kizu.main.ok.3.code = extractvalue %kizu.error.void %kizu.4, 0
+  %kizu.main.ok.3 = icmp eq i64 %kizu.main.ok.3.code, 0
+  br i1 %kizu.main.ok.3, label %kizu.main.exit.ok.5, label %kizu.main.exit.fail.6
 kizu.main.exit.fail.6:
-  %kizu.main.err.code.7 = extractvalue %kizu.error.void %kizu.4, 1
+  %kizu.main.err.code.7 = extractvalue %kizu.error.void %kizu.4, 0
   %kizu.main.err.name.8.row = getelementptr [1 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.7
   %kizu.main.err.name.8.ptr = load ptr, ptr %kizu.main.err.name.8.row
   %kizu.main.err.name.8.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.8.row, i64 0, i32 1
