@@ -701,9 +701,16 @@ fn (self: &var Emitter) write_array_pop(module: &ir::Module, node: &ir::InstrNod
 
 /// Shortens the array by one and returns the address of the element that left
 /// it, or null when there was none, the Go `arrayPopElement`. The length is
-/// written either way -- an empty array is written the length it already
-/// had -- so the path a pop takes is two loads, a compare and a store rather
-/// than a call the optimizer cannot see the length change through.
+/// read, tested and written where the pop is, rather than behind a call the
+/// optimizer cannot see the length change through.
+///
+/// Only a pop that finds an element writes the length, which is the shape a
+/// loop that pops until the array is empty needs to be understood whole: LLVM
+/// folds such a loop into one store of zero. Writing the unchanged length on
+/// the empty side as well reads the same, but LLVM 16 takes that form for a
+/// count that falls on every turn -- the last one too, which finds nothing --
+/// and when it vectorizes the loop it leaves the length at -1 whenever the
+/// turns come out a multiple of the vector width.
 fn (self: &var Emitter) array_pop_element(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -726,22 +733,27 @@ fn (self: &var Emitter) array_pop_element(
     let held_synthetic = try self.next_synthetic_value("array.pop.held");
     let held = try self.percent(held_synthetic);
     try self.line2("  %s = icmp sgt i64 %s, 0", Arg::Str(held), Arg::Str(length));
+    let pop_label = try self.helper_label_local(into, "array.pop.take");
+    let empty_label = try self.helper_label_local(into, "array.pop.empty");
+    let join_label = try self.helper_label_local(into, "array.pop.join");
+    try self.mark_current_block_exit(module, join_label);
+    try self.line3(
+        "  br i1 %s, label %%%s, label %%%s", Arg::Str(held), Arg::Str(pop_label), Arg::Str(empty_label));
+    try self.line1("%s:", Arg::Str(pop_label));
     let shorter_synthetic = try self.next_synthetic_value("array.pop.shorter");
     let shorter = try self.percent(shorter_synthetic);
     try self.line2("  %s = sub i64 %s, 1", Arg::Str(shorter), Arg::Str(length));
-    let kept_synthetic = try self.next_synthetic_value("array.pop.kept");
-    let kept = try self.percent(kept_synthetic);
-    try self.line4(
-        "  %s = select i1 %s, i64 %s, i64 %s",
-        Arg::Str(kept), Arg::Str(held), Arg::Str(shorter), Arg::Str(length)
-    );
     let stored_tag = self.tbaa_tag(TbaaKind::Count);
     try self.line3(
-        "  store i64 %s, ptr %s%s", Arg::Str(kept), Arg::Str(length_addr), Arg::Lit(stored_tag));
-    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, kept);
-    try self.line3(
-        "  %s = select i1 %s, ptr %s, ptr null",
-        Arg::Str(into), Arg::Str(held), Arg::Str(elem_addr)
+        "  store i64 %s, ptr %s%s", Arg::Str(shorter), Arg::Str(length_addr), Arg::Lit(stored_tag));
+    let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, shorter);
+    try self.line1("  br label %%%s", Arg::Str(join_label));
+    try self.line1("%s:", Arg::Str(empty_label));
+    try self.line1("  br label %%%s", Arg::Str(join_label));
+    try self.line1("%s:", Arg::Str(join_label));
+    try self.line4(
+        "  %s = phi ptr [ %s, %%%s ], [ null, %%%s ]",
+        Arg::Str(into), Arg::Str(elem_addr), Arg::Str(pop_label), Arg::Str(empty_label)
     );
     return into;
 }

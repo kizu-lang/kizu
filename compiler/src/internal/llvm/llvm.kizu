@@ -74,7 +74,10 @@ fn emit_for_native_target(
         generation: 0,
         darwin_stack_probe: darwin,
         tbaa_used: false,
-        wrote_phi_value_mark: false
+        wrote_phi_value_mark: false,
+        aggregates: map::new<[]u8, ir::Name>(allocator),
+        wrote_aggregate_phi: false,
+        wrote_open_trap: false
     };
     defer emitter.deinit(allocator);
     if try emitter.emit_module(module) |failed| {
@@ -147,6 +150,17 @@ struct Emitter {
     // Records that the function being written named a phi value by its mark,
     // so only a body that holds one is walked for it; Go searches the body.
     wrote_phi_value_mark: bool,
+    // The field types of each optional and error union the module declares,
+    // as the text between the braces of its declaration, the Go `aggregates`.
+    aggregates: map::Map<[]u8, ir::Name>,
+    // Records that the function being written holds a phi of an optional or
+    // error union, so only such a body is split; Go searches the body.
+    wrote_aggregate_phi: bool,
+    // Records that the function being written trapped somewhere its block
+    // goes on after -- a panic.fail or a test failure, not a check's trap,
+    // which a label always follows -- so only such a body is searched for a
+    // tail; Go searches every body.
+    wrote_open_trap: bool,
 }
 
 /// Is what the emitter knows about one SSA value, the Go `valueInfo`: its
@@ -1082,6 +1096,8 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     self.entry_param_loads.clear();
     self.wrote_param_loads = false;
     self.wrote_phi_value_mark = false;
+    self.wrote_aggregate_phi = false;
+    self.wrote_open_trap = false;
     try self.precompute_niche_aliases(module, node);
     var return_type = try self.llvm_type_of(module, node.return_type);
     let return_text = ir::name_text(&module.names, node.return_type);
@@ -1135,9 +1151,28 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     var resolved = string::new(self.allocator);
     defer resolved.deinit(self.allocator);
     try self.resolve_phi_predecessors(module, body_start, &var resolved);
+    var reachable = string::new(self.allocator);
+    defer reachable.deinit(self.allocator);
+    let resolved_text = resolved.as_bytes();
+    if self.wrote_open_trap {
+        try drop_unreachable_tails(self.allocator, resolved_text, &var reachable);
+    } else {
+        try reachable.append_bytes(self.allocator, resolved_text);
+    }
+    var return_llvm = try self.names.copy(return_type);
+    defer return_llvm.deinit(self.allocator);
+    let return_llvm_bytes = return_llvm.as_bytes();
+    var unified = string::new(self.allocator);
+    defer unified.deinit(self.allocator);
+    let reachable_bytes = reachable.as_bytes();
+    try self.unify_aggregate_returns(reachable_bytes, return_llvm_bytes, &var unified);
+    var split = string::new(self.allocator);
+    defer split.deinit(self.allocator);
+    let unified_bytes = unified.as_bytes();
+    try self.split_aggregate_phis(unified_bytes, &var split);
     var hoisted = string::new(self.allocator);
     defer hoisted.deinit(self.allocator);
-    let resolved_bytes = resolved.as_bytes();
+    let resolved_bytes = split.as_bytes();
     if try hoist_allocas_to_entry(self.allocator, resolved_bytes, &var hoisted) |failed| {
         errdefer failed.deinit(self.allocator);
         let fn_name = try self.own(module, node.name);
@@ -2372,6 +2407,7 @@ fn (self: &var Emitter) write_optional_load_result(
         let absent_name = try self.names.intern(absent);
         try self.line1("  br label %%%s", Arg::Str(labels.join));
         try self.line1("%s:", Arg::Str(labels.join));
+        try self.note_phi_type(opt_type);
         try self.line6(
             "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]",
             Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(absent_name), Arg::Str(labels.fail), Arg::Str(ok_name), Arg::Str(labels.ok)

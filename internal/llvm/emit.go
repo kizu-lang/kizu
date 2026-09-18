@@ -68,6 +68,9 @@ type emitter struct {
 	entryParamLoads  []string
 	wroteParamLoads  bool
 	stackProbeMethod string
+	// aggregates names the field types of each optional and error union the
+	// module declares, which is what a phi of one is split along.
+	aggregates map[string][]string
 }
 
 type valueInfo struct {
@@ -472,10 +475,15 @@ func (e *emitter) writeErrorUnionTypes() {
 		if success == "void" {
 			fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
 				e.llvmErrorUnionTypeName(name), failureType)
+			e.rememberAggregate(e.llvmErrorUnionTypeName(name), "i8", failureType)
 			continue
 		}
 		fmt.Fprintf(&e.out, "%s = type { i8, %s, %s }\n",
 			e.llvmErrorUnionTypeName(name), e.llvmType(success), failureType)
+		if !e.occupiesNothing(success) {
+			e.rememberAggregate(
+				e.llvmErrorUnionTypeName(name), "i8", e.llvmType(success), failureType)
+		}
 	}
 	if len(names) > 0 {
 		e.out.WriteByte('\n')
@@ -494,6 +502,9 @@ func (e *emitter) writeOptionalTypes() {
 		elem, _ := optionalElemLLVM(name)
 		fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
 			e.llvmOptionalTypeName(name), e.llvmType(elem))
+		if !e.occupiesNothing(elem) {
+			e.rememberAggregate(e.llvmOptionalTypeName(name), "i8", e.llvmType(elem))
+		}
 		written++
 	}
 	if written > 0 {
@@ -958,7 +969,8 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	// Bytes, not String: String copies the whole buffer, and the buffer holds
 	// the module written so far, so taking one function body that way costs
 	// the module size once per function.
-	body := e.resolvePhiPredecessors(string(e.out.Bytes()[bodyStart:]))
+	body := dropUnreachableTails(e.resolvePhiPredecessors(string(e.out.Bytes()[bodyStart:])))
+	body = e.splitAggregatePhis(e.unifyAggregateReturns(body, returnType))
 	hoisted, err := hoistAllocasToEntry(body)
 	if err != nil {
 		return fmt.Errorf("llvm error: function `%s`: %w", fn.Name, err)

@@ -500,8 +500,9 @@ func TestEmitCheckedSliceLabelFeedsFollowingPhi(t *testing.T) {
 // later phi predecessors, the shape a Map.get feeding a branch produces.
 func TestEmitMapGetLabelFeedsFollowingPhi(t *testing.T) {
 	got := emitTestModule(t, mapGetPhiModule())
-	want := "%kizu.result = phi %kizu.opt.i64 [ %kizu.found, %kizu.found.array.join ], " +
-		"[ %kizu.fallback, %alt ]"
+	want := "%kizu.result.split1.f0 = phi i8 " +
+		"[ %kizu.result.split1.arm0.f0, %kizu.found.array.join ], " +
+		"[ %kizu.result.split1.arm1.f0, %alt ]"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring %q", got, want)
 	}
@@ -830,7 +831,7 @@ func TestEmitErrorUnionPropagatesCode(t *testing.T) {
 		"= insertvalue %kizu.error.void zeroinitializer, i8 0, 0",
 		"= insertvalue %kizu.error.void %kizu.try.err.",
 		"i64 %kizu.try.err.",
-		"ret %kizu.error.void %kizu.try.err.",
+		"= extractvalue %kizu.error.void %kizu.try.err.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)

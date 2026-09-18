@@ -485,10 +485,17 @@ func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
 }
 
 // arrayPopElement shortens the array by one and returns the address of the
-// element that left it, or null when there was none. The length is written
-// either way -- an empty array is written the length it already had -- so the
-// path a pop takes is two loads, a compare and a store rather than a call the
+// element that left it, or null when there was none. The length is read,
+// tested and written where the pop is, rather than behind a call the
 // optimizer cannot see the length change through.
+//
+// Only a pop that finds an element writes the length, which is the shape a
+// loop that pops until the array is empty needs to be understood whole: LLVM
+// folds such a loop into one store of zero. Writing the unchanged length on
+// the empty side as well reads the same, but LLVM 16 takes that form for a
+// count that falls on every turn -- the last one too, which finds nothing --
+// and when it vectorizes the loop it leaves the length at -1 whenever the
+// turns come out a multiple of the vector width.
 func (e *emitter) arrayPopElement(instr *ir.Instr, into string) (string, error) {
 	elem, err := e.instrElementType(instr)
 	if err != nil {
@@ -500,15 +507,23 @@ func (e *emitter) arrayPopElement(instr *ir.Instr, into string) (string, error) 
 	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s%s\n", length, lengthAddr, e.tbaaTag(tbaaCount))
 	held := "%" + e.nextSyntheticValue("array.pop.held")
 	fmt.Fprintf(&e.out, "  %s = icmp sgt i64 %s, 0\n", held, length)
+	popLabel := helperLabel(into, "array.pop.take")
+	emptyLabel := helperLabel(into, "array.pop.empty")
+	joinLabel := helperLabel(into, "array.pop.join")
+	e.markCurrentBlockExit(joinLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", held, popLabel, emptyLabel)
+	fmt.Fprintf(&e.out, "%s:\n", popLabel)
 	shorter := "%" + e.nextSyntheticValue("array.pop.shorter")
 	fmt.Fprintf(&e.out, "  %s = sub i64 %s, 1\n", shorter, length)
-	kept := "%" + e.nextSyntheticValue("array.pop.kept")
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, i64 %s, i64 %s\n", kept, held, shorter, length)
-	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", kept, lengthAddr, e.tbaaTag(tbaaCount))
-	elemAddr := e.arrayElementAddr(handle, elem, kept)
-	ptrName := into
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", ptrName, held, elemAddr)
-	return ptrName, nil
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", shorter, lengthAddr, e.tbaaTag(tbaaCount))
+	elemAddr := e.arrayElementAddr(handle, elem, shorter)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", emptyLabel)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
+	fmt.Fprintf(&e.out, "  %s = phi ptr [ %s, %%%s ], [ null, %%%s ]\n",
+		into, elemAddr, popLabel, emptyLabel)
+	return into, nil
 }
 
 // writeArrayPop lowers Array.pop().
