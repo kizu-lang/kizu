@@ -72,9 +72,13 @@ source.kizu
 言って落ち、後者はループがスタックを 1 回転ごとに食って guard page で死にます。
 命令の形は固定しません。
 
-その実行ファイルは build cache に残ります。鍵は LLVM IR・runtime object・
+その実行ファイルは build cache に残ります。鍵は LLVM IR・runtime の source・
 toolchain、つまり実行ファイルが**何でできているか**だけで、ファイル名も時刻も
 入りません。front end は数 ms なので毎回通り、そこから先の link を飛ばします。
+runtime object の鍵にはさらに `clang --version` の 1 行目が入ります。clang を
+替えても path と flag は同じなので、そこだけが古い object と新しい clang が作る
+object を区別します。この問い合わせは link するときだけで、cache にある実行
+ファイルを走らせるだけの `run` は toolchain に触れません。
 桁の目安は `kizu run examples/hello.kizu` で初回 ~0.5s(うち大半が clang の
 link)、2 回目以降 ~10ms —— 絶対値は host と clang によります。
 `build --target native` は逆に、利用者が名前を指定した成果物とその build 記録を

@@ -98,22 +98,37 @@ pub fn build(
     }
     var cache = try buildcache::new(io, allocator);
     defer cache.deinit(allocator);
+    var source = string::new(allocator);
+    defer source.deinit(allocator);
+    if try runtime_source_for(allocator, sets, &var source) |failed| {
+        return move failed;
+    }
+    let dir = try temps.claim_dir(io, allocator);
+    defer dir.deinit(allocator);
+    let dir_bytes = dir.as_bytes();
+    var version = string::new(allocator);
+    defer version.deinit(allocator);
+    if try linker_version(io, allocator, dir_bytes, options, &var version) |failed| {
+        errdefer failed.deinit(allocator);
+        try clean_build_dir(io, allocator, dir_bytes);
+        return move failed;
+    }
+    let version_bytes = version.as_bytes();
     var runtime_path = string::new(allocator);
     defer runtime_path.deinit(allocator);
-    if try runtime_object(io, allocator, temps, &var cache, options, host, sets, &var runtime_path) |failed| {
+    if try runtime_object(io, allocator, temps, &var cache, options, host, &source, version_bytes, &var runtime_path) |failed| {
+        errdefer failed.deinit(allocator);
+        try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
     }
     let output = options.output.as_bytes();
     let parent = path::dirname(output);
     try fsutil::create_dir_all(io, parent);
-    let dir = try temps.claim_dir(io, allocator);
-    defer dir.deinit(allocator);
-    let dir_bytes = dir.as_bytes();
     var command = array::new<string::String>(allocator);
     defer command.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
     let darwin = target_is_darwin(options, host);
-    if try link(io, allocator, dir_bytes, runtime_bytes, output, options, darwin, llvm_ir, &var command) |failed| {
+    if try link(io, allocator, dir_bytes, runtime_bytes, output, options, darwin, version_bytes, llvm_ir, &var command) |failed| {
         errdefer failed.deinit(allocator);
         try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
@@ -126,7 +141,9 @@ pub fn build(
 /// Returns an executable for one lowered program, linking it only when
 /// nothing has it yet, the Go `Executable`: the same IR linked against the
 /// same runtime by the same toolchain is the same executable however often
-/// it is asked for, and the cache is shared with the Go CLI.
+/// it is asked for, and the cache is shared with the Go CLI. The toolchain
+/// is asked nothing until there is something to build: a run that finds its
+/// executable already made needs no C toolchain at all.
 pub fn executable(
     io: Io,
     allocator: Allocator,
@@ -142,15 +159,15 @@ pub fn executable(
     }
     var cache = try buildcache::new(io, allocator);
     defer cache.deinit(allocator);
-    var runtime_path = string::new(allocator);
-    defer runtime_path.deinit(allocator);
-    if try runtime_object(io, allocator, temps, &var cache, options, host, sets, &var runtime_path) |failed| {
+    var source = string::new(allocator);
+    defer source.deinit(allocator);
+    if try runtime_source_for(allocator, sets, &var source) |failed| {
         return move failed;
     }
     var target_spelling = string::new(allocator);
     defer target_spelling.deinit(allocator);
-    let runtime_bytes = runtime_path.as_bytes();
-    try executable_cache_target(allocator, options, host, runtime_bytes, &var target_spelling);
+    let source_bytes = source.as_bytes();
+    try executable_cache_target(allocator, &cache, options, host, source_bytes, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
     let ir_bytes = llvm_ir.as_bytes();
     let plan = try cache.get_or_build_artifact(
@@ -174,10 +191,28 @@ pub fn executable(
             defer dir.deinit(allocator);
             let dir_bytes = dir.as_bytes();
             let scratch_bytes = scratch_copy.as_bytes();
+            var version = string::new(allocator);
+            defer version.deinit(allocator);
+            if try linker_version(io, allocator, dir_bytes, options, &var version) |failed| {
+                errdefer failed.deinit(allocator);
+                try cache.discard_artifact(io, allocator, move pending);
+                try clean_build_dir(io, allocator, dir_bytes);
+                return move failed;
+            }
+            let version_bytes = version.as_bytes();
+            var runtime_path = string::new(allocator);
+            defer runtime_path.deinit(allocator);
+            if try runtime_object(io, allocator, temps, &var cache, options, host, &source, version_bytes, &var runtime_path) |failed| {
+                errdefer failed.deinit(allocator);
+                try cache.discard_artifact(io, allocator, move pending);
+                try clean_build_dir(io, allocator, dir_bytes);
+                return move failed;
+            }
+            let runtime_bytes = runtime_path.as_bytes();
             var command = array::new<string::String>(allocator);
             defer command.deinit(allocator);
             let darwin = target_is_darwin(options, host);
-            if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, darwin, llvm_ir, &var command) |failed| {
+            if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, darwin, version_bytes, llvm_ir, &var command) |failed| {
                 errdefer failed.deinit(allocator);
                 try cache.discard_artifact(io, allocator, move pending);
                 try clean_build_dir(io, allocator, dir_bytes);
@@ -308,31 +343,39 @@ fn append_host_of(allocator: Allocator, answer: []u8, out: &var string::String) 
 }
 
 /// Spells what changes the runtime object but is not in its source, the Go
-/// `runtimeCacheTarget` over `toolchainKey`, `/`-joined in the same order.
+/// `runtimeCacheTarget` over `toolchainKey`, `/`-joined in the same order,
+/// then the clang's version line: the path and flags stay the same across an
+/// upgrade, and an object the old clang made must not be linked into what
+/// the new one builds.
 fn runtime_cache_target(allocator: Allocator,
     options: &Options,
     host: &string::String,
+    version: []u8,
     out: &var string::String
 ) -> !void {
     try out.append_bytes(allocator, "native-runtime");
-    return append_toolchain_key(allocator, options, host, out);
+    try append_toolchain_key(allocator, options, host, out);
+    try out.append_byte(allocator, cast<u8>(47));
+    return out.append_bytes(allocator, version);
 }
 
 /// Spells what the executable is made of besides the IR, the Go
-/// `executableCacheTarget`: the toolchain key and the runtime object's own
-/// stored name, so a program built against an older runtime is a different
-/// artifact rather than the same one.
+/// `executableCacheTarget`: the toolchain key and the hash of the runtime
+/// source it is linked with, so a program built against an older runtime is
+/// a different artifact rather than the same one. The clang's version is not
+/// part of it: an executable already made was linked whole by one clang, and
+/// asking which one would cost every run the toolchain it does not need.
 fn executable_cache_target(allocator: Allocator,
+    cache: &buildcache::Cache,
     options: &Options,
     host: &string::String,
-    runtime_path: []u8,
+    runtime_source: []u8,
     out: &var string::String
 ) -> !void {
     try out.append_bytes(allocator, "native-exe");
     try append_toolchain_key(allocator, options, host, out);
     try out.append_byte(allocator, cast<u8>(47));
-    let base = path::basename(runtime_path);
-    return out.append_bytes(allocator, base);
+    return cache.append_content_hash(allocator, runtime_source, out);
 }
 
 /// Appends the Go `toolchainKey` parts, `/`-joined: the driver, the host
@@ -402,14 +445,13 @@ fn link(
     output: []u8,
     options: &Options,
     darwin: bool,
+    version: []u8,
     llvm_ir: &string::String,
     command: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
     var module = string::new(allocator);
     defer module.deinit(allocator);
-    if try module_for_linker(io, allocator, dir, options, darwin, llvm_ir, &var module) |failed| {
-        return move failed;
-    }
+    try module_for_linker(allocator, darwin, version, llvm_ir, &var module);
     let ir_path = try path::join(allocator, dir, "main.ll");
     defer ir_path.deinit(allocator);
     let ir_bytes = ir_path.as_bytes();
@@ -419,28 +461,53 @@ fn link(
 }
 
 /// Writes the module as the linker is to compile it, the Go
-/// `moduleForLinker`: with Apple's stack probe when Apple's clang links a
-/// Darwin target. Every module is emitted asking for LLVM's own inline probe,
-/// with which a frame wider than a page touches each page it crosses; Apple's
-/// clang calls the system __chkstk_darwin helper instead, and before Apple
-/// clang 17 takes any other probe name for a function to call. The choice
-/// waits until the link so that the module, and the executable cache keyed by
-/// it, is the same whichever clang links it. std::process has no output
-/// capture, so the linker's answer goes through the build directory.
+/// `moduleForLinker`: with Apple's stack probe when Apple's clang, named by
+/// its version line, links a Darwin target. Every module is emitted asking
+/// for LLVM's own inline probe, with which a frame wider than a page touches
+/// each page it crosses; Apple's clang calls the system __chkstk_darwin
+/// helper instead, and before Apple clang 17 takes any other probe name for
+/// a function to call. The choice waits until the link so that the module,
+/// and the executable cache keyed by it, is the same whichever clang links it.
 fn module_for_linker(
+    allocator: Allocator,
+    darwin: bool,
+    version: []u8,
+    llvm_ir: &string::String,
+    out: &var string::String
+) -> !void {
+    let text = llvm_ir.as_bytes();
+    let inline_probe =
+        \\"probe-stack"="inline-asm"
+    ;
+    let apple_probe =
+        \\"probe-stack"="__chkstk_darwin"
+    ;
+    let apple = index_of(version, "Apple clang") orelse -1;
+    let at = index_of(text, inline_probe) orelse -1;
+    if !darwin or apple < 0 or at < 0 {
+        return out.append_bytes(allocator, text);
+    }
+    let size = mem::len(text);
+    try out.append_bytes(allocator, text[0..at]);
+    try out.append_bytes(allocator, apple_probe);
+    return out.append_bytes(allocator, text[at + mem::len(inline_probe)..size]);
+}
+
+/// Writes the line the linker names itself with, the Go `linkerVersion`: the
+/// first of its `--version` output, `Apple clang version 17.0.0
+/// (clang-1700.0.13.3)` or `clang version 21.1.8`, with the spaces, tabs and
+/// carriage return `strings.Trim` takes off either end. It is what tells one
+/// clang from another where the path and flags are the same: the runtime
+/// object is keyed by it, and the Darwin stack probe is chosen by it.
+/// std::process has no output capture, so the answer goes through the build
+/// directory.
+fn linker_version(
     io: Io,
     allocator: Allocator,
     dir: []u8,
     options: &Options,
-    darwin: bool,
-    llvm_ir: &string::String,
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
-    let text = llvm_ir.as_bytes();
-    if !darwin {
-        try out.append_bytes(allocator, text);
-        return null;
-    }
     let answer_path = try path::join(allocator, dir, "clang-version.txt");
     defer answer_path.deinit(allocator);
     var script = string::new(allocator);
@@ -463,24 +530,26 @@ fn module_for_linker(
     let answer_bytes = answer_path.as_bytes();
     let answer = try fs::read_file(io, allocator, answer_bytes, mem::Limit::Unlimited);
     defer answer.deinit(allocator);
-    let version = answer.as_bytes();
-    let inline_probe =
-        \\"probe-stack"="inline-asm"
-    ;
-    let apple_probe =
-        \\"probe-stack"="__chkstk_darwin"
-    ;
-    let apple = index_of(version, "Apple clang") orelse -1;
-    let at = index_of(text, inline_probe) orelse -1;
-    if apple < 0 or at < 0 {
-        try out.append_bytes(allocator, text);
-        return null;
+    let text = answer.as_bytes();
+    var end = 0;
+    while end < mem::len(text) and text[end] != cast<u8>(10) {
+        end = end + 1;
     }
-    let size = mem::len(text);
-    try out.append_bytes(allocator, text[0..at]);
-    try out.append_bytes(allocator, apple_probe);
-    try out.append_bytes(allocator, text[at + mem::len(inline_probe)..size]);
+    while end > 0 and is_trimmed(text[end - 1]) {
+        end = end - 1;
+    }
+    var start = 0;
+    while start < end and is_trimmed(text[start]) {
+        start = start + 1;
+    }
+    try out.append_bytes(allocator, text[start..end]);
     return null;
+}
+
+/// Reports whether a version line's end byte is one `strings.Trim` takes
+/// off: a space, a tab or a carriage return.
+fn is_trimmed(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(9) or byte == cast<u8>(13);
 }
 
 /// Rejects native build modes that do not have a concrete backend yet, the
@@ -511,11 +580,28 @@ fn validate_options(allocator: Allocator, options: &Options) -> !?diagnostic::Di
     return null;
 }
 
+/// Writes the runtime C source a program is linked with, the Go
+/// `runtimeSourceFor`: the runtime is part of the compiler, not part of the
+/// program, and the numbers it names failures with are read from std.
+fn runtime_source_for(
+    allocator: Allocator,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    if try require_runtime_error_sets(allocator, sets) |failed| {
+        return move failed;
+    }
+    try error_set_constants(allocator, sets, out);
+    try out.append_bytes(allocator, runtime_source());
+    return null;
+}
+
 /// Returns the compiled runtime to link, compiling it only when nothing
 /// has it yet, the Go `runtimeObject`: the object lives in the shared
-/// build cache under the toolchain key, so a runtime compiled by either
-/// CLI serves both. On a miss the source is compiled into the cache's
-/// scratch path through a claimed temporary directory.
+/// build cache under the toolchain key and the clang's version, so a
+/// runtime compiled by either CLI serves both. On a miss the source is
+/// compiled into the cache's scratch path through a claimed temporary
+/// directory.
 fn runtime_object(
     io: Io,
     allocator: Allocator,
@@ -523,19 +609,13 @@ fn runtime_object(
     cache: &var buildcache::Cache,
     options: &Options,
     host: &string::String,
-    sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
+    source: &string::String,
+    version: []u8,
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
-    if try require_runtime_error_sets(allocator, sets) |failed| {
-        return move failed;
-    }
-    var source = string::new(allocator);
-    defer source.deinit(allocator);
-    try error_set_constants(allocator, sets, &var source);
-    try source.append_bytes(allocator, runtime_source());
     var target_spelling = string::new(allocator);
     defer target_spelling.deinit(allocator);
-    try runtime_cache_target(allocator, options, host, &var target_spelling);
+    try runtime_cache_target(allocator, options, host, version, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
     let source_bytes = source.as_bytes();
     let plan = try cache.get_or_build_artifact(
@@ -559,7 +639,7 @@ fn runtime_object(
             defer dir.deinit(allocator);
             let dir_bytes = dir.as_bytes();
             let scratch_bytes = scratch_copy.as_bytes();
-            if try compile_runtime(io, allocator, dir_bytes, &source, scratch_bytes, options) |failed| {
+            if try compile_runtime(io, allocator, dir_bytes, source, scratch_bytes, options) |failed| {
                 errdefer failed.deinit(allocator);
                 try cache.discard_artifact(io, allocator, move pending);
                 try clean_build_dir(io, allocator, dir_bytes);
