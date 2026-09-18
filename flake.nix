@@ -3,15 +3,22 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+    # The clang the shell builds native programs with comes from a newer
+    # release than the rest. 24.05's is LLVM 16, whose arm64 backend writes no
+    # stack probe, which the coroutine guards rely on, and whose code for the
+    # same IR runs over a tenth slower in places than LLVM 21's -- the LLVM
+    # rustc carries, which is what the benchmarks against Rust compare with.
+    nixpkgs-llvm.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
-    { self, nixpkgs, flake-utils, ... }:
+    { self, nixpkgs, nixpkgs-llvm, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
+        llvm = import nixpkgs-llvm { inherit system; };
       in
       {
         # `nix build` / `nix run` produce the same <prefix>/bin + <prefix>/lib
@@ -35,7 +42,7 @@
           '';
         };
 
-        devShells.default = pkgs.mkShell {
+        devShells.default = (pkgs.mkShell.override { stdenv = llvm.llvmPackages_21.stdenv; }) {
           packages = [
             pkgs.go_1_22
             pkgs.golangci-lint

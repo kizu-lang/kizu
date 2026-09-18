@@ -349,9 +349,9 @@ func emitNativeFile(args []string) error {
 	return nil
 }
 
-// nativeTargetIsDarwin identifies the stack-probe ABI selected by the native
-// target. An omitted triple names the host; explicit Apple Darwin and macOS
-// triples use the same system helper.
+// nativeTargetIsDarwin reports whether the native target is Darwin, whose
+// functions keep frame records. An omitted triple names the host; explicit
+// Apple Darwin and macOS triples name Darwin too.
 func nativeTargetIsDarwin(triple string) bool {
 	if triple == "" {
 		return runtime.GOOS == "darwin"
