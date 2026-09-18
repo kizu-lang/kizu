@@ -45,9 +45,57 @@ struct PhiParts {
     arms_start: i64,
 }
 
-/// The longest body whose returns are gathered, the Go `inlinableBodyLines`.
+/// The longest body whose returns are gathered when more than one place names
+/// the function, the Go `inlinableBodyLines`: LLVM copies a function one
+/// place calls into that caller whatever its size.
 fn inlinable_body_lines() -> i64 {
     return 100;
+}
+
+/// Counts the places in the module that name each function, the Go
+/// `countReferences`: a call, a call a cleanup makes, or taking its address.
+fn (self: &var Emitter) count_references(module: &ir::Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if ir::is_empty(instr_node.extern_abi) {
+                    try self.count_reference(module, instr_node.op, instr_node.operand);
+                }
+                var cleanup_index = 0;
+                while instr_node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if ir::is_empty(cleanup.extern_abi) {
+                        try self.count_reference(module, cleanup.op, cleanup.operand);
+                    }
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Counts the function one operation names, if it names one, the Go
+/// `countReference`.
+fn (self: &var Emitter) count_reference(module: &ir::Module, op: ir::Op, operand: ir::Name) -> !void {
+    if op != ir::Op::Call and op != ir::Op::FuncAddr {
+        return;
+    }
+    let retained = ir::name_text(&module.names, operand);
+    let bytes = retained.as_bytes();
+    if self.references.at_mut(bytes) |count| {
+        count.* = count.* + 1;
+        return;
+    }
+    return self.references.insert(self.allocator, bytes, 1);
 }
 
 /// The block every return of an aggregate goes through once the returns are
@@ -365,13 +413,19 @@ fn (self: &Emitter) aggregate_fields(name: []u8, fields: &var array::Array<LineS
 /// Gathers the returns of a function that answers an optional or error union
 /// from more than one place into one return, built from one phi per field,
 /// the Go `unifyAggregateReturns`.
-fn (self: &var Emitter) unify_aggregate_returns(body: []u8, return_type: []u8, out: &var string::String) -> !void {
+fn (self: &var Emitter) unify_aggregate_returns(
+    body: []u8,
+    name: []u8,
+    return_type: []u8,
+    out: &var string::String
+) -> !void {
     var fields = array::new<LineSpan>(self.allocator);
     defer fields.deinit(self.allocator);
     var field_text = string::new(self.allocator);
     defer field_text.deinit(self.allocator);
     let known = try self.aggregate_fields(return_type, &var fields, &var field_text);
-    if !known or more_lines_than(body, inlinable_body_lines()) {
+    let one_caller = (self.references.get(name) orelse 0) == 1;
+    if !known or (!one_caller and more_lines_than(body, inlinable_body_lines())) {
         return out.append_bytes(self.allocator, body);
     }
     var prefix = try string::from_bytes(self.allocator, "  ret ");

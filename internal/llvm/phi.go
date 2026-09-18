@@ -277,12 +277,48 @@ func splitOnePhi(
 	return splitPhi{phis: phis, builds: builds}
 }
 
-// inlinableBodyLines is the longest body whose returns are gathered. What the
-// gathering buys is paid back when LLVM copies the function into a caller,
-// and a body past this is past what LLVM copies at -O3; every return it
-// gathers there costs a read of each field and an arm of each phi, for a
-// merge the optimizer never gets to see from the caller's side.
+// inlinableBodyLines is the longest body whose returns are gathered when more
+// than one place names the function. What the gathering buys is paid back
+// when LLVM copies the function into a caller, and a body past this is past
+// what LLVM copies at -O3; every return it gathers there costs a read of each
+// field and an arm of each phi, for a merge the optimizer never gets to see
+// from the caller's side. A function one place calls is the exception: LLVM
+// copies it into that caller whatever its size. A builder that appends a known
+// number of elements and answers !void is the usual one, and returned whole,
+// its success met its failures in one phi, so the caller never learned that
+// the array came back with exactly the elements it appended.
 const inlinableBodyLines = 100
+
+// countReferences records how many places in the module name each function:
+// a call, a call a cleanup makes, or taking its address.
+func (e *emitter) countReferences() {
+	e.references = map[string]int{}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.ExternABI == "" {
+					e.countReference(instr.Op)
+				}
+				for _, cleanup := range instr.Cleanups {
+					if cleanup.ExternABI == "" {
+						e.countReference(cleanup.Op)
+					}
+				}
+			}
+		}
+	}
+}
+
+// countReference counts the function one operation names, if it names one.
+func (e *emitter) countReference(op string) {
+	if name, ok := strings.CutPrefix(op, "func.addr."); ok {
+		e.references[name]++
+		return
+	}
+	if name, ok := strings.CutPrefix(op, "call."); ok && op != "call.indirect" {
+		e.references[name]++
+	}
+}
 
 // returnJoinLabel names the block every return of an aggregate goes through
 // once the returns are gathered into one.
@@ -296,9 +332,9 @@ const returnJoinLabel = "kizu.return.join"
 // to take apart and which nothing downstream can fold. Returned through one
 // block that assembles the fields, they meet as the fields, and the caller's
 // reads of them fold into the arms they came from.
-func (e *emitter) unifyAggregateReturns(body string, returnType string) string {
+func (e *emitter) unifyAggregateReturns(body string, name string, returnType string) string {
 	fields, ok := e.aggregateFields(returnType)
-	if !ok || strings.Count(body, "\n") > inlinableBodyLines {
+	if !ok || (e.references[name] != 1 && strings.Count(body, "\n") > inlinableBodyLines) {
 		return body
 	}
 	prefix := "  ret " + returnType + " "

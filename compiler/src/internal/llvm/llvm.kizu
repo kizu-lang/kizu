@@ -75,6 +75,7 @@ fn emit_for_native_target(
         tbaa_used: false,
         wrote_phi_value_mark: false,
         aggregates: map::new<[]u8, ir::Name>(allocator),
+        references: map::new<[]u8, i64>(allocator),
         wrote_aggregate_phi: false,
         wrote_open_trap: false
     };
@@ -152,6 +153,9 @@ struct Emitter {
     // The field types of each optional and error union the module declares,
     // as the text between the braces of its declaration, the Go `aggregates`.
     aggregates: map::Map<[]u8, ir::Name>,
+    // Counts the places that name each function (phi.kizu), the Go
+    // `references`.
+    references: map::Map<[]u8, i64>,
     // Records that the function being written holds a phi of an optional or
     // error union, so only such a body is split; Go searches the body.
     wrote_aggregate_phi: bool,
@@ -685,6 +689,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
         return move failed;
     }
     try self.collect_function_names(module);
+    try self.count_references(module);
     try self.collect_strings(module);
     if try self.validate_module_types(module) |failed| {
         return move failed;
@@ -1164,7 +1169,7 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     var unified = string::new(self.allocator);
     defer unified.deinit(self.allocator);
     let reachable_bytes = reachable.as_bytes();
-    try self.unify_aggregate_returns(reachable_bytes, return_llvm_bytes, &var unified);
+    try self.unify_aggregate_returns(reachable_bytes, name_bytes, return_llvm_bytes, &var unified);
     var split = string::new(self.allocator);
     defer split.deinit(self.allocator);
     let unified_bytes = unified.as_bytes();
