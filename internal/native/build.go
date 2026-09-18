@@ -96,11 +96,58 @@ func link(runtimePath string, output string, options Options) ([]string, error) 
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
+	llvmIR, err := moduleForLinker(options)
+	if err != nil {
+		return nil, err
+	}
 	irPath := filepath.Join(tmp, "main.ll")
-	if err := os.WriteFile(irPath, []byte(options.LLVMIR), 0o644); err != nil {
+	if err := os.WriteFile(irPath, []byte(llvmIR), 0o644); err != nil {
 		return nil, err
 	}
 	return runClang(irPath, runtimePath, output, options)
+}
+
+// The stack probe a module asks for, as the emitter writes it and as Apple's
+// clang wants it on Darwin. A frame wider than a page touches each page it
+// crosses with the probe, which is what the coroutine guards rely on. Every
+// module is emitted asking for LLVM's own inline probe; Apple's clang is the
+// one toolchain that wants another. On arm64 Darwin it calls the system
+// __chkstk_darwin helper, and before Apple clang 17 it takes any other probe
+// name for a function to call, so the module would not link. Upstream LLVM
+// writes the inline probe and stops at the helper's name.
+const (
+	inlineStackProbe = `"probe-stack"="inline-asm"`
+	appleStackProbe  = `"probe-stack"="__chkstk_darwin"`
+)
+
+// moduleForLinker returns the module as the linker is to compile it: with
+// Apple's stack probe when Apple's clang links a Darwin target. The choice
+// waits until the link so that the module, and the executable cache keyed by
+// it, is the same whichever clang links it, and a run that finds its
+// executable already made has no toolchain to ask.
+func moduleForLinker(options Options) (string, error) {
+	if !TargetIsDarwin(options.Triple) {
+		return options.LLVMIR, nil
+	}
+	out, err := exec.Command(options.Linker, "--version").Output()
+	if err != nil {
+		return "", fmt.Errorf("native error: %s --version failed: %w", options.Linker, err)
+	}
+	if !strings.Contains(string(out), "Apple clang") {
+		return options.LLVMIR, nil
+	}
+	return strings.Replace(options.LLVMIR, inlineStackProbe, appleStackProbe, 1), nil
+}
+
+// TargetIsDarwin reports whether a native target triple names Darwin. An
+// omitted triple names the host; explicit Apple Darwin and macOS triples name
+// Darwin too.
+func TargetIsDarwin(triple string) bool {
+	if triple == "" {
+		return runtime.GOOS == "darwin"
+	}
+	lower := strings.ToLower(triple)
+	return strings.Contains(lower, "darwin") || strings.Contains(lower, "macos")
 }
 
 // validateOptions rejects native build modes that do not have a concrete backend yet.

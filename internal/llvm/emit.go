@@ -15,28 +15,23 @@ import (
 
 // Emit formats a typed SSA IR module as LLVM IR.
 func Emit(module *ir.Module) (string, error) {
-	return emit(module, "inline-asm")
+	return emit(module, false)
 }
 
-// EmitNative formats a module for the native target. Darwin's LLVM backend
-// has long exposed stack probing through the system __chkstk_darwin helper;
-// other shipped targets use LLVM's inline probe implementation.
+// EmitNative formats a module for the native target, which on Darwin keeps a
+// frame record in every function that calls.
 func EmitNative(module *ir.Module, darwin bool) (string, error) {
-	method := "inline-asm"
-	if darwin {
-		method = "__chkstk_darwin"
-	}
-	return emit(module, method)
+	return emit(module, darwin)
 }
 
-// emit formats a module with the stack-probe method selected by its caller.
-func emit(module *ir.Module, stackProbeMethod string) (string, error) {
+// emit formats a module, with frame records when frameRecords is set.
+func emit(module *ir.Module, frameRecords bool) (string, error) {
 	e := &emitter{
-		module:           module,
-		types:            typ.NewTable(),
-		strings:          map[string]string{},
-		values:           map[string]valueInfo{},
-		stackProbeMethod: stackProbeMethod,
+		module:       module,
+		types:        typ.NewTable(),
+		strings:      map[string]string{},
+		values:       map[string]valueInfo{},
+		frameRecords: frameRecords,
 	}
 	if err := e.emit(); err != nil {
 		return "", err
@@ -64,10 +59,10 @@ type emitter struct {
 	niches         map[string]ir.Value
 	// tbaaUsed records that a load or store named a type-based alias tag,
 	// so the module ends with the tag table (tbaa.go).
-	tbaaUsed         bool
-	entryParamLoads  []string
-	wroteParamLoads  bool
-	stackProbeMethod string
+	tbaaUsed        bool
+	entryParamLoads []string
+	wroteParamLoads bool
+	frameRecords    bool
 	// aggregates names the field types of each optional and error union the
 	// module declares, which is what a phi of one is split along.
 	aggregates map[string][]string
@@ -249,18 +244,21 @@ func (e *emitter) writeHeader() {
 	e.writeTryDecls()
 	// The shared attribute makes large frames touch each page before they can
 	// cross a coroutine guard. Small frames receive no added instructions.
+	// The probe asked for is LLVM's own inline one; a Darwin link by Apple's
+	// clang, which wants its system helper instead, swaps it
+	// (native.moduleForLinker).
 	// Darwin's arm64 ABI has every function that calls keep a frame record,
 	// which is what its unwinders and profilers walk; its compilers keep one
 	// by default, and code without one also runs a call-heavy recursion
 	// measurably slower there.
 	framePointer := ""
-	if e.stackProbeMethod == "__chkstk_darwin" {
+	if e.frameRecords {
 		framePointer = "\"frame-pointer\"=\"non-leaf\" "
 	}
 	fmt.Fprintf(&e.out,
-		"attributes #0 = { %s\"probe-stack\"=\"%s\" "+
+		"attributes #0 = { %s\"probe-stack\"=\"inline-asm\" "+
 			"\"stack-probe-size\"=\"4096\" }\n\n",
-		framePointer, e.stackProbeMethod,
+		framePointer,
 	)
 }
 

@@ -328,7 +328,7 @@ func emitNativeFile(args []string) error {
 		return err
 	}
 	ir.KeepTargetReachableFunctions(module, "", "main")
-	llvmIR, err := llvm.EmitNative(module, nativeTargetIsDarwin(options.Triple))
+	llvmIR, err := llvm.EmitNative(module, native.TargetIsDarwin(options.Triple))
 	if err != nil {
 		return err
 	}
@@ -347,17 +347,6 @@ func emitNativeFile(args []string) error {
 	}
 	_, _ = fmt.Println(options.Output)
 	return nil
-}
-
-// nativeTargetIsDarwin identifies the stack-probe ABI selected by the native
-// target. An omitted triple names the host; explicit Apple Darwin and macOS
-// triples use the same system helper.
-func nativeTargetIsDarwin(triple string) bool {
-	if triple == "" {
-		return runtime.GOOS == "darwin"
-	}
-	lower := strings.ToLower(triple)
-	return strings.Contains(lower, "darwin") || strings.Contains(lower, "macos")
 }
 
 // parseOptFileArgs parses an optional --opt flag followed by one file path.

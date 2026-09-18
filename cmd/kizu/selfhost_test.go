@@ -1236,9 +1236,11 @@ func runNativeCLIAtEnv(
 
 // clangNoise matches the toolchain lines the Go CLI captures and discards
 // on success, which the selfhost CLI lets through because std::process
-// inherits the child's streams.
+// inherits the child's streams. A clang wrapper that adds include paths to
+// every command also has clang say it did not use them on an IR input.
 var clangNoise = regexp.MustCompile(
-	`^(warning: overriding the module target triple .*|\d+ warnings? generated\.)$`)
+	`^(warning: overriding the module target triple .*|\d+ warnings? generated\.|` +
+		`clang: warning: argument unused during compilation: .*)$`)
 
 // selfhostNativeStderr drops what only the selfhost path prints on stderr:
 // the inherited toolchain noise the Go CLI captures and discards.
