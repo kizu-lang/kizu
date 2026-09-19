@@ -25,6 +25,13 @@ std::math::log10(value: f64) -> f64
 std::math::pow(base: f64, exponent: f64) -> f64
 std::math::fmod(value: f64, divisor: f64) -> f64
 std::math::ldexp(fraction: f64, exponent: i64) -> f64
+std::math::sin(value: f64) -> f64
+std::math::cos(value: f64) -> f64
+std::math::tan(value: f64) -> f64
+std::math::asin(value: f64) -> f64
+std::math::acos(value: f64) -> f64
+std::math::atan(value: f64) -> f64
+std::math::atan2(y: f64, x: f64) -> f64
 std::math::pi() -> f64
 std::math::tau() -> f64
 std::math::e() -> f64
@@ -70,14 +77,23 @@ trusted primitive です。backend はそれぞれを 1 命令(LLVM intrinsic、
 - `ldexp` は `fraction * 2^exponent` で、範囲を超えれば無限大か 0、正規化数の
   下は 1 回だけ丸めて非正規化数にします。
 
+三角関数は Cephes の算法(これも Go と同じ)です。引数が 2^29 未満なら 3 つに
+分けた pi/4 を引いて円の 8 分の 1 に落とし、それ以上なら 4/pi を 1217 bit 持った
+Payne–Hanek reduction で落とすので、`sin(1e22)` も `sin(1e300)` も正しい値です。
+
+- `sin` / `cos` / `tan` は radian を取り、無限大に NaN を返します。
+- `asin` / `acos` は [-1, 1] の外に NaN、`atan` は [-pi/2, pi/2] を返します。
+- `atan2(y, x)` は点 (x, y) の角度を (-pi, pi] で返し、象限を両方の符号から
+  決めます(`atan2(1, -1)` は 3pi/4)。0 と無限大の組は C の `atan2` と同じです。
+
 `cmd/kizu` の `TestMath` が Go の `math` と数千の値で突き合わせ、native と wasm の
 両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作は Go と一致し、
-残りは 1 ulp 以内です(Go は arm64 で乗算と加算を 1 回の丸めに融合するので、
-最後の bit が動くことがあります)。
+残りは 1 ulp 以内(`tan` は逆数を取るので 2 ulp)です。Go は arm64 で乗算と加算を
+1 回の丸めに融合するので、最後の bit が動くことがあります。
 
 ## まだ無いもの
 
-- `sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2`、双曲線関数
+- 双曲線関数 `sinh` / `cosh` / `tanh` とその逆関数
 - `frexp` / `modf`(値を 2 つ返す形が決まってから)
 - 偶数丸めの `round_even`、`fma`、`cbrt`
 - `f32` 版

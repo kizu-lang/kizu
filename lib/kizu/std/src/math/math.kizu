@@ -764,3 +764,400 @@ fn inv_ln2() -> f64 { return 1.44269504088896340736; }
 fn inv_ln10() -> f64 { return 0.43429448190325182765; }
 
 fn sqrt2_half() -> f64 { return 0.70710678118654752440; }
+
+// ---------------------------------------------------------------------------
+// Trigonometry.
+//
+// These follow the Cephes algorithms as Go's math package spells them. An
+// argument below 2^29 is reduced to an octant of the circle with pi/4 split
+// into three parts; a larger one goes through Payne-Hanek reduction against
+// 1217 bits of 4/pi, which is enough for the largest float. Each answers
+// within one unit in the last place, and the same bits on every target.
+
+// A reduced angle: the octant j of x / (pi/4) modulo 8, and what is left
+// of x past j * pi/4.
+struct Octant {
+    j: u64,
+    z: f64,
+}
+
+// sin returns the sine of value in radians. An infinity gives NaN.
+pub fn sin(value: f64) -> f64 {
+    if value == 0.0 or float::is_nan(value) {
+        return value;
+    }
+    if float::is_infinite(value) {
+        return nan();
+    }
+    var sign = false;
+    var x = value;
+    if x < 0.0 {
+        x = -x;
+        sign = true;
+    }
+    let octant = reduce_octant(x);
+    var j = octant.j;
+    let z = octant.z;
+    // Reflect in the x axis.
+    if j > 3 {
+        sign = !sign;
+        j = j - 4;
+    }
+    let zz = z * z;
+    var y = 0.0;
+    if j == 1 or j == 2 {
+        y = cos_kernel(zz);
+    } else {
+        y = sin_kernel(z, zz);
+    }
+    if sign {
+        y = -y;
+    }
+    return y;
+}
+
+// cos returns the cosine of value in radians. An infinity gives NaN.
+pub fn cos(value: f64) -> f64 {
+    if float::is_nan(value) or float::is_infinite(value) {
+        return nan();
+    }
+    var sign = false;
+    let octant = reduce_octant(abs(value));
+    var j = octant.j;
+    let z = octant.z;
+    if j > 3 {
+        j = j - 4;
+        sign = !sign;
+    }
+    if j > 1 {
+        sign = !sign;
+    }
+    let zz = z * z;
+    var y = 0.0;
+    if j == 1 or j == 2 {
+        y = sin_kernel(z, zz);
+    } else {
+        y = cos_kernel(zz);
+    }
+    if sign {
+        y = -y;
+    }
+    return y;
+}
+
+// tan returns the tangent of value in radians. An infinity gives NaN.
+pub fn tan(value: f64) -> f64 {
+    if value == 0.0 or float::is_nan(value) {
+        return value;
+    }
+    if float::is_infinite(value) {
+        return nan();
+    }
+    var sign = false;
+    var x = value;
+    if x < 0.0 {
+        x = -x;
+        sign = true;
+    }
+    let octant = reduce_octant(x);
+    let j = octant.j;
+    let z = octant.z;
+    let zz = z * z;
+    var y = z;
+    if zz > 1e-14 {
+        let p = ((-1.30936939181383777646e4 * zz) + 1.15351664838587416140e6) * zz - 1.79565251976484877988e7;
+        let q = (((zz + 1.36812963470692954678e4) * zz - 1.32089234440210967447e6) * zz + 2.50083801823357915839e7) * zz - 5.38695755929454629881e7;
+        y = z + z * (zz * p / q);
+    }
+    if j & 2 == 2 {
+        y = -1.0 / y;
+    }
+    if sign {
+        y = -y;
+    }
+    return y;
+}
+
+// sin_kernel is the sine of a reduced angle z, with zz = z * z.
+fn sin_kernel(z: f64, zz: f64) -> f64 {
+    let s0 = 1.58962301576546568060e-10;
+    let s1 = -2.50507477628578072866e-8;
+    let s2 = 2.75573136213857245213e-6;
+    let s3 = -1.98412698295895385996e-4;
+    let s4 = 8.33333333332211858878e-3;
+    let s5 = -1.66666666666666307295e-1;
+    return z + z * zz * (((((s0 * zz + s1) * zz + s2) * zz + s3) * zz + s4) * zz + s5);
+}
+
+// cos_kernel is the cosine of a reduced angle whose square is zz.
+fn cos_kernel(zz: f64) -> f64 {
+    let c0 = -1.13585365213876817300e-11;
+    let c1 = 2.08757008419747316778e-9;
+    let c2 = -2.75573141792967388112e-7;
+    let c3 = 2.48015872888517045348e-5;
+    let c4 = -1.38888888888730564116e-3;
+    let c5 = 4.16666666666665929218e-2;
+    return 1.0 - 0.5 * zz + zz * zz * (((((c0 * zz + c1) * zz + c2) * zz + c3) * zz + c4) * zz + c5);
+}
+
+// reduce_octant splits a non-negative x into the octant of x / (pi/4) and
+// the remainder: below 2^29 by subtracting a three-part pi/4, above it by
+// Payne-Hanek reduction. An odd octant is mapped to the even one after it
+// so that the remainder is centred on zero.
+fn reduce_octant(x: f64) -> Octant {
+    if x >= 536870912.0 {
+        return reduce_octant_huge(x);
+    }
+    let pi4_a = 7.85398125648498535156e-1;
+    let pi4_b = 3.77489470793079817668e-8;
+    let pi4_c = 2.69515142907905952645e-15;
+    var j = cast<u64>(x * four_over_pi());
+    var y = cast<f64>(j);
+    if j & 1 == 1 {
+        j = j + 1;
+        y = y + 1.0;
+    }
+    j = j & 7;
+    let z = ((x - y * pi4_a) - y * pi4_b) - y * pi4_c;
+    return Octant { j: j, z: z };
+}
+
+// reduce_octant_huge is Payne-Hanek reduction of x >= pi/4 by pi/4: the
+// mantissa of x is multiplied by the digits of 4/pi that matter at x's
+// exponent, in 64-bit pieces, and the integer and fractional parts are read
+// off the product. From "Argument Reduction for Huge Arguments: Good to the
+// Last Bit", K. C. Ng et al, 1992.
+fn reduce_octant_huge(x: f64) -> Octant {
+    if x < pi_over_4() {
+        return Octant { j: 0, z: x };
+    }
+    // x = ix * 2^exp with the hidden bit made explicit.
+    var ix = float::bits(x);
+    let exp = cast<i64>((ix >> 52) & 2047) - 1023 - 52;
+    ix = (ix & 0x000fffffffffffff) | 0x0010000000000000;
+    // The three digits of 4/pi at which the product's leading digit has
+    // exponent -61; exp is at least -53 and below 971.
+    let digit = cast<u64>((exp + 61) / 64);
+    let bitshift = cast<u64>((exp + 61) % 64);
+    let z0 = (four_over_pi_digit(digit) << bitshift) | (four_over_pi_digit(digit + 1) >> (64 - bitshift));
+    let z1 = (four_over_pi_digit(digit + 1) << bitshift) | (four_over_pi_digit(digit + 2) >> (64 - bitshift));
+    let z2 = (four_over_pi_digit(digit + 2) << bitshift) | (four_over_pi_digit(digit + 3) >> (64 - bitshift));
+    // Multiply the mantissa by the digits and keep the upper two words.
+    let z2hi = mul64_high(z2, ix);
+    let z1hi = mul64_high(z1, ix);
+    let z1lo = z1 * ix;
+    let z0lo = z0 * ix;
+    let lo = z1lo + z2hi;
+    var carry = cast<u64>(0);
+    if lo < z1lo {
+        carry = 1;
+    }
+    var hi = z0lo + z1hi + carry;
+    // The top 3 bits are the octant; the rest is the fraction.
+    var j = hi >> 61;
+    hi = (hi << 3) | (lo >> 61);
+    let lz = leading_zeros(hi);
+    let e = cast<u64>(1023) - (lz + 1);
+    hi = (hi << (lz + 1)) | (lo >> (64 - (lz + 1)));
+    hi = hi >> 12;
+    hi = hi | (e << 52);
+    var z = float::from_bits(hi);
+    if j & 1 == 1 {
+        j = j + 1;
+        j = j & 7;
+        z = z - 1.0;
+    }
+    return Octant { j: j, z: z * pi_over_4() };
+}
+
+// mul64_high returns the upper 64 bits of the 128-bit product of a and b.
+fn mul64_high(a: u64, b: u64) -> u64 {
+    let mask32 = cast<u64>(0xffffffff);
+    let a0 = a & mask32;
+    let a1 = a >> 32;
+    let b0 = b & mask32;
+    let b1 = b >> 32;
+    let w0 = a0 * b0;
+    let t = a1 * b0 + (w0 >> 32);
+    var w1 = t & mask32;
+    let w2 = t >> 32;
+    w1 = w1 + a0 * b1;
+    return a1 * b1 + w2 + (w1 >> 32);
+}
+
+// leading_zeros returns the number of leading zero bits in value, 64 for 0.
+fn leading_zeros(value: u64) -> u64 {
+    var count = cast<u64>(0);
+    var rest = value;
+    var width = cast<u64>(32);
+    while width > 0 {
+        if rest >> (64 - width) == 0 {
+            count = count + width;
+            rest = rest << width;
+        }
+        width = width >> 1;
+    }
+    if rest == 0 {
+        return 64;
+    }
+    return count;
+}
+
+// four_over_pi_digit returns the index-th 64-bit digit of 4/pi, so that
+// 4/pi is the sum of digit(i) * 2^(-64 i): 19 digits and the leading one
+// give 1217 bits, enough for the largest float exponent.
+fn four_over_pi_digit(index: u64) -> u64 {
+    if index == 0 { return 0x0000000000000001; }
+    if index == 1 { return word64(0x45f306dc, 0x9c882a53); }
+    if index == 2 { return word64(0xf84eafa3, 0xea69bb81); }
+    if index == 3 { return word64(0xb6c52b32, 0x78872083); }
+    if index == 4 { return word64(0xfca2c757, 0xbd778ac3); }
+    if index == 5 { return word64(0x6e48dc74, 0x849ba5c0); }
+    if index == 6 { return word64(0x0c925dd4, 0x13a32439); }
+    if index == 7 { return word64(0xfc3bd639, 0x62534e7d); }
+    if index == 8 { return word64(0xd1046bea, 0x5d768909); }
+    if index == 9 { return word64(0xd338e04d, 0x68befc82); }
+    if index == 10 { return word64(0x7323ac73, 0x06a673e9); }
+    if index == 11 { return word64(0x3908bf17, 0x7bf25076); }
+    if index == 12 { return word64(0x3ff12fff, 0xbc0b301f); }
+    if index == 13 { return word64(0xde5e2316, 0xb414da3e); }
+    if index == 14 { return word64(0xda6cfd9e, 0x4f96136e); }
+    if index == 15 { return word64(0x9e8c7ecd, 0x3cbfd45a); }
+    if index == 16 { return word64(0xea4f758f, 0xd7cbe2f6); }
+    if index == 17 { return word64(0x7a0e73ef, 0x14a525d4); }
+    if index == 18 { return word64(0xd7f6bf62, 0x3f1aba10); }
+    if index == 19 { return word64(0xac06608d, 0xf8f6d757); }
+    return 0;
+}
+
+// word64 joins two 32-bit halves, since a literal cannot exceed the i64
+// range.
+fn word64(high: u64, low: u64) -> u64 {
+    return (high << 32) | low;
+}
+
+// asin returns the arc sine of value, in [-pi/2, pi/2]. A value outside
+// [-1, 1] gives NaN.
+pub fn asin(value: f64) -> f64 {
+    if value == 0.0 {
+        return value;
+    }
+    var sign = false;
+    var x = value;
+    if x < 0.0 {
+        x = -x;
+        sign = true;
+    }
+    if x > 1.0 {
+        return nan();
+    }
+    var temp = sqrt(1.0 - x * x);
+    if x > 0.7 {
+        temp = pi_over_2() - atan_positive(temp / x);
+    } else {
+        temp = atan_positive(x / temp);
+    }
+    if sign {
+        temp = -temp;
+    }
+    return temp;
+}
+
+// acos returns the arc cosine of value, in [0, pi]. A value outside [-1, 1]
+// gives NaN.
+pub fn acos(value: f64) -> f64 {
+    return pi_over_2() - asin(value);
+}
+
+// atan returns the arc tangent of value, in [-pi/2, pi/2].
+pub fn atan(value: f64) -> f64 {
+    if value == 0.0 {
+        return value;
+    }
+    if value > 0.0 {
+        return atan_positive(value);
+    }
+    return -atan_positive(-value);
+}
+
+// atan2 returns the angle of the point (x, y) from the positive x axis, in
+// (-pi, pi], with the quadrant chosen from the signs of both arguments:
+// atan2(1, -1) is 3pi/4 where atan(1 / -1) is -pi/4.
+pub fn atan2(y: f64, x: f64) -> f64 {
+    if float::is_nan(y) or float::is_nan(x) {
+        return nan();
+    }
+    if y == 0.0 {
+        if x >= 0.0 and !is_negative(x) {
+            return copysign(0.0, y);
+        }
+        return copysign(pi(), y);
+    }
+    if x == 0.0 {
+        return copysign(pi_over_2(), y);
+    }
+    if float::is_infinite(x) {
+        if x == infinity() {
+            if float::is_infinite(y) {
+                return copysign(pi_over_4(), y);
+            }
+            return copysign(0.0, y);
+        }
+        if float::is_infinite(y) {
+            return copysign(three_pi_over_4(), y);
+        }
+        return copysign(pi(), y);
+    }
+    if float::is_infinite(y) {
+        return copysign(pi_over_2(), y);
+    }
+    let q = atan(y / x);
+    if x < 0.0 {
+        if q <= 0.0 {
+            return q + pi();
+        }
+        return q - pi();
+    }
+    return q;
+}
+
+// atan_positive is the arc tangent of a positive value, the Cephes `satan`:
+// the argument is folded into [0, 0.66] where the rational approximation
+// holds.
+fn atan_positive(x: f64) -> f64 {
+    let more_bits = 6.123233995736765886130e-17;
+    let tan_3pi_over_8 = 2.41421356237309504880;
+    if x <= 0.66 {
+        return atan_reduced(x);
+    }
+    if x > tan_3pi_over_8 {
+        return pi_over_2() - atan_reduced(1.0 / x) + more_bits;
+    }
+    return pi_over_4() + atan_reduced((x - 1.0) / (x + 1.0)) + 0.5 * more_bits;
+}
+
+// atan_reduced is the arc tangent of x in [0, 0.66], the Cephes `xatan`.
+fn atan_reduced(x: f64) -> f64 {
+    let p0 = -8.750608600031904122785e-01;
+    let p1 = -1.615753718733365076637e+01;
+    let p2 = -7.500855792314704667340e+01;
+    let p3 = -1.228866684490136173410e+02;
+    let p4 = -6.485021904942025371773e+01;
+    let q0 = 2.485846490142306297962e+01;
+    let q1 = 1.650270098316988542046e+02;
+    let q2 = 4.328810604912902668951e+02;
+    let q3 = 4.853903996359136964868e+02;
+    let q4 = 1.945506571482613964425e+02;
+    var z = x * x;
+    z = z * ((((p0 * z + p1) * z + p2) * z + p3) * z + p4) / (((((z + q0) * z + q1) * z + q2) * z + q3) * z + q4);
+    z = x * z + x;
+    return z;
+}
+
+fn four_over_pi() -> f64 { return 1.27323954473516268615107010698011489627567716592365; }
+
+fn pi_over_4() -> f64 { return 0.78539816339744830961566084581987572104929234984378; }
+
+fn pi_over_2() -> f64 { return 1.57079632679489661923132169163975144209858469968755; }
+
+fn three_pi_over_4() -> f64 { return 2.35619449019234492884698253745962716314787704953133; }

@@ -36,6 +36,14 @@ var mathUnaryFunctions = []struct {
 	{"log1p", math.Log1p, 1},
 	{"log2", math.Log2, 1},
 	{"log10", math.Log10, 1},
+	{"sin", math.Sin, 1},
+	{"cos", math.Cos, 1},
+	// tan ends in a reciprocal, which doubles what the fused multiply-add
+	// moved.
+	{"tan", math.Tan, 2},
+	{"asin", math.Asin, 1},
+	{"acos", math.Acos, 1},
+	{"atan", math.Atan, 1},
 }
 
 // mathBinaryFunctions lists the two-argument std::math functions beside the Go
@@ -69,6 +77,7 @@ var mathBinaryFunctions = []struct {
 	}, 0},
 	{"pow", math.Pow, 1},
 	{"fmod", math.Mod, 0},
+	{"atan2", math.Atan2, 1},
 }
 
 // mathBits lists the values std::math is checked on: the float text bit
@@ -82,6 +91,8 @@ func mathBits() []uint64 {
 		4503599627370495.5, -4503599627370495.5, 4503599627370496, 9007199254740993,
 		2, 3, 10, 0.001, 100.5, 1e-300, 1e300, 700, 709.7, 709.8, -745, -745.2,
 		1023.5, 1024, -1074, -1074.5, 1e-10, -1e-10, 0.25, -0.75, 6.5, -7,
+		math.Pi, -math.Pi, math.Pi / 2, math.Pi / 4, 3 * math.Pi / 4, 2 * math.Pi, 0.66, 0.7, 2.5,
+		536870911, 536870912, 536870913, 1e15, 1e22, 1e50, 1e100, 1e200, 1e300,
 		math.Inf(1), math.Inf(-1), math.NaN(),
 	} {
 		bits = append(bits, math.Float64bits(value))
