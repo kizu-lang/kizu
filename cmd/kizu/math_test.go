@@ -6,23 +6,36 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 )
 
 // mathUnaryFunctions lists the one-argument std::math functions beside the Go
-// function each is checked against.
+// function each is checked against, and how many units in the last place the
+// two may differ by. The IEEE operations and the bit manipulations answer
+// exactly. The rest follow the same algorithms Go does, but Go fuses a
+// multiply and an add into one rounding on arm64 and runs exp as assembly
+// there, which can move the last bit either way.
 var mathUnaryFunctions = []struct {
 	name string
 	want func(float64) float64
+	ulps uint64
 }{
-	{"sqrt", math.Sqrt},
-	{"floor", math.Floor},
-	{"ceil", math.Ceil},
-	{"trunc", math.Trunc},
-	{"round", math.Round},
-	{"abs", math.Abs},
+	{"sqrt", math.Sqrt, 0},
+	{"floor", math.Floor, 0},
+	{"ceil", math.Ceil, 0},
+	{"trunc", math.Trunc, 0},
+	{"round", math.Round, 0},
+	{"abs", math.Abs, 0},
+	{"exp", math.Exp, 1},
+	{"exp2", math.Exp2, 1},
+	{"expm1", math.Expm1, 1},
+	{"log", math.Log, 1},
+	{"log1p", math.Log1p, 1},
+	{"log2", math.Log2, 1},
+	{"log10", math.Log10, 1},
 }
 
 // mathBinaryFunctions lists the two-argument std::math functions beside the Go
@@ -32,9 +45,10 @@ var mathUnaryFunctions = []struct {
 var mathBinaryFunctions = []struct {
 	name string
 	want func(float64, float64) float64
+	ulps uint64
 }{
-	{"copysign", math.Copysign},
-	{"hypot", math.Hypot},
+	{"copysign", math.Copysign, 0},
+	{"hypot", math.Hypot, 1},
 	{"min", func(a, b float64) float64 {
 		switch {
 		case math.IsNaN(a):
@@ -43,7 +57,7 @@ var mathBinaryFunctions = []struct {
 			return a
 		}
 		return math.Min(a, b)
-	}},
+	}, 0},
 	{"max", func(a, b float64) float64 {
 		switch {
 		case math.IsNaN(a):
@@ -52,7 +66,9 @@ var mathBinaryFunctions = []struct {
 			return a
 		}
 		return math.Max(a, b)
-	}},
+	}, 0},
+	{"pow", math.Pow, 1},
+	{"fmod", math.Mod, 0},
 }
 
 // mathBits lists the values std::math is checked on: the float text bit
@@ -64,6 +80,8 @@ func mathBits() []uint64 {
 	for _, value := range []float64{
 		0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, -0.49999999999999994,
 		4503599627370495.5, -4503599627370495.5, 4503599627370496, 9007199254740993,
+		2, 3, 10, 0.001, 100.5, 1e-300, 1e300, 700, 709.7, 709.8, -745, -745.2,
+		1023.5, 1024, -1074, -1074.5, 1e-10, -1e-10, 0.25, -0.75, 6.5, -7,
 		math.Inf(1), math.Inf(-1), math.NaN(),
 	} {
 		bits = append(bits, math.Float64bits(value))
@@ -117,29 +135,80 @@ func mathProgram(bits []uint64) string {
 	return b.String()
 }
 
-// mathWant lists the answers Go's math gives in the order mathProgram prints
-// them. Every NaN is spelled the same way, because which NaN comes back is not
-// part of what any function promises.
-func mathWant(bits []uint64) []string {
-	spell := func(value float64) string {
-		if math.IsNaN(value) {
-			return "NaN"
-		}
-		return strconv.FormatInt(int64(math.Float64bits(value)), 10)
+// mathExpectation is one answer Go's math gives and how far std::math may be
+// from it, or nothing to compare with where Go's answer is not the oracle.
+type mathExpectation struct {
+	value float64
+	ulps  uint64
+	skip  bool
+}
+
+// goAnswersWrongly reports the cases Go's math is known to answer wrongly, so
+// that they are not held against std::math. On amd64 Go's Exp and Log are
+// assembly whose argument reduction gives up at the edges: Log of a subnormal
+// comes back as Log of the smallest normal, and Exp overflows a little below
+// the true threshold. The arm64 build runs the same algorithms std::math does
+// and checks these cases exactly.
+func goAnswersWrongly(name string, x float64) bool {
+	if runtime.GOARCH != "amd64" {
+		return false
 	}
-	var want []string
+	const smallestNormal = 2.2250738585072014e-308
+	switch name {
+	case "log", "log10":
+		return x != 0 && math.Abs(x) < smallestNormal
+	case "exp":
+		return x > 709
+	}
+	return false
+}
+
+// mathWant lists the answers Go's math gives in the order mathProgram prints
+// them.
+func mathWant(bits []uint64) []mathExpectation {
+	var want []mathExpectation
 	for _, pattern := range bits {
 		for _, function := range mathUnaryFunctions {
-			want = append(want, spell(function.want(math.Float64frombits(pattern))))
+			x := math.Float64frombits(pattern)
+			want = append(want, mathExpectation{
+				value: function.want(x), ulps: function.ulps, skip: goAnswersWrongly(function.name, x)})
 		}
 	}
 	for i := range bits[:len(bits)-1] {
 		for _, function := range mathBinaryFunctions {
 			a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-			want = append(want, spell(function.want(a, b)))
+			want = append(want, mathExpectation{value: function.want(a, b), ulps: function.ulps})
 		}
 	}
 	return want
+}
+
+// mathMatches reports whether got is within the allowed units in the last
+// place of want. Every NaN matches every NaN, because which NaN comes back is
+// not part of what any function promises; an infinity matches only itself, and
+// a zero is one unit from the smallest subnormal of its sign.
+func mathMatches(got float64, want mathExpectation) bool {
+	if want.skip {
+		return true
+	}
+	if math.IsNaN(want.value) || math.IsNaN(got) {
+		return math.IsNaN(want.value) && math.IsNaN(got)
+	}
+	a, b := math.Float64bits(got), math.Float64bits(want.value)
+	if a == b {
+		return true
+	}
+	if math.IsInf(got, 0) || math.IsInf(want.value, 0) {
+		return false
+	}
+	if math.Signbit(got) != math.Signbit(want.value) {
+		return false
+	}
+	distance := a - b
+	if b > a {
+		distance = b - a
+	}
+	return distance <= want.ulps
 }
 
 // mathLabel names the case behind one output line.
@@ -167,20 +236,20 @@ func compareMathOutput(t *testing.T, bits []uint64, output string) {
 	}
 	failures := 0
 	for i := range want {
-		got := lines[i]
-		if pattern, err := strconv.ParseInt(got, 10, 64); err == nil {
-			if math.IsNaN(math.Float64frombits(uint64(pattern))) {
-				got = "NaN"
-			}
+		pattern, err := strconv.ParseInt(lines[i], 10, 64)
+		if err != nil {
+			t.Fatalf("%s: printed %q", mathLabel(bits, i), lines[i])
 		}
-		if got == want[i] {
+		got := math.Float64frombits(uint64(pattern))
+		if mathMatches(got, want[i]) {
 			continue
 		}
 		failures++
 		if failures > 20 {
 			continue
 		}
-		t.Errorf("%s: got %s, want %s", mathLabel(bits, i), got, want[i])
+		t.Errorf("%s: got %v (%#x), want %v (%#x)", mathLabel(bits, i),
+			got, math.Float64bits(got), want[i].value, math.Float64bits(want[i].value))
 	}
 	if failures > 20 {
 		t.Errorf("%d more mismatches", failures-20)
