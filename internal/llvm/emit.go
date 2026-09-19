@@ -243,6 +243,7 @@ func (e *emitter) writeHeader() {
 	e.writeExternalCallDecls()
 	e.writePanicDecls()
 	e.writeFloatCastDecls()
+	e.writeFloatMathDecls()
 	e.writeSliceCompareDecls()
 	e.writeTryDecls()
 	// The shared attribute makes large frames touch each page before they can
@@ -1178,6 +1179,8 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeOptInstr(instr)
 	case instr.Op == "float.bits", instr.Op == "float.from_bits":
 		return e.writeFloatBits(instr)
+	case floatUnaryIntrinsics[instr.Op] != "":
+		return e.writeFloatUnary(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
@@ -1195,6 +1198,47 @@ func (e *emitter) writeFloatBits(instr *ir.Instr) error {
 		name, e.llvmType(instr.Args[0].Type), value.operand, e.llvmType(instr.Result.Type))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
+}
+
+// floatUnaryIntrinsics names the LLVM intrinsic behind each one-operand
+// float instruction of `std::math`. Each is one IEEE 754 operation, so the
+// backend gives the correctly rounded answer as one machine instruction.
+var floatUnaryIntrinsics = map[string]string{
+	"float.sqrt":  "llvm.sqrt.f64",
+	"float.floor": "llvm.floor.f64",
+	"float.ceil":  "llvm.ceil.f64",
+	"float.trunc": "llvm.trunc.f64",
+}
+
+// writeFloatUnary calls the intrinsic behind a one-operand float instruction.
+func (e *emitter) writeFloatUnary(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: %s expects 1 arg", instr.Op)
+	}
+	value := e.value(instr.Args[0])
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call double @%s(double %s)\n",
+		name, floatUnaryIntrinsics[instr.Op], value.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeFloatMathDecls declares the float intrinsics the module calls, in the
+// order of their instruction names.
+func (e *emitter) writeFloatMathDecls() {
+	ops := make([]string, 0, len(floatUnaryIntrinsics))
+	for op := range floatUnaryIntrinsics {
+		if e.usesOp(op) {
+			ops = append(ops, op)
+		}
+	}
+	sort.Strings(ops)
+	for _, op := range ops {
+		fmt.Fprintf(&e.out, "declare double @%s(double)\n", floatUnaryIntrinsics[op])
+	}
+	if len(ops) > 0 {
+		e.out.WriteByte('\n')
+	}
 }
 
 // writeOptInstr dispatches optional-value operations.

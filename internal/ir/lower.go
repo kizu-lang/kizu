@@ -2381,6 +2381,17 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	return l.emit("call."+symbol, sig.Return, args, ""), nil
 }
 
+// floatUnaryPrimitives maps the `std::math` primitives that are one IEEE 754
+// operation on one f64 to the instruction each becomes. Every backend has the
+// operation as one instruction or intrinsic, so the answer is the same bits on
+// every target.
+var floatUnaryPrimitives = map[string]string{
+	"std::internal::builtin::f64_sqrt":  "float.sqrt",
+	"std::internal::builtin::f64_floor": "float.floor",
+	"std::internal::builtin::f64_ceil":  "float.ceil",
+	"std::internal::builtin::f64_trunc": "float.trunc",
+}
+
 // lowerCoreBuiltinCall lowers the std::internal::builtin calls that are one
 // instruction rather than a runtime call, and reports whether name was one.
 func (l *lowerer) lowerCoreBuiltinCall(name string, args []Value) (Value, bool, error) {
@@ -2398,6 +2409,12 @@ func (l *lowerer) lowerCoreBuiltinCall(name string, args []Value) (Value, bool, 
 			return Value{}, true, fmt.Errorf("ir error: std::internal::builtin::f64_from_bits expects 1 arg")
 		}
 		return l.emit("float.from_bits", "f64", args, ""), true, nil
+	}
+	if op, ok := floatUnaryPrimitives[name]; ok {
+		if len(args) != 1 {
+			return Value{}, true, fmt.Errorf("ir error: %s expects 1 arg", name)
+		}
+		return l.emit(op, "f64", args, ""), true, nil
 	}
 	if name == "std::internal::builtin::test_fail" {
 		return l.emit("test.fail", "void", args, ""), true, nil

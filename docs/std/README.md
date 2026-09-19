@@ -43,6 +43,7 @@
 | [testing](testing.md) | assertion |
 | [rand](rand.md) | seed から決まる擬似乱数列 |
 | [float](float.md) | 浮動小数点値の文字列変換と bit 表現 |
+| [math](math.md) | f64 の初等関数と定数 |
 
 実装は `lib/kizu/std/src/` にあります。trusted primitive の境界は
 [docs/stdlib.md](../stdlib.md) です。

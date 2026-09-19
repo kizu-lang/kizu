@@ -795,8 +795,9 @@ func floatComparisonOpcode(op string) (byte, bool) {
 	}
 }
 
-// floatArithmeticOpcode maps float negation and the four arithmetic
-// operations; the two widths sit 14 opcodes apart.
+// floatArithmeticOpcode maps float negation, the four arithmetic operations,
+// and the f64 rounding and square root instructions `std::math` writes; the
+// two widths sit 14 opcodes apart.
 func floatArithmeticOpcode(op string) (byte, bool) {
 	switch op {
 	case "f32.neg":
@@ -811,6 +812,14 @@ func floatArithmeticOpcode(op string) (byte, bool) {
 		return 0x95, true
 	case "f64.neg":
 		return 0x9a, true
+	case "f64.ceil":
+		return 0x9b, true
+	case "f64.floor":
+		return 0x9c, true
+	case "f64.trunc":
+		return 0x9d, true
+	case "f64.sqrt":
+		return 0x9f, true
 	case "f64.add":
 		return 0xa0, true
 	case "f64.sub":

@@ -28,6 +28,7 @@ float literal もこの `parse` で値を決めます(Go seed は `strconv`)。�
 
 `bits` は IEEE 754 binary64 の表現をそのまま返し、`from_bits` はその逆です。
 `cast` は値を変換しますが表現には触れないので、bit を見る処理はこの 2 つの上に
-書きます。両方とも trusted primitive で、float の支援が backend に頼るのはこの 2 つだけです。
+書きます。両方とも trusted primitive です。float の支援が backend に頼るのは、この 2 つと
+[std::math](math.md) の `sqrt` / `floor` / `ceil` / `trunc` だけです。
 
 言語としての float(型、literal、演算、cast)は SPEC §6.9.3 と §7 にあります。

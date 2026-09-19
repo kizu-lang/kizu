@@ -38,40 +38,42 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 46 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 45/46 |
-| arithmetic / bitwise / float | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| fn / let / struct / literals | 47 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 46/47 |
+| arithmetic / bitwise / float | 9 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| if / match | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
-| enum / union | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/17 |
-| error union `!T` / try / errdefer | 52 | ✅ | ✅ | ✅ | 34/52 | 34/52 | 34/52 | 31/52 |
-| optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
-| move / borrow | 62 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| if / match | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/18 |
+| enum / union | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
+| error union `!T` / try / errdefer | 57 | ✅ | ✅ | ✅ | 37/57 | 37/57 | 37/57 | 34/57 |
+| optional `?T` / orelse / capture | 27 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 25/27 |
+| move / borrow | 63 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | cast / slice / stack buffer / box | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 | 15/16 |
 | unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 | 1/4 |
-| contract / generics | 18 | ✅ | ✅ | ✅ | 17/18 | 17/18 | 17/18 | 15/18 |
+| contract / generics | 20 | ✅ | ✅ | ✅ | 19/20 | 19/20 | 19/20 | 16/20 |
 | std::array | 21 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
 | std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 21/22 | 20/22 |
-| std::json | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 14/16 |
+| std::json | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
+| std::compress | 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::math | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::time | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 29 | ✅ | ✅ | ✅ | 12/29 | 12/29 | 12/29 | 3/29 |
-| std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 | 2/19 | 2/19 |
+| std::fs / path / io / process | 33 | ✅ | ✅ | ✅ | 14/33 | 14/33 | 14/33 | 4/33 |
+| std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 192 runnable examples,
-measured on 2026-09-08 with `just backend-matrix` -- re-run it after touching a
+tags, so an example appears in more than one row. 209 runnable examples,
+measured on 2026-09-19 with `just backend-matrix` -- re-run it after touching a
 backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
 program's output: `run` executes the native build; `wasm` and `wasm-opt` load
 the default and optimized WAT with `wasmtime`; `wasm-bin` loads the binary

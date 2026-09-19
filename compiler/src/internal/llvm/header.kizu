@@ -58,6 +58,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.write_external_call_decls(module);
     try self.write_panic_decls(module);
     try self.write_float_cast_decls(module);
+    try self.write_float_math_decls(module);
     try self.write_slice_compare_decls(module);
     try self.write_try_decls(module);
     // Large frames touch each page before they can cross a coroutine guard;
@@ -1025,6 +1026,37 @@ fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
         start = start + 1;
     }
     return false;
+}
+
+/// Declares the float intrinsics the module calls, in the order of their
+/// instruction names, the Go `writeFloatMathDecls`.
+fn (self: &var Emitter) write_float_math_decls(module: &ir::Module) -> !void {
+    var written = 0;
+    var index = 0;
+    while float_unary_ops_by_name(index) |op| {
+        index = index + 1;
+        if !uses_op(module, op) {
+            continue;
+        }
+        let intrinsic = float_unary_intrinsic(op) orelse continue;
+        let callee = try self.names.intern(intrinsic);
+        try self.line1("declare double @%s(double)", Arg::Str(callee));
+        written = written + 1;
+    }
+    if written > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Lists the one-operand float instructions in the order of their names,
+/// which is the order the Go emitter sorts their declarations into.
+fn float_unary_ops_by_name(index: i64) -> ?ir::Op {
+    if index == 0 { return ir::Op::FloatCeil; }
+    if index == 1 { return ir::Op::FloatFloor; }
+    if index == 2 { return ir::Op::FloatSqrt; }
+    if index == 3 { return ir::Op::FloatTrunc; }
+    return null;
 }
 
 /// Declares every saturating float-to-integer intrinsic the module calls,
