@@ -1,0 +1,44 @@
+import std::array;
+import std::mem;
+
+struct Pair {
+    left: array::Array<i64>,
+    right: array::Array<i64>,
+}
+
+fn add_first(dst: &var array::Array<i64>, src: &array::Array<i64>) -> !void {
+    try dst.set(0, dst.get_or_panic(0) + src.get_or_panic(0));
+    return;
+}
+
+// One call may borrow two disjoint fields of the same owner, one of them
+// mutably: `pair.left` and `pair.right` are different storage, so reading
+// `pair.right` does not touch the borrow of `pair.left`. Overlapping paths
+// (`&var pair.left` with `&pair`) stay rejected.
+fn (self: &var Pair) fold() -> !void {
+    try add_first(&var self.left, &self.right);
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var left = array::new<i64>(allocator);
+    errdefer left.deinit(allocator);
+    try left.append(allocator, 1);
+    var right = array::new<i64>(allocator);
+    errdefer right.deinit(allocator);
+    try right.append(allocator, 10);
+    var pair = Pair { left: move left, right: move right };
+    defer pair.deinit(allocator);
+    try add_first(&var pair.left, &pair.right);
+    try pair.fold();
+    print(pair.left.get_or_panic(0));
+    print(pair.right.get_or_panic(0));
+    return;
+}
+
+// run
+// features: borrow field-borrow mutable-borrow ownership std-array
+// output:
+// 21
+// 10

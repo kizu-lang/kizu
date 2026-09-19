@@ -382,6 +382,21 @@ fn (self: &var Checker) read_ident(
     ident: ast::IdentExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    return self.read_ident_aliasing(tree, env, ident, empty_name(), out);
+}
+
+/// Reads a binding on behalf of the field path under it that the read
+/// touches, empty for the whole value, the Go `readIdentAliasing`. A mutable
+/// borrow of the whole value blocks every read; a field borrow blocks the
+/// whole value and the paths that alias the borrowed one, and leaves
+/// disjoint fields readable.
+fn (self: &var Checker) read_ident_aliasing(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    ident: ast::IdentExpr,
+    path: Name,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
     if self.lookup_text(tree, env, ident.name) |value| {
         if try self.check_deinitialized_use(tree, env, ident.name, value, ident.span) |failed| {
             return move failed;
@@ -389,7 +404,13 @@ fn (self: &var Checker) read_ident(
         if self.binding(value).moved {
             return try self.error1(tree, ident.span, "move error: moved value `%s` was used", Arg::Text(ident.name));
         }
-        if self.binding(value).active_mut_borrows > 0 or self.store.has_field_borrows(value, true) {
+        var blocked = self.binding(value).active_mut_borrows > 0;
+        if is_empty(path) {
+            blocked = blocked or self.store.has_field_borrows(value, true);
+        } else {
+            blocked = blocked or self.overlapping_field_borrows(value, path, true) > 0;
+        }
+        if blocked {
             return try self.error1(
                 tree, ident.span, "borrow error: value `%s` cannot be read while mutably borrowed",
                 Arg::Text(ident.name)
