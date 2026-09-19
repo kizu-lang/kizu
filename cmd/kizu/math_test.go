@@ -116,7 +116,8 @@ var mathBinaryFunctions = []struct {
 		}
 		return math.Max(a, b)
 	}, 0},
-	{"pow", math.Pow, 1},
+	// pow multiplies an exp of a log, so the last bit of each can add up.
+	{"pow", math.Pow, 2},
 	{"fmod", math.Mod, 0},
 	{"atan2", math.Atan2, 1},
 }
@@ -218,9 +219,9 @@ type mathExpectation struct {
 // goAnswersWrongly reports the cases Go's math is known to answer wrongly, so
 // that they are not held against std::math. On amd64 Go's Exp and Log are
 // assembly whose argument reduction gives up at the edges: Log of a subnormal
-// comes back as Log of the smallest normal, and Exp overflows a little below
-// the true threshold. The arm64 build runs the same algorithms std::math does
-// and checks these cases exactly.
+// comes back as Log of the smallest normal, and Exp, which sinh and cosh end
+// in, overflows a little below the true threshold. The arm64 build runs the
+// same algorithms std::math does and checks these cases exactly.
 func goAnswersWrongly(name string, x float64) bool {
 	if runtime.GOARCH != "amd64" {
 		return false
@@ -229,7 +230,7 @@ func goAnswersWrongly(name string, x float64) bool {
 	switch name {
 	case "log", "log10":
 		return x != 0 && math.Abs(x) < smallestNormal
-	case "exp":
+	case "exp", "sinh", "cosh":
 		return x > 709
 	}
 	return false
