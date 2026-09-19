@@ -15,6 +15,16 @@ std::math::min(a: f64, b: f64) -> f64
 std::math::max(a: f64, b: f64) -> f64
 std::math::clamp(value: f64, low: f64, high: f64) -> f64
 std::math::hypot(x: f64, y: f64) -> f64
+std::math::exp(value: f64) -> f64
+std::math::exp2(value: f64) -> f64
+std::math::expm1(value: f64) -> f64
+std::math::log(value: f64) -> f64
+std::math::log1p(value: f64) -> f64
+std::math::log2(value: f64) -> f64
+std::math::log10(value: f64) -> f64
+std::math::pow(base: f64, exponent: f64) -> f64
+std::math::fmod(value: f64, divisor: f64) -> f64
+std::math::ldexp(fraction: f64, exponent: i64) -> f64
 std::math::pi() -> f64
 std::math::tau() -> f64
 std::math::e() -> f64
@@ -44,12 +54,30 @@ trusted primitive です。backend はそれぞれを 1 命令(LLVM intrinsic、
   もう片方が NaN でも無限大です。
 - `nan()` は符号 bit の立たない quiet NaN、`infinity()` は正の無限大です。
 
+指数と対数は FreeBSD msun の算法(Go の `math` と同じ)を Kizu で書いたもので、
+引数を 2 つに分けた ln 2 で小さな範囲に落とし、そこで短い有理式を評価して、2 の
+べきで戻します。真の値から 1 ulp 以内で、これも target によりません。
+
+- `exp` は 709.78 あたりを超えると無限大、-745.13 あたりを下回ると 0 です。
+  `exp2` は同じ形で 2 のべき。
+- `expm1` / `log1p` は `exp(x) - 1` / `log(1 + x)` を、引き算や足し算が桁を
+  落とす小さな `x` でも正しく返します(`expm1(1e-10)` は `1.00000000005e-10`)。
+- `log` は負の値に NaN、0 に負の無限大。`log2` は 2 のべきに正確な整数を返します。
+- `pow` は C の `pow` の特別扱いをそのまま持ちます: `pow(x, 0)` と `pow(1, y)` は
+  常に 1、負の底に整数でない指数は NaN、0 と無限大は指数の符号と偶奇に従います。
+- `fmod` は C の `fmod` で、結果は `value` の符号を持ち、大きさは `|divisor|`
+  未満です(`fmod(-5.5, 2.0)` は `-1.5`)。0 で割ると NaN です。
+- `ldexp` は `fraction * 2^exponent` で、範囲を超えれば無限大か 0、正規化数の
+  下は 1 回だけ丸めて非正規化数にします。
+
 `cmd/kizu` の `TestMath` が Go の `math` と数千の値で突き合わせ、native と wasm の
-両方で同じ bit を返すことを確かめています。
+両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作は Go と一致し、
+残りは 1 ulp 以内です(Go は arm64 で乗算と加算を 1 回の丸めに融合するので、
+最後の bit が動くことがあります)。
 
 ## まだ無いもの
 
-- `pow` / `exp` / `log` / `sin` / `cos` / `tan` / `atan2` などの超越関数
-- `fmod` / `rem`
-- 偶数丸めの `round_even`、`fma`
+- `sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2`、双曲線関数
+- `frexp` / `modf`(値を 2 つ返す形が決まってから)
+- 偶数丸めの `round_even`、`fma`、`cbrt`
 - `f32` 版

@@ -168,3 +168,599 @@ pub fn nan() -> f64 {
 fn sign_bit() -> u64 { return cast<u64>(1) << 63; }
 
 fn exponent_mask() -> u64 { return cast<u64>(2047) << 52; }
+
+// ---------------------------------------------------------------------------
+// Exponentials and logarithms.
+//
+// These follow the FreeBSD msun algorithms as Go's math package spells them:
+// the argument is reduced to a small range with a two-part ln 2, a short
+// rational or polynomial approximation is evaluated there, and the result is
+// scaled back by a power of two. Each answers within one unit in the last
+// place of the true value, and the same bits on every target.
+
+// exp returns e raised to value. Above about 709.78 the answer is infinity;
+// below about -745.13 it is 0.
+pub fn exp(value: f64) -> f64 {
+    let overflow = 709.782712893383973096;
+    let underflow = -745.133219101941108420;
+    let near_zero = 3.7252902984619140625e-9;
+    if float::is_nan(value) or value == infinity() {
+        return value;
+    }
+    if value == -infinity() {
+        return 0.0;
+    }
+    if value > overflow {
+        return infinity();
+    }
+    if value < underflow {
+        return 0.0;
+    }
+    if -near_zero < value and value < near_zero {
+        return 1.0 + value;
+    }
+    // Reduce: value = k ln 2 + r, with r kept as hi - lo for the extra bits.
+    var k = 0;
+    if value < 0.0 {
+        k = cast<i64>(log2_e() * value - 0.5);
+    } else {
+        k = cast<i64>(log2_e() * value + 0.5);
+    }
+    let hi = value - cast<f64>(k) * ln2_hi();
+    let lo = cast<f64>(k) * ln2_lo();
+    return exp_reduced(hi, lo, k);
+}
+
+// exp2 returns 2 raised to value.
+pub fn exp2(value: f64) -> f64 {
+    let overflow = 1023.9999999999999;
+    let underflow = -1074.0;
+    if float::is_nan(value) or value == infinity() {
+        return value;
+    }
+    if value == -infinity() {
+        return 0.0;
+    }
+    if value > overflow {
+        return infinity();
+    }
+    if value < underflow {
+        return 0.0;
+    }
+    // Reduce: value = k + t with |t| <= 1/2, then t ln 2 as hi - lo.
+    var k = 0;
+    if value > 0.0 {
+        k = cast<i64>(value + 0.5);
+    }
+    if value < 0.0 {
+        k = cast<i64>(value - 0.5);
+    }
+    let t = value - cast<f64>(k);
+    let hi = t * ln2_hi();
+    let lo = -t * ln2_lo();
+    return exp_reduced(hi, lo, k);
+}
+
+// exp_reduced returns exp(hi - lo) * 2^k for a reduced argument, the msun
+// kernel shared by exp and exp2.
+fn exp_reduced(hi: f64, lo: f64, k: i64) -> f64 {
+    let p1 = 1.66666666666666657415e-01;
+    let p2 = -2.77777777770155933842e-03;
+    let p3 = 6.61375632143793436117e-05;
+    let p4 = -1.65339022054652515390e-06;
+    let p5 = 4.13813679705723846039e-08;
+    let r = hi - lo;
+    let t = r * r;
+    let c = r - t * (p1 + t * (p2 + t * (p3 + t * (p4 + t * p5))));
+    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
+    return ldexp(y, k);
+}
+
+// expm1 returns exp(value) - 1, accurate where the subtraction itself would
+// lose every digit: expm1(1e-10) is 1.00000000005e-10.
+pub fn expm1(value: f64) -> f64 {
+    let overflow = 709.782712893383973096;
+    let ln2_x56 = 3.88162421113569373274e+01;
+    let ln2_half_x3 = 1.03972077083991796413e+00;
+    let ln2_half = 3.46573590279972654709e-01;
+    let inv_ln2 = 1.44269504088896338700e+00;
+    let tiny = 5.5511151231257827021181583404541015625e-17;
+    let q1 = -3.33333333333331316428e-02;
+    let q2 = 1.58730158725481460165e-03;
+    let q3 = -7.93650757867487942473e-05;
+    let q4 = 4.00821782732936239552e-06;
+    let q5 = -2.01099218183624371326e-07;
+    if value == infinity() or float::is_nan(value) {
+        return value;
+    }
+    if value == -infinity() {
+        return -1.0;
+    }
+    let negative = value < 0.0;
+    let magnitude = abs(value);
+    // A huge argument is -1 or overflows before any reduction.
+    if magnitude >= ln2_x56 {
+        if negative {
+            return -1.0;
+        }
+        if magnitude >= overflow {
+            return infinity();
+        }
+    }
+    // Reduce to |x| <= ln 2 / 2, keeping c, what the reduction dropped.
+    var x = value;
+    var c = 0.0;
+    var k = 0;
+    if magnitude > ln2_half {
+        var hi = 0.0;
+        var lo = 0.0;
+        if magnitude < ln2_half_x3 {
+            if negative {
+                hi = x + ln2_hi();
+                lo = -ln2_lo();
+                k = -1;
+            } else {
+                hi = x - ln2_hi();
+                lo = ln2_lo();
+                k = 1;
+            }
+        } else {
+            if negative {
+                k = cast<i64>(inv_ln2 * x - 0.5);
+            } else {
+                k = cast<i64>(inv_ln2 * x + 0.5);
+            }
+            let t = cast<f64>(k);
+            hi = x - t * ln2_hi();
+            lo = t * ln2_lo();
+        }
+        x = hi - lo;
+        c = (hi - x) - lo;
+    } else {
+        if magnitude < tiny {
+            return x;
+        }
+    }
+    let hfx = 0.5 * x;
+    let hxs = x * hfx;
+    let r1 = 1.0 + hxs * (q1 + hxs * (q2 + hxs * (q3 + hxs * (q4 + hxs * q5))));
+    let t = 3.0 - r1 * hfx;
+    var e = hxs * ((r1 - t) / (6.0 - x * t));
+    if k == 0 {
+        return x - (x * e - hxs);
+    }
+    e = (x * (e - c) - c);
+    e = e - hxs;
+    if k == -1 {
+        return 0.5 * (x - e) - 0.5;
+    }
+    if k == 1 {
+        if x < -0.25 {
+            return -2.0 * (e - (x + 0.5));
+        }
+        return 1.0 + 2.0 * (x - e);
+    }
+    if k <= -2 or k > 56 {
+        let y = 1.0 - (e - x);
+        return scale_exponent(y, k) - 1.0;
+    }
+    if k < 20 {
+        // t = 1 - 2^-k, built from its bits.
+        let t2 = float::from_bits(0x3ff0000000000000 - (0x20000000000000 >> cast<u64>(k)));
+        let y = t2 - (e - x);
+        return scale_exponent(y, k);
+    }
+    let t2 = float::from_bits(cast<u64>(1023 - k) << 52);
+    var y = x - (e + t2);
+    y = y + 1.0;
+    return scale_exponent(y, k);
+}
+
+// scale_exponent adds k to the exponent field of a normal value, which is
+// value * 2^k as long as the result stays normal; the callers keep it so.
+fn scale_exponent(value: f64, k: i64) -> f64 {
+    if k >= 0 {
+        return float::from_bits(float::bits(value) + (cast<u64>(k) << 52));
+    }
+    return float::from_bits(float::bits(value) - (cast<u64>(-k) << 52));
+}
+
+// log returns the natural logarithm of value. A negative value gives NaN and
+// 0 gives negative infinity.
+pub fn log(value: f64) -> f64 {
+    let l1 = 6.666666666666735130e-01;
+    let l2 = 3.999999999940941908e-01;
+    let l3 = 2.857142874366239149e-01;
+    let l4 = 2.222219843214978396e-01;
+    let l5 = 1.818357216161805012e-01;
+    let l6 = 1.531383769920937332e-01;
+    let l7 = 1.479819860511658591e-01;
+    if float::is_nan(value) or value == infinity() {
+        return value;
+    }
+    if value < 0.0 {
+        return nan();
+    }
+    if value == 0.0 {
+        return -infinity();
+    }
+    // Reduce: value = 2^k (1 + f) with sqrt(2)/2 < 1 + f < sqrt(2).
+    let split = frexp(value);
+    var f1 = split.fraction;
+    var ki = split.exponent;
+    if f1 < sqrt2_half() {
+        f1 = f1 * 2.0;
+        ki = ki - 1;
+    }
+    let f = f1 - 1.0;
+    let k = cast<f64>(ki);
+    let s = f / (2.0 + f);
+    let s2 = s * s;
+    let s4 = s2 * s2;
+    let t1 = s2 * (l1 + s4 * (l3 + s4 * (l5 + s4 * l7)));
+    let t2 = s4 * (l2 + s4 * (l4 + s4 * l6));
+    let r = t1 + t2;
+    let hfsq = 0.5 * f * f;
+    return k * ln2_hi() - ((hfsq - (s * (hfsq + r) + k * ln2_lo())) - f);
+}
+
+// log1p returns log(1 + value), accurate where the addition itself would
+// lose every digit: log1p(1e-10) is 9.9999999995e-11.
+pub fn log1p(value: f64) -> f64 {
+    let sqrt2_m1 = 4.142135623730950488017e-01;
+    let sqrt2_half_m1 = -2.928932188134524755992e-01;
+    let small = 1.86264514923095703125e-9;
+    let tiny = 5.5511151231257827021181583404541015625e-17;
+    let two53 = 9007199254740992.0;
+    let lp1 = 6.666666666666735130e-01;
+    let lp2 = 3.999999999940941908e-01;
+    let lp3 = 2.857142874366239149e-01;
+    let lp4 = 2.222219843214978396e-01;
+    let lp5 = 1.818357216161805012e-01;
+    let lp6 = 1.531383769920937332e-01;
+    let lp7 = 1.479819860511658591e-01;
+    if value < -1.0 or float::is_nan(value) {
+        return nan();
+    }
+    if value == -1.0 {
+        return -infinity();
+    }
+    if value == infinity() {
+        return infinity();
+    }
+    let magnitude = abs(value);
+    var f = 0.0;
+    var iu = cast<u64>(0);
+    var k = 1;
+    if magnitude < sqrt2_m1 {
+        if magnitude < small {
+            if magnitude < tiny {
+                return value;
+            }
+            return value - value * value * 0.5;
+        }
+        if value > sqrt2_half_m1 {
+            k = 0;
+            f = value;
+            iu = 1;
+        }
+    }
+    var c = 0.0;
+    if k != 0 {
+        var u = 0.0;
+        if magnitude < two53 {
+            u = 1.0 + value;
+            iu = float::bits(u);
+            k = cast<i64>(iu >> 52) - 1023;
+            // The correction term: what 1 + value rounded away.
+            if k > 0 {
+                c = 1.0 - (u - value);
+            } else {
+                c = value - (u - 1.0);
+            }
+            c = c / u;
+        } else {
+            u = value;
+            iu = float::bits(u);
+            k = cast<i64>(iu >> 52) - 1023;
+            c = 0.0;
+        }
+        iu = iu & 0x000fffffffffffff;
+        if iu < 0x0006a09e667f3bcd {
+            u = float::from_bits(iu | 0x3ff0000000000000);
+        } else {
+            k = k + 1;
+            u = float::from_bits(iu | 0x3fe0000000000000);
+            iu = (0x0010000000000000 - iu) >> 2;
+        }
+        f = u - 1.0;
+    }
+    let hfsq = 0.5 * f * f;
+    let kf = cast<f64>(k);
+    if iu == 0 {
+        if f == 0.0 {
+            if k == 0 {
+                return 0.0;
+            }
+            c = c + kf * ln2_lo();
+            return kf * ln2_hi() + c;
+        }
+        let r = hfsq * (1.0 - 0.66666666666666666 * f);
+        if k == 0 {
+            return f - r;
+        }
+        return kf * ln2_hi() - ((r - (kf * ln2_lo() + c)) - f);
+    }
+    let s = f / (2.0 + f);
+    let z = s * s;
+    let r = z * (lp1 + z * (lp2 + z * (lp3 + z * (lp4 + z * (lp5 + z * (lp6 + z * lp7))))));
+    if k == 0 {
+        return f - (hfsq - s * (hfsq + r));
+    }
+    return kf * ln2_hi() - ((hfsq - (s * (hfsq + r) + (kf * ln2_lo() + c))) - f);
+}
+
+// log2 returns the base-2 logarithm of value. An exact power of two gives an
+// exact integer.
+pub fn log2(value: f64) -> f64 {
+    let split = frexp(value);
+    if split.fraction == 0.5 {
+        return cast<f64>(split.exponent - 1);
+    }
+    return log(split.fraction) * inv_ln2() + cast<f64>(split.exponent);
+}
+
+// log10 returns the base-10 logarithm of value.
+pub fn log10(value: f64) -> f64 {
+    return log(value) * inv_ln10();
+}
+
+// pow returns base raised to exponent, with the special cases of C's pow:
+// pow(x, 0) and pow(1, y) are 1 for any x and y, a negative base with a
+// non-integral exponent is NaN, and 0 and the infinities follow the sign
+// and parity of the exponent.
+pub fn pow(base: f64, exponent: f64) -> f64 {
+    if exponent == 0.0 or base == 1.0 {
+        return 1.0;
+    }
+    if exponent == 1.0 {
+        return base;
+    }
+    if float::is_nan(base) or float::is_nan(exponent) {
+        return nan();
+    }
+    if base == 0.0 {
+        if exponent < 0.0 {
+            if is_negative(base) and is_odd_integer(exponent) {
+                return -infinity();
+            }
+            return infinity();
+        }
+        if is_negative(base) and is_odd_integer(exponent) {
+            return base;
+        }
+        return 0.0;
+    }
+    if float::is_infinite(exponent) {
+        if base == -1.0 {
+            return 1.0;
+        }
+        if (abs(base) < 1.0) == (exponent == infinity()) {
+            return 0.0;
+        }
+        return infinity();
+    }
+    if float::is_infinite(base) {
+        if base == -infinity() {
+            return pow(1.0 / base, -exponent);
+        }
+        if exponent < 0.0 {
+            return 0.0;
+        }
+        return infinity();
+    }
+    if exponent == 0.5 {
+        return sqrt(base);
+    }
+    if exponent == -0.5 {
+        return 1.0 / sqrt(base);
+    }
+    let parts = modf(abs(exponent));
+    var yi = parts.whole;
+    var yf = parts.fraction;
+    if yf != 0.0 and base < 0.0 {
+        return nan();
+    }
+    if yi >= 9223372036854775808.0 {
+        // A large even integer exponent: everything but -1 overflows or
+        // underflows.
+        if base == -1.0 {
+            return 1.0;
+        }
+        if (abs(base) < 1.0) == (exponent > 0.0) {
+            return 0.0;
+        }
+        return infinity();
+    }
+    // The answer is a1 * 2^ae: first base^yf, then base^yi by squaring
+    // along the bits of yi, with the powers of two kept in ae.
+    var a1 = 1.0;
+    var ae = 0;
+    if yf != 0.0 {
+        if yf > 0.5 {
+            yf = yf - 1.0;
+            yi = yi + 1.0;
+        }
+        a1 = exp(yf * log(base));
+    }
+    let split = frexp(base);
+    var x1 = split.fraction;
+    var xe = split.exponent;
+    var i = cast<i64>(yi);
+    while i != 0 {
+        if xe < -4096 or 4096 < xe {
+            // ae already exceeds any float exponent, so the final scaling
+            // overflows or underflows whatever the remaining bits add.
+            ae = ae + xe;
+            break;
+        }
+        if i & 1 == 1 {
+            a1 = a1 * x1;
+            ae = ae + xe;
+        }
+        x1 = x1 * x1;
+        xe = xe << 1;
+        if x1 < 0.5 {
+            x1 = x1 + x1;
+            xe = xe - 1;
+        }
+        i = i >> 1;
+    }
+    if exponent < 0.0 {
+        a1 = 1.0 / a1;
+        ae = -ae;
+    }
+    return ldexp(a1, ae);
+}
+
+// fmod returns the remainder of value / divisor, with the sign of value and a
+// magnitude below |divisor|, the way C's fmod does: fmod(5.5, 2.0) is 1.5 and
+// fmod(-5.5, 2.0) is -1.5. A zero divisor, an infinite value, or a NaN gives
+// NaN.
+pub fn fmod(value: f64, divisor: f64) -> f64 {
+    if divisor == 0.0 or float::is_infinite(value) or float::is_nan(value) or float::is_nan(divisor) {
+        return nan();
+    }
+    let y = abs(divisor);
+    let ysplit = frexp(y);
+    var r = value;
+    if value < 0.0 {
+        r = -value;
+    }
+    while r >= y {
+        let rsplit = frexp(r);
+        var rexp = rsplit.exponent;
+        if rsplit.fraction < ysplit.fraction {
+            rexp = rexp - 1;
+        }
+        r = r - ldexp(y, rexp - ysplit.exponent);
+    }
+    if value < 0.0 {
+        r = -r;
+    }
+    return r;
+}
+
+// ldexp returns fraction * 2^exponent, with a result past the format
+// becoming infinity or 0 and one below the normal range rounded once into a
+// subnormal.
+pub fn ldexp(fraction: f64, exponent: i64) -> f64 {
+    if fraction == 0.0 or float::is_infinite(fraction) or float::is_nan(fraction) {
+        return fraction;
+    }
+    let normal = normalize(fraction);
+    var bits = float::bits(normal.fraction);
+    var e = exponent + normal.exponent + cast<i64>((bits >> 52) & 2047) - 1023;
+    if e < -1075 {
+        return copysign(0.0, fraction);
+    }
+    if e > 1023 {
+        if fraction < 0.0 {
+            return -infinity();
+        }
+        return infinity();
+    }
+    var m = 1.0;
+    if e < -1022 {
+        // A subnormal result: build it 2^53 too large, then scale once.
+        e = e + 53;
+        m = 1.1102230246251565404236316680908203125e-16;
+    }
+    bits = bits & ~(cast<u64>(2047) << 52);
+    bits = bits | (cast<u64>(e + 1023) << 52);
+    return m * float::from_bits(bits);
+}
+
+// Split is a value taken apart into a fraction in [1/2, 1) and the power of
+// two that scales it back, or a value and its integral and fractional parts.
+struct Split {
+    fraction: f64,
+    exponent: i64,
+}
+
+// frexp splits value into fraction * 2^exponent with the fraction in
+// [1/2, 1). Zero, the infinities and NaN come back as they are with a zero
+// exponent.
+fn frexp(value: f64) -> Split {
+    if value == 0.0 or float::is_infinite(value) or float::is_nan(value) {
+        return Split { fraction: value, exponent: 0 };
+    }
+    let normal = normalize(value);
+    var bits = float::bits(normal.fraction);
+    let exponent = normal.exponent + cast<i64>((bits >> 52) & 2047) - 1022;
+    bits = bits & ~(cast<u64>(2047) << 52);
+    bits = bits | (cast<u64>(1022) << 52);
+    return Split { fraction: float::from_bits(bits), exponent: exponent };
+}
+
+// normalize scales a subnormal value up by 2^52 so that its exponent field
+// is meaningful, reporting the -52 that undoes it; a normal value is
+// returned as it is with 0.
+fn normalize(value: f64) -> Split {
+    let smallest_normal = 2.2250738585072014e-308;
+    if abs(value) < smallest_normal {
+        return Split { fraction: value * 4503599627370496.0, exponent: -52 };
+    }
+    return Split { fraction: value, exponent: 0 };
+}
+
+// Parts is a value taken apart into its integral and fractional parts.
+struct Parts {
+    whole: f64,
+    fraction: f64,
+}
+
+// modf splits value into its integral and fractional parts, both with the
+// sign of value.
+fn modf(value: f64) -> Parts {
+    if value < 1.0 {
+        if value < 0.0 {
+            let parts = modf(-value);
+            return Parts { whole: -parts.whole, fraction: -parts.fraction };
+        }
+        if value == 0.0 {
+            return Parts { whole: value, fraction: value };
+        }
+        return Parts { whole: 0.0, fraction: value };
+    }
+    var bits = float::bits(value);
+    let e = cast<i64>((bits >> 52) & 2047) - 1023;
+    // Keep the top 12 + e bits, the integral part, and clear the rest.
+    if e < 52 {
+        bits = bits & ~((cast<u64>(1) << cast<u64>(52 - e)) - 1);
+    }
+    let whole = float::from_bits(bits);
+    return Parts { whole: whole, fraction: value - whole };
+}
+
+// is_odd_integer reports whether value is an odd integer. Past 2^53 every
+// value is an even integer.
+fn is_odd_integer(value: f64) -> bool {
+    if abs(value) >= 9007199254740992.0 {
+        return false;
+    }
+    let parts = modf(value);
+    return parts.fraction == 0.0 and cast<i64>(parts.whole) & 1 == 1;
+}
+
+fn ln2_hi() -> f64 { return 6.93147180369123816490e-01; }
+
+fn ln2_lo() -> f64 { return 1.90821492927058770002e-10; }
+
+fn log2_e() -> f64 { return 1.44269504088896338700e+00; }
+
+fn inv_ln2() -> f64 { return 1.44269504088896340736; }
+
+fn inv_ln10() -> f64 { return 0.43429448190325182765; }
+
+fn sqrt2_half() -> f64 { return 0.70710678118654752440; }
