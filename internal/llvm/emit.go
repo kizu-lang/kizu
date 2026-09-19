@@ -1181,6 +1181,8 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeFloatBits(instr)
 	case floatUnaryIntrinsics[instr.Op] != "":
 		return e.writeFloatUnary(instr)
+	case instr.Op == "float.fma":
+		return e.writeFloatFma(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
@@ -1223,17 +1225,41 @@ func (e *emitter) writeFloatUnary(instr *ir.Instr) error {
 	return nil
 }
 
+// writeFloatFma calls llvm.fma.f64, the `std::math` fused multiply-add: one
+// rounding of x * y + z, which the arm64 and x86-64 (with FMA) targets have
+// as one instruction and which libm supplies where they do not.
+func (e *emitter) writeFloatFma(instr *ir.Instr) error {
+	if len(instr.Args) != 3 {
+		return fmt.Errorf("llvm error: %s expects 3 args", instr.Op)
+	}
+	x := e.value(instr.Args[0])
+	y := e.value(instr.Args[1])
+	z := e.value(instr.Args[2])
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call double @llvm.fma.f64(double %s, double %s, double %s)\n",
+		name, x.operand, y.operand, z.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
 // writeFloatMathDecls declares the float intrinsics the module calls, in the
 // order of their instruction names.
 func (e *emitter) writeFloatMathDecls() {
-	ops := make([]string, 0, len(floatUnaryIntrinsics))
+	ops := make([]string, 0, len(floatUnaryIntrinsics)+1)
 	for op := range floatUnaryIntrinsics {
 		if e.usesOp(op) {
 			ops = append(ops, op)
 		}
 	}
+	if e.usesOp("float.fma") {
+		ops = append(ops, "float.fma")
+	}
 	sort.Strings(ops)
 	for _, op := range ops {
+		if op == "float.fma" {
+			e.out.WriteString("declare double @llvm.fma.f64(double, double, double)\n")
+			continue
+		}
 		fmt.Fprintf(&e.out, "declare double @%s(double)\n", floatUnaryIntrinsics[op])
 	}
 	if len(ops) > 0 {

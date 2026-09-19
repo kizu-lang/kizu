@@ -34,8 +34,10 @@ var mathUnaryFunctions = []struct {
 	{"expm1", math.Expm1, 1},
 	{"log", math.Log, 1},
 	{"log1p", math.Log1p, 1},
-	{"log2", math.Log2, 1},
-	{"log10", math.Log10, 1},
+	// Go's log2 and log10 are its log times a rounded constant, three
+	// roundings in all, and std::math's are the same shape on its own log.
+	{"log2", math.Log2, 2},
+	{"log10", math.Log10, 2},
 	{"sin", math.Sin, 1},
 	{"cos", math.Cos, 1},
 	// tan ends in a reciprocal, which doubles what the fused multiply-add
@@ -218,12 +220,27 @@ type mathExpectation struct {
 }
 
 // goAnswersWrongly reports the cases Go's math is known to answer wrongly, so
-// that they are not held against std::math. On amd64 Go's Exp and Log are
-// assembly whose argument reduction gives up at the edges: Log of a subnormal
-// comes back as Log of the smallest normal, and Exp, which sinh and cosh end
-// in, overflows a little below the true threshold. The arm64 build runs the
-// same algorithms std::math does and checks these cases exactly.
+// that they are not held against std::math. From 2^29 up Go reduces the
+// argument of sin, cos and tan by Payne-Hanek but then subtracts 1 from the
+// fraction as a float, which drops the low bits whenever the angle is close
+// to a multiple of pi/4; std::math subtracts in integers first and keeps
+// them, and its answers there were checked against 60-digit references. On
+// amd64 Go's Exp and Log are assembly whose argument reduction gives up at
+// the edges: Log of a subnormal comes back as Log of the smallest normal,
+// and Exp, which sinh and cosh end in, overflows a little below the true
+// threshold. The arm64 build runs msun for those and checks them exactly.
 func goAnswersWrongly(name string, x float64) bool {
+	switch name {
+	case "sin", "cos":
+		// Below 2^29 Go subtracts pi/4 in three pieces that hold about 100
+		// bits, so an argument within x * 2^-46 of a multiple of pi/2 (pi
+		// itself, whose sine is 1.2e-16) loses its low bits too.
+		quarter := math.Round(x / (math.Pi / 2))
+		near := quarter != 0 && math.Abs(x-quarter*(math.Pi/2)) < math.Abs(x)*0x1p-46
+		return near || math.Abs(x) >= 536870912
+	case "tan":
+		return math.Abs(x) >= 536870912
+	}
 	if runtime.GOARCH != "amd64" {
 		return false
 	}
@@ -235,6 +252,18 @@ func goAnswersWrongly(name string, x float64) bool {
 		return x > 709
 	}
 	return false
+}
+
+// goAnswersWronglyOnPair is goAnswersWrongly for the two-argument functions.
+// Go's Pow raises to the whole part of the exponent by repeated squaring and
+// to the fraction through Exp(yf * Log(x)), so its error grows with the
+// exponent and with |y log x|: Pow(0.1, 10) is 4 ulp off and Pow(1e300, 0.1)
+// 44. std::math's pow was checked against 60-digit references instead.
+func goAnswersWronglyOnPair(name string, x, y float64) bool {
+	if name != "pow" {
+		return false
+	}
+	return math.Abs(y) > 2 || math.Abs(y*math.Log(math.Abs(x))) > 1
 }
 
 // mathWant lists the answers Go's math gives in the order mathProgram prints
@@ -251,7 +280,11 @@ func mathWant(bits []uint64) []mathExpectation {
 	for i := range bits[:len(bits)-1] {
 		for _, function := range mathBinaryFunctions {
 			a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-			want = append(want, mathExpectation{value: function.want(a, b), ulps: function.ulps})
+			want = append(want, mathExpectation{
+				value: function.want(a, b),
+				ulps:  function.ulps,
+				skip:  goAnswersWronglyOnPair(function.name, a, b),
+			})
 		}
 	}
 	for i := range bits[:len(bits)-2] {

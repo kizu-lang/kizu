@@ -2416,6 +2416,16 @@ func (l *lowerer) lowerCoreBuiltinCall(name string, args []Value) (Value, bool, 
 		}
 		return l.emit(op, "f64", args, ""), true, nil
 	}
+	if name == "std::internal::builtin::f64_fma" {
+		// x * y + z rounded once, the native target's fused multiply-add;
+		// wasm has no such instruction, so std::math reaches this only
+		// under std::target::is_native() and computes the same bits in
+		// software elsewhere.
+		if len(args) != 3 {
+			return Value{}, true, fmt.Errorf("ir error: %s expects 3 args", name)
+		}
+		return l.emit("float.fma", "f64", args, ""), true, nil
+	}
 	if name == "std::internal::builtin::test_fail" {
 		return l.emit("test.fail", "void", args, ""), true, nil
 	}

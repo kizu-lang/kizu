@@ -77,6 +77,10 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeFloatBits(instr)
 	case floatUnaryInstructions[instr.Op] != "":
 		return e.writeFloatUnary(instr)
+	case instr.Op == "float.fma":
+		// wasm has no fused multiply-add; std::math reaches the primitive
+		// only under std::target::is_native().
+		return fmt.Errorf("wasm error: %s has no wasm instruction", instr.Op)
 	case instr.Op == "buffer.new", instr.Op == "buffer.as_bytes":
 		return e.writeBufferInstr(instr)
 	default:

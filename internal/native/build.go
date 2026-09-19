@@ -361,7 +361,17 @@ func clangFlags(options Options) []string {
 	if options.Triple != "" {
 		flags = append(flags, "-target", options.Triple)
 	}
-	return append(flags, clangOptimizationFlags(options.Opt)...)
+	return append(flags, clangOptimizationFlags(options.Opt, TargetIsArm64(options.Triple))...)
+}
+
+// TargetIsArm64 reports whether a native target triple names a 64-bit Arm
+// machine. An omitted triple names the host.
+func TargetIsArm64(triple string) bool {
+	if triple == "" {
+		return runtime.GOARCH == "arm64"
+	}
+	lower := strings.ToLower(triple)
+	return strings.Contains(lower, "aarch64") || strings.Contains(lower, "arm64")
 }
 
 // clangOptimizationFlags select the native toolchain optimization level.
@@ -382,13 +392,35 @@ func clangFlags(options Options) []string {
 // entry point by 92 bytes made a loop over two million doubles 14% slower,
 // with not one instruction of the loop changed. Aligned, the loop is where it
 // was in either build.
-func clangOptimizationFlags(opt bool) []string {
-	if opt {
-		return []string{
-			"-O3", "-falign-loops=32", "-Xclang", "-mllvm", "-Xclang", "-enable-tail-merge=false",
-		}
+//
+// And it lets every simplification pass turn a switch over constants into a
+// lookup table, not only the late one. Kizu has no constant arrays, so a
+// table (the kernels of std::math) is a function that compares its index
+// against each value in turn, and LLVM folds the chain into a switch. By
+// default the switch becomes a table only after inlining has run, so the
+// function is still a hundred blocks when the inliner sees it and stays a
+// call, and every caller that keeps values live across that call spills
+// them: sin was three times slower for it.
+//
+// And on arm64 it has float constants loaded from a literal pool rather than
+// built in a register by a mov and three movk, which the Apple tuning
+// prefers on the grounds that the pair fuse. A loop that calls a kernel
+// with a dozen constants, an FFT butterfly say, rebuilds them on every call
+// because the call clobbers the registers they sat in; loaded, each is one
+// instruction. The eighteen macro benchmarks are unmoved by it; the
+// numeric ones gain up to 12%.
+func clangOptimizationFlags(opt bool, arm64 bool) []string {
+	if !opt {
+		return []string{"-O0"}
 	}
-	return []string{"-O0"}
+	flags := []string{
+		"-O3", "-falign-loops=32", "-Xclang", "-mllvm", "-Xclang", "-enable-tail-merge=false",
+		"-Xclang", "-mllvm", "-Xclang", "-switch-to-lookup=true",
+	}
+	if arm64 {
+		flags = append(flags, "-Xclang", "-target-feature", "-Xclang", "-fuse-literals")
+	}
+	return flags
 }
 
 // Metadata records explicit native build inputs next to the output artifact.

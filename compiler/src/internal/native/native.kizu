@@ -128,7 +128,7 @@ pub fn build(
     defer command.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
     let darwin = target_is_darwin(options, host);
-    if try link(io, allocator, dir_bytes, runtime_bytes, output, options, darwin, version_bytes, llvm_ir, &var command) |failed| {
+    if try link(io, allocator, dir_bytes, runtime_bytes, output, options, darwin, target_is_arm64(options, host), version_bytes, llvm_ir, &var command) |failed| {
         errdefer failed.deinit(allocator);
         try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
@@ -212,7 +212,7 @@ pub fn executable(
             var command = array::new<string::String>(allocator);
             defer command.deinit(allocator);
             let darwin = target_is_darwin(options, host);
-            if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, darwin, version_bytes, llvm_ir, &var command) |failed| {
+            if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, darwin, target_is_arm64(options, host), version_bytes, llvm_ir, &var command) |failed| {
                 errdefer failed.deinit(allocator);
                 try cache.discard_artifact(io, allocator, move pending);
                 try clean_build_dir(io, allocator, dir_bytes);
@@ -281,6 +281,20 @@ fn index_of(haystack: []u8, needle: []u8) -> ?i64 {
         start = start + 1;
     }
     return null;
+}
+
+/// Reports whether the selected native target is a 64-bit Arm machine, the
+/// Go `TargetIsArm64`. An omitted triple names the host.
+pub fn target_is_arm64(options: &Options, host: &string::String) -> bool {
+    if options.triple.len() == 0 {
+        let host_bytes = host.as_bytes();
+        if index_of(host_bytes, "-arm64") |_| {
+            return true;
+        }
+        return false;
+    }
+    let triple = options.triple.as_bytes();
+    return contains_ascii_fold(triple, "aarch64") or contains_ascii_fold(triple, "arm64");
 }
 
 /// Reports whether the selected native target is Darwin, whose functions keep
@@ -395,7 +409,7 @@ fn append_toolchain_key(allocator: Allocator,
     }
     var flags = array::new<string::String>(allocator);
     defer flags.deinit(allocator);
-    try clang_optimization_flags(allocator, options.opt, &var flags);
+    try clang_optimization_flags(allocator, options.opt, target_is_arm64(options, host), &var flags);
     var index = 0;
     while flags.at(index) |flag| {
         index = index + 1;
@@ -445,6 +459,7 @@ fn link(
     output: []u8,
     options: &Options,
     darwin: bool,
+    arm64: bool,
     version: []u8,
     llvm_ir: &string::String,
     command: &var array::Array<string::String>
@@ -457,7 +472,7 @@ fn link(
     let ir_bytes = ir_path.as_bytes();
     let text = module.as_bytes();
     try fs::write_file(io, ir_bytes, text);
-    return run_clang(io, allocator, dir, options, ir_bytes, runtime_path, output, command);
+    return run_clang(io, allocator, dir, options, arm64, ir_bytes, runtime_path, output, command);
 }
 
 /// Writes the module as the linker is to compile it, the Go
@@ -639,7 +654,7 @@ fn runtime_object(
             defer dir.deinit(allocator);
             let dir_bytes = dir.as_bytes();
             let scratch_bytes = scratch_copy.as_bytes();
-            if try compile_runtime(io, allocator, dir_bytes, source, scratch_bytes, options) |failed| {
+            if try compile_runtime(io, allocator, dir_bytes, source, scratch_bytes, options, target_is_arm64(options, host)) |failed| {
                 errdefer failed.deinit(allocator);
                 try cache.discard_artifact(io, allocator, move pending);
                 try clean_build_dir(io, allocator, dir_bytes);
@@ -660,7 +675,8 @@ fn compile_runtime(
     dir: []u8,
     source: &string::String,
     object: []u8,
-    options: &Options
+    options: &Options,
+    arm64: bool
 ) -> !?diagnostic::Diagnostic {
     let source_path = try path::join(allocator, dir, "runtime.c");
     defer source_path.deinit(allocator);
@@ -671,7 +687,7 @@ fn compile_runtime(
     defer command.deinit(allocator);
     let linker = options.linker.as_bytes();
     try append_copy(allocator, &var command, linker);
-    try clang_flags(allocator, options, &var command);
+    try clang_flags(allocator, options, arm64, &var command);
     try append_copy(allocator, &var command, "-c");
     try append_copy(allocator, &var command, source_bytes);
     try append_copy(allocator, &var command, "-o");
@@ -683,7 +699,8 @@ fn compile_runtime(
 /// `compileRuntime`. std::process::spawn_wait8 carries eight arguments at
 /// most, and an optimized build hands clang more than that
 /// (`clang [-target T] -O3 -falign-loops=32 -Xclang -mllvm -Xclang
-/// -enable-tail-merge=false <a> <b> -o <output>`), so the arguments after the
+/// -enable-tail-merge=false -Xclang -mllvm -Xclang -switch-to-lookup=true
+/// <a> <b> -o <output>`), so the arguments after the
 /// toolchain go to a response file in the build's temporary directory, one
 /// quoted word each, and clang reads them from `@file` exactly as the command
 /// records them.
@@ -898,6 +915,7 @@ fn run_clang(
     allocator: Allocator,
     dir: []u8,
     options: &Options,
+    arm64: bool,
     ir_path: []u8,
     runtime_path: []u8,
     output: []u8,
@@ -905,7 +923,7 @@ fn run_clang(
 ) -> !?diagnostic::Diagnostic {
     let linker = options.linker.as_bytes();
     try append_copy(allocator, command, linker);
-    try clang_flags(allocator, options, command);
+    try clang_flags(allocator, options, arm64, command);
     try append_copy(allocator, command, ir_path);
     try append_copy(allocator, command, runtime_path);
     try append_copy(allocator, command, "-o");
@@ -920,6 +938,7 @@ fn run_clang(
 fn clang_flags(
     allocator: Allocator,
     options: &Options,
+    arm64: bool,
     out: &var array::Array<string::String>
 ) -> !void {
     if options.triple.len() > 0 {
@@ -927,7 +946,7 @@ fn clang_flags(
         let triple = options.triple.as_bytes();
         try append_copy(allocator, out, triple);
     }
-    return clang_optimization_flags(allocator, options.opt, out);
+    return clang_optimization_flags(allocator, options.opt, arm64, out);
 }
 
 /// Selects the native toolchain optimization level, the Go
@@ -941,20 +960,39 @@ fn clang_flags(
 ///
 /// And it starts every loop on a 32-byte boundary, so where a hot loop falls
 /// does not depend on how much code precedes it.
+///
+/// And it lets every simplification pass turn a switch over constants into
+/// a lookup table, not only the late one, so that the table functions of
+/// std::math are small by the time the inliner sees them; and on arm64 it
+/// has float constants loaded from a literal pool rather than built by a
+/// mov and three movk, which a loop calling a kernel rebuilds on every
+/// call.
 fn clang_optimization_flags(
     allocator: Allocator,
     opt: bool,
+    arm64: bool,
     out: &var array::Array<string::String>
 ) -> !void {
-    if opt {
-        try append_copy(allocator, out, "-O3");
-        try append_copy(allocator, out, "-falign-loops=32");
-        try append_copy(allocator, out, "-Xclang");
-        try append_copy(allocator, out, "-mllvm");
-        try append_copy(allocator, out, "-Xclang");
-        return append_copy(allocator, out, "-enable-tail-merge=false");
+    if !opt {
+        return append_copy(allocator, out, "-O0");
     }
-    return append_copy(allocator, out, "-O0");
+    try append_copy(allocator, out, "-O3");
+    try append_copy(allocator, out, "-falign-loops=32");
+    try append_copy(allocator, out, "-Xclang");
+    try append_copy(allocator, out, "-mllvm");
+    try append_copy(allocator, out, "-Xclang");
+    try append_copy(allocator, out, "-enable-tail-merge=false");
+    try append_copy(allocator, out, "-Xclang");
+    try append_copy(allocator, out, "-mllvm");
+    try append_copy(allocator, out, "-Xclang");
+    try append_copy(allocator, out, "-switch-to-lookup=true");
+    if arm64 {
+        try append_copy(allocator, out, "-Xclang");
+        try append_copy(allocator, out, "-target-feature");
+        try append_copy(allocator, out, "-Xclang");
+        try append_copy(allocator, out, "-fuse-literals");
+    }
+    return;
 }
 
 /// Appends one owned copy of bytes to a command line.
