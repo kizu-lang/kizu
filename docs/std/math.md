@@ -1,53 +1,55 @@
 # std::math
 
-f64 の初等関数と定数です。
+初等関数と定数です。`T` は `f32` か `f64` で、`math::sin<f64>(x)` のように static
+引数で選びます(`array::new<T>` と同じ綴り)。それ以外の型は body で type error に
+なります。
 
 ```text
-std::math::sqrt(value: f64) -> f64
-std::math::floor(value: f64) -> f64
-std::math::ceil(value: f64) -> f64
-std::math::trunc(value: f64) -> f64
-std::math::round(value: f64) -> f64
-std::math::abs(value: f64) -> f64
-std::math::copysign(magnitude: f64, sign: f64) -> f64
-std::math::is_negative(value: f64) -> bool
-std::math::min(a: f64, b: f64) -> f64
-std::math::max(a: f64, b: f64) -> f64
-std::math::clamp(value: f64, low: f64, high: f64) -> f64
-std::math::hypot(x: f64, y: f64) -> f64
-std::math::exp(value: f64) -> f64
-std::math::exp2(value: f64) -> f64
-std::math::expm1(value: f64) -> f64
-std::math::log(value: f64) -> f64
-std::math::log1p(value: f64) -> f64
-std::math::log2(value: f64) -> f64
-std::math::log10(value: f64) -> f64
-std::math::pow(base: f64, exponent: f64) -> f64
-std::math::fmod(value: f64, divisor: f64) -> f64
-std::math::ldexp(fraction: f64, exponent: i64) -> f64
-std::math::sin(value: f64) -> f64
-std::math::cos(value: f64) -> f64
-std::math::tan(value: f64) -> f64
-std::math::asin(value: f64) -> f64
-std::math::acos(value: f64) -> f64
-std::math::atan(value: f64) -> f64
-std::math::atan2(y: f64, x: f64) -> f64
-std::math::sinh(value: f64) -> f64
-std::math::cosh(value: f64) -> f64
-std::math::tanh(value: f64) -> f64
-std::math::asinh(value: f64) -> f64
-std::math::acosh(value: f64) -> f64
-std::math::atanh(value: f64) -> f64
-std::math::cbrt(value: f64) -> f64
-std::math::round_even(value: f64) -> f64
-std::math::fma(x: f64, y: f64, z: f64) -> f64
-std::math::frexp(value: f64) -> Scaled      // { fraction: f64, exponent: i64 }
-std::math::modf(value: f64) -> Parts        // { whole: f64, fraction: f64 }
-std::math::pi() -> f64
-std::math::tau() -> f64
-std::math::e() -> f64
-std::math::infinity() -> f64
-std::math::nan() -> f64
+std::math::sqrt<T>(value: T) -> T
+std::math::floor<T>(value: T) -> T
+std::math::ceil<T>(value: T) -> T
+std::math::trunc<T>(value: T) -> T
+std::math::round<T>(value: T) -> T
+std::math::abs<T>(value: T) -> T
+std::math::copysign<T>(magnitude: T, sign: T) -> T
+std::math::is_negative<T>(value: T) -> bool
+std::math::min<T>(a: T, b: T) -> T
+std::math::max<T>(a: T, b: T) -> T
+std::math::clamp<T>(value: T, low: T, high: T) -> T
+std::math::hypot<T>(x: T, y: T) -> T
+std::math::exp<T>(value: T) -> T
+std::math::exp2<T>(value: T) -> T
+std::math::expm1<T>(value: T) -> T
+std::math::log<T>(value: T) -> T
+std::math::log1p<T>(value: T) -> T
+std::math::log2<T>(value: T) -> T
+std::math::log10<T>(value: T) -> T
+std::math::pow<T>(base: T, exponent: T) -> T
+std::math::fmod<T>(value: T, divisor: T) -> T
+std::math::ldexp<T>(fraction: T, exponent: i64) -> T
+std::math::sin<T>(value: T) -> T
+std::math::cos<T>(value: T) -> T
+std::math::tan<T>(value: T) -> T
+std::math::asin<T>(value: T) -> T
+std::math::acos<T>(value: T) -> T
+std::math::atan<T>(value: T) -> T
+std::math::atan2<T>(y: T, x: T) -> T
+std::math::sinh<T>(value: T) -> T
+std::math::cosh<T>(value: T) -> T
+std::math::tanh<T>(value: T) -> T
+std::math::asinh<T>(value: T) -> T
+std::math::acosh<T>(value: T) -> T
+std::math::atanh<T>(value: T) -> T
+std::math::cbrt<T>(value: T) -> T
+std::math::round_even<T>(value: T) -> T
+std::math::fma<T>(x: T, y: T, z: T) -> T
+std::math::frexp<T>(value: T) -> Scaled      // { fraction: f64, exponent: i64 }
+std::math::modf<T>(value: T) -> Parts        // { whole: f64, fraction: f64 }
+std::math::pi<T>() -> T
+std::math::tau<T>() -> T
+std::math::e<T>() -> T
+std::math::infinity<T>() -> T
+std::math::nan<T>() -> T
 ```
 
 `sqrt` / `floor` / `ceil` / `trunc` は IEEE 754 が答えを 1 つに定める演算で、
@@ -119,9 +121,9 @@ bit が動くことがあります。
 
 ## f32
 
-`f32` の関数は持ちません。`cast<f64>` で上げて計算し、`cast<f32>` で戻します。
-`sqrt` / `floor` / `ceil` / `trunc` / `round` / `round_even` / `fma` はこの 2 段の
-丸めでも正しく丸まった `f32` になり(f64 の 53 bit は f32 の 24 bit の 2 倍と
-2 bit 以上あるため)、残りは f64 で 1 ulp 以内の値を丸めるので、`f32` で 1 ulp を
-超えることは事実上ありません。単精度専用の速い算法は、それを要る利用者が
-現れてから考えます。
+`f32` は f64 で計算して 1 回 `cast<f32>` で戻します。`sqrt` / `floor` / `ceil` /
+`trunc` / `round` / `round_even` / `fma` はこの 2 段の丸めでも正しく丸まった `f32`
+です(f64 の 53 bit は f32 の 24 bit の 2 倍と 2 bit 以上あるため)。残りは f64 で
+1 ulp 以内の値を丸めるので、`f32` で 1 ulp を超えることは事実上ありません。
+`frexp` / `modf` は `T` によらず f64 の部品を返します。`f32` はそこに正確に収まります。
+単精度専用の速い算法は、それを要る利用者が現れてから差し替えます。API は変わりません。

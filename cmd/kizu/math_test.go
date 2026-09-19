@@ -61,30 +61,31 @@ var mathUnaryFunctions = []struct {
 // mathHelpers are the functions the generated program defines itself, to
 // print one number of a std::math answer that has two.
 const mathHelpers = `fn frexp_fraction(value: f64) -> f64 {
-    return math::frexp(value).fraction;
+    return math::frexp<f64>(value).fraction;
 }
 
 fn frexp_exponent(value: f64) -> f64 {
-    return cast<f64>(math::frexp(value).exponent);
+    return cast<f64>(math::frexp<f64>(value).exponent);
 }
 
 fn modf_whole(value: f64) -> f64 {
-    return math::modf(value).whole;
+    return math::modf<f64>(value).whole;
 }
 
 fn modf_fraction(value: f64) -> f64 {
-    return math::modf(value).fraction;
+    return math::modf<f64>(value).fraction;
 }
 
 `
 
 // mathCallee spells how the generated program calls a function: a helper it
-// defines by its bare name, anything else through the module.
+// defines by its bare name, anything else through the module with f64 as
+// the float type.
 func mathCallee(name string) string {
 	if strings.Contains(mathHelpers, "fn "+name+"(") {
 		return name
 	}
-	return "math::" + name
+	return "math::" + name + "<f64>"
 }
 
 // mathBinaryFunctions lists the two-argument std::math functions beside the Go
@@ -385,4 +386,101 @@ func TestMathWASM(t *testing.T) {
 		t.Fatalf("wasmtime failed: %v\n%s", err, output)
 	}
 	compareMathOutput(t, bits, string(output))
+}
+
+// mathSingleValues lists the f32 values the single-precision path is checked
+// on: ordinary magnitudes, the edges of the format, and the specials.
+func mathSingleValues() []float32 {
+	return []float32{
+		0, float32(math.Copysign(0, -1)), 0.5, -0.5, 1, -1, 2, 3, 0.1, 0.7, 2.5, -2.5, 100, 1e30, 1e-30,
+		0.7853982, 3.1415927, 1e-45, 3.4028235e38,
+		float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN()),
+	}
+}
+
+// mathSingleProgram writes a program that applies every one-argument
+// std::math function to every value as an f32 and prints the bits of each
+// f32 answer, widened to f64 so that print has one integer to write.
+func mathSingleProgram(values []float32) string {
+	var b strings.Builder
+	b.WriteString("import std::float;\nimport std::math;\n\n")
+	b.WriteString("fn show(value: f32) -> void {\n")
+	b.WriteString("    print(cast<i64>(float::bits(cast<f64>(value))));\n}\n\n")
+	b.WriteString("fn main() -> void {\n")
+	for i, value := range values {
+		wide := float64(value)
+		bits := math.Float64bits(wide)
+		fmt.Fprintf(&b, "    let v%d: f32 = cast<f32>(float::from_bits(cast<u64>(%d) << 32 | %d));\n",
+			i, bits>>32, bits&0xFFFFFFFF)
+		for _, function := range mathUnaryFunctions {
+			if strings.Contains(mathHelpers, "fn "+function.name+"(") {
+				continue
+			}
+			fmt.Fprintf(&b, "    show(math::%s<f32>(v%d));\n", function.name, i)
+		}
+	}
+	b.WriteString("}\n")
+	return b.String()
+}
+
+// mathSingleMatches reports whether an f32 answer is within the allowed
+// units in the last place of the f32 nearest Go's f64 answer.
+func mathSingleMatches(got float32, want float32, ulps uint64) bool {
+	if math.IsNaN(float64(want)) || math.IsNaN(float64(got)) {
+		return math.IsNaN(float64(want)) && math.IsNaN(float64(got))
+	}
+	a, b := uint64(math.Float32bits(got)), uint64(math.Float32bits(want))
+	if a == b {
+		return true
+	}
+	if math.IsInf(float64(got), 0) || math.IsInf(float64(want), 0) {
+		return false
+	}
+	if math.Signbit(float64(got)) != math.Signbit(float64(want)) {
+		return false
+	}
+	distance := a - b
+	if b > a {
+		distance = b - a
+	}
+	return distance <= ulps
+}
+
+// TestMathSingle checks the f32 instantiations: each computes in f64 and
+// rounds once, so it is the f32 nearest Go's f64 answer, within the same
+// allowance the f64 path has.
+func TestMathSingle(t *testing.T) {
+	values := mathSingleValues()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "math32.kizu")
+	if err := os.WriteFile(path, []byte(mathSingleProgram(values)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runKizuEnv(nil, "run", path)
+	if err != nil {
+		t.Fatalf("run failed: %v\n%s", err, output)
+	}
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	line := 0
+	for _, value := range values {
+		for _, function := range mathUnaryFunctions {
+			if strings.Contains(mathHelpers, "fn "+function.name+"(") {
+				continue
+			}
+			if line >= len(lines) {
+				t.Fatalf("output stops after %d lines", line)
+			}
+			pattern, err := strconv.ParseInt(lines[line], 10, 64)
+			if err != nil {
+				t.Fatalf("%s<f32>(%g): printed %q", function.name, value, lines[line])
+			}
+			got := float32(math.Float64frombits(uint64(pattern)))
+			want := float32(function.want(float64(value)))
+			matches := mathSingleMatches(got, want, function.ulps)
+			if !matches && !goAnswersWrongly(function.name, float64(value)) {
+				t.Errorf("%s<f32>(%g): got %v, want %v", function.name, value, got, want)
+			}
+			line++
+		}
+	}
 }
