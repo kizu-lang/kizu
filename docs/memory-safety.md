@@ -248,7 +248,7 @@ memory-safety invariants to representative examples.
 | assignment moves non-copy values | `examples/variables.kizu` | `examples/negative/assignment_move.kizu` |
 | borrow does not move owner | `examples/borrow.kizu`, `examples/last_use_borrow.kizu`, `examples/borrow_call_then_move.kizu` | `examples/negative/borrow_escape.kizu` |
 | non-copy value cannot move while borrowed | | `examples/negative/move_while_borrowed.kizu`, `examples/negative/borrow_before_last_use_move.kizu`, `examples/negative/borrow_loop_last_use.kizu` |
-| field-path borrow permits disjoint fields | `examples/field_borrow.kizu`, `examples/nested_field_path.kizu` | `examples/negative/field_borrow_same_field_assignment.kizu`, `examples/negative/field_borrow_owner_move.kizu`, `examples/negative/nested_field_borrow_overlap.kizu` |
+| field-path borrow permits disjoint fields | `examples/field_borrow.kizu`, `examples/nested_field_path.kizu`, `examples/field_borrow_disjoint_call.kizu` | `examples/negative/field_borrow_same_field_assignment.kizu`, `examples/negative/field_borrow_owner_move.kizu`, `examples/negative/nested_field_borrow_overlap.kizu`, `examples/negative/field_borrow_overlap_call.kizu` |
 | borrow cannot be stored or passed as owned | | `examples/negative/borrow_field.kizu`, `examples/negative/borrow_local_alias.kizu`, `examples/negative/borrow_to_owner.kizu` |
 | copy value can be copied through borrow deref | `examples/borrow_deref_copy.kizu` | |
 | non-copy value cannot move out of borrow deref | `examples/borrow_deref_copy.kizu` | `examples/negative/borrow_deref_move.kizu`, `examples/negative/mut_borrow_deref_move.kizu` |
@@ -256,6 +256,7 @@ memory-safety invariants to representative examples.
 | shared and mutable borrows cannot conflict | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_conflict.kizu` |
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
 | `&var self` method requires a mutable receiver | `examples/mutable_self_method.kizu`, `tests/behavior/src/mutable_self_method/mutable_self_method_test.kizu` | `examples/negative/mutable_self_method_let_receiver.kizu` |
+| a call result receives a by-value method only as a copy value | `examples/method_on_call_result.kizu` | `examples/negative/method_on_call_result_borrow.kizu`, `examples/negative/method_on_call_result_mut.kizu`, `examples/negative/method_on_call_result_owner.kizu` |
 | arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
 | arena at returns an arena-tied `&T` | `examples/arena.kizu`, `examples/arena_helper.kizu`, `tests/behavior/src/arena_param/arena_param_test.kizu` | `examples/negative/arena_at_move.kizu`, `examples/negative/arena_at_borrow_escape.kizu`, `examples/negative/arena_deinit_while_at_borrowed.kizu` |

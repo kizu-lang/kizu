@@ -40,40 +40,72 @@ fn (self: &var Checker) read_field_expr(
         }
     }
     var receiver_type = empty_name();
-    if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
-        return move failed;
-    }
-    receiver_type = try self.names.borrowed_value(receiver_type);
     if try self.direct_field_root_of_field(tree, env, field) |found| {
-        if !is_empty(found.path) and self.field_deinit_name(found.root, found.path) {
+        if self.field_deinit_name(found.root, found.path) {
             return try self.error2(
                 tree, field.span, "move error: field `%s.%s` was deinitialized",
                 Arg::Str(self.binding(found.root).name), Arg::Str(found.path)
             );
         }
-        if self.binding(found.root).active_mut_borrows > 0 {
-            return try self.error1(
-                tree, field.span, "borrow error: value `%s` cannot be read while mutably borrowed",
-                Arg::Str(self.binding(found.root).name)
-            );
+        if try self.read_field_path_receiver(tree, env, field.receiver, found.path, &var receiver_type) |failed| {
+            return move failed;
         }
-        if self.field_borrow_count(found.root, found.path, true) > 0 {
-            return try self.error2(
-                tree, field.span, "borrow error: field `%s.%s` cannot be read while mutably borrowed",
-                Arg::Str(self.binding(found.root).name), Arg::Str(found.path)
-            );
+    } else {
+        if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
+            return move failed;
         }
     }
-    if self.struct_field_type_text(receiver_type, tree, field.name) |field_type| {
-        out.* = field_type;
-        return null;
-    }
-    if self.read_fs_field_type(receiver_type, tree, field.name) |field_type| {
-        out.* = field_type;
-        return null;
-    }
-    out.* = receiver_type;
+    receiver_type = try self.names.borrowed_value(receiver_type);
+    out.* = self.field_type_name(receiver_type, tree, field.name);
     return null;
+}
+
+/// Types the receiver of a field access rooted in a local binding, the Go
+/// `readFieldPathReceiver`. Reading `p.b` touches only the storage under
+/// `p.b`, so the root is read against the borrows that alias that path
+/// rather than against every field borrow on it: `f(&var p.a, &p.b)` names
+/// disjoint storage (SPEC §9).
+fn (self: &var Checker) read_field_path_receiver(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    receiver: ast::Expression,
+    path: Name,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if ident_expr(tree, receiver) |ident| {
+        return self.read_ident_aliasing(tree, env, ident, path, out);
+    }
+    if field_expr(tree, receiver) |inner| {
+        if try self.direct_field_root_of_field(tree, env, inner) |found| {
+            if self.field_deinit_name(found.root, found.path) {
+                return try self.error2(
+                    tree, inner.span, "move error: field `%s.%s` was deinitialized",
+                    Arg::Str(self.binding(found.root).name), Arg::Str(found.path)
+                );
+            }
+        }
+        var receiver_type = empty_name();
+        if try self.read_field_path_receiver(tree, env, inner.receiver, path, &var receiver_type) |failed| {
+            return move failed;
+        }
+        receiver_type = try self.names.borrowed_value(receiver_type);
+        out.* = self.field_type_name(receiver_type, tree, inner.name);
+        return null;
+    }
+    return self.read_expr(tree, env, receiver, out);
+}
+
+/// Resolves the ownership type of a field on a receiver type, the Go
+/// `fieldTypeName`; a receiver the checker has no fields for keeps its own
+/// type.
+fn (self: &Checker) field_type_name(receiver_type: Name, tree: &ast::Ast, field: ast::Text) -> Name {
+    if self.struct_field_type_text(receiver_type, tree, field) |field_type| {
+        return field_type;
+    }
+    if self.read_fs_field_type(receiver_type, tree, field) |field_type| {
+        return field_type;
+    }
+    return receiver_type;
 }
 
 /// Returns ownership types for builtin filesystem structs, the Go

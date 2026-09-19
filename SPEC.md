@@ -567,12 +567,16 @@ self.related.len();
 `Color.Red` や `Shape.Circle(10)` のような dot による enum / union lookup は
 compile error です。互換構文としては扱いません。
 
-method receiver path は local binding を root とする field path です。
+method receiver path は local binding を root とする field path です。copy 型(§8)の
+call 結果は、値で受ける `self: T` の method の receiver にもなれます: temporary は
+場所を持ちませんが、copy 型の値受け receiver はその呼び出しより長く生きるものを
+何も読まないためです。`&self` / `&var self` の method と owner の値には束縛が要ります。
 
 ```kizu
 values.len();          // ok: local receiver
 self.related.len();    // ok: direct field receiver
 self.a.b.len();        // ok: nested field receiver
+a.add(b).scale(3);     // ok: copy 型の call 結果に値受け method
 ```
 
 field receiver は root owner の ownership state に従います。read-only method は
@@ -2998,15 +3002,17 @@ source に残す唯一の手段です。`std::mem::Limit` は確保上限の uni
 
 **view を返す accessor.** `String.as_bytes` は owned buffer への local
 read-only view、`as_mut_bytes` は writable view(`&var []u8`)です。
+`Array<T>.as_slice` / `as_mut_slice` は同じ規則で `[]T` / `&var []T` を返します
+(T は u8 以外の固定幅の数。名前が返るものを言うのは `[N]T` と同じで、§7.1)。
 どちらも戻り値を local binding に束縛する必要があります。receiver は local
 binding のほか、そこを root とする field path(`owner.field.as_bytes()`)を
 書けます: このとき borrow は root の該当 path に付き、その path に重なる操作と
-root 全体の move が view の最終使用まで待ちます(§9)。`as_mut_bytes` は root が
-mutable であることを要求します。read-only view が
-生きている間は `append_bytes` / `append_byte` / `truncate` / `clear` /
-`deinit` を禁止します。writable view は mutable binding の String からだけ
-作れ、生きている間 String は exclusive borrow です —— すべての method 呼び出し、
-`deinit`、共有 view を禁止します。書き込みは既存 bytes の上書きだけで、
+root 全体の move が view の最終使用まで待ちます(§9)。`as_mut_bytes` /
+`as_mut_slice` は root が mutable であることを要求します。read-only view が
+生きている間は `append_bytes` / `append_byte` / `append` / `truncate` / `clear` /
+`deinit` を禁止します。writable view は mutable binding の String / Array からだけ
+作れ、生きている間 owner は exclusive borrow です —— すべての method 呼び出し、
+`deinit`、共有 view を禁止します。書き込みは既存要素の上書きだけで、
 length と capacity は変わりません。
 
 **mutator の receiver.** `String` の `append_bytes` / `append_byte` /

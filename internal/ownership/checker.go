@@ -2278,6 +2278,8 @@ func (c *Checker) checkStringViewLetStmt(
 		kind := "String"
 		if isBufferTypeName(target.typeName) {
 			kind = "buffer"
+		} else if isArrayTypeName(target.typeName) {
+			kind = "Array"
 		}
 		return errorf("string error: `%s.%s` requires mutable %s binding",
 			kind, viewMethodName(stmt.Value), kind)
@@ -2366,10 +2368,17 @@ func (c *Checker) stringViewInitializer(
 			return nil, "", false, false
 		}
 	}
-	if viewed != "std::string::String" && !isBufferTypeName(viewed) {
+	if viewed != "std::string::String" && !isBufferTypeName(viewed) &&
+		!(isArrayTypeName(viewed) && (field.Name == "as_slice" || field.Name == "as_mut_slice")) {
 		return nil, "", false, false
 	}
 	return target, path, field.Name == "as_mut_bytes" || field.Name == "as_mut_slice", true
+}
+
+// isArrayTypeName reports whether a type spelling is a `std::array::Array<T>`.
+func isArrayTypeName(typeName string) bool {
+	base, _, ok := splitGenericType(typeName)
+	return ok && base == "std::array::Array"
 }
 
 // viewReceiverPath reads the local a view initializer borrows from, and the
@@ -2397,11 +2406,14 @@ func isViewTypeName(typeName string) bool {
 	return strings.HasPrefix(typeName, "[]")
 }
 
-// viewOfTypeName returns the view a String or a stack buffer gives: bytes
-// for a String, `[]T` for a `[N]T`.
+// viewOfTypeName returns the view a String, a stack buffer, or an Array
+// gives: bytes for a String, `[]T` for a `[N]T` or an `Array<T>`.
 func viewOfTypeName(typeName string) string {
 	if isBufferTypeName(typeName) {
 		return "[]" + typeName[strings.IndexByte(typeName, ']')+1:]
+	}
+	if _, elem, ok := splitGenericType(typeName); ok && isArrayTypeName(typeName) {
+		return "[]" + elem
 	}
 	return "[]u8"
 }
@@ -7207,36 +7219,61 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 				ident.Name, expr.Name)
 		}
 	}
-	receiverType, err := c.readExpr(expr.Receiver, env)
-	if err != nil {
-		return "", err
-	}
-	receiverType = borrowedOwnershipValueType(receiverType)
+	var receiverType string
+	var err error
 	if root, field, ok := directFieldRoot(expr, env); ok {
-		if field != "" && root.fieldDeinit[field] {
+		if root.fieldDeinit[field] {
 			return "", errorAt(expr.Span, "move error: field `%s.%s` was deinitialized",
 				root.name, field)
 		}
-		if root.activeMutBorrows > 0 {
-			return "", errorAt(expr.Span,
-				"borrow error: value `%s` cannot be read while mutably borrowed",
-				root.name)
-		}
-		if root.fieldMutBorrows[field] > 0 {
-			return "", errorAt(expr.Span,
-				"borrow error: field `%s.%s` cannot be read while mutably borrowed",
+		receiverType, err = c.readFieldPathReceiver(expr.Receiver, env, field)
+	} else {
+		receiverType, err = c.readExpr(expr.Receiver, env)
+	}
+	if err != nil {
+		return "", err
+	}
+	return c.fieldTypeName(borrowedOwnershipValueType(receiverType), expr.Name), nil
+}
+
+// readFieldPathReceiver types the receiver of a field access rooted in a local
+// binding. Reading `p.b` touches only the storage under `p.b`, so the root is
+// read against the borrows that alias that path rather than against every
+// field borrow on it: `f(&var p.a, &p.b)` names disjoint storage (SPEC §9).
+func (c *Checker) readFieldPathReceiver(
+	receiver ast.Expression,
+	env *scope,
+	path string,
+) (string, error) {
+	switch e := receiver.(type) {
+	case *ast.IdentExpr:
+		return readIdentAliasing(e, env, path)
+	case *ast.FieldExpr:
+		if root, field, ok := directFieldRoot(e, env); ok && root.fieldDeinit[field] {
+			return "", errorAt(e.Span, "move error: field `%s.%s` was deinitialized",
 				root.name, field)
 		}
+		receiverType, err := c.readFieldPathReceiver(e.Receiver, env, path)
+		if err != nil {
+			return "", err
+		}
+		return c.fieldTypeName(borrowedOwnershipValueType(receiverType), e.Name), nil
 	}
+	return c.readExpr(receiver, env)
+}
+
+// fieldTypeName resolves the ownership type of field name on receiverType; a
+// receiver the checker has no fields for keeps its own type.
+func (c *Checker) fieldTypeName(receiverType string, name string) string {
 	if fields := c.structs[receiverType]; fields != nil {
-		if typ, ok := fields[expr.Name]; ok {
-			return typ, nil
+		if typ, ok := fields[name]; ok {
+			return typ
 		}
 	}
-	if typ, ok := readFsFieldType(receiverType, expr.Name); ok {
-		return typ, nil
+	if typ, ok := readFsFieldType(receiverType, name); ok {
+		return typ
 	}
-	return receiverType, nil
+	return receiverType
 }
 
 // readFsFieldType returns ownership types for builtin filesystem structs.
@@ -7592,7 +7629,40 @@ func (c *Checker) checkMethodCallExpr(
 	if typ, ok, err := c.checkBoxReceiverExpr(field, args, env); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkCopyTemporaryReceiverMethod(field, args, env); ok || err != nil {
+		return typ, err
+	}
 	return c.checkLocalReceiverMethod(field, args, env)
+}
+
+// checkCopyTemporaryReceiverMethod lets a call result of a copy type receive
+// a by-value method: `a.add(b).scale(3)`. The temporary has no place, and a
+// `self: T` receiver of a copy type reads nothing that could outlive the
+// call, so no binding is needed. Owned values and `&` / `&var` receivers
+// still need one.
+func (c *Checker) checkCopyTemporaryReceiverMethod(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if _, ok := field.Receiver.(*ast.CallExpr); !ok {
+		return "", false, nil
+	}
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return "", true, err
+	}
+	if !c.isCopyType(receiverType) {
+		return "", false, nil
+	}
+	method := c.implMethod(receiverType, field.Name)
+	if method == nil || len(method.params) == 0 ||
+		method.params[0].borrow || method.params[0].mutBorrow {
+		return "", false, nil
+	}
+	receiver := c.newBinding(field.Receiver.String(), receiverType)
+	result, err := c.checkNonArenaMethod(receiver, field.Name, args, env)
+	return result, true, err
 }
 
 // checkConsumingReceiverOwned rejects a method that takes its receiver over
@@ -7656,7 +7726,8 @@ func (c *Checker) checkLocalReceiverMethod(
 ) (string, error) {
 	receiver, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return "", errorAt(field.Span, "arena error: arena method receiver must be a local binding")
+		return "", errorAt(field.Span,
+			"move error: method receiver must be a local binding or a field path")
 	}
 	arena, exists := env.lookup(receiver.Name)
 	if !exists {
@@ -8673,6 +8744,14 @@ func (c *Checker) containsArenaAt(expr ast.Expression, env *scope) bool {
 
 // readIdent resolves a variable reference without moving it.
 func readIdent(ident *ast.IdentExpr, env *scope) (string, error) {
+	return readIdentAliasing(ident, env, "")
+}
+
+// readIdentAliasing reads a binding on behalf of the field path under it that
+// the read touches, "" for the whole value. A mutable borrow of the whole
+// value blocks every read; a field borrow blocks the whole value and the
+// paths that alias the borrowed one, and leaves disjoint fields readable.
+func readIdentAliasing(ident *ast.IdentExpr, env *scope, path string) (string, error) {
 	value, ok := env.lookup(ident.Name)
 	if ok {
 		if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
@@ -8681,7 +8760,13 @@ func readIdent(ident *ast.IdentExpr, env *scope) (string, error) {
 		if value.moved {
 			return "", errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
 		}
-		if value.activeMutBorrows > 0 || len(value.fieldMutBorrows) > 0 {
+		blocked := value.activeMutBorrows > 0
+		if path == "" {
+			blocked = blocked || len(value.fieldMutBorrows) > 0
+		} else {
+			blocked = blocked || overlappingFieldCount(value.fieldMutBorrows, path) > 0
+		}
+		if blocked {
 			return "", errorAt(ident.Span,
 				"borrow error: value `%s` cannot be read while mutably borrowed",
 				ident.Name)

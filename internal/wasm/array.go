@@ -691,14 +691,18 @@ func (e *emitter) writeArrayClear(instr *ir.Instr) error {
 	return nil
 }
 
-// writeArrayAsBytes builds a byte-slice view of an Array of bytes.
+// writeArrayAsBytes builds a view of an Array of numbers: the same {ptr, len}
+// descriptor as every view, with the length in elements.
 func (e *emitter) writeArrayAsBytes(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Result.Type != "[]u8" {
-		return fmt.Errorf("wasm error: array.as_bytes expects Array<u8> -> []u8")
+	if len(instr.Args) != 1 || !strings.HasPrefix(instr.Result.Type, "[]") {
+		return fmt.Errorf("wasm error: array.as_bytes expects Array<T> -> []T")
 	}
 	elem, ok := arrayElementWasmType(instr.Args[0].Type)
-	if !ok || elem != "u8" {
-		return fmt.Errorf("wasm error: array.as_bytes expects Array<u8> -> []u8")
+	if !ok {
+		return fmt.Errorf("wasm error: array.as_bytes expects Array<T> -> []T")
+	}
+	if _, _, _, ok := viewAccess(elem); !ok {
+		return fmt.Errorf("wasm error: array.as_bytes expects an Array of numbers, got Array<%s>", elem)
 	}
 	h := e.arrayHeaderOf(instr.Args[0])
 	slot, err := e.resultSlot(instr.Result)

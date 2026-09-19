@@ -457,8 +457,9 @@ fn is_view_method_name(name: []u8) -> bool {
 
 // Returns in view_out the view type a view method gives on a receiver, the
 // Go `viewOfReceiver`. A String and a buffer of u8 are viewed as bytes; a
-// buffer of any other number is viewed as a slice of that number, and the
-// name says which, so `[8]u32` has no `as_bytes`.
+// buffer or an Array of any other number is viewed as a slice of that
+// number, and the name says which, so `[8]u32` has no `as_bytes` and
+// `Array<u8>` -- whose byte owner is `String` -- no `as_slice`.
 fn (self: &var Checker) view_of_receiver(
     receiver: Type,
     method: []u8,
@@ -476,6 +477,33 @@ fn (self: &var Checker) view_of_receiver(
         }
         view_out.* = try self.types.byte_string_type();
         return null;
+    }
+    let receiver_text = try self.types.copy_text(self.allocator, receiver);
+    defer receiver_text.deinit(self.allocator);
+    let receiver_bytes = receiver_text.as_bytes();
+    if split_generic_type(receiver_bytes) |parts| {
+        if mem::equal_bytes(parts.base, "std::array::Array") {
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            if bytes {
+                try message.append_bytes(self.allocator, "`Array` has no `");
+                try message.append_bytes(self.allocator, method);
+                try message.append_bytes(self.allocator, "`; an Array of numbers is viewed with `as_slice`");
+                return try self.checker_message_at("type error", ast::zero_span(), move message);
+            }
+            if !typ::is_buffer_elem(parts.args) or mem::equal_bytes(parts.args, "u8") {
+                try message.append_byte(self.allocator, cast<u8>(96));
+                try self.append_checker_type(&var message, receiver);
+                try message.append_bytes(self.allocator, "` has no `");
+                try message.append_bytes(self.allocator, method);
+                try message.append_bytes(self.allocator, "`; `as_slice` views an Array of numbers other than u8");
+                return try self.checker_message_at("type error", ast::zero_span(), move message);
+            }
+            message.deinit(self.allocator);
+            let elem = try self.types.intern(parts.args);
+            view_out.* = try self.types.slice_of(elem);
+            return null;
+        }
     }
     let elem = try self.types.buffer_elem(receiver) orelse
         return try self.view_receiver_error(method);
@@ -505,7 +533,7 @@ fn (self: &Checker) view_receiver_error(method: []u8) -> !diagnostic::Diagnostic
     errdefer message.deinit(self.allocator);
     try message.append_byte(self.allocator, cast<u8>(96));
     try message.append_bytes(self.allocator, method);
-    try message.append_bytes(self.allocator, "` expects String or stack buffer receiver");
+    try message.append_bytes(self.allocator, "` expects String, stack buffer, or Array receiver");
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 

@@ -65,7 +65,52 @@ fn (self: &var Checker) check_method_call_expr(
     if handled {
         return null;
     }
+    if try self.check_copy_temporary_receiver_method(tree, env, field, args, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
     return self.check_local_receiver_method(tree, env, field, args, out);
+}
+
+/// Lets a call result of a copy type receive a by-value method, the Go
+/// `checkCopyTemporaryReceiverMethod`: `a.add(b).scale(3)`. The temporary
+/// has no place, and a `self: T` receiver of a copy type reads nothing that
+/// could outlive the call, so no binding is needed. Owned values and `&` /
+/// `&var` receivers still need one.
+fn (self: &var Checker) check_copy_temporary_receiver_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    if call_expr(tree, field.receiver) |_call| {
+        var receiver_type = empty_name();
+        if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
+            handled.* = true;
+            return move failed;
+        }
+        let copy = try self.is_copy_type(receiver_type);
+        if !copy {
+            return null;
+        }
+        let method = try self.names.intern_text(tree, field.name);
+        let method_fn = self.impl_method(receiver_type, method) orelse return null;
+        let first = self.param_at(method_fn, 0) orelse return null;
+        if first.borrow or first.mut_borrow {
+            return null;
+        }
+        handled.* = true;
+        let receiver_name = try self.names.intern_expression(tree, field.receiver);
+        let value = self.store.new_binding(receiver_name, receiver_type);
+        let receiver = try self.store.retain(move value);
+        return self.check_non_arena_method(tree, env, receiver, method, args, out);
+    }
+    return null;
 }
 
 /// Lets an immediate shared Arena.at result receive the same read-only
@@ -117,7 +162,7 @@ fn (self: &var Checker) check_local_receiver_method(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let receiver = ident_expr(tree, field.receiver) orelse
-        return try self.error0(field.span, "arena error: arena method receiver must be a local binding");
+        return try self.error0(field.span, "move error: method receiver must be a local binding or a field path");
     let arena = self.lookup_text(tree, env, receiver.name) orelse
         return try self.error1(tree, receiver.span, "arena error: undefined arena `%s`", Arg::Text(receiver.name));
     if self.binding(arena).deinitialized {

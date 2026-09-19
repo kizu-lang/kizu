@@ -34,7 +34,10 @@ public `std::builtin::string_*` calls and do not change the Kizu-facing stdlib
 decision in this ADR.
 
 The Array helpers needed only by `String` are std-only in v0.2; they are not
-public `std::array` API.
+public `std::array` API. `Array<u8>.as_bytes` / `as_mut_bytes` stay that way:
+the public view over an Array of any other number is `as_slice` / `as_mut_slice`,
+the same pair a `[N]T` stack buffer gives, so bytes have one owner (`String`)
+and one view name.
 
 The `String` storage field remains private to std source. User code cannot
 access or mutate the backing `Array<u8>` directly.

@@ -919,6 +919,16 @@ fn (self: &var Checker) check_array_method(
     if is_std_array_storage_method(name) {
         return self.check_std_array_storage_method(tree, element, name, args, offset, out);
     }
+    if mem::equal_bytes(name, "as_slice") or mem::equal_bytes(name, "as_mut_slice") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "`Array.");
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "` must be bound with `let name = array.");
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "()`");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
     if mem::equal_bytes(name, "at") or
         mem::equal_bytes(name, "at_mut") {
         if !self.capture_condition {
@@ -1061,23 +1071,29 @@ fn (self: &var Checker) check_std_array_storage_method(
         try message.append_byte(self.allocator, cast<u8>(96));
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
+    // The primitive std forwards to gives `[]T` over the elements of an Array
+    // of numbers: `as_bytes` on bytes, `as_slice` on any other number.
     let count = args.len(tree) - offset;
-    if !self.types.is_text(element, "u8") {
+    let element_text = try self.types.copy_text(self.allocator, element);
+    defer element_text.deinit(self.allocator);
+    let element_bytes = element_text.as_bytes();
+    if !typ::is_buffer_elem(element_bytes) {
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
         try message.append_bytes(self.allocator, "`Array.");
         try message.append_bytes(self.allocator, name);
-        try message.append_bytes(self.allocator, "` requires Array<u8>");
+        try message.append_bytes(self.allocator, "` requires a fixed-width number element, got ");
+        try message.append_bytes(self.allocator, element_bytes);
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     if count != 0 {
         return try self.receiver_arity_error("Array", name, 0, count);
     }
-    let bytes = try self.types.byte_string_type();
+    let view = try self.types.slice_of(element);
     if mem::equal_bytes(name, "as_mut_bytes") {
-        out.* = try self.types.borrow_wrapped_type(true, true, bytes);
+        out.* = try self.types.borrow_wrapped_type(true, true, view);
     } else {
-        out.* = bytes;
+        out.* = view;
     }
     return null;
 }
