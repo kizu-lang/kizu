@@ -7617,7 +7617,40 @@ func (c *Checker) checkMethodCallExpr(
 	if typ, ok, err := c.checkBoxReceiverExpr(field, args, env); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkCopyTemporaryReceiverMethod(field, args, env); ok || err != nil {
+		return typ, err
+	}
 	return c.checkLocalReceiverMethod(field, args, env)
+}
+
+// checkCopyTemporaryReceiverMethod lets a call result of a copy type receive
+// a by-value method: `a.add(b).scale(3)`. The temporary has no place, and a
+// `self: T` receiver of a copy type reads nothing that could outlive the
+// call, so no binding is needed. Owned values and `&` / `&var` receivers
+// still need one.
+func (c *Checker) checkCopyTemporaryReceiverMethod(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if _, ok := field.Receiver.(*ast.CallExpr); !ok {
+		return "", false, nil
+	}
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return "", true, err
+	}
+	if !c.isCopyType(receiverType) {
+		return "", false, nil
+	}
+	method := c.implMethod(receiverType, field.Name)
+	if method == nil || len(method.params) == 0 ||
+		method.params[0].borrow || method.params[0].mutBorrow {
+		return "", false, nil
+	}
+	receiver := c.newBinding(field.Receiver.String(), receiverType)
+	result, err := c.checkNonArenaMethod(receiver, field.Name, args, env)
+	return result, true, err
 }
 
 // checkConsumingReceiverOwned rejects a method that takes its receiver over
@@ -7681,7 +7714,8 @@ func (c *Checker) checkLocalReceiverMethod(
 ) (string, error) {
 	receiver, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return "", errorAt(field.Span, "arena error: arena method receiver must be a local binding")
+		return "", errorAt(field.Span,
+			"move error: method receiver must be a local binding or a field path")
 	}
 	arena, exists := env.lookup(receiver.Name)
 	if !exists {
