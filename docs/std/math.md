@@ -32,6 +32,17 @@ std::math::asin(value: f64) -> f64
 std::math::acos(value: f64) -> f64
 std::math::atan(value: f64) -> f64
 std::math::atan2(y: f64, x: f64) -> f64
+std::math::sinh(value: f64) -> f64
+std::math::cosh(value: f64) -> f64
+std::math::tanh(value: f64) -> f64
+std::math::asinh(value: f64) -> f64
+std::math::acosh(value: f64) -> f64
+std::math::atanh(value: f64) -> f64
+std::math::cbrt(value: f64) -> f64
+std::math::round_even(value: f64) -> f64
+std::math::fma(x: f64, y: f64, z: f64) -> f64
+std::math::frexp(value: f64) -> Scaled      // { fraction: f64, exponent: i64 }
+std::math::modf(value: f64) -> Parts        // { whole: f64, fraction: f64 }
 std::math::pi() -> f64
 std::math::tau() -> f64
 std::math::e() -> f64
@@ -86,14 +97,31 @@ Payne–Hanek reduction で落とすので、`sin(1e22)` も `sin(1e300)` も正
 - `atan2(y, x)` は点 (x, y) の角度を (-pi, pi] で返し、象限を両方の符号から
   決めます(`atan2(1, -1)` は 3pi/4)。0 と無限大の組は C の `atan2` と同じです。
 
+双曲線関数は `exp` / `log1p` の上に書いた Cephes / FreeBSD の式です。`acosh` は 1
+未満に NaN、`atanh` は [-1, 1] の外に NaN、両端に無限大を返します。`cbrt` は符号を
+保ち(`cbrt(-8.0)` は `-2.0`)、0.667 ulp 以内です。
+
+- `round_even` は最も近い整数値で、半分は偶数側へ丸めます(`round_even(0.5)` は
+  `0.0`、`round_even(2.5)` は `2.0`)。`round` との違いはこの半分の扱いだけです。
+- `fma(x, y, z)` は `x * y + z` を 1 回の丸めで返します。書き下した `x * y + z`
+  は 2 回丸めるので、`fma(0.1, 10.0, -1.0)` は `0.1 * 10.0` の誤差
+  `5.551115123125783e-17` を返し、書き下した式は `0.0` です。積を 128 bit で
+  正確に作り、`z` を揃えて 1 度だけ偶数丸めするので、hardware の fma と同じ bit
+  です。
+- `frexp` は `fraction * 2^exponent`(fraction は [1/2, 1))に、`modf` は整数部と
+  小数部(どちらも元の符号)に分け、struct で 2 つの値を返します。
+
 `cmd/kizu` の `TestMath` が Go の `math` と数千の値で突き合わせ、native と wasm の
-両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作は Go と一致し、
-残りは 1 ulp 以内(`tan` は逆数を取るので 2 ulp)です。Go は arm64 で乗算と加算を
-1 回の丸めに融合するので、最後の bit が動くことがあります。
+両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作、`fma`、
+`round_even`、`frexp` / `modf` は Go と一致し、残りは 1 ulp 以内(`tan` は逆数を
+取るので 2 ulp)です。Go は arm64 で乗算と加算を 1 回の丸めに融合するので、最後の
+bit が動くことがあります。
 
-## まだ無いもの
+## f32
 
-- 双曲線関数 `sinh` / `cosh` / `tanh` とその逆関数
-- `frexp` / `modf`(値を 2 つ返す形が決まってから)
-- 偶数丸めの `round_even`、`fma`、`cbrt`
-- `f32` 版
+`f32` の関数は持ちません。`cast<f64>` で上げて計算し、`cast<f32>` で戻します。
+`sqrt` / `floor` / `ceil` / `trunc` / `round` / `round_even` / `fma` はこの 2 段の
+丸めでも正しく丸まった `f32` になり(f64 の 53 bit は f32 の 24 bit の 2 倍と
+2 bit 以上あるため)、残りは f64 で 1 ulp 以内の値を丸めるので、`f32` で 1 ulp を
+超えることは事実上ありません。単精度専用の速い算法は、それを要る利用者が
+現れてから考えます。

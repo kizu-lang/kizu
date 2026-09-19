@@ -681,48 +681,48 @@ pub fn ldexp(fraction: f64, exponent: i64) -> f64 {
     return m * float::from_bits(bits);
 }
 
-// Split is a value taken apart into a fraction in [1/2, 1) and the power of
-// two that scales it back, or a value and its integral and fractional parts.
-struct Split {
-    fraction: f64,
-    exponent: i64,
+// Scaled is a value taken apart into a fraction and the power of two that
+// scales it back: fraction * 2^exponent.
+pub struct Scaled {
+    pub fraction: f64,
+    pub exponent: i64,
 }
 
 // frexp splits value into fraction * 2^exponent with the fraction in
 // [1/2, 1). Zero, the infinities and NaN come back as they are with a zero
 // exponent.
-fn frexp(value: f64) -> Split {
+pub fn frexp(value: f64) -> Scaled {
     if value == 0.0 or float::is_infinite(value) or float::is_nan(value) {
-        return Split { fraction: value, exponent: 0 };
+        return Scaled { fraction: value, exponent: 0 };
     }
     let normal = normalize(value);
     var bits = float::bits(normal.fraction);
     let exponent = normal.exponent + cast<i64>((bits >> 52) & 2047) - 1022;
     bits = bits & ~(cast<u64>(2047) << 52);
     bits = bits | (cast<u64>(1022) << 52);
-    return Split { fraction: float::from_bits(bits), exponent: exponent };
+    return Scaled { fraction: float::from_bits(bits), exponent: exponent };
 }
 
 // normalize scales a subnormal value up by 2^52 so that its exponent field
 // is meaningful, reporting the -52 that undoes it; a normal value is
 // returned as it is with 0.
-fn normalize(value: f64) -> Split {
+fn normalize(value: f64) -> Scaled {
     let smallest_normal = 2.2250738585072014e-308;
     if abs(value) < smallest_normal {
-        return Split { fraction: value * 4503599627370496.0, exponent: -52 };
+        return Scaled { fraction: value * 4503599627370496.0, exponent: -52 };
     }
-    return Split { fraction: value, exponent: 0 };
+    return Scaled { fraction: value, exponent: 0 };
 }
 
 // Parts is a value taken apart into its integral and fractional parts.
-struct Parts {
-    whole: f64,
-    fraction: f64,
+pub struct Parts {
+    pub whole: f64,
+    pub fraction: f64,
 }
 
 // modf splits value into its integral and fractional parts, both with the
-// sign of value.
-fn modf(value: f64) -> Parts {
+// sign of value: modf(-2.5) is -2.0 and -0.5.
+pub fn modf(value: f64) -> Parts {
     if value < 1.0 {
         if value < 0.0 {
             let parts = modf(-value);
@@ -1161,3 +1161,446 @@ fn pi_over_4() -> f64 { return 0.78539816339744830961566084581987572104929234984
 fn pi_over_2() -> f64 { return 1.57079632679489661923132169163975144209858469968755; }
 
 fn three_pi_over_4() -> f64 { return 2.35619449019234492884698253745962716314787704953133; }
+
+// ---------------------------------------------------------------------------
+// Hyperbolics, the cube root, round-to-even and the fused multiply-add.
+
+// sinh returns the hyperbolic sine of value.
+pub fn sinh(value: f64) -> f64 {
+    let p0 = -0.6307673640497716991184787251e+6;
+    let p1 = -0.8991272022039509355398013511e+5;
+    let p2 = -0.2894211355989563807284660366e+4;
+    let p3 = -0.2630563213397497062819489e+2;
+    let q0 = -0.6307673640497716991212077277e+6;
+    let q1 = 0.1521517378790019070696485176e+5;
+    let q2 = -0.173678953558233699533450911e+3;
+    var sign = false;
+    var x = value;
+    if x < 0.0 {
+        x = -x;
+        sign = true;
+    }
+    var temp = 0.0;
+    if x > 21.0 {
+        temp = exp(x) * 0.5;
+    } else {
+        if x > 0.5 {
+            let ex = exp(x);
+            temp = (ex - 1.0 / ex) * 0.5;
+        } else {
+            let sq = x * x;
+            temp = (((p3 * sq + p2) * sq + p1) * sq + p0) * x;
+            temp = temp / (((sq + q2) * sq + q1) * sq + q0);
+        }
+    }
+    if sign {
+        temp = -temp;
+    }
+    return temp;
+}
+
+// cosh returns the hyperbolic cosine of value.
+pub fn cosh(value: f64) -> f64 {
+    let x = abs(value);
+    if x > 21.0 {
+        return exp(x) * 0.5;
+    }
+    let ex = exp(x);
+    return (ex + 1.0 / ex) * 0.5;
+}
+
+// tanh returns the hyperbolic tangent of value, in [-1, 1].
+pub fn tanh(value: f64) -> f64 {
+    let max_log = 8.8029691931113054295988e+01;
+    let p0 = -9.64399179425052238628e-1;
+    let p1 = -9.92877231001918586564e1;
+    let p2 = -1.61468768441708447952e3;
+    let q0 = 1.12811678491632931402e2;
+    let q1 = 2.23548839060100448583e3;
+    let q2 = 4.84406305325125486048e3;
+    var z = abs(value);
+    if z > 0.5 * max_log {
+        if value < 0.0 {
+            return -1.0;
+        }
+        return 1.0;
+    }
+    if z >= 0.625 {
+        let s = exp(2.0 * z);
+        z = 1.0 - 2.0 / (s + 1.0);
+        if value < 0.0 {
+            z = -z;
+        }
+        return z;
+    }
+    if value == 0.0 {
+        return value;
+    }
+    let s = value * value;
+    return value + value * s * ((p0 * s + p1) * s + p2) / (((s + q0) * s + q1) * s + q2);
+}
+
+// asinh returns the inverse hyperbolic sine of value.
+pub fn asinh(value: f64) -> f64 {
+    let ln2 = 6.93147180559945286227e-01;
+    let near_zero = 3.7252902984619140625e-9;
+    let large = 268435456.0;
+    if float::is_nan(value) or float::is_infinite(value) {
+        return value;
+    }
+    var sign = false;
+    var x = value;
+    if x < 0.0 {
+        x = -x;
+        sign = true;
+    }
+    var temp = 0.0;
+    if x > large {
+        temp = log(x) + ln2;
+    } else {
+        if x > 2.0 {
+            temp = log(2.0 * x + 1.0 / (sqrt(x * x + 1.0) + x));
+        } else {
+            if x < near_zero {
+                temp = x;
+            } else {
+                temp = log1p(x + x * x / (1.0 + sqrt(1.0 + x * x)));
+            }
+        }
+    }
+    if sign {
+        temp = -temp;
+    }
+    return temp;
+}
+
+// acosh returns the inverse hyperbolic cosine of value. A value below 1
+// gives NaN.
+pub fn acosh(value: f64) -> f64 {
+    let ln2 = 6.93147180559945286227e-01;
+    let large = 268435456.0;
+    if value < 1.0 or float::is_nan(value) {
+        return nan();
+    }
+    if value == 1.0 {
+        return 0.0;
+    }
+    if value >= large {
+        return log(value) + ln2;
+    }
+    if value > 2.0 {
+        return log(2.0 * value - 1.0 / (value + sqrt(value * value - 1.0)));
+    }
+    let t = value - 1.0;
+    return log1p(t + sqrt(2.0 * t + t * t));
+}
+
+// atanh returns the inverse hyperbolic tangent of value. A value outside
+// [-1, 1] gives NaN and the ends give the infinities.
+pub fn atanh(value: f64) -> f64 {
+    let near_zero = 3.7252902984619140625e-9;
+    if value < -1.0 or value > 1.0 or float::is_nan(value) {
+        return nan();
+    }
+    if value == 1.0 {
+        return infinity();
+    }
+    if value == -1.0 {
+        return -infinity();
+    }
+    var sign = false;
+    var x = value;
+    if x < 0.0 {
+        x = -x;
+        sign = true;
+    }
+    var temp = 0.0;
+    if x < near_zero {
+        temp = x;
+    } else {
+        if x < 0.5 {
+            temp = x + x;
+            temp = 0.5 * log1p(temp + temp * x / (1.0 - x));
+        } else {
+            temp = 0.5 * log1p((x + x) / (1.0 - x));
+        }
+    }
+    if sign {
+        temp = -temp;
+    }
+    return temp;
+}
+
+// cbrt returns the cube root of value, with the sign of value: cbrt(-8.0)
+// is -2.0. The FreeBSD msun algorithm: a rough root from the bits, a
+// rational refinement, and one Newton step.
+pub fn cbrt(value: f64) -> f64 {
+    let b1 = cast<u64>(715094163);
+    let b2 = cast<u64>(696219795);
+    let c = 5.42857142857142815906e-01;
+    let d = -7.05306122448979611050e-01;
+    let e = 1.41428571428571436819e+00;
+    let f = 1.60714285714285720630e+00;
+    let g = 3.57142857142857150787e-01;
+    let smallest_normal = 2.22507385850720138309e-308;
+    if value == 0.0 or float::is_nan(value) or float::is_infinite(value) {
+        return value;
+    }
+    var sign = false;
+    var x = value;
+    if x < 0.0 {
+        x = -x;
+        sign = true;
+    }
+    // A root good to 5 bits, straight from the exponent.
+    var t = float::from_bits(float::bits(x) / 3 + (b1 << 32));
+    if x < smallest_normal {
+        t = 18014398509481984.0 * x;
+        t = float::from_bits(float::bits(t) / 3 + (b2 << 32));
+    }
+    // To 23 bits.
+    var r = t * t / x;
+    var s = c + r * t;
+    t = t * (g + f / (s + e + d / s));
+    // Chop to 22 bits, made larger than the root.
+    t = float::from_bits((float::bits(t) & (cast<u64>(0xFFFFFFFFC) << 28)) + (cast<u64>(1) << 30));
+    // One Newton step to 53 bits, within 0.667 ulp.
+    s = t * t;
+    r = x / s;
+    let w = t + t;
+    r = (r - t) / (w + r);
+    t = t + t * r;
+    if sign {
+        t = -t;
+    }
+    return t;
+}
+
+// round_even returns the integral value nearest to value, with halves
+// rounded to the even neighbour: round_even(0.5) is 0.0 and
+// round_even(1.5) is 2.0.
+pub fn round_even(value: f64) -> f64 {
+    var bits = float::bits(value);
+    let e = (bits >> 52) & 2047;
+    if e >= 1023 {
+        // |value| >= 1: add just under a half, or a half when the integral
+        // part is odd, then drop the fraction. Past 2^52, infinity and NaN
+        // have no fraction bits and pass through.
+        let half_minus_ulp = (cast<u64>(1) << 51) - 1;
+        let shift = e - 1023;
+        bits = bits + ((half_minus_ulp + ((bits >> (52 - shift)) & 1)) >> shift);
+        bits = bits & ~(fraction_mask() >> shift);
+        return float::from_bits(bits);
+    }
+    if e == 1022 and bits & fraction_mask() != 0 {
+        // 0.5 < |value| < 1 rounds to +-1.
+        return float::from_bits((bits & sign_bit()) | (cast<u64>(1023) << 52));
+    }
+    // |value| <= 0.5, subnormals included, rounds to +-0.
+    return float::from_bits(bits & sign_bit());
+}
+
+fn fraction_mask() -> u64 { return (cast<u64>(1) << 52) - 1; }
+
+// fma returns x * y + z with one rounding, where x * y + z written out
+// rounds twice: fma(0.1, 10.0, -1.0) is the error of 0.1 * 10.0, which the
+// plain expression loses. The product is formed exactly as 128 bits, z is
+// aligned to it with the bits shifted out compressed into a sticky bit, and
+// the sum is rounded once to the nearest even. From Go's math.FMA.
+pub fn fma(x: f64, y: f64, z: f64) -> f64 {
+    let bx = float::bits(x);
+    let by = float::bits(y);
+    let bz = float::bits(z);
+    let inf = exponent_mask();
+    // A zero, an infinity or a NaN among x and y: x * y + z rounds once.
+    if x == 0.0 or y == 0.0 or z == 0.0 or bx & inf == inf or by & inf == inf {
+        return x * y + z;
+    }
+    // A finite product plus an infinite or NaN z is z.
+    if bz & inf == inf {
+        return z;
+    }
+    let xp = fma_split(bx);
+    let yp = fma_split(by);
+    let zp = fma_split(bz);
+    // The product: sign, exponent and a two-word mantissa, the 106-bit
+    // product shifted left by 21 so that its top bit is bit 62 or 63.
+    var ps = xp.sign ^ yp.sign;
+    var pe = xp.exponent + yp.exponent - 1023 + 1;
+    let xm = xp.mantissa << 10;
+    let ym = yp.mantissa << 11;
+    var pm1 = mul64_high(xm, ym);
+    var pm2 = xm * ym;
+    var zs = zp.sign;
+    var ze = zp.exponent;
+    var zm1 = zp.mantissa << 10;
+    var zm2 = cast<u64>(0);
+    // Normalize the product to bit 62.
+    let is62zero = (~pm1 >> 62) & 1;
+    let shifted = shl128(pm1, pm2, is62zero);
+    pm1 = shifted.high;
+    pm2 = shifted.low;
+    pe = pe - cast<i64>(is62zero);
+    // Add the smaller magnitude to the larger.
+    if pe < ze or (pe == ze and pm1 < zm1) {
+        let ts = ps;
+        let te = pe;
+        let t1 = pm1;
+        let t2 = pm2;
+        ps = zs;
+        pe = ze;
+        pm1 = zm1;
+        pm2 = zm2;
+        zs = ts;
+        ze = te;
+        zm1 = t1;
+        zm2 = t2;
+    }
+    // p == -z is +0, since neither operand is zero.
+    if ps != zs and pe == ze and pm1 == zm1 and pm2 == zm2 {
+        return 0.0;
+    }
+    // Align z to the product.
+    let aligned = shr128_sticky(zm1, zm2, cast<u64>(pe - ze));
+    zm1 = aligned.high;
+    zm2 = aligned.low;
+    var m = cast<u64>(0);
+    if ps == zs {
+        // (pm1:pm2) + (zm1:zm2)
+        let low = pm2 + zm2;
+        var carry = cast<u64>(0);
+        if low < pm2 {
+            carry = 1;
+        }
+        pm2 = low;
+        pm1 = pm1 + zm1 + carry;
+        pe = pe - cast<i64>(~pm1 >> 63);
+        let compressed = shr128_sticky(pm1, pm2, 64 + (pm1 >> 63));
+        pm1 = compressed.high;
+        m = compressed.low;
+    } else {
+        // (pm1:pm2) - (zm1:zm2)
+        let low = pm2 - zm2;
+        var borrow = cast<u64>(0);
+        if pm2 < zm2 {
+            borrow = 1;
+        }
+        pm2 = low;
+        pm1 = pm1 - zm1 - borrow;
+        var nz = leading_zeros(pm1);
+        if nz == 64 {
+            nz = nz + leading_zeros(pm2);
+        }
+        pe = pe - cast<i64>(nz);
+        let shifted2 = shl128(pm1, pm2, nz - 1);
+        m = shifted2.high;
+        pm2 = shifted2.low;
+        if pm2 != 0 {
+            m = m | 1;
+        }
+    }
+    // Round to nearest even; a result past the exponent range is infinity.
+    if pe > 1022 + 1023 or (pe == 1022 + 1023 and ((m + (cast<u64>(1) << 9)) >> 63) == 1) {
+        return float::from_bits((ps << 63) | inf);
+    }
+    if pe < 0 {
+        let n = cast<u64>(-pe);
+        var sticky = cast<u64>(0);
+        if m & ((cast<u64>(1) << n) - 1) != 0 {
+            sticky = 1;
+        }
+        m = (m >> n) | sticky;
+        pe = 0;
+    }
+    let rounded = (m + (cast<u64>(1) << 9)) >> 10;
+    // A tie, with the rounding bit set and nothing below it, goes to even.
+    if (m & ((cast<u64>(1) << 10) - 1)) == (cast<u64>(1) << 9) {
+        m = rounded & ~cast<u64>(1);
+    } else {
+        m = rounded;
+    }
+    if m == 0 {
+        pe = 0;
+    }
+    return float::from_bits((ps << 63) + (cast<u64>(pe) << 52) + m);
+}
+
+// FmaPart is one operand of fma taken apart: its sign bit, its biased
+// exponent, and its mantissa with the hidden bit made explicit and a
+// subnormal shifted up to normal.
+struct FmaPart {
+    sign: u64,
+    exponent: i64,
+    mantissa: u64,
+}
+
+fn fma_split(bits: u64) -> FmaPart {
+    let sign = bits >> 63;
+    var exponent = cast<i64>((bits >> 52) & 2047);
+    var mantissa = bits & fraction_mask();
+    if exponent == 0 {
+        let shift = leading_zeros(mantissa) - 11;
+        mantissa = mantissa << shift;
+        exponent = 1 - cast<i64>(shift);
+    } else {
+        mantissa = mantissa | (cast<u64>(1) << 52);
+    }
+    return FmaPart { sign: sign, exponent: exponent, mantissa: mantissa };
+}
+
+// Words is a 128-bit value as two 64-bit words.
+struct Words {
+    high: u64,
+    low: u64,
+}
+
+// shl128 shifts a two-word value left by n, for any n below 128.
+fn shl128(high: u64, low: u64, n: u64) -> Words {
+    return Words {
+        high: (high << n) | (low >> (64 - n)) | (low << (n - 64)),
+        low: low << n,
+    };
+}
+
+// shr128 shifts a two-word value right by n, for any n below 128.
+fn shr128(high: u64, low: u64, n: u64) -> Words {
+    return Words {
+        high: high >> n,
+        low: (low >> n) | (high << (64 - n)) | (high >> (n - 64)),
+    };
+}
+
+// shr128_sticky shifts a two-word value right by n and folds every bit
+// shifted out into the lowest bit of the result, so that rounding still
+// sees whether anything was below it.
+fn shr128_sticky(high: u64, low: u64, n: u64) -> Words {
+    if n == 0 {
+        return Words { high: high, low: low };
+    }
+    if n == 64 {
+        var sticky = cast<u64>(0);
+        if low != 0 {
+            sticky = 1;
+        }
+        return Words { high: 0, low: high | sticky };
+    }
+    if n >= 128 {
+        var sticky = cast<u64>(0);
+        if high | low != 0 {
+            sticky = 1;
+        }
+        return Words { high: 0, low: sticky };
+    }
+    let shifted = shr128(high, low, n);
+    var dropped = cast<u64>(0);
+    if n < 64 {
+        dropped = low & ((cast<u64>(1) << n) - 1);
+    } else {
+        dropped = (high & ((cast<u64>(1) << (n - 64)) - 1)) | low;
+    }
+    var sticky = cast<u64>(0);
+    if dropped != 0 {
+        sticky = 1;
+    }
+    return Words { high: shifted.high, low: shifted.low | sticky };
+}
