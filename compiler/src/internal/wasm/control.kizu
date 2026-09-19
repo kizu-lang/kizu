@@ -148,6 +148,9 @@ fn (self: &var Emitter) write_instr_node(
     if node.op == ir::Op::FloatBits or node.op == ir::Op::FloatFromBits {
         return self.write_float_bits(module, node);
     }
+    if float_unary_instruction(node.op) |_| {
+        return self.write_float_unary(module, node);
+    }
     if node.op == ir::Op::BufferNew or node.op == ir::Op::BufferAsBytes {
         return self.write_buffer_instr(module, node);
     }
@@ -1520,6 +1523,50 @@ fn (self: &var Emitter) append_float_to_integer(
     try fmt::append_i64(self.allocator, out, high);
     try out.append_bytes(self.allocator, ")))");
     return;
+}
+
+/// Names the wasm instruction behind a one-operand float instruction of
+/// `std::math`, the Go `floatUnaryInstructions`; each is one IEEE 754
+/// operation, so it answers the same bits the native target does. Null for
+/// any other instruction.
+fn float_unary_instruction(op: ir::Op) -> ?[]u8 {
+    if op == ir::Op::FloatSqrt {
+        return "f64.sqrt";
+    }
+    if op == ir::Op::FloatFloor {
+        return "f64.floor";
+    }
+    if op == ir::Op::FloatCeil {
+        return "f64.ceil";
+    }
+    if op == ir::Op::FloatTrunc {
+        return "f64.trunc";
+    }
+    return null;
+}
+
+/// Applies a one-operand float instruction, the Go `writeFloatUnary`.
+fn (self: &var Emitter) write_float_unary(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let instruction = float_unary_instruction(node.op) orelse "";
+    if mem::len(instruction) == 0 {
+        return try self.fail_op(module, node, "wasm error: unsupported instruction `%s`");
+    }
+    if node.args.len() != 1 {
+        return try self.fail_op(module, node, "wasm error: %s expects 1 arg");
+    }
+    let value = try self.arg_expr(module, node, 0);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    try expression.append_byte(self.allocator, cast<u8>(40));
+    try expression.append_bytes(self.allocator, instruction);
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, value);
+    try expression.append_byte(self.allocator, cast<u8>(41));
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
 }
 
 /// Reinterprets a float as its bits or bits as a float, the

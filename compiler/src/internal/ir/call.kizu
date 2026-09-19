@@ -503,6 +503,25 @@ fn (self: &var Lowerer) lower_function_pointer_signature(pointer: Name) -> !Sign
     return SignatureHandle { node: handle };
 }
 
+/// Returns the instruction behind a `std::math` primitive that is one IEEE
+/// 754 operation on one f64, the Go `floatUnaryPrimitives`, or null for any
+/// other name.
+fn (self: &Lowerer) float_unary_primitive(name: Name) -> ?Op {
+    if self.name_is(name, "std::internal::builtin::f64_sqrt") {
+        return Op::FloatSqrt;
+    }
+    if self.name_is(name, "std::internal::builtin::f64_floor") {
+        return Op::FloatFloor;
+    }
+    if self.name_is(name, "std::internal::builtin::f64_ceil") {
+        return Op::FloatCeil;
+    }
+    if self.name_is(name, "std::internal::builtin::f64_trunc") {
+        return Op::FloatTrunc;
+    }
+    return null;
+}
+
 /// Reports whether an interned name starts with text.
 fn (self: &Lowerer) name_starts_with(value: Name, text: []u8) -> bool {
     let retained = name_text(&self.module.names, value);
@@ -560,6 +579,19 @@ fn (self: &var Lowerer) lower_named_call_expr(
             return try self.fail0("ir error: std::internal::builtin::f64_from_bits expects 1 arg");
         }
         out.* = try self.emit_with(Op::FloatFromBits, empty_name(), self.common.f64_type, empty_name(), &args);
+        return null;
+    }
+    if self.float_unary_primitive(name) |op| {
+        if args.len() != 1 {
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, "ir error: ");
+            let spelling = name_text(&self.module.names, name);
+            try message.append_string(self.allocator, spelling);
+            try message.append_bytes(self.allocator, " expects 1 arg");
+            return try self.fail_message(move message);
+        }
+        out.* = try self.emit_with(op, empty_name(), self.common.f64_type, empty_name(), &args);
         return null;
     }
     if self.name_is(name, "std::internal::builtin::test_fail") {

@@ -340,9 +340,12 @@ func camelToSnake(name string) string {
 	return out.String()
 }
 
-// runClang invokes the configured C/LLVM toolchain with explicit inputs.
+// runClang invokes the configured C/LLVM toolchain with explicit inputs. The
+// link names libm because a float intrinsic the target has no instruction for
+// (floor on x86-64 without SSE4.1, say) is lowered to the C library's
+// function; on Darwin libm is part of libSystem and the name is harmless.
 func runClang(irPath string, runtimePath string, output string, options Options) ([]string, error) {
-	args := append(clangFlags(options), irPath, runtimePath, "-o", output)
+	args := append(clangFlags(options), irPath, runtimePath, "-o", output, "-lm")
 	cmd := exec.Command(options.Linker, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

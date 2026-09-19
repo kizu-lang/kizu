@@ -75,6 +75,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCast(instr)
 	case instr.Op == "float.bits", instr.Op == "float.from_bits":
 		return e.writeFloatBits(instr)
+	case floatUnaryInstructions[instr.Op] != "":
+		return e.writeFloatUnary(instr)
 	case instr.Op == "buffer.new", instr.Op == "buffer.as_bytes":
 		return e.writeBufferInstr(instr)
 	default:
@@ -226,6 +228,29 @@ func (e *emitter) writeFloatBits(instr *ir.Instr) error {
 	if instr.Op == "float.bits" {
 		expr = "(i64.reinterpret_f64 " + value + ")"
 	}
+	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+	return nil
+}
+
+// floatUnaryInstructions names the wasm instruction behind each one-operand
+// float instruction of `std::math`. Each is one IEEE 754 operation, so it
+// answers the same bits the native target does.
+var floatUnaryInstructions = map[string]string{
+	"float.sqrt":  "f64.sqrt",
+	"float.floor": "f64.floor",
+	"float.ceil":  "f64.ceil",
+	"float.trunc": "f64.trunc",
+}
+
+// writeFloatUnary applies a one-operand float instruction.
+func (e *emitter) writeFloatUnary(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("wasm error: %s expects 1 arg", instr.Op)
+	}
+	value := e.value(instr.Args[0]).expr
+	expr := "(" + floatUnaryInstructions[instr.Op] + " " + value + ")"
 	symbol := symbolName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
 	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}

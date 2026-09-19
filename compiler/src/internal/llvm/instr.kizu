@@ -359,6 +359,48 @@ fn (self: &var Emitter) write_float_bits(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
+/// Names the LLVM intrinsic behind a one-operand float instruction of
+/// `std::math`, the Go `floatUnaryIntrinsics`; each is one IEEE 754
+/// operation, so the backend gives the correctly rounded answer as one
+/// machine instruction. Null for any other instruction.
+pub fn float_unary_intrinsic(op: ir::Op) -> ?[]u8 {
+    if op == ir::Op::FloatSqrt {
+        return "llvm.sqrt.f64";
+    }
+    if op == ir::Op::FloatFloor {
+        return "llvm.floor.f64";
+    }
+    if op == ir::Op::FloatCeil {
+        return "llvm.ceil.f64";
+    }
+    if op == ir::Op::FloatTrunc {
+        return "llvm.trunc.f64";
+    }
+    return null;
+}
+
+/// Calls the intrinsic behind a one-operand float instruction, the Go
+/// `writeFloatUnary`.
+fn (self: &var Emitter) write_float_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let intrinsic = float_unary_intrinsic(node.op) orelse "";
+    if mem::len(intrinsic) == 0 {
+        let op = try self.op_name(module, node);
+        return try self.fail1("llvm error: unsupported instruction `%s`", Arg::Str(op));
+    }
+    if node.args.len() != 1 {
+        let op = try self.op_name(module, node);
+        return try self.fail1("llvm error: %s expects 1 arg", Arg::Str(op));
+    }
+    let source = node.args.get_or_panic(0);
+    let value = try self.operand(module, source);
+    let name = try self.local_name(module, node.result.name);
+    let callee = try self.names.intern(intrinsic);
+    try self.line3("  %s = call double @%s(double %s)",
+        Arg::Str(name), Arg::Str(callee), Arg::Str(value.operand));
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
 /// Emits the address conversion between a raw pointer and an integer, the
 /// Go `writePointerIntegerCast`. Width changes ride the conversion itself:
 /// inttoptr and ptrtoint extend and truncate to the target on their own.

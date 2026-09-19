@@ -1,0 +1,170 @@
+import std::float;
+
+// Elementary functions and constants on f64.
+//
+// Four of them are one IEEE 754 operation each -- `sqrt`, `floor`, `ceil`
+// and `trunc` -- and rest on the backend, which has each as one instruction
+// or intrinsic and answers the correctly rounded value. Everything else is
+// written over those four and over the bits of a float, so the answer is
+// the same on every target.
+
+// sqrt returns the square root of value, correctly rounded. A negative value
+// gives NaN; -0.0 gives -0.0.
+pub fn sqrt(value: f64) -> f64 {
+    return std::internal::builtin::f64_sqrt(value);
+}
+
+// floor returns the largest integral value not greater than value.
+pub fn floor(value: f64) -> f64 {
+    return std::internal::builtin::f64_floor(value);
+}
+
+// ceil returns the smallest integral value not less than value.
+pub fn ceil(value: f64) -> f64 {
+    return std::internal::builtin::f64_ceil(value);
+}
+
+// trunc returns the integral part of value, rounding toward zero.
+pub fn trunc(value: f64) -> f64 {
+    return std::internal::builtin::f64_trunc(value);
+}
+
+// round returns the integral value nearest to value, with halves rounded
+// away from zero: round(0.5) is 1.0 and round(-0.5) is -1.0.
+pub fn round(value: f64) -> f64 {
+    // value - whole is exact below 2^52; above it every value is integral
+    // and the difference is zero. NaN and the infinities fall through both
+    // comparisons and come back as trunc left them.
+    let whole = trunc(value);
+    let rest = value - whole;
+    if rest >= 0.5 {
+        return whole + 1.0;
+    }
+    if rest <= -0.5 {
+        return whole - 1.0;
+    }
+    return whole;
+}
+
+// abs returns value with its sign bit cleared: |NaN| is NaN, |-0.0| is 0.0.
+pub fn abs(value: f64) -> f64 {
+    return float::from_bits(float::bits(value) & ~sign_bit());
+}
+
+// copysign returns magnitude with the sign bit of sign.
+pub fn copysign(magnitude: f64, sign: f64) -> f64 {
+    let bits = (float::bits(magnitude) & ~sign_bit()) | (float::bits(sign) & sign_bit());
+    return float::from_bits(bits);
+}
+
+// is_negative reports whether the sign bit of value is set, so -0.0 is
+// negative and NaN follows its sign bit.
+pub fn is_negative(value: f64) -> bool {
+    return float::bits(value) & sign_bit() != 0;
+}
+
+// min returns the smaller of two values. One NaN yields the other value,
+// and -0.0 is smaller than 0.0.
+pub fn min(a: f64, b: f64) -> f64 {
+    if float::is_nan(a) {
+        return b;
+    }
+    if float::is_nan(b) {
+        return a;
+    }
+    if a == b {
+        if is_negative(a) {
+            return a;
+        }
+        return b;
+    }
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+// max returns the larger of two values. One NaN yields the other value,
+// and 0.0 is larger than -0.0.
+pub fn max(a: f64, b: f64) -> f64 {
+    if float::is_nan(a) {
+        return b;
+    }
+    if float::is_nan(b) {
+        return a;
+    }
+    if a == b {
+        if is_negative(a) {
+            return b;
+        }
+        return a;
+    }
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+// clamp returns value held within [low, high]. A NaN value stays NaN.
+pub fn clamp(value: f64, low: f64, high: f64) -> f64 {
+    if value < low {
+        return low;
+    }
+    if value > high {
+        return high;
+    }
+    return value;
+}
+
+// hypot returns sqrt(x*x + y*y) without the overflow or underflow the
+// squares alone would have: the larger magnitude is factored out first.
+// An infinite argument gives infinity even when the other is NaN.
+pub fn hypot(x: f64, y: f64) -> f64 {
+    var p = abs(x);
+    var q = abs(y);
+    if float::is_infinite(p) or float::is_infinite(q) {
+        return infinity();
+    }
+    if float::is_nan(p) or float::is_nan(q) {
+        return nan();
+    }
+    if p < q {
+        let swap = p;
+        p = q;
+        q = swap;
+    }
+    if p == 0.0 {
+        return 0.0;
+    }
+    let ratio = q / p;
+    return p * sqrt(1.0 + ratio * ratio);
+}
+
+// pi is the ratio of a circle's circumference to its diameter.
+pub fn pi() -> f64 {
+    return 3.141592653589793;
+}
+
+// tau is 2 * pi, the circumference of the unit circle.
+pub fn tau() -> f64 {
+    return 6.283185307179586;
+}
+
+// e is the base of the natural logarithm.
+pub fn e() -> f64 {
+    return 2.718281828459045;
+}
+
+// infinity returns positive infinity.
+pub fn infinity() -> f64 {
+    return float::from_bits(exponent_mask());
+}
+
+// nan returns a quiet NaN with the sign bit clear.
+pub fn nan() -> f64 {
+    return float::from_bits(exponent_mask() | (cast<u64>(1) << 51));
+}
+
+fn sign_bit() -> u64 { return cast<u64>(1) << 63; }
+
+fn exponent_mask() -> u64 { return cast<u64>(2047) << 52; }
