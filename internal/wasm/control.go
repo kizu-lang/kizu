@@ -77,6 +77,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeFloatBits(instr)
 	case floatUnaryInstructions[instr.Op] != "":
 		return e.writeFloatUnary(instr)
+	case instr.Op == "table.get":
+		return e.writeTableGet(instr)
 	case instr.Op == "float.fma":
 		// wasm has no fused multiply-add; std::math reaches the primitive
 		// only under std::target::is_native().
@@ -257,6 +259,25 @@ func (e *emitter) writeFloatUnary(instr *ir.Instr) error {
 	expr := "(" + floatUnaryInstructions[instr.Op] + " " + value + ")"
 	symbol := symbolName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbol, expr)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
+	return nil
+}
+
+// writeTableGet reads one value of a table.get from its data segment: the
+// index is clamped to the last entry, so a value past the end gets the
+// fall-through's.
+func (e *emitter) writeTableGet(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("wasm error: %s expects 1 arg", instr.Op)
+	}
+	last := len(ir.TableValues(instr)) - 1
+	index := e.value(instr.Args[0]).expr
+	at := fmt.Sprintf("(select %s (i64.const %d) (i64.lt_u %s (i64.const %d)))",
+		index, last, index, last)
+	address := fmt.Sprintf("(i32.add (i32.const %d) (i32.wrap_i64 (i64.shl %s (i64.const 3))))",
+		e.tables[instr], at)
+	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s (i64.load %s))\n", symbol, address)
 	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
 	return nil
 }

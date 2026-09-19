@@ -56,6 +56,9 @@ fn emit_for_native_target(
         out: string::new(allocator),
         strings: map::new<[]u8, ir::Name>(allocator),
         string_literals: map::new<[]u8, ir::Name>(allocator),
+        tables: array::new<ir::Name>(allocator),
+        table_order: array::new<ir::Instr>(allocator),
+        tables_written: 0,
         values: array::new<ValueInfo>(allocator),
         function_names: map::new<[]u8, ir::Function>(allocator),
         current_return: ir::empty_name(),
@@ -114,6 +117,12 @@ struct Emitter {
     out: string::String,
     strings: map::Map<[]u8, ir::Name>,
     string_literals: map::Map<[]u8, ir::Name>,
+    // tables names the global behind each table.get in discovery order,
+    // which is the order they are written in; tables_written counts those
+    // written so far, and table_order holds the instructions.
+    tables: array::Array<ir::Name>,
+    table_order: array::Array<ir::Instr>,
+    tables_written: i64,
     // Indexed by the module name id of the SSA value, not keyed by its
     // spelling: the ids are dense, the emitter reaches this table for every
     // operand of every instruction, and a stale generation already stands for
@@ -691,6 +700,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
     try self.collect_function_names(module);
     try self.count_references(module);
     try self.collect_strings(module);
+    try self.collect_tables(module);
     if try self.validate_module_types(module) |failed| {
         return move failed;
     }
@@ -1478,6 +1488,90 @@ fn (self: &var Emitter) write_block(module: &ir::Module, block: ir::Block) -> !?
 }
 
 /// Writes one LLVM instruction, the Go `writeInstr`.
+/// Assigns stable global names to the tables of table.get, the Go
+/// `collectTables`.
+fn (self: &var Emitter) collect_tables(module: &ir::Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op != ir::Op::TableGet {
+                    continue;
+                }
+                let global = try self.text1("@.table.%d", Arg::Int(self.table_order.len()));
+                try self.tables.append(self.allocator, global);
+                try self.table_order.append(self.allocator, instr);
+            }
+        }
+    }
+    return;
+}
+
+/// Writes the constant array behind each table.get, the Go `writeTables`.
+fn (self: &var Emitter) write_tables(module: &ir::Module) -> !void {
+    var index = 0;
+    while self.table_order.get(index) |instr| {
+        index = index + 1;
+        let node = module.instrs.at(instr.node);
+        var values = array::new<u64>(self.allocator);
+        defer values.deinit(self.allocator);
+        try ir::table_values(self.allocator, module, node, &var values);
+        let global = self.tables.get(index - 1) orelse continue;
+        var text = string::new(self.allocator);
+        errdefer text.deinit(self.allocator);
+        var value_index = 0;
+        while values.get(value_index) |value| {
+            if value_index > 0 {
+                try text.append_bytes(self.allocator, ", ");
+            }
+            value_index = value_index + 1;
+            try text.append_bytes(self.allocator, "i64 ");
+            try fmt::append_i64(self.allocator, &var text, cast<i64>(value));
+        }
+        try self.line3("%s = private unnamed_addr constant [%d x i64] [%s]",
+            Arg::Str(global), Arg::Int(values.len()), Arg::Owned(move text));
+    }
+    if self.table_order.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Reads one value of a table.get, the Go `writeTableGet`: the index is
+/// clamped to the last entry, so a value past the end gets the
+/// fall-through's.
+fn (self: &var Emitter) write_table_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        let op = try self.op_name(module, node);
+        return try self.fail1("llvm error: %s expects 1 arg", Arg::Str(op));
+    }
+    var values = array::new<u64>(self.allocator);
+    defer values.deinit(self.allocator);
+    try ir::table_values(self.allocator, module, node, &var values);
+    let last = values.len() - 1;
+    let index = try self.operand(module, node.args.get_or_panic(0));
+    let name = try self.local_name(module, node.result.name);
+    let ordinal = self.tables_written;
+    self.tables_written = ordinal + 1;
+    let global = self.tables.get(ordinal) orelse ir::empty_name();
+    try self.line3("  %s.in = icmp ult i64 %s, %d", Arg::Str(name), Arg::Str(index.operand), Arg::Int(last));
+    try self.line4("  %s.at = select i1 %s.in, i64 %s, i64 %d",
+        Arg::Str(name), Arg::Str(name), Arg::Str(index.operand), Arg::Int(last));
+    try self.line4("  %s.ptr = getelementptr inbounds [%d x i64], ptr %s, i64 0, i64 %s.at",
+        Arg::Str(name), Arg::Int(values.len()), Arg::Str(global), Arg::Str(name));
+    try self.line2("  %s = load i64, ptr %s.ptr", Arg::Str(name), Arg::Str(name));
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
 fn (self: &var Emitter) write_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         Const => return self.write_const(module, node),
@@ -1584,6 +1678,7 @@ fn (self: &var Emitter) write_runtime_instr(module: &ir::Module, node: &ir::Inst
         FloatCeil => return self.write_float_unary(module, node),
         FloatTrunc => return self.write_float_unary(module, node),
         FloatFma => return self.write_float_fma(module, node),
+        TableGet => return self.write_table_get(module, node),
         _ => {
             let op = try self.op_name(module, node);
             return try self.fail1("llvm error: unsupported instruction `%s`", Arg::Str(op));

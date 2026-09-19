@@ -14,6 +14,7 @@ func Optimize(module *Module, target stdtarget.Target) error {
 	Inline(module)
 	EliminateTailRecursion(module)
 	ConstantFold(module)
+	FoldConstantTables(module)
 	CopyPropagate(module)
 	ForwardFieldLoads(module)
 	EliminateBoundsChecks(module)
@@ -284,7 +285,7 @@ func isPureOp(op string) bool {
 		"union.new", "union.tag", "union.payload", "union.payload_ref", "union.load",
 		"slice.len", "slice.index", "slice.compare", "slice.slice", "buffer.new", "buffer.as_bytes",
 		"float.bits", "float.from_bits", "float.sqrt", "float.floor", "float.ceil", "float.trunc",
-		"float.fma",
+		"float.fma", "table.get",
 		"box.borrow", "box.borrow_mut",
 		"array.new", "array.len", "array.capacity", "array.get", "array.at", "array.at_mut",
 		"array.as_bytes", "map.new", "map.len", "map.get", "map.contains", "map.at",

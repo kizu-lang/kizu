@@ -97,6 +97,9 @@ fn emit_format(
         out: string::new(allocator),
         strings: map::new<[]u8, DataRef>(allocator),
         data_order: array::new<ir::Name>(allocator),
+        tables: array::new<i64>(allocator),
+        table_order: array::new<ir::Instr>(allocator),
+        tables_written: 0,
         error_table: empty_data_ref(),
         panic_kinds: map::new<[]u8, bool>(allocator),
         values: map::new<[]u8, ValueInfo>(allocator),
@@ -207,6 +210,13 @@ struct Emitter {
     out: string::String,
     strings: map::Map<[]u8, DataRef>,
     data_order: array::Array<ir::Name>,
+    // tables holds the memory offset of each table.get's values in
+    // discovery order, which is the order they are written in, placed
+    // after the strings; tables_written counts those written so far, and
+    // table_order holds the instructions.
+    tables: array::Array<i64>,
+    table_order: array::Array<ir::Instr>,
+    tables_written: i64,
     // error_table is the global-code-indexed {pointer, length} table used
     // only when a fallible main reports an uncaught error to the host.
     error_table: DataRef,
@@ -559,7 +569,70 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     offset = try self.record_used_panic_data(offset);
     offset = try self.collect_main_error_strings(module, offset);
     offset = self.collect_main_error_table(offset);
+    offset = try self.collect_tables(module, wasm_align_up(offset, 8));
     self.data_end = wasm_align_up(offset, 8);
+    return;
+}
+
+/// Places the values of each table.get after the strings, eight bytes each,
+/// and returns the offset after the last, the Go `collectTables`.
+fn (self: &var Emitter) collect_tables(module: &ir::Module, start: i64) -> !i64 {
+    var offset = start;
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op != ir::Op::TableGet {
+                    continue;
+                }
+                try self.tables.append(self.allocator, offset);
+                try self.table_order.append(self.allocator, instr);
+                var values = array::new<u64>(self.allocator);
+                defer values.deinit(self.allocator);
+                try ir::table_values(self.allocator, module, instr_node, &var values);
+                offset = offset + 8 * values.len();
+            }
+        }
+    }
+    return offset;
+}
+
+/// Writes the data segment of each table.get, little-endian, the Go
+/// `writeTables`.
+fn (self: &var Emitter) write_tables(module: &ir::Module) -> !void {
+    var index = 0;
+    while self.table_order.get(index) |instr| {
+        index = index + 1;
+        let node = module.instrs.at(instr.node);
+        var values = array::new<u64>(self.allocator);
+        defer values.deinit(self.allocator);
+        try ir::table_values(self.allocator, module, node, &var values);
+        let offset = self.tables.get(index - 1) orelse continue;
+        var text = string::new(self.allocator);
+        errdefer text.deinit(self.allocator);
+        var value_index = 0;
+        while values.get(value_index) |value| {
+            value_index = value_index + 1;
+            var shift = cast<u64>(0);
+            while shift < 64 {
+                try text.append_byte(self.allocator, cast<u8>(92));
+                try append_hex_byte(self.allocator, &var text, cast<u8>((value >> shift) & 255));
+                shift = shift + 8;
+            }
+        }
+        let format =
+            \\  (data (i32.const %d) "%s")
+        ;
+        try self.line2(format, Arg::Int(offset), Arg::Owned(move text));
+    }
     return;
 }
 
@@ -787,6 +860,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
         try self.line2(format, Arg::Int(offset), Arg::Owned(move text));
     }
     try self.write_main_error_table(module);
+    try self.write_tables(module);
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
