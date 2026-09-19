@@ -2278,6 +2278,8 @@ func (c *Checker) checkStringViewLetStmt(
 		kind := "String"
 		if isBufferTypeName(target.typeName) {
 			kind = "buffer"
+		} else if isArrayTypeName(target.typeName) {
+			kind = "Array"
 		}
 		return errorf("string error: `%s.%s` requires mutable %s binding",
 			kind, viewMethodName(stmt.Value), kind)
@@ -2366,10 +2368,17 @@ func (c *Checker) stringViewInitializer(
 			return nil, "", false, false
 		}
 	}
-	if viewed != "std::string::String" && !isBufferTypeName(viewed) {
+	if viewed != "std::string::String" && !isBufferTypeName(viewed) &&
+		!(isArrayTypeName(viewed) && (field.Name == "as_slice" || field.Name == "as_mut_slice")) {
 		return nil, "", false, false
 	}
 	return target, path, field.Name == "as_mut_bytes" || field.Name == "as_mut_slice", true
+}
+
+// isArrayTypeName reports whether a type spelling is a `std::array::Array<T>`.
+func isArrayTypeName(typeName string) bool {
+	base, _, ok := splitGenericType(typeName)
+	return ok && base == "std::array::Array"
 }
 
 // viewReceiverPath reads the local a view initializer borrows from, and the
@@ -2397,11 +2406,14 @@ func isViewTypeName(typeName string) bool {
 	return strings.HasPrefix(typeName, "[]")
 }
 
-// viewOfTypeName returns the view a String or a stack buffer gives: bytes
-// for a String, `[]T` for a `[N]T`.
+// viewOfTypeName returns the view a String, a stack buffer, or an Array
+// gives: bytes for a String, `[]T` for a `[N]T` or an `Array<T>`.
 func viewOfTypeName(typeName string) string {
 	if isBufferTypeName(typeName) {
 		return "[]" + typeName[strings.IndexByte(typeName, ']')+1:]
+	}
+	if _, elem, ok := splitGenericType(typeName); ok && isArrayTypeName(typeName) {
+		return "[]" + elem
 	}
 	return "[]u8"
 }

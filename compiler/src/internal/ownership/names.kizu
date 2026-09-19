@@ -595,11 +595,18 @@ fn (self: &NameTable) is_view_type(name: Name) -> bool {
     return self.starts_with(name, "[]");
 }
 
-/// Returns the view a String or a stack buffer gives -- bytes for a String,
-/// `[]T` for a `[N]T` -- the Go `viewOfTypeName`.
+/// Reports whether a spelling is a `std::array::Array<T>`, the Go
+/// `isArrayTypeName`.
+fn (self: &NameTable) is_array_type(name: Name) -> bool {
+    return self.generic_base_is(name, "std::array::Array");
+}
+
+/// Returns the view a String, a stack buffer, or an Array gives -- bytes for
+/// a String, `[]T` for a `[N]T` or an `Array<T>` -- the Go `viewOfTypeName`.
 fn (self: &var NameTable) view_of_type(name: Name) -> !Name {
     var spelling = try string::from_bytes(self.allocator, "[]");
     defer spelling.deinit(self.allocator);
+    var elem_written = false;
     if self.is_buffer_type(name) {
         let copied = try self.copy_text(name);
         defer copied.deinit(self.allocator);
@@ -609,7 +616,17 @@ fn (self: &var NameTable) view_of_type(name: Name) -> !Name {
             at = at + 1;
         }
         try spelling.append_bytes(self.allocator, bytes[at + 1..mem::len(bytes)]);
-    } else {
+        elem_written = true;
+    }
+    if self.is_array_type(name) {
+        if try self.split_generic(name) |parts| {
+            let elem = try self.copy_text(parts.args);
+            defer elem.deinit(self.allocator);
+            try spelling.append_string(self.allocator, &elem);
+            elem_written = true;
+        }
+    }
+    if !elem_written {
         try spelling.append_bytes(self.allocator, "u8");
     }
     let text = spelling.as_bytes();

@@ -83,6 +83,8 @@ var containers = map[string]Container{
 		// guarded where the binding forms.
 		"as_bytes":     {Access: AccessRead, StdOnly: true},
 		"as_mut_bytes": {Access: AccessRead, StdOnly: true},
+		"as_slice":     {Access: AccessView},
+		"as_mut_slice": {Access: AccessView},
 		"at":           {Access: AccessCapture},
 		"at_mut":       {Access: AccessCapture},
 		"deinit":       {Access: AccessCleanup},

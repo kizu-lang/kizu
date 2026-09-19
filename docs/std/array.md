@@ -17,6 +17,8 @@ array.get(index: i64) -> ?T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> ?&T
 array.at_mut(index: i64) -> ?&var T
+array.as_slice() -> []T                                  // T が u8 以外の固定幅の数のとき
+array.as_mut_slice() -> &var []T
 array.set(index: i64, value: T) -> std::array::Error!void
 array.swap(left: i64, right: i64) -> std::array::Error!void
 array.remove(index: i64) -> std::array::Error!T
@@ -72,6 +74,19 @@ monomorphize 後は raw storage primitive 1 回になります。element type �
 cleanup の名前はこれ 1 つなので、要素型が決まっていない generic code も同じ
 ものを書け、`Array<Array<String>>` のような入れ子もそのまま解放できます。
 
-element borrow(`at` / `at_mut`)の消費規則、borrow が生きている間の禁止事項、
-`deinit` の element cleanup 義務、element 型に置ける型の制限は checker が持つ
-規則なので SPEC §14.4 にあります。
+`as_slice` / `as_mut_slice` は要素の並びへの view で、`[N]T` の同名 method と同じ
+ものを返します。要素型は u8 以外の固定幅の数(`u16 u32 u64 i8 i16 i32 i64 f32 f64`)
+に限ります: u8 の owner は `String` で、その view は `as_bytes` です(名前が返る
+ものを言う、SPEC §7.1)。struct や owner の要素は等幅の数の並びではないので view を
+持ちません。view の型が数を数えるので、`mem::count<T>(view)` と `view[i]` は要素
+単位です。
+
+```kizu
+let view = samples.as_slice();          // []f64。samples は view の最終使用まで borrow 中
+let cells = counts.as_mut_slice();      // &var []i64。counts は exclusive borrow
+cells[0] = 10;
+```
+
+element borrow(`at` / `at_mut`)の消費規則、view(`as_slice` / `as_mut_slice`)を
+`let` に束縛する規則と borrow が生きている間の禁止事項、`deinit` の element cleanup
+義務、element 型に置ける型の制限は checker が持つ規則なので SPEC §14.4 にあります。

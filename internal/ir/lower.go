@@ -1109,7 +1109,7 @@ func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 		// into the caller's binding — element writes only, no re-pointing
 		// (ADR-0096) — so the fat pointer itself is the storage and travels
 		// flat, exactly like a shared slice view.
-		if elem == "[]u8" {
+		if strings.HasPrefix(elem, "[]") {
 			return elem, PassValue
 		}
 		return "&var " + elem, PassCallerStorage
@@ -3199,10 +3199,11 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 		return l.emit("array.at", "?&"+elem, args, ""), nil
 	case "at_mut":
 		return l.emit("array.at_mut", "?&var "+elem, args, ""), nil
-	case "as_mut_bytes":
-		// The same view value as as_bytes: mutability is a checker-level
-		// permission, not a different runtime representation (ADR-0096).
-		return l.emit("array.as_bytes", "[]u8", args, ""), nil
+	case "as_bytes", "as_mut_bytes":
+		// One view value for both: mutability is a checker-level permission,
+		// not a different runtime representation (ADR-0096). The view counts
+		// elements, so it is `[]T` for an Array<T> of any number.
+		return l.emit("array.as_bytes", "[]"+elem, args, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown array method `%s`", name)
 	}
@@ -3223,8 +3224,6 @@ func arrayMethodResultType(name string) (string, bool) {
 		return "i64", true
 	case "clear", "deinit":
 		return "void", true
-	case "as_bytes":
-		return "[]u8", true
 	default:
 		return "", false
 	}

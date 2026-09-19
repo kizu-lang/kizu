@@ -696,10 +696,11 @@ func (e *emitter) writeArrayClear(instr *ir.Instr) error {
 	return nil
 }
 
-// writeArrayAsBytes lowers Array<u8>.as_bytes().
+// writeArrayAsBytes lowers Array<T>.as_bytes() / as_slice(): the view is the
+// same {ptr, len} pair whatever it counts, and the length counts elements.
 func (e *emitter) writeArrayAsBytes(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Result.Type != "[]u8" {
-		return fmt.Errorf("llvm error: array.as_bytes expects Array<u8> -> []u8")
+	if len(instr.Args) != 1 || !strings.HasPrefix(instr.Result.Type, "[]") {
+		return fmt.Errorf("llvm error: array.as_bytes expects Array<T> -> []T")
 	}
 	handle := e.value(instr.Args[0]).operand
 	data := e.arrayData(handle)

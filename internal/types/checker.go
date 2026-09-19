@@ -1694,8 +1694,9 @@ func isViewMethodName(name string) bool {
 
 // viewOfReceiver returns the view type a view method gives on a receiver, and
 // what the receiver is called in a diagnostic. A String and a buffer of u8
-// are viewed as bytes; a buffer of any other number is viewed as a slice of
-// that number, and the name says which, so `[8]u32` has no `as_bytes`.
+// are viewed as bytes; a buffer or an Array of any other number is viewed
+// as a slice of that number, and the name says which, so `[8]u32` has no
+// `as_bytes` and `Array<u8>` -- whose byte owner is `String` -- no `as_slice`.
 func (c *Checker) viewOfReceiver(receiver Type, method string) (Type, string, error) {
 	bytes := method == "as_bytes" || method == "as_mut_bytes"
 	if receiver == "std::string::String" {
@@ -1704,10 +1705,23 @@ func (c *Checker) viewOfReceiver(receiver Type, method string) (Type, string, er
 		}
 		return typeByteString, "String", nil
 	}
+	if base, arg, ok := splitGenericType(string(receiver)); ok && base == "std::array::Array" {
+		if bytes {
+			return "", "", errorf(
+				"type error: `Array` has no `%s`; an Array of numbers is viewed with `as_slice`",
+				method)
+		}
+		if !typ.IsBufferElem(arg) || arg == string(typeU8) {
+			return "", "", errorf(
+				"type error: `%s` has no `%s`; `as_slice` views an Array of numbers other than u8",
+				receiver, method)
+		}
+		return Type("[]" + arg), "Array", nil
+	}
 	elem, ok := c.types.bufferElem(receiver)
 	if !ok {
 		return "", "", errorf(
-			"type error: `%s` expects String or stack buffer receiver", method)
+			"type error: `%s` expects String, stack buffer, or Array receiver", method)
 	}
 	if bytes && elem != typeU8 {
 		return "", "", errorf(
@@ -2195,7 +2209,8 @@ func (c *Checker) methodBorrowSources(
 		return union, true, err
 	}
 	switch field.Name {
-	case "as_bytes", "as_mut_bytes", "borrow", "borrow_mut", "at", "at_mut":
+	case "as_bytes", "as_mut_bytes", "as_slice", "as_mut_slice",
+		"borrow", "borrow_mut", "at", "at_mut":
 		sources, err := c.exprBorrowSources(field.Receiver, env, unsafe)
 		return sources, true, err
 	default:
@@ -7247,6 +7262,10 @@ func (c *Checker) checkArrayMethod(
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args)
 	}
+	if name == "as_slice" || name == "as_mut_slice" {
+		return "", errorf(
+			"type error: `Array.%s` must be bound with `let name = array.%s()`", name, name)
+	}
 	// Rules the declaration cannot state: `at`/`at_mut` hand out a borrow,
 	// `get` copies out of the array, and owner elements make shallow cleanup a
 	// leak (ADR-0091). One cleanup name covers both: `deinit` releases what the
@@ -7401,20 +7420,23 @@ func isStdArrayStorageMethod(name string) bool {
 	return name == "as_bytes" || name == "as_mut_bytes"
 }
 
-// checkArrayAsBytes validates Array<u8> to byte-slice view conversion. The
-// as_mut_bytes form hands back the writable view spelling (ADR-0096); the
-// view value itself is the same.
+// checkArrayAsBytes validates the Array to view primitive std forwards to:
+// `[]T` over the elements of an Array of numbers, which is what `as_bytes`
+// gives on bytes and `as_slice` on any other number. The mutable form hands
+// back the writable view spelling (ADR-0096); the view value itself is the
+// same.
 func checkArrayAsBytes(elem Type, name string, args []ast.Expression) (Type, error) {
-	if elem != typeU8 {
-		return "", errorf("type error: `Array.%s` requires Array<u8>", name)
+	if !typ.IsBufferElem(string(elem)) {
+		return "", errorf("type error: `Array.%s` requires a fixed-width number element, got %s",
+			name, elem)
 	}
 	if len(args) != 0 {
 		return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
 	}
 	if name == "as_mut_bytes" {
-		return "&var []u8", nil
+		return Type("&var []" + string(elem)), nil
 	}
-	return typeByteString, nil
+	return Type("[]" + string(elem)), nil
 }
 
 // isStdType reports whether a type belongs to the reserved std namespace.
