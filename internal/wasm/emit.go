@@ -43,6 +43,7 @@ func LowerTarget(module *ir.Module, target Target) (*Module, error) {
 		types:              typ.NewTable(),
 		paramsByFunction:   paramsByFunction,
 		strings:            map[string]dataRef{},
+		tables:             map[*ir.Instr]int{},
 		errorTable:         nameTable{},
 		values:             map[string]valueInfo{},
 		panicKinds:         map[string]bool{},
@@ -90,6 +91,10 @@ type emitter struct {
 	// dataOrder keeps assignment order when zero-length data shares an offset
 	// with the following segment. Sorting offsets alone cannot order that tie.
 	dataOrder []string
+	// tables holds the memory offset of each table.get's values, in
+	// discovery order, placed after the strings.
+	tables     map[*ir.Instr]int
+	tableOrder []*ir.Instr
 	// errorTable is the global-code-indexed {pointer, length} table used only
 	// when a fallible main must report its uncaught error at the host boundary.
 	errorTable nameTable
@@ -261,7 +266,38 @@ func (e *emitter) collectStrings() {
 	}
 	offset = e.collectMainErrorStrings(offset)
 	offset = e.collectMainErrorTable(offset)
+	offset = e.collectTables(alignUp(offset, 8))
 	e.dataEnd = alignUp(offset, 8)
+}
+
+// collectTables places the values of each table.get after the strings,
+// eight bytes each, and returns the offset after the last.
+func (e *emitter) collectTables(offset int) int {
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == "table.get" {
+					e.tables[instr] = offset
+					e.tableOrder = append(e.tableOrder, instr)
+					offset += 8 * len(ir.TableValues(instr))
+				}
+			}
+		}
+	}
+	return offset
+}
+
+// writeTables writes the data segment of each table.get, little-endian.
+func (e *emitter) writeTables() {
+	for _, instr := range e.tableOrder {
+		var bytes strings.Builder
+		for _, value := range ir.TableValues(instr) {
+			for shift := 0; shift < 64; shift += 8 {
+				fmt.Fprintf(&bytes, "\\%02x", byte(value>>shift))
+			}
+		}
+		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", e.tables[instr], bytes.String())
+	}
 }
 
 // sortedStringLiteralsByDiscovery returns constants in deterministic IR order.
@@ -320,6 +356,7 @@ func (e *emitter) writeHeader() {
 		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", ref.offset, dataLiteral(lit))
 	}
 	e.writeMainErrorTable()
+	e.writeTables()
 	e.out.WriteByte('\n')
 }
 

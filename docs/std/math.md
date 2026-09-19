@@ -29,6 +29,7 @@ std::math::fmod<T>(value: T, divisor: T) -> T
 std::math::ldexp<T>(fraction: T, exponent: i64) -> T
 std::math::sin<T>(value: T) -> T
 std::math::cos<T>(value: T) -> T
+std::math::sin_cos<T>(value: T) -> SinCos     // { sin: f64, cos: f64 }
 std::math::tan<T>(value: T) -> T
 std::math::asin<T>(value: T) -> T
 std::math::acos<T>(value: T) -> T
@@ -57,8 +58,12 @@ trusted primitive です。backend はそれぞれを 1 命令(LLVM intrinsic、
 `f64.sqrt` など)で出すので、正しく丸めた値がどの target でも同じ bit で返ります。
 `sqrt` は負の値に NaN を、`-0.0` に `-0.0` を返します。
 
-残りはこの 4 つと `std::float::bits` の上に Kizu で書いてあり、同じく target に
-よりません。
+残りはこの 4 つと `std::float::bits` の上に Kizu で書いてあります。native では
+`x * y + z` を 1 回で丸める fused multiply-add も primitive `f64_fma` で
+1 命令になり、`exp` / `log` / `pow` / `sin` / `cos` の核はそれを使います。wasm
+には fma 命令が無いので、そこでは積と和を別々に丸めます。どちらの target も
+真の値から 1 ulp 以内ですが、この 5 つ(とそれに乗る `tanh` など)は native
+と wasm で最後の bit が違うことがあります。それ以外は target によりません。
 
 - `round` は最も近い整数値で、半分は零から遠い側へ丸めます(`round(0.5)` は
   `1.0`、`round(-0.5)` は `-1.0`)。`0.49999999999999994` は `0.0` です。
@@ -74,9 +79,12 @@ trusted primitive です。backend はそれぞれを 1 命令(LLVM intrinsic、
   もう片方が NaN でも無限大です。
 - `nan()` は符号 bit の立たない quiet NaN、`infinity()` は正の無限大です。
 
-指数と対数は FreeBSD msun の算法(Go の `math` と同じ)を Kizu で書いたもので、
-引数を 2 つに分けた ln 2 で小さな範囲に落とし、そこで短い有理式を評価して、2 の
-べきで戻します。真の値から 1 ulp 以内で、これも target によりません。
+`exp` / `exp2` / `log` / `pow` は ARM optimized-routines の形の table 駆動で、
+`lib/kizu/std/src/math/tables.kizu` の 128 点(`exp` は 2^(i/128)、`log` は
+区間中心の log)に引数を落とし、残りを短い多項式で埋めます。`pow` は log を
+double-double で持って指数を掛け、それを `exp` の核に渡します。`expm1` / `log1p` /
+`log2` / `log10` は FreeBSD msun の算法(Go の `math` と同じ)です。どれも真の値
+から 1 ulp 以内(`exp` `log` `pow` は 0.55 ulp 以内)です。
 
 - `exp` は 709.78 あたりを超えると無限大、-745.13 あたりを下回ると 0 です。
   `exp2` は同じ形で 2 のべき。
@@ -90,11 +98,17 @@ trusted primitive です。backend はそれぞれを 1 命令(LLVM intrinsic、
 - `ldexp` は `fraction * 2^exponent` で、範囲を超えれば無限大か 0、正規化数の
   下は 1 回だけ丸めて非正規化数にします。
 
-三角関数は Cephes の算法(これも Go と同じ)です。引数が 2^29 未満なら 3 つに
-分けた pi/4 を引いて円の 8 分の 1 に落とし、それ以上なら 4/pi を 1217 bit 持った
-Payne–Hanek reduction で落とすので、`sin(1e22)` も `sin(1e300)` も正しい値です。
+`sin` / `cos` も table 駆動です。引数を円の 128 点 k pi/64 の最寄りに落とし
+(2^17 未満は 30 bit ずつの pi/64 を引く msun の形、それ以上は 4/pi を 1217 bit
+持った Payne–Hanek reduction)、表の sin(k pi/64)、cos(k pi/64)(double-double)と
+残り r の短い多項式から加法定理で組みます。答えの零点(sin なら 0 と pi)から
+3 点以内では表の値と多項式が打ち消し合うので、native の `sin` / `cos` は fused
+multiply-add で積と和の丸め誤差を厳密に拾い(分岐なし)、`sin_cos` と wasm は
+零点からの距離を直接多項式に入れます。`sin_cos` は同じ角の両方を 1 回の縮約と
+表引きで返すので、片方とほとんど同じ費用です。`tan` は Cephes の算法(Go と同じ)で pi/4 の 8 分円に
+落とします。`sin(1e22)` も `sin(1e300)` も正しい値です。
 
-- `sin` / `cos` / `tan` は radian を取り、無限大に NaN を返します。
+- `sin` / `cos` / `sin_cos` / `tan` は radian を取り、無限大に NaN を返します。
 - `asin` / `acos` は [-1, 1] の外に NaN、`atan` は [-pi/2, pi/2] を返します。
 - `atan2(y, x)` は点 (x, y) の角度を (-pi, pi] で返し、象限を両方の符号から
   決めます(`atan2(1, -1)` は 3pi/4)。0 と無限大の組は C の `atan2` と同じです。
@@ -115,9 +129,11 @@ Payne–Hanek reduction で落とすので、`sin(1e22)` も `sin(1e300)` も正
 
 `cmd/kizu` の `TestMath` が Go の `math` と数千の値で突き合わせ、native と wasm の
 両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作、`fma`、
-`round_even`、`frexp` / `modf` は Go と一致し、残りは 1 ulp 以内(`tan` は逆数を
-取るので 2 ulp)です。Go は arm64 で乗算と加算を 1 回の丸めに融合するので、最後の
-bit が動くことがあります。
+`round_even`、`frexp` / `modf` は Go と一致し、残りは 1 ulp 以内(`tan` と
+`log2` / `log10` は丸めが重なるので 2 ulp)です。Go の側が外れる値 —— 2^29 以上と
+pi/2 の倍数付近の三角関数、指数が大きい `pow` —— は照合から外し、そこは 60 桁の
+参照値で 1 ulp 未満を確かめてあります。Go は arm64 で乗算と加算を 1 回の丸めに
+融合するので、最後の bit が動くことがあります。
 
 ## f32
 

@@ -50,6 +50,10 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::f64_floor":          {Args: []ArgKind{ArgF64}, Return: "f64"},
 	"std::internal::builtin::f64_ceil":           {Args: []ArgKind{ArgF64}, Return: "f64"},
 	"std::internal::builtin::f64_trunc":          {Args: []ArgKind{ArgF64}, Return: "f64"},
+	"std::internal::builtin::f64_fma": {
+		Args:   []ArgKind{ArgF64, ArgF64, ArgF64},
+		Return: "f64",
+	},
 	"std::internal::builtin::io_write_stdout": {
 		Args:   []ArgKind{ArgIo, ArgBytes},
 		Return: "std::io::Error!void",
@@ -275,6 +279,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::f64_floor":                    true,
 	"std::internal::builtin::f64_ceil":                     true,
 	"std::internal::builtin::f64_trunc":                    true,
+	"std::internal::builtin::f64_fma":                      true,
 	"std::internal::builtin::mem_page_allocator":           true,
 	"std::internal::builtin::print_line":                   true,
 	"std::internal::builtin::net_accept":                   true,

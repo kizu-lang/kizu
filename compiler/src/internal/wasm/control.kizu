@@ -151,6 +151,14 @@ fn (self: &var Emitter) write_instr_node(
     if float_unary_instruction(node.op) |_| {
         return self.write_float_unary(module, node);
     }
+    if node.op == ir::Op::TableGet {
+        return self.write_table_get(module, node);
+    }
+    if node.op == ir::Op::FloatFma {
+        // wasm has no fused multiply-add; std::math reaches the primitive
+        // only under std::target::is_native().
+        return try self.fail_op(module, node, "wasm error: %s has no wasm instruction");
+    }
     if node.op == ir::Op::BufferNew or node.op == ir::Op::BufferAsBytes {
         return self.write_buffer_instr(module, node);
     }
@@ -1565,6 +1573,41 @@ fn (self: &var Emitter) write_float_unary(
     try expression.append_byte(self.allocator, cast<u8>(32));
     try self.names.append_to(&var expression, value);
     try expression.append_byte(self.allocator, cast<u8>(41));
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
+}
+
+/// Reads one value of a table.get from its data segment, the Go
+/// `writeTableGet`: the index is clamped to the last entry, so a value past
+/// the end gets the fall-through's.
+fn (self: &var Emitter) write_table_get(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail_op(module, node, "wasm error: %s expects 1 arg");
+    }
+    var values = array::new<u64>(self.allocator);
+    defer values.deinit(self.allocator);
+    try ir::table_values(self.allocator, module, node, &var values);
+    let last = values.len() - 1;
+    let index = try self.arg_expr(module, node, 0);
+    let ordinal = self.tables_written;
+    self.tables_written = ordinal + 1;
+    let offset = self.tables.get(ordinal) orelse 0;
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    try expression.append_bytes(self.allocator, "(i64.load (i32.add (i32.const ");
+    try fmt::append_i64(self.allocator, &var expression, offset);
+    try expression.append_bytes(self.allocator, ") (i32.wrap_i64 (i64.shl (select ");
+    try self.names.append_to(&var expression, index);
+    try expression.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, &var expression, last);
+    try expression.append_bytes(self.allocator, ") (i64.lt_u ");
+    try self.names.append_to(&var expression, index);
+    try expression.append_bytes(self.allocator, " (i64.const ");
+    try fmt::append_i64(self.allocator, &var expression, last);
+    try expression.append_bytes(self.allocator, "))) (i64.const 3)))))");
     let expr = try self.names.intern_owned(move expression);
     return self.write_scalar_result(module, node.result, expr);
 }

@@ -1,0 +1,292 @@
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+/// Rewrites each function that compares its one integer parameter against
+/// 0, 1, 2, ... in turn and returns a constant for each into one table.get,
+/// the Go `FoldConstantTables`. Kizu has no constant arrays, so a table (the
+/// kernels of std::math) is such a function, and left as a chain of
+/// comparisons it costs the wasm target a comparison per entry on every
+/// call. table.get carries the values in order, the fall-through's last, and
+/// answers values[index] for index below len - 1 and the last value
+/// otherwise.
+pub fn fold_constant_tables(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        var values = array::new<u64>(allocator);
+        defer values.deinit(allocator);
+        if !try constant_table(allocator, module, function, &var values) {
+            continue;
+        }
+        try replace_with_table(allocator, module, function, &values);
+    }
+    return;
+}
+
+/// Reads the values of a function shaped as a table into out, the Go
+/// `constantTable`: a chain of blocks each comparing the parameter with the
+/// next integer and returning a constant on a match, ending in a block
+/// returning a constant. At least two values make a table.
+fn constant_table(
+    allocator: Allocator,
+    module: &Module,
+    function: Function,
+    out: &var array::Array<u64>
+) -> !bool {
+    if module.function_param_count(function) != 1 {
+        return false;
+    }
+    let param = module.function_param(function, 0) orelse return false;
+    if !module.names.is(param.type_name, "i64") {
+        return false;
+    }
+    let return_type = module.function_return(function);
+    if !module.names.is(return_type, "u64") and !module.names.is(return_type, "i64") {
+        return false;
+    }
+    let unsigned = module.names.is(return_type, "u64");
+    var blocks = map::new<i64, Block>(allocator);
+    defer blocks.deinit(allocator);
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        try blocks.insert(allocator, name_id(module.block_name(block)), block);
+    }
+    var block = function_block_at(module, function, 0) orelse return false;
+    while true {
+        let term = module.block_terminator(block);
+        if term.op == TermOp::Return {
+            let maybe = try evaluate_block(allocator, module, block, return_type, unsigned);
+            let value = maybe orelse return false;
+            if out.len() < 1 {
+                return false;
+            }
+            try out.append(allocator, value);
+            return true;
+        }
+        if term.op != TermOp::Branch {
+            return false;
+        }
+        let node = module.blocks.at(block.node);
+        if node.instrs.len() != 2 {
+            return false;
+        }
+        let key = module.instrs.at(node.instrs.get_or_panic(0).node);
+        let compare = module.instrs.at(node.instrs.get_or_panic(1).node);
+        if key.op != Op::Const or !module.names.is(key.result.type_name, "i64") {
+            return false;
+        }
+        let key_text = name_text(&module.names, key.immediate);
+        let key_bytes = key_text.as_bytes();
+        let expected = parse_i64(key_bytes) orelse return false;
+        if expected != out.len() {
+            return false;
+        }
+        if compare.op != Op::Binary or !module.names.is(compare.operand, "==") or compare.args.len() != 2 {
+            return false;
+        }
+        if !same_name(compare.args.get_or_panic(0).name, param.name) or
+            !same_name(compare.args.get_or_panic(1).name, key.result.name) or
+            !same_name(term.cond.name, compare.result.name) {
+            return false;
+        }
+        let then = blocks.get(name_id(term.target)) orelse return false;
+        let other = blocks.get(name_id(term.else_target)) orelse return false;
+        if module.block_terminator(then).op != TermOp::Return {
+            return false;
+        }
+        let maybe = try evaluate_block(allocator, module, then, return_type, unsigned);
+        let value = maybe orelse return false;
+        try out.append(allocator, value);
+        let other_node = module.blocks.at(other.node);
+        let other_term = module.block_terminator(other);
+        if other_node.instrs.len() != 0 or other_term.op != TermOp::Jump {
+            return false;
+        }
+        block = blocks.get(name_id(other_term.target)) orelse return false;
+    }
+    return false;
+}
+
+/// Computes the constant a block returns, the Go `evaluateBlock`: its
+/// instructions must be integer constants and the wrapping arithmetic of
+/// the table type on them, and the returned value one of those.
+fn evaluate_block(
+    allocator: Allocator,
+    module: &Module,
+    block: Block,
+    type_name: Name,
+    unsigned: bool
+) -> !?u64 {
+    var known = map::new<i64, u64>(allocator);
+    defer known.deinit(allocator);
+    let node = module.blocks.at(block.node);
+    var index = 0;
+    while node.instrs.get(index) |instr| {
+        index = index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if !same_name(instr_node.result.type_name, type_name) {
+            return null;
+        }
+        var value = cast<u64>(0);
+        if instr_node.op == Op::Const {
+            let text = name_text(&module.names, instr_node.immediate);
+            let text_bytes = text.as_bytes();
+            value = parse_table_constant(text_bytes, unsigned) orelse return null;
+        } else {
+            if instr_node.op != Op::Binary or instr_node.args.len() != 2 {
+                return null;
+            }
+            let left = known.get(name_id(instr_node.args.get_or_panic(0).name)) orelse return null;
+            let right = known.get(name_id(instr_node.args.get_or_panic(1).name)) orelse return null;
+            value = table_arithmetic(module, instr_node.operand, left, right, unsigned) orelse return null;
+        }
+        try known.insert(allocator, name_id(instr_node.result.name), value);
+    }
+    let term = module.block_terminator(block);
+    return known.get(name_id(term.value.name));
+}
+
+/// Reads an integer literal as the bits of the table type, the Go
+/// `parseTableConstant`.
+fn parse_table_constant(text: []u8, unsigned: bool) -> ?u64 {
+    if !unsigned {
+        let signed = parse_i64(text) orelse return null;
+        return cast<u64>(signed);
+    }
+    let length = mem::len(text);
+    if length == 0 {
+        return null;
+    }
+    var value = cast<u64>(0);
+    var index = 0;
+    while index < length {
+        let byte = text[index];
+        index = index + 1;
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return null;
+        }
+        let digit = cast<u64>(byte - cast<u8>(48));
+        if value > ((cast<u64>(0) - 1) - digit) / 10 {
+            return null;
+        }
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+/// Computes the wrapping integer operations a table value is built from,
+/// the Go `tableArithmetic`: shifts, which give 0 past the width, and bit
+/// and sum operations.
+fn table_arithmetic(module: &Module, operand: Name, left: u64, right: u64, unsigned: bool) -> ?u64 {
+    if module.names.is(operand, "<<") {
+        if right >= 64 {
+            return 0;
+        }
+        return left << right;
+    }
+    if module.names.is(operand, ">>") {
+        if !unsigned {
+            return null;
+        }
+        if right >= 64 {
+            return 0;
+        }
+        return left >> right;
+    }
+    if module.names.is(operand, "|") {
+        return left | right;
+    }
+    if module.names.is(operand, "&") {
+        return left & right;
+    }
+    if module.names.is(operand, "^") {
+        return left ^ right;
+    }
+    if module.names.is(operand, "+") {
+        return left + right;
+    }
+    if module.names.is(operand, "-") {
+        return left - right;
+    }
+    if module.names.is(operand, "*") {
+        return left * right;
+    }
+    return null;
+}
+
+/// Replaces the body of a table function with one block holding one
+/// table.get, the Go rewrite in `FoldConstantTables`. The values are its
+/// immediate: decimal, signed for i64, separated by commas (`formatTable`).
+fn replace_with_table(
+    allocator: Allocator,
+    module: &var Module,
+    function: Function,
+    values: &array::Array<u64>
+) -> !void {
+    let function_node = module.function_nodes.at(function.node);
+    let count = function_node.blocks.len();
+    let first = function_block_at(module, function, 0) orelse return;
+    let last = function_block_at(module, function, count - 1) orelse return;
+    let last_value = module.block_terminator(last).value;
+    let return_type = module.function_return(function);
+    let unsigned = module.names.is(return_type, "u64");
+    let param = module.function_param(function, 0) orelse return;
+    let result = Value { name: last_value.name, type_name: return_type };
+    var text = string::new(allocator);
+    errdefer text.deinit(allocator);
+    var index = 0;
+    while values.get(index) |value| {
+        if index > 0 {
+            try text.append_byte(allocator, cast<u8>(44));
+        }
+        index = index + 1;
+        if unsigned {
+            try fmt::append_u64(allocator, &var text, value);
+        } else {
+            try fmt::append_i64(allocator, &var text, cast<i64>(value));
+        }
+    }
+    let immediate = try module.names.intern_owned(move text);
+    var instr = module.blank_instr(result, Op::TableGet, empty_name(), immediate);
+    errdefer instr.deinit(allocator);
+    try instr.args.append(allocator, param.value());
+    if module.function_nodes.at_mut(function.node) |node| {
+        try node.blocks.truncate(allocator, 1);
+    }
+    if module.blocks.at_mut(first.node) |node| {
+        node.instrs.clear(allocator);
+    }
+    let _ = try module.add_instr(allocator, first, move instr);
+    module.set_terminator(first, Terminator {
+        op: TermOp::Return,
+        value: result,
+        cond: empty_value(),
+        target: empty_name(),
+        else_target: empty_name()
+    });
+    return;
+}
+
+/// Reads the values a table.get carries into out, as the bits of each, the
+/// Go `TableValues`.
+pub fn table_values(allocator: Allocator, module: &Module, node: &InstrNode, out: &var array::Array<u64>) -> !void {
+    let unsigned = module.names.is(node.result.type_name, "u64");
+    let text = name_text(&module.names, node.immediate);
+    let bytes = text.as_bytes();
+    var start = 0;
+    var index = 0;
+    let length = mem::len(bytes);
+    while index <= length {
+        if index == length or bytes[index] == cast<u8>(44) {
+            let value = parse_table_constant(bytes[start..index], unsigned) orelse 0;
+            try out.append(allocator, value);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}

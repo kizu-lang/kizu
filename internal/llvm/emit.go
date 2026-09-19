@@ -30,6 +30,7 @@ func emit(module *ir.Module, frameRecords bool) (string, error) {
 		module:       module,
 		types:        typ.NewTable(),
 		strings:      map[string]string{},
+		tables:       map[*ir.Instr]string{},
 		values:       map[string]valueInfo{},
 		frameRecords: frameRecords,
 	}
@@ -44,10 +45,13 @@ func emit(module *ir.Module, frameRecords bool) (string, error) {
 }
 
 type emitter struct {
-	module         *ir.Module
-	types          *typ.Table
-	out            bytes.Buffer
-	strings        map[string]string
+	module  *ir.Module
+	types   *typ.Table
+	out     bytes.Buffer
+	strings map[string]string
+	// tables names the global behind each table.get, in discovery order.
+	tables         map[*ir.Instr]string
+	tableOrder     []*ir.Instr
 	values         map[string]valueInfo
 	functionNames  map[string]bool
 	functionParams map[string][]ir.Param
@@ -83,6 +87,7 @@ func (e *emitter) emit() error {
 	e.collectFunctionNames()
 	e.countReferences()
 	e.collectStrings()
+	e.collectTables()
 	if err := e.validateModuleTypes(); err != nil {
 		return err
 	}
@@ -211,6 +216,54 @@ func (e *emitter) collectStrings() {
 	}
 }
 
+// collectTables assigns stable global names to the tables of table.get.
+func (e *emitter) collectTables() {
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == "table.get" {
+					e.tables[instr] = fmt.Sprintf("@.table.%d", len(e.tableOrder))
+					e.tableOrder = append(e.tableOrder, instr)
+				}
+			}
+		}
+	}
+}
+
+// writeTables writes the constant array behind each table.get.
+func (e *emitter) writeTables() {
+	for _, instr := range e.tableOrder {
+		values := ir.TableValues(instr)
+		texts := make([]string, len(values))
+		for i, value := range values {
+			texts[i] = "i64 " + strconv.FormatInt(int64(value), 10)
+		}
+		fmt.Fprintf(&e.out, "%s = private unnamed_addr constant [%d x i64] [%s]\n",
+			e.tables[instr], len(values), strings.Join(texts, ", "))
+	}
+	if len(e.tableOrder) > 0 {
+		e.out.WriteByte('\n')
+	}
+}
+
+// writeTableGet reads one value of a table.get: the index is clamped to the
+// last entry, so a value past the end gets the fall-through's.
+func (e *emitter) writeTableGet(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: %s expects 1 arg", instr.Op)
+	}
+	count := len(ir.TableValues(instr))
+	index := e.value(instr.Args[0]).operand
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s.in = icmp ult i64 %s, %d\n", name, index, count-1)
+	fmt.Fprintf(&e.out, "  %s.at = select i1 %s.in, i64 %s, i64 %d\n", name, name, index, count-1)
+	fmt.Fprintf(&e.out, "  %s.ptr = getelementptr inbounds [%d x i64], ptr %s, i64 0, i64 %s.at\n",
+		name, count, e.tables[instr], name)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s.ptr\n", name, name)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
 // writeHeader writes globals and runtime declarations.
 func (e *emitter) writeHeader() {
 	e.out.WriteString("; Kizu LLVM IR\n")
@@ -232,6 +285,7 @@ func (e *emitter) writeHeader() {
 	if len(e.strings) > 0 {
 		e.out.WriteByte('\n')
 	}
+	e.writeTables()
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_main_error_message(ptr, i64)\n\n")
 	e.out.WriteString("declare void @kizu_runtime_init_args(i32, ptr)\n\n")
@@ -1177,10 +1231,26 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeErrorInstr(instr)
 	case strings.HasPrefix(instr.Op, "opt."):
 		return e.writeOptInstr(instr)
+	case strings.HasPrefix(instr.Op, "float."):
+		return e.writeFloatInstr(instr)
+	case instr.Op == "table.get":
+		return e.writeTableGet(instr)
+	default:
+		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
+	}
+}
+
+// writeFloatInstr dispatches the float instructions of `std::float` and
+// `std::math`: the bit views, the one-operand intrinsics and the fused
+// multiply-add.
+func (e *emitter) writeFloatInstr(instr *ir.Instr) error {
+	switch {
 	case instr.Op == "float.bits", instr.Op == "float.from_bits":
 		return e.writeFloatBits(instr)
 	case floatUnaryIntrinsics[instr.Op] != "":
 		return e.writeFloatUnary(instr)
+	case instr.Op == "float.fma":
+		return e.writeFloatFma(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
@@ -1223,17 +1293,41 @@ func (e *emitter) writeFloatUnary(instr *ir.Instr) error {
 	return nil
 }
 
+// writeFloatFma calls llvm.fma.f64, the `std::math` fused multiply-add: one
+// rounding of x * y + z, which the arm64 and x86-64 (with FMA) targets have
+// as one instruction and which libm supplies where they do not.
+func (e *emitter) writeFloatFma(instr *ir.Instr) error {
+	if len(instr.Args) != 3 {
+		return fmt.Errorf("llvm error: %s expects 3 args", instr.Op)
+	}
+	x := e.value(instr.Args[0])
+	y := e.value(instr.Args[1])
+	z := e.value(instr.Args[2])
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call double @llvm.fma.f64(double %s, double %s, double %s)\n",
+		name, x.operand, y.operand, z.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
 // writeFloatMathDecls declares the float intrinsics the module calls, in the
 // order of their instruction names.
 func (e *emitter) writeFloatMathDecls() {
-	ops := make([]string, 0, len(floatUnaryIntrinsics))
+	ops := make([]string, 0, len(floatUnaryIntrinsics)+1)
 	for op := range floatUnaryIntrinsics {
 		if e.usesOp(op) {
 			ops = append(ops, op)
 		}
 	}
+	if e.usesOp("float.fma") {
+		ops = append(ops, "float.fma")
+	}
 	sort.Strings(ops)
 	for _, op := range ops {
+		if op == "float.fma" {
+			e.out.WriteString("declare double @llvm.fma.f64(double, double, double)\n")
+			continue
+		}
 		fmt.Fprintf(&e.out, "declare double @%s(double)\n", floatUnaryIntrinsics[op])
 	}
 	if len(ops) > 0 {
