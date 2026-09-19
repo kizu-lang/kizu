@@ -44,6 +44,47 @@ var mathUnaryFunctions = []struct {
 	{"asin", math.Asin, 1},
 	{"acos", math.Acos, 1},
 	{"atan", math.Atan, 1},
+	{"sinh", math.Sinh, 1},
+	{"cosh", math.Cosh, 1},
+	{"tanh", math.Tanh, 1},
+	{"asinh", math.Asinh, 1},
+	{"acosh", math.Acosh, 1},
+	{"atanh", math.Atanh, 1},
+	{"cbrt", math.Cbrt, 1},
+	{"round_even", math.RoundToEven, 0},
+	{"frexp_fraction", func(x float64) float64 { f, _ := math.Frexp(x); return f }, 0},
+	{"frexp_exponent", func(x float64) float64 { _, e := math.Frexp(x); return float64(e) }, 0},
+	{"modf_whole", func(x float64) float64 { w, _ := math.Modf(x); return w }, 0},
+	{"modf_fraction", func(x float64) float64 { _, f := math.Modf(x); return f }, 0},
+}
+
+// mathHelpers are the functions the generated program defines itself, to
+// print one number of a std::math answer that has two.
+const mathHelpers = `fn frexp_fraction(value: f64) -> f64 {
+    return math::frexp(value).fraction;
+}
+
+fn frexp_exponent(value: f64) -> f64 {
+    return cast<f64>(math::frexp(value).exponent);
+}
+
+fn modf_whole(value: f64) -> f64 {
+    return math::modf(value).whole;
+}
+
+fn modf_fraction(value: f64) -> f64 {
+    return math::modf(value).fraction;
+}
+
+`
+
+// mathCallee spells how the generated program calls a function: a helper it
+// defines by its bare name, anything else through the module.
+func mathCallee(name string) string {
+	if strings.Contains(mathHelpers, "fn "+name+"(") {
+		return name
+	}
+	return "math::" + name
 }
 
 // mathBinaryFunctions lists the two-argument std::math functions beside the Go
@@ -80,6 +121,17 @@ var mathBinaryFunctions = []struct {
 	{"atan2", math.Atan2, 1},
 }
 
+// mathTernaryFunctions lists the three-argument std::math functions beside
+// the Go function each is checked against. fma is exact by definition, and
+// Go's is a hardware instruction or exact software.
+var mathTernaryFunctions = []struct {
+	name string
+	want func(float64, float64, float64) float64
+	ulps uint64
+}{
+	{"fma", math.FMA, 0},
+}
+
 // mathBits lists the values std::math is checked on: the float text bit
 // patterns, which cover the edges of the format and a spread of random
 // doubles, plus the halves and near-halves that rounding is about, both
@@ -93,6 +145,7 @@ func mathBits() []uint64 {
 		1023.5, 1024, -1074, -1074.5, 1e-10, -1e-10, 0.25, -0.75, 6.5, -7,
 		math.Pi, -math.Pi, math.Pi / 2, math.Pi / 4, 3 * math.Pi / 4, 2 * math.Pi, 0.66, 0.7, 2.5,
 		536870911, 536870912, 536870913, 1e15, 1e22, 1e50, 1e100, 1e200, 1e300,
+		0.1, 10, -1, 1e308, 1e-308, 4.9e-324, 3, 4, 0.5000000000000001, 21.5, 22, 0.625, 0.7,
 		math.Inf(1), math.Inf(-1), math.NaN(),
 	} {
 		bits = append(bits, math.Float64bits(value))
@@ -107,6 +160,7 @@ func mathProgram(bits []uint64) string {
 	var b strings.Builder
 	b.WriteString("import std::float;\nimport std::math;\n\n")
 	b.WriteString("fn show(value: f64) -> void {\n    print(cast<i64>(float::bits(value)));\n}\n\n")
+	b.WriteString(mathHelpers)
 	// A u64 literal cannot exceed the i64 range, so a pattern is written as
 	// its two halves.
 	b.WriteString("fn from(high: u64, low: u64) -> f64 {\n")
@@ -117,13 +171,20 @@ func mathProgram(bits []uint64) string {
 	var calls []string
 	for _, pattern := range bits {
 		for _, function := range mathUnaryFunctions {
-			calls = append(calls, fmt.Sprintf("    show(math::%s(%s));\n", function.name, from(pattern)))
+			calls = append(calls, fmt.Sprintf("    show(%s(%s));\n",
+				mathCallee(function.name), from(pattern)))
 		}
 	}
 	for i := range bits[:len(bits)-1] {
 		for _, function := range mathBinaryFunctions {
-			calls = append(calls, fmt.Sprintf("    show(math::%s(%s, %s));\n",
-				function.name, from(bits[i]), from(bits[i+1])))
+			calls = append(calls, fmt.Sprintf("    show(%s(%s, %s));\n",
+				mathCallee(function.name), from(bits[i]), from(bits[i+1])))
+		}
+	}
+	for i := range bits[:len(bits)-2] {
+		for _, function := range mathTernaryFunctions {
+			calls = append(calls, fmt.Sprintf("    show(%s(%s, %s, %s));\n",
+				mathCallee(function.name), from(bits[i]), from(bits[i+1]), from(bits[i+2])))
 		}
 	}
 	// A wasm function holds at most 50000 locals and every call here takes a
@@ -191,6 +252,13 @@ func mathWant(bits []uint64) []mathExpectation {
 			want = append(want, mathExpectation{value: function.want(a, b), ulps: function.ulps})
 		}
 	}
+	for i := range bits[:len(bits)-2] {
+		for _, function := range mathTernaryFunctions {
+			a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
+			c := math.Float64frombits(bits[i+2])
+			want = append(want, mathExpectation{value: function.want(a, b, c), ulps: function.ulps})
+		}
+	}
 	return want
 }
 
@@ -231,10 +299,18 @@ func mathLabel(bits []uint64, line int) string {
 		return fmt.Sprintf("%s(%g)", function.name, value)
 	}
 	line -= unary
-	function := mathBinaryFunctions[line%len(mathBinaryFunctions)]
-	i := line / len(mathBinaryFunctions)
+	binary := (len(bits) - 1) * len(mathBinaryFunctions)
+	if line < binary {
+		function := mathBinaryFunctions[line%len(mathBinaryFunctions)]
+		i := line / len(mathBinaryFunctions)
+		a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
+		return fmt.Sprintf("%s(%g, %g)", function.name, a, b)
+	}
+	line -= binary
+	function := mathTernaryFunctions[line%len(mathTernaryFunctions)]
+	i := line / len(mathTernaryFunctions)
 	a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-	return fmt.Sprintf("%s(%g, %g)", function.name, a, b)
+	return fmt.Sprintf("%s(%g, %g, %g)", function.name, a, b, math.Float64frombits(bits[i+2]))
 }
 
 // compareMathOutput checks one run's output line by line against Go's math.

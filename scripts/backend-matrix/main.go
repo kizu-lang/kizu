@@ -98,7 +98,7 @@ var groups = []featureGroup{
 	{"std::float", []string{"std-float", "append", "parse", "shortest"}},
 	{"std::math", []string{
 		"std-math", "sqrt", "floor", "ceil", "trunc", "round", "hypot",
-		"exp", "log", "pow", "fmod", "trig"}},
+		"exp", "log", "pow", "fmod", "trig", "hyperbolic", "cbrt", "fma"}},
 	{"std::rand", []string{"std-rand", "seed", "deterministic"}},
 	{"std::time", []string{"std-time", "duration", "instant", "unix-time"}},
 	{"std::date", []string{"std-date", "date-time", "weekday", "iso-8601"}},
