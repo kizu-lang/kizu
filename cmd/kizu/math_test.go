@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,10 +136,31 @@ func mathProgram(bits []uint64) string {
 }
 
 // mathExpectation is one answer Go's math gives and how far std::math may be
-// from it.
+// from it, or nothing to compare with where Go's answer is not the oracle.
 type mathExpectation struct {
 	value float64
 	ulps  uint64
+	skip  bool
+}
+
+// goAnswersWrongly reports the cases Go's math is known to answer wrongly, so
+// that they are not held against std::math. On amd64 Go's Exp and Log are
+// assembly whose argument reduction gives up at the edges: Log of a subnormal
+// comes back as Log of the smallest normal, and Exp overflows a little below
+// the true threshold. The arm64 build runs the same algorithms std::math does
+// and checks these cases exactly.
+func goAnswersWrongly(name string, x float64) bool {
+	if runtime.GOARCH != "amd64" {
+		return false
+	}
+	const smallestNormal = 2.2250738585072014e-308
+	switch name {
+	case "log", "log10":
+		return x != 0 && math.Abs(x) < smallestNormal
+	case "exp":
+		return x > 709
+	}
+	return false
 }
 
 // mathWant lists the answers Go's math gives in the order mathProgram prints
@@ -147,13 +169,15 @@ func mathWant(bits []uint64) []mathExpectation {
 	var want []mathExpectation
 	for _, pattern := range bits {
 		for _, function := range mathUnaryFunctions {
-			want = append(want, mathExpectation{function.want(math.Float64frombits(pattern)), function.ulps})
+			x := math.Float64frombits(pattern)
+			want = append(want, mathExpectation{
+				value: function.want(x), ulps: function.ulps, skip: goAnswersWrongly(function.name, x)})
 		}
 	}
 	for i := range bits[:len(bits)-1] {
 		for _, function := range mathBinaryFunctions {
 			a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-			want = append(want, mathExpectation{function.want(a, b), function.ulps})
+			want = append(want, mathExpectation{value: function.want(a, b), ulps: function.ulps})
 		}
 	}
 	return want
@@ -164,6 +188,9 @@ func mathWant(bits []uint64) []mathExpectation {
 // not part of what any function promises; an infinity matches only itself, and
 // a zero is one unit from the smallest subnormal of its sign.
 func mathMatches(got float64, want mathExpectation) bool {
+	if want.skip {
+		return true
+	}
 	if math.IsNaN(want.value) || math.IsNaN(got) {
 		return math.IsNaN(want.value) && math.IsNaN(got)
 	}
