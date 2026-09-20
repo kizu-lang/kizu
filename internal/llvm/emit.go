@@ -1578,7 +1578,7 @@ func (e *emitter) writeSliceStore(instr *ir.Instr) error {
 	base := "%" + e.nextSyntheticValue("slice.store")
 	ptrName := base + ".ptr"
 	elemPtrName := base + ".elem.ptr"
-	elemType := llvmPrimitiveType(elem)
+	elemType := e.llvmType(elem)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
 		elemPtrName, elemType, ptrName, index.operand)
@@ -2553,7 +2553,7 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	resultName := localName(instr.Result.Name)
 	ptrName := resultName + ".ptr"
 	elemPtrName := resultName + ".elem.ptr"
-	elemType := llvmPrimitiveType(elem)
+	elemType := e.llvmType(elem)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
 		elemPtrName, elemType, ptrName, index.operand)
@@ -2582,7 +2582,7 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	sliceLenName := resultName + ".len"
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
-		slicePtrName, llvmPrimitiveType(elem), ptrName, start.operand)
+		slicePtrName, e.llvmType(elem), ptrName, start.operand)
 	fmt.Fprintf(&e.out, "  %s = sub i64 %s, %s\n", sliceLenName, end.operand, start.operand)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
 		baseName, slicePtrName)

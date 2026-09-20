@@ -26,32 +26,15 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 	}
 }
 
-// viewAccess spells how one element type is read from and written to linear
-// memory, and how wide its cell is. Integers are widened to the i64 every
-// integer lives in; a signed one sign-extends, an unsigned one zero-extends.
-func viewAccess(elem string) (load string, store string, size int, ok bool) {
-	switch elem {
-	case "u8":
-		return "i64.load8_u", "i64.store8", 1, true
-	case "i8":
-		return "i64.load8_s", "i64.store8", 1, true
-	case "u16":
-		return "i64.load16_u", "i64.store16", 2, true
-	case "i16":
-		return "i64.load16_s", "i64.store16", 2, true
-	case "u32":
-		return "i64.load32_u", "i64.store32", 4, true
-	case "i32":
-		return "i64.load32_s", "i64.store32", 4, true
-	case "u64", "i64":
-		return "i64.load", "i64.store", 8, true
-	case "f32":
-		return "f32.load", "f32.store", 4, true
-	case "f64":
-		return "f64.load", "f64.store", 8, true
-	default:
-		return "", "", 0, false
+// viewCell returns the byte width of one element of a view: the element's
+// own layout, whatever it is, since a view counts elements and an element
+// of copy data is read and written the way a container's is.
+func (e *emitter) viewCell(elem string) (int, error) {
+	layout, err := e.typeLayout(elem)
+	if err != nil {
+		return 0, err
 	}
+	return layout.size, nil
 }
 
 // viewElem returns the element type of a view spelling `[]T`.
@@ -85,40 +68,47 @@ func (e *emitter) writeSliceLen(instr *ir.Instr) error {
 // writeSliceIndex reads one element through a view descriptor.
 func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	elem, ok := viewElem(instr.Args[0].Type)
-	load, _, size, known := viewAccess(elem)
-	if len(instr.Args) != 2 || !ok || !known ||
+	if len(instr.Args) != 2 || !ok ||
 		instr.Args[1].Type != "i64" || instr.Result.Type != elem {
 		return fmt.Errorf("wasm error: slice.index expects []T, i64 -> T")
 	}
+	size, err := e.viewCell(elem)
+	if err != nil {
+		return err
+	}
 	index := e.value(instr.Args[1]).expr
 	address := elementAddress(e.viewPointer(instr.Args[0]), index, size)
-	return e.writeScalarResult(instr.Result, "("+load+" "+address+")")
+	return e.writeLoadValue(instr.Result, address, 0)
 }
 
 // writeSliceStore writes one element through a mutable view descriptor.
 func (e *emitter) writeSliceStore(instr *ir.Instr) error {
 	elem, ok := viewElem(instr.Args[0].Type)
-	_, store, size, known := viewAccess(elem)
-	if len(instr.Args) != 3 || !ok || !known ||
+	if len(instr.Args) != 3 || !ok ||
 		instr.Args[1].Type != "i64" || instr.Args[2].Type != elem ||
 		instr.Result.Type != "void" {
 		return fmt.Errorf("wasm error: slice.store expects []T, i64, T -> void")
 	}
+	size, err := e.viewCell(elem)
+	if err != nil {
+		return err
+	}
 	index := e.value(instr.Args[1]).expr
-	value := e.value(instr.Args[2]).expr
 	address := elementAddress(e.viewPointer(instr.Args[0]), index, size)
-	fmt.Fprintf(&e.out, "            (%s %s %s)\n", store, address, value)
-	return nil
+	return e.writeStoreValue(address, 0, elem, e.value(instr.Args[2]))
 }
 
 // writeSliceSlice materializes a descriptor for one subview.
 func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	elem, ok := viewElem(instr.Args[0].Type)
-	_, _, size, known := viewAccess(elem)
-	if len(instr.Args) != 3 || !ok || !known ||
+	if len(instr.Args) != 3 || !ok ||
 		instr.Args[1].Type != "i64" || instr.Args[2].Type != "i64" ||
 		instr.Result.Type != instr.Args[0].Type {
 		return fmt.Errorf("wasm error: slice.slice expects []T, i64, i64 -> []T")
+	}
+	size, err := e.viewCell(elem)
+	if err != nil {
+		return err
 	}
 	start := e.value(instr.Args[1]).expr
 	end := e.value(instr.Args[2]).expr

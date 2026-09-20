@@ -1711,9 +1711,9 @@ func (c *Checker) viewOfReceiver(receiver Type, method string) (Type, string, er
 				"type error: `Array` has no `%s`; an Array of numbers is viewed with `as_slice`",
 				method)
 		}
-		if !typ.IsBufferElem(arg) || arg == string(typeU8) {
+		if arg == string(typeU8) || !c.isViewElem(Type(arg)) {
 			return "", "", errorf(
-				"type error: `%s` has no `%s`; `as_slice` views an Array of numbers other than u8",
+				"type error: `%s` has no `%s`; `as_slice` views an Array of copy data other than u8",
 				receiver, method)
 		}
 		return Type("[]" + arg), "Array", nil
@@ -7412,7 +7412,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 	if !c.currentStd {
 		return "", errorf("type error: Array has no method `%s`", name)
 	}
-	return checkArrayAsBytes(elem, name, args)
+	return c.checkArrayAsBytes(elem, name, args)
 }
 
 // isStdArrayStorageMethod reports raw view methods reserved to std source.
@@ -7421,13 +7421,13 @@ func isStdArrayStorageMethod(name string) bool {
 }
 
 // checkArrayAsBytes validates the Array to view primitive std forwards to:
-// `[]T` over the elements of an Array of numbers, which is what `as_bytes`
-// gives on bytes and `as_slice` on any other number. The mutable form hands
+// `[]T` over the elements of an Array of copy data, which is what `as_bytes`
+// gives on bytes and `as_slice` on anything else. The mutable form hands
 // back the writable view spelling (ADR-0096); the view value itself is the
 // same.
-func checkArrayAsBytes(elem Type, name string, args []ast.Expression) (Type, error) {
-	if !typ.IsBufferElem(string(elem)) {
-		return "", errorf("type error: `Array.%s` requires a fixed-width number element, got %s",
+func (c *Checker) checkArrayAsBytes(elem Type, name string, args []ast.Expression) (Type, error) {
+	if !c.isViewElem(elem) {
+		return "", errorf("type error: `Array.%s` requires a copy element, got %s",
 			name, elem)
 	}
 	if len(args) != 0 {
@@ -8146,6 +8146,15 @@ func (c *Checker) ownerType(typ Type) bool {
 // releaseNamesAllocator reports whether releasing typ takes an allocator.
 func (c *Checker) releaseNamesAllocator(typ Type) bool {
 	return ast.ReleaseNames(c.releaseAllocators, string(typ))
+}
+
+// isViewElem reports whether T can be the element of a view `[]T`: plain
+// copy data, so that reading an element copies it and nothing reachable
+// through the view carries a cleanup. An owner element would be reachable
+// without its obligation, and a view element would be a borrow kept in
+// storage. A type parameter stands for whatever the instantiation checks.
+func (c *Checker) isViewElem(elem Type) bool {
+	return c.typeParams.contains(string(elem)) || c.isPlainDataType(string(elem), nil)
 }
 
 // isCopyType reports whether values of typ can be duplicated safe code.

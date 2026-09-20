@@ -1325,7 +1325,10 @@ let head = bytes[..end];
 ```
 
 対象は view `[]T` です。index は element を 1 つ、slice は同じ element の view を
-返します。
+返します。T は copy data です: 固定幅の数値、`bool`、enum、error set、
+arena handle、およびそれらだけからなる struct / union。owner や view を含む
+型は element になれません(view 越しに cleanup 義務のない owner が見えるか、
+borrow が storage に入るため)。element の読みは copy です。
 
 ```text
 []T [ i64 ] -> T
@@ -3003,7 +3006,8 @@ source に残す唯一の手段です。`std::mem::Limit` は確保上限の uni
 **view を返す accessor.** `String.as_bytes` は owned buffer への local
 read-only view、`as_mut_bytes` は writable view(`&var []u8`)です。
 `Array<T>.as_slice` / `as_mut_slice` は同じ規則で `[]T` / `&var []T` を返します
-(T は u8 以外の固定幅の数。名前が返るものを言うのは `[N]T` と同じで、§7.1)。
+(T は u8 以外の、view が持てる copy data(§7.1)。名前が返るものを言うのは
+`[N]T` と同じです)。
 どちらも戻り値を local binding に束縛する必要があります。receiver は local
 binding のほか、そこを root とする field path(`owner.field.as_bytes()`)を
 書けます: このとき borrow は root の該当 path に付き、その path に重なる操作と

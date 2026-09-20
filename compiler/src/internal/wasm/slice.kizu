@@ -29,61 +29,20 @@ fn (self: &var Emitter) write_slice_instr(
     return try self.fail_op(module, node, "wasm error: unsupported slice instruction `%s`");
 }
 
-/// Spells the wasm load for one element type: integers widen to the i64
-/// every integer lives in, a signed one sign-extending and an unsigned one
-/// zero-extending; floats load as themselves.
-fn view_load(elem: []u8) -> []u8 {
-    if mem::equal_bytes(elem, "u8") {
-        return "i64.load8_u";
+/// Returns the byte width of one element of a view, the Go `viewCell`: the
+/// element's own layout, whatever it is, since a view counts elements and an
+/// element of copy data is read and written the way a container's is.
+fn (self: &var Emitter) view_cell(module: &ir::Module, elem: []u8) -> !WasmCellResult {
+    let measured = try self.type_layout_bytes(module, elem);
+    match measured {
+        Error(failed) => return WasmCellResult::Error(move failed),
+        Layout(found) => return WasmCellResult::Cell(found.size),
     }
-    if mem::equal_bytes(elem, "i8") {
-        return "i64.load8_s";
-    }
-    if mem::equal_bytes(elem, "u16") {
-        return "i64.load16_u";
-    }
-    if mem::equal_bytes(elem, "i16") {
-        return "i64.load16_s";
-    }
-    if mem::equal_bytes(elem, "u32") {
-        return "i64.load32_u";
-    }
-    if mem::equal_bytes(elem, "i32") {
-        return "i64.load32_s";
-    }
-    if mem::equal_bytes(elem, "f32") {
-        return "f32.load";
-    }
-    if mem::equal_bytes(elem, "f64") {
-        return "f64.load";
-    }
-    return "i64.load";
 }
 
-/// Spells the wasm store for one element type.
-fn view_store(elem: []u8) -> []u8 {
-    if mem::equal_bytes(elem, "u8") or mem::equal_bytes(elem, "i8") {
-        return "i64.store8";
-    }
-    if mem::equal_bytes(elem, "u16") or mem::equal_bytes(elem, "i16") {
-        return "i64.store16";
-    }
-    if mem::equal_bytes(elem, "u32") or mem::equal_bytes(elem, "i32") {
-        return "i64.store32";
-    }
-    if mem::equal_bytes(elem, "f32") {
-        return "f32.store";
-    }
-    if mem::equal_bytes(elem, "f64") {
-        return "f64.store";
-    }
-    return "i64.store";
-}
-
-/// Returns the byte width of one element, 0 for a type no view holds.
-fn view_cell(elem: []u8) -> i64 {
-    let layout = wasm_primitive_layout(elem) orelse return 0;
-    return layout.size;
+union WasmCellResult {
+    Cell(i64),
+    Error(diagnostic::Diagnostic),
 }
 
 /// Spells the address of element `index` of a view, the Go `elementAddress`:
@@ -140,24 +99,23 @@ fn (self: &var Emitter) write_slice_index(
         return try self.fail0("wasm error: slice.index expects []T, i64 -> T");
     }
     let elem = view_bytes[2..mem::len(view_bytes)];
-    let cell = view_cell(elem);
-    if node.args.len() != 2 or cell == 0 or
+    if node.args.len() != 2 or
         !module.names.is(at.type_name, "i64") or
         !module.names.is(node.result.type_name, elem) {
         return try self.fail0("wasm error: slice.index expects []T, i64 -> T");
     }
-    let load = view_load(elem);
+    var cell = 0;
+    let measured = try self.view_cell(module, elem);
+    match measured {
+        Error(failed) => return move failed,
+        Cell(found) => {
+            cell = found;
+        },
+    }
     let index = try self.value_of(module, at);
     let pointer = try self.view_pointer(module, slice);
     let address_name = try self.element_address(pointer, index.expr, cell);
-    var loaded = try string::from_bytes(self.allocator, "(");
-    errdefer loaded.deinit(self.allocator);
-    try loaded.append_bytes(self.allocator, load);
-    try loaded.append_byte(self.allocator, cast<u8>(32));
-    try self.names.append_to(&var loaded, address_name);
-    try loaded.append_byte(self.allocator, cast<u8>(41));
-    let expr = try self.names.intern_owned(move loaded);
-    return self.write_scalar_result(module, node.result, expr);
+    return self.write_load_value(module, node.result, address_name, 0);
 }
 
 fn (self: &var Emitter) write_slice_store(
@@ -173,22 +131,25 @@ fn (self: &var Emitter) write_slice_store(
         return try self.fail0("wasm error: slice.store expects []T, i64, T -> void");
     }
     let elem = view_bytes[2..mem::len(view_bytes)];
-    let cell = view_cell(elem);
-    if node.args.len() != 3 or cell == 0 or
+    if node.args.len() != 3 or
         !module.names.is(at.type_name, "i64") or
         !module.names.is(stored.type_name, elem) or
         !module.names.is(node.result.type_name, "void") {
         return try self.fail0("wasm error: slice.store expects []T, i64, T -> void");
     }
-    let store_text = view_store(elem);
-    let store = try self.names.intern(store_text);
+    var cell = 0;
+    let measured = try self.view_cell(module, elem);
+    match measured {
+        Error(failed) => return move failed,
+        Cell(found) => {
+            cell = found;
+        },
+    }
     let index = try self.value_of(module, at);
     let value = try self.value_of(module, stored);
     let pointer = try self.view_pointer(module, slice);
     let address_name = try self.element_address(pointer, index.expr, cell);
-    try self.line3("            (%s %s %s)",
-        Arg::Str(store), Arg::Str(address_name), Arg::Str(value.expr));
-    return null;
+    return self.write_store_value(module, address_name, 0, stored.type_name, value);
 }
 
 fn (self: &var Emitter) write_slice_slice(
@@ -204,11 +165,18 @@ fn (self: &var Emitter) write_slice_slice(
         return try self.fail0("wasm error: slice.slice expects []T, i64, i64 -> []T");
     }
     let elem = view_bytes[2..mem::len(view_bytes)];
-    let cell = view_cell(elem);
-    if node.args.len() != 3 or cell == 0 or
+    if node.args.len() != 3 or
         !module.names.is(from.type_name, "i64") or !module.names.is(to.type_name, "i64") or
         !ir::same_name(node.result.type_name, slice.type_name) {
         return try self.fail0("wasm error: slice.slice expects []T, i64, i64 -> []T");
+    }
+    var cell = 0;
+    let measured = try self.view_cell(module, elem);
+    match measured {
+        Error(failed) => return move failed,
+        Cell(found) => {
+            cell = found;
+        },
     }
     let start = try self.value_of(module, from);
     let end = try self.value_of(module, to);

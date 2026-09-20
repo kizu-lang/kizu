@@ -101,5 +101,5 @@ backing(literal 等)の書き込み可能性を保証しないため渡せない
 
 - 可変 view の保存(view struct)の実需が出た場合。それは穴 3(borrow field)
   の再評価であり、本 ADR の決定 1 は「保存は owned で」の方針ごと見直しになる
-- `[]T`(u8 以外)の mutable slice が必要になった時、決定 2 の供給源を
-  generic に広げる(additive)
+- (済)`[]T` の mutable slice は `[N]T` の `as_mut_slice`(ADR-0097)と
+  `Array<T>.as_mut_slice` が供給源で、T は view が持てる copy data(SPEC §7.1)
