@@ -3253,7 +3253,7 @@ func (c *Checker) checkLoopCleansNoOuterField(env *scope, inBody map[int]*bindin
 // union capture binds the success payload the same way an optional capture
 // binds the value (SPEC §11.1).
 func optionalPayloadName(typeName string) string {
-	if elem, ok := typ.OptionalElem(typeName); ok {
+	if elem, ok := typ.OpenableElem(typeName); ok {
 		return elem
 	}
 	if parsed, err := typ.Parse(typeName); err == nil {

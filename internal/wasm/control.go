@@ -107,6 +107,10 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 		return e.writeRefLoad(instr)
 	case instr.Op == "ptr.offset":
 		return e.writePtrOffset(instr)
+	case instr.Op == "ptr.has":
+		return e.writePtrHas(instr)
+	case instr.Op == "ptr.value":
+		return e.writePtrValue(instr)
 	case strings.HasPrefix(instr.Op, "union."):
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "vector."):

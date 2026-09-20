@@ -469,6 +469,28 @@ func OptionalElem(text string) (string, bool) {
 	return text[1:], true
 }
 
+// NullablePointerElem returns the non-null pointer spelling a nullable raw
+// pointer `?ptr<T>` / `?ptr<const T>` opens to, and reports whether text is
+// one. A nullable pointer is not an optional value (SPEC §11): it has no
+// payload to own or clean up, and the only thing to do with it is test it
+// for null, which is what `if p |q|` and `orelse` do.
+func NullablePointerElem(text string) (string, bool) {
+	if strings.HasPrefix(text, "?ptr<") {
+		return text[1:], true
+	}
+	return "", false
+}
+
+// OpenableElem returns what a capture or `orelse` binds when its condition
+// is text: the payload of an optional, or the non-null pointer of a
+// nullable raw pointer.
+func OpenableElem(text string) (string, bool) {
+	if elem, ok := OptionalElem(text); ok {
+		return elem, true
+	}
+	return NullablePointerElem(text)
+}
+
 // BorrowOptionalElem splits a borrow optional `?&T` / `?&var T` into its
 // payload type and mutability, and reports whether text is one. This is the
 // one definition of that split; both checkers ask here so the answer cannot

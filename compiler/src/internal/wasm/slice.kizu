@@ -169,6 +169,47 @@ fn (self: &var Emitter) write_ptr_offset(
     return self.write_scalar_result(module, node.result, address);
 }
 
+/// Tests a nullable raw pointer for null, the Go `writePtrHas`: on this
+/// target null is address zero.
+fn (self: &var Emitter) write_ptr_has(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse ir::empty_value();
+    let pointer_text = ir::name_text(&module.names, pointer.type_name);
+    let pointer_bytes = pointer_text.as_bytes();
+    if node.args.len() != 1 or !mem::starts_with(pointer_bytes, "?ptr<") or
+        !ir::ends_with_bytes(pointer_bytes, ">") {
+        return try self.fail0("wasm error: ptr.has expects ?ptr<T> -> bool");
+    }
+    let base = try self.value_of(module, pointer);
+    var test = try string::from_bytes(self.allocator, "(i32.ne ");
+    errdefer test.deinit(self.allocator);
+    try self.names.append_to(&var test, base.expr);
+    try test.append_bytes(self.allocator, " (i32.const 0))");
+    let expr = try self.names.intern_owned(move test);
+    return self.write_scalar_result(module, node.result, expr);
+}
+
+/// Opens a nullable raw pointer where ptr.has was true, the Go
+/// `writePtrValue`: the same address, so the value is aliased rather than
+/// copied.
+fn (self: &var Emitter) write_ptr_value(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse ir::empty_value();
+    let pointer_text = ir::name_text(&module.names, pointer.type_name);
+    let pointer_bytes = pointer_text.as_bytes();
+    if node.args.len() != 1 or !mem::starts_with(pointer_bytes, "?ptr<") or
+        !ir::ends_with_bytes(pointer_bytes, ">") {
+        return try self.fail0("wasm error: ptr.value expects ?ptr<T> -> ptr<T>");
+    }
+    let base = try self.value_of(module, pointer);
+    try self.set_value(module, node.result, base.expr);
+    return null;
+}
+
 fn (self: &var Emitter) write_slice_index(
     module: &ir::Module,
     node: &ir::InstrNode

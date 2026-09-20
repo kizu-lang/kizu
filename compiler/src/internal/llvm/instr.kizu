@@ -1054,6 +1054,37 @@ fn (self: &var Emitter) write_ptr_offset(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
+/// Tests a nullable raw pointer for null, the Go `writePtrHas`: the pointer
+/// is its own tag, so there is no payload to unpack.
+fn (self: &var Emitter) write_ptr_has(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse ir::empty_value();
+    let pointer_text = ir::name_text(&module.names, pointer.type_name);
+    let pointer_bytes = pointer_text.as_bytes();
+    if node.args.len() != 1 or !is_nullable_pointer_type(pointer_bytes) {
+        return try self.fail0("llvm error: ptr.has expects ?ptr<T> -> bool");
+    }
+    let info = try self.operand(module, pointer);
+    let result_name = try self.local_name(module, node.result.name);
+    try self.line2("  %s = icmp ne ptr %s, null", Arg::Str(result_name), Arg::Str(info.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Opens a nullable raw pointer where ptr.has was true, the Go
+/// `writePtrValue`. The non-null pointer is the same machine value, so
+/// nothing is emitted.
+fn (self: &var Emitter) write_ptr_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse ir::empty_value();
+    let pointer_text = ir::name_text(&module.names, pointer.type_name);
+    let pointer_bytes = pointer_text.as_bytes();
+    if node.args.len() != 1 or !is_nullable_pointer_type(pointer_bytes) {
+        return try self.fail0("llvm error: ptr.value expects ?ptr<T> -> ptr<T>");
+    }
+    let carried = try self.operand(module, pointer);
+    try self.set_value(module, node.result, carried.operand);
+    return null;
+}
+
 /// Loads one element, the Go `writeSliceIndex`. The bounds test reaches the
 /// backend as a preceding cond_fail instruction, so no check is generated
 /// here.

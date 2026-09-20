@@ -280,7 +280,7 @@ func hasEffect(instr *Instr) bool {
 func isPureOp(op string) bool {
 	switch op {
 	case "const", "id", "phi", "cast", "struct.new", "local.slot", "ref.load",
-		"opt.null", "opt.some", "opt.has", "opt.value",
+		"opt.null", "opt.some", "opt.has", "opt.value", "ptr.has", "ptr.value",
 		"error.ok", "error.error", "error.has", "error.value", "error.code",
 		"union.new", "union.tag", "union.payload", "union.payload_ref", "union.load",
 		"slice.len", "slice.index", "slice.compare", "slice.slice", "slice.ptr", "slice.from_ptr",

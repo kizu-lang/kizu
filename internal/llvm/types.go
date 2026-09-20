@@ -126,6 +126,11 @@ func isRawPointerType(typ string) bool {
 	return strings.HasPrefix(typ, "ptr<") && strings.HasSuffix(typ, ">")
 }
 
+// isNullablePointerType reports whether typ is ?ptr<T> or ?ptr<const T>.
+func isNullablePointerType(typ string) bool {
+	return strings.HasPrefix(typ, "?ptr<") && strings.HasSuffix(typ, ">")
+}
+
 // integerLLVMType maps Kizu integer spellings to LLVM integer widths.
 func integerLLVMType(typ string) string {
 	switch typ {
