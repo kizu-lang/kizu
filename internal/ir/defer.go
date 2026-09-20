@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -42,55 +43,137 @@ func (l *lowerer) recordCleanup(expr ast.Expression, onError bool) error {
 	return nil
 }
 
-// cleanupReceiver reads the receiver expression a cleanup call consumes. The
-// shape is the one cleanupFromExpr accepts, so anything else has already
-// failed there.
+// cleanupReceiver reads the expression naming the one owner a deferred call
+// consumes: the receiver of a method call, or the binding an argument
+// marks `move`. The ownership checker names the same node when it retires
+// an errdefer, which is how the two agree on which entry it was. A call
+// that consumes nothing has none.
 func cleanupReceiver(expr ast.Expression) ast.Expression {
-	call, ok := expr.(*ast.CallExpr)
+	call, ok := deferredCall(expr)
 	if !ok {
 		return nil
 	}
-	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok {
-		return nil
+	if field, ok := call.Callee.(*ast.FieldExpr); ok && !field.Namespace {
+		return field.Receiver
 	}
-	return field.Receiver
+	for _, arg := range call.Args {
+		if marker, ok := arg.(*ast.MoveExpr); ok {
+			return marker.Value
+		}
+	}
+	return nil
 }
 
-// cleanupFromExpr converts a defer expression into a void cleanup.
-//
-// A cleanup may carry arguments beyond its receiver. `Box.deinit` takes the
-// allocator that handed out the cell, because the cell does not store one:
-// what a release needs and what the value spells are separate questions, and
-// keeping a copy of the answer in every cell is what a `deinit(allocator)`
-// avoids. The arguments are read where the defer is written, not where it
-// runs, so what runs at scope exit is settled at the point the source names.
-func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
+// deferredCall is the call a defer statement registers, under whatever
+// markers it was written with.
+func deferredCall(expr ast.Expression) (*ast.CallExpr, bool) {
+	for {
+		inner, ok := ast.MarkerValue(expr)
+		if !ok {
+			break
+		}
+		expr = inner
+	}
 	call, ok := expr.(*ast.CallExpr)
+	return call, ok
+}
+
+// cleanupFromExpr converts a deferred call into a void cleanup: the callee
+// resolved now, the arguments read now, the call emitted at each exit.
+//
+// The arguments are read where the defer is written, not where it runs, so
+// what runs at scope exit is settled at the point the source names. The one
+// exception is an owner the call consumes -- a by-value receiver, or an
+// argument marked `move` -- which stays in its slot until the exit that
+// runs the call, since the frame may still use it until then and the exit
+// is what hands it over (loadCleanupArgs).
+func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
+	call, ok := deferredCall(expr)
 	if !ok {
-		return Cleanup{}, fmt.Errorf("ir error: defer expects cleanup method call")
+		return Cleanup{}, fmt.Errorf("ir error: defer expects a void call")
 	}
-	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Namespace {
-		return Cleanup{}, fmt.Errorf("ir error: defer expects cleanup method call")
-	}
-	ident, ok := field.Receiver.(*ast.IdentExpr)
-	if !ok {
-		return Cleanup{}, fmt.Errorf("ir error: defer cleanup receiver must be a local")
-	}
-	receiver, ok := l.env.get(ident.Name)
-	if !ok {
-		return Cleanup{}, fmt.Errorf("ir error: undefined defer receiver `%s`", ident.Name)
-	}
-	rest := make([]Value, 0, len(call.Args))
-	for _, arg := range call.Args {
-		value, err := l.lowerExpr(arg)
+	if field, ok := call.Callee.(*ast.FieldExpr); ok && !field.Namespace {
+		ident, ok := field.Receiver.(*ast.IdentExpr)
+		if !ok {
+			return Cleanup{}, fmt.Errorf("ir error: defer method receiver must be a local")
+		}
+		receiver, ok := l.env.get(ident.Name)
+		if !ok {
+			return Cleanup{}, fmt.Errorf("ir error: undefined defer receiver `%s`", ident.Name)
+		}
+		var params []Param
+		if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
+			if sig, ok := l.signatures[methodName]; ok && len(sig.Params) > 0 {
+				params = sig.Params[1:]
+			}
+		}
+		args, err := l.lowerCleanupArgs(params, call.Args)
 		if err != nil {
 			return Cleanup{}, err
 		}
-		rest = append(rest, value)
+		return l.cleanupFromMethod(receiver, field.Name, args)
 	}
-	return l.cleanupFromMethod(receiver, field.Name, rest)
+	name, ok := l.functionCalleeName(call.Callee)
+	if !ok {
+		return Cleanup{}, fmt.Errorf("ir error: unsupported defer callee `%s`", call.Callee.String())
+	}
+	sig, ok := l.signatures[name]
+	if !ok {
+		return Cleanup{}, fmt.Errorf("ir error: unsupported defer callee `%s`", name)
+	}
+	args, err := l.lowerCleanupArgs(sig.Params, call.Args)
+	if err != nil {
+		return Cleanup{}, err
+	}
+	return l.cleanupFromFunction(name, args)
+}
+
+// lowerCleanupArgs lowers a deferred call's arguments at the types the
+// callee declares, the way a direct call does: a borrow parameter takes the
+// caller's storage, a value parameter the value read now. A `move x`
+// argument is the slot x lives in, loaded at the exit that runs the call.
+func (l *lowerer) lowerCleanupArgs(params []Param, exprs []ast.Expression) ([]Value, error) {
+	args := make([]Value, 0, len(exprs))
+	for index, arg := range exprs {
+		if marker, ok := arg.(*ast.MoveExpr); ok {
+			if ident, ok := marker.Value.(*ast.IdentExpr); ok {
+				if slot, ok := l.env.get(ident.Name); ok {
+					args = append(args, slot)
+					continue
+				}
+			}
+		}
+		want := Param{}
+		if index < len(params) {
+			want = params[index]
+		}
+		value, err := l.lowerContextualExpr(arg, want.Type)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, value)
+	}
+	return args, nil
+}
+
+// cleanupFromFunction resolves a deferred call to a declared function or an
+// extern one. The signature says the call returns void; a std primitive
+// with no declared signature is not a thing a defer can name.
+func (l *lowerer) cleanupFromFunction(name string, args []Value) (Cleanup, error) {
+	sig, ok := l.signatures[name]
+	if !ok {
+		return Cleanup{}, fmt.Errorf("ir error: unsupported defer callee `%s`", name)
+	}
+	if sig.Return != "void" {
+		return Cleanup{}, fmt.Errorf("ir error: defer call must return void, got %s", sig.Return)
+	}
+	cleanup := Cleanup{Op: "call." + name, Args: args, Loads: ownerLoads(args, sig.Params)}
+	if external, ok := l.externDecls[name]; ok {
+		cleanup.Op = "call." + external.name
+		cleanup.ExternABI = external.abi
+		cleanup.ExternName = external.name
+	}
+	return cleanup, nil
 }
 
 // containerCleanup names what one std container's cleanup needs: the std type
@@ -144,34 +227,38 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string, rest []Value)
 			if container.shallowNamesAllocator {
 				args = append(args, rest...)
 			}
-			return Cleanup{Op: container.shallowOp, Args: args}, nil
+			return Cleanup{Op: container.shallowOp, Args: args, Loads: ownerLoads(args, nil)}, nil
 		}
 		op, _, err := l.stdContainerCallOp(container.name, method, container.typeArg)
 		if err != nil {
 			return Cleanup{}, err
 		}
-		return Cleanup{Op: op, Args: append([]Value{receiver}, rest...)}, nil
+		args := append([]Value{receiver}, rest...)
+		return Cleanup{Op: op, Args: args, Loads: ownerLoads(args, nil)}, nil
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, method); ok {
-		sig := l.signatures[methodName]
-		if sig.Return != "void" {
-			return Cleanup{}, fmt.Errorf(
-				"ir error: defer cleanup must return void, got %s",
-				sig.Return,
-			)
-		}
-		cleanup := Cleanup{
-			Op:   "call." + methodName,
-			Args: append([]Value{receiver}, rest...),
-		}
-		if external, ok := l.externDecls[methodName]; ok {
-			cleanup.Op = "call." + external.name
-			cleanup.ExternABI = external.abi
-			cleanup.ExternName = external.name
-		}
-		return cleanup, nil
+		return l.cleanupFromFunction(methodName, append([]Value{receiver}, rest...))
 	}
 	return Cleanup{}, fmt.Errorf("ir error: unknown cleanup method `%s`", method)
+}
+
+// ownerLoads marks the arguments a cleanup loads at exit: a slot whose
+// parameter takes the value itself. A slot handed to a `&` / `&var`
+// parameter is what that parameter wants and is passed as it is. With no
+// signature every slot is an owner, which is what a std container's runtime
+// release takes.
+func ownerLoads(args []Value, params []Param) []bool {
+	loads := make([]bool, len(args))
+	for index, arg := range args {
+		if !isMutableReferenceType(arg.Type) {
+			continue
+		}
+		if index < len(params) && strings.HasPrefix(params[index].Type, "&") {
+			continue
+		}
+		loads[index] = true
+	}
+	return loads
 }
 
 // errorCleanups returns all active cleanups that run on an error-return path,
@@ -253,7 +340,7 @@ func (l *lowerer) emitCleanupFrame(frame int) {
 // consumes the value, so the slot is loaded at the exit that runs it.
 func (l *lowerer) emitCleanups(cleanups []Cleanup) {
 	for _, cleanup := range cleanups {
-		l.emit(cleanup.Op, "void", l.loadCleanupArgs(cleanup.Args), "")
+		l.emit(cleanup.Op, "void", l.loadCleanupArgs(cleanup.Args, cleanup.Loads), "")
 		if cleanup.ExternABI != "" {
 			instr := l.block.Instrs[len(l.block.Instrs)-1]
 			instr.ExternABI = cleanup.ExternABI
@@ -262,12 +349,12 @@ func (l *lowerer) emitCleanups(cleanups []Cleanup) {
 	}
 }
 
-// loadCleanupArgs loads slot-backed cleanup receivers into values. Args without
-// a slot are returned as they are, unallocated.
-func (l *lowerer) loadCleanupArgs(args []Value) []Value {
+// loadCleanupArgs loads the slot-backed owners a cleanup consumes into
+// values, and passes every other argument as it is.
+func (l *lowerer) loadCleanupArgs(args []Value, loads []bool) []Value {
 	needsLoad := false
-	for _, arg := range args {
-		if isMutableReferenceType(arg.Type) {
+	for _, load := range loads {
+		if load {
 			needsLoad = true
 			break
 		}
@@ -277,7 +364,7 @@ func (l *lowerer) loadCleanupArgs(args []Value) []Value {
 	}
 	out := make([]Value, len(args))
 	for index, arg := range args {
-		if isMutableReferenceType(arg.Type) {
+		if loads[index] {
 			arg = l.emit("ref.load", derefType(arg.Type), []Value{arg}, "")
 		}
 		out[index] = arg

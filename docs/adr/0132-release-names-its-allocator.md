@@ -79,8 +79,8 @@ owner は allocator を取らず、generic cleanup は宣言からどちらか�
 
 ### cleanup は引数を運ぶ
 
-`defer` / `errdefer` が受け取る cleanup は receiver 以外の引数を持てます。
-引数は **defer が書かれた場所で読まれ**、scope を抜けるときに走るのはその値です。
+`defer` / `errdefer` が受け取る call は consume する owner 以外の引数を持てます。
+copy 引数は **defer が書かれた場所で読まれ**、scope を抜けるときに走るのはその値です。
 
 ### tie 規則
 

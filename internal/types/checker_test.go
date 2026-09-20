@@ -1698,7 +1698,7 @@ func TestCheckRejectsInvalidErrDeferredCleanup(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "errdefer expects cleanup method call") {
+	if !strings.Contains(err.Error(), "errdefer expects a call to a declared function or method") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
@@ -1712,7 +1712,7 @@ func TestCheckRejectsInvalidDeferredCleanup(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "defer expects cleanup method call") {
+	if !strings.Contains(err.Error(), "defer expects a call to a declared function or method") {
 		t.Fatalf("got %q", err.Error())
 	}
 }

@@ -1,42 +1,82 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
-import compiler::internal::typ;
 import std::mem;
 import std::string;
 
-// Restricts defer and errdefer to the explicit cleanup call shape.
-fn (self: &Checker) validate_cleanup_call_expr(
+// Accepts a call, possibly under an `unsafe` marker, and nothing that
+// could fail on the way, the Go `validateDeferredCallShape`. A deferred
+// call runs where no caller is listening, so it cannot fail: a `try` or a
+// `catch` inside it would be an error path with nowhere to go. A builtin
+// form such as `print` is a statement the compiler spells out in place, not
+// a function a call can be held to; a deferred call names something with a
+// signature.
+fn (self: &Checker) validate_deferred_call_shape(
     tree: &ast::Ast,
     keyword: []u8,
     expression: ast::Expression
 ) -> !?diagnostic::Diagnostic {
-    match tree.expressions.at(expression.node) {
-        Call(call) => match tree.expressions.at(call.callee.node) {
-            Field(field) => {
-                let retained = tree.texts.at(field.name.node);
-                let name = retained.as_bytes();
-                if mem::equal_bytes(name, typ::cleanup_method()) {
-                    return null;
-                }
-                var message = string::new(self.allocator);
-                errdefer message.deinit(self.allocator);
-                try message.append_bytes(self.allocator, keyword);
-                try message.append_bytes(self.allocator, " cleanup must be `");
-                try message.append_bytes(self.allocator, typ::cleanup_method());
-                try message.append_bytes(self.allocator, "`, got `");
-                try message.append_bytes(self.allocator, name);
-                try message.append_byte(self.allocator, cast<u8>(96));
-                return try self.checker_message_at("type error", ast::zero_span(), move message);
-            },
-            _ => {},
+    var inner = expression;
+    match tree.expressions.at(inner.node) {
+        Unsafe(marked) => {
+            inner = marked.value;
         },
         _ => {},
     }
+    match tree.expressions.at(inner.node) {
+        Try(_) => {
+            return try self.deferred_call_error(keyword, " call cannot propagate an error with `try`", "");
+        },
+        Call(call) => {
+            match tree.expressions.at(call.callee.node) {
+                Ident(identifier) => {
+                    let retained = tree.texts.at(identifier.name.node);
+                    let name = retained.as_bytes();
+                    if is_builtin_call_name(name) {
+                        var message = string::new(self.allocator);
+                        errdefer message.deinit(self.allocator);
+                        try message.append_bytes(self.allocator, keyword);
+                        try message.append_bytes(self.allocator, " expects a call to a declared function or method, got builtin `");
+                        try message.append_bytes(self.allocator, name);
+                        try message.append_byte(self.allocator, cast<u8>(96));
+                        return try self.checker_message_at("type error", ast::zero_span(), move message);
+                    }
+                    return null;
+                },
+                _ => return null,
+            }
+        },
+        Binary(binary) => {
+            let retained = tree.texts.at(binary.operator.node);
+            let operator = retained.as_bytes();
+            if mem::equal_bytes(operator, "catch") {
+                return try self.deferred_call_error(keyword, " call cannot fail; `catch` has no error to catch", "");
+            }
+        },
+        _ => {},
+    }
+    return try self.deferred_call_error(keyword, " expects a void call", "");
+}
+
+// Builds the diagnostic for a deferred statement of the wrong shape.
+fn (self: &Checker) deferred_call_error(keyword: []u8, text: []u8, tail: []u8) -> !?diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
     try message.append_bytes(self.allocator, keyword);
-    try message.append_bytes(self.allocator, " expects cleanup method call");
+    try message.append_bytes(self.allocator, text);
+    try message.append_bytes(self.allocator, tail);
     return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Names the call spellings the checker types itself rather than through a
+// declaration, the Go `isBuiltinCallName`: they have no signature to defer
+// against.
+fn is_builtin_call_name(name: []u8) -> bool {
+    return mem::equal_bytes(name, "print") or mem::equal_bytes(name, "ptr_read") or
+        mem::equal_bytes(name, "ptr_write") or mem::equal_bytes(name, "ptr_of") or
+        mem::equal_bytes(name, "mut_ptr_of") or mem::equal_bytes(name, "ptr_offset") or
+        mem::equal_bytes(name, "view_from_ptr") or mem::equal_bytes(name, "mut_view_from_ptr") or
+        mem::equal_bytes(name, "volatile_read") or mem::equal_bytes(name, "volatile_write") or
+        mem::equal_bytes(name, "Io");
 }
 
 // Records an active loop label after rejecting a duplicate named loop.

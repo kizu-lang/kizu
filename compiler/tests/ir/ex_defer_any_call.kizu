@@ -1,0 +1,431 @@
+// `defer` and `errdefer` register one call that returns void. What the call
+// is does not matter: a cleanup method, a function of this program, or an
+// extern one. Each argument follows its own passing mode -- a copy is read
+// where the defer is written, a borrow is checked again at the exit, and the
+// one owner the call consumes (a by-value receiver, or a `move` argument)
+// is handed over at the exit that runs it.
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+error Error {
+    OutOfMemory,
+    TooSmall,
+}
+
+struct Counter {
+    exits: i64,
+}
+
+fn note_exit(counter: &var Counter) -> void {
+    counter.exits = counter.exits + 1;
+    return;
+}
+
+/// handle は open で作られ、release にちょうど 1 回渡される。
+unsafe struct Handle {
+    block: ptr<u8>,
+}
+
+fn open(size: usize) -> Error!Handle {
+    // SAFETY: the block, if any, is owned by the Handle until release.
+    let block = unsafe malloc(size) orelse return Error::OutOfMemory;
+    // SAFETY: block is live and nothing else holds it.
+    return unsafe Handle { block: block };
+}
+
+fn release(handle: Handle) -> void {
+    // SAFETY: the handle's block came from malloc and is released once.
+    unsafe free(handle.block);
+    return;
+}
+
+// The extern call is deferred on the error path only: the block is freed
+// when the size check fails, and kept when it passes.
+fn reserve(size: usize) -> Error!Handle {
+    // SAFETY: freed on the error path below, or owned by the Handle.
+    let block = unsafe malloc(size) orelse return Error::OutOfMemory;
+    // SAFETY: block came from malloc above and is not used after an error.
+    errdefer unsafe free(block);
+    if size < 8 {
+        return Error::TooSmall;
+    }
+    // SAFETY: block is live and the errdefer will not run on this path.
+    return unsafe Handle { block: block };
+}
+
+fn count_exits(counter: &var Counter) -> Error!void {
+    defer note_exit(counter);
+    let handle = try open(32);
+    defer release(move handle);
+    let _ = try reserve(4);
+    return;
+}
+
+fn main() -> void {
+    var counter = Counter { exits: 0 };
+    if count_exits(&var counter) {
+        print("no failure");
+    } else |failure| {
+        print(failure == Error::TooSmall);
+    }
+    print(counter.exits);
+    return;
+}
+
+// run
+// features: defer errdefer extern-c raw-pointer
+// output:
+// true
+// 1
+
+// ir
+// lower:
+// fn note_exit(%counter: &var Counter) -> void {
+// entry:
+//   %1: i64 = field.ref.exits %counter: &var Counter
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.exits %counter: &var Counter, %3: i64
+//   return void: void
+// }
+// fn open(%size: usize) -> Error!Handle {
+// entry:
+//   %1: ?ptr<u8> = extern "c" call.malloc %size: usize
+//   %2: bool = ptr.has %1: ?ptr<u8>
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: ptr<u8> = ptr.value %1: ?ptr<u8>
+//   %6: Handle = struct.new {block: %5: ptr<u8>}
+//   %7: Error!Handle = error.ok %6: Handle
+//   return %7: Error!Handle
+// guard.exit.2:
+//   %3: Error = const 104
+//   %4: Error!Handle = error.error %3: Error
+//   return %4: Error!Handle
+// }
+// fn release(%handle: Handle) -> void {
+// entry:
+//   %1: ptr<u8> = field.block %handle: Handle
+//   extern "c" call.free %1: ptr<u8>
+//   return void: void
+// }
+// fn reserve(%size: usize) -> Error!Handle {
+// entry:
+//   %1: ?ptr<u8> = extern "c" call.malloc %size: usize
+//   %2: bool = ptr.has %1: ?ptr<u8>
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: ptr<u8> = ptr.value %1: ?ptr<u8>
+//   %6: usize = const 8
+//   %7: bool = binary.< %size: usize, %6: usize
+//   branch %7: bool, if.then.3, if.else.4
+// guard.exit.2:
+//   %3: Error = const 104
+//   %4: Error!Handle = error.error %3: Error
+//   return %4: Error!Handle
+// if.then.3:
+//   %8: Error = const 105
+//   %9: Error!Handle = error.error %8: Error
+//   extern "c" call.free %5: ptr<u8>
+//   return %9: Error!Handle
+// if.else.4:
+//   jump if.end.5
+// if.end.5:
+//   %11: Handle = struct.new {block: %5: ptr<u8>}
+//   %12: Error!Handle = error.ok %11: Handle
+//   return %12: Error!Handle
+// }
+// fn count_exits(%counter: &var Counter) -> Error!void {
+// entry:
+//   %1: usize = const 32
+//   %2: Error!Handle = call.open %1: usize
+//   %3: Handle = error.try %2: Error!Handle, cleanup call.note_exit %counter: &var Counter
+//   %4: &var Handle = local.slot %3: Handle
+//   %5: usize = const 4
+//   %6: Error!Handle = call.reserve %5: usize
+//   %7: Handle = ref.load %4: &var Handle
+//   %8: Handle = error.try %6: Error!Handle, cleanup call.release %7: Handle; call.note_exit %counter: &var Counter
+//   %9: Handle = ref.load %4: &var Handle
+//   call.release %9: Handle
+//   call.note_exit %counter: &var Counter
+//   %12: Error!void = error.ok
+//   return %12: Error!void
+// }
+// fn main() -> void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Counter = struct.new {exits: %1: i64}
+//   %3: &var Counter = local.slot %2: Counter
+//   %4: Error!void = call.count_exits %3: &var Counter
+//   %5: Error = error.code %4: Error!void
+//   %6: bool = error.has %4: Error!void
+//   branch %6: bool, if.then.1, if.else.2
+// if.then.1:
+//   %7: []u8 = const "no failure"
+//   call.std::fmt::print._5b_5du8 %7: []u8
+//   jump if.end.3
+// if.else.2:
+//   %9: Error = const 105
+//   %10: bool = binary.== %5: Error, %9: Error
+//   call.std::fmt::print.bool %10: bool
+//   jump if.end.3
+// if.end.3:
+//   %12: i64 = field.ref.exits %3: &var Counter
+//   call.std::fmt::print.i64 %12: i64
+//   return void: void
+// }
+// opt:
+// fn note_exit(%counter: &var Counter) -> void {
+// entry:
+//   %1: i64 = field.ref.exits %counter: &var Counter
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.exits %counter: &var Counter, %3: i64
+//   return void: void
+// }
+// fn open(%size: usize) -> Error!Handle {
+// entry:
+//   %1: ?ptr<u8> = extern "c" call.malloc %size: usize
+//   %2: bool = ptr.has %1: ?ptr<u8>
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: ptr<u8> = ptr.value %1: ?ptr<u8>
+//   %6: Handle = struct.new {block: %5: ptr<u8>}
+//   %7: Error!Handle = error.ok %6: Handle
+//   return %7: Error!Handle
+// guard.exit.2:
+//   %3: Error = const 104
+//   %4: Error!Handle = error.error %3: Error
+//   return %4: Error!Handle
+// }
+// fn release(%handle: Handle) -> void {
+// entry:
+//   %1: ptr<u8> = field.block %handle: Handle
+//   extern "c" call.free %1: ptr<u8>
+//   return void: void
+// }
+// fn reserve(%size: usize) -> Error!Handle {
+// entry:
+//   %1: ?ptr<u8> = extern "c" call.malloc %size: usize
+//   %2: bool = ptr.has %1: ?ptr<u8>
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: ptr<u8> = ptr.value %1: ?ptr<u8>
+//   %6: usize = const 8
+//   %7: bool = binary.< %size: usize, %6: usize
+//   branch %7: bool, if.then.3, if.else.4
+// guard.exit.2:
+//   %3: Error = const 104
+//   %4: Error!Handle = error.error %3: Error
+//   return %4: Error!Handle
+// if.then.3:
+//   %8: Error = const 105
+//   %9: Error!Handle = error.error %8: Error
+//   extern "c" call.free %5: ptr<u8>
+//   return %9: Error!Handle
+// if.else.4:
+//   jump if.end.5
+// if.end.5:
+//   %11: Handle = struct.new {block: %5: ptr<u8>}
+//   %12: Error!Handle = error.ok %11: Handle
+//   return %12: Error!Handle
+// }
+// fn count_exits(%counter: &var Counter) -> Error!void {
+// entry:
+//   %1: usize = const 32
+//   jump in1.entry
+// in1.entry:
+//   %in1.1: ?ptr<u8> = extern "c" call.malloc %1: usize
+//   %in1.2: bool = ptr.has %in1.1: ?ptr<u8>
+//   branch %in1.2: bool, in1.guard.some.1, in1.guard.exit.2
+// in1.guard.some.1:
+//   %in1.5: ptr<u8> = ptr.value %in1.1: ?ptr<u8>
+//   %in1.6: Handle = struct.new {block: %in1.5: ptr<u8>}
+//   %in1.7: Error!Handle = error.ok %in1.6: Handle
+//   jump in1.cont
+// in1.guard.exit.2:
+//   %in1.3: Error = const 104
+//   %in1.4: Error!Handle = error.error %in1.3: Error
+//   jump in1.cont
+// in1.cont:
+//   %2: Error!Handle = phi [in1.guard.some.1, %in1.7: Error!Handle], [in1.guard.exit.2, %in1.4: Error!Handle]
+//   %3: Handle = error.try %2: Error!Handle, cleanup call.note_exit %counter: &var Counter
+//   %4: &var Handle = local.slot %3: Handle
+//   %5: usize = const 4
+//   %6: Error!Handle = call.reserve %5: usize
+//   %7: Handle = ref.load %4: &var Handle
+//   %8: Handle = error.try %6: Error!Handle, cleanup call.release %7: Handle; call.note_exit %counter: &var Counter
+//   %9: Handle = ref.load %4: &var Handle
+//   %in2.1: ptr<u8> = field.block %9: Handle
+//   extern "c" call.free %in2.1: ptr<u8>
+//   %in3.1: i64 = field.ref.exits %counter: &var Counter
+//   %in3.2: i64 = const 1
+//   %in3.3: i64 = binary.+ %in3.1: i64, %in3.2: i64
+//   field.ref.set.exits %counter: &var Counter, %in3.3: i64
+//   %12: Error!void = error.ok
+//   return %12: Error!void
+// }
+// fn main() -> void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Counter = struct.new {exits: %1: i64}
+//   %3: &var Counter = local.slot %2: Counter
+//   %4: Error!void = call.count_exits %3: &var Counter
+//   %5: Error = error.code %4: Error!void
+//   %6: bool = error.has %4: Error!void
+//   branch %6: bool, if.then.1, if.else.2
+// if.then.1:
+//   %7: []u8 = const "no failure"
+//   print.line %7: []u8
+//   jump if.end.3
+// if.else.2:
+//   %9: Error = const 105
+//   %10: bool = binary.== %5: Error, %9: Error
+//   jump in2.entry
+// in2.entry:
+//   branch %10: bool, in2.if.then.1, in2.if.else.2
+// in2.if.then.1:
+//   %in2.1: []u8 = const "true"
+//   print.line %in2.1: []u8
+//   jump in2.if.end.3
+// in2.if.else.2:
+//   %in2.3: []u8 = const "false"
+//   print.line %in2.3: []u8
+//   jump in2.if.end.3
+// in2.if.end.3:
+//   jump in2.cont
+// in2.cont:
+//   jump if.end.3
+// if.end.3:
+//   %12: i64 = field.ref.exits %3: &var Counter
+//   %in3.1: i64 = cast %12: i64, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   return void: void
+// }
+// opt wasm:
+// fn note_exit(%counter: &var Counter) -> void {
+// entry:
+//   %1: i64 = field.ref.exits %counter: &var Counter
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.exits %counter: &var Counter, %3: i64
+//   return void: void
+// }
+// fn open(%size: usize) -> Error!Handle {
+// entry:
+//   %1: ?ptr<u8> = extern "c" call.malloc %size: usize
+//   %2: bool = ptr.has %1: ?ptr<u8>
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: ptr<u8> = ptr.value %1: ?ptr<u8>
+//   %6: Handle = struct.new {block: %5: ptr<u8>}
+//   %7: Error!Handle = error.ok %6: Handle
+//   return %7: Error!Handle
+// guard.exit.2:
+//   %3: Error = const 104
+//   %4: Error!Handle = error.error %3: Error
+//   return %4: Error!Handle
+// }
+// fn release(%handle: Handle) -> void {
+// entry:
+//   %1: ptr<u8> = field.block %handle: Handle
+//   extern "c" call.free %1: ptr<u8>
+//   return void: void
+// }
+// fn reserve(%size: usize) -> Error!Handle {
+// entry:
+//   %1: ?ptr<u8> = extern "c" call.malloc %size: usize
+//   %2: bool = ptr.has %1: ?ptr<u8>
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: ptr<u8> = ptr.value %1: ?ptr<u8>
+//   %6: usize = const 8
+//   %7: bool = binary.< %size: usize, %6: usize
+//   branch %7: bool, if.then.3, if.else.4
+// guard.exit.2:
+//   %3: Error = const 104
+//   %4: Error!Handle = error.error %3: Error
+//   return %4: Error!Handle
+// if.then.3:
+//   %8: Error = const 105
+//   %9: Error!Handle = error.error %8: Error
+//   extern "c" call.free %5: ptr<u8>
+//   return %9: Error!Handle
+// if.else.4:
+//   jump if.end.5
+// if.end.5:
+//   %11: Handle = struct.new {block: %5: ptr<u8>}
+//   %12: Error!Handle = error.ok %11: Handle
+//   return %12: Error!Handle
+// }
+// fn count_exits(%counter: &var Counter) -> Error!void {
+// entry:
+//   %1: usize = const 32
+//   jump in1.entry
+// in1.entry:
+//   %in1.1: ?ptr<u8> = extern "c" call.malloc %1: usize
+//   %in1.2: bool = ptr.has %in1.1: ?ptr<u8>
+//   branch %in1.2: bool, in1.guard.some.1, in1.guard.exit.2
+// in1.guard.some.1:
+//   %in1.5: ptr<u8> = ptr.value %in1.1: ?ptr<u8>
+//   %in1.6: Handle = struct.new {block: %in1.5: ptr<u8>}
+//   %in1.7: Error!Handle = error.ok %in1.6: Handle
+//   jump in1.cont
+// in1.guard.exit.2:
+//   %in1.3: Error = const 104
+//   %in1.4: Error!Handle = error.error %in1.3: Error
+//   jump in1.cont
+// in1.cont:
+//   %2: Error!Handle = phi [in1.guard.some.1, %in1.7: Error!Handle], [in1.guard.exit.2, %in1.4: Error!Handle]
+//   %3: Handle = error.try %2: Error!Handle, cleanup call.note_exit %counter: &var Counter
+//   %4: &var Handle = local.slot %3: Handle
+//   %5: usize = const 4
+//   %6: Error!Handle = call.reserve %5: usize
+//   %7: Handle = ref.load %4: &var Handle
+//   %8: Handle = error.try %6: Error!Handle, cleanup call.release %7: Handle; call.note_exit %counter: &var Counter
+//   %9: Handle = ref.load %4: &var Handle
+//   %in2.1: ptr<u8> = field.block %9: Handle
+//   extern "c" call.free %in2.1: ptr<u8>
+//   %in3.1: i64 = field.ref.exits %counter: &var Counter
+//   %in3.2: i64 = const 1
+//   %in3.3: i64 = binary.+ %in3.1: i64, %in3.2: i64
+//   field.ref.set.exits %counter: &var Counter, %in3.3: i64
+//   %12: Error!void = error.ok
+//   return %12: Error!void
+// }
+// fn main() -> void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Counter = struct.new {exits: %1: i64}
+//   %3: &var Counter = local.slot %2: Counter
+//   %4: Error!void = call.count_exits %3: &var Counter
+//   %5: Error = error.code %4: Error!void
+//   %6: bool = error.has %4: Error!void
+//   branch %6: bool, if.then.1, if.else.2
+// if.then.1:
+//   %7: []u8 = const "no failure"
+//   print.line %7: []u8
+//   jump if.end.3
+// if.else.2:
+//   %9: Error = const 105
+//   %10: bool = binary.== %5: Error, %9: Error
+//   jump in2.entry
+// in2.entry:
+//   branch %10: bool, in2.if.then.1, in2.if.else.2
+// in2.if.then.1:
+//   %in2.1: []u8 = const "true"
+//   print.line %in2.1: []u8
+//   jump in2.if.end.3
+// in2.if.else.2:
+//   %in2.3: []u8 = const "false"
+//   print.line %in2.3: []u8
+//   jump in2.if.end.3
+// in2.if.end.3:
+//   jump in2.cont
+// in2.cont:
+//   jump if.end.3
+// if.end.3:
+//   %12: i64 = field.ref.exits %3: &var Counter
+//   %in3.1: i64 = cast %12: i64, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   return void: void
+// }

@@ -601,16 +601,10 @@ fn instr_read_at(module: &Module, instr: Instr, slot: i64) -> ?Value {
     var index = 0;
     while node.cleanups.get(index) |cleanup| {
         index = index + 1;
-        if slot == at {
-            return cleanup.arg;
+        if slot < at + cleanup.args_len {
+            return module.cleanup_arg(cleanup, slot - at);
         }
-        at = at + 1;
-        if !is_empty(cleanup.allocator.name) {
-            if slot == at {
-                return cleanup.allocator;
-            }
-            at = at + 1;
-        }
+        at = at + cleanup.args_len;
     }
     return null;
 }
@@ -618,6 +612,7 @@ fn instr_read_at(module: &Module, instr: Instr, slot: i64) -> ?Value {
 /// Replaces the value at slot among the ones an instruction reads, the slot
 /// instr_read_at numbers.
 fn set_instr_read(module: &var Module, instr: Instr, slot: i64, value: Value) -> !void {
+    let pool = &var module.cleanup_args;
     if module.instrs.at_mut(instr.node) |node| {
         let args = node.args.len();
         if slot < args {
@@ -632,20 +627,13 @@ fn set_instr_read(module: &var Module, instr: Instr, slot: i64, value: Value) ->
         }
         var at = args + fields;
         var index = 0;
-        while node.cleanups.at_mut(index) |cleanup| {
+        while node.cleanups.get(index) |cleanup| {
             index = index + 1;
-            if slot == at {
-                cleanup.arg = value;
+            if slot < at + cleanup.args_len {
+                try pool.set(cleanup.args_start + (slot - at), value);
                 return;
             }
-            at = at + 1;
-            if !is_empty(cleanup.allocator.name) {
-                if slot == at {
-                    cleanup.allocator = value;
-                    return;
-                }
-                at = at + 1;
-            }
+            at = at + cleanup.args_len;
         }
     }
     return;

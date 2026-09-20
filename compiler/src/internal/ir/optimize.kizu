@@ -318,6 +318,7 @@ fn fold_comparison(module: &Module, op: Op, operand: Name, left: i64, right: i64
 /// Applies copy propagation to instruction operands, the Go `replaceArgs`.
 fn replace_args(module: &var Module, instr: Instr, copies: &map::Map<[]u8, Value>) -> !void {
     let names = &module.names;
+    let pool = &var module.cleanup_args;
     if module.instrs.at_mut(instr.node) |node| {
         var index = 0;
         while node.args.get(index) |arg| {
@@ -346,15 +347,14 @@ fn replace_args(module: &var Module, instr: Instr, copies: &map::Map<[]u8, Value
         }
         index = 0;
         while node.cleanups.get(index) |cleanup| {
-            if copy_of(names, copies, cleanup.arg.name) |replacement| {
-                if node.cleanups.at_mut(index) |slot| {
-                    slot.arg = replacement;
+            var arg_index = 0;
+            while arg_index < cleanup.args_len {
+                if pool.get(cleanup.args_start + arg_index) |arg| {
+                    if copy_of(names, copies, arg.name) |replacement| {
+                        try pool.set(cleanup.args_start + arg_index, replacement);
+                    }
                 }
-            }
-            if copy_of(names, copies, cleanup.allocator.name) |replacement| {
-                if node.cleanups.at_mut(index) |slot| {
-                    slot.allocator = replacement;
-                }
+                arg_index = arg_index + 1;
             }
             index = index + 1;
         }
@@ -414,8 +414,11 @@ fn used_values(allocator: Allocator, module: &Module, function: Function) -> !ma
             arg_index = 0;
             while instr_node.cleanups.get(arg_index) |cleanup| {
                 arg_index = arg_index + 1;
-                try mark_used(allocator, module, &var used, cleanup.arg.name);
-                try mark_used(allocator, module, &var used, cleanup.allocator.name);
+                var cleanup_arg = 0;
+                while module.cleanup_arg(cleanup, cleanup_arg) |arg| {
+                    cleanup_arg = cleanup_arg + 1;
+                    try mark_used(allocator, module, &var used, arg.name);
+                }
             }
         }
         try mark_used(allocator, module, &var used, block_node.terminator.value.name);
