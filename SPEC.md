@@ -2254,6 +2254,12 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * `ptr_read(p)` は `ptr<T>` / `ptr<const T>` から `T` を読む
 * `ptr_write(p, value)` は `ptr<T>` に `T` を書く
 * `ptr_write` は `ptr<const T>` と nullable pointer には使えない
+* `ptr_of(v)` は view `[]T` の先頭要素の address を `ptr<const T>` として返す
+* `mut_ptr_of(v)` は `&var []T` として持つ binding(indexed assignment が書ける
+  view と同じもの、ADR-0096)の先頭要素の address を `ptr<T>` として返す
+* `ptr_of` / `mut_ptr_of` に `unsafe` は要らない。address を取ること自体は
+  何も読み書きしない。view の borrow が終わった後もその pointer が指し続ける
+  ことは、pointer を使う `unsafe` 操作の側が引き受ける
 * raw pointer を field から読み出すのに `unsafe` は要らない。取り出した
   pointer を使う操作の側が要求する
 * `ptr<T>` / `?ptr<T>` を field に持つ struct を `unsafe struct` と宣言しないのは

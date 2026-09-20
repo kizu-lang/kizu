@@ -195,6 +195,9 @@ fn (self: &var Checker) check_call_expr_dispatch(
             if mem::equal_bytes(name, "ptr_read") {
                 return self.check_ptr_read(tree, scope, span, expression.args, out);
             }
+            if mem::equal_bytes(name, "ptr_of") or mem::equal_bytes(name, "mut_ptr_of") {
+                return self.check_ptr_of(tree, scope, name, expression.args, out);
+            }
             if mem::equal_bytes(name, "ptr_write") {
                 return self.check_ptr_write(tree, scope, span, expression.args, out);
             }
@@ -905,6 +908,90 @@ fn (self: &Checker) named_arity_error(
     }
     try message.append_bytes(self.allocator, ", got ");
     try fmt::append_i64(self.allocator, &var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+/// Types the raw pointer to a view's first element, the Go `checkPtrOf`:
+/// `ptr_of(v)` gives `ptr<const T>` for any view, `mut_ptr_of(v)` gives
+/// `ptr<T>` and needs a writable one. Taking the address needs no `unsafe`,
+/// the way reading a raw pointer out of a field needs none: the operation
+/// that uses the pointer is the one that asks (SPEC §12).
+fn (self: &var Checker) check_ptr_of(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 1 {
+        return try self.named_arity_error(name, 1, args.len(tree));
+    }
+    var view_type = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var view_type) |problem| {
+        return move problem;
+    }
+    let elem = try self.types.slice_elem(view_type) orelse
+        return try self.ptr_of_view_error(name, view_type);
+    if mem::equal_bytes(name, "ptr_of") {
+        out.* = try self.pointer_type_to(elem, true);
+        return null;
+    }
+    // A writable view is a binding held as `&var []T`, the same thing an
+    // indexed assignment or a `&var v[a..b]` lends from (ADR-0096).
+    var writable = false;
+    match tree.expressions.at(argument.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let binding = retained.as_bytes();
+            writable = self.scopes.is_mut_borrowed(scope, binding);
+        },
+        _ => {},
+    }
+    if !writable {
+        return try self.mut_ptr_of_binding_error(tree, argument);
+    }
+    out.* = try self.pointer_type_to(elem, false);
+    return null;
+}
+
+/// Spells `ptr<const T>` or `ptr<T>` for an element type.
+fn (self: &var Checker) pointer_type_to(elem: Type, constant: bool) -> !Type {
+    var spelling = try string::from_bytes(self.allocator, "ptr<");
+    defer spelling.deinit(self.allocator);
+    if constant {
+        try spelling.append_bytes(self.allocator, "const ");
+    }
+    try self.append_checker_type(&var spelling, elem);
+    try spelling.append_bytes(self.allocator, ">");
+    let bytes = spelling.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &Checker) ptr_of_view_error(name: []u8, got: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` expects a view `[]T`, got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) mut_ptr_of_binding_error(
+    tree: &ast::Ast,
+    argument: ast::Expression
+) -> !diagnostic::Diagnostic {
+    let rendered = try ast::render_expression(self.allocator, tree, argument);
+    defer rendered.deinit(self.allocator);
+    let text = rendered.as_bytes();
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator,
+        "`mut_ptr_of` needs a writable view binding (`&var []T`), `"
+    );
+    try message.append_bytes(self.allocator, text);
+    try message.append_bytes(self.allocator, "` is not one");
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 

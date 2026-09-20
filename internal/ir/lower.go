@@ -1738,6 +1738,9 @@ func (l *lowerer) lowerPtrBuiltinCall(expr *ast.CallExpr) (Value, bool, error) {
 	case "ptr_write":
 		value, err := l.lowerPtrStore(ident.Name, "ref.store", expr.Args)
 		return value, true, err
+	case "ptr_of", "mut_ptr_of":
+		value, err := l.lowerPtrOf(ident.Name, expr.Args)
+		return value, true, err
 	case "volatile_read":
 		value, err := l.lowerPtrLoad(ident.Name, "volatile.load", expr.Args)
 		return value, true, err
@@ -1747,6 +1750,35 @@ func (l *lowerer) lowerPtrBuiltinCall(expr *ast.CallExpr) (Value, bool, error) {
 	default:
 		return Value{}, false, nil
 	}
+}
+
+// lowerPtrOf lowers the address of a view's first element. The view value
+// carries its element type; whether the pointer may write is what the name
+// decided, and the checker has already held `mut_ptr_of` to a writable view.
+func (l *lowerer) lowerPtrOf(name string, args []ast.Expression) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("ir error: %s expects 1 arg", name)
+	}
+	view, err := l.lowerExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	elem, ok := viewElemType(view.Type)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: %s expects a view, got %s", name, view.Type)
+	}
+	if name == "ptr_of" {
+		return l.emit("slice.ptr", "ptr<const "+elem+">", []Value{view}, ""), nil
+	}
+	return l.emit("slice.ptr", "ptr<"+elem+">", []Value{view}, ""), nil
+}
+
+// viewElemType returns T for a view spelled `[]T`.
+func viewElemType(name string) (string, bool) {
+	if strings.HasPrefix(name, "[]") {
+		return name[2:], true
+	}
+	return "", false
 }
 
 // lowerPtrLoad lowers a raw pointer read builtin to op.

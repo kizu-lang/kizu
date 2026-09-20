@@ -1564,6 +1564,8 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 	switch instr.Op {
 	case "slice.len":
 		return e.writeSliceLen(instr)
+	case "slice.ptr":
+		return e.writeSlicePtr(instr)
 	case "slice.index":
 		return e.writeSliceIndex(instr)
 	case "slice.store":
@@ -2554,6 +2556,20 @@ func (e *emitter) writeSliceLen(instr *ir.Instr) error {
 	slice := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n",
+		resultName, slice.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeSlicePtr extracts the element pointer from a view value.
+func (e *emitter) writeSlicePtr(instr *ir.Instr) error {
+	_, ok := viewElem(instr.Args[0].Type)
+	if len(instr.Args) != 1 || !ok || !isRawPointerType(instr.Result.Type) {
+		return fmt.Errorf("llvm error: slice.ptr expects []T -> ptr<T>")
+	}
+	slice := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n",
 		resultName, slice.operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil

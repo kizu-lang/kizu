@@ -4214,6 +4214,9 @@ func (c *Checker) checkCallExprDispatch(
 	if name.Name == "ptr_read" {
 		return c.checkPtrRead(expr, env, unsafe)
 	}
+	if name.Name == "ptr_of" || name.Name == "mut_ptr_of" {
+		return c.checkPtrOf(name.Name, expr, env, unsafe)
+	}
 	if name.Name == "ptr_write" {
 		return c.checkPtrWrite(expr, env, unsafe)
 	}
@@ -8088,6 +8091,42 @@ func (c *Checker) directFieldCleanupReceiver(expr ast.Expression, env *scope) bo
 	}
 	_, found := env.lookup(owner.Name)
 	return found
+}
+
+// checkPtrOf types the raw pointer to a view's first element: `ptr_of(v)`
+// gives `ptr<const T>` for any view, `mut_ptr_of(v)` gives `ptr<T>` and
+// needs a writable one. Taking the address needs no `unsafe`, the way
+// reading a raw pointer out of a field needs none: the operation that uses
+// the pointer is the one that asks (SPEC §12).
+func (c *Checker) checkPtrOf(
+	name string,
+	expr *ast.CallExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(expr.Args) != 1 {
+		return "", errorf("type error: `%s` expects 1 arg, got %d", name, len(expr.Args))
+	}
+	viewType, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := sliceElem(viewType)
+	if !ok {
+		return "", errorf("type error: `%s` expects a view `[]T`, got %s", name, viewType)
+	}
+	if name == "ptr_of" {
+		return Type("ptr<const " + string(elem) + ">"), nil
+	}
+	// A writable view is a binding held as `&var []T`, the same thing an
+	// indexed assignment or a `&var v[a..b]` lends from (ADR-0096).
+	ident, isIdent := expr.Args[0].(*ast.IdentExpr)
+	if !isIdent || !env.isMutBorrowed(ident.Name) {
+		return "", errorf(
+			"type error: `mut_ptr_of` needs a writable view binding (`&var []T`), `%s` is not one",
+			expr.Args[0].String())
+	}
+	return Type("ptr<" + string(elem) + ">"), nil
 }
 
 // checkPtrRead validates unsafe raw pointer reads.

@@ -191,6 +191,12 @@ fn (self: &var Lowerer) lower_ptr_builtin_call(
         let name = try self.text_name(tree, ident.name);
         return self.lower_ptr_store(tree, name, Op::RefStore, call.args, out);
     }
+    if text_is(tree, ident.name, "ptr_of") or text_is(tree, ident.name, "mut_ptr_of") {
+        handled.* = true;
+        let name = try self.text_name(tree, ident.name);
+        let constant = text_is(tree, ident.name, "ptr_of");
+        return self.lower_ptr_of(tree, name, constant, call.args, out);
+    }
     if text_is(tree, ident.name, "volatile_read") {
         handled.* = true;
         let name = try self.text_name(tree, ident.name);
@@ -201,6 +207,41 @@ fn (self: &var Lowerer) lower_ptr_builtin_call(
         let name = try self.text_name(tree, ident.name);
         return self.lower_ptr_store(tree, name, Op::VolatileStore, call.args, out);
     }
+    return null;
+}
+
+/// Lowers the address of a view's first element, the Go `lowerPtrOf`. The
+/// view value carries its element type; whether the pointer may write is
+/// what the name decided, and the checker has already held `mut_ptr_of` to
+/// a writable view.
+fn (self: &var Lowerer) lower_ptr_of(
+    tree: &var ast::Ast,
+    name: Name,
+    constant: bool,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 1 {
+        return try self.fail1(tree, "ir error: %s expects 1 arg", Arg::Str(name));
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    var view = empty_value();
+    if try self.lower_expr(tree, first, &var view) |failed| {
+        return move failed;
+    }
+    if !self.module.names.starts_with(view.type_name, "[]") {
+        return try self.fail2(
+            tree, "ir error: %s expects a view, got %s", Arg::Str(name), Arg::Str(view.type_name)
+        );
+    }
+    let elem = try self.module.names.view_elem(view.type_name);
+    if constant {
+        let pointer = try self.module.names.wrapped("ptr<const ", elem, ">");
+        out.* = try self.emit1(Op::SlicePtr, pointer, view);
+        return null;
+    }
+    let pointer = try self.module.names.wrapped("ptr<", elem, ">");
+    out.* = try self.emit1(Op::SlicePtr, pointer, view);
     return null;
 }
 

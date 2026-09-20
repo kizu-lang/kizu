@@ -1,0 +1,334 @@
+// `ptr_of(v)` is the address of a view's first element as `ptr<const T>`,
+// and `mut_ptr_of(v)` is the same address as `ptr<T>` from a writable view.
+// Taking the address is safe; what uses the pointer is the `unsafe` step.
+// This is how a view's memory is handed to C without copying.
+import std::mem;
+
+extern "c" fn memcmp(left: ptr<const u8>, right: ptr<const u8>, size: usize) -> i32
+fn fill(values: &var []f64, count: usize, start: f64) -> void {
+    let base = mut_ptr_of(values);
+    var index: usize = 0;
+    while index < count {
+        // SAFETY: the caller passes the view's own length as count.
+        let address = unsafe int_from_ptr<usize>(base) + index * 8;
+        // SAFETY: address is a slot inside the view, as computed above.
+        unsafe ptr_write(unsafe ptr_from_int<ptr<f64>>(address), start + 1.0);
+        index = index + 1;
+    }
+    return;
+}
+
+fn same_bytes(left: []u8, right: []u8) -> bool {
+    if mem::len(left) != mem::len(right) {
+        return false;
+    }
+    let size = cast<usize>(mem::len(left));
+    // SAFETY: both views have size bytes, and memcmp reads exactly that many.
+    return unsafe memcmp(ptr_of(left), ptr_of(right), size) == 0;
+}
+
+fn main() -> void {
+    var buffer = [3]f64{};
+    let values = buffer.as_mut_slice();
+    fill(values, 3, 1.5);
+    let first = ptr_of(values);
+    // SAFETY: the view still borrows the buffer, so the pointer is live.
+    print(unsafe ptr_read(first) == 2.5);
+    print(same_bytes("kizu", "kizu"));
+    print(same_bytes("kizu", "kizo"));
+    return;
+}
+
+// run
+// features: extern-c raw-pointer view
+// output:
+// true
+// true
+// false
+
+// ir
+// lower:
+// fn fill(%values: []f64, %count: usize, %start: f64) -> void {
+// entry:
+//   %1: ptr<f64> = slice.ptr %values: []f64
+//   %2: usize = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: usize = phi [entry, %2: usize], [while.body.2, %14: usize]
+//   %4: bool = binary.< %3: usize, %count: usize
+//   branch %4: bool, while.body.2, while.end.3
+// while.body.2:
+//   %5: usize = cast %1: ptr<f64>, usize
+//   %6: usize = const 8
+//   %7: usize = binary.* %3: usize, %6: usize
+//   %8: usize = binary.+ %5: usize, %7: usize
+//   %9: ptr<f64> = cast %8: usize, ptr<f64>
+//   %10: f64 = const 1.0
+//   %11: f64 = binary.+ %start: f64, %10: f64
+//   ref.store %9: ptr<f64>, %11: f64
+//   %13: usize = const 1
+//   %14: usize = binary.+ %3: usize, %13: usize
+//   jump while.header.1
+// while.end.3:
+//   return void: void
+// }
+// fn same_bytes(%left: []u8, %right: []u8) -> bool {
+// entry:
+//   %1: i64 = call.std::mem::len %left: []u8
+//   %2: i64 = call.std::mem::len %right: []u8
+//   %3: bool = binary.!= %1: i64, %2: i64
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: bool = const false
+//   return %4: bool
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %5: i64 = call.std::mem::len %left: []u8
+//   %6: usize = cast %5: i64, usize
+//   %7: ptr<const u8> = slice.ptr %left: []u8
+//   %8: ptr<const u8> = slice.ptr %right: []u8
+//   %9: i32 = extern "c" call.memcmp %7: ptr<const u8>, %8: ptr<const u8>, %6: usize
+//   %10: i32 = const 0
+//   %11: bool = binary.== %9: i32, %10: i32
+//   return %11: bool
+// }
+// fn main() -> void {
+// entry:
+//   %1: [3]f64 = buffer.new
+//   %2: &var [3]f64 = local.slot %1: [3]f64
+//   %3: [3]f64 = ref.load %2: &var [3]f64
+//   %4: []f64 = buffer.as_bytes %3: [3]f64
+//   %5: usize = const 3
+//   %6: f64 = const 1.5
+//   call.fill %4: []f64, %5: usize, %6: f64
+//   %8: ptr<const f64> = slice.ptr %4: []f64
+//   %9: f64 = ref.load %8: ptr<const f64>
+//   %10: f64 = const 2.5
+//   %11: bool = binary.== %9: f64, %10: f64
+//   call.std::fmt::print.bool %11: bool
+//   %13: []u8 = const "kizu"
+//   %14: []u8 = const "kizu"
+//   %15: bool = call.same_bytes %13: []u8, %14: []u8
+//   call.std::fmt::print.bool %15: bool
+//   %17: []u8 = const "kizu"
+//   %18: []u8 = const "kizo"
+//   %19: bool = call.same_bytes %17: []u8, %18: []u8
+//   call.std::fmt::print.bool %19: bool
+//   return void: void
+// }
+// opt:
+// fn fill(%values: []f64, %count: usize, %start: f64) -> void {
+// entry:
+//   %1: ptr<f64> = slice.ptr %values: []f64
+//   %2: usize = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: usize = phi [entry, %2: usize], [while.body.2, %14: usize]
+//   %4: bool = binary.< %3: usize, %count: usize
+//   branch %4: bool, while.body.2, while.end.3
+// while.body.2:
+//   %5: usize = cast %1: ptr<f64>, usize
+//   %6: usize = const 8
+//   %7: usize = binary.* %3: usize, %6: usize
+//   %8: usize = binary.+ %5: usize, %7: usize
+//   %9: ptr<f64> = cast %8: usize, ptr<f64>
+//   %10: f64 = const 1.0
+//   %11: f64 = binary.+ %start: f64, %10: f64
+//   ref.store %9: ptr<f64>, %11: f64
+//   %13: usize = const 1
+//   %14: usize = binary.+ %3: usize, %13: usize
+//   jump while.header.1
+// while.end.3:
+//   return void: void
+// }
+// fn same_bytes(%left: []u8, %right: []u8) -> bool {
+// entry:
+//   %in1.1: i64 = slice.len %left: []u8
+//   %in2.1: i64 = slice.len %right: []u8
+//   %3: bool = binary.!= %in1.1: i64, %in2.1: i64
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: bool = const false
+//   return %4: bool
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %6: usize = cast %in1.1: i64, usize
+//   %7: ptr<const u8> = slice.ptr %left: []u8
+//   %8: ptr<const u8> = slice.ptr %right: []u8
+//   %9: i32 = extern "c" call.memcmp %7: ptr<const u8>, %8: ptr<const u8>, %6: usize
+//   %10: i32 = const 0
+//   %11: bool = binary.== %9: i32, %10: i32
+//   return %11: bool
+// }
+// fn main() -> void {
+// entry:
+//   %1: [3]f64 = buffer.new
+//   %2: &var [3]f64 = local.slot %1: [3]f64
+//   %3: [3]f64 = ref.load %2: &var [3]f64
+//   %4: []f64 = buffer.as_bytes %3: [3]f64
+//   %5: usize = const 3
+//   %6: f64 = const 1.5
+//   call.fill %4: []f64, %5: usize, %6: f64
+//   %8: ptr<const f64> = slice.ptr %4: []f64
+//   %9: f64 = ref.load %8: ptr<const f64>
+//   %10: f64 = const 2.5
+//   %11: bool = binary.== %9: f64, %10: f64
+//   jump in1.entry
+// in1.entry:
+//   branch %11: bool, in1.if.then.1, in1.if.else.2
+// in1.if.then.1:
+//   %in1.1: []u8 = const "true"
+//   print.line %in1.1: []u8
+//   jump in1.if.end.3
+// in1.if.else.2:
+//   %in1.3: []u8 = const "false"
+//   print.line %in1.3: []u8
+//   jump in1.if.end.3
+// in1.if.end.3:
+//   jump in1.cont
+// in1.cont:
+//   %13: []u8 = const "kizu"
+//   %14: []u8 = const "kizu"
+//   %15: bool = call.same_bytes %13: []u8, %14: []u8
+//   jump in2.entry
+// in2.entry:
+//   branch %15: bool, in2.if.then.1, in2.if.else.2
+// in2.if.then.1:
+//   %in2.1: []u8 = const "true"
+//   print.line %in2.1: []u8
+//   jump in2.if.end.3
+// in2.if.else.2:
+//   %in2.3: []u8 = const "false"
+//   print.line %in2.3: []u8
+//   jump in2.if.end.3
+// in2.if.end.3:
+//   jump in2.cont
+// in2.cont:
+//   %17: []u8 = const "kizu"
+//   %18: []u8 = const "kizo"
+//   %19: bool = call.same_bytes %17: []u8, %18: []u8
+//   jump in3.entry
+// in3.entry:
+//   branch %19: bool, in3.if.then.1, in3.if.else.2
+// in3.if.then.1:
+//   %in3.1: []u8 = const "true"
+//   print.line %in3.1: []u8
+//   jump in3.if.end.3
+// in3.if.else.2:
+//   %in3.3: []u8 = const "false"
+//   print.line %in3.3: []u8
+//   jump in3.if.end.3
+// in3.if.end.3:
+//   jump in3.cont
+// in3.cont:
+//   return void: void
+// }
+// opt wasm:
+// fn fill(%values: []f64, %count: usize, %start: f64) -> void {
+// entry:
+//   %1: ptr<f64> = slice.ptr %values: []f64
+//   %2: usize = const 0
+//   jump while.header.1
+// while.header.1:
+//   %4: bool = binary.< %2: usize, %count: usize
+//   branch %4: bool, while.body.2, while.end.3
+// while.body.2:
+//   %rot1.b.3: usize = phi [while.header.1, %2: usize], [while.body.2, %14: usize]
+//   %5: usize = cast %1: ptr<f64>, usize
+//   %6: usize = const 8
+//   %7: usize = binary.* %rot1.b.3: usize, %6: usize
+//   %8: usize = binary.+ %5: usize, %7: usize
+//   %9: ptr<f64> = cast %8: usize, ptr<f64>
+//   %10: f64 = const 1.0
+//   %11: f64 = binary.+ %start: f64, %10: f64
+//   ref.store %9: ptr<f64>, %11: f64
+//   %13: usize = const 1
+//   %14: usize = binary.+ %rot1.b.3: usize, %13: usize
+//   %rot1.l0.4: bool = binary.< %14: usize, %count: usize
+//   branch %rot1.l0.4: bool, while.body.2, while.end.3
+// while.end.3:
+//   return void: void
+// }
+// fn same_bytes(%left: []u8, %right: []u8) -> bool {
+// entry:
+//   %in1.1: i64 = slice.len %left: []u8
+//   %in2.1: i64 = slice.len %right: []u8
+//   %3: bool = binary.!= %in1.1: i64, %in2.1: i64
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: bool = const false
+//   return %4: bool
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %6: usize = cast %in1.1: i64, usize
+//   %7: ptr<const u8> = slice.ptr %left: []u8
+//   %8: ptr<const u8> = slice.ptr %right: []u8
+//   %9: i32 = extern "c" call.memcmp %7: ptr<const u8>, %8: ptr<const u8>, %6: usize
+//   %10: i32 = const 0
+//   %11: bool = binary.== %9: i32, %10: i32
+//   return %11: bool
+// }
+// fn main() -> void {
+// entry:
+//   %1: [3]f64 = buffer.new
+//   %2: &var [3]f64 = local.slot %1: [3]f64
+//   %3: [3]f64 = ref.load %2: &var [3]f64
+//   %4: []f64 = buffer.as_bytes %3: [3]f64
+//   %5: usize = const 3
+//   %6: f64 = const 1.5
+//   call.fill %4: []f64, %5: usize, %6: f64
+//   %8: ptr<const f64> = slice.ptr %4: []f64
+//   %9: f64 = ref.load %8: ptr<const f64>
+//   %10: f64 = const 2.5
+//   %11: bool = binary.== %9: f64, %10: f64
+//   jump in1.entry
+// in1.entry:
+//   branch %11: bool, in1.if.then.1, in1.if.else.2
+// in1.if.then.1:
+//   %in1.1: []u8 = const "true"
+//   print.line %in1.1: []u8
+//   jump in1.if.end.3
+// in1.if.else.2:
+//   %in1.3: []u8 = const "false"
+//   print.line %in1.3: []u8
+//   jump in1.if.end.3
+// in1.if.end.3:
+//   jump in1.cont
+// in1.cont:
+//   %13: []u8 = const "kizu"
+//   %15: bool = call.same_bytes %13: []u8, %13: []u8
+//   jump in2.entry
+// in2.entry:
+//   branch %15: bool, in2.if.then.1, in2.if.else.2
+// in2.if.then.1:
+//   %in2.1: []u8 = const "true"
+//   print.line %in2.1: []u8
+//   jump in2.if.end.3
+// in2.if.else.2:
+//   %in2.3: []u8 = const "false"
+//   print.line %in2.3: []u8
+//   jump in2.if.end.3
+// in2.if.end.3:
+//   jump in2.cont
+// in2.cont:
+//   %18: []u8 = const "kizo"
+//   %19: bool = call.same_bytes %13: []u8, %18: []u8
+//   jump in3.entry
+// in3.entry:
+//   branch %19: bool, in3.if.then.1, in3.if.else.2
+// in3.if.then.1:
+//   %in3.1: []u8 = const "true"
+//   print.line %in3.1: []u8
+//   jump in3.if.end.3
+// in3.if.else.2:
+//   %in3.3: []u8 = const "false"
+//   print.line %in3.3: []u8
+//   jump in3.if.end.3
+// in3.if.end.3:
+//   jump in3.cont
+// in3.cont:
+//   return void: void
+// }

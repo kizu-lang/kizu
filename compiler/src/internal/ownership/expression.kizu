@@ -1422,6 +1422,36 @@ fn (self: &var Checker) check_pointer_builtin(
     return null;
 }
 
+/// Reads the view whose address is taken and names the raw pointer it
+/// gives, the Go `readPtrOf`. The pointer is a copy value with no borrow of
+/// its own: what it points at after the view's borrow ends is the business
+/// of the `unsafe` operation that uses it.
+fn (self: &var Checker) read_ptr_of(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: ast::Text,
+    call: ast::CallExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if arg_count(tree, call.args) != 1 {
+        let spelled = try self.names.intern_text(tree, name);
+        return try self.error1(tree, ast::zero_span(), "move error: `%s` expects 1 arg", Arg::Str(spelled));
+    }
+    let argument = arg_at(tree, call.args, 0) orelse return null;
+    var view_type = empty_name();
+    if try self.read_expr(tree, env, argument, &var view_type) |failed| {
+        return move failed;
+    }
+    let borrowed = try self.names.trim_prefix(view_type, "&var ");
+    let elem = try self.names.trim_prefix(borrowed, "[]");
+    if text_equals(tree, name, "ptr_of") {
+        out.* = try self.names.wrapped("ptr<const ", elem, ">");
+        return null;
+    }
+    out.* = try self.names.wrapped("ptr<", elem, ">");
+    return null;
+}
+
 /// Reads pointer/integer conversion arguments without moving values, the Go
 /// `checkPointerIntCastBuiltin`.
 fn (self: &var Checker) check_pointer_int_cast_builtin(
