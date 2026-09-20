@@ -13,6 +13,8 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 	switch instr.Op {
 	case "slice.len":
 		return e.writeSliceLen(instr)
+	case "slice.ptr":
+		return e.writeSlicePtr(instr)
 	case "slice.index":
 		return e.writeSliceIndex(instr)
 	case "slice.store":
@@ -63,6 +65,16 @@ func (e *emitter) writeSliceLen(instr *ir.Instr) error {
 	}
 	expr := fmt.Sprintf("(i64.extend_i32_u %s)", e.viewLength(instr.Args[0]))
 	return e.writeScalarResult(instr.Result, expr)
+}
+
+// writeSlicePtr reads the element pointer of a view descriptor as a raw
+// pointer, which on this target is the same i32 address.
+func (e *emitter) writeSlicePtr(instr *ir.Instr) error {
+	_, ok := viewElem(instr.Args[0].Type)
+	if len(instr.Args) != 1 || !ok {
+		return fmt.Errorf("wasm error: slice.ptr expects []T -> ptr<T>")
+	}
+	return e.writeScalarResult(instr.Result, e.viewPointer(instr.Args[0]))
 }
 
 // writeSliceIndex reads one element through a view descriptor.

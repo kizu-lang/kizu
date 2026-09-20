@@ -7129,6 +7129,9 @@ func (c *Checker) checkBuiltinCall(
 	case "ptr_read", "ptr_write", "volatile_read", "volatile_write":
 		result, err := c.checkPointerBuiltin(expr, env)
 		return result, true, err
+	case "ptr_of", "mut_ptr_of":
+		result, err := c.readPtrOf(name, expr, env)
+		return result, true, err
 	case "Io":
 		return "", true, errorf("move error: use `std::io::blocking()`")
 	default:
@@ -7184,6 +7187,25 @@ func (c *Checker) checkPointerBuiltin(expr *ast.CallExpr, env *scope) (string, e
 		return "i64", nil
 	}
 	return "void", nil
+}
+
+// readPtrOf reads the view whose address is taken and names the raw pointer
+// it gives. The pointer is a copy value with no borrow of its own: what it
+// points at after the view's borrow ends is the business of the `unsafe`
+// operation that uses it.
+func (c *Checker) readPtrOf(name string, expr *ast.CallExpr, env *scope) (string, error) {
+	if len(expr.Args) != 1 {
+		return "", errorf("move error: `%s` expects 1 arg", name)
+	}
+	viewType, err := c.readExpr(expr.Args[0], env)
+	if err != nil {
+		return "", err
+	}
+	elem := strings.TrimPrefix(strings.TrimPrefix(viewType, "&var "), "[]")
+	if name == "ptr_of" {
+		return "ptr<const " + elem + ">", nil
+	}
+	return "ptr<" + elem + ">", nil
 }
 
 // checkPointerIntCastBuiltin reads pointer/integer conversion arguments without moving values.
