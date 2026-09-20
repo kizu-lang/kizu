@@ -17,7 +17,7 @@ array.get(index: i64) -> ?T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> ?&T
 array.at_mut(index: i64) -> ?&var T
-array.as_slice() -> []T                                  // T が u8 以外の固定幅の数のとき
+array.as_slice() -> []T                                  // T が u8 以外の copy data のとき
 array.as_mut_slice() -> &var []T
 array.set(index: i64, value: T) -> std::array::Error!void
 array.swap(left: i64, right: i64) -> std::array::Error!void
@@ -75,11 +75,12 @@ cleanup の名前はこれ 1 つなので、要素型が決まっていない ge
 ものを書け、`Array<Array<String>>` のような入れ子もそのまま解放できます。
 
 `as_slice` / `as_mut_slice` は要素の並びへの view で、`[N]T` の同名 method と同じ
-ものを返します。要素型は u8 以外の固定幅の数(`u16 u32 u64 i8 i16 i32 i64 f32 f64`)
-に限ります: u8 の owner は `String` で、その view は `as_bytes` です(名前が返る
-ものを言う、SPEC §7.1)。struct や owner の要素は等幅の数の並びではないので view を
-持ちません。view の型が数を数えるので、`mem::count<T>(view)` と `view[i]` は要素
-単位です。
+ものを返します。要素型は u8 以外の copy data(数、enum、それらだけからなる struct
+など、SPEC §7.1)に限ります: u8 の owner は `String` で、その view は `as_bytes`
+です(名前が返るものを言う)。owner や view を持つ要素は、view 越しに cleanup の
+ない owner が見えることになるので view を持ちません。view の型が要素を数えるので、
+`mem::count<T>(view)` と `view[i]` は要素単位で、struct の要素は `view[i]` で
+copy として読み、`cells[i] = value` で丸ごと書きます。
 
 ```kizu
 let view = samples.as_slice();          // []f64。samples は view の最終使用まで borrow 中

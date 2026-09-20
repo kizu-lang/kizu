@@ -739,6 +739,22 @@ fn (self: &var Checker) check_map_key_arg(
     return null;
 }
 
+/// Reports whether T can be the element of a view `[]T`, the Go
+/// `isViewElem`: plain copy data, so that reading an element copies it and
+/// nothing reachable through the view carries a cleanup. A type parameter
+/// stands for whatever the instantiation checks.
+fn (self: &var Checker) is_view_elem(tree: &ast::Ast, value: Type) -> !bool {
+    let retained = try self.types.copy_text(self.allocator, value);
+    defer retained.deinit(self.allocator);
+    let text = retained.as_bytes();
+    if self.type_params.contains(text) {
+        return true;
+    }
+    var seen = array::new<Type>(self.allocator);
+    defer seen.deinit(self.allocator);
+    return self.is_plain_data_type(tree, value, &var seen);
+}
+
 fn (self: &var Checker) is_copy_type(tree: &ast::Ast, value: Type) -> !bool {
     let retained = try self.types.copy_text(self.allocator, value);
     defer retained.deinit(self.allocator);
@@ -1072,17 +1088,17 @@ fn (self: &var Checker) check_std_array_storage_method(
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     // The primitive std forwards to gives `[]T` over the elements of an Array
-    // of numbers: `as_bytes` on bytes, `as_slice` on any other number.
+    // of copy data: `as_bytes` on bytes, `as_slice` on anything else.
     let count = args.len(tree) - offset;
-    let element_text = try self.types.copy_text(self.allocator, element);
-    defer element_text.deinit(self.allocator);
-    let element_bytes = element_text.as_bytes();
-    if !typ::is_buffer_elem(element_bytes) {
+    if !try self.is_view_elem(tree, element) {
+        let element_text = try self.types.copy_text(self.allocator, element);
+        defer element_text.deinit(self.allocator);
+        let element_bytes = element_text.as_bytes();
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
         try message.append_bytes(self.allocator, "`Array.");
         try message.append_bytes(self.allocator, name);
-        try message.append_bytes(self.allocator, "` requires a fixed-width number element, got ");
+        try message.append_bytes(self.allocator, "` requires a copy element, got ");
         try message.append_bytes(self.allocator, element_bytes);
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
