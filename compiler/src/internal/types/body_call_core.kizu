@@ -198,6 +198,12 @@ fn (self: &var Checker) check_call_expr_dispatch(
             if mem::equal_bytes(name, "ptr_of") or mem::equal_bytes(name, "mut_ptr_of") {
                 return self.check_ptr_of(tree, scope, name, expression.args, out);
             }
+            if mem::equal_bytes(name, "ptr_offset") {
+                return self.check_ptr_offset(tree, scope, span, expression.args, out);
+            }
+            if is_raw_view_builtin_name(name) {
+                return try self.raw_view_not_bound_error(name);
+            }
             if mem::equal_bytes(name, "ptr_write") {
                 return self.check_ptr_write(tree, scope, span, expression.args, out);
             }
@@ -953,6 +959,181 @@ fn (self: &var Checker) check_ptr_of(
     }
     out.* = try self.pointer_type_to(elem, false);
     return null;
+}
+
+/// Types `ptr_offset(p, count)`, the Go `checkPtrOffset`: the same pointer
+/// type, moved by count elements. Stepping past the allocation the pointer
+/// came from is what the `unsafe` marker answers for, the way Rust's
+/// `offset` asks.
+fn (self: &var Checker) check_ptr_offset(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if try self.require_unsafe_capability_at(UnsafeCapability::PtrOffset, "`ptr_offset`", span) |problem| {
+        return move problem;
+    }
+    if args.len(tree) != 2 {
+        return try self.named_arity_error("ptr_offset", 2, args.len(tree));
+    }
+    var pointer_type = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var pointer_type) |problem| {
+        return move problem;
+    }
+    match try self.types.raw_pointer_deref_type(pointer_type) {
+        Value(_) => {},
+        Error(_) => return try self.pointer_read_type_error("ptr_offset", pointer_type),
+    }
+    let count = args.get_or_panic(tree, 1);
+    if try self.check_ptr_count(tree, scope, "ptr_offset", count) |problem| {
+        return move problem;
+    }
+    out.* = pointer_type;
+    return null;
+}
+
+/// Types the element count of a raw pointer builtin as i64, the integer a
+/// view counts its elements in, the Go `checkPtrCount`.
+fn (self: &var Checker) check_ptr_count(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    expression: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let want = try self.types.i64_type();
+    var count = empty_type();
+    if try self.check_contextual_expr(tree, scope, expression, want, &var count) |problem| {
+        return move problem;
+    }
+    if !same_type(count, want) {
+        return try self.ptr_count_error(name, count);
+    }
+    return null;
+}
+
+fn (self: &Checker) ptr_count_error(name: []u8, got: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` expects an i64 count, got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+/// Reports the two builtins that make a view over raw memory, the Go
+/// `isRawViewBuiltinName`. Each is a let initializer only, the way
+/// `as_slice` is: the binding is what the view's writability is read from.
+fn is_raw_view_builtin_name(name: []u8) -> bool {
+    return mem::equal_bytes(name, "view_from_ptr") or mem::equal_bytes(name, "mut_view_from_ptr");
+}
+
+fn (self: &Checker) raw_view_not_bound_error(name: []u8) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` must be bound with `let name = ");
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "(p, count)`");
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+/// Recognizes `let v = view_from_ptr(p, count)` and `let v =
+/// mut_view_from_ptr(p, count)`, the Go `checkRawViewInitializer`, and
+/// returns the view type and its writability. The view borrows nothing the
+/// checker can name: that the memory holds count elements for as long as
+/// the view is used is what the `unsafe` marker answers for.
+fn (self: &var Checker) check_raw_view_initializer(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    call: &ast::CallExpr,
+    view_out: &var Type,
+    mutable_out: &var bool,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    var callee: ?ast::IdentExpr = null;
+    match tree.expressions.at(call.callee.node) {
+        Ident(value) => {
+            callee = value;
+        },
+        _ => {},
+    }
+    let identifier = callee orelse return null;
+    let retained = tree.texts.at(identifier.name.node);
+    let source_name = retained.as_bytes();
+    let owned_name = try string::from_bytes(self.allocator, source_name);
+    defer owned_name.deinit(self.allocator);
+    let name = owned_name.as_bytes();
+    if !is_raw_view_builtin_name(name) {
+        return null;
+    }
+    handled.* = true;
+    let mutable = mem::equal_bytes(name, "mut_view_from_ptr");
+    mutable_out.* = mutable;
+    let operation = try quoted_name(self.allocator, name);
+    defer operation.deinit(self.allocator);
+    let operation_bytes = operation.as_bytes();
+    if try self.require_unsafe_capability_at(UnsafeCapability::PtrView, operation_bytes, identifier.span) |problem| {
+        return move problem;
+    }
+    let args = call.args;
+    if args.len(tree) != 2 {
+        return try self.named_arity_error(name, 2, args.len(tree));
+    }
+    var pointer_type = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var pointer_type) |problem| {
+        return move problem;
+    }
+    var element = empty_type();
+    if mutable {
+        match try self.types.assignable_raw_pointer_deref_type(pointer_type) {
+            Value(value) => {
+                element = value;
+            },
+            Error(failure) => {
+                return match failure {
+                    Const => try self.mut_view_pointer_error(pointer_type),
+                    _ => try self.pointer_read_type_error(name, pointer_type),
+                };
+            },
+        }
+    } else {
+        match try self.types.raw_pointer_deref_type(pointer_type) {
+            Value(value) => {
+                element = value;
+            },
+            Error(_) => return try self.pointer_read_type_error(name, pointer_type),
+        }
+    }
+    let count = args.get_or_panic(tree, 1);
+    if try self.check_ptr_count(tree, scope, name, count) |problem| {
+        return move problem;
+    }
+    view_out.* = try self.view_type_of(element);
+    return null;
+}
+
+/// Spells `[]T` for an element type.
+fn (self: &var Checker) view_type_of(elem: Type) -> !Type {
+    var spelling = try string::from_bytes(self.allocator, "[]");
+    defer spelling.deinit(self.allocator);
+    try self.append_checker_type(&var spelling, elem);
+    let bytes = spelling.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &Checker) mut_view_pointer_error(got: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "`mut_view_from_ptr` expects mutable raw pointer, got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 /// Spells `ptr<const T>` or `ptr<T>` for an element type.

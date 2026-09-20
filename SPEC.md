@@ -2260,6 +2260,15 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * `ptr_of` / `mut_ptr_of` に `unsafe` は要らない。address を取ること自体は
   何も読み書きしない。view の borrow が終わった後もその pointer が指し続ける
   ことは、pointer を使う `unsafe` 操作の側が引き受ける
+* `ptr_offset(p, count)` は `p` を `count` 要素(`i64`、負も可)進めた同じ型の
+  pointer を返す。元の allocation を出ないことは `unsafe` が引き受ける
+* `let v = view_from_ptr(p, count)` は `ptr<T>` / `ptr<const T>` の指す `count`
+  要素を `[]T` として束縛する。`let v = mut_view_from_ptr(p, count)` は `ptr<T>`
+  から書ける view binding(`&var []T` として持つものと同じ扱い)を作る。どちらも
+  `let` の初期化子にしか書けず、式の途中には置けない(`as_slice` と同じ)
+* raw memory の view はどの binding も借りていないが、local borrow として扱う。
+  返せず、field にも入らない。`count` 要素がそこにあり、view を使う間そこに
+  あり続けることは `unsafe` が引き受ける
 * raw pointer を field から読み出すのに `unsafe` は要らない。取り出した
   pointer を使う操作の側が要求する
 * `ptr<T>` / `?ptr<T>` を field に持つ struct を `unsafe struct` と宣言しないのは
@@ -2290,6 +2299,8 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_deref` | `p.*` / `p.* = value` / `p.*.field` |
 | `ptr_cast` | raw pointer 間の `cast<ptr<...>>(value)` |
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
+| `ptr_offset` | `ptr_offset(p, count)` |
+| `ptr_view` | `view_from_ptr(p, count)` / `mut_view_from_ptr(p, count)` |
 | `extern_call` | `extern "..." fn` call |
 | `unsafe_call` | `unsafe fn` call |
 | `struct_invariant` | `unsafe struct` の構築 / field write |

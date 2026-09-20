@@ -197,6 +197,15 @@ fn (self: &var Lowerer) lower_ptr_builtin_call(
         let constant = text_is(tree, ident.name, "ptr_of");
         return self.lower_ptr_of(tree, name, constant, call.args, out);
     }
+    if text_is(tree, ident.name, "ptr_offset") {
+        handled.* = true;
+        return self.lower_ptr_offset(tree, call.args, out);
+    }
+    if text_is(tree, ident.name, "view_from_ptr") or text_is(tree, ident.name, "mut_view_from_ptr") {
+        handled.* = true;
+        let name = try self.text_name(tree, ident.name);
+        return self.lower_view_from_ptr(tree, name, call.args, out);
+    }
     if text_is(tree, ident.name, "volatile_read") {
         handled.* = true;
         let name = try self.text_name(tree, ident.name);
@@ -242,6 +251,68 @@ fn (self: &var Lowerer) lower_ptr_of(
     }
     let pointer = try self.module.names.wrapped("ptr<", elem, ">");
     out.* = try self.emit1(Op::SlicePtr, pointer, view);
+    return null;
+}
+
+/// Lowers `ptr_offset(p, count)` to a pointer step of count elements, the
+/// Go `lowerPtrOffset`; the result keeps the pointer's type.
+fn (self: &var Lowerer) lower_ptr_offset(
+    tree: &var ast::Ast,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 2 {
+        return try self.fail0("ir error: ptr_offset expects 2 args");
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    let second = ownership::arg_at(tree, args, 1) orelse return null;
+    var pointer = empty_value();
+    if try self.lower_expr(tree, first, &var pointer) |failed| {
+        return move failed;
+    }
+    if try self.raw_pointer_elem(pointer.type_name) |_| {} else {
+        return try self.fail1(
+            tree, "ir error: ptr_offset expects raw pointer, got %s", Arg::Str(pointer.type_name)
+        );
+    }
+    let i64_name = try self.module.names.intern("i64");
+    var count = empty_value();
+    if try self.lower_contextual_expr(tree, second, i64_name, &var count) |failed| {
+        return move failed;
+    }
+    out.* = try self.emit2(Op::PtrOffset, pointer.type_name, pointer, count);
+    return null;
+}
+
+/// Lowers `view_from_ptr(p, count)` and its mutable form to a view over the
+/// pointer's memory, the Go `lowerViewFromPtr`. Both forms make the same
+/// value: what the binding may do with it is what the checker decided from
+/// the name.
+fn (self: &var Lowerer) lower_view_from_ptr(
+    tree: &var ast::Ast,
+    name: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 2 {
+        return try self.fail1(tree, "ir error: %s expects 2 args", Arg::Str(name));
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    let second = ownership::arg_at(tree, args, 1) orelse return null;
+    var pointer = empty_value();
+    if try self.lower_expr(tree, first, &var pointer) |failed| {
+        return move failed;
+    }
+    let elem = try self.raw_pointer_elem(pointer.type_name) orelse return try self.fail2(
+        tree, "ir error: %s expects raw pointer, got %s", Arg::Str(name), Arg::Str(pointer.type_name)
+    );
+    let i64_name = try self.module.names.intern("i64");
+    var count = empty_value();
+    if try self.lower_contextual_expr(tree, second, i64_name, &var count) |failed| {
+        return move failed;
+    }
+    let view = try self.module.names.prefixed("[]", elem);
+    out.* = try self.emit2(Op::SliceFromPtr, view, pointer, count);
     return null;
 }
 

@@ -43,6 +43,12 @@ fn (self: &var Checker) check_let_stmt(
     if try self.string_view_initializer(tree, env, statement.value, &var view) {
         return self.check_string_view_let_stmt(tree, env, statement, view);
     }
+    if try self.check_raw_view_let_stmt(tree, env, statement, &var handled) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
     if try self.check_explicit_borrow_result_let_stmt(tree, env, statement, &var handled) |failed| {
         return move failed;
     }
@@ -911,6 +917,52 @@ fn (self: &var Checker) check_string_view_let_stmt(
     value.local_borrow = true;
     try value.borrow_targets.append(self.allocator, BorrowSource { target: view.target, field: view.path });
     value.mut_borrow = view.mutable;
+    let _ = try self.define(env, move value);
+    return null;
+}
+
+/// Binds `let v = view_from_ptr(p, count)` or its `mut_view_from_ptr` form,
+/// the Go `checkRawViewLetStmt`: a view that borrows no binding, since raw
+/// memory has no owner the checker knows. It is a local borrow all the
+/// same, so it cannot be returned or stored, and the mutable form is the
+/// one writable view binding that lends nothing.
+fn (self: &var Checker) check_raw_view_let_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::LetStmt,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let call = call_expr(tree, unwrap_expression_markers(tree, statement.value)) orelse return null;
+    let callee = ident_expr(tree, call.callee) orelse return null;
+    let is_mutable = text_equals(tree, callee.name, "mut_view_from_ptr");
+    if !is_mutable and !text_equals(tree, callee.name, "view_from_ptr") {
+        return null;
+    }
+    handled.* = true;
+    if arg_count(tree, call.args) != 2 {
+        let spelled = try self.names.intern_text(tree, callee.name);
+        return try self.error1(tree, ast::zero_span(), "move error: `%s` expects 2 args", Arg::Str(spelled));
+    }
+    let pointer = arg_at(tree, call.args, 0) orelse return null;
+    let count = arg_at(tree, call.args, 1) orelse return null;
+    var pointer_type = empty_name();
+    if try self.read_expr(tree, env, pointer, &var pointer_type) |failed| {
+        return move failed;
+    }
+    var ignored = empty_name();
+    if try self.read_expr(tree, env, count, &var ignored) |failed| {
+        return move failed;
+    }
+    let element = try self.names.raw_pointer_element(pointer_type) orelse pointer_type;
+    let elem = try self.names.trim_prefix(element, "const ");
+    let view_type = try self.names.prefixed("[]", elem);
+    let name = try self.names.intern_text(tree, statement.name);
+    var value = self.store.new_binding(name, view_type);
+    errdefer value.deinit(self.allocator);
+    value.borrowed_param = true;
+    value.local_borrow = true;
+    value.mut_borrow = is_mutable;
     let _ = try self.define(env, move value);
     return null;
 }

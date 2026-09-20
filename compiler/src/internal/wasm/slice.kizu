@@ -17,6 +17,9 @@ fn (self: &var Emitter) write_slice_instr(
     if node.op == ir::Op::SlicePtr {
         return self.write_slice_ptr(module, node);
     }
+    if node.op == ir::Op::SliceFromPtr {
+        return self.write_slice_from_ptr(module, node);
+    }
     if node.op == ir::Op::SliceIndex {
         return self.write_slice_index(module, node);
     }
@@ -102,6 +105,68 @@ fn (self: &var Emitter) write_slice_ptr(
     }
     let pointer = try self.view_pointer(module, arg);
     return self.write_scalar_result(module, node.result, pointer);
+}
+
+/// Writes a view descriptor over raw memory, the Go `writeSliceFromPtr`: the
+/// pointer word is the address as given, the length word the count.
+fn (self: &var Emitter) write_slice_from_ptr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse ir::empty_value();
+    let count = node.args.get(1) orelse ir::empty_value();
+    if node.args.len() != 2 or !module.names.starts_with(node.result.type_name, "[]") or
+        !module.names.starts_with(pointer.type_name, "ptr<") or
+        !module.names.is(count.type_name, "i64") {
+        return try self.fail0("wasm error: slice.from_ptr expects ptr<T>, i64 -> []T");
+    }
+    let slot = try self.result_slot(module, node.result) orelse
+        return try self.fail0("wasm error: no frame slot for slice result");
+    let address = try self.value_of(module, pointer);
+    let length = try self.value_of(module, count);
+    try self.line2("            (i32.store %s %s)", Arg::Str(slot), Arg::Str(address.expr));
+    let length_expr = try self.names.wrapped("(i32.wrap_i64 ", length.expr, ")");
+    let length_address = try self.address_at(slot, 4);
+    try self.line2("            (i32.store %s %s)",
+        Arg::Str(length_address), Arg::Str(length_expr));
+    try self.set_value(module, node.result, slot);
+    return null;
+}
+
+/// Steps a raw pointer by a count of its elements, each the width of the
+/// element's layout, the Go `writePtrOffset`.
+fn (self: &var Emitter) write_ptr_offset(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse ir::empty_value();
+    let count = node.args.get(1) orelse ir::empty_value();
+    let pointer_text = ir::name_text(&module.names, pointer.type_name);
+    let pointer_bytes = pointer_text.as_bytes();
+    let closed = mem::len(pointer_bytes) > 4 and
+        pointer_bytes[mem::len(pointer_bytes) - 1] == cast<u8>(62);
+    if node.args.len() != 2 or !mem::starts_with(pointer_bytes, "ptr<") or !closed or
+        !module.names.is(count.type_name, "i64") or
+        !ir::same_name(node.result.type_name, pointer.type_name) {
+        return try self.fail0("wasm error: ptr.offset expects ptr<T>, i64 -> ptr<T>");
+    }
+    var elem_start = 4;
+    if mem::starts_with(pointer_bytes[4..mem::len(pointer_bytes)], "const ") {
+        elem_start = 10;
+    }
+    let elem = pointer_bytes[elem_start..mem::len(pointer_bytes) - 1];
+    var cell = 0;
+    let measured = try self.view_cell(module, elem);
+    match measured {
+        Error(failed) => return move failed,
+        Cell(found) => {
+            cell = found;
+        },
+    }
+    let base = try self.value_of(module, pointer);
+    let step = try self.value_of(module, count);
+    let address = try self.element_address(base.expr, step.expr, cell);
+    return self.write_scalar_result(module, node.result, address);
 }
 
 fn (self: &var Emitter) write_slice_index(

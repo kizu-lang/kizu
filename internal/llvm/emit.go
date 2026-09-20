@@ -1183,6 +1183,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
+	case instr.Op == "ptr.offset":
+		return e.writePtrOffset(instr)
 	case instr.Op == "phi":
 		return e.writePhi(instr)
 	case instr.Op == "struct.new":
@@ -1566,6 +1568,8 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 		return e.writeSliceLen(instr)
 	case "slice.ptr":
 		return e.writeSlicePtr(instr)
+	case "slice.from_ptr":
+		return e.writeSliceFromPtr(instr)
 	case "slice.index":
 		return e.writeSliceIndex(instr)
 	case "slice.store":
@@ -2571,6 +2575,41 @@ func (e *emitter) writeSlicePtr(instr *ir.Instr) error {
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n",
 		resultName, slice.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeSliceFromPtr builds a view value from a raw pointer and a count.
+func (e *emitter) writeSliceFromPtr(instr *ir.Instr) error {
+	_, ok := viewElem(instr.Result.Type)
+	if len(instr.Args) != 2 || !ok || !isRawPointerType(instr.Args[0].Type) ||
+		instr.Args[1].Type != "i64" {
+		return fmt.Errorf("llvm error: slice.from_ptr expects ptr<T>, i64 -> []T")
+	}
+	pointer := e.value(instr.Args[0])
+	count := e.value(instr.Args[1])
+	resultName := localName(instr.Result.Name)
+	baseName := resultName + ".base"
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
+		baseName, pointer.operand)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n",
+		resultName, baseName, count.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writePtrOffset steps a raw pointer by a count of its elements.
+func (e *emitter) writePtrOffset(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || !isRawPointerType(instr.Args[0].Type) ||
+		instr.Args[1].Type != "i64" || instr.Result.Type != instr.Args[0].Type {
+		return fmt.Errorf("llvm error: ptr.offset expects ptr<T>, i64 -> ptr<T>")
+	}
+	elem := derefLLVMType(instr.Args[0].Type)
+	pointer := e.value(instr.Args[0])
+	count := e.value(instr.Args[1])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+		resultName, e.llvmType(elem), pointer.operand, count.operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

@@ -1,0 +1,272 @@
+// Raw memory becomes a view with `view_from_ptr(p, count)`, or a writable
+// one with `let v = mut_view_from_ptr(p, count)`, and `ptr_offset(p, count)`
+// steps a pointer by elements. All three are `unsafe`: nothing checks that
+// count elements are there, or that they stay there while the view is used.
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+fn sum(values: []i64, count: i64) -> i64 {
+    var total: i64 = 0;
+    for 0..count |index| {
+        total = total + values[index];
+    }
+    return total;
+}
+
+fn main() -> void {
+    // SAFETY: 4 i64 cells are 32 bytes, and the block is freed below.
+    let block = unsafe malloc(32);
+    // SAFETY: the block holds 4 i64 cells and nothing else reads it yet.
+    let cells = unsafe cast<ptr<i64>>(block);
+    // SAFETY: the block has room for 4 cells, as allocated above.
+    let values = unsafe mut_view_from_ptr(cells, 4);
+    values[0] = 10;
+    values[1] = 20;
+    values[2] = 30;
+    values[3] = 40;
+    print(sum(values, 4));
+    // SAFETY: cell 2 is inside the 4-cell block, and 2 cells follow it.
+    let tail = unsafe ptr_offset(cells, 2);
+    // SAFETY: 2 cells follow the pointer inside the block.
+    let last_two = unsafe view_from_ptr(tail, 2);
+    print(sum(last_two, 2));
+    // SAFETY: block came from malloc above and no view of it is used again.
+    unsafe free(block);
+    return;
+}
+
+// run
+// features: extern-c raw-pointer view
+// output:
+// 100
+// 70
+
+// ir
+// lower:
+// fn sum(%values: []i64, %count: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 0
+//   jump for.header.1
+// for.header.1:
+//   %3: i64 = phi [entry, %1: i64], [for.step.3, %11: i64]
+//   %4: i64 = phi [entry, %2: i64], [for.step.3, %13: i64]
+//   %5: bool = binary.< %4: i64, %count: i64
+//   branch %5: bool, for.body.2, for.end.4
+// for.body.2:
+//   %6: i64 = slice.len %values: []i64
+//   %7: u64 = cast %4: i64, u64
+//   %8: u64 = cast %6: i64, u64
+//   %9: bool = binary.>= %7: u64, %8: u64
+//   cond_fail %9: bool, bounds(%4: i64, %6: i64)
+//   %10: i64 = slice.index %values: []i64, %4: i64
+//   %11: i64 = binary.+ %3: i64, %10: i64
+//   jump for.step.3
+// for.step.3:
+//   %12: i64 = const 1
+//   %13: i64 = binary.+ %4: i64, %12: i64
+//   jump for.header.1
+// for.end.4:
+//   return %3: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 32
+//   %2: ptr<u8> = extern "c" call.malloc %1: usize
+//   %3: ptr<i64> = cast %2: ptr<u8>, ptr<i64>
+//   %4: i64 = const 4
+//   %5: []i64 = slice.from_ptr %3: ptr<i64>, %4: i64
+//   %6: i64 = const 10
+//   %7: i64 = const 0
+//   %8: i64 = slice.len %5: []i64
+//   %9: u64 = cast %7: i64, u64
+//   %10: u64 = cast %8: i64, u64
+//   %11: bool = binary.>= %9: u64, %10: u64
+//   cond_fail %11: bool, bounds(%7: i64, %8: i64)
+//   slice.store %5: []i64, %7: i64, %6: i64
+//   %13: i64 = const 20
+//   %14: i64 = const 1
+//   %15: i64 = slice.len %5: []i64
+//   %16: u64 = cast %14: i64, u64
+//   %17: u64 = cast %15: i64, u64
+//   %18: bool = binary.>= %16: u64, %17: u64
+//   cond_fail %18: bool, bounds(%14: i64, %15: i64)
+//   slice.store %5: []i64, %14: i64, %13: i64
+//   %20: i64 = const 30
+//   %21: i64 = const 2
+//   %22: i64 = slice.len %5: []i64
+//   %23: u64 = cast %21: i64, u64
+//   %24: u64 = cast %22: i64, u64
+//   %25: bool = binary.>= %23: u64, %24: u64
+//   cond_fail %25: bool, bounds(%21: i64, %22: i64)
+//   slice.store %5: []i64, %21: i64, %20: i64
+//   %27: i64 = const 40
+//   %28: i64 = const 3
+//   %29: i64 = slice.len %5: []i64
+//   %30: u64 = cast %28: i64, u64
+//   %31: u64 = cast %29: i64, u64
+//   %32: bool = binary.>= %30: u64, %31: u64
+//   cond_fail %32: bool, bounds(%28: i64, %29: i64)
+//   slice.store %5: []i64, %28: i64, %27: i64
+//   %34: i64 = const 4
+//   %35: i64 = call.sum %5: []i64, %34: i64
+//   call.std::fmt::print.i64 %35: i64
+//   %37: i64 = const 2
+//   %38: ptr<i64> = ptr.offset %3: ptr<i64>, %37: i64
+//   %39: i64 = const 2
+//   %40: []i64 = slice.from_ptr %38: ptr<i64>, %39: i64
+//   %41: i64 = const 2
+//   %42: i64 = call.sum %40: []i64, %41: i64
+//   call.std::fmt::print.i64 %42: i64
+//   extern "c" call.free %2: ptr<u8>
+//   return void: void
+// }
+// opt:
+// fn sum(%values: []i64, %count: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 0
+//   jump for.header.1
+// for.header.1:
+//   %3: i64 = phi [entry, %1: i64], [for.step.3, %11: i64]
+//   %4: i64 = phi [entry, %2: i64], [for.step.3, %13: i64]
+//   %5: bool = binary.< %4: i64, %count: i64
+//   branch %5: bool, for.body.2, for.end.4
+// for.body.2:
+//   %6: i64 = slice.len %values: []i64
+//   %7: u64 = cast %4: i64, u64
+//   %8: u64 = cast %6: i64, u64
+//   %9: bool = binary.>= %7: u64, %8: u64
+//   cond_fail %9: bool, bounds(%4: i64, %6: i64)
+//   %10: i64 = slice.index %values: []i64, %4: i64
+//   %11: i64 = binary.+ %3: i64, %10: i64
+//   jump for.step.3
+// for.step.3:
+//   %12: i64 = const 1
+//   %13: i64 = binary.+ %4: i64, %12: i64
+//   jump for.header.1
+// for.end.4:
+//   return %3: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 32
+//   %2: ptr<u8> = extern "c" call.malloc %1: usize
+//   %3: ptr<i64> = cast %2: ptr<u8>, ptr<i64>
+//   %4: i64 = const 4
+//   %5: []i64 = slice.from_ptr %3: ptr<i64>, %4: i64
+//   %6: i64 = const 10
+//   %7: i64 = const 0
+//   %8: i64 = slice.len %5: []i64
+//   %9: u64 = cast %7: i64, u64
+//   %10: u64 = cast %8: i64, u64
+//   %11: bool = binary.>= %9: u64, %10: u64
+//   cond_fail %11: bool, bounds(%7: i64, %8: i64)
+//   slice.store %5: []i64, %7: i64, %6: i64
+//   %13: i64 = const 20
+//   %14: i64 = const 1
+//   %16: u64 = cast %14: i64, u64
+//   %17: u64 = cast %8: i64, u64
+//   %18: bool = binary.>= %16: u64, %17: u64
+//   cond_fail %18: bool, bounds(%14: i64, %8: i64)
+//   slice.store %5: []i64, %14: i64, %13: i64
+//   %20: i64 = const 30
+//   %21: i64 = const 2
+//   %23: u64 = cast %21: i64, u64
+//   %24: u64 = cast %8: i64, u64
+//   %25: bool = binary.>= %23: u64, %24: u64
+//   cond_fail %25: bool, bounds(%21: i64, %8: i64)
+//   slice.store %5: []i64, %21: i64, %20: i64
+//   %27: i64 = const 40
+//   %28: i64 = const 3
+//   %30: u64 = cast %28: i64, u64
+//   %31: u64 = cast %8: i64, u64
+//   %32: bool = binary.>= %30: u64, %31: u64
+//   cond_fail %32: bool, bounds(%28: i64, %8: i64)
+//   slice.store %5: []i64, %28: i64, %27: i64
+//   %34: i64 = const 4
+//   %35: i64 = call.sum %5: []i64, %34: i64
+//   %in1.1: i64 = cast %35: i64, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   %37: i64 = const 2
+//   %38: ptr<i64> = ptr.offset %3: ptr<i64>, %37: i64
+//   %39: i64 = const 2
+//   %40: []i64 = slice.from_ptr %38: ptr<i64>, %39: i64
+//   %41: i64 = const 2
+//   %42: i64 = call.sum %40: []i64, %41: i64
+//   %in2.1: i64 = cast %42: i64, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   extern "c" call.free %2: ptr<u8>
+//   return void: void
+// }
+// opt wasm:
+// fn sum(%values: []i64, %count: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump for.header.1
+// for.header.1:
+//   %5: bool = binary.< %1: i64, %count: i64
+//   branch %5: bool, for.body.2, for.end.4
+// for.body.2:
+//   %rot1.b.4: i64 = phi [for.header.1, %1: i64], [for.step.3, %13: i64]
+//   %rot1.b.3: i64 = phi [for.header.1, %1: i64], [for.step.3, %11: i64]
+//   %6: i64 = slice.len %values: []i64
+//   %7: u64 = cast %rot1.b.4: i64, u64
+//   %8: u64 = cast %6: i64, u64
+//   %9: bool = binary.>= %7: u64, %8: u64
+//   cond_fail %9: bool, bounds(%rot1.b.4: i64, %6: i64)
+//   %10: i64 = slice.index %values: []i64, %rot1.b.4: i64
+//   %11: i64 = binary.+ %rot1.b.3: i64, %10: i64
+//   jump for.step.3
+// for.step.3:
+//   %12: i64 = const 1
+//   %13: i64 = binary.+ %rot1.b.4: i64, %12: i64
+//   %rot1.l0.5: bool = binary.< %13: i64, %count: i64
+//   branch %rot1.l0.5: bool, for.body.2, for.end.4
+// for.end.4:
+//   %rot1.x.3: i64 = phi [for.header.1, %1: i64], [for.step.3, %11: i64]
+//   return %rot1.x.3: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 32
+//   %2: ptr<u8> = extern "c" call.malloc %1: usize
+//   %3: ptr<i64> = cast %2: ptr<u8>, ptr<i64>
+//   %4: i64 = const 4
+//   %5: []i64 = slice.from_ptr %3: ptr<i64>, %4: i64
+//   %6: i64 = const 10
+//   %7: i64 = const 0
+//   %8: i64 = slice.len %5: []i64
+//   %9: u64 = cast %7: i64, u64
+//   %10: u64 = cast %8: i64, u64
+//   %11: bool = binary.>= %9: u64, %10: u64
+//   cond_fail %11: bool, bounds(%7: i64, %8: i64)
+//   slice.store %5: []i64, %7: i64, %6: i64
+//   %13: i64 = const 20
+//   %14: i64 = const 1
+//   %16: u64 = cast %14: i64, u64
+//   %18: bool = binary.>= %16: u64, %10: u64
+//   cond_fail %18: bool, bounds(%14: i64, %8: i64)
+//   slice.store %5: []i64, %14: i64, %13: i64
+//   %20: i64 = const 30
+//   %21: i64 = const 2
+//   %23: u64 = cast %21: i64, u64
+//   %25: bool = binary.>= %23: u64, %10: u64
+//   cond_fail %25: bool, bounds(%21: i64, %8: i64)
+//   slice.store %5: []i64, %21: i64, %20: i64
+//   %27: i64 = const 40
+//   %28: i64 = const 3
+//   %30: u64 = cast %28: i64, u64
+//   %32: bool = binary.>= %30: u64, %10: u64
+//   cond_fail %32: bool, bounds(%28: i64, %8: i64)
+//   slice.store %5: []i64, %28: i64, %27: i64
+//   %35: i64 = call.sum %5: []i64, %4: i64
+//   %in1.1: i64 = cast %35: i64, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   %38: ptr<i64> = ptr.offset %3: ptr<i64>, %21: i64
+//   %40: []i64 = slice.from_ptr %38: ptr<i64>, %21: i64
+//   %42: i64 = call.sum %40: []i64, %21: i64
+//   %in2.1: i64 = cast %42: i64, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   extern "c" call.free %2: ptr<u8>
+//   return void: void
+// }

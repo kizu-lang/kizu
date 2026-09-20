@@ -865,6 +865,7 @@ fn (self: &var Emitter) write_slice_instr(module: &ir::Module, node: &ir::InstrN
     match node.op {
         SliceLen => return self.write_slice_len(module, node),
         SlicePtr => return self.write_slice_ptr(module, node),
+        SliceFromPtr => return self.write_slice_from_ptr(module, node),
         SliceIndex => return self.write_slice_index(module, node),
         SliceStore => return self.write_slice_store(module, node),
         SliceSlice => return self.write_slice_slice(module, node),
@@ -1005,6 +1006,50 @@ fn (self: &var Emitter) write_slice_ptr(module: &ir::Module, node: &ir::InstrNod
     let slice = try self.operand(module, node.args.get_or_panic(0));
     let result_name = try self.local_name(module, node.result.name);
     try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(result_name), Arg::Str(slice.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Builds a view value from a raw pointer and a count, the Go
+/// `writeSliceFromPtr`.
+fn (self: &var Emitter) write_slice_from_ptr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.starts_with(node.result.type_name, "[]") or
+        !module.names.starts_with(node.args.get_or_panic(0).type_name, "ptr<") or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
+        return try self.fail0("llvm error: slice.from_ptr expects ptr<T>, i64 -> []T");
+    }
+    let pointer = try self.operand(module, node.args.get_or_panic(0));
+    let count = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    let base_name = try self.suffixed(result_name, ".base");
+    try self.line2("  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0", Arg::Str(base_name), Arg::Str(pointer.operand));
+    try self.line3(
+        "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1",
+        Arg::Str(result_name), Arg::Str(base_name), Arg::Str(count.operand)
+    );
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Steps a raw pointer by a count of its elements, the Go `writePtrOffset`.
+fn (self: &var Emitter) write_ptr_offset(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let pointer_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
+    let pointer_bytes = pointer_text.as_bytes();
+    if node.args.len() != 2 or !is_raw_pointer_type(pointer_bytes) or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !ir::same_name(node.result.type_name, node.args.get_or_panic(0).type_name) {
+        return try self.fail0("llvm error: ptr.offset expects ptr<T>, i64 -> ptr<T>");
+    }
+    let elem = deref_llvm_type(pointer_bytes);
+    let elem_name = try self.llvm_type(module, elem);
+    let pointer = try self.operand(module, node.args.get_or_panic(0));
+    let count = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 %s",
+        Arg::Str(result_name), Arg::Str(elem_name), Arg::Str(pointer.operand), Arg::Str(count.operand)
+    );
     try self.set_value(module, node.result, result_name);
     return null;
 }
