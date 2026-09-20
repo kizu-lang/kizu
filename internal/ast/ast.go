@@ -110,7 +110,7 @@ type FunctionSignature struct {
 	ExternABI      string
 	ExportABI      string
 	// LinkLibrary and LinkFramework name what the native linker is handed to
-	// resolve an `extern "c"` symbol: `@link_lib("m")` becomes `-lm` and
+	// resolve an `extern "c"` symbol: `@link_library("m")` becomes `-lm` and
 	// `@link_framework("Accelerate")` becomes `-framework Accelerate`. Where
 	// the linker looks for them is the manifest's business (SPEC §12.2).
 	LinkLibrary   string
@@ -214,7 +214,7 @@ func (d *FunctionDecl) String() string {
 func linkAttributeText(sig FunctionSignature) string {
 	text := ""
 	if sig.LinkLibrary != "" {
-		text += "@link_lib(" + quote.Bytes(sig.LinkLibrary) + ")\n"
+		text += "@link_library(" + quote.Bytes(sig.LinkLibrary) + ")\n"
 	}
 	if sig.LinkFramework != "" {
 		text += "@link_framework(" + quote.Bytes(sig.LinkFramework) + ")\n"

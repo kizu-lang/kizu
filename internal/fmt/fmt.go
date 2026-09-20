@@ -433,7 +433,7 @@ func (b *builder) maybeBlankLineForTopLevel(t token.Token) {
 }
 
 // continuesAttribute reports whether the declaration being started belongs
-// to a `@link_lib` / `@link_framework` line above it, or is another such
+// to a `@link_library` / `@link_framework` line above it, or is another such
 // line; the attribute and its declaration are one declaration and stay
 // together.
 func (b *builder) continuesAttribute() bool {
