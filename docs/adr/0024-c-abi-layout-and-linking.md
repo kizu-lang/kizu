@@ -20,7 +20,7 @@ C ABI layout と linking はすべて明示する。
 ## C function linking
 
 `extern "c" fn` は C ABI call boundary を表す。symbol がどの library のものかは
-宣言の上の `@link_lib("x")` / `@link_framework("X")` が名指し、linker が
+宣言の上の `@link_library("x")` / `@link_framework("X")` が名指し、linker が
 それをどこで探すかは manifest の `[native]` が持つ(SPEC §3、§12.2)。
 
 分けた理由: 名前は宣言を読む人が知りたい情報で、在処は build する machine の

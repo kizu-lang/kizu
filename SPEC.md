@@ -178,7 +178,7 @@ directory は production module を作りません。したがって library pac
 root module を持たなくてもよく、std の source root 直下には production file を
 置きません。
 
-`[native]` は native link の探索 directory です。`@link_lib` / `@link_framework`
+`[native]` は native link の探索 directory です。`@link_library` / `@link_framework`
 (§12.2)が名指す library をどこで探すかだけを持ち、何を link するかは持ちません。
 相対 path は manifest のある directory から解決します。
 
@@ -2471,14 +2471,14 @@ library 指定も暗黙にしません。symbol がどの library のものか�
 宣言の上に attribute で書きます。
 
 ```kizu
-@link_lib("m")
+@link_library("m")
 extern "c" fn cbrt(value: f64) -> f64
 
 @link_framework("Accelerate")
 extern "c" fn vDSP_create_fftsetupD(log2n: u64, radix: i32) -> ptr<u8>
 ```
 
-* `@link_lib("x")` は linker に `-lx` を、`@link_framework("X")` は
+* `@link_library("x")` は linker に `-lx` を、`@link_framework("X")` は
   `-framework X` を渡します。attribute は `extern "c" fn` にだけ書け、それぞれ
   1 つの宣言に 1 回です。`@link_framework` は Darwin target でだけ build できます。
 * link されるのは、reachability を閉じた後に残った call が名指す宣言のものだけです。

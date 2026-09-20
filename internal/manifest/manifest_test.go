@@ -66,7 +66,7 @@ paths = ["src"]
 }
 
 // TestParseManifestNativeSearchPaths reads the `[native]` directories the
-// linker is told to look in for what `@link_lib` / `@link_framework` name.
+// linker is told to look in for what `@link_library` / `@link_framework` name.
 func TestParseManifestNativeSearchPaths(t *testing.T) {
 	source := `[package]
 name = "app"

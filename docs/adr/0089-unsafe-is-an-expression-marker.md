@@ -58,7 +58,7 @@ fn main() {
 ```
 
 Kizu がコンパイラ予約名を書く場所は 5 つあり、4 つは string literal である
-(`extern "c"`、`@repr("c")`、`@link_name("puts")`、`@link_lib("c")`)。
+(`extern "c"`、`@repr("c")`、`@link_name("puts")`、`@link_library("c")`)。
 `@unsafe(ptr_deref)` だけが裸の識別子を使っている。
 
 ### `@` は `unsafe` に対して仕事をしていない
@@ -66,7 +66,7 @@ Kizu がコンパイラ予約名を書く場所は 5 つあり、4 つは string
 `unsafe` は既に予約語である(`internal/token/token.go:92`)。`@unsafe` は
 `token.At` + `token.Unsafe` の 2 トークンで、`@` を外しても構文は一意に決まる。
 
-一方 `requires_unsafe` / `repr` / `link_name` / `link_lib` は予約語ではない。
+一方 `requires_unsafe` / `repr` / `link_name` / `link_library` は予約語ではない。
 これらの `@` は「予約語にせずに済ませる」という仕事をしている。`@unsafe` の
 `@` だけが重複している。
 
@@ -325,7 +325,7 @@ Rust では規約と lint だが、Kizu は言語規則にする。理由は 2 �
 ## 影響
 
 - `@unsafe(...)` 文は消える。`token.At` の文位置受け口(`internal/parser/parser.go:708`)
-  ごと削除する。`@` が付く語は `@repr` / `@link_name` / `@link_lib` だけになり、
+  ごと削除する。`@` が付く語は `@repr` / `@link_name` / `@link_library` だけになり、
   **`@` = 宣言に付く attribute、引数は string literal** という 1 本の規則に揃う
 - `unsafe` は 3 箇所に現れ、意味は 1 つ(コンパイラが証明しない。人間が持つ)
 

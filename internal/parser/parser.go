@@ -237,7 +237,7 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	return fn
 }
 
-// parseAttributedDecl parses the `@link_lib("...")` / `@link_framework("...")`
+// parseAttributedDecl parses the `@link_library("...")` / `@link_framework("...")`
 // lines above an extern declaration and the declaration they belong to. The
 // attributes name what the linker resolves the symbol from, so the only
 // declaration they can sit on is an `extern "c" fn` (SPEC §12.2).
@@ -250,11 +250,11 @@ func (p *Parser) parseAttributedDecl() ast.Decl {
 			return &ast.FunctionDecl{Doc: docs}
 		}
 		switch {
-		case name == "link_lib" && library == "":
+		case name == "link_library" && library == "":
 			library = value
 		case name == "link_framework" && framework == "":
 			framework = value
-		case name == "link_lib" || name == "link_framework":
+		case name == "link_library" || name == "link_framework":
 			p.errorf("parse error: duplicate attribute @%s", name)
 			return &ast.FunctionDecl{Doc: docs}
 		default:

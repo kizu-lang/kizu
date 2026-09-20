@@ -35,7 +35,7 @@ type Options struct {
 	Linker    string
 	Opt       bool
 	// Libraries and Frameworks are what the program's reached extern
-	// declarations named with `@link_lib` / `@link_framework`; the search
+	// declarations named with `@link_library` / `@link_framework`; the search
 	// paths are what its manifest's `[native]` section says about where the
 	// linker looks for them. Both are handed to the linker as written and
 	// key the executable, so a program that links another library is another
