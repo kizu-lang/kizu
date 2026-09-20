@@ -2767,9 +2767,34 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 				ident.Name, deinit)
 		}
 		return value, path, nil
+	case *ast.IndexExpr:
+		return c.sliceBorrowTarget(target, env)
 	default:
 		return nil, "", errorf("borrow error: borrow target must be a local binding or field path")
 	}
+}
+
+// sliceBorrowTarget resolves `&var v[a..b]`: a range of a writable view
+// binding. The borrow is of the whole binding, since which elements two
+// ranges share is not something the checker proves. The bounds are read
+// where the borrow expression itself is read, as any index is.
+func (c *Checker) sliceBorrowTarget(target *ast.IndexExpr, env *scope) (*binding, string, error) {
+	ident, ok := target.Target.(*ast.IdentExpr)
+	if !ok || !target.Slice {
+		return nil, "", errorAt(target.Span,
+			"borrow error: a borrowed range must be `v[a..b]` of a local view binding")
+	}
+	value, ok := env.lookup(ident.Name)
+	if !ok {
+		return nil, "", errorAt(ident.Span,
+			"borrow error: undefined variable `%s`", ident.Name)
+	}
+	if !value.mutBorrow || !isViewTypeName(value.typeName) {
+		return nil, "", errorAt(target.Span,
+			"borrow error: `&var %s[..]` needs a writable view binding (`&var []T`)",
+			ident.Name)
+	}
+	return value, "", nil
 }
 
 // activateBorrow records one active whole-value or field borrow on a target.

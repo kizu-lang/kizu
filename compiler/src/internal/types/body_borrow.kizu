@@ -19,7 +19,7 @@ fn (self: &var Checker) check_borrow_prefix(
     let retained = tree.texts.at(expression.operator.node);
     let operator = retained.as_bytes();
     let mutable = mem::equal_bytes(operator, "&var");
-    if try self.check_borrow_target_shape(tree, expression.right) |problem| {
+    if try self.check_borrow_target_shape(tree, expression.right, mutable) |problem| {
         return move problem;
     }
     var value_type = empty_type();
@@ -66,9 +66,15 @@ fn borrow_prefix(tree: &ast::Ast, expression: ast::Expression) -> BorrowPrefixRe
     return BorrowPrefixResult::None;
 }
 
+/// Restricts explicit borrows to direct locals or a field path rooted in
+/// one, and a `&var` borrow also to a range of a view binding, the Go
+/// `checkBorrowTargetShape`: `&var v[a..b]` lends part of a writable view
+/// for writing. The shared form has no borrow spelling, since `v[a..b]`
+/// already is the read-only view of the range.
 fn (self: &Checker) check_borrow_target_shape(
     tree: &ast::Ast,
-    expression: ast::Expression
+    expression: ast::Expression,
+    mutable: bool
 ) -> !?diagnostic::Diagnostic {
     match tree.expressions.at(expression.node) {
         Ident(_) => return null,
@@ -78,11 +84,42 @@ fn (self: &Checker) check_borrow_target_shape(
         path.deinit(self.allocator);
         return null;
     }
+    if slice_borrow_target(tree, expression) |_| {
+        if mutable {
+            return null;
+        }
+        return try self.checker_error_at(
+            "type error",
+            expression_span(tree, expression),
+            "a shared view of a range is the slice itself (`v[a..b]`); `&var` lends it for writing"
+        );
+    }
     return try self.checker_error_at(
         "type error",
         expression_span(tree, expression),
         "borrow target must be a local binding or field path"
     );
+}
+
+/// Recognizes `v[a..b]` under a `&var`, the Go `sliceBorrowTarget`: a range
+/// of a view named by a local binding, whose writable part the borrow hands
+/// out.
+fn slice_borrow_target(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IdentExpr {
+    match tree.expressions.at(expression.node) {
+        Index(index) => {
+            if !index.slice {
+                return null;
+            }
+            match tree.expressions.at(index.target.node) {
+                Ident(identifier) => return ast::IdentExpr {
+                    name: identifier.name,
+                    span: identifier.span
+                },
+                _ => return null,
+            }
+        },
+        _ => return null,
+    }
 }
 
 fn mutable_place_base(
@@ -111,6 +148,21 @@ fn (self: &Checker) require_mutable_borrow_arg(
     expression: ast::Expression,
     want: Type
 ) -> !?diagnostic::Diagnostic {
+    if slice_borrow_target(tree, expression) |ident| {
+        let retained = tree.texts.at(ident.name.node);
+        let name = retained.as_bytes();
+        if self.scopes.is_mut_borrowed(scope, name) {
+            return null;
+        }
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "`&var ");
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "[..]` needs a writable view binding (`&var []T`), `");
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "` is not one");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
     if self.types.is_slice_type(want) {
         match tree.expressions.at(expression.node) {
             Ident(identifier) => {

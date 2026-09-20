@@ -255,6 +255,7 @@ memory-safety invariants to representative examples.
 | mutable borrow requires mutable binding | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_immutable.kizu` |
 | shared and mutable borrows cannot conflict | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_conflict.kizu` |
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
+| `&var v[a..b]` lends a range of a writable view and borrows the whole view | `examples/writable_subview.kizu` | `examples/negative/subview_shared_source.kizu`, `examples/negative/subview_source_read.kizu`, `examples/negative/subview_overlap_args.kizu`, `examples/negative/subview_shared_prefix.kizu`, `examples/negative/subview_escape.kizu` |
 | `&var self` method requires a mutable receiver | `examples/mutable_self_method.kizu`, `tests/behavior/src/mutable_self_method/mutable_self_method_test.kizu` | `examples/negative/mutable_self_method_let_receiver.kizu` |
 | a call result receives a by-value method only as a copy value | `examples/method_on_call_result.kizu` | `examples/negative/method_on_call_result_borrow.kizu`, `examples/negative/method_on_call_result_mut.kizu`, `examples/negative/method_on_call_result_owner.kizu` |
 | arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
