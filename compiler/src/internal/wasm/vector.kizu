@@ -1,0 +1,199 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/vector.go. A vector `f64x2` and its kin
+// are the 128-bit `v128` of the simd proposal: a value type like a float,
+// living in a local, stored and loaded whole. Lane operations are spelled
+// with the shape prefix wasm uses, `f64x2.add`, which is the Kizu type name
+// itself.
+
+/// Returns the wasm value type one lane travels as outside the vector, the
+/// Go `vectorLaneWasmType`: a float lane is itself, an integer lane is the
+/// i32 or i64 the lane instructions take.
+fn vector_lane_wasm_type(elem: []u8) -> []u8 {
+    if mem::equal_bytes(elem, "f32") or mem::equal_bytes(elem, "f64") {
+        return elem;
+    }
+    if mem::equal_bytes(elem, "i64") or mem::equal_bytes(elem, "u64") {
+        return "i64";
+    }
+    return "i32";
+}
+
+/// Spells the lane read of one shape, the Go `vectorExtractLane`: the
+/// 16-bit shapes carry the sign in the instruction name.
+fn vector_extract_lane(elem: []u8) -> []u8 {
+    if mem::equal_bytes(elem, "i16") {
+        return "i16x8.extract_lane_s";
+    }
+    if mem::equal_bytes(elem, "u16") {
+        return "i16x8.extract_lane_u";
+    }
+    if mem::equal_bytes(elem, "f64") {
+        return "f64x2.extract_lane";
+    }
+    if mem::equal_bytes(elem, "f32") {
+        return "f32x4.extract_lane";
+    }
+    if mem::equal_bytes(elem, "i64") or mem::equal_bytes(elem, "u64") {
+        return "i64x2.extract_lane";
+    }
+    return "i32x4.extract_lane";
+}
+
+/// Maps a Kizu arithmetic operator on a vector kind (see `typ::vector_kind`)
+/// to the lane-wise wasm operation, the Go `wasmVectorBinaryOp`. The kind
+/// is a number so the name returned is tied to nothing.
+fn wasm_vector_binary_op(names: &ir::NameTable, op: ir::Name, kind: i64) -> []u8 {
+    if kind == 0 {
+        if names.is(op, "-") { return "f64x2.sub"; }
+        if names.is(op, "*") { return "f64x2.mul"; }
+        if names.is(op, "/") { return "f64x2.div"; }
+        return "f64x2.add";
+    }
+    if kind == 1 {
+        if names.is(op, "-") { return "f32x4.sub"; }
+        if names.is(op, "*") { return "f32x4.mul"; }
+        if names.is(op, "/") { return "f32x4.div"; }
+        return "f32x4.add";
+    }
+    if kind == 2 or kind == 5 {
+        if names.is(op, "-") { return "i64x2.sub"; }
+        if names.is(op, "*") { return "i64x2.mul"; }
+        return "i64x2.add";
+    }
+    if kind == 4 or kind == 7 {
+        if names.is(op, "-") { return "i16x8.sub"; }
+        if names.is(op, "*") { return "i16x8.mul"; }
+        return "i16x8.add";
+    }
+    if names.is(op, "-") { return "i32x4.sub"; }
+    if names.is(op, "*") { return "i32x4.mul"; }
+    return "i32x4.add";
+}
+
+/// Returns the shape prefix a signed-agnostic instruction uses: `u32x4` is
+/// spelled `i32x4` by wasm.
+fn vector_shape(typ: []u8) -> []u8 {
+    if mem::equal_bytes(typ, "u64x2") { return "i64x2"; }
+    if mem::equal_bytes(typ, "u32x4") { return "i32x4"; }
+    if mem::equal_bytes(typ, "u16x8") { return "i16x8"; }
+    return typ;
+}
+
+/// Appends one Kizu lane value narrowed to what replace_lane takes, the Go
+/// `vectorLaneIn`.
+fn (self: &var Emitter) append_vector_lane_in(
+    out: &var string::String,
+    elem: []u8,
+    value: ir::Name
+) -> !void {
+    if mem::equal_bytes(vector_lane_wasm_type(elem), "i32") {
+        try out.append_bytes(self.allocator, "(i32.wrap_i64 ");
+        try self.names.append_to(out, value);
+        try out.append_byte(self.allocator, cast<u8>(41));
+        return;
+    }
+    try self.names.append_to(out, value);
+    return;
+}
+
+/// Builds a vector from one value per lane, the Go `writeVectorNew`: a
+/// splat of the first lane, then a replace of each later one.
+fn (self: &var Emitter) write_vector_new(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let kind = typ::vector_kind(result_bytes);
+    if kind < 0 {
+        return try self.fail0("wasm error: vector.new expects a vector result");
+    }
+    let elem = typ::vector_lane_of_kind(kind);
+    let lanes = typ::vector_lanes(result_bytes);
+    if node.args.len() != lanes {
+        return try self.fail0("wasm error: vector.new expects one value per lane");
+    }
+    let shape = vector_shape(result_bytes);
+    // The nesting is written front to back: every replace opens first, the
+    // splat sits innermost, and each later lane closes one replace.
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    var open = lanes - 1;
+    while open >= 1 {
+        try expression.append_byte(self.allocator, cast<u8>(40));
+        try expression.append_bytes(self.allocator, shape);
+        try expression.append_bytes(self.allocator, ".replace_lane ");
+        try fmt::append_i64(self.allocator, &var expression, open);
+        try expression.append_byte(self.allocator, cast<u8>(32));
+        open = open - 1;
+    }
+    let first = try self.arg_expr(module, node, 0);
+    try expression.append_byte(self.allocator, cast<u8>(40));
+    try expression.append_bytes(self.allocator, shape);
+    try expression.append_bytes(self.allocator, ".splat ");
+    try self.append_vector_lane_in(&var expression, elem, first);
+    try expression.append_byte(self.allocator, cast<u8>(41));
+    var index = 1;
+    while index < lanes {
+        let lane = try self.arg_expr(module, node, index);
+        try expression.append_byte(self.allocator, cast<u8>(32));
+        try self.append_vector_lane_in(&var expression, elem, lane);
+        try expression.append_byte(self.allocator, cast<u8>(41));
+        index = index + 1;
+    }
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
+}
+
+/// Reads one lane, the Go `writeVectorLane`; the lane index is the
+/// instruction's immediate, and an integer lane is widened back to the i64
+/// it lives in, with the sign the lane type has.
+fn (self: &var Emitter) write_vector_lane(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: vector.lane expects one vector");
+    }
+    let vector = node.args.get_or_panic(0);
+    let vector_text = ir::name_text(&module.names, vector.type_name);
+    let vector_bytes = vector_text.as_bytes();
+    let kind = typ::vector_kind(vector_bytes);
+    if kind < 0 {
+        return try self.fail0("wasm error: vector.lane expects a vector");
+    }
+    let elem = typ::vector_lane_of_kind(kind);
+    if !module.names.is(node.result.type_name, elem) {
+        return try self.fail0("wasm error: vector.lane result must be the lane type");
+    }
+    let value = try self.arg_expr(module, node, 0);
+    var expression = string::new(self.allocator);
+    errdefer expression.deinit(self.allocator);
+    let narrow = mem::equal_bytes(vector_lane_wasm_type(elem), "i32");
+    if narrow {
+        if mem::starts_with(elem, "u") {
+            try expression.append_bytes(self.allocator, "(i64.extend_i32_u ");
+        } else {
+            try expression.append_bytes(self.allocator, "(i64.extend_i32_s ");
+        }
+    }
+    try expression.append_byte(self.allocator, cast<u8>(40));
+    try expression.append_bytes(self.allocator, vector_extract_lane(elem));
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    let immediate = try self.own(module, node.immediate);
+    try self.names.append_to(&var expression, immediate);
+    try expression.append_byte(self.allocator, cast<u8>(32));
+    try self.names.append_to(&var expression, value);
+    try expression.append_byte(self.allocator, cast<u8>(41));
+    if narrow {
+        try expression.append_byte(self.allocator, cast<u8>(41));
+    }
+    let expr = try self.names.intern_owned(move expression);
+    return self.write_scalar_result(module, node.result, expr);
+}

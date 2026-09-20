@@ -1,6 +1,7 @@
 import compiler::internal::ir;
 import compiler::internal::stdfmt;
 import compiler::internal::typ;
+import std::fmt;
 import std::mem;
 import std::string;
 
@@ -65,8 +66,41 @@ fn llvm_primitive_type(typ_name: []u8) -> []u8 {
     return "ptr";
 }
 
+/// Spells a vector type, `<2 x double>`, the vector arm of the Go
+/// `llvmPrimitiveType`; a vector is the one primitive whose spelling is
+/// built rather than named.
+fn append_llvm_vector_type(allocator: Allocator, out: &var string::String, typ_name: []u8) -> !bool {
+    let kind = typ::vector_kind(typ_name);
+    if kind < 0 {
+        return false;
+    }
+    let lane = typ::vector_lane_of_kind(kind);
+    try out.append_byte(allocator, cast<u8>(60));
+    try fmt::append_i64(allocator, out, typ::vector_lanes(typ_name));
+    try out.append_bytes(allocator, " x ");
+    try out.append_bytes(allocator, llvm_primitive_type(lane));
+    try out.append_byte(allocator, cast<u8>(62));
+    return true;
+}
+
+/// Returns the scalar an arithmetic instruction works in, the Go
+/// `laneType`: the lane of a vector, or the type itself.
+fn lane_type(typ_name: []u8) -> []u8 {
+    let kind = typ::vector_kind(typ_name);
+    if kind >= 0 {
+        return typ::vector_lane_of_kind(kind);
+    }
+    return typ_name;
+}
+
 /// Maps Kizu IR types to LLVM IR types, the Go `llvmType`.
 fn (self: &var Emitter) llvm_type(module: &ir::Module, typ_name: []u8) -> !ir::Name {
+    if typ::is_vector(typ_name) {
+        var spelled = string::new(self.allocator);
+        errdefer spelled.deinit(self.allocator);
+        let _ = try append_llvm_vector_type(self.allocator, &var spelled, typ_name);
+        return self.names.intern_owned(move spelled);
+    }
     if try self.error_union_success_type(typ_name) |success| {
         defer success.deinit(self.allocator);
         return self.llvm_error_union_type_name(typ_name);
@@ -209,6 +243,15 @@ fn is_unsigned_integer_type(typ_name: []u8) -> bool {
 /// instruction carries. Division and remainder read the sign of the type;
 /// the rest are the same for both.
 fn llvm_binary_op(names: &ir::NameTable, op: ir::Name, typ_name: ir::Name) -> []u8 {
+    let retained = ir::name_text(names, typ_name);
+    let bytes = retained.as_bytes();
+    return llvm_binary_op_signed(names, op, is_unsigned_integer_type(bytes));
+}
+
+/// Maps a Kizu binary operator to an LLVM integer instruction given only
+/// whether the type is unsigned: the one fact the choice reads, so a vector
+/// can hand over its lane's without a spelling.
+fn llvm_binary_op_signed(names: &ir::NameTable, op: ir::Name, unsigned: bool) -> []u8 {
     if names.is(op, "+") {
         return "add";
     }
@@ -218,16 +261,14 @@ fn llvm_binary_op(names: &ir::NameTable, op: ir::Name, typ_name: ir::Name) -> []
     if names.is(op, "*") {
         return "mul";
     }
-    let retained = ir::name_text(names, typ_name);
-    let bytes = retained.as_bytes();
     if names.is(op, "/") {
-        if is_unsigned_integer_type(bytes) {
+        if unsigned {
             return "udiv";
         }
         return "sdiv";
     }
     if names.is(op, "%") {
-        if is_unsigned_integer_type(bytes) {
+        if unsigned {
             return "urem";
         }
         return "srem";

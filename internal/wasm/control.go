@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"fmt"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"strconv"
 	"strings"
 
@@ -106,6 +107,8 @@ func (e *emitter) writeMemoryInstr(instr *ir.Instr) error {
 		return e.writeRefLoad(instr)
 	case strings.HasPrefix(instr.Op, "union."):
 		return e.writeUnionInstr(instr)
+	case strings.HasPrefix(instr.Op, "vector."):
+		return e.writeVectorInstr(instr)
 	case strings.HasPrefix(instr.Op, "slice."):
 		return e.writeSliceInstr(instr)
 	case isTaggedOwnerOp(instr.Op):
@@ -337,6 +340,9 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	if isFloatType(instr.Result.Type) {
 		wasmOp = wasmFloatBinaryOp(op, instr.Result.Type)
 	}
+	if typ.IsVector(instr.Result.Type) {
+		wasmOp = wasmVectorBinaryOp(op, instr.Result.Type)
+	}
 	if instr.Result.Type == "bool" {
 		wasmOp = wasmCompareOp(op, instr.Args[0].Type)
 		if instr.Args[0].Type == "bool" {
@@ -376,7 +382,7 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 		}
 		expr = "(i32.eqz " + value + ")"
 	case "-":
-		if isFloatType(instr.Result.Type) {
+		if isFloatType(instr.Result.Type) || typ.IsVector(instr.Result.Type) {
 			expr = "(" + instr.Result.Type + ".neg " + value + ")"
 			break
 		}

@@ -162,6 +162,12 @@ fn (self: &var Emitter) write_instr_node(
     if node.op == ir::Op::BufferNew or node.op == ir::Op::BufferAsBytes {
         return self.write_buffer_instr(module, node);
     }
+    if node.op == ir::Op::VectorNew {
+        return self.write_vector_new(module, node);
+    }
+    if node.op == ir::Op::VectorLane {
+        return self.write_vector_lane(module, node);
+    }
     if node.op == ir::Op::StructNew {
         return self.write_struct_new(module, node);
     }
@@ -389,6 +395,12 @@ fn binary_operation(module: &ir::Module, node: &ir::InstrNode) -> []u8 {
     if is_float_type(&module.names, node.result.type_name) {
         return wasm_float_binary_op(&module.names, node.operand, node.result.type_name);
     }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let kind = typ::vector_kind(result_bytes);
+    if kind >= 0 {
+        return wasm_vector_binary_op(&module.names, node.operand, kind);
+    }
     return wasm_binary_op(&module.names, node.operand, node.result.type_name);
 }
 
@@ -481,9 +493,12 @@ fn (self: &var Emitter) write_unary(
                 expression.deinit(self.allocator);
                 return try self.fail_op(module, node, "wasm error: unsupported unary `%s`");
             }
-            if is_float_type(&module.names, node.result.type_name) {
+            let result_text = ir::name_text(&module.names, node.result.type_name);
+            let result_bytes = result_text.as_bytes();
+            if is_float_type(&module.names, node.result.type_name) or
+                typ::is_vector(result_bytes) {
                 try expression.append_byte(self.allocator, cast<u8>(40));
-                try expression.append_bytes(self.allocator, wasm_type(module, node.result.type_name));
+                try expression.append_bytes(self.allocator, result_bytes);
                 try expression.append_bytes(self.allocator, ".neg ");
                 try self.names.append_to(&var expression, value);
                 try expression.append_byte(self.allocator, cast<u8>(41));

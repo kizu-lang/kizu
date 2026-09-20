@@ -195,6 +195,15 @@ func (l *lowerer) collectMutBorrowsExpr(expr ast.Expression, found map[string]bo
 	return nil
 }
 
+// literalValues returns the expressions a struct or vector literal is built
+// from: the field values, or the lanes.
+func literalValues(expr ast.Expression) []ast.Expression {
+	if vector, ok := expr.(*ast.VectorLiteralExpr); ok {
+		return vector.Lanes
+	}
+	return structLiteralValues(expr.(*ast.StructLiteralExpr))
+}
+
 // expressionChildren returns the expressions written inside expr, and reports
 // whether the node is one this walk knows.
 func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
@@ -224,8 +233,8 @@ func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 		return []ast.Expression{e.Receiver}, true
 	case *ast.IndexExpr:
 		return []ast.Expression{e.Target, e.Index, e.Start, e.End}, true
-	case *ast.StructLiteralExpr:
-		return structLiteralValues(e), true
+	case *ast.StructLiteralExpr, *ast.VectorLiteralExpr:
+		return literalValues(e), true
 	case *ast.CallExpr:
 		return append([]ast.Expression{e.Callee}, e.Args...), true
 	default:

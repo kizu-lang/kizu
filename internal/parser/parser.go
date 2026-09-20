@@ -1552,6 +1552,9 @@ func (p *Parser) parseIdentPrefixExpression() ast.Expression {
 	if p.peek.Type == token.LBrace && startsUpper(p.cur.Literal) {
 		return p.parseStructLiteralExpr(p.cur.Literal)
 	}
+	if p.peek.Type == token.LBrace && typ.IsVector(p.cur.Literal) {
+		return p.parseVectorLiteralExpr()
+	}
 	return &ast.IdentExpr{Name: p.cur.Literal, Span: tokenSpan(p.cur)}
 }
 
@@ -2156,6 +2159,22 @@ func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
 		p.nextToken()
 	}
 	p.expectListClose("struct literal")
+	return expr
+}
+
+// parseVectorLiteralExpr parses `f64x2{a, b}`: one expression per lane.
+func (p *Parser) parseVectorLiteralExpr() ast.Expression {
+	expr := &ast.VectorLiteralExpr{TypeName: p.cur.Literal, Span: tokenSpan(p.cur)}
+	p.nextToken()
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		expr.Lanes = append(expr.Lanes, p.parseExpression(lowest))
+		if !p.consumeListDelimiter("vector lane") {
+			return expr
+		}
+		p.nextToken()
+	}
+	p.expectListClose("vector literal")
 	return expr
 }
 

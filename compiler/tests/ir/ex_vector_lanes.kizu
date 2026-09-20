@@ -1,0 +1,514 @@
+import std::array;
+import std::mem;
+
+struct Complex {
+    pub re: f64,
+    pub im: f64,
+}
+
+// A complex product on one vector: (a.re + i a.im)(b.re + i b.im), with the
+// real parts of `a` spread over both lanes and the imaginary parts over a
+// swapped `b`, then signed so the lanes come out as (re, im).
+fn mul(a: f64x2, b: f64x2) -> f64x2 {
+    let a_re = f64x2 { a[0], a[0] };
+    let a_im = f64x2 { a[1], a[1] };
+    let b_swapped = f64x2 { b[1], b[0] };
+    return a_re * b + a_im * b_swapped * f64x2 { -1.0, 1.0 };
+}
+
+fn sum(values: []f64x2) -> f64x2 {
+    var total = f64x2 { 0.0, 0.0 };
+    for 0..mem::count<f64x2>(values) |i| {
+        total = total + values[i];
+    }
+    return total;
+}
+
+// A vector type is a fixed set of lanes in one 128-bit register: `f64x2` is
+// two f64, `i32x4` four i32. It is built from one value per lane, read a lane
+// at a time by a literal index, and combined lane by lane with the arithmetic
+// operators. A vector is copy data, so it sits in a struct, an Array or a
+// view like any number.
+fn main() -> !void {
+    let x = f64x2 { 1.0, 2.0 };
+    let y = f64x2 { 3.0, 4.0 };
+    let s = x + y;
+    print(cast<i64>(s[0]));
+    print(cast<i64>(s[1]));
+    let p = mul(x, y);
+    print(cast<i64>(p[0]));
+    print(cast<i64>(p[1]));
+    let n = -x;
+    print(cast<i64>(n[1]));
+
+    let c = Complex { re: p[0], im: p[1] };
+    let doubled = f64x2 { c.re, c.im }
+    * f64x2 { 2.0, 2.0 };
+    print(cast<i64>(doubled[0] + doubled[1]));
+
+    let q = i32x4 { 1, 2, 3, 4 }
+    * i32x4 { 2, 2, 2, 2 };
+    print(cast<i64>(q[3]));
+
+    let allocator = mem::page_allocator();
+    var values = array::new<f64x2>(allocator);
+    defer values.deinit(allocator);
+    for 0..5 |i| {
+        try values.append(allocator, f64x2 { cast<f64>(i), 1.0 });
+    }
+    let view = values.as_slice();
+    let total = sum(view);
+    print(cast<i64>(total[0]));
+    print(cast<i64>(total[1]));
+    return;
+}
+
+// run
+// features: vector simd struct std-array typed_view
+// output:
+// 4
+// 6
+// -5
+// 10
+// -2
+// 10
+// 8
+// 10
+// 5
+
+// ir
+// lower:
+// fn mul(%a: f64x2, %b: f64x2) -> f64x2 {
+// entry:
+//   %1: f64 = vector.lane %a: f64x2, 0
+//   %2: f64 = vector.lane %a: f64x2, 0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: f64 = vector.lane %a: f64x2, 1
+//   %5: f64 = vector.lane %a: f64x2, 1
+//   %6: f64x2 = vector.new %4: f64, %5: f64
+//   %7: f64 = vector.lane %b: f64x2, 1
+//   %8: f64 = vector.lane %b: f64x2, 0
+//   %9: f64x2 = vector.new %7: f64, %8: f64
+//   %10: f64x2 = binary.* %3: f64x2, %b: f64x2
+//   %11: f64x2 = binary.* %6: f64x2, %9: f64x2
+//   %12: f64 = const 1.0
+//   %13: f64 = unary.- %12: f64
+//   %14: f64 = const 1.0
+//   %15: f64x2 = vector.new %13: f64, %14: f64
+//   %16: f64x2 = binary.* %11: f64x2, %15: f64x2
+//   %17: f64x2 = binary.+ %10: f64x2, %16: f64x2
+//   return %17: f64x2
+// }
+// fn sum(%values: []f64x2) -> f64x2 {
+// entry:
+//   %1: f64 = const 0.0
+//   %2: f64 = const 0.0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: i64 = const 0
+//   %5: i64 = call.std::mem::count.f64x2 %values: []f64x2
+//   jump for.header.1
+// for.header.1:
+//   %6: f64x2 = phi [entry, %3: f64x2], [for.step.3, %14: f64x2]
+//   %7: i64 = phi [entry, %4: i64], [for.step.3, %16: i64]
+//   %8: bool = binary.< %7: i64, %5: i64
+//   branch %8: bool, for.body.2, for.end.4
+// for.body.2:
+//   %9: i64 = slice.len %values: []f64x2
+//   %10: u64 = cast %7: i64, u64
+//   %11: u64 = cast %9: i64, u64
+//   %12: bool = binary.>= %10: u64, %11: u64
+//   cond_fail %12: bool, bounds(%7: i64, %9: i64)
+//   %13: f64x2 = slice.index %values: []f64x2, %7: i64
+//   %14: f64x2 = binary.+ %6: f64x2, %13: f64x2
+//   jump for.step.3
+// for.step.3:
+//   %15: i64 = const 1
+//   %16: i64 = binary.+ %7: i64, %15: i64
+//   jump for.header.1
+// for.end.4:
+//   return %6: f64x2
+// }
+// fn main() -> !void {
+// entry:
+//   %1: f64 = const 1.0
+//   %2: f64 = const 2.0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: f64 = const 3.0
+//   %5: f64 = const 4.0
+//   %6: f64x2 = vector.new %4: f64, %5: f64
+//   %7: f64x2 = binary.+ %3: f64x2, %6: f64x2
+//   %8: f64 = vector.lane %7: f64x2, 0
+//   %9: i64 = cast %8: f64, i64
+//   call.std::fmt::print.i64 %9: i64
+//   %11: f64 = vector.lane %7: f64x2, 1
+//   %12: i64 = cast %11: f64, i64
+//   call.std::fmt::print.i64 %12: i64
+//   %14: f64x2 = call.mul %3: f64x2, %6: f64x2
+//   %15: f64 = vector.lane %14: f64x2, 0
+//   %16: i64 = cast %15: f64, i64
+//   call.std::fmt::print.i64 %16: i64
+//   %18: f64 = vector.lane %14: f64x2, 1
+//   %19: i64 = cast %18: f64, i64
+//   call.std::fmt::print.i64 %19: i64
+//   %21: f64x2 = unary.- %3: f64x2
+//   %22: f64 = vector.lane %21: f64x2, 1
+//   %23: i64 = cast %22: f64, i64
+//   call.std::fmt::print.i64 %23: i64
+//   %25: f64 = vector.lane %14: f64x2, 0
+//   %26: f64 = vector.lane %14: f64x2, 1
+//   %27: Complex = struct.new {re: %25: f64, im: %26: f64}
+//   %28: f64 = field.re %27: Complex
+//   %29: f64 = field.im %27: Complex
+//   %30: f64x2 = vector.new %28: f64, %29: f64
+//   %31: f64 = const 2.0
+//   %32: f64 = const 2.0
+//   %33: f64x2 = vector.new %31: f64, %32: f64
+//   %34: f64x2 = binary.* %30: f64x2, %33: f64x2
+//   %35: f64 = vector.lane %34: f64x2, 0
+//   %36: f64 = vector.lane %34: f64x2, 1
+//   %37: f64 = binary.+ %35: f64, %36: f64
+//   %38: i64 = cast %37: f64, i64
+//   call.std::fmt::print.i64 %38: i64
+//   %40: i32 = const 1
+//   %41: i32 = const 2
+//   %42: i32 = const 3
+//   %43: i32 = const 4
+//   %44: i32x4 = vector.new %40: i32, %41: i32, %42: i32, %43: i32
+//   %45: i32 = const 2
+//   %46: i32 = const 2
+//   %47: i32 = const 2
+//   %48: i32 = const 2
+//   %49: i32x4 = vector.new %45: i32, %46: i32, %47: i32, %48: i32
+//   %50: i32x4 = binary.* %44: i32x4, %49: i32x4
+//   %51: i32 = vector.lane %50: i32x4, 3
+//   %52: i64 = cast %51: i32, i64
+//   call.std::fmt::print.i64 %52: i64
+//   %54: Allocator = call.std::mem::page_allocator
+//   %55: std::array::Array<f64x2> = array.new %54: Allocator
+//   %56: &var std::array::Array<f64x2> = local.slot %55: std::array::Array<f64x2>
+//   %57: i64 = const 0
+//   %58: i64 = const 5
+//   jump for.header.1
+// for.header.1:
+//   %59: i64 = phi [entry, %57: i64], [for.step.3, %68: i64]
+//   %60: bool = binary.< %59: i64, %58: i64
+//   branch %60: bool, for.body.2, for.end.4
+// for.body.2:
+//   %61: f64 = cast %59: i64, f64
+//   %62: f64 = const 1.0
+//   %63: f64x2 = vector.new %61: f64, %62: f64
+//   %64: std::mem::Error!void = call.std::array::Array.append.f64x2 %56: &var std::array::Array<f64x2>, %54: Allocator, %63: f64x2
+//   %65: std::array::Array<f64x2> = ref.load %56: &var std::array::Array<f64x2>
+//   error.try %64: std::mem::Error!void, cleanup array.deinit %65: std::array::Array<f64x2>, %54: Allocator
+//   jump for.step.3
+// for.step.3:
+//   %67: i64 = const 1
+//   %68: i64 = binary.+ %59: i64, %67: i64
+//   jump for.header.1
+// for.end.4:
+//   %69: []f64x2 = call.std::array::Array.as_slice.f64x2 %56: &var std::array::Array<f64x2>
+//   %70: f64x2 = call.sum %69: []f64x2
+//   %71: f64 = vector.lane %70: f64x2, 0
+//   %72: i64 = cast %71: f64, i64
+//   call.std::fmt::print.i64 %72: i64
+//   %74: f64 = vector.lane %70: f64x2, 1
+//   %75: i64 = cast %74: f64, i64
+//   call.std::fmt::print.i64 %75: i64
+//   %77: std::array::Array<f64x2> = ref.load %56: &var std::array::Array<f64x2>
+//   array.deinit %77: std::array::Array<f64x2>, %54: Allocator
+//   %79: !void = error.ok
+//   return %79: !void
+// }
+// opt:
+// fn mul(%a: f64x2, %b: f64x2) -> f64x2 {
+// entry:
+//   %1: f64 = vector.lane %a: f64x2, 0
+//   %2: f64 = vector.lane %a: f64x2, 0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: f64 = vector.lane %a: f64x2, 1
+//   %5: f64 = vector.lane %a: f64x2, 1
+//   %6: f64x2 = vector.new %4: f64, %5: f64
+//   %7: f64 = vector.lane %b: f64x2, 1
+//   %8: f64 = vector.lane %b: f64x2, 0
+//   %9: f64x2 = vector.new %7: f64, %8: f64
+//   %10: f64x2 = binary.* %3: f64x2, %b: f64x2
+//   %11: f64x2 = binary.* %6: f64x2, %9: f64x2
+//   %12: f64 = const 1.0
+//   %13: f64 = unary.- %12: f64
+//   %14: f64 = const 1.0
+//   %15: f64x2 = vector.new %13: f64, %14: f64
+//   %16: f64x2 = binary.* %11: f64x2, %15: f64x2
+//   %17: f64x2 = binary.+ %10: f64x2, %16: f64x2
+//   return %17: f64x2
+// }
+// fn sum(%values: []f64x2) -> f64x2 {
+// entry:
+//   %1: f64 = const 0.0
+//   %2: f64 = const 0.0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: i64 = const 0
+//   %in1.1: i64 = slice.len %values: []f64x2
+//   jump for.header.1
+// for.header.1:
+//   %6: f64x2 = phi [entry, %3: f64x2], [for.step.3, %14: f64x2]
+//   %7: i64 = phi [entry, %4: i64], [for.step.3, %16: i64]
+//   %8: bool = binary.< %7: i64, %in1.1: i64
+//   branch %8: bool, for.body.2, for.end.4
+// for.body.2:
+//   %10: u64 = cast %7: i64, u64
+//   %11: u64 = cast %in1.1: i64, u64
+//   %12: bool = binary.>= %10: u64, %11: u64
+//   cond_fail %12: bool, bounds(%7: i64, %in1.1: i64)
+//   %13: f64x2 = slice.index %values: []f64x2, %7: i64
+//   %14: f64x2 = binary.+ %6: f64x2, %13: f64x2
+//   jump for.step.3
+// for.step.3:
+//   %15: i64 = const 1
+//   %16: i64 = binary.+ %7: i64, %15: i64
+//   jump for.header.1
+// for.end.4:
+//   return %6: f64x2
+// }
+// fn main() -> !void {
+// entry:
+//   %1: f64 = const 1.0
+//   %2: f64 = const 2.0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: f64 = const 3.0
+//   %5: f64 = const 4.0
+//   %6: f64x2 = vector.new %4: f64, %5: f64
+//   %7: f64x2 = binary.+ %3: f64x2, %6: f64x2
+//   %8: f64 = vector.lane %7: f64x2, 0
+//   %9: i64 = cast %8: f64, i64
+//   %in1.1: i64 = cast %9: i64, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   %11: f64 = vector.lane %7: f64x2, 1
+//   %12: i64 = cast %11: f64, i64
+//   %in2.1: i64 = cast %12: i64, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %14: f64x2 = call.mul %3: f64x2, %6: f64x2
+//   %15: f64 = vector.lane %14: f64x2, 0
+//   %16: i64 = cast %15: f64, i64
+//   %in3.1: i64 = cast %16: i64, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   %18: f64 = vector.lane %14: f64x2, 1
+//   %19: i64 = cast %18: f64, i64
+//   %in4.1: i64 = cast %19: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %21: f64x2 = unary.- %3: f64x2
+//   %22: f64 = vector.lane %21: f64x2, 1
+//   %23: i64 = cast %22: f64, i64
+//   %in5.1: i64 = cast %23: i64, i64
+//   call.std::fmt::write_i64 %in5.1: i64
+//   %25: f64 = vector.lane %14: f64x2, 0
+//   %26: f64 = vector.lane %14: f64x2, 1
+//   %27: Complex = struct.new {re: %25: f64, im: %26: f64}
+//   %28: f64 = field.re %27: Complex
+//   %29: f64 = field.im %27: Complex
+//   %30: f64x2 = vector.new %28: f64, %29: f64
+//   %31: f64 = const 2.0
+//   %32: f64 = const 2.0
+//   %33: f64x2 = vector.new %31: f64, %32: f64
+//   %34: f64x2 = binary.* %30: f64x2, %33: f64x2
+//   %35: f64 = vector.lane %34: f64x2, 0
+//   %36: f64 = vector.lane %34: f64x2, 1
+//   %37: f64 = binary.+ %35: f64, %36: f64
+//   %38: i64 = cast %37: f64, i64
+//   %in6.1: i64 = cast %38: i64, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   %40: i32 = const 1
+//   %41: i32 = const 2
+//   %42: i32 = const 3
+//   %43: i32 = const 4
+//   %44: i32x4 = vector.new %40: i32, %41: i32, %42: i32, %43: i32
+//   %45: i32 = const 2
+//   %46: i32 = const 2
+//   %47: i32 = const 2
+//   %48: i32 = const 2
+//   %49: i32x4 = vector.new %45: i32, %46: i32, %47: i32, %48: i32
+//   %50: i32x4 = binary.* %44: i32x4, %49: i32x4
+//   %51: i32 = vector.lane %50: i32x4, 3
+//   %52: i64 = cast %51: i32, i64
+//   %in7.1: i64 = cast %52: i64, i64
+//   call.std::fmt::write_i64 %in7.1: i64
+//   %in8.1: Allocator = call.std::internal::builtin::mem_page_allocator
+//   %55: std::array::Array<f64x2> = array.new %in8.1: Allocator
+//   %56: &var std::array::Array<f64x2> = local.slot %55: std::array::Array<f64x2>
+//   %57: i64 = const 0
+//   %58: i64 = const 5
+//   jump for.header.1
+// for.header.1:
+//   %59: i64 = phi [entry, %57: i64], [for.step.3, %68: i64]
+//   %60: bool = binary.< %59: i64, %58: i64
+//   branch %60: bool, for.body.2, for.end.4
+// for.body.2:
+//   %61: f64 = cast %59: i64, f64
+//   %62: f64 = const 1.0
+//   %63: f64x2 = vector.new %61: f64, %62: f64
+//   %in9.1: std::mem::Error!void = array.append %56: &var std::array::Array<f64x2>, %in8.1: Allocator, %63: f64x2
+//   %65: std::array::Array<f64x2> = ref.load %56: &var std::array::Array<f64x2>
+//   error.try %in9.1: std::mem::Error!void, cleanup array.deinit %65: std::array::Array<f64x2>, %in8.1: Allocator
+//   jump for.step.3
+// for.step.3:
+//   %67: i64 = const 1
+//   %68: i64 = binary.+ %59: i64, %67: i64
+//   jump for.header.1
+// for.end.4:
+//   %in10.1: []f64x2 = array.as_bytes %56: &var std::array::Array<f64x2>
+//   %70: f64x2 = call.sum %in10.1: []f64x2
+//   %71: f64 = vector.lane %70: f64x2, 0
+//   %72: i64 = cast %71: f64, i64
+//   %in11.1: i64 = cast %72: i64, i64
+//   call.std::fmt::write_i64 %in11.1: i64
+//   %74: f64 = vector.lane %70: f64x2, 1
+//   %75: i64 = cast %74: f64, i64
+//   %in12.1: i64 = cast %75: i64, i64
+//   call.std::fmt::write_i64 %in12.1: i64
+//   %77: std::array::Array<f64x2> = ref.load %56: &var std::array::Array<f64x2>
+//   array.deinit %77: std::array::Array<f64x2>, %in8.1: Allocator
+//   %79: !void = error.ok
+//   return %79: !void
+// }
+// opt wasm:
+// fn mul(%a: f64x2, %b: f64x2) -> f64x2 {
+// entry:
+//   %1: f64 = vector.lane %a: f64x2, 0
+//   %2: f64 = vector.lane %a: f64x2, 0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: f64 = vector.lane %a: f64x2, 1
+//   %5: f64 = vector.lane %a: f64x2, 1
+//   %6: f64x2 = vector.new %4: f64, %5: f64
+//   %7: f64 = vector.lane %b: f64x2, 1
+//   %8: f64 = vector.lane %b: f64x2, 0
+//   %9: f64x2 = vector.new %7: f64, %8: f64
+//   %10: f64x2 = binary.* %3: f64x2, %b: f64x2
+//   %11: f64x2 = binary.* %6: f64x2, %9: f64x2
+//   %12: f64 = const 1.0
+//   %13: f64 = unary.- %12: f64
+//   %15: f64x2 = vector.new %13: f64, %12: f64
+//   %16: f64x2 = binary.* %11: f64x2, %15: f64x2
+//   %17: f64x2 = binary.+ %10: f64x2, %16: f64x2
+//   return %17: f64x2
+// }
+// fn sum(%values: []f64x2) -> f64x2 {
+// entry:
+//   %1: f64 = const 0.0
+//   %3: f64x2 = vector.new %1: f64, %1: f64
+//   %4: i64 = const 0
+//   %in1.1: i64 = slice.len %values: []f64x2
+//   jump for.header.1
+// for.header.1:
+//   %8: bool = binary.< %4: i64, %in1.1: i64
+//   branch %8: bool, for.body.2, for.end.4
+// for.body.2:
+//   %rot1.b.7: i64 = phi [for.header.1, %4: i64], [for.step.3, %16: i64]
+//   %rot1.b.6: f64x2 = phi [for.header.1, %3: f64x2], [for.step.3, %14: f64x2]
+//   %10: u64 = cast %rot1.b.7: i64, u64
+//   %11: u64 = cast %in1.1: i64, u64
+//   %12: bool = binary.>= %10: u64, %11: u64
+//   cond_fail %12: bool, bounds(%rot1.b.7: i64, %in1.1: i64)
+//   %13: f64x2 = slice.index %values: []f64x2, %rot1.b.7: i64
+//   %14: f64x2 = binary.+ %rot1.b.6: f64x2, %13: f64x2
+//   jump for.step.3
+// for.step.3:
+//   %15: i64 = const 1
+//   %16: i64 = binary.+ %rot1.b.7: i64, %15: i64
+//   %rot1.l0.8: bool = binary.< %16: i64, %in1.1: i64
+//   branch %rot1.l0.8: bool, for.body.2, for.end.4
+// for.end.4:
+//   %rot1.x.6: f64x2 = phi [for.header.1, %3: f64x2], [for.step.3, %14: f64x2]
+//   return %rot1.x.6: f64x2
+// }
+// fn main() -> !void {
+// entry:
+//   %1: f64 = const 1.0
+//   %2: f64 = const 2.0
+//   %3: f64x2 = vector.new %1: f64, %2: f64
+//   %4: f64 = const 3.0
+//   %5: f64 = const 4.0
+//   %6: f64x2 = vector.new %4: f64, %5: f64
+//   %7: f64x2 = binary.+ %3: f64x2, %6: f64x2
+//   %8: f64 = vector.lane %7: f64x2, 0
+//   %9: i64 = cast %8: f64, i64
+//   %in1.1: i64 = cast %9: i64, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   %11: f64 = vector.lane %7: f64x2, 1
+//   %12: i64 = cast %11: f64, i64
+//   %in2.1: i64 = cast %12: i64, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %14: f64x2 = call.mul %3: f64x2, %6: f64x2
+//   %15: f64 = vector.lane %14: f64x2, 0
+//   %16: i64 = cast %15: f64, i64
+//   %in3.1: i64 = cast %16: i64, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   %18: f64 = vector.lane %14: f64x2, 1
+//   %19: i64 = cast %18: f64, i64
+//   %in4.1: i64 = cast %19: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %21: f64x2 = unary.- %3: f64x2
+//   %22: f64 = vector.lane %21: f64x2, 1
+//   %23: i64 = cast %22: f64, i64
+//   %in5.1: i64 = cast %23: i64, i64
+//   call.std::fmt::write_i64 %in5.1: i64
+//   %25: f64 = vector.lane %14: f64x2, 0
+//   %26: f64 = vector.lane %14: f64x2, 1
+//   %27: Complex = struct.new {re: %25: f64, im: %26: f64}
+//   %28: f64 = field.re %27: Complex
+//   %29: f64 = field.im %27: Complex
+//   %30: f64x2 = vector.new %28: f64, %29: f64
+//   %33: f64x2 = vector.new %2: f64, %2: f64
+//   %34: f64x2 = binary.* %30: f64x2, %33: f64x2
+//   %35: f64 = vector.lane %34: f64x2, 0
+//   %36: f64 = vector.lane %34: f64x2, 1
+//   %37: f64 = binary.+ %35: f64, %36: f64
+//   %38: i64 = cast %37: f64, i64
+//   %in6.1: i64 = cast %38: i64, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   %40: i32 = const 1
+//   %41: i32 = const 2
+//   %42: i32 = const 3
+//   %43: i32 = const 4
+//   %44: i32x4 = vector.new %40: i32, %41: i32, %42: i32, %43: i32
+//   %49: i32x4 = vector.new %41: i32, %41: i32, %41: i32, %41: i32
+//   %50: i32x4 = binary.* %44: i32x4, %49: i32x4
+//   %51: i32 = vector.lane %50: i32x4, 3
+//   %52: i64 = cast %51: i32, i64
+//   %in7.1: i64 = cast %52: i64, i64
+//   call.std::fmt::write_i64 %in7.1: i64
+//   %in8.1: Allocator = call.std::internal::builtin::mem_page_allocator
+//   %55: std::array::Array<f64x2> = array.new %in8.1: Allocator
+//   %56: &var std::array::Array<f64x2> = local.slot %55: std::array::Array<f64x2>
+//   %57: i64 = const 0
+//   %58: i64 = const 5
+//   jump for.header.1
+// for.header.1:
+//   jump for.body.2
+// for.body.2:
+//   %rot1.b.59: i64 = phi [for.header.1, %57: i64], [for.step.3, %68: i64]
+//   %61: f64 = cast %rot1.b.59: i64, f64
+//   %63: f64x2 = vector.new %61: f64, %1: f64
+//   %in9.1: std::mem::Error!void = array.append %56: &var std::array::Array<f64x2>, %in8.1: Allocator, %63: f64x2
+//   %65: std::array::Array<f64x2> = ref.load %56: &var std::array::Array<f64x2>
+//   error.try %in9.1: std::mem::Error!void, cleanup array.deinit %65: std::array::Array<f64x2>, %in8.1: Allocator
+//   jump for.step.3
+// for.step.3:
+//   %67: i64 = const 1
+//   %68: i64 = binary.+ %rot1.b.59: i64, %67: i64
+//   %rot1.l0.60: bool = binary.< %68: i64, %58: i64
+//   branch %rot1.l0.60: bool, for.body.2, for.end.4
+// for.end.4:
+//   %in10.1: []f64x2 = array.as_bytes %56: &var std::array::Array<f64x2>
+//   %70: f64x2 = call.sum %in10.1: []f64x2
+//   %71: f64 = vector.lane %70: f64x2, 0
+//   %72: i64 = cast %71: f64, i64
+//   %in11.1: i64 = cast %72: i64, i64
+//   call.std::fmt::write_i64 %in11.1: i64
+//   %74: f64 = vector.lane %70: f64x2, 1
+//   %75: i64 = cast %74: f64, i64
+//   %in12.1: i64 = cast %75: i64, i64
+//   call.std::fmt::write_i64 %in12.1: i64
+//   %77: std::array::Array<f64x2> = ref.load %56: &var std::array::Array<f64x2>
+//   array.deinit %77: std::array::Array<f64x2>, %in8.1: Allocator
+//   %79: !void = error.ok
+//   return %79: !void
+// }

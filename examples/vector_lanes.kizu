@@ -1,0 +1,77 @@
+import std::array;
+import std::mem;
+
+struct Complex {
+    pub re: f64,
+    pub im: f64,
+}
+
+// A complex product on one vector: (a.re + i a.im)(b.re + i b.im), with the
+// real parts of `a` spread over both lanes and the imaginary parts over a
+// swapped `b`, then signed so the lanes come out as (re, im).
+fn mul(a: f64x2, b: f64x2) -> f64x2 {
+    let a_re = f64x2 { a[0], a[0] };
+    let a_im = f64x2 { a[1], a[1] };
+    let b_swapped = f64x2 { b[1], b[0] };
+    return a_re * b + a_im * b_swapped * f64x2 { -1.0, 1.0 };
+}
+
+fn sum(values: []f64x2) -> f64x2 {
+    var total = f64x2 { 0.0, 0.0 };
+    for 0..mem::count<f64x2>(values) |i| {
+        total = total + values[i];
+    }
+    return total;
+}
+
+// A vector type is a fixed set of lanes in one 128-bit register: `f64x2` is
+// two f64, `i32x4` four i32. It is built from one value per lane, read a lane
+// at a time by a literal index, and combined lane by lane with the arithmetic
+// operators. A vector is copy data, so it sits in a struct, an Array or a
+// view like any number.
+fn main() -> !void {
+    let x = f64x2 { 1.0, 2.0 };
+    let y = f64x2 { 3.0, 4.0 };
+    let s = x + y;
+    print(cast<i64>(s[0]));
+    print(cast<i64>(s[1]));
+    let p = mul(x, y);
+    print(cast<i64>(p[0]));
+    print(cast<i64>(p[1]));
+    let n = -x;
+    print(cast<i64>(n[1]));
+
+    let c = Complex { re: p[0], im: p[1] };
+    let doubled = f64x2 { c.re, c.im }
+    * f64x2 { 2.0, 2.0 };
+    print(cast<i64>(doubled[0] + doubled[1]));
+
+    let q = i32x4 { 1, 2, 3, 4 }
+    * i32x4 { 2, 2, 2, 2 };
+    print(cast<i64>(q[3]));
+
+    let allocator = mem::page_allocator();
+    var values = array::new<f64x2>(allocator);
+    defer values.deinit(allocator);
+    for 0..5 |i| {
+        try values.append(allocator, f64x2 { cast<f64>(i), 1.0 });
+    }
+    let view = values.as_slice();
+    let total = sum(view);
+    print(cast<i64>(total[0]));
+    print(cast<i64>(total[1]));
+    return;
+}
+
+// run
+// features: vector simd struct std-array typed_view
+// output:
+// 4
+// 6
+// -5
+// 10
+// -2
+// 10
+// 8
+// 10
+// 5

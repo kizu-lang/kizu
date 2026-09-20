@@ -2992,11 +2992,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) 
 		return c.checkAccessExpr(e, env, unsafe)
 	case *ast.StructLiteralExpr:
 		return c.checkStructLiteralExpr(e, env, unsafe)
-	case *ast.BufferLiteralExpr:
-		if !typ.IsBufferElem(e.Elem) {
-			return "", errorf("type error: buffer element must be a fixed-width number, got %s", e.Elem)
-		}
-		return Type(e.TypeText()), nil
+	case *ast.VectorLiteralExpr, *ast.BufferLiteralExpr:
+		return c.checkBuiltinLiteralExpr(e, env, unsafe)
 	default:
 		return c.checkControlExpr(expr, env, unsafe)
 	}
@@ -3341,12 +3338,81 @@ func (c *Checker) payloadBindsByReference(payload Type) bool {
 	return ast.OwnerType(c.deinitOwners, name)
 }
 
+// checkBuiltinLiteralExpr validates the literals of the builtin aggregates:
+// a zero-filled stack buffer `[N]T{}` and a vector `f64x2{a, b}`.
+func (c *Checker) checkBuiltinLiteralExpr(
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if vector, ok := expr.(*ast.VectorLiteralExpr); ok {
+		return c.checkVectorLiteralExpr(vector, env, unsafe)
+	}
+	buffer := expr.(*ast.BufferLiteralExpr)
+	if !typ.IsBufferElem(buffer.Elem) {
+		return "", errorf("type error: buffer element must be a fixed-width number, got %s", buffer.Elem)
+	}
+	return Type(buffer.TypeText()), nil
+}
+
+// checkVectorLiteralExpr validates `f64x2{a, b}`: one expression per lane,
+// each of the lane type, with a bare literal taking the lane type as its
+// context the way a parameter type is an argument's.
+func (c *Checker) checkVectorLiteralExpr(
+	expr *ast.VectorLiteralExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	elem, lanes, ok := typ.VectorOf(expr.TypeName)
+	if !ok {
+		return "", errorAt(expr.Span, "type error: `%s` is not a vector type", expr.TypeName)
+	}
+	if len(expr.Lanes) != lanes {
+		return "", errorAt(expr.Span, "type error: `%s` has %d lanes, got %d values",
+			expr.TypeName, lanes, len(expr.Lanes))
+	}
+	for i, lane := range expr.Lanes {
+		got, err := c.checkContextualExpr(lane, Type(elem), env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != Type(elem) {
+			return "", errorAt(expressionSpan(lane),
+				"type error: lane %d of `%s` expects %s, got %s", i, expr.TypeName, elem, got)
+		}
+	}
+	return Type(expr.TypeName), nil
+}
+
+// checkVectorLane validates `v[i]` on a vector: the index is an integer
+// literal naming a lane, so the bound is settled here and nothing traps.
+func checkVectorLane(expr *ast.IndexExpr, target Type, elem string, lanes int) (Type, error) {
+	if expr.Slice {
+		return "", errorAt(expr.Span,
+			"type error: a vector has lanes, not a range; `%s[a..b]` is not a view", target)
+	}
+	literal, ok := expr.Index.(*ast.IntExpr)
+	if !ok {
+		return "", errorAt(expr.Span,
+			"type error: a vector lane is named by an integer literal, got `%s`", expr.Index.String())
+	}
+	index, err := strconv.ParseInt(literal.Value, 0, 64)
+	if err != nil || index < 0 || index >= int64(lanes) {
+		return "", errorAt(expr.Span, "type error: lane %s is outside `%s`, which has lanes 0..%d",
+			literal.Value, target, lanes)
+	}
+	return Type(elem), nil
+}
+
 // checkIndexExpr validates checked one-dimensional indexing and slicing of a
 // view: an index reads one element, a slice is a view of the same element.
 func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	target, err := c.checkExpr(expr.Target, env, unsafe)
 	if err != nil {
 		return "", err
+	}
+	if lane, lanes, ok := typ.VectorOf(string(target)); ok {
+		return checkVectorLane(expr, target, lane, lanes)
 	}
 	elem, ok := sliceElem(target)
 	if !ok {
@@ -3769,6 +3835,12 @@ func (c *Checker) checkPrefixExpr(
 	}
 	switch expr.Operator {
 	case "-":
+		if elem, _, ok := typ.VectorOf(string(right)); ok {
+			if !signedNumericTypes[Type(elem)] {
+				return "", errorf("type error: unary - expects signed lanes, got %s", right)
+			}
+			return right, nil
+		}
 		if !signedNumericTypes[right] {
 			return "", errorf("type error: unary - expects signed numeric, got %s", right)
 		}
@@ -3841,6 +3913,9 @@ func (c *Checker) checkBinaryExpr(
 	if err != nil {
 		return "", err
 	}
+	if typ.IsVector(string(left)) || typ.IsVector(string(right)) {
+		return checkVectorOperands(expr, left, right)
+	}
 	if expr.Operator == "==" || expr.Operator == "!=" {
 		return c.checkEquality(expr.Operator, left, right, expr.OperatorSpan)
 	}
@@ -3871,6 +3946,28 @@ func checkArithmeticOperands(expr *ast.BinaryExpr, left Type, right Type) error 
 		return checkShiftLiteral(expr)
 	}
 	return nil
+}
+
+// checkVectorOperands validates a binary operator on vectors: `+`, `-` and
+// `*` lane by lane on the same vector type, and `/` on float lanes. There is
+// no comparison, remainder, or bit operation on a vector (SPEC §7.3).
+func checkVectorOperands(expr *ast.BinaryExpr, left Type, right Type) (Type, error) {
+	if left != right {
+		return "", operatorTypeMismatch(expr.Operator, left, right, expr.OperatorSpan)
+	}
+	elem, _, _ := typ.VectorOf(string(left))
+	switch expr.Operator {
+	case "+", "-", "*":
+		return left, nil
+	case "/":
+		if elem == "f32" || elem == "f64" {
+			return left, nil
+		}
+		return "", errorAt(expr.OperatorSpan,
+			"type error: operator `/` on a vector expects float lanes, got %s", left)
+	}
+	return "", errorAt(expr.OperatorSpan,
+		"type error: operator `%s` is not defined on a vector (%s)", expr.Operator, left)
 }
 
 // checkLogical validates boolean logical operands.
@@ -8218,7 +8315,7 @@ func (c *Checker) isPlainDataType(name string, seen map[string]bool) bool {
 		return c.isPlainDataType(inner, seen)
 	}
 	t := Type(name)
-	if t == typeBool || t == typeVoid || numericTypes[t] {
+	if t == typeBool || t == typeVoid || numericTypes[t] || typ.IsVector(name) {
 		return true
 	}
 	// A function pointer is the address of a top-level function, which

@@ -2296,11 +2296,20 @@ fn (self: &var Parser) parse_ident_prefix_expression(
         let owned_name = try owned_token_literal(self.allocator, current);
         return self.parse_struct_literal_expr(tree, move owned_name);
     }
+    if self.peek_kind() == token::Kind::LBrace and
+        token_literal_is_vector(current) {
+        return self.parse_vector_literal_expr(tree);
+    }
     let name = try retain_literal(tree, current);
     return try tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: name,
         span: token_span(current)
     }));
+}
+
+fn token_literal_is_vector(current: &token::Token) -> bool {
+    let bytes = current.literal.as_bytes();
+    return typ::is_vector(bytes);
 }
 
 fn token_literal_starts_upper(current: &token::Token) -> bool {
@@ -2472,6 +2481,34 @@ fn (self: &var Parser) parse_call_expr(
         callee: callee,
         args: retained_args
     }));
+}
+
+/// Parses `f64x2{a, b}`: one expression per lane, the Go
+/// `parseVectorLiteralExpr`.
+fn (self: &var Parser) parse_vector_literal_expr(
+    tree: &var ast::Ast
+) -> !ast::Expression {
+    let current = self.current_token();
+    let type_name = try retain_literal(tree, current);
+    let span = token_span(current);
+    var lanes = array::new<ast::Expression>(self.allocator);
+    errdefer lanes.deinit(self.allocator);
+    try self.next_token();
+    try self.next_token();
+    while self.current_kind() != token::Kind::RBrace and
+        self.current_kind() != token::Kind::Eof {
+        let lane = try self.parse_expression(tree, lowest_precedence());
+        try lanes.append(self.allocator, lane);
+        if !try self.consume_list_delimiter("vector lane") {
+            lanes.deinit(self.allocator);
+            return try tree.add_recovered_expression(span);
+        }
+        try self.next_token();
+    }
+    try self.expect_list_close("vector literal", "");
+    return try tree.add_expression(ast::ExpressionNode::VectorLiteral(
+        ast::VectorLiteralExpr { type_name: type_name, lanes: move lanes, span: span }
+    ));
 }
 
 fn (self: &var Parser) parse_struct_literal_expr(
