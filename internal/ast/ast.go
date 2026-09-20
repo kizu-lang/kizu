@@ -109,8 +109,14 @@ type FunctionSignature struct {
 	RequiresUnsafe bool
 	ExternABI      string
 	ExportABI      string
-	Public         bool
-	Std            bool
+	// LinkLibrary and LinkFramework name what the native linker is handed to
+	// resolve an `extern "c"` symbol: `@link_lib("m")` becomes `-lm` and
+	// `@link_framework("Accelerate")` becomes `-framework Accelerate`. Where
+	// the linker looks for them is the manifest's business (SPEC §12.2).
+	LinkLibrary   string
+	LinkFramework string
+	Public        bool
+	Std           bool
 	// Span points at the declaration name, so a diagnostic about the
 	// signature can say where it was written.
 	Span Span
@@ -188,8 +194,9 @@ func (d *FunctionDecl) String() string {
 		prefix += "unsafe "
 	}
 	if d.ExternABI != "" {
-		return fmt.Sprintf("%sextern %s fn %s%s%s(%s)%s",
-			prefix, quote.Bytes(d.ExternABI), receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%s%sextern %s fn %s%s%s(%s)%s",
+			linkAttributeText(d.FunctionSignature), prefix, quote.Bytes(d.ExternABI),
+			receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
 	if d.ExportABI != "" {
 		prefix += "export " + quote.Bytes(d.ExportABI) + " "
@@ -200,6 +207,19 @@ func (d *FunctionDecl) String() string {
 	}
 	return fmt.Sprintf("%sfn %s%s%s(%s)%s %s",
 		prefix, receiver, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
+}
+
+// linkAttributeText renders the link attributes written above an extern
+// declaration, each on its own line, so a formatted file reads as written.
+func linkAttributeText(sig FunctionSignature) string {
+	text := ""
+	if sig.LinkLibrary != "" {
+		text += "@link_lib(" + quote.Bytes(sig.LinkLibrary) + ")\n"
+	}
+	if sig.LinkFramework != "" {
+		text += "@link_framework(" + quote.Bytes(sig.LinkFramework) + ")\n"
+	}
+	return text
 }
 
 // TestDecl represents a top-level test block.

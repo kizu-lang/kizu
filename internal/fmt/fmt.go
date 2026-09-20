@@ -426,10 +426,18 @@ func (b *builder) maybeBlankLineForTopLevel(t token.Token) {
 		b.lastTopDecl = t.Type
 		return
 	}
-	if !b.isConsecutiveImport(t) && !endsWithBlankLine(&b.out) {
+	if !b.isConsecutiveImport(t) && !b.continuesAttribute() && !endsWithBlankLine(&b.out) {
 		b.out.WriteByte('\n')
 	}
 	b.lastTopDecl = t.Type
+}
+
+// continuesAttribute reports whether the declaration being started belongs
+// to a `@link_lib` / `@link_framework` line above it, or is another such
+// line; the attribute and its declaration are one declaration and stay
+// together.
+func (b *builder) continuesAttribute() bool {
+	return b.lastTopDecl == token.At
 }
 
 // isTopLevelDeclAtLineStart reports whether t starts a declaration at top level.
@@ -1062,7 +1070,7 @@ func noSpaceBefore(t token.Token) bool {
 func noSpaceAfter(t token.Token) bool {
 	switch t.Type {
 	case token.LParen, token.LBracket, token.Dot, token.DoubleColon,
-		token.Bang, token.Question, token.Amp, token.Tilde, token.Range:
+		token.Bang, token.Question, token.Amp, token.Tilde, token.Range, token.At:
 		return true
 	}
 	return false
@@ -1111,7 +1119,7 @@ func canFollowSliceMarker(t token.Token) bool {
 // isTopLevelDeclStart reports whether t begins a top-level declaration.
 func isTopLevelDeclStart(t token.Token) bool {
 	switch t.Type {
-	case token.Import, token.Public, token.Extern, token.Export,
+	case token.Import, token.Public, token.Extern, token.Export, token.At,
 		token.Function, token.Struct, token.Enum, token.Union, token.Contract, token.Impl:
 		return true
 	case token.Ident:

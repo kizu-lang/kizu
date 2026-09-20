@@ -42,6 +42,16 @@ func isPackageRoot(path string) bool {
 
 // loadPackageGraph parses kizu.toml and resolves the package module graph.
 func loadPackageGraph(path string) (project.Graph, error) {
+	root, parsed, err := loadManifest(path)
+	if err != nil {
+		return project.Graph{}, err
+	}
+	return project.ResolveModules(root, parsed)
+}
+
+// loadManifest reads the manifest a package root or kizu.toml path names and
+// returns it with the directory it governs.
+func loadManifest(path string) (string, manifest.Manifest, error) {
 	root := path
 	manifestPath := filepath.Join(path, "kizu.toml")
 	if filepath.Base(path) == "kizu.toml" {
@@ -50,13 +60,13 @@ func loadPackageGraph(path string) (project.Graph, error) {
 	}
 	source, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return project.Graph{}, err
+		return "", manifest.Manifest{}, err
 	}
-	manifest, err := manifest.ParseManifest(string(source))
+	parsed, err := manifest.ParseManifest(string(source))
 	if err != nil {
-		return project.Graph{}, err
+		return "", manifest.Manifest{}, err
 	}
-	return project.ResolveModules(root, manifest)
+	return root, parsed, nil
 }
 
 // loadPackageProgram resolves a package root and loads its merged program.

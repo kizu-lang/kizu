@@ -35,6 +35,16 @@ pub struct Options {
     pub emit: string::String,
     pub linker: string::String,
     pub opt: bool,
+    /// libraries and frameworks are what the program's reached extern
+    /// declarations named with `@link_lib` / `@link_framework`; the search
+    /// paths are what its manifest's `[native]` section says about where
+    /// the linker looks for them. Both are handed to the linker as written
+    /// and key the executable, so a program that links another library is
+    /// another build (SPEC §12.2).
+    pub libraries: array::Array<string::String>,
+    pub frameworks: array::Array<string::String>,
+    pub library_search: array::Array<string::String>,
+    pub framework_search: array::Array<string::String>,
 }
 
 /// Hands out temporary build directories: TMPDIR (or /tmp) plus
@@ -93,7 +103,7 @@ pub fn build(
     if options.output.len() == 0 {
         return try fail_parts(allocator, "native error: output path is required", "", "");
     }
-    if try validate_options(allocator, options) |failed| {
+    if try validate_options(allocator, options, host) |failed| {
         return move failed;
     }
     var cache = try buildcache::new(io, allocator);
@@ -154,7 +164,7 @@ pub fn executable(
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
     out_exe: &var string::String
 ) -> !?diagnostic::Diagnostic {
-    if try validate_options(allocator, options) |failed| {
+    if try validate_options(allocator, options, host) |failed| {
         return move failed;
     }
     var cache = try buildcache::new(io, allocator);
@@ -410,6 +420,7 @@ fn append_toolchain_key(allocator: Allocator,
     var flags = array::new<string::String>(allocator);
     defer flags.deinit(allocator);
     try clang_optimization_flags(allocator, options.opt, target_is_arm64(options, host), &var flags);
+    try link_flags(allocator, options, &var flags);
     var index = 0;
     while flags.at(index) |flag| {
         index = index + 1;
@@ -569,7 +580,11 @@ fn is_trimmed(byte: u8) -> bool {
 
 /// Rejects native build modes that do not have a concrete backend yet, the
 /// Go `validateOptions`.
-fn validate_options(allocator: Allocator, options: &Options) -> !?diagnostic::Diagnostic {
+fn validate_options(
+    allocator: Allocator,
+    options: &Options,
+    host: &string::String
+) -> !?diagnostic::Diagnostic {
     let libc = options.libc.as_bytes();
     if !mem::equal_bytes(libc, "on") {
         return try fail_parts(allocator, "native error: --libc ", libc, " is not implemented yet");
@@ -591,6 +606,18 @@ fn validate_options(allocator: Allocator, options: &Options) -> !?diagnostic::Di
     let linker = options.linker.as_bytes();
     if !mem::equal_bytes(linker, "clang") {
         return try fail_parts(allocator, "native error: --linker ", linker, " is not implemented yet");
+    }
+    if options.frameworks.at(0) |framework| {
+        if !target_is_darwin(options, host) {
+            var message = string::new(allocator);
+            defer message.deinit(allocator);
+            try message.append_bytes(allocator, "native error: @link_framework(");
+            let framework_bytes = framework.as_bytes();
+            try fmt::append_bytes_literal(allocator, &var message, framework_bytes);
+            try message.append_bytes(allocator, ") needs a Darwin target");
+            let message_bytes = message.as_bytes();
+            return try fail_parts(allocator, message_bytes, "", "");
+        }
     }
     return null;
 }
@@ -927,10 +954,59 @@ fn run_clang(
     try append_copy(allocator, command, runtime_path);
     try append_copy(allocator, command, "-o");
     try append_copy(allocator, command, output);
-    // libm, for a float intrinsic the target has no instruction for; on
-    // Darwin it is part of libSystem and the name is harmless.
-    try append_copy(allocator, command, "-lm");
+    try link_flags(allocator, options, command);
     return spawn_clang(io, allocator, dir, options, command);
+}
+
+/// Spells what the linker resolves foreign symbols from, the Go `linkFlags`:
+/// the search paths the manifest adds, then each library and framework the
+/// program's extern declarations named, then libm, which the runtime needs
+/// whatever the program declares (for a float intrinsic the target has no
+/// instruction for; on Darwin it is part of libSystem and the name is
+/// harmless). The order is the linker's: a path must be known before the
+/// library looked for in it.
+fn link_flags(
+    allocator: Allocator,
+    options: &Options,
+    out: &var array::Array<string::String>
+) -> !void {
+    try append_prefixed(allocator, "-L", &options.library_search, out);
+    try append_prefixed(allocator, "-F", &options.framework_search, out);
+    try append_prefixed(allocator, "-l", &options.libraries, out);
+    var index = 0;
+    while options.frameworks.at(index) |framework| {
+        index = index + 1;
+        try append_copy(allocator, out, "-framework");
+        let framework_bytes = framework.as_bytes();
+        try append_copy(allocator, out, framework_bytes);
+    }
+    index = 0;
+    while options.libraries.at(index) |library| {
+        index = index + 1;
+        let library_bytes = library.as_bytes();
+        if mem::equal_bytes(library_bytes, "m") {
+            return;
+        }
+    }
+    return append_copy(allocator, out, "-lm");
+}
+
+/// Appends each value with prefix in front of it as one argument.
+fn append_prefixed(
+    allocator: Allocator,
+    prefix: []u8,
+    values: &array::Array<string::String>,
+    out: &var array::Array<string::String>
+) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        var flag = try string::from_bytes(allocator, prefix);
+        errdefer flag.deinit(allocator);
+        try flag.append_string(allocator, value);
+        try out.append(allocator, move flag);
+    }
+    return;
 }
 
 /// Spells what the toolchain is asked to produce, the Go `clangFlags`.
@@ -1059,14 +1135,11 @@ fn write_metadata(
     let mode = optimization_mode_name(options.opt);
     try encoder.write_bytes_field("optimization_mode", mode);
     try write_field(&var encoder, "output", &options.output);
-    try encoder.begin_array_field("command");
-    var index = 0;
-    while command.at(index) |argument| {
-        index = index + 1;
-        let argument_bytes = argument.as_bytes();
-        try encoder.write_bytes(argument_bytes);
-    }
-    try encoder.end_array();
+    try write_list_field(&var encoder, "command", command);
+    try write_list_field(&var encoder, "libraries", &options.libraries);
+    try write_list_field(&var encoder, "frameworks", &options.frameworks);
+    try write_list_field(&var encoder, "library_search", &options.library_search);
+    try write_list_field(&var encoder, "framework_search", &options.framework_search);
     try encoder.end_object();
     var out = string::new(allocator);
     defer out.deinit(allocator);
@@ -1080,6 +1153,26 @@ fn write_metadata(
     let text = out.as_bytes();
     try fs::write_file(io, target_bytes, text);
     return;
+}
+
+/// Writes one list of strings as a metadata array field. An empty list is
+/// `null`, the way Go's encoder writes a slice nothing was appended to.
+fn write_list_field(
+    encoder: &var json::Encoder,
+    name: []u8,
+    values: &array::Array<string::String>
+) -> !void {
+    if values.len() == 0 {
+        return encoder.write_null_field(name);
+    }
+    try encoder.begin_array_field(name);
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let value_bytes = value.as_bytes();
+        try encoder.write_bytes(value_bytes);
+    }
+    return encoder.end_array();
 }
 
 /// Writes one owned option value as a metadata field.

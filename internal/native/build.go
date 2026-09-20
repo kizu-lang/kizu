@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -33,6 +34,16 @@ type Options struct {
 	Emit      string
 	Linker    string
 	Opt       bool
+	// Libraries and Frameworks are what the program's reached extern
+	// declarations named with `@link_lib` / `@link_framework`; the search
+	// paths are what its manifest's `[native]` section says about where the
+	// linker looks for them. Both are handed to the linker as written and
+	// key the executable, so a program that links another library is another
+	// build (SPEC §12.2).
+	Libraries       []string
+	Frameworks      []string
+	LibrarySearch   []string
+	FrameworkSearch []string
 }
 
 // Build links a lowered program into the executable the caller names, and
@@ -193,6 +204,10 @@ func validateOptions(options Options) error {
 	if options.Linker != "clang" {
 		return fmt.Errorf("native error: --linker %s is not implemented yet", options.Linker)
 	}
+	if len(options.Frameworks) > 0 && !TargetIsDarwin(options.Triple) {
+		return fmt.Errorf("native error: @link_framework(%q) needs a Darwin target",
+			options.Frameworks[0])
+	}
 	return nil
 }
 
@@ -249,7 +264,8 @@ func executableCacheTarget(options Options, runtimeSource string) string {
 // from: the driver, the machine it targets, and the flags it is asked to honour.
 func toolchainKey(options Options) []string {
 	key := []string{options.Linker, runtime.GOOS + "-" + runtime.GOARCH}
-	return append(key, clangFlags(options)...)
+	key = append(key, clangFlags(options)...)
+	return append(key, linkFlags(options)...)
 }
 
 // compileRuntime compiles the runtime source into one object file.
@@ -345,13 +361,39 @@ func camelToSnake(name string) string {
 // (floor on x86-64 without SSE4.1, say) is lowered to the C library's
 // function; on Darwin libm is part of libSystem and the name is harmless.
 func runClang(irPath string, runtimePath string, output string, options Options) ([]string, error) {
-	args := append(clangFlags(options), irPath, runtimePath, "-o", output, "-lm")
+	args := append(clangFlags(options), irPath, runtimePath, "-o", output)
+	args = append(args, linkFlags(options)...)
 	cmd := exec.Command(options.Linker, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("native error: %s failed: %w\n%s", options.Linker, err, out)
 	}
 	return append([]string{options.Linker}, args...), nil
+}
+
+// linkFlags spells what the linker resolves foreign symbols from: the search
+// paths the manifest adds, then each library and framework the program's
+// extern declarations named, then libm, which the runtime needs whatever
+// the program declares. The order is the linker's: a path must be known
+// before the library looked for in it.
+func linkFlags(options Options) []string {
+	flags := []string{}
+	for _, dir := range options.LibrarySearch {
+		flags = append(flags, "-L"+dir)
+	}
+	for _, dir := range options.FrameworkSearch {
+		flags = append(flags, "-F"+dir)
+	}
+	for _, library := range options.Libraries {
+		flags = append(flags, "-l"+library)
+	}
+	for _, framework := range options.Frameworks {
+		flags = append(flags, "-framework", framework)
+	}
+	if slices.Contains(options.Libraries, "m") {
+		return flags
+	}
+	return append(flags, "-lm")
 }
 
 // clangFlags spells what the toolchain is asked to produce. The runtime object
@@ -426,6 +468,13 @@ type Metadata struct {
 	OptMode string   `json:"optimization_mode"`
 	Output  string   `json:"output"`
 	Command []string `json:"command"`
+	// Libraries and Frameworks are the link inputs the program declared, and
+	// the search paths are where its manifest said to look, each as handed to
+	// the linker.
+	Libraries       []string `json:"libraries"`
+	Frameworks      []string `json:"frameworks"`
+	LibrarySearch   []string `json:"library_search"`
+	FrameworkSearch []string `json:"framework_search"`
 }
 
 // writeMetadata writes the explicit build configuration used for this artifact.
@@ -435,6 +484,8 @@ func writeMetadata(options Options, command []string) error {
 		LibC: options.LibC, Runtime: options.Runtime, Emit: options.Emit,
 		Linker: options.Linker, OptMode: optimizationModeName(options.Opt),
 		Output: options.Output, Command: command,
+		Libraries: options.Libraries, Frameworks: options.Frameworks,
+		LibrarySearch: options.LibrarySearch, FrameworkSearch: options.FrameworkSearch,
 	}
 	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {

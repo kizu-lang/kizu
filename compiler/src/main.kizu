@@ -1837,8 +1837,92 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         runtime: move runtime_mode,
         emit: move emit,
         linker: move linker,
-        opt: false
+        opt: false,
+        libraries: array::new<string::String>(allocator),
+        frameworks: array::new<string::String>(allocator),
+        library_search: array::new<string::String>(allocator),
+        framework_search: array::new<string::String>(allocator)
     };
+}
+
+/// Fills what the linker resolves foreign symbols from, the Go
+/// `setLinkInputs`: the libraries and frameworks the module's remaining
+/// extern calls declared, and the search paths the package manifest names
+/// for them. A loose file has no manifest and so no search paths of its own.
+fn set_link_inputs(
+    io: Io,
+    allocator: Allocator,
+    module: &ir::Module,
+    target: []u8,
+    options: &var native::Options
+) -> !?diagnostic::Diagnostic {
+    try ir::link_inputs(allocator, module, &var options.libraries, &var options.frameworks);
+    let package = try is_package_root(io, target);
+    if !package {
+        return null;
+    }
+    var root = try string::from_bytes(allocator, target);
+    defer root.deinit(allocator);
+    var manifest_path = try path::join(allocator, target, "kizu.toml");
+    defer manifest_path.deinit(allocator);
+    if mem::equal_bytes(path::basename(target), "kizu.toml") {
+        root.clear();
+        try root.append_bytes(allocator, path::dirname(target));
+        manifest_path.clear();
+        try manifest_path.append_bytes(allocator, target);
+    }
+    let manifest_bytes = manifest_path.as_bytes();
+    let manifest_read = try read_source_file(io, allocator, manifest_bytes);
+    match manifest_read {
+        Failed(message) => {
+            defer message.deinit(allocator);
+            let message_bytes = message.as_bytes();
+            return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
+        },
+        Text(text) => {
+            defer text.deinit(allocator);
+            let text_bytes = text.as_bytes();
+            let parsed = try manifest::parse_manifest(allocator, text_bytes);
+            match parsed {
+                Manifest(found) => {
+                    defer found.deinit(allocator);
+                    let root_bytes = root.as_bytes();
+                    try append_search_paths(allocator, root_bytes, &found.library_search, &var options.library_search);
+                    try append_search_paths(allocator, root_bytes, &found.framework_search, &var options.framework_search);
+                    return null;
+                },
+                Error(message) => {
+                    defer message.deinit(allocator);
+                    let message_bytes = message.as_bytes();
+                    return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
+                },
+            }
+        },
+    }
+}
+
+/// Resolves manifest search directories against the package root, the Go
+/// `absoluteSearchPaths`, so the linker is handed the same directory
+/// whichever directory the build is run from.
+fn append_search_paths(
+    allocator: Allocator,
+    root: []u8,
+    dirs: &array::Array<string::String>,
+    out: &var array::Array<string::String>
+) -> !void {
+    var index = 0;
+    while dirs.at(index) |dir| {
+        index = index + 1;
+        let dir_bytes = dir.as_bytes();
+        if mem::len(dir_bytes) > 0 and dir_bytes[0] == cast<u8>(47) {
+            let cleaned = try path::clean(allocator, dir_bytes);
+            try out.append(allocator, move cleaned);
+            continue;
+        }
+        let joined = try path::join(allocator, root, dir_bytes);
+        try out.append(allocator, move joined);
+    }
+    return;
 }
 
 /// Runs `run <file|package> [-- args...]`, the Go `dispatchRun`: everything
@@ -1854,7 +1938,7 @@ fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: 
     }
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
-    return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &options, null, child_start, child_count);
+    return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &var options, null, child_start, child_count);
 }
 
 /// Runs `test <file|package> [-- args...]`, the Go `dispatchTest`.
@@ -1898,7 +1982,7 @@ fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next:
     }
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
-    return native_target(io, allocator, lib_dir, path, NativeCommand::Test, &options, seed, child_start, child_count);
+    return native_target(io, allocator, lib_dir, path, NativeCommand::Test, &var options, seed, child_start, child_count);
 }
 
 /// Returns the seed after `--seed`, or null when the flag was not given or
@@ -1950,7 +2034,7 @@ fn build_native_command(io: Io, allocator: Allocator, lib_dir: []u8, first: i64,
         return parsed;
     }
     let target_bytes = target_path.as_bytes();
-    return native_target(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &options, null, 0, 0);
+    return native_target(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &var options, null, 0, 0);
 }
 
 /// Parses native build flags and derives defaults, the Go
@@ -2103,7 +2187,7 @@ fn native_target(
     lib_dir: []u8,
     target: []u8,
     command: NativeCommand,
-    options: &native::Options,
+    options: &var native::Options,
     seed: ?i64,
     child_start: i64,
     child_count: i64
@@ -2181,6 +2265,11 @@ fn native_target(
                     try keep_target_program(
                         allocator, &var lowerer.module, ""
                     );
+                    if try set_link_inputs(io, allocator, &lowerer.module, target, options) |failed| {
+                        defer failed.deinit(allocator);
+                        try report(io, allocator, &loader.sources, &failed);
+                        return 1;
+                    }
                     var temps = try native::new_temp_dirs(allocator);
                     defer temps.deinit(allocator);
                     var host = string::new(allocator);

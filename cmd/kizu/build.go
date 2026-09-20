@@ -32,7 +32,7 @@ func stdErrorSets() (map[string]map[string]int, error) {
 // linkModule emits one lowered module and returns an executable for it. The
 // executable is kept rather than thrown away, so a program that has not changed
 // since it was last run is not linked a second time.
-func linkModule(module *ir.Module) (string, error) {
+func linkModule(module *ir.Module, path string) (string, error) {
 	ir.KeepTargetReachableFunctions(module, "", "main")
 	llvmIR, err := llvm.EmitNative(module, runtime.GOOS == "darwin")
 	if err != nil {
@@ -42,10 +42,50 @@ func linkModule(module *ir.Module) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return native.Executable(native.Options{
+	options := native.Options{
 		LLVMIR: llvmIR, ErrorSets: errorSets,
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
-	})
+	}
+	if err := setLinkInputs(&options, module, path); err != nil {
+		return "", err
+	}
+	return native.Executable(options)
+}
+
+// setLinkInputs fills what the linker resolves foreign symbols from: the
+// libraries and frameworks the module's remaining extern calls declared, and
+// the search paths the package manifest names for them. A loose file has no
+// manifest and so no search paths of its own.
+func setLinkInputs(options *native.Options, module *ir.Module, path string) error {
+	options.Libraries, options.Frameworks = ir.LinkInputs(module)
+	if !isPackageRoot(path) {
+		return nil
+	}
+	root, parsed, err := loadManifest(path)
+	if err != nil {
+		return err
+	}
+	options.LibrarySearch = absoluteSearchPaths(root, parsed.LibrarySearch)
+	options.FrameworkSearch = absoluteSearchPaths(root, parsed.FrameworkSearch)
+	return nil
+}
+
+// absoluteSearchPaths resolves manifest search directories against the
+// package root, so the linker is handed the same directory whichever
+// directory the build is run from.
+func absoluteSearchPaths(root string, dirs []string) []string {
+	if len(dirs) == 0 {
+		return nil
+	}
+	resolved := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if filepath.IsAbs(dir) {
+			resolved = append(resolved, filepath.Clean(dir))
+			continue
+		}
+		resolved = append(resolved, filepath.Join(root, dir))
+	}
+	return resolved
 }
 
 // buildFile dispatches build subcommands.
@@ -336,13 +376,17 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := native.Build(native.Options{
+	buildOptions := native.Options{
 		LLVMIR: llvmIR, Output: options.Output, ErrorSets: errorSets,
 		Triple: options.Triple,
 		CPU:    options.CPU, ABI: options.ABI, LibC: options.LibC,
 		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
 		Opt: options.Opt,
-	}); err != nil {
+	}
+	if err := setLinkInputs(&buildOptions, module, options.Path); err != nil {
+		return err
+	}
+	if err := native.Build(buildOptions); err != nil {
 		return err
 	}
 	_, _ = fmt.Println(options.Output)

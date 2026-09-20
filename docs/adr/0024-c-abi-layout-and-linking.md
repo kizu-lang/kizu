@@ -19,18 +19,24 @@ C ABI layout と linking はすべて明示する。
 
 ## C function linking
 
-`extern "c" fn` は C ABI call boundary を表す。
-将来 link name や library が必要になった場合は、宣言に attribute を付ける。
+`extern "c" fn` は C ABI call boundary を表す。symbol がどの library のものかは
+宣言の上の `@link_lib("x")` / `@link_framework("X")` が名指し、linker が
+それをどこで探すかは manifest の `[native]` が持つ(SPEC §3、§12.2)。
 
-検討する構文:
+分けた理由: 名前は宣言を読む人が知りたい情報で、在処は build する machine の
+事情だからだ。Rust は前者を `#[link(name)]` で source に、後者を build.rs の
+`cargo:rustc-link-search` で持つ。Kizu は build script を持たないので、後者は
+宣言的な manifest の表に置く。
 
-```kizu
-@link_name("puts")
-@link_lib("c")
-extern "c" fn c_puts(s: ptr<const u8>) -> i32
-```
+却下した案:
 
-v0.1 では attribute parser は実装しない。
+| 案 | 却下理由 |
+|---|---|
+| 名前も manifest に書く(`libraries = ["m"]`) | どの extern がどの library に依存するかが source から消え、使わない宣言の library まで link する |
+| 探索 directory も attribute に書く | source が machine の path を持ち、package を別の machine で build できない |
+| header を読んで library を推測する | 依存が暗黙になる。ADR の主旨に反する |
+| `@link_name("puts")` で symbol 名を付け替える | 必要になった例が無い。宣言名 = symbol で足りている |
+| pkg-config 連携 | 外部 tool への依存。必要になったら `[native]` に足す |
 
 ## C layout
 

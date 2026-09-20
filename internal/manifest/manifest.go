@@ -14,6 +14,13 @@ type Manifest struct {
 	PackageName string
 	Version     string
 	Paths       []string
+	// LibrarySearch and FrameworkSearch are the `[native]` directories the
+	// linker is told to look in for what `@link_lib` / `@link_framework`
+	// name, relative to the manifest. The names live in the source beside
+	// the extern declaration; where they are found is the package's
+	// build input, so it lives here (SPEC §12.2).
+	LibrarySearch   []string
+	FrameworkSearch []string
 }
 
 // ParseManifest parses the declarative subset of kizu.toml used by Kizu.
@@ -98,7 +105,7 @@ func parseSection(line string, lineNo int) (string, error) {
 	}
 	section := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
 	switch section {
-	case "package", "modules":
+	case "package", "modules", "native":
 		return section, nil
 	default:
 		return "", fmt.Errorf("manifest error:%d: unsupported section `%s`", lineNo, section)
@@ -146,6 +153,18 @@ func assignManifestValue(
 			return err
 		}
 		manifest.Paths = parsed
+	case "native.library_search":
+		parsed, err := parseStringList(value, lineNo)
+		if err != nil {
+			return err
+		}
+		manifest.LibrarySearch = parsed
+	case "native.framework_search":
+		parsed, err := parseStringList(value, lineNo)
+		if err != nil {
+			return err
+		}
+		manifest.FrameworkSearch = parsed
 	default:
 		return fmt.Errorf("manifest error:%d: unsupported key `%s.%s`", lineNo, section, key)
 	}

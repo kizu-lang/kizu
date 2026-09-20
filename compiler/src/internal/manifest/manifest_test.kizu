@@ -1,3 +1,4 @@
+import std::array;
 import std::mem;
 import std::string;
 import std::testing;
@@ -92,4 +93,50 @@ test "parse std manifest allows the reserved std package name" {
         },
         Error(text) => expect_string(text, ""),
     }
+}
+
+fn expect_entry(values: &array::Array<string::String>, index: i64, expected: []u8) -> void {
+    if values.at(index) |value| {
+        expect_string(value, expected);
+    } else {
+        testing::fail("missing entry");
+    }
+    return;
+}
+
+test "parse manifest reads the native search paths" {
+    let allocator = mem::page_allocator();
+    let source =
+        \\[package]
+        \\name = "app"
+        \\
+        \\[native]
+        \\library_search = ["/opt/homebrew/lib", "vendor/lib"]
+        \\framework_search = ["vendor/frameworks"]
+    ;
+    let result = try parse_manifest(allocator, source);
+    defer result.deinit(allocator);
+    match &result {
+        Manifest(manifest) => {
+            testing::expect_equal<i64>(2, manifest.library_search.len());
+            expect_entry(&manifest.library_search, 1, "vendor/lib");
+            testing::expect_equal<i64>(1, manifest.framework_search.len());
+            expect_entry(&manifest.framework_search, 0, "vendor/frameworks");
+        },
+        Error(text) => expect_string(text, ""),
+    }
+}
+
+test "parse manifest rejects an unknown native key" {
+    let allocator = mem::page_allocator();
+    let source =
+        \\[package]
+        \\name = "app"
+        \\
+        \\[native]
+        \\libraries = ["m"]
+    ;
+    let result = try parse_manifest(allocator, source);
+    defer result.deinit(allocator);
+    expect_error(&result, "manifest error:5: unsupported key `native.libraries`");
 }

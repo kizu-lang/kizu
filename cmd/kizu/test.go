@@ -18,7 +18,7 @@ func testFile(path string, args []string, seed *int64) error {
 	if err := addTestMain(module, seed); err != nil {
 		return err
 	}
-	exe, err := linkModule(module)
+	exe, err := linkModule(module, path)
 	if err != nil {
 		return err
 	}

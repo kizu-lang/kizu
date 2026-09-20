@@ -108,6 +108,13 @@ pub struct FunctionSignature {
     pub requires_unsafe: bool,
     pub extern_abi: Text,
     pub export_abi: Text,
+    /// link_library and link_framework name what the native linker is
+    /// handed to resolve an `extern "c"` symbol: `@link_lib("m")` becomes
+    /// `-lm` and `@link_framework("Accelerate")` becomes
+    /// `-framework Accelerate`. Where the linker looks for them is the
+    /// manifest's business (SPEC §12.2).
+    pub link_library: Text,
+    pub link_framework: Text,
     pub public: bool,
     pub std: bool,
     /// span points at the declaration name, so a diagnostic about the
@@ -1475,6 +1482,10 @@ fn append_function_decl(
     ast: &Ast,
     declaration: &FunctionDecl
 ) -> !void {
+    if !text_is_empty(ast, declaration.signature.extern_abi) {
+        try append_link_attribute(allocator, out, ast, "@link_lib(", declaration.signature.link_library);
+        try append_link_attribute(allocator, out, ast, "@link_framework(", declaration.signature.link_framework);
+    }
     if declaration.signature.public {
         try out.append_bytes(allocator, "pub ");
     }
@@ -1513,6 +1524,27 @@ fn append_function_decl(
     } else {
         try out.append_byte(allocator, cast<u8>(59));
     }
+    return;
+}
+
+/// Renders one link attribute written above an extern declaration on its own
+/// line, the Go `linkAttributeText`, so a formatted file reads as written.
+fn append_link_attribute(
+    allocator: Allocator,
+    out: &var string::String,
+    ast: &Ast,
+    prefix: []u8,
+    value: Text
+) -> !void {
+    if text_is_empty(ast, value) {
+        return;
+    }
+    try out.append_bytes(allocator, prefix);
+    let retained = ast.texts.at(value.node);
+    let bytes = retained.as_bytes();
+    try fmt::append_bytes_literal(allocator, out, bytes);
+    try out.append_bytes(allocator, ")");
+    try out.append_byte(allocator, cast<u8>(10));
     return;
 }
 
@@ -2569,6 +2601,8 @@ fn derive_decl(
             requires_unsafe: false,
             extern_abi: names.empty,
             export_abi: names.empty,
+            link_library: names.empty,
+            link_framework: names.empty,
             public: false,
             std: std_owner,
             span: zero_span()
