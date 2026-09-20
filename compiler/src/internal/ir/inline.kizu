@@ -723,9 +723,15 @@ fn (self: &BodyCopier) copy_instr(allocator: Allocator, module: &var Module, ins
     index = 0;
     while cleanups.get(index) |cleanup| {
         index = index + 1;
+        var renamed_args = array::new<Value>(allocator);
+        defer renamed_args.deinit(allocator);
+        var arg_index = 0;
+        while module.cleanup_arg(cleanup, arg_index) |arg| {
+            arg_index = arg_index + 1;
+            try renamed_args.append(allocator, try self.value(module, arg));
+        }
         var renamed = cleanup;
-        renamed.arg = try self.value(module, cleanup.arg);
-        renamed.allocator = try self.value(module, cleanup.allocator);
+        renamed.args_start = try module.add_cleanup_args(allocator, &renamed_args);
         try node.cleanups.append(allocator, renamed);
     }
     return Instr { node: try module.instrs.add(allocator, move node) };
@@ -760,6 +766,7 @@ fn replace_function_values(
         var instr_index = 0;
         while inline_instr_at(module, block, instr_index) |instr| {
             instr_index = instr_index + 1;
+            let pool = &var module.cleanup_args;
             if module.instrs.at_mut(instr.node) |node| {
                 var index = 0;
                 while node.args.get(index) |arg| {
@@ -777,10 +784,15 @@ fn replace_function_values(
                     field.value = resolve_replacement(replacements, field.value);
                 }
                 index = 0;
-                while node.cleanups.at_mut(index) |cleanup| {
+                while node.cleanups.get(index) |cleanup| {
                     index = index + 1;
-                    cleanup.arg = resolve_replacement(replacements, cleanup.arg);
-                    cleanup.allocator = resolve_replacement(replacements, cleanup.allocator);
+                    var arg_index = 0;
+                    while arg_index < cleanup.args_len {
+                        if pool.get(cleanup.args_start + arg_index) |arg| {
+                            try pool.set(cleanup.args_start + arg_index, resolve_replacement(replacements, arg));
+                        }
+                        arg_index = arg_index + 1;
+                    }
                 }
             }
         }

@@ -384,16 +384,29 @@ func linkFlags(options Options) []string {
 	for _, dir := range options.FrameworkSearch {
 		flags = append(flags, "-F"+dir)
 	}
-	for _, library := range options.Libraries {
+	for _, library := range linkLibraries(options) {
 		flags = append(flags, "-l"+library)
 	}
 	for _, framework := range options.Frameworks {
 		flags = append(flags, "-framework", framework)
 	}
-	if slices.Contains(options.Libraries, "m") {
-		return flags
+	return flags
+}
+
+// runtimeLibraries are the libraries the runtime shim itself needs, whatever
+// the program declares.
+var runtimeLibraries = []string{"m"}
+
+// linkLibraries lists every library the executable links, the program's
+// then the runtime's, each once.
+func linkLibraries(options Options) []string {
+	libraries := make([]string, 0, len(options.Libraries)+len(runtimeLibraries))
+	for _, library := range slices.Concat(options.Libraries, runtimeLibraries) {
+		if !slices.Contains(libraries, library) {
+			libraries = append(libraries, library)
+		}
 	}
-	return append(flags, "-lm")
+	return libraries
 }
 
 // clangFlags spells what the toolchain is asked to produce. The runtime object

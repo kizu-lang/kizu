@@ -1,0 +1,78 @@
+// `defer` and `errdefer` register one call that returns void. What the call
+// is does not matter: a cleanup method, a function of this program, or an
+// extern one. Each argument follows its own passing mode -- a copy is read
+// where the defer is written, a borrow is checked again at the exit, and the
+// one owner the call consumes (a by-value receiver, or a `move` argument)
+// is handed over at the exit that runs it.
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+error Error {
+    OutOfMemory,
+    TooSmall,
+}
+
+struct Counter {
+    exits: i64,
+}
+
+fn note_exit(counter: &var Counter) -> void {
+    counter.exits = counter.exits + 1;
+    return;
+}
+
+/// handle は open で作られ、release にちょうど 1 回渡される。
+unsafe struct Handle {
+    block: ptr<u8>,
+}
+
+fn open(size: usize) -> Error!Handle {
+    // SAFETY: the block, if any, is owned by the Handle until release.
+    let block = unsafe malloc(size) orelse return Error::OutOfMemory;
+    // SAFETY: block is live and nothing else holds it.
+    return unsafe Handle { block: block };
+}
+
+fn release(handle: Handle) -> void {
+    // SAFETY: the handle's block came from malloc and is released once.
+    unsafe free(handle.block);
+    return;
+}
+
+// The extern call is deferred on the error path only: the block is freed
+// when the size check fails, and kept when it passes.
+fn reserve(size: usize) -> Error!Handle {
+    // SAFETY: freed on the error path below, or owned by the Handle.
+    let block = unsafe malloc(size) orelse return Error::OutOfMemory;
+    // SAFETY: block came from malloc above and is not used after an error.
+    errdefer unsafe free(block);
+    if size < 8 {
+        return Error::TooSmall;
+    }
+    // SAFETY: block is live and the errdefer will not run on this path.
+    return unsafe Handle { block: block };
+}
+
+fn count_exits(counter: &var Counter) -> Error!void {
+    defer note_exit(counter);
+    let handle = try open(32);
+    defer release(move handle);
+    let _ = try reserve(4);
+    return;
+}
+
+fn main() -> void {
+    var counter = Counter { exits: 0 };
+    if count_exits(&var counter) {
+        print("no failure");
+    } else |failure| {
+        print(failure == Error::TooSmall);
+    }
+    print(counter.exits);
+    return;
+}
+
+// run
+// features: defer errdefer extern-c raw-pointer
+// output:
+// true
+// 1

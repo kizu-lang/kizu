@@ -1516,16 +1516,18 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
-// TestCheckRejectsInvalidDeferredCleanup checks the supported defer shape.
+// TestCheckRejectsInvalidDeferredCleanup checks that defer registers a call
+// and nothing else.
 func TestCheckRejectsInvalidDeferredCleanup(t *testing.T) {
 	source := `fn main() {
-    defer print("not cleanup");
+    let value = 1;
+    defer value;
 }`
 	err := checkSource(source)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "defer expects cleanup method call") {
+	if !strings.Contains(err.Error(), "defer expects a void call") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
@@ -1592,16 +1594,18 @@ fn build() -> !std::arena::Arena<User> {
 	}
 }
 
-// TestCheckRejectsInvalidErrDeferCleanup keeps errdefer to cleanup method calls.
+// TestCheckRejectsInvalidErrDeferCleanup checks that errdefer registers a
+// call and nothing else.
 func TestCheckRejectsInvalidErrDeferCleanup(t *testing.T) {
 	source := `fn main() {
-    errdefer print("not cleanup");
+    let value = 1;
+    errdefer value;
 }`
 	err := checkSource(source)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "errdefer expects cleanup method call") {
+	if !strings.Contains(err.Error(), "errdefer expects a void call") {
 		t.Fatalf("got %q", err.Error())
 	}
 }

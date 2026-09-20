@@ -1415,62 +1415,82 @@ func (c *Checker) checkBodyStmt(
 
 // checkDeferStmt validates the first supported block cleanup registration form.
 func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe unsafeMark) (bool, error) {
-	if err := validateDeferCleanupExpr(stmt.Expr); err != nil {
-		return false, err
-	}
-	got, err := c.checkExpr(stmt.Expr, env, unsafe)
-	if err != nil {
-		return false, err
-	}
-	if got != typeVoid {
-		return false, errorf("type error: defer cleanup must return void, got %s", got)
-	}
-	return false, nil
+	return false, c.checkDeferredCall("defer", stmt.Expr, env, unsafe)
 }
 
-// validateDeferCleanupExpr restricts defer to explicit cleanup method calls.
-func validateDeferCleanupExpr(expr ast.Expression) error {
-	return validateCleanupCallExpr("defer", expr)
-}
-
-// checkErrDeferStmt validates an error-path cleanup registration. It shares the
-// cleanup-call shape with defer; the path-sensitive timing difference is handled
-// by lowering and the runtime, not by the type surface.
+// checkErrDeferStmt validates an error-path cleanup registration. It shares
+// the shape with defer; the path-sensitive timing difference is handled by
+// lowering and the runtime, not by the type surface.
 func (c *Checker) checkErrDeferStmt(
 	stmt *ast.ErrDeferStmt,
 	env *scope,
 	unsafe unsafeMark,
 ) (bool, error) {
-	if err := validateCleanupCallExpr("errdefer", stmt.Expr); err != nil {
-		return false, err
-	}
-	got, err := c.checkExpr(stmt.Expr, env, unsafe)
-	if err != nil {
-		return false, err
-	}
-	if got != typeVoid {
-		return false, errorf("type error: errdefer cleanup must return void, got %s", got)
-	}
-	return false, nil
+	return false, c.checkDeferredCall("errdefer", stmt.Expr, env, unsafe)
 }
 
-// validateCleanupExpr restricts defer/errdefer to explicit cleanup method calls.
-func validateCleanupCallExpr(keyword string, expr ast.Expression) error {
-	call, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return errorf("type error: %s expects cleanup method call", keyword)
+// checkDeferredCall types what `defer` / `errdefer` registers: one call that
+// returns void, under whatever `unsafe` marker its callee needs. A deferred
+// call runs where no caller is listening, so it cannot fail: a `try` or a
+// `catch` inside it would be an error path with nowhere to go, and a call
+// that returns a value would drop it. What the call's arguments mean --
+// read now, or consumed and re-checked at exit -- is the ownership
+// checker's question, asked by their passing mode (SPEC §6.3.1).
+func (c *Checker) checkDeferredCall(
+	keyword string,
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	if err := validateDeferredCallShape(keyword, expr); err != nil {
+		return err
 	}
-	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok {
-		return errorf("type error: %s expects cleanup method call", keyword)
+	got, err := c.checkExpr(expr, env, unsafe)
+	if err != nil {
+		return err
 	}
-	// The source already holds a method call, so naming the method it wanted
-	// beats repeating that one was expected. There is only one (ADR-0119).
-	if field.Name != typ.CleanupMethod {
-		return errorf("type error: %s cleanup must be `%s`, got `%s`",
-			keyword, typ.CleanupMethod, field.Name)
+	if got != typeVoid {
+		return errorf("type error: %s call must return void, got %s", keyword, got)
 	}
 	return nil
+}
+
+// validateDeferredCallShape accepts a call, possibly under an `unsafe`
+// marker, and nothing that could fail on the way.
+func validateDeferredCallShape(keyword string, expr ast.Expression) error {
+	inner := expr
+	if marked, ok := inner.(*ast.UnsafeExpr); ok {
+		inner = marked.Value
+	}
+	switch e := inner.(type) {
+	case *ast.TryExpr:
+		return errorf("type error: %s call cannot propagate an error with `try`", keyword)
+	case *ast.CallExpr:
+		// A builtin form such as `print` is a statement the compiler spells
+		// out in place, not a function a call can be held to; a deferred
+		// call names something with a signature.
+		if ident, ok := e.Callee.(*ast.IdentExpr); ok && isBuiltinCallName(ident.Name) {
+			return errorf("type error: %s expects a call to a declared function or method, got builtin `%s`",
+				keyword, ident.Name)
+		}
+		return nil
+	case *ast.BinaryExpr:
+		if e.Operator == "catch" {
+			return errorf("type error: %s call cannot fail; `catch` has no error to catch", keyword)
+		}
+	}
+	return errorf("type error: %s expects a void call", keyword)
+}
+
+// isBuiltinCallName names the call spellings the checker types itself rather
+// than through a declaration: they have no signature to defer against.
+func isBuiltinCallName(name string) bool {
+	switch name {
+	case "print", "ptr_read", "ptr_write", "ptr_of", "mut_ptr_of", "ptr_offset",
+		"view_from_ptr", "mut_view_from_ptr", "volatile_read", "volatile_write", "Io":
+		return true
+	}
+	return false
 }
 
 // checkLetStmt validates a let or var declaration.

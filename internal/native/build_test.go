@@ -100,7 +100,7 @@ func TestLinkFlagsFollowTheLinkerOrder(t *testing.T) {
 		LibrarySearch: []string{"/opt/lib"}, FrameworkSearch: []string{"/opt/frameworks"},
 	}
 	got := strings.Join(linkFlags(options), " ")
-	want := "-L/opt/lib -F/opt/frameworks -lfftw3 -framework Accelerate -lm"
+	want := "-L/opt/lib -F/opt/frameworks -lfftw3 -lm -framework Accelerate"
 	if got != want {
 		t.Fatalf("linkFlags = %q, want %q", got, want)
 	}

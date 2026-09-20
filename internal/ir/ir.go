@@ -181,6 +181,12 @@ type Instr struct {
 type Cleanup struct {
 	Op   string
 	Args []Value
+	// Loads marks the arguments that are slots to load at the exit that
+	// runs the cleanup: the owners the call consumes, which the frame may
+	// still use until then. Every other argument is the value it had where
+	// the defer was written, a borrow's slot included, since the callee
+	// takes the slot itself.
+	Loads []bool
 	// ExternABI and ExternName carry the same declared foreign-call facts as
 	// Instr. A cleanup can stay attached to error.try instead of becoming an
 	// instruction, so deriving them later from Op would lose the boundary.

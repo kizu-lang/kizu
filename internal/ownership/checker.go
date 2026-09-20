@@ -905,56 +905,115 @@ func (kind cleanupKind) keyword() string {
 	return "defer"
 }
 
-// registerCleanup validates one cleanup registration and records it. Both
-// kinds name a cleanup method call on a receiver read where the statement is
-// written; the receiver's arguments are read there too (ADR-0132). A value
-// carries one registration at most. What differs is when the cleanup runs: a
-// defer discharges the receiver's consume obligation (ADR-0091) from here on,
-// while an errdefer is not applied at normal block exit, so it never blocks a
-// success-path move and its receiver is re-validated at each error-return
-// path that can run it.
+// registerCleanup validates one deferred call and records it. The call's
+// arguments are read where the statement is written (ADR-0132); the one
+// argument the call consumes -- a receiver its method takes by value, or an
+// argument marked `move` -- is the owner the registration is about. A value
+// carries one registration at most. What differs between the kinds is when
+// the call runs: a defer discharges the owner's consume obligation
+// (ADR-0091) from here on, while an errdefer is not applied at normal block
+// exit, so it never blocks a success-path move and its owner is re-validated
+// at each error-return path that can run it.
 func (c *Checker) registerCleanup(kind cleanupKind, expr ast.Expression, env *scope) error {
-	call, ok := expr.(*ast.CallExpr)
+	call, ok := unwrapExpressionMarkers(expr).(*ast.CallExpr)
 	if !ok {
-		return errorf("move error: %s expects cleanup method call", kind.keyword())
+		return errorf("move error: %s expects a void call", kind.keyword())
 	}
-	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok {
-		return errorf("move error: %s expects cleanup method call", kind.keyword())
-	}
-	if field.Name != typ.CleanupMethod {
-		return errorf("move error: %s cleanup must be `%s`, got `%s`",
-			kind.keyword(), typ.CleanupMethod, field.Name)
-	}
-	receiverType, err := c.readExpr(field.Receiver, env)
+	owner, ownerExpr, err := c.readDeferredCall(kind, call, env)
 	if err != nil {
 		return err
 	}
-	if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
-		return err
-	}
-	var value *binding
-	if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
-		if found, exists := env.lookup(ident.Name); exists {
-			if err := c.checkCleanupNotRegistered(found, field.Receiver); err != nil {
-				return err
-			}
-			value = found
+	if owner != nil {
+		if err := c.checkCleanupNotRegistered(owner, ownerExpr); err != nil {
+			return err
 		}
 	}
 	switch kind {
 	case cleanupDefer:
-		if value != nil {
-			value.deferCleanup = true
+		if owner != nil {
+			owner.deferCleanup = true
 		}
 	case cleanupErrDefer:
-		entry := errDeferEntry{receiver: field.Receiver}
-		if value != nil {
-			entry.name, entry.id = value.name, value.id
+		entry := errDeferEntry{receiver: ownerExpr}
+		if owner != nil {
+			entry.name, entry.id = owner.name, owner.id
 		}
 		c.liveErrDefers = append(c.liveErrDefers, entry)
 	}
 	return nil
+}
+
+// readDeferredCall reads a deferred call's receiver and arguments without
+// consuming anything, and returns the one owner the call will consume when
+// it runs, with the expression that names it. A method receiver is that
+// owner when the method takes it by value; an argument is when it is
+// marked `move`. Two owners in one call would need two registrations to
+// retire separately, so a call may consume at most one.
+func (c *Checker) readDeferredCall(
+	kind cleanupKind,
+	call *ast.CallExpr,
+	env *scope,
+) (*binding, ast.Expression, error) {
+	var owner *binding
+	var ownerExpr ast.Expression
+	if field, ok := call.Callee.(*ast.FieldExpr); ok && !field.Namespace {
+		receiverType, err := c.readExpr(field.Receiver, env)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
+			return nil, nil, err
+		}
+		if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
+			if found, exists := env.lookup(ident.Name); exists &&
+				c.methodConsumesReceiver(found, field.Name) {
+				owner, ownerExpr = found, field.Receiver
+			}
+		}
+	}
+	for _, arg := range call.Args {
+		marker, place := splitMoveMarker(arg)
+		if marker == nil {
+			if _, err := c.readExpr(arg, env); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
+		if _, err := c.readExpr(place, env); err != nil {
+			return nil, nil, err
+		}
+		ident, ok := place.(*ast.IdentExpr)
+		if !ok {
+			return nil, nil, errorAt(marker.Span,
+				"move error: %s can only move a local binding, got `%s`",
+				kind.keyword(), place.String())
+		}
+		found, exists := env.lookup(ident.Name)
+		if !exists {
+			continue
+		}
+		if owner != nil {
+			return nil, nil, errorAt(marker.Span,
+				"move error: %s call consumes both `%s` and `%s`; a deferred call consumes at most one owner",
+				kind.keyword(), owner.name, found.name)
+		}
+		owner, ownerExpr = found, place
+	}
+	return owner, ownerExpr, nil
+}
+
+// methodConsumesReceiver reports whether calling method on value takes the
+// value over, read from the method's signature for a user type, and from the
+// one cleanup name for std storage, whose `deinit` is the call that ends it.
+func (c *Checker) methodConsumesReceiver(value *binding, method string) bool {
+	receiverType := value.typeName
+	if base, _, ok := splitGenericType(receiverType); ok {
+		receiverType = base
+	}
+	if info := c.implMethod(receiverType, method); info != nil {
+		return functionConsumesReceiver(info)
+	}
+	return method == typ.CleanupMethod && c.valueTypeNeedsConsume(value.typeName)
 }
 
 // checkCleanupNotRegistered rejects a second cleanup registration for one
@@ -986,12 +1045,7 @@ func (c *Checker) checkDeferredReleaseArgs(
 	args []ast.Expression,
 	env *scope,
 ) error {
-	for _, arg := range args {
-		if _, err := c.readExpr(arg, env); err != nil {
-			return err
-		}
-	}
-	if len(args) != 1 {
+	if len(args) != 1 || field.Name != typ.CleanupMethod {
 		return nil
 	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)

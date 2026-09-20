@@ -35,6 +35,11 @@ pub struct Module {
     // program links is read off the calls that survive reachability, not off
     // the declarations (link_inputs).
     pub externs: array::Array<Extern>,
+    // cleanup_args holds the arguments of every deferred cleanup, each
+    // cleanup naming its own contiguous run: the Go `Cleanup.Args` slice,
+    // kept here so a Cleanup stays a copy value the frames and the attached
+    // instructions can carry.
+    pub cleanup_args: array::Array<Value>,
 }
 
 /// Is what one `extern` declaration tells the linker: the ABI it is called
@@ -57,8 +62,50 @@ pub fn new_module(allocator: Allocator) -> !Module {
         function_nodes: arena::new<FunctionNode>(allocator),
         blocks: arena::new<BlockNode>(allocator),
         instrs: arena::new<InstrNode>(allocator),
-        externs: array::new<Extern>(allocator)
+        externs: array::new<Extern>(allocator),
+        cleanup_args: array::new<Value>(allocator)
     };
+}
+
+/// Appends one cleanup's arguments to the module's pool and returns where
+/// the run starts.
+pub fn (self: &var Module) add_cleanup_args(allocator: Allocator, args: &array::Array<Value>) -> !i64 {
+    let start = self.cleanup_args.len();
+    var index = 0;
+    while args.get(index) |arg| {
+        index = index + 1;
+        try self.cleanup_args.append(allocator, arg);
+    }
+    return start;
+}
+
+/// Returns one argument of a cleanup, or null past its last.
+pub fn (self: &Module) cleanup_arg(cleanup: Cleanup, index: i64) -> ?Value {
+    if index < 0 or index >= cleanup.args_len {
+        return null;
+    }
+    return self.cleanup_args.get(cleanup.args_start + index);
+}
+
+/// Replaces one argument of a cleanup in place.
+pub fn (self: &var Module) set_cleanup_arg(cleanup: Cleanup, index: i64, value: Value) -> !void {
+    if index < 0 or index >= cleanup.args_len {
+        return;
+    }
+    try self.cleanup_args.set(cleanup.args_start + index, value);
+    return;
+}
+
+/// Reports whether a cleanup loads its index-th argument out of a slot at
+/// the exit that runs it, the Go `Cleanup.Loads[index]`.
+pub fn cleanup_loads(cleanup: Cleanup, index: i64) -> bool {
+    var bit = 1;
+    var count = 0;
+    while count < index {
+        bit = bit * 2;
+        count = count + 1;
+    }
+    return (cleanup.loads / bit) % 2 == 1;
 }
 
 /// Files what the linker is told about one host symbol, so a call naming
@@ -275,19 +322,22 @@ pub struct InstrNode {
     pub span: ast::Span,
 }
 
-/// Is a deferred void instruction that must run before a scope exits. Its
-/// one operand is the receiver value it consumes. on_error marks errdefer
-/// cleanups, which run only on error-return paths. receiver names the local
-/// the cleanup consumes, so an error exit can drop the cleanups a move has
-/// retired (ADR-0114).
+/// Is a deferred void call that must run before a scope exits. Its
+/// arguments are a run of the module's cleanup_args pool. on_error marks
+/// errdefer cleanups, which run only on error-return paths. receiver names
+/// the owner the call consumes, so an error exit can drop the cleanups a
+/// move has retired (ADR-0114).
 pub struct Cleanup {
     pub op: Op,
     pub operand: Name,
-    pub arg: Value,
-    // The allocator the release names, read where the defer was written
-    // (ADR-0132). A runtime op whose header still holds one carries none, and
-    // spells that as the empty value.
-    pub allocator: Value,
+    pub args_start: i64,
+    pub args_len: i64,
+    // loads marks, one bit per argument, the arguments that are slots to
+    // load at the exit that runs the cleanup: the owners the call consumes,
+    // which the frame may still use until then. Every other argument is the
+    // value it had where the defer was written, a borrow's slot included,
+    // since the callee takes the slot itself (the Go `Cleanup.Loads`).
+    pub loads: i64,
     // Explicit foreign-call facts consumed by backends. A cleanup can remain
     // attached to error.try, so its boundary cannot be recovered from a
     // standalone instruction later.

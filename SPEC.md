@@ -467,28 +467,37 @@ fn make_values(allocator: mem::Allocator) -> !array::Array<i64> {
 }
 ```
 
-で許可する形は cleanup method call の expression statement だけです。
+で登録できるのは **`void` を返す call 1 つ** です。cleanup method でも、この
+program の関数でも、`extern "c" fn` でも同じ規則で扱います。
 
 ```kizu
-defer values.deinit(allocator);
-defer text.deinit(allocator);
-defer users.deinit(allocator);
+defer values.deinit(allocator);       // by-value receiver を出口で consume
+defer note_exit(&var counter);        // borrow は出口で再検査
+defer release(move handle);           // `move` した owner を出口で consume
+errdefer unsafe free(block);          // copy 引数は登録時に読む
 ```
 
 `defer let ...;`、`defer return ...;`、`defer { ... }`、
-`defer defer ...;` は構文として扱いません。
-deferred expression は `.deinit(allocator)` のような `void` cleanup call でなければ
-なりません。receiver 以外の引数は **`defer` が書かれた場所で読み**、block を出るときに
-走るのはその値です。cleanup 対象は自動探索しません。Drop / RAII / implicit destructor
-はありません。
+`defer defer ...;` は構文として扱いません。call が `void` 以外(`!void` を含む)を
+返すもの、`try` / `catch` を含むもの、`print` のような builtin form は拒否します。
+deferred call は呼び出し元の居ない場所で走るので、失敗を伝える先がありません。
+cleanup 対象は自動探索しません。Drop / RAII / implicit destructor はありません。
 
-deferred cleanup は明示 cleanup call と同じ ownership rule で検査します。
-登録時点で receiver を参照できる必要があり、block exit で実行する時点でも
-receiver が move 済み、deinit 済み、borrow 中なら拒否します。
-`errdefer` の receiver を consume すると、その `errdefer` は退役します。consume 以降の
+引数は通常の call と同じ passing mode で扱います。
+
+* copy 引数(整数、float、raw pointer、view でない値)は **`defer` が書かれた場所で
+  読み**、block を出るときに走るのはその値です(ADR-0132)。
+* `&T` / `&var T` 引数は登録時に名前を参照でき、block exit で実行する時点でも
+  live で、borrow が衝突しないことを検査します。
+* by-value の receiver と `move` 引数は、その call が **consume する owner** です。
+  1 つの deferred call が consume できる owner は 1 つまでで、2 つは 2 つの
+  `defer` に分けます。owner は登録時点で参照でき、block exit で実行する時点で
+  move 済み、deinit 済み、borrow 中なら拒否します。
+
+`errdefer` の owner を consume すると、その `errdefer` は退役します。consume 以降の
 error exit path では実行しません。move でも明示 `deinit` でも同じで、move を行う
 呼び出し自身が失敗する path も含みます。consume 済みの値をそこで解放すると、
-同じ値を 2 回解放することになるためです。`defer` / `errdefer` の receiver に別の値を代入することは compile error です。
+同じ値を 2 回解放することになるためです。`defer` / `errdefer` の owner に別の値を代入することは compile error です。
 cleanup は登録時に live だった値を解放するので、名前が別の値を指すようになると、
 cleanup は名前が意味しなくなった値を持つことになります。新しい owner は
 新しい名前に束縛します。

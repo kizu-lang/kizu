@@ -1266,8 +1266,8 @@ fn (self: &var Lowerer) lower_try_expr(
     try self.retire_cleanups_for_try(expression, &var cleanups);
     var index = 0;
     while index < cleanups.len() {
-        if cleanups.at_mut(index) |slot| {
-            slot.arg = try self.load_cleanup_arg(slot.arg);
+        if cleanups.get(index) |cleanup| {
+            try cleanups.set(index, try self.loaded_cleanup(cleanup));
         }
         index = index + 1;
     }
@@ -2080,11 +2080,13 @@ fn (self: &var Lowerer) release_owner_on_failure(
     let cleanup_bytes = typ::cleanup_method();
     let method = try self.name(cleanup_bytes);
     var cleanup = empty_cleanup();
-    var named_allocator = empty_value();
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit(self.allocator);
+    try args.append(self.allocator, owner);
     if self.release_names_allocator(owner.type_name) {
-        named_allocator = allocator;
+        try args.append(self.allocator, allocator);
     }
-    if try self.cleanup_from_method(tree, owner, method, named_allocator, &var cleanup) |failed| {
+    if try self.cleanup_from_method(tree, owner, method, &args, &var cleanup) |failed| {
         return move failed;
     }
     cleanup.on_error = true;

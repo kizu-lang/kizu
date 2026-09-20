@@ -2678,7 +2678,7 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 		l.ownership.RetiredErrDefersForTry(expr),
 	)
 	for index := range cleanups {
-		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args)
+		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args, cleanups[index].Loads)
 	}
 	result := l.emit("error.try", errorUnionElementType(l.types, value.Type), []Value{value}, "")
 	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = cleanups

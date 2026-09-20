@@ -8,8 +8,8 @@ import std::array;
 // Mechanical port of internal/ir/defer.go: the lexical cleanup frames, the
 // `defer` / `errdefer` statements that record one cleanup each, and the
 // emission of the recorded cleanups at block ends, returns, loop exits and
-// `try` propagation. The Go `Cleanup.Args` is always the one receiver the
-// cleanup consumes, so it is the copy field `arg`; the Go op string is an
+// `try` propagation. The Go `Cleanup.Args` is a run of the module's
+// cleanup_args pool, so a Cleanup stays a copy value; the Go op string is an
 // `Op` plus the symbol a `call.<f>` cleanup carries in `operand`.
 
 /// Opens a lexical cleanup frame for one block, the Go `pushDeferFrame`, and
@@ -57,45 +57,183 @@ fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Exp
     return null;
 }
 
-/// Reads the receiver expression a cleanup call consumes, the Go
-/// `cleanupReceiver`. The shape is the one `cleanup_from_expr` accepts, so
-/// anything else has already failed there.
+/// Reads the expression naming the one owner a deferred call consumes, the
+/// Go `cleanupReceiver`: the receiver of a method call, or the binding an
+/// argument marks `move`. The ownership checker names the same node when it
+/// retires an errdefer, which is how the two agree on which entry it was. A
+/// call that consumes nothing has none.
 fn cleanup_receiver(tree: &ast::Ast, expression: ast::Expression) -> ?arena::Handle<ast::ExpressionNode> {
-    let call = ownership::call_expr(tree, expression) orelse return null;
-    let field = ownership::field_expr(tree, call.callee) orelse return null;
-    return field.receiver.node;
+    let call = ownership::call_expr(tree, deferred_call_expr(tree, expression)) orelse return null;
+    if ownership::field_expr(tree, call.callee) |field| {
+        if !field.namespace {
+            return field.receiver.node;
+        }
+    }
+    var index = 0;
+    while ownership::arg_at(tree, call.args, index) |arg| {
+        index = index + 1;
+        if ownership::move_expr(tree, arg) |marker| {
+            return marker.value.node;
+        }
+    }
+    return null;
 }
 
-/// Converts the narrow v0 defer expression into a void cleanup, the Go
-/// `cleanupFromExpr`.
+/// Returns the expression a defer statement registers, under whatever
+/// markers it was written with, the Go `deferredCall` before its cast.
+fn deferred_call_expr(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
+    var current = expression;
+    while ast::marker_value(tree, current) |inner| {
+        current = inner;
+    }
+    return current;
+}
+
+/// Converts a deferred call into a void cleanup, the Go `cleanupFromExpr`:
+/// the callee resolved now, the arguments read now, the call emitted at each
+/// exit.
+///
+/// The arguments are read where the defer is written, not where it runs, so
+/// what runs at scope exit is settled at the point the source names. The one
+/// exception is an owner the call consumes -- a by-value receiver, or an
+/// argument marked `move` -- which stays in its slot until the exit that
+/// runs the call, since the frame may still use it until then and the exit
+/// is what hands it over (load_cleanup_args).
 fn (self: &var Lowerer) cleanup_from_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
     out: &var Cleanup
 ) -> !?diagnostic::Diagnostic {
-    let call = ownership::call_expr(tree, expression) orelse
-        return try self.fail0("ir error: defer expects cleanup method call");
-    let field = ownership::field_expr(tree, call.callee) orelse
-        return try self.fail0("ir error: defer expects cleanup method call");
-    if field.namespace {
-        return try self.fail0("ir error: defer expects cleanup method call");
-    }
-    let ident = ownership::ident_expr(tree, field.receiver) orelse
-        return try self.fail0("ir error: defer cleanup receiver must be a local");
-    let name = try self.text_name(tree, ident.name);
-    let receiver = self.envs.get(self.env, name) orelse
-        return try self.fail1(tree, "ir error: undefined defer receiver `%s`", Arg::Str(name));
-    let method = try self.text_name(tree, field.name);
-    // The arguments are read where the defer is written, not where it runs,
-    // so what runs at scope exit is settled at the point the source names.
-    var allocator = empty_value();
-    if ownership::arg_count(tree, call.args) > 0 {
-        let argument = call.args.get_or_panic(tree, 0);
-        if try self.lower_expr(tree, argument, &var allocator) |failed| {
-            return move failed;
+    let call = ownership::call_expr(tree, deferred_call_expr(tree, expression)) orelse
+        return try self.fail0("ir error: defer expects a void call");
+    if ownership::field_expr(tree, call.callee) |field| {
+        if !field.namespace {
+            let ident = ownership::ident_expr(tree, field.receiver) orelse
+                return try self.fail0("ir error: defer method receiver must be a local");
+            let name = try self.text_name(tree, ident.name);
+            let receiver = self.envs.get(self.env, name) orelse
+                return try self.fail1(tree, "ir error: undefined defer receiver `%s`", Arg::Str(name));
+            let method = try self.text_name(tree, field.name);
+            var params = no_params();
+            if try self.impl_method_callee_name(receiver.type_name, method) |method_name| {
+                if self.signature_named(method_name) |signature| {
+                    params = params_after_self(signature);
+                }
+            }
+            var args = array::new<Value>(self.allocator);
+            defer args.deinit(self.allocator);
+            try args.append(self.allocator, receiver);
+            if try self.lower_cleanup_args(tree, params, call.args, &var args) |failed| {
+                return move failed;
+            }
+            return self.cleanup_from_method(tree, receiver, method, &args, out);
         }
     }
-    return self.cleanup_from_method(tree, receiver, method, allocator, out);
+    let name = try self.function_callee_name(tree, call.callee) orelse
+        return try self.fail1(tree, "ir error: unsupported defer callee `%s`", Arg::Str(try self.callee_name_text(tree, call.callee)));
+    let signature = self.signature_named(name) orelse
+        return try self.fail1(tree, "ir error: unsupported defer callee `%s`", Arg::Str(name));
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit(self.allocator);
+    if try self.lower_cleanup_args(tree, params_of(signature), call.args, &var args) |failed| {
+        return move failed;
+    }
+    return self.cleanup_from_function(tree, name, &args, out);
+}
+
+/// Spells a callee expression for a diagnostic, the Go `call.Callee.String()`.
+fn (self: &var Lowerer) callee_name_text(tree: &ast::Ast, callee: ast::Expression) -> !Name {
+    let rendered = try ast::render_expression(self.allocator, tree, callee);
+    return self.module.names.intern_owned(move rendered);
+}
+
+/// Lowers a deferred call's arguments at the types the callee declares, the
+/// way a direct call does, the Go `lowerCleanupArgs`: a borrow parameter
+/// takes the caller's storage, a value parameter the value read now. A
+/// `move x` argument is the slot x lives in, loaded at the exit that runs
+/// the call.
+fn (self: &var Lowerer) lower_cleanup_args(
+    tree: &var ast::Ast,
+    params: ParamsView,
+    args: ast::ExpressionList,
+    out: &var array::Array<Value>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        let position = index;
+        index = index + 1;
+        if ownership::move_expr(tree, arg) |marker| {
+            if ownership::ident_expr(tree, marker.value) |ident| {
+                let name = try self.text_name(tree, ident.name);
+                if self.envs.get(self.env, name) |slot| {
+                    try out.append(self.allocator, slot);
+                    continue;
+                }
+            }
+        }
+        var want = empty_name();
+        if self.view_param(params, position) |param| {
+            want = param.type_name;
+        }
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try out.append(self.allocator, value);
+    }
+    return null;
+}
+
+/// Resolves a deferred call to a declared function or an extern one, the
+/// Go `cleanupFromFunction`. The signature says the call returns void; a std
+/// primitive with no declared signature is not a thing a defer can name.
+fn (self: &var Lowerer) cleanup_from_function(
+    tree: &var ast::Ast,
+    name: Name,
+    args: &array::Array<Value>,
+    out: &var Cleanup
+) -> !?diagnostic::Diagnostic {
+    let signature = self.signature_named(name) orelse
+        return try self.fail1(tree, "ir error: unsupported defer callee `%s`", Arg::Str(name));
+    let returned = self.signature_return(signature);
+    if !self.name_is(returned, "void") {
+        return try self.fail1(tree, "ir error: defer call must return void, got %s", Arg::Str(returned));
+    }
+    var cleanup = try self.cleanup_of(Op::Call, name, args, self.owner_loads(args, params_of(signature)));
+    if self.extern_decl(name) |external| {
+        cleanup.operand = external.name;
+        cleanup.extern_abi = external.abi;
+        cleanup.extern_name = external.name;
+    }
+    out.* = cleanup;
+    return null;
+}
+
+/// Marks the arguments a cleanup loads at exit, the Go `ownerLoads`: a slot
+/// whose parameter takes the value itself. A slot handed to a `&` / `&var`
+/// parameter is what that parameter wants and is passed as it is. With no
+/// signature every slot is an owner, which is what a std container's
+/// runtime release takes.
+fn (self: &Lowerer) owner_loads(args: &array::Array<Value>, params: ParamsView) -> i64 {
+    var loads = 0;
+    var bit = 1;
+    var index = 0;
+    while args.get(index) |arg| {
+        var load = self.is_mutable_reference_type(arg.type_name);
+        if load {
+            if self.view_param(params, index) |param| {
+                if self.module.names.starts_with(param.type_name, "&") {
+                    load = false;
+                }
+            }
+        }
+        if load {
+            loads = loads + bit;
+        }
+        bit = bit * 2;
+        index = index + 1;
+    }
+    return loads;
 }
 
 /// Names what one std container's cleanup needs, the Go `containerCleanup`:
@@ -161,14 +299,16 @@ fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?Containe
     return null;
 }
 
-/// Returns a cleanup that runs op over the one receiver it consumes, the Go
-/// `Cleanup{Op: op, Args: []Value{receiver}}`.
-fn cleanup_of(op: Op, operand: Name, receiver: Value, allocator: Value) -> Cleanup {
+/// Returns a cleanup that runs op over args, the Go `Cleanup{Op: op, Args:
+/// args, Loads: loads}`, with the arguments filed in the module's pool.
+fn (self: &var Lowerer) cleanup_of(op: Op, operand: Name, args: &array::Array<Value>, loads: i64) -> !Cleanup {
+    let start = try self.module.add_cleanup_args(self.allocator, args);
     return Cleanup {
         op: op,
         operand: operand,
-        arg: receiver,
-        allocator: allocator,
+        args_start: start,
+        args_len: args.len(),
+        loads: loads,
         extern_abi: empty_name(),
         extern_name: empty_name(),
         on_error: false,
@@ -183,12 +323,13 @@ fn (self: &Lowerer) cleanup_call_op_slot() -> ContainerCallOp {
 }
 
 /// Resolves one receiver.method() cleanup into an IR instruction, the Go
-/// `cleanupFromMethod`.
+/// `cleanupFromMethod`. args holds the receiver first, then the arguments
+/// the statement carried.
 fn (self: &var Lowerer) cleanup_from_method(
     tree: &var ast::Ast,
     receiver: Value,
     method: Name,
-    allocator: Value,
+    args: &array::Array<Value>,
     out: &var Cleanup
 ) -> !?diagnostic::Diagnostic {
     let receiver_type = try self.deref_type(receiver.type_name);
@@ -200,11 +341,17 @@ fn (self: &var Lowerer) cleanup_from_method(
             // would. Plain contents have no loop to run, so they keep the
             // runtime op.
             if !self.is_owner_type(container.owner_arg) {
-                var carried = empty_value();
+                var carried = array::new<Value>(self.allocator);
+                defer carried.deinit(self.allocator);
+                try carried.append(self.allocator, receiver);
                 if container.shallow_names_allocator {
-                    carried = allocator;
+                    var index = 1;
+                    while args.get(index) |arg| {
+                        index = index + 1;
+                        try carried.append(self.allocator, arg);
+                    }
                 }
-                out.* = cleanup_of(container.shallow_op, empty_name(), receiver, carried);
+                out.* = try self.cleanup_of(container.shallow_op, empty_name(), &carried, self.owner_loads(&carried, no_params()));
                 return null;
             }
             let container_name = container.name;
@@ -212,26 +359,12 @@ fn (self: &var Lowerer) cleanup_from_method(
             if try self.std_container_call_op(tree, container_name, method, container.type_arg, &var resolved) |failed| {
                 return move failed;
             }
-            out.* = cleanup_of(Op::Call, resolved.symbol, receiver, allocator);
+            out.* = try self.cleanup_of(Op::Call, resolved.symbol, args, self.owner_loads(args, no_params()));
             return null;
         }
     }
     if try self.impl_method_callee_name(receiver.type_name, method) |method_name| {
-        var returned = empty_name();
-        if self.signature_named(method_name) |signature| {
-            returned = self.signature_return(signature);
-        }
-        if !self.name_is(returned, "void") {
-            return try self.fail1(tree, "ir error: defer cleanup must return void, got %s", Arg::Str(returned));
-        }
-        var cleanup = cleanup_of(Op::Call, method_name, receiver, allocator);
-        if self.extern_decl(method_name) |external| {
-            cleanup.operand = external.name;
-            cleanup.extern_abi = external.abi;
-            cleanup.extern_name = external.name;
-        }
-        out.* = cleanup;
-        return null;
+        return self.cleanup_from_function(tree, method_name, args, out);
     }
     return try self.fail1(tree, "ir error: unknown cleanup method `%s`", Arg::Str(method));
 }
@@ -370,20 +503,16 @@ fn (self: &var Lowerer) emit_cleanup_frame(frame: i64) -> !void {
 }
 
 /// Appends cleanup instructions to the current block, the Go `emitCleanups`.
-/// A cleanup receiver that lives in a slot arrives as `&var T` storage; every
-/// cleanup consumes the value, so the slot is loaded at the exit that runs
-/// it.
+/// An owner the cleanup consumes lives in a slot until here, so the slot is
+/// loaded at the exit that runs it.
 fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void {
     var index = 0;
     while cleanups.get(index) |cleanup| {
         index = index + 1;
-        let arg = try self.load_cleanup_arg(cleanup.arg);
-        if is_empty(cleanup.allocator.name) {
-            let _ = try self.emit_op1(cleanup.op, cleanup.operand, self.common.void_type, arg);
-        } else {
-            let _ = try self.emit_op2(
-                cleanup.op, cleanup.operand, self.common.void_type, arg, cleanup.allocator);
-        }
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit(self.allocator);
+        try self.load_cleanup_args(cleanup, &var args);
+        let _ = try self.emit_with(cleanup.op, cleanup.operand, self.common.void_type, empty_name(), &args);
         if !is_empty(cleanup.extern_abi) {
             if self.last_instr() |instr| {
                 self.module.set_extern_call(instr, cleanup.extern_abi, cleanup.extern_name);
@@ -393,15 +522,38 @@ fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void
     return;
 }
 
-/// Loads a slot-backed cleanup receiver into a value, the Go
-/// `loadCleanupArgs` for the one receiver a cleanup has. An arg without a
-/// slot is returned as it is.
-fn (self: &var Lowerer) load_cleanup_arg(arg: Value) -> !Value {
-    if !self.is_mutable_reference_type(arg.type_name) {
-        return arg;
+/// Appends a cleanup's arguments with the slot-backed owners it consumes
+/// loaded into values and every other argument as it is, the Go
+/// `loadCleanupArgs`.
+fn (self: &var Lowerer) load_cleanup_args(cleanup: Cleanup, out: &var array::Array<Value>) -> !void {
+    var index = 0;
+    while self.module.cleanup_arg(cleanup, index) |arg| {
+        let position = index;
+        index = index + 1;
+        if cleanup_loads(cleanup, position) {
+            let elem = try self.deref_type(arg.type_name);
+            let loaded = try self.emit1(Op::RefLoad, elem, arg);
+            try out.append(self.allocator, loaded);
+            continue;
+        }
+        try out.append(self.allocator, arg);
     }
-    let elem = try self.deref_type(arg.type_name);
-    return self.emit1(Op::RefLoad, elem, arg);
+    return;
+}
+
+/// Returns a copy of cleanup whose arguments are already loaded, the Go
+/// `cleanups[index].Args = l.loadCleanupArgs(...)` at a try: the loaded
+/// run is filed anew, so the frame's own entry keeps its slots for the
+/// exits still to come.
+fn (self: &var Lowerer) loaded_cleanup(cleanup: Cleanup) -> !Cleanup {
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit(self.allocator);
+    try self.load_cleanup_args(cleanup, &var args);
+    var loaded = cleanup;
+    loaded.args_start = try self.module.add_cleanup_args(self.allocator, &args);
+    loaded.args_len = args.len();
+    loaded.loads = 0;
+    return loaded;
 }
 
 /// Returns an empty cleanup record, the slot a resolver fills.
@@ -409,8 +561,9 @@ fn empty_cleanup() -> Cleanup {
     return Cleanup {
         op: Op::Id,
         operand: empty_name(),
-        arg: empty_value(),
-        allocator: empty_value(),
+        args_start: 0,
+        args_len: 0,
+        loads: 0,
         extern_abi: empty_name(),
         extern_name: empty_name(),
         on_error: false,
