@@ -1351,8 +1351,9 @@ index / slice syntax は recoverable error を返しません。
 
 writable slice place(`&var []T` binding)への indexed assignment
 `buf[i] = x` は許可します。bounds は読みと同じく element 単位で trap です。
-書き込みの供給源は §9 の mutable view 規則が定めます。
-indexed borrow、multi-dimensional slicing、
+書き込みの供給源は §9 の mutable view 規則が定めます。writable view の範囲は
+`&var buf[start..end]` で writable view として貸せます(§9)。
+要素 1 つの indexed borrow(`&items[i]`)、multi-dimensional slicing、
 `std::array::Array<T>` への直接 indexing は後続に分離します(ADR-0096
 決定 3: Array は std 定義の struct であり、組み込み indexing は IR の
 layout 結合か隠れ call になるため)。
@@ -1662,8 +1663,9 @@ borrow のルール:
   assignment / borrow は禁止する。path の重なりは一方が他方を含むこと:
   `user.profile.name` は `user.profile` と重なり、`user.age` とは重ならない
 * index / slice expression は read-only checked access から始める
-* indexed borrow syntax はまだ実装しない。将来 `&items[0]` を追加する場合は、
-  専用の安全ルールと regression coverage を先に追加する
+* writable view binding `v` の範囲は `&var v[a..b]` で writable view として
+  貸せる(下記)。要素 1 つの indexed borrow `&items[i]` はまだ実装しない。
+  追加する場合は、専用の安全ルールと regression coverage を先に追加する
 
 境界を越える borrowed view の由来は、注釈でなく署名から構造的に
 導出されます(ADR-0098):
@@ -1731,8 +1733,13 @@ T が deinit 義務を持つ型の場合、caller の生きた所有値を黙っ
 差し替えはできません。`&var []u8` を作れるのは書き込み可能な place だけ
 です: `String.as_mut_bytes()` と stack buffer の `as_mut_bytes()`
 (どちらも mutable binding から。view が生きている間、元の値全体が
-exclusive borrow)、および `&var []u8` 引数の
-再貸し。plain `[]u8` からは作れず、`var` 束縛の plain slice local も
+exclusive borrow)、`&var []u8` 引数の再貸し、および writable view
+binding の範囲 `&var v[a..b]`(`let row = &var v[a..b];` の local binding
+としても、`&var []T` 引数へ直接も書ける)。範囲を貸している間は `v` 全体が
+exclusive borrow です: 2 つの範囲が要素を共有しないことは checker が
+証明しないので、次の範囲は前の範囲の最終使用を待ちます。読み取りの
+範囲は `v[a..b]` がそのまま view なので、`&v[a..b]` はありません。
+plain `[]u8` からは作れず、`var` 束縛の plain slice local も
 `&var []u8` parameter には渡せません(backing の書き込み可能性を保証
 しないため)。可変 view は borrow なので field に保存できず、escape
 できません。

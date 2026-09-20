@@ -3795,7 +3795,7 @@ func (c *Checker) checkBorrowPrefix(
 	unsafe unsafeMark,
 ) (Type, bool, error) {
 	mutable := expr.Operator == "&var"
-	if err := checkBorrowTargetShape(expr.Right); err != nil {
+	if err := checkBorrowTargetShape(expr.Right, mutable); err != nil {
 		return "", false, err
 	}
 	typ, err := c.checkExpr(expr.Right, env, unsafe)
@@ -7816,9 +7816,18 @@ func (c *Checker) checkCallableArgs(
 
 // requireMutableBorrowArg restricts &var arguments to mutable locals or reborrowed &var params.
 // A `&var []u8` slot is stricter (ADR-0096): only a writable view binding may
-// be lent — a `var`-bound plain slice does not guarantee writable backing.
+// be lent — a `var`-bound plain slice does not guarantee writable backing —
+// or a range of one, `&var v[a..b]`, which is a view whatever the slot says.
 // want may be "" when the slot's type is unknown at the call site.
 func requireMutableBorrowArg(expr ast.Expression, want Type, env *scope) error {
+	if ident, ok := sliceBorrowTarget(expr); ok {
+		if env.isMutBorrowed(ident.Name) {
+			return nil
+		}
+		return errorf(
+			"type error: `&var %s[..]` needs a writable view binding (`&var []T`), `%s` is not one",
+			ident.Name, ident.Name)
+	}
 	if isSliceType(want) {
 		if ident, ok := expr.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
 			return nil
@@ -7850,7 +7859,7 @@ func prepareBorrowArgument(
 	if !wantBorrow {
 		return nil, errorf("type error: borrow argument cannot be passed to owning parameter")
 	}
-	if err := checkBorrowTargetShape(prefix.Right); err != nil {
+	if err := checkBorrowTargetShape(prefix.Right, prefix.Operator == "&var"); err != nil {
 		return nil, err
 	}
 	if prefix.Operator == "&var" && !wantMutable {
@@ -7878,16 +7887,38 @@ func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
 }
 
 // checkBorrowTargetShape restricts explicit borrows to direct locals or a
-// field path rooted in one.
-func checkBorrowTargetShape(expr ast.Expression) error {
+// field path rooted in one, and a `&var` borrow also to a range of a view
+// binding: `&var v[a..b]` lends part of a writable view for writing. The
+// shared form has no borrow spelling, since `v[a..b]` already is the
+// read-only view of the range.
+func checkBorrowTargetShape(expr ast.Expression, mutable bool) error {
 	if _, ok := expr.(*ast.IdentExpr); ok {
 		return nil
 	}
 	if _, _, ok := ast.FieldPathRoot(expr); ok {
 		return nil
 	}
+	if _, ok := sliceBorrowTarget(expr); ok {
+		if mutable {
+			return nil
+		}
+		return errorAt(expressionSpan(expr),
+			"type error: a shared view of a range is the slice itself (`v[a..b]`);"+
+				" `&var` lends it for writing")
+	}
 	return errorAt(expressionSpan(expr),
 		"type error: borrow target must be a local binding or field path")
+}
+
+// sliceBorrowTarget recognizes `v[a..b]` under a `&var`: a range of a view
+// named by a local binding, whose writable part the borrow hands out.
+func sliceBorrowTarget(expr ast.Expression) (*ast.IdentExpr, bool) {
+	index, ok := expr.(*ast.IndexExpr)
+	if !ok || !index.Slice {
+		return nil, false
+	}
+	ident, ok := index.Target.(*ast.IdentExpr)
+	return ident, ok
 }
 
 // checkArenaAdd validates the arena_add primitive: the add is what buys the

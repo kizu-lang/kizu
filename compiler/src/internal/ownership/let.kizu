@@ -1175,6 +1175,9 @@ fn (self: &var Checker) borrow_target(
         out.field = empty_name();
         return null;
     }
+    if index_expr(tree, expression) |index| {
+        return self.slice_borrow_target(tree, env, index, out);
+    }
     let field = field_expr(tree, expression) orelse
         return try self.error0(ast::zero_span(), "borrow error: borrow target must be a local binding or field path");
     let path = try ast::field_path_root(self.allocator, tree, expression) orelse
@@ -1197,6 +1200,35 @@ fn (self: &var Checker) borrow_target(
     }
     out.value = value;
     out.field = path_name;
+    return null;
+}
+
+/// Resolves `&var v[a..b]`, the `IndexExpr` arm of the Go `borrowTarget`:
+/// a range of a writable view binding. The borrow is of the whole binding,
+/// since which elements two ranges share is not something the checker
+/// proves. The bounds are read where the borrow expression itself is read,
+/// as any index is.
+fn (self: &var Checker) slice_borrow_target(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    index: ast::IndexExpr,
+    out: &var BorrowTarget
+) -> !?diagnostic::Diagnostic {
+    if !index.slice {
+        return try self.error0(index.span, "borrow error: a borrowed range must be `v[a..b]` of a local view binding");
+    }
+    let ident = ident_expr(tree, index.target) orelse
+        return try self.error0(index.span, "borrow error: a borrowed range must be `v[a..b]` of a local view binding");
+    let value = self.lookup_text(tree, env, ident.name) orelse
+        return try self.error1(tree, ident.span, "borrow error: undefined variable `%s`", Arg::Text(ident.name));
+    if !self.binding(value).mut_borrow or !self.names.starts_with(self.binding(value).type_name, "[]") {
+        return try self.error1(
+            tree, index.span, "borrow error: `&var %s[..]` needs a writable view binding (`&var []T`)",
+            Arg::Text(ident.name)
+        );
+    }
+    out.value = value;
+    out.field = empty_name();
     return null;
 }
 

@@ -52,6 +52,9 @@ checker 層だけが運ぶ。`&var i64` の `.* =` が本体そのものの書�
   はすべて拒否)
 - `&var []u8` 引数の再貸し(既存の borrow 伝播)
 - (後続)`[N]T` の var local からの slicing
+- writable view binding の範囲 `&var v[a..b]`。範囲が生きている間 `v` 全体が
+  exclusive borrow。読み取りの範囲は `v[a..b]` そのものなので `&v[a..b]` は
+  作らない(同じ意味に 2 つの形を持たない)
 
 `&var []u8` parameter へ渡せる引数も writable view binding だけである。
 `var bytes = "AB"` のような plain slice local は、mutable binding であっても
@@ -81,6 +84,7 @@ backing(literal 等)の書き込み可能性を保証しないため渡せない
 | method 経由のみ(`buf.set(i, x)`) | slice への直接書き込みを永久に持たない言語になり、systems language の基本操作が API 越しになる |
 | `nums[i]` を `at()` へ desugar | 呼び出しが source に見えない(原理 2)。trap と recoverable の意味差(§7.1)も潰れる |
 | 推論で全 `&var` slice 引数を書き込み可能扱い | 供給源の追跡が契約から消える。明示性の公理と矛盾 |
+| 範囲が disjoint なら同じ view の複数の `&var v[a..b]` を同時に許す | 添字の関係は一般に静的に決まらない。決まる場合だけ許すと borrow の可否が式の形で変わる 2 経路になる。分けたい側が別々の view(別の Array / buffer)を持つ |
 
 ## 影響
 
