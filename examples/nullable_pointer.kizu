@@ -1,0 +1,51 @@
+// A C function that may return NULL is declared with `?ptr<T>`. The one
+// thing to do with such a pointer is ask whether it is null, and `if p |q|`
+// and `orelse` do that the way they open an optional: the capture is the
+// same address as a `ptr<T>`. Testing for null needs no `unsafe`; using the
+// pointer does.
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+error Error {
+    OutOfMemory,
+}
+
+// Address zero is the null pointer, as `?ptr<u8>` spells it.
+fn none() -> ?ptr<u8> {
+    // SAFETY: address zero is null, which nothing dereferences.
+    return unsafe ptr_from_int<ptr<u8>>(0);
+}
+
+fn first_byte(block: ?ptr<u8>) -> Error!u8 {
+    let cell = block orelse return Error::OutOfMemory;
+    // SAFETY: cell is a live block of at least one byte, written below.
+    unsafe ptr_write(cell, 42);
+    // SAFETY: the byte was just written.
+    return unsafe ptr_read(cell);
+}
+
+fn main() -> void {
+    // SAFETY: the block, if any, is freed below.
+    let block = unsafe malloc(16);
+    if block |cell| {
+        // SAFETY: cell is the block malloc returned, live until free.
+        let value = first_byte(block) catch 0;
+        print(value);
+        // SAFETY: cell came from malloc and nothing uses it after.
+        unsafe free(cell);
+    } else {
+        print("out of memory");
+    }
+    // A null pointer opens to nothing.
+    if none() |_cell| {
+        print("null opened");
+    } else {
+        print("null stays closed");
+    }
+    return;
+}
+
+// run
+// features: extern-c raw-pointer nullable-pointer
+// output:
+// 42
+// null stays closed

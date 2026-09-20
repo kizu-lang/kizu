@@ -1296,7 +1296,10 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
 * `?Owner` field の cleanup 契約は §14.4 にある。`deinit` の中で optional を開いて
   中身を解放する。宣言しなければ、それを行う body が導出される
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
-  semantics の対象外(unsafe 世界の C ABI 用)
+  semantics の対象外(unsafe 世界の C ABI 用)。開く形だけは同じで、
+  `if p |q|` / `while p |q|` / `p orelse ...` が `ptr<T>` を束縛する(§12)。
+  `null` literal は書けず、null は `ptr_from_int<ptr<T>>(0)` を `?ptr<T>` に
+  渡した値
 
 collection は primitive ではなく、標準ライブラリ型として扱います。
 実装済みの collection / ownership 型:
@@ -2250,6 +2253,10 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * `p.*.field` は struct raw pointer の field read / assignment に使える
 * `ptr<const T>` 経由の assignment は禁止
 * `?ptr<T>` / `?ptr<const T>` は直接 dereference できない
+* `?ptr<T>` は `if p |q|` / `while p |q|` / `p orelse default` /
+  `p orelse return` で開き、`q` は `ptr<T>`。null の検査に `unsafe` は要らない。
+  optional との違いは payload が無いことだけで、pointer 自身が null かどうかの
+  tag になる
 * `p.field` のような raw pointer field access は禁止
 * `ptr_read(p)` は `ptr<T>` / `ptr<const T>` から `T` を読む
 * `ptr_write(p, value)` は `ptr<T>` に `T` を書く

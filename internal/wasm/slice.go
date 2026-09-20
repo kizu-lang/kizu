@@ -116,6 +116,26 @@ func (e *emitter) writePtrOffset(instr *ir.Instr) error {
 	return e.writeScalarResult(instr.Result, elementAddress(pointer, count, size))
 }
 
+// writePtrHas tests a nullable raw pointer for null, which on this target
+// is address zero.
+func (e *emitter) writePtrHas(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || !isNullablePointerType(instr.Args[0].Type) {
+		return fmt.Errorf("wasm error: ptr.has expects ?ptr<T> -> bool")
+	}
+	expr := fmt.Sprintf("(i32.ne %s (i32.const 0))", e.value(instr.Args[0]).expr)
+	return e.writeScalarResult(instr.Result, expr)
+}
+
+// writePtrValue opens a nullable raw pointer where ptr.has was true: the
+// same address, so the value is aliased rather than copied.
+func (e *emitter) writePtrValue(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || !isNullablePointerType(instr.Args[0].Type) {
+		return fmt.Errorf("wasm error: ptr.value expects ?ptr<T> -> ptr<T>")
+	}
+	e.values[instr.Result.Name] = valueInfo{expr: e.value(instr.Args[0]).expr}
+	return nil
+}
+
 // writeSliceIndex reads one element through a view descriptor.
 func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	elem, ok := viewElem(instr.Args[0].Type)

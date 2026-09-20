@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 type branchResult struct {
@@ -82,15 +83,49 @@ func (l *lowerer) lowerIfCondition(stmt *ast.IfStmt) (Value, Value, Value, error
 		return cond, payload, errPayload, nil
 	}
 	if stmt.Capture != "" {
-		elem, ok := optionalElemType(cond.Type)
+		open, ok := l.openable(cond)
 		if !ok {
 			return Value{}, Value{}, Value{}, fmt.Errorf(
 				"ir error: if capture needs a `?T` condition, got %s", cond.Type)
 		}
-		payload = l.emit("opt.value", elem, []Value{cond}, "")
-		cond = l.emit("opt.has", "bool", []Value{cond}, "")
+		payload = open.value()
+		cond = open.has()
 	}
 	return cond, payload, errPayload, nil
+}
+
+// openable is an optional or a nullable raw pointer about to be opened: the
+// same two questions, is there something and what is it, asked with the
+// ops of the value's own kind. An optional carries a payload beside its
+// tag; a nullable pointer is its own tag, null or not.
+type openable struct {
+	l      *lowerer
+	source Value
+	elem   string
+	hasOp  string
+	getOp  string
+}
+
+// openable classifies value for opening, and reports false when it is
+// neither an optional nor a nullable raw pointer.
+func (l *lowerer) openable(value Value) (openable, bool) {
+	if elem, ok := optionalElemType(value.Type); ok {
+		return openable{l: l, source: value, elem: elem, hasOp: "opt.has", getOp: "opt.value"}, true
+	}
+	if elem, ok := typ.NullablePointerElem(value.Type); ok {
+		return openable{l: l, source: value, elem: elem, hasOp: "ptr.has", getOp: "ptr.value"}, true
+	}
+	return openable{}, false
+}
+
+// has emits the presence test.
+func (o openable) has() Value {
+	return o.l.emit(o.hasOp, "bool", []Value{o.source}, "")
+}
+
+// value emits the opened value, valid where has() was true.
+func (o openable) value() Value {
+	return o.l.emit(o.getOp, o.elem, []Value{o.source}, "")
 }
 
 // lowerCaptureBranch lowers one branch of an if with a capture bound for its
@@ -138,11 +173,12 @@ func (l *lowerer) lowerOrelseExpr(expr *ast.BinaryExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	elem, ok := optionalElemType(opt.Type)
+	open, ok := l.openable(opt)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: orelse needs a `?T` left operand, got %s", opt.Type)
 	}
-	has := l.emit("opt.has", "bool", []Value{opt}, "")
+	elem := open.elem
+	has := open.has()
 	someBlock := l.newBlock(l.nextBlockName("orelse.some"))
 	elseBlock := l.newBlock(l.nextBlockName("orelse.else"))
 	mergeBlock := l.newBlock(l.nextBlockName("orelse.end"))
@@ -150,7 +186,7 @@ func (l *lowerer) lowerOrelseExpr(expr *ast.BinaryExpr) (Value, error) {
 		Op: "branch", Cond: has, Target: someBlock.Name, Else: elseBlock.Name,
 	}
 	l.block = someBlock
-	value := l.emit("opt.value", elem, []Value{opt}, "")
+	value := open.value()
 	someEnd := l.block.Name
 	l.block.Terminator = Terminator{Op: "jump", Target: mergeBlock.Name}
 	l.block = elseBlock
@@ -253,11 +289,11 @@ func (l *lowerer) lowerOrelseGuardExpr(expr *ast.OrelseGuardExpr) (Value, error)
 	if err != nil {
 		return Value{}, err
 	}
-	elem, ok := optionalElemType(opt.Type)
+	open, ok := l.openable(opt)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: orelse needs a `?T` left operand, got %s", opt.Type)
 	}
-	has := l.emit("opt.has", "bool", []Value{opt}, "")
+	has := open.has()
 	someBlock := l.newBlock(l.nextBlockName("guard.some"))
 	exitBlock := l.newBlock(l.nextBlockName("guard.exit"))
 	l.block.Terminator = Terminator{
@@ -268,7 +304,7 @@ func (l *lowerer) lowerOrelseGuardExpr(expr *ast.OrelseGuardExpr) (Value, error)
 		return Value{}, err
 	}
 	l.block = someBlock
-	return l.emit("opt.value", elem, []Value{opt}, ""), nil
+	return open.value(), nil
 }
 
 // lowerGuardExit lowers the exit arm of an orelse guard through the same
@@ -552,13 +588,13 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 			if err != nil || stmt.Capture == "" {
 				return cond, err
 			}
-			elem, ok := optionalElemType(cond.Type)
+			open, ok := l.openable(cond)
 			if !ok {
 				return Value{}, fmt.Errorf(
 					"ir error: while capture needs a `?T` condition, got %s", cond.Type)
 			}
-			l.bindCapture(stmt.Capture, l.emit("opt.value", elem, []Value{cond}, ""))
-			return l.emit("opt.has", "bool", []Value{cond}, ""), nil
+			l.bindCapture(stmt.Capture, open.value())
+			return open.has(), nil
 		},
 	})
 }

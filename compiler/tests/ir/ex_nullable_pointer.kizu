@@ -1,0 +1,280 @@
+// A C function that may return NULL is declared with `?ptr<T>`. The one
+// thing to do with such a pointer is ask whether it is null, and `if p |q|`
+// and `orelse` do that the way they open an optional: the capture is the
+// same address as a `ptr<T>`. Testing for null needs no `unsafe`; using the
+// pointer does.
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+error Error {
+    OutOfMemory,
+}
+
+// Address zero is the null pointer, as `?ptr<u8>` spells it.
+fn none() -> ?ptr<u8> {
+    // SAFETY: address zero is null, which nothing dereferences.
+    return unsafe ptr_from_int<ptr<u8>>(0);
+}
+
+fn first_byte(block: ?ptr<u8>) -> Error!u8 {
+    let cell = block orelse return Error::OutOfMemory;
+    // SAFETY: cell is a live block of at least one byte, written below.
+    unsafe ptr_write(cell, 42);
+    // SAFETY: the byte was just written.
+    return unsafe ptr_read(cell);
+}
+
+fn main() -> void {
+    // SAFETY: the block, if any, is freed below.
+    let block = unsafe malloc(16);
+    if block |cell| {
+        // SAFETY: cell is the block malloc returned, live until free.
+        let value = first_byte(block) catch 0;
+        print(value);
+        // SAFETY: cell came from malloc and nothing uses it after.
+        unsafe free(cell);
+    } else {
+        print("out of memory");
+    }
+    // A null pointer opens to nothing.
+    if none() |_cell| {
+        print("null opened");
+    } else {
+        print("null stays closed");
+    }
+    return;
+}
+
+// run
+// features: extern-c raw-pointer nullable-pointer
+// output:
+// 42
+// null stays closed
+
+// ir
+// lower:
+// fn none() -> ?ptr<u8> {
+// entry:
+//   %1: i64 = const 0
+//   %2: ptr<u8> = cast %1: i64, ptr<u8>
+//   return %2: ptr<u8>
+// }
+// fn first_byte(%block: ?ptr<u8>) -> Error!u8 {
+// entry:
+//   %1: bool = ptr.has %block: ?ptr<u8>
+//   branch %1: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %4: ptr<u8> = ptr.value %block: ?ptr<u8>
+//   %5: u8 = const 42
+//   ref.store %4: ptr<u8>, %5: u8
+//   %7: u8 = ref.load %4: ptr<u8>
+//   %8: Error!u8 = error.ok %7: u8
+//   return %8: Error!u8
+// guard.exit.2:
+//   %2: Error = const 104
+//   %3: Error!u8 = error.error %2: Error
+//   return %3: Error!u8
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 16
+//   %2: ?ptr<u8> = extern "c" call.malloc %1: usize
+//   %3: ptr<u8> = ptr.value %2: ?ptr<u8>
+//   %4: bool = ptr.has %2: ?ptr<u8>
+//   branch %4: bool, if.then.1, if.else.2
+// if.then.1:
+//   %5: Error!u8 = call.first_byte %2: ?ptr<u8>
+//   %6: bool = error.has %5: Error!u8
+//   branch %6: bool, catch.ok.4, catch.else.5
+// if.else.2:
+//   %12: []u8 = const "out of memory"
+//   call.std::fmt::print._5b_5du8 %12: []u8
+//   jump if.end.3
+// if.end.3:
+//   %14: ?ptr<u8> = call.none
+//   %15: ptr<u8> = ptr.value %14: ?ptr<u8>
+//   %16: bool = ptr.has %14: ?ptr<u8>
+//   branch %16: bool, if.then.7, if.else.8
+// catch.ok.4:
+//   %7: u8 = error.value %5: Error!u8
+//   jump catch.end.6
+// catch.else.5:
+//   %8: u8 = const 0
+//   jump catch.end.6
+// catch.end.6:
+//   %9: u8 = phi [catch.ok.4, %7: u8], [catch.else.5, %8: u8]
+//   call.std::fmt::print.u8 %9: u8
+//   extern "c" call.free %3: ptr<u8>
+//   jump if.end.3
+// if.then.7:
+//   %17: []u8 = const "null opened"
+//   call.std::fmt::print._5b_5du8 %17: []u8
+//   jump if.end.9
+// if.else.8:
+//   %19: []u8 = const "null stays closed"
+//   call.std::fmt::print._5b_5du8 %19: []u8
+//   jump if.end.9
+// if.end.9:
+//   return void: void
+// }
+// opt:
+// fn none() -> ?ptr<u8> {
+// entry:
+//   %1: i64 = const 0
+//   %2: ptr<u8> = cast %1: i64, ptr<u8>
+//   return %2: ptr<u8>
+// }
+// fn first_byte(%block: ?ptr<u8>) -> Error!u8 {
+// entry:
+//   %1: bool = ptr.has %block: ?ptr<u8>
+//   branch %1: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %4: ptr<u8> = ptr.value %block: ?ptr<u8>
+//   %5: u8 = const 42
+//   ref.store %4: ptr<u8>, %5: u8
+//   %7: u8 = ref.load %4: ptr<u8>
+//   %8: Error!u8 = error.ok %7: u8
+//   return %8: Error!u8
+// guard.exit.2:
+//   %2: Error = const 104
+//   %3: Error!u8 = error.error %2: Error
+//   return %3: Error!u8
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 16
+//   %2: ?ptr<u8> = extern "c" call.malloc %1: usize
+//   %3: ptr<u8> = ptr.value %2: ?ptr<u8>
+//   %4: bool = ptr.has %2: ?ptr<u8>
+//   branch %4: bool, if.then.1, if.else.2
+// if.then.1:
+//   jump in1.entry
+// in1.entry:
+//   %in1.1: bool = ptr.has %2: ?ptr<u8>
+//   branch %in1.1: bool, in1.guard.some.1, in1.guard.exit.2
+// in1.guard.some.1:
+//   %in1.4: ptr<u8> = ptr.value %2: ?ptr<u8>
+//   %in1.5: u8 = const 42
+//   ref.store %in1.4: ptr<u8>, %in1.5: u8
+//   %in1.7: u8 = ref.load %in1.4: ptr<u8>
+//   %in1.8: Error!u8 = error.ok %in1.7: u8
+//   jump in1.cont
+// in1.guard.exit.2:
+//   %in1.2: Error = const 104
+//   %in1.3: Error!u8 = error.error %in1.2: Error
+//   jump in1.cont
+// in1.cont:
+//   %5: Error!u8 = phi [in1.guard.some.1, %in1.8: Error!u8], [in1.guard.exit.2, %in1.3: Error!u8]
+//   %6: bool = error.has %5: Error!u8
+//   branch %6: bool, catch.ok.4, catch.else.5
+// if.else.2:
+//   %12: []u8 = const "out of memory"
+//   print.line %12: []u8
+//   jump if.end.3
+// if.end.3:
+//   %14: ?ptr<u8> = call.none
+//   %16: bool = ptr.has %14: ?ptr<u8>
+//   branch %16: bool, if.then.7, if.else.8
+// catch.ok.4:
+//   %7: u8 = error.value %5: Error!u8
+//   jump catch.end.6
+// catch.else.5:
+//   %8: u8 = const 0
+//   jump catch.end.6
+// catch.end.6:
+//   %9: u8 = phi [catch.ok.4, %7: u8], [catch.else.5, %8: u8]
+//   %in3.1: u64 = cast %9: u8, u64
+//   call.std::fmt::write_u64 %in3.1: u64
+//   extern "c" call.free %3: ptr<u8>
+//   jump if.end.3
+// if.then.7:
+//   %17: []u8 = const "null opened"
+//   print.line %17: []u8
+//   jump if.end.9
+// if.else.8:
+//   %19: []u8 = const "null stays closed"
+//   print.line %19: []u8
+//   jump if.end.9
+// if.end.9:
+//   return void: void
+// }
+// opt wasm:
+// fn none() -> ?ptr<u8> {
+// entry:
+//   %1: i64 = const 0
+//   %2: ptr<u8> = cast %1: i64, ptr<u8>
+//   return %2: ptr<u8>
+// }
+// fn first_byte(%block: ?ptr<u8>) -> Error!u8 {
+// entry:
+//   %1: bool = ptr.has %block: ?ptr<u8>
+//   branch %1: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %4: ptr<u8> = ptr.value %block: ?ptr<u8>
+//   %5: u8 = const 42
+//   ref.store %4: ptr<u8>, %5: u8
+//   %7: u8 = ref.load %4: ptr<u8>
+//   %8: Error!u8 = error.ok %7: u8
+//   return %8: Error!u8
+// guard.exit.2:
+//   %2: Error = const 104
+//   %3: Error!u8 = error.error %2: Error
+//   return %3: Error!u8
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 16
+//   %2: ?ptr<u8> = extern "c" call.malloc %1: usize
+//   %3: ptr<u8> = ptr.value %2: ?ptr<u8>
+//   %4: bool = ptr.has %2: ?ptr<u8>
+//   branch %4: bool, if.then.1, if.else.2
+// if.then.1:
+//   jump in1.entry
+// in1.entry:
+//   %in1.1: bool = ptr.has %2: ?ptr<u8>
+//   branch %in1.1: bool, in1.guard.some.1, in1.guard.exit.2
+// in1.guard.some.1:
+//   %in1.4: ptr<u8> = ptr.value %2: ?ptr<u8>
+//   %in1.5: u8 = const 42
+//   ref.store %in1.4: ptr<u8>, %in1.5: u8
+//   %in1.7: u8 = ref.load %in1.4: ptr<u8>
+//   %in1.8: Error!u8 = error.ok %in1.7: u8
+//   jump in1.cont
+// in1.guard.exit.2:
+//   %in1.2: Error = const 104
+//   %in1.3: Error!u8 = error.error %in1.2: Error
+//   jump in1.cont
+// in1.cont:
+//   %5: Error!u8 = phi [in1.guard.some.1, %in1.8: Error!u8], [in1.guard.exit.2, %in1.3: Error!u8]
+//   %6: bool = error.has %5: Error!u8
+//   branch %6: bool, catch.ok.4, catch.else.5
+// if.else.2:
+//   %12: []u8 = const "out of memory"
+//   print.line %12: []u8
+//   jump if.end.3
+// if.end.3:
+//   %14: ?ptr<u8> = call.none
+//   %16: bool = ptr.has %14: ?ptr<u8>
+//   branch %16: bool, if.then.7, if.else.8
+// catch.ok.4:
+//   %7: u8 = error.value %5: Error!u8
+//   jump catch.end.6
+// catch.else.5:
+//   %8: u8 = const 0
+//   jump catch.end.6
+// catch.end.6:
+//   %9: u8 = phi [catch.ok.4, %7: u8], [catch.else.5, %8: u8]
+//   %in3.1: u64 = cast %9: u8, u64
+//   call.std::fmt::write_u64 %in3.1: u64
+//   extern "c" call.free %3: ptr<u8>
+//   jump if.end.3
+// if.then.7:
+//   %17: []u8 = const "null opened"
+//   print.line %17: []u8
+//   jump if.end.9
+// if.else.8:
+//   %19: []u8 = const "null stays closed"
+//   print.line %19: []u8
+//   jump if.end.9
+// if.end.9:
+//   return void: void
+// }

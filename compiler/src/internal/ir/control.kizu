@@ -168,17 +168,18 @@ fn (self: &var Lowerer) lower_orelse_expr(tree: &var ast::Ast, binary: ast::Bina
     if try self.lower_expr(tree, binary.left, &var opt) |failed| {
         return move failed;
     }
-    let elem = try self.optional_elem_type(opt.type_name) orelse return try self.fail1(
+    let open = try self.openable(opt.type_name) orelse return try self.fail1(
         tree, "ir error: orelse needs a `?T` left operand, got %s", Arg::Str(opt.type_name)
     );
-    let has = try self.emit1(Op::OptHas, self.common.bool_type, opt);
+    let elem = open.elem;
+    let has = try self.emit1(open.has_op, self.common.bool_type, opt);
     let some_block = try self.new_block_named("orelse.some");
     let else_block = try self.new_block_named("orelse.else");
     let merge_block = try self.new_block_named("orelse.end");
     let merge_name = self.module.block_name(merge_block);
     self.terminate_branch(has, some_block, else_block);
     self.block = some_block;
-    let value = try self.emit1(Op::OptValue, elem, opt);
+    let value = try self.emit1(open.value_op, elem, opt);
     let some_end = self.block_label();
     self.terminate(jump_terminator(merge_name));
     self.block = else_block;
@@ -204,10 +205,10 @@ fn (self: &var Lowerer) lower_orelse_guard_expr(tree: &var ast::Ast, guard: ast:
     if try self.lower_expr(tree, guard.condition, &var opt) |failed| {
         return move failed;
     }
-    let elem = try self.optional_elem_type(opt.type_name) orelse return try self.fail1(
+    let open = try self.openable(opt.type_name) orelse return try self.fail1(
         tree, "ir error: orelse needs a `?T` left operand, got %s", Arg::Str(opt.type_name)
     );
-    let has = try self.emit1(Op::OptHas, self.common.bool_type, opt);
+    let has = try self.emit1(open.has_op, self.common.bool_type, opt);
     let some_block = try self.new_block_named("guard.some");
     let exit_block = try self.new_block_named("guard.exit");
     self.terminate_branch(has, some_block, exit_block);
@@ -216,7 +217,7 @@ fn (self: &var Lowerer) lower_orelse_guard_expr(tree: &var ast::Ast, guard: ast:
         return move failed;
     }
     self.block = some_block;
-    out.* = try self.emit1(Op::OptValue, elem, opt);
+    out.* = try self.emit1(open.value_op, open.elem, opt);
     return null;
 }
 
@@ -464,11 +465,11 @@ fn (self: &var Lowerer) lower_if_condition(
         cond = try self.emit1(Op::ErrorHas, self.common.bool_type, cond);
     }
     if has_capture and !has_err_capture {
-        let elem = try self.optional_elem_type(cond.type_name) orelse return try self.fail1(
+        let open = try self.openable(cond.type_name) orelse return try self.fail1(
             tree, "ir error: if capture needs a `?T` condition, got %s", Arg::Str(cond.type_name)
         );
-        payload = try self.emit1(Op::OptValue, elem, cond);
-        cond = try self.emit1(Op::OptHas, self.common.bool_type, cond);
+        payload = try self.emit1(open.value_op, open.elem, cond);
+        cond = try self.emit1(open.has_op, self.common.bool_type, cond);
     }
     out.* = IfHead { cond: cond, payload: payload, err_payload: err_payload };
     return null;
@@ -786,13 +787,13 @@ fn (self: &var Lowerer) lower_loop_header(
                 out.* = LoopTest::Plain(cond);
                 return null;
             }
-            let elem = try self.optional_elem_type(cond.type_name) orelse return try self.fail1(
+            let open = try self.openable(cond.type_name) orelse return try self.fail1(
                 tree, "ir error: while capture needs a `?T` condition, got %s", Arg::Str(cond.type_name)
             );
             let capture = try self.text_name(tree, loop.capture);
-            let payload = try self.emit1(Op::OptValue, elem, cond);
+            let payload = try self.emit1(open.value_op, open.elem, cond);
             try self.bind_capture(capture, payload);
-            out.* = LoopTest::Plain(try self.emit1(Op::OptHas, self.common.bool_type, cond));
+            out.* = LoopTest::Plain(try self.emit1(open.has_op, self.common.bool_type, cond));
             return null;
         },
         For(loop) => {

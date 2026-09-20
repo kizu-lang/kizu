@@ -1183,8 +1183,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
-	case instr.Op == "ptr.offset":
-		return e.writePtrOffset(instr)
+	case strings.HasPrefix(instr.Op, "ptr."):
+		return e.writeRawPointerInstr(instr)
 	case instr.Op == "phi":
 		return e.writePhi(instr)
 	case instr.Op == "struct.new":
@@ -2595,6 +2595,45 @@ func (e *emitter) writeSliceFromPtr(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n",
 		resultName, baseName, count.operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeRawPointerInstr dispatches the raw pointer instructions: a step by
+// elements, and the null test and opening of a nullable pointer.
+func (e *emitter) writeRawPointerInstr(instr *ir.Instr) error {
+	switch instr.Op {
+	case "ptr.offset":
+		return e.writePtrOffset(instr)
+	case "ptr.has":
+		return e.writePtrHas(instr)
+	case "ptr.value":
+		return e.writePtrValue(instr)
+	default:
+		return fmt.Errorf("llvm error: unsupported raw pointer instruction `%s`", instr.Op)
+	}
+}
+
+// writePtrHas tests a nullable raw pointer for null: the pointer is its own
+// tag, so there is no payload to unpack.
+func (e *emitter) writePtrHas(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || !isNullablePointerType(instr.Args[0].Type) {
+		return fmt.Errorf("llvm error: ptr.has expects ?ptr<T> -> bool")
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", resultName, e.value(instr.Args[0]).operand)
+	e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
+	return nil
+}
+
+// writePtrValue opens a nullable raw pointer where ptr.has was true. The
+// non-null pointer is the same machine value, so nothing is emitted.
+func (e *emitter) writePtrValue(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || !isNullablePointerType(instr.Args[0].Type) {
+		return fmt.Errorf("llvm error: ptr.value expects ?ptr<T> -> ptr<T>")
+	}
+	e.values[instr.Result.Name] = valueInfo{
+		typ: instr.Result.Type, operand: e.value(instr.Args[0]).operand,
+	}
 	return nil
 }
 

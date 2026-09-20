@@ -388,6 +388,13 @@ func optionalElem(t Type) (Type, bool) {
 	return Type(elem), ok
 }
 
+// openableElem returns what a capture or `orelse` binds from t: an
+// optional's payload, or a nullable raw pointer's non-null spelling.
+func openableElem(t Type) (Type, bool) {
+	elem, ok := typ.OpenableElem(string(t))
+	return Type(elem), ok
+}
+
 // fillsNullablePointer reports whether a `ptr<T>` fills a `?ptr<T>` slot. The
 // two spell the same machine value and the non-null one is a subset of the
 // nullable one, so widening is always sound. `?ptr<T>` is a raw-pointer

@@ -128,7 +128,8 @@ func primitiveLayout(typ string) (wasmLayout, bool) {
 	if typpkg.IsVector(typ) {
 		return wasmLayout{size: 16, align: 16}, true
 	}
-	if isReferenceType(typ) || isRawPointerType(typ) || isFunctionPointerType(typ) {
+	if isReferenceType(typ) || isRawPointerType(typ) || isNullablePointerType(typ) ||
+		isFunctionPointerType(typ) {
 		return wasmLayout{size: 4, align: 4}, true
 	}
 	if strings.HasPrefix(typ, "[]") {
@@ -242,6 +243,11 @@ func isReferenceType(typ string) bool {
 // isRawPointerType reports whether typ is a raw pointer.
 func isRawPointerType(typ string) bool {
 	return strings.HasPrefix(typ, "ptr<") && strings.HasSuffix(typ, ">")
+}
+
+// isNullablePointerType reports whether typ is a nullable raw pointer.
+func isNullablePointerType(typ string) bool {
+	return strings.HasPrefix(typ, "?ptr<") && strings.HasSuffix(typ, ">")
 }
 
 // isFunctionPointerType reports whether typ is a function signature value.

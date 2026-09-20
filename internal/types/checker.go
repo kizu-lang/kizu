@@ -2499,7 +2499,7 @@ func (c *Checker) bindConditionCapture(
 		}
 		return nil
 	}
-	elem, ok := optionalElem(cond)
+	elem, ok := openableElem(cond)
 	if !ok {
 		return errorf(
 			"type error: %s capture `|%s|` requires an optional condition, got %s",
@@ -3071,7 +3071,7 @@ func (c *Checker) checkOrelseGuardExpr(
 	if err != nil {
 		return "", err
 	}
-	elem, ok := optionalElem(cond)
+	elem, ok := openableElem(cond)
 	if !ok {
 		return "", errorf("type error: `orelse` expects an optional left operand, got %s", cond)
 	}
@@ -3502,7 +3502,7 @@ func (c *Checker) checkOrelseExpr(
 	if err != nil {
 		return "", err
 	}
-	elem, ok := optionalElem(left)
+	elem, ok := openableElem(left)
 	if !ok {
 		return "", errorf("type error: `orelse` expects an optional left operand, got %s", left)
 	}
