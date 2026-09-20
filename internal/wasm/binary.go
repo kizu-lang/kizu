@@ -11,6 +11,7 @@ const (
 	wasmI64     = byte(0x7e)
 	wasmF32     = byte(0x7d)
 	wasmF64     = byte(0x7c)
+	wasmV128    = byte(0x7b)
 	wasmFuncRef = byte(0x70)
 )
 
@@ -797,6 +798,8 @@ func (m *binaryModule) valueType(index int) (byte, error) {
 		return wasmF32, nil
 	case "f64":
 		return wasmF64, nil
+	case "v128":
+		return wasmV128, nil
 	default:
 		return 0, m.errorf(index, "unsupported value type")
 	}

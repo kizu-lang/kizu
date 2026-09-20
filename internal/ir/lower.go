@@ -680,6 +680,8 @@ func leadingSpan(expr ast.Expression) ast.Span {
 		return e.Span
 	case *ast.BufferLiteralExpr:
 		return e.Span
+	case *ast.VectorLiteralExpr:
+		return e.Span
 	case *ast.MoveExpr:
 		return e.Span
 	case *ast.UnsafeExpr:
@@ -1569,8 +1571,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
-	case *ast.BufferLiteralExpr:
-		return l.emit("buffer.new", e.TypeText(), nil, ""), nil
+	case *ast.BufferLiteralExpr, *ast.VectorLiteralExpr:
+		return l.lowerBuiltinLiteral(e)
 	case *ast.FieldExpr, *ast.IndexExpr, *ast.DerefExpr:
 		return l.lowerAccessExpr(e)
 	default:
@@ -3369,6 +3371,26 @@ func (l *lowerer) lowerEnumTagExpr(expr *ast.FieldExpr) (Value, bool) {
 	return l.emitConst(enumName, fmt.Sprintf("%d", index)), true
 }
 
+// lowerBuiltinLiteral lowers the literals of the builtin aggregates: a
+// zero-filled stack buffer, and a vector built from one value per lane, each
+// lowered under the lane type the way an argument is under its parameter.
+func (l *lowerer) lowerBuiltinLiteral(expr ast.Expression) (Value, error) {
+	vector, ok := expr.(*ast.VectorLiteralExpr)
+	if !ok {
+		return l.emit("buffer.new", expr.(*ast.BufferLiteralExpr).TypeText(), nil, ""), nil
+	}
+	elem, _, _ := typ.VectorOf(vector.TypeName)
+	lanes := make([]Value, 0, len(vector.Lanes))
+	for _, lane := range vector.Lanes {
+		value, err := l.lowerContextualExpr(lane, elem)
+		if err != nil {
+			return Value{}, err
+		}
+		lanes = append(lanes, value)
+	}
+	return l.emit("vector.new", vector.TypeName, lanes, ""), nil
+}
+
 // lowerIndexExpr lowers checked byte-slice indexing and slicing.
 //
 // The bounds test lives here rather than in a backend, so every backend
@@ -3378,6 +3400,11 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 	target, err := l.lowerExpr(expr.Target)
 	if err != nil {
 		return Value{}, err
+	}
+	if elem, _, ok := typ.VectorOf(target.Type); ok {
+		// The lane is a literal the checker bounded; it travels as the
+		// instruction's immediate, since no value computes it.
+		return l.emit("vector.lane", elem, []Value{target}, expr.Index.(*ast.IntExpr).Value), nil
 	}
 	if !expr.Slice {
 		index, err := l.lowerExpr(expr.Index)

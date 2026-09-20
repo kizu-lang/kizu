@@ -1,6 +1,7 @@
 package llvm
 
 import (
+	typpkg "github.com/kizu-lang/kizu/internal/typ"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -87,6 +88,10 @@ func primitiveLayout(typ string) (int, int, bool) {
 	default:
 		if strings.HasPrefix(typ, "[]") {
 			return 16, 8, true
+		}
+		// A vector is one 128-bit register, stored at its own width.
+		if typpkg.IsVector(typ) {
+			return 16, 16, true
 		}
 		return 0, 0, false
 	}

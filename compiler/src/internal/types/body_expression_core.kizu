@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::typ;
+import std::fmt;
 import std::mem;
 import std::string;
 
@@ -12,6 +13,10 @@ fn (self: &var Checker) check_expr(
     expression: ast::Expression,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
+    if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
+        defer literal.deinit(self.allocator);
+        return self.check_vector_literal_expr(tree, scope, &literal, out);
+    }
     match tree.expressions.at(expression.node) {
         Int(_) => return self.check_scalar_expr(tree, expression, out),
         Float(_) => return self.check_scalar_expr(tree, expression, out),
@@ -82,6 +87,8 @@ fn (self: &var Checker) check_expr(
             return self.check_index_expr(tree, scope, &copied, out);
         },
         StructLiteral(_) => return self.check_struct_literal_expr(tree, scope, expression, out),
+        VectorLiteral(_) => return try self.checker_error_at(
+            "type error", ast::zero_span(), "vector literal reached the node dispatch"),
         BufferLiteral(value) => {
             let retained = tree.texts.at(value.elem.node);
             let elem = retained.as_bytes();
@@ -182,6 +189,15 @@ fn (self: &var Checker) check_prefix_expr(
         return move problem;
     }
     if mem::equal_bytes(operator, "-") {
+        let kind = try self.vector_kind_of(right);
+        if kind >= 0 {
+            let lane = typ::vector_lane_of_kind(kind);
+            if !is_signed_numeric_type(lane) {
+                return try self.unary_type_error(operator, "signed lanes", right);
+            }
+            out.* = right;
+            return null;
+        }
         if !self.checker_signed_numeric_type(right) {
             return try self.unary_type_error(operator, "signed numeric", right);
         }
@@ -277,6 +293,9 @@ fn (self: &var Checker) check_binary_expr(
     if try self.coerce_binary_literal(tree, expression, &var left, &var right) |problem| {
         return move problem;
     }
+    if try self.is_vector_type(left) or try self.is_vector_type(right) {
+        return self.check_vector_operands(operator, left, right, expression.operator_span, out);
+    }
     if mem::equal_bytes(operator, "==") or
         mem::equal_bytes(operator, "!=") {
         return self.check_equality(operator, left, right, expression.operator_span, out);
@@ -305,6 +324,172 @@ fn (self: &var Checker) check_binary_expr(
         return null;
     }
     out.* = left;
+    return null;
+}
+
+/// Returns the lane type of a vector type, or null for any other type.
+/// Returns the vector kind of a type (see `typ::vector_kind`), or -1.
+fn (self: &var Checker) vector_kind_of(value: Type) -> !i64 {
+    let text = try self.types.copy_text(self.allocator, value);
+    defer text.deinit(self.allocator);
+    let bytes = text.as_bytes();
+    return typ::vector_kind(bytes);
+}
+
+fn (self: &var Checker) is_vector_type(value: Type) -> !bool {
+    let text = try self.types.copy_text(self.allocator, value);
+    defer text.deinit(self.allocator);
+    let bytes = text.as_bytes();
+    return typ::is_vector(bytes);
+}
+
+/// Validates a binary operator on vectors, the Go `checkVectorOperands`:
+/// `+`, `-` and `*` lane by lane on the same vector type, and `/` on float
+/// lanes. There is no comparison, remainder, or bit operation on a vector
+/// (SPEC §7.3).
+fn (self: &var Checker) check_vector_operands(
+    operator: []u8,
+    left: Type,
+    right: Type,
+    span: ast::Span,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if !same_type(left, right) {
+        return try self.operator_type_mismatch(operator, left, right, span);
+    }
+    let kind = try self.vector_kind_of(left);
+    if kind < 0 {
+        return null;
+    }
+    let lane = typ::vector_lane_of_kind(kind);
+    if mem::equal_bytes(operator, "+") or mem::equal_bytes(operator, "-") or
+        mem::equal_bytes(operator, "*") {
+        out.* = left;
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    if mem::equal_bytes(operator, "/") {
+        if mem::equal_bytes(lane, "f32") or mem::equal_bytes(lane, "f64") {
+            message.deinit(self.allocator);
+            out.* = left;
+            return null;
+        }
+        try message.append_bytes(self.allocator, "operator `/` on a vector expects float lanes, got ");
+        try self.append_checker_type(&var message, left);
+        return try self.checker_message_at("type error", span, move message);
+    }
+    try message.append_bytes(self.allocator, "operator `");
+    try message.append_bytes(self.allocator, operator);
+    try message.append_bytes(self.allocator, "` is not defined on a vector (");
+    try self.append_checker_type(&var message, left);
+    try message.append_byte(self.allocator, cast<u8>(41));
+    return try self.checker_message_at("type error", span, move message);
+}
+
+/// Validates `f64x2{a, b}`, the Go `checkVectorLiteralExpr`: one expression
+/// per lane, each of the lane type, with a bare literal taking the lane type
+/// as its context the way a parameter type is an argument's.
+fn (self: &var Checker) check_vector_literal_expr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::VectorLiteralExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let retained = tree.texts.at(expression.type_name.node);
+    let name = retained.as_bytes();
+    let kind = typ::vector_kind(name);
+    if kind < 0 {
+        return try self.checker_error_at("type error", expression.span, "not a vector type");
+    }
+    let lane = typ::vector_lane_of_kind(kind);
+    let lanes = typ::vector_lanes(name);
+    if expression.lanes.len() != lanes {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "` has ");
+        try fmt::append_i64(self.allocator, &var message, lanes);
+        try message.append_bytes(self.allocator, " lanes, got ");
+        try fmt::append_i64(self.allocator, &var message, expression.lanes.len());
+        try message.append_bytes(self.allocator, " values");
+        return try self.checker_message_at("type error", expression.span, move message);
+    }
+    let lane_type = try self.types.intern(lane);
+    let vector_type = try self.types.intern(name);
+    var index = 0;
+    while expression.lanes.get(index) |value| {
+        var got = empty_type();
+        if try self.check_contextual_expr(tree, scope, value, lane_type, &var got) |problem| {
+            return move problem;
+        }
+        if !same_type(got, lane_type) {
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, "lane ");
+            try fmt::append_i64(self.allocator, &var message, index);
+            try message.append_bytes(self.allocator, " of `");
+            try self.append_checker_type(&var message, vector_type);
+            try message.append_bytes(self.allocator, "` expects ");
+            try self.append_checker_type(&var message, lane_type);
+            try message.append_bytes(self.allocator, ", got ");
+            try self.append_checker_type(&var message, got);
+            return try self.checker_message_at("type error", expression_span(tree, value), move message);
+        }
+        index = index + 1;
+    }
+    out.* = vector_type;
+    return null;
+}
+
+/// Validates `v[i]` on a vector, the Go `checkVectorLane`: the index is an
+/// integer literal naming a lane, so the bound is settled here and nothing
+/// traps.
+fn (self: &var Checker) check_vector_lane(
+    tree: &ast::Ast,
+    expression: &ast::IndexExpr,
+    target: Type,
+    lane: []u8,
+    lanes: i64,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if expression.slice {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "a vector has lanes, not a range; `");
+        try self.append_checker_type(&var message, target);
+        try message.append_bytes(self.allocator, "[a..b]` is not a view");
+        return try self.checker_message_at("type error", expression.span, move message);
+    }
+    let index_expr = expression.index orelse
+        return try self.checker_error_at("type error", expression.span, "index is missing");
+    var index = -1;
+    if integer_literal_value(tree, index_expr) |value| {
+        index = value;
+    } else {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "a vector lane is named by an integer literal, got `");
+        let rendered = try ast::render_expression(self.allocator, tree, index_expr);
+        defer rendered.deinit(self.allocator);
+        let rendered_bytes = rendered.as_bytes();
+        try message.append_bytes(self.allocator, rendered_bytes);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        return try self.checker_message_at("type error", expression.span, move message);
+    }
+    if index < 0 or index >= lanes {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "lane ");
+        try fmt::append_i64(self.allocator, &var message, index);
+        try message.append_bytes(self.allocator, " is outside `");
+        try self.append_checker_type(&var message, target);
+        try message.append_bytes(self.allocator, "`, which has lanes 0..");
+        try fmt::append_i64(self.allocator, &var message, lanes);
+        return try self.checker_message_at("type error", expression.span, move message);
+    }
+    out.* = try self.types.intern(lane);
     return null;
 }
 
@@ -500,6 +685,15 @@ fn (self: &var Checker) check_index_expr(
     var target = empty_type();
     if try self.check_expr(tree, scope, expression.target, &var target) |problem| {
         return move problem;
+    }
+    let target_kind = try self.vector_kind_of(target);
+    if target_kind >= 0 {
+        let target_text = try self.types.copy_text(self.allocator, target);
+        defer target_text.deinit(self.allocator);
+        let target_bytes = target_text.as_bytes();
+        let lanes = typ::vector_lanes(target_bytes);
+        let lane = typ::vector_lane_of_kind(target_kind);
+        return self.check_vector_lane(tree, expression, target, lane, lanes, out);
     }
     let elem = try self.types.slice_elem(target) orelse
         return try self.index_target_error(target);

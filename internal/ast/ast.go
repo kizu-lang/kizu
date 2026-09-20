@@ -1164,6 +1164,27 @@ func (e *BufferLiteralExpr) TypeText() string {
 	return fmt.Sprintf("[%d]%s", e.Size, e.Elem)
 }
 
+// VectorLiteralExpr is `f64x2{a, b}`: a vector built from one expression
+// per lane, in lane order.
+type VectorLiteralExpr struct {
+	// TypeName is the vector type's spelling, one of the fixed names.
+	TypeName string
+	Lanes    []Expression
+	Span     Span
+}
+
+// expressionNode marks VectorLiteralExpr as an expression node.
+func (*VectorLiteralExpr) expressionNode() {}
+
+// String returns the literal as written in source.
+func (e *VectorLiteralExpr) String() string {
+	lanes := make([]string, 0, len(e.Lanes))
+	for _, lane := range e.Lanes {
+		lanes = append(lanes, lane.String())
+	}
+	return e.TypeName + "{" + strings.Join(lanes, ", ") + "}"
+}
+
 // String returns a compact debug representation of the struct literal.
 func (e *StructLiteralExpr) String() string {
 	fields := make([]string, 0, len(e.Fields))

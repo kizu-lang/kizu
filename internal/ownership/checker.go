@@ -4077,6 +4077,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readScalarExpr(e)
 	case *ast.BufferLiteralExpr:
 		return e.TypeText(), nil
+	case *ast.VectorLiteralExpr:
+		return c.readVectorLiteral(e, env)
 	case *ast.ComptimeExpr:
 		return c.readComptimeExpr(e, env)
 	case *ast.IdentExpr:
@@ -4216,11 +4218,26 @@ func (c *Checker) readCatchGuardExpr(expr *ast.CatchGuardExpr, env *scope) (stri
 	return elem, nil
 }
 
+// readVectorLiteral reads the lanes of `f64x2{a, b}`; the value is the
+// vector type itself, copy data whatever the lanes were computed from.
+func (c *Checker) readVectorLiteral(expr *ast.VectorLiteralExpr, env *scope) (string, error) {
+	for _, lane := range expr.Lanes {
+		if _, err := c.readExpr(lane, env); err != nil {
+			return "", err
+		}
+	}
+	return expr.TypeName, nil
+}
+
 // readIndexExpr reads checked byte indexing and slicing without moving bytes.
 func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error) {
 	target, err := c.readExpr(expr.Target, env)
 	if err != nil {
 		return "", err
+	}
+	if elem, _, ok := typ.VectorOf(target); ok {
+		// A lane is named by a literal the type checker has already bounded.
+		return elem, nil
 	}
 	if !isViewTypeName(target) {
 		return "", errorf("move error: index/slice target expects a view (`[]T`), got %s", target)
@@ -8889,7 +8906,7 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 
 // isCopyType reports whether values of typeName can be reused after move contexts.
 func (c *Checker) isCopyType(typeName string) bool {
-	if isViewTypeName(typeName) {
+	if isViewTypeName(typeName) || typ.IsVector(typeName) {
 		return true
 	}
 	if isRawPointerType(typeName) {
@@ -9432,6 +9449,8 @@ func exprIdentUses(expr ast.Expression) []string {
 		return exprIdentUses(e.Receiver)
 	case *ast.DerefExpr:
 		return exprIdentUses(e.Receiver)
+	case *ast.VectorLiteralExpr:
+		return vectorLaneIdentUses(e)
 	case *ast.IndexExpr:
 		uses := exprIdentUses(e.Target)
 		uses = append(uses, exprIdentUses(e.Index)...)
@@ -9442,6 +9461,16 @@ func exprIdentUses(expr ast.Expression) []string {
 	default:
 		return valueStmtIdentUses(expr)
 	}
+}
+
+// vectorLaneIdentUses collects the identifier reads of every lane of a
+// vector literal.
+func vectorLaneIdentUses(expr *ast.VectorLiteralExpr) []string {
+	uses := []string{}
+	for _, lane := range expr.Lanes {
+		uses = append(uses, exprIdentUses(lane)...)
+	}
+	return uses
 }
 
 // valueStmtIdentUses collects identifier reads from the expressions that

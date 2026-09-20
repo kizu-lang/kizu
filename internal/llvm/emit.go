@@ -10,7 +10,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/ir"
-	"github.com/kizu-lang/kizu/internal/typ"
+	typpkg "github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Emit formats a typed SSA IR module as LLVM IR.
@@ -28,7 +28,7 @@ func EmitNative(module *ir.Module, darwin bool) (string, error) {
 func emit(module *ir.Module, frameRecords bool) (string, error) {
 	e := &emitter{
 		module:       module,
-		types:        typ.NewTable(),
+		types:        typpkg.NewTable(),
 		strings:      map[string]string{},
 		tables:       map[*ir.Instr]string{},
 		values:       map[string]valueInfo{},
@@ -46,7 +46,7 @@ func emit(module *ir.Module, frameRecords bool) (string, error) {
 
 type emitter struct {
 	module  *ir.Module
-	types   *typ.Table
+	types   *typpkg.Table
 	out     bytes.Buffer
 	strings map[string]string
 	// tables names the global behind each table.get, in discovery order.
@@ -592,7 +592,7 @@ func (e *emitter) collectOptionalName(seen map[string]bool, name string) {
 
 // optionalElemLLVM returns T for an optional value type `?T`.
 func optionalElemLLVM(name string) (string, bool) {
-	return typ.OptionalElem(name)
+	return typpkg.OptionalElem(name)
 }
 
 // writeBorrowOptionalResult hands a nullable runtime pointer back as a borrow
@@ -973,8 +973,8 @@ func (e *emitter) collectErrorUnionName(seen map[string]bool, name string) {
 	}
 	// An error union nested in a static argument needs its named type too:
 	// `std::array::Array<!i64>` stores `!i64`, so the element has to be sized.
-	typ.Walk(parsed, func(node typ.Type) {
-		if _, ok := node.(*typ.ErrorUnion); ok {
+	typpkg.Walk(parsed, func(node typpkg.Type) {
+		if _, ok := node.(*typpkg.ErrorUnion); ok {
 			seen[node.String()] = true
 		}
 	})
@@ -1195,14 +1195,29 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeRefLoad(instr)
 	case instr.Op == "local.slot":
 		return e.writeLocalSlot(instr)
-	case instr.Op == "buffer.new":
-		return e.writeBufferNew(instr)
-	case instr.Op == "buffer.as_bytes":
-		return e.writeBufferAsBytes(instr)
+	case strings.HasPrefix(instr.Op, "buffer."), strings.HasPrefix(instr.Op, "vector."):
+		return e.writeValueInstr(instr)
 	case instr.Op == "cond_fail":
 		return e.writeCondFail(instr)
 	default:
 		return e.writeRuntimeInstr(instr)
+	}
+}
+
+// writeValueInstr dispatches the instructions of the builtin value
+// aggregates: a stack buffer and its view, and a vector and its lanes.
+func (e *emitter) writeValueInstr(instr *ir.Instr) error {
+	switch instr.Op {
+	case "buffer.new":
+		return e.writeBufferNew(instr)
+	case "buffer.as_bytes":
+		return e.writeBufferAsBytes(instr)
+	case "vector.new":
+		return e.writeVectorNew(instr)
+	case "vector.lane":
+		return e.writeVectorLane(instr)
+	default:
+		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
 }
 
@@ -1614,7 +1629,7 @@ func (e *emitter) scalarConstOperand(instr *ir.Instr) (string, bool) {
 // bits of the value widened to double. A decimal spelling would have to be
 // exactly representable, and `0.1` is not.
 func llvmFloatConstant(kind string, literal string) (string, bool) {
-	value, ok := typ.ParseFloatLiteral(literal)
+	value, ok := typpkg.ParseFloatLiteral(literal)
 	if !ok {
 		return "", false
 	}
@@ -1684,8 +1699,9 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 		return e.writeShift(instr, op, left, right)
 	}
 	name := localName(instr.Result.Name)
-	binaryOp := llvmBinaryOp(op, instr.Result.Type)
-	if isFloatType(instr.Result.Type) {
+	lane := laneType(instr.Result.Type)
+	binaryOp := llvmBinaryOp(op, lane)
+	if isFloatType(lane) {
 		binaryOp = llvmFloatBinaryOp(op)
 	}
 	fmt.Fprintf(&e.out, "  %s = %s %s %s, %s\n",
@@ -1746,13 +1762,17 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 		}
 		fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", name, value.operand)
 	case "-":
-		if isFloatType(instr.Result.Type) {
+		if isFloatType(laneType(instr.Result.Type)) {
 			fmt.Fprintf(&e.out, "  %s = fneg %s %s\n",
 				name, e.llvmType(instr.Result.Type), value.operand)
 			break
 		}
-		fmt.Fprintf(&e.out, "  %s = sub %s 0, %s\n",
-			name, e.llvmType(instr.Result.Type), value.operand)
+		zero := "0"
+		if typpkg.IsVector(instr.Result.Type) {
+			zero = "zeroinitializer"
+		}
+		fmt.Fprintf(&e.out, "  %s = sub %s %s, %s\n",
+			name, e.llvmType(instr.Result.Type), zero, value.operand)
 	case "~":
 		fmt.Fprintf(&e.out, "  %s = xor %s %s, -1\n",
 			name, e.llvmType(instr.Result.Type), value.operand)
@@ -2592,6 +2612,51 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	return nil
 }
 
+// writeVectorNew builds a vector from one value per lane, in lane order.
+func (e *emitter) writeVectorNew(instr *ir.Instr) error {
+	elem, lanes, ok := typpkg.VectorOf(instr.Result.Type)
+	if !ok || len(instr.Args) != lanes {
+		return fmt.Errorf("llvm error: vector.new expects %s lanes, got %d",
+			instr.Result.Type, len(instr.Args))
+	}
+	vectorType := e.llvmType(instr.Result.Type)
+	laneType := llvmPrimitiveType(elem)
+	name := localName(instr.Result.Name)
+	current := "poison"
+	for i, arg := range instr.Args {
+		if arg.Type != elem {
+			return fmt.Errorf("llvm error: vector.new lane %d expects %s, got %s", i, elem, arg.Type)
+		}
+		next := name
+		if i+1 < lanes {
+			next = fmt.Sprintf("%s.lane%d", name, i)
+		}
+		fmt.Fprintf(&e.out, "  %s = insertelement %s %s, %s %s, i32 %d\n",
+			next, vectorType, current, laneType, e.value(arg).operand, i)
+		current = next
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeVectorLane reads one lane of a vector; the lane index is the
+// instruction's immediate.
+func (e *emitter) writeVectorLane(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: vector.lane expects one vector")
+	}
+	elem, _, ok := typpkg.VectorOf(instr.Args[0].Type)
+	if !ok || instr.Result.Type != elem {
+		return fmt.Errorf("llvm error: vector.lane expects a vector -> lane, got %s -> %s",
+			instr.Args[0].Type, instr.Result.Type)
+	}
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = extractelement %s %s, i32 %s\n",
+		name, e.llvmType(instr.Args[0].Type), e.value(instr.Args[0]).operand, instr.Immediate)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
 // writeBufferNew allocates a zero-filled fixed-length stack buffer. The value
 // registered for the result is the alloca pointer: a buffer is its storage,
 // and the views buffer.as_bytes hands out point into it (ADR-0097).
@@ -2636,11 +2701,11 @@ func (e *emitter) bufferSize(typeName string) (int64, string, bool) {
 	if err != nil {
 		return 0, "", false
 	}
-	buffer, ok := parsed.(*typ.Buffer)
+	buffer, ok := parsed.(*typpkg.Buffer)
 	if !ok {
 		return 0, "", false
 	}
-	return buffer.Size, typ.Text(buffer.Elem), true
+	return buffer.Size, typpkg.Text(buffer.Elem), true
 }
 
 // writeCondFail reports the named failure when the tested condition holds.
@@ -3042,7 +3107,7 @@ func (e *emitter) absorbsErrorUnionReturn(value ir.Value) bool {
 		return false
 	}
 	got, err := e.types.Parse(value.Type)
-	return err == nil && typ.AbsorbsErrorSet(want, got)
+	return err == nil && typpkg.AbsorbsErrorSet(want, got)
 }
 
 // writeAbsorbedErrorUnionReturn returns one error union as another, naming the

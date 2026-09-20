@@ -5,7 +5,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/kizu-lang/kizu/internal/typ"
+	typpkg "github.com/kizu-lang/kizu/internal/typ"
 )
 
 // wasmType maps Kizu IR types to WebAssembly value types. Memory-backed
@@ -17,6 +17,9 @@ func (e *emitter) wasmType(typ string) string {
 	}
 	if isFloatType(typ) {
 		return typ
+	}
+	if typpkg.IsVector(typ) {
+		return "v128"
 	}
 	return "i32"
 }
@@ -229,7 +232,7 @@ func hexByte(value byte) string {
 // floatConstExpr spells a floating-point constant exactly: the bits of the
 // value reinterpreted, since a decimal in the text format would round again.
 func floatConstExpr(kind string, literal string) (string, bool) {
-	value, ok := typ.ParseFloatLiteral(literal)
+	value, ok := typpkg.ParseFloatLiteral(literal)
 	if !ok {
 		return "", false
 	}

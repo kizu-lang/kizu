@@ -1430,6 +1430,31 @@ fn write_as_mut(p: ptr<const u8>) {
 pointer cast の memory safety obligation はプログラマが負います。
 ただし、`unsafe` の中でも type check / move check / borrow check は無効化されません。
 
+### 7.3 vector 型
+
+SIMD は明示です。vector 型は固定名の 128-bit 値で、lane 数と lane 型を
+名前が言います:
+
+```text
+f64x2  f32x4  i64x2  i32x4  i16x8  u64x2  u32x4  u16x8
+```
+
+vector は copy data です(§7.1 の view の要素にも、struct field、`Array<T>`
+の要素、引数、戻り値にも置けます)。値は lane ごとの literal から作り、lane は
+整数 literal で読みます。lane の書き込みはなく、値を作り直します。
+
+```kizu
+let a = f64x2{1.0, 2.0};         // lane 数ちょうど。literal は lane 型を文脈に取る
+let re = a[0];                    // f64。index は整数 literal 限定で、範囲外は compile error
+let swapped = f64x2{a[1], a[0]};
+```
+
+演算は両辺が同じ vector 型の `+ - *`、float lane の `/`、符号付き lane の単項 `-`
+で、すべて lane ごとです。比較、`%`、bit 演算、shuffle、reduce は持ちません。
+backend は native では LLVM の vector 型、wasm では simd128 の `v128` に写します
+(wasmtime と browser はどちらも既定で有効)。名前が返るものを言う `[N]T` と同じで、
+`Vector<N, T>` のような任意の lane 数は持ちません(ADR-0149)。
+
 ## 8. 所有権
 
 所有される値を代入または関数引数として渡すと move されます。

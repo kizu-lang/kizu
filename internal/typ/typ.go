@@ -47,6 +47,38 @@ func IsBufferElem(name string) bool {
 	}
 }
 
+// VectorOf splits a vector type name into its lane type and lane count:
+// `f64x2` is two f64 lanes. The names are the 128-bit vectors (SPEC §7.3),
+// one register wide on every target the compiler has.
+func VectorOf(name string) (elem string, lanes int, ok bool) {
+	switch name {
+	case "f64x2":
+		return "f64", 2, true
+	case "f32x4":
+		return "f32", 4, true
+	case "i64x2":
+		return "i64", 2, true
+	case "i32x4":
+		return "i32", 4, true
+	case "i16x8":
+		return "i16", 8, true
+	case "u64x2":
+		return "u64", 2, true
+	case "u32x4":
+		return "u32", 4, true
+	case "u16x8":
+		return "u16", 8, true
+	default:
+		return "", 0, false
+	}
+}
+
+// IsVector reports whether name spells a vector type.
+func IsVector(name string) bool {
+	_, _, ok := VectorOf(name)
+	return ok
+}
+
 // Buffer is `[N]T`, a fixed-length stack buffer (ADR-0097).
 type Buffer struct {
 	Size int64

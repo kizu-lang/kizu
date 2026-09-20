@@ -313,6 +313,7 @@ pub union ExpressionNode {
     Index(IndexExpr),
     StructLiteral(StructLiteralExpr),
     BufferLiteral(BufferLiteralExpr),
+    VectorLiteral(VectorLiteralExpr),
     Field(FieldExpr),
     Deref(DerefExpr),
     If(IfStmt),
@@ -574,6 +575,31 @@ pub struct BufferLiteralExpr {
     pub size: i64,
     pub elem: Text,
     pub span: Span,
+}
+
+/// Is `f64x2{a, b}`: a vector built from one expression per lane, in lane
+/// order; type_name is the vector type's spelling.
+pub struct VectorLiteralExpr {
+    pub type_name: Text,
+    pub lanes: array::Array<Expression>,
+    pub span: Span,
+}
+
+/// Copies one vector literal out of the tree, or null when the expression is
+/// something else: the lanes are an owned clone, since the node itself holds
+/// them and cannot leave the tree. The caller releases the copy.
+pub fn copy_vector_literal(
+    allocator: Allocator,
+    tree: &Ast,
+    expression: Expression
+) -> !?VectorLiteralExpr {
+    match tree.expressions.at(expression.node) {
+        VectorLiteral(value) => {
+            let lanes = try value.lanes.clone(allocator);
+            return VectorLiteralExpr { type_name: value.type_name, lanes: move lanes, span: value.span };
+        },
+        _ => return null,
+    }
 }
 
 /// Represents one field initializer in a struct literal.
@@ -1007,6 +1033,19 @@ fn append_expression(
         BufferLiteral(value) => {
             try value.append_type_text(allocator, ast, out);
             try out.append_bytes(allocator, "{}");
+        },
+        VectorLiteral(value) => {
+            try append_text(allocator, out, ast, value.type_name);
+            try out.append_byte(allocator, cast<u8>(123));
+            var index = 0;
+            while value.lanes.get(index) |lane| {
+                if index > 0 {
+                    try out.append_bytes(allocator, ", ");
+                }
+                try append_expression(allocator, out, ast, lane);
+                index = index + 1;
+            }
+            try out.append_byte(allocator, cast<u8>(125));
         },
         Field(value) => {
             try append_expression(allocator, out, ast, value.receiver);

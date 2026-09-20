@@ -55,6 +55,14 @@ const (
 )
 
 var knownTypes = map[Type]bool{
+	"f64x2":               true,
+	"f32x4":               true,
+	"i64x2":               true,
+	"i32x4":               true,
+	"i16x8":               true,
+	"u64x2":               true,
+	"u32x4":               true,
+	"u16x8":               true,
 	typeBool:              true,
 	typeI64:               true,
 	typeByteString:        true,

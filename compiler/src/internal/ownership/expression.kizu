@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::typ;
 import std::array;
 import std::mem;
 
@@ -16,6 +17,10 @@ fn (self: &var Checker) read_expr(
 ) -> !?diagnostic::Diagnostic {
     if transparent_expr_value(tree, expression) |inner| {
         return self.read_expr(tree, env, inner, out);
+    }
+    if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
+        defer literal.deinit(self.allocator);
+        return self.read_vector_literal(tree, env, &literal, out);
     }
     match tree.expressions.at(expression.node) {
         Int(_) => {
@@ -47,6 +52,8 @@ fn (self: &var Checker) read_expr(
             out.* = try self.names.intern_owned(move text);
             return null;
         },
+        VectorLiteral(_) => return try self.error0(
+            ast::zero_span(), "move error: vector literal reached the node dispatch"),
         Comptime(value) => return self.read_comptime_only(tree, value.expr, out),
         Ident(value) => {
             let copied = value;
@@ -206,6 +213,26 @@ fn (self: &var Checker) read_catch_guard_expr(
 
 /// Reads checked byte indexing and slicing without moving bytes, the Go
 /// `readIndexExpr`.
+/// Reads the lanes of `f64x2{a, b}`, the `VectorLiteralExpr` arm of the Go
+/// `readExpr`; the value is the vector type itself.
+fn (self: &var Checker) read_vector_literal(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    literal: &ast::VectorLiteralExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    var lane_type = empty_name();
+    while literal.lanes.get(index) |lane| {
+        if try self.read_expr(tree, env, lane, &var lane_type) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    out.* = try self.names.intern_text(tree, literal.type_name);
+    return null;
+}
+
 fn (self: &var Checker) read_index_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -215,6 +242,15 @@ fn (self: &var Checker) read_index_expr(
     var target = empty_name();
     if try self.read_expr(tree, env, index.target, &var target) |failed| {
         return move failed;
+    }
+    let target_text = name_text(&self.names, target);
+    let target_bytes = target_text.as_bytes();
+    let target_kind = typ::vector_kind(target_bytes);
+    if target_kind >= 0 {
+        // A lane is named by a literal the type checker has already bounded.
+        let lane = typ::vector_lane_of_kind(target_kind);
+        out.* = try self.names.intern(lane);
+        return null;
     }
     if !self.names.is_view_type(target) {
         return try self.error1(

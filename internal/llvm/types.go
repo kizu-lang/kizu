@@ -1,9 +1,10 @@
 package llvm
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/kizu-lang/kizu/internal/typ"
+	typpkg "github.com/kizu-lang/kizu/internal/typ"
 )
 
 // localName turns Kizu SSA names into valid named LLVM local identifiers.
@@ -28,6 +29,9 @@ func llvmPrimitiveType(typ string) string {
 	case "f64":
 		return "double"
 	default:
+		if elem, lanes, ok := typpkg.VectorOf(typ); ok {
+			return fmt.Sprintf("<%d x %s>", lanes, llvmPrimitiveType(elem))
+		}
 		if strings.HasPrefix(typ, "[]") {
 			// Every view is the same {ptr, len} pair whatever it counts; the
 			// name keeps the element the type was first written for.
@@ -194,6 +198,15 @@ func isFloatType(typ string) bool {
 	return typ == "f32" || typ == "f64"
 }
 
+// laneType returns the scalar an arithmetic instruction works in: the lane
+// of a vector, or the type itself.
+func laneType(typ string) string {
+	if elem, _, ok := typpkg.VectorOf(typ); ok {
+		return elem
+	}
+	return typ
+}
+
 // llvmFloatBinaryOp maps a Kizu arithmetic operator on a float type to an
 // LLVM floating-point instruction.
 func llvmFloatBinaryOp(op string) string {
@@ -354,8 +367,8 @@ func (e *emitter) errorUnionParts(name string) (string, string, bool) {
 	if err != nil {
 		return "", "", false
 	}
-	errorType, success, ok := typ.ErrorUnionParts(parsed)
-	return typ.Text(errorType), typ.Text(success), ok
+	errorType, success, ok := typpkg.ErrorUnionParts(parsed)
+	return typpkg.Text(errorType), typpkg.Text(success), ok
 }
 
 // isLowerableErrorUnionSuccess reports whether the current backend can carry T.

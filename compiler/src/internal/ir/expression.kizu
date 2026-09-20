@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::typ;
 import std::array;
 import std::fmt;
 import std::mem;
@@ -80,6 +81,10 @@ fn (self: &var Lowerer) lower_expr(
         out.* = try self.emit0(Op::BufferNew, type_name);
         return null;
     }
+    if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
+        defer literal.deinit(self.allocator);
+        return self.lower_vector_literal_expr(tree, &literal, out);
+    }
     if ownership::field_expr(tree, expression) |field| {
         return self.lower_field_expr(tree, field, out);
     }
@@ -111,6 +116,38 @@ fn is_null_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
 
 /// Returns the type spelling of a buffer literal, the Go
 /// `BufferLiteralExpr.TypeText`, or null for another expression.
+/// Lowers `f64x2{a, b}` to `vector.new` with one lane value per operand,
+/// each lowered under the lane type the way an argument is under its
+/// parameter, the Go `VectorLiteralExpr` arm of `lowerExpr`.
+fn (self: &var Lowerer) lower_vector_literal_expr(
+    tree: &var ast::Ast,
+    literal: &ast::VectorLiteralExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let retained = tree.texts.at(literal.type_name.node);
+    let name_bytes = retained.as_bytes();
+    let kind = typ::vector_kind(name_bytes);
+    if kind < 0 {
+        return try self.fail0("ir error: not a vector type");
+    }
+    let lane = typ::vector_lane_of_kind(kind);
+    let lane_type = try self.name(lane);
+    let type_name = try self.name(name_bytes);
+    var lanes = array::new<Value>(self.allocator);
+    defer lanes.deinit(self.allocator);
+    var index = 0;
+    while literal.lanes.get(index) |lane_expr| {
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, lane_expr, lane_type, &var value) |failed| {
+            return move failed;
+        }
+        try lanes.append(self.allocator, value);
+        index = index + 1;
+    }
+    out.* = try self.emit_with(Op::VectorNew, empty_name(), type_name, empty_name(), &lanes);
+    return null;
+}
+
 fn buffer_literal_type(allocator: Allocator, tree: &ast::Ast, expression: ast::Expression) -> !?string::String {
     match tree.expressions.at(expression.node) {
         BufferLiteral(literal) => return try literal.type_text(allocator, tree),
@@ -375,6 +412,7 @@ fn expression_go_type(tree: &ast::Ast, expression: ast::Expression) -> []u8 {
         Index(_) => return "*ast.IndexExpr",
         StructLiteral(_) => return "*ast.StructLiteralExpr",
         BufferLiteral(_) => return "*ast.BufferLiteralExpr",
+        VectorLiteral(_) => return "*ast.VectorLiteralExpr",
         Field(_) => return "*ast.FieldExpr",
         Deref(_) => return "*ast.DerefExpr",
         If(_) => return "*ast.IfStmt",
@@ -780,6 +818,24 @@ fn (self: &var Lowerer) lower_index_expr(
     var target = empty_value();
     if try self.lower_expr(tree, index.target, &var target) |failed| {
         return move failed;
+    }
+    let target_text = name_text(&self.module.names, target.type_name);
+    let target_bytes = target_text.as_bytes();
+    let target_kind = typ::vector_kind(target_bytes);
+    if target_kind >= 0 {
+        let lane = typ::vector_lane_of_kind(target_kind);
+        // The lane is a literal the checker bounded; it travels as the
+        // instruction's immediate, since no value computes it.
+        let index_expr = index.index orelse
+            return try self.fail0("ir error: vector lane index is missing");
+        let literal = ownership::int_expr(tree, index_expr) orelse
+            return try self.fail0("ir error: vector lane index must be a literal");
+        let retained = tree.texts.at(literal.value.node);
+        let literal_text = retained.as_bytes();
+        let immediate = try self.name(literal_text);
+        let lane_type = try self.name(lane);
+        out.* = try self.emit_imm1(Op::VectorLane, lane_type, immediate, target);
+        return null;
     }
     if !index.slice {
         var position = empty_value();

@@ -134,6 +134,9 @@ func (e *binaryInstructionEncoder) encode(out []byte, index int) ([]byte, error)
 	case binaryImmediateInstruction:
 		return e.encodeImmediateOperation(out, index, op)
 	default:
+		if subopcode, ok := simdOpcode(op); ok {
+			return e.encodeWithSIMDOpcode(out, children[1:], subopcode)
+		}
 		opcode, ok := simpleInstructionOpcode(op)
 		if !ok {
 			return nil, e.module.errorf(index, "unsupported instruction %s", op)
@@ -163,7 +166,12 @@ func classifyInstruction(op string) binaryInstructionKind {
 		return binaryImmediateInstruction
 	case "memory.size", "memory.grow", "memory.copy", "memory.fill":
 		return binaryImmediateInstruction
+	case "v128.load", "v128.store":
+		return binaryImmediateInstruction
 	default:
+		if _, _, ok := simdLaneOpcode(op); ok {
+			return binaryImmediateInstruction
+		}
 		return binarySimpleInstruction
 	}
 }
@@ -225,6 +233,13 @@ func (e *binaryInstructionEncoder) encodeImmediateOperation(
 		"i32.store", "i64.store", "i32.store8", "i64.store8",
 		"i64.store16", "i64.store32", "f32.store", "f64.store":
 		return e.encodeMemory(out, index, op)
+	case "v128.load", "v128.store":
+		return e.encodeVectorMemory(out, index, op)
+	case "i16x8.extract_lane_s", "i16x8.extract_lane_u", "i16x8.replace_lane",
+		"i32x4.extract_lane", "i32x4.replace_lane", "i64x2.extract_lane", "i64x2.replace_lane",
+		"f32x4.extract_lane", "f32x4.replace_lane", "f64x2.extract_lane", "f64x2.replace_lane":
+		subopcode, _, _ := simdLaneOpcode(op)
+		return e.encodeSIMDLane(out, index, subopcode)
 	case "memory.size", "memory.grow":
 		return e.encodeMemorySize(out, index, op)
 	case "i64.trunc_sat_f32_s", "i64.trunc_sat_f32_u", "i64.trunc_sat_f64_s", "i64.trunc_sat_f64_u":
@@ -523,6 +538,118 @@ func (e *binaryInstructionEncoder) encodeConstant(
 	}
 	out = append(out, 0x42)
 	return appendI64(out, value), nil
+}
+
+// simdPrefix opens every instruction of the simd proposal; the operation
+// itself follows as an unsigned LEB128 number.
+const simdPrefix = byte(0xfd)
+
+// encodeWithSIMDOpcode emits the operands, the simd prefix and the operation.
+func (e *binaryInstructionEncoder) encodeWithSIMDOpcode(
+	out []byte,
+	operands []int,
+	subopcode uint32,
+) ([]byte, error) {
+	out, err := e.encodeSequence(out, operands)
+	if err != nil {
+		return nil, err
+	}
+	return appendU32(append(out, simdPrefix), subopcode), nil
+}
+
+// encodeVectorMemory emits `v128.load` / `v128.store`: the operands, the
+// prefixed operation, and a memarg at the vector's natural 16-byte
+// alignment. The generated text never writes an offset.
+func (e *binaryInstructionEncoder) encodeVectorMemory(
+	out []byte,
+	index int,
+	op string,
+) ([]byte, error) {
+	children := e.module.source.nodes[index].children
+	subopcode := uint32(0)
+	if op == "v128.store" {
+		subopcode = 11
+	}
+	out, err := e.encodeSequence(out, children[1:])
+	if err != nil {
+		return nil, err
+	}
+	out = appendU32(append(out, simdPrefix), subopcode)
+	out = appendU32(out, 4)
+	return appendU32(out, 0), nil
+}
+
+// encodeSIMDLane emits a lane instruction: `(f64x2.extract_lane 1 v)` reads
+// lane 1, `(f64x2.replace_lane 1 v x)` writes it. The lane number is the
+// first operand in the text and the last byte in the encoding.
+func (e *binaryInstructionEncoder) encodeSIMDLane(
+	out []byte,
+	index int,
+	subopcode uint32,
+) ([]byte, error) {
+	children := e.module.source.nodes[index].children
+	if len(children) < 3 {
+		return nil, e.module.errorf(index, "lane instruction expects a lane and operands")
+	}
+	lane, err := e.module.unsigned(children[1])
+	if err != nil {
+		return nil, err
+	}
+	out, err = e.encodeSequence(out, children[2:])
+	if err != nil {
+		return nil, err
+	}
+	out = appendU32(append(out, simdPrefix), subopcode)
+	return append(out, byte(lane)), nil
+}
+
+// simdLaneOpcode maps the lane reads and writes of each shape; the number is
+// the proposal's operation number.
+func simdLaneOpcode(op string) (uint32, string, bool) {
+	switch op {
+	case "i16x8.extract_lane_s":
+		return 24, op, true
+	case "i16x8.extract_lane_u":
+		return 25, op, true
+	case "i16x8.replace_lane":
+		return 26, op, true
+	case "i32x4.extract_lane":
+		return 27, op, true
+	case "i32x4.replace_lane":
+		return 28, op, true
+	case "i64x2.extract_lane":
+		return 29, op, true
+	case "i64x2.replace_lane":
+		return 30, op, true
+	case "f32x4.extract_lane":
+		return 31, op, true
+	case "f32x4.replace_lane":
+		return 32, op, true
+	case "f64x2.extract_lane":
+		return 33, op, true
+	case "f64x2.replace_lane":
+		return 34, op, true
+	default:
+		return 0, "", false
+	}
+}
+
+// simdOpcodes are the operand-only simd operations the emitter writes: the
+// splats, negations and lane-wise arithmetic of each shape, by the
+// proposal's operation number.
+var simdOpcodes = map[string]uint32{
+	"i16x8.splat": 16, "i32x4.splat": 17, "i64x2.splat": 18, "f32x4.splat": 19, "f64x2.splat": 20,
+	"i16x8.neg": 129, "i16x8.add": 142, "i16x8.sub": 145, "i16x8.mul": 149,
+	"i32x4.neg": 161, "i32x4.add": 174, "i32x4.sub": 177, "i32x4.mul": 181,
+	"i64x2.neg": 193, "i64x2.add": 206, "i64x2.sub": 209, "i64x2.mul": 213,
+	"f32x4.neg": 225, "f32x4.add": 228, "f32x4.sub": 229, "f32x4.mul": 230, "f32x4.div": 231,
+	"f64x2.neg": 237, "f64x2.add": 240, "f64x2.sub": 241, "f64x2.mul": 242, "f64x2.div": 243,
+}
+
+// simdOpcode maps one operand-only simd operation to its number.
+func simdOpcode(op string) (uint32, bool) {
+	subopcode, ok := simdOpcodes[op]
+	return subopcode, ok
 }
 
 // encodeMemory emits load/store operands and the natural generated memarg.

@@ -2,6 +2,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
 import std::array;
+import std::fmt;
 import std::map;
 import std::mem;
 import std::string;
@@ -123,16 +124,18 @@ fn (self: &var Emitter) write_binary(module: &ir::Module, node: &ir::InstrNode) 
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_bytes = result_text.as_bytes();
-    if is_float_type(result_bytes) {
+    let lane = lane_type(result_bytes);
+    if is_float_type(lane) {
         try self.line5(
             "  %s = %s %s %s, %s",
             Arg::Str(name), Arg::Lit(llvm_float_binary_op(&module.names, node.operand)),
             Arg::Str(result_type), Arg::Str(left.operand), Arg::Str(right.operand)
         );
     } else {
+        let unsigned = is_unsigned_integer_type(lane);
         try self.line5(
             "  %s = %s %s %s, %s",
-            Arg::Str(name), Arg::Lit(llvm_binary_op(&module.names, node.operand, node.result.type_name)),
+            Arg::Str(name), Arg::Lit(llvm_binary_op_signed(&module.names, node.operand, unsigned)),
             Arg::Str(result_type), Arg::Str(left.operand), Arg::Str(right.operand)
         );
     }
@@ -204,10 +207,17 @@ fn (self: &var Emitter) write_unary(module: &ir::Module, node: &ir::InstrNode) -
     } else {
         if module.names.is(node.operand, "-") {
             let result_type = try self.llvm_type_of(module, node.result.type_name);
-            if module.names.is(node.result.type_name, "f32") or module.names.is(node.result.type_name, "f64") {
+            let result_text = ir::name_text(&module.names, node.result.type_name);
+            let result_bytes = result_text.as_bytes();
+            let lane = lane_type(result_bytes);
+            if is_float_type(lane) {
                 try self.line3("  %s = fneg %s %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
             } else {
-                try self.line3("  %s = sub %s 0, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+                if typ::is_vector(result_bytes) {
+                    try self.line3("  %s = sub %s zeroinitializer, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+                } else {
+                    try self.line3("  %s = sub %s 0, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+                }
             }
         } else {
             if module.names.is(node.operand, "~") {
@@ -863,6 +873,79 @@ fn (self: &var Emitter) write_slice_instr(module: &ir::Module, node: &ir::InstrN
             return try self.fail1("llvm error: unsupported slice instruction `%s`", Arg::Str(op));
         },
     }
+}
+
+/// Builds a vector from one value per lane, in lane order, the Go
+/// `writeVectorNew`.
+fn (self: &var Emitter) write_vector_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let kind = typ::vector_kind(result_bytes);
+    if kind < 0 {
+        return try self.fail0("llvm error: vector.new expects a vector result");
+    }
+    let lane = typ::vector_lane_of_kind(kind);
+    let lanes = typ::vector_lanes(result_bytes);
+    if node.args.len() != lanes {
+        return try self.fail0("llvm error: vector.new expects one value per lane");
+    }
+    let vector_type = try self.llvm_type(module, result_bytes);
+    let lane_llvm = try self.names.intern(llvm_primitive_type(lane));
+    let name = try self.local_name(module, node.result.name);
+    var current = try self.names.intern("poison");
+    var index = 0;
+    while node.args.get(index) |arg| {
+        if !module.names.is(arg.type_name, lane) {
+            return try self.fail0("llvm error: vector.new lane has the wrong type");
+        }
+        var next = name;
+        if index + 1 < lanes {
+            var suffix = try string::from_bytes(self.allocator, ".lane");
+            defer suffix.deinit(self.allocator);
+            try fmt::append_i64(self.allocator, &var suffix, index);
+            let suffix_bytes = suffix.as_bytes();
+            next = try self.suffixed(name, suffix_bytes);
+        }
+        let operand = try self.operand(module, arg);
+        try self.line6(
+            "  %s = insertelement %s %s, %s %s, i32 %d",
+            Arg::Str(next), Arg::Str(vector_type), Arg::Str(current),
+            Arg::Str(lane_llvm), Arg::Str(operand.operand), Arg::Int(index)
+        );
+        current = next;
+        index = index + 1;
+    }
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Reads one lane of a vector, the Go `writeVectorLane`; the lane index is
+/// the instruction's immediate.
+fn (self: &var Emitter) write_vector_lane(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: vector.lane expects one vector");
+    }
+    let vector = node.args.get_or_panic(0);
+    let vector_text = ir::name_text(&module.names, vector.type_name);
+    let vector_bytes = vector_text.as_bytes();
+    let kind = typ::vector_kind(vector_bytes);
+    if kind < 0 {
+        return try self.fail0("llvm error: vector.lane expects a vector");
+    }
+    let lane = typ::vector_lane_of_kind(kind);
+    if !module.names.is(node.result.type_name, lane) {
+        return try self.fail0("llvm error: vector.lane result must be the lane type");
+    }
+    let name = try self.local_name(module, node.result.name);
+    let vector_type = try self.llvm_type(module, vector_bytes);
+    let operand = try self.operand(module, vector);
+    let immediate = try self.own(module, node.immediate);
+    try self.line4(
+        "  %s = extractelement %s %s, i32 %s",
+        Arg::Str(name), Arg::Str(vector_type), Arg::Str(operand.operand), Arg::Str(immediate)
+    );
+    try self.set_value(module, node.result, name);
+    return null;
 }
 
 /// Writes one element through a writable view, the Go `writeSliceStore`. The

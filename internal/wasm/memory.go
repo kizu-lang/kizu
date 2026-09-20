@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"fmt"
+	typpkg "github.com/kizu-lang/kizu/internal/typ"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -163,6 +164,9 @@ func (e *emitter) storeOp(typ string) (string, error) {
 	case "Allocator", "Io":
 		return "i32.store", nil
 	}
+	if typpkg.IsVector(typ) {
+		return "v128.store", nil
+	}
 	if e.isAddressValueType(typ) {
 		return "i32.store", nil
 	}
@@ -197,6 +201,9 @@ func (e *emitter) loadOp(typ string) (string, error) {
 		return "f64.load", nil
 	case "Allocator", "Io":
 		return "i32.load", nil
+	}
+	if typpkg.IsVector(typ) {
+		return "v128.load", nil
 	}
 	if e.isAddressValueType(typ) {
 		return "i32.load", nil

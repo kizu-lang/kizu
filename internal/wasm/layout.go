@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"fmt"
+	typpkg "github.com/kizu-lang/kizu/internal/typ"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -123,6 +124,9 @@ func primitiveLayout(typ string) (wasmLayout, bool) {
 		return wasmLayout{size: 4, align: 4}, true
 	case "Allocator", "Io":
 		return wasmLayout{size: 4, align: 4}, true
+	}
+	if typpkg.IsVector(typ) {
+		return wasmLayout{size: 16, align: 16}, true
 	}
 	if isReferenceType(typ) || isRawPointerType(typ) || isFunctionPointerType(typ) {
 		return wasmLayout{size: 4, align: 4}, true

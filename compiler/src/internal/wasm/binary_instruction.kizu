@@ -213,6 +213,20 @@ fn (self: &BinaryModule) encode_named_instruction(
     if wasm_memory_instruction(op) |memory| {
         return self.encode_memory(syntax, input, state, out, node, memory);
     }
+    if mem::equal_bytes(op, "v128.load") or mem::equal_bytes(op, "v128.store") {
+        return self.encode_vector_memory(syntax, input, state, out, node, op);
+    }
+    if wasm_simd_lane_opcode(op) |lane_opcode| {
+        return self.encode_simd_lane(syntax, input, state, out, node, lane_opcode);
+    }
+    if wasm_simd_opcode(op) |simd_opcode| {
+        if !try self.encode_sequence(syntax, input, state, out, node, 1) {
+            return false;
+        }
+        try out.append_byte(self.allocator, cast<u8>(253));
+        try wasm_append_u32(self.allocator, out, simd_opcode);
+        return true;
+    }
     if mem::equal_bytes(op, "memory.size") or mem::equal_bytes(op, "memory.grow") {
         return self.encode_memory_size(syntax, input, state, out, node, op);
     }
@@ -549,6 +563,106 @@ fn (self: &BinaryModule) encode_memory(
     try wasm_append_u32(self.allocator, out, memory.alignment);
     try wasm_append_u32(self.allocator, out, 0);
     return true;
+}
+
+/// Emits `v128.load` / `v128.store`, the Go `encodeVectorMemory`: the
+/// operands, the simd prefix (0xfd) and operation, and a memarg at the
+/// vector's natural 16-byte alignment. The generated text never writes an
+/// offset.
+fn (self: &BinaryModule) encode_vector_memory(
+    syntax: &WasmModule,
+    input: []u8,
+    state: &var BinaryInstructionState,
+    out: &var string::String,
+    node: arena::Handle<WasmNode>,
+    op: []u8
+) -> !bool {
+    if !try self.encode_sequence(syntax, input, state, out, node, 1) {
+        return false;
+    }
+    try out.append_byte(self.allocator, cast<u8>(253));
+    if mem::equal_bytes(op, "v128.store") {
+        try wasm_append_u32(self.allocator, out, 11);
+    } else {
+        try wasm_append_u32(self.allocator, out, 0);
+    }
+    try wasm_append_u32(self.allocator, out, 4);
+    try wasm_append_u32(self.allocator, out, 0);
+    return true;
+}
+
+/// Emits a lane instruction, the Go `encodeSIMDLane`: `(f64x2.extract_lane
+/// 1 v)` reads lane 1, `(f64x2.replace_lane 1 v x)` writes it. The lane
+/// number is the first operand in the text and the last byte in the
+/// encoding.
+fn (self: &BinaryModule) encode_simd_lane(
+    syntax: &WasmModule,
+    input: []u8,
+    state: &var BinaryInstructionState,
+    out: &var string::String,
+    node: arena::Handle<WasmNode>,
+    subopcode: i64
+) -> !bool {
+    let lane_node = wasm_list_get(syntax, node, 1) orelse return false;
+    let lane = self.unsigned_atom(syntax, input, lane_node) orelse return false;
+    if !try self.encode_sequence(syntax, input, state, out, node, 2) {
+        return false;
+    }
+    try out.append_byte(self.allocator, cast<u8>(253));
+    try wasm_append_u32(self.allocator, out, subopcode);
+    try out.append_byte(self.allocator, cast<u8>(lane));
+    return true;
+}
+
+/// Maps the lane reads and writes of each shape, the Go `simdLaneOpcode`;
+/// the number is the proposal's operation number.
+fn wasm_simd_lane_opcode(op: []u8) -> ?i64 {
+    if mem::equal_bytes(op, "i16x8.extract_lane_s") { return 24; }
+    if mem::equal_bytes(op, "i16x8.extract_lane_u") { return 25; }
+    if mem::equal_bytes(op, "i16x8.replace_lane") { return 26; }
+    if mem::equal_bytes(op, "i32x4.extract_lane") { return 27; }
+    if mem::equal_bytes(op, "i32x4.replace_lane") { return 28; }
+    if mem::equal_bytes(op, "i64x2.extract_lane") { return 29; }
+    if mem::equal_bytes(op, "i64x2.replace_lane") { return 30; }
+    if mem::equal_bytes(op, "f32x4.extract_lane") { return 31; }
+    if mem::equal_bytes(op, "f32x4.replace_lane") { return 32; }
+    if mem::equal_bytes(op, "f64x2.extract_lane") { return 33; }
+    if mem::equal_bytes(op, "f64x2.replace_lane") { return 34; }
+    return null;
+}
+
+/// Maps the operand-only simd operations the emitter writes, the Go
+/// `simdOpcode`: the splats, negations and lane-wise arithmetic of each
+/// shape.
+fn wasm_simd_opcode(op: []u8) -> ?i64 {
+    if mem::equal_bytes(op, "i16x8.splat") { return 16; }
+    if mem::equal_bytes(op, "i32x4.splat") { return 17; }
+    if mem::equal_bytes(op, "i64x2.splat") { return 18; }
+    if mem::equal_bytes(op, "f32x4.splat") { return 19; }
+    if mem::equal_bytes(op, "f64x2.splat") { return 20; }
+    if mem::equal_bytes(op, "i16x8.neg") { return 129; }
+    if mem::equal_bytes(op, "i16x8.add") { return 142; }
+    if mem::equal_bytes(op, "i16x8.sub") { return 145; }
+    if mem::equal_bytes(op, "i16x8.mul") { return 149; }
+    if mem::equal_bytes(op, "i32x4.neg") { return 161; }
+    if mem::equal_bytes(op, "i32x4.add") { return 174; }
+    if mem::equal_bytes(op, "i32x4.sub") { return 177; }
+    if mem::equal_bytes(op, "i32x4.mul") { return 181; }
+    if mem::equal_bytes(op, "i64x2.neg") { return 193; }
+    if mem::equal_bytes(op, "i64x2.add") { return 206; }
+    if mem::equal_bytes(op, "i64x2.sub") { return 209; }
+    if mem::equal_bytes(op, "i64x2.mul") { return 213; }
+    if mem::equal_bytes(op, "f32x4.neg") { return 225; }
+    if mem::equal_bytes(op, "f32x4.add") { return 228; }
+    if mem::equal_bytes(op, "f32x4.sub") { return 229; }
+    if mem::equal_bytes(op, "f32x4.mul") { return 230; }
+    if mem::equal_bytes(op, "f32x4.div") { return 231; }
+    if mem::equal_bytes(op, "f64x2.neg") { return 237; }
+    if mem::equal_bytes(op, "f64x2.add") { return 240; }
+    if mem::equal_bytes(op, "f64x2.sub") { return 241; }
+    if mem::equal_bytes(op, "f64x2.mul") { return 242; }
+    if mem::equal_bytes(op, "f64x2.div") { return 243; }
+    return null;
 }
 
 fn (self: &BinaryModule) encode_memory_size(
