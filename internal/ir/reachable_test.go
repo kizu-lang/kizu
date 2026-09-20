@@ -1,6 +1,9 @@
 package ir
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestKeepReachableFunctionsFollowsCallsAddressesAndCleanups verifies the
 // executable closure includes ordinary calls, function-pointer targets, and
@@ -101,4 +104,34 @@ func functionWithOps(name string, ops ...string) *Function {
 		instrs = append(instrs, &Instr{Op: op, Result: Value{Type: "void"}})
 	}
 	return &Function{Name: name, Blocks: []*Block{{Name: "entry", Instrs: instrs}}}
+}
+
+// TestLinkInputsFollowTheCallsThatRemain links what the remaining foreign
+// calls declared, once each, and nothing for a declaration no kept call names.
+func TestLinkInputsFollowTheCallsThatRemain(t *testing.T) {
+	module := &Module{
+		Externs: map[string]Extern{
+			"cbrt":   {ABI: "c", Library: "m"},
+			"sqrt":   {ABI: "c", Library: "m"},
+			"fft":    {ABI: "c", Library: "fftw3"},
+			"unused": {ABI: "c", Library: "never", Framework: "Never"},
+			"vdsp":   {ABI: "c", Framework: "Accelerate"},
+		},
+		Functions: []*Function{{
+			Name: "main",
+			Blocks: []*Block{{Instrs: []*Instr{
+				{Op: "call.cbrt", ExternABI: "c", ExternName: "cbrt"},
+				{Op: "call.sqrt", ExternABI: "c", ExternName: "sqrt"},
+				{Op: "call.fft", ExternABI: "c", ExternName: "fft"},
+				{Op: "error.try", Cleanups: []Cleanup{{ExternABI: "c", ExternName: "vdsp"}}},
+			}}},
+		}},
+	}
+	libraries, frameworks := LinkInputs(module)
+	if got := strings.Join(libraries, " "); got != "fftw3 m" {
+		t.Fatalf("libraries = %q", got)
+	}
+	if got := strings.Join(frameworks, " "); got != "Accelerate" {
+		t.Fatalf("frameworks = %q", got)
+	}
 }

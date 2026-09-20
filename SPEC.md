@@ -178,6 +178,16 @@ directory は production module を作りません。したがって library pac
 root module を持たなくてもよく、std の source root 直下には production file を
 置きません。
 
+`[native]` は native link の探索 directory です。`@link_lib` / `@link_framework`
+(§12.2)が名指す library をどこで探すかだけを持ち、何を link するかは持ちません。
+相対 path は manifest のある directory から解決します。
+
+```toml
+[native]
+library_search = ["vendor/lib"]
+framework_search = ["vendor/frameworks"]
+```
+
 package graph 内で suffix が `_test.kizu` の file は `kizu test <package>` のときだけ、
 同じ directory の module に加わります。package を対象にした `run` / `check` / `build`
 からは除外します。file path を直接指定した loose-source command は、その1fileを明示的に
@@ -2451,14 +2461,28 @@ C layout struct は `unsafe struct` の要求から外します。C ABI struct �
 `pub` にできないと構築できず、名前も C の側が決めるためです。raw pointer field を
 持つ C layout struct が safe Kizu の保証外である根拠は §0.1 が既に持っています。
 
-link name / library 指定も暗黙にしません。
-将来必要になった場合は attribute として扱います。
+library 指定も暗黙にしません。symbol がどの library のものかは `extern "c" fn`
+宣言の上に attribute で書きます。
 
 ```kizu
-@link_name("puts")
-@link_lib("c")
-extern "c" fn c_puts(s: ptr<const u8>) -> i32
+@link_lib("m")
+extern "c" fn cbrt(value: f64) -> f64
+
+@link_framework("Accelerate")
+extern "c" fn vDSP_create_fftsetupD(log2n: u64, radix: i32) -> ptr<u8>
 ```
+
+* `@link_lib("x")` は linker に `-lx` を、`@link_framework("X")` は
+  `-framework X` を渡します。attribute は `extern "c" fn` にだけ書け、それぞれ
+  1 つの宣言に 1 回です。`@link_framework` は Darwin target でだけ build できます。
+* link されるのは、reachability を閉じた後に残った call が名指す宣言のものだけです。
+  呼ばれない宣言の library は link しません。
+* 探索 directory は source に書けません。manifest の `[native]`(§3)が持ちます。
+  名前は宣言を読めば分かり、在処は package を build する側が決めるためです。
+* library の名前と探索 directory は build cache key と build metadata に入ります。
+* header から依存を推測しません。見つからない library は linker の error のまま
+  報告します。
+* `@link_name` のような symbol 名の付け替えは持ちません。宣言名がそのまま symbol です。
 
 compiler runtime が使う symbol は `kizu_` prefix を予約します。
 
@@ -2466,9 +2490,9 @@ compiler runtime が使う symbol は `kizu_` prefix を予約します。
 kizu_print_string
 ```
 
-LLVM IR backend では、extern C call は将来 `declare` と `call` に lower します。
+LLVM IR backend では、extern C call は `declare` と `call` に lower します。
 native executable generation は、LLVM lowering 済み subset と `kizu_` runtime shim に
-限定して扱います。extern C library selection と C layout 完全対応は別 phase で扱います。
+限定して扱います。C layout 完全対応は別 phase で扱います。
 
 ## 13. comptime
 

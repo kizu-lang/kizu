@@ -77,7 +77,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Unsafe:
 			program.Decls = append(program.Decls, p.parseUnsafeDecl(commentText(p.cur.DocComments)))
 			p.nextToken()
-		case token.Extern:
+		case token.Extern, token.At:
 			program.Decls = append(program.Decls, p.parseExternDecl())
 			p.nextToken()
 		case token.Export:
@@ -214,8 +214,12 @@ func (p *Parser) parseUnsafeDecl(docs string) ast.Decl {
 	}
 }
 
-// parseExternDecl parses extern "abi" fn declarations.
+// parseExternDecl parses extern "abi" fn declarations, with the link
+// attributes written above one.
 func (p *Parser) parseExternDecl() ast.Decl {
+	if p.cur.Type == token.At {
+		return p.parseAttributedDecl()
+	}
 	return p.parseExternDeclWithDoc(commentText(p.cur.DocComments))
 }
 
@@ -231,6 +235,77 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	}
 	p.parseFunctionSignatureAfterFn(fn)
 	return fn
+}
+
+// parseAttributedDecl parses the `@link_lib("...")` / `@link_framework("...")`
+// lines above an extern declaration and the declaration they belong to. The
+// attributes name what the linker resolves the symbol from, so the only
+// declaration they can sit on is an `extern "c" fn` (SPEC §12.2).
+func (p *Parser) parseAttributedDecl() ast.Decl {
+	docs := commentText(p.cur.DocComments)
+	library, framework := "", ""
+	for p.cur.Type == token.At {
+		name, value, ok := p.parseLinkAttribute()
+		if !ok {
+			return &ast.FunctionDecl{Doc: docs}
+		}
+		switch {
+		case name == "link_lib" && library == "":
+			library = value
+		case name == "link_framework" && framework == "":
+			framework = value
+		case name == "link_lib" || name == "link_framework":
+			p.errorf("parse error: duplicate attribute @%s", name)
+			return &ast.FunctionDecl{Doc: docs}
+		default:
+			p.errorf("parse error: unknown attribute @%s", name)
+			return &ast.FunctionDecl{Doc: docs}
+		}
+		p.nextToken()
+	}
+	// The declaration is parsed whatever it is, so one misplaced attribute
+	// is one diagnostic rather than a cascade over the tokens after it.
+	var decl ast.Decl
+	if p.cur.Type == token.Public {
+		p.nextToken()
+		decl = p.parseTopLevelDeclWithDoc(docs)
+		setPublicDecl(decl)
+	} else {
+		decl = p.parseTopLevelDeclWithDoc(docs)
+	}
+	fn, ok := decl.(*ast.FunctionDecl)
+	if !ok || fn.ExternABI == "" {
+		p.errorf("parse error: link attributes apply to extern \"c\" fn declarations")
+		return decl
+	}
+	fn.LinkLibrary = library
+	fn.LinkFramework = framework
+	return fn
+}
+
+// parseLinkAttribute parses one `@name("value")` and leaves the closing
+// parenthesis current. The value is the library or framework name as the
+// linker is handed it, so an empty one is refused here.
+func (p *Parser) parseLinkAttribute() (string, string, bool) {
+	if !p.expectPeek(token.Ident) {
+		return "", "", false
+	}
+	name := p.cur.Literal
+	if !p.expectPeek(token.LParen) {
+		return "", "", false
+	}
+	if !p.expectPeek(token.String) {
+		return "", "", false
+	}
+	value := p.cur.Literal
+	if !p.expectPeek(token.RParen) {
+		return "", "", false
+	}
+	if value == "" {
+		p.errorf("parse error: attribute @%s needs a name", name)
+		return "", "", false
+	}
+	return name, value, true
 }
 
 // parseExportDecl parses export "abi" function definitions.

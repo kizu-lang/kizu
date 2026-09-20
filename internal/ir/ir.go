@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -15,6 +16,59 @@ type Module struct {
 	ErrorSets map[string]Enum
 	Unions    map[string]Union
 	Functions []*Function
+	// Externs lists the declared foreign functions by host symbol, with what
+	// the native linker is handed to resolve each. A call names its symbol in
+	// ExternName; which of these a program links is read off the calls that
+	// survive reachability, not off the declarations (LinkInputs).
+	Externs map[string]Extern
+}
+
+// Extern is what one `extern` declaration tells the linker: the ABI it is
+// called through and the library or framework its symbol lives in.
+type Extern struct {
+	ABI       string
+	Library   string
+	Framework string
+}
+
+// LinkInputs returns the libraries and frameworks the module's remaining
+// foreign calls need, each once and sorted. It is asked after reachability
+// has been closed, so a library declared for a function the program never
+// calls is not linked.
+func LinkInputs(module *Module) (libraries []string, frameworks []string) {
+	seenLibraries := map[string]bool{}
+	seenFrameworks := map[string]bool{}
+	visit := func(name string) {
+		extern, ok := module.Externs[name]
+		if !ok {
+			return
+		}
+		if extern.Library != "" && !seenLibraries[extern.Library] {
+			seenLibraries[extern.Library] = true
+			libraries = append(libraries, extern.Library)
+		}
+		if extern.Framework != "" && !seenFrameworks[extern.Framework] {
+			seenFrameworks[extern.Framework] = true
+			frameworks = append(frameworks, extern.Framework)
+		}
+	}
+	for _, fn := range module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.ExternName != "" {
+					visit(instr.ExternName)
+				}
+				for _, cleanup := range instr.Cleanups {
+					if cleanup.ExternName != "" {
+						visit(cleanup.ExternName)
+					}
+				}
+			}
+		}
+	}
+	sort.Strings(libraries)
+	sort.Strings(frameworks)
+	return libraries, frameworks
 }
 
 // Struct is the IR view of a declared Kizu struct.

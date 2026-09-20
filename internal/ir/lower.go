@@ -790,8 +790,13 @@ func (l *lowerer) collectDecls() error {
 		if fn, ok := decl.(*ast.FunctionDecl); ok {
 			l.signatures[fn.Name] = l.lowerSignature(fn.FunctionSignature)
 			if fn.ExternABI != "" {
-				l.externDecls[fn.Name] = externalDecl{
-					abi: fn.ExternABI, name: externalSymbol(fn.Name),
+				symbol := externalSymbol(fn.Name)
+				l.externDecls[fn.Name] = externalDecl{abi: fn.ExternABI, name: symbol}
+				if l.module.Externs == nil {
+					l.module.Externs = map[string]Extern{}
+				}
+				l.module.Externs[symbol] = Extern{
+					ABI: fn.ExternABI, Library: fn.LinkLibrary, Framework: fn.LinkFramework,
 				}
 			}
 		}

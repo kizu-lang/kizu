@@ -18,6 +18,13 @@ pub struct Manifest {
     pub package_name: string::String,
     pub version: string::String,
     pub paths: array::Array<string::String>,
+    /// library_search and framework_search are the `[native]` directories
+    /// the linker is told to look in for what `@link_lib` /
+    /// `@link_framework` name, relative to the manifest. The names live in
+    /// the source beside the extern declaration; where they are found is the
+    /// package's build input, so it lives here (SPEC §12.2).
+    pub library_search: array::Array<string::String>,
+    pub framework_search: array::Array<string::String>,
 }
 
 /// Is either the parsed manifest or the manifest error text.
@@ -31,6 +38,7 @@ enum Section {
     None,
     Package,
     Modules,
+    Native,
 }
 
 // Holds the two sides of one `key = value` line.
@@ -64,7 +72,9 @@ fn parse(allocator: Allocator, source: []u8, allow_reserved_name: bool) -> !Pars
     var manifest = Manifest {
         package_name: string::new(allocator),
         version: string::new(allocator),
-        paths: array::new<string::String>(allocator)
+        paths: array::new<string::String>(allocator),
+        library_search: array::new<string::String>(allocator),
+        framework_search: array::new<string::String>(allocator)
     };
     errdefer manifest.deinit(allocator);
     if try parse_into(allocator, source, allow_reserved_name, &var manifest) |failure| {
@@ -168,6 +178,10 @@ fn parse_section(
         section.* = Section::Modules;
         return null;
     }
+    if mem::equal_bytes(name, "native") {
+        section.* = Section::Native;
+        return null;
+    }
     var failure = try line_error(allocator, line_no, "unsupported section `");
     errdefer failure.deinit(allocator);
     try failure.append_bytes(allocator, name);
@@ -211,6 +225,18 @@ fn assign_manifest_value(
         }
         return parse_string_list(allocator, value, line_no, &var manifest.paths);
     }
+    if section == Section::Native and mem::equal_bytes(key, "library_search") {
+        while manifest.library_search.pop() |old| {
+            old.deinit(allocator);
+        }
+        return parse_string_list(allocator, value, line_no, &var manifest.library_search);
+    }
+    if section == Section::Native and mem::equal_bytes(key, "framework_search") {
+        while manifest.framework_search.pop() |old| {
+            old.deinit(allocator);
+        }
+        return parse_string_list(allocator, value, line_no, &var manifest.framework_search);
+    }
     var failure = try line_error(allocator, line_no, "unsupported key `");
     errdefer failure.deinit(allocator);
     try failure.append_bytes(allocator, section_spelling(section));
@@ -226,6 +252,7 @@ fn section_spelling(section: Section) -> []u8 {
         None => "",
         Package => "package",
         Modules => "modules",
+        Native => "native",
     };
 }
 

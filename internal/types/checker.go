@@ -918,6 +918,10 @@ func validateHostFunctionABI(fn ast.FunctionSignature) error {
 	if fn.ExternABI != "" && fn.ExternABI != "c" && fn.ExternABI != "browser" {
 		return errorf("type error: unsupported extern ABI %q", fn.ExternABI)
 	}
+	if (fn.LinkLibrary != "" || fn.LinkFramework != "") && fn.ExternABI != "c" {
+		return errorf("type error: link attributes on `%s` apply to extern \"c\" fn declarations",
+			fn.Name)
+	}
 	if fn.ExportABI != "" && fn.ExportABI != "browser" {
 		return errorf("type error: unsupported export ABI %q", fn.ExportABI)
 	}

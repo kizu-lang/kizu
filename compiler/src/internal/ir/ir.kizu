@@ -4,6 +4,7 @@ import std::array;
 import std::fmt;
 import std::map;
 import std::mem;
+import std::sort;
 import std::string;
 
 // Mechanical port of internal/ir/ir.go: Kizu's typed SSA intermediate
@@ -28,6 +29,20 @@ pub struct Module {
     pub function_nodes: arena::Arena<FunctionNode>,
     pub blocks: arena::Arena<BlockNode>,
     pub instrs: arena::Arena<InstrNode>,
+    // externs lists the declared foreign functions by host symbol, indexed
+    // by the symbol's name id, with what the native linker is handed to
+    // resolve each. A call names its symbol in extern_name; which of these a
+    // program links is read off the calls that survive reachability, not off
+    // the declarations (link_inputs).
+    pub externs: array::Array<Extern>,
+}
+
+/// Is what one `extern` declaration tells the linker: the ABI it is called
+/// through and the library or framework its symbol lives in, the Go `Extern`.
+pub struct Extern {
+    pub abi: Name,
+    pub library: Name,
+    pub framework: Name,
 }
 
 /// Creates an empty module whose names are its own.
@@ -41,8 +56,103 @@ pub fn new_module(allocator: Allocator) -> !Module {
         functions: array::new<Function>(allocator),
         function_nodes: arena::new<FunctionNode>(allocator),
         blocks: arena::new<BlockNode>(allocator),
-        instrs: arena::new<InstrNode>(allocator)
+        instrs: arena::new<InstrNode>(allocator),
+        externs: array::new<Extern>(allocator)
     };
+}
+
+/// Files what the linker is told about one host symbol, so a call naming
+/// the symbol can be traced back to its library.
+pub fn (self: &var Module) set_extern(allocator: Allocator, symbol: Name, declared: Extern) -> !void {
+    let id = name_id(symbol);
+    while self.externs.len() <= id {
+        try self.externs.append(allocator, Extern {
+            abi: empty_name(), library: empty_name(), framework: empty_name()
+        });
+    }
+    return self.externs.set(id, declared);
+}
+
+/// Appends the libraries and frameworks the module's remaining foreign calls
+/// need, each once and sorted, the Go `LinkInputs`. It is asked after
+/// reachability has been closed, so a library declared for a function the
+/// program never calls is not linked.
+pub fn link_inputs(
+    allocator: Allocator,
+    module: &Module,
+    libraries: &var array::Array<string::String>,
+    frameworks: &var array::Array<string::String>
+) -> !void {
+    var seen_libraries = map::new<[]u8, bool>(allocator);
+    defer seen_libraries.deinit(allocator);
+    var seen_frameworks = map::new<[]u8, bool>(allocator);
+    defer seen_frameworks.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                try visit_extern(allocator, module, instr_node.extern_name, &var seen_libraries, &var seen_frameworks, libraries, frameworks);
+                var cleanup_index = 0;
+                while instr_node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    try visit_extern(allocator, module, cleanup.extern_name, &var seen_libraries, &var seen_frameworks, libraries, frameworks);
+                }
+            }
+        }
+    }
+    try sort::strings(libraries);
+    try sort::strings(frameworks);
+    return;
+}
+
+/// Adds the library and framework one foreign call's symbol was declared
+/// with, once each.
+fn visit_extern(
+    allocator: Allocator,
+    module: &Module,
+    symbol: Name,
+    seen_libraries: &var map::Map<[]u8, bool>,
+    seen_frameworks: &var map::Map<[]u8, bool>,
+    libraries: &var array::Array<string::String>,
+    frameworks: &var array::Array<string::String>
+) -> !void {
+    if is_empty(symbol) {
+        return;
+    }
+    if module.externs.get(name_id(symbol)) |declared| {
+        try add_link_input(allocator, module, declared.library, seen_libraries, libraries);
+        try add_link_input(allocator, module, declared.framework, seen_frameworks, frameworks);
+    }
+    return;
+}
+
+/// Appends one link input by its spelling unless it was already appended.
+fn add_link_input(
+    allocator: Allocator,
+    module: &Module,
+    value: Name,
+    seen: &var map::Map<[]u8, bool>,
+    out: &var array::Array<string::String>
+) -> !void {
+    if is_empty(value) {
+        return;
+    }
+    let retained = name_text(&module.names, value);
+    let bytes = retained.as_bytes();
+    if seen.contains(bytes) {
+        return;
+    }
+    try seen.insert(allocator, bytes, true);
+    let copied = try string::from_bytes(allocator, bytes);
+    return out.append(allocator, move copied);
 }
 
 /// Is the IR view of a declared Kizu struct.

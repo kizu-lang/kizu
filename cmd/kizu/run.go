@@ -28,7 +28,7 @@ func buildRunExecutable(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return linkModule(module)
+	return linkModule(module, path)
 }
 
 // lowerRunTarget lowers either a package root or a single source file.

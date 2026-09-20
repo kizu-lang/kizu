@@ -3,6 +3,7 @@ package native
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -87,5 +88,48 @@ func TestLinkerVersionIsTheFirstLine(t *testing.T) {
 	}
 	if want := "Apple clang version 15.0.0 (clang-1500.3.9.4)"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestLinkFlagsFollowTheLinkerOrder hands the linker the search paths before
+// the libraries looked for in them, and libm last whatever the program
+// declared, since the runtime needs it.
+func TestLinkFlagsFollowTheLinkerOrder(t *testing.T) {
+	options := Options{
+		Libraries: []string{"fftw3"}, Frameworks: []string{"Accelerate"},
+		LibrarySearch: []string{"/opt/lib"}, FrameworkSearch: []string{"/opt/frameworks"},
+	}
+	got := strings.Join(linkFlags(options), " ")
+	want := "-L/opt/lib -F/opt/frameworks -lfftw3 -framework Accelerate -lm"
+	if got != want {
+		t.Fatalf("linkFlags = %q, want %q", got, want)
+	}
+	// A program that names libm itself is not handed it twice.
+	if got := strings.Join(linkFlags(Options{Libraries: []string{"m"}}), " "); got != "-lm" {
+		t.Fatalf("linkFlags(m) = %q", got)
+	}
+}
+
+// TestExecutableKeyNamesTheLibrariesItLinks keys the executable by what it
+// links: the same IR linked against another library is another executable.
+func TestExecutableKeyNamesTheLibrariesItLinks(t *testing.T) {
+	base := Options{LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang"}
+	withLibrary := base
+	withLibrary.Libraries = []string{"fftw3"}
+	if executableCacheTarget(base, "int r;") == executableCacheTarget(withLibrary, "int r;") {
+		t.Fatalf("a linked library does not change the executable key")
+	}
+}
+
+// TestFrameworkNeedsDarwin refuses `@link_framework` for a target whose
+// linker has no frameworks, before clang is asked.
+func TestFrameworkNeedsDarwin(t *testing.T) {
+	options := Options{
+		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
+		Triple: "x86_64-unknown-linux-gnu", Frameworks: []string{"Accelerate"},
+	}
+	err := validateOptions(options)
+	if err == nil || !strings.Contains(err.Error(), "needs a Darwin target") {
+		t.Fatalf("expected a Darwin-only error, got %v", err)
 	}
 }
