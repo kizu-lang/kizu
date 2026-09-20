@@ -1599,6 +1599,14 @@ func (c *Checker) defineSpecialLetInitializer(
 		return true, requireScopeDefinition(stmt.Name,
 			env.defineParamWithSource(stmt.Name, view, true, mutable, sources, false))
 	}
+	rawView, mutable, ok, err := c.checkMarkedRawViewInitializer(stmt.Value, env, unsafe)
+	if ok || err != nil {
+		if err != nil {
+			return true, err
+		}
+		return true, requireScopeDefinition(stmt.Name,
+			env.defineParamWithSource(stmt.Name, rawView, true, mutable, nil, false))
+	}
 	return false, nil
 }
 
@@ -4211,20 +4219,8 @@ func (c *Checker) checkCallExprDispatch(
 	if name.Name == "print" {
 		return c.checkPrintCall(expr, env, unsafe)
 	}
-	if name.Name == "ptr_read" {
-		return c.checkPtrRead(expr, env, unsafe)
-	}
-	if name.Name == "ptr_of" || name.Name == "mut_ptr_of" {
-		return c.checkPtrOf(name.Name, expr, env, unsafe)
-	}
-	if name.Name == "ptr_write" {
-		return c.checkPtrWrite(expr, env, unsafe)
-	}
-	if name.Name == "volatile_read" {
-		return c.checkVolatileRead(expr, env, unsafe)
-	}
-	if name.Name == "volatile_write" {
-		return c.checkVolatileWrite(expr, env, unsafe)
+	if typ, ok, err := c.checkPtrBuiltinCall(name.Name, expr, env, unsafe); ok || err != nil {
+		return typ, err
 	}
 	if name.Name == "Io" {
 		return "", errorf("type error: use `std::io::blocking()`")
@@ -8127,6 +8123,165 @@ func (c *Checker) checkPtrOf(
 			expr.Args[0].String())
 	}
 	return Type("ptr<" + string(elem) + ">"), nil
+}
+
+// checkPtrBuiltinCall dispatches the raw pointer and volatile builtins by
+// name, and reports whether name was one of them.
+func (c *Checker) checkPtrBuiltinCall(
+	name string,
+	expr *ast.CallExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, bool, error) {
+	var typ Type
+	var err error
+	switch name {
+	case "ptr_read":
+		typ, err = c.checkPtrRead(expr, env, unsafe)
+	case "ptr_write":
+		typ, err = c.checkPtrWrite(expr, env, unsafe)
+	case "ptr_of", "mut_ptr_of":
+		typ, err = c.checkPtrOf(name, expr, env, unsafe)
+	case "ptr_offset":
+		typ, err = c.checkPtrOffset(expr, env, unsafe)
+	case "view_from_ptr", "mut_view_from_ptr":
+		err = errorf("type error: `%s` must be bound with `let name = %s(p, count)`", name, name)
+	case "volatile_read":
+		typ, err = c.checkVolatileRead(expr, env, unsafe)
+	case "volatile_write":
+		typ, err = c.checkVolatileWrite(expr, env, unsafe)
+	default:
+		return "", false, nil
+	}
+	return typ, true, err
+}
+
+// checkPtrOffset types `ptr_offset(p, count)`: the same pointer type, moved
+// by count elements. Stepping past the allocation the pointer came from is
+// what the `unsafe` marker answers for, the way Rust's `offset` asks.
+func (c *Checker) checkPtrOffset(expr *ast.CallExpr, env *scope, unsafe unsafeMark) (Type, error) {
+	if err := requireUnsafeCapabilityAt(
+		unsafe, unsafePtrOffset, "`ptr_offset`", expressionSpan(expr.Callee),
+	); err != nil {
+		return "", err
+	}
+	if len(expr.Args) != 2 {
+		return "", errorf("type error: `ptr_offset` expects 2 args, got %d", len(expr.Args))
+	}
+	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := pointerElement(ptrType); !ok || strings.HasPrefix(string(ptrType), "?") {
+		return "", errorf("type error: `ptr_offset` expects non-null raw pointer, got %s", ptrType)
+	}
+	if err := c.checkPtrCount("ptr_offset", expr.Args[1], env, unsafe); err != nil {
+		return "", err
+	}
+	return ptrType, nil
+}
+
+// checkPtrCount types the element count of a raw pointer builtin as i64,
+// the integer a view counts its elements in.
+func (c *Checker) checkPtrCount(
+	name string,
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	count, err := c.checkContextualExpr(expr, typeI64, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if !sameType(count, typeI64) {
+		return errorf("type error: `%s` expects an i64 count, got %s", name, count)
+	}
+	return nil
+}
+
+// isRawViewBuiltinName reports the two builtins that make a view over raw
+// memory. Each is a let initializer only, the way `as_slice` is: the binding
+// is what the view's writability is read from.
+func isRawViewBuiltinName(name string) bool {
+	return name == "view_from_ptr" || name == "mut_view_from_ptr"
+}
+
+// checkMarkedRawViewInitializer recognizes a raw view initializer under the
+// `unsafe` marker it is written with, so the marker's accounting is the
+// same as for any other marked expression: it must cover the operation and
+// it must be justified.
+func (c *Checker) checkMarkedRawViewInitializer(
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, bool, bool, error) {
+	marked, ok := expr.(*ast.UnsafeExpr)
+	if !ok {
+		return c.checkRawViewInitializer(expr, env, unsafe)
+	}
+	call, ok := marked.Value.(*ast.CallExpr)
+	if !ok {
+		return "", false, false, nil
+	}
+	ident, ok := call.Callee.(*ast.IdentExpr)
+	if !ok || !isRawViewBuiltinName(ident.Name) {
+		return "", false, false, nil
+	}
+	var mutable bool
+	view, err := c.underMark(marked, func(inner unsafeMark) (Type, error) {
+		var checkErr error
+		var viewType Type
+		viewType, mutable, _, checkErr = c.checkRawViewInitializer(call, env, inner)
+		return viewType, checkErr
+	})
+	return view, mutable, true, err
+}
+
+// checkRawViewInitializer recognizes `let v = view_from_ptr(p, count)` and
+// `let v = mut_view_from_ptr(p, count)`, and returns the view type and its
+// writability. The view borrows nothing the checker can name: that the
+// memory holds count elements for as long as the view is used is what the
+// `unsafe` marker answers for.
+func (c *Checker) checkRawViewInitializer(
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, bool, bool, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return "", false, false, nil
+	}
+	ident, ok := call.Callee.(*ast.IdentExpr)
+	if !ok || !isRawViewBuiltinName(ident.Name) {
+		return "", false, false, nil
+	}
+	name := ident.Name
+	mutable := name == "mut_view_from_ptr"
+	if err := requireUnsafeCapabilityAt(
+		unsafe, unsafePtrView, "`"+name+"`", expressionSpan(call.Callee),
+	); err != nil {
+		return "", mutable, true, err
+	}
+	if len(call.Args) != 2 {
+		return "", mutable, true, errorf("type error: `%s` expects 2 args, got %d", name, len(call.Args))
+	}
+	ptrType, err := c.checkExpr(call.Args[0], env, unsafe)
+	if err != nil {
+		return "", mutable, true, err
+	}
+	elem, ok := pointerElement(ptrType)
+	if !ok || strings.HasPrefix(string(ptrType), "?") {
+		return "", mutable, true, errorf(
+			"type error: `%s` expects non-null raw pointer, got %s", name, ptrType)
+	}
+	if mutable && strings.HasPrefix(elem, "const ") {
+		return "", mutable, true, errorf(
+			"type error: `mut_view_from_ptr` expects mutable raw pointer, got %s", ptrType)
+	}
+	if err := c.checkPtrCount(name, call.Args[1], env, unsafe); err != nil {
+		return "", mutable, true, err
+	}
+	return Type("[]" + strings.TrimPrefix(elem, "const ")), mutable, true, nil
 }
 
 // checkPtrRead validates unsafe raw pointer reads.

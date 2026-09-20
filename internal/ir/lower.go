@@ -1741,6 +1741,12 @@ func (l *lowerer) lowerPtrBuiltinCall(expr *ast.CallExpr) (Value, bool, error) {
 	case "ptr_of", "mut_ptr_of":
 		value, err := l.lowerPtrOf(ident.Name, expr.Args)
 		return value, true, err
+	case "ptr_offset":
+		value, err := l.lowerPtrOffset(expr.Args)
+		return value, true, err
+	case "view_from_ptr", "mut_view_from_ptr":
+		value, err := l.lowerViewFromPtr(ident.Name, expr.Args)
+		return value, true, err
 	case "volatile_read":
 		value, err := l.lowerPtrLoad(ident.Name, "volatile.load", expr.Args)
 		return value, true, err
@@ -1771,6 +1777,48 @@ func (l *lowerer) lowerPtrOf(name string, args []ast.Expression) (Value, error) 
 		return l.emit("slice.ptr", "ptr<const "+elem+">", []Value{view}, ""), nil
 	}
 	return l.emit("slice.ptr", "ptr<"+elem+">", []Value{view}, ""), nil
+}
+
+// lowerPtrOffset lowers `ptr_offset(p, count)` to a pointer step of count
+// elements; the result keeps the pointer's type.
+func (l *lowerer) lowerPtrOffset(args []ast.Expression) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("ir error: ptr_offset expects 2 args")
+	}
+	pointer, err := l.lowerExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if _, ok := rawPointerElem(pointer.Type); !ok {
+		return Value{}, fmt.Errorf("ir error: ptr_offset expects raw pointer, got %s", pointer.Type)
+	}
+	count, err := l.lowerContextualExpr(args[1], "i64")
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("ptr.offset", pointer.Type, []Value{pointer, count}, ""), nil
+}
+
+// lowerViewFromPtr lowers `view_from_ptr(p, count)` and its mutable form to
+// a view over the pointer's memory. Both forms make the same value: what
+// the binding may do with it is what the checker decided from the name.
+func (l *lowerer) lowerViewFromPtr(name string, args []ast.Expression) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("ir error: %s expects 2 args", name)
+	}
+	pointer, err := l.lowerExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	elem, ok := rawPointerElem(pointer.Type)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: %s expects raw pointer, got %s", name, pointer.Type)
+	}
+	count, err := l.lowerContextualExpr(args[1], "i64")
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("slice.from_ptr", "[]"+elem, []Value{pointer, count}, ""), nil
 }
 
 // viewElemType returns T for a view spelled `[]T`.

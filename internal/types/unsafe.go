@@ -15,6 +15,8 @@ const (
 	unsafePtrDeref        unsafeCapability = "ptr_deref"
 	unsafePtrCast         unsafeCapability = "ptr_cast"
 	unsafePtrIntCast      unsafeCapability = "ptr_int_cast"
+	unsafePtrOffset       unsafeCapability = "ptr_offset"
+	unsafePtrView         unsafeCapability = "ptr_view"
 	unsafeExternCall      unsafeCapability = "extern_call"
 	unsafeUnsafeCall      unsafeCapability = "unsafe_call"
 	unsafeStructInvariant unsafeCapability = "struct_invariant"

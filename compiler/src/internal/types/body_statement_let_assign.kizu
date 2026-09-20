@@ -257,8 +257,70 @@ fn (self: &var Checker) define_special_let_initializer(
         return self.require_scope_definition(name, defined);
     }
     sources.deinit(self.allocator);
+    var raw_handled = false;
+    var raw_view = empty_type();
+    if try self.check_marked_raw_view_initializer(
+        tree,
+        scope,
+        statement.value,
+        &var raw_view,
+        &var mutable,
+        &var raw_handled
+    ) |problem| {
+        return move problem;
+    }
+    if raw_handled {
+        let defined = try self.define_scope_param(scope, name, raw_view, true, mutable, false);
+        return self.require_scope_definition(name, defined);
+    }
     handled.* = false;
     return null;
+}
+
+// Recognizes a raw view initializer under the `unsafe` marker it is written
+// with, the Go `checkMarkedRawViewInitializer`, so the marker's accounting
+// is the same as for any other marked expression: it must cover the
+// operation and it must be justified.
+fn (self: &var Checker) check_marked_raw_view_initializer(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    view_out: &var Type,
+    mutable_out: &var bool,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    var inner = expression;
+    var marker: ?ast::UnsafeExpr = null;
+    match tree.expressions.at(expression.node) {
+        Unsafe(value) => {
+            inner = value.value;
+            marker = ast::UnsafeExpr { value: value.value, safety: value.safety, span: value.span };
+        },
+        _ => {},
+    }
+    var call_parts: ?ast::CallExpr = null;
+    match tree.expressions.at(inner.node) {
+        Call(value) => {
+            call_parts = ast::CallExpr { callee: value.callee, args: value.args };
+        },
+        _ => {},
+    }
+    let call = call_parts orelse return null;
+    let unsafe_marker = marker orelse
+        return self.check_raw_view_initializer(tree, scope, &call, view_out, mutable_out, handled);
+    let saved_mark = self.mark;
+    self.mark = UnsafeMark { used: false };
+    if try self.check_raw_view_initializer(tree, scope, &call, view_out, mutable_out, handled) |problem| {
+        self.mark = saved_mark;
+        return move problem;
+    }
+    let inner_mark = self.mark;
+    self.mark = saved_mark;
+    if !handled.* {
+        return null;
+    }
+    return self.check_under_mark(tree, &unsafe_marker, &inner_mark);
 }
 
 // Is the callee and argument list of one `receiver.name(args)` call.

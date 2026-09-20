@@ -27,8 +27,17 @@ var capabilities = []Info{
 		ShortPermit: "covers `ptr_from_int<ptr<...>>(value)` and `int_from_ptr<usize>(value)`",
 	},
 	{
+		Name:        "ptr_offset",
+		ShortPermit: "covers stepping a raw pointer by elements with `ptr_offset(p, count)`",
+	},
+	{
 		Name:        "ptr_read",
 		ShortPermit: "covers raw pointer reads with `ptr_read(p)`",
+	},
+	{
+		Name: "ptr_view",
+		ShortPermit: "covers making a view over raw memory with " +
+			"`view_from_ptr(p, count)` / `mut_view_from_ptr(p, count)`",
 	},
 	{
 		Name:        "ptr_write",

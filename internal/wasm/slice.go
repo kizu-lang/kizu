@@ -15,6 +15,8 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 		return e.writeSliceLen(instr)
 	case "slice.ptr":
 		return e.writeSlicePtr(instr)
+	case "slice.from_ptr":
+		return e.writeSliceFromPtr(instr)
 	case "slice.index":
 		return e.writeSliceIndex(instr)
 	case "slice.store":
@@ -75,6 +77,43 @@ func (e *emitter) writeSlicePtr(instr *ir.Instr) error {
 		return fmt.Errorf("wasm error: slice.ptr expects []T -> ptr<T>")
 	}
 	return e.writeScalarResult(instr.Result, e.viewPointer(instr.Args[0]))
+}
+
+// writeSliceFromPtr writes a view descriptor over raw memory: the pointer
+// word is the address as given, the length word the count.
+func (e *emitter) writeSliceFromPtr(instr *ir.Instr) error {
+	_, ok := viewElem(instr.Result.Type)
+	if len(instr.Args) != 2 || !ok || !isRawPointerType(instr.Args[0].Type) ||
+		instr.Args[1].Type != "i64" {
+		return fmt.Errorf("wasm error: slice.from_ptr expects ptr<T>, i64 -> []T")
+	}
+	slot, err := e.resultSlot(instr.Result)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&e.out, "            (i32.store %s %s)\n", slot, e.value(instr.Args[0]).expr)
+	fmt.Fprintf(&e.out, "            (i32.store %s (i32.wrap_i64 %s))\n",
+		addressAt(slot, 4), e.value(instr.Args[1]).expr)
+	e.values[instr.Result.Name] = valueInfo{expr: slot}
+	return nil
+}
+
+// writePtrOffset steps a raw pointer by a count of its elements, each the
+// width of the element's layout.
+func (e *emitter) writePtrOffset(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || !isRawPointerType(instr.Args[0].Type) ||
+		instr.Args[1].Type != "i64" || instr.Result.Type != instr.Args[0].Type {
+		return fmt.Errorf("wasm error: ptr.offset expects ptr<T>, i64 -> ptr<T>")
+	}
+	elem := strings.TrimPrefix(
+		strings.TrimSuffix(strings.TrimPrefix(instr.Args[0].Type, "ptr<"), ">"), "const ")
+	size, err := e.viewCell(elem)
+	if err != nil {
+		return err
+	}
+	pointer := e.value(instr.Args[0]).expr
+	count := e.value(instr.Args[1]).expr
+	return e.writeScalarResult(instr.Result, elementAddress(pointer, count, size))
 }
 
 // writeSliceIndex reads one element through a view descriptor.

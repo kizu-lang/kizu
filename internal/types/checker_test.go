@@ -645,8 +645,8 @@ func runErrorCases(t *testing.T, cases []struct {
 func TestUnsafeCapabilityMetadataMatchesChecker(t *testing.T) {
 	checkerCapabilities := []unsafeCapability{
 		unsafePtrRead, unsafePtrWrite, unsafePtrDeref, unsafePtrCast,
-		unsafePtrIntCast, unsafeExternCall, unsafeUnsafeCall,
-		unsafeStructInvariant, unsafeVolatile,
+		unsafePtrIntCast, unsafePtrOffset, unsafePtrView, unsafeExternCall,
+		unsafeUnsafeCall, unsafeStructInvariant, unsafeVolatile,
 	}
 	for _, capability := range checkerCapabilities {
 		if _, ok := unsafecap.Lookup(string(capability)); !ok {

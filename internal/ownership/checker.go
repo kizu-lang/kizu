@@ -1610,15 +1610,8 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if borrow, ok := borrowPrefix(stmt.Value); ok {
 		return c.checkBorrowLetStmt(stmt, borrow, env)
 	}
-	target, field, elem, mutable, ok, err := c.boxBorrowInitializer(stmt.Value, env)
-	if ok || err != nil {
-		if err != nil {
-			return err
-		}
-		return c.checkBoxBorrowLetStmt(stmt, target, field, elem, mutable, env)
-	}
-	if target, path, mutable, ok := c.stringViewInitializer(stmt.Value, env); ok {
-		return c.checkStringViewLetStmt(stmt, target, path, mutable, env)
+	if handled, err := c.checkViewLetStmt(stmt, env); handled || err != nil {
+		return err
 	}
 	if handled, err := c.checkExplicitBorrowResultLetStmt(stmt, env); handled {
 		return err
@@ -7132,6 +7125,12 @@ func (c *Checker) checkBuiltinCall(
 	case "ptr_of", "mut_ptr_of":
 		result, err := c.readPtrOf(name, expr, env)
 		return result, true, err
+	case "ptr_offset":
+		result, err := c.readPtrOffset(expr, env)
+		return result, true, err
+	case "view_from_ptr", "mut_view_from_ptr":
+		return "", true, errorf("move error: `%s` must be bound with `let name = %s(p, count)`",
+			name, name)
 	case "Io":
 		return "", true, errorf("move error: use `std::io::blocking()`")
 	default:
@@ -7206,6 +7205,72 @@ func (c *Checker) readPtrOf(name string, expr *ast.CallExpr, env *scope) (string
 		return "ptr<const " + elem + ">", nil
 	}
 	return "ptr<" + elem + ">", nil
+}
+
+// readPtrOffset reads a pointer and a count and names the stepped pointer,
+// which is the same raw pointer type.
+func (c *Checker) readPtrOffset(expr *ast.CallExpr, env *scope) (string, error) {
+	if len(expr.Args) != 2 {
+		return "", errorf("move error: `ptr_offset` expects 2 args")
+	}
+	ptrType, err := c.readExpr(expr.Args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if _, err := c.readExpr(expr.Args[1], env); err != nil {
+		return "", err
+	}
+	return ptrType, nil
+}
+
+// checkViewLetStmt binds the initializers that lend a local view or borrow:
+// a Box's `borrow` family, a storage binding's `as_slice` family, or a raw
+// pointer's `view_from_ptr` family.
+func (c *Checker) checkViewLetStmt(stmt *ast.LetStmt, env *scope) (bool, error) {
+	target, field, elem, mutable, ok, err := c.boxBorrowInitializer(stmt.Value, env)
+	if ok || err != nil {
+		if err != nil {
+			return true, err
+		}
+		return true, c.checkBoxBorrowLetStmt(stmt, target, field, elem, mutable, env)
+	}
+	if target, path, mutable, ok := c.stringViewInitializer(stmt.Value, env); ok {
+		return true, c.checkStringViewLetStmt(stmt, target, path, mutable, env)
+	}
+	return c.checkRawViewLetStmt(stmt, env)
+}
+
+// checkRawViewLetStmt binds `let v = view_from_ptr(p, count)` or its
+// `mut_view_from_ptr` form: a view that borrows no binding, since raw
+// memory has no owner the checker knows. It is a local borrow all the same,
+// so it cannot be returned or stored, and the mutable form is the one
+// writable view binding that lends nothing.
+func (c *Checker) checkRawViewLetStmt(stmt *ast.LetStmt, env *scope) (bool, error) {
+	call, ok := unwrapExpressionMarkers(stmt.Value).(*ast.CallExpr)
+	if !ok {
+		return false, nil
+	}
+	ident, ok := call.Callee.(*ast.IdentExpr)
+	if !ok || (ident.Name != "view_from_ptr" && ident.Name != "mut_view_from_ptr") {
+		return false, nil
+	}
+	if len(call.Args) != 2 {
+		return true, errorf("move error: `%s` expects 2 args", ident.Name)
+	}
+	ptrType, err := c.readExpr(call.Args[0], env)
+	if err != nil {
+		return true, err
+	}
+	if _, err := c.readExpr(call.Args[1], env); err != nil {
+		return true, err
+	}
+	elem, _ := rawPointerElement(ptrType)
+	value := c.newBinding(stmt.Name, "[]"+strings.TrimPrefix(elem, "const "))
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.mutBorrow = ident.Name == "mut_view_from_ptr"
+	env.define(value)
+	return true, nil
 }
 
 // checkPointerIntCastBuiltin reads pointer/integer conversion arguments without moving values.
