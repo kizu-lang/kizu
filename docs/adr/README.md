@@ -143,3 +143,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0147: browser WASM は明示的な import / export を host 境界にする](0147-browser-wasm-host-boundary.md)
 - [ADR-0148: 抱える接続の数は accept を止めて守る](0148-a-full-server-stops-accepting.md)
 - [ADR-0149: SIMD は固定名の 128-bit vector 型で明示する](0149-explicit-simd-vector-types.md)
+- [ADR-0150: native target は OS を darwin / linux の 1 語で名乗る](0150-native-target-names-its-os.md)

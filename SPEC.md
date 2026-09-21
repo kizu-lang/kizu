@@ -180,12 +180,19 @@ root module を持たなくてもよく、std の source root 直下には produ
 
 `[native]` は native link の探索 directory です。`@link_library` / `@link_framework`
 (§12.2)が名指す library をどこで探すかだけを持ち、何を link するかは持ちません。
-相対 path は manifest のある directory から解決します。
+相対 path は manifest のある directory から解決します。`[native.darwin]` /
+`[native.linux]` は同じ key を持ち、build が選んだ OS(§13.3)の section だけが
+`[native]` の後ろに加わります。他の OS 名の section は manifest error です。
 
 ```toml
 [native]
 library_search = ["vendor/lib"]
+
+[native.darwin]
 framework_search = ["vendor/frameworks"]
+
+[native.linux]
+library_search = ["/opt/lib"]
 ```
 
 package graph 内で suffix が `_test.kizu` の file は `kizu test <package>` のときだけ、
@@ -2902,13 +2909,22 @@ comptime if std::target::is_native() {
 std::target::is_native()  -> bool    comptime-if-only
 std::target::is_wasi()    -> bool    comptime-if-only
 std::target::is_browser() -> bool    comptime-if-only
+std::target::is_darwin()  -> bool    comptime-if-only
+std::target::is_linux()   -> bool    comptime-if-only
 ```
 
-3 つは引数も static 引数も取らず、1 回の build ではちょうど 1 つだけが true です。
+述語は引数も static 引数も取りません。build family を問う 3 つは、1 回の build で
+ちょうど 1 つだけが true です。
 `build --target native`、`run`、`check`、`test`、`ir`、`build --emit-llvm` は native、
 `build --target wasm32-wasi` は WASI、`build --target wasm32-browser` は browser を
 選びます。`fmt` の semantic validation も native を使い、`parse` は target を
 選びません。
+
+OS を問う 2 つは native build の operating system を答えます。native build では
+ちょうど 1 つが true で、wasm build では両方 false です。`build --target native
+--triple` は triple の OS を、それ以外の native command は compiler が動いている
+host の OS を選びます。native target の OS は darwin と linux で、他の OS を名指す
+triple は build を拒否します。同じ OS 名を manifest の `[native.<os>]`(§3)が使います。
 
 述語に runtime の値はありません。`std::target` という source module を import する
 形でもなく、利用者が同じ述語を定義することもできません。選ばれた branch だけを

@@ -17,9 +17,9 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
-// Lower converts a checked Kizu AST into typed SSA IR.
+// Lower converts a checked Kizu AST for the host target into typed SSA IR.
 func Lower(program *ast.Program, ownershipResult ownership.Result) (*Module, error) {
-	return LowerForTarget(program, ownershipResult, stdtarget.Native)
+	return LowerForTarget(program, ownershipResult, stdtarget.MustHost())
 }
 
 // LowerForTarget converts a checked Kizu AST for one build target into typed SSA IR.
@@ -163,9 +163,9 @@ type loopPhi struct {
 	phi  *Instr
 }
 
-// newLowerer prepares lookup tables used during lowering.
+// newLowerer prepares lookup tables for the host target.
 func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer {
-	return newLowererForTarget(program, ownershipResult, stdtarget.Native)
+	return newLowererForTarget(program, ownershipResult, stdtarget.MustHost())
 }
 
 // newLowererForTarget prepares lookup tables for one selected build target.

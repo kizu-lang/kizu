@@ -3,6 +3,8 @@ package manifest
 import (
 	"fmt"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 )
 
 // Manifest is the minimal kizu.toml shape accepted by the compiler.
@@ -14,13 +16,35 @@ type Manifest struct {
 	PackageName string
 	Version     string
 	Paths       []string
-	// LibrarySearch and FrameworkSearch are the `[native]` directories the
-	// linker is told to look in for what `@link_library` / `@link_framework`
-	// name, relative to the manifest. The names live in the source beside
-	// the extern declaration; where they are found is the package's
-	// build input, so it lives here (SPEC §12.2).
-	LibrarySearch   []string
-	FrameworkSearch []string
+	// Native is the `[native]` section: the directories the linker is told
+	// to look in for what `@link_library` / `@link_framework` name, relative
+	// to the manifest. The names live in the source beside the extern
+	// declaration; where they are found is the package's build input, so it
+	// lives here (SPEC §12.2). NativeByOS holds the `[native.<os>]` sections
+	// that add to it for one operating system, keyed by the name the
+	// `std::target` predicates use.
+	Native     SearchPaths
+	NativeByOS map[string]*SearchPaths
+}
+
+// SearchPaths is what one `[native]` or `[native.<os>]` section tells the
+// linker to search.
+type SearchPaths struct {
+	Libraries  []string
+	Frameworks []string
+}
+
+// NativeSearch returns the search directories for one operating system: the
+// `[native]` section followed by that OS's section.
+func (m Manifest) NativeSearch(os string) SearchPaths {
+	forOS := m.NativeByOS[os]
+	if forOS == nil {
+		forOS = &SearchPaths{}
+	}
+	return SearchPaths{
+		Libraries:  append(append([]string{}, m.Native.Libraries...), forOS.Libraries...),
+		Frameworks: append(append([]string{}, m.Native.Frameworks...), forOS.Frameworks...),
+	}
 }
 
 // ParseManifest parses the declarative subset of kizu.toml used by Kizu.
@@ -107,9 +131,55 @@ func parseSection(line string, lineNo int) (string, error) {
 	switch section {
 	case "package", "modules", "native":
 		return section, nil
-	default:
-		return "", fmt.Errorf("manifest error:%d: unsupported section `%s`", lineNo, section)
 	}
+	if os, ok := strings.CutPrefix(section, "native."); ok {
+		if _, known := stdtarget.NativeFor(os); known {
+			return section, nil
+		}
+		return "", fmt.Errorf("manifest error:%d: unsupported section `%s`: native targets are %s",
+			lineNo, section, strings.Join(stdtarget.NativeOS(), ", "))
+	}
+	return "", fmt.Errorf("manifest error:%d: unsupported section `%s`", lineNo, section)
+}
+
+// nativeSearchPaths returns the search paths a `[native]` or `[native.<os>]`
+// section fills.
+func nativeSearchPaths(manifest *Manifest, section string) *SearchPaths {
+	if section == "native" {
+		return &manifest.Native
+	}
+	os := strings.TrimPrefix(section, "native.")
+	if manifest.NativeByOS == nil {
+		manifest.NativeByOS = map[string]*SearchPaths{}
+	}
+	if manifest.NativeByOS[os] == nil {
+		manifest.NativeByOS[os] = &SearchPaths{}
+	}
+	return manifest.NativeByOS[os]
+}
+
+// assignNativeValue stores one search path list into its section.
+func assignNativeValue(
+	manifest *Manifest,
+	section string,
+	key string,
+	value string,
+	lineNo int,
+) error {
+	parsed, err := parseStringList(value, lineNo)
+	if err != nil {
+		return err
+	}
+	paths := nativeSearchPaths(manifest, section)
+	switch key {
+	case "library_search":
+		paths.Libraries = parsed
+	case "framework_search":
+		paths.Frameworks = parsed
+	default:
+		return fmt.Errorf("manifest error:%d: unsupported key `%s.%s`", lineNo, section, key)
+	}
+	return nil
 }
 
 // parseAssignment parses one key/value assignment.
@@ -153,19 +223,10 @@ func assignManifestValue(
 			return err
 		}
 		manifest.Paths = parsed
-	case "native.library_search":
-		parsed, err := parseStringList(value, lineNo)
-		if err != nil {
-			return err
-		}
-		manifest.LibrarySearch = parsed
-	case "native.framework_search":
-		parsed, err := parseStringList(value, lineNo)
-		if err != nil {
-			return err
-		}
-		manifest.FrameworkSearch = parsed
 	default:
+		if section == "native" || strings.HasPrefix(section, "native.") {
+			return assignNativeValue(manifest, section, key, value, lineNo)
+		}
 		return fmt.Errorf("manifest error:%d: unsupported key `%s.%s`", lineNo, section, key)
 	}
 	return nil

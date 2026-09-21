@@ -88,7 +88,7 @@ func renderIRCase(input string) string {
 	out.WriteString("// lower:\n")
 	writeIRDump(&out, module)
 	out.WriteString("// opt:\n")
-	if err := Optimize(module, stdtarget.Native); err != nil {
+	if err := Optimize(module, stdtarget.MustHost()); err != nil {
 		out.WriteString("// ")
 		writeFoldedLine(&out, err.Error())
 		return out.String()

@@ -79,11 +79,59 @@ framework_search = ["vendor/frameworks"]
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if len(manifest.LibrarySearch) != 2 || manifest.LibrarySearch[1] != "vendor/lib" {
-		t.Fatalf("got library search %#v", manifest.LibrarySearch)
+	if len(manifest.Native.Libraries) != 2 || manifest.Native.Libraries[1] != "vendor/lib" {
+		t.Fatalf("got library search %#v", manifest.Native.Libraries)
 	}
-	if len(manifest.FrameworkSearch) != 1 || manifest.FrameworkSearch[0] != "vendor/frameworks" {
-		t.Fatalf("got framework search %#v", manifest.FrameworkSearch)
+	if len(manifest.Native.Frameworks) != 1 || manifest.Native.Frameworks[0] != "vendor/frameworks" {
+		t.Fatalf("got framework search %#v", manifest.Native.Frameworks)
+	}
+}
+
+// TestParseManifestNativeSectionPerOS reads `[native.<os>]` sections, which
+// add to `[native]` for the OS the build selects and are ignored for others.
+func TestParseManifestNativeSectionPerOS(t *testing.T) {
+	source := `[package]
+name = "app"
+
+[native]
+library_search = ["vendor/lib"]
+
+[native.darwin]
+framework_search = ["vendor/frameworks"]
+
+[native.linux]
+library_search = ["/opt/lib"]
+`
+	manifest, err := ParseManifest(source)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	darwin := manifest.NativeSearch("darwin")
+	if strings.Join(darwin.Libraries, ",") != "vendor/lib" ||
+		strings.Join(darwin.Frameworks, ",") != "vendor/frameworks" {
+		t.Fatalf("got darwin search %#v", darwin)
+	}
+	linux := manifest.NativeSearch("linux")
+	if strings.Join(linux.Libraries, ",") != "vendor/lib,/opt/lib" || len(linux.Frameworks) != 0 {
+		t.Fatalf("got linux search %#v", linux)
+	}
+	if none := manifest.NativeSearch(""); strings.Join(none.Libraries, ",") != "vendor/lib" {
+		t.Fatalf("got search without an OS %#v", none)
+	}
+}
+
+// TestParseManifestRejectsUnknownNativeOS keeps the section names to the
+// operating systems the predicates can name.
+func TestParseManifestRejectsUnknownNativeOS(t *testing.T) {
+	_, err := ParseManifest(`[package]
+name = "app"
+
+[native.windows]
+library_search = ["vendor/lib"]
+`)
+	want := "unsupported section `native.windows`: native targets are darwin, linux"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected unsupported section error, got %v", err)
 	}
 }
 

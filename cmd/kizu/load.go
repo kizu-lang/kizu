@@ -99,7 +99,11 @@ func loadPackageProgramMode(path string, includeTests bool) (project.Graph, *ast
 
 // lowerFile parses, checks, lowers, and optionally optimizes source to typed SSA IR.
 func lowerFile(path string, opt bool) (*ir.Module, error) {
-	return lowerFileForTarget(path, opt, stdtarget.Native)
+	host, err := stdtarget.Host()
+	if err != nil {
+		return nil, err
+	}
+	return lowerFileForTarget(path, opt, host)
 }
 
 // lowerFileForTarget lowers one source file with target-aware comptime selection.
@@ -130,12 +134,20 @@ func lowerFileForTarget(
 
 // lowerPackage resolves a package graph and lowers its qualified program to typed SSA IR.
 func lowerPackage(path string, opt bool) (*ir.Module, error) {
-	return lowerPackageModeForTarget(path, opt, false, stdtarget.Native)
+	host, err := stdtarget.Host()
+	if err != nil {
+		return nil, err
+	}
+	return lowerPackageModeForTarget(path, opt, false, host)
 }
 
 // lowerTestPackage includes package test files before checking and lowering.
 func lowerTestPackage(path string, opt bool) (*ir.Module, error) {
-	return lowerPackageModeForTarget(path, opt, true, stdtarget.Native)
+	host, err := stdtarget.Host()
+	if err != nil {
+		return nil, err
+	}
+	return lowerPackageModeForTarget(path, opt, true, host)
 }
 
 // lowerPackageForTarget lowers a production package for one selected target.

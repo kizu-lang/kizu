@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -33,8 +32,12 @@ func stdErrorSets() (map[string]map[string]int, error) {
 // executable is kept rather than thrown away, so a program that has not changed
 // since it was last run is not linked a second time.
 func linkModule(module *ir.Module, path string) (string, error) {
+	host, err := stdtarget.Host()
+	if err != nil {
+		return "", err
+	}
 	ir.KeepTargetReachableFunctions(module, "", "main")
-	llvmIR, err := llvm.EmitNative(module, runtime.GOOS == "darwin")
+	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin)
 	if err != nil {
 		return "", err
 	}
@@ -43,7 +46,7 @@ func linkModule(module *ir.Module, path string) (string, error) {
 		return "", err
 	}
 	options := native.Options{
-		LLVMIR: llvmIR, ErrorSets: errorSets,
+		LLVMIR: llvmIR, ErrorSets: errorSets, Target: host,
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
 	}
 	if err := setLinkInputs(&options, module, path); err != nil {
@@ -65,8 +68,9 @@ func setLinkInputs(options *native.Options, module *ir.Module, path string) erro
 	if err != nil {
 		return err
 	}
-	options.LibrarySearch = absoluteSearchPaths(root, parsed.LibrarySearch)
-	options.FrameworkSearch = absoluteSearchPaths(root, parsed.FrameworkSearch)
+	search := parsed.NativeSearch(options.Target.OS())
+	options.LibrarySearch = absoluteSearchPaths(root, search.Libraries)
+	options.FrameworkSearch = absoluteSearchPaths(root, search.Frameworks)
 	return nil
 }
 
@@ -114,7 +118,11 @@ func buildFile(args []string) error {
 // through here, so `ir` and `build` are asked the same question about the same
 // program instead of one of them refusing a directory.
 func lowerTarget(path string, opt bool) (*ir.Module, error) {
-	return lowerTargetForTarget(path, opt, stdtarget.Native)
+	host, err := stdtarget.Host()
+	if err != nil {
+		return nil, err
+	}
+	return lowerTargetForTarget(path, opt, host)
 }
 
 // lowerTargetForTarget lowers a file or package for one selected build target.
@@ -355,20 +363,19 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
+	target, err := native.TargetFor(options.Triple)
+	if err != nil {
+		return err
+	}
 	// Native --opt runs the typed-SSA optimizer before clang's: a body the IR
 	// inliner has already copied into its caller reaches clang as the loop it
 	// is part of, which older toolchains do not always reconstruct from a call.
-	var module *ir.Module
-	if isPackageRoot(options.Path) {
-		module, err = lowerPackage(options.Path, options.Opt)
-	} else {
-		module, err = lowerFile(options.Path, options.Opt)
-	}
+	module, err := lowerTargetForTarget(options.Path, options.Opt, target)
 	if err != nil {
 		return err
 	}
 	ir.KeepTargetReachableFunctions(module, "", "main")
-	llvmIR, err := llvm.EmitNative(module, native.TargetIsDarwin(options.Triple))
+	llvmIR, err := llvm.EmitNative(module, target == stdtarget.NativeDarwin)
 	if err != nil {
 		return err
 	}
@@ -378,8 +385,8 @@ func emitNativeFile(args []string) error {
 	}
 	buildOptions := native.Options{
 		LLVMIR: llvmIR, Output: options.Output, ErrorSets: errorSets,
-		Triple: options.Triple,
-		CPU:    options.CPU, ABI: options.ABI, LibC: options.LibC,
+		Target: target, Triple: options.Triple,
+		CPU: options.CPU, ABI: options.ABI, LibC: options.LibC,
 		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
 		Opt: options.Opt,
 	}
