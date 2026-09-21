@@ -823,6 +823,21 @@ if age >= 20 {
 }
 ```
 
+`else` の後には block のほかに `if` か `comptime if` を続けて書けます。
+`else if cond { }` は `else { if cond { } }` の綴りで、木は同じです。
+capture(`else if f() |v|`)も、`else |err|` の後に続く branch も、展開した形と
+同じ規則に従います。
+
+```kizu
+if n < 3 {
+    print("small");
+} else if n < 10 {
+    print("medium");
+} else {
+    print("large");
+}
+```
+
 expression として使う場合は `else` が必須で、両 branch の末尾 value type が一致しなければ
 なりません。関数の戻り値は引き続き明示的な `return` で返します。
 branch value は expression なので `;` を付けません。
@@ -2652,6 +2667,7 @@ comptime if 1 + 1 == 2 {
 `comptime` expression は、整数、真偽値、文字列、compile-time type value、
 単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
 `comptime if` の条件は、これに加えて §13.3 の `std::target` 述語を評価します。
+`else comptime if` で続けて書けます(§6.9)。
 `type<i64>` のような `type<T>` literal と、instantiated generic body 内の
 static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
@@ -2894,14 +2910,10 @@ error set では各 arm が宣言元の set で修飾され(`FsError::NotFound =
 ```kizu
 comptime if std::target::is_native() {
     try file_adapter::run();
-} else {
-    comptime if std::target::is_wasi() {
-        try wasi_adapter::run();
-    } else {
-        comptime if std::target::is_browser() {
-            browser_adapter::run();
-        }
-    }
+} else comptime if std::target::is_wasi() {
+    try wasi_adapter::run();
+} else comptime if std::target::is_browser() {
+    browser_adapter::run();
 }
 ```
 

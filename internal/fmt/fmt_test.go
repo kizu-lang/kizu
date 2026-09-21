@@ -34,6 +34,26 @@ func TestFormatOneLineExpressionBlocksStayOnTheirLine(t *testing.T) {
 	}
 }
 
+// TestFormatKeepsElseIfOnTheClosingLine keeps `} else if` and
+// `} else comptime if` on the line that closes the branch before them.
+func TestFormatKeepsElseIfOnTheClosingLine(t *testing.T) {
+	src := "fn main() -> void {\n" +
+		"    if a {\n" +
+		"        print(1);\n" +
+		"    } else if b {\n" +
+		"        print(2);\n" +
+		"    } else comptime if c {\n" +
+		"        print(3);\n" +
+		"    } else {\n" +
+		"        print(4);\n" +
+		"    }\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != src {
+		t.Fatalf("Format(else if):\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
 // TestFormatKeepsOneBlankLineBetweenStatements keeps a blank line the author
 // put between statements, collapses several to one, and drops one that
 // follows the opening brace or precedes the closing one.

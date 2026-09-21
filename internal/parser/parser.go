@@ -957,12 +957,36 @@ func (p *Parser) parseComptimeIfStmt() ast.Statement {
 	stmt.Consequence = p.parseBlockStmt()
 	if p.peek.Type == token.Else {
 		p.nextToken()
+		if p.continuesElseChain() {
+			stmt.Alternative = p.parseElseChain()
+			return stmt
+		}
 		if !p.expectPeek(token.LBrace) {
 			return stmt
 		}
 		stmt.Alternative = p.parseBlockStmt()
 	}
 	return stmt
+}
+
+// continuesElseChain reports whether the `else` under the cursor is followed
+// by `if` or `comptime if` rather than a block.
+func (p *Parser) continuesElseChain() bool {
+	return p.peek.Type == token.If || p.peek.Type == token.Comptime
+}
+
+// parseElseChain parses the `if` or `comptime if` an `else` continues with.
+// `else if` is spelling: the alternative is the block that `else { if ... }`
+// would hold, so the tree is the same either way (SPEC §6.9).
+func (p *Parser) parseElseChain() *ast.BlockStmt {
+	p.nextToken()
+	var nested ast.Statement
+	if p.cur.Type == token.Comptime {
+		nested = p.parseComptimeIfStmt()
+	} else {
+		nested = p.parseIfStmt()
+	}
+	return &ast.BlockStmt{Statements: []ast.Statement{nested}}
 }
 
 // parseLetStmt parses a let or var declaration.
@@ -1071,6 +1095,10 @@ func (p *Parser) parseIfStmt() *ast.IfStmt {
 	stmt.Consequence = p.parseBlockStmt()
 	if p.peek.Type == token.Else {
 		p.nextToken()
+		if p.continuesElseChain() {
+			stmt.Alternative = p.parseElseChain()
+			return stmt
+		}
 		// `else |err|` binds the error member of an error union condition
 		// (SPEC §11.1), with the same `|name|` spelling as the success capture.
 		errCapture, ok := p.parsePayloadCapture()

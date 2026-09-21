@@ -327,6 +327,33 @@ func TestParseIfAndWhile(t *testing.T) {
 	}
 }
 
+// TestParseElseIfChain keeps `else if` and `else comptime if` as spelling:
+// the tree is the one `else { if ... }` builds.
+func TestParseElseIfChain(t *testing.T) {
+	input := `fn main() {
+    if a {
+        print(1);
+    } else if b |v| {
+        print(v);
+    } else comptime if c {
+        print(3);
+    } else {
+        print(4);
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	got := program.String()
+	want := `fn main() { if a { print(1); } else { if b { print(v); } else { ` +
+		`comptime if c { print(3); } else { print(4); } } } }`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseLogicalExpressions checks boolean operator precedence.
 func TestParseLogicalExpressions(t *testing.T) {
 	input := `fn main() {
