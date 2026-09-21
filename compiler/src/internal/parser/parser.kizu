@@ -1516,8 +1516,12 @@ fn (self: &var Parser) parse_comptime_if_stmt(
     var alternative: ?ast::Block = null;
     if self.peek_kind() == token::Kind::Else {
         try self.next_token();
-        if try self.expect_peek(token::Kind::LBrace) {
-            alternative = try self.parse_block_stmt(tree);
+        if self.continues_else_chain() {
+            alternative = try self.parse_else_chain(tree);
+        } else {
+            if try self.expect_peek(token::Kind::LBrace) {
+                alternative = try self.parse_block_stmt(tree);
+            }
         }
     }
     return try tree.add_statement(ast::StatementNode::ComptimeIf(
@@ -1656,16 +1660,20 @@ fn (self: &var Parser) parse_if_stmt(tree: &var ast::Ast) -> !?ast::IfStmt {
         var err_capture = try tree.add_empty_text();
         if self.peek_kind() == token::Kind::Else {
             try self.next_token();
-            // `else |err|` binds the error member of an error union condition
-            // (SPEC §11.1), with the same `|name|` spelling as the success
-            // capture.
-            if try self.parse_payload_capture(tree) |bound| {
-                err_capture = bound;
+            if self.continues_else_chain() {
+                alternative = try self.parse_else_chain(tree);
             } else {
-                return null;
-            }
-            if try self.expect_peek(token::Kind::LBrace) {
-                alternative = try self.parse_block_stmt(tree);
+                // `else |err|` binds the error member of an error union
+                // condition (SPEC §11.1), with the same `|name|` spelling as
+                // the success capture.
+                if try self.parse_payload_capture(tree) |bound| {
+                    err_capture = bound;
+                } else {
+                    return null;
+                }
+                if try self.expect_peek(token::Kind::LBrace) {
+                    alternative = try self.parse_block_stmt(tree);
+                }
             }
         }
         return ast::IfStmt {
@@ -1677,6 +1685,37 @@ fn (self: &var Parser) parse_if_stmt(tree: &var ast::Ast) -> !?ast::IfStmt {
         };
     }
     return null;
+}
+
+/// Reports whether the `else` under the cursor is followed by `if` or
+/// `comptime if` rather than a block.
+fn (self: &var Parser) continues_else_chain() -> bool {
+    return self.peek_kind() == token::Kind::If or
+        self.peek_kind() == token::Kind::Comptime;
+}
+
+/// Parses the `if` or `comptime if` an `else` continues with. `else if` is
+/// spelling: the alternative is the block that `else { if ... }` would hold,
+/// so the tree is the same either way (SPEC §6.9).
+fn (self: &var Parser) parse_else_chain(tree: &var ast::Ast) -> !ast::Block {
+    try self.next_token();
+    let nested = try self.parse_else_chain_statement(tree);
+    var statements = array::new<ast::Statement>(self.allocator);
+    errdefer statements.deinit(self.allocator);
+    try statements.append(self.allocator, nested);
+    return try tree.add_block(ast::BlockStmt { statements: move statements });
+}
+
+fn (self: &var Parser) parse_else_chain_statement(
+    tree: &var ast::Ast
+) -> !ast::Statement {
+    if self.current_kind() == token::Kind::Comptime {
+        return try self.parse_comptime_if_stmt(tree);
+    }
+    if try self.parse_if_stmt(tree) |value| {
+        return try tree.add_statement(ast::StatementNode::If(value));
+    }
+    return try tree.add_recovered_statement(token_span_at(self));
 }
 
 fn (self: &var Parser) parse_while_stmt(

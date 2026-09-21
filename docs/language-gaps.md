@@ -22,7 +22,6 @@ language / std の不足と、その場で使った局所解です。証拠の�
 | current working directory を読む API が無い | init の Go `filepath.Abs(target)`。`TestSelfhostFrontend/init` の引数無し case は process の cwd を変えて比較する | `fsutil::absolute` は test / shell が cwd と同じ値に保つ `PWD` と `path::join` / `clean` を使う |
 | file の exclusive create が無い | init の Go `writeNewFile` は `O_CREATE|O_EXCL` で事前検査後の race でも既存 file を上書きしない | `reject_existing_init_files` で `kizu.toml` と `src/main.kizu` を先に拒否してから `fs::write_file`。検査と write の間に別 process が作る race は残る |
 | `match try f()` では owner payload を move out できない | loader の `match try self.read_std_graph()` | `let r = try f(); match r { ... }` |
-| `else if` が無い | loader | `else { if ... }` に展開 |
 | owner field への代入不可のため「field を入れ替える」書き方が無い | loader の `self.order` の差し替え、ModuleFile.imports の設定 | 空で作って in place に insert する。入れ替えが要る場合は 2 つの field を持つ |
 | Array.at の結果は capture 限定で `orelse` も不可 | checker body port | `if arr.at(i) \|v\| {} else {}` |
 | `typ::map_names` の rename callback は error set しか返せず diagnostic を運べない | loader の resolve_type_node | mapper struct に失敗を記録して呼び出し後に読む |
