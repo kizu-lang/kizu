@@ -223,18 +223,42 @@ func (p *Parser) parseExternDecl() ast.Decl {
 	return p.parseExternDeclWithDoc(commentText(p.cur.DocComments))
 }
 
-// parseExternDeclWithDoc parses extern "abi" fn declarations with attached docs.
+// parseExternDeclWithDoc parses the declarations `extern "abi"` introduces
+// with attached docs: a foreign function, or a struct whose layout the
+// foreign ABI decides.
 func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	fn := &ast.FunctionDecl{Doc: docs}
 	if !p.expectPeek(token.String) {
 		return fn
 	}
-	fn.ExternABI = p.cur.Literal
+	abi := p.cur.Literal
+	if p.peek.Type == token.Struct {
+		p.nextToken()
+		return p.parseExternStructDecl(docs, abi)
+	}
+	fn.ExternABI = abi
 	if !p.expectPeek(token.Function) {
 		return fn
 	}
 	p.parseFunctionSignatureAfterFn(fn)
 	return fn
+}
+
+// parseExternStructDecl parses the struct after `extern "abi"`. Its fields
+// are visible wherever the struct is, because the foreign side names them,
+// so `pub` on one says nothing and is refused rather than allowed to mean
+// something.
+func (p *Parser) parseExternStructDecl(docs string, abi string) *ast.StructDecl {
+	decl := p.parseStructDeclWithDoc(docs)
+	decl.ExternABI = abi
+	for _, field := range decl.Fields {
+		if field.Public {
+			p.errorf("parse error: extern struct field `%s.%s` is visible already; drop `pub`",
+				decl.Name, field.Name)
+			return decl
+		}
+	}
+	return decl
 }
 
 // parseAttributedDecl parses the `@link_library("...")` / `@link_framework("...")`

@@ -28,9 +28,9 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 ```
 
 ```kizu
-extern struct Point {
-    x: i32
-    y: i32
+extern "c" struct Point {
+    x: i32,
+    y: i32,
 }
 ```
 

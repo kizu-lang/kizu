@@ -57,9 +57,10 @@ fn main() {
 }
 ```
 
-Kizu がコンパイラ予約名を書く場所は 5 つあり、4 つは string literal である
-(`extern "c"`、`@repr("c")`、`@link_name("puts")`、`@link_library("c")`)。
-`@unsafe(ptr_deref)` だけが裸の識別子を使っている。
+Kizu がコンパイラ予約名を書く場所のうち、他はすべて string literal である
+(`extern "c" fn` / `extern "c" struct`、`@link_library("c")`、
+`@link_framework("Accelerate")`)。`@unsafe(ptr_deref)` だけが裸の識別子を
+使っている。
 
 ### `@` は `unsafe` に対して仕事をしていない
 
@@ -162,9 +163,9 @@ compile error にする。判定は型注釈の構文検査で足りる。
 | Array 要素に入れる | 既に拒否(`examples/negative/std_array_struct_raw_pointer_element.kizu`) |
 | union variant の payload や std container の要素に裸の pointer を入れる | 印は付かない。ただしそこには pointer 1 つしか無く、ずれる相手の field が無い。決定 3 が閉じたいのは `data` と `len` が独立に動ける形で、多 field の payload は struct にするほか無く、その struct は規則に掛かる |
 
-C layout struct(SPEC §12.2 が `extern struct` / `@repr("c")` として将来定める形)
-は対象外にする。C ABI struct は field を `pub` にできないと構築できず、
-`import-c-header` は C の名前をそのまま使うため改名も課せない。根拠は SPEC §0.1
+C layout struct(SPEC §12.2 の `extern "c" struct`)は対象外にする。C ABI struct
+の field は C の側が名指し、`import-c-header` は C の名前をそのまま使うため
+改名も課せない。根拠は SPEC §0.1
 が既に持っている ——「raw pointer operation、C ABI call、unchecked operation は
 safe Kizu の保証外です」。例外ではなく、元から線の外である。
 

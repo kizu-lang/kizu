@@ -27,6 +27,12 @@ struct CollectionMemberTypeIssue {
     member: CollectionMemberIssue, type_name: Type,
 }
 
+/// One extern struct field C cannot lay out, reported at the declaration.
+struct CollectionExternFieldIssue {
+    member: CollectionMemberIssue, type_name: Type,
+    span: ast::Span,
+}
+
 struct CollectionImplMethodIssue {
     contract_name: ast::Text, type_name: ast::Text, method: FunctionHandle,
 }
@@ -67,6 +73,9 @@ union TypeCollectionIssue {
     StructTypeValue(CollectionMemberIssue),
     StructBuffer(CollectionMemberIssue),
     StructOptionalView(CollectionMemberIssue),
+    ExternStructTypeParams(ast::Text),
+    ExternStructUnsafe(ast::Text),
+    ExternStructField(CollectionExternFieldIssue),
     FunctionObligationDoc(ast::Text),
     ReservedFunctionStaticParam(ast::Text),
     FunctionReturnCompileTimeOnly(CollectionNamedTypeIssue),
@@ -91,6 +100,7 @@ union TypeCollectionIssue {
     BrowserHostParam(CollectionHostParamIssue),
     BrowserHostReturn(CollectionNamedTypeIssue),
     CHostBorrowParam(CollectionHostParamIssue),
+    CHostStructByValue(CollectionHostParamIssue),
     CHostParam(CollectionHostParamIssue),
     CHostReturn(CollectionNamedTypeIssue),
 }
@@ -120,6 +130,17 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
     if try self.resolve_error_set_compositions(tree) |failed| {
         owners.deinit(self.allocator);
         return move failed;
+    }
+    // An extern struct's fields may name an extern struct declared later, so
+    // their C representation is checked once every struct is known.
+    index = 0;
+    while program.declarations.get(index) |declaration| {
+        if try self.validate_extern_struct_fields(tree, declaration) |issue| {
+            let value = try self.type_collection_diagnostic(tree, issue);
+            owners.deinit(self.allocator);
+            return move value;
+        }
+        index = index + 1;
     }
     index = 0;
     while program.declarations.get(index) |declaration| {
@@ -185,6 +206,9 @@ fn (self: &var Checker) collect_struct(
     if obligation_doc_missing(declaration.requires_unsafe, doc) {
         return TypeCollectionIssue::StructObligationDoc(declaration.name);
     }
+    if extern_struct_shape_issue(tree, declaration) |issue| {
+        return issue;
+    }
     try self.metadata.structs.insert(self.allocator, name, declaration_handle);
     let previous = try self.type_params.enter_ast(self.allocator, tree, &declaration.type_params);
     let result = try self.collect_struct_fields(tree, declaration, owners);
@@ -192,9 +216,39 @@ fn (self: &var Checker) collect_struct(
     return result;
 }
 
+/// Refuses the parts of a struct declaration a foreign ABI has no layout
+/// for, the Go `validateExternStructShape`: generics, `unsafe struct`, and
+/// any ABI but C.
+fn extern_struct_shape_issue(
+    tree: &ast::Ast, declaration: &ast::StructDecl
+) -> ?TypeCollectionIssue {
+    let retained_abi = tree.texts.at(declaration.extern_abi.node);
+    let abi = retained_abi.as_bytes();
+    if mem::len(abi) == 0 {
+        return null;
+    }
+    if !mem::equal_bytes(abi, "c") {
+        return TypeCollectionIssue::UnsupportedExternAbi(declaration.extern_abi);
+    }
+    if declaration.type_params.len() > 0 {
+        return TypeCollectionIssue::ExternStructTypeParams(declaration.name);
+    }
+    if declaration.requires_unsafe {
+        return TypeCollectionIssue::ExternStructUnsafe(declaration.name);
+    }
+    return null;
+}
+
+/// Reports whether the declaration promises a foreign layout.
+fn is_extern_struct_decl(tree: &ast::Ast, declaration: &ast::StructDecl) -> bool {
+    let retained_abi = tree.texts.at(declaration.extern_abi.node);
+    return retained_abi.len() > 0;
+}
+
 fn (self: &var Checker) collect_struct_fields(
     tree: &ast::Ast, declaration: &ast::StructDecl, owners: &map::Map<[]u8, bool>
 ) -> !?TypeCollectionIssue {
+    let extern_struct = is_extern_struct_decl(tree, declaration);
     var index = 0;
     while declaration.fields.at(index) |field| {
         match try self.resolve_type_node(self.allocator, tree, field.type_name) {
@@ -205,26 +259,13 @@ fn (self: &var Checker) collect_struct_fields(
                 if field.borrow {
                     return TypeCollectionIssue::StructBorrow(member);
                 }
-                if raw_pointer_field_requires_unsafe(
-                    &self.types, declaration.requires_unsafe, field_type
-                ) {
-                    return TypeCollectionIssue::StructRawPointer(member);
-                }
-                if compile_time_only_type(&self.types, field_type) {
-                    let issue = CollectionMemberTypeIssue {
-                        member: member, type_name: field_type
-                    };
-                    return TypeCollectionIssue::StructCompileTimeOnly(issue);
-                }
-                if self.types.contains_type_value(field_type) {
-                    return TypeCollectionIssue::StructTypeValue(member);
-                }
-                if self.types.contains_buffer_type(field_type) {
-                    return TypeCollectionIssue::StructBuffer(member);
-                }
-                if try self.types.optional_elem(field_type) |element| {
-                    if !try self.optional_field_element_allowed(tree, owners, element) {
-                        return TypeCollectionIssue::StructOptionalView(member);
+                // The foreign side reads the raw pointer fields; the struct's
+                // own invariant is its layout, which the compiler does check.
+                if !extern_struct {
+                    if try self.kizu_struct_field_issue(
+                        tree, declaration, owners, member, field_type
+                    ) |issue| {
+                        return issue;
                     }
                 }
             },
@@ -233,6 +274,85 @@ fn (self: &var Checker) collect_struct_fields(
         index = index + 1;
     }
     return null;
+}
+
+/// Checks what a field of a struct Kizu lays out may hold.
+fn (self: &var Checker) kizu_struct_field_issue(
+    tree: &ast::Ast, declaration: &ast::StructDecl, owners: &map::Map<[]u8, bool>,
+    member: CollectionMemberIssue, field_type: Type
+) -> !?TypeCollectionIssue {
+    if raw_pointer_field_requires_unsafe(
+        &self.types, declaration.requires_unsafe, field_type
+    ) {
+        return TypeCollectionIssue::StructRawPointer(member);
+    }
+    if compile_time_only_type(&self.types, field_type) {
+        let issue = CollectionMemberTypeIssue {
+            member: member, type_name: field_type
+        };
+        return TypeCollectionIssue::StructCompileTimeOnly(issue);
+    }
+    if self.types.contains_type_value(field_type) {
+        return TypeCollectionIssue::StructTypeValue(member);
+    }
+    if self.types.contains_buffer_type(field_type) {
+        return TypeCollectionIssue::StructBuffer(member);
+    }
+    if try self.types.optional_elem(field_type) |element| {
+        if !try self.optional_field_element_allowed(tree, owners, element) {
+            return TypeCollectionIssue::StructOptionalView(member);
+        }
+    }
+    return null;
+}
+
+/// Limits an extern struct to what C lays out, the Go
+/// `validateExternStructFields`: scalars, raw pointers, and other extern
+/// structs.
+fn (self: &var Checker) validate_extern_struct_fields(
+    tree: &ast::Ast, declaration_handle: ast::Declaration
+) -> !?TypeCollectionIssue {
+    match tree.declarations.at(declaration_handle.node) {
+        Struct(declaration) => {
+            if !is_extern_struct_decl(tree, declaration) {
+                return null;
+            }
+            var index = 0;
+            while declaration.fields.at(index) |field| {
+                let field_type = try self.types.remember(&tree.types, field.type_name);
+                if !c_host_scalar(&self.types, field_type) and
+                    !try self.is_extern_struct(tree, field_type) {
+                    let member = CollectionMemberIssue {
+                        owner: declaration.name, member: field.name
+                    };
+                    return TypeCollectionIssue::ExternStructField(CollectionExternFieldIssue {
+                        member: member, type_name: field_type, span: declaration.span
+                    });
+                }
+                index = index + 1;
+            }
+            return null;
+        },
+        _ => return null,
+    }
+}
+
+/// Reports whether a type names a struct with a C layout, the Go
+/// `isExternStruct`.
+fn (self: &Checker) is_extern_struct(tree: &ast::Ast, value: Type) -> !bool {
+    let text = try self.types.copy_text(self.allocator, value);
+    defer text.deinit(self.allocator);
+    let name = text.as_bytes();
+    return self.is_extern_struct_name(tree, name);
+}
+
+/// Reports whether `name` is a struct with a C layout.
+fn (self: &Checker) is_extern_struct_name(tree: &ast::Ast, name: []u8) -> bool {
+    let handle = self.metadata.structs.get(name) orelse return false;
+    match tree.declarations.at(handle.node) {
+        Struct(declaration) => return is_extern_struct_decl(tree, declaration),
+        _ => return false,
+    }
 }
 
 fn (self: &var Checker) optional_field_element_allowed(tree: &ast::Ast, owners: &map::Map<[]u8, bool>, element: Type) -> !bool {
@@ -561,7 +681,7 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
             return function_storage_issue(self.allocator, move storage, issue);
         }
     }
-    if self.validate_host_function_signature(
+    if try self.validate_host_function_signature(
         tree, signature, &storage.params, return_type
     ) |issue| {
         return function_storage_issue(self.allocator, move storage, issue);
@@ -592,7 +712,7 @@ fn (self: &Checker) validate_host_function_signature(
     signature: &ast::FunctionSignature,
     params: &array::Array<Type>,
     return_type: Type
-) -> ?TypeCollectionIssue {
+) -> !?TypeCollectionIssue {
     let retained_extern_abi = tree.texts.at(signature.extern_abi.node);
     let extern_abi = retained_extern_abi.as_bytes();
     let retained_export_abi = tree.texts.at(signature.export_abi.node);
@@ -615,7 +735,7 @@ fn (self: &Checker) validate_host_function_signature(
         return TypeCollectionIssue::LinkAttributesNotC(signature.name);
     }
     if mem::equal_bytes(extern_abi, "c") {
-        return self.validate_c_host_function_types(signature, params, return_type);
+        return self.validate_c_host_function_types(tree, signature, params, return_type);
     }
     let browser_import = mem::equal_bytes(extern_abi, "browser");
     let browser_export = mem::equal_bytes(export_abi, "browser");
@@ -664,25 +784,23 @@ fn (self: &Checker) validate_host_function_signature(
 }
 
 /// Limits a C function's boundary to what C can name, the Go
-/// `validateCHostFunctionTypes`: integers, floats, bool, and raw pointers. A
-/// view, a borrow, an owner, a struct, or an error union has no C
+/// `validateCHostFunctionTypes`: integers, floats, bool, raw pointers, and an
+/// extern struct lent as `&S` / `&var S`, which C receives as a pointer to
+/// the struct. A view, an owner, a Kizu struct, or an error union has no C
 /// representation; passing one hands C the address of something it cannot
-/// read, and taking one back hands Kizu a value C never built.
+/// read, and taking one back hands Kizu a value C never built. An extern
+/// struct by value is refused too: how C passes a struct in registers is per
+/// platform, and a pointer says the same thing everywhere.
 fn (self: &Checker) validate_c_host_function_types(
+    tree: &ast::Ast,
     signature: &ast::FunctionSignature,
     params: &array::Array<Type>,
     return_type: Type
-) -> ?TypeCollectionIssue {
+) -> !?TypeCollectionIssue {
     var index = 0;
     while params.get(index) |parameter_type| {
-        let issue = self.host_param_issue(signature, index, parameter_type);
-        if signature.params.at(index) |parameter| {
-            if parameter.borrow or parameter.mut_borrow {
-                return TypeCollectionIssue::CHostBorrowParam(issue);
-            }
-        }
-        if !c_host_scalar(&self.types, parameter_type) {
-            return TypeCollectionIssue::CHostParam(issue);
+        if try self.c_host_param_issue(tree, signature, index, parameter_type) |issue| {
+            return issue;
         }
         index = index + 1;
     }
@@ -693,6 +811,32 @@ fn (self: &Checker) validate_c_host_function_types(
         return TypeCollectionIssue::CHostReturn(issue);
     }
     return null;
+}
+
+/// Reports what keeps one parameter off the C boundary, or null when C can
+/// receive it.
+fn (self: &Checker) c_host_param_issue(
+    tree: &ast::Ast,
+    signature: &ast::FunctionSignature,
+    index: i64,
+    parameter_type: Type
+) -> !?TypeCollectionIssue {
+    let issue = self.host_param_issue(signature, index, parameter_type);
+    if signature.params.at(index) |parameter| {
+        if parameter.borrow or parameter.mut_borrow {
+            if try self.is_extern_struct(tree, parameter_type) {
+                return null;
+            }
+            return TypeCollectionIssue::CHostBorrowParam(issue);
+        }
+    }
+    if c_host_scalar(&self.types, parameter_type) {
+        return null;
+    }
+    if try self.is_extern_struct(tree, parameter_type) {
+        return TypeCollectionIssue::CHostStructByValue(issue);
+    }
+    return TypeCollectionIssue::CHostParam(issue);
 }
 
 /// Describes one host boundary parameter for a diagnostic: its position,
@@ -1005,6 +1149,24 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, "` cannot store an optional view; a capture would be hidden ");
             try message.append_bytes(self.allocator, "from the rules that read field types");
         },
+        ExternStructTypeParams(name) => {
+            try message.append_bytes(self.allocator, "extern struct `");
+            try append_collection_text(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator, "` cannot have type parameters");
+        },
+        ExternStructUnsafe(name) => {
+            try message.append_bytes(self.allocator, "extern struct `");
+            try append_collection_text(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator, "` cannot be `unsafe struct`");
+        },
+        ExternStructField(extern_field) => {
+            span = extern_field.span;
+            try message.append_bytes(self.allocator, "extern struct field `");
+            try append_collection_member(self.allocator, &var message, tree, extern_field.member, ".");
+            try message.append_bytes(self.allocator, "` has type `");
+            try self.append_checker_type(&var message, extern_field.type_name);
+            try message.append_bytes(self.allocator, "`, which C cannot lay out");
+        },
         FunctionObligationDoc(name) => {
             category = "unsafe error";
             try message.append_bytes(self.allocator, "`unsafe fn ");
@@ -1147,6 +1309,20 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try self.append_c_host_param_spelling(&var message, tree, host_param);
             try message.append_bytes(self.allocator, "`), which C cannot receive");
         },
+        CHostStructByValue(host_param) => {
+            span = host_param.span;
+            try message.append_bytes(self.allocator, "C ");
+            try append_function_name(self.allocator, &var message, tree, host_param.name);
+            try message.append_bytes(self.allocator, " parameter ");
+            try fmt::append_i64(self.allocator, &var message, host_param.index);
+            try message.append_bytes(self.allocator, " takes extern struct `");
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_bytes(self.allocator, "` by value; lend it as `&");
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_bytes(self.allocator, "` or `&var ");
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_byte(self.allocator, cast<u8>(96));
+        },
         CHostParam(host_param) => {
             span = host_param.span;
             try message.append_bytes(self.allocator, "C ");
@@ -1185,6 +1361,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try value.with_help(self.allocator, help_text);
         },
         CHostBorrowParam(_) => try add_c_host_advice(self.allocator, &var value),
+        CHostStructByValue(_) => try add_c_host_advice(self.allocator, &var value),
         CHostParam(_) => try add_c_host_advice(self.allocator, &var value),
         CHostReturn(_) => try add_c_host_advice(self.allocator, &var value),
         _ => {},
@@ -1196,7 +1373,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
 /// `cHostTypeError` note and help.
 fn add_c_host_advice(allocator: Allocator, value: &var diagnostic::Diagnostic) -> !void {
     try value.with_note(allocator,
-        "a C function passes only what C can name: an integer, a float, `bool`, `ptr<T>`, `ptr<const T>`, or a nullable pointer"
+        "a C function passes only what C can name: an integer, a float, `bool`, `ptr<T>`, `ptr<const T>`, a nullable pointer, or an extern struct as `&S` / `&var S`"
     );
     return value.with_help(allocator,
         "spell the value as C sees it: `ptr<const u8>` with a `usize` length for bytes, `ptr<T>` for a value C reads or writes in place"

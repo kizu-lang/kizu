@@ -40,31 +40,20 @@ C ABI layout と linking はすべて明示する。
 
 ## C layout
 
-Kizu の通常 `struct` は C layout を約束しない。
+Kizu の通常 `struct` は C layout を約束しない。C と共有する layout は
+`extern "c" struct` と書く(SPEC §12.2)。`extern "c" fn` と同じ語で同じ ABI 名を
+名指す。field は C が名指しできる型だけで、`extern "c" fn` は `&S` / `&var S` で
+受け取り pointer として渡す。
 
-C ABI と共有する layout には、将来 `extern struct` または `repr(c)` 相当を導入する。
+却下した案:
 
-検討する構文:
-
-```kizu
-extern struct Point {
-    x: i32
-    y: i32
-}
-```
-
-または:
-
-```kizu
-@repr("c")
-struct Point {
-    x: i32
-    y: i32
-}
-```
-
-どちらを採用するかは、実装 phase で決める。
-ただし、通常 struct を暗黙に C layout として扱うことは禁止する。
+| 案 | 却下理由 |
+|---|---|
+| `@repr("c")` attribute | attribute は link 情報のためのもの。layout は型の宣言そのもので、`extern "c" fn` が ABI を語で名乗るのと揃える |
+| `extern struct`(ABI 名なし) | `extern "c" fn` が ABI を書くのに struct だけ省くと、別 ABI を足したとき綴りが割れる |
+| 通常 struct を暗黙に C layout にする | Kizu の layout を C との約束で縛る。境界は書いて見えるべき |
+| struct の値渡し | register への載せ方が platform ごとに違う。pointer なら同じ意味で、必要な例も無い |
+| field を `pub` 必須にする | C が名前を決めているので書いても情報が無い。書けなくして綴りを 1 つにする |
 
 ## Runtime symbols
 

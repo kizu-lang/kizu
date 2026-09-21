@@ -2260,8 +2260,10 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 
 `extern "c" fn` の引数と戻り値は C が名指しできる型だけです: 整数、浮動小数、
 `bool`、`ptr<T>` / `ptr<const T>` / nullable raw pointer、戻り値の `void`。
-`[]u8`、borrow(`&T` / `&var T`)、owner、struct、error union は C 側に表現が
-無いので拒否します。byte 列は `ptr<const u8>` と `usize` の長さで渡します。
+引数はこれに加えて `extern "c" struct`(§12.2)の borrow `&S` / `&var S` を
+取れます。`[]u8`、それ以外の borrow、owner、通常の struct、error union は
+C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `usize` の長さで
+渡します。
 
 ルール:
 
@@ -2490,31 +2492,31 @@ target ABI、import option を含めます。
 
 ### 12.2 C ABI layout / linking 方針
 
-Kizu の通常 `struct` は C layout を約束しません。
-C ABI と共有する layout は、将来 `extern struct` または `repr(c)` 相当で明示します。
-
-検討する構文:
+Kizu の通常 `struct` は C layout を約束しません。C と共有する layout は
+`extern "c" struct` で明示します。
 
 ```kizu
-extern struct Point {
-    x: i32,
-    y: i32,
+extern "c" struct Timespec {
+    seconds: i64,
+    nanoseconds: i64,
 }
+
+extern "c" fn clock_gettime(clock: i32, out: &var Timespec) -> i32
 ```
 
-または:
-
-```kizu
-@repr("c")
-struct Point {
-    x: i32,
-    y: i32,
-}
-```
-
-C layout struct は `unsafe struct` の要求から外します。C ABI struct は field を
-`pub` にできないと構築できず、名前も C の側が決めるためです。raw pointer field を
-持つ C layout struct が safe Kizu の保証外である根拠は §0.1 が既に持っています。
+* field は C が名指しできる型だけです: 整数、浮動小数、`bool`、`ptr<T>` /
+  `ptr<const T>` / nullable raw pointer、別の `extern "c" struct`。宣言順に
+  C の規則で並べます。type parameter は持てません。
+* field は struct が見える所ならどこからでも見えます。名前は C の側が決めるので
+  `pub` は書けません。struct 自体の可視性は通常どおり `pub` が決めます。
+* raw pointer field があっても `unsafe struct` にはしません。struct の不変条件は
+  layout であり、それは compiler が検査します。pointer の先を読み書きする側が
+  `unsafe` を負う根拠は §0.1 が持っています。
+* `extern "c" fn` は `extern "c" struct` を `&S` / `&var S` で受け取れ、C には
+  struct への pointer として渡ります。値渡しは拒否します。C が struct を register に
+  どう載せるかは platform ごとに違い、pointer なら同じ意味を持つためです。
+* それ以外は通常の struct と同じです。literal で構築し、field を読み書きし、
+  `ptr<S>` 経由なら `p.*.field` で触ります。
 
 library 指定も暗黙にしません。symbol がどの library のものかは `extern "c" fn`
 宣言の上に attribute で書きます。
