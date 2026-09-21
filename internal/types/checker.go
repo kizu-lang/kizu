@@ -215,6 +215,13 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 	if err := c.resolveErrorSetCompositions(); err != nil {
 		return err
 	}
+	// An extern struct's fields may name an extern struct declared later, so
+	// their C representation is checked once every struct is known.
+	for _, decl := range program.Decls {
+		if err := c.validateExternStructFields(decl); err != nil {
+			return err
+		}
+	}
 	for _, decl := range program.Decls {
 		if err := c.collectMethodDecl(decl); err != nil {
 			return err
@@ -233,6 +240,49 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 		}
 	}
 	return nil
+}
+
+// validateExternStructShape refuses the parts of a struct declaration a
+// foreign ABI has no layout for: generics, and any ABI but C.
+func validateExternStructShape(decl *ast.StructDecl) error {
+	if decl.ExternABI == "" {
+		return nil
+	}
+	if decl.ExternABI != "c" {
+		return errorf("type error: unsupported extern ABI %q", decl.ExternABI)
+	}
+	if len(decl.TypeParams) > 0 {
+		return errorf("type error: extern struct `%s` cannot have type parameters", decl.Name)
+	}
+	if decl.RequiresUnsafe {
+		return errorf("type error: extern struct `%s` cannot be `unsafe struct`", decl.Name)
+	}
+	return nil
+}
+
+// validateExternStructFields limits an extern struct to what C lays out:
+// scalars, raw pointers, and other extern structs.
+func (c *Checker) validateExternStructFields(decl ast.Decl) error {
+	st, ok := decl.(*ast.StructDecl)
+	if !ok || st.ExternABI == "" {
+		return nil
+	}
+	for _, field := range st.Fields {
+		fieldType := Type(typ.Text(field.TypeName))
+		if cHostScalar(fieldType) || c.isExternStruct(fieldType) {
+			continue
+		}
+		return errorAt(st.Span,
+			"type error: extern struct field `%s.%s` has type `%s`, which C cannot lay out",
+			st.Name, field.Name, fieldType)
+	}
+	return nil
+}
+
+// isExternStruct reports whether a type names a struct with a C layout.
+func (c *Checker) isExternStruct(value Type) bool {
+	decl, ok := c.structs[string(value)]
+	return ok && decl.ExternABI != ""
 }
 
 // collectTypeDecl registers one type declaration before methods are validated.
@@ -569,6 +619,9 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		"unsafe struct "+decl.Name, "the invariant its fields carry"); err != nil {
 		return err
 	}
+	if err := validateExternStructShape(decl); err != nil {
+		return err
+	}
 	c.structs[decl.Name] = decl
 	previousTypeParams := c.typeParams.enter(decl.TypeParams)
 	defer c.typeParams.restore(previousTypeParams)
@@ -580,6 +633,11 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		if field.Borrow {
 			return errorf("type error: borrow field `%s.%s` cannot store borrow",
 				decl.Name, field.Name)
+		}
+		if decl.ExternABI != "" {
+			// The foreign side reads the raw pointer fields; the struct's own
+			// invariant is its layout, which the compiler does check.
+			continue
 		}
 		if rawPointerFieldRequiresUnsafe(&c.types, decl.RequiresUnsafe, typ) {
 			return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
@@ -825,7 +883,7 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 					" return; declare a bare `?&T` / `?&var T`", fn.Name)
 		}
 	}
-	if err := validateHostFunctionSignature(fn, paramInfo.params, ret); err != nil {
+	if err := validateHostFunctionSignature(fn, paramInfo.params, ret, c.isExternStruct); err != nil {
 		return nil, err
 	}
 	return &functionType{
@@ -842,12 +900,13 @@ func validateHostFunctionSignature(
 	fn ast.FunctionSignature,
 	params []Type,
 	ret Type,
+	isExternStruct func(Type) bool,
 ) error {
 	if err := validateHostFunctionABI(fn); err != nil {
 		return err
 	}
 	if fn.ExternABI == "c" {
-		return validateCHostFunctionTypes(fn, params, ret)
+		return validateCHostFunctionTypes(fn, params, ret, isExternStruct)
 	}
 	if fn.ExternABI != "browser" && fn.ExportABI != "browser" {
 		return nil
@@ -859,14 +918,18 @@ func validateHostFunctionSignature(
 }
 
 // validateCHostFunctionTypes limits a C function's boundary to what C can
-// name: integers, floats, bool, and raw pointers. A view, a borrow, an owner,
-// a struct, or an error union has no C representation; passing one hands C
-// the address of something it cannot read, and taking one back hands Kizu a
-// value C never built.
+// name: integers, floats, bool, raw pointers, and an extern struct lent as
+// `&S` / `&var S`, which C receives as a pointer to the struct. A view, an
+// owner, a Kizu struct, or an error union has no C representation; passing
+// one hands C the address of something it cannot read, and taking one back
+// hands Kizu a value C never built. An extern struct by value is refused
+// too: how C passes a struct in registers is per platform, and a pointer
+// says the same thing everywhere.
 func validateCHostFunctionTypes(
 	fn ast.FunctionSignature,
 	params []Type,
 	ret Type,
+	isExternStruct func(Type) bool,
 ) error {
 	for index, param := range params {
 		spelled := string(param)
@@ -876,12 +939,21 @@ func validateCHostFunctionTypes(
 			spelled = "&" + spelled
 		}
 		if fn.Params[index].Borrow || fn.Params[index].MutBorrow {
+			if isExternStruct(param) {
+				continue
+			}
 			return cHostTypeError(fn.Span, fmt.Sprintf(
 				"C function `%s` parameter %d is a borrow (`%s`), which C cannot receive",
 				fn.Name, index+1, spelled))
 		}
 		if cHostScalar(param) {
 			continue
+		}
+		if isExternStruct(param) {
+			return cHostTypeError(fn.Span, fmt.Sprintf(
+				"C function `%s` parameter %d takes extern struct `%s` by value; "+
+					"lend it as `&%s` or `&var %s`",
+				fn.Name, index+1, spelled, spelled, spelled))
 		}
 		return cHostTypeError(fn.Span, fmt.Sprintf(
 			"C function `%s` parameter %d has type `%s`, which C cannot receive",
@@ -899,7 +971,7 @@ func validateCHostFunctionTypes(
 func cHostTypeError(span ast.Span, message string) error {
 	return diag.FromText(diag.SeverityError, span, "type error: "+message).
 		WithNote("a C function passes only what C can name: an integer, a float, `bool`," +
-			" `ptr<T>`, `ptr<const T>`, or a nullable pointer").
+			" `ptr<T>`, `ptr<const T>`, a nullable pointer, or an extern struct as `&S` / `&var S`").
 		WithHelp("spell the value as C sees it: `ptr<const u8>` with a `usize` length" +
 			" for bytes, `ptr<T>` for a value C reads or writes in place")
 }
@@ -6578,7 +6650,7 @@ func (c *Checker) resolveFieldExpr(
 
 // checkPrivateFieldAccess enforces std and user module field visibility.
 func (c *Checker) checkPrivateFieldAccess(typeName string, field ast.Field) error {
-	if field.Public {
+	if field.Public || c.isExternStruct(Type(typeName)) {
 		return nil
 	}
 	if isStdType(Type(typeName)) {

@@ -258,6 +258,10 @@ type StructDecl struct {
 	// that invariant is what needs `unsafe`, so writes are marked and reads are
 	// not.
 	RequiresUnsafe bool
+	// ExternABI names the foreign ABI whose layout the struct promises,
+	// spelled `extern "c" struct`. Its fields are what that ABI can name and
+	// are public: the foreign side already decides them (SPEC §12.2).
+	ExternABI string
 }
 
 // declNode marks StructDecl as a declaration node.
@@ -275,6 +279,9 @@ func (d *StructDecl) String() string {
 	}
 	if d.RequiresUnsafe {
 		prefix += "unsafe "
+	}
+	if d.ExternABI != "" {
+		prefix += fmt.Sprintf("extern %q ", d.ExternABI)
 	}
 	typeParams := typeParamText(d.TypeParams)
 	if typeParams != "" {

@@ -397,18 +397,26 @@ fn (self: &var Parser) parse_extern_decl(
     return self.parse_extern_decl_with_doc(tree, move docs, false);
 }
 
+/// Parses the declarations `extern "abi"` introduces with attached docs: a
+/// foreign function, or a struct whose layout the foreign ABI decides.
 fn (self: &var Parser) parse_extern_decl_with_doc(
     tree: &var ast::Ast,
     docs: string::String,
     public: bool
 ) -> !ast::Declaration {
-    var function = try self.function_stub(tree, public, move docs);
-    errdefer function.deinit(self.allocator);
+    errdefer docs.deinit(self.allocator);
     if !try self.expect_peek(token::Kind::String) {
-        function.deinit(self.allocator);
+        docs.deinit(self.allocator);
         return try tree.add_recovered_declaration(token_span_at(self));
     }
-    function.signature.extern_abi = try self.retain_current_literal(tree);
+    let abi = try self.retain_current_literal(tree);
+    if self.peek_kind() == token::Kind::Struct {
+        try self.next_token();
+        return self.parse_extern_struct_decl(tree, move docs, public, abi);
+    }
+    var function = try self.function_stub(tree, public, move docs);
+    errdefer function.deinit(self.allocator);
+    function.signature.extern_abi = abi;
     self.take_link_attributes(&var function.signature);
     if !try self.expect_peek(token::Kind::Function) {
         function.deinit(self.allocator);
@@ -416,6 +424,51 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     }
     let _ = try self.parse_function_signature_after_fn(tree, &var function.signature);
     return add_function_decl(self.allocator, tree, move function);
+}
+
+/// Parses the struct after `extern "abi"`, the Go `parseExternStructDecl`.
+/// Its fields are visible wherever the struct is, because the foreign side
+/// names them, so `pub` on one says nothing and is refused rather than
+/// allowed to mean something.
+fn (self: &var Parser) parse_extern_struct_decl(
+    tree: &var ast::Ast,
+    docs: string::String,
+    public: bool,
+    abi: ast::Text
+) -> !ast::Declaration {
+    var declaration = try self.parse_struct_decl_with_doc(tree, move docs, public) orelse
+        return try tree.add_recovered_declaration(token_span_at(self));
+    errdefer declaration.deinit(self.allocator);
+    declaration.extern_abi = abi;
+    var index = 0;
+    while declaration.fields.at(index) |field| {
+        if field.public {
+            try self.error_extern_struct_pub_field(tree, declaration.name, field.name);
+            break;
+        }
+        index = index + 1;
+    }
+    return add_struct_decl(self.allocator, tree, move declaration);
+}
+
+/// Records that `pub` on an extern struct field says nothing.
+fn (self: &var Parser) error_extern_struct_pub_field(
+    tree: &ast::Ast,
+    struct_name: ast::Text,
+    field_name: ast::Text
+) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit(self.allocator);
+    try entry.message.append_bytes(self.allocator, "parse error: extern struct field `");
+    let retained_struct = tree.texts.at(struct_name.node);
+    let struct_bytes = retained_struct.as_bytes();
+    try entry.message.append_bytes(self.allocator, struct_bytes);
+    try entry.message.append_byte(self.allocator, cast<u8>(46));
+    let retained_field = tree.texts.at(field_name.node);
+    let field_bytes = retained_field.as_bytes();
+    try entry.message.append_bytes(self.allocator, field_bytes);
+    try entry.message.append_bytes(self.allocator, "` is visible already; drop `pub`");
+    return self.record(move entry);
 }
 
 /// Moves the link attributes read above this declaration onto it, leaving
@@ -938,6 +991,7 @@ fn (self: &var Parser) finish_struct_decl(
         type_params.deinit(self.allocator);
         return null;
     }
+    let extern_abi = try tree.add_empty_text();
     let fields = try self.parse_struct_fields(tree);
     return ast::StructDecl {
         name: name,
@@ -946,7 +1000,8 @@ fn (self: &var Parser) finish_struct_decl(
         fields: move fields,
         public: public,
         span: span,
-        requires_unsafe: false
+        requires_unsafe: false,
+        extern_abi: extern_abi
     };
 }
 
