@@ -8,6 +8,7 @@ import (
 
 	kizufmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/ownership"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -64,10 +65,14 @@ func insertMoveMarkers(path, source string) (string, error) {
 	if err != nil {
 		return source, nil
 	}
-	if err := types.New().Check(program); err != nil {
+	host, err := stdtarget.Host()
+	if err != nil {
+		return source, err
+	}
+	if err := types.NewForTarget(host).Check(program); err != nil {
 		return source, nil
 	}
-	markers, err := ownership.New().MissingMoveMarkers(program)
+	markers, err := ownership.NewForTarget(host).MissingMoveMarkers(program)
 	if err != nil {
 		return source, nil
 	}

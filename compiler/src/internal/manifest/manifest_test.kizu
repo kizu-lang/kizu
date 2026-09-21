@@ -118,13 +118,84 @@ test "parse manifest reads the native search paths" {
     defer result.deinit(allocator);
     match &result {
         Manifest(manifest) => {
-            testing::expect_equal<i64>(2, manifest.library_search.len());
-            expect_entry(&manifest.library_search, 1, "vendor/lib");
-            testing::expect_equal<i64>(1, manifest.framework_search.len());
-            expect_entry(&manifest.framework_search, 0, "vendor/frameworks");
+            testing::expect_equal<i64>(2, manifest.native.libraries.len());
+            expect_entry(&manifest.native.libraries, 1, "vendor/lib");
+            testing::expect_equal<i64>(1, manifest.native.frameworks.len());
+            expect_entry(&manifest.native.frameworks, 0, "vendor/frameworks");
         },
         Error(text) => expect_string(text, ""),
     }
+}
+
+test "parse manifest reads a native section per operating system" {
+    let allocator = mem::page_allocator();
+    let source =
+        \\[package]
+        \\name = "app"
+        \\
+        \\[native]
+        \\library_search = ["vendor/lib"]
+        \\
+        \\[native.darwin]
+        \\framework_search = ["vendor/frameworks"]
+        \\
+        \\[native.linux]
+        \\library_search = ["/opt/lib"]
+    ;
+    let result = try parse_manifest(allocator, source);
+    defer result.deinit(allocator);
+    match &result {
+        Manifest(manifest) => {
+            let darwin = try manifest.native_search(allocator, "darwin");
+            defer darwin.deinit(allocator);
+            testing::expect_equal<i64>(1, darwin.libraries.len());
+            expect_entry(&darwin.libraries, 0, "vendor/lib");
+            testing::expect_equal<i64>(1, darwin.frameworks.len());
+            expect_entry(&darwin.frameworks, 0, "vendor/frameworks");
+            let linux = try manifest.native_search(allocator, "linux");
+            defer linux.deinit(allocator);
+            testing::expect_equal<i64>(2, linux.libraries.len());
+            expect_entry(&linux.libraries, 0, "vendor/lib");
+            expect_entry(&linux.libraries, 1, "/opt/lib");
+            testing::expect_equal<i64>(0, linux.frameworks.len());
+            let none = try manifest.native_search(allocator, "");
+            defer none.deinit(allocator);
+            testing::expect_equal<i64>(1, none.libraries.len());
+            expect_entry(&none.libraries, 0, "vendor/lib");
+        },
+        Error(text) => expect_string(text, ""),
+    }
+}
+
+test "parse manifest rejects an unknown native operating system" {
+    let allocator = mem::page_allocator();
+    let source =
+        \\[package]
+        \\name = "app"
+        \\
+        \\[native.windows]
+        \\library_search = ["vendor/lib"]
+    ;
+    let result = try parse_manifest(allocator, source);
+    defer result.deinit(allocator);
+    expect_error(
+        &result,
+        "manifest error:4: unsupported section `native.windows`: native targets are darwin, linux"
+    );
+}
+
+test "parse manifest rejects an unknown key in a native section per operating system" {
+    let allocator = mem::page_allocator();
+    let source =
+        \\[package]
+        \\name = "app"
+        \\
+        \\[native.darwin]
+        \\foo = ["m"]
+    ;
+    let result = try parse_manifest(allocator, source);
+    defer result.deinit(allocator);
+    expect_error(&result, "manifest error:5: unsupported key `native.darwin.foo`");
 }
 
 test "parse manifest rejects an unknown native key" {

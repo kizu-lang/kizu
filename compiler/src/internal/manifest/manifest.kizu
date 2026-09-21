@@ -1,3 +1,4 @@
+import compiler::internal::stdtarget;
 import std::array;
 import std::fmt;
 import std::mem;
@@ -18,13 +19,65 @@ pub struct Manifest {
     pub package_name: string::String,
     pub version: string::String,
     pub paths: array::Array<string::String>,
-    /// library_search and framework_search are the `[native]` directories
-    /// the linker is told to look in for what `@link_library` /
-    /// `@link_framework` name, relative to the manifest. The names live in
-    /// the source beside the extern declaration; where they are found is the
-    /// package's build input, so it lives here (SPEC §12.2).
-    pub library_search: array::Array<string::String>,
-    pub framework_search: array::Array<string::String>,
+    /// native is the `[native]` section: the directories the linker is told
+    /// to look in for what `@link_library` / `@link_framework` name, relative
+    /// to the manifest. The names live in the source beside the extern
+    /// declaration; where they are found is the package's build input, so it
+    /// lives here (SPEC §12.2). native_darwin and native_linux hold the
+    /// `[native.<os>]` sections that add to it for one operating system, the
+    /// Go `NativeByOS` map with one field per name the `std::target`
+    /// predicates use.
+    pub native: SearchPaths,
+    pub native_darwin: SearchPaths,
+    pub native_linux: SearchPaths,
+}
+
+/// Is what one `[native]` or `[native.<os>]` section tells the linker to
+/// search.
+pub struct SearchPaths {
+    pub libraries: array::Array<string::String>,
+    pub frameworks: array::Array<string::String>,
+}
+
+/// Returns empty search paths.
+pub fn new_search_paths(allocator: Allocator) -> SearchPaths {
+    return SearchPaths {
+        libraries: array::new<string::String>(allocator),
+        frameworks: array::new<string::String>(allocator)
+    };
+}
+
+/// Returns the search directories for one operating system, the Go
+/// `NativeSearch`: the `[native]` section followed by that OS's section.
+pub fn (self: &Manifest) native_search(allocator: Allocator, os: []u8) -> !SearchPaths {
+    var out = new_search_paths(allocator);
+    errdefer out.deinit(allocator);
+    try append_cloned(allocator, &self.native.libraries, &var out.libraries);
+    try append_cloned(allocator, &self.native.frameworks, &var out.frameworks);
+    if stdtarget::native_for(os) |target| {
+        if target == stdtarget::Target::NativeDarwin {
+            try append_cloned(allocator, &self.native_darwin.libraries, &var out.libraries);
+            try append_cloned(allocator, &self.native_darwin.frameworks, &var out.frameworks);
+        } else {
+            try append_cloned(allocator, &self.native_linux.libraries, &var out.libraries);
+            try append_cloned(allocator, &self.native_linux.frameworks, &var out.frameworks);
+        }
+    }
+    return move out;
+}
+
+// append_cloned appends a copy of every string in values onto out.
+fn append_cloned(
+    allocator: Allocator, values: &array::Array<string::String>, out: &var array::Array<string::String>
+) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        let cloned = try string::from_bytes(allocator, bytes);
+        try out.append(allocator, move cloned);
+    }
+    return;
 }
 
 /// Is either the parsed manifest or the manifest error text.
@@ -39,6 +92,8 @@ enum Section {
     Package,
     Modules,
     Native,
+    NativeDarwin,
+    NativeLinux,
 }
 
 // Holds the two sides of one `key = value` line.
@@ -73,8 +128,9 @@ fn parse(allocator: Allocator, source: []u8, allow_reserved_name: bool) -> !Pars
         package_name: string::new(allocator),
         version: string::new(allocator),
         paths: array::new<string::String>(allocator),
-        library_search: array::new<string::String>(allocator),
-        framework_search: array::new<string::String>(allocator)
+        native: new_search_paths(allocator),
+        native_darwin: new_search_paths(allocator),
+        native_linux: new_search_paths(allocator)
     };
     errdefer manifest.deinit(allocator);
     if try parse_into(allocator, source, allow_reserved_name, &var manifest) |failure| {
@@ -186,7 +242,31 @@ fn parse_section(
     errdefer failure.deinit(allocator);
     try failure.append_bytes(allocator, name);
     try failure.append_bytes(allocator, "`");
+    if mem::starts_with(name, "native.") {
+        let os = name[7..mem::len(name)];
+        if stdtarget::native_for(os) |target| {
+            failure.deinit(allocator);
+            section.* = native_section(target);
+            return null;
+        }
+        try failure.append_bytes(allocator, ": native targets are ");
+        try failure.append_bytes(allocator, stdtarget::native_os_spelling());
+    }
     return move failure;
+}
+
+// native_section returns the `[native.<os>]` section of one native target.
+fn native_section(target: stdtarget::Target) -> Section {
+    if target == stdtarget::Target::NativeDarwin {
+        return Section::NativeDarwin;
+    }
+    return Section::NativeLinux;
+}
+
+// is_native_section reports the `[native]` and `[native.<os>]` sections.
+fn is_native_section(section: Section) -> bool {
+    return section == Section::Native or section == Section::NativeDarwin or
+        section == Section::NativeLinux;
 }
 
 // parse_assignment parses one key/value assignment into out.
@@ -225,17 +305,8 @@ fn assign_manifest_value(
         }
         return parse_string_list(allocator, value, line_no, &var manifest.paths);
     }
-    if section == Section::Native and mem::equal_bytes(key, "library_search") {
-        while manifest.library_search.pop() |old| {
-            old.deinit(allocator);
-        }
-        return parse_string_list(allocator, value, line_no, &var manifest.library_search);
-    }
-    if section == Section::Native and mem::equal_bytes(key, "framework_search") {
-        while manifest.framework_search.pop() |old| {
-            old.deinit(allocator);
-        }
-        return parse_string_list(allocator, value, line_no, &var manifest.framework_search);
+    if is_native_section(section) {
+        return assign_native_value(allocator, manifest, section, key, value, line_no);
     }
     var failure = try line_error(allocator, line_no, "unsupported key `");
     errdefer failure.deinit(allocator);
@@ -246,6 +317,66 @@ fn assign_manifest_value(
     return move failure;
 }
 
+// assign_native_value stores one search path list into its section, the Go
+// `assignNativeValue`: the list is parsed before the key is looked at, so a
+// malformed value is reported before an unknown key.
+fn assign_native_value(
+    allocator: Allocator, manifest: &var Manifest, section: Section, key: []u8, value: []u8,
+    line_no: i64
+) -> !?string::String {
+    var parsed = array::new<string::String>(allocator);
+    defer parsed.deinit(allocator);
+    if try parse_string_list(allocator, value, line_no, &var parsed) |failure| {
+        return move failure;
+    }
+    if mem::equal_bytes(key, "library_search") {
+        if section == Section::Native {
+            try replace_list(allocator, &var manifest.native.libraries, &var parsed);
+            return null;
+        }
+        if section == Section::NativeDarwin {
+            try replace_list(allocator, &var manifest.native_darwin.libraries, &var parsed);
+            return null;
+        }
+        try replace_list(allocator, &var manifest.native_linux.libraries, &var parsed);
+        return null;
+    }
+    if mem::equal_bytes(key, "framework_search") {
+        if section == Section::Native {
+            try replace_list(allocator, &var manifest.native.frameworks, &var parsed);
+            return null;
+        }
+        if section == Section::NativeDarwin {
+            try replace_list(allocator, &var manifest.native_darwin.frameworks, &var parsed);
+            return null;
+        }
+        try replace_list(allocator, &var manifest.native_linux.frameworks, &var parsed);
+        return null;
+    }
+    var failure = try line_error(allocator, line_no, "unsupported key `");
+    errdefer failure.deinit(allocator);
+    try failure.append_bytes(allocator, section_spelling(section));
+    try failure.append_bytes(allocator, ".");
+    try failure.append_bytes(allocator, key);
+    try failure.append_bytes(allocator, "`");
+    return move failure;
+}
+
+// replace_list moves every string of parsed into out in order, dropping what
+// out held, the Go slice assignment.
+fn replace_list(
+    allocator: Allocator, out: &var array::Array<string::String>, parsed: &var array::Array<string::String>
+) -> !void {
+    while out.pop() |old| {
+        old.deinit(allocator);
+    }
+    while parsed.len() > 0 {
+        let value = try parsed.remove(0);
+        try out.append(allocator, move value);
+    }
+    return;
+}
+
 // section_spelling returns the section name Go keeps as the section string.
 fn section_spelling(section: Section) -> []u8 {
     return match section {
@@ -253,6 +384,8 @@ fn section_spelling(section: Section) -> []u8 {
         Package => "package",
         Modules => "modules",
         Native => "native",
+        NativeDarwin => "native.darwin",
+        NativeLinux => "native.linux",
     };
 }
 

@@ -292,7 +292,7 @@ fn output_target(output: Output) -> stdtarget::Target {
     if output == Output::Wasm or output == Output::WasmBinary {
         return stdtarget::Target::WasmWasi;
     }
-    return stdtarget::Target::Native;
+    return stdtarget::host();
 }
 
 /// Closes an executable module over its entry and the exports one target can
@@ -1830,6 +1830,7 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
     errdefer linker.deinit(allocator);
     return native::Options {
         output: string::new(allocator),
+        target: stdtarget::host(),
         triple: string::new(allocator),
         cpu: string::new(allocator),
         abi: string::new(allocator),
@@ -1887,8 +1888,11 @@ fn set_link_inputs(
                 Manifest(found) => {
                     defer found.deinit(allocator);
                     let root_bytes = root.as_bytes();
-                    try append_search_paths(allocator, root_bytes, &found.library_search, &var options.library_search);
-                    try append_search_paths(allocator, root_bytes, &found.framework_search, &var options.framework_search);
+                    let os = stdtarget::os_name(options.target);
+                    let search = try found.native_search(allocator, os);
+                    defer search.deinit(allocator);
+                    try append_search_paths(allocator, root_bytes, &search.libraries, &var options.library_search);
+                    try append_search_paths(allocator, root_bytes, &search.frameworks, &var options.framework_search);
                     return null;
                 },
                 Error(message) => {
@@ -2198,6 +2202,14 @@ fn native_target(
     defer loader.deinit(allocator);
     var package_name = string::new(allocator);
     defer package_name.deinit(allocator);
+    let triple = options.triple.as_bytes();
+    var build_target = stdtarget::host();
+    if try native::target_for(allocator, triple, &var build_target) |failed| {
+        defer failed.deinit(allocator);
+        try report(io, allocator, &loader.sources, &failed);
+        return 1;
+    }
+    options.target = build_target;
     let include_tests = command == NativeCommand::Test;
     let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, include_tests);
     match loaded {
@@ -2208,12 +2220,12 @@ fn native_target(
         },
         Program(program) => {
             defer program.deinit(allocator);
-            if try types::check(allocator, &var tree, &program) |failed| {
+            if try types::check_for_target(allocator, &var tree, &program, build_target) |failed| {
                 defer failed.deinit(allocator);
                 try report(io, allocator, &loader.sources, &failed);
                 return 1;
             }
-            var checker = try ownership::new_checker(allocator, &tree, &program);
+            var checker = try ownership::new_checker_for_target(allocator, &tree, &program, build_target);
             defer checker.deinit(allocator);
             if try checker.check_program(&var tree, &program) |failed| {
                 defer failed.deinit(allocator);
@@ -2229,7 +2241,7 @@ fn native_target(
                 },
                 Codes(std_errors) => {
                     defer std_errors.deinit(allocator);
-                    var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+                    var lowerer = try ir::new_lowerer_for_target(allocator, &tree, &program, &checker, build_target);
                     defer lowerer.deinit(allocator);
                     if try lowerer.lower(&var tree, &program, &std_errors, &loader.sources) |failed| {
                         defer failed.deinit(allocator);
@@ -2237,7 +2249,7 @@ fn native_target(
                         return 1;
                     }
                     if command == NativeCommand::Build and options.opt {
-                        if try ir::optimize(allocator, &var lowerer.module, stdtarget::Target::Native) |failed| {
+                        if try ir::optimize(allocator, &var lowerer.module, build_target) |failed| {
                             defer failed.deinit(allocator);
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
@@ -2279,7 +2291,7 @@ fn native_target(
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
                     }
-                    let darwin = native::target_is_darwin(options, &host);
+                    let darwin = build_target == stdtarget::Target::NativeDarwin;
                     var text = string::new(allocator);
                     defer text.deinit(allocator);
                     if try llvm::emit_native(allocator, &var lowerer.module, &var text, darwin) |failed| {

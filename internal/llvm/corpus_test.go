@@ -122,7 +122,7 @@ func lowerCorpusInput(input string, opt bool) (*ir.Module, error) {
 		return nil, err
 	}
 	if opt {
-		if err := ir.Optimize(module, stdtarget.Native); err != nil {
+		if err := ir.Optimize(module, stdtarget.MustHost()); err != nil {
 			return nil, err
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -84,10 +85,14 @@ func (s *Server) analyzeDocument(uri string) []Diagnostic {
 // every independent type error at once. Ownership checks only run once the
 // program type-checks cleanly, since they assume a well-typed program.
 func checkProgramDiagnostics(program *ast.Program) []Diagnostic {
-	if typeErrors := types.New().CheckAll(program); len(typeErrors) > 0 {
+	host, err := stdtarget.Host()
+	if err != nil {
+		return []Diagnostic{diagnosticAtStart(err.Error())}
+	}
+	if typeErrors := types.NewForTarget(host).CheckAll(program); len(typeErrors) > 0 {
 		return diagnosticsFromErrors(typeErrors)
 	}
-	if moveErrors := ownership.New().CheckAll(program); len(moveErrors) > 0 {
+	if moveErrors := ownership.NewForTarget(host).CheckAll(program); len(moveErrors) > 0 {
 		return diagnosticsFromErrors(moveErrors)
 	}
 	return []Diagnostic{}

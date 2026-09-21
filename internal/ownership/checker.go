@@ -240,9 +240,9 @@ type temporaryBorrow struct {
 	mutable bool
 }
 
-// New creates an empty ownership checker.
+// New creates an empty ownership checker for the host target.
 func New() *Checker {
-	return NewForTarget(stdtarget.Native)
+	return NewForTarget(stdtarget.MustHost())
 }
 
 // NewForTarget creates an ownership checker for one selected build target.

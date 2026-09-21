@@ -1,6 +1,7 @@
 package native
 
 import (
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,11 @@ func TestModuleForLinkerFollowsTheClang(t *testing.T) {
 		{"Apple clang version 15.0.0 (clang-1500.3.9.4)", "x86_64-unknown-linux-gnu", module},
 	}
 	for _, tt := range cases {
-		got := moduleForLinker(Options{LLVMIR: module, Triple: tt.triple, Linker: "clang"}, tt.version)
+		target, err := TargetFor(tt.triple)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := moduleForLinker(Options{LLVMIR: module, Target: target, Linker: "clang"}, tt.version)
 		if got != tt.want {
 			t.Errorf("%q for %s: got %q, want %q", tt.version, tt.triple, got, tt.want)
 		}
@@ -126,10 +131,35 @@ func TestExecutableKeyNamesTheLibrariesItLinks(t *testing.T) {
 func TestFrameworkNeedsDarwin(t *testing.T) {
 	options := Options{
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
-		Triple: "x86_64-unknown-linux-gnu", Frameworks: []string{"Accelerate"},
+		Target: stdtarget.NativeLinux, Frameworks: []string{"Accelerate"},
 	}
 	err := validateOptions(options)
 	if err == nil || !strings.Contains(err.Error(), "needs a Darwin target") {
 		t.Fatalf("expected a Darwin-only error, got %v", err)
+	}
+}
+
+// TestTargetForTriple maps the OS a triple names to the target the comptime
+// predicates and the manifest read, and refuses an OS the runtime has no
+// build for.
+func TestTargetForTriple(t *testing.T) {
+	cases := map[string]stdtarget.Target{
+		"arm64-apple-darwin":       stdtarget.NativeDarwin,
+		"x86_64-apple-macos":       stdtarget.NativeDarwin,
+		"x86_64-unknown-linux-gnu": stdtarget.NativeLinux,
+	}
+	for triple, want := range cases {
+		got, err := TargetFor(triple)
+		if err != nil || got != want {
+			t.Fatalf("TargetFor(%q) = (%v, %v), want %v", triple, got, err, want)
+		}
+	}
+	if _, err := TargetFor("x86_64-pc-windows-msvc"); err == nil ||
+		!strings.Contains(err.Error(), "names no supported OS") {
+		t.Fatalf("expected an unsupported OS error, got %v", err)
+	}
+	host, err := TargetFor("")
+	if err != nil || !host.IsNative() {
+		t.Fatalf("TargetFor(\"\") = (%v, %v)", host, err)
 	}
 }

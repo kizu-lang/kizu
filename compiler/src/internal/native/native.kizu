@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::buildcache;
 import compiler::internal::diagnostic;
 import compiler::internal::fsutil;
+import compiler::internal::stdtarget;
 import std::array;
 import std::fmt;
 import std::fs;
@@ -27,6 +28,10 @@ import std::string;
 /// struct cannot borrow (`LLVMIR`, `ErrorSets`).
 pub struct Options {
     pub output: string::String,
+    /// target is the native target the triple (or, without one, the host)
+    /// names. It is what the program was lowered for, so the same answer
+    /// decides the comptime branches, the manifest section and the link.
+    pub target: stdtarget::Target,
     pub triple: string::String,
     pub cpu: string::String,
     pub abi: string::String,
@@ -103,7 +108,7 @@ pub fn build(
     if options.output.len() == 0 {
         return try fail_parts(allocator, "native error: output path is required", "", "");
     }
-    if try validate_options(allocator, options, host) |failed| {
+    if try validate_options(allocator, options) |failed| {
         return move failed;
     }
     var cache = try buildcache::new(io, allocator);
@@ -137,7 +142,7 @@ pub fn build(
     var command = array::new<string::String>(allocator);
     defer command.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
-    let darwin = target_is_darwin(options, host);
+    let darwin = options.target == stdtarget::Target::NativeDarwin;
     if try link(io, allocator, dir_bytes, runtime_bytes, output, options, darwin, target_is_arm64(options, host), version_bytes, llvm_ir, &var command) |failed| {
         errdefer failed.deinit(allocator);
         try clean_build_dir(io, allocator, dir_bytes);
@@ -164,7 +169,7 @@ pub fn executable(
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
     out_exe: &var string::String
 ) -> !?diagnostic::Diagnostic {
-    if try validate_options(allocator, options, host) |failed| {
+    if try validate_options(allocator, options) |failed| {
         return move failed;
     }
     var cache = try buildcache::new(io, allocator);
@@ -221,7 +226,7 @@ pub fn executable(
             let runtime_bytes = runtime_path.as_bytes();
             var command = array::new<string::String>(allocator);
             defer command.deinit(allocator);
-            let darwin = target_is_darwin(options, host);
+            let darwin = options.target == stdtarget::Target::NativeDarwin;
             if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, darwin, target_is_arm64(options, host), version_bytes, llvm_ir, &var command) |failed| {
                 errdefer failed.deinit(allocator);
                 try cache.discard_artifact(io, allocator, move pending);
@@ -307,16 +312,32 @@ pub fn target_is_arm64(options: &Options, host: &string::String) -> bool {
     return contains_ascii_fold(triple, "aarch64") or contains_ascii_fold(triple, "arm64");
 }
 
-/// Reports whether the selected native target is Darwin, whose functions keep
-/// frame records. An omitted triple names host; an explicit Darwin or macOS
-/// triple names Darwin even when clang is cross-compiling.
-pub fn target_is_darwin(options: &Options, host: &string::String) -> bool {
-    if options.triple.len() == 0 {
-        let host_bytes = host.as_bytes();
-        return mem::starts_with(host_bytes, "darwin-");
+/// Returns the native target a triple names, the Go `TargetFor`. An omitted
+/// triple names the host; explicit Apple Darwin and macOS triples name
+/// Darwin, Linux triples name Linux, and a triple for any other OS is
+/// refused because the runtime is not built for it.
+pub fn target_for(
+    allocator: Allocator, triple: []u8, out: &var stdtarget::Target
+) -> !?diagnostic::Diagnostic {
+    if mem::len(triple) == 0 {
+        out.* = stdtarget::host();
+        return null;
     }
-    let triple = options.triple.as_bytes();
-    return contains_ascii_fold(triple, "darwin") or contains_ascii_fold(triple, "macos");
+    if contains_ascii_fold(triple, "darwin") or contains_ascii_fold(triple, "macos") {
+        out.* = stdtarget::Target::NativeDarwin;
+        return null;
+    }
+    if contains_ascii_fold(triple, "linux") {
+        out.* = stdtarget::Target::NativeLinux;
+        return null;
+    }
+    var message = string::new(allocator);
+    defer message.deinit(allocator);
+    try message.append_bytes(allocator, " names no supported OS (");
+    try message.append_bytes(allocator, stdtarget::native_os_spelling());
+    try message.append_bytes(allocator, ")");
+    let after = message.as_bytes();
+    return try fail_parts(allocator, "native error: --triple ", triple, after);
 }
 
 fn contains_ascii_fold(haystack: []u8, needle: []u8) -> bool {
@@ -582,8 +603,7 @@ fn is_trimmed(byte: u8) -> bool {
 /// Go `validateOptions`.
 fn validate_options(
     allocator: Allocator,
-    options: &Options,
-    host: &string::String
+    options: &Options
 ) -> !?diagnostic::Diagnostic {
     let libc = options.libc.as_bytes();
     if !mem::equal_bytes(libc, "on") {
@@ -608,7 +628,7 @@ fn validate_options(
         return try fail_parts(allocator, "native error: --linker ", linker, " is not implemented yet");
     }
     if options.frameworks.at(0) |framework| {
-        if !target_is_darwin(options, host) {
+        if options.target != stdtarget::Target::NativeDarwin {
             var message = string::new(allocator);
             defer message.deinit(allocator);
             try message.append_bytes(allocator, "native error: @link_framework(");

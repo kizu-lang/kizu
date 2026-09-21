@@ -103,9 +103,9 @@ type Checker struct {
 	captureCondition bool
 }
 
-// New creates an empty type checker.
+// New creates an empty type checker for the host target.
 func New() *Checker {
-	return NewForTarget(stdtarget.Native)
+	return NewForTarget(stdtarget.MustHost())
 }
 
 // NewForTarget creates a type checker for one selected build target.

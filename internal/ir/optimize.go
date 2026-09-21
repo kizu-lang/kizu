@@ -20,7 +20,7 @@ func Optimize(module *Module, target stdtarget.Target) error {
 	EliminateBoundsChecks(module)
 	SimplifyBranches(module)
 	DeadCodeEliminate(module)
-	if target != stdtarget.Native {
+	if !target.IsNative() {
 		ReshapeForEngine(module)
 	}
 	return Verify(module)

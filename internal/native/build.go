@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/buildcache"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 )
 
 // Options describes one native link request.
@@ -26,14 +27,18 @@ type Options struct {
 	// written in is the only thing that decides them.
 	ErrorSets map[string]map[string]int
 	Output    string
-	Triple    string
-	CPU       string
-	ABI       string
-	LibC      string
-	Runtime   string
-	Emit      string
-	Linker    string
-	Opt       bool
+	// Target is the native target the triple (or, without one, the host)
+	// names. It is what the program was lowered for, so the same answer
+	// decides the comptime branches, the manifest section and the link.
+	Target  stdtarget.Target
+	Triple  string
+	CPU     string
+	ABI     string
+	LibC    string
+	Runtime string
+	Emit    string
+	Linker  string
+	Opt     bool
 	// Libraries and Frameworks are what the program's reached extern
 	// declarations named with `@link_library` / `@link_framework`; the search
 	// paths are what its manifest's `[native]` section says about where the
@@ -153,7 +158,7 @@ const (
 // Darwin target. The choice waits until the link so that the module, and the
 // executable cache keyed by it, is the same whichever clang links it.
 func moduleForLinker(options Options, version string) string {
-	if !TargetIsDarwin(options.Triple) || !strings.Contains(version, "Apple clang") {
+	if options.Target != stdtarget.NativeDarwin || !strings.Contains(version, "Apple clang") {
 		return options.LLVMIR
 	}
 	return strings.Replace(options.LLVMIR, inlineStackProbe, appleStackProbe, 1)
@@ -173,15 +178,24 @@ func linkerVersion(options Options) (string, error) {
 	return strings.Trim(line, " \t\r"), nil
 }
 
-// TargetIsDarwin reports whether a native target triple names Darwin. An
-// omitted triple names the host; explicit Apple Darwin and macOS triples name
-// Darwin too.
-func TargetIsDarwin(triple string) bool {
+// TargetFor returns the native target a triple names. An omitted triple
+// names the host; explicit Apple Darwin and macOS triples name Darwin, Linux
+// triples name Linux, and a triple for any other OS is refused because the
+// runtime is not built for it.
+func TargetFor(triple string) (stdtarget.Target, error) {
 	if triple == "" {
-		return runtime.GOOS == "darwin"
+		return stdtarget.Host()
 	}
 	lower := strings.ToLower(triple)
-	return strings.Contains(lower, "darwin") || strings.Contains(lower, "macos")
+	switch {
+	case strings.Contains(lower, "darwin") || strings.Contains(lower, "macos"):
+		return stdtarget.NativeDarwin, nil
+	case strings.Contains(lower, "linux"):
+		return stdtarget.NativeLinux, nil
+	default:
+		return 0, fmt.Errorf("native error: --triple %s names no supported OS (%s)",
+			triple, strings.Join(stdtarget.NativeOS(), ", "))
+	}
 }
 
 // validateOptions rejects native build modes that do not have a concrete backend yet.
@@ -204,7 +218,7 @@ func validateOptions(options Options) error {
 	if options.Linker != "clang" {
 		return fmt.Errorf("native error: --linker %s is not implemented yet", options.Linker)
 	}
-	if len(options.Frameworks) > 0 && !TargetIsDarwin(options.Triple) {
+	if len(options.Frameworks) > 0 && options.Target != stdtarget.NativeDarwin {
 		return fmt.Errorf("native error: @link_framework(%q) needs a Darwin target",
 			options.Frameworks[0])
 	}

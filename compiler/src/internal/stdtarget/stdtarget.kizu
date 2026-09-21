@@ -4,11 +4,61 @@ import std::mem;
 // have no runtime implementation; every semantic phase evaluates this one
 // closed registry.
 
-/// Names the host contract selected for one build.
+/// Names the host contract selected for one build. A native target also
+/// names its operating system, which is what the OS predicates and the
+/// manifest's `[native.<os>]` sections read.
 pub enum Target {
-    Native,
+    NativeDarwin,
+    NativeLinux,
     WasmWasi,
     WasmBrowser,
+}
+
+/// Reports whether the target links a native executable, the Go `IsNative`.
+pub fn is_native(target: Target) -> bool {
+    return target == Target::NativeDarwin or target == Target::NativeLinux;
+}
+
+/// Returns the operating system name a native target is known by in source
+/// and in the manifest, the Go `OS`: "darwin" or "linux". A wasm target has
+/// none.
+pub fn os_name(target: Target) -> []u8 {
+    return match target {
+        NativeDarwin => "darwin",
+        NativeLinux => "linux",
+        WasmWasi => "",
+        WasmBrowser => "",
+    };
+}
+
+/// Spells the operating systems a native target can select, the Go
+/// `NativeOS` already joined with ", " the way the diagnostics print it.
+pub fn native_os_spelling() -> []u8 {
+    return "darwin, linux";
+}
+
+/// Returns the native target for one operating system name, the Go
+/// `NativeFor`.
+pub fn native_for(os: []u8) -> ?Target {
+    if mem::equal_bytes(os, "darwin") {
+        return Target::NativeDarwin;
+    }
+    if mem::equal_bytes(os, "linux") {
+        return Target::NativeLinux;
+    }
+    return null;
+}
+
+/// Returns the native target the compiler itself runs on, the Go `Host`.
+/// The compiler binary is built for one operating system, so the answer is
+/// the one its own comptime predicates give; Go asks `runtime.GOOS` and
+/// refuses a host the runtime is not built for, which cannot happen here
+/// because this compiler is not built for such a host.
+pub fn host() -> Target {
+    comptime if std::target::is_darwin() {
+        return Target::NativeDarwin;
+    }
+    return Target::NativeLinux;
 }
 
 /// Names one compiler-resolved std::target predicate.
@@ -16,6 +66,8 @@ pub enum Predicate {
     IsNative,
     IsWasi,
     IsBrowser,
+    IsDarwin,
+    IsLinux,
 }
 
 /// Returns the predicate named by source text.
@@ -29,15 +81,23 @@ pub fn identify(name: []u8) -> ?Predicate {
     if mem::equal_bytes(name, "std::target::is_browser") {
         return Predicate::IsBrowser;
     }
+    if mem::equal_bytes(name, "std::target::is_darwin") {
+        return Predicate::IsDarwin;
+    }
+    if mem::equal_bytes(name, "std::target::is_linux") {
+        return Predicate::IsLinux;
+    }
     return null;
 }
 
 /// Answers one predicate for the selected build target.
 pub fn evaluate(target: Target, predicate: Predicate) -> bool {
     return match predicate {
-        IsNative => target == Target::Native,
+        IsNative => is_native(target),
         IsWasi => target == Target::WasmWasi,
         IsBrowser => target == Target::WasmBrowser,
+        IsDarwin => target == Target::NativeDarwin,
+        IsLinux => target == Target::NativeLinux,
     };
 }
 
@@ -47,5 +107,7 @@ pub fn spelling(predicate: Predicate) -> []u8 {
         IsNative => "std::target::is_native",
         IsWasi => "std::target::is_wasi",
         IsBrowser => "std::target::is_browser",
+        IsDarwin => "std::target::is_darwin",
+        IsLinux => "std::target::is_linux",
     };
 }
