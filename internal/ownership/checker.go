@@ -4597,6 +4597,11 @@ func releaseConsumedBorrows(value *binding) {
 
 // moveNonIdentExpr handles move contexts for compound expressions.
 func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, error) {
+	// `unsafe` marks what the type checker cannot prove; it says nothing
+	// about ownership, so the value under it moves as it would unmarked.
+	if marked, ok := expr.(*ast.UnsafeExpr); ok {
+		return c.moveNonIdentExpr(marked.Value, env)
+	}
 	if deref, ok := expr.(*ast.DerefExpr); ok {
 		return c.moveDerefExpr(deref, env)
 	}

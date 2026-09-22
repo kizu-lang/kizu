@@ -1,0 +1,42 @@
+// `unsafe` marks what the type checker cannot prove about a struct literal;
+// it says nothing about ownership. An owner handed to a field under the
+// marker moves the way it would unmarked, so the struct is what frees it.
+import std::array;
+import std::mem;
+
+/// `first` always points at the first cell of `items`.
+unsafe struct Cells {
+    first: ptr<i64>,
+    items: array::Array<i64>,
+}
+
+fn (self: Cells) deinit(allocator: Allocator) -> void {
+    self.items.deinit(allocator);
+    return;
+}
+
+fn make(allocator: Allocator) -> !Cells {
+    var items = array::new<i64>(allocator);
+    errdefer items.deinit(allocator);
+    try items.append(allocator, 7);
+    let view = items.as_mut_slice();
+    let first = mut_ptr_of(view);
+    // SAFETY: first was taken from items, which the struct owns from here on.
+    return unsafe Cells { first: first, items: move items };
+}
+
+pub fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let cells = try make(allocator);
+    defer cells.deinit(allocator);
+    // SAFETY: first points at the live first cell of items.
+    print(unsafe ptr_read(cells.first));
+    print(cells.items.len());
+    return;
+}
+
+// run
+// features: unsafe-struct move struct-literal std-array
+// output:
+// 7
+// 1
