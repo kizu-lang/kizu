@@ -702,6 +702,7 @@ func cleanupInstruction(cleanup ir.Cleanup) *ir.Instr {
 		Result:     ir.Value{Type: "void"},
 		Op:         cleanup.Op,
 		Args:       cleanup.Args,
+		CallParams: cleanup.CallParams,
 		ExternABI:  cleanup.ExternABI,
 		ExternName: cleanup.ExternName,
 	}
@@ -719,7 +720,12 @@ func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
 		)
 	}
 	params := make([]string, 0, len(instr.Args))
-	for _, arg := range instr.Args {
+	for index, arg := range instr.Args {
+		// A parameter handed the address of a copy is a pointer to C.
+		if index < len(instr.CallParams) && instr.CallParams[index].TakesAddressOf(arg.Type) {
+			params = append(params, "ptr")
+			continue
+		}
 		params = append(params, e.llvmType(arg.Type))
 	}
 	return fmt.Sprintf(
@@ -1865,7 +1871,13 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		return e.writeInternalCall(name, instr)
 	}
 	args := make([]string, 0, len(instr.Args))
-	for _, arg := range instr.Args {
+	for index, arg := range instr.Args {
+		// A foreign callee carries its declared passing on the call; a
+		// parameter handed the address of a copy gets that copy made here.
+		if index < len(instr.CallParams) && instr.CallParams[index].TakesAddressOf(arg.Type) {
+			args = append(args, e.copyAddressArg(arg, index))
+			continue
+		}
 		value := e.value(arg)
 		args = append(args, e.llvmType(arg.Type)+" "+value.operand)
 	}
@@ -1943,12 +1955,7 @@ func (e *emitter) internalCallArg(arg ir.Value, param ir.Param, index int) (stri
 	value := e.value(arg)
 	argType := e.llvmType(arg.Type)
 	if param.TakesAddressOf(arg.Type) {
-		slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
-		fmt.Fprintf(&e.out, "  %s = alloca %s, align %d\n",
-			slotName, argType, maxInlinePayloadAlign)
-		fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
-			argType, value.operand, slotName, maxInlinePayloadAlign)
-		return "ptr " + slotName, nil
+		return e.copyAddressArg(arg, index), nil
 	}
 	if !e.usesIndirectStructParamABI(arg.Type) {
 		return argType + " " + value.operand, nil
@@ -1957,6 +1964,19 @@ func (e *emitter) internalCallArg(arg ir.Value, param ir.Param, index int) (stri
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, argType)
 	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, value.operand, slotName)
 	return "ptr " + slotName, nil
+}
+
+// copyAddressArg stores a copy of arg in a slot of its own and returns that
+// slot as the pointer argument a PassCopyAddress parameter reads through.
+func (e *emitter) copyAddressArg(arg ir.Value, index int) string {
+	value := e.value(arg)
+	argType := e.llvmType(arg.Type)
+	slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
+	fmt.Fprintf(&e.out, "  %s = alloca %s, align %d\n",
+		slotName, argType, maxInlinePayloadAlign)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
+		argType, value.operand, slotName, maxInlinePayloadAlign)
+	return "ptr " + slotName
 }
 
 // usesHostedRuntimeABI reports whether a std hosted runtime call uses the

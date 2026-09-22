@@ -168,6 +168,9 @@ func (l *lowerer) cleanupFromFunction(name string, args []Value) (Cleanup, error
 		return Cleanup{}, fmt.Errorf("ir error: defer call must return void, got %s", sig.Return)
 	}
 	cleanup := Cleanup{Op: "call." + name, Args: args, Loads: ownerLoads(args, sig.Params)}
+	if _, foreign := l.externDecls[name]; foreign {
+		cleanup.CallParams = sig.Params
+	}
 	if external, ok := l.externDecls[name]; ok {
 		cleanup.Op = "call." + external.name
 		cleanup.ExternABI = external.abi
