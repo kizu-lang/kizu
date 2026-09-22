@@ -40,6 +40,10 @@ pub struct Module {
     // kept here so a Cleanup stays a copy value the frames and the attached
     // instructions can carry.
     pub cleanup_args: array::Array<Value>,
+    // cleanup_params holds the declared parameters of every deferred
+    // foreign call, each cleanup naming its own contiguous run: the Go
+    // `Cleanup.CallParams` slice, pooled the way cleanup_args is.
+    pub cleanup_params: array::Array<Param>,
 }
 
 /// Is what one `extern` declaration tells the linker: the ABI it is called
@@ -63,7 +67,8 @@ pub fn new_module(allocator: Allocator) -> !Module {
         blocks: arena::new<BlockNode>(allocator),
         instrs: arena::new<InstrNode>(allocator),
         externs: array::new<Extern>(allocator),
-        cleanup_args: array::new<Value>(allocator)
+        cleanup_args: array::new<Value>(allocator),
+        cleanup_params: array::new<Param>(allocator)
     };
 }
 
@@ -94,6 +99,26 @@ pub fn (self: &var Module) set_cleanup_arg(cleanup: Cleanup, index: i64, value: 
     }
     try self.cleanup_args.set(cleanup.args_start + index, value);
     return;
+}
+
+/// Appends one cleanup's declared parameters to the module's pool and
+/// returns where the run starts.
+pub fn (self: &var Module) add_cleanup_params(allocator: Allocator, params: &array::Array<Param>) -> !i64 {
+    let start = self.cleanup_params.len();
+    var index = 0;
+    while params.get(index) |param| {
+        index = index + 1;
+        try self.cleanup_params.append(allocator, param);
+    }
+    return start;
+}
+
+/// Returns one declared parameter of a cleanup, or null past its last.
+pub fn (self: &Module) cleanup_param(cleanup: Cleanup, index: i64) -> ?Param {
+    if index < 0 or index >= cleanup.params_len {
+        return null;
+    }
+    return self.cleanup_params.get(cleanup.params_start + index);
 }
 
 /// Reports whether a cleanup loads its index-th argument out of a slot at
@@ -343,6 +368,11 @@ pub struct Cleanup {
     // standalone instruction later.
     pub extern_abi: Name,
     pub extern_name: Name,
+    // The declared passing of a foreign callee, which has no body here to
+    // read it from, as a run of the module's cleanup_params pool (the Go
+    // `Cleanup.CallParams`, InstrNode.call_params).
+    pub params_start: i64,
+    pub params_len: i64,
     pub on_error: bool,
     // The receiver expression the cleanup statement was written with, which
     // is how the ownership checker names a retired errdefer: one node per

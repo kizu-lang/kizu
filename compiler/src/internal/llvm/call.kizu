@@ -29,6 +29,13 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
     defer args.deinit(self.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
+        // A foreign callee carries its declared passing on the call; a
+        // parameter handed the address of a copy gets that copy made here.
+        if call_param_takes_address_of(module, node, index, arg.type_name) {
+            try args.append(self.allocator, try self.copy_address_arg(module, arg, index));
+            index = index + 1;
+            continue;
+        }
         index = index + 1;
         let value = try self.operand(module, arg);
         let arg_type = try self.llvm_type_of(module, arg.type_name);
@@ -152,13 +159,7 @@ fn (self: &var Emitter) internal_call_arg(
     let value = try self.operand(module, arg);
     let arg_type = try self.llvm_type_of(module, arg.type_name);
     if takes_address_of(module, passing, param_type, arg.type_name) {
-        let slot_name = try self.next_arg_slot(index);
-        try self.line3("  %s = alloca %s, align %d", Arg::Str(slot_name), Arg::Str(arg_type), Arg::Int(max_inline_payload_align()));
-        try self.line4(
-            "  store %s %s, ptr %s, align %d",
-            Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
-        );
-        return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
+        return self.copy_address_arg(module, arg, index);
     }
     let type_text = ir::name_text(&module.names, arg.type_name);
     let type_bytes = type_text.as_bytes();
@@ -169,6 +170,29 @@ fn (self: &var Emitter) internal_call_arg(
     try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(arg_type));
     try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name));
     return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
+}
+
+/// Stores a copy of arg in a slot of its own and returns that slot as the
+/// pointer argument a CopyAddress parameter reads through, the Go
+/// `copyAddressArg`.
+fn (self: &var Emitter) copy_address_arg(module: &ir::Module, arg: ir::Value, index: i64) -> !string::String {
+    let value = try self.operand(module, arg);
+    let arg_type = try self.llvm_type_of(module, arg.type_name);
+    let slot_name = try self.next_arg_slot(index);
+    try self.line3("  %s = alloca %s, align %d", Arg::Str(slot_name), Arg::Str(arg_type), Arg::Int(max_inline_payload_align()));
+    try self.line4(
+        "  store %s %s, ptr %s, align %d",
+        Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
+    );
+    return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
+}
+
+/// Reports whether the call's index-th declared parameter, when the call
+/// carries one, is handed the address of a copy of its argument: the Go
+/// `index < len(instr.CallParams) && instr.CallParams[index].TakesAddressOf(arg.Type)`.
+fn call_param_takes_address_of(module: &ir::Module, node: &ir::InstrNode, index: i64, arg_type: ir::Name) -> bool {
+    let param = node.call_params.get(index) orelse return false;
+    return takes_address_of(module, param.passing, param.type_name, arg_type);
 }
 
 /// Names the slot one by-address argument is copied into, the Go
@@ -348,6 +372,12 @@ fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, 
     }
     var index = 0;
     while node.args.get(index) |arg| {
+        // A parameter handed the address of a copy is a pointer to C.
+        if call_param_takes_address_of(module, node, index, arg.type_name) {
+            try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+            index = index + 1;
+            continue;
+        }
         index = index + 1;
         let arg_type = try self.llvm_type_of(module, arg.type_name);
         try params.append(self.allocator, try self.names.copy(arg_type));

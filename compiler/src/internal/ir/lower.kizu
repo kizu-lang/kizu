@@ -1304,11 +1304,22 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     var params = array::new<Param>(self.allocator);
     errdefer params.deinit(self.allocator);
     let count = self.decl_param_count(decl);
+    let extern_abi = self.decl_facts.at(decl.node).extern_abi;
     var index = 0;
     while index < count {
         let facts = self.decl_param(decl, index);
         index = index + 1;
-        try params.append(self.allocator, try self.lower_param(facts));
+        var lowered = try self.lower_param(facts);
+        if !is_empty(extern_abi) and facts.borrow and !facts.mut_borrow {
+            // A foreign function reads a borrowed extern struct through a
+            // pointer, so the call hands it the address of a copy: the flat
+            // copy a Kizu `&T` travels as is an internal shape C knows
+            // nothing about (SPEC §12.2).
+            let elem = try self.resolve_bound_type(facts.type_name);
+            lowered.type_name = try self.module.names.prefixed("&", elem);
+            lowered.passing = Passing::CopyAddress;
+        }
+        try params.append(self.allocator, lowered);
     }
     let declared_return = self.decl_facts.at(decl.node).return_type;
     let resolved = try self.resolve_bound_type(declared_return);

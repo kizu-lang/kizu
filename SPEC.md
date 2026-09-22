@@ -2513,8 +2513,10 @@ extern "c" fn clock_gettime(clock: i32, out: &var Timespec) -> i32
   layout であり、それは compiler が検査します。pointer の先を読み書きする側が
   `unsafe` を負う根拠は §0.1 が持っています。
 * `extern "c" fn` は `extern "c" struct` を `&S` / `&var S` で受け取れ、C には
-  struct への pointer として渡ります。値渡しは拒否します。C が struct を register に
-  どう載せるかは platform ごとに違い、pointer なら同じ意味を持つためです。
+  struct への pointer として渡ります。`&var S` は呼び出し側の storage そのもの、
+  `&S` は call のために作った copy の address です。値渡しは拒否します。C が
+  struct を register にどう載せるかは platform ごとに違い、pointer なら同じ意味を
+  持つためです。
 * それ以外は通常の struct と同じです。literal で構築し、field を読み書きし、
   `ptr<S>` 経由なら `p.*.field` で触ります。
 

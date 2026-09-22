@@ -192,6 +192,9 @@ type Cleanup struct {
 	// instruction, so deriving them later from Op would lose the boundary.
 	ExternABI  string
 	ExternName string
+	// CallParams carries the declared passing of a foreign callee, which
+	// has no body here to read it from (Instr.CallParams).
+	CallParams []Param
 	OnError    bool
 	// Receiver is the receiver expression the cleanup statement was written
 	// with, which is how the ownership checker names a retired errdefer: one

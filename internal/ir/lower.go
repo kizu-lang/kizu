@@ -980,7 +980,16 @@ func lowerStruct(decl *ast.StructDecl) Struct {
 func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
 	params := make([]Param, 0, len(sig.Params))
 	for _, param := range sig.Params {
-		params = append(params, l.lowerParam(param))
+		lowered := l.lowerParam(param)
+		if sig.ExternABI != "" && param.Borrow && !param.MutBorrow {
+			// A foreign function reads a borrowed extern struct through a
+			// pointer, so the call hands it the address of a copy: the flat
+			// copy a Kizu `&T` travels as is an internal shape C knows
+			// nothing about (SPEC §12.2).
+			lowered.Type = "&" + l.resolveType(typ.Text(param.TypeName))
+			lowered.Passing = PassCopyAddress
+		}
+		params = append(params, lowered)
 	}
 	declaredReturn := l.resolveType(returnType(typ.Text(sig.ReturnType)))
 	returned := l.lowerReturnType(declaredReturn)
@@ -2408,6 +2417,7 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 	} else if builtinReturn, ok := runtimeBuiltinReturnType(name); ok {
 		ret = builtinReturn
 	}
+	calleeName := name
 	external, foreign := l.externDecls[name]
 	if foreign {
 		name = external.name
@@ -2417,6 +2427,9 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 		instr := l.block.Instrs[len(l.block.Instrs)-1]
 		instr.ExternABI = external.abi
 		instr.ExternName = external.name
+		// A foreign callee has no body in the module, so the call carries
+		// the passing its declaration decided, the way an indirect call does.
+		instr.CallParams = l.signatures[calleeName].Params
 	}
 	return result, nil
 }
