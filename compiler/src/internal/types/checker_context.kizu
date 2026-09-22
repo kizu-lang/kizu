@@ -135,6 +135,63 @@ fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaFieldHandle {
     return null;
 }
 
+// Names one active integer-range `comptime for` capture, the Go
+// `comptimeInts` entry. Unlike a field capture the integer is a value: the
+// body reads it as an i64 local, and a comptime expression reads the integer
+// it stands for in this expansion. Bindings form a lexical stack the same
+// way the field captures do.
+struct ComptimeIntBinding {
+    parent: ?arena::Handle<ComptimeIntBinding>,
+    name: string::String,
+    value: i64,
+}
+
+struct ComptimeIntStore {
+    allocator: Allocator,
+    bindings: arena::Arena<ComptimeIntBinding>,
+    current: ?arena::Handle<ComptimeIntBinding>,
+}
+
+fn new_comptime_int_store(allocator: Allocator) -> ComptimeIntStore {
+    return ComptimeIntStore {
+        allocator: allocator,
+        bindings: arena::new<ComptimeIntBinding>(allocator),
+        current: null
+    };
+}
+
+fn (self: &var ComptimeIntStore) bind(
+    name: []u8,
+    value: i64
+) -> !?arena::Handle<ComptimeIntBinding> {
+    let previous = self.current;
+    let owned_name = try string::from_bytes(self.allocator, name);
+    self.current = try self.bindings.add(self.allocator, ComptimeIntBinding {
+        parent: previous,
+        name: move owned_name,
+        value: value
+    });
+    return previous;
+}
+
+fn (self: &var ComptimeIntStore) restore(previous: ?arena::Handle<ComptimeIntBinding>) -> void {
+    self.current = previous;
+    return;
+}
+
+fn (self: &ComptimeIntStore) get(name: []u8) -> ?i64 {
+    var current = self.current;
+    while current |handle| {
+        let binding = self.bindings.at(handle);
+        let retained_name = binding.name.as_bytes();
+        if mem::equal_bytes(retained_name, name) {
+            return binding.value;
+        }
+        current = binding.parent;
+    }
+    return null;
+}
+
 // Names one active `Function` static argument. Bindings form a lexical stack
 // the same way the field captures do: restoring the previous handle removes
 // every name an instantiation pushed.

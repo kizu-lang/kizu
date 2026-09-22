@@ -268,6 +268,64 @@ fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaField {
     return null;
 }
 
+/// Names one active integer-range `comptime for` capture, the Go
+/// `comptimeInts` entry: the integer this expansion stands for, so a comptime
+/// condition in the body folds with it. Bindings form the same lexical stack
+/// the field captures do.
+struct ComptimeIntBinding {
+    parent: ?arena::Handle<ComptimeIntBinding>,
+    name: string::String,
+    value: i64,
+}
+
+struct ComptimeIntStore {
+    allocator: Allocator,
+    bindings: arena::Arena<ComptimeIntBinding>,
+    current: ?arena::Handle<ComptimeIntBinding>,
+}
+
+fn new_comptime_int_store(allocator: Allocator) -> ComptimeIntStore {
+    return ComptimeIntStore {
+        allocator: allocator,
+        bindings: arena::new<ComptimeIntBinding>(allocator),
+        current: null
+    };
+}
+
+fn (self: ComptimeIntStore) deinit(allocator: Allocator) -> void {
+    self.bindings.deinit(allocator);
+    return;
+}
+
+fn (self: &var ComptimeIntStore) bind(name: []u8, value: i64) -> !?arena::Handle<ComptimeIntBinding> {
+    let previous = self.current;
+    let owned_name = try string::from_bytes(self.allocator, name);
+    self.current = try self.bindings.add(self.allocator, ComptimeIntBinding {
+        parent: previous,
+        name: move owned_name,
+        value: value
+    });
+    return previous;
+}
+
+fn (self: &var ComptimeIntStore) restore(previous: ?arena::Handle<ComptimeIntBinding>) -> void {
+    self.current = previous;
+    return;
+}
+
+fn (self: &ComptimeIntStore) get(name: []u8) -> ?i64 {
+    var current = self.current;
+    while current |handle| {
+        let binding = self.bindings.at(handle);
+        let retained_name = binding.name.as_bytes();
+        if mem::equal_bytes(retained_name, name) {
+            return binding.value;
+        }
+        current = binding.parent;
+    }
+    return null;
+}
+
 /// Names one active `Function` static argument. Bindings form a lexical stack
 /// the same way the field captures do.
 struct FunctionBinding {
@@ -458,6 +516,10 @@ pub struct Checker {
     // meta_fields binds the captures of the `comptime for` expansions
     // currently open. A capture is not a value, so it is not a scope binding.
     meta_fields: MetaBindingStore,
+    // comptime_ints binds the captures of the integer-range `comptime for`
+    // expansions currently open, so a comptime condition in the body folds
+    // with the integer this expansion stands for.
+    comptime_ints: ComptimeIntStore,
     function_bindings: FunctionBindingStore,
     // loop_starts is the stack of loops the statement being checked sits in,
     // innermost last: what a `break` or `continue` leaves, and the binding
@@ -565,6 +627,7 @@ pub fn new_checker_for_target(
         checked_instances: map::new<[]u8, bool>(allocator),
         instantiation_depth: 0,
         meta_fields: new_meta_binding_store(allocator),
+        comptime_ints: new_comptime_int_store(allocator),
         function_bindings: new_function_binding_store(allocator),
         loop_starts: array::new<LoopStart>(allocator),
         loop_base: 0,
@@ -606,6 +669,7 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.declared_deinits.deinit(allocator);
     self.checked_instances.deinit(allocator);
     self.meta_fields.deinit(allocator);
+    self.comptime_ints.deinit(allocator);
     self.function_bindings.deinit(allocator);
     self.missing_markers.deinit(allocator);
     self.type_arg_values.deinit(allocator);

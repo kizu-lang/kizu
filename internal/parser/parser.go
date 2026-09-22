@@ -1205,15 +1205,24 @@ func (p *Parser) parseForStmt(label string) ast.Statement {
 	return stmt
 }
 
-// parseComptimeForStmt parses a compile-time loop over a `std::meta` list.
-// The capture spelling is the one every other loop uses.
+// parseComptimeForStmt parses a compile-time loop over a `std::meta` list or
+// an integer range. The range and capture spellings are the ones the runtime
+// `for` uses, so the only word that separates the two loops is `comptime`.
 func (p *Parser) parseComptimeForStmt() ast.Statement {
 	stmt := &ast.ComptimeForStmt{}
 	if !p.expectPeek(token.For) {
 		return stmt
 	}
 	p.nextToken()
-	stmt.List = p.parseExpression(lowest)
+	first := p.parseExpression(lowest)
+	if p.peek.Type == token.Range {
+		p.nextToken()
+		p.nextToken()
+		stmt.Start = first
+		stmt.End = p.parseExpression(lowest)
+	} else {
+		stmt.List = first
+	}
 	capture, ok := p.parsePayloadCapture()
 	if !ok {
 		return stmt

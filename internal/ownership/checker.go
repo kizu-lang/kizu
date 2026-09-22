@@ -56,6 +56,10 @@ type Checker struct {
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// open. A capture is not a value, so it is not a scope binding.
 	metaFields map[string]metaField
+	// comptimeInts binds the captures of the integer-range `comptime for`
+	// expansions currently open, so a comptime condition in the body folds
+	// with the integer this expansion stands for.
+	comptimeInts map[string]int64
 	// loopStarts is the stack of loops the statement being checked sits in,
 	// innermost last: what a `break` or `continue` leaves, and the binding
 	// watermark its body's locals start at.
@@ -264,6 +268,7 @@ func NewForTarget(target stdtarget.Target) *Checker {
 		enumOrder:         map[string][]string{},
 		unionOrder:        map[string][]string{},
 		metaFields:        map[string]metaField{},
+		comptimeInts:      map[string]int64{},
 		functionArgs:      map[string]string{},
 		checkedInstances:  map[string]bool{},
 		result:            newResult(),

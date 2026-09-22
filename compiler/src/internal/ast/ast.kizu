@@ -433,11 +433,25 @@ pub struct ComptimeIfStmt {
     pub alternative: ?Block,
 }
 
-/// Repeats a body for every element of a compile-time list.
+/// Repeats a body for every element of a compile-time list, or for every
+/// integer of a half-open range. Name binds one element per expansion.
 pub struct ComptimeForStmt {
-    pub list: Expression,
+    pub iterable: ComptimeForIterable,
     pub name: Text,
     pub body: Block,
+}
+
+/// Is what a `comptime for` walks: a `std::meta` list, or an integer range
+/// written Start..End (the Go List, or Start and End with List nil).
+pub union ComptimeForIterable {
+    List(Expression),
+    Range(ComptimeForRange),
+}
+
+/// Is the half-open integer range an integer-range `comptime for` expands.
+pub struct ComptimeForRange {
+    pub start: Expression,
+    pub end: Expression,
 }
 
 /// Repeats a body for every variant of a compile-time value.
@@ -1171,7 +1185,14 @@ fn append_statement(
         },
         ComptimeFor(value) => {
             try out.append_bytes(allocator, "comptime for ");
-            try append_expression(allocator, out, ast, value.list);
+            match value.iterable {
+                List(list) => try append_expression(allocator, out, ast, list),
+                Range(range) => {
+                    try append_expression(allocator, out, ast, range.start);
+                    try out.append_bytes(allocator, "..");
+                    try append_expression(allocator, out, ast, range.end);
+                },
+            }
             try out.append_bytes(allocator, " |");
             try append_text(allocator, out, ast, value.name);
             try out.append_bytes(allocator, "| ");

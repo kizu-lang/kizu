@@ -117,6 +117,9 @@ func nestingStatementChildren(stmt ast.Statement) ([]ast.Expression, []ast.State
 	case *ast.ComptimeIfStmt:
 		return []ast.Expression{s.Condition}, blocks(s.Consequence, s.Alternative), true
 	case *ast.ComptimeForStmt:
+		if s.IsRange() {
+			return []ast.Expression{s.Start, s.End}, blocks(s.Body), true
+		}
 		return nil, blocks(s.Body), true
 	case *ast.ComptimeMatchStmt:
 		return []ast.Expression{s.Value}, blocks(s.Body), true

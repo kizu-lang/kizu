@@ -3,6 +3,7 @@ package ir
 import (
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/quote"
@@ -61,6 +62,9 @@ func matchArmKey(arm ast.MatchArm) string {
 // lowerComptimeForStmt lowers the body once per field. The loop itself has no
 // runtime form: what reaches the IR is the expansions, in field order.
 func (l *lowerer) lowerComptimeForStmt(stmt *ast.ComptimeForStmt) error {
+	if stmt.IsRange() {
+		return l.lowerComptimeForRange(stmt)
+	}
 	fields, err := l.comptimeForFields(stmt.List)
 	if err != nil {
 		return err
@@ -75,6 +79,32 @@ func (l *lowerer) lowerComptimeForStmt(stmt *ast.ComptimeForStmt) error {
 	}()
 	for _, field := range fields {
 		l.metaFields[stmt.Name] = field
+		if err := l.lowerBlock(stmt.Body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lowerComptimeForRange lowers the body once per integer in the range, with
+// the capture bound as a static value: a read of it in the body is the
+// constant, and a comptime condition on it folds (lowerIdentExpr, constInt).
+func (l *lowerer) lowerComptimeForRange(stmt *ast.ComptimeForStmt) error {
+	start, startOK := l.constInt(stmt.Start)
+	end, endOK := l.constInt(stmt.End)
+	if !startOK || !endOK {
+		return fmt.Errorf("ir error: comptime for range bounds must be constant integers")
+	}
+	previous, had := l.staticValues[stmt.Name]
+	defer func() {
+		if had {
+			l.staticValues[stmt.Name] = previous
+			return
+		}
+		delete(l.staticValues, stmt.Name)
+	}()
+	for value := start; value < end; value++ {
+		l.staticValues[stmt.Name] = staticValue{typ: "i64", text: strconv.FormatInt(value, 10)}
 		if err := l.lowerBlock(stmt.Body); err != nil {
 			return err
 		}

@@ -52,6 +52,9 @@ func matchArmKey(arm ast.MatchArm) string {
 // the body is a move in every expansion -- which is what makes moving an owner
 // inside a multi-field loop the error it should be.
 func (c *Checker) checkComptimeForStmt(stmt *ast.ComptimeForStmt, env *scope) error {
+	if stmt.IsRange() {
+		return c.checkComptimeForRange(stmt, env)
+	}
 	fields, err := c.comptimeForFields(stmt.List)
 	if err != nil {
 		return err
@@ -67,6 +70,41 @@ func (c *Checker) checkComptimeForStmt(stmt *ast.ComptimeForStmt, env *scope) er
 	for _, field := range fields {
 		c.metaFields[stmt.Name] = field
 		if err := c.checkBlock(stmt.Body, env.child()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkComptimeForRange checks each expansion of an integer-range loop with
+// the capture bound as a copy i64 local and as the integer a comptime
+// condition in the body folds with. The type checker has already sized the
+// range, so an unreadable bound here is a bug, not a diagnostic.
+func (c *Checker) checkComptimeForRange(stmt *ast.ComptimeForStmt, env *scope) error {
+	if _, err := c.readComptimeOnly(stmt.Start); err != nil {
+		return err
+	}
+	if _, err := c.readComptimeOnly(stmt.End); err != nil {
+		return err
+	}
+	start, startOK := c.intLiteral(stmt.Start)
+	end, endOK := c.intLiteral(stmt.End)
+	if !startOK || !endOK {
+		return errorf("borrow error: comptime for range bounds must be comptime integers")
+	}
+	previous, had := c.comptimeInts[stmt.Name]
+	defer func() {
+		if had {
+			c.comptimeInts[stmt.Name] = previous
+			return
+		}
+		delete(c.comptimeInts, stmt.Name)
+	}()
+	for value := start; value < end; value++ {
+		c.comptimeInts[stmt.Name] = value
+		child := env.child()
+		child.define(c.newBinding(stmt.Name, "i64"))
+		if err := c.checkBlock(stmt.Body, child); err != nil {
 			return err
 		}
 	}

@@ -1089,6 +1089,28 @@ fn main() { let size = comptime (4 * 1024); ` +
 	}
 }
 
+// TestParseComptimeForRange checks that a comptime loop over an integer
+// range keeps the runtime `for` spelling, with `comptime` the only added word.
+func TestParseComptimeForRange(t *testing.T) {
+	input := `fn main() {
+    comptime for 0..3 |row| {
+        comptime for row..2 * row |col| {
+            print(row * col);
+        }
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() { comptime for 0..3 |row| { ` +
+		`comptime for row..(2 * row) |col| { print((row * col)); } } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseMinimalGenerics checks explicit static type args and type literals.
 func TestParseMinimalGenerics(t *testing.T) {
 	input := `fn is_i64<T>(value: T) -> bool {

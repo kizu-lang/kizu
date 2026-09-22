@@ -28,9 +28,23 @@ fn (self: &var Checker) check_comptime_for_stmt(
     env: ScopeHandle,
     statement: ast::ComptimeForStmt
 ) -> !?diagnostic::Diagnostic {
+    match statement.iterable {
+        List(list) => return self.check_comptime_for_list(tree, env, statement, list),
+        Range(range) => return self.check_comptime_for_range(tree, env, statement, range),
+    }
+}
+
+/// Checks each expansion of a loop over a `std::meta` list, with the capture
+/// naming one field per expansion.
+fn (self: &var Checker) check_comptime_for_list(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ComptimeForStmt,
+    list: ast::Expression
+) -> !?diagnostic::Diagnostic {
     var fields = array::new<MetaField>(self.allocator);
     defer fields.deinit(self.allocator);
-    if try self.comptime_for_fields(tree, statement.list, &var fields) |failed| {
+    if try self.comptime_for_fields(tree, list, &var fields) |failed| {
         return move failed;
     }
     let retained = tree.texts.at(statement.name.node);
@@ -50,6 +64,54 @@ fn (self: &var Checker) check_comptime_for_stmt(
         }
     }
     self.meta_fields.restore(previous);
+    return null;
+}
+
+/// Checks each expansion of an integer-range loop, the Go
+/// `checkComptimeForRange`, with the capture bound as a copy i64 local and as
+/// the integer a comptime condition in the body folds with. The type checker
+/// has already sized the range, so an unreadable bound here is a bug, not a
+/// diagnostic.
+fn (self: &var Checker) check_comptime_for_range(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ComptimeForStmt,
+    range: ast::ComptimeForRange
+) -> !?diagnostic::Diagnostic {
+    var ignored = empty_name();
+    if try self.read_comptime_only(tree, range.start, &var ignored) |failed| {
+        return move failed;
+    }
+    if try self.read_comptime_only(tree, range.end, &var ignored) |failed| {
+        return move failed;
+    }
+    let start = self.int_literal(tree, range.start) orelse return try self.error0(
+        ast::zero_span(), "borrow error: comptime for range bounds must be comptime integers"
+    );
+    let end = self.int_literal(tree, range.end) orelse return try self.error0(
+        ast::zero_span(), "borrow error: comptime for range bounds must be comptime integers"
+    );
+    let retained = tree.texts.at(statement.name.node);
+    let name_bytes = retained.as_bytes();
+    let name = try string::from_bytes(self.allocator, name_bytes);
+    defer name.deinit(self.allocator);
+    let interned = try self.names.intern_text(tree, statement.name);
+    let previous = self.comptime_ints.current;
+    var value = start;
+    while value < end {
+        let bytes = name.as_bytes();
+        let _ = try self.comptime_ints.bind(bytes, value);
+        let child = try self.store.child(env);
+        let counter = self.store.new_binding(interned, self.common.i64_name);
+        errdefer counter.deinit(self.allocator);
+        let _ = try self.define(child, move counter);
+        if try self.check_block(tree, child, statement.body) |failed| {
+            self.comptime_ints.restore(previous);
+            return move failed;
+        }
+        value = value + 1;
+    }
+    self.comptime_ints.restore(previous);
     return null;
 }
 

@@ -16,9 +16,22 @@ import std::string;
 /// itself has no runtime form: what reaches the IR is the expansions, in
 /// field order.
 fn (self: &var Lowerer) lower_comptime_for_stmt(tree: &var ast::Ast, statement: ast::ComptimeForStmt) -> !?diagnostic::Diagnostic {
+    match statement.iterable {
+        List(list) => return self.lower_comptime_for_list(tree, statement, list),
+        Range(range) => return self.lower_comptime_for_range(tree, statement, range),
+    }
+}
+
+/// Lowers the body once per field of a `std::meta` list, with the capture
+/// naming that field.
+fn (self: &var Lowerer) lower_comptime_for_list(
+    tree: &var ast::Ast,
+    statement: ast::ComptimeForStmt,
+    list: ast::Expression
+) -> !?diagnostic::Diagnostic {
     var fields = array::new<MetaField>(self.allocator);
     defer fields.deinit(self.allocator);
-    if try self.comptime_for_fields(tree, statement.list, &var fields) |failed| {
+    if try self.comptime_for_fields(tree, list, &var fields) |failed| {
         return move failed;
     }
     let name = try self.text_name(tree, statement.name);
@@ -35,6 +48,56 @@ fn (self: &var Lowerer) lower_comptime_for_stmt(tree: &var ast::Ast, statement: 
     }
     self.restore_meta(mark);
     return null;
+}
+
+/// Lowers the body once per integer in the range, the Go
+/// `lowerComptimeForRange`, with the capture bound as a static value: a read
+/// of it in the body is the constant, and a comptime condition on it folds
+/// (lower_ident_expr, const_int).
+fn (self: &var Lowerer) lower_comptime_for_range(
+    tree: &var ast::Ast,
+    statement: ast::ComptimeForStmt,
+    range: ast::ComptimeForRange
+) -> !?diagnostic::Diagnostic {
+    var start = 0;
+    if !try self.const_int(tree, range.start, &var start) {
+        return try self.fail0("ir error: comptime for range bounds must be constant integers");
+    }
+    var end = 0;
+    if !try self.const_int(tree, range.end, &var end) {
+        return try self.fail0("ir error: comptime for range bounds must be constant integers");
+    }
+    let name = try self.text_name(tree, statement.name);
+    let mark = StaticMark { previous: self.static_current };
+    var value = start;
+    while value < end {
+        self.restore_static(mark);
+        try self.bind_static_int(name, value);
+        if try self.lower_block(tree, statement.body) |failed| {
+            self.restore_static(mark);
+            return move failed;
+        }
+        value = value + 1;
+    }
+    self.restore_static(mark);
+    return null;
+}
+
+/// Binds one integer-range capture as an i64 static value for the length of
+/// one expansion; `restore_static` with the mark taken before unbinds it.
+fn (self: &var Lowerer) bind_static_int(name: Name, value: i64) -> !void {
+    let text = try self.module.names.intern_i64(value);
+    let bound = StaticValue { name: name, typ: self.common.i64_type, text: text };
+    self.static_current = try self.static_bindings.add(
+        self.allocator, StaticBinding { parent: self.static_current, value: bound }
+    );
+    return;
+}
+
+/// Puts the static bindings in force before a bind back.
+fn (self: &var Lowerer) restore_static(mark: StaticMark) -> void {
+    self.static_current = mark.previous;
+    return;
 }
 
 /// Reads the list a `comptime for` walks, the Go `comptimeForFields`.

@@ -31,18 +31,24 @@ fn (self: &var Checker) check_comptime_if_stmt(
 }
 
 /// Evaluates integer-only compile-time arithmetic used in branch conditions,
-/// the Go `intLiteral`.
-pub fn int_literal(tree: &ast::Ast, expression: ast::Expression) -> ?i64 {
+/// the Go `intLiteral`, with an integer-range capture standing for its
+/// expansion's value.
+fn (self: &Checker) int_literal(tree: &ast::Ast, expression: ast::Expression) -> ?i64 {
     if comptime_expr(tree, expression) |wrapped| {
-        return int_literal(tree, wrapped.expr);
+        return self.int_literal(tree, wrapped.expr);
     }
     if int_expr(tree, expression) |literal| {
         let retained = tree.texts.at(literal.value.node);
         let bytes = retained.as_bytes();
         return decimal_i64(bytes);
     }
+    if ident_expr(tree, expression) |ident| {
+        let retained = tree.texts.at(ident.name.node);
+        let bytes = retained.as_bytes();
+        return self.comptime_ints.get(bytes);
+    }
     if prefix_expr(tree, expression) |prefix| {
-        let value = int_literal(tree, prefix.right);
+        let value = self.int_literal(tree, prefix.right);
         if text_equals(tree, prefix.operator, "-") {
             let present = value orelse return null;
             return 0 - present;
@@ -50,8 +56,8 @@ pub fn int_literal(tree: &ast::Ast, expression: ast::Expression) -> ?i64 {
         return null;
     }
     if binary_expr(tree, expression) |binary| {
-        let left = int_literal(tree, binary.left) orelse return null;
-        let right = int_literal(tree, binary.right) orelse return null;
+        let left = self.int_literal(tree, binary.left) orelse return null;
+        let right = self.int_literal(tree, binary.right) orelse return null;
         return eval_comptime_int(tree, binary.operator, left, right);
     }
     return null;
@@ -152,6 +158,10 @@ fn (self: &var Checker) read_comptime_only(
             let bytes = retained.as_bytes();
             if self.type_arg_values.contains(bytes) {
                 out.* = self.common.type_value_name;
+                return null;
+            }
+            if self.comptime_ints.get(bytes) |_| {
+                out.* = self.common.i64_name;
                 return null;
             }
             return try self.error0(
@@ -315,8 +325,8 @@ fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expressi
                     return compare_comptime_types(tree, copied.operator, left_type, right_type);
                 }
             }
-            let left = int_literal(tree, copied.left) orelse return null;
-            let right = int_literal(tree, copied.right) orelse return null;
+            let left = self.int_literal(tree, copied.left) orelse return null;
+            let right = self.int_literal(tree, copied.right) orelse return null;
             return compare_comptime_ints(tree, copied.operator, left, right);
         },
         _ => return null,

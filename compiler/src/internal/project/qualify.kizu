@@ -663,28 +663,49 @@ fn (self: &var Loader) qualify_comptime_match_stmt(
     }
 }
 
-/// Rewrites the compile-time list and the loop body.
+/// Rewrites the compile-time list or the range bounds, and the loop body.
 fn (self: &var Loader) qualify_comptime_for_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
     stmt: ast::ComptimeForStmt
 ) -> !StatementResult {
     var node = stmt;
-    let outcome = try self.qualify_expr(tree, file, stmt.list);
-    match outcome {
-        Expression(list) => {
-            node.list = list;
-            let body_outcome = try self.qualify_block(tree, file, stmt.body);
-            return match body_outcome {
-                Block(body) => {
-                    node.body = body;
-                    StatementResult::Statement(try tree.add_statement(ast::StatementNode::ComptimeFor(node)))
+    match stmt.iterable {
+        List(list) => {
+            let outcome = try self.qualify_expr(tree, file, list);
+            match outcome {
+                Expression(qualified) => {
+                    node.iterable = ast::ComptimeForIterable::List(qualified);
                 },
-                Failed(failed) => StatementResult::Failed(move failed),
-            };
+                Failed(failed) => return StatementResult::Failed(move failed),
+            }
         },
-        Failed(failed) => return StatementResult::Failed(move failed),
+        Range(range) => {
+            let start_outcome = try self.qualify_expr(tree, file, range.start);
+            match start_outcome {
+                Expression(start) => {
+                    let end_outcome = try self.qualify_expr(tree, file, range.end);
+                    match end_outcome {
+                        Expression(end) => {
+                            node.iterable = ast::ComptimeForIterable::Range(
+                                ast::ComptimeForRange { start: start, end: end }
+                            );
+                        },
+                        Failed(failed) => return StatementResult::Failed(move failed),
+                    }
+                },
+                Failed(failed) => return StatementResult::Failed(move failed),
+            }
+        },
     }
+    let body_outcome = try self.qualify_block(tree, file, stmt.body);
+    return match body_outcome {
+        Block(body) => {
+            node.body = body;
+            StatementResult::Statement(try tree.add_statement(ast::StatementNode::ComptimeFor(node)))
+        },
+        Failed(failed) => StatementResult::Failed(move failed),
+    };
 }
 
 /// Rewrites type-bearing expressions in a deferred cleanup.
