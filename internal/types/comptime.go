@@ -88,6 +88,9 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 		if ok {
 			return comptimeValue{typ: typeType, s: string(typ)}, nil
 		}
+		if value, ok := c.comptimeInts[e.Name]; ok {
+			return comptimeValue{typ: typeI64, i: value}, nil
+		}
 		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
 	case *ast.PrefixExpr:
 		return c.evalComptimePrefix(e)

@@ -57,9 +57,9 @@ fn (self: &var Lowerer) const_bool(tree: &var ast::Ast, expression: ast::Express
             }
         }
         var left = 0;
-        let left_ok = const_int(tree, binary.left, &var left);
+        let left_ok = try self.const_int(tree, binary.left, &var left);
         var right = 0;
-        let right_ok = const_int(tree, binary.right, &var right);
+        let right_ok = try self.const_int(tree, binary.right, &var right);
         if left_ok and right_ok {
             let retained = tree.texts.at(binary.operator.node);
             let operator = retained.as_bytes();
@@ -156,9 +156,9 @@ fn (self: &var Lowerer) const_logical_bool(tree: &var ast::Ast, binary: ast::Bin
 
 /// Evaluates constant integer arithmetic used by comptime branches, the Go
 /// `constInt`.
-fn const_int(tree: &ast::Ast, expression: ast::Expression, out: &var i64) -> bool {
+fn (self: &var Lowerer) const_int(tree: &ast::Ast, expression: ast::Expression, out: &var i64) -> !bool {
     if ownership::comptime_expr(tree, expression) |inner| {
-        return const_int(tree, inner.expr, out);
+        return self.const_int(tree, inner.expr, out);
     }
     if ownership::int_expr(tree, expression) |literal| {
         let retained = tree.texts.at(literal.value.node);
@@ -167,9 +167,23 @@ fn const_int(tree: &ast::Ast, expression: ast::Expression, out: &var i64) -> boo
         out.* = value;
         return true;
     }
+    if ownership::ident_expr(tree, expression) |ident| {
+        // An integer-range capture is bound like an `<n: i64>` static value,
+        // so the expansion's integer reads through the same binding.
+        let name = try self.text_name(tree, ident.name);
+        let static = self.static_value(name) orelse return false;
+        if !self.name_is(static.typ, "i64") {
+            return false;
+        }
+        let retained = name_text(&self.module.names, static.text);
+        let bytes = retained.as_bytes();
+        let value = ownership::decimal_i64(bytes) orelse return false;
+        out.* = value;
+        return true;
+    }
     if ownership::prefix_expr(tree, expression) |prefix| {
         var value = 0;
-        let ok = const_int(tree, prefix.right, &var value);
+        let ok = try self.const_int(tree, prefix.right, &var value);
         if text_is(tree, prefix.operator, "-") {
             out.* = 0 - value;
             return ok;
@@ -182,9 +196,9 @@ fn const_int(tree: &ast::Ast, expression: ast::Expression, out: &var i64) -> boo
     }
     if ownership::binary_expr(tree, expression) |binary| {
         var left = 0;
-        let left_ok = const_int(tree, binary.left, &var left);
+        let left_ok = try self.const_int(tree, binary.left, &var left);
         var right = 0;
-        let right_ok = const_int(tree, binary.right, &var right);
+        let right_ok = try self.const_int(tree, binary.right, &var right);
         if left_ok and right_ok {
             let retained = tree.texts.at(binary.operator.node);
             let operator = retained.as_bytes();

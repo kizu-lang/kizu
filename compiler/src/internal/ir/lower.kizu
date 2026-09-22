@@ -238,6 +238,22 @@ pub struct MetaMark {
     previous: ?arena::Handle<MetaBinding>,
 }
 
+// StaticBinding is one static value bound for the length of one expansion:
+// the capture of an integer-range `comptime for`, which the Go lowerer
+// writes into `staticValues` beside the instance's own static arguments. The
+// chain through parent is newest first, so a capture shadows an instance
+// static of the same name until its mark is restored.
+struct StaticBinding {
+    parent: ?arena::Handle<StaticBinding>,
+    value: StaticValue,
+}
+
+/// Identifies the static bindings in force before a bind, what its restore
+/// puts back.
+pub struct StaticMark {
+    previous: ?arena::Handle<StaticBinding>,
+}
+
 /// Is one errdefer receiver the ownership checker retired at one return
 /// statement or try expression, the Go `Result` maps flattened.
 pub struct RetiredReceiver {
@@ -342,6 +358,11 @@ pub struct Lowerer {
     // currently being lowered.
     meta_bindings: arena::Arena<MetaBinding>,
     meta_current: ?arena::Handle<MetaBinding>,
+    // static_bindings binds the captures of the integer-range `comptime for`
+    // expansions currently being lowered, read before the instance's own
+    // static arguments.
+    static_bindings: arena::Arena<StaticBinding>,
+    static_current: ?arena::Handle<StaticBinding>,
     // extern_decls maps a resolved foreign function name to its explicit ABI
     // and host symbol.
     extern_decls: array::Array<ExternDecl>,
@@ -509,6 +530,8 @@ pub fn new_lowerer_for_target(
         union_decls: map::new<[]u8, ast::Declaration>(allocator),
         meta_bindings: arena::new<MetaBinding>(allocator),
         meta_current: null,
+        static_bindings: arena::new<StaticBinding>(allocator),
+        static_current: null,
         extern_decls: array::new<ExternDecl>(allocator),
         next_error_code: 0,
         deinit_owners: move deinit_owners,
@@ -1828,9 +1851,18 @@ fn (self: &Lowerer) binding_count(args: GenericArgsHandle) -> i64 {
     return node.bindings.len();
 }
 
-/// Returns the compile-time value bound to name in the instance being
-/// lowered, the Go `l.staticValues[name]`, or null.
+/// Returns the compile-time value bound to name, the Go `l.staticValues[name]`,
+/// or null: an expansion's integer-range capture first, then the static
+/// arguments of the instance being lowered.
 fn (self: &Lowerer) static_value(name: Name) -> ?StaticValue {
+    var current = self.static_current;
+    while current |handle| {
+        let binding = self.static_bindings.at(handle);
+        if same_name(binding.value.name, name) {
+            return binding.value;
+        }
+        current = binding.parent;
+    }
     let args = self.current_args orelse return null;
     let node = self.generic_args.at(args.node);
     var index = 0;

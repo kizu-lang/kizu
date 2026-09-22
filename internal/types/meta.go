@@ -59,6 +59,9 @@ func (c *Checker) checkComptimeForStmt(
 	wantReturn Type,
 	unsafe unsafeMark,
 ) (bool, error) {
+	if stmt.IsRange() {
+		return c.checkComptimeForRange(stmt, env, wantReturn, unsafe)
+	}
 	fields, err := c.comptimeForFields(stmt.List)
 	if err != nil {
 		return false, err
@@ -84,9 +87,76 @@ func (c *Checker) checkComptimeForStmt(
 	return returns && len(fields) > 0, nil
 }
 
-// comptimeForFields reads the list a `comptime for` walks. Only the two
-// declared lists are iterable: an integer range is what the runtime `for` is
-// for.
+// checkComptimeForRange expands an integer-range loop and checks each
+// expansion with the capture bound to that expansion's integer. The capture
+// is an i64 local to the body and a known integer to comptime expressions in
+// it, so `comptime if i * k != 0` folds per expansion (SPEC §13.1).
+func (c *Checker) checkComptimeForRange(
+	stmt *ast.ComptimeForStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe unsafeMark,
+) (bool, error) {
+	start, end, err := c.comptimeRangeBounds(stmt)
+	if err != nil {
+		return false, err
+	}
+	previous, had := c.comptimeInts[stmt.Name]
+	defer func() {
+		if had {
+			c.comptimeInts[stmt.Name] = previous
+			return
+		}
+		delete(c.comptimeInts, stmt.Name)
+	}()
+	returns := true
+	for value := start; value < end; value++ {
+		c.comptimeInts[stmt.Name] = value
+		child := env.child()
+		if err := requireScopeDefinition(stmt.Name, child.define(stmt.Name, typeI64, false)); err != nil {
+			return false, err
+		}
+		expansionReturns, err := c.checkBlock(stmt.Body, child, wantReturn, unsafe)
+		if err != nil {
+			return false, err
+		}
+		returns = returns && expansionReturns
+	}
+	return returns && start < end, nil
+}
+
+// maxComptimeRangeExpansions caps how many times one integer-range `comptime
+// for` may expand. The checker is the one place that counts, so the ownership
+// checker and the lowerer walk whatever range reaches them.
+const maxComptimeRangeExpansions = 1024
+
+// comptimeRangeBounds evaluates the bounds of an integer-range `comptime for`.
+// Both are comptime integers, and the range is capped: each expansion is a
+// copy of the body to check and lower, so a range that wants thousands of
+// them is asking for a runtime loop.
+func (c *Checker) comptimeRangeBounds(stmt *ast.ComptimeForStmt) (int64, int64, error) {
+	start, err := c.evalComptime(stmt.Start)
+	if err != nil {
+		return 0, 0, err
+	}
+	end, err := c.evalComptime(stmt.End)
+	if err != nil {
+		return 0, 0, err
+	}
+	if start.typ != typeI64 || end.typ != typeI64 {
+		return 0, 0, errorf("comptime error: comptime for range bounds must be integers")
+	}
+	if end.i-start.i > maxComptimeRangeExpansions {
+		return 0, 0, errorf(
+			"comptime error: comptime for %d..%d expands %d times; the limit is %d "+
+				"(a longer range is a runtime `for`)",
+			start.i, end.i, end.i-start.i, maxComptimeRangeExpansions)
+	}
+	return start.i, end.i, nil
+}
+
+// comptimeForFields reads the list a `comptime for` walks. The two declared
+// lists and an integer range are the iterables; the range is its own path.
 func (c *Checker) comptimeForFields(list ast.Expression) ([]metaField, error) {
 	call, ok := list.(*ast.CallExpr)
 	if !ok {

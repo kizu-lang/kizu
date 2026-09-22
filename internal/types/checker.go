@@ -79,7 +79,12 @@ type Checker struct {
 	// open, by capture name. A capture is not a value, so it lives here rather
 	// than in a scope: the only thing that may read it is a `std::meta` form.
 	metaFields map[string]metaField
-	loopLabels []string
+	// comptimeInts binds the captures of the integer-range `comptime for`
+	// expansions currently open, by capture name. Unlike a field capture the
+	// integer is a value: the body reads it as an i64 local, and a comptime
+	// expression reads the integer it stands for in this expansion.
+	comptimeInts map[string]int64
+	loopLabels   []string
 	// checkedStdBodies records the std wrapper instantiations already checked,
 	// keyed by name and static arguments.
 	checkedStdBodies map[string]bool
@@ -117,6 +122,7 @@ func NewForTarget(target stdtarget.Target) *Checker {
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
+		comptimeInts:     map[string]int64{},
 		functionArgs:     map[string]string{},
 	}
 }

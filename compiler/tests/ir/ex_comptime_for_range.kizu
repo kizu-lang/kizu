@@ -1,0 +1,439 @@
+import std::fmt;
+import std::mem;
+import std::string;
+
+// weighted_sum walks a 3x2 grid of weights unrolled at compile time. The
+// captures are integers the body may do arithmetic on, and a `comptime if`
+// written against them is decided per expansion: a cell whose row or column
+// is 0 adds its term without a multiply, so no `if` reaches the binary, and
+// no loop does either.
+fn weighted_sum(a: i64, b: i64, c: i64) -> i64 {
+    var total = 0;
+    comptime for 0..3 |row| {
+        comptime for 0..2 |col| {
+            comptime if row * col == 0 {
+                total = total + pick(a, b, c, row) + col;
+            } else {
+                total = total + pick(a, b, c, row) * (row * col + 1);
+            }
+        }
+    }
+    return total;
+}
+
+fn pick(a: i64, b: i64, c: i64, index: i64) -> i64 {
+    if index == 0 {
+        return a;
+    }
+    if index == 1 {
+        return b;
+    }
+    return c;
+}
+
+// An empty range expands to nothing, and each expansion is its own scope, so
+// the same capture name serves the next loop.
+fn count_expansions() -> i64 {
+    var count = 0;
+    comptime for 4..4 |i| {
+        count = count + i;
+    }
+    comptime for 2..5 |i| {
+        count = count + i;
+    }
+    return count;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try fmt::append_i64(allocator, out, weighted_sum(1, 10, 100));
+    try out.append_bytes(allocator, " ");
+    try fmt::append_i64(allocator, out, count_expansions());
+    let bytes = out.as_bytes();
+    print(bytes);
+    return;
+}
+
+// run
+// features: comptime comptime-for
+// output:
+// 433 9
+
+// ir
+// lower:
+// fn weighted_sum(%a: i64, %b: i64, %c: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 0
+//   %3: i64 = call.pick %a: i64, %b: i64, %c: i64, %2: i64
+//   %4: i64 = binary.+ %1: i64, %3: i64
+//   %5: i64 = const 0
+//   %6: i64 = binary.+ %4: i64, %5: i64
+//   %7: i64 = const 0
+//   %8: i64 = call.pick %a: i64, %b: i64, %c: i64, %7: i64
+//   %9: i64 = binary.+ %6: i64, %8: i64
+//   %10: i64 = const 1
+//   %11: i64 = binary.+ %9: i64, %10: i64
+//   %12: i64 = const 1
+//   %13: i64 = call.pick %a: i64, %b: i64, %c: i64, %12: i64
+//   %14: i64 = binary.+ %11: i64, %13: i64
+//   %15: i64 = const 0
+//   %16: i64 = binary.+ %14: i64, %15: i64
+//   %17: i64 = const 1
+//   %18: i64 = call.pick %a: i64, %b: i64, %c: i64, %17: i64
+//   %19: i64 = const 1
+//   %20: i64 = const 1
+//   %21: i64 = binary.* %19: i64, %20: i64
+//   %22: i64 = const 1
+//   %23: i64 = binary.+ %21: i64, %22: i64
+//   %24: i64 = binary.* %18: i64, %23: i64
+//   %25: i64 = binary.+ %16: i64, %24: i64
+//   %26: i64 = const 2
+//   %27: i64 = call.pick %a: i64, %b: i64, %c: i64, %26: i64
+//   %28: i64 = binary.+ %25: i64, %27: i64
+//   %29: i64 = const 0
+//   %30: i64 = binary.+ %28: i64, %29: i64
+//   %31: i64 = const 2
+//   %32: i64 = call.pick %a: i64, %b: i64, %c: i64, %31: i64
+//   %33: i64 = const 2
+//   %34: i64 = const 1
+//   %35: i64 = binary.* %33: i64, %34: i64
+//   %36: i64 = const 1
+//   %37: i64 = binary.+ %35: i64, %36: i64
+//   %38: i64 = binary.* %32: i64, %37: i64
+//   %39: i64 = binary.+ %30: i64, %38: i64
+//   return %39: i64
+// }
+// fn pick(%a: i64, %b: i64, %c: i64, %index: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: bool = binary.== %index: i64, %1: i64
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   return %a: i64
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %3: i64 = const 1
+//   %4: bool = binary.== %index: i64, %3: i64
+//   branch %4: bool, if.then.4, if.else.5
+// if.then.4:
+//   return %b: i64
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   return %c: i64
+// }
+// fn count_expansions() -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 2
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   %4: i64 = const 3
+//   %5: i64 = binary.+ %3: i64, %4: i64
+//   %6: i64 = const 4
+//   %7: i64 = binary.+ %5: i64, %6: i64
+//   return %7: i64
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: i64 = const 1
+//   %5: i64 = const 10
+//   %6: i64 = const 100
+//   %7: i64 = call.weighted_sum %4: i64, %5: i64, %6: i64
+//   %8: std::mem::Error!void = call.std::fmt::append_i64 %1: Allocator, %3: &var std::string::String, %7: i64
+//   %9: std::string::String = ref.load %3: &var std::string::String
+//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %1: Allocator
+//   %11: []u8 = const " "
+//   %12: std::mem::Error!void = call.std::string::String.append_bytes %3: &var std::string::String, %1: Allocator, %11: []u8
+//   %13: std::string::String = ref.load %3: &var std::string::String
+//   error.try %12: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String, %1: Allocator
+//   %15: i64 = call.count_expansions
+//   %16: std::mem::Error!void = call.std::fmt::append_i64 %1: Allocator, %3: &var std::string::String, %15: i64
+//   %17: std::string::String = ref.load %3: &var std::string::String
+//   error.try %16: std::mem::Error!void, cleanup call.std::string::String.deinit %17: std::string::String, %1: Allocator
+//   %19: []u8 = call.std::string::String.as_bytes %3: &var std::string::String
+//   call.std::fmt::print._5b_5du8 %19: []u8
+//   %21: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %21: std::string::String, %1: Allocator
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// opt:
+// fn weighted_sum(%a: i64, %b: i64, %c: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump in1.entry
+// in1.entry:
+//   jump in1.if.then.1
+// in1.if.then.1:
+//   jump in1.cont
+// in1.cont:
+//   %4: i64 = binary.+ %1: i64, %a: i64
+//   %5: i64 = const 0
+//   %6: i64 = binary.+ %4: i64, %5: i64
+//   jump in2.entry
+// in2.entry:
+//   jump in2.if.then.1
+// in2.if.then.1:
+//   jump in2.cont
+// in2.cont:
+//   %9: i64 = binary.+ %6: i64, %a: i64
+//   %10: i64 = const 1
+//   %11: i64 = binary.+ %9: i64, %10: i64
+//   jump in3.entry
+// in3.entry:
+//   jump in3.if.else.2
+// in3.if.else.2:
+//   jump in3.if.end.3
+// in3.if.end.3:
+//   jump in3.if.then.4
+// in3.if.then.4:
+//   jump in3.cont
+// in3.cont:
+//   %14: i64 = binary.+ %11: i64, %b: i64
+//   %15: i64 = const 0
+//   %16: i64 = binary.+ %14: i64, %15: i64
+//   jump in4.entry
+// in4.entry:
+//   jump in4.if.else.2
+// in4.if.else.2:
+//   jump in4.if.end.3
+// in4.if.end.3:
+//   jump in4.if.then.4
+// in4.if.then.4:
+//   jump in4.cont
+// in4.cont:
+//   %23: i64 = const 2
+//   %24: i64 = binary.* %b: i64, %23: i64
+//   %25: i64 = binary.+ %16: i64, %24: i64
+//   jump in5.entry
+// in5.entry:
+//   jump in5.if.else.2
+// in5.if.else.2:
+//   jump in5.if.end.3
+// in5.if.end.3:
+//   jump in5.if.else.5
+// in5.if.else.5:
+//   jump in5.if.end.6
+// in5.if.end.6:
+//   jump in5.cont
+// in5.cont:
+//   %28: i64 = binary.+ %25: i64, %c: i64
+//   %29: i64 = const 0
+//   %30: i64 = binary.+ %28: i64, %29: i64
+//   jump in6.entry
+// in6.entry:
+//   jump in6.if.else.2
+// in6.if.else.2:
+//   jump in6.if.end.3
+// in6.if.end.3:
+//   jump in6.if.else.5
+// in6.if.else.5:
+//   jump in6.if.end.6
+// in6.if.end.6:
+//   jump in6.cont
+// in6.cont:
+//   %37: i64 = const 3
+//   %38: i64 = binary.* %c: i64, %37: i64
+//   %39: i64 = binary.+ %30: i64, %38: i64
+//   return %39: i64
+// }
+// fn pick(%a: i64, %b: i64, %c: i64, %index: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: bool = binary.== %index: i64, %1: i64
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   return %a: i64
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %3: i64 = const 1
+//   %4: bool = binary.== %index: i64, %3: i64
+//   branch %4: bool, if.then.4, if.else.5
+// if.then.4:
+//   return %b: i64
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   return %c: i64
+// }
+// fn count_expansions() -> i64 {
+// entry:
+//   %7: i64 = const 9
+//   return %7: i64
+// }
+// fn main() -> !void {
+// entry:
+//   %in1.1: Allocator = call.std::internal::builtin::mem_page_allocator
+//   %in2.1: std::array::Array<u8> = array.new %in1.1: Allocator
+//   %in2.2: std::string::String = struct.new {bytes: %in2.1: std::array::Array<u8>}
+//   %3: &var std::string::String = local.slot %in2.2: std::string::String
+//   %4: i64 = const 1
+//   %5: i64 = const 10
+//   %6: i64 = const 100
+//   %7: i64 = call.weighted_sum %4: i64, %5: i64, %6: i64
+//   %8: std::mem::Error!void = call.std::fmt::append_i64 %in1.1: Allocator, %3: &var std::string::String, %7: i64
+//   %9: std::string::String = ref.load %3: &var std::string::String
+//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %in1.1: Allocator
+//   %11: []u8 = const " "
+//   %in3.1: &var std::array::Array<u8> = field.addr.bytes %3: &var std::string::String
+//   %in3.in1.1: std::mem::Error!void = array.append_bytes %in3.1: &var std::array::Array<u8>, %in1.1: Allocator, %11: []u8
+//   %13: std::string::String = ref.load %3: &var std::string::String
+//   error.try %in3.in1.1: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String, %in1.1: Allocator
+//   %in4.7: i64 = const 9
+//   %16: std::mem::Error!void = call.std::fmt::append_i64 %in1.1: Allocator, %3: &var std::string::String, %in4.7: i64
+//   %17: std::string::String = ref.load %3: &var std::string::String
+//   error.try %16: std::mem::Error!void, cleanup call.std::string::String.deinit %17: std::string::String, %in1.1: Allocator
+//   %in5.1: std::array::Array<u8> = field.ref.bytes %3: &var std::string::String
+//   %in5.2: []u8 = call.std::array::Array.as_bytes.u8 %in5.1: std::array::Array<u8>
+//   print.line %in5.2: []u8
+//   %21: std::string::String = ref.load %3: &var std::string::String
+//   %in7.1: std::array::Array<u8> = field.bytes %21: std::string::String
+//   %in7.in1.1: &var std::array::Array<u8> = local.slot %in7.1: std::array::Array<u8>
+//   %in7.in1.2: std::array::Array<u8> = ref.load %in7.in1.1: &var std::array::Array<u8>
+//   array.deinit %in7.in1.2: std::array::Array<u8>, %in1.1: Allocator
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// opt wasm:
+// fn weighted_sum(%a: i64, %b: i64, %c: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump in1.entry
+// in1.entry:
+//   jump in1.if.then.1
+// in1.if.then.1:
+//   jump in1.cont
+// in1.cont:
+//   %4: i64 = binary.+ %1: i64, %a: i64
+//   %6: i64 = binary.+ %4: i64, %1: i64
+//   jump in2.entry
+// in2.entry:
+//   jump in2.if.then.1
+// in2.if.then.1:
+//   jump in2.cont
+// in2.cont:
+//   %9: i64 = binary.+ %6: i64, %a: i64
+//   %10: i64 = const 1
+//   %11: i64 = binary.+ %9: i64, %10: i64
+//   jump in3.entry
+// in3.entry:
+//   jump in3.if.else.2
+// in3.if.else.2:
+//   jump in3.if.end.3
+// in3.if.end.3:
+//   jump in3.if.then.4
+// in3.if.then.4:
+//   jump in3.cont
+// in3.cont:
+//   %14: i64 = binary.+ %11: i64, %b: i64
+//   %16: i64 = binary.+ %14: i64, %1: i64
+//   jump in4.entry
+// in4.entry:
+//   jump in4.if.else.2
+// in4.if.else.2:
+//   jump in4.if.end.3
+// in4.if.end.3:
+//   jump in4.if.then.4
+// in4.if.then.4:
+//   jump in4.cont
+// in4.cont:
+//   %23: i64 = const 2
+//   %24: i64 = binary.* %b: i64, %23: i64
+//   %25: i64 = binary.+ %16: i64, %24: i64
+//   jump in5.entry
+// in5.entry:
+//   jump in5.if.else.2
+// in5.if.else.2:
+//   jump in5.if.end.3
+// in5.if.end.3:
+//   jump in5.if.else.5
+// in5.if.else.5:
+//   jump in5.if.end.6
+// in5.if.end.6:
+//   jump in5.cont
+// in5.cont:
+//   %28: i64 = binary.+ %25: i64, %c: i64
+//   %30: i64 = binary.+ %28: i64, %1: i64
+//   jump in6.entry
+// in6.entry:
+//   jump in6.if.else.2
+// in6.if.else.2:
+//   jump in6.if.end.3
+// in6.if.end.3:
+//   jump in6.if.else.5
+// in6.if.else.5:
+//   jump in6.if.end.6
+// in6.if.end.6:
+//   jump in6.cont
+// in6.cont:
+//   %37: i64 = const 3
+//   %38: i64 = binary.* %c: i64, %37: i64
+//   %39: i64 = binary.+ %30: i64, %38: i64
+//   return %39: i64
+// }
+// fn pick(%a: i64, %b: i64, %c: i64, %index: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: bool = binary.== %index: i64, %1: i64
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   return %a: i64
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %3: i64 = const 1
+//   %4: bool = binary.== %index: i64, %3: i64
+//   branch %4: bool, if.then.4, if.else.5
+// if.then.4:
+//   return %b: i64
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   return %c: i64
+// }
+// fn count_expansions() -> i64 {
+// entry:
+//   %7: i64 = const 9
+//   return %7: i64
+// }
+// fn main() -> !void {
+// entry:
+//   %in1.1: Allocator = call.std::internal::builtin::mem_page_allocator
+//   %in2.1: std::array::Array<u8> = array.new %in1.1: Allocator
+//   %in2.2: std::string::String = struct.new {bytes: %in2.1: std::array::Array<u8>}
+//   %3: &var std::string::String = local.slot %in2.2: std::string::String
+//   %4: i64 = const 1
+//   %5: i64 = const 10
+//   %6: i64 = const 100
+//   %7: i64 = call.weighted_sum %4: i64, %5: i64, %6: i64
+//   %8: std::mem::Error!void = call.std::fmt::append_i64 %in1.1: Allocator, %3: &var std::string::String, %7: i64
+//   %9: std::string::String = ref.load %3: &var std::string::String
+//   error.try %8: std::mem::Error!void, cleanup call.std::string::String.deinit %9: std::string::String, %in1.1: Allocator
+//   %11: []u8 = const " "
+//   %in3.1: &var std::array::Array<u8> = field.addr.bytes %3: &var std::string::String
+//   %in3.in1.1: std::mem::Error!void = array.append_bytes %in3.1: &var std::array::Array<u8>, %in1.1: Allocator, %11: []u8
+//   %13: std::string::String = ref.load %3: &var std::string::String
+//   error.try %in3.in1.1: std::mem::Error!void, cleanup call.std::string::String.deinit %13: std::string::String, %in1.1: Allocator
+//   %in4.7: i64 = const 9
+//   %16: std::mem::Error!void = call.std::fmt::append_i64 %in1.1: Allocator, %3: &var std::string::String, %in4.7: i64
+//   %17: std::string::String = ref.load %3: &var std::string::String
+//   error.try %16: std::mem::Error!void, cleanup call.std::string::String.deinit %17: std::string::String, %in1.1: Allocator
+//   %in5.1: std::array::Array<u8> = field.ref.bytes %3: &var std::string::String
+//   %in5.2: []u8 = call.std::array::Array.as_bytes.u8 %in5.1: std::array::Array<u8>
+//   print.line %in5.2: []u8
+//   %21: std::string::String = ref.load %3: &var std::string::String
+//   %in7.1: std::array::Array<u8> = field.bytes %21: std::string::String
+//   %in7.in1.1: &var std::array::Array<u8> = local.slot %in7.1: std::array::Array<u8>
+//   %in7.in1.2: std::array::Array<u8> = ref.load %in7.in1.1: &var std::array::Array<u8>
+//   array.deinit %in7.in1.2: std::array::Array<u8>, %in1.1: Allocator
+//   %23: !void = error.ok
+//   return %23: !void
+// }

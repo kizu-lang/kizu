@@ -25,22 +25,26 @@ func (c *Checker) checkComptimeIfStmt(stmt *ast.ComptimeIfStmt, env *scope) erro
 	return c.checkBlock(selected, env.child())
 }
 
-// intLiteral evaluates integer-only compile-time arithmetic used in branch conditions.
-func intLiteral(expr ast.Expression) (int64, bool) {
+// intLiteral evaluates integer-only compile-time arithmetic used in branch
+// conditions, with an integer-range capture standing for its expansion's value.
+func (c *Checker) intLiteral(expr ast.Expression) (int64, bool) {
 	switch e := expr.(type) {
 	case *ast.ComptimeExpr:
-		return intLiteral(e.Expr)
+		return c.intLiteral(e.Expr)
 	case *ast.IntExpr:
 		value, err := strconv.ParseInt(e.Value, 10, 64)
 		return value, err == nil
+	case *ast.IdentExpr:
+		value, ok := c.comptimeInts[e.Name]
+		return value, ok
 	case *ast.PrefixExpr:
-		value, ok := intLiteral(e.Right)
+		value, ok := c.intLiteral(e.Right)
 		if e.Operator == "-" {
 			return -value, ok
 		}
 	case *ast.BinaryExpr:
-		left, leftOK := intLiteral(e.Left)
-		right, rightOK := intLiteral(e.Right)
+		left, leftOK := c.intLiteral(e.Left)
+		right, rightOK := c.intLiteral(e.Right)
 		if leftOK && rightOK {
 			return evalComptimeInt(e.Operator, left, right)
 		}
@@ -127,6 +131,9 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 	case *ast.IdentExpr:
 		if _, ok := c.typeArgValues[e.Name]; ok {
 			return "type", nil
+		}
+		if _, ok := c.comptimeInts[e.Name]; ok {
+			return "i64", nil
 		}
 		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
 	case *ast.PrefixExpr:
@@ -266,8 +273,8 @@ func (c *Checker) comptimeBool(expr ast.Expression) (bool, bool) {
 		if leftTypeOK && rightTypeOK {
 			return compareComptimeTypes(e.Operator, leftType, rightType)
 		}
-		left, leftOK := intLiteral(e.Left)
-		right, rightOK := intLiteral(e.Right)
+		left, leftOK := c.intLiteral(e.Left)
+		right, rightOK := c.intLiteral(e.Right)
 		if leftOK && rightOK {
 			return compareComptimeInts(e.Operator, left, right)
 		}

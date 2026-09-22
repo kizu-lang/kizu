@@ -60,7 +60,7 @@ fn (self: &var Checker) check_comptime_if_stmt(
 }
 
 // Expands a compile-time loop and checks each expansion. The body is
-// ordinary Kizu code checked once per field, not a rewritten token stream.
+// ordinary Kizu code checked once per element, not a rewritten token stream.
 fn (self: &var Checker) check_comptime_for_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -68,9 +68,29 @@ fn (self: &var Checker) check_comptime_for_stmt(
     want_return: Type,
     out: &var bool
 ) -> !?diagnostic::Diagnostic {
+    match statement.iterable {
+        List(list) => return self.check_comptime_for_list(
+            tree, scope, statement, list, want_return, out
+        ),
+        Range(range) => return self.check_comptime_for_range(
+            tree, scope, statement, range, want_return, out
+        ),
+    }
+}
+
+// Checks each expansion of a loop over a `std::meta` list, with the capture
+// naming one field per expansion.
+fn (self: &var Checker) check_comptime_for_list(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::ComptimeForStmt,
+    list: ast::Expression,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
     var fields = array::new<MetaFieldHandle>(self.allocator);
     defer fields.deinit(self.allocator);
-    if try self.comptime_for_fields(tree, statement.list, &var fields) |problem| {
+    if try self.comptime_for_fields(tree, list, &var fields) |problem| {
         return move problem;
     }
     let retained_name = tree.texts.at(statement.name.node);
@@ -104,8 +124,121 @@ fn (self: &var Checker) check_comptime_for_stmt(
     return null;
 }
 
-// Reads the list a `comptime for` walks. Only the two declared lists are
-// iterable: an integer range is what the runtime `for` is for.
+// Expands an integer-range loop and checks each expansion with the capture
+// bound to that expansion's integer. The capture is an i64 local to the body
+// and a known integer to comptime expressions in it, so `comptime if i * k
+// != 0` folds per expansion (SPEC §13.1).
+fn (self: &var Checker) check_comptime_for_range(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::ComptimeForStmt,
+    range: ast::ComptimeForRange,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    var start = 0;
+    var end = 0;
+    if try self.comptime_range_bounds(tree, range, &var start, &var end) |problem| {
+        return move problem;
+    }
+    let retained_name = tree.texts.at(statement.name.node);
+    let source_name = retained_name.as_bytes();
+    let owned_name = try string::from_bytes(self.allocator, source_name);
+    defer owned_name.deinit(self.allocator);
+    let previous_ints = self.comptime_ints.current;
+    var returns = true;
+    var value = start;
+    while value < end {
+        let name = owned_name.as_bytes();
+        let _ = try self.comptime_ints.bind(name, value);
+        let child = try self.scopes.new_scope(scope);
+        let index_type = try self.types.i64_type();
+        let defined = try self.scopes.define(child, name, index_type, false);
+        if try self.require_scope_definition(name, defined) |problem| {
+            self.comptime_ints.restore(previous_ints);
+            return move problem;
+        }
+        var expansion_returns = false;
+        if try self.check_block(
+            tree,
+            child,
+            statement.body,
+            want_return,
+            &var expansion_returns
+        ) |problem| {
+            self.comptime_ints.restore(previous_ints);
+            return move problem;
+        }
+        returns = returns and expansion_returns;
+        value = value + 1;
+    }
+    self.comptime_ints.restore(previous_ints);
+    // An empty range expands to nothing, and nothing cannot return.
+    out.* = returns and start < end;
+    return null;
+}
+
+// Caps how many times one integer-range `comptime for` may expand. The
+// checker is the one place that counts, so the ownership checker and the
+// lowerer walk whatever range reaches them.
+fn max_comptime_range_expansions() -> i64 {
+    return 1024;
+}
+
+// Evaluates the bounds of an integer-range `comptime for`. Both are comptime
+// integers, and the range is capped: each expansion is a copy of the body to
+// check and lower, so a range that wants thousands of them is asking for a
+// runtime loop.
+fn (self: &var Checker) comptime_range_bounds(
+    tree: &ast::Ast,
+    range: ast::ComptimeForRange,
+    start: &var i64,
+    end: &var i64
+) -> !?diagnostic::Diagnostic {
+    var start_value = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, range.start, &var start_value) |problem| {
+        return move problem;
+    }
+    var end_value = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, range.end, &var end_value) |problem| {
+        return move problem;
+    }
+    var first = 0;
+    var last = 0;
+    match start_value {
+        Integer(integer) => {
+            first = integer;
+        },
+        _ => return try self.comptime_error("comptime for range bounds must be integers"),
+    }
+    match end_value {
+        Integer(integer) => {
+            last = integer;
+        },
+        _ => return try self.comptime_error("comptime for range bounds must be integers"),
+    }
+    let limit = max_comptime_range_expansions();
+    if last - first > limit {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "comptime for ");
+        try fmt::append_i64(self.allocator, &var message, first);
+        try message.append_bytes(self.allocator, "..");
+        try fmt::append_i64(self.allocator, &var message, last);
+        try message.append_bytes(self.allocator, " expands ");
+        try fmt::append_i64(self.allocator, &var message, last - first);
+        try message.append_bytes(self.allocator, " times; the limit is ");
+        try fmt::append_i64(self.allocator, &var message, limit);
+        try message.append_bytes(self.allocator, " (a longer range is a runtime `for`)");
+        return try self.comptime_message(move message);
+    }
+    start.* = first;
+    end.* = last;
+    return null;
+}
+
+// Reads the list a `comptime for` walks. The two declared lists and an
+// integer range are the iterables; the range is its own path.
 fn (self: &var Checker) comptime_for_fields(
     tree: &ast::Ast,
     list: ast::Expression,

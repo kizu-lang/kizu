@@ -783,18 +783,28 @@ func (s *ComptimeIfStmt) String() string {
 }
 
 // ComptimeForStmt repeats a body once per element of a compile-time list.
-// The list is a `std::meta` form, and Name binds one element per expansion.
+// The list is a `std::meta` form, or a half-open integer range written as
+// Start..End with List nil, and Name binds one element per expansion.
 type ComptimeForStmt struct {
-	List Expression
-	Name string
-	Body *BlockStmt
+	List  Expression
+	Start Expression
+	End   Expression
+	Name  string
+	Body  *BlockStmt
 }
+
+// IsRange reports whether the loop walks an integer range rather than a list.
+func (s *ComptimeForStmt) IsRange() bool { return s.List == nil }
 
 // statementNode marks ComptimeForStmt as a statement node.
 func (*ComptimeForStmt) statementNode() {}
 
 // String returns a compact debug representation of the comptime loop.
 func (s *ComptimeForStmt) String() string {
+	if s.IsRange() {
+		return fmt.Sprintf("comptime for %s..%s |%s| %s",
+			s.Start.String(), s.End.String(), s.Name, s.Body.String())
+	}
 	return fmt.Sprintf("comptime for %s |%s| %s", s.List.String(), s.Name, s.Body.String())
 }
 

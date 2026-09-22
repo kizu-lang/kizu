@@ -25,7 +25,7 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0002: Kizu は低レベル寄りのシステムプログラミング言語を目指す](0002-system-programming-language.md)
 - [ADR-0003: 基本型は Zig 寄りの小文字表記にする](0003-lowercase-primitive-types.md)
 - [ADR-0004: ローカル束縛は let / var を使う](0004-let-var-bindings.md)
-- [ADR-0006: comptime は採用候補とし、macro は採用しない](0006-comptime-without-macros.md)
+- [ADR-0006: comptime は展開だけを持ち、macro と interpreter は持たない](0006-comptime-without-macros.md)
 - [ADR-0008: C 親和性は ABI / FFI / layout / pointer で確保する](0008-c-interop.md)
 - [ADR-0009: compiler backend の前に Kizu IR を導入する](0009-kizu-ir-before-backends.md)
 - [ADR-0010: ビルド時間とキャッシュサイズの評価方法を早期に確立する](0010-build-performance-evaluation.md)

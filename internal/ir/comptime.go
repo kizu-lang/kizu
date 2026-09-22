@@ -48,8 +48,8 @@ func (l *lowerer) constBool(expr ast.Expression) (bool, bool) {
 				return equal == (e.Operator == "=="), true
 			}
 		}
-		left, leftOK := constInt(e.Left)
-		right, rightOK := constInt(e.Right)
+		left, leftOK := l.constInt(e.Left)
+		right, rightOK := l.constInt(e.Right)
 		if leftOK && rightOK {
 			return compareConstInts(e.Operator, left, right)
 		}
@@ -116,15 +116,24 @@ func (l *lowerer) constLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
 }
 
 // constInt evaluates constant integer arithmetic used by comptime branches.
-func constInt(expr ast.Expression) (int64, bool) {
+func (l *lowerer) constInt(expr ast.Expression) (int64, bool) {
 	switch e := expr.(type) {
 	case *ast.ComptimeExpr:
-		return constInt(e.Expr)
+		return l.constInt(e.Expr)
 	case *ast.IntExpr:
 		value, err := strconv.ParseInt(e.Value, 10, 64)
 		return value, err == nil
+	case *ast.IdentExpr:
+		// An integer-range capture is bound like an `<n: i64>` static value,
+		// so the expansion's integer reads through the same binding.
+		static, ok := l.staticValues[e.Name]
+		if !ok || static.typ != "i64" {
+			return 0, false
+		}
+		value, err := strconv.ParseInt(static.text, 10, 64)
+		return value, err == nil
 	case *ast.PrefixExpr:
-		value, ok := constInt(e.Right)
+		value, ok := l.constInt(e.Right)
 		if e.Operator == "-" {
 			return -value, ok
 		}
@@ -132,8 +141,8 @@ func constInt(expr ast.Expression) (int64, bool) {
 			return ^value, ok
 		}
 	case *ast.BinaryExpr:
-		left, leftOK := constInt(e.Left)
-		right, rightOK := constInt(e.Right)
+		left, leftOK := l.constInt(e.Left)
+		right, rightOK := l.constInt(e.Right)
 		if leftOK && rightOK {
 			return evalConstInt(e.Operator, left, right)
 		}

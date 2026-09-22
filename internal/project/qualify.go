@@ -342,11 +342,17 @@ func (c *graphChecker) qualifyComptimeForStmt(
 	stmt *ast.ComptimeForStmt,
 ) (*ast.ComptimeForStmt, error) {
 	cp := *stmt
-	list, err := c.qualifyExpr(module, stmt.List)
-	if err != nil {
+	var err error
+	if stmt.IsRange() {
+		if cp.Start, err = c.qualifyExpr(module, stmt.Start); err != nil {
+			return nil, err
+		}
+		if cp.End, err = c.qualifyExpr(module, stmt.End); err != nil {
+			return nil, err
+		}
+	} else if cp.List, err = c.qualifyExpr(module, stmt.List); err != nil {
 		return nil, err
 	}
-	cp.List = list
 	cp.Body, err = c.qualifyBlock(module, stmt.Body)
 	return &cp, err
 }

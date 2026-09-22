@@ -1824,6 +1824,9 @@ fn (self: &var Parser) parse_for_stmt(
     }));
 }
 
+/// Parses a compile-time loop over a `std::meta` list or an integer range.
+/// The range and capture spellings are the ones the runtime `for` uses, so
+/// the only word that separates the two loops is `comptime`.
 fn (self: &var Parser) parse_comptime_for_stmt(
     tree: &var ast::Ast
 ) -> !ast::Statement {
@@ -1831,7 +1834,14 @@ fn (self: &var Parser) parse_comptime_for_stmt(
         return try tree.add_recovered_statement(token_span_at(self));
     }
     try self.next_token();
-    let list = try self.parse_expression(tree, lowest_precedence());
+    let first = try self.parse_expression(tree, lowest_precedence());
+    var iterable = ast::ComptimeForIterable::List(first);
+    if self.peek_kind() == token::Kind::Range {
+        try self.next_token();
+        try self.next_token();
+        let end = try self.parse_expression(tree, lowest_precedence());
+        iterable = ast::ComptimeForIterable::Range(ast::ComptimeForRange { start: first, end: end });
+    }
     if try self.parse_payload_capture(tree) |name| {
         if text_is_empty(tree, name) {
             try self.error_text(
@@ -1844,7 +1854,7 @@ fn (self: &var Parser) parse_comptime_for_stmt(
         }
         let body = try self.parse_block_stmt(tree);
         return try tree.add_statement(ast::StatementNode::ComptimeFor(
-            ast::ComptimeForStmt { list: list, name: name, body: body }
+            ast::ComptimeForStmt { iterable: iterable, name: name, body: body }
         ));
     }
     return try tree.add_recovered_statement(token_span_at(self));

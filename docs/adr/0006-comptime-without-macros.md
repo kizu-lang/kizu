@@ -1,41 +1,40 @@
-# ADR-0006: comptime は採用候補とし、macro は採用しない
+# ADR-0006: comptime は展開だけを持ち、macro と interpreter は持たない
 
 Status: 採用
 
 ## 背景
 
-Kizu は Zig に近い低レベル指向を目指す。
-そのため `comptime` は有力な機能である。
-
-一方、macro / proc macro / AST rewrite は仕様とビルドを複雑にし、Kizu の明快さと
-仕様を絞る方針を損なう可能性が高い。
+Kizu は Zig に近い低レベル指向を目指し、`comptime` は有力な機能である。一方、
+macro / proc macro / AST rewrite は仕様とビルドを複雑にし、Kizu の明快さと仕様を
+絞る方針を損なう。任意の Kizu 関数をコンパイル時に実行する interpreter も、
+checker と IR の意味論をもう 1 つ持つことになり、build 時間を Go 並みに保つ方針と
+衝突する。
 
 ## 決定
 
-`comptime` は Phase 13 で限定的に採用する。
-ただし macro は採用しない。
+`comptime` は「型検査済みの Kizu コードを、コンパイル時に分かる値で**展開する**」
+ものに限る。現在の形は SPEC §13 が持つ: `comptime <expr>`、`comptime if`、
+`comptime for`(struct field / variant / 整数 range)、`comptime match`、
+static 引数 `<n: i64>`。
 
-方針:
+- `comptime` expression が評価するのは整数・真偽値・文字列・型値と、その単項 /
+  二項演算、`std::meta` / `std::target` 述語だけ
+- 展開された各反復・各 branch は、その束縛のもとで型・ownership・borrow 検査する
+- runtime の値は `comptime` expression から参照できず、runtime borrow が comptime
+  境界を越えて escape することも禁止する
+- filesystem access や build script 的副作用は持たない
 
-- `comptime` は型検査済みの Kizu コードとして扱う
-- ownership / borrow check の対象にする
-- AST や token stream を直接書き換える API は提供しない
-- runtime borrow が comptime 境界を越えて escape することは禁止する
-- 任意の filesystem access や build script 的副作用は許さない
+整数 range の `comptime for` は runtime の `for` と同じ綴りに `comptime` を
+置いた形で、capture は body では i64 の値、`comptime` expression では展開の整数。
+展開数は 1024 で打ち切る: 展開は body の複製なので、それ以上は runtime の loop か
+表が正しい形である。
 
-v0.1 で採用するもの:
+## 却下した案
 
-- `comptime <expr>`
-- `fn f(comptime n: i64)`
-- `comptime if <bool expr> { ... } else { ... }`
-
-v0.1 の `comptime` expression は、リテラル、単項演算、二項演算に限定する。
-runtime local value は `comptime` expression から参照できない。
-
-## 影響
-
-- `comptime` ありでも borrow checker は技術的に可能
-- comptime の結果は型付きの値として扱う
-- branch / call path selection は `comptime if` で表す
-- macro-heavy な表現力は目指さない
-- type-level comptime と top-level declaration generation は今後の phase で別途判断する
+| 案 | 却下理由 |
+|---|---|
+| macro / AST rewrite API | 検査前の書き換えは型・所有権の検査対象にできず、読む側に展開後の形を要求する |
+| 任意の Kizu 関数の comptime 実行(Zig の comptime interpreter) | checker / IR と別の評価器を持ち、両実装(Go seed と Kizu compiler)の一致点が増える。build 時間の上限も失う |
+| `inline for` を別 keyword にする | `comptime for` が field / variant で既に同じ意味を持つ。展開するかどうかは `comptime` の 1 語で読める |
+| 展開数の上限を持たない | body の複製が無制限に生成され、build 時間と binary size が source から読めなくなる |
+| top-level `const` に comptime 評価した表を置く | global data を持つかは別の問い(hidden global runtime を持たない方針、§15)。必要になれば別 ADR |

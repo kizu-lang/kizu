@@ -1035,6 +1035,7 @@ for 0..3 |i| {
 ```
 
 iterator protocol、collection iteration、`inline for` は扱いません。
+コンパイル時に展開する range は `comptime for`(§13.1)です。
 
 ### 6.12 match
 
@@ -2726,8 +2727,27 @@ comptime for std::meta::public_fields<T>() |f| {
 `comptime if` と同じく、これは token stream や AST を書き換える macro では
 ありません。展開された各反復を、その束縛のもとで型・所有権・borrow 検査します。
 
-反復できるのは `std::meta::public_fields<T>()` と `std::meta::variants<T>()`
-だけです。整数 range は runtime の `for` が持ちます。
+反復できるのは `std::meta::public_fields<T>()`、`std::meta::variants<T>()`、
+および整数 range です。
+
+```kizu
+comptime for 0..3 |row| {
+    comptime for 0..2 |col| {
+        comptime if row * col == 0 {
+            total = total + pick(row);
+        } else {
+            total = total + pick(row) * (row * col + 1);
+        }
+    }
+}
+```
+
+整数 range の両端は `comptime` expression として評価できる整数で、runtime の
+`for` と同じく終了値を含みません。capture は body では i64 の値であり、
+`comptime` expression の中ではその展開の整数です。`comptime if` の条件に書けば
+展開ごとに branch が選ばれ、展開数 0 の range は何も残しません。1 つの
+`comptime for` が展開できるのは 1024 回までで、超えると診断になります(それ以上は
+runtime の `for` か表)。
 
 `std::meta` は、struct と sum type の構造をコンパイル時に読むための組み込みの
 式の形です。comptime 専用の**型**は持ちません(ADR-0113)。
