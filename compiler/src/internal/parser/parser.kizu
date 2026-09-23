@@ -3439,8 +3439,111 @@ fn (self: &var Parser) parse_static_type_arg(
         kind == token::Kind::False {
         return try owned_token_literal(self.allocator, self.current_token());
     }
+    if kind == token::Kind::LParen {
+        return self.parse_static_expr_arg(tree);
+    }
     try self.error_token("expected static argument, got ", self.current_token());
     return null;
+}
+
+// parse_static_expr_arg parses a parenthesized static argument such as
+// `(n1 * k2)`. The parentheses are what keep a `>` inside it from closing the
+// list. Only integer arithmetic on literals and names is a static expression;
+// it is recorded in the one spelling staticexpr reads.
+fn (self: &var Parser) parse_static_expr_arg(tree: &var ast::Ast) -> !?string::String {
+    // Parse the inside of the parentheses only: an expression parse that
+    // started at `(` would read the closing `>` as a comparison.
+    try self.next_token();
+    let expression = try self.parse_expression(tree, lowest_precedence());
+    if !try self.expect_peek(token::Kind::RParen) {
+        return null;
+    }
+    var text = string::new(self.allocator);
+    errdefer text.deinit(self.allocator);
+    if try append_static_expr_text(self.allocator, tree, expression, &var text) {
+        return move text;
+    }
+    text.deinit(self.allocator);
+    let rendered = try ast::render_expression(self.allocator, tree, expression);
+    defer rendered.deinit(self.allocator);
+    var entry = try self.error_entry();
+    errdefer entry.deinit(self.allocator);
+    try entry.message.append_bytes(self.allocator, "static argument expression `");
+    try entry.message.append_string(self.allocator, &rendered);
+    try entry.message.append_bytes(self.allocator,
+        "` is not integer arithmetic (literals, names, and + - * / % only)");
+    try self.record(move entry);
+    // The expression was read to its `)`, so the list goes on from there; a
+    // stand-in keeps one bad argument to one error.
+    var stand_in = string::new(self.allocator);
+    errdefer stand_in.deinit(self.allocator);
+    try stand_in.append_bytes(self.allocator, "0");
+    return move stand_in;
+}
+
+// append_static_expr_text spells a static expression canonically: a name or
+// literal as itself, every operation in its own parentheses, and negation as
+// a subtraction from 0, so the reader needs no precedence. It answers false
+// for anything that is not integer arithmetic.
+fn append_static_expr_text(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    out: &var string::String
+) -> !bool {
+    match tree.expressions.at(expression.node) {
+        Int(value) => {
+            try append_retained_string(allocator, out, tree.texts.at(value.value.node));
+            return true;
+        },
+        Ident(value) => {
+            try append_retained_string(allocator, out, tree.texts.at(value.name.node));
+            return true;
+        },
+        Prefix(value) => {
+            if !text_equal(tree, value.operator, "-") {
+                return false;
+            }
+            try out.append_bytes(allocator, "(0 - ");
+            if !try append_static_expr_text(allocator, tree, value.right, out) {
+                return false;
+            }
+            try out.append_bytes(allocator, ")");
+            return true;
+        },
+        Binary(value) => {
+            if !is_static_expr_operator(tree, value.operator) {
+                return false;
+            }
+            try out.append_bytes(allocator, "(");
+            if !try append_static_expr_text(allocator, tree, value.left, out) {
+                return false;
+            }
+            try out.append_bytes(allocator, " ");
+            try append_retained_string(allocator, out, tree.texts.at(value.operator.node));
+            try out.append_bytes(allocator, " ");
+            if !try append_static_expr_text(allocator, tree, value.right, out) {
+                return false;
+            }
+            try out.append_bytes(allocator, ")");
+            return true;
+        },
+        _ => return false,
+    }
+}
+
+fn text_equal(tree: &ast::Ast, value: ast::Text, expected: []u8) -> bool {
+    let retained = tree.texts.at(value.node);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, expected);
+}
+
+fn is_static_expr_operator(tree: &ast::Ast, operator: ast::Text) -> bool {
+    return text_equal(tree, operator, "+") or
+        text_equal(tree, operator, "-") or
+        text_equal(tree, operator, "*") or
+        text_equal(tree, operator, "/") or
+        text_equal(tree, operator, "%");
 }
 
 fn (self: &var Parser) parse_type_argument(
@@ -3899,6 +4002,9 @@ fn (self: &var Parser) type_apply_looks_like_call() -> !bool {
 fn (self: &var Parser) scan_type_apply_lookahead() -> !bool {
     try self.next_token();
     var depth = 1;
+    // A `<` or `>` inside a parenthesized static expression is arithmetic,
+    // not a bracket of the list.
+    var parens = 0;
     while depth > 0 {
         try self.next_token();
         let kind = self.current_kind();
@@ -3908,10 +4014,16 @@ fn (self: &var Parser) scan_type_apply_lookahead() -> !bool {
             kind == token::Kind::RBrace {
             return false;
         }
-        if kind == token::Kind::Lt {
+        if kind == token::Kind::LParen {
+            parens = parens + 1;
+        }
+        if kind == token::Kind::RParen {
+            parens = parens - 1;
+        }
+        if kind == token::Kind::Lt and parens == 0 {
             depth = depth + 1;
         }
-        if kind == token::Kind::Gt {
+        if kind == token::Kind::Gt and parens == 0 {
             depth = depth - 1;
         }
     }

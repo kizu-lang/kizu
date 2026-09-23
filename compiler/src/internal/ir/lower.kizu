@@ -3,6 +3,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import compiler::internal::project;
 import compiler::internal::source;
+import compiler::internal::staticexpr;
 import compiler::internal::stdmeta;
 import compiler::internal::stdmethod;
 import compiler::internal::stdtarget;
@@ -1878,11 +1879,61 @@ fn (self: &Lowerer) static_value(name: Name) -> ?StaticValue {
 /// Forwards a static value through an outer binding, the Go
 /// `resolveStaticValue`, so a generic passing its own static value on keeps
 /// the caller's argument.
-fn (self: &Lowerer) resolve_static_value(text: Name) -> Name {
+fn (self: &var Lowerer) resolve_static_value(text: Name) -> !Name {
     if self.static_value(text) |bound| {
         return bound.text;
     }
-    return text;
+    let retained = name_text(&self.module.names, text);
+    let bytes = retained.as_bytes();
+    if !staticexpr::is(bytes) {
+        return text;
+    }
+    // The checker evaluated the same text against the same names, so an
+    // expression reaching here evaluates.
+    var env = try self.static_int_env();
+    defer env.deinit(self.allocator);
+    let outcome = try staticexpr::eval(self.allocator, bytes, &env);
+    match outcome {
+        Value(value) => return self.module.names.intern_i64(value),
+        Problem(problem) => {
+            problem.deinit(self.allocator);
+            return text;
+        },
+    }
+}
+
+/// Collects the integers the i64 static values stand for, the Go `staticInt`,
+/// in the order static_value searches them so the binding in force wins.
+fn (self: &Lowerer) static_int_env() -> !staticexpr::Env {
+    var env = staticexpr::new_env(self.allocator);
+    errdefer env.deinit(self.allocator);
+    var current = self.static_current;
+    while current |handle| {
+        let binding = self.static_bindings.at(handle);
+        try self.add_static_int(&var env, binding.value);
+        current = binding.parent;
+    }
+    let args = self.current_args orelse return move env;
+    let node = self.generic_args.at(args.node);
+    var index = 0;
+    while node.values.get(index) |value| {
+        index = index + 1;
+        try self.add_static_int(&var env, value);
+    }
+    return move env;
+}
+
+fn (self: &Lowerer) add_static_int(env: &var staticexpr::Env, value: StaticValue) -> !void {
+    let name_retained = name_text(&self.module.names, value.name);
+    let name = name_retained.as_bytes();
+    if self.module.names.is(value.typ, "i64") {
+        let text_retained = name_text(&self.module.names, value.text);
+        let text = text_retained.as_bytes();
+        if staticexpr::parse_i64(text) |integer| {
+            return env.bind(self.allocator, name, integer);
+        }
+    }
+    return env.hide(self.allocator, name);
 }
 
 /// Returns what a function is running as when it holds no instance bindings,

@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::staticexpr;
 import compiler::internal::stdprim;
 import compiler::internal::typ;
 import std::array;
@@ -595,6 +596,15 @@ fn (self: &var Checker) check_static_arg(
             try checked.substitutions.insert(allocator, parameter_name, resolved);
         } else {
             if self.types.is_text(parameter_type, "Field") {
+                // An expression is refused the way the Go checker refuses it,
+                // before it is read as a field name.
+                if staticexpr::is(argument_bytes) {
+                    if try self.check_static_expr_arg(
+                        function_name, parameter_name, parameter_type, argument_bytes
+                    ) |problem| {
+                        return move problem;
+                    }
+                }
                 let result = try self.field_static_arg(
                     tree,
                     function,
@@ -634,7 +644,7 @@ fn (self: &var Checker) check_static_arg(
                     return move problem;
                 }
                 if !self.types.is_text(parameter_type, "Function") {
-                    if self.static_value_of(argument_bytes) |value| {
+                    if try self.static_value_of(argument_bytes) |value| {
                         try checked.bindings.values.insert(allocator, parameter_name, value);
                     }
                 }
@@ -644,12 +654,23 @@ fn (self: &var Checker) check_static_arg(
     return null;
 }
 
-// static_value_of reads an integer or bool static argument: a literal, or a
+// static_value_of reads an integer or bool static argument: a literal, a
 // name bound to one where the call is written -- a static parameter of the
-// generic doing the call, or an integer-range `comptime for` capture.
-fn (self: &Checker) static_value_of(argument: []u8) -> ?ComptimeValue {
+// generic doing the call, or an integer-range `comptime for` capture -- or a
+// parenthesized integer expression over such names.
+fn (self: &Checker) static_value_of(argument: []u8) -> !?ComptimeValue {
     if self.comptime_values.get(argument) |bound| {
         return bound;
+    }
+    if staticexpr::is(argument) {
+        let outcome = try self.eval_static_expr(argument);
+        match outcome {
+            Value(value) => return ComptimeValue::Integer(value),
+            Problem(problem) => {
+                problem.deinit(self.allocator);
+                return null;
+            },
+        }
     }
     if mem::equal_bytes(argument, "true") {
         return ComptimeValue::Boolean(true);
@@ -865,6 +886,9 @@ fn (self: &Checker) check_static_value_arg(
             return null;
         }
     }
+    if staticexpr::is(argument) {
+        return self.check_static_expr_arg(function_name, parameter_name, parameter_type, argument);
+    }
     if self.types.is_text(parameter_type, "Function") {
         if is_identifier_text(argument) {
             return null;
@@ -889,6 +913,63 @@ fn (self: &Checker) check_static_value_arg(
     return try self.static_value_kind_error(
         function_name, parameter_name, expected_bytes, argument
     );
+}
+
+// check_static_expr_arg validates a parenthesized static expression: it fills
+// an integer parameter, and every name in it is a compile-time integer where
+// the call is written.
+fn (self: &Checker) check_static_expr_arg(
+    function_name: []u8,
+    parameter_name: []u8,
+    parameter_type: Type,
+    argument: []u8
+) -> !?diagnostic::Diagnostic {
+    if !self.accepts_comptime_value(parameter_type, ComptimeValue::Integer(0)) {
+        let expected = try self.types.copy_text(self.allocator, parameter_type);
+        defer expected.deinit(self.allocator);
+        let expected_bytes = expected.as_bytes();
+        return try self.static_value_kind_error(
+            function_name, parameter_name, expected_bytes, argument
+        );
+    }
+    let outcome = try self.eval_static_expr(argument);
+    match outcome {
+        Value(_) => return null,
+        Problem(problem) => {
+            defer problem.deinit(self.allocator);
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            try message.append_byte(self.allocator, cast<u8>(96));
+            try message.append_bytes(self.allocator, function_name);
+            try message.append_bytes(self.allocator, "` static argument `");
+            try message.append_bytes(self.allocator, parameter_name);
+            try message.append_bytes(self.allocator, "`: ");
+            try message.append_string(self.allocator, &problem);
+            return try self.checker_message_at("type error", ast::zero_span(), move message);
+        },
+    }
+}
+
+// eval_static_expr evaluates a static expression against the integers the
+// comptime-readable names stand for where the call is written, the Go
+// `staticexpr.Eval(arg, c.comptimeInt)`. The innermost binding of a name is
+// the one in force, so the walk from the current binding outward binds it
+// first.
+fn (self: &Checker) eval_static_expr(argument: []u8) -> !staticexpr::Outcome {
+    var env = staticexpr::new_env(self.allocator);
+    defer env.deinit(self.allocator);
+    var current = self.comptime_values.current;
+    while current |handle| {
+        let binding = self.comptime_values.bindings.at(handle);
+        let bound = binding.value;
+        let name = binding.name.as_bytes();
+        match bound {
+            Integer(value) => try env.bind(self.allocator, name, value),
+            _ => try env.hide(self.allocator, name),
+        }
+        current = binding.parent;
+    }
+    return staticexpr::eval(self.allocator, argument, &env);
 }
 
 // accepts_comptime_value reports whether a name bound to a comptime value --

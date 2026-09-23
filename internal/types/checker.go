@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
@@ -5981,6 +5982,10 @@ func (c *Checker) staticValueOf(arg string) (comptimeValue, bool) {
 	if value, ok := c.comptimeValues[arg]; ok {
 		return value, true
 	}
+	if staticexpr.Is(arg) {
+		value, err := staticexpr.Eval(arg, c.comptimeInt)
+		return comptimeValue{typ: typeI64, i: value}, err == nil
+	}
 	switch arg {
 	case "true":
 		return comptimeValue{typ: typeBool, b: true}, true
@@ -6046,6 +6051,9 @@ func (c *Checker) checkStaticValueArg(
 	if bound, ok := c.comptimeValues[arg]; ok && acceptsComptimeValue(want, bound) {
 		return nil
 	}
+	if staticexpr.Is(arg) {
+		return c.checkStaticExprArg(name, param, want, arg)
+	}
 	switch want {
 	case typeField:
 		_, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
@@ -6069,6 +6077,31 @@ func (c *Checker) checkStaticValueArg(
 		}
 		return nil
 	}
+}
+
+// checkStaticExprArg validates a parenthesized static expression: it fills an
+// integer parameter, and every name in it is a compile-time integer where the
+// call is written.
+func (c *Checker) checkStaticExprArg(
+	name string,
+	param ast.StaticParam,
+	want Type,
+	arg string,
+) error {
+	if !acceptsComptimeValue(want, comptimeValue{typ: typeI64}) {
+		return errorf("type error: `%s` static argument `%s` expects %s, got `%s`",
+			name, param.Name, param.Type, arg)
+	}
+	if _, err := staticexpr.Eval(arg, c.comptimeInt); err != nil {
+		return errorf("type error: `%s` static argument `%s`: %v", name, param.Name, err)
+	}
+	return nil
+}
+
+// comptimeInt answers the integer a comptime-readable name stands for.
+func (c *Checker) comptimeInt(name string) (int64, bool) {
+	value, ok := c.comptimeValues[name]
+	return value.i, ok && value.typ == typeI64
 }
 
 // acceptsComptimeValue reports whether a name bound to a comptime value -- an

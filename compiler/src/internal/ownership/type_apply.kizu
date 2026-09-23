@@ -1,7 +1,9 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::staticexpr;
 import std::arena;
 import std::array;
+import std::fmt;
 import std::map;
 import std::string;
 
@@ -1234,9 +1236,52 @@ fn (self: &var Checker) generic_call_values(
         if self.comptime_values.get(arg_bytes) |outer| {
             arg = outer;
         }
+        arg = try self.evaluate_static_expr(arg);
         try values.append(self.allocator, arg);
     }
     return move values;
+}
+
+/// Replaces a parenthesized static expression with the decimal text of its
+/// value, the Go `staticexpr.Eval(arg, c.comptimeInt)`. The type checker has
+/// already refused an expression that does not evaluate, so a failure here
+/// leaves the text as written.
+fn (self: &var Checker) evaluate_static_expr(arg: Name) -> !Name {
+    let retained = name_text(&self.names, arg);
+    let arg_bytes = retained.as_bytes();
+    if !staticexpr::is(arg_bytes) {
+        return arg;
+    }
+    // The innermost binding of a name is the one in force, so the walk from
+    // the current binding outward binds it first.
+    var env = staticexpr::new_env(self.allocator);
+    defer env.deinit(self.allocator);
+    var current = self.comptime_values.current;
+    while current |handle| {
+        let binding = self.comptime_values.bindings.at(handle);
+        let value_text = name_text(&self.names, binding.value);
+        let value_bytes = value_text.as_bytes();
+        let name = binding.name.as_bytes();
+        if staticexpr::parse_i64(value_bytes) |value| {
+            try env.bind(self.allocator, name, value);
+        } else {
+            try env.hide(self.allocator, name);
+        }
+        current = binding.parent;
+    }
+    let outcome = try staticexpr::eval(self.allocator, arg_bytes, &env);
+    match outcome {
+        Value(value) => {
+            var text = string::new(self.allocator);
+            errdefer text.deinit(self.allocator);
+            try fmt::append_i64(self.allocator, &var text, value);
+            return self.names.intern_owned(move text);
+        },
+        Problem(problem) => {
+            problem.deinit(self.allocator);
+            return arg;
+        },
+    }
 }
 
 /// Replaces the comptime-readable names with the values an instance binds and

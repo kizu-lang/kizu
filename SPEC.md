@@ -2599,7 +2599,22 @@ compile-time 値として書けるのは整数、`true` / `false`、`Function`
 (top-level function 名)、および `Field`(struct の public field 名)です。
 整数・bool の parameter には、呼び出し側で値が決まっている名前 ——
 呼び出し側自身の static parameter と、整数 range の `comptime for` の
-capture(§13.1)—— も同じ種類の literal として渡せます。型引数推論、generic methods、bounds、
+capture(§13.1)—— も同じ種類の literal として渡せます。
+整数の parameter には、括弧で囲んだ整数演算も書けます。
+
+```kizu
+comptime for 0..8 |n1| {
+    comptime for 0..3 |k2| {
+        rotate<((n1 * k2) % 24)>(value);
+    }
+}
+```
+
+括弧の中に書けるのは整数 literal、上の名前、単項 `-`、`+ - * / %` だけで、
+呼び出しを検査する時点で評価し、その値の instance を指します
+(`scaled<(n * 2 + 1)>` は n = 4 なら `scaled<9>`)。括弧は必須です: 中の `>` や
+比較が static 引数リストの閉じ `>` と区別できなくなるためです。比較や bool を
+作る式は書けません —— 条件は body の `comptime if` に書きます。型引数推論、generic methods、bounds、
 associated types、higher-kinded types、specialization は実装しません。
 reflection は §13.1 の comptime 専用 structural reflection だけを持ち、
 runtime reflection と AST 書き換えは持ちません。
