@@ -35,8 +35,12 @@ func (c *Checker) intLiteral(expr ast.Expression) (int64, bool) {
 		value, err := strconv.ParseInt(e.Value, 10, 64)
 		return value, err == nil
 	case *ast.IdentExpr:
-		value, ok := c.comptimeInts[e.Name]
-		return value, ok
+		text, ok := c.comptimeValues[e.Name]
+		if !ok {
+			return 0, false
+		}
+		value, err := strconv.ParseInt(text, 10, 64)
+		return value, err == nil
 	case *ast.PrefixExpr:
 		value, ok := c.intLiteral(e.Right)
 		if e.Operator == "-" {
@@ -132,7 +136,10 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 		if _, ok := c.typeArgValues[e.Name]; ok {
 			return "type", nil
 		}
-		if _, ok := c.comptimeInts[e.Name]; ok {
+		if text, ok := c.comptimeValues[e.Name]; ok {
+			if text == "true" || text == "false" {
+				return "bool", nil
+			}
 			return "i64", nil
 		}
 		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
@@ -256,6 +263,9 @@ func (c *Checker) comptimeBool(expr ast.Expression) (bool, bool) {
 		return c.comptimeBool(e.Expr)
 	case *ast.BoolExpr:
 		return e.Value, true
+	case *ast.IdentExpr:
+		text := c.comptimeValues[e.Name]
+		return text == "true", text == "true" || text == "false"
 	case *ast.CallExpr:
 		if value, ok := c.targetPredicateCall(e); ok {
 			return value, true
@@ -265,19 +275,26 @@ func (c *Checker) comptimeBool(expr ast.Expression) (bool, bool) {
 		value, ok := c.comptimeBool(e.Right)
 		return !value, ok && e.Operator == "!"
 	case *ast.BinaryExpr:
-		if e.Operator == "and" || e.Operator == "or" {
-			return c.comptimeLogicalBool(e)
-		}
-		leftType, leftTypeOK := c.comptimeTypeValue(e.Left)
-		rightType, rightTypeOK := c.comptimeTypeValue(e.Right)
-		if leftTypeOK && rightTypeOK {
-			return compareComptimeTypes(e.Operator, leftType, rightType)
-		}
-		left, leftOK := c.intLiteral(e.Left)
-		right, rightOK := c.intLiteral(e.Right)
-		if leftOK && rightOK {
-			return compareComptimeInts(e.Operator, left, right)
-		}
+		return c.comptimeBinaryBool(e)
+	}
+	return false, false
+}
+
+// comptimeBinaryBool evaluates a compile-time logical operator, a type
+// comparison, or an integer comparison.
+func (c *Checker) comptimeBinaryBool(e *ast.BinaryExpr) (bool, bool) {
+	if e.Operator == "and" || e.Operator == "or" {
+		return c.comptimeLogicalBool(e)
+	}
+	leftType, leftTypeOK := c.comptimeTypeValue(e.Left)
+	rightType, rightTypeOK := c.comptimeTypeValue(e.Right)
+	if leftTypeOK && rightTypeOK {
+		return compareComptimeTypes(e.Operator, leftType, rightType)
+	}
+	left, leftOK := c.intLiteral(e.Left)
+	right, rightOK := c.intLiteral(e.Right)
+	if leftOK && rightOK {
+		return compareComptimeInts(e.Operator, left, right)
 	}
 	return false, false
 }

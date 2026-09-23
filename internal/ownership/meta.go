@@ -1,6 +1,7 @@
 package ownership
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -92,16 +93,16 @@ func (c *Checker) checkComptimeForRange(stmt *ast.ComptimeForStmt, env *scope) e
 	if !startOK || !endOK {
 		return errorf("borrow error: comptime for range bounds must be comptime integers")
 	}
-	previous, had := c.comptimeInts[stmt.Name]
+	previous, had := c.comptimeValues[stmt.Name]
 	defer func() {
 		if had {
-			c.comptimeInts[stmt.Name] = previous
+			c.comptimeValues[stmt.Name] = previous
 			return
 		}
-		delete(c.comptimeInts, stmt.Name)
+		delete(c.comptimeValues, stmt.Name)
 	}()
 	for value := start; value < end; value++ {
-		c.comptimeInts[stmt.Name] = value
+		c.comptimeValues[stmt.Name] = strconv.FormatInt(value, 10)
 		child := env.child()
 		child.define(c.newBinding(stmt.Name, "i64"))
 		if err := c.checkBlock(stmt.Body, child); err != nil {

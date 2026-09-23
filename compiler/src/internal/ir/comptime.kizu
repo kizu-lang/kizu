@@ -33,6 +33,10 @@ fn (self: &var Lowerer) const_bool(tree: &var ast::Ast, expression: ast::Express
         out.* = literal.value;
         return true;
     }
+    if ownership::ident_expr(tree, expression) |ident| {
+        let name = try self.text_name(tree, ident.name);
+        return self.static_bool(name, out);
+    }
     if ownership::call_expr(tree, expression) |call| {
         if try self.target_predicate_call(tree, call, out) {
             return true;
@@ -46,25 +50,47 @@ fn (self: &var Lowerer) const_bool(tree: &var ast::Ast, expression: ast::Express
         return ok and text_is(tree, prefix.operator, "!");
     }
     if ownership::binary_expr(tree, expression) |binary| {
-        if text_is(tree, binary.operator, "and") or text_is(tree, binary.operator, "or") {
-            return self.const_logical_bool(tree, binary, out);
+        return self.const_binary_bool(tree, binary, out);
+    }
+    return false;
+}
+
+/// Reads a bool static parameter, the Go `staticBool`, which reaches the
+/// instance being lowered as its literal.
+fn (self: &Lowerer) static_bool(name: Name, out: &var bool) -> bool {
+    let static = self.static_value(name) orelse return false;
+    if !self.name_is(static.typ, "bool") {
+        return false;
+    }
+    out.* = self.name_is(static.text, "true");
+    return true;
+}
+
+/// Evaluates a constant logical operator, a type comparison, or an integer
+/// comparison, the Go `constBinaryBool`.
+fn (self: &var Lowerer) const_binary_bool(
+    tree: &var ast::Ast,
+    binary: ast::BinaryExpr,
+    out: &var bool
+) -> !bool {
+    if text_is(tree, binary.operator, "and") or text_is(tree, binary.operator, "or") {
+        return self.const_logical_bool(tree, binary, out);
+    }
+    if text_is(tree, binary.operator, "==") or text_is(tree, binary.operator, "!=") {
+        var equal = false;
+        if try self.const_type_equal(tree, binary.left, binary.right, &var equal) {
+            out.* = equal == text_is(tree, binary.operator, "==");
+            return true;
         }
-        if text_is(tree, binary.operator, "==") or text_is(tree, binary.operator, "!=") {
-            var equal = false;
-            if try self.const_type_equal(tree, binary.left, binary.right, &var equal) {
-                out.* = equal == text_is(tree, binary.operator, "==");
-                return true;
-            }
-        }
-        var left = 0;
-        let left_ok = try self.const_int(tree, binary.left, &var left);
-        var right = 0;
-        let right_ok = try self.const_int(tree, binary.right, &var right);
-        if left_ok and right_ok {
-            let retained = tree.texts.at(binary.operator.node);
-            let operator = retained.as_bytes();
-            return compare_const_ints(operator, left, right, out);
-        }
+    }
+    var left = 0;
+    let left_ok = try self.const_int(tree, binary.left, &var left);
+    var right = 0;
+    let right_ok = try self.const_int(tree, binary.right, &var right);
+    if left_ok and right_ok {
+        let retained = tree.texts.at(binary.operator.node);
+        let operator = retained.as_bytes();
+        return compare_const_ints(operator, left, right, out);
     }
     return false;
 }

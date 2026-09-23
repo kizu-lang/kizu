@@ -12,10 +12,27 @@ struct CheckedStaticArgs {
     names: array::Array<string::String>,
     type_args: array::Array<Type>,
     substitutions: map::Map<[]u8, Type>,
-    field_args: map::Map<[]u8, MetaFieldHandle>,
+    bindings: StaticBindings,
+}
+
+// StaticBindings is what one call binds the compile-time value parameters of
+// a generic to, the Go `staticBindings`: fields, function names, and integer
+// or bool values. Each is part of which instance the call names, and each is
+// readable in that instance's body through the form that reads it.
+struct StaticBindings {
+    fields: map::Map<[]u8, MetaFieldHandle>,
     // What each `Function` static parameter of this call was given. A body
     // that calls one is checked against the function it names.
-    function_args: map::Map<[]u8, string::String>,
+    functions: map::Map<[]u8, string::String>,
+    values: map::Map<[]u8, ComptimeValue>,
+}
+
+fn new_static_bindings(allocator: Allocator) -> StaticBindings {
+    return StaticBindings {
+        fields: map::new<[]u8, MetaFieldHandle>(allocator),
+        functions: map::new<[]u8, string::String>(allocator),
+        values: map::new<[]u8, ComptimeValue>(allocator)
+    };
 }
 
 struct StaticParamCheck {
@@ -457,13 +474,12 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
         tree,
         handle,
         &checked.substitutions,
-        &checked.field_args,
-        &checked.function_args
+        &checked.bindings
     ) |problem| {
         return try self.annotate_instantiation(move problem, span, name, &checked.type_args);
     }
     let previous_meta = self.meta_bindings.current;
-    try self.bind_static_meta_fields(&checked.field_args);
+    try self.bind_static_meta_fields(&checked.bindings.fields);
     let declared_return = self.function_return_type(handle);
     let substituted = try self.types.substitute_type_params(self.allocator,
         declared_return, &checked.substitutions
@@ -476,16 +492,16 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     return null;
 }
 
-// function_has_function_static_param reports whether a declaration names a
-// function among its compile-time parameters.
-fn (self: &Checker) function_has_function_static_param(function: FunctionHandle) -> bool {
+// function_has_value_static_param reports whether a declaration takes a
+// compile-time value in `<...>`, the Go `FunctionSignature.HasValueStaticParam`.
+// Such a body means something only once the value is bound: a `Function`
+// names the callee, and an integer or bool can decide a `comptime if`.
+fn (self: &Checker) function_has_value_static_param(function: FunctionHandle) -> bool {
     if self.metadata.functions.at(function.index) |value| {
         var index = 0;
         while value.signature.static_params.at(index) |parameter| {
             if !parameter.is_type {
-                if self.types.is_text(parameter.type_name, "Function") {
-                    return true;
-                }
+                return true;
             }
             index = index + 1;
         }
@@ -517,8 +533,7 @@ fn (self: &var Checker) check_static_args(
         names: array::new<string::String>(self.allocator),
         type_args: array::new<Type>(self.allocator),
         substitutions: map::new<[]u8, Type>(self.allocator),
-        field_args: map::new<[]u8, MetaFieldHandle>(self.allocator),
-        function_args: map::new<[]u8, string::String>(self.allocator)
+        bindings: new_static_bindings(self.allocator)
     };
     errdefer checked.deinit(self.allocator);
     var index = 0;
@@ -591,7 +606,7 @@ fn (self: &var Checker) check_static_arg(
                 );
                 match result {
                     Value(field) => {
-                        try checked.field_args.insert(allocator, parameter_name, field);
+                        try checked.bindings.fields.insert(allocator, parameter_name, field);
                     },
                     Unbound => {},
                     Problem(problem) => return move problem,
@@ -608,7 +623,7 @@ fn (self: &var Checker) check_static_arg(
                     if !forwarded {
                         try target.append_bytes(allocator, argument_bytes);
                     }
-                    try checked.function_args.insert(allocator, parameter_name, move target);
+                    try checked.bindings.functions.insert(allocator, parameter_name, move target);
                 }
                 if try self.check_static_value_arg(
                     function_name,
@@ -618,10 +633,32 @@ fn (self: &var Checker) check_static_arg(
                 ) |problem| {
                     return move problem;
                 }
+                if !self.types.is_text(parameter_type, "Function") {
+                    if self.static_value_of(argument_bytes) |value| {
+                        try checked.bindings.values.insert(allocator, parameter_name, value);
+                    }
+                }
             }
         }
     }
     return null;
+}
+
+// static_value_of reads an integer or bool static argument: a literal, or a
+// name bound to one where the call is written -- a static parameter of the
+// generic doing the call, or an integer-range `comptime for` capture.
+fn (self: &Checker) static_value_of(argument: []u8) -> ?ComptimeValue {
+    if self.comptime_values.get(argument) |bound| {
+        return bound;
+    }
+    if mem::equal_bytes(argument, "true") {
+        return ComptimeValue::Boolean(true);
+    }
+    if mem::equal_bytes(argument, "false") {
+        return ComptimeValue::Boolean(false);
+    }
+    let integer = decimal_i64(argument) orelse return null;
+    return ComptimeValue::Integer(integer);
 }
 
 fn (self: &Checker) copy_static_param(function: FunctionHandle, index: i64) -> !?StaticParamCheck {
@@ -823,6 +860,11 @@ fn (self: &Checker) check_static_value_arg(
             return null;
         }
     }
+    if self.comptime_values.get(argument) |bound| {
+        if self.accepts_comptime_value(parameter_type, bound) {
+            return null;
+        }
+    }
     if self.types.is_text(parameter_type, "Function") {
         if is_identifier_text(argument) {
             return null;
@@ -847,6 +889,25 @@ fn (self: &Checker) check_static_value_arg(
     return try self.static_value_kind_error(
         function_name, parameter_name, expected_bytes, argument
     );
+}
+
+// accepts_comptime_value reports whether a name bound to a comptime value --
+// an integer-range capture, or a static value the calling instance was given
+// -- may fill a static parameter of type want. It forwards the way a literal
+// of its kind would: a bool fills a bool parameter, an integer any other
+// value parameter, and neither names a function or a field.
+fn (self: &Checker) accepts_comptime_value(want: Type, bound: ComptimeValue) -> bool {
+    if self.types.is_text(want, "Function") or self.types.is_text(want, "Field") {
+        return false;
+    }
+    var bound_bool = false;
+    match bound {
+        Boolean(_) => {
+            bound_bool = true;
+        },
+        _ => {},
+    }
+    return bound_bool == self.types.is_text(want, "bool");
 }
 
 fn is_identifier_text(text: []u8) -> bool {
@@ -2232,11 +2293,10 @@ fn (self: &var Checker) check_generic_instantiation(
     tree: &var ast::Ast,
     function: FunctionHandle,
     substitutions: &map::Map<[]u8, Type>,
-    fields: &map::Map<[]u8, MetaFieldHandle>,
-    functions: &map::Map<[]u8, string::String>
+    bindings: &StaticBindings
 ) -> !?diagnostic::Diagnostic {
     var done = false;
-    if try self.enter_instantiation(function, substitutions, fields, functions, &var done) |problem| {
+    if try self.enter_instantiation(function, substitutions, bindings, &var done) |problem| {
         return move problem;
     }
     if done {
@@ -2244,14 +2304,17 @@ fn (self: &var Checker) check_generic_instantiation(
     }
     let previous_meta = self.meta_bindings.current;
     let previous_functions = self.function_bindings.current;
-    try self.bind_static_meta_fields(fields);
-    try self.bind_static_functions(functions);
+    try self.bind_static_meta_fields(&bindings.fields);
+    try self.bind_static_functions(&bindings.functions);
+    let previous_values = try self.comptime_values.enter(&bindings.values);
     if try self.check_generic_instantiation_bound(self.allocator, tree, function, substitutions) |problem| {
+        self.comptime_values.restore(previous_values);
         self.function_bindings.restore(previous_functions);
         self.meta_bindings.restore(previous_meta);
         self.leave_instantiation();
         return move problem;
     }
+    self.comptime_values.restore(previous_values);
     self.function_bindings.restore(previous_functions);
     self.meta_bindings.restore(previous_meta);
     self.leave_instantiation();
@@ -2471,11 +2534,10 @@ fn (self: &var Checker) revalidate_substituted(
 fn (self: &var Checker) enter_instantiation(
     function: FunctionHandle,
     substitutions: &map::Map<[]u8, Type>,
-    fields: &map::Map<[]u8, MetaFieldHandle>,
-    functions: &map::Map<[]u8, string::String>,
+    bindings: &StaticBindings,
     done: &var bool
 ) -> !?diagnostic::Diagnostic {
-    let key = try self.instance_key(function, substitutions, fields, functions) orelse
+    let key = try self.instance_key(function, substitutions, bindings) orelse
         return try self.checker_error_at(
         "type error", ast::zero_span(), "missing generic function metadata"
     );
@@ -2507,8 +2569,7 @@ fn (self: &var Checker) leave_instantiation() -> void {
 fn (self: &Checker) instance_key(
     function: FunctionHandle,
     substitutions: &map::Map<[]u8, Type>,
-    fields: &map::Map<[]u8, MetaFieldHandle>,
-    functions: &map::Map<[]u8, string::String>
+    bindings: &StaticBindings
 ) -> !?string::String {
     var key = string::new(self.allocator);
     errdefer key.deinit(self.allocator);
@@ -2534,17 +2595,23 @@ fn (self: &Checker) instance_key(
         index = 0;
         while value.signature.static_params.at(index) |parameter| {
             let parameter_name = parameter.name.as_bytes();
-            if functions.at(parameter_name) |bound| {
-                let bound_bytes = bound.as_bytes();
-                try key.append_byte(self.allocator, cast<u8>(46));
-                try key.append_bytes(self.allocator, bound_bytes);
-            }
-            if fields.get(parameter_name) |field| {
+            if bindings.fields.get(parameter_name) |field| {
                 let entry = self.meta_field_entries.at(field.node);
                 try key.append_byte(self.allocator, cast<u8>(46));
                 try self.append_checker_type(&var key, entry.owner);
                 try key.append_byte(self.allocator, cast<u8>(46));
                 try key.append_string(self.allocator, &entry.name);
+            }
+            if bindings.functions.at(parameter_name) |bound| {
+                let bound_bytes = bound.as_bytes();
+                try key.append_byte(self.allocator, cast<u8>(46));
+                try key.append_bytes(self.allocator, bound_bytes);
+            }
+            // Each integer or bool value is its own instance: the body can
+            // fold a `comptime if` differently for each.
+            if bindings.values.get(parameter_name) |bound| {
+                try key.append_byte(self.allocator, cast<u8>(46));
+                try append_comptime_value_text(self.allocator, &var key, bound);
             }
             index = index + 1;
         }
@@ -2552,6 +2619,26 @@ fn (self: &Checker) instance_key(
     }
     key.deinit(self.allocator);
     return null;
+}
+
+// append_comptime_value_text spells an integer or bool value the way a static
+// argument does, which is how an instance key tells two bindings apart.
+fn append_comptime_value_text(
+    allocator: Allocator,
+    out: &var string::String,
+    value: ComptimeValue
+) -> !void {
+    match value {
+        Integer(integer) => return fmt::append_i64(allocator, out, integer),
+        Boolean(flag) => {
+            if flag {
+                return out.append_bytes(allocator, "true");
+            }
+            return out.append_bytes(allocator, "false");
+        },
+        _ => {},
+    }
+    return;
 }
 
 /// Bounds how deep generic instantiation may nest, the Go

@@ -56,10 +56,11 @@ type Checker struct {
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// open. A capture is not a value, so it is not a scope binding.
 	metaFields map[string]metaField
-	// comptimeInts binds the captures of the integer-range `comptime for`
-	// expansions currently open, so a comptime condition in the body folds
-	// with the integer this expansion stands for.
-	comptimeInts map[string]int64
+	// comptimeValues binds, by name, the integer and bool static parameters
+	// of the instance being checked and the integer-range `comptime for`
+	// captures currently open, spelled as a static argument is. A comptime
+	// condition in the body folds with them.
+	comptimeValues map[string]string
 	// loopStarts is the stack of loops the statement being checked sits in,
 	// innermost last: what a `break` or `continue` leaves, and the binding
 	// watermark its body's locals start at.
@@ -268,7 +269,7 @@ func NewForTarget(target stdtarget.Target) *Checker {
 		enumOrder:         map[string][]string{},
 		unionOrder:        map[string][]string{},
 		metaFields:        map[string]metaField{},
-		comptimeInts:      map[string]int64{},
+		comptimeValues:    map[string]string{},
 		functionArgs:      map[string]string{},
 		checkedInstances:  map[string]bool{},
 		result:            newResult(),
@@ -628,9 +629,10 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	if fn.sig.ExternABI != "" {
 		return nil
 	}
-	// A body that calls a `Function` static parameter has no callee until the
-	// parameter is bound, so it is checked once per instantiation instead.
-	if hasFunctionStaticParam(fn.sig) {
+	// A body with a compile-time value in `<...>` means something only once
+	// the value is bound -- a `Function` names the callee, an integer can
+	// decide a `comptime if` -- so it is checked once per instantiation.
+	if fn.sig.HasValueStaticParam() {
 		return nil
 	}
 	env := newScope(nil)
@@ -6902,9 +6904,10 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err != nil {
 		return "", true, err
 	}
+	values := c.genericCallValues(fn, typeArg)
 	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
 	restoreFunctions := c.bindFunctionArgs(c.genericCallFunctions(fn, typeArg))
-	err = c.checkGenericInstantiation(fn, subst)
+	err = c.checkGenericInstantiation(fn, subst, values)
 	restoreFunctions()
 	restore()
 	if err != nil {
@@ -6958,18 +6961,29 @@ func (c *Checker) genericCallSubst(
 	return subst, nil
 }
 
-// hasFunctionStaticParam reports whether a signature names a function among its
-// compile-time parameters.
-func hasFunctionStaticParam(sig ast.FunctionSignature) bool {
-	for _, param := range sig.StaticParams {
+// genericCallValues reads the integer and bool static arguments of one call,
+// each through the bindings in force where the call is written, so a capture
+// or a forwarded static parameter arrives as the value it stands for.
+func (c *Checker) genericCallValues(fn *functionInfo, typeArg string) map[string]string {
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
+		return nil
+	}
+	bound := map[string]string{}
+	for idx, param := range fn.sig.StaticParams {
 		if param.IsType() {
 			continue
 		}
-		if typ.Text(param.Type) == "Function" {
-			return true
+		if kind := typ.Text(param.Type); kind == "Function" || kind == "Field" {
+			continue
 		}
+		arg := strings.TrimSpace(staticArgs[idx])
+		if outer, ok := c.comptimeValues[arg]; ok {
+			arg = outer
+		}
+		bound[param.Name] = arg
 	}
-	return false
+	return bound
 }
 
 // genericCallFunctions reads the `Function` static arguments of one call, so a
@@ -7084,8 +7098,12 @@ func (c *Checker) bindMetaFields(fields map[string]metaField) func() {
 }
 
 // checkGenericInstantiation checks a generic function body for one static type set.
-func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
-	done, err := c.enterInstantiation(fn, subst)
+func (c *Checker) checkGenericInstantiation(
+	fn *functionInfo,
+	subst map[string]string,
+	values map[string]string,
+) error {
+	done, err := c.enterInstantiation(fn, subst, values)
 	if err != nil || done {
 		return err
 	}
@@ -7100,6 +7118,11 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeArgValues := c.typeArgValues
+	previousComptimeValues := c.comptimeValues
+	c.comptimeValues = make(map[string]string, len(values))
+	for name, value := range values {
+		c.comptimeValues[name] = value
+	}
 	c.loopStarts = nil
 	c.pendingOwnerTemps = nil
 	c.pendingMovedPlaces = nil
@@ -7113,6 +7136,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
 		c.typeArgValues = previousTypeArgValues
+		c.comptimeValues = previousComptimeValues
 	}()
 	return c.checkBlock(fn.body, env)
 }
@@ -7124,12 +7148,21 @@ const maxInstantiationDepth = 64
 
 // enterInstantiation records one instantiation and reports whether it has
 // already been checked.
-func (c *Checker) enterInstantiation(fn *functionInfo, subst map[string]string) (bool, error) {
+func (c *Checker) enterInstantiation(
+	fn *functionInfo,
+	subst map[string]string,
+	values map[string]string,
+) (bool, error) {
 	args := make([]string, 0, len(subst))
 	for _, param := range fn.sig.TypeParamNames() {
 		args = append(args, subst[param])
 	}
 	key := fn.name + "<" + strings.Join(args, ", ") + ">"
+	for _, param := range fn.sig.StaticParams {
+		if value, ok := values[param.Name]; ok {
+			key += "." + value
+		}
+	}
 	if c.checkedInstances[key] {
 		return true, nil
 	}

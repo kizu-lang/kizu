@@ -1129,9 +1129,11 @@ fn (self: &var Checker) check_generic_user_type_apply(
         subst.deinit(self.allocator);
         return move failed;
     }
+    let values = try self.generic_call_values(function, type_arg);
+    defer values.deinit(self.allocator);
     let restore = try self.bind_generic_call_fields(tree, function, type_arg);
     let restore_functions = try self.bind_generic_call_functions(function, type_arg);
-    if try self.check_generic_instantiation(tree, function, move subst) |failed| {
+    if try self.check_generic_instantiation(tree, function, move subst, &values) |failed| {
         self.function_bindings.restore(restore_functions);
         self.meta_fields.restore(restore);
         return move failed;
@@ -1183,21 +1185,82 @@ fn (self: &var Checker) instantiate_function_info(function: FunctionHandle, subs
     return FunctionHandle { index: try self.functions.add(self.allocator, move info) };
 }
 
-/// Reports whether a declaration names a function among its compile-time
-/// parameters. Such a body is checked once per instantiation, because that is
-/// the only place a call written against the parameter has a callee.
-fn (self: &Checker) has_function_static_param(function: FunctionHandle) -> bool {
+/// Reports whether a declaration takes a compile-time value in `<...>`, the
+/// Go `FunctionSignature.HasValueStaticParam`. Such a body means something
+/// only once the value is bound -- a `Function` names the callee, an integer
+/// or bool can decide a `comptime if` -- so it is checked per instantiation.
+fn (self: &Checker) has_value_static_param(function: FunctionHandle) -> bool {
     var index = 0;
     while self.static_param_at(function, index) |param| {
         index = index + 1;
-        if param.is_type {
-            continue;
-        }
-        if self.names.is(param.type_name, "Function") {
+        if !param.is_type {
             return true;
         }
     }
     return false;
+}
+
+/// Reads the integer and bool static arguments of one call, the Go
+/// `genericCallValues`, each through the bindings in force where the call is
+/// written, so a capture or a forwarded static parameter arrives as the value
+/// it stands for. The answer runs parallel to the static parameters, with an
+/// empty name wherever a parameter is not such a value; it is empty when the
+/// arguments do not split to the parameter count.
+fn (self: &var Checker) generic_call_values(
+    function: FunctionHandle,
+    type_arg: Name
+) -> !array::Array<Name> {
+    var values = array::new<Name>(self.allocator);
+    errdefer values.deinit(self.allocator);
+    let static_count = self.static_param_count(function);
+    let static_args = try self.names.split_generic_args(type_arg) orelse return move values;
+    defer static_args.deinit(self.allocator);
+    if static_args.len() != static_count {
+        return move values;
+    }
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        var arg = static_args.get_or_panic(index);
+        index = index + 1;
+        let value_param = !param.is_type and
+            !self.names.is(param.type_name, "Function") and
+            !self.names.is(param.type_name, "Field");
+        if !value_param {
+            try values.append(self.allocator, empty_name());
+            continue;
+        }
+        let retained = name_text(&self.names, arg);
+        let arg_bytes = retained.as_bytes();
+        if self.comptime_values.get(arg_bytes) |outer| {
+            arg = outer;
+        }
+        try values.append(self.allocator, arg);
+    }
+    return move values;
+}
+
+/// Replaces the comptime-readable names with the values an instance binds and
+/// answers the handle that puts back the ones in force. It replaces rather
+/// than adds: an instance body is its own function, and the captures and
+/// static values of the body that called it are not in scope.
+fn (self: &var Checker) enter_comptime_values(
+    function: FunctionHandle,
+    values: &array::Array<Name>
+) -> !?arena::Handle<ComptimeValueBinding> {
+    let previous = self.comptime_values.current;
+    self.comptime_values.current = null;
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        let value = values.get(index) orelse empty_name();
+        index = index + 1;
+        if is_empty(value) {
+            continue;
+        }
+        let retained = name_text(&self.names, param.name);
+        let bytes = retained.as_bytes();
+        let _ = try self.comptime_values.bind(bytes, value);
+    }
+    return previous;
 }
 
 /// Binds the `Function` static arguments of one call under their parameter
@@ -1419,11 +1482,12 @@ fn (self: &var Checker) bind_generic_field(name: Name, field: MetaField) -> !voi
 fn (self: &var Checker) check_generic_instantiation(
     tree: &var ast::Ast,
     function: FunctionHandle,
-    subst: Subst
+    subst: Subst,
+    values: &array::Array<Name>
 ) -> !?diagnostic::Diagnostic {
     errdefer subst.deinit(self.allocator);
     var done = false;
-    if try self.enter_instantiation(tree, function, &subst, &var done) |failed| {
+    if try self.enter_instantiation(tree, function, &subst, values, &var done) |failed| {
         subst.deinit(self.allocator);
         return move failed;
     }
@@ -1433,7 +1497,9 @@ fn (self: &var Checker) check_generic_instantiation(
     }
     let env = try self.store.new_scope(null);
     let previous = try self.enter_function(function, move subst);
+    let previous_values = try self.enter_comptime_values(function, values);
     if try self.define_params(tree, function, env, true) |failed| {
+        self.comptime_values.restore(previous_values);
         self.restore_function(previous);
         self.instantiation_depth = self.instantiation_depth - 1;
         return move failed;
@@ -1441,11 +1507,13 @@ fn (self: &var Checker) check_generic_instantiation(
     let body = self.functions.at(function.index).body;
     if body |block| {
         if try self.check_block(tree, env, block) |failed| {
+            self.comptime_values.restore(previous_values);
             self.restore_function(previous);
             self.instantiation_depth = self.instantiation_depth - 1;
             return move failed;
         }
     }
+    self.comptime_values.restore(previous_values);
     self.restore_function(previous);
     self.instantiation_depth = self.instantiation_depth - 1;
     return null;
@@ -1465,6 +1533,7 @@ fn (self: &var Checker) enter_instantiation(
     tree: &ast::Ast,
     function: FunctionHandle,
     subst: &Subst,
+    values: &array::Array<Name>,
     done: &var bool
 ) -> !?diagnostic::Diagnostic {
     done.* = false;
@@ -1488,6 +1557,16 @@ fn (self: &var Checker) enter_instantiation(
         }
     }
     try key.append_bytes(self.allocator, ">");
+    // Each integer or bool value is its own instance: the body can fold a
+    // `comptime if` differently for each.
+    index = 0;
+    while values.get(index) |value| {
+        index = index + 1;
+        if !is_empty(value) {
+            try key.append_bytes(self.allocator, ".");
+            try self.names.append_to(&var key, value);
+        }
+    }
     let key_bytes = key.as_bytes();
     if self.checked_instances.get(key_bytes) orelse false {
         done.* = true;

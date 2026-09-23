@@ -4,6 +4,7 @@ import compiler::internal::stdmeta;
 import compiler::internal::typ;
 import std::arena;
 import std::array;
+import std::fmt;
 import std::mem;
 import std::string;
 
@@ -96,22 +97,27 @@ fn (self: &var Checker) check_comptime_for_range(
     let name = try string::from_bytes(self.allocator, name_bytes);
     defer name.deinit(self.allocator);
     let interned = try self.names.intern_text(tree, statement.name);
-    let previous = self.comptime_ints.current;
+    let previous = self.comptime_values.current;
     var value = start;
     while value < end {
+        var text = string::new(self.allocator);
+        defer text.deinit(self.allocator);
+        try fmt::append_i64(self.allocator, &var text, value);
+        let text_bytes = text.as_bytes();
+        let spelled = try self.names.intern(text_bytes);
         let bytes = name.as_bytes();
-        let _ = try self.comptime_ints.bind(bytes, value);
+        let _ = try self.comptime_values.bind(bytes, spelled);
         let child = try self.store.child(env);
         let counter = self.store.new_binding(interned, self.common.i64_name);
         errdefer counter.deinit(self.allocator);
         let _ = try self.define(child, move counter);
         if try self.check_block(tree, child, statement.body) |failed| {
-            self.comptime_ints.restore(previous);
+            self.comptime_values.restore(previous);
             return move failed;
         }
         value = value + 1;
     }
-    self.comptime_ints.restore(previous);
+    self.comptime_values.restore(previous);
     return null;
 }
 

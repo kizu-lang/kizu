@@ -45,7 +45,10 @@ fn (self: &Checker) int_literal(tree: &ast::Ast, expression: ast::Expression) ->
     if ident_expr(tree, expression) |ident| {
         let retained = tree.texts.at(ident.name.node);
         let bytes = retained.as_bytes();
-        return self.comptime_ints.get(bytes);
+        let bound = self.comptime_values.get(bytes) orelse return null;
+        let text = name_text(&self.names, bound);
+        let text_bytes = text.as_bytes();
+        return decimal_i64(text_bytes);
     }
     if prefix_expr(tree, expression) |prefix| {
         let value = self.int_literal(tree, prefix.right);
@@ -160,7 +163,11 @@ fn (self: &var Checker) read_comptime_only(
                 out.* = self.common.type_value_name;
                 return null;
             }
-            if self.comptime_ints.get(bytes) |_| {
+            if self.comptime_values.get(bytes) |bound| {
+                if self.names.is(bound, "true") or self.names.is(bound, "false") {
+                    out.* = self.common.bool_name;
+                    return null;
+                }
                 out.* = self.common.i64_name;
                 return null;
             }
@@ -298,6 +305,18 @@ fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expressi
     match tree.expressions.at(expression.node) {
         Comptime(value) => return self.comptime_bool(tree, value.expr),
         Bool(value) => return value.value,
+        Ident(value) => {
+            let retained = tree.texts.at(value.name.node);
+            let bytes = retained.as_bytes();
+            let bound = self.comptime_values.get(bytes) orelse return null;
+            if self.names.is(bound, "true") {
+                return true;
+            }
+            if self.names.is(bound, "false") {
+                return false;
+            }
+            return null;
+        },
         Call(value) => {
             let copied = value;
             if try self.target_predicate_call(tree, copied) |selected| {
@@ -313,24 +332,27 @@ fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expressi
             }
             return !inner;
         },
-        Binary(value) => {
-            let copied = value;
-            let logical = text_equals(tree, copied.operator, "and") or
-                text_equals(tree, copied.operator, "or");
-            if logical {
-                return self.comptime_logical_bool(tree, copied);
-            }
-            if try self.comptime_type_value(tree, copied.left) |left_type| {
-                if try self.comptime_type_value(tree, copied.right) |right_type| {
-                    return compare_comptime_types(tree, copied.operator, left_type, right_type);
-                }
-            }
-            let left = self.int_literal(tree, copied.left) orelse return null;
-            let right = self.int_literal(tree, copied.right) orelse return null;
-            return compare_comptime_ints(tree, copied.operator, left, right);
-        },
+        Binary(value) => return self.comptime_binary_bool(tree, value),
         _ => return null,
     }
+}
+
+/// Evaluates a compile-time logical operator, a type comparison, or an
+/// integer comparison, the Go `comptimeBinaryBool`.
+fn (self: &var Checker) comptime_binary_bool(tree: &ast::Ast, binary: ast::BinaryExpr) -> !?bool {
+    let logical = text_equals(tree, binary.operator, "and") or
+        text_equals(tree, binary.operator, "or");
+    if logical {
+        return self.comptime_logical_bool(tree, binary);
+    }
+    if try self.comptime_type_value(tree, binary.left) |left_type| {
+        if try self.comptime_type_value(tree, binary.right) |right_type| {
+            return compare_comptime_types(tree, binary.operator, left_type, right_type);
+        }
+    }
+    let left = self.int_literal(tree, binary.left) orelse return null;
+    let right = self.int_literal(tree, binary.right) orelse return null;
+    return compare_comptime_ints(tree, binary.operator, left, right);
 }
 
 /// Returns a type value from the minimal compile-time type subset, the Go
