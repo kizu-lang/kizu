@@ -1,0 +1,326 @@
+// A static value is a compile-time value inside the body it is given to:
+// `comptime if` reads it, and each value is its own instance, so the branch
+// not taken is neither checked nor lowered for that value.
+fn tenfold_even<k: i64>() -> i64 {
+    comptime if k % 2 == 0 {
+        return k * 10;
+    } else {
+        return k;
+    }
+}
+
+// A static value forwards to another generic by name, the way a type
+// parameter does.
+fn pair<a: i64, b: i64>() -> i64 {
+    return tenfold_even<a>() + tenfold_even<b>();
+}
+
+fn choose<first: bool>(x: i64, y: i64) -> i64 {
+    comptime if first {
+        return x;
+    }
+    return y;
+}
+
+fn main() -> void {
+    print(tenfold_even<4>());
+    // An integer-range capture fills an integer static parameter, so a loop
+    // unrolled at compile time instantiates one generic per step.
+    comptime for 0..3 |a| {
+        comptime for 1..3 |b| {
+            print(pair<a, b>());
+        }
+    }
+    print(choose<true>(1, 2));
+    print(choose<false>(1, 2));
+}
+
+// run
+// features: comptime comptime-for generics
+// output:
+// 40
+// 1
+// 20
+// 2
+// 21
+// 21
+// 40
+// 1
+// 2
+
+// ir
+// lower:
+// fn main() -> void {
+// entry:
+//   %1: i64 = call.tenfold_even.4
+//   call.std::fmt::print.i64 %1: i64
+//   %3: i64 = call.pair.0.1
+//   call.std::fmt::print.i64 %3: i64
+//   %5: i64 = call.pair.0.2
+//   call.std::fmt::print.i64 %5: i64
+//   %7: i64 = call.pair.1.1
+//   call.std::fmt::print.i64 %7: i64
+//   %9: i64 = call.pair.1.2
+//   call.std::fmt::print.i64 %9: i64
+//   %11: i64 = call.pair.2.1
+//   call.std::fmt::print.i64 %11: i64
+//   %13: i64 = call.pair.2.2
+//   call.std::fmt::print.i64 %13: i64
+//   %15: i64 = const 1
+//   %16: i64 = const 2
+//   %17: i64 = call.choose.true %15: i64, %16: i64
+//   call.std::fmt::print.i64 %17: i64
+//   %19: i64 = const 1
+//   %20: i64 = const 2
+//   %21: i64 = call.choose.false %19: i64, %20: i64
+//   call.std::fmt::print.i64 %21: i64
+//   return void: void
+// }
+// fn tenfold_even.4() -> i64 {
+// entry:
+//   %1: i64 = const 4
+//   %2: i64 = const 10
+//   %3: i64 = binary.* %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn pair.0.1() -> i64 {
+// entry:
+//   %1: i64 = call.tenfold_even.0
+//   %2: i64 = call.tenfold_even.1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn pair.0.2() -> i64 {
+// entry:
+//   %1: i64 = call.tenfold_even.0
+//   %2: i64 = call.tenfold_even.2
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn pair.1.1() -> i64 {
+// entry:
+//   %1: i64 = call.tenfold_even.1
+//   %2: i64 = call.tenfold_even.1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn pair.1.2() -> i64 {
+// entry:
+//   %1: i64 = call.tenfold_even.1
+//   %2: i64 = call.tenfold_even.2
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn pair.2.1() -> i64 {
+// entry:
+//   %1: i64 = call.tenfold_even.2
+//   %2: i64 = call.tenfold_even.1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn pair.2.2() -> i64 {
+// entry:
+//   %1: i64 = call.tenfold_even.2
+//   %2: i64 = call.tenfold_even.2
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn choose.true(%x: i64, %y: i64) -> i64 {
+// entry:
+//   return %x: i64
+// }
+// fn choose.false(%x: i64, %y: i64) -> i64 {
+// entry:
+//   return %y: i64
+// }
+// fn tenfold_even.0() -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 10
+//   %3: i64 = binary.* %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn tenfold_even.1() -> i64 {
+// entry:
+//   %1: i64 = const 1
+//   return %1: i64
+// }
+// fn tenfold_even.2() -> i64 {
+// entry:
+//   %1: i64 = const 2
+//   %2: i64 = const 10
+//   %3: i64 = binary.* %1: i64, %2: i64
+//   return %3: i64
+// }
+// opt:
+// fn main() -> void {
+// entry:
+//   %in1.3: i64 = const 40
+//   %in2.1: i64 = cast %in1.3: i64, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %in3.3: i64 = const 1
+//   %in4.1: i64 = cast %in3.3: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %in5.3: i64 = const 20
+//   %in6.1: i64 = cast %in5.3: i64, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   %in7.3: i64 = const 2
+//   %in8.1: i64 = cast %in7.3: i64, i64
+//   call.std::fmt::write_i64 %in8.1: i64
+//   %in9.3: i64 = const 21
+//   %in10.1: i64 = cast %in9.3: i64, i64
+//   call.std::fmt::write_i64 %in10.1: i64
+//   %in11.3: i64 = const 21
+//   %in12.1: i64 = cast %in11.3: i64, i64
+//   call.std::fmt::write_i64 %in12.1: i64
+//   %in13.3: i64 = const 40
+//   %in14.1: i64 = cast %in13.3: i64, i64
+//   call.std::fmt::write_i64 %in14.1: i64
+//   %15: i64 = const 1
+//   %in16.1: i64 = cast %15: i64, i64
+//   call.std::fmt::write_i64 %in16.1: i64
+//   %20: i64 = const 2
+//   %in18.1: i64 = cast %20: i64, i64
+//   call.std::fmt::write_i64 %in18.1: i64
+//   return void: void
+// }
+// fn tenfold_even.4() -> i64 {
+// entry:
+//   %3: i64 = const 40
+//   return %3: i64
+// }
+// fn pair.0.1() -> i64 {
+// entry:
+//   %3: i64 = const 1
+//   return %3: i64
+// }
+// fn pair.0.2() -> i64 {
+// entry:
+//   %3: i64 = const 20
+//   return %3: i64
+// }
+// fn pair.1.1() -> i64 {
+// entry:
+//   %3: i64 = const 2
+//   return %3: i64
+// }
+// fn pair.1.2() -> i64 {
+// entry:
+//   %3: i64 = const 21
+//   return %3: i64
+// }
+// fn pair.2.1() -> i64 {
+// entry:
+//   %3: i64 = const 21
+//   return %3: i64
+// }
+// fn pair.2.2() -> i64 {
+// entry:
+//   %3: i64 = const 40
+//   return %3: i64
+// }
+// fn choose.true(%x: i64, %y: i64) -> i64 {
+// entry:
+//   return %x: i64
+// }
+// fn choose.false(%x: i64, %y: i64) -> i64 {
+// entry:
+//   return %y: i64
+// }
+// fn tenfold_even.0() -> i64 {
+// entry:
+//   %3: i64 = const 0
+//   return %3: i64
+// }
+// fn tenfold_even.1() -> i64 {
+// entry:
+//   %1: i64 = const 1
+//   return %1: i64
+// }
+// fn tenfold_even.2() -> i64 {
+// entry:
+//   %3: i64 = const 20
+//   return %3: i64
+// }
+// opt wasm:
+// fn main() -> void {
+// entry:
+//   %in1.3: i64 = const 40
+//   %in2.1: i64 = cast %in1.3: i64, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %in3.3: i64 = const 1
+//   %in4.1: i64 = cast %in3.3: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %in5.3: i64 = const 20
+//   %in6.1: i64 = cast %in5.3: i64, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   %in7.3: i64 = const 2
+//   %in8.1: i64 = cast %in7.3: i64, i64
+//   call.std::fmt::write_i64 %in8.1: i64
+//   %in9.3: i64 = const 21
+//   %in10.1: i64 = cast %in9.3: i64, i64
+//   call.std::fmt::write_i64 %in10.1: i64
+//   call.std::fmt::write_i64 %in10.1: i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   call.std::fmt::write_i64 %in8.1: i64
+//   return void: void
+// }
+// fn tenfold_even.4() -> i64 {
+// entry:
+//   %3: i64 = const 40
+//   return %3: i64
+// }
+// fn pair.0.1() -> i64 {
+// entry:
+//   %3: i64 = const 1
+//   return %3: i64
+// }
+// fn pair.0.2() -> i64 {
+// entry:
+//   %3: i64 = const 20
+//   return %3: i64
+// }
+// fn pair.1.1() -> i64 {
+// entry:
+//   %3: i64 = const 2
+//   return %3: i64
+// }
+// fn pair.1.2() -> i64 {
+// entry:
+//   %3: i64 = const 21
+//   return %3: i64
+// }
+// fn pair.2.1() -> i64 {
+// entry:
+//   %3: i64 = const 21
+//   return %3: i64
+// }
+// fn pair.2.2() -> i64 {
+// entry:
+//   %3: i64 = const 40
+//   return %3: i64
+// }
+// fn choose.true(%x: i64, %y: i64) -> i64 {
+// entry:
+//   return %x: i64
+// }
+// fn choose.false(%x: i64, %y: i64) -> i64 {
+// entry:
+//   return %y: i64
+// }
+// fn tenfold_even.0() -> i64 {
+// entry:
+//   %3: i64 = const 0
+//   return %3: i64
+// }
+// fn tenfold_even.1() -> i64 {
+// entry:
+//   %1: i64 = const 1
+//   return %1: i64
+// }
+// fn tenfold_even.2() -> i64 {
+// entry:
+//   %3: i64 = const 20
+//   return %3: i64
+// }

@@ -144,6 +144,19 @@ type StaticParam struct {
 // IsType reports whether this entry declares a type parameter.
 func (p StaticParam) IsType() bool { return p.Type == nil }
 
+// HasValueStaticParam reports whether the signature takes a compile-time
+// value in `<...>`. Such a body means something only once the value is bound:
+// a `Function` names the callee, and an integer or bool can decide a
+// `comptime if`. It is checked per instantiation rather than as written.
+func (s FunctionSignature) HasValueStaticParam() bool {
+	for _, param := range s.StaticParams {
+		if !param.IsType() {
+			return true
+		}
+	}
+	return false
+}
+
 // String renders the parameter as it is written in source.
 func (p StaticParam) String() string {
 	if p.IsType() {

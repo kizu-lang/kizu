@@ -101,17 +101,17 @@ func (c *Checker) checkComptimeForRange(
 	if err != nil {
 		return false, err
 	}
-	previous, had := c.comptimeInts[stmt.Name]
+	previous, had := c.comptimeValues[stmt.Name]
 	defer func() {
 		if had {
-			c.comptimeInts[stmt.Name] = previous
+			c.comptimeValues[stmt.Name] = previous
 			return
 		}
-		delete(c.comptimeInts, stmt.Name)
+		delete(c.comptimeValues, stmt.Name)
 	}()
 	returns := true
 	for value := start; value < end; value++ {
-		c.comptimeInts[stmt.Name] = value
+		c.comptimeValues[stmt.Name] = comptimeValue{typ: typeI64, i: value}
 		child := env.child()
 		if err := requireScopeDefinition(stmt.Name, child.define(stmt.Name, typeI64, false)); err != nil {
 			return false, err

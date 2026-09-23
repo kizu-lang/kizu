@@ -135,38 +135,38 @@ fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaFieldHandle {
     return null;
 }
 
-// Names one active integer-range `comptime for` capture, the Go
-// `comptimeInts` entry. Unlike a field capture the integer is a value: the
-// body reads it as an i64 local, and a comptime expression reads the integer
-// it stands for in this expansion. Bindings form a lexical stack the same
-// way the field captures do.
-struct ComptimeIntBinding {
-    parent: ?arena::Handle<ComptimeIntBinding>,
+// Names one value a comptime expression may read, the Go `comptimeValues`
+// entry: an integer or bool static parameter of the instance being checked,
+// or an integer-range `comptime for` capture. The body also reads each as an
+// ordinary local. Bindings form a lexical stack the same way the field
+// captures do.
+struct ComptimeValueBinding {
+    parent: ?arena::Handle<ComptimeValueBinding>,
     name: string::String,
-    value: i64,
+    value: ComptimeValue,
 }
 
-struct ComptimeIntStore {
+struct ComptimeValueStore {
     allocator: Allocator,
-    bindings: arena::Arena<ComptimeIntBinding>,
-    current: ?arena::Handle<ComptimeIntBinding>,
+    bindings: arena::Arena<ComptimeValueBinding>,
+    current: ?arena::Handle<ComptimeValueBinding>,
 }
 
-fn new_comptime_int_store(allocator: Allocator) -> ComptimeIntStore {
-    return ComptimeIntStore {
+fn new_comptime_value_store(allocator: Allocator) -> ComptimeValueStore {
+    return ComptimeValueStore {
         allocator: allocator,
-        bindings: arena::new<ComptimeIntBinding>(allocator),
+        bindings: arena::new<ComptimeValueBinding>(allocator),
         current: null
     };
 }
 
-fn (self: &var ComptimeIntStore) bind(
+fn (self: &var ComptimeValueStore) bind(
     name: []u8,
-    value: i64
-) -> !?arena::Handle<ComptimeIntBinding> {
+    value: ComptimeValue
+) -> !?arena::Handle<ComptimeValueBinding> {
     let previous = self.current;
     let owned_name = try string::from_bytes(self.allocator, name);
-    self.current = try self.bindings.add(self.allocator, ComptimeIntBinding {
+    self.current = try self.bindings.add(self.allocator, ComptimeValueBinding {
         parent: previous,
         name: move owned_name,
         value: value
@@ -174,12 +174,33 @@ fn (self: &var ComptimeIntStore) bind(
     return previous;
 }
 
-fn (self: &var ComptimeIntStore) restore(previous: ?arena::Handle<ComptimeIntBinding>) -> void {
+// enter replaces the readable names with the values an instance binds and
+// answers the handle that puts back the ones in force. It replaces rather
+// than adds: an instance body is its own function, and the captures and
+// static values of the body that called it are not in scope.
+fn (self: &var ComptimeValueStore) enter(
+    values: &map::Map<[]u8, ComptimeValue>
+) -> !?arena::Handle<ComptimeValueBinding> {
+    let previous = self.current;
+    self.current = null;
+    var index = 0;
+    while values.key_at(index) |name| {
+        if values.get(name) |value| {
+            let _ = try self.bind(name, value);
+        }
+        index = index + 1;
+    }
+    return previous;
+}
+
+fn (self: &var ComptimeValueStore) restore(
+    previous: ?arena::Handle<ComptimeValueBinding>
+) -> void {
     self.current = previous;
     return;
 }
 
-fn (self: &ComptimeIntStore) get(name: []u8) -> ?i64 {
+fn (self: &ComptimeValueStore) get(name: []u8) -> ?ComptimeValue {
     var current = self.current;
     while current |handle| {
         let binding = self.bindings.at(handle);

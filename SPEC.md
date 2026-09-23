@@ -2596,7 +2596,10 @@ fn sized<n: i64>() -> i64 {
 `std::testing::expect_equal<i64>(expected, actual)`。
 
 compile-time 値として書けるのは整数、`true` / `false`、`Function`
-(top-level function 名)、および `Field`(struct の public field 名)です。型引数推論、generic methods、bounds、
+(top-level function 名)、および `Field`(struct の public field 名)です。
+整数・bool の parameter には、呼び出し側で値が決まっている名前 ——
+呼び出し側自身の static parameter と、整数 range の `comptime for` の
+capture(§13.1)—— も同じ種類の literal として渡せます。型引数推論、generic methods、bounds、
 associated types、higher-kinded types、specialization は実装しません。
 reflection は §13.1 の comptime 専用 structural reflection だけを持ち、
 runtime reflection と AST 書き換えは持ちません。
@@ -2671,6 +2674,10 @@ comptime if 1 + 1 == 2 {
 
 `comptime` expression は、整数、真偽値、文字列、compile-time type value、
 単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
+整数・bool の static parameter(`<n: i64>`、`<first: bool>`)も、その
+instance が受け取った値として読めます。値ごとに別の instance なので、
+`comptime if n % 2 == 0` の選ばれなかった branch はその値では検査も lowering も
+されません。
 `comptime if` の条件は、これに加えて §13.3 の `std::target` 述語を評価します。
 `else comptime if` で続けて書けます(§6.9)。
 `type<i64>` のような `type<T>` literal と、instantiated generic body 内の

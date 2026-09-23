@@ -31,6 +31,8 @@ func (l *lowerer) constBool(expr ast.Expression) (bool, bool) {
 		return l.constBool(e.Expr)
 	case *ast.BoolExpr:
 		return e.Value, true
+	case *ast.IdentExpr:
+		return l.staticBool(e.Name)
 	case *ast.CallExpr:
 		if value, ok := l.targetPredicateCall(e); ok {
 			return value, true
@@ -40,19 +42,36 @@ func (l *lowerer) constBool(expr ast.Expression) (bool, bool) {
 		value, ok := l.constBool(e.Right)
 		return !value, ok && e.Operator == "!"
 	case *ast.BinaryExpr:
-		if e.Operator == "and" || e.Operator == "or" {
-			return l.constLogicalBool(e)
+		return l.constBinaryBool(e)
+	}
+	return false, false
+}
+
+// staticBool reads a bool static parameter, which reaches the instance being
+// lowered as its literal.
+func (l *lowerer) staticBool(name string) (bool, bool) {
+	static, ok := l.staticValues[name]
+	if !ok || static.typ != "bool" {
+		return false, false
+	}
+	return static.text == "true", true
+}
+
+// constBinaryBool evaluates a constant logical operator, a type comparison, or
+// an integer comparison.
+func (l *lowerer) constBinaryBool(e *ast.BinaryExpr) (bool, bool) {
+	if e.Operator == "and" || e.Operator == "or" {
+		return l.constLogicalBool(e)
+	}
+	if e.Operator == "==" || e.Operator == "!=" {
+		if equal, ok := l.constTypeEqual(e.Left, e.Right); ok {
+			return equal == (e.Operator == "=="), true
 		}
-		if e.Operator == "==" || e.Operator == "!=" {
-			if equal, ok := l.constTypeEqual(e.Left, e.Right); ok {
-				return equal == (e.Operator == "=="), true
-			}
-		}
-		left, leftOK := l.constInt(e.Left)
-		right, rightOK := l.constInt(e.Right)
-		if leftOK && rightOK {
-			return compareConstInts(e.Operator, left, right)
-		}
+	}
+	left, leftOK := l.constInt(e.Left)
+	right, rightOK := l.constInt(e.Right)
+	if leftOK && rightOK {
+		return compareConstInts(e.Operator, left, right)
 	}
 	return false, false
 }

@@ -16,6 +16,28 @@ type comptimeValue struct {
 	s   string
 }
 
+// text spells an integer or bool value the way a static argument does, which
+// is how an instance key tells two bindings apart.
+func (v comptimeValue) text() string {
+	if v.typ == typeBool {
+		return strconv.FormatBool(v.b)
+	}
+	return strconv.FormatInt(v.i, 10)
+}
+
+// enterComptimeValues replaces the comptime-readable names with the values an
+// instance binds and returns the call that puts back the ones in force. It
+// replaces rather than adds: an instance body is its own function, and the
+// captures and static values of the body that called it are not in scope.
+func (c *Checker) enterComptimeValues(values map[string]comptimeValue) func() {
+	previous := c.comptimeValues
+	c.comptimeValues = make(map[string]comptimeValue, len(values))
+	for name, value := range values {
+		c.comptimeValues[name] = value
+	}
+	return func() { c.comptimeValues = previous }
+}
+
 // checkComptimeExpr validates and evaluates a compile-time expression.
 func (c *Checker) checkComptimeExpr(
 	expr *ast.ComptimeExpr,
@@ -88,8 +110,8 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 		if ok {
 			return comptimeValue{typ: typeType, s: string(typ)}, nil
 		}
-		if value, ok := c.comptimeInts[e.Name]; ok {
-			return comptimeValue{typ: typeI64, i: value}, nil
+		if value, ok := c.comptimeValues[e.Name]; ok {
+			return value, nil
 		}
 		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
 	case *ast.PrefixExpr:

@@ -79,12 +79,12 @@ type Checker struct {
 	// open, by capture name. A capture is not a value, so it lives here rather
 	// than in a scope: the only thing that may read it is a `std::meta` form.
 	metaFields map[string]metaField
-	// comptimeInts binds the captures of the integer-range `comptime for`
-	// expansions currently open, by capture name. Unlike a field capture the
-	// integer is a value: the body reads it as an i64 local, and a comptime
-	// expression reads the integer it stands for in this expansion.
-	comptimeInts map[string]int64
-	loopLabels   []string
+	// comptimeValues binds the names a comptime expression may read as a
+	// value: the integer and bool static parameters of the instance being
+	// checked, and the captures of the integer-range `comptime for` expansions
+	// currently open. The body also reads each as an ordinary local.
+	comptimeValues map[string]comptimeValue
+	loopLabels     []string
 	// checkedStdBodies records the std wrapper instantiations already checked,
 	// keyed by name and static arguments.
 	checkedStdBodies map[string]bool
@@ -122,7 +122,7 @@ func NewForTarget(target stdtarget.Target) *Checker {
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
-		comptimeInts:     map[string]int64{},
+		comptimeValues:   map[string]comptimeValue{},
 		functionArgs:     map[string]string{},
 	}
 }
@@ -1312,7 +1312,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	if fn.sig.ExternABI != "" {
 		return nil
 	}
-	if hasFunctionStaticParam(fn.sig) {
+	if fn.sig.HasValueStaticParam() {
 		return nil
 	}
 	if err := checkMainReturnType(fn); err != nil {
@@ -5880,7 +5880,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, errorf("type error: `%s` expects %d static arguments",
 			name, len(fn.sig.StaticParams))
 	}
-	typeArgsText, fieldArgs, funcArgs, err := c.checkStaticArgs(name, fn, argsText)
+	typeArgsText, bindings, err := c.checkStaticArgs(name, fn, argsText)
 	if err != nil {
 		return "", true, err
 	}
@@ -5903,13 +5903,13 @@ func (c *Checker) checkGenericUserTypeApply(
 			return "", true, err
 		}
 	}
-	if err := c.checkGenericInstantiation(fn, subst, fieldArgs, funcArgs); err != nil {
+	if err := c.checkGenericInstantiation(fn, subst, bindings); err != nil {
 		return "", true, c.annotateInstantiation(err, span, fn, typeArgs)
 	}
 	// The result the caller sees is the declaration's type with this call's
 	// arguments bound, forms included: `-> std::meta::field_type<T, f>` is a
 	// concrete type here even though it is not one where it was written.
-	restore := c.bindMetaFields(fieldArgs)
+	restore := c.bindMetaFields(bindings.fields)
 	result, err := c.resolveInstanceType(c.types.substituteTypeParams(fn.returnType, subst))
 	restore()
 	if err != nil {
@@ -5924,10 +5924,13 @@ func (c *Checker) checkStaticArgs(
 	name string,
 	fn *functionType,
 	argsText []string,
-) ([]string, map[string]metaField, map[string]string, error) {
+) ([]string, staticBindings, error) {
 	typeArgs := []string{}
-	fieldArgs := map[string]metaField{}
-	funcArgs := map[string]string{}
+	bindings := staticBindings{
+		fields: map[string]metaField{},
+		funcs:  map[string]string{},
+		values: map[string]comptimeValue{},
+	}
 	for idx, param := range fn.sig.StaticParams {
 		arg := strings.TrimSpace(argsText[idx])
 		if param.IsType() {
@@ -5937,24 +5940,58 @@ func (c *Checker) checkStaticArgs(
 		if Type(typ.Text(param.Type)) == typeField {
 			field, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, staticBindings{}, err
 			}
 			if field.name != "" {
-				fieldArgs[param.Name] = field
+				bindings.fields[param.Name] = field
 			}
 			continue
 		}
 		if err := c.checkStaticValueArg(name, param, arg, idx, argsText, fn); err != nil {
-			return nil, nil, nil, err
+			return nil, staticBindings{}, err
 		}
 		if Type(typ.Text(param.Type)) == typeFunction {
 			// A `Function` argument may itself be the parameter of the generic
 			// doing the call, in which case the name to record is what that one
 			// was given.
-			funcArgs[param.Name] = c.resolveFunctionArg(arg)
+			bindings.funcs[param.Name] = c.resolveFunctionArg(arg)
+			continue
+		}
+		if value, ok := c.staticValueOf(arg); ok {
+			bindings.values[param.Name] = value
 		}
 	}
-	return typeArgs, fieldArgs, funcArgs, nil
+	return typeArgs, bindings, nil
+}
+
+// staticBindings is what one call binds the compile-time value parameters of
+// a generic to: fields, function names, and integer or bool values. Each is
+// part of which instance the call names, and each is readable in that
+// instance's body through the form that reads it.
+type staticBindings struct {
+	fields map[string]metaField
+	funcs  map[string]string
+	values map[string]comptimeValue
+}
+
+// staticValueOf reads an integer or bool static argument: a literal, or a name
+// bound to one where the call is written -- a static parameter of the generic
+// doing the call, or an integer-range `comptime for` capture.
+func (c *Checker) staticValueOf(arg string) (comptimeValue, bool) {
+	if value, ok := c.comptimeValues[arg]; ok {
+		return value, true
+	}
+	switch arg {
+	case "true":
+		return comptimeValue{typ: typeBool, b: true}, true
+	case "false":
+		return comptimeValue{typ: typeBool, b: false}, true
+	}
+	value, err := strconv.ParseInt(arg, 10, 64)
+	if err != nil {
+		return comptimeValue{}, false
+	}
+	return comptimeValue{typ: typeI64, i: value}, true
 }
 
 // resolveFunctionArg reads a `Function` static argument through the bindings in
@@ -6005,7 +6042,11 @@ func (c *Checker) checkStaticValueArg(
 	if param.Type != nil && c.staticParams[arg] == Type(typ.Text(param.Type)) {
 		return nil
 	}
-	switch Type(typ.Text(param.Type)) {
+	want := Type(typ.Text(param.Type))
+	if bound, ok := c.comptimeValues[arg]; ok && acceptsComptimeValue(want, bound) {
+		return nil
+	}
+	switch want {
 	case typeField:
 		_, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
 		return err
@@ -6028,6 +6069,18 @@ func (c *Checker) checkStaticValueArg(
 		}
 		return nil
 	}
+}
+
+// acceptsComptimeValue reports whether a name bound to a comptime value -- an
+// integer-range capture, or a static value the calling instance was given --
+// may fill a static parameter of type want. It forwards the way a literal of
+// its kind would: a bool fills a bool parameter, an integer any other value
+// parameter, and neither names a function or a field.
+func acceptsComptimeValue(want Type, bound comptimeValue) bool {
+	if want == typeFunction || want == typeField {
+		return false
+	}
+	return (bound.typ == typeBool) == (want == typeBool)
 }
 
 // fieldStaticArg resolves a `Field` static argument to the field it names. The
@@ -6103,20 +6156,6 @@ func isIdentifierText(text string) bool {
 	return true
 }
 
-// hasFunctionStaticParam reports whether a signature names a function among its
-// compile-time parameters.
-func hasFunctionStaticParam(sig ast.FunctionSignature) bool {
-	for _, param := range sig.StaticParams {
-		if param.IsType() {
-			continue
-		}
-		if Type(typ.Text(param.Type)) == typeFunction {
-			return true
-		}
-	}
-	return false
-}
-
 // checkGenericInstantiation checks a generic function body for one static type
 // set. A `Field` static argument instantiates like a type argument rather than
 // like the other compile-time values: the body reads it through
@@ -6125,16 +6164,16 @@ func hasFunctionStaticParam(sig ast.FunctionSignature) bool {
 func (c *Checker) checkGenericInstantiation(
 	fn *functionType,
 	subst map[string]Type,
-	fieldArgs map[string]metaField,
-	funcArgs map[string]string,
+	bindings staticBindings,
 ) error {
-	done, err := c.enterInstantiation(fn, subst, fieldArgs, funcArgs)
+	done, err := c.enterInstantiation(fn, subst, bindings)
 	if err != nil || done {
 		return err
 	}
 	defer func() { c.instantiationDepth-- }()
-	defer c.bindMetaFields(fieldArgs)()
-	defer c.bindFunctionArgs(funcArgs)()
+	defer c.bindMetaFields(bindings.fields)()
+	defer c.bindFunctionArgs(bindings.funcs)()
+	defer c.enterComptimeValues(bindings.values)()
 	env := newScope(nil)
 	staticParams, err := defineStaticValueParams(&c.types, env, fn.sig)
 	if err != nil {
@@ -6237,10 +6276,9 @@ const maxInstantiationDepth = 32
 func (c *Checker) enterInstantiation(
 	fn *functionType,
 	subst map[string]Type,
-	fieldArgs map[string]metaField,
-	funcArgs map[string]string,
+	bindings staticBindings,
 ) (bool, error) {
-	key := instanceKey(fn, subst, fieldArgs, funcArgs)
+	key := instanceKey(fn, subst, bindings)
 	if c.checkedInstances[key] {
 		return true, nil
 	}
@@ -6271,8 +6309,7 @@ func elideTypeText(text string) string {
 func instanceKey(
 	fn *functionType,
 	subst map[string]Type,
-	fieldArgs map[string]metaField,
-	funcArgs map[string]string,
+	bindings staticBindings,
 ) string {
 	args := make([]Type, 0, len(subst))
 	for _, param := range fn.sig.TypeParamNames() {
@@ -6280,11 +6317,14 @@ func instanceKey(
 	}
 	key := fn.name + "<" + joinTypes(args) + ">"
 	for _, param := range fn.sig.StaticParams {
-		if field, ok := fieldArgs[param.Name]; ok {
+		if field, ok := bindings.fields[param.Name]; ok {
 			key += "." + string(field.owner) + "." + field.name
 		}
-		if bound, ok := funcArgs[param.Name]; ok {
+		if bound, ok := bindings.funcs[param.Name]; ok {
 			key += "." + bound
+		}
+		if value, ok := bindings.values[param.Name]; ok {
+			key += "." + value.text()
 		}
 	}
 	return key
@@ -7598,7 +7638,7 @@ func (c *Checker) checkStdMethodBody(fn *functionType, typeArgs []Type) error {
 	for idx, param := range typeParams {
 		subst[param] = typeArgs[idx]
 	}
-	return c.checkGenericInstantiation(fn, subst, nil, nil)
+	return c.checkGenericInstantiation(fn, subst, staticBindings{})
 }
 
 // checkStdArrayStorageMethod validates raw Array views reserved to std source.
@@ -8725,7 +8765,7 @@ func (c *Checker) checkPrintInstance(arg Type, span ast.Span) (Type, error) {
 		return "", errorf("type error: `%s` is not loaded", stdlib.PrintFunction)
 	}
 	subst := map[string]Type{fn.sig.TypeParamNames()[0]: arg}
-	if err := c.checkGenericInstantiation(fn, subst, nil, nil); err != nil {
+	if err := c.checkGenericInstantiation(fn, subst, staticBindings{}); err != nil {
 		return "", c.annotateInstantiation(err, span, fn, []Type{arg})
 	}
 	return typeVoid, nil
