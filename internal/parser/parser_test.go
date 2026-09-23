@@ -1111,6 +1111,24 @@ func TestParseComptimeForRange(t *testing.T) {
 	}
 }
 
+// TestParseStaticArgExpression checks that a parenthesized static argument is
+// recorded in the canonical spelling: every operation in its own parentheses,
+// negation as a subtraction from 0, and a `>` inside it not closing the list.
+func TestParseStaticArgExpression(t *testing.T) {
+	input := `fn main() {
+    print(f<T, (a * 3 + b % 7), (-n), (k)>());
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() { print(f<T, ((a * 3) + (b % 7)), (0 - n), k>()); }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseMinimalGenerics checks explicit static type args and type literals.
 func TestParseMinimalGenerics(t *testing.T) {
 	input := `fn is_i64<T>(value: T) -> bool {

@@ -2022,9 +2022,66 @@ func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 		return p.cur.Literal
 	case token.True, token.False:
 		return p.cur.Literal
+	case token.LParen:
+		return p.parseStaticExprArg()
 	default:
 		p.errorf("expected static argument, got %s", tokenDescription(p.cur))
 		return ""
+	}
+}
+
+// parseStaticExprArg parses a parenthesized static argument such as
+// `(n1 * k2)`. The parentheses are what keep a `>` inside it from closing the
+// list. Only integer arithmetic on literals and names is a static
+// expression; it is recorded in the one spelling internal/staticexpr reads.
+func (p *Parser) parseStaticExprArg() string {
+	// Parse the inside of the parentheses only: an expression parse that
+	// started at `(` would read the closing `>` as a comparison.
+	p.nextToken()
+	expr := p.parseExpression(lowest)
+	if !p.expectPeek(token.RParen) {
+		return ""
+	}
+	text, ok := staticExprText(expr)
+	if !ok {
+		p.errorf("static argument expression `%s` is not integer arithmetic "+
+			"(literals, names, and + - * / %% only)", expr.String())
+		// The expression was read to its `)`, so the list goes on from
+		// there; a stand-in keeps one bad argument to one error.
+		return "0"
+	}
+	return text
+}
+
+// staticExprText spells a static expression canonically: a name or literal
+// as itself, every operation in its own parentheses, and negation as a
+// subtraction from 0, so the reader needs no precedence.
+func staticExprText(expr ast.Expression) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.IntExpr:
+		return e.Value, true
+	case *ast.IdentExpr:
+		return e.Name, true
+	case *ast.PrefixExpr:
+		right, ok := staticExprText(e.Right)
+		if !ok || e.Operator != "-" {
+			return "", false
+		}
+		return "(0 - " + right + ")", true
+	case *ast.BinaryExpr:
+		switch e.Operator {
+		case "+", "-", "*", "/", "%":
+		default:
+			return "", false
+		}
+		left, leftOK := staticExprText(e.Left)
+		right, rightOK := staticExprText(e.Right)
+		if !leftOK || !rightOK {
+			return "", false
+		}
+		return "(" + left + " " + e.Operator + " " + right + ")", true
+	default:
+		return "", false
 	}
 }
 
@@ -2543,15 +2600,26 @@ func (p *Parser) typeApplyLooksLikeCall() bool {
 
 	p.nextToken()
 	depth := 1
+	// A `<` or `>` inside a parenthesized static expression is arithmetic,
+	// not a bracket of the list.
+	parens := 0
 	for depth > 0 {
 		p.nextToken()
 		switch p.cur.Type {
 		case token.EOF, token.Semicolon, token.LBrace, token.RBrace:
 			return false
+		case token.LParen:
+			parens++
+		case token.RParen:
+			parens--
 		case token.LT:
-			depth++
+			if parens == 0 {
+				depth++
+			}
 		case token.GT:
-			depth--
+			if parens == 0 {
+				depth--
+			}
 		}
 	}
 	return p.peek.Type == token.LParen

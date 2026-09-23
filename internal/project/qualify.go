@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
@@ -719,6 +720,11 @@ func (c *graphChecker) qualifyTypeApplyExpr(
 			// is qualified the way a callee is. Resolving it as a type would
 			// leave the name unqualified and the call would find nothing.
 			args[idx] = c.qualifyFunctionName(module, arg)
+			continue
+		}
+		if staticexpr.Is(arg) {
+			// Integer arithmetic on compile-time names; nothing in it is a
+			// type or a module path.
 			continue
 		}
 		args[idx], err = c.resolveType(module, arg)

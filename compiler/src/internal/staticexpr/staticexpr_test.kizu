@@ -1,0 +1,74 @@
+import std::mem;
+import std::testing;
+
+fn expect_value(env: &Env, text: []u8, want: i64) -> !void {
+    let allocator = mem::page_allocator();
+    let outcome = try eval(allocator, text, env);
+    match outcome {
+        Value(value) => testing::expect(value == want),
+        Problem(problem) => {
+            problem.deinit(allocator);
+            testing::fail("static expression did not evaluate");
+        },
+    }
+    return;
+}
+
+fn expect_problem(env: &Env, text: []u8) -> !void {
+    let allocator = mem::page_allocator();
+    let outcome = try eval(allocator, text, env);
+    match outcome {
+        Value(_) => testing::fail("static expression evaluated; want an error"),
+        Problem(problem) => problem.deinit(allocator),
+    }
+    return;
+}
+
+test "static expression eval reads the canonical spelling against bound names" {
+    let allocator = mem::page_allocator();
+    var env = new_env(allocator);
+    defer env.deinit(allocator);
+    try env.bind(allocator, "n1", 3);
+    try env.bind(allocator, "k2", 2);
+    try expect_value(&env, "(n1 * k2)", 6);
+    try expect_value(&env, "((n1 * k2) % 4)", 2);
+    try expect_value(&env, "((n1 + 21) - -k2)", 26);
+    try expect_value(&env, "(((n1 * 8) + k2) / 5)", 5);
+    try expect_value(&env, "(-n1 * k2)", -6);
+    try expect_problem(&env, "(n1 * missing)");
+    try expect_problem(&env, "(n1 / 0)");
+    try expect_problem(&env, "(n1 * k2");
+}
+
+test "static expression is only a parenthesized argument" {
+    testing::expect(is("(n * 2)"));
+    testing::expect(!is("n"));
+    testing::expect(!is("-2"));
+    testing::expect(!is(""));
+}
+
+test "static expression parse_i64 reads a signed decimal" {
+    if parse_i64("-42") |value| {
+        testing::expect(value == -42);
+    } else {
+        testing::fail("-42 did not parse");
+    }
+    if parse_i64("-") |_| {
+        testing::fail("a lone sign parsed");
+    }
+    if parse_i64("99999999999999999999") |_| {
+        testing::fail("an out-of-range literal parsed");
+    }
+}
+
+test "static expression env keeps the first binding of a name" {
+    let allocator = mem::page_allocator();
+    var env = new_env(allocator);
+    defer env.deinit(allocator);
+    try env.hide(allocator, "flag");
+    try env.bind(allocator, "flag", 1);
+    try env.bind(allocator, "n", 4);
+    try env.bind(allocator, "n", 9);
+    try expect_problem(&env, "(flag + 1)");
+    try expect_value(&env, "(n * 2)", 8);
+}

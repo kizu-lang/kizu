@@ -1,0 +1,314 @@
+import std::array;
+import std::mem;
+import std::string;
+
+// Port of internal/staticexpr. A static argument travels through the compiler
+// as text, the way a type argument does, so the parser records an expression
+// in one canonical spelling -- every operation in its own parentheses, as in
+// `((n1 * k2) % 24)` -- and each checker evaluates that text against the
+// compile-time names in force where the call is written.
+//
+// The Go evaluator asks a lookup callback for each name. Kizu has no closures,
+// so the caller instead fills an Env with the integers its names stand for
+// before evaluating; a name the Env lacks is the same error the callback's
+// "not known" answer is.
+
+/// Is the compile-time names an expression may use, in lookup order: the
+/// first binding of a name wins, so a caller binds its innermost scope first.
+/// A name bound to something other than an integer is still recorded, so it
+/// hides an outer integer of the same name the way the Go map entry does.
+pub struct Env {
+    names: array::Array<string::String>,
+    values: array::Array<i64>,
+    integers: array::Array<bool>,
+}
+
+/// Is what evaluating an expression gives: its value, or why it has none.
+pub union Outcome {
+    Value(i64),
+    Problem(string::String),
+}
+
+/// Returns an empty Env.
+pub fn new_env(allocator: Allocator) -> Env {
+    return Env {
+        names: array::new<string::String>(allocator),
+        values: array::new<i64>(allocator),
+        integers: array::new<bool>(allocator)
+    };
+}
+
+/// Releases the names the Env copied.
+pub fn (self: Env) deinit(allocator: Allocator) -> void {
+    self.names.deinit(allocator);
+    self.values.deinit(allocator);
+    self.integers.deinit(allocator);
+    return;
+}
+
+/// Binds name to an integer unless an earlier binding already spells name.
+pub fn (self: &var Env) bind(allocator: Allocator, name: []u8, value: i64) -> !void {
+    return self.record(allocator, name, value, true);
+}
+
+/// Records that name stands for something other than an integer, unless an
+/// earlier binding already spells name.
+pub fn (self: &var Env) hide(allocator: Allocator, name: []u8) -> !void {
+    return self.record(allocator, name, 0, false);
+}
+
+fn (self: &var Env) record(allocator: Allocator, name: []u8, value: i64, integer: bool) -> !void {
+    if self.index_of(name) >= 0 {
+        return;
+    }
+    let owned = try string::from_bytes(allocator, name);
+    errdefer owned.deinit(allocator);
+    try self.values.append(allocator, value);
+    try self.integers.append(allocator, integer);
+    try self.names.append(allocator, move owned);
+    return;
+}
+
+/// Returns the integer name stands for, or null when the Env binds no
+/// integer to it.
+pub fn (self: &Env) lookup(name: []u8) -> ?i64 {
+    let index = self.index_of(name);
+    if index < 0 {
+        return null;
+    }
+    let integer = self.integers.get(index) orelse return null;
+    if !integer {
+        return null;
+    }
+    return self.values.get(index);
+}
+
+fn (self: &Env) index_of(name: []u8) -> i64 {
+    var index = 0;
+    while self.names.at(index) |bound| {
+        let bytes = bound.as_bytes();
+        if mem::equal_bytes(bytes, name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+/// Reports whether a static argument is an expression rather than a name, a
+/// literal, or a type. Only an expression starts with a parenthesis.
+pub fn is(text: []u8) -> bool {
+    return mem::len(text) > 0 and text[0] == cast<u8>(40);
+}
+
+/// Parses the decimal spelling of an i64, with an optional leading `-`, the
+/// Go `strconv.ParseInt(text, 10, 64)` the checkers read a bound value with.
+pub fn parse_i64(text: []u8) -> ?i64 {
+    let size = mem::len(text);
+    var index = 0;
+    var negative = false;
+    if size > 0 and text[0] == cast<u8>(45) {
+        negative = true;
+        index = 1;
+    }
+    if index == size {
+        return null;
+    }
+    // Accumulate toward the sign so -9223372036854775808 parses without
+    // passing through a positive value that does not fit.
+    var value = 0;
+    while index < size {
+        let byte = text[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return null;
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if negative {
+            if value < (-9223372036854775807 - 1 + digit) / 10 {
+                return null;
+            }
+            value = value * 10 - digit;
+        } else {
+            if value > (9223372036854775807 - digit) / 10 {
+                return null;
+            }
+            value = value * 10 + digit;
+        }
+        index = index + 1;
+    }
+    return value;
+}
+
+/// Evaluates canonical expression text against the integers env binds.
+pub fn eval(allocator: Allocator, text: []u8, env: &Env) -> !Outcome {
+    var pos = 0;
+    let outcome = try term(allocator, text, &var pos, env);
+    match outcome {
+        Value(value) => {
+            if pos != mem::len(text) {
+                var message = string::new(allocator);
+                errdefer message.deinit(allocator);
+                try message.append_bytes(allocator, "unexpected `");
+                try message.append_bytes(allocator, text[pos..mem::len(text)]);
+                try message.append_bytes(allocator, "` in static expression `");
+                try message.append_bytes(allocator, text);
+                try message.append_byte(allocator, cast<u8>(96));
+                return Outcome::Problem(move message);
+            }
+            return Outcome::Value(value);
+        },
+        Problem(problem) => return Outcome::Problem(move problem),
+    }
+}
+
+// term reads one operand: a literal, a name, a negation, or a parenthesized
+// binary operation. The canonical spelling needs no precedence: each
+// operation carries its own parentheses.
+fn term(allocator: Allocator, text: []u8, pos: &var i64, env: &Env) -> !Outcome {
+    let size = mem::len(text);
+    if pos.* >= size {
+        var message = string::new(allocator);
+        errdefer message.deinit(allocator);
+        try message.append_bytes(allocator, "static expression `");
+        try message.append_bytes(allocator, text);
+        try message.append_bytes(allocator, "` ends early");
+        return Outcome::Problem(move message);
+    }
+    let byte = text[pos.*];
+    if byte == cast<u8>(40) {
+        return operation(allocator, text, pos, env);
+    }
+    if byte == cast<u8>(45) {
+        pos.* = pos.* + 1;
+        let inner = try term(allocator, text, pos, env);
+        match inner {
+            Value(value) => return Outcome::Value(0 - value),
+            Problem(problem) => return Outcome::Problem(move problem),
+        }
+    }
+    if is_digit(byte) {
+        let start = pos.*;
+        while pos.* < size and is_digit(text[pos.*]) {
+            pos.* = pos.* + 1;
+        }
+        let digits = text[start..pos.*];
+        if parse_i64(digits) |value| {
+            return Outcome::Value(value);
+        }
+        // The Go strconv error for a literal past the i64 range.
+        var message = string::new(allocator);
+        errdefer message.deinit(allocator);
+        try message.append_bytes(allocator, "strconv.ParseInt: parsing ");
+        try message.append_byte(allocator, cast<u8>(34));
+        try message.append_bytes(allocator, digits);
+        try message.append_byte(allocator, cast<u8>(34));
+        try message.append_bytes(allocator, ": value out of range");
+        return Outcome::Problem(move message);
+    }
+    if is_name_byte(byte) {
+        let start = pos.*;
+        while pos.* < size and is_name_byte(text[pos.*]) {
+            pos.* = pos.* + 1;
+        }
+        let name = text[start..pos.*];
+        if env.lookup(name) |value| {
+            return Outcome::Value(value);
+        }
+        var message = string::new(allocator);
+        errdefer message.deinit(allocator);
+        try message.append_byte(allocator, cast<u8>(96));
+        try message.append_bytes(allocator, name);
+        try message.append_bytes(allocator, "` is not a compile-time integer");
+        return Outcome::Problem(move message);
+    }
+    var message = string::new(allocator);
+    errdefer message.deinit(allocator);
+    try message.append_bytes(allocator, "unexpected `");
+    try message.append_byte(allocator, byte);
+    try message.append_bytes(allocator, "` in static expression `");
+    try message.append_bytes(allocator, text);
+    try message.append_byte(allocator, cast<u8>(96));
+    return Outcome::Problem(move message);
+}
+
+// operation reads `(left op right)`.
+fn operation(allocator: Allocator, text: []u8, pos: &var i64, env: &Env) -> !Outcome {
+    let size = mem::len(text);
+    pos.* = pos.* + 1;
+    var left = 0;
+    let left_outcome = try term(allocator, text, pos, env);
+    match left_outcome {
+        Value(value) => {
+            left = value;
+        },
+        Problem(problem) => return Outcome::Problem(move problem),
+    }
+    if pos.* + 3 > size or
+        text[pos.*] != cast<u8>(32) or
+        text[pos.* + 2] != cast<u8>(32) {
+        return malformed(allocator, text);
+    }
+    let op = text[pos.* + 1];
+    pos.* = pos.* + 3;
+    var right = 0;
+    let right_outcome = try term(allocator, text, pos, env);
+    match right_outcome {
+        Value(value) => {
+            right = value;
+        },
+        Problem(problem) => return Outcome::Problem(move problem),
+    }
+    if pos.* >= size or text[pos.*] != cast<u8>(41) {
+        return malformed(allocator, text);
+    }
+    pos.* = pos.* + 1;
+    return apply(allocator, op, left, right);
+}
+
+fn apply(allocator: Allocator, op: u8, left: i64, right: i64) -> !Outcome {
+    if op == cast<u8>(43) {
+        return Outcome::Value(left + right);
+    }
+    if op == cast<u8>(45) {
+        return Outcome::Value(left - right);
+    }
+    if op == cast<u8>(42) {
+        return Outcome::Value(left * right);
+    }
+    if op == cast<u8>(47) or op == cast<u8>(37) {
+        if right == 0 {
+            let message = try string::from_bytes(allocator, "static expression divides by zero");
+            return Outcome::Problem(move message);
+        }
+        if op == cast<u8>(47) {
+            return Outcome::Value(left / right);
+        }
+        return Outcome::Value(left % right);
+    }
+    var message = string::new(allocator);
+    errdefer message.deinit(allocator);
+    try message.append_bytes(allocator, "static expression operator `");
+    try message.append_byte(allocator, op);
+    try message.append_bytes(allocator, "` is not integer arithmetic");
+    return Outcome::Problem(move message);
+}
+
+fn malformed(allocator: Allocator, text: []u8) -> !Outcome {
+    var message = string::new(allocator);
+    errdefer message.deinit(allocator);
+    try message.append_bytes(allocator, "malformed static expression `");
+    try message.append_bytes(allocator, text);
+    try message.append_byte(allocator, cast<u8>(96));
+    return Outcome::Problem(move message);
+}
+
+fn is_digit(byte: u8) -> bool {
+    return byte >= cast<u8>(48) and byte <= cast<u8>(57);
+}
+
+fn is_name_byte(byte: u8) -> bool {
+    return byte == cast<u8>(95) or
+        (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+        (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
+        is_digit(byte);
+}

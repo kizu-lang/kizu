@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/quote"
+	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
@@ -487,7 +488,24 @@ func (l *lowerer) resolveStaticValue(text string) string {
 	if bound, ok := l.staticValues[text]; ok {
 		return bound.text
 	}
+	if staticexpr.Is(text) {
+		// The checker evaluated the same text against the same names, so
+		// an expression reaching here evaluates.
+		if value, err := staticexpr.Eval(text, l.staticInt); err == nil {
+			return strconv.FormatInt(value, 10)
+		}
+	}
 	return text
+}
+
+// staticInt answers the integer an i64 static value stands for.
+func (l *lowerer) staticInt(name string) (int64, bool) {
+	static, ok := l.staticValues[name]
+	if !ok || static.typ != "i64" {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(static.text, 10, 64)
+	return value, err == nil
 }
 
 // lower performs declaration collection and function lowering.

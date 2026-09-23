@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -6981,9 +6982,26 @@ func (c *Checker) genericCallValues(fn *functionInfo, typeArg string) map[string
 		if outer, ok := c.comptimeValues[arg]; ok {
 			arg = outer
 		}
+		if staticexpr.Is(arg) {
+			// The type checker has already refused an expression that does
+			// not evaluate, so a failure here leaves the text as written.
+			if value, err := staticexpr.Eval(arg, c.comptimeInt); err == nil {
+				arg = strconv.FormatInt(value, 10)
+			}
+		}
 		bound[param.Name] = arg
 	}
 	return bound
+}
+
+// comptimeInt answers the integer a comptime-readable name stands for.
+func (c *Checker) comptimeInt(name string) (int64, bool) {
+	text, ok := c.comptimeValues[name]
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(text, 10, 64)
+	return value, err == nil
 }
 
 // genericCallFunctions reads the `Function` static arguments of one call, so a
