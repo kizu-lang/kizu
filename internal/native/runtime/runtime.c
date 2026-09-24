@@ -31,6 +31,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -703,13 +704,16 @@ void kizu_panic_shift_negative(int64_t line, int64_t column) {
  */
 static int64_t kizu_arena_instances = 0;
 
+/* Pool threads build arenas too, so the count is taken atomically: two
+   arenas built at once must not share an id. */
 int64_t kizu_arena_origin(void) {
-    if (kizu_arena_instances >= KIZU_ARENA_INSTANCE_MAX) {
+    int64_t instance =
+        __atomic_add_fetch(&kizu_arena_instances, 1, __ATOMIC_RELAXED);
+    if (instance > KIZU_ARENA_INSTANCE_MAX) {
         fputs("runtime error: arena instances exhausted\n", stderr);
         kizu_panic_abort();
     }
-    kizu_arena_instances += 1;
-    return (kizu_arena_instances << KIZU_ARENA_INDEX_BITS) + 1;
+    return (instance << KIZU_ARENA_INDEX_BITS) + 1;
 }
 
 void kizu_panic_test_fail(const unsigned char *s, int64_t len,
@@ -2401,18 +2405,23 @@ void std__internal__builtin__net_poller_close(int64_t handle) {
 struct KizuLoop;
 struct KizuTaskSet;
 
+/* A stack a coroutine or a pool thread runs on. base is the usable run above
+   one inaccessible page. The allocation is wider so that page can be aligned
+   without asking Allocator for a second block; release has to name the
+   original address and size. */
+typedef struct {
+    void *base;
+    size_t size;
+    void *allocation;
+    int64_t allocation_size;
+    void *guard;
+    size_t guard_size;
+} KizuStack;
+
 typedef struct KizuCoro {
     ucontext_t inside;
     ucontext_t outside;
-    /* stack is the usable run above one inaccessible page. The allocation is
-       wider so that page can be aligned without asking Allocator for a second
-       block; release has to name the original address and size. */
-    void *stack;
-    size_t stack_size;
-    void *stack_allocation;
-    int64_t stack_allocation_size;
-    void *stack_guard;
-    size_t stack_guard_size;
+    KizuStack stack;
     void (*entry)(int64_t);
     int64_t arg;
     /* A task carries what its worker is told instead of one number: the Io it
@@ -2446,14 +2455,13 @@ typedef struct KizuCoro {
     int hold_reaping;
 } KizuCoro;
 
-/* The coroutine currently running, or NULL in the caller. One thread means one
-   of these; a thread of its own would need one per thread, which is a change
-   to make when threads are. */
-static KizuCoro *kizu_coro_current = NULL;
+/* The coroutine currently running on this thread, or NULL in the caller. A
+   pool thread resumes coroutines of its own, so each thread has one. */
+static _Thread_local KizuCoro *kizu_coro_current = NULL;
 
 /* Handed to the trampoline, because makecontext passes int arguments and a
    pointer is not one. It is read once, immediately, on the first resume. */
-static KizuCoro *kizu_coro_starting = NULL;
+static _Thread_local KizuCoro *kizu_coro_starting = NULL;
 
 static KizuCoro *kizu_coro_from(int64_t handle) {
     if (handle == 0) {
@@ -2482,8 +2490,8 @@ typedef enum {
    A guard alone is not enough for a frame wider than a page: every emitted
    Kizu function carries the target's LLVM stack-probe contract, which touches
    the stack at most 4096 bytes apart and therefore cannot jump over this page. */
-static KizuStackResult kizu_coro_stack_new(
-    KizuCoro *coro, void *allocator, int64_t stack_bytes) {
+static KizuStackResult kizu_stack_new(
+    KizuStack *stack, void *allocator, int64_t stack_bytes) {
     if (stack_bytes < 16384) {
         stack_bytes = 16384;
     }
@@ -2513,31 +2521,30 @@ static KizuStackResult kizu_coro_stack_new(
         kizu_rt_free(allocator, allocation, allocation_size);
         return KIZU_STACK_PROTECTION_FAILED;
     }
-    coro->stack_allocation = allocation;
-    coro->stack_allocation_size = allocation_size;
-    coro->stack_guard = guard;
-    coro->stack_guard_size = (size_t)page_bytes;
-    coro->stack = (unsigned char *)guard + page_bytes;
-    coro->stack_size = (size_t)stack_bytes;
+    stack->allocation = allocation;
+    stack->allocation_size = allocation_size;
+    stack->guard = guard;
+    stack->guard_size = (size_t)page_bytes;
+    stack->base = (unsigned char *)guard + page_bytes;
+    stack->size = (size_t)stack_bytes;
     return KIZU_STACK_READY;
 }
 
-static void kizu_coro_stack_release(KizuCoro *coro, void *allocator) {
-    if (!coro || !coro->stack_allocation) {
+static void kizu_stack_release(KizuStack *stack, void *allocator) {
+    if (!stack->allocation) {
         return;
     }
     if (mprotect(
-            coro->stack_guard,
-            coro->stack_guard_size,
+            stack->guard,
+            stack->guard_size,
             PROT_READ | PROT_WRITE) != 0) {
         /* An allocator may inspect the block it releases. It must never be
            handed a block that still contains an inaccessible page. */
         abort();
     }
-    kizu_rt_free(
-        allocator, coro->stack_allocation, coro->stack_allocation_size);
-    coro->stack = NULL;
-    coro->stack_allocation = NULL;
+    kizu_rt_free(allocator, stack->allocation, stack->allocation_size);
+    stack->base = NULL;
+    stack->allocation = NULL;
 }
 
 /* The first thing that runs on the new stack. It calls the entry and then
@@ -2572,7 +2579,7 @@ void std__internal__builtin__coro_new(
         *out = kizu_err_i64(KIZU_ERR_STD_CORO_ERROR_OUT_OF_MEMORY);
         return;
     }
-    KizuStackResult stack = kizu_coro_stack_new(coro, NULL, stack_bytes);
+    KizuStackResult stack = kizu_stack_new(&coro->stack, NULL, stack_bytes);
     if (stack != KIZU_STACK_READY) {
         free(coro);
         int64_t failure = stack == KIZU_STACK_PROTECTION_FAILED
@@ -2611,8 +2618,8 @@ int64_t std__internal__builtin__coro_resume(int64_t handle) {
     if (!coro->started) {
         coro->started = 1;
         getcontext(&coro->inside);
-        coro->inside.uc_stack.ss_sp = coro->stack;
-        coro->inside.uc_stack.ss_size = coro->stack_size;
+        coro->inside.uc_stack.ss_sp = coro->stack.base;
+        coro->inside.uc_stack.ss_size = coro->stack.size;
         coro->inside.uc_link = &coro->outside;
         kizu_coro_starting = coro;
         makecontext(&coro->inside, kizu_coro_trampoline, 0);
@@ -2654,8 +2661,248 @@ void std__internal__builtin__coro_close(int64_t handle) {
     if (!coro) {
         return;
     }
-    kizu_coro_stack_release(coro, NULL);
+    kizu_stack_release(&coro->stack, NULL);
     free(coro);
+}
+
+/* ---------------------------------------------------------------------------
+ * Thread pools
+ *
+ * A pool is threads that run one round at a time. A round cuts a slice into
+ * chunks that do not overlap and hands each chunk to the worker once; the
+ * caller runs chunks too, and `each` returns only after every chunk ran and
+ * every helper has left the round. So nothing a round was lent outlives the
+ * call that lent it, and two threads never hold the same element.
+ *
+ * The helpers start when the pool is made and wait between rounds, because a
+ * round is often shorter than starting a thread takes.
+ * ------------------------------------------------------------------------ */
+
+#define KIZU_POOL_TAG INT64_C(0x4b495a55504f4f4c)
+#define KIZU_POOL_THREADS_MAX 1024
+
+typedef struct KizuPool KizuPool;
+
+typedef struct {
+    KizuPool *pool;
+    pthread_t id;
+    KizuStack stack;
+} KizuPoolHelper;
+
+struct KizuPool {
+    int64_t tag;
+    pthread_mutex_t lock;
+    /* Signalled when a round starts or the pool shuts down. */
+    pthread_cond_t start;
+    /* Signalled when the last helper leaves a round. */
+    pthread_cond_t finish;
+    int64_t round;
+    int shutdown;
+    int64_t helpers_in_round;
+    /* The round. Written by the caller under the lock before it starts the
+       round, and only read after that. */
+    void *worker;
+    void (*invoke)(void *, KizuSliceU8 *, int64_t);
+    unsigned char *base;
+    int64_t len;
+    int64_t chunk;
+    int64_t elem_size;
+    int64_t chunks;
+    /* The next chunk nobody has taken. */
+    int64_t next;
+    int64_t helper_count;
+    KizuPoolHelper *helpers;
+};
+
+static KizuPool *kizu_pool_from(int64_t handle) {
+    KizuPool *pool = (KizuPool *)(intptr_t)handle;
+    if (!pool || pool->tag != KIZU_POOL_TAG) {
+        return NULL;
+    }
+    return pool;
+}
+
+/* Takes chunks until none are left. Every thread in the round, the caller
+   included, runs this. */
+static void kizu_pool_run_chunks(KizuPool *pool) {
+    for (;;) {
+        int64_t index = __atomic_fetch_add(&pool->next, 1, __ATOMIC_RELAXED);
+        if (index >= pool->chunks) {
+            return;
+        }
+        int64_t start = index * pool->chunk;
+        int64_t count = pool->len - start;
+        if (count > pool->chunk) {
+            count = pool->chunk;
+        }
+        KizuSliceU8 part = {pool->base + start * pool->elem_size, count};
+        pool->invoke(pool->worker, &part, index);
+    }
+}
+
+static void *kizu_pool_helper_main(void *arg) {
+    KizuPoolHelper *helper = (KizuPoolHelper *)arg;
+    KizuPool *pool = helper->pool;
+    int64_t seen = 0;
+    pthread_mutex_lock(&pool->lock);
+    for (;;) {
+        while (!pool->shutdown && pool->round == seen) {
+            pthread_cond_wait(&pool->start, &pool->lock);
+        }
+        if (pool->shutdown) {
+            pthread_mutex_unlock(&pool->lock);
+            return NULL;
+        }
+        seen = pool->round;
+        pthread_mutex_unlock(&pool->lock);
+        kizu_pool_run_chunks(pool);
+        pthread_mutex_lock(&pool->lock);
+        pool->helpers_in_round -= 1;
+        if (pool->helpers_in_round == 0) {
+            pthread_cond_signal(&pool->finish);
+        }
+    }
+}
+
+/* Stops and joins the first `started` helpers and releases everything the pool
+   holds. Used by close and by a pool that could not start all its helpers. */
+static void kizu_pool_release(KizuPool *pool, int64_t started, void *allocator) {
+    pthread_mutex_lock(&pool->lock);
+    pool->shutdown = 1;
+    pthread_cond_broadcast(&pool->start);
+    pthread_mutex_unlock(&pool->lock);
+    for (int64_t i = 0; i < started; i++) {
+        pthread_join(pool->helpers[i].id, NULL);
+    }
+    for (int64_t i = 0; i < pool->helper_count; i++) {
+        kizu_stack_release(&pool->helpers[i].stack, allocator);
+    }
+    pthread_cond_destroy(&pool->finish);
+    pthread_cond_destroy(&pool->start);
+    pthread_mutex_destroy(&pool->lock);
+    pool->tag = 0;
+    kizu_rt_free(
+        allocator,
+        pool->helpers,
+        pool->helper_count * (int64_t)sizeof *pool->helpers);
+    kizu_rt_free(allocator, pool, (int64_t)sizeof *pool);
+}
+
+/* Starts one helper on a stack bought from the pool's allocator, with the same
+   guard page a coroutine stack has. */
+static int64_t kizu_pool_start_helper(
+    KizuPoolHelper *helper, void *allocator, int64_t stack_bytes) {
+    KizuStackResult stack = kizu_stack_new(&helper->stack, allocator, stack_bytes);
+    if (stack != KIZU_STACK_READY) {
+        return stack == KIZU_STACK_PROTECTION_FAILED
+            ? KIZU_ERR_STD_THREAD_ERROR_STACK_PROTECTION_FAILED
+            : KIZU_ERR_STD_THREAD_ERROR_OUT_OF_MEMORY;
+    }
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        return KIZU_ERR_STD_THREAD_ERROR_SPAWN_FAILED;
+    }
+    int failed = pthread_attr_setstack(&attr, helper->stack.base, helper->stack.size) != 0 ||
+        pthread_create(&helper->id, &attr, kizu_pool_helper_main, helper) != 0;
+    pthread_attr_destroy(&attr);
+    return failed ? KIZU_ERR_STD_THREAD_ERROR_SPAWN_FAILED : 0;
+}
+
+/* Makes a pool of `threads` threads counting the caller, so it starts one
+   fewer helper. Everything it holds comes from `allocator`. */
+void std__internal__builtin__thread_pool_new(
+    KizuErrorI64 *out, void *allocator, int64_t threads, int64_t stack_bytes) {
+    if (threads < 1 || threads > KIZU_POOL_THREADS_MAX) {
+        *out = kizu_err_i64(KIZU_ERR_STD_THREAD_ERROR_SPAWN_FAILED);
+        return;
+    }
+    KizuPool *pool = (KizuPool *)kizu_rt_zalloc(allocator, (int64_t)sizeof *pool);
+    if (!pool) {
+        *out = kizu_err_i64(KIZU_ERR_STD_THREAD_ERROR_OUT_OF_MEMORY);
+        return;
+    }
+    int64_t helper_count = threads - 1;
+    if (helper_count > 0) {
+        pool->helpers = (KizuPoolHelper *)kizu_rt_zalloc(
+            allocator, helper_count * (int64_t)sizeof *pool->helpers);
+        if (!pool->helpers) {
+            kizu_rt_free(allocator, pool, (int64_t)sizeof *pool);
+            *out = kizu_err_i64(KIZU_ERR_STD_THREAD_ERROR_OUT_OF_MEMORY);
+            return;
+        }
+    }
+    pool->tag = KIZU_POOL_TAG;
+    pool->helper_count = helper_count;
+    pthread_mutex_init(&pool->lock, NULL);
+    pthread_cond_init(&pool->start, NULL);
+    pthread_cond_init(&pool->finish, NULL);
+    for (int64_t i = 0; i < helper_count; i++) {
+        pool->helpers[i].pool = pool;
+        int64_t failure = kizu_pool_start_helper(&pool->helpers[i], allocator, stack_bytes);
+        if (failure != 0) {
+            kizu_pool_release(pool, i, allocator);
+            *out = kizu_err_i64(failure);
+            return;
+        }
+    }
+    *out = kizu_ok_i64((int64_t)(intptr_t)pool);
+}
+
+/* Runs one round: every chunk of `data` goes to `worker` once, on whichever
+   thread takes it. `data` arrives as the address of the caller's {ptr, len};
+   elem_size is what the backend measured T at, and `invoke` is the backend's
+   thunk that calls a Kizu worker with its own ABI. */
+void std__internal__builtin__thread_pool_each(
+    int64_t handle,
+    KizuSliceU8 *data,
+    int64_t elem_size,
+    int64_t chunk,
+    void *worker,
+    void *invoke) {
+    KizuPool *pool = kizu_pool_from(handle);
+    if (!pool || !data || !worker || !invoke || chunk < 1 || data->len <= 0) {
+        return;
+    }
+    pool->worker = worker;
+    pool->invoke = (void (*)(void *, KizuSliceU8 *, int64_t))invoke;
+    pool->base = data->ptr;
+    pool->len = data->len;
+    pool->chunk = chunk;
+    pool->elem_size = elem_size;
+    pool->chunks = (data->len + chunk - 1) / chunk;
+    pool->next = 0;
+    if (pool->helper_count > 0) {
+        pthread_mutex_lock(&pool->lock);
+        pool->helpers_in_round = pool->helper_count;
+        pool->round += 1;
+        pthread_cond_broadcast(&pool->start);
+        pthread_mutex_unlock(&pool->lock);
+    }
+    kizu_pool_run_chunks(pool);
+    if (pool->helper_count > 0) {
+        pthread_mutex_lock(&pool->lock);
+        while (pool->helpers_in_round > 0) {
+            pthread_cond_wait(&pool->finish, &pool->lock);
+        }
+        pthread_mutex_unlock(&pool->lock);
+    }
+}
+
+void std__internal__builtin__thread_pool_close(int64_t handle, void *allocator) {
+    KizuPool *pool = kizu_pool_from(handle);
+    if (!pool) {
+        return;
+    }
+    kizu_pool_release(pool, pool->helper_count, allocator);
+}
+
+/* The processors this process may run on right now. The count is the OS's
+   answer, so it is asked through Io like any other; one is the floor, because
+   the caller is always one. */
+int64_t std__internal__builtin__thread_cpu_count(void *io) {
+    (void)io;
+    long count = sysconf(_SC_NPROCESSORS_ONLN);
+    return count < 1 ? 1 : (int64_t)count;
 }
 
 /* ------------------------------------------------------------------ *
@@ -3031,7 +3278,7 @@ static void kizu_task_release(KizuCoro *coro) {
     void *allocator = coro->storage_allocator;
     kizu_rt_free(
         allocator, coro->owned_task_state, coro->owned_task_state_size);
-    kizu_coro_stack_release(coro, allocator);
+    kizu_stack_release(&coro->stack, allocator);
     kizu_rt_free(allocator, coro, (int64_t)sizeof *coro);
 }
 
@@ -3137,7 +3384,7 @@ void std__internal__builtin__task_new(
         *out = kizu_ok_i64((int64_t)(intptr_t)coro);
         return;
     }
-    KizuStackResult stack = kizu_coro_stack_new(coro, allocator, stack_bytes);
+    KizuStackResult stack = kizu_stack_new(&coro->stack, allocator, stack_bytes);
     if (stack != KIZU_STACK_READY) {
         kizu_task_release(coro);
         int64_t failure = stack == KIZU_STACK_PROTECTION_FAILED
@@ -3226,7 +3473,7 @@ void std__internal__builtin__task_set_spawn(
         *out = kizu_ok_void();
         return;
     }
-    KizuStackResult stack = kizu_coro_stack_new(coro, allocator, stack_bytes);
+    KizuStackResult stack = kizu_stack_new(&coro->stack, allocator, stack_bytes);
     if (stack != KIZU_STACK_READY) {
         kizu_task_release(coro);
         int64_t failure = stack == KIZU_STACK_PROTECTION_FAILED

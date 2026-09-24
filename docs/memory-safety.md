@@ -26,7 +26,6 @@ The following are not guaranteed by safe Kizu:
 - absence of deadlock
 - absence of logic bugs
 - absence of panics or runtime errors
-- real OS-thread parallel execution (ADR-0025)
 - raw pointer safety
 - C ABI call safety
 - allocator primitive safety
@@ -183,28 +182,17 @@ install the guard is reported by spawn as `StackProtectionFailed`; there is no
 unguarded fallback. Crossing the boundary terminates the process before an
 out-of-range write and does not attempt to unwind on the exhausted stack.
 
-Kizu still has no thread, channel, mutex, or atomic API. The earlier
-`std::thread`, `std::channel`, `std::sync`, `std::atomic`, and
-`std::io::threaded()` APIs were withdrawn by ADR-0025: they carried checker
-rules with no IR lowering or runtime behind them.
-
-Threads return, for parallel work. The order changes: the execution path comes
-first, and safety rules are written against threads that actually run. Two
-constraints are already fixed.
-
-- The shape follows Zig (ADR-0039): no hidden global runtime, `Io` and allocator
-  passed explicitly, no function coloring.
-- Data-race freedom is not negotiable. Zig does not prevent data races in its
-  type system; Kizu must. An API that lets safe Kizu write a data race is not
-  adopted, however convenient.
-
-What a returning thread API must demonstrate is listed in ADR-0025. Evented
-workers do not weaken that gate: they provide interleaving, not parallelism or
-a shared-memory race model.
+Kizu runs work in parallel through one call, `std::thread::each` (SPEC §15.3,
+ADR-0025). It cuts a `&var []T` into chunks that do not overlap, runs them on
+the pool's threads, and returns only after every chunk ran. A worker is a
+top-level function with no captures and there are no mutable globals, so a
+worker reaches its own chunk and nothing else; the slice's borrow ends when the
+call returns, as any call's does. The element type may not carry a view, an
+`Io`, or an `Allocator`, which would reach past its chunk or put one capability
+in two threads. There is no thread handle, channel, mutex, or atomic API.
 
 `std::fs`, `std::io`, and `std::process` keep requiring an explicit `Io`
 capability and return I/O failures as `!T` values that propagate through `try`.
-That boundary is unaffected by the withdrawal.
 
 ### Comptime
 
@@ -256,6 +244,7 @@ memory-safety invariants to representative examples.
 | shared and mutable borrows cannot conflict | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_conflict.kizu` |
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
 | `&var v[a..b]` lends a range of a writable view and borrows the whole view | `examples/writable_subview.kizu` | `examples/negative/subview_shared_source.kizu`, `examples/negative/subview_source_read.kizu`, `examples/negative/subview_overlap_args.kizu`, `examples/negative/subview_shared_prefix.kizu`, `examples/negative/subview_escape.kizu` |
+| a pool round hands each thread a chunk it alone holds, and nothing past the call | `examples/thread_each.kizu`, `tests/behavior/src/thread/thread_test.kizu` | `examples/negative/thread_each_capability_element.kizu`, `examples/negative/thread_pool_not_deinit.kizu` |
 | `&var self` method requires a mutable receiver | `examples/mutable_self_method.kizu`, `tests/behavior/src/mutable_self_method/mutable_self_method_test.kizu` | `examples/negative/mutable_self_method_let_receiver.kizu` |
 | a call result receives a by-value method only as a copy value | `examples/method_on_call_result.kizu` | `examples/negative/method_on_call_result_borrow.kizu`, `examples/negative/method_on_call_result_mut.kizu`, `examples/negative/method_on_call_result_owner.kizu` |
 | arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
@@ -299,7 +288,8 @@ These are known areas to keep conservative:
 - Numeric casts and integer-width runtime semantics are incomplete.
 - Containers are `Array` / `Map` / `String` / `Arena` / `Box`; a general
   container contract for user-written ones does not exist yet.
-- Real OS threads and async runtime semantics are not implemented (ADR-0025).
+- Threads run only through `std::thread::each`; workers cannot return failures
+  yet (ADR-0025).
 - Raw pointer runtime operations are not implemented as a safe guarantee.
 
 Do not describe these areas as memory-safe until their invariants and regression

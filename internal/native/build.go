@@ -311,6 +311,7 @@ var runtimeErrorSets = []string{
 	"std::io::Error",
 	"std::net::Error",
 	"std::process::Error",
+	"std::thread::Error",
 }
 
 // requireRuntimeErrorSets rejects a build that cannot name what the runtime
@@ -408,8 +409,9 @@ func linkFlags(options Options) []string {
 }
 
 // runtimeLibraries are the libraries the runtime shim itself needs, whatever
-// the program declares.
-var runtimeLibraries = []string{"m"}
+// the program declares: libm for the float intrinsics and libpthread for
+// std::thread. On Darwin both are part of libSystem and the names are harmless.
+var runtimeLibraries = []string{"m", "pthread"}
 
 // linkLibraries lists every library the executable links, the program's
 // then the runtime's, each once.

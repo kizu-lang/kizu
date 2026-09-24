@@ -1708,6 +1708,23 @@ func (l *lowerer) lowerTaskSetSpawn(state string, args []ast.Expression) (Value,
 	return l.releaseOwnerOnFailure(result, values[4], values[2])
 }
 
+// lowerThreadPoolEach lowers one pool round. The `&var []T` the wrapper was
+// lent is a view value in IR; the backend adds what T measures, which is how
+// the runtime finds where each chunk starts.
+func (l *lowerer) lowerThreadPoolEach(elem string, args []ast.Expression) (Value, error) {
+	params := []Param{
+		{Type: "i64"},
+		{Type: "[]" + elem},
+		{Type: "i64"},
+		{Type: "fn(&var []" + elem + ", i64) -> void"},
+	}
+	values, err := l.lowerCallArgsAs(params, args)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("call.std::internal::builtin::thread_pool_each", "void", values, ""), nil
+}
+
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
 // The std storage constructors lower to one instruction each, so their std
 // bodies are never walked. Every other generic call resolves by name.
@@ -1734,6 +1751,8 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerTaskNew(l.resolveType(typeApply.TypeArg), args)
 	case "std::internal::builtin::task_set_spawn":
 		return l.lowerTaskSetSpawn(l.resolveType(typeApply.TypeArg), args)
+	case "std::internal::builtin::thread_pool_each":
+		return l.lowerThreadPoolEach(l.resolveType(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,

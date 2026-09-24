@@ -823,7 +823,10 @@ fn require_runtime_error_sets(
     if try require_error_set(allocator, sets, "std::net::Error") |failed| {
         return move failed;
     }
-    return require_error_set(allocator, sets, "std::process::Error");
+    if try require_error_set(allocator, sets, "std::process::Error") |failed| {
+        return move failed;
+    }
+    return require_error_set(allocator, sets, "std::thread::Error");
 }
 
 /// Rejects a build that cannot name what the runtime returns.
@@ -980,10 +983,10 @@ fn run_clang(
 
 /// Spells what the linker resolves foreign symbols from, the Go `linkFlags`:
 /// the search paths the manifest adds, then each library and framework the
-/// program's extern declarations named, then libm, which the runtime needs
-/// whatever the program declares (for a float intrinsic the target has no
-/// instruction for; on Darwin it is part of libSystem and the name is
-/// harmless). The order is the linker's: a path must be known before the
+/// program's extern declarations named, then libm and libpthread, which the
+/// runtime needs whatever the program declares (a float intrinsic the target
+/// has no instruction for, and std::thread; on Darwin both are part of
+/// libSystem and the names are harmless). The order is the linker's: a path must be known before the
 /// library looked for in it.
 fn link_flags(
     allocator: Allocator,
@@ -1000,15 +1003,28 @@ fn link_flags(
         let framework_bytes = framework.as_bytes();
         try append_copy(allocator, out, framework_bytes);
     }
-    index = 0;
+    try append_runtime_library(allocator, options, "m", "-lm", out);
+    return append_runtime_library(allocator, options, "pthread", "-lpthread", out);
+}
+
+/// Appends one library the runtime shim needs unless the program already
+/// named it.
+fn append_runtime_library(
+    allocator: Allocator,
+    options: &Options,
+    name: []u8,
+    flag: []u8,
+    out: &var array::Array<string::String>
+) -> !void {
+    var index = 0;
     while options.libraries.at(index) |library| {
         index = index + 1;
         let library_bytes = library.as_bytes();
-        if mem::equal_bytes(library_bytes, "m") {
+        if mem::equal_bytes(library_bytes, name) {
             return;
         }
     }
-    return append_copy(allocator, out, "-lm");
+    return append_copy(allocator, out, flag);
 }
 
 /// Appends each value with prefix in front of it as one argument.

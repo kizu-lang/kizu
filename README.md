@@ -38,21 +38,21 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 47 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 46/47 |
-| arithmetic / bitwise / float | 9 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| fn / let / struct / literals | 51 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 50/51 |
+| arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| if / match | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/18 |
+| if / match | 19 | ✅ | ✅ | ✅ | 18/19 | 18/19 | 18/19 | 16/19 |
 | enum / union | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
-| error union `!T` / try / errdefer | 57 | ✅ | ✅ | ✅ | 37/57 | 37/57 | 37/57 | 34/57 |
-| optional `?T` / orelse / capture | 27 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 25/27 |
-| move / borrow | 63 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| error union `!T` / try / errdefer | 58 | ✅ | ✅ | ✅ | 37/58 | 37/58 | 37/58 | 34/58 |
+| optional `?T` / orelse / capture | 28 | ✅ | ✅ | ✅ | 27/28 | 27/28 | 27/28 | 25/28 |
+| move / borrow | 70 | ✅ | ✅ | ✅ | 68/70 | 68/70 | 68/70 | 68/70 |
+| deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| cast / slice / stack buffer / box | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 | 15/16 |
-| unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 | 1/4 |
-| contract / generics | 20 | ✅ | ✅ | ✅ | 19/20 | 19/20 | 19/20 | 16/20 |
-| std::array | 21 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
+| cast / slice / stack buffer / box | 17 | ✅ | ✅ | ✅ | 16/17 | 16/17 | 16/17 | 16/17 |
+| unsafe / raw pointer / extern C | 11 | ✅ | ✅ | ✅ | 2/11 | 2/11 | 2/11 | 2/11 |
+| contract / generics | 23 | ✅ | ✅ | ✅ | 22/23 | 22/23 | 22/23 | 19/23 |
+| std::array | 26 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
 | std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 21/22 | 20/22 |
@@ -60,7 +60,7 @@ not in any one execution path.
 | std::compress | 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::math | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::math | 5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::time | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -69,35 +69,26 @@ not in any one execution path.
 | std::fs / path / io / process | 33 | ✅ | ✅ | ✅ | 14/33 | 14/33 | 14/33 | 4/33 |
 | std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| std::thread | 1 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. 209 runnable examples,
-measured on 2026-09-19 with `just backend-matrix` -- re-run it after touching a
-backend. `run`, `wasm`, `wasm-opt`, `wasm-bin`, and `browser` are judged on the
-program's output: `run` executes the native build; `wasm` and `wasm-opt` load
-the default and optimized WAT with `wasmtime`; `wasm-bin` loads the binary
-module there; `browser` loads the browser binary with the JavaScript host
-adapter. `llvm` is judged on whether lowering succeeded, because `run` already
-builds the native target from the same text.
+tags, so an example appears in more than one row. `just backend-matrix`
+regenerates the table; re-run it after touching a backend. `run`, `wasm`,
+`wasm-opt`, `wasm-bin`, and `browser` are judged on the program's output: `run`
+executes the native build; `wasm` and `wasm-opt` load the default and optimized
+WAT with `wasmtime`; `wasm-bin` loads the binary module there; `browser` loads
+the browser binary with the JavaScript host adapter. `llvm` is judged on whether
+lowering succeeded, because `run` already builds the native target from the
+same text.
 
-| Route | Passing |
-| --- | --- |
-| `kizu check` | 187/187 |
-| `kizu run` | 187/187 |
-| `kizu build --emit-llvm` | 187/187 |
-| `kizu build --target wasm32-wasi` (WAT) | 166/187 |
-| `kizu build --target wasm32-wasi --opt` (WAT) | 166/187 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 166/187 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 157/187 |
-
-The native route has no pending runnable example. WASI remains a target subset;
-its remaining 20 examples are explicit target-unsupported capabilities: 16
-`std::net`, two extern C, one evented I/O, and one coroutine example. The
-default WAT, optimized WAT, and binary routes have no remaining lowering
-failure, runtime-only refusal, or output mismatch. The browser route likewise
-has no lowering failure or output mismatch: all remaining 27 are explicit
-target-unsupported capabilities. The browser column is broad JavaScript-engine
+Every runnable example passes `check`, `run`, and `llvm`. The Wasm routes have
+no lowering failure. What they refuse is a capability the target does not
+have -- `std::net`, extern C, evented I/O, coroutines, threads, and on the
+browser also `std::fs` and process arguments -- with an explicit
+target-unsupported error. The two examples that differ in output print which
+target they were built for (`else_if.kizu`, `target_os.kizu`), so they differ
+by design. The browser column is broad JavaScript-engine
 coverage; the real-page fixture is `tests/browser/smoke.html`.
 In addition to the standalone binary, one command writes adjacent `app.wasm`
 and `app.mjs` browser artifacts. Importing the module does not start the
@@ -133,8 +124,8 @@ deliberately excluded, so the two are not confused.
 
 | Feature | State |
 | --- | --- |
-| threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it. Coroutines (`std::coro`) and an evented `Io` are in, and they are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
-| wasm beyond the current target subsets | **in progress.** WASI WAT and binary routes run 170/192 runnable examples, browser binary runs 161/192, and all remaining cases are classified as target-unsupported capabilities |
+| threads for parallel work | **in progress.** `std::thread::Pool` runs one function over the non-overlapping chunks of a slice on several threads and returns after every chunk ran (native only). Workers that return failures and chunks of elements that are not contiguous are next (ADR-0025). Coroutines (`std::coro`) and an evented `Io` are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
+| wasm beyond the current target subsets | **in progress.** Every example the Wasm routes do not run is refused as a capability the target lacks |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
 | `kizu lint` | **not started** |

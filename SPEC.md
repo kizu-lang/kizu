@@ -76,14 +76,12 @@ full stdlib
 kizu lint
 self-hosting compiler
 async fn / await syntax
-thread / channel / mutex / atomic API
-OS thread runtime
+thread handle / channel / mutex / atomic API
 Rust 同等以上の runtime performance guarantee
 ```
 
 self-host は Go の構造に沿って `compiler/` へ移植中で、shipping 実装は Go 一本です。
-thread は入れます。撤回したのは API の形だけで、実行系を先に作り、安全規則は
-動く thread の上でだけ書きます(ADR-0025)。
+thread は `std::thread::Pool` の 1 つの形だけを持ちます(§15.3、ADR-0025)。
 
 ## 1. 目標
 
@@ -3348,9 +3346,9 @@ std::set::Set<T>      後続 phase
 
 ## 15. concurrency / async 方針
 
-Kizu は `async fn` / `await` syntax を実装しません。thread / channel / mutex /
-atomic API もまだ持ちません。ADR-0025 で撤回した API は checker rule だけで、IR
-lowering も runtime も無かったためです。
+Kizu は `async fn` / `await` syntax を実装しません。thread handle / channel /
+mutex / atomic API も持ちません。複数 CPU で同時に走るのは `std::thread::Pool` の
+`each` だけです(§15.3、ADR-0025)。
 
 一方、**1 thread 上で待ちの間に別の worker を進める API は持ちます。**
 `std::io::Future` は caller の state を借りる 1 worker、`std::io::TaskSet` は move
@@ -3358,17 +3356,12 @@ lowering も runtime も無かったためです。
 に見える I/O wait だけです(ADR-0146)。ここでいう concurrency と、複数 CPU で
 同時に走る parallelism / thread safety は分けます。
 
-**thread は入れます。** 並列処理は Kizu の目標であり、撤回したのは API の形だけです。
-順番だけを変えます。実行系が先で、安全規則は動く thread の上でだけ書きます。
-
-戻すときの制約は 2 つです。
+thread の API は 2 つの制約を守ります。
 
 * Zig を参照します。hidden global runtime を持たず、`Io` と allocator を明示的に
   渡し、function coloring を作りません(ADR-0039)
 * memory race safety は譲りません。Zig は data race を型で防ぎませんが、Kizu は
   防ぎます。safe Kizu で data race を書ける API は採用しません
-
-thread API の形と個数は未定です。撤回した 8 個の型を一度に戻すことはしません。
 
 ### 15.1 Io capability
 
@@ -3652,6 +3645,24 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
   (checker が main の形を検査し、entry point が native / WASI の process status、または
   browser host へ返す status に写す)
 * `std::process` helper は hidden I/O を持たない
+
+### 15.3 thread pool
+
+`std::thread::each<T>(&var pool, data, chunk, worker)` は `data: &var []T` を
+`chunk` 要素ずつの重ならない塊に切り、各塊を `worker: fn(&var []T, i64) -> void`
+に 1 回ずつ渡します。塊は pool の thread(呼び出し側を含む)で同時に走り、
+`each` は全部の塊が終わってから返ります。API の形は `docs/std/thread.md` にあります。
+
+compiler が知っている規則は次の 2 つです。
+
+* `data` の借用は `each` の呼び出しの間だけです。thread に渡った塊が呼び出しより
+  長く生きることはないので、借用の規則は普通の呼び出しと同じです
+* `T` は view と `Io` / `Allocator` を含めません。2 つの塊に同じ capability が
+  複製されると、1 つの allocator や Io を 2 つの thread が同時に使うことになるため
+  です(`std::io::spawn` の state と同じ述語)
+
+worker は top-level function なので何も捕捉しません。書き換えられる global も
+無いので、worker が触れるのは渡された塊だけです。
 
 ## 16. contract / impl 方針
 

@@ -110,6 +110,7 @@ var groups = []featureGroup{
 	{"std::net / http", []string{
 		"net", "http", "routing", "client", "url", "multipart"}},
 	{"async / coro", []string{"async", "evented", "coro", "task-set"}},
+	{"std::thread", []string{"thread"}},
 }
 
 // routes are the CLI paths each example is put through. `run` builds a native

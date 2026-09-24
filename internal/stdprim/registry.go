@@ -191,6 +191,13 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::task_set_wait_one": {
 		Args: []ArgKind{ArgIo, ArgI64}, Return: "std::io::Error!void",
 	},
+	"std::internal::builtin::thread_cpu_count": {Args: []ArgKind{ArgIo}, Return: "i64"},
+	"std::internal::builtin::thread_pool_new": {
+		Args: []ArgKind{ArgAllocator, ArgI64, ArgI64}, Return: "std::thread::Error!i64",
+	},
+	"std::internal::builtin::thread_pool_close": {
+		Args: []ArgKind{ArgI64, ArgAllocator}, Return: "void",
+	},
 	"std::internal::builtin::test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
 	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
@@ -326,6 +333,10 @@ var primitives = map[string]bool{
 	"std::internal::builtin::process_unix_millis":          true,
 	"std::internal::builtin::test_fail":                    true,
 	"std::internal::builtin::test_fail_equal":              true,
+	"std::internal::builtin::thread_cpu_count":             true,
+	"std::internal::builtin::thread_pool_close":            true,
+	"std::internal::builtin::thread_pool_each":             true,
+	"std::internal::builtin::thread_pool_new":              true,
 }
 
 // Primitive reports whether name is a `std::internal::builtin::` primitive.

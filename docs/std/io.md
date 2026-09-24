@@ -176,6 +176,6 @@ let exchange = server.accept_connection(handle, allocator) catch return;
 io::spawn<http::Exchange>(&var tasks, serve_connection, move exchange) catch return;
 ```個別の結果を読み戻すときは `Future`、接続のように渡したら終わりの仕事は
 `TaskSet` を使います。どちらも thread ではなく、evented Io の待ちの間に 1 thread
-上で交互に進みます。
+上で交互に進みます。複数の CPU で同時に走らせるのは `std::thread` です(`docs/std/thread.md`)。
 
 実例は `examples/io_evented.kizu` と `examples/http_tasks.kizu` にあります。

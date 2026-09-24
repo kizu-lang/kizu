@@ -76,6 +76,9 @@ func (e *emitter) validateRuntimeCapabilities() error {
 	if e.usesAnyBuiltin(netBuiltins...) {
 		return e.unsupportedCapability("std::net")
 	}
+	if e.usesAnyBuiltin(threadBuiltins...) {
+		return e.unsupportedCapability("std::thread")
+	}
 	if e.usesAnyBuiltin(testSeedBuiltins...) {
 		return e.unsupportedCapability("std::testing::seed")
 	}
@@ -173,6 +176,15 @@ var coroBuiltins = []string{
 	"std::internal::builtin::coro_suspend",
 	"std::internal::builtin::coro_finished",
 	"std::internal::builtin::coro_close",
+}
+
+// threadBuiltins are the primitives behind std::thread. Neither Wasm host
+// starts threads.
+var threadBuiltins = []string{
+	"std::internal::builtin::thread_cpu_count",
+	"std::internal::builtin::thread_pool_new",
+	"std::internal::builtin::thread_pool_each",
+	"std::internal::builtin::thread_pool_close",
 }
 
 var netBuiltins = []string{

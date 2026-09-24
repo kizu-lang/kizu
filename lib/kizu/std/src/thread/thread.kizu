@@ -1,0 +1,76 @@
+// A pool runs one function over a slice on several threads at once.
+//
+// This is parallelism: the threads run at the same time, on as many CPUs as
+// there are. What keeps that from being a data race is the shape of the one
+// call that uses them. `each` cuts the slice into chunks that do not overlap,
+// hands every chunk to the worker once, and returns only after all of them
+// ran. A worker is a top-level function, so it captures nothing; what it can
+// reach is its own chunk and nothing else, and the borrow of the slice ends
+// when `each` returns, the way any call's does.
+//
+// There are no handles to join, no channels and no locks here. ADR-0025
+// withdrew those shapes and set the order this follows: the thing that runs
+// comes first, and a rule is written only on top of it.
+
+pub error Error {
+    OutOfMemory,
+    SpawnFailed,
+    StackProtectionFailed,
+}
+
+// A Pool owns its threads and their stacks. `deinit` stops and joins them and
+// returns their memory to the allocator the pool was made with.
+pub struct Pool {
+    handle: i64,
+}
+
+// A pool thread runs the same code the caller does, so it gets the stack a
+// main thread usually has rather than a coroutine's.
+fn thread_stack_bytes() -> i64 {
+    return 8 * 1024 * 1024;
+}
+
+// cpu_count is how many processors this process may run on now: the number
+// of threads that can run at once. It is at least 1.
+pub fn cpu_count(io: Io) -> i64 {
+    return std::internal::builtin::thread_cpu_count(io);
+}
+
+// init makes a pool of `threads` threads counting the caller, which runs
+// chunks too, so it starts `threads - 1` more. Their stacks come from
+// `allocator`. Starting a thread is asking the OS, so it takes the Io.
+pub fn init(
+    io: Io,
+    allocator: Allocator,
+    threads: i64
+) -> std::thread::Error!std::thread::Pool {
+    if threads < 1 or threads > 1024 {
+        std::internal::builtin::panic("thread init: threads must be from 1 to 1024");
+    }
+    let handle = try std::internal::builtin::thread_pool_new(
+        allocator, threads, thread_stack_bytes());
+    return Pool { handle: handle };
+}
+
+fn (self: std::thread::Pool) deinit(allocator: Allocator) -> void {
+    std::internal::builtin::thread_pool_close(self.handle, allocator);
+    return;
+}
+
+// each cuts `data` into chunks of `chunk` elements -- the last one may be
+// shorter -- and calls `worker(part, index)` once for each, where `index`
+// counts chunks from 0. The chunks run on the pool's threads in no promised
+// order and return when all of them have. T holds no Io, Allocator, or view:
+// those would reach past the chunk they came in.
+pub fn each<T>(
+    pool: &var std::thread::Pool,
+    data: &var []T,
+    chunk: i64,
+    worker: fn(&var []T, i64) -> void
+) -> void {
+    if chunk < 1 {
+        std::internal::builtin::panic("thread each: chunk must be at least 1");
+    }
+    std::internal::builtin::thread_pool_each<T>(pool.handle, data, chunk, worker);
+    return;
+}

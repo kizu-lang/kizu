@@ -45,10 +45,12 @@ func emit(module *ir.Module, frameRecords bool) (string, error) {
 }
 
 type emitter struct {
-	module  *ir.Module
-	types   *typpkg.Table
-	out     bytes.Buffer
-	strings map[string]string
+	module *ir.Module
+	// nextThreadEach numbers the slots pool rounds put their slice in.
+	nextThreadEach int
+	types          *typpkg.Table
+	out            bytes.Buffer
+	strings        map[string]string
 	// tables names the global behind each table.get, in discovery order.
 	tables         map[*ir.Instr]string
 	tableOrder     []*ir.Instr
@@ -93,6 +95,7 @@ func (e *emitter) emit() error {
 	}
 	e.writeHeader()
 	e.writeTaskInvokeThunks()
+	e.writeThreadEachInvokeThunk()
 	for _, fn := range e.module.Functions {
 		if err := e.writeFunction(fn); err != nil {
 			return err
@@ -710,6 +713,9 @@ func cleanupInstruction(cleanup ir.Cleanup) *ir.Instr {
 
 // externalCallDecl formats one external call declaration from typed IR operands.
 func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
+	if name == threadPoolEachName {
+		return "declare void @" + llvmFunctionName(name) + "(i64, ptr, i64, i64, ptr, ptr)"
+	}
 	if e.usesHostedRuntimeABI(name, instr) {
 		params := []string{"ptr"}
 		params = append(params, e.hostedRuntimeParamTypes(name, instr.Args)...)
@@ -1863,6 +1869,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	foreignC := instr.ExternABI == "c"
 	if foreignC {
 		name = instr.ExternName
+	}
+	if !foreignC && name == threadPoolEachName {
+		return e.writeThreadPoolEach(instr)
 	}
 	if !foreignC && e.usesHostedRuntimeABI(name, instr) {
 		return e.writeHostedRuntimeCall(name, instr)
