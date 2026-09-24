@@ -33,61 +33,58 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 原理的に起きません(ADR-0083)。プログラムが「どう動くべきか」を定義するのは
 プログラム自身の末尾に書かれた case であり、特定の実行経路ではありません。
 
-| 機能 | 例の数 | check | run | llvm | wasm | wasm-bin | browser |
-| --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 46 | ✅ | ✅ | ✅ | ✅ | ✅ | 45/46 |
-| arithmetic / bitwise / float | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| if / match | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
-| enum / union | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | 15/17 |
-| error union `!T` / try / errdefer | 52 | ✅ | ✅ | ✅ | 34/52 | 34/52 | 31/52 |
-| optional `?T` / orelse / capture | 25 | ✅ | ✅ | ✅ | ✅ | ✅ | 23/25 |
-| move / borrow | 62 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| deinit / defer | 24 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| comptime / reflection | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| cast / slice / stack buffer / box | 16 | ✅ | ✅ | ✅ | 15/16 | 15/16 | 15/16 |
-| unsafe / raw pointer / extern C | 4 | ✅ | ✅ | ✅ | 1/4 | 1/4 | 1/4 |
-| contract / generics | 18 | ✅ | ✅ | ✅ | 17/18 | 17/18 | 15/18 |
-| std::array | 21 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
-| std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 20/22 |
-| std::json | 16 | ✅ | ✅ | ✅ | ✅ | ✅ | 14/16 |
-| std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::time | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 29 | ✅ | ✅ | ✅ | 12/29 | 12/29 | 3/29 |
-| std::net / http | 19 | ✅ | ✅ | ✅ | 2/19 | 2/19 | 2/19 |
-| async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| 機能 | 例の数 | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
+| --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| fn / let / struct / literals | 51 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 50/51 |
+| arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| if / match | 19 | ✅ | ✅ | ✅ | 18/19 | 18/19 | 18/19 | 16/19 |
+| enum / union | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
+| error union `!T` / try / errdefer | 58 | ✅ | ✅ | ✅ | 37/58 | 37/58 | 37/58 | 34/58 |
+| optional `?T` / orelse / capture | 28 | ✅ | ✅ | ✅ | 27/28 | 27/28 | 27/28 | 25/28 |
+| move / borrow | 70 | ✅ | ✅ | ✅ | 68/70 | 68/70 | 68/70 | 68/70 |
+| deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
+| arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
+| cast / slice / stack buffer / box | 17 | ✅ | ✅ | ✅ | 16/17 | 16/17 | 16/17 | 16/17 |
+| unsafe / raw pointer / extern C | 11 | ✅ | ✅ | ✅ | 2/11 | 2/11 | 2/11 | 2/11 |
+| contract / generics | 23 | ✅ | ✅ | ✅ | 22/23 | 22/23 | 22/23 | 19/23 |
+| std::array | 26 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
+| std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 21/22 | 20/22 |
+| std::json | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
+| std::compress | 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::math | 5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::time | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::fs / path / io / process | 33 | ✅ | ✅ | ✅ | 14/33 | 14/33 | 14/33 | 4/33 |
+| std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
+| async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| std::thread | 1 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。runnable example は 190 件、測定は 2026-09-08 に
-`just backend-matrix` で実施しました。backend を触ったら回し直してください。
-`run`、`wasm`、`wasm-bin`、`browser` はプログラムの出力で判定します。`run` は native
-build を実行し、`wasm` と `wasm-bin` は WAT と binary module を `wasmtime` で、
-`browser` は browser binary を JavaScript host adapter で読み込みます。`llvm` は lowering
-が通ったかで判定します —— native target は `run` が同じ text から build するためです。
+1 つの example は複数の行に現れます。表は `just backend-matrix` が生成します。
+backend を触ったら回し直してください。`run`、`wasm`、`wasm-opt`、`wasm-bin`、
+`browser` はプログラムの出力で判定します。`run` は native build を実行し、`wasm` と
+`wasm-opt` は既定と最適化後の WAT を、`wasm-bin` は binary module を `wasmtime` で、
+`browser` は browser binary を JavaScript host adapter で読み込みます。`llvm` は
+lowering が通ったかで判定します —— native target は `run` が同じ text から build
+するためです。
 
-| 経路 | 通過 |
-| --- | --- |
-| `kizu check` | 187/187 |
-| `kizu run` | 187/187 |
-| `kizu build --emit-llvm` | 187/187 |
-| `kizu build --target wasm32-wasi` (WAT) | 166/187 |
-| `kizu build --target wasm32-wasi --emit wasm -o <out>` | 166/187 |
-| `kizu build --target wasm32-browser --emit wasm -o <out>` | 157/187 |
-
-native 経路に pending の runnable example はありません。WASI はまだ target subset
-で、残る 20 件はすべて明示的な target 非対応(`std::net` 16、extern C 2、
-evented I/O 1、coroutine 1)です。browser は lowering failure と output
-mismatch が 0、残る 27 件はすべて明示的な target 非対応です。browser 列は JavaScript
-engine の広い検証で、実 page の fixture は `tests/browser/smoke.html` です。
+runnable example はすべて `check`、`run`、`llvm` を通ります。Wasm の経路に lowering
+failure はありません。通らないのは target が持たない capability —— `std::net`、
+extern C、evented I/O、coroutine、thread、browser ではさらに `std::fs` と process 引数
+—— で、明示的な target 非対応の error になります。出力が違う 2 件は build した
+target の名前を出力する example(`else_if.kizu`、`target_os.kizu`)で、違うのが正しい
+動作です。
+browser 列は JavaScript engine の広い検証で、実 page の fixture は `tests/browser/smoke.html` です。
 browser向けにはbinary単体に加え、次のcommandで隣り合う`app.wasm`と`app.mjs`を
 directoryへ出力できます。moduleのimportだけではprogramを開始しません。
 
@@ -118,8 +115,8 @@ no-libc / freestanding build は build policy としては受理済みですが�
 
 | 機能 | 状態 |
 | --- | --- |
-| 並列処理のための thread | **予定。** 以前の API は checker rule だけを持ち lowering も runtime も無かったため撤回しました。戻すための受け入れ条件は ADR-0025 にあり、その第 1 条件は `kizu run` で実行できることです。coroutine(`std::coro`)と evented な `Io` は入っていますが、これは 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
-| 現在の subset を超える wasm backend | **進行中。** WASI WAT / binary は 166/187、browser binary は 157/187 が動き、残りはすべて target 非対応として分類済みです |
+| 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。失敗を返す worker と連続していない要素の塊が次です(ADR-0025)。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
+| 現在の subset を超える wasm backend | **進行中。** Wasm の経路で動かない example は、すべて target が持たない capability として拒否されます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |
 | `kizu lint` | **未着手** |
